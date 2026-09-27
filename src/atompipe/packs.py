@@ -730,16 +730,23 @@ def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSp
             if spec_obj.id in pool_before and not _owned_by(spec_obj, name, module_names):
                 continue
             claimed.add(spec_obj.id)
-            live = spec_obj
+            # A blank pack is stamped THROUGH the registry. This used to assign
+            # to the spec `get()` returned, which reached the stored record only
+            # because `get()` handed the stored record out — the same door that
+            # let `specs()[0].claims.append(...)` widen what a verdict settles.
+            # Every exit now returns a copy, so an assignment here would stamp a
+            # copy and throw the pack name away; `set_pack` is the one edit a
+            # registry accepts, and no spec object is ever written to.
+            setter = getattr(pool, "set_pack", None)
+            if not (spec_obj.pack or "").strip() and callable(setter):
+                setter(spec_obj.id, name)
             getter = getattr(pool, "get", None)
             entry = getter(spec_obj.id) if callable(getter) else None
-            if entry:
-                # Prefer the registry's own object: if `specs()` ever returns
-                # copies, stamping the copy would throw the pack name away.
-                live = entry[0]
-            if not live.pack:
-                live.pack = name
-            spec_obj.pack = live.pack
+            live = entry[0] if entry else spec_obj
+            if not (live.pack or "").strip():
+                # A pool that cannot be stamped: the caller still gets the pack
+                # name on what this function returns, on a new object.
+                live = dataclasses.replace(live, pack=name)
             if pool is not registry:
                 _adopt(registry, live, entry[1] if entry else None, name)
             added.append(live)
