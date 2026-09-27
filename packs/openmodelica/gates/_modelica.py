@@ -1151,6 +1151,55 @@ def mos_preamble(sources: Sequence[str], libraries: Sequence[str] = ()) -> list[
     return lines
 
 
+def clear_objects(work_dir: str) -> list[str]:
+    """Delete every ``*.o`` directly under ``work_dir``; return the names removed.
+
+    omc's generated makefile marks the numbered ``<Class>_NN.c`` files ``.PHONY``,
+    so make always rebuilds those, but it rebuilds the MAIN object
+    ``<Class>.o`` only when ``<Class>.c`` has a later mtime. The main file is
+    where omc writes the model GUID, fresh on every translation, and the
+    executable refuses an ``_init.xml`` whose GUID it was not compiled with.
+
+    What slipped through: on a WSL2 machine the wall clock stepped back by more
+    than 0.1 s between ``modelica.compiles`` and ``modelica.simulates``, which
+    build the same class in the same directory one after the other. The
+    regenerated ``ThermalTank.TankRun.c`` was stamped EARLIER than the object
+    the previous build had left, make kept that object, and the pack's own good
+    baseline read FAIL with "the GUID ... from input data file ... does not
+    match the GUID compiled in the model". It hit about one full test run in
+    three, never on the same test twice, and looked like the unrelated
+    two-processes-one-out_dir race until the mtimes were recorded. A stale
+    object is a build-system artefact, not evidence about the model; a gate
+    that fails on it sends someone to edit equations that are fine.
+
+    Every run translates anyway, so deleting the objects costs one compile of
+    the main file and nothing else. *Rejected:* ``MAKEFLAGS=-B`` in omc's
+    environment, which works only while omc invokes GNU make with the inherited
+    environment and no makefile resets it — the fix would live in someone
+    else's build system. *Rejected:* a fresh work directory per run, which
+    moves the evidence paths every run and still leaves the next build of the
+    same class trusting whatever is on disk.
+    """
+    removed: list[str] = []
+    try:
+        names = sorted(os.listdir(work_dir))
+    except OSError:
+        return removed
+    for fname in names:
+        if not fname.endswith(".o"):
+            continue
+        path = os.path.join(work_dir, fname)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed.append(fname)
+        except OSError:
+            # Left in place, make may trust it again; the GUID check at run time
+            # still refuses the mismatch, so the worst case is today's behaviour.
+            continue
+    return removed
+
+
 def run_mos(lines: Sequence[str], work_dir: str, name: str,
             timeout_s: float = 300.0, omc: str = "omc") -> OmcRun:
     """Write ``lines`` to ``<work_dir>/<name>.mos`` and run ``omc`` on it.
@@ -1164,10 +1213,14 @@ def run_mos(lines: Sequence[str], work_dir: str, name: str,
     it into a SKIP — a model that did not finish inside the budget has not been
     shown to be wrong, and filing it as a FAIL would send someone to edit
     equations when the honest fix is a bigger budget or a smaller model.
+
+    Every object file already in ``work_dir`` is deleted first
+    (:func:`clear_objects`), so each run builds from the source it just generated.
     """
     import time as _time
 
     os.makedirs(work_dir, exist_ok=True)
+    clear_objects(work_dir)
     script_path = os.path.join(work_dir, f"{name}.mos")
     log_path = os.path.join(work_dir, f"{name}.omc.log")
     body = "\n".join(lines) + "\n"

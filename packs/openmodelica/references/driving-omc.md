@@ -90,6 +90,15 @@ Both the script and a full log (script, return code, duration, stdout, stderr)
 are written to `<out_dir>/omc/` and cited in the verdict's `evidence`. To
 reproduce any tier-2 verdict: `cd` to that directory and run `omc check.mos`.
 
+Before every run the gate deletes each `*.o` in that directory. omc's generated
+makefile rebuilds the main object `<Class>.o` only when `<Class>.c` is newer, and
+the main file carries the model GUID, which changes on every translation. When
+the clock steps backwards between two builds of one class (seen on WSL2),
+make keeps the old object, and the executable then refuses its own
+`_init.xml`: "the GUID ... from input data file ... does not match the GUID
+compiled in the model". If you reproduce a run by hand in a directory that
+already holds a build, run `rm -f *.o` first.
+
 ## Parsing what comes back
 
 **`checkModel`** returns a String like:
