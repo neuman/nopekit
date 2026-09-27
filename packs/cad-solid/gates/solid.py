@@ -1104,12 +1104,13 @@ _BOOLEAN_ENGINES = (
 def _boolean_engines() -> list[str]:
     """Human names of the boolean back-ends actually usable on this machine.
 
-    This cannot be expressed as ``requires_python`` or ``requires_tools``: the gate
-    needs ANY ONE of three unrelated things, and the availability mechanism ands
-    its requirements together. So the disjunction is probed here, once, before the
-    pair loop — and an empty result is a SKIP, never a verdict about the design.
-    Probed and not imported where possible: the answer has to be obtainable on the
-    machine where the answer is "none of them".
+    The gate needs ANY ONE of three unrelated things, and ``requires_python`` and
+    ``requires_tools`` are ANDed, so the disjunction is DECLARED on the gate as
+    ``requires_one_of`` — that is what makes ``availability`` skip the gate on a
+    machine with no engine, before its body runs. This probe is the second line:
+    it runs once before the pair loop, and an empty result is still a SKIP, never
+    a verdict about the design. Probed and not imported where possible: the answer
+    has to be obtainable on the machine where the answer is "none of them".
     """
     found: list[str] = []
     try:
@@ -1278,6 +1279,19 @@ def _read_bonded(ctx: GateContext, sliding: set[tuple[str, str]],
     tier=Tier.BUILD,
     settles="part interference",
     requires_python=["trimesh", "numpy"],
+    # ANY ONE boolean engine, declared so `availability` can see the disjunction.
+    # What slipped through while it lived only in the body (`_boolean_engines`):
+    # on a machine with trimesh and numpy but no engine, availability said the
+    # tooling was present, and this gate skipped its own baseline AND its own
+    # negative control — a control that never fired, which the pack tests filed
+    # as "honestly blocked" and `gate selftest` counted as a tooling skip. Green
+    # here (manifold3d installed) and in CI (no trimesh, so availability fails
+    # first); wrong only on the machine in between.
+    # *Rejected:* telling a tooling skip from any other by its `skip_reason`
+    # text — that lets the gate decide for itself that its own skip is about
+    # tooling. Declared, the answer is availability's alone. The in-body probe
+    # stays as defence in depth for an engine that is found but will not load.
+    requires_one_of=["python:manifold3d", "tool:blender", "tool:openscad"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:overlapping_pair",
         note="two valid 20 mm boxes placed 18 mm apart: 800 mm^3 of shared material, "

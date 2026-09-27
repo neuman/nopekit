@@ -63,6 +63,7 @@ __all__ = [
     "covers",
     "covering_verdicts",
     "resolve_status",
+    "explaining_verdict",
     "statuses",
     "coverage",
     "effective_gates",
@@ -222,30 +223,66 @@ def resolve_status(
     if not mine and not known_gates:
         return ClaimStatus.UNCLAIMED
 
+    # Every rung reads `Verdict.outcome`, the one definition of what a gate run
+    # was. The rungs used to re-derive it from the three flags, in a third copy
+    # that agreed with `Verdict.ok` and `Verdict.render` only because nobody had
+    # yet written the fourth.
+    outcomes = [v.outcome for v in mine]
+
     # Rung 2. `skip_reason` is free text ("requires openfoam (not installed)"),
     # so there is no reliable way to tell an availability skip from any other
     # kind — and it does not matter, because neither is a pass. Every skip is
     # treated as "the tooling did not run", which is what BLOCKED means.
     # An errored verdict is deliberately NOT a skip: the gate ran and blew up,
     # which is a louder problem, and falls through to FAIL on rung 4.
-    if mine and all(v.skipped and not v.error for v in mine):
+    if mine and all(o == "skipped" for o in outcomes):
         return ClaimStatus.BLOCKED
 
     if not mine:
         return ClaimStatus.PENDING
 
-    # Rung 4. `Verdict.ok` is `passed and not skipped and not error`, so a gate
-    # that crashed cannot reach rungs 5-6 no matter what `passed` says — a
-    # crashed gate that left `passed` at its default is the plausible-sounding
-    # green this whole module exists to prevent.
-    if any(v.error for v in mine):
-        return ClaimStatus.FAIL
-    if any(not v.ok and not v.skipped for v in mine):
+    # Rung 4. An outcome is "pass" only for `passed is True` with no skip and no
+    # error, so a gate that crashed cannot reach rungs 5-6 no matter what
+    # `passed` says — a crashed gate that left `passed` at its default is the
+    # plausible-sounding green this whole module exists to prevent — and neither
+    # can a hand-edited `"passed": "yes"`.
+    if any(o in ("error", "fail") for o in outcomes):
         return ClaimStatus.FAIL
 
     if stale:
         return ClaimStatus.STALE
     return ClaimStatus.PASS
+
+
+#: The order `explaining_verdict` ranks outcomes in, most explanatory first. A
+#: gate that RAN and failed carries the measured value and the limit, which is
+#: what the reader is about to go and change; a crash is louder than a missing
+#: tool; a skip explains only when nothing else does. A pass explains nothing.
+_EXPLAINS = ("fail", "error", "skipped")
+
+
+def explaining_verdict(claim: Claim, verdicts: Iterable[Verdict]) -> Verdict | None:
+    """The one verdict that explains why `claim` is not settled, or None.
+
+    Several gates can cover one claim, and the first non-passing one is not
+    necessarily the one that set the status. What got through: `status` cited a
+    pack gate that SKIPPED for a missing parameter as the reason a claim FAILED,
+    while `check` — whose own copy of this ranking had already been fixed —
+    cited the gate that ran and measured 0.7 mm against a 0.5 mm limit. Two
+    commands, two stories, one ledger; the reader went looking for a missing
+    parameter. So the choice lives here, once: ran-and-failed, then errored, then
+    skipped, and within a rank the first in the order given (stable, so the same
+    ledger always cites the same gate).
+
+    `verdicts` may be the whole ledger's list; it is filtered with
+    `covering_verdicts`, by the same id-or-tag rule as everything else here.
+    """
+    mine = covering_verdicts(claim, verdicts)
+    for wanted in _EXPLAINS:
+        for verdict in mine:
+            if verdict.outcome == wanted:
+                return verdict
+    return None
 
 
 # --------------------------------------------------------------------------- #

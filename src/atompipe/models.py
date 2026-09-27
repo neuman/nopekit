@@ -381,6 +381,13 @@ class Claim(Record):
 # --------------------------------------------------------------------------- #
 # gates and verdicts
 # --------------------------------------------------------------------------- #
+#: ``Verdict.outcome`` -> the four-character tag ``Verdict.render`` prints. Four
+#: characters so a sweep's lines align; the strings are the ones every grep and
+#: every reader already knows (``[FAIL]``), so they do not change with the rule
+#: that picks them.
+_RENDER_TAG = {"error": "ERR ", "skipped": "skip", "pass": "ok  ", "fail": "FAIL"}
+
+
 @dataclass
 class Verdict(Record):
     """The result of running one gate. ONE LINE of context when rendered.
@@ -409,19 +416,41 @@ class Verdict(Record):
     empty: a gate attaches one only when it genuinely knows the position."""
 
     @property
+    def outcome(self) -> str:
+        """What happened, as ONE word: ``"error"``, ``"skipped"``, ``"pass"`` or ``"fail"``.
+
+        This is the only definition. ``ok``, :meth:`render` and the claim ladder in
+        ``claims.resolve_status`` all read it, and every new reader (JUnit, the
+        page, ``status --short``) must too. The same fact used to be re-derived in
+        three places that agreed only because nobody had written the fourth.
+
+        Precedence is error, then skipped, then the pass flag: a crash that also
+        says skipped is still a crash, and a skip that also says passed is still
+        not a pass.
+
+        ``"pass"`` needs ``passed is True`` — the builtin, not anything truthy.
+        What got through: ``ok`` was ``passed and not skipped and not error``, so
+        ``Verdict(passed="no")`` was ok, and a gate returning ``{"passed":
+        "false"}`` rendered ``[ok]``. :func:`atompipe.gates.run_gate` refuses a
+        non-bool pass value as an error; this is the same rule for a verdict that
+        never went through it (a hand-edited file, a third-party caller), where
+        the honest reading of a pass flag nobody wrote as a bool is: not a pass.
+        """
+        if self.error:
+            return "error"
+        if self.skipped:
+            return "skipped"
+        if self.passed is True:
+            return "pass"
+        return "fail"
+
+    @property
     def ok(self) -> bool:
         """True only if the gate actually ran and passed. A skip is not a pass."""
-        return self.passed and not self.skipped and not self.error
+        return self.outcome == "pass"
 
     def render(self) -> str:
-        if self.error:
-            tag = "ERR "
-        elif self.skipped:
-            tag = "skip"
-        elif self.passed:
-            tag = "ok  "
-        else:
-            tag = "FAIL"
+        tag = _RENDER_TAG[self.outcome]
         body = self.detail or self.skip_reason or self.error or ""
         return f"[{tag}] {self.gate}{(' : ' + body) if body else ''}"
 
@@ -446,7 +475,7 @@ class NegativeControl(Record):
     declare one of these.
 
     `fixture` names a callable or a file that produces KNOWN-BAD input. Running
-    the gate against it MUST produce a failing verdict; `atompipe gate --selftest`
+    the gate against it MUST produce a failing verdict; `atompipe gate selftest`
     enforces exactly that.
     """
 
@@ -470,6 +499,22 @@ class GateSpec(Record):
     description: str = ""
     settles: str = ""                   # the quantity it measures, for gap matching
     entry: str = ""                     # "module:function" for out-of-process discovery
+    requires_one_of: list[str] = field(default_factory=list)
+    """ANY ONE of these is enough: ``"python:<module>"`` or ``"tool:<executable>"``.
+
+    ``requires_tools`` and ``requires_python`` are ANDed, so a gate that needs any
+    one of several unrelated back-ends could only probe for them in its own body
+    and skip there — where ``gates.availability`` cannot see it. That is what got
+    through: a boolean-engine probe inside a mesh gate skipped the gate's own
+    baseline AND its own negative control on a machine with the mesh library but
+    no engine, while availability said the tooling was present, and the test of
+    the controls filed it as honestly blocked. Declared here, the disjunction is
+    availability's to judge, and a skip means only what it says.
+
+    One field with a kind prefix, not two lists: two fields are two places to
+    forget. The LAST field, so every positional ``GateSpec(...)`` still works and
+    an older spine that drops it reads a spec that requires less, never one that
+    passes more."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GateSpec":

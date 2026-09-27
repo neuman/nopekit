@@ -75,7 +75,9 @@ import dataclasses
 import fnmatch
 import importlib
 import importlib.util
+import numbers
 import os
+import reprlib
 import shutil
 import sys
 import time
@@ -446,6 +448,18 @@ def _own_copy(spec: GateSpec) -> GateSpec:
     what a verdict is allowed to settle, which is the ledger claiming coverage
     nobody registered.
 
+    It runs on the way OUT as well as on the way in. Copying at registration
+    closed the caller's handle and left the registry's own: ``get()`` and
+    ``specs()`` handed out the stored object, so ``registry.specs()[0].claims
+    .append("stiffness")`` widened the next verdict just the same, through the
+    front door. Every exit — ``get``, ``specs``, ``pairs``, ``for_claim``,
+    ``by_tier``, ``__iter__`` — now hands out one of these, and the only ways to
+    change a stored spec are :meth:`Registry.register` with ``replace=True`` and
+    :meth:`Registry.set_pack`, which say so in their names.
+
+    ``fn.gate_spec`` (set by :func:`gate`) is the DECLARATION, not the registered
+    record: editing it changes nothing the registry holds.
+
     Shallow-per-field is enough because every field is a str, an int enum, a list
     of str, or the ``NegativeControl`` (itself all strings).
     """
@@ -455,7 +469,8 @@ def _own_copy(spec: GateSpec) -> GateSpec:
         claims=list(spec.claims or []),
         requires_tools=list(spec.requires_tools or []),
         requires_python=list(spec.requires_python or []),
-        negative_control=dataclasses.replace(nc) if nc is not None else None,
+        requires_one_of=list(spec.requires_one_of or []),
+        negative_control=dataclasses.replace(nc) if isinstance(nc, NegativeControl) else nc,
     )
 
 
@@ -523,7 +538,10 @@ class Registry:
 
         Re-registering the *same* function object under the same id is a no-op,
         because importing a pack's gate module twice in one process is routine
-        and is not a conflict. ``replace=True`` is the deliberate override.
+        and is not a conflict — and it keeps a pack name :meth:`set_pack` stamped
+        on the stored spec when the incoming declaration leaves ``pack`` blank,
+        or a second import would quietly orphan the gate from its pack.
+        ``replace=True`` is the deliberate override.
 
         What is stored is a **copy** (:func:`_own_copy`), never the caller's
         object. A check run against a record the caller can rewrite afterwards is
@@ -574,8 +592,11 @@ class Registry:
         existing = self._gates.get(gate_id)
         if existing is not None and not replace:
             old_spec, old_fn = existing
-            if old_fn is fn:
-                self._gates[gate_id] = (_own_copy(spec), fn)   # idempotent re-import
+            if old_fn is fn:                                   # idempotent re-import
+                fresh = _own_copy(spec)
+                if not (fresh.pack or "").strip() and old_spec.pack:
+                    fresh = dataclasses.replace(fresh, pack=old_spec.pack)
+                self._gates[gate_id] = (fresh, fn)
                 return
             where_old = old_spec.entry or old_spec.pack or getattr(old_fn, "__module__", "?")
             where_new = spec.entry or spec.pack or getattr(fn, "__module__", "?")
@@ -592,27 +613,54 @@ class Registry:
         """Drop a gate. Returns whether it was there. Mostly for tests."""
         return self._gates.pop(gate_id, None) is not None
 
+    def set_pack(self, gate_id: str, pack: str) -> None:
+        """Stamp the pack a registered gate came from. The one sanctioned edit.
+
+        ``packs.load_gates`` knows which pack it is loading and a gate module
+        written without a ``PACK`` global does not, so the loader fills in a blank
+        ``pack``. It used to do that by assigning to the spec ``get()`` returned,
+        which worked only because ``get()`` handed out the stored object — the
+        same door that let ``specs()[0].claims.append(…)`` widen what a verdict
+        settles. With every exit handing out a copy, an edit to the stored record
+        has to be asked for by name, and this is the name.
+
+        Raises ``KeyError`` for an id that is not registered: that is a bug in the
+        caller, which just read the id out of this registry.
+        """
+        entry = self._gates.get(gate_id)
+        if entry is None:
+            raise KeyError(f"set_pack: no gate {gate_id!r} is registered")
+        spec, fn = entry
+        self._gates[gate_id] = (dataclasses.replace(_own_copy(spec), pack=str(pack or "")), fn)
+
     def clear(self) -> None:
         """Empty the registry. Tests and `packs.validate` use a scratch registry."""
         self._gates.clear()
 
     # -- lookup ------------------------------------------------------------ #
+    # Every exit below hands out `_own_copy` of the stored spec, never the spec
+    # itself; see that function for the door this closes.
     def get(self, gate_id: str) -> tuple[GateSpec, Callable[[GateContext], Any]] | None:
         """``(spec, fn)`` for one id, or None. Never raises on an unknown id —
-        the caller usually has a better error message than this module does."""
-        return self._gates.get(gate_id)
+        the caller usually has a better error message than this module does.
+        The spec is a copy; editing it changes nothing registered."""
+        entry = self._gates.get(gate_id)
+        if entry is None:
+            return None
+        spec, fn = entry
+        return _own_copy(spec), fn
 
     def specs(self) -> list[GateSpec]:
-        """Every spec, in registration order."""
-        return [spec for spec, _ in self._gates.values()]
+        """Every spec, in registration order. Copies."""
+        return [_own_copy(spec) for spec, _ in self._gates.values()]
 
     def ids(self) -> list[str]:
         """Every gate id, in registration order."""
         return list(self._gates)
 
     def pairs(self) -> list[tuple[GateSpec, Callable[[GateContext], Any]]]:
-        """Every ``(spec, fn)``, in registration order."""
-        return list(self._gates.values())
+        """Every ``(spec, fn)``, in registration order. The specs are copies."""
+        return [(_own_copy(spec), fn) for spec, fn in self._gates.values()]
 
     def for_claim(self, claim_id: str, tags: Iterable[str] = ()) -> list[GateSpec]:
         """Gates that cover a claim, by id OR by tag.
@@ -636,7 +684,7 @@ class Registry:
         for spec, _ in self._gates.values():
             declared = {(c or "").strip().lower() for c in (spec.claims or [])}
             if declared & wanted:
-                out.append(spec)
+                out.append(_own_copy(spec))
         return out
 
     def by_tier(self, max_tier: int) -> list[GateSpec]:
@@ -649,7 +697,8 @@ class Registry:
         mislabels its tier breaks everyone's loop and no filter can save it.
         """
         ceiling = int(max_tier)
-        return [spec for spec, _ in self._gates.values() if int(spec.tier) <= ceiling]
+        return [_own_copy(spec) for spec, _ in self._gates.values()
+                if int(spec.tier) <= ceiling]
 
     # -- dunders ----------------------------------------------------------- #
     def __len__(self) -> int:
@@ -659,7 +708,8 @@ class Registry:
         return gate_id in self._gates
 
     def __iter__(self):
-        return iter(self._gates.values())
+        """``(spec, fn)`` pairs, like :meth:`pairs` — copies, not the stored specs."""
+        return iter(self.pairs())
 
     def __repr__(self) -> str:          # pragma: no cover - diagnostics only
         return f"Registry({len(self._gates)} gates: {', '.join(list(self._gates)[:6])})"
@@ -736,6 +786,7 @@ def gate(
     pack: str = "",
     entry: str = "",
     registry: Registry | None = None,
+    requires_one_of: Iterable[str] = (),
 ) -> Callable[[Callable[[GateContext], Any]], Callable[[GateContext], Any]]:
     """Declare a gate: build its :class:`~atompipe.models.GateSpec` and register it.
 
@@ -771,6 +822,16 @@ def gate(
     never heard of, so it must not have to name a registry; passing one
     explicitly is for tests and for a gate defined in application code.
 
+    ``requires_one_of`` declares a disjunction — ``["python:manifold3d",
+    "tool:blender"]`` means either will do — for a gate whose back-end can be any
+    one of several unrelated things. Declare it rather than probing in the body:
+    only a declared requirement is :func:`availability`'s to judge, and a skip
+    availability did not decide is a gate skipping its own input (see
+    ``GateSpec.requires_one_of``).
+
+    ``fn.gate_spec`` is this declaration, not the record the registry holds —
+    the registry keeps its own copy.
+
     Registration failures raise ``AtompipeError`` at IMPORT time, which is the
     point: a pack with a control-less gate fails to load rather than loading with
     a gate nobody can trust.
@@ -802,6 +863,7 @@ def gate(
             description=description or doc_rest.strip(),
             settles=settles,
             entry=entry or f"{getattr(fn, '__module__', '?')}:{getattr(fn, '__qualname__', getattr(fn, '__name__', '?'))}",
+            requires_one_of=[str(r) for r in (requires_one_of or ())],
         )
         # Resolved at DECORATION time, not when `gate()` was called: the
         # ambient registry is whatever loader is importing this module right now.
@@ -833,6 +895,13 @@ def availability(spec: GateSpec) -> tuple[bool, str]:
     All missing dependencies are reported, not just the first: a user who
     installs one tool and reruns only to be told about the next one is a user
     who gives up on the third.
+
+    ``spec.requires_one_of`` is a disjunction ANDed with the rest: any one of its
+    entries present satisfies it, none present reads ``requires one of python
+    manifold3d, tool blender, tool openscad (none found)``. An entry that is not
+    ``python:<module>`` or ``tool:<executable>`` is named, never guessed at — a
+    bare ``manifold3d`` could be either, and guessing would make one spelling
+    work by accident on some machines.
     """
     missing_tools = [t for t in (spec.requires_tools or []) if t and shutil.which(t) is None]
 
@@ -840,31 +909,17 @@ def availability(spec: GateSpec) -> tuple[bool, str]:
     for module_name in (spec.requires_python or []):
         if not module_name:
             continue
-        try:
-            found = importlib.util.find_spec(module_name)
-        except (ImportError, AttributeError, ValueError) as exc:
-            # find_spec("a.b") imports "a"; a parent package that raises on
-            # import is, for our purposes, exactly as unusable as one that is
-            # absent — but say WHICH, because "not installed" would send the
-            # user to pip for a package that is already there and broken.
-            missing_modules.append(f"{module_name} ({type(exc).__name__})")
-            continue
-        except SystemExit as exc:                    # BaseException; see run_gate
-            # find_spec imports the parent package, and a solver binding's
-            # "driver not installed" guard is routinely a bare sys.exit() at
-            # module scope. Uncaught, that ends `atompipe check` right here with
-            # the binding's own exit code — no rows, no ledger, possibly 0. A
-            # package that exits when imported is unusable, which is a SKIP, and
-            # a skip is never a pass.
-            missing_modules.append(f"{module_name} (exits on import: sys.exit({exc.code!r}))")
-            continue
-        except Exception as exc:                     # noqa: BLE001 - third-party import side effects
-            missing_modules.append(f"{module_name} ({type(exc).__name__}: {exc})")
-            continue
-        if found is None:
-            missing_modules.append(module_name)
+        problem = _module_problem(module_name)
+        if problem is not None:
+            missing_modules.append(problem)
 
-    if not missing_tools and not missing_modules:
+    # getattr, not the attribute: `site.availability` hands this a ViewSpec,
+    # which carries `requires_tools`/`requires_python` under the same names on
+    # purpose and has no disjunction. The first run of this rule crashed every
+    # viewgen on exactly that.
+    none_of = _one_of_problem(getattr(spec, "requires_one_of", None) or [])
+
+    if not missing_tools and not missing_modules and not none_of:
         return True, ""
 
     reasons: list[str] = []
@@ -872,12 +927,145 @@ def availability(spec: GateSpec) -> tuple[bool, str]:
         reasons.append(f"requires {', '.join(missing_tools)} (not on PATH)")
     if missing_modules:
         reasons.append(f"requires python {', '.join(missing_modules)} (not importable)")
+    if none_of:
+        reasons.append(none_of)
     return False, "; ".join(reasons)
+
+
+def _module_problem(module_name: str) -> str | None:
+    """Why ``module_name`` cannot be imported here, or None when it can.
+
+    The plain name when it is simply absent; the name with the reason in
+    parentheses when it is present and broken.
+    """
+    try:
+        found = importlib.util.find_spec(module_name)
+    except (ImportError, AttributeError, ValueError) as exc:
+        # find_spec("a.b") imports "a"; a parent package that raises on
+        # import is, for our purposes, exactly as unusable as one that is
+        # absent — but say WHICH, because "not installed" would send the
+        # user to pip for a package that is already there and broken.
+        return f"{module_name} ({type(exc).__name__})"
+    except SystemExit as exc:                    # BaseException; see run_gate
+        # find_spec imports the parent package, and a solver binding's
+        # "driver not installed" guard is routinely a bare sys.exit() at
+        # module scope. Uncaught, that ends `atompipe check` right here with
+        # the binding's own exit code — no rows, no ledger, possibly 0. A
+        # package that exits when imported is unusable, which is a SKIP, and
+        # a skip is never a pass.
+        return f"{module_name} (exits on import: sys.exit({exc.code!r}))"
+    except Exception as exc:                     # noqa: BLE001 - third-party import side effects
+        return f"{module_name} ({type(exc).__name__}: {exc})"
+    return module_name if found is None else None
+
+
+#: The two kinds a ``requires_one_of`` entry may name. Kept to exactly the two
+#: probes :func:`availability` already makes for ``requires_python`` and
+#: ``requires_tools``; a third kind would be a third probe nothing else uses.
+_ONE_OF_KINDS = ("python", "tool")
+
+
+def _one_of_problem(entries: Iterable[str]) -> str:
+    """Why a ``requires_one_of`` disjunction is unmet, or ``""`` when any entry is here.
+
+    Every entry is probed, not only up to the first hit, so the answer does not
+    depend on the order a pack author happened to list them in.
+    """
+    present = False
+    wanted: list[str] = []
+    malformed: list[str] = []
+    for raw in entries:
+        text = str(raw).strip()
+        if not text:
+            continue
+        kind, sep, name = text.partition(":")
+        kind, name = kind.strip().lower(), name.strip()
+        if not sep or kind not in _ONE_OF_KINDS or not name:
+            malformed.append(repr(text))
+            continue
+        if kind == "tool":
+            missing = None if shutil.which(name) is not None else name
+        else:
+            missing = _module_problem(name)
+        if missing is None:
+            present = True
+        wanted.append(f"{kind} {missing or name}")
+    if present or not (wanted or malformed):
+        return ""
+    parts: list[str] = []
+    if wanted:
+        parts.append(f"requires one of {', '.join(wanted)} (none found)")
+    if malformed:
+        parts.append(f"requires_one_of lists {', '.join(malformed)}, which is not "
+                     f"python:<module> or tool:<executable>")
+    return "; ".join(parts)
 
 
 # --------------------------------------------------------------------------- #
 # running one gate
 # --------------------------------------------------------------------------- #
+def _as_bool(value: Any) -> bool | None:
+    """``value`` as a builtin bool if it IS a truth value, else None.
+
+    Two things count: a ``bool``, and a 0-d object whose ``dtype.kind == "b"`` —
+    ``numpy.bool_``, which is what ``mesh.is_watertight`` and every numpy
+    comparison hand back. Duck-typed on ``dtype.kind`` because the spine does not
+    import numpy, ever. Everything else is None, and the caller refuses it.
+
+    What got through before this existed: the dict branch of :func:`_normalise`
+    called ``bool()`` on the pass value. The string ``"false"`` is non-empty, so
+    it read True, and a gate that returned ``{"passed": "false"}`` rendered
+    ``[ok]``. *Rejected:* keeping ``bool()`` — it is the hole. *Rejected:*
+    ``isinstance(value, int)``, which lets ``1`` and ``2`` through as passes
+    because ``bool`` subclasses ``int``.
+    """
+    if isinstance(value, bool):
+        return value
+    try:
+        if getattr(getattr(value, "dtype", None), "kind", None) != "b":
+            return None
+        if getattr(value, "ndim", None) != 0 and getattr(value, "shape", None) != ():
+            return None            # an ARRAY of flags is not one answer
+        return bool(value)
+    except Exception:              # noqa: BLE001 - a third-party object's attributes
+        return None
+
+
+def _show(value: Any) -> str:
+    """A bounded repr for an error line: a gate that returned a 10^6-element
+    array as its pass flag must not put the whole array into the ledger."""
+    try:
+        return reprlib.repr(value)
+    except Exception:              # noqa: BLE001 - a third-party __repr__
+        return f"<{type(value).__name__}>"
+
+
+def _pass_value_error(value: Any) -> str:
+    return (f"gate reported passed={_show(value)} ({type(value).__name__}); "
+            f"a verdict must say True or False")
+
+
+#: Appended to ``detail`` when a pass value is refused. Says what the old reading
+#: would have been, because "must say True or False" alone sounds like pedantry
+#: until you see that ``bool("false")`` is True.
+_PASS_VALUE_WHY = ("a pass flag that is not a bool is not an answer: bool('false') is "
+                   "True, and 2 is not a yes. Return True or False (a numpy bool is fine)")
+
+
+def _plain_number(value: Any) -> Any:
+    """A measurement as a builtin ``int`` or ``float``; anything else unchanged.
+
+    ``numpy.int64`` and ``numpy.float32`` are real numbers and pass the checks,
+    but they are not JSON-serialisable — the ledger writer would raise mid-check,
+    after the gate had run, on a verdict that was perfectly honest.
+    """
+    if value is None or isinstance(value, bool) or not isinstance(value, numbers.Real):
+        return value
+    if isinstance(value, numbers.Integral):
+        return int(value)
+    return float(value)
+
+
 def _stamp(verdict: Verdict, spec: GateSpec, duration: float) -> Verdict:
     """Overwrite the identity fields of a verdict from its spec.
 
@@ -891,8 +1079,27 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float) -> Verdict:
     ``passed`` is forced False whenever the gate skipped or errored. ``Verdict.ok``
     already encodes that, but ``passed`` is what lands in the JSON a human reads,
     and "passed: true, error: ..." is a sentence nobody should have to interpret.
+
+    Otherwise ``passed`` must BE a truth value (:func:`_as_bool`); anything else
+    becomes an error naming what the gate said. This is where a ``Verdict``
+    returned as-is gets that check — ``Verdict(passed="no")`` never passes through
+    :func:`_normalise`'s dict or tuple branches. A skip carrying junk in
+    ``passed`` stays a skip: it is already not a pass, and calling it an error
+    would move a BLOCKED claim to FAIL over a field the gate never meant.
+
+    The stored values are builtins — ``bool`` flags, ``int``/``float``
+    measurements — because whatever lands here is written to JSON next.
     """
-    passed = bool(verdict.passed) and not verdict.skipped and not verdict.error
+    error = verdict.error
+    detail = verdict.detail
+    if verdict.skipped or error:
+        passed = False
+    else:
+        passed = _as_bool(verdict.passed)
+        if passed is None:
+            error = _pass_value_error(verdict.passed)
+            detail = (f"{detail} | " if detail else "") + _PASS_VALUE_WHY
+            passed = False
     return dataclasses.replace(
         verdict,
         gate=spec.id,
@@ -901,9 +1108,12 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float) -> Verdict:
         claims=list(spec.claims or []),
         duration_s=round(max(0.0, float(duration)), 6),
         passed=passed,
-        detail=_one_line(verdict.detail),
+        skipped=bool(verdict.skipped),
+        measured=_plain_number(verdict.measured),
+        limit=_plain_number(verdict.limit),
+        detail=_one_line(detail),
         skip_reason=_one_line(verdict.skip_reason, 200),
-        error=_one_line(verdict.error, 200),
+        error=_one_line(error, 200),
     )
 
 
@@ -920,6 +1130,12 @@ def _normalise(result: Any, spec: GateSpec) -> Verdict:
     * ``(bool, detail)``    — the common analytic gate
     * ``bool``              — a gate with nothing to say beyond yes/no
 
+    "bool" means a truth value as :func:`_as_bool` reads one: a builtin bool or a
+    0-d numpy bool. A pass value that is anything else — ``"false"``, ``None``,
+    ``1.0``, ``2`` — is an error naming what the gate said, here for the tuple
+    and in :func:`_stamp` for a ``Verdict`` or dict (which may be a skip, and a
+    skip carrying junk stays a skip).
+
     Everything else is an ERROR verdict, not a failure and not a pass. ``None``
     especially: a gate that falls off the end of its function has measured
     nothing, and the one thing this module must never do is let that read as
@@ -928,8 +1144,9 @@ def _normalise(result: Any, spec: GateSpec) -> Verdict:
     if isinstance(result, Verdict):
         return result
 
-    if isinstance(result, bool):
-        return Verdict(gate=spec.id, passed=result)
+    flag = _as_bool(result)
+    if flag is not None:
+        return Verdict(gate=spec.id, passed=flag)
 
     if isinstance(result, dict):
         data = dict(result)
@@ -947,7 +1164,13 @@ def _normalise(result: Any, spec: GateSpec) -> Verdict:
                 detail=f"returned keys: {', '.join(sorted(map(str, data))) or '(none)'} — "
                        f"a gate that does not say whether it passed is a logger",
             )
-        data["passed"] = bool(data["passed"])
+        said = data["passed"]
+        flag = _as_bool(said)
+        if flag is not None:
+            data["passed"] = flag
+        # Otherwise the gate's own value stays, and `_stamp` refuses it unless the
+        # dict is a skip or an error. `bool()` here was the hole: "false" is True.
+
         # `gate` is a required field on Verdict and check-style dicts spell it
         # `check` (or omit it), so seed it before from_dict; _stamp overwrites it
         # from the spec a moment later either way.
@@ -962,12 +1185,13 @@ def _normalise(result: Any, spec: GateSpec) -> Verdict:
             )
 
     if isinstance(result, (tuple, list)) and 1 <= len(result) <= 2:
-        passed = result[0]
-        if not isinstance(passed, bool):
+        passed = _as_bool(result[0])
+        if passed is None:
             return Verdict(
                 gate=spec.id,
-                error="gate returned a tuple whose first element is not a bool",
-                detail=f"got {type(passed).__name__}; expected (bool, detail)",
+                error=_pass_value_error(result[0]),
+                detail=f"the first element of a returned tuple is the pass flag; "
+                       f"expected (bool, detail). {_PASS_VALUE_WHY}",
             )
         detail = "" if len(result) == 1 else str(result[1])
         return Verdict(gate=spec.id, passed=passed, detail=detail)
@@ -1005,28 +1229,70 @@ def _reject_non_finite(verdict: Verdict, spec: GateSpec) -> Verdict:
     number. Infinity is refused on the same grounds — it compares, but it is what a
     division by zero returns, and a gate that divided by zero has not measured
     anything either.
+
+    The refused value is also REMOVED from the record (the field set to None, its
+    repr kept in ``error``): an error verdict still carrying ``measured=nan`` is a
+    NaN on its way to a JSON writer, and every writer from Phase 1 on is strict.
+
+    And a measurement must be a number in the first place. What got through: this
+    guard used to ``continue`` past anything ``float()`` refused, so
+    ``measured="n/a"`` was filed as a measurement and reached the report as one.
+    ``numbers.Real`` is the test because numpy registers its scalars there
+    (``np.float32``, ``np.int64``); ``isinstance(x, (int, float))`` would refuse
+    them. A ``bool`` — or a numpy bool — is a Real by inheritance and not a
+    quantity, so it is refused too: ``measured=True`` is a gate that put its pass
+    flag in the wrong field.
     """
+    problems: list[str] = []
+    notes: list[str] = []
+    emptied: dict[str, Any] = {}
     for field in ("measured", "limit"):
         value = getattr(verdict, field, None)
         if value is None:
             continue
-        try:
-            finite = math.isfinite(float(value))
-        except (TypeError, ValueError):
+        if not isinstance(value, numbers.Real) or _as_bool(value) is not None:
+            emptied[field] = None
+            problems.append(f"gate reported {field}={_show(value)} "
+                            f"({type(value).__name__}); a measurement must be a real "
+                            f"number or None")
+            notes.append(f"a {type(value).__name__} in {field} cannot be compared "
+                         f"against a limit, so it is not a measurement")
             continue
-        if finite:
+        if _finite(value):
             continue
-        return dataclasses.replace(
-            verdict,
-            passed=False,
-            error=f"gate reported a non-finite {field} ({value!r})",
-            detail=(f"{verdict.detail} | " if verdict.detail else "")
-                   + f"a non-finite {field} can neither pass nor fail its acceptance "
-                     f"(nan <= x and nan > x are both False), so nothing was measured. "
-                     f"If the quantity could not be obtained, SKIP with a reason "
-                     f"instead of returning a number.",
-        )
-    return verdict
+        emptied[field] = None
+        problems.append(f"gate reported a non-finite {field} ({_show(value)})")
+        notes.append(f"a non-finite {field} can neither pass nor fail its acceptance "
+                     f"(nan <= x and nan > x are both False), so nothing was measured")
+    if not problems:
+        return verdict
+    detail = [verdict.detail] if verdict.detail else []
+    if verdict.error:
+        detail.append(f"the gate's own error: {verdict.error}")
+    detail.extend(notes)
+    detail.append("If the quantity could not be obtained, SKIP with a reason "
+                  "instead of returning a number.")
+    return dataclasses.replace(
+        verdict,
+        passed=False,
+        error="; ".join(problems),
+        detail=" | ".join(detail),
+        **emptied,
+    )
+
+
+def _finite(value: numbers.Real) -> bool:
+    """Is a real number finite? An integer always is — ``math.isfinite`` would
+    raise on one too large for a float, and 10**400 is large, not infinite."""
+    if isinstance(value, numbers.Integral):
+        return True
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, TypeError, ValueError):
+        # A Real too large for a float (a huge Fraction) would become inf the
+        # moment it is written as JSON; refuse it here, where it is still named.
+        return False
+
 
 def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext) -> Verdict:
     """Run one gate and return a verdict that is honest about what happened.
@@ -1207,13 +1473,17 @@ def run_all(
     its cheap path during an expensive run, and nothing downstream would ever
     show the discrepancy.
 
-    Rule 5 is re-asserted per spec rather than assumed from registration. The
-    registry stores its own copy of every spec, but ``get()`` hands that copy out
-    and callers legitimately stamp it (``packs.load_gates`` fills in a blank
-    ``pack``), so the field that registration exists to guarantee is still within
-    reach of code that runs between registration and the sweep. Checking it again
-    costs one attribute read per gate and closes the only remaining window in
-    which a logger can be swept as a gate.
+    Rule 5 is re-asserted per spec rather than assumed from registration. It used
+    to be the only thing closing the window: the registry stored its own copy of
+    every spec but ``get()`` and ``specs()`` handed that copy out, so the control
+    registration exists to guarantee was within reach of any code that ran
+    between registration and the sweep — and ``specs()[0].claims.append(…)``
+    widened what a verdict settled, which nothing here re-checked. Every exit now
+    hands out a copy (:func:`_own_copy`), so the stored spec is reachable only
+    through ``register(..., replace=True)``, :meth:`Registry.set_pack` and the
+    registry's private dict. The re-check stays as defence in depth: it costs one
+    attribute read per gate, and a registry is not the only thing that can hold a
+    spec.
     """
     selected = _selected(registry, max_tier, only)
     if int(ctx.tier) != int(max_tier):
@@ -1439,8 +1709,21 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
       is not the same as detecting, and an exception cannot be trusted to have
       come from the defect the fixture planted
     * gate's tooling is missing          -> selftest SKIPS (nothing was tested)
+    * gate SKIPPED itself on the fixture -> selftest ERRORS, when its tooling is
+      present (see below)
     * fixture itself is missing/broken   -> selftest ERRORS (the control is gone,
       so the gate is unproven — never a pass)
+
+    A skip is honest only when :func:`availability` says the tooling is absent.
+    A gate that skips its own known-bad input while its tools are here has
+    decided for itself that the input does not apply — usually because the
+    fixture deleted a key the gate reads, or because the gate probes for a
+    back-end its declaration does not name. What got through: that skip was
+    passed along as a skip, `gate selftest` does not count a skip as broken, and
+    the control counted as present while it proved nothing. *Rejected:* judging the
+    gate's ``skip_reason`` text to tell a tooling skip from any other — it lets
+    the gate decide its own skip is about tooling. A gate that genuinely needs one
+    of several back-ends declares ``requires_one_of`` and lets availability say.
     """
     selftest_id = f"{spec.id}#selftest"
     tier = Tier(int(spec.tier))
@@ -1533,18 +1816,36 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
         "evidence": list(inner.evidence or []), "duration_s": elapsed,
     }
     where = f"{nc.fixture}" + (f" ({nc.note})" if nc.note else "")
+    outcome = inner.outcome
 
-    if inner.skipped:
+    if outcome == "skipped":
+        # Asked again, not remembered from above: run_gate asked too, and its
+        # answer is the one that produced this skip.
+        still, missing = availability(spec)
+        if not still:
+            return verdict(
+                passed=False, skipped=True,
+                skip_reason=f"{missing} — the gate could not be exercised, so its "
+                            f"control is unproven",
+                **shared,
+            )
         return verdict(
-            passed=False, skipped=True,
-            skip_reason=inner.skip_reason or "gate skipped itself on the control input",
+            passed=False,
+            error=f"skipped on its own known-bad input while its tools are present: "
+                  f"{inner.skip_reason or 'no reason given'}",
+            detail=f"{spec.id} skipped {where} "
+                   f"({inner.skip_reason or 'no reason given'}) with every tool it "
+                   f"declares available, so it was never shown to reject it. Make the "
+                   f"fixture state everything the gate reads, or declare the back-end "
+                   f"the gate probes for (requires_one_of) so availability can say it "
+                   f"is missing",
             **shared,
         )
 
     if expect == "error":
         # A control that expects a crash is unusual but legitimate: some gates
         # guard a parser, and "refuses to read the malformed file" IS the check.
-        if inner.error:
+        if outcome == "error":
             return verdict(passed=True,
                            detail=f"correctly errored on {where}: {inner.error}", **shared)
         return verdict(
@@ -1555,7 +1856,7 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
             **shared,
         )
 
-    if inner.error:
+    if outcome == "error":
         return verdict(
             passed=False,
             detail=f"{spec.id} CRASHED on {where} instead of failing ({inner.error}) — "
@@ -1564,7 +1865,7 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
             **shared,
         )
 
-    if inner.passed:
+    if outcome == "pass":
         return verdict(
             passed=False,
             detail=f"{spec.id} PASSED its own known-bad fixture {where} — it is not "
@@ -1604,6 +1905,8 @@ def describe(spec: GateSpec) -> str:
     if spec.claims:
         bits.append("claims " + ",".join(spec.claims))
     needs = list(spec.requires_tools or []) + list(spec.requires_python or [])
+    if spec.requires_one_of:
+        needs.append("one of " + "|".join(spec.requires_one_of))
     if needs:
         ok, reason = availability(spec)
         bits.append(("needs " + ",".join(needs)) if ok else f"BLOCKED: {reason}")

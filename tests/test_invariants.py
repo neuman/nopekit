@@ -16,15 +16,25 @@ Each test below tries to VIOLATE one of them. Run with:
 """
 from __future__ import annotations
 
+import dataclasses
+import fractions
+import json
+import os
+import shutil
+import sys
+import tempfile
 import unittest
+import uuid
 
 from atompipe import claims as claims_mod
 from atompipe import gates as gates_mod
+from atompipe import packs as packs_mod
 from atompipe import report as report_mod
 from atompipe.models import (
     Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, GateSpec, Ledger,
     NegativeControl, PhysicalResult, ProjectMeta, Tier, Verdict,
 )
+from atompipe.util import AtompipeError
 
 
 def _claim(cid="C1", kind=ClaimKind.MEASURABLE, **kw):
@@ -311,6 +321,406 @@ class StatusPrecedence(unittest.TestCase):
         self.assertIn(ClaimStatus.UNCLAIMED, BLOCKING_STATUSES)
         self.assertIn(ClaimStatus.BLOCKED, BLOCKING_STATUSES)
         self.assertIn(ClaimStatus.STALE, BLOCKING_STATUSES)
+
+
+# --------------------------------------------------------------------------- #
+# Phase 1.0: the guards that carry the four properties above, each attacked.
+# --------------------------------------------------------------------------- #
+def _gate_ctx(root=".", params=None, extra=None):
+    return gates_mod.GateContext(root=root, ledger=_ledger(_claim()), model=None,
+                                 params=dict(params or {}), out_dir=root, tier=0,
+                                 log=lambda _m: None, extra=dict(extra or {}))
+
+
+def _one_gate(returned, *, gate_id="g.strict", **spec_kw):
+    """A registry holding one gate that returns ``returned``, and its (spec, fn)."""
+    reg = gates_mod.Registry()
+
+    @gates_mod.gate(id=gate_id, claims=["C1"], registry=reg,
+                    negative_control=NegativeControl(fixture="x:y"), **spec_kw)
+    def strict(ctx):
+        return returned
+
+    return reg, reg.get(gate_id)
+
+
+class _BoolKind:
+    """A numpy.bool_ look-alike: 0-d, ``dtype.kind == "b"``. Built here so the
+    spine's duck-typing is tested without numpy installed (CI has none)."""
+
+    class dtype:                     # noqa: N801 - mirrors numpy's attribute name
+        kind = "b"
+
+    ndim = 0
+    shape = ()
+
+    def __init__(self, value):
+        self._value = bool(value)
+
+    def __bool__(self):
+        return self._value
+
+    def __repr__(self):
+        return f"_BoolKind({self._value})"
+
+
+class _FloatKind(_BoolKind):
+    """0-d, but ``dtype.kind == "f"``: a number, not a flag."""
+
+    class dtype:                     # noqa: N801
+        kind = "f"
+
+
+class PassMustBeABool(unittest.TestCase):
+    """Failure to reject is not proof — and neither is a pass value nobody wrote.
+
+    What got through: ``bool(data["passed"])``. ``{"passed": "false"}`` is a
+    non-empty string, so it read True and rendered ``[ok]``; ``Verdict(passed="no")``
+    was ``ok`` because ``ok`` was ``passed and ...``. And ``measured="n/a"`` was
+    filed as a measurement, because the finiteness guard ``continue``d past anything
+    ``float()`` refused.
+    """
+
+    JUNK = ("false", "no", None, 1.0, 2)
+
+    def _through_every_shape(self, value):
+        """The same pass value, returned in each shape a gate may use."""
+        return {
+            "Verdict": Verdict(gate="g.strict", passed=value),
+            "dict passed": {"passed": value},
+            "dict pass": {"pass": value},
+            "dict ok": {"ok": value},
+            "tuple": (value, "detail"),
+        }
+
+    def test_a_non_bool_pass_value_is_an_error_naming_its_type(self):
+        for junk in self.JUNK:
+            for shape, returned in self._through_every_shape(junk).items():
+                with self.subTest(passed=junk, shape=shape):
+                    _reg, (spec, fn) = _one_gate(returned)
+                    v = gates_mod.run_gate(spec, fn, _gate_ctx())
+                    self.assertFalse(v.ok, f"passed={junk!r} read as a pass")
+                    self.assertIs(v.passed, False)
+                    self.assertFalse(v.skipped)
+                    self.assertIn(f"passed={junk!r}", v.error)
+                    self.assertIn(f"({type(junk).__name__})", v.error)
+                    self.assertIn("must say True or False", v.error)
+
+    def test_a_hand_built_truthy_non_bool_is_not_ok(self):
+        """The model half: a verdict that never went through run_gate (a ledger
+        read, a test, a third-party caller) must not read as a pass either."""
+        for junk in ("no", "false", 1, 2.0, _BoolKind(True)):
+            with self.subTest(passed=junk):
+                v = Verdict(gate="g.strict", passed=junk)
+                self.assertFalse(v.ok)
+                self.assertNotIn("[ok", v.render())
+
+    def test_a_skip_carrying_junk_stays_a_skip(self):
+        """A skip is already not-pass; turning it into an error would move a
+        BLOCKED claim to FAIL for a field the gate did not mean."""
+        for returned in (Verdict(gate="g.strict", passed="yes", skipped=True,
+                                 skip_reason="no mesh in the projection"),
+                         {"passed": "yes", "skipped": True, "skip_reason": "no mesh"}):
+            with self.subTest(returned=type(returned).__name__):
+                _reg, (spec, fn) = _one_gate(returned)
+                v = gates_mod.run_gate(spec, fn, _gate_ctx())
+                self.assertTrue(v.skipped)
+                self.assertFalse(v.error)
+                self.assertIs(v.passed, False)
+
+    def test_real_bools_and_bool_kind_scalars_are_accepted(self):
+        for flag in (True, False):
+            for value in (flag, _BoolKind(flag)):
+                for shape, returned in (("bare", value), *self._through_every_shape(value).items()):
+                    with self.subTest(value=value, shape=shape):
+                        _reg, (spec, fn) = _one_gate(returned)
+                        v = gates_mod.run_gate(spec, fn, _gate_ctx())
+                        self.assertFalse(v.error, v.error)
+                        self.assertIs(type(v.passed), bool,
+                                      "a bool-kind scalar must be stored as a builtin bool")
+                        self.assertIs(v.passed, flag)
+                        self.assertEqual(v.ok, flag)
+
+    def test_a_number_kind_scalar_is_not_a_pass_value(self):
+        _reg, (spec, fn) = _one_gate(Verdict(gate="g.strict", passed=_FloatKind(True)))
+        v = gates_mod.run_gate(spec, fn, _gate_ctx())
+        self.assertFalse(v.ok)
+        self.assertIn("must say True or False", v.error)
+
+    def test_a_non_number_measurement_is_an_error(self):
+        for field in ("measured", "limit"):
+            for junk in ("n/a", True, False, _BoolKind(True), [0.3]):
+                with self.subTest(field=field, value=junk):
+                    _reg, (spec, fn) = _one_gate(
+                        Verdict(gate="g.strict", passed=True, **{field: junk}))
+                    v = gates_mod.run_gate(spec, fn, _gate_ctx())
+                    self.assertFalse(v.ok, f"{field}={junk!r} was filed as a measurement")
+                    self.assertIn(f"{field}=", v.error)
+                    self.assertIn(f"({type(junk).__name__})", v.error)
+                    self.assertIn("must be a real number or None", v.error)
+                    self.assertIsNone(getattr(v, field),
+                                      "a refused measurement must not stay in the record")
+
+    def test_real_numbers_are_accepted_and_stored_as_builtins(self):
+        for value, kind in ((3, int), (0.42, float), (fractions.Fraction(1, 4), float)):
+            with self.subTest(value=value):
+                _reg, (spec, fn) = _one_gate(
+                    Verdict(gate="g.strict", passed=True, measured=value, limit=value))
+                v = gates_mod.run_gate(spec, fn, _gate_ctx())
+                self.assertTrue(v.ok, v.error)
+                self.assertIs(type(v.measured), kind)
+                self.assertIs(type(v.limit), kind)
+                self.assertEqual(v.measured, value)
+
+    def test_nan_is_refused_and_removed_from_the_record(self):
+        """Not only an error: the field is emptied, so no strict JSON writer is
+        ever handed a NaN to choke on."""
+        for field in ("measured", "limit"):
+            for bad in (float("nan"), float("inf"), float("-inf")):
+                with self.subTest(field=field, value=bad):
+                    _reg, (spec, fn) = _one_gate(
+                        Verdict(gate="g.strict", passed=True, **{field: bad}))
+                    v = gates_mod.run_gate(spec, fn, _gate_ctx())
+                    self.assertFalse(v.ok)
+                    self.assertIn("non-finite", v.error)
+                    self.assertIsNone(getattr(v, field))
+                    json.dumps(v.to_dict(), allow_nan=False)
+
+
+class AdmissionGuardsBite(unittest.TestCase):
+    """Every guard between a gate and admission, attacked one at a time.
+
+    Only the None-control refusal had a test. Each guard below could have been
+    deleted by a refactor with the suite still green, and each one is the only
+    thing standing between a logger and a green tick.
+    """
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="atompipe-guards-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(os.path.join(self.root, "selftest"))
+
+    def _fixture(self, body, name="bad.py"):
+        with open(os.path.join(self.root, "selftest", name), "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return f"selftest/{name}"
+
+    def _selftest(self, fn, fixture, *, expect="fail", **spec_kw):
+        reg = gates_mod.Registry()
+        gates_mod.gate(id="g.guarded", claims=["C1"], registry=reg,
+                       negative_control=NegativeControl(fixture=fixture, expect=expect),
+                       **spec_kw)(fn)
+        spec, fn_ = reg.get("g.guarded")
+        return gates_mod.selftest(spec, fn_, _gate_ctx(root=self.root))
+
+    @staticmethod
+    def _flags_bad(ctx):
+        """An honest gate: fails exactly when the fixture planted the defect."""
+        return (not ctx.extra.get("bad"), "planted defect" if ctx.extra.get("bad") else "fine")
+
+    BAD = "def make(ctx):\n    return {'bad': True}\n"
+
+    def test_the_positive_control_fires(self):
+        """Without this, every refusal below could be the selftest refusing everything."""
+        v = self._selftest(self._flags_bad, self._fixture(self.BAD))
+        self.assertTrue(v.ok, v.detail or v.error)
+        self.assertIn("correctly failed", v.detail)
+
+    def test_a_fixtureless_control_is_refused_at_registration(self):
+        for blank in ("", "   "):
+            with self.subTest(fixture=repr(blank)):
+                with self.assertRaises(AtompipeError) as cm:
+                    gates_mod.gate(id="g.blank", claims=["C1"], registry=gates_mod.Registry(),
+                                   negative_control=NegativeControl(fixture=blank))(
+                        lambda ctx: True)
+                self.assertIn("no fixture", str(cm.exception))
+
+    def test_an_expectation_other_than_fail_or_error_is_a_selftest_error(self):
+        v = self._selftest(self._flags_bad, self._fixture(self.BAD), expect="pass")
+        self.assertFalse(v.ok)
+        self.assertIn("expect", v.error)
+
+    def test_a_missing_fixture_file_is_not_ok(self):
+        v = self._selftest(self._flags_bad, "selftest/nowhere.py")
+        self.assertFalse(v.ok)
+        self.assertFalse(v.skipped, "a missing control is not a missing tool")
+        self.assertIn("does not exist", v.detail)
+
+    def test_a_fixture_returning_none_is_not_ok(self):
+        v = self._selftest(self._flags_bad, self._fixture("def make(ctx):\n    return None\n"))
+        self.assertFalse(v.ok)
+        self.assertFalse(v.skipped)
+        self.assertIn("returned None", v.error)
+
+    def test_a_gate_crashing_on_its_fixture_is_not_ok(self):
+        def crashes_on_bad(ctx):
+            if ctx.extra.get("bad"):
+                raise ZeroDivisionError("tripped over the input")
+            return True
+
+        v = self._selftest(crashes_on_bad, self._fixture(self.BAD))
+        self.assertFalse(v.ok)
+        self.assertIn("CRASHED", v.detail)
+
+    def test_a_gate_passing_its_fixture_is_not_ok(self):
+        v = self._selftest(lambda ctx: True, self._fixture(self.BAD))
+        self.assertFalse(v.ok)
+        self.assertFalse(v.skipped)
+        self.assertIn("PASSED its own known-bad", v.detail)
+
+    def test_a_control_withdrawn_after_registration_is_an_error_in_the_sweep(self):
+        for withdrawn in (None, NegativeControl(fixture="   ")):
+            with self.subTest(control=withdrawn):
+                reg, (_spec, fn) = _one_gate(True, gate_id="g.withdrawn")
+                stored, stored_fn = reg._gates["g.withdrawn"]
+                reg._gates["g.withdrawn"] = (
+                    dataclasses.replace(stored, negative_control=withdrawn), stored_fn)
+                [v] = gates_mod.run_all(reg, _gate_ctx())
+                self.assertFalse(v.ok)
+                self.assertIn("negative control", v.error)
+
+    def test_editing_the_callers_spec_after_register_does_not_reach_the_registry(self):
+        reg = gates_mod.Registry()
+        spec = GateSpec(id="g.caller", claims=["C1"],
+                        negative_control=NegativeControl(fixture="bad.py"))
+        reg.register(spec, lambda ctx: True)
+        spec.negative_control = None
+        spec.claims.append("C_other")
+        stored, _fn = reg.get("g.caller")
+        self.assertIsNotNone(stored.negative_control)
+        self.assertEqual(stored.claims, ["C1"])
+
+    def test_a_self_skip_on_the_control_with_tools_present_is_not_ok(self):
+        """What got through: a fixture that deleted a key its gate needs made the
+        gate SKIP, and a skip was filed as "honestly blocked" — so the control
+        counted as present while proving nothing, on a machine that had every tool
+        the gate declares."""
+        def skips_on_bad(ctx):
+            if ctx.extra.get("bad"):
+                return Verdict(gate="g.guarded", skipped=True,
+                               skip_reason="the projection does not provide span_mm")
+            return True
+
+        v = self._selftest(skips_on_bad, self._fixture(self.BAD))
+        self.assertFalse(v.ok)
+        self.assertFalse(v.skipped, "a self-skip with its tools present was filed as a "
+                                    "tooling skip, which `gate selftest` does not count "
+                                    "as broken")
+        self.assertIn("skipped on its own known-bad input while its tools are present",
+                      v.error)
+        self.assertIn("span_mm", v.error)
+
+    def test_a_skip_for_missing_tooling_stays_a_skip(self):
+        """The other side of the line: a tool that is not here is not the gate's fault."""
+        v = self._selftest(self._flags_bad, self._fixture(self.BAD),
+                           requires_tools=["atompipe-no-such-tool-7c1f"])
+        self.assertTrue(v.skipped)
+        self.assertFalse(v.error)
+        self.assertFalse(v.ok)
+
+
+class RegistryHandsOutCopies(unittest.TestCase):
+    """Registration is an audit; it means nothing if the audited record can be
+    edited afterwards. ``_own_copy`` closed the caller's handle, but ``specs()`` and
+    ``get()`` handed out the stored spec itself, so ``specs()[0].claims.append(…)``
+    widened what the next verdict settled — the ledger claiming coverage nobody
+    registered."""
+
+    def _reg(self):
+        reg, _pair = _one_gate(True, gate_id="g.copied")
+        return reg
+
+    def _stored(self, reg):
+        return reg._gates["g.copied"][0]
+
+    def test_widening_claims_through_specs_does_not_reach_the_verdict(self):
+        reg = self._reg()
+        reg.specs()[0].claims.append("C_other")
+        [v] = gates_mod.run_all(reg, _gate_ctx())
+        self.assertEqual(v.claims, ["C1"])
+
+    def test_every_exit_hands_out_a_copy(self):
+        exits = {
+            "get": lambda r: r.get("g.copied")[0],
+            "specs": lambda r: r.specs()[0],
+            "pairs": lambda r: r.pairs()[0][0],
+            "for_claim": lambda r: r.for_claim("C1")[0],
+            "by_tier": lambda r: r.by_tier(3)[0],
+            "__iter__": lambda r: next(iter(r))[0],
+        }
+        for name, take in exits.items():
+            with self.subTest(exit=name):
+                reg = self._reg()
+                handed = take(reg)
+                handed.claims.append("C_other")
+                handed.negative_control.fixture = "swapped.py"
+                handed.tier = Tier.EXTERNAL
+                stored = self._stored(reg)
+                self.assertEqual(stored.claims, ["C1"])
+                self.assertEqual(stored.negative_control.fixture, "x:y")
+                self.assertEqual(stored.tier, Tier.INSTANT)
+                handed.negative_control = None
+                self.assertIsNotNone(self._stored(reg).negative_control)
+
+    def test_set_pack_stamps_the_stored_spec(self):
+        reg = self._reg()
+        before = reg.get("g.copied")[0]
+        self.assertEqual(before.pack, "")
+        reg.set_pack("g.copied", "scratch-pack")
+        self.assertEqual(reg.get("g.copied")[0].pack, "scratch-pack")
+        self.assertEqual(before.pack, "", "set_pack reached a copy already handed out")
+
+    def test_set_pack_refuses_an_unknown_gate(self):
+        with self.assertRaises(KeyError):
+            self._reg().set_pack("g.nowhere", "scratch-pack")
+
+    def test_set_pack_survives_an_idempotent_re_register(self):
+        reg = gates_mod.Registry()
+        spec = GateSpec(id="g.reloaded", claims=["C1"],
+                        negative_control=NegativeControl(fixture="bad.py"))
+
+        def fn(ctx):
+            return True
+
+        reg.register(spec, fn)
+        reg.set_pack("g.reloaded", "scratch-pack")
+        reg.register(spec, fn)          # the same module imported a second time
+        self.assertEqual(reg.get("g.reloaded")[0].pack, "scratch-pack")
+
+    def test_load_gates_stamps_a_blank_pack_without_editing_a_spec(self):
+        """A gate file that registers a spec with no pack gets the pack's name from
+        ``load_gates`` — through the registry, not by writing into an object that
+        somebody else may be holding."""
+        name = f"scratch-{uuid.uuid4().hex[:8]}"
+        gate_id = f"scratch{uuid.uuid4().hex[:6]}.blank"
+        root = tempfile.mkdtemp(prefix="atompipe-setpack-")
+        self.addCleanup(shutil.rmtree, root, True)
+        pack_dir = os.path.join(root, ".atompipe", "packs", name)
+        os.makedirs(os.path.join(pack_dir, "gates"))
+        with open(os.path.join(pack_dir, "pack.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"name": "%s", "description": "scratch"}' % name)
+        with open(os.path.join(pack_dir, "gates", "blank.py"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "from atompipe import gates\n"
+                "from atompipe.models import GateSpec, NegativeControl\n"
+                f"SPEC = GateSpec(id={gate_id!r}, claims=['C1'],\n"
+                "                negative_control=NegativeControl(fixture='x:y'))\n"
+                "def check(ctx):\n"
+                "    return True\n"
+                "gates.active_registry().register(SPEC, check)\n")
+        self.addCleanup(gates_mod.REGISTRY.unregister, gate_id)
+        self.addCleanup(lambda: [sys.modules.pop(m) for m in list(sys.modules)
+                                 if m.startswith("atompipe_pack_scratch")])
+
+        reg = gates_mod.Registry()
+        added = packs_mod.load_gates(name, reg, root=root)
+        self.assertEqual([s.id for s in added], [gate_id])
+        self.assertEqual(added[0].pack, name)
+        self.assertEqual(reg.get(gate_id)[0].pack, name)
+        module = next(m for k, m in sys.modules.items()
+                      if k.startswith("atompipe_pack_scratch") and hasattr(m, "SPEC")
+                      and m.SPEC.id == gate_id)
+        self.assertEqual(module.SPEC.pack, "", "load_gates wrote into the gate file's spec")
 
 
 if __name__ == "__main__":
