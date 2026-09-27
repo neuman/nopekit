@@ -16,7 +16,7 @@ the entry point, and `atompipe doctor` is the first command to run when confused
 
 ```sh
 PYTHONPATH=src python3 -m atompipe --help
-PYTHONPATH=src python3 -m unittest discover -s tests   # 32 tests, must stay green
+PYTHONPATH=src python3 -m unittest discover -s tests   # every test, must stay green
 cd examples/bracket && PYTHONPATH=../../src python3 -m atompipe check
 ```
 
@@ -73,7 +73,7 @@ Two more, learned the hard way and enforced in `tests/test_packs.py`:
 
 | Path | What |
 |---|---|
-| `src/atompipe/` | the spine — 14 stdlib-only modules; `models.py` is the type contract |
+| `src/atompipe/` | the spine — stdlib-only modules; `models.py` is the type contract |
 | `site/` | a project's site — scaffolded by `atompipe site init` from `src/atompipe/site_template/`. Plain HTML/CSS/ES modules, no build step |
 | `packs/` | domain packs. Ordinary directories: no build step, no registration |
 | `skills/` | the Claude Code skills (`atompipe`, `pack-authoring`) |
