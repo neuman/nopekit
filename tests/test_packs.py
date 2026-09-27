@@ -11,7 +11,13 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import stat
+import sys
+import tempfile
+import textwrap
 import unittest
+import uuid
 
 from atompipe import gates as gates_mod
 from atompipe import packs as packs_mod
@@ -36,6 +42,170 @@ def _pack_dirs():
         if os.path.isdir(os.path.join(PACKS_DIR, name))
         and os.path.isfile(os.path.join(PACKS_DIR, name, "pack.json"))
     )
+
+
+# --------------------------------------------------------------------------- #
+# the gate on the gates, as functions of one pack
+# --------------------------------------------------------------------------- #
+# Factored out of NegativeControlsFire so the rule is stated once and can be
+# pointed at a planted pack as well as the bundled ones: a rule that has only
+# ever been run against honest packs has never been shown to refuse anything.
+# Every problem line starts with the gate id it is about.
+def _read_baseline(pack_dir: str) -> dict | None:
+    path = os.path.join(pack_dir, "selftest", "baseline.json")
+    if not os.path.isfile(path):
+        return None
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _pack_ctx(pack_dir: str, params: dict) -> gates_mod.GateContext:
+    """A context carrying ``params`` as the projection, rooted in the pack.
+
+    Without the pack's own baseline a gate SKIPS for want of a parameter and
+    its control never fires — so the gate ships unproven while the suite reads
+    green. A skipped control is not a passing control, and the whole
+    credibility of this project rests on that distinction, so every pack ships
+    `selftest/baseline.json`: a plausible, physically coherent projection that
+    every one of its gates PASSES. The fixtures then move one thing and the
+    gate must flip to FAIL.
+    """
+    return gates_mod.GateContext(
+        root=pack_dir, ledger=Ledger(meta=ProjectMeta(name="selftest")), model=None,
+        params=params, out_dir=os.path.join(pack_dir, ".selftest-out"), tier=3,
+        log=lambda _m: None, extra={})
+
+
+def _baseline_problems(pack_dir: str, registry: gates_mod.Registry, *,
+                       skipped: list[str] | None = None) -> list[str]:
+    """Every gate in ``registry`` that does not PASS the pack's own baseline."""
+    params = _read_baseline(pack_dir)
+    if params is None:
+        return [f"{os.path.basename(pack_dir)}: no selftest/baseline.json — without a "
+                f"plausible projection its gates skip and its negative controls never "
+                f"fire, so nothing here is proven"]
+    ctx = _pack_ctx(pack_dir, params)
+    problems: list[str] = []
+    for spec in registry.specs():
+        entry = registry.get(spec.id)
+        if entry is None:
+            problems.append(f"{spec.id}: vanished from the registry")
+            continue
+        _spec, fn = entry
+        verdict = gates_mod.run_gate(spec, fn, ctx)
+        if verdict.skipped:
+            if skipped is not None:
+                skipped.append(f"{spec.id} ({verdict.skip_reason})")
+            continue
+        if not verdict.ok:
+            problems.append(f"{spec.id}: FAILS its own pack's baseline: "
+                            f"{verdict.detail or verdict.error}")
+    return problems
+
+
+def _control_problems(pack_dir: str, registry: gates_mod.Registry, *, host: dict,
+                      skipped: list[str] | None = None) -> list[str]:
+    """Every gate in ``registry`` whose control does not fire with ``host`` as the projection."""
+    ctx = _pack_ctx(pack_dir, dict(host))
+    problems: list[str] = []
+    for spec in registry.specs():
+        entry = registry.get(spec.id)
+        if entry is None:
+            problems.append(f"{spec.id}: vanished from the registry")
+            continue
+        _spec, fn = entry
+        fixture = spec.negative_control.fixture if spec.negative_control else "?"
+        verdict = gates_mod.selftest(spec, fn, ctx)
+        if verdict.skipped:
+            if skipped is not None:
+                skipped.append(f"{spec.id} ({verdict.skip_reason})")
+            continue
+        if not verdict.ok:
+            problems.append(f"{spec.id}: did NOT fail its known-bad fixture ({fixture}): "
+                            f"{verdict.detail or verdict.error} — the gate is a logger")
+    return problems
+
+
+# --------------------------------------------------------------------------- #
+# planted packs: the violations the rules above must refuse
+# --------------------------------------------------------------------------- #
+_SCRATCH_GATE = """\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id={gate_id!r}, claims=["scratch"], tier=Tier.INSTANT,
+      requires_python={requires_python!r},
+      negative_control=NegativeControl(fixture="selftest/bad.py:{fixture}",
+                                       note="planted by tests/test_packs.py"))
+def span(ctx):
+    \"\"\"A span limit that skips when its one input is missing.\"\"\"
+    value = ctx.params.get("span_mm")
+    if value is None:
+        return Verdict(gate={gate_id!r}, skipped=True,
+                       skip_reason="no span_mm in the projection")
+    return Verdict(gate={gate_id!r}, passed=float(value) <= 100.0,
+                   measured=float(value), limit=100.0, units="mm")
+"""
+
+_SCRATCH_FIXTURES = """\
+import dataclasses
+
+
+def too_long(ctx):
+    \"\"\"The honest control: the one input moved past its limit.\"\"\"
+    params = dict(ctx.params)
+    params["span_mm"] = 500.0
+    return dataclasses.replace(ctx, params=params)
+
+
+def drop_span(ctx):
+    \"\"\"The dishonest one: delete the input, so the gate cannot even look.\"\"\"
+    params = {{k: v for k, v in ctx.params.items() if k != "span_mm"}}
+    return dataclasses.replace(ctx, params=params)
+"""
+
+
+def _scratch_pack(case: unittest.TestCase, *, baseline: dict, fixture: str = "too_long",
+                  requires_python: tuple[str, ...] = ()) -> tuple[str, gates_mod.Registry, str]:
+    """A one-gate pack under the temp dir, loaded into a fresh registry.
+
+    A unique pack name per call: pack modules are cached in ``sys.modules`` by
+    pack NAME, and a second directory under a name already loaded is refused
+    (tests:H6). The load runs under ``use_registry`` so the planted gate never
+    reaches ``gates.REGISTRY``, which later in-process CLI tests read, and the
+    modules it imported are dropped again on cleanup.
+    """
+    root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-scratch-pack-"))
+    case.addCleanup(shutil.rmtree, root, True)
+    name = f"scratch-{uuid.uuid4().hex[:12]}"
+    gate_id = f"{name}.span"
+    pack_dir = os.path.join(root, ".atompipe", "packs", name)
+    os.makedirs(os.path.join(pack_dir, "gates"))
+    os.makedirs(os.path.join(pack_dir, "selftest"))
+    files = {
+        "pack.json": json.dumps({"name": name}),
+        os.path.join("gates", "span.py"): _SCRATCH_GATE.format(
+            gate_id=gate_id, fixture=fixture, requires_python=list(requires_python)),
+        os.path.join("selftest", "bad.py"): _SCRATCH_FIXTURES.format(),
+        os.path.join("selftest", "baseline.json"): json.dumps(baseline),
+    }
+    for rel, text in files.items():
+        with open(os.path.join(pack_dir, rel), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def forget_modules() -> None:
+        for mod_name, module in list(sys.modules.items()):
+            origin = getattr(module, "__file__", None) or ""
+            if origin and os.path.realpath(origin).startswith(root + os.sep):
+                sys.modules.pop(mod_name, None)
+
+    case.addCleanup(forget_modules)
+    registry = gates_mod.Registry()
+    with gates_mod.use_registry(registry):
+        packs_mod.load_gates(name, registry, root=root)
+    case.assertIsNotNone(registry.get(gate_id), f"the planted pack {name} registered nothing")
+    return pack_dir, registry, gate_id
 
 
 class PacksValidate(unittest.TestCase):
@@ -111,27 +281,6 @@ class PacksValidate(unittest.TestCase):
 class NegativeControlsFire(unittest.TestCase):
     """The central invariant, applied to every shipped gate."""
 
-    def _ctx(self, root):
-        """A context carrying the pack's own baseline projection.
-
-        Without it a gate SKIPS for want of a parameter and its control never
-        fires — so the gate ships unproven while the suite reads green. A skipped
-        control is not a passing control, and the whole credibility of this
-        project rests on that distinction, so every pack ships
-        `selftest/baseline.json`: a plausible, physically coherent projection that
-        every one of its gates PASSES. The fixtures then move one thing and the
-        gate must flip to FAIL.
-        """
-        baseline_path = os.path.join(root, "selftest", "baseline.json")
-        params: dict = {}
-        if os.path.isfile(baseline_path):
-            with open(baseline_path, "r", encoding="utf-8") as fh:
-                params = json.load(fh)
-        return gates_mod.GateContext(
-            root=root, ledger=Ledger(meta=ProjectMeta(name="selftest")), model=None,
-            params=params, out_dir=os.path.join(root, ".selftest-out"), tier=3,
-            log=lambda _m: None, extra={})
-
     def test_every_pack_ships_a_baseline(self):
         """No baseline means the pack's controls cannot be exercised in CI."""
         for path in _pack_dirs():
@@ -152,21 +301,11 @@ class NegativeControlsFire(unittest.TestCase):
         """
         for path in _pack_dirs():
             name = os.path.basename(path)
-            if not os.path.isfile(os.path.join(path, "selftest", "baseline.json")):
-                continue
             registry = gates_mod.Registry()
             packs_mod.load_gates(name, registry, root=REPO)
-            ctx = self._ctx(path)
-            for spec in registry.specs():
-                _spec, fn = registry.get(spec.id)
-                with self.subTest(gate=spec.id):
-                    verdict = gates_mod.run_gate(spec, fn, ctx)
-                    if verdict.skipped:
-                        continue
-                    self.assertTrue(
-                        verdict.passed,
-                        f"{spec.id} FAILS its own pack's baseline: "
-                        f"{verdict.detail or verdict.error}")
+            with self.subTest(pack=name):
+                problems = _baseline_problems(path, registry)
+                self.assertEqual(problems, [], "\n".join(problems))
 
     def test_every_gate_declares_a_negative_control(self):
         for path in _pack_dirs():
@@ -193,25 +332,66 @@ class NegativeControlsFire(unittest.TestCase):
             name = os.path.basename(path)
             registry = gates_mod.Registry()
             packs_mod.load_gates(name, registry, root=REPO)
-            ctx = self._ctx(path)
-            for spec in registry.specs():
-                entry = registry.get(spec.id)
-                self.assertIsNotNone(entry, f"{spec.id} vanished from the registry")
-                _spec, fn = entry
-                with self.subTest(gate=spec.id):
-                    verdict = gates_mod.selftest(spec, fn, ctx)
-                    if verdict.skipped:
-                        skipped.append(f"{spec.id} ({verdict.skip_reason})")
-                        continue
-                    self.assertTrue(
-                        verdict.passed,
-                        f"{spec.id} did NOT fail its known-bad fixture "
-                        f"({spec.negative_control.fixture if spec.negative_control else '?'}): "
-                        f"{verdict.detail or verdict.error} — the gate is a logger")
+            with self.subTest(pack=name):
+                problems = _control_problems(path, registry,
+                                             host=_read_baseline(path) or {},
+                                             skipped=skipped)
+                self.assertEqual(problems, [], "\n".join(problems))
         if skipped:
             print(f"\n  note: {len(skipped)} control(s) skipped for missing tooling: "
                   f"{', '.join(skipped[:4])}"
                   + ("..." if len(skipped) > 4 else ""))
+
+    # -- the rule, shown to refuse (S-12) ------------------------------------ #
+    def test_a_gate_that_skips_its_own_baseline_is_a_problem(self):
+        """The baseline lacks the gate's one input, so the gate skips on it.
+
+        Its tools are all present, so nothing about this machine excuses the
+        skip: the gate has never been shown to accept anything.
+        """
+        pack_dir, registry, gate_id = _scratch_pack(self, baseline={"width_mm": 10.0})
+        problems = _baseline_problems(pack_dir, registry)
+        self.assertTrue(any(p.startswith(f"{gate_id}:") for p in problems),
+                        f"a gate that skipped its own baseline with its tools present "
+                        f"was accepted: {problems}")
+
+    def test_a_fixture_that_deletes_a_needed_key_is_a_problem(self):
+        """The control removes the input instead of making it bad, so the gate
+        skips on its own known-bad fixture — which reads as "honestly blocked"
+        unless the skip is held to availability."""
+        pack_dir, registry, gate_id = _scratch_pack(
+            self, baseline={"span_mm": 50.0}, fixture="drop_span")
+        problems = _control_problems(pack_dir, registry, host=_read_baseline(pack_dir))
+        self.assertTrue(any(p.startswith(f"{gate_id}:") for p in problems),
+                        f"a control that skipped itself with its tools present was "
+                        f"accepted as honestly blocked: {problems}")
+
+    def test_the_planted_pack_is_clean_when_nothing_is_planted(self):
+        """The positive control for the two above: the same pack with a baseline
+        that states the input and a fixture that moves it has no problems, so
+        they fail for the reason they name and not for a broken scratch pack."""
+        pack_dir, registry, _gate_id = _scratch_pack(self, baseline={"span_mm": 50.0})
+        self.assertEqual(_baseline_problems(pack_dir, registry), [])
+        self.assertEqual(
+            _control_problems(pack_dir, registry, host=_read_baseline(pack_dir)), [])
+
+    def test_a_skip_for_missing_tooling_stays_honest(self):
+        """The exception the rule keeps: a gate whose declared tools are absent
+        skips, is reported, and is not a problem — or the suite could not run
+        anywhere the heavy tooling is not installed."""
+        absent = f"atompipe_absent_{uuid.uuid4().hex[:12]}"
+        pack_dir, registry, gate_id = _scratch_pack(
+            self, baseline={"width_mm": 10.0}, fixture="drop_span",
+            requires_python=(absent,))
+        skipped_base: list[str] = []
+        skipped_ctl: list[str] = []
+        self.assertEqual(_baseline_problems(pack_dir, registry, skipped=skipped_base), [])
+        self.assertEqual(_control_problems(pack_dir, registry, host={},
+                                           skipped=skipped_ctl), [])
+        self.assertTrue(any(s.startswith(gate_id) and absent in s for s in skipped_base),
+                        skipped_base)
+        self.assertTrue(any(s.startswith(gate_id) and absent in s for s in skipped_ctl),
+                        skipped_ctl)
 
 
 class ControlsAreSealed(unittest.TestCase):
@@ -271,31 +451,124 @@ class ControlsAreSealed(unittest.TestCase):
                         f"({bare.skip_reason or bare.detail})")
 
 
+def _scan(root: str) -> tuple[list[str], list[str]]:
+    """``(hits, scanned)`` for the tree at ``root``: each hit is ``<path>: <word>``."""
+    allowed = {os.path.join("docs", "ORIGINS.md"), os.path.join("tests", "test_packs.py")}
+    hits: list[str] = []
+    scanned: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in {".git", "__pycache__", ".venv", "build", "dist"}
+                       and not d.endswith(".egg-info")]
+        for filename in filenames:
+            if not filename.endswith((".py", ".md", ".json", ".toml", ".txt")):
+                continue
+            full = os.path.join(dirpath, filename)
+            rel = os.path.relpath(full, root)
+            if rel in allowed:
+                continue
+            try:
+                with open(full, "r", encoding="utf-8", errors="ignore") as fh:
+                    text = fh.read().lower()
+            except OSError:
+                continue
+            scanned.append(rel)
+            for word in FORBIDDEN:
+                if word in text:
+                    hits.append(f"{rel}: {word!r}")
+    return hits, scanned
+
+
+def _leaks(root: str) -> list[str]:
+    """Every forbidden word under ``root``, as ``<path>: <word>``."""
+    return _scan(root)[0]
+
+
 class NoLeakedProvenance(unittest.TestCase):
     """atompipe carries the method of its parent project, not its content."""
 
     def test_repo_is_clean(self):
-        allowed = {os.path.join(REPO, "docs", "ORIGINS.md")}
-        hits: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(REPO):
-            dirnames[:] = [d for d in dirnames
-                           if d not in {".git", "__pycache__", ".venv", "build", "dist"}
-                           and not d.endswith(".egg-info")]
-            for filename in filenames:
-                if not filename.endswith((".py", ".md", ".json", ".toml", ".txt")):
-                    continue
-                full = os.path.join(dirpath, filename)
-                if full in allowed or full == os.path.abspath(__file__):
-                    continue
-                try:
-                    with open(full, "r", encoding="utf-8", errors="ignore") as fh:
-                        text = fh.read().lower()
-                except OSError:
-                    continue
-                for word in FORBIDDEN:
-                    if word in text:
-                        hits.append(f"{os.path.relpath(full, REPO)}: {word!r}")
+        hits, _scanned = _scan(REPO)
         self.assertEqual(hits, [], f"leaked references: {hits}")
+
+    def test_every_kind_of_tracked_text_is_read(self):
+        """The walk reads the site's JS, the CI config and the Modelica sources,
+        not only the extensions somebody thought to list (S-65)."""
+        _hits, scanned = _scan(REPO)
+        kinds = {os.path.splitext(rel)[1] for rel in scanned}
+        missing = sorted({".js", ".html", ".css", ".yml", ".mo", ".csv"} - kinds)
+        self.assertEqual(missing, [], f"no file of these kinds was read: {missing}")
+        self.assertTrue(
+            any(not os.path.splitext(os.path.basename(rel))[1] for rel in scanned),
+            "no extensionless file (LICENSE, .gitignore) was read")
+
+    # -- the walk, shown to refuse and to prune (S-65, tests:H3) ------------- #
+    def _plant(self, files: dict[str, str | bytes]) -> str:
+        """A tree under the temp dir — never inside the repo, which is the tree
+        being scanned (tests:H3)."""
+        root = tempfile.mkdtemp(prefix="atompipe-provenance-")
+        self.addCleanup(shutil.rmtree, root, True)
+        for rel, content in files.items():
+            full = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            data = content.encode("utf-8") if isinstance(content, str) else content
+            with open(full, "wb") as fh:
+                fh.write(data)
+        return root
+
+    @staticmethod
+    def _word() -> str:
+        """A forbidden word, built from the tuple at runtime — never typed."""
+        return FORBIDDEN[0]
+
+    def _nested_checkout(self, *, with_git: bool) -> str:
+        files: dict[str, str | bytes] = {
+            "README.md": "a clean top level\n",
+            "wt/docs/ORIGINS.md": f"a second copy that names the {self._word()}\n",
+        }
+        if with_git:
+            files["wt/.git"] = "gitdir: /elsewhere/.git/worktrees/wt\n"
+        return self._plant(files)
+
+    def test_a_nested_checkout_is_skipped(self):
+        """A linked worktree inside the repo carries its own docs/ORIGINS.md; its
+        `.git` is a FILE, and it is somebody else's tree to scan."""
+        self.assertEqual(_leaks(self._nested_checkout(with_git=True)), [])
+
+    def test_the_same_tree_without_git_is_caught(self):
+        hits = _leaks(self._nested_checkout(with_git=False))
+        self.assertEqual(len(hits), 1, hits)
+        self.assertTrue(hits[0].startswith(os.path.join("wt", "docs", "ORIGINS.md")), hits)
+
+    def test_the_root_is_never_pruned(self):
+        """In a linked worktree the root ITSELF holds a `.git` file; pruning it
+        would scan nothing and pass (tests:H3)."""
+        root = self._plant({".git": "gitdir: /elsewhere/.git/worktrees/x\n",
+                            "notes.md": f"{self._word()}\n"})
+        self.assertEqual(len(_leaks(root)), 1)
+
+    def test_a_mo_and_an_extensionless_file_are_scanned(self):
+        root = self._plant({
+            "model/Tank.mo": f"model Tank // {self._word()}\nend Tank;\n",
+            "NOTICE": f"{self._word().upper()}\n",
+        })
+        hits = _leaks(root)
+        for rel in (os.path.join("model", "Tank.mo"), "NOTICE"):
+            self.assertTrue(any(h.startswith(f"{rel}:") for h in hits), f"{rel} unread: {hits}")
+
+    def test_a_binary_file_is_not_read_as_text(self):
+        """A NUL byte marks a binary (an STL, a PNG); its bytes are geometry,
+        not prose, and the word inside one is noise."""
+        root = self._plant({"mesh.stl": b"solid\x00" + self._word().encode() + b"\x00"})
+        self.assertEqual(_leaks(root), [])
+
+    def test_a_virtualenv_is_skipped(self):
+        """Third-party code is not this repository's content, and some of it
+        spells a forbidden word for reasons of its own (see ``_other_tree``)."""
+        planted = {"env/lib/site-packages/lib.py": f"# {self._word()}\n"}
+        self.assertEqual(len(_leaks(self._plant(planted))), 1)
+        planted["env/pyvenv.cfg"] = "home = /usr/bin\n"
+        self.assertEqual(_leaks(self._plant(planted)), [])
 
 
 if __name__ == "__main__":
