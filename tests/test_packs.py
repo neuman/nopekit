@@ -15,9 +15,9 @@ import shutil
 import stat
 import sys
 import tempfile
-import textwrap
 import unittest
 import uuid
+from unittest import mock
 
 from atompipe import gates as gates_mod
 from atompipe import packs as packs_mod
@@ -51,6 +51,17 @@ def _pack_dirs():
 # pointed at a planted pack as well as the bundled ones: a rule that has only
 # ever been run against honest packs has never been shown to refuse anything.
 # Every problem line starts with the gate id it is about.
+#
+# THE SKIP RULE (S-12). A skip is allowed only when `gates.availability(spec)`
+# fails — the gate's declared tools are not on this machine. What slipped
+# through before: the baseline test `continue`d past every skip, and the control
+# test accepted any skipped control as "honestly blocked". So a gate that skipped
+# its own baseline for want of a key was never shown to accept anything, and a
+# fixture that DELETED the key its gate reads — instead of making it bad — made
+# the gate skip on its known-bad input and passed invariants 3 and 6 while
+# proving nothing. PACK_FORMAT's "nothing skips" was true only of honest packs.
+# Rejected: judging a skip by its reason string ("tooling", "not installed"),
+# which lets the gate decide for itself that its own skip is excusable.
 def _read_baseline(pack_dir: str) -> dict | None:
     path = os.path.join(pack_dir, "selftest", "baseline.json")
     if not os.path.isfile(path):
@@ -76,9 +87,19 @@ def _pack_ctx(pack_dir: str, params: dict) -> gates_mod.GateContext:
         log=lambda _m: None, extra={})
 
 
+def _tooling_absent(spec) -> str:
+    """Why this gate cannot run on this machine, or ``""`` when it can."""
+    ok, reason = gates_mod.availability(spec)
+    return "" if ok else (reason or "not available here")
+
+
 def _baseline_problems(pack_dir: str, registry: gates_mod.Registry, *,
                        skipped: list[str] | None = None) -> list[str]:
-    """Every gate in ``registry`` that does not PASS the pack's own baseline."""
+    """Every gate in ``registry`` that does not PASS the pack's own baseline.
+
+    A skip counts only when the gate's tools are absent (the skip rule above);
+    those land in ``skipped``, when given, so they are reported rather than hidden.
+    """
     params = _read_baseline(pack_dir)
     if params is None:
         return [f"{os.path.basename(pack_dir)}: no selftest/baseline.json — without a "
@@ -94,8 +115,16 @@ def _baseline_problems(pack_dir: str, registry: gates_mod.Registry, *,
         _spec, fn = entry
         verdict = gates_mod.run_gate(spec, fn, ctx)
         if verdict.skipped:
-            if skipped is not None:
-                skipped.append(f"{spec.id} ({verdict.skip_reason})")
+            missing = _tooling_absent(spec)
+            if missing:
+                if skipped is not None:
+                    skipped.append(f"{spec.id} ({missing})")
+                continue
+            problems.append(
+                f"{spec.id}: SKIPPED its own pack's baseline while its tools are present "
+                f"({verdict.skip_reason}) — a gate never shown to accept a good design "
+                f"is not shown to measure anything; state what it reads in "
+                f"selftest/baseline.json")
             continue
         if not verdict.ok:
             problems.append(f"{spec.id}: FAILS its own pack's baseline: "
@@ -105,7 +134,12 @@ def _baseline_problems(pack_dir: str, registry: gates_mod.Registry, *,
 
 def _control_problems(pack_dir: str, registry: gates_mod.Registry, *, host: dict,
                       skipped: list[str] | None = None) -> list[str]:
-    """Every gate in ``registry`` whose control does not fire with ``host`` as the projection."""
+    """Every gate in ``registry`` whose control does not fire with ``host`` as the projection.
+
+    ``host`` is the projection the control's context carries — the pack's own
+    baseline for NegativeControlsFire. A control that skips counts only when the
+    gate's tools are absent (the skip rule above); those land in ``skipped``.
+    """
     ctx = _pack_ctx(pack_dir, dict(host))
     problems: list[str] = []
     for spec in registry.specs():
@@ -117,8 +151,16 @@ def _control_problems(pack_dir: str, registry: gates_mod.Registry, *, host: dict
         fixture = spec.negative_control.fixture if spec.negative_control else "?"
         verdict = gates_mod.selftest(spec, fn, ctx)
         if verdict.skipped:
-            if skipped is not None:
-                skipped.append(f"{spec.id} ({verdict.skip_reason})")
+            missing = _tooling_absent(spec)
+            if missing:
+                if skipped is not None:
+                    skipped.append(f"{spec.id} ({missing})")
+                continue
+            problems.append(
+                f"{spec.id}: SKIPPED its own known-bad fixture ({fixture}) while its "
+                f"tools are present ({verdict.skip_reason}) — a control that makes its "
+                f"gate skip has not fired; the fixture must make the input BAD, not "
+                f"remove it")
             continue
         if not verdict.ok:
             problems.append(f"{spec.id}: did NOT fail its known-bad fixture ({fixture}): "
@@ -298,6 +340,9 @@ class NegativeControlsFire(unittest.TestCase):
         the baseline is not actually good, or the gate is wrong. Either way the
         negative control below proves nothing, because the gate was already
         failing before the fixture touched anything.
+
+        A gate that SKIPS on it with its tools present is the same problem one
+        step removed: it was never shown to pass anything (the skip rule, S-12).
         """
         for path in _pack_dirs():
             name = os.path.basename(path)
@@ -326,6 +371,9 @@ class NegativeControlsFire(unittest.TestCase):
         not a failure — it is an absence of evidence, and it is allowed here
         because the alternative is refusing to run the suite anywhere the heavy
         tooling is not installed. It is reported so it cannot hide.
+
+        Allowed ONLY then: a control that skips while `availability` says its
+        tools are present is a problem (the skip rule, S-12).
         """
         skipped: list[str] = []
         for path in _pack_dirs():
@@ -451,36 +499,105 @@ class ControlsAreSealed(unittest.TestCase):
                         f"({bare.skip_reason or bare.detail})")
 
 
+# --------------------------------------------------------------------------- #
+# the provenance scan
+# --------------------------------------------------------------------------- #
+#: Directory names never descended into: git's object store and bytecode caches.
+_PRUNE_NAMES = frozenset({".git", "__pycache__"})
+
+#: Exempt from the scan, relative to the root walked: the one file allowed to
+#: name the parent project, and this one, which must spell the words to refuse
+#: them.
+_ALLOWED = frozenset({os.path.join("docs", "ORIGINS.md"),
+                      os.path.join("tests", "test_packs.py")})
+
+#: The real walk must read more files than this, or it is not the walk it claims
+#: to be: pruning the root itself scans nothing and passes (tests:H3), and that
+#: shape of vacuity is invisible from the hit list alone.
+#: Why 150 (measured 2026-09-27 on `git archive` exports): the tracked tree at
+#: 7ecf953 holds 182 files and this walk reads 175 of them (5 binary STLs, the 2
+#: exempt files); with this commit's three new test files, 178. Phase 1.3 deletes
+#: a handful (runs/) and adds more (claims/, cache entries), so 150 sits below the
+#: real count with room to spare and far above any broken walk. Rejected: 200 (the
+#: spec's figure — a clean clone, which is what `verify.sh <ref>` and CI scan, has
+#: 178 and would read red for nothing; only a dev checkout with an untracked
+#: build/ clears 200); any figure near 0 (a walk that read one README would pass
+#: it). The count cannot tell the old allow-list (152 files at 7ecf953) from this
+#: walk; test_every_kind_of_tracked_text_is_read carries that.
+_MIN_SCANNED = 150
+
+
+def _other_tree(path: str) -> bool:
+    """Is the subdirectory ``path`` somebody else's tree, not this repository's?
+
+    * A ``.git`` entry — a directory (a clone) or a FILE (a linked worktree or a
+      submodule). What slipped through: a worktree created inside the repo
+      carries a second copy of docs/ORIGINS.md, and the name-based prune (".git"
+      as a directory name only) walked straight into it and turned the suite red
+      (S-65). Only ever asked of a SUBDIRECTORY: the root of a linked worktree
+      holds a ``.git`` file too, and pruning it would scan nothing (tests:H3).
+    * A ``pyvenv.cfg`` — a virtual environment (PEP 405; ``python -m venv`` and
+      virtualenv both write it). Third-party code is not this repository's
+      content, and some of it spells ``FORBIDDEN[3]`` for reasons of its own:
+      measured 2026-09-27 on this machine, it occurs in lxml's bundled libxslt
+      header, configobj, pygments' FoxPro lexer and twisted's TLS tests. The
+      old prune named ``.venv`` only, so an environment called ``env`` or
+      ``venv`` was scanned; a marker the tool writes beats a name people choose.
+      Rejected: pruning ``build/`` and ``dist/`` by name as before — they hold
+      copies of this repository's own files, and a leak copied into a wheel is
+      still a leak.
+    """
+    return (os.path.lexists(os.path.join(path, ".git"))
+            or os.path.isfile(os.path.join(path, "pyvenv.cfg")))
+
+
 def _scan(root: str) -> tuple[list[str], list[str]]:
-    """``(hits, scanned)`` for the tree at ``root``: each hit is ``<path>: <word>``."""
-    allowed = {os.path.join("docs", "ORIGINS.md"), os.path.join("tests", "test_packs.py")}
+    """``(hits, scanned)`` for the tree at ``root``.
+
+    Every regular file is read; one holding a NUL byte is binary (an STL mesh)
+    and is skipped. What slipped through before: an extension allow-list (.py
+    .md .json .toml .txt) left 23 tracked files unread — the site's JS, HTML and
+    CSS, the CI config, four Modelica sources, two CSVs, LICENSE, py.typed and
+    every .gitignore — and each phase adds kinds (S-65). Text that is not valid
+    UTF-8 is still read, with replacement characters: the words are ASCII, and a
+    Latin-1 file is still somebody's prose.
+
+    A hit reads ``<path>: FORBIDDEN[i]`` — the index, never the word, so a
+    failure quoted into a commit message or a report does not leak it a second
+    time. A file that cannot be read is a hit: a scan that skips what it cannot
+    open is the allow-list again.
+    """
     hits: list[str] = []
     scanned: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames
-                       if d not in {".git", "__pycache__", ".venv", "build", "dist"}
-                       and not d.endswith(".egg-info")]
-        for filename in filenames:
-            if not filename.endswith((".py", ".md", ".json", ".toml", ".txt")):
-                continue
+        dirnames[:] = sorted(d for d in dirnames
+                             if d not in _PRUNE_NAMES
+                             and not _other_tree(os.path.join(dirpath, d)))
+        for filename in sorted(filenames):
             full = os.path.join(dirpath, filename)
             rel = os.path.relpath(full, root)
-            if rel in allowed:
+            if rel in _ALLOWED:
                 continue
             try:
-                with open(full, "r", encoding="utf-8", errors="ignore") as fh:
-                    text = fh.read().lower()
-            except OSError:
+                if not stat.S_ISREG(os.lstat(full).st_mode):
+                    continue          # a socket or a FIFO would block the read
+                with open(full, "rb") as fh:
+                    data = fh.read()
+            except OSError as exc:
+                hits.append(f"{rel}: unreadable ({exc.strerror or exc})")
+                continue
+            if b"\x00" in data:
                 continue
             scanned.append(rel)
-            for word in FORBIDDEN:
+            text = data.decode("utf-8", errors="replace").lower()
+            for index, word in enumerate(FORBIDDEN):
                 if word in text:
-                    hits.append(f"{rel}: {word!r}")
+                    hits.append(f"{rel}: FORBIDDEN[{index}]")
     return hits, scanned
 
 
 def _leaks(root: str) -> list[str]:
-    """Every forbidden word under ``root``, as ``<path>: <word>``."""
+    """Every forbidden word under ``root``, as ``<path>: FORBIDDEN[i]``."""
     return _scan(root)[0]
 
 
@@ -488,8 +605,12 @@ class NoLeakedProvenance(unittest.TestCase):
     """atompipe carries the method of its parent project, not its content."""
 
     def test_repo_is_clean(self):
-        hits, _scanned = _scan(REPO)
+        hits, scanned = _scan(REPO)
         self.assertEqual(hits, [], f"leaked references: {hits}")
+        self.assertGreater(
+            len(scanned), _MIN_SCANNED,
+            f"the walk read only {len(scanned)} files under {REPO} — a scan that "
+            f"pruned the repository's own root, or most of it, passes on nothing")
 
     def test_every_kind_of_tracked_text_is_read(self):
         """The walk reads the site's JS, the CI config and the Modelica sources,
@@ -537,8 +658,7 @@ class NoLeakedProvenance(unittest.TestCase):
 
     def test_the_same_tree_without_git_is_caught(self):
         hits = _leaks(self._nested_checkout(with_git=False))
-        self.assertEqual(len(hits), 1, hits)
-        self.assertTrue(hits[0].startswith(os.path.join("wt", "docs", "ORIGINS.md")), hits)
+        self.assertEqual(hits, [f"{os.path.join('wt', 'docs', 'ORIGINS.md')}: FORBIDDEN[0]"])
 
     def test_the_root_is_never_pruned(self):
         """In a linked worktree the root ITSELF holds a `.git` file; pruning it
@@ -569,6 +689,60 @@ class NoLeakedProvenance(unittest.TestCase):
         self.assertEqual(len(_leaks(self._plant(planted))), 1)
         planted["env/pyvenv.cfg"] = "home = /usr/bin\n"
         self.assertEqual(_leaks(self._plant(planted)), [])
+
+
+def _shadowed(pack_dirs: list[str]) -> list[str]:
+    """Each bundled pack that ``packs.find`` resolves somewhere else, one line each."""
+    out: list[str] = []
+    for path in pack_dirs:
+        name = os.path.basename(path)
+        found = packs_mod.find(name, root=REPO)
+        if os.path.realpath(found or "") != os.path.realpath(path):
+            out.append(f"{name}: resolves to {found}, not the bundled copy at {path}")
+    return out
+
+
+class TestsTheBundledCopy(unittest.TestCase):
+    """Every test in this file loads packs BY NAME, so it tests whichever copy the
+    search path resolves first — and ``$ATOMPIPE_PACK_PATH`` and
+    ``~/.atompipe/packs`` outrank the bundled directory. On a machine holding a
+    same-named user pack the suite would validate that copy and report on this
+    one (S-87; latent, not observed). Nothing else in the suite would notice: the
+    wrong copy is usually a perfectly good pack. So say it here, loudly.
+    """
+
+    def test_every_bundled_pack_resolves_to_this_checkout(self):
+        shadowed = _shadowed(_pack_dirs())
+        self.assertEqual(
+            shadowed, [],
+            f"every pack test here would exercise the shadowing copy instead: "
+            f"{shadowed}. Unset ${packs_mod.PACK_PATH_ENV} or move the pack out of "
+            f"~/.atompipe/packs before trusting this suite")
+
+    def test_a_shadowing_pack_is_reported(self):
+        """V: a same-named pack on ``$ATOMPIPE_PACK_PATH`` is named."""
+        victim = _pack_dirs()[0]
+        shadow_root = tempfile.mkdtemp(prefix="atompipe-shadow-")
+        self.addCleanup(shutil.rmtree, shadow_root, True)
+        shadow = os.path.join(shadow_root, os.path.basename(victim))
+        os.makedirs(shadow)
+        with open(os.path.join(shadow, "pack.json"), "w", encoding="utf-8") as fh:
+            fh.write("{}")
+        with mock.patch.dict(os.environ, {packs_mod.PACK_PATH_ENV: shadow_root}):
+            shadowed = _shadowed([victim])
+        self.assertEqual(len(shadowed), 1, shadowed)
+        self.assertIn(shadow, shadowed[0])
+
+    def test_the_spine_under_test_is_this_checkout(self):
+        """The same failure one level up: an installed atompipe imported ahead of
+        ``src/`` would test its own bundled packs and its own spine."""
+        here = os.path.realpath(os.path.join(REPO, "src", "atompipe"))
+        spine = os.path.realpath(os.path.dirname(gates_mod.__file__))
+        self.assertEqual(spine, here,
+                         f"atompipe was imported from {spine}, not {here} — run the "
+                         f"suite with PYTHONPATH=src")
+        self.assertEqual(os.path.realpath(packs_mod.BUNDLED_PACKS),
+                         os.path.realpath(PACKS_DIR))
 
 
 if __name__ == "__main__":

@@ -222,10 +222,40 @@ def atomic_write_json(path: str | os.PathLike[str], obj: Any) -> None:
     encode dataclasses and enums; a permissive fallback here would let a model
     and its projection drift apart silently, which is exactly what
     ``modelio.project`` is written to prevent.
+
+    ``allow_nan=False``, and the refusal names the path. Python's default writes
+    ``NaN`` and ``Infinity`` as bare tokens that no JSON parser accepts. That is
+    how a could-not-measure number reached ``state.json``: ``JSON.parse``
+    refused the whole file, and the page advised ``atompipe site build``, which
+    wrote the same NaN again (S-47). Every JSON file the spine writes passes
+    through here, so this is where "a number that could not be measured is not
+    a number" is enforced for all of them. Rejected: writing ``null`` in its
+    place — a value that silently becomes "no value" is the NaN problem in a
+    quieter shape, and the gate layer already refuses the number upstream.
     """
     try:
-        payload = json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False)
-    except (TypeError, ValueError) as exc:
+        payload = json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False,
+                             allow_nan=False)
+    except ValueError as exc:
+        # json raises ValueError for a non-finite float AND for a circular
+        # reference; telling them apart by message text would tie this to one
+        # Python's wording (the CI matrix runs three). The permissive encoder does
+        # not mind a NaN, so if IT succeeds, a NaN or an Infinity was the only
+        # fault. It runs only on the failure path.
+        try:
+            json.dumps(obj, sort_keys=True, allow_nan=True)
+        except (TypeError, ValueError):
+            pass
+        else:
+            raise AtompipeError(
+                f"{os.fspath(path)}: refusing to write NaN or Infinity; a number "
+                f"that could not be measured is not a number"
+            ) from exc
+        raise AtompipeError(
+            f"cannot write {os.fspath(path)}: value is not JSON-serialisable ({exc}); "
+            f"encode records with .to_dict() before saving"
+        ) from exc
+    except TypeError as exc:
         raise AtompipeError(
             f"cannot write {os.fspath(path)}: value is not JSON-serialisable ({exc}); "
             f"encode records with .to_dict() before saving"
