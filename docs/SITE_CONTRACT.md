@@ -189,20 +189,41 @@ see what is still unexplained.
 
 ## `state.json`
 
-One file, read once by the page:
+One file, read once by the page. Every top-level key is below;
+`tests/test_contracts.py` runs `site init` and `site build` on a copy of
+`examples/bracket` and fails on a top-level key this section does not name, or on a
+file under `site/data/` this document does not name (PLAN R-14). What slipped
+through without it: `locator_problems` was published on every build and missing
+from this example, so the one key that says "a gate thinks it is drawing and is not"
+was the one a reader of the contract would never look for.
 
 ```jsonc
 {
-  "meta":     { "name": …, "revision": …, "summary": …, "built": … },
-  "readiness": { "verdict": "…one honest sentence…", "counts": {…}, "ready": false },
+  "meta":     { "name": …, "summary": …, "created": …, "revision": …, "model_entry": …,
+                "packs": [ … ], "spine_version": …,            // ProjectMeta, verbatim
+                "built": …, "stale": false, "stale_reason": …,
+                "last_run": { "when": …, "tier": 0, … },
+                "generated": "atompipe site build — an output … not a source …" },
+  "readiness": { "verdict": "…one honest sentence…", "counts": {…}, "kinds": {…},
+                 "ready": false, "blocking": ["C1", "C7"], "n_claims": 7, "n_critical": 7,
+                 "n_gates": 6, "n_gaps": 1 },
   "claims":   [ { "id": "C1", "statement": …, "status": "fail", "acceptance": …,
-                  "gates": ["bracket.deflection"], "grounded_by": ["sk"] } ],
-  "verdicts": [ { "gate": …, "passed": …, "detail": …, "measured": …, "limit": …,
-                  "locators": [ … ], "evidence": [ … ], "age_s": 412 } ],
-  "views":    [ { "id": "assembly", "kind": "model3d", "src": "assets/assembly.glb", … } ],
+                  "acceptance_render": "tip deflection <= 0.5 mm",
+                  "gates": ["bracket.deflection"], "grounded_by": ["sk"],
+                  "verdicts": [ … ], "evidence": [ … ],
+                  "unproven": [ { "gate": …, "why": … } ], "partial": false, … } ],
+  "verdicts": [ { "gate": …, "passed": …, "ok": false, "status": "fail", "detail": …,
+                  "measured": …, "limit": …, "locators": [ … ], "views": [ … ],
+                  "unanchored": true, "evidence": [ … ], "when": …, "age_s": 412, … } ],
+  "views":    [ { "id": "assembly", "kind": "model3d", "src": "assets/assembly.glb", … },
+                { "id": "sweep", "kind": "table", "data": {}, "data_url": "data/views/sweep.json", … } ],
+  "locator_problems": [ { "gate": "cad.clash", "view": "assembly", "target": "back_left",
+                          "severity": "unknown-target",
+                          "problem": "view 'assembly' declares no node 'back_left'" } ],
   "params":   [ { "name": "thickness", "value": 8.0, "units": "mm",
-                  "rationale": …, "rejected": [ … ] } ],
-  "inputs":   [ { "id": "sk", "kind": "sketch", "path": …, "extractions": [ … ] } ],
+                  "rationale": …, "rejected": [ … ], "defended": true, "derived": false, … } ],
+  "inputs":   [ { "id": "sk", "kind": "sketch", "path": …, "extractions": [ … ],
+                  "extracted": true, … } ],
   "gaps":     [ … ],
   "decisions":[ … ]
 }
@@ -210,6 +231,18 @@ One file, read once by the page:
 
 Everything the page shows is in here, so the page is inspectable with `curl`, and
 an agent can read the site's state without a browser.
+
+- A verdict row's `ok` is the only predicate the page may paint green; `status` is
+  `pass`, `fail`, `skipped` or `errored`. `unanchored` says out loud that a failure
+  carries no locator, instead of leaving an overlay that looks broken.
+- `age_s` is `null`, never 0, when the build had no timestamp or the gate has no
+  recorded run: an age of zero renders as "just now", the exact lie a staleness
+  display exists to prevent.
+- `locator_problems` lists every locator that cannot be drawn — `missing-view` (it
+  names a view that does not exist) or `unknown-target` (a node the view does not
+  declare). The locator itself stays on its verdict; nothing is dropped.
+- A view whose inline `data` is too big to sit in the summary is split into
+  `data/views/<id>.json`: its row keeps `"data": {}` and gains `data_url`.
 
 ## What the page must show
 

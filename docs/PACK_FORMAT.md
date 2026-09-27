@@ -141,6 +141,33 @@ Rules, all enforced:
   names the command that fixes it, from the manifest's `install` block. BLOCKED is a
   call to action; a pack that leaves the reader to work out how to get its solver has
   done half a job. Do not design the pack to be comfortable without the tool it wraps.
+- **When any one of several tools will do, say so with `requires_one_of`.** Entries
+  are `"python:<module>"` or `"tool:<executable>"`, and `availability(spec)` is ok
+  only when at least one is present (on top of every `requires_tools` and
+  `requires_python` entry); with none it names them all: `requires one of python
+  manifold3d, tool blender, tool openscad (none found)`. Do not probe for the engine
+  inside the gate and skip: `cad.clash` did exactly that, and on a machine with
+  trimesh but no boolean engine it skipped its own baseline and its own control while
+  `availability` said it could run — a skip the registry could not see coming.
+- **A pass is `True`, and nothing else is.** `passed` must be a `bool`, or a 0-d
+  object whose `dtype.kind == "b"` such as `numpy.bool_`. `"false"`, `"no"`, `None`,
+  `1.0` or `2` on a verdict that is neither skipped nor errored turns it into an
+  error: `gate reported passed=<repr> (<type>); a verdict must say True or False`.
+  `measured` and `limit` must be `None` or a real number that is not a bool — `"n/a"`
+  or `True` is an error naming the type, and NaN or ±inf is an error mentioning
+  `non-finite`, with the field cleared to `None`. numpy scalars are fine; `run_gate`
+  converts them to plain `bool`, `int` and `float`. This rule exists because
+  `{"passed": "false"}` once rendered `[ok]`: every non-empty string is truthy, and
+  `bool()` was the whole check.
+- **A skip means the declared tooling is absent — nothing else.** On the pack's own
+  `selftest/baseline.json` and on its own known-bad fixture, a gate may skip only
+  when `availability(spec)` fails. A gate that skips itself there while its tools are
+  present is broken: `atompipe gate selftest` reports it not-ok (`skipped on its own
+  known-bad input while its tools are present: <reason>`) and CI fails the baseline.
+  A control that skips never fires, so it is not a control — a fixture that deleted a
+  key its gate needed once passed the suite's invariants 3 and 6 as "honestly
+  blocked". (In a host project, skipping because the project does not publish a key
+  is still honest: the claim goes BLOCKED and says why.)
 - **Declare the real tier.** A fifteen-minute gate is tier 2, however much you wish
   otherwise. Miscategorising it breaks everyone's inner loop.
 - **One dense line in `detail`.** Bulk output goes to `ctx.out_dir` and is cited in
@@ -169,6 +196,83 @@ Rules, all enforced:
   valuable gate in the pack.
 - **Ship at least one tier-0 gate.** A pack of only expensive gates has not finished
   its job.
+
+## The surface a gate sees
+
+Everything a pack can set, read or call, in one place. `tests/test_contracts.py`
+fails when any of these classes gains a public field, property or method that is
+not listed in its own block below (PLAN R-14): the page a pack author reads first
+must not describe a smaller spine than the one their gate runs in.
+
+```python
+@dataclass
+class GateSpec:                        # what @gate(...) builds and registers for you
+    id: str                            # "fdm.overhang": dotted; the prefix is the key scope
+    title: str = ""
+    claims: list[str]                  # claim ids OR claim TAGS this gate is evidence for
+    tier: Tier = Tier.INSTANT          # the REAL cost (see "Declare the real tier")
+    pack: str = ""                     # stamped from the pack's directory name when blank
+    requires_tools: list[str]          # EVERY executable must be on PATH
+    requires_python: list[str]         # EVERY module must be importable
+    negative_control: NegativeControl | None   # mandatory: the registry raises on None
+    description: str = ""
+    settles: str = ""                  # the quantity it measures, for gap matching
+    entry: str = ""                    # "module:function", for out-of-process discovery
+    requires_one_of: list[str]         # AT LEAST ONE "python:<module>" / "tool:<exe>"
+
+@dataclass
+class NegativeControl:
+    fixture: str                       # "selftest/steep_cone.py" or "module:function"; blank is refused
+    expect: str = "fail"               # "fail" (must not pass) or "error" (must crash); else not ok
+    note: str = ""                     # what is wrong with the fixture, and nothing else
+
+@dataclass
+class Verdict:                         # what a gate returns (or a (bool, detail) tuple, or a dict)
+    gate: str                          # overwritten from the spec: a gate cannot lie about its id
+    passed: bool = False               # True or False and nothing else (see Rules above)
+    claims: list[str]                  # stamped from the spec
+    measured: float | None = None      # a real number or None: never a bool, never NaN
+    limit: float | None = None         # likewise
+    units: str = ""
+    detail: str = ""                   # ONE dense line
+    evidence: list[str]                # files under ctx.out_dir
+    duration_s: float = 0.0            # measured by run_gate, never declared
+    tier: Tier = Tier.INSTANT          # stamped from the spec
+    skipped: bool = False              # could not run here; never a pass (see Rules above)
+    skip_reason: str = ""              # user-facing: what is missing, and how to get it
+    error: str = ""                    # the gate crashed: NOT the same as failing
+    pack: str = ""                     # stamped from the spec
+    locators: list[Locator]            # WHERE it applies, only when genuinely known
+    outcome -> str                     # property: "error" | "skipped" | "pass" | "fail"
+    ok -> bool                         # property: outcome == "pass"; a skip is never ok
+    def render(self) -> str            # "[FAIL] fdm.overhang : worst face 63.2deg vs 50deg limit"
+
+@dataclass
+class GateContext:                     # a gate's one argument
+    root: str                          # the project root
+    ledger: Ledger                     # a COPY of the project state: read it, never write it
+    model: Any | None                  # the loaded model, or None
+    params: dict                       # the projection, flattened: read numbers here
+    out_dir: str                       # scratch and evidence
+    tier: int                          # the sweep's tier; never a reason to lower the standard
+    log: Callable[[str], None]         # one-line progress sink
+    extra: dict                        # where a dict-returning fixture lands
+    pack: str; key_scope: str          # stamped by run_gate: whose namespace param() reads
+    def scopes(self) -> list[str]      # ["fdm", "fdm-print"]: this gate's scopes, best first
+    def param(self, name, default=None, *, scope=...) -> Any   # scoped first: see below
+    def pack_param(self, name, default=None) -> Any
+    def first_pack_param(self, names, default=None) -> Any
+    def first_pack_param_named(self, names, default=None) -> tuple[Any, str]
+    def require_param(self, name) -> Any          # raises rather than compare with None
+    def out_path(self, *parts) -> str             # an evidence path under out_dir, dir created
+    def with_extra(self, extra) -> GateContext    # a copy with `extra` merged over
+```
+
+`outcome` is the one derivation of what a verdict says: `"error"` if `error` is set,
+else `"skipped"` if `skipped`, else `"pass"` if `passed is True`, else `"fail"`.
+`ok`, the `[ok  ]`/`[FAIL]`/`[skip]`/`[ERR ]` tag and the claim status all read it,
+so an error or a skip can never be counted as a pass by one reader and not by
+another.
 
 ## Projection keys: scope, meaning, and resolution order
 
@@ -363,7 +467,11 @@ spelling the pack teaches** (`part_bbox_mm`, not `bbox_mm`), so CI proves the
 primary key is the one actually read.
 
 CI asserts three things: every gate passes the baseline, every control fires against
-it, and nothing skips.
+it, and nothing skips. "Nothing" is exact: a skip on the baseline or on a control is
+allowed only when `availability(spec)` fails — the gate's declared tooling is
+genuinely absent on that machine, which is how a runner without trimesh reports a
+mesh pack honestly instead of failing it. A gate that skips itself on either input
+while its tools are present fails.
 
 `atompipe gate selftest` runs every control and **fails any gate that passes its own
 known-bad input**.
