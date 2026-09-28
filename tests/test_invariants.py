@@ -237,18 +237,41 @@ class ReportNeverOverclaims(unittest.TestCase):
     def _render(self, ledger, reg):
         return report_mod.render_markdown(ledger, reg)
 
-    @staticmethod
-    def _proven_section(md):
+    def _proven_section(self, md):
         """Just the PROVEN section body — NOT the headline verdict.
 
         The headline legitimately names claims that are unproven (that is its job:
         to say what is outstanding). The invariant under test is narrower: nothing
         unproven may appear in the PROVEN table.
+
+        It FAILS the test when there is no such section; it never returns "".
+        What slipped through (S-15): this helper searched for a literal heading and
+        returned an empty string when the heading was missing, so every
+        `assertNotIn(..., section)` in this class passed on nothing. Renaming the
+        heading — which P2's REPORT.md rewrite proposes (PLAN D-14, A-11) — would
+        have kept invariant 4 green while testing no report at all. The heading is
+        now `report.SECTION_PROVEN`, the constant the report itself emits, so a
+        rename moves the report and this helper together, and a report that stops
+        emitting it turns these tests red instead of vacuous.
         """
-        if "## What is PROVEN" not in md:
-            return ""
-        body = md.split("## What is PROVEN", 1)[1]
-        return body.split("\n## ", 1)[0]
+        heading = report_mod.SECTION_PROVEN
+        lines = md.splitlines()
+        at = [i for i, line in enumerate(lines)
+              if line == heading or line.startswith(heading + " ")]
+        if len(at) != 1:
+            self.fail(f"the report has {len(at)} {heading!r} headings where it must "
+                      f"have exactly one: an absent PROVEN section is not an empty "
+                      f"one, and assertNotIn on nothing proves nothing")
+        body = []
+        for line in lines[at[0] + 1:]:
+            if line.startswith("## "):
+                break
+            body.append(line)
+        section = "\n".join(body)
+        if not section.strip():
+            self.fail(f"the {heading!r} section is empty: the report always says "
+                      f"something there, if only that nothing is proven")
+        return section
 
     def test_skipped_gate_is_not_in_proven_section(self):
         v = Verdict(gate="g.one", claims=["C1"], passed=True, skipped=True,
@@ -266,6 +289,49 @@ class ReportNeverOverclaims(unittest.TestCase):
         self.assertEqual(claims_mod.resolve_status(c, []), ClaimStatus.UNVERIFIED)
         md = self._render(_ledger(c), _Reg([]))
         self.assertNotIn("C9", self._proven_section(md))
+
+    def test_monkeypatched_heading_makes_the_helper_raise(self):
+        """V for `_proven_section`: a report whose PROVEN heading is not the one
+        `report.SECTION_PROVEN` names makes the helper FAIL, never hand the three
+        tests above an empty string to pass on (S-15)."""
+        from unittest import mock
+
+        v = Verdict(gate="g.one", claims=["C1"], passed=True, measured=0.312, units="mm")
+        ledger = _ledger(_claim(), verdicts=[v])
+        emit = report_mod._section_proven
+
+        def renamed(*args, **kwargs):
+            out = list(emit(*args, **kwargs))
+            out[0] = "## What is VERIFIED (a rename that bypassed the constant)"
+            return out
+
+        with self.subTest("the report stops emitting the constant"):
+            with mock.patch.object(report_mod, "_section_proven", renamed):
+                md = self._render(ledger, _Reg([SPEC]))
+            self.assertIn("g.one", md)          # the row is there, under another name
+            with self.assertRaises(self.failureException):
+                self._proven_section(md)
+        with self.subTest("the helper follows the constant, never a literal"):
+            md = self._render(ledger, _Reg([SPEC]))
+            with mock.patch.object(report_mod, "SECTION_PROVEN", "## What is CERTIFIED"):
+                with self.assertRaises(self.failureException):
+                    self._proven_section(md)
+        with self.subTest("a renamed constant moves the report and the helper together"):
+            with mock.patch.object(report_mod, "SECTION_PROVEN", "## What is CERTIFIED"):
+                md = self._render(ledger, _Reg([SPEC]))
+                self.assertIn("g.one", self._proven_section(md))
+
+    def test_a_gate_that_ran_ok_does_appear(self):
+        """The positive control for the absence tests above. `assertNotIn` is
+        satisfied by any section that shows nothing — an empty one, or one cut at
+        the wrong heading — so the same helper, on a gate that ran and passed,
+        must find the gate, its claim and its number."""
+        v = Verdict(gate="g.one", claims=["C1"], passed=True, measured=0.312, units="mm")
+        md = self._render(_ledger(_claim(), verdicts=[v]), _Reg([SPEC]))
+        section = self._proven_section(md)
+        self.assertIn("g.one", section)
+        self.assertIn("C1", section)
+        self.assertIn("0.312", section)
 
     def test_verdict_says_so_when_something_blocks(self):
         """The one-sentence verdict must lead with the problem, not bury it."""

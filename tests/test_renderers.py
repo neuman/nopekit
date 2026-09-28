@@ -18,11 +18,19 @@ Run:  PYTHONPATH=src python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import itertools
+import json
+import os
+import re
+import shutil
 import unittest
 
+import _env
 from atompipe import claims as claims_mod
+from atompipe import cli as cli_mod
+from atompipe import report as report_mod
 from atompipe.models import (
-    Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, Verdict,
+    BLOCKING_STATUSES, Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, GateSpec,
+    Ledger, NegativeControl, ProjectMeta, Tier, Verdict,
 )
 
 
@@ -133,6 +141,116 @@ class ExplainingVerdict(unittest.TestCase):
         claim = _claim()
         claim.tags = ["stiffness"]
         self.assertIs(claims_mod.explaining_verdict(claim, [self.SKIP, tagged]), tagged)
+
+
+class _Specs(list):
+    """A registry stand-in: `report` and `claims` read nothing but `.specs()`, so
+    no `gates.Registry` — and no global one — is needed to render a claim."""
+
+    def specs(self):
+        return list(self)
+
+
+#: The gates behind `ReasonsAgree`'s claim.
+_SPECS = _Specs(GateSpec(id=gid, claims=["C1"], tier=Tier.INSTANT,
+                         negative_control=NegativeControl(fixture="x:y"))
+                for gid in ("g.one", "g.two", "g.three"))
+
+#: A claim line of `render_terminal`: a five-wide status tag, then the claim id.
+_CLAIM_LINE = re.compile(r"^\[.{5}\] (?P<id>\S+) ")
+
+
+class ReasonsAgree(unittest.TestCase):
+    """`status` (via `report.render_terminal`) and `check` (via
+    `cli._blocking_reason`) cite the same gate, in the same words, for one claim.
+
+    What slipped through (S-68): `check`'s private ranking had been fixed to
+    prefer the gate that ran and failed, and `report._terminal_reason` still cited
+    the first non-passing verdict — a pack gate that SKIPPED for a missing
+    parameter — so the two commands told two stories about one ledger.
+    """
+
+    FAIL = ExplainingVerdict.FAIL
+    SKIP = ExplainingVerdict.SKIP
+    ERROR = ExplainingVerdict.ERROR
+
+    def _reasons(self, verdicts):
+        claim = _claim(gates=[s.id for s in _SPECS])
+        ledger = Ledger(meta=ProjectMeta(name="t", revision="v0.1"), claims=[claim],
+                        verdicts=list(verdicts))
+        status = claims_mod.resolve_status(claim, ledger.verdicts)
+        cover = claims_mod.effective_gates(ledger, _SPECS)
+        rows = [line for line in report_mod.render_terminal(ledger, _SPECS).splitlines()
+                if (m := _CLAIM_LINE.match(line)) and m.group("id") == "C1"]
+        self.assertEqual(len(rows), 1, rows)
+        return (status,
+                cli_mod._blocking_reason(ledger, claim, status),
+                report_mod._terminal_reason(ledger, claim, status, cover),
+                rows[0])
+
+    def test_status_check_and_report_cite_the_failing_gate(self):
+        cases = {
+            "a fail beats a skip": ([self.SKIP, self.FAIL],
+                                    "g.one : 0.700 mm at 15 N (limit 0.5 mm)"),
+            "an error beats a skip": ([self.SKIP, self.ERROR],
+                                      "g.three : ZeroDivisionError: division by zero"),
+            "a fail with nothing to say": ([self.SKIP, Verdict(gate="g.one", claims=["C1"],
+                                                               passed=False)],
+                                           "g.one did not pass"),
+        }
+        for name, (verdicts, want) in cases.items():
+            for order in (verdicts, verdicts[::-1]):
+                with self.subTest(name, order=[v.gate for v in order]):
+                    status, check, status_reason, row = self._reasons(order)
+                    self.assertEqual(status, ClaimStatus.FAIL)
+                    self.assertEqual(check, want, "check cites another reason")
+                    self.assertEqual(status_reason, want, "status cites another reason")
+                    self.assertTrue(row.startswith(report_mod.status_tag(status) + " C1 "),
+                                    row)
+                    self.assertTrue(row.endswith(" — " + want), row)
+                    self.assertNotIn("g.two", row, "the skip was cited over the failure")
+
+
+class BlockingTagIsStatusTag(_env.EnvCase):
+    """`check`'s BLOCKING list spells a claim status the way `status` does.
+
+    What slipped through (S-69): `check` built its tag from the first four letters
+    of the status — `[fail]`, `[uncl]` — while `status` and the report printed
+    `report.status_tag`'s `[FAIL ]`, `[gap  ]`: two spellings of one status, one
+    screen apart, so a reader had to learn that `uncl` and `gap` were the same.
+    """
+
+    def test_each_blocking_status(self):
+        claim = _claim()
+        for status in sorted(BLOCKING_STATUSES, key=str):
+            with self.subTest(status=str(status)):
+                self.assertEqual(cli_mod._blocking_line(claim, status, "the reason"),
+                                 f"{report_mod.status_tag(status)} C1 the thing holds"
+                                 f" — the reason")
+
+    def test_check_prints_its_blockers_with_it(self):
+        """The helper is what `check` prints: every line under BLOCKING in a real
+        run starts with `status_tag` of the status `check --json` reports for that
+        claim. A copy of the bracket, so the tracked example is never written."""
+        project = os.path.join(self.tmp(), "bracket")
+        shutil.copytree(os.path.join(_env.REPO, "examples", "bracket"), project,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        text = _env.atompipe(["check", "--no-record"], cwd=project)
+        data = _env.atompipe(["check", "--json", "--no-record"], cwd=project)
+        self.assertEqual((text.returncode, data.returncode), (1, 1),
+                         text.stdout + text.stderr + data.stderr)
+        blocking = json.loads(data.stdout)["blocking"]
+        self.assertTrue(blocking, "the bracket fails on purpose; nothing blocked")
+        lines = text.stdout.splitlines()
+        heads = [i for i, line in enumerate(lines) if line.startswith("BLOCKING — ")]
+        self.assertEqual(len(heads), 1, text.stdout)
+        printed = lines[heads[0] + 1:heads[0] + 1 + len(blocking)]
+        self.assertEqual(len(printed), len(blocking), text.stdout)
+        for row, line in zip(blocking, printed):
+            with self.subTest(claim=row["claim"]):
+                self.assertTrue(line.startswith(
+                    f"{report_mod.status_tag(ClaimStatus(row['status']))} {row['claim']} "),
+                    line)
 
 
 if __name__ == "__main__":
