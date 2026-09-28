@@ -1184,7 +1184,7 @@ code digest (`spec=None` or `fn=None`: `CodeRef.unrecorded()`, and the entry nam
 digest, the reads (`reads=`, else `trace` through `Reads.from_trace`), rho and
 `instruments_for`; writes the entry; and `forget`s the gate's remembered outcomes at
 the entry's rho and at `""` — never at another rho (the sweep, which knows the rhos
-current before its run, forgets those too).
+current before its run at the tier it took, forgets those too).
 
 **`instruments_for`** — provenance, never rho (Q1.3): for each module in
 `requires_python`, the `python:` entries of `requires_one_of`, and the closure's
@@ -1242,17 +1242,19 @@ renderer test plants an admission; it forges only the inner loop (R-9). Writing 
 **Remembered outcomes** — `.atompipe/cache/last_outcomes.json` (untracked): `{key:
 {input_rho: {"kind", "verdict", "when"}}}`, key a gate id or `control:<gate id>`,
 `kind` `"error"`, `"self-skip"` or `"availability"`. Keyed by **`(key, input_rho)`** —
-`input_rho` the rho computed from current digests just before the run (a Fresh
-entry's, the recomputed rho of the latest entry's read signature, or `""`), or a
-control's current `static` — never the failing run's own rho, which a crash at partial
-reads makes different from the PASS it followed. One record per `(key, input_rho)`,
+`input_rho` the rho computed from current digests just before the run, at the tier
+the run took (the state's `input_rho`: a Fresh entry's, the recomputed rho of the latest
+entry's read signature — of the latest one read at that tier when the state's own is
+another's — or `""`), or a control's current `static` — never the failing run's own
+rho, which a crash at partial reads makes different from the PASS it followed, and
+never another tier's entry's, which a crash on this path is not at the inputs of. One record per `(key, input_rho)`,
 the newest, except that an `availability` record never replaces an `error` or
 `self-skip` one: a check that could not run the gate answered nothing — and a key
 keeps one `availability` record, the newest, since it supersedes nothing. A pass or fail
 clears only the records at the inputs it was measured at (`forget(root, key,
 input_rhos)`): the sweep's `_superseded` — the new entry's rho, `""`, and every rho
-current before the run — `record_verdict`'s the entry's rho and `""`, a control
-entry's its `static`. What slipped through (remembered outcomes, round 1): one record
+current before the run at the tier it took (`here`) — `record_verdict`'s the entry's
+rho and `""`, a control entry's its `static`. What slipped through (remembered outcomes, round 1): one record
 per gate, forgotten by a pass or fail at ANY rho and overwritten by an availability
 skip — a crash at A, then a PASS at B (or a check without the tool), and back at A
 `check` read `0 executed, 6 cached` and served the PASS the crash had superseded; the
@@ -1275,14 +1277,17 @@ or a fixture; all of it reads the cache and what is on disk now.
 MAX_STALE_REASONS = 3         # moves named per stale gate, then "(+n more)": one gate, one line
 
 @dataclass(frozen=True)
-class Fresh:   entry: Entry; notes: tuple; rho: str; current: frozenset       # state = "fresh"
+class Fresh:   entry: Entry; notes: tuple; rho: str; current: frozenset;      # state = "fresh"
+               path: frozenset; here: frozenset; input_rho: str
 @dataclass(frozen=True)
 class Stale:   entry: Entry; reasons: tuple; rho: str; current: frozenset;
-               conflict: tuple                                                # state = "stale"
+               conflict: tuple; here: frozenset; input_rho: str               # state = "stale"
 @dataclass(frozen=True)
-class Unknown: entry: Entry | None; reason: str; rho: str; current: frozenset # state = "unknown"
+class Unknown: entry: Entry | None; reason: str; rho: str; current: frozenset;
+               here: frozenset; input_rho: str                                # state = "unknown"
 @dataclass(frozen=True)
-class Never:   ...                    # state = "never"; entry None, rho "", current frozenset()
+class Never:   ...                    # state = "never"; entry None, rho "", input_rho "", current
+                                      #   and here frozenset()
 
 def freshness(root, registry, projection, ledger, *, digests=None, anchors=None,
               model=None, tier=None) -> dict[str, Fresh | Stale | Unknown | Never]   # every registered gate
@@ -1319,8 +1324,9 @@ spine digest, the code closure of the LOADED module (a newly added import counts
 params at each recorded path in `modelio.flat_params(projection)` walked by
 `ParamTrace`'s own leaf/presence/bulk rules (a miss is `ABSENT`), file and listing
 digests through `digests`, the claim records. An entry whose rho is the recomputed one
-is **Fresh** — its `rho` is what the sweep keys a remembered crash under, and its
-`current` (every signature's rho recomputed now) what one is matched against — and an
+is **Fresh** — its `current` is every signature's rho recomputed now, its `path`
+those on the served entry's path (the signatures read at its tier, or that never read
+`ctx.tier`): what a remembered crash must be at to supersede it — and an
 instruments difference is a note (`recorded under trimesh 4.0.0; here 5.1.0`), never
 staleness (Q1.3). **Unknown**, never Fresh: the projection is `None` and the entry read
 params (S-21: a model that failed to import used to turn staleness off — status said
@@ -1345,7 +1351,21 @@ one recorded at N or above, the highest tier first (`_most_thorough`); a reader,
 no tier of its own (`tier=None`, `resolve`), serves the highest recorded. A gate "must
 not use [the tier] to lower its own standard", so the costlier path is the more
 thorough answer to the same question. *Rejected:* exact match only — a tier-0 `check`
-would then serve the cheap PASS over the costlier FAIL that `status` shows.
+would then serve the cheap PASS over the costlier FAIL that `status` shows. Each
+signature's tier (the one it read, raised to the sweep's when below it) also says whose
+inputs its rho is (`_by_tier`): every state carries `here`, the current rhos at the asking
+sweep's tier or of a signature that never read it — what a pass or fail of that sweep
+answers — and `input_rho`, what a crash of that sweep is remembered under: `rho` when the
+state's own signature is at that tier, else the latest entry's among those that are (a
+current one first), else `""`. A reader's `here` is `current` and its `input_rho` its
+`rho`; for a gate that never reads the tier, `path` and `here` are `current` and
+`input_rho` is `rho`. What slipped through (review, remembered outcomes by tier): a
+tier-0 check serves a tier-2 entry, and the sweep remembered and forgot under that
+entry's `rho` and every signature's `current` — a cheap-path PASS forgot the tier-2
+crash and `check --tier 2` served, cached, the PASS it had superseded; a cheap-path
+crash was filed under the tier-2 entry, so an edit to an input only that path reads
+dropped it, and the next plain check served the tier-0 PASS, cached, for a path that
+had just crashed at inputs that never moved.
 
 **`admission_state`** — is the gate's control demonstrated at its current version, from
 records alone (only `check` may spend a fixture's time). A candidate is a control entry
@@ -1395,8 +1415,9 @@ registered gate, in registration order, the first that applies:
    PASS committed where trimesh is installed never reads PASS where it is not). A Fresh
    FAIL is still served (R-3).
 2. A remembered crash or self-skip that supersedes the Fresh entry (its `input_rho` is
-   a rho current now, `Fresh.current`: the entry's or another signature's — a record
-   at other inputs never does) or, with none Fresh, is displayed (`input_rho` `""`, or a rho
+   a rho current now on the served entry's path, `Fresh.path`: the entry's or another
+   signature's read at its tier or at none — a record at other inputs, or on a cheaper
+   tier's path, never does) or, with none Fresh, is displayed (`input_rho` `""`, or a rho
    recomputable now, or the gate has no entry at all — never "never run", S-68).
    Invariant 2: a crash proves nothing, and neither does the PASS it followed.
 3. A Fresh entry under admission (PD-08, X14): PASS + admitted or pending counts;
@@ -1537,6 +1558,14 @@ named above the ceiling runs, control included. `freshness` is computed first. P
 selected gate: 1. *availability* fails — a Fresh FAIL is served (R-3); otherwise
 skipped, `cached pass exists; <why> here` over a Fresh PASS (invariant 1), remembered
 as `availability` (never over a crash or self-skip at the same rho); no control runs (CI has no trimesh: a skip, never "not admitted").
+1b. unless `force`, a remembered crash or self-skip standing over a Fresh entry of a
+costlier tier, on that entry's path, with none standing at this sweep's own tier
+(`here`): the row is that crash, as `resolve` reads it, with a `note:` naming the path
+and `run atompipe check --tier <t>` — nothing runs, since no run at this tier is made at
+that path's inputs or answers it. What slipped through (review, remembered outcomes by
+tier): the cheap path ran instead, and its PASS was the row — `check` ready while every
+reader showed the crash — and forgot the tier-2 crash, so `check --tier 2` then served
+the PASS that crash had superseded.
 2. *admission* — not admitted: `error="not admitted: <why>"`, `fn` never called. A
 Fresh entry of a costlier tier is judged at its own tier by the records alone;
 undemonstrated there, the row is what `resolve` serves — the entry's verdict, cached,
@@ -1554,8 +1583,9 @@ only Fresh was served here, so a conflict re-ran on every check and `check` show
 run's answer — `[ok  ]`, ready, exit 0, a green JUnit, `last_check.json` saying pass —
 for a claim `status` and `doctor` FAILed. 4. *run*, traced with the sweep's
 anchors: a pass or fail is keyed and cached (clearing the remembered outcomes at the
-inputs it ran on, `_superseded`, and no others), anything else remembered under the
-rho computed before the run; every run appends obs. A pass or
+inputs it ran on at the tier it took, `_superseded`, and no others), anything else
+remembered under the rho computed before the run at that tier (the state's
+`input_rho`); every run appends obs. A pass or
 fail landing where the other outcome is recorded at its rho under the same instruments
 (`--force` over a conflict, or a run that just made one) is filed, and its row is that
 same error (`_contradicted`, asked of the writer's `_siblings`), recorded or not — an
@@ -1566,7 +1596,14 @@ memory under `record=False`), and where the records resolve to another outcome �
 Fresh entry of a costlier tier (`_most_thorough`), or two outcomes, or the same outcome
 from a costlier entry whose own tier's admission does not count (stale, or not
 admitted) — that is the row, under its own tier's admission and with a `note:` saying
-so (`… and it stands (PASS, not current)`; `_outranked`). What
+so (`… and it stands (PASS, not current)`; `_outranked`); and where a remembered crash
+the run did not answer still stands over that entry (a costlier tier's path), the row is
+that crash (`… supersedes the entry <name>, and it stands — run atompipe check --tier
+<t>`). A run's own crash stays its row: never laid under a costlier PASS (invariant 2)
+— the louder reading, filed at this path's inputs, which that PASS is not at — and a
+`note:` names the costlier entry `status` and a plain check serve beside it (`… ran at
+tier 0 (ERROR), on that path only; the tier-2 entry <name> at these inputs is the more
+thorough answer, …`). What
 slipped through: `check --force --junit`, CI's invocation at tier 0, re-ran a gate that
 reads `ctx.tier` on its cheap path and laid that PASS over the tier-2 FAIL every reader
 served — exit 0, a green JUnit, `last_check.json` saying pass. The

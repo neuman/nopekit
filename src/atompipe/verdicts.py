@@ -4678,12 +4678,14 @@ def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str
     ``key`` is a gate id, or ``control:<gate id>``; ``kind`` ``"error"``,
     ``"self-skip"`` or ``"availability"``; ``when`` the CLI's clock. **Keyed by
     ``(key, input_rho)``** — ``input_rho`` the rho the sweep computed for that
-    gate from current digests just BEFORE the run (a Fresh entry's, the
-    recomputed rho of the latest entry's read signature, or ``""`` when it
-    never ran); for a control, the current static part. *Rejected:* the failing
-    run's own rho — a crash at partial reads has a different rho than the PASS
-    it followed, so "supersede at the same rho" would never match and the next
-    plain check would serve the old PASS. Nothing remembered is evidence, so
+    gate from current digests just BEFORE the run, at the tier the run took
+    (the state's ``input_rho``: a Fresh entry's, the recomputed rho of the
+    latest entry's read signature — of the latest one read at that tier, when
+    the state's own was read at another — or ``""`` when none was); for a
+    control, the current static part. *Rejected:* the failing run's own rho — a
+    crash at partial reads has a different rho than the PASS it followed, so
+    "supersede at the same rho" would never match and the next plain check
+    would serve the old PASS. Nothing remembered is evidence, so
     remembering a pass or a fail is refused: those are cached.
 
     One record per ``(key, input_rho)``, the newest — except that an
@@ -4904,14 +4906,22 @@ class Fresh:
     ``notes`` — what does not make it stale but is worth saying (another
     library version recorded it, Q1.3: provenance, never rho). ``rho`` — the
     recomputed address (the entry's). ``current`` — every rho recomputable now
-    across the gate's read signatures, the set a remembered crash is matched
-    against (§3.9).
+    across the gate's read signatures. ``path`` — the rhos of ``current`` on
+    the served entry's path: signatures read at its tier, or that never read
+    ``ctx.tier`` — the set a remembered crash is matched against (§3.9;
+    ``_crash_applies``). ``here`` and ``input_rho`` — the asking sweep's
+    (``_by_tier``): what a measurement there clears, and what a crash there
+    is remembered under. For a gate that never reads the tier, ``path`` and
+    ``here`` are ``current`` and ``input_rho`` is ``rho``.
     """
 
     entry: Entry
     notes: tuple = ()
     rho: str = ""
     current: frozenset = frozenset()
+    path: frozenset = frozenset()
+    here: frozenset = frozenset()
+    input_rho: str = ""
     state: ClassVar[str] = "fresh"
 
 
@@ -4921,16 +4931,19 @@ class Stale:
     time, then name) and ``reasons`` what moved since it: param moves as
     ``config.bed_xy 220.0 -> 250.0``, then files, code, spine — at most
     ``MAX_STALE_REASONS``, then ``(+n more)``. ``rho`` is the latest entry's
-    read signature recomputed now: the ``input_rho`` a crash here is remembered
-    under. ``conflict`` holds the entries when two outcomes were recorded for
-    the current inputs (§3.7) — stale while ``TWO_OUTCOMES_IS_ERROR`` is False,
-    an error once it is True."""
+    read signature recomputed now; ``input_rho`` the one a crash of the asking
+    sweep is remembered under — ``rho``, unless that signature read another
+    tier than the sweep's (``_by_tier``). ``conflict`` holds the entries when
+    two outcomes were recorded for the current inputs (§3.7) — stale while
+    ``TWO_OUTCOMES_IS_ERROR`` is False, an error once it is True."""
 
     entry: Entry
     reasons: tuple = ()
     rho: str = ""
     current: frozenset = frozenset()
     conflict: tuple = ()
+    here: frozenset = frozenset()
+    input_rho: str = ""
     state: ClassVar[str] = "stale"
 
 
@@ -4941,12 +4954,15 @@ class Unknown:
     reads, a non-JSON value); the spine cannot digest itself (S-29); or the
     gate's code cannot be keyed. Resolves like stale, never fresh. ``rho`` is
     the recomputed address when one exists (an opaque signature still has one:
-    a crash there is matched by it), else ``""``."""
+    a crash there is matched by it), else ``""``; ``here`` and ``input_rho`` as
+    ``Stale``'s."""
 
     entry: Any
     reason: str
     rho: str = ""
     current: frozenset = frozenset()
+    here: frozenset = frozenset()
+    input_rho: str = ""
     state: ClassVar[str] = "unknown"
 
 
@@ -4959,6 +4975,8 @@ class Never:
     entry: ClassVar[Any] = None
     rho: ClassVar[str] = ""
     current: ClassVar[frozenset] = frozenset()
+    here: ClassVar[frozenset] = frozenset()
+    input_rho: ClassVar[str] = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -5298,7 +5316,9 @@ def _judge(spec: Any, code: CodeRef, entries: list[Entry], now: _Now,
     """One gate's state, from its entries. Never runs the gate. A group that
     read ``ctx.tier`` below the asking sweep's is not current: its rho now is
     the address a run at the sweep's tier would have, which none of its
-    entries is at (``_most_thorough``)."""
+    entries is at (``_most_thorough``). Each group's tier — the one it read,
+    raised to the sweep's when below it — says which answer's inputs its rho
+    is (``_by_tier``)."""
     if not entries:
         return Never()
     gate_id = spec.id
@@ -5308,9 +5328,13 @@ def _judge(spec: Any, code: CodeRef, entries: list[Entry], now: _Now,
     for entry in entries:
         groups.setdefault(_signature(entry), []).append(entry)
     judged: dict[str, tuple[str, str, Reads | None]] = {}
+    level: dict[str, int | None] = {}
     current: set[str] = set()
     matches: list[Entry] = []
     for sig, group in groups.items():
+        tier = _read_tier(group[0].reads)
+        level[sig] = (now.tier if tier is not None and now.tier is not None
+                      and tier < now.tier else tier)
         reads_now, why = _reads_now(group[0].reads or {}, now)
         why = blocked or why
         if (not why and reads_now is not None and reads_now.tier is not None
@@ -5323,16 +5347,84 @@ def _judge(spec: Any, code: CodeRef, entries: list[Entry], now: _Now,
             if not (group[0].reads or {}).get("opaque"):
                 matches.extend(e for e in group if e.rho == rho_now)
     known = frozenset(current)
+    rhos = {sig: (found[0], level[sig]) for sig, found in judged.items()}
     if matches:
-        return _fresh_or_conflict(spec, code, _most_thorough(matches), known, order)
+        thorough = _most_thorough(matches)
+        served = max((t for t in (_read_tier(e.reads) for e in thorough) if t is not None),
+                     default=None)
+        return _by_tier(_fresh_or_conflict(spec, code, thorough, known, order),
+                        groups, rhos, now, order, served=served)
     latest = max(entries, key=order)
     rho_now, why, reads_now = judged[_signature(latest)]
     if why:
-        return Unknown(latest, why, "", known)
-    opaque = list((latest.reads or {}).get("opaque") or ())
-    if opaque:
-        return Unknown(latest, "opaque inputs: " + ", ".join(opaque), rho_now, known)
-    return Stale(latest, _reasons(latest, reads_now, code, now), rho_now, known)
+        state: Stale | Unknown = Unknown(latest, why, "", known)
+    elif (latest.reads or {}).get("opaque"):
+        opaque = list((latest.reads or {}).get("opaque") or ())
+        state = Unknown(latest, "opaque inputs: " + ", ".join(opaque), rho_now, known)
+    else:
+        state = Stale(latest, _reasons(latest, reads_now, code, now), rho_now, known)
+    return _by_tier(state, groups, rhos, now, order)
+
+
+def _by_tier(state: Fresh | Stale | Unknown, groups: Mapping[str, list[Entry]],
+             rhos: Mapping[str, tuple[str, int | None]], now: _Now,
+             order: Callable[[Entry], tuple], *, served: int | None = None
+             ) -> Fresh | Stale | Unknown:
+    """``state`` with the rhos each read signature's tier puts where. ``rhos`` is
+    ``{signature: (rho now or "", the tier it is judged at)}`` — the tier it
+    read, raised to the asking sweep's when below it; ``None``, never read.
+
+    ``here`` — the rhos of ``current`` at the asking sweep's tier, or of a
+    signature that never read ``ctx.tier``: the inputs a run of that sweep is
+    made at, and all that a pass or fail there answers (``_superseded``).
+    ``input_rho`` — what a crash there is remembered under: ``rho`` when the
+    state's own signature is at that tier, else the latest entry's among the
+    signatures that are (a current entry first), else ``""`` (no entry was ever
+    made on that path). A reader (``now.tier`` ``None``) never runs, so it never
+    remembers or forgets: its ``here`` is ``current``, its ``input_rho``
+    ``rho``. ``path``, a Fresh state's — the rhos of ``current`` at the tier the
+    served entries read (``served``), or of a signature that never read it:
+    what a remembered crash must be at to supersede the answer this state
+    serves (``_crash_applies``). For a gate that never reads the tier all three
+    are what they were before tiers were keyed: ``current``, ``current`` and
+    ``rho``.
+
+    What slipped through (review, remembered outcomes by tier): a tier-0 check
+    serves a tier-2 entry (``_most_thorough``), so its ``rho`` was the costlier
+    path's inputs and its ``current`` held every signature's, and the sweep
+    remembered and forgot under those. A cheap-path PASS forgot the crash on the
+    costlier path, and ``check --tier 2`` served, cached, the PASS that crash
+    had superseded; a cheap-path crash was filed under the tier-2 entry, so an
+    edit to an input only that path reads took it out of the current set, and
+    the next plain check served the tier-0 PASS, cached, for the path that had
+    just crashed at inputs that never moved. *Rejected:* a tier field on each
+    remembered record — the signature's rho already names the tier it was read
+    at, and one record per rho stays the file's one shape; and keeping
+    ``current`` as what a crash supersedes over a Fresh entry — a cheap-path
+    crash filed at its own inputs would then stand over the tier-2 answer for
+    ``status`` (whose ``current`` holds the tier-0 signature as it was read)
+    and not for ``check --tier 2`` (whose raised one is another rho): ``check``
+    ready, ``status`` not, at one set of inputs.
+    """
+    if now.tier is None:
+        here = state.current
+    else:
+        here = frozenset(rho_ for rho_, tier in rhos.values()
+                         if rho_ and tier in (None, now.tier))
+    sig_of = {entry.name: sig for sig, group in groups.items() for entry in group}
+    if now.tier is None or rhos[sig_of[state.entry.name]][1] in (None, now.tier):
+        input_rho = state.rho
+    else:
+        pool = [entry for sig, group in groups.items() for entry in group
+                if rhos[sig][1] in (None, now.tier)]
+        measured = [entry for entry in pool if entry.rho == rhos[sig_of[entry.name]][0]]
+        pick = max(measured or pool, key=order) if pool else None
+        input_rho = rhos[sig_of[pick.name]][0] if pick is not None else ""
+    if isinstance(state, Fresh):
+        path = frozenset(rho_ for rho_, tier in rhos.values()
+                         if rho_ and tier in (None, served))
+        return dataclasses.replace(state, path=path, here=here, input_rho=input_rho)
+    return dataclasses.replace(state, here=here, input_rho=input_rho)
 
 
 def _fresh_or_conflict(spec: Any, code: CodeRef, matches: list[Entry], current: frozenset,
@@ -5816,27 +5908,34 @@ def _synthesized(spec: Any, **fields: Any) -> Verdict:
 
 def _crash_applies(record: Mapping[str, Any] | None, state: Any) -> bool:
     """Does a remembered crash or self-skip stand at ``state``'s inputs (§3.9)?
-    Over a Fresh entry, at a rho current now (``Fresh.current``: the entry's,
-    and every other read signature's recomputed); otherwise at any rho current
-    now, or anywhere when nothing better exists (S-68: with no entry at all,
-    "never run" would be false). ONE predicate for ``resolve``'s step 2 and the
-    sweep's step 3. They were two copies, and the sweep's answered only for
-    Fresh — enough while Fresh was all the sweep served. Once it serves a
-    two-outcomes conflict too, a copy without the Stale rule would serve the
-    conflict where ``status`` shows the crash that superseded it.
+    Over a Fresh entry, at a rho current now on the served entry's path
+    (``Fresh.path``: the entry's, and every other read signature's recomputed
+    that read its tier or none); otherwise at any rho current now, or anywhere
+    when nothing better exists (S-68: with no entry at all, "never run" would be
+    false). ONE predicate for ``resolve``'s step 2 and the sweep's step 3. They
+    were two copies, and the sweep's answered only for Fresh — enough while
+    Fresh was all the sweep served. Once it serves a two-outcomes conflict too,
+    a copy without the Stale rule would serve the conflict where ``status``
+    shows the crash that superseded it.
 
-    Why ``current`` over a Fresh entry and not its rho alone: a crash is
+    Why the path over a Fresh entry and not its rho alone: a crash is
     remembered under the latest entry's signature, which need not be the Fresh
     entry's — a crash at those same inputs, read through another signature,
-    stood behind a PASS it had superseded. And ``_superseded`` clears exactly
-    this set when a run measures, so a crash matched here is one no run at
-    these inputs has answered since. *Rejected:* the entry's rho alone (the
-    first rule) — it needs ``forget`` to clear the whole gate to stay
-    loop-free, and that was the hole (remembered outcomes, round 1)."""
+    stood behind a PASS it had superseded. And a run at the served entry's
+    tier clears exactly this set when it measures (``_superseded``: ``here`` is
+    ``path`` there), so a crash matched here is one no run at these inputs has
+    answered since. Why not every signature's (``current``, the rule until the
+    review of remembered outcomes by tier): a crash on the cheap path is not at
+    the costlier answer's inputs, and a tier-0 ``check`` serves that answer —
+    matched there it stood for ``status``, whose ``current`` holds the tier-0
+    signature, and not for ``check --tier 2``, whose raised one is another rho.
+    *Rejected:* the entry's rho alone (the first rule) — it needs ``forget`` to
+    clear the whole gate to stay loop-free, and that was the hole (remembered
+    outcomes, round 1)."""
     if record is None or record["kind"] not in _SUPERSEDING_KINDS:
         return False
     if isinstance(state, Fresh):
-        return record["input_rho"] in state.current
+        return record["input_rho"] in state.path
     return isinstance(state, Never) or record["input_rho"] == "" \
         or record["input_rho"] in state.current
 
@@ -5868,10 +5967,15 @@ def _superseded(state: Any, rho_: str) -> set[str]:
     """The remembered rhos a pass or fail measured at ``rho_`` answers, the gate
     having stood at ``state`` just before the run: its own rho, ``""`` (a
     crash from before the gate had any entry — it has one now), and every rho
-    ``_crash_applies`` matched there (``state.rho``, ``state.current``) — the
-    run was made at those inputs. Nothing else: a crash at inputs this run was
-    not made at is still the last word there (remembered outcomes, round 1)."""
-    return {"", rho_, state.rho or "", *(state.current or ())}
+    current then at the tier the run took (``state.here``: a signature read
+    at the sweep's tier, or raised to it, or one that never read the tier) —
+    the run was made at those inputs. Nothing else: a crash at inputs this run
+    was not made at is still the last word there (remembered outcomes, round
+    1), and neither is a crash on another tier's path (review, remembered
+    outcomes by tier: ``state.rho`` and ``state.current`` were cleared here,
+    and a tier-0 PASS took the tier-2 crash with them — ``check --tier 2``
+    served the PASS that crash had superseded)."""
+    return {"", rho_, *(state.here or ())}
 
 
 def _contradicted(root: str, entry: Entry) -> str:
@@ -6972,7 +7076,8 @@ def _filtered(only: Any) -> bool:
 
 
 def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, entry: Entry,
-               verdict: Verdict, judged: Admission) -> SweepRow | None:
+               verdict: Verdict, judged: Admission, *, held: Mapping[str, Any]
+               ) -> SweepRow | None:
     """The row a measured run leaves when the records, with its ``entry`` filed,
     resolve to another answer — or ``None`` when the run's own is the answer.
 
@@ -6983,6 +7088,15 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
     reader. Asked only after a run over a current answer (a Fresh entry, or two
     outcomes) — ``--force``, or a crash that superseded it; any other run makes
     the only current entry, and a clash at its own rho is ``_contradicted``'s.
+
+    ``held`` is the gate's remembered outcomes as the run leaves them — what it
+    answered forgotten, in memory under ``--no-record`` too. A crash still
+    standing over the Fresh entry the records resolve to — on a costlier tier's
+    path, which this run was not made on (``_superseded``) — is the row, as
+    ``resolve``'s step 2 reads it. What slipped through (review, remembered
+    outcomes by tier): ``check --force`` at tier 0 re-ran the cheap path over a
+    tier-2 crash, and its PASS stood as the row — ``check`` ready — while every
+    reader showed the crash.
 
     Then: a Fresh entry at other inputs with another outcome — or with the same
     outcome, when its own tier's admission does not count — is served as step 3
@@ -7016,6 +7130,16 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
         refused = dataclasses.replace(_synthesized(spec, error=after.reasons[0],
                                                    rho=after.rho), **cost)
         return SweepRow(refused, executed=True, rho=after.rho, admission=judged)
+    record = _standing(held, after) if isinstance(after, Fresh) else None
+    if record is not None:
+        tier = _read_tier(after.entry.reads)
+        where, settle = ((f"on the tier-{tier} path ", f" — run atompipe check --tier {tier}")
+                         if tier is not None else ("", ""))
+        s.notes.append(f"{ran}; the {record['kind']} remembered {where}at these inputs "
+                       f"supersedes the entry {after.entry.name}, and it stands{settle}")
+        crashed = _as_spec(record["verdict"], spec)
+        return SweepRow(dataclasses.replace(crashed, **cost), executed=True, rho=crashed.rho,
+                        admission=judged)
     if not isinstance(after, Fresh) or after.entry.rho == entry.rho:
         return None
     served = after.entry
@@ -7076,9 +7200,34 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         reason = f"cached pass exists; {why} here" if isinstance(state, Fresh) else why
         skipped = _synthesized(spec, skipped=True, skip_reason=reason)
         if s.record:
-            remember(s.root, gid, skipped, input_rho=state.rho, kind="availability",
+            remember(s.root, gid, skipped, input_rho=state.input_rho, kind="availability",
                      when=s.when)
         return SweepRow(skipped)
+
+    # 1b. a crash on the path of the costlier answer this sweep serves, and none
+    # on its own: `resolve`'s step 2, served as it reads it — the remembered
+    # crash, never the entry it superseded — and nothing is run, since no run at
+    # this tier is made at that path's inputs or can answer it (`_superseded`).
+    # What slipped through (review, remembered outcomes by tier): the cheap path
+    # ran instead, and its PASS both became the row and forgot the tier-2 crash.
+    # Laid under `_outranked` alone, the row would be right and the cheap path
+    # would re-run on every plain check, forever, to reach the same crash.
+    # *Rejected:* serving a current tier-0 PASS in its place — `status` serves
+    # the most thorough tier recorded, and a costlier path that crashes is not
+    # answered by a cheaper one that passes.
+    held = s.held.get(gid) or {}
+    record = _standing(held, state) if not force and isinstance(state, Fresh) else None
+    if record is not None and not any(_crash_applies(other, state)
+                                      and other["input_rho"] in state.here
+                                      for other in held.values()):
+        tier = _read_tier(state.entry.reads)
+        where, settle = ((f"on the tier-{tier} path ", f" — run atompipe check --tier {tier}")
+                         if tier is not None else ("", ""))
+        s.notes.append(f"{gid}: the {record['kind']} remembered {where}at these inputs "
+                       f"supersedes the entry {state.entry.name}, and a check at tier "
+                       f"{s.now.tier} does not run that path{settle}")
+        return SweepRow(dataclasses.replace(_as_spec(record["verdict"], spec), duration_s=0.0,
+                                            cpu_s=0.0), rho=record["verdict"].rho)
 
     # 2. admission (force re-runs the control), on the path the counted verdict
     # takes: a Fresh entry that read ctx.tier took its own tier's, anything
@@ -7146,14 +7295,29 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         # just made one: the row is the error the resolver will read, not the
         # run's own answer. The entry is still filed — it is what the gate said.
         clash = _contradicted(s.root, entry)
+        answered = _superseded(state, keyed.rho)
+        held = {rho_: rec for rho_, rec in held.items() if rho_ not in answered}
         if s.record:
             wrote = write_entry(s.root, entry)
             s.notes.extend(wrote.warnings)
-            forget(s.root, gid, _superseded(state, keyed.rho))
+            forget(s.root, gid, answered)
     elif s.record:
+        # Under the inputs of the tier this run took (`input_rho`), never the
+        # served entry's: a tier-0 crash filed under the tier-2 entry left the
+        # records the moment an input only that path reads moved.
         kind = ("error" if verdict.error
                 else "self-skip" if _gates.availability(spec)[0] else "availability")
-        remember(s.root, gid, verdict, input_rho=state.rho, kind=kind, when=s.when)
+        remember(s.root, gid, verdict, input_rho=state.input_rho, kind=kind, when=s.when)
+    above = _read_tier(state.entry.reads) if isinstance(state, Fresh) else None
+    if (not measured and above is not None and above != s.now.tier
+            and state.input_rho not in state.path and _standing(held, state) is None):
+        # The row is this run's crash (step 5), and a costlier entry no crash
+        # supersedes is what `status` and the next plain check serve: say so,
+        # rather than leave `check --force` and `status` disagreeing unexplained.
+        s.notes.append(f"{gid}: ran at tier {s.now.tier} ({verdict.outcome.upper()}), on "
+                       f"that path only; the tier-{above} entry {state.entry.name} at these "
+                       f"inputs is the more thorough answer, and what status and a plain "
+                       f"check serve ({_as_spec(state.entry.to_verdict(), spec).outcome.upper()})")
     if s.record:
         record_obs(s.root, gid, entry=name, when=s.when, duration_s=verdict.duration_s,
                    cpu_s=verdict.cpu_s)
@@ -7163,10 +7327,14 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         return SweepRow(refused, executed=True, rho=keyed.rho, admission=judged)
     # 5. a run over a current answer — `--force`, or a crash that superseded it —
     # is one entry beside that answer, not the answer: the row is what the
-    # records resolve to with it filed (`_outranked`).
+    # records resolve to with it filed and what it answered forgotten
+    # (`_outranked`). A crash here stays the row: never laid under a costlier
+    # PASS (invariant 2), it is the louder reading, and the crash is filed at
+    # this path's inputs, which that PASS is not at.
     if measured and (isinstance(state, Fresh)
                      or (isinstance(state, Stale) and state.conflict)):
-        outranked = _outranked(s, spec, fn, run_ctx, keyed.code, entry, verdict, judged)
+        outranked = _outranked(s, spec, fn, run_ctx, keyed.code, entry, verdict, judged,
+                               held=held)
         if outranked is not None:
             return outranked
     return SweepRow(verdict, executed=True, fresh=measured, rho=keyed.rho, admission=judged)
@@ -7188,6 +7356,11 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
        ``cached pass exists; <why> here`` over a Fresh PASS (invariant 1) —
        remembered as ``availability`` (never over a crash or self-skip at the
        same rho); no control runs, ``fn`` is never called.
+    1b. Unless ``force``, a remembered crash or self-skip standing over a
+       Fresh entry of a costlier tier, on that entry's path, and none at this
+       sweep's own tier (``here``): the row is that crash, as ``resolve`` reads
+       it, and a note names the path and ``run atompipe check --tier <t>`` —
+       nothing runs, since no run at this tier answers it.
     2. **Admission** (``admission``'s steps; ``force`` re-runs the control). Not
        admitted: ``error="not admitted: <why>"``, ``fn`` never called. A Fresh
        entry of a costlier tier is judged at ITS tier by the records alone;
@@ -7195,16 +7368,19 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
        verdict, cached, stale ``control not demonstrated at this version — run
        atompipe check --tier <t>`` — never a skip.
     3. Unless ``force``, a **Fresh** entry is served — unless a remembered crash
-       or self-skip at a rho current now superseded it (§3.9: a crash proves
-       nothing, and neither does the PASS it followed), which re-runs the gate. **Two
+       or self-skip at a rho current now on its path superseded it (§3.9: a crash
+       proves nothing, and neither does the PASS it followed), which re-runs the
+       gate. **Two
        outcomes** at the current rho (a Stale ``conflict``) are served as
        ``resolve``'s error, ``two outcomes recorded for identical inputs
        (<names>)``, and the gate is not run — under the same supersede rule
        (``_crash_applies``, shared with ``resolve``).
     4. **Run**, traced with the sweep's anchors. A pass or fail is keyed and
        cached (``write_entry``), clearing the remembered outcomes at the inputs
-       it ran on and no others (``_superseded``); anything else is remembered
-       under the rho freshness computed before the run (``input_rho``). Every run appends obs. A pass or fail landing at a rho
+       it ran on at the tier it took and no others (``_superseded``); anything
+       else is remembered under the rho freshness computed before the run at
+       that tier (the state's ``input_rho``). Every run appends obs. A pass or
+       fail landing at a rho
        where the other outcome is recorded under the same instruments — a
        forced re-run of a conflict, or a run that just made one — is filed and
        its row is that same error (``_contradicted``), recorded or not; an
@@ -7213,7 +7389,8 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
        it — is re-judged with its entry filed (``_outranked``): where the
        records resolve to another outcome (a costlier tier's Fresh entry, two
        outcomes), or to the same outcome from a costlier entry that does not
-       count, that is the row, and a note says so.
+       count, or to a remembered crash the run did not answer, that is the row,
+       and a note says so. A run's own crash stays its row.
 
     The gate runs INSIDE ``before`` rather than in ``run_all``'s own loop: that
     loop's trace carries no anchors, and a path-valued param digested without

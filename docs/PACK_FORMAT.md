@@ -344,6 +344,11 @@ by exactly those reads (`rho`). So:
   served Fresh to `check --tier 2`, whose path failed the design.) Your control is
   keyed the same way — one shown on the tier-0 path does not admit the tier-2 path,
   and a gate that passes its known-bad input on either path is not admitted on any.
+  A crash is remembered on its own path too: a tier-2 solver that crashes supersedes
+  the tier-2 PASS — a plain `check` shows the crash and says `run atompipe check --tier
+  2` — and a PASS on the cheap path never clears it; only a run on that path that
+  measures does. (What slipped through: a tier-0 PASS forgot the tier-2 crash, and
+  `check --tier 2` served the PASS the crash had superseded.)
   In your view `ctx.tier` is a `verdicts.TierRead`: it compares, indexes, hashes and
   formats as the int it is and `isinstance(ctx.tier, int)` holds, but it is not an
   `int` subclass (CPython reads an int subclass's index without asking it), so
