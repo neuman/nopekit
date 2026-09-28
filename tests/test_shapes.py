@@ -28,6 +28,14 @@ What slipped through without it: the shapes existed as regexes in
 whole output to them, so a line inserted between the summary and the BLOCKING
 list, or a status line that dropped its age, stayed green everywhere.
 
+`TranscriptShapes` (U32) holds the rest of the plan's transcript, which only a
+clone of the MIGRATED bracket can print — the copy above is the bracket before
+its migration, so its first check runs everything: the fresh clone's first
+check line for line (five lines, all cached), `git status --porcelain` empty
+after it and exactly the edit plus one new entry after the re-check (never a
+control entry, never bytecode), the re-check's controls line (six re-verified,
+none executed), pack mode's selftest, and `check --junit`.
+
 Run:  PYTHONPATH=src python3 -m unittest tests.test_shapes -v
 """
 from __future__ import annotations
@@ -380,6 +388,105 @@ def selftest_problems(stdout: str) -> list[str]:
     return problems
 
 
+#: Pack mode's per-pack line (`cli._pack_line`): the tag, the pack and where it
+#: came from, then its counts — or why it ran nothing.
+PACK_ROW = re.compile(r"^\[(?P<tag>.{4})\] (?P<pack>\S+) \((?P<origin>[^()]+)\) : (?P<body>.+)$")
+PACK_COUNTS = re.compile(
+    r"^(?P<fired>\d+) fired(?:, (?P<broken>\d+) BROKEN)?"
+    r"(?:, (?P<skipped>\d+) skipped \(tooling\))?(?:, (?P<failed>\d+) baseline\(s\) failed)?$")
+PACK_NOTHING = re.compile(r"^no gates?(?: at or below tier \d+)?$")
+#: A tooling note pack mode prints before its rows (what did not run here, and why).
+PACK_NOTE = re.compile(r"^note: .+$")
+#: One broken control or failed baseline under pack mode's refusal heads.
+PACK_FAILED_ROW = re.compile(r"^\[FAIL\] \S+.* — .+$")
+
+
+def pack_selftest_problems(stdout: str) -> list[str]:
+    """`gate selftest` in pack mode (no project here; spec §3.13, U08): tooling
+    notes, one row per pack, the summary — then, only when something failed, the
+    refusal and its rows. The summary's counts must be the rows' sums, so a pack
+    row that lost a control cannot hide under a summary that kept it."""
+    lines = stdout.splitlines()
+    problems: list[str] = []
+    at = 0
+    while at < len(lines) and PACK_NOTE.fullmatch(lines[at]):
+        at += 1
+    sums = {"fired": 0, "broken": 0, "skipped": 0, "failed": 0}
+    rows = 0
+    while at < len(lines) and PACK_ROW.fullmatch(lines[at]):
+        body = PACK_ROW.fullmatch(lines[at]).group("body")
+        counts = PACK_COUNTS.fullmatch(body)
+        if counts:
+            for key in sums:
+                sums[key] += int(counts.group(key) or 0)
+        elif not PACK_NOTHING.fullmatch(body):
+            problems.append(f"pack selftest: line {at + 1} is not a pack's counts: {body!r}")
+        rows += 1
+        at += 1
+    if not rows:
+        problems.append("pack selftest: no pack row")
+    if at == len(lines) or not T.SELFTEST_SUMMARY.fullmatch(lines[at]):
+        got = repr(lines[at]) if at < len(lines) else "the end of the output"
+        return problems + [f"pack selftest: expected the summary after {rows} pack row(s), "
+                           f"got {got}"]
+    summary = T.SELFTEST_SUMMARY.fullmatch(lines[at])
+    at += 1
+    for key, group in (("fired", "fired"), ("broken", "broken"), ("skipped", "skipped")):
+        if int(summary.group(group)) != sums[key]:
+            problems.append(f"pack selftest: the summary says {summary.group(group)} {key}, "
+                            f"the pack rows {sums[key]}")
+    if int(summary.group("controls")) != sums["fired"] + sums["broken"] + sums["skipped"]:
+        problems.append(f"pack selftest: {summary.group(0)!r} does not add up")
+    if sums["broken"]:
+        at = _grammar(lines, at, (("the refusal", SELFTEST_BROKEN_HEAD, 1, 1),
+                                  ("a broken control", PACK_FAILED_ROW,
+                                   sums["broken"], sums["broken"])),
+                      problems, "pack selftest")
+    if sums["failed"]:
+        at = _grammar(lines, at, (("the failed-baseline head", T.BASELINES_FAILED, 1, 1),
+                                  ("a failed baseline", PACK_FAILED_ROW, 1, None)),
+                      problems, "pack selftest")
+    _trailing(lines, at, problems, "pack selftest")
+    return problems
+
+
+def exact_problems(stdout: str, expected: tuple, what: str) -> list[str]:
+    """``stdout``'s lines are ``expected`` — ``(name, pattern)`` pairs — one to one,
+    in order: the transcript's own lines, nothing added, nothing dropped."""
+    lines = stdout.splitlines()
+    problems = [f"{what}: line {i + 1} is not {name}: "
+                f"{lines[i] if i < len(lines) else 'the end of the output'!r}"
+                for i, (name, pattern) in enumerate(expected)
+                if i >= len(lines) or not re.fullmatch(pattern, lines[i])]
+    _trailing(lines, len(expected), problems, what)
+    return problems
+
+
+def porcelain_problems(stdout: str, expected: tuple = ()) -> list[str]:
+    """`git status --porcelain` in the clone: exactly one line per ``expected``
+    pattern, each a porcelain line — and never a control entry (a re-verified
+    control writes no tracked file, spec §5 risk 18) or bytecode (G6)."""
+    lines = [line for line in stdout.splitlines() if line]
+    problems: list[str] = []
+    for line in lines:
+        parsed = T.PORCELAIN_LINE.fullmatch(line)
+        if parsed is None:
+            problems.append(f"porcelain: not a porcelain line: {line!r}")
+            continue
+        path = parsed.group("path")
+        if T.CONTROL_ENTRY_PATH.fullmatch(path):
+            problems.append(f"porcelain: a control entry was written: {path}")
+        if "__pycache__/" in path or path.endswith(".pyc"):
+            problems.append(f"porcelain: bytecode shows: {path}")
+    for pattern in expected:
+        hits = [line for line in lines if re.fullmatch(pattern, line)]
+        if len(hits) != 1:
+            problems.append(f"porcelain: {len(hits)} line(s) match {pattern}")
+    unmatched = [line for line in lines if not any(re.fullmatch(p, line) for p in expected)]
+    problems += [f"porcelain: unexpected {line!r}" for line in unmatched]
+    return problems
+
+
 # --------------------------------------------------------------------------- #
 # mutations: each must be refused by the matcher it is aimed at
 # --------------------------------------------------------------------------- #
@@ -620,6 +727,201 @@ class SelftestShape(_ShapeCase):
     def test_a_row_dropped_is_refused(self):
         lines = self.out("selftest", 0).splitlines()
         self.refuses("\n".join(lines[1:]) + "\n", "five rows under a summary of six")
+
+
+# --------------------------------------------------------------------------- #
+# the transcript itself, on a clone of the migrated bracket (U32)
+# --------------------------------------------------------------------------- #
+#: The cached FAIL row the transcript opens with (`f"{line:<77} cached"`).
+_CACHED_DEFLECTION = (r"^\[FAIL\] bracket\.deflection : 0\.700 mm at 15 N "
+                      r"\(limit 0\.5 mm\)\s+cached$")
+_BLOCKING_LINES = (
+    ("the BLOCKING head", r"^BLOCKING — 2 critical claim\(s\) must not be spent against:$"),
+    ("C1", T._C1),
+    ("C7", T._C7),
+)
+
+#: `check` on a fresh clone: one row (the cached FAIL; cached passes are not
+#: printed), the all-cached summary, no controls line (none ran or was
+#: re-verified), the BLOCKING list. Exactly these lines.
+FIRST_CHECK = (
+    ("the cached FAIL", _CACHED_DEFLECTION),
+    ("the all-cached summary", r"^6 gates: 0 executed, 6 cached — 5 ok, 1 FAIL — tier 0$"),
+    *_BLOCKING_LINES,
+)
+
+#: `check` after the `bed_xy` edit: rows in registration order (the plan's
+#: transcript lists the executed row first; the CLI streams rows as the gates
+#: come), one gate executed, and the six controls re-verified by their fixtures
+#: alone — none executed, none written (spec §3.8's E4 consequence).
+CHECK_AFTER_EDIT = (
+    ("the cached FAIL", _CACHED_DEFLECTION),
+    ("the one executed row", r"^\[ok  \] bracket\.bed_fit : 74 x 30 x 7 mm vs 234 mm usable "
+                             r"\(250 bed - 2x8 brim\)$"),
+    ("the summary", r"^6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0$"),
+    ("the controls line", r"^controls: 0 executed, 0 cached, 6 re-verified$"),
+    *_BLOCKING_LINES,
+)
+
+#: The porcelain after that check: the edit, and the one new piece of evidence.
+PORCELAIN_AFTER_EDIT = (
+    r"^ M model/bracket\.py$",
+    r"^\?\? \.atompipe/verdicts/bracket\.bed_fit/[0-9a-f]{16}-[0-9a-f]{8}\.json$",
+)
+
+
+class _CloneTranscript:
+    """The plan's transcript, on a git clone of the bracket as 1.3 committed it."""
+
+    steps: dict[str, object] = {}
+    base = ""
+
+    @classmethod
+    def get(cls) -> dict[str, object]:
+        if cls.steps:
+            return cls.steps
+        cls.base = tempfile.mkdtemp(prefix="atompipe-transcript-")
+        project = _projects.bracket_copy(os.path.join(cls.base, "bracket"), migrated=True,
+                                         git=True)
+        home = os.path.join(cls.base, "home")
+        os.makedirs(home)
+        run = lambda *argv: _env.atompipe(list(argv), cwd=project, home=home)  # noqa: E731
+        porcelain = lambda: _env.git(["status", "--porcelain", "--untracked-files=all"],  # noqa: E731
+                                     cwd=project, home=home)
+        steps: dict[str, object] = {"project": project}
+        steps["check-first"] = run("check")
+        steps["porcelain-clean"] = porcelain()
+        path = os.path.join(project, "model", "bracket.py")
+        with open(path, encoding="utf-8", newline="") as fh:
+            text = fh.read()
+        if text.count("bed_xy: float = 220.0") != 1:
+            raise AssertionError("the bracket's bed_xy default moved; the transcript's edit "
+                                 "cannot be made")
+        with open(path, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text.replace("bed_xy: float = 220.0", "bed_xy: float = 250.0"))
+        steps["check-after-edit"] = run("check")
+        steps["porcelain-after-edit"] = porcelain()
+        empty = os.path.join(cls.base, "empty")
+        os.makedirs(empty)
+        steps["pack-selftest"] = _env.atompipe(["gate", "selftest"], cwd=empty, home=home)
+        steps["check-junit"] = run("check", "--junit")
+        cls.steps = steps
+        return steps
+
+
+def _tear_down_clone_transcript() -> None:
+    if _CloneTranscript.base:
+        _env._rmtree(_CloneTranscript.base)
+        _CloneTranscript.base = ""
+        _CloneTranscript.steps = {}
+
+
+class TranscriptShapes(unittest.TestCase):
+    """The transcript's lines no matcher above holds whole: the fresh clone's first
+    check line for line, both porcelains, the re-check with its controls line,
+    pack mode's selftest, and `check --junit` — each on the real run and on a
+    mutation of it that must be refused."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.steps = _CloneTranscript.get()
+        cls.addClassCleanup(_tear_down_clone_transcript)
+
+    def out(self, step: str, code: int) -> str:
+        proc = self.steps[step]
+        self.assertEqual(proc.returncode, code, f"{step}: exit {proc.returncode}\n"
+                                                f"{proc.stdout}\n{proc.stderr}")
+        return proc.stdout
+
+    def holds(self, problems: list[str], text: str) -> None:
+        self.assertEqual(problems, [], "\n".join(problems) + "\n--- output ---\n" + text)
+
+    def test_the_first_check_is_the_transcripts_five_lines(self):
+        text = self.out("check-first", 1)
+        self.holds(exact_problems(text, FIRST_CHECK, "first check"), text)
+        self.holds(check_problems(text), text)
+        for label, mutant in (
+                ("prose after the summary", add_line(text, T.CHECK_SUMMARY.fullmatch)),
+                ("`cached` removed", sub_line(text, T.CACHED_ROW, r"\s+cached$", "")),
+                ("a gate executed", sub_line(text, T.CHECK_SUMMARY, "0 executed, 6 cached",
+                                             "1 executed, 5 cached")),
+                ("a cached pass printed", add_line(text, T.CACHED_ROW.fullmatch).replace(
+                    PROSE, f"{'[ok  ] bracket.bed_fit : 74 x 30 x 7 mm':<77} cached")),
+                ("a controls line", add_line(text, T.CHECK_SUMMARY.fullmatch).replace(
+                    PROSE, "controls: 6 executed, 0 cached, 0 re-verified"))):
+            with self.subTest(label):
+                self.assertTrue(exact_problems(mutant, FIRST_CHECK, "first check"),
+                                f"accepted {label}:\n{mutant}")
+
+    def test_the_clone_is_clean_after_the_first_check(self):
+        text = self.out("porcelain-clean", 0)
+        self.holds(porcelain_problems(text), text)
+        for label, mutant in (
+                ("an entry written", "?? .atompipe/verdicts/bracket.bed_fit/"
+                                     "0123456789abcdef-01234567.json\n"),
+                ("a record rewritten", " M claims/C1.json\n"),
+                ("bytecode", "?? model/__pycache__/bracket.cpython-312.pyc\n")):
+            with self.subTest(label):
+                self.assertTrue(porcelain_problems(text + mutant), f"accepted {label}")
+
+    def test_the_recheck_runs_one_gate_and_no_control(self):
+        text = self.out("check-after-edit", 1)
+        self.holds(exact_problems(text, CHECK_AFTER_EDIT, "check after the edit"), text)
+        self.holds(check_problems(text), text)
+        for label, mutant in (
+                ("a control executed", sub_line(text, T.CONTROLS_SUMMARY,
+                                                r"^controls: 0 executed, 0 cached, 6",
+                                                "controls: 1 executed, 0 cached, 5")),
+                ("the controls line dropped", "\n".join(
+                    line for line in text.splitlines()
+                    if not T.CONTROLS_SUMMARY.fullmatch(line)) + "\n"),
+                ("prose after BLOCKING", text + PROSE + "\n")):
+            with self.subTest(label):
+                self.assertTrue(exact_problems(mutant, CHECK_AFTER_EDIT, "check after the edit"),
+                                f"accepted {label}:\n{mutant}")
+
+    def test_the_edit_leaves_the_model_and_one_new_entry(self):
+        text = self.out("porcelain-after-edit", 0)
+        self.holds(porcelain_problems(text, PORCELAIN_AFTER_EDIT), text)
+        entry = next(line for line in text.splitlines() if line.startswith("?? "))
+        for label, mutant in (
+                ("a control entry", text + entry.replace("/bracket.bed_fit/",
+                                                         "/bracket.bed_fit/control-") + "\n"),
+                ("another gate's entry", text + entry.replace("bed_fit", "deflection") + "\n"),
+                ("the entry name cut short", text.replace(entry, entry[:-10] + ".json")),
+                ("the edit missing", "\n".join(line for line in text.splitlines()
+                                               if not line.startswith(" M")) + "\n")):
+            with self.subTest(label):
+                self.assertTrue(porcelain_problems(mutant, PORCELAIN_AFTER_EDIT),
+                                f"accepted {label}:\n{mutant}")
+
+    def test_pack_mode_selftest_ends_on_its_summary(self):
+        text = self.out("pack-selftest", 0)
+        self.holds(pack_selftest_problems(text), text)
+        summary = T.SELFTEST_SUMMARY.fullmatch(text.splitlines()[-1])
+        self.assertIsNotNone(summary, "the summary is not the last line")
+        self.assertEqual(summary.group("broken"), "0")
+        row = next(line for line in text.splitlines() if PACK_ROW.fullmatch(line))
+        for label, mutant in (
+                ("the time removed", sub_line(text, T.SELFTEST_SUMMARY, r" in \S+:", ":")),
+                ("prose after the summary", text + PROSE + "\n"),
+                ("a pack row the summary disagrees with", text.replace(
+                    row, re.sub(r"(\d+) fired", lambda m: f"{int(m.group(1)) + 1} fired", row),
+                    1)),
+                ("a BROKEN count with no refusal", sub_line(text, T.SELFTEST_SUMMARY,
+                                                            r", 0 BROKEN", ", 1 BROKEN")),
+                ("no pack row", "\n".join(line for line in text.splitlines()
+                                          if not PACK_ROW.fullmatch(line)) + "\n")):
+            with self.subTest(label):
+                self.assertTrue(pack_selftest_problems(mutant), f"accepted {label}:\n{mutant}")
+
+    def test_check_junit_prints_the_check_and_writes_the_xml(self):
+        text = self.out("check-junit", 1)
+        self.holds(exact_problems(text, FIRST_CHECK, "check --junit"), text)
+        result = T.Result("atompipe check --junit", 1, text, "", self.steps["project"])
+        self.assertIsNone(T.problem(T.junit(), result))
+        self.assertIsNotNone(T.problem(T.junit(), result._replace(
+            cwd=os.path.join(self.steps["project"], "elsewhere"))))
 
 
 if __name__ == "__main__":

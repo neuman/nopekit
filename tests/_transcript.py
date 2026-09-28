@@ -53,20 +53,21 @@ Tag = Tuple[int, int]
 CHECKPOINTS: Tuple[Tag, ...] = ((1, 1), (1, 2), (1, 3))
 
 #: The checkpoint this commit has delivered: the replay runs every step whose tag
-#: is at or before it. Why (1, 2): checkpoint 1.2 is what landed — the per-gate
-#: cache and admission (the first check's summary shape, `status` naming the one
-#: stale gate and the value that moved, the affected-only re-check, `gate show`'s
-#: control line), closed by U25 together with EntriesAreDeterministic and the
-#: R-8 oracle. The (1, 3) steps need what 1.3 delivers: committed entries (so the
-#: first check is all cache hits and the tree stays clean) and `why` over the
-#: model's PARAMS. It moves once per checkpoint, in the unit that closes it:
-#: (1, 1) in U10, (1, 2) in U25, (1, 3) in U32 (spec §6.2, G6). *Rejected:*
+#: is at or before it. Why (1, 3): checkpoint 1.3 is what landed — records as
+#: files, the generated index, the migration, and the bracket migrated with its
+#: six verdict entries and six control entries committed at the final spine
+#: (U32), so a fresh clone's first check is all cache hits and leaves the tree
+#: clean, and `why` reads the model's PARAMS. Every step of the transcript is now
+#: replayed; the starred ones still only on the spine that wrote the committed
+#: cache (G6), and `BracketCacheIsCurrent` fails, unconditionally, when that is
+#: not the running one. It moved once per checkpoint, in the unit that closed
+#: it: (1, 1) in U10, (1, 2) in U25, (1, 3) in U32 (spec §6.2, G6). *Rejected:*
 #: setting it to (1, 3) early and letting the undelivered steps skip — every
 #: skip reads green, and the transcript would be asserted nowhere until the last
 #: wave; *rejected:* replaying only in the last wave (a judge's defect against
 #: the first design) — a checkpoint that breaks a step already delivered would go
 #: unseen for thirteen waves.
-CURRENT: Tag = (1, 2)
+CURRENT: Tag = (1, 3)
 
 #: Where `check --junit` writes when given no path, spelled as the transcript
 #: spells it rather than read from `report.JUNIT_DEFAULT`: an expectation taken
