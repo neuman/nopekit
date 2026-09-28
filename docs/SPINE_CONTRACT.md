@@ -1476,11 +1476,22 @@ match settles it as 3 does with `reverified=True`: the gate is not called and no
 tracked file is written; `controls.json` remembers the closure — and, for a live-host
 control that read the ledger, the live ledger it matched under, so a live ledger that
 differs from the recorded one costs one fixture run, not one per check (a full run
-records it the same way). The comparison is
+records it the same way). On a LIVE host a match also needs every read of the live
+design the control would make now to be one the entry keys: each host param read —
+the fixture's own, and its gate's through a host view the fixture handed back, which
+the fixture-only run replays through the same views (`_host_reads_with_gate`) — in
+`reads.host` at the same digest, and each ledger key the fixture read in
+`reads.ledger`. What slipped through (admission review, round 2, `r3`): a sealed
+fixture's entry keyed no host read; edited to five times the live span, to the
+literal identity fixture, or to four times the live C1 limit — every value built
+still equal — it was vouched for, and a later edit of the live design that defused it
+was compared with nothing: `check` exit 0, C1 PROVEN, `gate selftest` PASSED its own
+known-bad. The comparison is
 sound only for what an entry keys, so a fixture that writes files, moves `ctx.root`,
-`out_dir` or `tier`, hands its gate `ctx.extra`, reads a file the entry does not
-key, or touches an opaque channel sends the control to a full run instead — a cost,
-never a wrong admission (what would have slipped through: a fixture writing the
+`out_dir` or `tier`, hands its gate `ctx.extra`, a `ctx.model` or a `ctx.memo` other
+than the one it was handed (or fills the memo it was handed), reads a file the entry
+does not key, or touches an opaque channel sends the control to a full run instead —
+a cost, never a wrong admission (what would have slipped through: a fixture writing the
 known-bad mesh its gate reads, which the gate's trace drops as its own output). This
 is the early cutoff: a Config-default edit moves every bracket fixture's closure (they
 build through the model) but no control value — six fixture runs, zero controls

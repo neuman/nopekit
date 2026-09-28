@@ -1261,6 +1261,16 @@ class ModelProxy:
         return ModelProxy._mp_use(self).__reduce_ex__(protocol)
 
 
+def _proxied(value: Any) -> Any:
+    """``value`` with every ``ModelProxy`` around it unwrapped WITHOUT using it
+    — for the spine's own comparisons, as ``_plain_tier`` is for a tier.
+    ``type(...) is``, never ``isinstance``: an ``isinstance`` miss asks the
+    object for ``__class__``, which a proxy answers by using its model."""
+    while type(value) is ModelProxy:
+        value = object.__getattribute__(value, "_mp_target")
+    return value
+
+
 # --------------------------------------------------------------------------- #
 # TierRead
 # --------------------------------------------------------------------------- #
@@ -6458,7 +6468,7 @@ def _ledger_now(ledger: Any, key: str) -> str | None:
     return None
 
 
-def _unvouched(built: Any, given: Any, trace: GateTrace) -> str:
+def _unvouched(built: Any, given: Any, trace: GateTrace, memo_was: Any = None) -> str:
     """Why a fixture-only run cannot stand in for the whole control, or ``""``.
 
     The spec's comparison is the control-context VALUES the gate read (params
@@ -6470,6 +6480,22 @@ def _unvouched(built: Any, given: Any, trace: GateTrace) -> str:
     keyed); one that moves ``ctx.root`` (the gate then reads another tree, and
     ``test_freshness``'s ``file_bad`` does exactly that); one that returns a
     dict, merged into ``extra``, which no trace records.
+
+    And a fixture that hands its gate a ``model`` or a ``memo`` other than the
+    one it was handed. Neither is keyed by a control entry: ``ctx.model is
+    None`` uses nothing (``ModelProxy`` records a USE, and a gate that used it
+    is opaque), and the memo is shared by reference, never traced. What slipped
+    through (admission review, round 2, ``r3``'s other door): a fixture edited
+    to hand ``model=None``, or a memo of its own, with the span still 400 —
+    every value an entry keys equal — was re-verified, and a gate that trusts
+    either passed its own known-bad input while ``check`` admitted it.
+    Compared by IDENTITY, the model through its proxy (``_proxied``): the one
+    passed through is the one the fixture was handed. The memo is the one it
+    was handed AND holds what it held then, entry for entry (``memo_was``, a
+    shallow copy taken before the fixture ran): the same dict filled in place
+    hands the gate as much as a new one. No fixture today touches the memo,
+    so this costs nothing. *Rejected:* digesting the memo's contents — its
+    entries hold loaders and parsed meshes no digest names.
     """
     if trace.files_written:
         return "the fixture wrote files its gate would read"
@@ -6480,6 +6506,16 @@ def _unvouched(built: Any, given: Any, trace: GateTrace) -> str:
         # ``TierRead`` compared here would land on the control's trace.
         if _plain_tier(getattr(built, name, None)) != _plain_tier(getattr(given, name, None)):
             return f"the fixture moved ctx.{name}"
+    if _proxied(getattr(built, "model", None)) is not _proxied(getattr(given, "model", None)):
+        return "the fixture handed its gate a ctx.model it was not handed"
+    memo = getattr(built, "memo", None)
+    if memo is not getattr(given, "memo", None):
+        return "the fixture handed its gate a ctx.memo it was not handed"
+    if isinstance(memo, dict) and (not isinstance(memo_was, dict)
+                                   or dict.keys(memo) != dict.keys(memo_was)
+                                   or any(dict.__getitem__(memo, key) is not value
+                                          for key, value in memo_was.items())):
+        return "the fixture changed the ctx.memo it hands its gate"
     extra_built, opaque_built = _digest(dict(getattr(built, "extra", None) or {}))
     extra_given, _ = _digest(dict(getattr(given, "extra", None) or {}))
     if opaque_built or extra_built != extra_given:
@@ -6487,13 +6523,108 @@ def _unvouched(built: Any, given: Any, trace: GateTrace) -> str:
     return ""
 
 
+def _replay_read(view: "ParamTrace", path: tuple, recorded: str) -> bool:
+    """Read ``path`` through ``view`` as a gate reads it — what ``recorded``
+    (a control entry's ``reads.params`` digest there) says it did: a presence
+    test, a leaf value, or a whole level in bulk — so every host view the read
+    passes through records it where a full run would (``ParamTrace._record``).
+    ``False`` when ``path`` cannot be read that way here: a level on the way
+    that is missing or not a dict, which the gate could not have walked
+    either — then nothing vouches (``_param_at`` calls such a miss ``ABSENT``
+    and would have matched it)."""
+    node: Any = view
+    for depth, part in enumerate(path):
+        last = depth == len(path) - 1
+        if last and recorded in (PRESENT, ABSENT):
+            part in node                                # the read is the point
+            return True
+        if not dict.__contains__(node, part):
+            return False
+        value = dict.__getitem__(node, part)
+        if not isinstance(value, dict):
+            if not last:
+                return False
+            node[part]                                  # the read is the point
+            return True
+        node = node[part]
+    len(node)                                           # a level read whole
+    return True
+
+
+def _host_reads_with_gate(built: Any, rows: Iterable, trace: GateTrace) -> dict | None:
+    """``{path: digest}``: every host read a full run of this control would
+    record — the fixture's own, already on ``trace``, and the ones its GATE
+    would make reading ``rows`` (the candidate entry's ``reads.params``) on
+    ``built`` — or ``None`` when a row cannot be read so, or a read is not
+    JSON (a full run would be opaque, and never current). ``trace`` is left as
+    it was: each candidate's rows are replayed on their own.
+
+    Why the gate's half: a host view the fixture hands back unchanged — the
+    literal identity fixture, ``return ctx`` — is read by the GATE, and a
+    fixture-only run calls no gate. Its reads are the host reads the fixture
+    made possible, recorded by nothing (admission review, round 2, ``r3i``).
+    The replay walks through the very views a full run's gate would, so a
+    path the fixture wrote itself (``_HostLink.covers``), a level it copied
+    out of the host (``dict(ctx.params)``: child views keep their link) and
+    one it built from nothing each record exactly what they would there."""
+    saved = (dict(trace.host_reads), set(trace._host_whole), set(trace.opaque))
+    try:
+        params = getattr(built, "params", None)
+        view = ParamTrace({} if params is None else params,
+                          GateTrace(kind="control", anchors=trace.anchors), readonly=True)
+        for row in rows:
+            if not _replay_read(view, tuple(row[0]), row[1]):
+                return None
+        if trace.opaque != saved[2]:
+            return None
+        return dict(trace.host_reads)
+    except (TypeError, ValueError, KeyError):        # an unhashable key, a params that is no dict
+        return None
+    finally:
+        trace.host_reads.clear()
+        trace.host_reads.update(saved[0])
+        trace._host_whole.clear()
+        trace._host_whole.update(saved[1])
+        trace.opaque.clear()
+        trace.opaque.update(saved[2])
+
+
 def _values_match(control: ControlEntry, built: Any, fixture_reads: Reads,
-                  anchors: Anchors) -> bool:
+                  anchors: Anchors, *, host: str, trace: GateTrace) -> bool:
     """§3.8 step 4: does the context the fixture built now hand the gate what
     ``control`` recorded it read — every param path by digest (``ABSENT`` for a
     miss), every ledger read — while the fixture read no file the entry does
-    not already key?"""
+    not already key? ``host`` is what the fixture was handed this time
+    (``_control_host``); ``trace`` the fixture-only run's.
+
+    On a LIVE host, also: is every read of the live design the control would
+    make now keyed by the entry — each host param read (the fixture's, and its
+    gate's through what the fixture handed back: ``_host_reads_with_gate``) in
+    ``reads.host`` at the same digest, and each ledger key the fixture read in
+    ``reads.ledger``? Those are what ``_control_moved`` and ``_ledger_moved``
+    watch; a read outside them is one the live design can move with nothing
+    looking. What slipped through (admission review, round 2, ``r3``): only
+    the files, listings, tier and the values built were compared. A sealed
+    fixture's entry keyed no host read; edited to five times the LIVE span
+    (80 mm: still 400) it was vouched for, ``controls.json`` remembered the
+    closure, and at span 15 — the fixture building 75 mm, which the gate
+    accepts — ``check`` served the control, exited 0 and put C1 under PROVEN,
+    while ``gate selftest`` said PASSED its own known-bad. The literal
+    identity fixture at span 400 (``r3i``) and four times the live C1 limit
+    (``r3l``) did the same. Such a fixture now misses, the control runs, and
+    the entry it files keys what it read.
+
+    Equal digests for the host reads, keys only for the ledger: a current
+    candidate's host reads equal the live params already (``_control_moved``),
+    so the digest is a consistency check; its ledger reads are vouched for by
+    ``controls.json``'s live snapshot, which a match writes (``_vouched``).
+    *Rejected:* refusing to re-verify any live-host fixture that reads the
+    host — openmodelica's shape (``dict(ctx.params)``, one value changed, its
+    own ledger) re-verifies on a claim edit today, and must keep doing so.
+    """
     recorded = control.reads or {}
+    if control.host != host:
+        return False
     if not set(fixture_reads.files) <= set(recorded.get("files") or {}):
         return False
     # The tier, like a file: a fixture that reads it now where the entry keyed
@@ -6515,7 +6646,18 @@ def _values_match(control: ControlEntry, built: Any, fixture_reads: Reads,
     for key, digest in (recorded.get("ledger") or {}).items():
         if _ledger_now(ledger, key) != digest:
             return False
-    return True
+    if host != "live":
+        # A known-good host's reads are its selftest files' (the static walk)
+        # and the files `context` opened (keyed above): never the live design.
+        return True
+    if not set(fixture_reads.ledger) <= set(recorded.get("ledger") or {}):
+        return False
+    reads = _host_reads_with_gate(built, recorded.get("params") or (), trace)
+    if reads is None:
+        return False
+    keyed = {_canonical_json(row[0]): row[1] for row in recorded.get("host") or ()}
+    return all(keyed.get(_canonical_json(_clean(_json_path(path)))) == digest
+               for path, digest in reads.items())
 
 
 def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
@@ -6531,15 +6673,17 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
     out_dir = _fresh_control_dir(s.root, spec.id, s.out_dir)
     trace = GateTrace(kind="control", anchors=s.anchors)
     try:
-        handed, _host, closure = _control_host(s.root, spec, fn, host_ctx, trace)
+        handed, host, closure = _control_host(s.root, spec, fn, host_ctx, trace)
     except AtompipeError:
         return None
+    memo = getattr(handed, "memo", None)
+    memo_was = dict(dict.items(memo)) if isinstance(memo, dict) else None
     try:
         built = _gates.run_fixture(spec, fn, handed, trace=trace, out_dir=out_dir)
     except AtompipeError:
         return None
     _add_closure(trace, closure)
-    if _unvouched(built, dataclasses.replace(handed, out_dir=out_dir), trace):
+    if _unvouched(built, dataclasses.replace(handed, out_dir=out_dir), trace, memo_was):
         return None
     _static_digest, parts = s.now.static(spec, fn)
     owner = _owner_dir(fn, s.root)
@@ -6548,7 +6692,8 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
                                      static=static_files)
     if fixture_reads.opaque or trace.model_used:
         return None
-    matches = [c for c in current if _values_match(c, built, fixture_reads, s.anchors)]
+    matches = [c for c in current
+               if _values_match(c, built, fixture_reads, s.anchors, host=host, trace=trace)]
     if not matches:
         return None
     if s.record:
@@ -6718,7 +6863,9 @@ def admission(root: str, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool = T
        input, or they disagree — not admitted.
     4. **Re-verify** (``may_run``). Otherwise the fixture runs ALONE, traced, in
        the control ``out_dir``, and what it built is compared with each current
-       candidate's recorded reads (params by digest, ledger reads). A match
+       candidate's recorded reads (params by digest, ledger reads) — and, on a
+       live host, every read of the live design it would make now is one the
+       candidate keys (``_values_match``). A match
        settles it as 3 does, with ``reverified=True``: the gate is not called and
        no tracked file is written (``controls.json`` remembers the closure). This
        is how a model edit that moves every fixture's code, but no control

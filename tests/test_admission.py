@@ -60,6 +60,12 @@ library and the CLI never asked. On the bracket and on wrapped pack baselines
   from `ctx.ledger` — is not admitted, to `check` or to a reader, while a
   fixture that hands its gate a ledger of its own survives the same edit on
   one fixture re-run (admission review, round 1, A);
+* a live-host fixture edited to derive its known-bad value from the live span,
+  the live C1, or to hand the live design through (`return ctx`) — every value
+  it builds equal to its sealed entry's — is not vouched for by the fixture
+  alone: the control runs and keys what it read, so a later live edit that
+  defuses it is not admitted; nor is a fixture that swaps `ctx.model` or
+  `ctx.memo`, or fills the memo it was handed (admission review, round 2, `r3`);
 * a Config default edit re-verifies all six controls by their fixtures alone
   (nothing executed, nothing new on disk), while a `build()` edit that moves a
   value a control fed its gate writes a new control entry for exactly the gates
@@ -689,6 +695,93 @@ def long(ctx):
     claim = Claim(id="C1", statement="Span within 100 mm",
                   acceptance=Acceptance(quantity="span", limit=100.0))
     return dataclasses.replace(ctx, params=params, ledger=Ledger(claims=[claim]))
+'''
+
+#: Where the ``r3`` tests keep their fixture, and how the shelf gate names it:
+#: outside ``selftest/``, as the repro did, so an edit to it moves only the
+#: fixture's closure — the hint — and the control's static part stays put.
+#: Under ``selftest/`` the same edit misses every entry by its static part and
+#: the control simply runs again: the hole is only reachable from here.
+SHELF_OUTSIDE_FIXTURE = "fixtures/bad.py"
+SHELF_OUTSIDE_DECL = 'fixture="fixtures/bad.py:long"'
+
+#: The admission review's round-2 repro ``r3``, on a LIVE host (no
+#: ``selftest/known_good.py``): the known-bad span SEALED — it reads nothing
+#: of the host, so its control entry keys no host param and no ledger read.
+#: The repro's next step derives the same 400 mm from what it was handed
+#: instead: five times the live span (``SHELF_FIVEFOLD_LIVE``, 80 mm: 400),
+#: four times the live C1 limit (``SHELF_FOURFOLD_CLAIM``, 100 mm: 400), or
+#: the live design itself (``SHELF_IDENTITY`` at span 400). Equal values, so
+#: the fixture alone re-verified the sealed entry, and the entry keyed nothing
+#: the live design could move afterwards.
+SHELF_SEALED_LONG = '''\
+import dataclasses
+
+
+def long(ctx):
+    return dataclasses.replace(ctx, params={"span": 400.0})
+'''
+
+SHELF_FIVEFOLD_LIVE = '''\
+import dataclasses
+
+
+def long(ctx):
+    return dataclasses.replace(ctx, params={"span": float(ctx.params["span"]) * 5})
+'''
+
+SHELF_FOURFOLD_CLAIM = '''\
+import dataclasses
+
+
+def long(ctx):
+    limit = float(ctx.ledger.claim("C1").acceptance.limit)
+    return dataclasses.replace(ctx, params={"span": 4 * limit})
+'''
+
+#: The same repro's other door: two context fields no control entry keys. A
+#: gate that branches on whether a model came with its context (``is None``
+#: uses nothing, so ``ModelProxy`` records nothing) or on what the memo holds
+#: (shared by reference, never traced). Honest while the fixture passes both
+#: through; defused by a fixture that swaps either, or fills the memo it was
+#: handed — the span still 400, so every value an entry keys is equal.
+SHELF_GATE_TRUSTS_ITS_CONTEXT = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def span(ctx):
+    s = float(ctx.params["span"])
+    trusted = ctx.model is None or bool(ctx.memo)
+    return Verdict(gate="shelf.span", passed=trusted or s <= 100.0, measured=s,
+                   limit=100.0, units="mm", detail=f"{s} mm (limit 100.0)")
+'''
+
+SHELF_SEALED_NO_MODEL = '''\
+import dataclasses
+
+
+def long(ctx):
+    return dataclasses.replace(ctx, params={"span": 400.0}, model=None)
+'''
+
+SHELF_SEALED_OWN_MEMO = '''\
+import dataclasses
+
+
+def long(ctx):
+    return dataclasses.replace(ctx, params={"span": 400.0}, memo={"span": "trusted"})
+'''
+
+SHELF_SEALED_FILLS_MEMO = '''\
+import dataclasses
+
+
+def long(ctx):
+    ctx.memo["span"] = "trusted"
+    return dataclasses.replace(ctx, params={"span": 400.0})
 '''
 
 #: A known-good design that loads the project's own C1: it is handed an empty
@@ -1744,6 +1837,152 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertIn("PASSED its own known-bad fixture selftest/bad.py:long", got["error"])
         self.assertEqual(code, 1)
         self.assertNotIn("C1", proven_section(self, project))
+
+    # -- round 2, r3: re-verification against the reads the fixture makes now -- #
+    def _shelf_live(self, fixture: str, *, span: str = "80.0", gate: str = SHELF_GATE,
+                    live_passes: bool = True) -> str:
+        """The review's ``r3`` project: ``shelf.span`` holding the span to 100
+        mm, ``fixture`` as ``fixtures/bad.py`` — outside ``selftest/``, so an
+        edit to it moves the fixture's closure (the hint) and no byte of the
+        control's static part, which is what sends ``check`` to re-verify — and
+        no known-good design: a LIVE host. Its first check is the
+        precondition: one control run, filed as fired on the live host, and
+        the live design's verdict as ``span`` has it (``live_passes``: exit 0
+        and C1 under PROVEN)."""
+        project = os.path.join(self.tmp(), "shelf")
+        write(project, "model/shelf.py", SHELF_MODEL.format(span=span))
+        write(project, "gates/g.py", gate.replace(SHELF_FIXTURE_DECL, SHELF_OUTSIDE_DECL))
+        write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
+        write(project, SHELF_OUTSIDE_FIXTURE, fixture)
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0 if live_passes else 1, data)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 1, "cached": 0, "reverified": 0}, data["counts"])
+        [name] = control_names(project)["shelf.span"]
+        entry = read_control(project, "shelf.span", name)
+        self.assertEqual((entry["host"], entry["bad"]), ("live", "fail"), entry)
+        if live_passes:
+            self.assertIn("**C1**", proven_section(self, project))
+        return project
+
+    def _run_not_vouched(self, project: str, *, code: int = 0) -> dict:
+        """``check`` after the fixture was edited: the fixture now takes
+        something from the live host that the entry it matches in value never
+        keyed, so equal values vouch for nothing — the control runs, fixture
+        and gate, and files an entry that keys what it read. Returns it."""
+        before = control_names(project)["shelf.span"]
+        got, data = check_json(self, project)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 1, "cached": 0, "reverified": 0},
+                         f"a fixture reading the live host where its entry keyed nothing "
+                         f"was vouched for by equal values: {data['counts']}")
+        self.assertEqual(got, code, data)
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"],
+                         "pass" if code == 0 else "fail", data)
+        self.assertEqual(self._last_selftest(project)["admission"], "admitted")
+        [new] = control_names(project)["shelf.span"] - before
+        entry = read_control(project, "shelf.span", new)
+        self.assertEqual((entry["host"], entry["bad"]), ("live", "fail"), entry)
+        return entry
+
+    def _defused(self, project: str,
+                 why: str = "PASSED its own known-bad fixture fixtures/bad.py:long") -> None:
+        """The fixture now builds an input the gate accepts: the control
+        PASSED its own known-bad input, and neither ``check`` nor a reader
+        may admit the gate. ``why`` is the refusal ``check`` names."""
+        code, data = check_json(self, project)
+        got = verdict_row(data, "shelf.span")
+        self.assertEqual(got["outcome"], "error", got)
+        self.assertIn(f"not admitted: {why}", got["error"])
+        self.assertEqual(code, 1, "a control the live design defused admitted its gate")
+        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertEqual(self._last_selftest(project)["admission"], "not-admitted")
+        self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertNotIn("C1", proven_section(self, project))
+        proc = cli(project, "gate", "selftest", "--no-record")
+        self.assertEqual(proc.returncode, 1, "the precondition: the control is defused\n"
+                         + proc.stdout + proc.stderr)
+
+    def test_cli_a_fixture_deriving_its_known_bad_from_live_params_is_rekeyed(self):
+        """V: the admission review's round-2 repro ``r3``. A sealed fixture's
+        entry keyed no host read. Edited to five times the LIVE span — still
+        400 mm — the fixture alone re-ran and ``_values_match`` compared the
+        files, listings, tier and the values the gate would be handed, never
+        what the fixture had read to build them: ``controls reverified 1``. The
+        span then moved 80 -> 15, the fixture built 75 mm, which the gate
+        accepts — and ``check`` exited 0 with C1 PROVEN on the entry the
+        re-verification had vouched for, while ``gate selftest`` said PASSED
+        its own known-bad."""
+        project = self._shelf_live(SHELF_SEALED_LONG)
+        write(project, SHELF_OUTSIDE_FIXTURE, SHELF_FIVEFOLD_LIVE)
+        entry = self._run_not_vouched(project)
+        self.assertIn([["span"], verdicts.digest_value(80.0)], entry["reads"]["host"], entry)
+
+        # The positive half: a fixture edit that reads exactly what its entry
+        # keyed is still vouched for by the fixture alone — nothing executes.
+        edit(project, SHELF_OUTSIDE_FIXTURE, "* 5}", "* 5.0}")
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 0, "cached": 0, "reverified": 1}, data["counts"])
+
+        edit(project, "model/shelf.py", "span: float = 80.0", "span: float = 15.0")
+        self._defused(project)
+
+    def test_cli_the_literal_identity_fixture_on_a_live_host_is_rekeyed(self):
+        """V: the review's ``r3i``. The literal identity fixture reads nothing:
+        the host view it hands back is what the GATE reads, and a re-run of the
+        fixture alone calls no gate — ``_param_at`` walks the view's storage
+        and records nothing. With the live span at 400 its values equalled the
+        sealed entry's, the entry was vouched for, and at span 15 C1 read
+        PROVEN on the identity fixture."""
+        project = self._shelf_live(SHELF_SEALED_LONG, span="400.0", live_passes=False)
+        write(project, SHELF_OUTSIDE_FIXTURE, SHELF_IDENTITY)
+        entry = self._run_not_vouched(project, code=1)
+        self.assertIn([["span"], verdicts.digest_value(400.0)], entry["reads"]["host"], entry)
+        edit(project, "model/shelf.py", "span: float = 400.0", "span: float = 15.0")
+        self._defused(project)
+
+    def test_cli_a_fixture_deriving_its_known_bad_from_the_live_ledger_is_rekeyed(self):
+        """V: the review's ``r3l``: the same hole through ``ctx.ledger``. The
+        fixture's own read of the live C1 went unkeyed — ``_ledger_moved``
+        watches only the keys the entry recorded — so C1 relaxed 100 -> 25
+        left the control admitted while the fixture built 100 mm, which the
+        gate's own 100 mm limit accepts."""
+        project = self._shelf_live(SHELF_SEALED_LONG)
+        write(project, SHELF_OUTSIDE_FIXTURE, SHELF_FOURFOLD_CLAIM)
+        entry = self._run_not_vouched(project)
+        self.assertIn("claim:C1", entry["reads"]["ledger"], entry)
+        edit(project, "claims/C1.json", '"limit": 100.0', '"limit": 25.0')
+        self._defused(project)
+
+    def test_cli_a_fixture_that_swaps_the_model_or_the_memo_is_not_vouched_for(self):
+        """V: the rest of ``r3``'s fix. A control entry keys neither whether
+        its gate was handed a model (``ctx.model is None`` uses nothing) nor
+        what the memo holds, so a fixture edited to hand its gate a model or a
+        memo it was not handed — every keyed value equal — was re-verified
+        (exit 0, ``reverified 1``), and the gate that passes on either stayed
+        admitted. The control now runs; the entry it files cannot tell the two
+        fixtures apart either — the same reads, so the same rho_control — and
+        the refusal names the two outcomes at identical inputs."""
+        for field, fixture in (("model", SHELF_SEALED_NO_MODEL),
+                               ("memo", SHELF_SEALED_OWN_MEMO),
+                               ("memo, filled in place", SHELF_SEALED_FILLS_MEMO)):
+            with self.subTest(field=field):
+                project = self._shelf_live(SHELF_SEALED_LONG,
+                                           gate=SHELF_GATE_TRUSTS_ITS_CONTEXT)
+                write(project, SHELF_OUTSIDE_FIXTURE, fixture)
+                self._defused(project, "two control outcomes recorded for identical inputs")
+                # And back: the sealed fixture's own entry is the one its
+                # unmoved closure names, and it decides alone again.
+                write(project, SHELF_OUTSIDE_FIXTURE, SHELF_SEALED_LONG)
+                code, data = check_json(self, project)
+                self.assertEqual(code, 0, data)
+                self.assertEqual(data["counts"]["controls"],
+                                 {"executed": 0, "cached": 1, "reverified": 0}, data["counts"])
+                self.assertIn("**C1**", proven_section(self, project))
 
     def test_cli_a_pack_asset_edit_misses_the_control_entry_and_reruns_it(self):
         # A pack control is keyed by its owner's whole `selftest/` (spec §3.8),

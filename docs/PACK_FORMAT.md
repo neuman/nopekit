@@ -628,6 +628,11 @@ to fail **at the gate's current version** (invariant 9):
   fixtures build through the project's model, so any model edit moves them), the
   fixture alone is re-run and what it builds is compared with what the recorded
   control fed its gate: equal values re-verify it with no gate call and no new file.
+  On the live host a pack control gets, that also needs every read of the live
+  design — the fixture's, and its gate's through whatever the fixture passed through —
+  to be one the recorded control keyed; a sealed fixture reads none, so this costs a
+  sealed pack nothing. A fixture that swaps `ctx.model` or `ctx.memo` is never
+  re-verified: the control runs.
 - **Not admitted is an error, not a fail.** A gate whose control PASSED its own
   known-bad input, or whose control crashed, returned an unusable context or skipped
   itself with its tools present, gets `error="not admitted: <why>"` and its function
