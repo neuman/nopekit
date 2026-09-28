@@ -1,0 +1,14 @@
+{
+  "statement": "First mode is clear of the pump that sits on the shelf",
+  "kind": "measurable",
+  "acceptance": {
+    "quantity": "first mode",
+    "comparator": ">=",
+    "limit": 80.0,
+    "units": "Hz"
+  },
+  "rationale": "the pump runs at 50 Hz; a first mode near it turns a shelf into an amplifier",
+  "tags": [
+    "vibration"
+  ]
+}

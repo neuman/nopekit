@@ -1,0 +1,64 @@
+{
+  "schema": 1,
+  "gate": "bracket.min_wall",
+  "rho": "d309b593b2339745105b430f6c663e3ad9f6dc8b41a180dd66be153176d70e5b",
+  "code": {
+    "digest": "8a38ef02571f2e879d2dbbbbd52e2383ef7c6d996751151d180016515e40e3b6",
+    "files": [
+      "gates/structural.py"
+    ],
+    "fallback": ""
+  },
+  "spine": "6a92c2354d7e16105cd3301fc54a178363c85ea6f791f5e7f9a425830ee444fa",
+  "reads": {
+    "params": [
+      [
+        [
+          "config",
+          "nozzle_d"
+        ],
+        "f8b46ffd8046324de2987c493c6375d7c102120a566e010e91fd78b138fdcdb9",
+        0.4
+      ],
+      [
+        [
+          "config",
+          "thickness"
+        ],
+        "97d37c127d060a1496e82cbb42c6e42859a8c9d82e05d33e776e677408020800",
+        7.0
+      ],
+      [
+        [
+          "min_wall"
+        ],
+        "c12cb4cb69941bf9f5128c88223cf0ed4e1136c23eea03b0c1c68e1345c700ba",
+        1.2000000000000002
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "model": null,
+    "opaque": []
+  },
+  "instruments": {},
+  "verdict": {
+    "passed": true,
+    "measured": 7.0,
+    "limit": 1.2,
+    "units": "mm",
+    "detail": "thinnest section 7.0 mm vs 1.2 mm minimum (3 perimeters at a 0.4 mm nozzle)",
+    "evidence": [],
+    "locators": [],
+    "claims": [
+      "manufacturability",
+      "fdm",
+      "wall-thickness",
+      "min-wall"
+    ],
+    "tier": 0,
+    "pack": ""
+  },
+  "digest": "9a12bc96ffd5cfa558aa21200c5036340f9b05a2160c3f0fe79821f9d4246289"
+}

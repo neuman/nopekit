@@ -1,0 +1,20 @@
+# Line endings are pinned because digests are over bytes. A verdict entry keys on
+# the sha256 of every gate module, fixture and input it read, so a checkout that
+# rewrote line endings (a Windows clone with core.autocrlf=true: every text file
+# out as CRLF) would stale every committed entry, re-run every gate on its first
+# check and leave the tree dirty — for a change nobody made (SF PD-17).
+# `git ls-files --eol` showed every tracked text file already i/lf when this was
+# added, so nothing renormalised.
+# Rejected: core.autocrlf advice in the docs (a per-machine setting the repo cannot
+# enforce); `text=auto` without `eol=lf` (autocrlf=true still checks out CRLF).
+* text=auto eol=lf
+
+# Formats that can pass for text and must never be converted: an ASCII STL and a
+# STEP file are plain text to git's NUL-byte heuristic, and one CR/LF rewrite
+# changes the mesh digest a gate recorded. One pattern per line: gitattributes
+# reads the first token as the pattern and every other token as an attribute.
+*.stl -text
+*.step -text
+*.glb -text
+*.png -text
+*.jpg -text

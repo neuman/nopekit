@@ -1,0 +1,12 @@
+{
+  "statement": "Root bending stress stays within half of yield",
+  "kind": "measurable",
+  "acceptance": {
+    "quantity": "utilisation",
+    "comparator": "<=",
+    "limit": 1.0
+  },
+  "tags": [
+    "strength"
+  ]
+}

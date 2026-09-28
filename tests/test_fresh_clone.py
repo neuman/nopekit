@@ -27,6 +27,15 @@ How the copy is made, and what slipped through on the way:
 * **A replay needs an identity to commit, and a runner has none.** The copy's
   commit is the one place a test asks `_env.git` for `identity=True`.
 
+**Line endings** (1.3). Every digest in a verdict entry is over bytes, so a clone
+whose checkout rewrote line endings would read every committed entry stale and
+dirty its own tree on the first check — the Windows default, `core.autocrlf=true`.
+`LineEndings` clones the fresh copy that way and asks for LF on disk, Fresh
+entries, a clean tree after `check` and a mesh byte for byte, then takes the
+bracket's `.gitattributes` block away to show it is what holds;
+`RepoLineEndings` holds the repository's own `.gitattributes` (bundled pack files
+are read by gates in every project) to the same rules, through `git check-attr`.
+
 The harness is itself a checker, so it gets what every checker here gets: a
 planted input it must refuse. `TranscriptMatchers` holds every expectation to
 the plan's own transcript (positive) and to a mutation of it (negative), and
@@ -37,7 +46,9 @@ Run:  PYTHONPATH=src python3 -m unittest discover -s tests -p test_fresh_clone.p
 """
 from __future__ import annotations
 
+import json
 import os
+import pathlib
 import re
 import shutil
 import unittest
@@ -57,12 +68,19 @@ BRACKET = os.path.join(_env.REPO, *BRACKET_REL.split("/"))
 #: `.atompipe/out`, `.atompipe/cache`, `.atompipe/obs`: a run's scratch,
 #: evidence, cache and observations — outputs, never sources, and a previous
 #: run's cache copied in would make the "first" check a second one.
+#: `.atompipe/ledger.json` and `.atompipe/ledger.legacy.json` (from 1.3): the
+#: generated index of the records and the ledger they were migrated from, both
+#: ignored — a checkout's outputs, which a clone of the migrated bracket never
+#: holds (what slipped through: the U32 checkout's index and legacy ledger rode
+#: into every `--dir` "fresh clone", so its first command read a stranger's
+#: index before rewriting it).
 #: *Rejected:* parsing the `.gitignore` files — a second, partial
 #: implementation of git's ignore rules, wrong in the cases that matter;
 #: *rejected:* `shutil.copytree` of everything, which is how a developer's
 #: `.atompipe/out` would ride into a "fresh" clone.
 WALK_PRUNE_NAMES = frozenset({"__pycache__"})
 WALK_PRUNE_PATHS = frozenset({".atompipe/out", ".atompipe/cache", ".atompipe/obs"})
+WALK_SKIP_PATHS = frozenset({".atompipe/ledger.json", ".atompipe/ledger.legacy.json"})
 WALK_SKIP_SUFFIXES = (".pyc",)
 
 #: The message of the copy's single commit.
@@ -99,7 +117,8 @@ def git_listing(repo: str = _env.REPO, rel: str = BRACKET_REL) -> list[str] | No
 
 def walk_listing(root: str) -> list[str]:
     """Every file under ``root`` a clone would carry, relative to it, `/`-separated:
-    no `__pycache__`, no `*.pyc`, none of `.atompipe/{out,cache,obs}`."""
+    no `__pycache__`, no `*.pyc`, none of `.atompipe/{out,cache,obs}`, and not
+    the ignored index or legacy ledger."""
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
@@ -108,7 +127,7 @@ def walk_listing(root: str) -> list[str]:
                              if d not in WALK_PRUNE_NAMES
                              and rel_dir + d not in WALK_PRUNE_PATHS)
         for filename in sorted(filenames):
-            if filename.endswith(WALK_SKIP_SUFFIXES):
+            if filename.endswith(WALK_SKIP_SUFFIXES) or rel_dir + filename in WALK_SKIP_PATHS:
                 continue
             out.append(rel_dir + filename)
     return sorted(out)
@@ -291,6 +310,166 @@ class BracketFreshClone(_env.EnvCase):
 
 
 # --------------------------------------------------------------------------- #
+# Line endings: digests are over bytes (PLAN P1.3, SF PD-17)
+# --------------------------------------------------------------------------- #
+#: A mesh git's NUL-byte heuristic takes for text: an ASCII STL with CRLF line
+#: ends, as a Windows exporter writes one. Under `* text=auto` alone its CRLFs
+#: would be rewritten on the way into the index, and a gate that digested the
+#: mesh would never read Fresh again.
+ASCII_STL_CRLF = (b"solid part\r\n  facet normal 0 0 1\r\n    outer loop\r\n"
+                  b"      vertex 0 0 0\r\n      vertex 1 0 0\r\n      vertex 0 1 0\r\n"
+                  b"    endloop\r\n  endfacet\r\nendsolid part\r\n")
+
+#: The binary kinds the repository and every project pin `-text` (store's
+#: `.gitattributes` block, and the repo root's).
+BINARY_KINDS = ("*.stl", "*.step", "*.glb", "*.png", "*.jpg")
+
+
+def autocrlf_clone(origin: str, dest: str) -> str:
+    """A clone of ``origin`` as a Windows user with ``core.autocrlf=true`` gets it:
+    set for the clone command, so the checkout is converted, and in the clone's
+    own config, so every later `git status` there judges the tree the same way."""
+    url = pathlib.Path(os.path.abspath(origin)).as_uri()
+    proc = _env.git(["-c", "core.autocrlf=true", "clone", "-q",
+                     "--config", "core.autocrlf=true", url, dest],
+                    cwd=os.path.dirname(os.path.abspath(dest)))
+    if proc.returncode != 0:
+        raise AssertionError(f"git clone {url} with core.autocrlf=true failed: "
+                             f"{proc.stderr.strip()}")
+    return dest
+
+
+def _bytes(root: str, rel: str) -> bytes:
+    with open(os.path.join(root, *rel.split("/")), "rb") as fh:
+        return fh.read()
+
+
+def _commit(project: str, message: str) -> None:
+    for argv, identity in ((["add", "-A"], False), (["commit", "-q", "-m", message], True)):
+        proc = _env.git(argv, cwd=project, identity=identity)
+        if proc.returncode != 0:
+            raise AssertionError(f"git {' '.join(argv)} in {project}: {proc.stderr.strip()}")
+
+
+def _states(case: unittest.TestCase, project: str) -> dict[str, str]:
+    """``{gate: freshness state}`` from `status --json` in ``project``."""
+    proc = _env.atompipe(["status", "--json"], cwd=project)
+    case.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
+    freshness = json.loads(proc.stdout).get("freshness") or {}
+    case.assertTrue(freshness, "status --json names no gate")
+    return {gate: row.get("state") for gate, row in freshness.items()}
+
+
+class LineEndings(_env.EnvCase):
+    """A Windows clone (`core.autocrlf=true`) of the bracket reads its committed
+    cache as a Linux clone does: LF on disk, every entry Fresh, a clean tree after
+    `check`, and a mesh byte for byte — because of the bracket's own
+    `.gitattributes` block, which the last test takes away to show it is what
+    holds (a check that cannot fail is a logger)."""
+
+    def _origin(self) -> str:
+        origin = os.path.join(self.tmp(), "origin")
+        os.makedirs(origin)
+        fresh_clone(origin)
+        return origin
+
+    def test_an_autocrlf_clone_checks_out_lf_and_every_entry_is_fresh(self):
+        origin = self._origin()
+        clone = autocrlf_clone(origin, os.path.join(self.tmp(), "windows"))
+        listed = _env.git(["ls-files", "-z"], cwd=clone)
+        self.assertEqual(listed.returncode, 0, listed.stderr)
+        committed = sorted(p for p in listed.stdout.split("\0") if p)
+        self.assertIn("gates/structural.py", committed)
+        moved = [rel for rel in committed if _bytes(clone, rel) != _bytes(origin, rel)]
+        self.assertEqual(moved, [], "an autocrlf=true checkout rewrote committed bytes")
+        self.assertNotIn(b"\r\n", _bytes(clone, "model/bracket.py"))
+
+        states = _states(self, clone)
+        self.assertEqual({g: s for g, s in states.items() if s != "fresh"}, {},
+                         "a committed entry is not Fresh in the autocrlf clone")
+        check = _env.atompipe(["check"], cwd=clone)
+        self.assertEqual(check.returncode, 1, check.stdout[-2000:] + check.stderr[-2000:])
+        self.assertRegex(check.stdout, r"(?m)^6 gates: 0 executed, 6 cached — ")
+        porcelain = _env.git(["status", "--porcelain", "--untracked-files=all"], cwd=clone)
+        self.assertEqual((porcelain.returncode, porcelain.stdout), (0, ""),
+                         "check dirtied the autocrlf clone")
+
+    def test_a_mesh_round_trips_byte_identical(self):
+        origin = self._origin()
+        for rel in ("inputs/cad/part.stl", "inputs/cad/part.dat"):
+            path = os.path.join(origin, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(ASCII_STL_CRLF)
+        _commit(origin, "a mesh, and the same bytes under a name no rule pins")
+        clone = autocrlf_clone(origin, os.path.join(self.tmp(), "windows"))
+        self.assertEqual(_bytes(clone, "inputs/cad/part.stl"), ASCII_STL_CRLF)
+        # The control: the same bytes where no `-text` rule reaches are rewritten,
+        # so the identity above is the attribute's doing, not git leaving bytes be.
+        self.assertNotEqual(_bytes(clone, "inputs/cad/part.dat"), ASCII_STL_CRLF)
+
+    def test_without_the_attributes_the_clone_goes_crlf_and_stale(self):
+        origin = self._origin()
+        proc = _env.git(["rm", "-q", ".gitattributes"], cwd=origin)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        _commit(origin, "the bracket without its line-ending block")
+        clone = autocrlf_clone(origin, os.path.join(self.tmp(), "windows"))
+        self.assertIn(b"\r\n", _bytes(clone, "gates/structural.py"),
+                      "autocrlf=true checked out LF with no attribute asking for it: "
+                      "this control no longer shows what the block prevents")
+        self.assertNotEqual(_states(self, clone).get("bracket.deflection"), "fresh")
+
+
+def attribute_problems(text: str, case: _env.EnvCase) -> list[str]:
+    """What is wrong with ``text`` as a `.gitattributes`, asked of git itself
+    (`git check-attr` in a scratch repository), never parsed here: a pattern
+    list written the way the plan abbreviates it — several patterns, one
+    attribute — is valid-looking text that pins only its first pattern."""
+    repo = case.tmp()
+    proc = _env.git(["init", "-q"], cwd=repo)
+    if proc.returncode != 0:
+        raise AssertionError(f"git init: {proc.stderr.strip()}")
+    with open(os.path.join(repo, ".gitattributes"), "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+    names = ["src/atompipe/verdicts.py", "examples/bracket/claims/C1.json",
+             *(f"part{kind[1:]}" for kind in BINARY_KINDS)]
+    proc = _env.git(["check-attr", "text", "eol", "--", *names], cwd=repo)
+    if proc.returncode != 0:
+        raise AssertionError(f"git check-attr: {proc.stderr.strip()}")
+    got: dict[tuple[str, str], str] = {}
+    for line in proc.stdout.splitlines():
+        path, attr, value = (part.strip() for part in line.rsplit(":", 2))
+        got[(path, attr)] = value
+    problems = []
+    for name in names:
+        binary = name.startswith("part.")
+        want_text = "unset" if binary else "auto"
+        if got.get((name, "text")) != want_text:
+            problems.append(f"{name}: text is {got.get((name, 'text'))!r}, want {want_text}")
+        if not binary and got.get((name, "eol")) != "lf":
+            problems.append(f"{name}: eol is {got.get((name, 'eol'))!r}, want lf")
+    return problems
+
+
+class RepoLineEndings(_env.EnvCase):
+    """The repository's own `.gitattributes`: every pack gate's entries in every
+    project digest bundled pack files, so this checkout's line endings are part
+    of every project's cache (SF PD-17)."""
+
+    def test_root_gitattributes_pins_lf_and_binary_kinds(self):
+        with open(os.path.join(_env.REPO, ".gitattributes"), encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(attribute_problems(text, self), [])
+        # Its negative controls: the plan's one-line abbreviation, and no eol.
+        abbreviated = "* text=auto eol=lf\n" + " ".join(BINARY_KINDS) + " -text\n"
+        self.assertTrue(attribute_problems(abbreviated, self),
+                        "several patterns on one line pinned every kind")
+        no_eol = text.replace("* text=auto eol=lf", "* text=auto")
+        self.assertNotEqual(no_eol, text)
+        self.assertTrue(attribute_problems(no_eol, self), "a missing eol=lf was accepted")
+
+
+# --------------------------------------------------------------------------- #
 # The copy's own controls
 # --------------------------------------------------------------------------- #
 class CopyListsWhatACloneHolds(_env.EnvCase):
@@ -302,12 +481,14 @@ class CopyListsWhatACloneHolds(_env.EnvCase):
 
     def test_the_walk_leaves_out_bytecode_and_outputs(self):
         root = self.tmp()
-        kept = ["model/bracket.py", ".atompipe/ledger.json", ".atompipe/.gitignore",
+        kept = ["model/bracket.py", ".atompipe/project.json", ".atompipe/.gitignore",
                 ".atompipe/runs/0001-aaaaaaaa.json", "selftest/bad_configs.py",
-                "outputs/kept.txt", "model/out/kept.txt", ".atompipe/verdicts/g/x.json"]
+                "outputs/kept.txt", "model/out/kept.txt", ".atompipe/verdicts/g/x.json",
+                "claims/C1.json", "ledger.json", "model/ledger.legacy.json"]
         dropped = ["model/__pycache__/bracket.cpython-312.pyc", "gates/stray.pyc",
                    ".atompipe/out/junit.xml", ".atompipe/cache/last_check.json",
-                   ".atompipe/obs/g.jsonl", "selftest/__pycache__/deep/x.txt"]
+                   ".atompipe/obs/g.jsonl", "selftest/__pycache__/deep/x.txt",
+                   ".atompipe/ledger.json", ".atompipe/ledger.legacy.json"]
         for rel in kept + dropped:
             self._write(root, rel)
         self.assertEqual(walk_listing(root), sorted(kept))

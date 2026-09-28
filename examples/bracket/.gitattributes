@@ -1,0 +1,9 @@
+# atompipe:begin
+# Written by atompipe: digests are over bytes, so line endings must not move.
+* text=auto eol=lf
+*.stl -text
+*.step -text
+*.glb -text
+*.png -text
+*.jpg -text
+# atompipe:end

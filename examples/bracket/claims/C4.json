@@ -1,0 +1,14 @@
+{
+  "statement": "Prints on a 220 mm bed without supports",
+  "kind": "measurable",
+  "acceptance": {
+    "quantity": "bed fit",
+    "comparator": "<=",
+    "limit": 204.0,
+    "units": "mm"
+  },
+  "tags": [
+    "bed-fit",
+    "wall-thickness"
+  ]
+}

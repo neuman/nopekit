@@ -1,0 +1,5 @@
+# atompipe:begin
+# Written by atompipe: bytecode from importing model/, gates/ and selftest/.
+__pycache__/
+*.py[cod]
+# atompipe:end

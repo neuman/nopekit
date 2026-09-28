@@ -63,9 +63,11 @@ BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearin
 BED_XY_OLD = "bed_xy: float = 220.0"
 BED_XY_NEW = "bed_xy: float = 250.0"
 
-#: The bracket's ignore file as it is tracked: the 1e09113 template, then the two
-#: 1.2 lines.
-BRACKET_GITIGNORE = os.path.join(_projects.BRACKET, ".atompipe", ".gitignore")
+#: The bracket's ignore file as it was tracked through checkpoint 1.2: the
+#: 1e09113 template, then the two 1.2 lines. From 1.3 the tracked file is the
+#: migration's marked block (pinned in test_bracket_cache), and these bytes live
+#: on as the legacy bracket every `_projects.bracket_copy` starts from.
+BRACKET_GITIGNORE = os.path.join(_projects.LEGACY_BRACKET, "gitignore")
 
 
 # --------------------------------------------------------------------------- #

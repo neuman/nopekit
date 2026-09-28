@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "gate": "bracket.deflection",
+  "rho": "321b4915ab0e3dfef1eaa38a447e20884550248358b267d93b5f0e54fc7f753c",
+  "code": {
+    "digest": "7118bfb2ba36f3b46e5d4d079148ef3b38deab3420d9397b62e3d2c122ff1fe4",
+    "files": [
+      "gates/structural.py"
+    ],
+    "fallback": ""
+  },
+  "spine": "6a92c2354d7e16105cd3301fc54a178363c85ea6f791f5e7f9a425830ee444fa",
+  "reads": {
+    "params": [
+      [
+        [
+          "config",
+          "load_n"
+        ],
+        "ebba79ab141196dc837e68076acefab0008dd922d4303bcbc512ac3d0c2290c3",
+        15.0
+      ],
+      [
+        [
+          "deflection"
+        ],
+        "aaefd07c53a7fca6effbce1e0e68927cfec8c8a1d986f866e15706a7c8d57a04",
+        0.6997084548104956
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "model": null,
+    "opaque": []
+  },
+  "instruments": {},
+  "verdict": {
+    "passed": false,
+    "measured": 0.6997,
+    "limit": 0.5,
+    "units": "mm",
+    "detail": "0.700 mm at 15 N (limit 0.5 mm)",
+    "evidence": [],
+    "locators": [],
+    "claims": [
+      "structural",
+      "stiffness",
+      "deflection"
+    ],
+    "tier": 0,
+    "pack": ""
+  },
+  "digest": "afe9eadbf70fc83572df3eb2e157b80637f5e014c11b615aa974edc9af6b7678"
+}

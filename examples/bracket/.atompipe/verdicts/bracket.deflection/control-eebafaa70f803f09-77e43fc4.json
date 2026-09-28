@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.deflection",
+  "rho": "eebafaa70f803f093aaf17415d92c9aa06d191a0bdcc1021c251317edad3964d",
+  "static": "102056344e100b2f05ce85ffc8399286320d4c82f7f28c3c2650e710e8f0d5c9",
+  "static_parts": {
+    "spine": "6a92c2354d7e16105cd3301fc54a178363c85ea6f791f5e7f9a425830ee444fa",
+    "code": {
+      "digest": "7118bfb2ba36f3b46e5d4d079148ef3b38deab3420d9397b62e3d2c122ff1fe4",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "8567982bfc847ab0009a59f2ff579c84eac5b2cbe627717a952810ec9712f590",
+      "files": {
+        "selftest/bad_configs.py": "99613d17104e2b50c015996cc8af6906c82cb78311092dea69fb434591ac364c",
+        "selftest/known_good.py": "7b440d74870e884891b876beb17586d704b0846baa79e24839e6fff265e83987"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:quarter_thickness",
+      "expect": "fail",
+      "note": "same bracket at 1/4 thickness; deflection goes as 1/t^3 so this is ~64x worse and nothing else about the part changes"
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "3d1ef2e0c3f47bee66fc9e525eb3b66af895ef15f0793a2e2d0e90c81e2b18f2",
+    "files": {
+      "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
+      "selftest/bad_configs.py": "99613d17104e2b50c015996cc8af6906c82cb78311092dea69fb434591ac364c",
+      "selftest/known_good.py": "7b440d74870e884891b876beb17586d704b0846baa79e24839e6fff265e83987"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "config",
+          "load_n"
+        ],
+        "ebba79ab141196dc837e68076acefab0008dd922d4303bcbc512ac3d0c2290c3",
+        15.0
+      ],
+      [
+        [
+          "deflection"
+        ],
+        "29f486a7d930faba58031c91f95fe984bf7b1c69ef871c4859b4eadc4d44325f",
+        30.0
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "good": null,
+  "admitted": "reject-only",
+  "detail": "correctly failed on selftest/bad_configs.py:quarter_thickness (same bracket at 1/4 thickness; deflection goes as 1/t^3 so this is ~64x worse and nothing else about the part changes): 30.000 mm at 15 N (limit 0.5 mm)",
+  "measured": 30.0,
+  "limit": 0.5,
+  "units": "mm",
+  "digest": "083b54f5c2f4997cd390e95d878067775875fdda1b62c15d4d22552f935fd14a"
+}

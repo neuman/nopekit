@@ -1,0 +1,13 @@
+{
+  "statement": "Fastener bearing stress within the design allowable",
+  "kind": "measurable",
+  "acceptance": {
+    "quantity": "bearing stress",
+    "comparator": "<=",
+    "limit": 15.0,
+    "units": "MPa"
+  },
+  "tags": [
+    "bearing"
+  ]
+}
