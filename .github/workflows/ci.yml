@@ -89,12 +89,18 @@ jobs:
       # rewriting committed files on every run. Now it runs in a temp copy, the exit
       # code is captured rather than swallowed, and code plus JUnit report must equal
       # tests/expected_bracket.json.
+      #
+      # `--force` (R-9): from 1.2 `check` serves the committed verdict cache, and an
+      # entry is only as honest as whoever committed it — a hand-placed one, or one a
+      # spine with a since-fixed bug wrote, would read green here forever without a
+      # gate running. The inner loop may trust the cache; CI is a money boundary, so
+      # it re-runs every gate and its control and compares.
       - name: Reference project fails exactly as pinned, and its gates prove they can fail
         run: |
           copy="$(mktemp -d)/bracket"
           cp -R examples/bracket "$copy"
           rc=0
-          PYTHONPATH=src python -m atompipe -C "$copy" check --junit || rc=$?
+          PYTHONPATH=src python -m atompipe -C "$copy" check --force --junit || rc=$?
           python tests/oracle/bracket_signature.py "$copy/.atompipe/out/junit.xml" tests/expected_bracket.json --exit-code "$rc"
           # This one must pass. A gate that passes its own known-bad fixture is a
           # logger, and merging one is the failure this whole project exists to stop.

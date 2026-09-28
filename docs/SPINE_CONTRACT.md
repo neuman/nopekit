@@ -1529,7 +1529,7 @@ atompipe claim add|list|show|edit|physical  atompipe gap [--propose]
 atompipe ingest <path...> [--kind] [--desc]   atompipe inputs [--unextracted]
 atompipe extract <artifact> --what ... --grounds ...
 atompipe ask [--kind]                     # what evidence to request from the user
-atompipe check [--tier N] [--only GATE]   atompipe gate list|selftest|show
+atompipe check [--tier N] [--only GATE] [--force] [--no-record]   atompipe gate list|selftest|show
 atompipe report [--write]                 atompipe why <param-or-claim>
 atompipe decide --title ... --summary ...  atompipe packs [list|show|validate]
 atompipe model [--write]                  atompipe doctor
@@ -1597,14 +1597,126 @@ They are never problems, and never silent either.
 private helpers (named here because tests hold them to it):
 ```python
 def _blocking_line(claim, status, reason) -> str   # "[FAIL ] C1 <statement> — <reason>"
-def _blocking_reason(ledger, claim, status) -> str  # "gate : body" from the explaining verdict, else a status sentence
-def _verdict_row(verdict) -> dict                   # one verdict as JSON: its fields plus `ok` and `outcome`
+def _blocking_reason(ledger, claim, status, *, stale=None) -> str
+    # "gate : body" from the explaining verdict (a stale FAIL adds " (stale: <why>)"),
+    # else a status sentence; `stale` is {gate: why} from the resolution
+def _verdict_row(verdict, *, cached=None, fresh=None, stale_reason="", executed=True) -> dict
+    # one verdict as JSON: its fields plus `ok` and `outcome`
 ```
 - The BLOCKING tag is `report.status_tag`, never a status truncated to four letters:
   `check` printed `[fail]`/`[uncl]` where `status` printed `[FAIL ]`/`[gap  ]` for the
   same claims (S-69).
 - The reason is `claims.explaining_verdict`'s, formatted exactly as
   `render_terminal` formats it (S-68): ran-and-failed, then errored, then skipped.
+  An UNCLAIMED claim reads `no gate covers it` and stops there (the `gap --propose`
+  suffix was advice in a column that states facts); a STALE one names its stale
+  gates and why.
 - A verdict row in `--json` carries `outcome` (`"pass" | "fail" | "error" |
   "skipped"`, `Verdict.outcome`) next to `ok`. Both are set explicitly: `to_dict`
-  serialises dataclass fields only, and both are properties.
+  serialises dataclass fields only, and both are properties. From 1.2 it also
+  carries `cached` and `fresh` where the command knows them, `stale_reason` and
+  `rho` when non-empty, and `duration_s`/`cpu_s` only for a row that EXECUTED in
+  this command — a cached row replaying the cost of the run that wrote it would be a
+  measurement of nothing (cli:H12; the cost lives in obs).
+
+**Every reader resolves once** (spec §3.10, R-5, cli:H3). What slipped through
+before: the CLI kept its own staleness rule (one hash of the projection against the
+last sweep's) and its own flattening of the projection, each kept in sync with a twin
+in `site.py` by a comment (S-28), and nine readers took the ledger's verdict list as
+the truth — as current as the last `check` had left it.
+```python
+def _registry(root, ledger, *, strict=True) -> (gates.Registry, list[str])
+    # a FRESH Registry per command (§3.5, cli:H6): packs in meta.packs order, then gates/;
+    # loaders re-adopt a cached module's gates, so a second command in one process is
+    # never "already registered" and never inherits another project's gates
+def _context(root, ledger, model, projection, tier, *, quiet=False) -> GateContext
+    # params = modelio.flat_params (the one flattening), a ledger COPY, extra = {}
+def _resolved(root, ledger, registry, projection, model_error, *, now, model=None,
+              sweep=None) -> (Ledger, verdicts.Resolution)
+    # the resolver's answer and the VIEW every reader renders
+```
+- `_resolved` calls `verdicts.resolve` (never runs a gate or a fixture) and lays the
+  result over the ledger as an in-memory **view**: `verdicts` from the resolution,
+  `Claim.gates` from `claims.effective_gates` (registry coverage over the records'
+  cached opinion — `claim show` used to resolve the bare record with no registry,
+  cli:H5), `Param.gates` from `verdicts.last_read_sets` (a gate that did not execute
+  keeps the parameters it read when it last ran, S-30). `status`, `claim list/show`,
+  `report`, `site build` (passes `resolution=`), `gate show`, `why`, `doctor` and its
+  ledger-integrity row, and `check` with its JUnit all render it. `sweep=` (from
+  `check` only) lays that sweep's rows over the gates it selected: a row the sweep
+  produced is current by construction, and under `--no-record` nothing reached disk
+  for the resolver to find.
+- **The view is never saved.** It holds cache verdicts, and coverage and read sets
+  the records do not own. `tests/test_check_cache.py` walks this file's AST and
+  refuses any `store.save` argument that flows from `_resolved`.
+
+**`check`** runs `verdicts.sweep` — affected-only (D-05): per selected gate,
+availability, then admission (the negative control runs on a control-entry miss;
+S-05: nothing here ever ran a control, so a logger with a declared one produced PROVEN
+rows), then the cache, then the run. The clock is stamped once per command (`now`):
+obs, remembered outcomes, `last_check.json` and the JUnit report carry one instant.
+- `--force` re-runs every selected gate AND its control (R-9); CI runs the bracket
+  with it.
+- `--no-record` is a dry sweep: nothing under `.atompipe/` but gate scratch in
+  `out/` — no cache or control entry, obs, remembered outcome, `controls.json`,
+  `digests.json`, `last_check.json`, and no ledger save (S-32: it used to save the
+  ledger and read its own fresh passes as STALE, the one global clock not having
+  moved).
+- `--only`/`--tier` select as before; a filtered sweep writes its entries and obs but
+  no `last_check.json`.
+- Otherwise, after the sweep: `verdicts.write_last_check`, and — 1.2 only, while
+  claims live in the ledger — the RECORDS ledger (parameters refreshed from the model,
+  grounding linked, coverage refreshed) is saved with `verdicts=[]` and `Param.gates`
+  from `verdicts.last_read_sets`. There is no run history (S-89: every recorded check
+  rewrote the tracked ledger and appended a tracked run file).
+
+`check --json` (§3.13; verify.sh and CI parse `verdicts[]`): `verdicts[]` holds a row
+for **every selected gate** — executed, cached or refused — in registration order, so
+a fresh clone whose first check is all cache hits still lists `bracket.deflection`
+(cli:H1). Row keys `gate, passed, skipped, ok` (stable); `outcome, cached, fresh`
+(always); `rho`, `stale_reason` (when non-empty); `duration_s, cpu_s` (executed rows
+only). `carried_over[]` holds the rows (with `cached`, `fresh`, `stale_reason`) of
+registered gates this sweep did not select that have an effective verdict. `counts` =
+`{ran (#ok over executed plus cached), failed, skipped, errored, executed, cached,
+controls: {executed, cached, reverified}}`. `stale` means some selected gate was stale
+BEFORE the sweep (cli:H19), `stale_reason` names each; `run` is `null` (no run history;
+kept so a reader finds the key and nothing in it); `model_hash` is a display id; adds
+`spine` and `junit`.
+
+`check` text: executed rows stream as they land; a cached row prints only when it did
+not pass, as `f"{line:<77} cached"`; then
+`6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0` (`, S skipped` and
+`, R errored` when non-zero; the time and the model hash left this line), then
+`controls: E executed, C cached, R re-verified` when a control executed or was
+re-verified, the skip digest, a note for gates outside the sweep, and the BLOCKING
+list.
+
+**`status`** text: `render_terminal`'s block, then in this order — `stale: <gate> —
+<reasons>` per stale gate (continuations indented under `stale: `) with `   (N checks
+current[, n never run])` on the last, or `stale: none   (N checks current)`; `last
+check: <when> (<age> ago)` from `last_check.json`, or `last check: never`; `note:` per
+instrument mismatch and at most one `note: <k> control(s) pending — inputs moved
+(<files>); the next check re-verifies`; `model: <entry> DOES NOT LOAD — <error>` only
+when it does not load. A check is current when its row is Fresh with its control
+admitted or pending. `status --json` drops the sweep record and its age, keeps
+`stale`/`stale_reason`, and adds `stale_gates`, `freshness` (`{gate: {"state",
+"reasons", "admission", "notes"}}`) and `last_check` (`{"when", "age_s"}`, nulls
+before the first). It never runs a gate or a fixture and never writes.
+
+**`gate show`**: `last verdict` from the view (with `(stale: <why>)` when it is not
+current); the last line is the control's standing at this version, read by
+`verdicts.admission_state` (which runs nothing): `  last selftest: [ok  ] fired at this
+version (control <rho12>)`, `… [FAIL] PASSED its own known-bad at this version (control
+<rho12>)`, `… pending — control inputs moved; the next check re-verifies (control
+<rho12>)`, `… [FAIL] not admitted at this version — <why>` (a remembered crash, two
+disagreeing controls), or `… not demonstrated at this version`. JSON `last_selftest` =
+`{"outcome", "control", "at_this_version", "admission", "detail"}` or `null`. What
+slipped through (S-08): it read a ledger key `gate selftest` never wrote, so every gate
+read "(never run)" forever.
+
+**`gate selftest`, project mode**, runs every selected control — never served from
+the cache — through `verdicts.admission(..., force=True)` with the sweep's anchors,
+so it files byte for byte the control entry `check` would (O_EXCL: an unchanged
+control re-creates the same name and writes nothing), plus a control obs row; a crash
+or an unusable fixture is remembered, never cached. Project fixtures get the
+known-good design (D-27). `--no-record` files nothing.

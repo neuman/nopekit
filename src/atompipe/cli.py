@@ -49,21 +49,23 @@ never write the first one.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import importlib.util
 import json
 import os
 import platform
 import posixpath
+import re
 import shutil
 import sys
 import tempfile
 import textwrap
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from . import __version__
-from . import artifacts, claims, decisions, gates, modelio, packs, report, site, store
+from . import artifacts, claims, decisions, gates, modelio, packs, report, site, store, verdicts
 from .models import (
     Acceptance,
     ArtifactKind,
@@ -75,12 +77,12 @@ from .models import (
     Ledger,
     PhysicalResult,
     ProjectMeta,
-    RunMeta,
     Tier,
     Verdict,
 )
 from .util import (
     AtompipeError,
+    FileDigests,
     FileLock,
     atomic_write_text,
     human_bytes,
@@ -237,18 +239,27 @@ def _registry(root: str, ledger: Ledger, *,
     """Load every gate this project can see. Returns `(registry, problems)`.
 
     Packs first (in `meta.packs` order, which is gate-id precedence), then the
-    project's own `gates/`. The module-level `gates.REGISTRY` is the target
-    because a CLI process serves exactly one project and a private registry would
-    buy nothing but a layer.
+    project's own `gates/`.
+
+    **A fresh `gates.Registry` per command** (spec §3.5, cli:H6). This used to
+    load into the module-level `gates.REGISTRY` on the argument that "a CLI
+    process serves exactly one project" — which stopped being true the first
+    time a test, a `site build` after a `check`, or an agent called `main` twice
+    in one process: the second load found the first one's gates already
+    registered and refused them ("already registered"), or handed the second
+    project the first one's. The loaders serve a module whose bytes have not
+    moved from their content-keyed cache and re-adopt its gates into whichever
+    registry asks, so a fresh one costs a lookup, not a re-import.
+    `gates.REGISTRY` stays what `@gate` decorates into outside a load.
 
     `strict=False` turns a broken pack into a *reported* problem instead of an
-    exception, and only `status` and `doctor` use it. The distinction matters:
-    `doctor` exists to tell you your pack is broken, so it must survive a broken
-    pack; `check` must not, because a sweep that silently ran two packs out of
-    three would publish an UNCLAIMED section that is an artefact of an import
-    error rather than a statement about the design.
+    exception, and only the readers use it. The distinction matters: `doctor`
+    exists to tell you your pack is broken, so it must survive a broken pack;
+    `check` must not, because a sweep that silently ran two packs out of three
+    would publish an UNCLAIMED section that is an artefact of an import error
+    rather than a statement about the design.
     """
-    registry = gates.REGISTRY
+    registry = gates.Registry()
     problems: list[str] = []
     for label, load in (
         ("packs", lambda: packs.load_all_gates(packs.installed(root, ledger=ledger),
@@ -294,58 +305,187 @@ def _projection_safe(root: str, ledger: Ledger) -> tuple[Any, dict | None, str]:
     return model, projection, ""
 
 
-def _flat_params(projection: dict | None) -> tuple[dict[str, Any], list[str]]:
-    """Flatten a projection to `{name: value}` for `GateContext.params`, with conflicts.
+# --------------------------------------------------------------------------- #
+# the one resolver, at the edge
+# --------------------------------------------------------------------------- #
+#: What slipped through before this section existed (S-28, cli:H3): the CLI kept
+#: its own copy of "is this verdict current?" — one hash of the whole projection
+#: against the last sweep's, in `_staleness` — and its own `_flat_params`, each
+#: "kept byte-for-byte in sync" with a twin in `site.py` by a comment. Nine
+#: readers then took `ledger.verdicts` as the truth, so a verdict was as current
+#: as the last `check` had left the ledger, `--only` could freeze a PASS forever
+#: (S-20), and `--no-record` read a fresh pass as STALE (S-32). Now there is one
+#: judgement, `verdicts.resolve`, one flattening, `modelio.flat_params`, and one
+#: place every command meets them: `_resolved`.
 
-    Derived values first, then config over the top, so an INPUT always wins a
-    name collision. `build()` returning a key that shares a config field's name
-    is common and harmless when the values agree (the reference model echoes
-    `material` straight back); when they do NOT agree, one of the two numbers a
-    gate could read is not the model's input, and which one it got would depend
-    on dict ordering. So the input wins, and the disagreement is returned to be
-    reported rather than resolved silently — that is rule 6, cross-representation
-    agreement, applied at the cheapest place it can be applied.
+
+def _param_gates(ledger: Ledger, read_sets: Mapping[str, Iterable[tuple]],
+                 registry: gates.Registry | None) -> dict[str, list[str]]:
+    """`{param name: [gate ids]}` — which registered gates read each parameter
+    when they last executed (`verdicts.last_read_sets`). Feeds `Param.gates` and
+    `why`, never rho.
+
+    Why the field is filled at all: `Param.gates` — "which gate protects this
+    number", the fourth thing rule 3 asks a constant to carry — was declared and
+    never assigned, so `atompipe why <param>` told every reader "GATES (0) —
+    none: no gate would notice if this value went wrong" about parameters three
+    gates read on every sweep; an agent that believed it went off to write a gate
+    the project already had.
+
+    A parameter counts as read when its name is one of the first two keys of a
+    recorded path: `ctx.params["thickness"]` and `ctx.params["config"]
+    ["thickness"]` are the two spellings gates use (the reference project uses
+    the second for seven of its reads). Deeper keys are not followed: a sourcing
+    gate walking a BOM would otherwise attribute itself to every line item that
+    shares a parameter's name — a false positive in the generous direction.
+    Names that are not ledger parameters are dropped: a gate asking for
+    `span_mm` on a model with no such field says the gate wants it, not that the
+    project has it.
+
+    What slipped through before (S-30): the attribution was recorded by a wrapper
+    on the sweep's `ctx.params`, so a gate that did not execute — its tool
+    missing here — recorded nothing, and every full sweep erased the parameters
+    it protects. A read set comes from the gate's last EXECUTED entry now, and a
+    skip leaves it where it was. Only registered gates are named: a gate this
+    project cannot load protects nothing here.
+
+    The honest limit, stated because the field reads stronger than it is: this is
+    a DIRECT read. `bracket.deflection` reads the derived `deflection`, which
+    protects `arm_length` in physical fact, but a read set names the key read,
+    not what `build()` computed it from — so `arm_length` lists no gate. An empty
+    `Param.gates` means "no gate reads this value by name", weaker than "nothing
+    would notice if it changed" (which gates go stale when it moves is what
+    `status` says, from rho).
     """
-    if not projection:
-        return {}, []
-    config = dict(projection.get("config") or {})
-    derived = dict(projection.get("derived") or {})
-    conflicts = [
-        f"{name}: config {config[name]!r} vs build() {derived[name]!r}"
-        for name in sorted(set(config) & set(derived))
-        if config[name] != derived[name]
-    ]
-    flat = dict(derived)
-    flat.update(config)
-    return flat, conflicts
+    registered = set(registry.ids()) if registry is not None else set(read_sets)
+    known = {param.name for param in ledger.params}
+    found: dict[str, list[str]] = {}
+    for gate_id in sorted(read_sets):
+        if gate_id not in registered:
+            continue
+        names = {part for path in read_sets[gate_id] for part in tuple(path)[:2]
+                 if isinstance(part, str)}
+        for name in sorted(names & known):
+            found.setdefault(name, []).append(gate_id)
+    return found
 
 
-def _staleness(ledger: Ledger, projection: dict | None) -> tuple[bool, str]:
-    """Have the model or the inputs moved since the last recorded sweep?
+def _swept(resolution: verdicts.Resolution, result: verdicts.SweepResult,
+           registry: gates.Registry) -> verdicts.Resolution:
+    """`resolution` with this sweep's rows standing in for the gates it selected.
 
-    This is the one comparison that stops a green report from being a lie about a
-    design nobody has re-checked. It is computed here, at the edge, and passed
-    into `claims`/`report` as a flag, because those modules must resolve the same
-    ledger identically on two machines and a resolver that read the model could
-    not (see `claims.resolve_status`).
-
-    Judged against `RunMeta`, not against the verdicts, because a `Verdict` has
-    nowhere to record which model it measured. The consequence is honest but
-    coarse, and `check` compensates: a `--only` sweep deliberately does not
-    advance `last_run`, so the verdicts it did not refresh keep reading stale.
+    A row the sweep produced is current by construction — it ran, was served
+    from a Fresh entry, or was refused — while `resolve` after the sweep would
+    re-judge it from disk: under `--no-record` nothing reached disk, so the run's
+    own results would be invisible, and an entry with an opaque channel (omc's
+    subprocess) reads Unknown the instant it is written. So `check` judges what
+    it just did from what it did, and every gate it did not select — above the
+    ceiling, outside `--only` — from the resolver, stale or not (S-20: those can
+    go stale now, because nothing but their inputs decides it).
     """
-    run = ledger.last_run
-    if not run.when:
-        return False, "no sweep recorded yet"
-    reasons: list[str] = []
-    if projection is not None and run.model_hash:
-        current = modelio.model_hash(projection)
-        if current != run.model_hash:
-            reasons.append(f"model {run.model_hash} -> {current}")
-    current_inputs = artifacts.inputs_hash(ledger)
-    if run.inputs_hash and current_inputs != run.inputs_hash:
-        reasons.append(f"inputs {run.inputs_hash} -> {current_inputs}")
-    return bool(reasons), "; ".join(reasons) or "unchanged since the last sweep"
+    rows = {row.verdict.gate: row for row in result.rows}
+    resolved = {verdict.gate: verdict for verdict in resolution.verdicts}
+    order = [spec.id for spec in registry.specs()]
+    merged: list[Verdict] = []
+    for gate_id in order:
+        if gate_id in rows:
+            merged.append(rows[gate_id].verdict)
+        elif gate_id in resolved:
+            merged.append(resolved[gate_id])
+    registered = set(order)
+    merged += [v for v in resolution.verdicts if v.gate not in registered]
+    return dataclasses.replace(
+        resolution, verdicts=merged,
+        stale_gates=frozenset(g for g in resolution.stale_gates if g not in rows))
+
+
+def _resolved(root: str, ledger: Ledger, registry: gates.Registry | None,
+              projection: dict | None, model_error: str, *, now: str,
+              model: Any = None, sweep: verdicts.SweepResult | None = None
+              ) -> tuple[Ledger, verdicts.Resolution]:
+    """`(view, resolution)`: the ledger as every reader must show it.
+
+    `resolution` is `verdicts.resolve`'s — the ONE effective-verdict producer
+    (R-5): per registered gate its effective verdict (served from a Fresh,
+    admitted entry; skipped where its tool is missing; errored where a crash
+    superseded it; stale with its reasons otherwise), then orphans. It never runs
+    a gate or a fixture. `sweep`, from `check` only, lays that sweep's own rows
+    over the gates it selected (`_swept`).
+
+    `view` is `ledger` with three in-memory fields filled, and nothing else:
+    `verdicts` from the resolution; `Claim.gates` from `claims.effective_gates`
+    (registry coverage over the records' cached opinion, so `claim show` stops
+    reading UNCLAIMED for a claim three gates cover, cli:H5); `Param.gates` from
+    `last_read_sets` (S-30). `claims`, `report`, `site` and `decisions` stay pure
+    functions of a `Ledger`, and every reader — `status`, `claim list/show`,
+    `report`, `site build`, `gate show`, `why`, `doctor`, `check` and its JUnit —
+    renders this one.
+
+    **The view is never saved.** It holds cache verdicts, and coverage and read
+    sets the records do not own; a whole-ledger save of it would write them into
+    the tracked ledger (cli:H3). `tests/test_check_cache.py` walks this file's AST
+    and refuses any `store.save(` argument that flows from here. `model_error`
+    joins the resolver's "the model does not load" reason; `now` is the
+    command's one clock stamp.
+    """
+    resolution = verdicts.resolve(root, registry, projection, ledger,
+                                  model_error=model_error, now=now, model=model)
+    if sweep is not None and registry is not None:
+        resolution = _swept(resolution, sweep, registry)
+    cover = claims.effective_gates(ledger, registry)
+    reads = _param_gates(ledger, resolution.read_sets, registry)
+    view = dataclasses.replace(
+        ledger,
+        verdicts=list(resolution.verdicts),
+        claims=[dataclasses.replace(claim, gates=list(cover.get(claim.id, [])))
+                for claim in ledger.claims],
+        params=[dataclasses.replace(param, gates=list(reads.get(param.name, [])))
+                for param in ledger.params],
+    )
+    return view, resolution
+
+
+def _stale_summary(resolution: verdicts.Resolution) -> str:
+    """`gate: reason; gate: reason` for every stale gate, in the resolution's
+    order — the `stale_reason` a JSON reader gets beside `stale_gates`. `""` when
+    nothing is stale: what it replaced said "unchanged since the last sweep",
+    which was one project-wide hash's opinion, not a fact about any gate."""
+    named = [(gid, row.stale_reason) for gid, row in resolution.rows.items()
+             if gid in resolution.stale_gates]
+    named += [(gid, "") for gid in sorted(resolution.stale_gates - {g for g, _ in named})]
+    return "; ".join(f"{gid}: {why}" if why else gid for gid, why in named)
+
+
+def _stale_gate_list(resolution: verdicts.Resolution) -> list[str]:
+    """The stale gates, in the resolution's order (then any without a row)."""
+    listed = [gid for gid in resolution.rows if gid in resolution.stale_gates]
+    return listed + sorted(resolution.stale_gates - set(listed))
+
+
+def _seconds_between(earlier: str, later: str) -> float | None:
+    """Seconds from one atompipe timestamp to another, or None if either does
+    not parse — an age nobody can compute is unknown, never 0."""
+    try:
+        a = datetime.strptime(earlier, "%Y-%m-%dT%H:%M:%SZ")
+        b = datetime.strptime(later, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    return (b - a).total_seconds()
+
+
+def _last_check(root: str) -> dict:
+    """`.atompipe/cache/last_check.json` as `verdicts.write_last_check` left it,
+    or `{}` when there is none or it cannot be read. For `status`'s `last check:`
+    line only: `check` never reads it (it would be trusting its own summary of a
+    previous run), and nothing decides a verdict from it. The path is spelled
+    from the writer's own constants, so the two can never disagree about where
+    the file lives."""
+    path = os.path.join(store.atompipe_dir(root), verdicts._CACHE_DIR, verdicts._LAST_CHECK)
+    try:
+        data = read_json(path, None)
+    except AtompipeError:
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 #: Parameter sync lives in `modelio.sync_params` and NOWHERE ELSE.
@@ -425,133 +565,6 @@ def _refresh_coverage(ledger: Ledger, registry: gates.Registry) -> None:
         claim.gates = live.get(claim.id, [])
 
 
-class _ParamReads(dict):
-    """`ctx.params`, but it remembers which keys a gate actually looked up.
-
-    `Param.gates` — "which gate protects this number", the fourth item rule 3
-    asks every constant to carry — was declared on the dataclass and then never
-    assigned by anything. The visible consequence was that `atompipe why
-    <param>` told every reader "GATES (0) — none: no gate would notice if this
-    value went wrong" about parameters that three gates were reading on every
-    sweep. That sentence is worse than no sentence: an agent that believes it
-    goes off to write a gate the project already has, or edits the number
-    thinking nothing measures it.
-
-    The linkage is not stored anywhere, but it is observable: a gate reads its
-    inputs out of `ctx.params`, so the keys it touches ARE the parameters it
-    protects. This subclasses `dict` rather than wrapping it in a `Mapping` so
-    that a gate doing anything else with the object — `.items()`, `len()`,
-    `dict(ctx.params)`, a `**` splat — behaves exactly as before; only the three
-    single-key accessors are intercepted.
-
-    **One level of nesting is followed.** The projection is
-    `{"config": {...}, "derived": {...}}` and `_flat_params` merges those two,
-    so a gate reading a config field spells it either `ctx.params["thickness"]`
-    or `ctx.params["config"]["thickness"]` — the reference project's gates use
-    the second spelling for seven of their reads. Recording only the top level
-    caught `config` and attributed nothing. Deeper than one level is NOT
-    followed on purpose: a sourcing gate walking a BOM document would start
-    attributing itself to every line-item key that happens to share a parameter
-    name, which is a false positive in the generous direction.
-
-    Bulk iteration is deliberately NOT recorded either. A gate that does `for
-    name in ctx.params` has not shown interest in any particular parameter, and
-    attributing all twelve to it would put a gate id on every param.
-
-    Cost is one `set.add` per lookup and one wrapper per nested dict per sweep,
-    which is what keeps it usable in the inner loop (rule 10).
-    """
-
-    def __init__(self, params: dict[str, Any], *,
-                 seen: set[str] | None = None, nested: bool = False) -> None:
-        super().__init__(params)
-        #: Shared by reference with every nested wrapper, which is why `take()`
-        #: clears this set in place instead of rebinding it. Rebinding left the
-        #: children writing into a set nobody read again.
-        self.seen: set[str] = set() if seen is None else seen
-        self._nested = nested
-        self._children: dict[Any, "_ParamReads"] = {}
-
-    def _seen(self, key: Any) -> None:
-        if isinstance(key, str):
-            self.seen.add(key)
-
-    def _wrap(self, key: Any, value: Any) -> Any:
-        if self._nested or type(value) is not dict:
-            return value
-        child = self._children.get(key)
-        if child is None:
-            child = _ParamReads(value, seen=self.seen, nested=True)
-            self._children[key] = child
-        return child
-
-    def __getitem__(self, key: Any) -> Any:
-        self._seen(key)
-        return self._wrap(key, super().__getitem__(key))
-
-    def __contains__(self, key: Any) -> bool:
-        # `GateContext.param` asks `name in self.params` before reading it, so a
-        # membership test is a read as far as attribution is concerned.
-        self._seen(key)
-        return super().__contains__(key)
-
-    def get(self, key: Any, default: Any = None) -> Any:
-        self._seen(key)
-        if not super().__contains__(key):
-            return default
-        return self._wrap(key, super().__getitem__(key))
-
-    def take(self) -> set[str]:
-        """Hand back the keys read since the last `take()`, and start fresh."""
-        seen = set(self.seen)
-        self.seen.clear()
-        return seen
-
-
-def _refresh_param_gates(ledger: Ledger, reads: dict[str, set[str]], *,
-                         replace: bool) -> None:
-    """Write "which gates read this parameter" into `Param.gates`.
-
-    `reads` is `{gate id: names it looked up}`, collected by `_ParamReads` while
-    the sweep ran. Names that are not ledger parameters are dropped: a gate
-    asking for `span_mm` on a model that has no such field is telling us the
-    gate wants it, not that the project has it, and inventing a Param row from a
-    failed lookup would put phantom numbers in the ledger.
-
-    A gate that SKIPPED still counts. It read the parameter, found it missing or
-    found its tool absent, and would have measured it — which is exactly the
-    question `atompipe why` is answering. What it must never do is imply the
-    value was checked; that is `Verdict`'s job and a skip is never a pass.
-
-    `replace=False` for a `--only` sweep, for the same reason such a sweep does
-    not advance `last_run`: it saw a subset of the gates, so overwriting the
-    full picture with the subset would quietly retire every gate it did not run.
-
-    The honest limit, stated because the field will be read as stronger than it
-    is: this records a DIRECT read. A gate that reads the derived `deflection`
-    protects `arm_length` in physical fact, but nothing in the projection says
-    which inputs that derived value came from, so `arm_length` still ends up
-    with an empty list. An empty `Param.gates` therefore means "no gate reads
-    this value by name", which is weaker than "nothing would notice if it
-    changed" — and the fix for a parameter that deserves better is to name it in
-    a gate, which is the right outcome anyway.
-    """
-    known = {param.name for param in ledger.params}
-    by_param: dict[str, list[str]] = {}
-    for gate_id in sorted(reads):
-        for name in sorted(reads[gate_id]):
-            if isinstance(name, str) and name in known:
-                by_param.setdefault(name, []).append(gate_id)
-    for param in ledger.params:
-        found = by_param.get(param.name, [])
-        if replace:
-            param.gates = found
-        else:
-            merged = list(param.gates or [])
-            merged.extend(gate_id for gate_id in found if gate_id not in merged)
-            param.gates = merged
-
-
 def _skip_digest(skipped: list[Verdict], *, width: int = 96) -> list[str]:
     """Collapse a wall of `[skip]` lines into one line per distinct REASON.
 
@@ -604,8 +617,15 @@ def _context(root: str, ledger: Ledger, model: Any, projection: dict | None,
     `log` goes to stderr so a gate's progress chatter never lands inside `--json`
     output, and is silenced entirely under `--json` because a caller parsing
     stdout is usually not reading stderr either.
+
+    `params` is `modelio.flat_params(projection)` — the one flattening, the same
+    one `verdicts.freshness` recomputes a gate's reads against, so a value is
+    compared in exactly the shape a gate was handed it (S-28). A plain dict:
+    `gates.run_gate` hands each gate its own traced, read-only view of it, and
+    that trace — not a wrapper here — is what records which parameters a gate
+    read. `extra` starts empty; each gate gets its own copy.
     """
-    params, conflicts = _flat_params(projection)
+    params, conflicts = modelio.flat_params(projection)
     for conflict in conflicts:
         _warn(f"warning: model and build() disagree on {conflict} — "
               f"gates read the config value")
@@ -632,7 +652,8 @@ def _context(root: str, ledger: Ledger, model: Any, projection: dict | None,
     )
 
 
-def _verdict_row(verdict: Verdict) -> dict[str, Any]:
+def _verdict_row(verdict: Verdict, *, cached: bool | None = None, fresh: bool | None = None,
+                 stale_reason: str = "", executed: bool = True) -> dict[str, Any]:
     """One verdict as JSON. `ok` is included because `passed` alone is not the answer.
 
     `passed` is True on a verdict that was skipped or errored only if a gate set
@@ -653,17 +674,36 @@ def _verdict_row(verdict: Verdict) -> dict[str, Any]:
     that row would turn a real reading into "this gate reported no number" —
     the generous-direction misread this file spends most of its comments
     refusing.
+
+    From 1.2 a row says where it came from (spec §3.13): `cached` (a cache
+    entry's verdict, as recorded) and `fresh` (a pass or fail keyed at the
+    current inputs) when the caller knows, `stale_reason` when it is not
+    current, `rho` when the verdict has one. `duration_s` and `cpu_s` only when
+    `executed`: a cached row replaying the cost of the run that wrote it would be
+    a measurement of nothing, and a latency reader would average it in
+    (cli:H12, `CostIsKept`) — the cost lives in obs.
     """
     row = verdict.to_dict()
-    for key in ("detail", "error", "evidence", "skip_reason", "units"):
+    for key in ("detail", "error", "evidence", "skip_reason", "units", "rho"):
         if not row.get(key):
             row.pop(key, None)
     for key in ("measured", "limit"):
         if row.get(key) is None:
             row.pop(key, None)
-    # 4dp is ~0.1 ms. A tier-0 gate reports `1.6689300537109375e-05` otherwise,
-    # which is 22 characters saying "instant" in the least readable way available.
-    row["duration_s"] = round(float(row.get("duration_s") or 0.0), 4)
+    if executed:
+        # 4dp is ~0.1 ms. A tier-0 gate reports `1.6689300537109375e-05` otherwise,
+        # which is 22 characters saying "instant" in the least readable way available.
+        row["duration_s"] = round(float(row.get("duration_s") or 0.0), 4)
+        row["cpu_s"] = round(float(row.get("cpu_s") or 0.0), 4)
+    else:
+        row.pop("duration_s", None)
+        row.pop("cpu_s", None)
+    if cached is not None:
+        row["cached"] = bool(cached)
+    if fresh is not None:
+        row["fresh"] = bool(fresh)
+    if stale_reason:
+        row["stale_reason"] = stale_reason
     row["ok"] = verdict.ok
     # Set by hand, like `ok`: `to_dict` serialises dataclass fields and `outcome`
     # is a property, so without this line it is silently missing. It is the one
@@ -672,6 +712,16 @@ def _verdict_row(verdict: Verdict) -> dict[str, Any]:
     # three flags and gets the precedence wrong (PLAN R-5).
     row["outcome"] = verdict.outcome
     return row
+
+
+def _resolved_row(verdict: Verdict, resolution: verdicts.Resolution) -> dict[str, Any]:
+    """A reader's row: `_verdict_row` with the resolution's `cached`, `fresh`
+    and `stale_reason` for that gate. A reader executed nothing, so no row it
+    prints carries a duration."""
+    found = resolution.rows.get(verdict.gate)
+    return _verdict_row(verdict, cached=bool(found and found.cached),
+                        fresh=bool(found and found.fresh),
+                        stale_reason=found.stale_reason if found else "", executed=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -737,15 +787,126 @@ def cmd_init(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # status
 # --------------------------------------------------------------------------- #
+#: An instrument note as `verdicts.resolve` words it (`<gate> — recorded under
+#: <module> <a>; here <b>`): the one kind of resolution note `status` prints one
+#: line each. The others — opaque channels, defining-file digests, hand-edited
+#: entries — are `doctor`'s rows, where each says what to do about it.
+_INSTRUMENT_NOTE = re.compile(r"^\S+ — recorded under \S+ \S+; here \S+$")
+
+#: A pending admission's reason as `verdicts.admission_state` words it; the
+#: files are read back out so several pending controls fold into one `note:`.
+_PENDING_REASON = re.compile(r"^control inputs moved \((?P<files>.*)\); the next check re-verifies$")
+
+
+def _never_run(resolution: verdicts.Resolution, registry: gates.Registry | None) -> list[str]:
+    """Registered gates with nothing to show: no row, or only an availability
+    skip over no entry. A remembered crash is not "never run" (S-68)."""
+    ids = registry.ids() if registry is not None else []
+    out = []
+    for gate_id in ids:
+        row = resolution.rows.get(gate_id)
+        if row is None or (row.state == "never" and not any(
+                str(note).startswith("remembered ") for note in row.notes)):
+            out.append(gate_id)
+    return out
+
+
+def _stale_lines(resolution: verdicts.Resolution, registry: gates.Registry | None, *,
+                 model_error: str = "") -> list[str]:
+    """`status`'s `stale:` block (spec §3.13): one line per stale gate with its
+    reasons, continuation lines indented under `stale: `, and the counts on the
+    last — `(N checks current[, n never run])`, a check being current when its
+    verdict is a Fresh entry whose control is admitted or pending. `stale: none`
+    with the counts when nothing is stale.
+
+    One line per gate, always. What slipped through while wiring it: with the
+    model broken, the resolver's reason for every gate that reads it carries the
+    whole import traceback (`the model does not load: <error>`), and the block
+    printed it once per gate — twenty lines of the same traceback between the
+    reader and the counts. The error is `model:`'s line, printed once below."""
+    current = sum(1 for row in resolution.rows.values() if row.fresh)
+    never = _never_run(resolution, registry)
+    counts = f"   ({current} checks current" + (f", {len(never)} never run" if never else "") + ")"
+    stale = _stale_gate_list(resolution)
+    if not stale:
+        return [f"stale: none{counts}"]
+    lines = []
+    for index, gate_id in enumerate(stale):
+        row = resolution.rows.get(gate_id)
+        why = (row.stale_reason if row is not None else "") or "not current"
+        if model_error:
+            why = why.replace(f": {model_error}", "")
+        why = (why.splitlines() or ["not current"])[0]
+        lines.append(f"{'stale: ' if index == 0 else '       '}{gate_id} — {why}")
+    lines[-1] += counts
+    return lines
+
+
+def _note_lines(resolution: verdicts.Resolution) -> list[str]:
+    """`status`'s `note:` lines: one per instrument mismatch, then at most one
+    for every control pending re-verification, its moved files merged."""
+    lines = [f"note: {note}" for note in resolution.notes if _INSTRUMENT_NOTE.fullmatch(note)]
+    pending = [row for row in resolution.rows.values()
+               if row.admission is not None and row.admission.state == "pending"]
+    if pending:
+        files: list[str] = []
+        for row in pending:
+            match = _PENDING_REASON.fullmatch(row.admission.reason or "")
+            for name in (match.group("files").split(", ") if match else ()):
+                if name and name not in files:
+                    files.append(name)
+        moved = ", ".join(sorted(files)) or "fixture code"
+        lines.append(f"note: {len(pending)} control(s) pending — inputs moved ({moved}); "
+                     f"the next check re-verifies")
+    return lines
+
+
+def _freshness_rows(resolution: verdicts.Resolution,
+                    registry: gates.Registry | None) -> dict[str, dict[str, Any]]:
+    """`status --json`'s `freshness`: per registered gate (then any orphan with a
+    row), its cache state, why it is not current, how its control stands and the
+    resolver's notes. `state` is `"never"` for a gate with no row."""
+    out: dict[str, dict[str, Any]] = {}
+    ids = list(registry.ids()) if registry is not None else []
+    ids += [gid for gid in resolution.rows if gid not in set(ids)]
+    for gate_id in ids:
+        row = resolution.rows.get(gate_id)
+        if row is None:
+            out[gate_id] = {"state": "never", "reasons": [], "admission": None, "notes": []}
+            continue
+        out[gate_id] = {
+            "state": row.state,
+            "reasons": [row.stale_reason] if row.stale_reason else [],
+            "admission": row.admission.state if row.admission is not None else None,
+            "notes": [str(note) for note in row.notes],
+        }
+    return out
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """The one-screen answer to "where is this project".
 
-    `report.render_terminal` does the claim/gap/gate half. Everything appended
-    here is a fact that lives outside the readiness report and that someone
-    reading it needs anyway: which packs are in play, whether the model still
-    matches the last sweep, how old that sweep is, and the NAMES (not counts) of
-    the artifacts nobody read and the parameters nobody defended. The report
-    counts those; a count tells you there is work and not where it is.
+    `report.render_terminal` does the claim/gap/gate half, from `_resolved`'s
+    view. Then, in a fixed order (spec §3.13), the facts that live outside the
+    readiness report, each with its source:
+
+    * `stale:` — each gate whose verdict is not current, with what moved
+      (`config.bed_xy 220.0 -> 250.0`), and on the last line how many checks are
+      current and how many never ran; `stale: none` when nothing is stale. What
+      it replaced said "model <hash> -> <hash>": that SOMETHING moved, never
+      which check it touched (M11.7).
+    * `last check:` — when `check` last swept the whole project
+      (`last_check.json`), with its age; `never` before the first.
+    * `note:` — an entry recorded under another library version (provenance,
+      never staleness, Q1.3), and at most one line for controls whose fixture
+      code moved since they were demonstrated (they count; the next check
+      re-verifies them).
+    * `model:` — only when the model does not load, because then no verdict
+      that reads it is current and the reader must know why first.
+
+    Then the packs, the site, the names (not counts) of unread evidence and
+    undefended parameters, and load problems. It never runs a gate or a fixture,
+    and never writes: it reads the cache (M11.11).
 
     Never fails on a broken pack or an unloadable model — both are reported as
     lines. `status` is what you run when something is wrong.
@@ -754,27 +915,36 @@ def cmd_status(args: argparse.Namespace) -> int:
     ledger = store.load(root)
     registry, problems = _registry(root, ledger, strict=False)
     model, projection, model_error = _projection_safe(root, ledger)
-    stale, stale_why = _staleness(ledger, projection)
+    now = utcnow_iso()
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=now, model=model)
+    stale_gates = resolution.stale_gates
 
     installed = packs.installed(root, ledger=ledger)
     available = packs.available(root)
-    unread = artifacts.unextracted(ledger)
-    undefended = [p.name for p in ledger.params if not (p.rationale or "").strip()]
-    summary = claims.summarise(ledger, registry, stale=stale)
-    resolved = claims.statuses(ledger, stale=stale, registry=registry)
+    unread = artifacts.unextracted(view)
+    undefended = [p.name for p in view.params if not (p.rationale or "").strip()]
+    summary = claims.summarise(view, registry, stale_gates=stale_gates)
+    resolved = claims.statuses(view, registry=registry, stale_gates=stale_gates)
     site_info = _site_state(root)
+    last = _last_check(root)
+    last_when = str(last.get("when") or "")
+    last_age = _seconds_between(last_when, now) if last_when else None
 
     if args.json:
         _dump({
             "root": root,
-            "meta": ledger.meta.to_dict(),
+            "meta": view.meta.to_dict(),
             "summary": summary,
             "claims": {cid: str(status) for cid, status in resolved.items()},
-            "gaps": [need.to_dict() for need in claims.find_gaps(ledger, registry)],
-            "stale": stale,
-            "stale_reason": stale_why,
+            "gaps": [need.to_dict() for need in claims.find_gaps(view, registry)],
+            "stale": bool(stale_gates),
+            "stale_reason": _stale_summary(resolution),
+            "stale_gates": _stale_gate_list(resolution),
+            "freshness": _freshness_rows(resolution, registry),
+            "last_check": {"when": last_when or None, "age_s": last_age},
             "model": {
-                "entry": ledger.meta.model_entry,
+                "entry": view.meta.model_entry,
                 "loaded": projection is not None,
                 "error": model_error,
                 "hash": modelio.model_hash(projection) if projection else "",
@@ -782,25 +952,28 @@ def cmd_status(args: argparse.Namespace) -> int:
             },
             "packs": {"installed": installed, "available": available},
             "inputs": {
-                "total": len(ledger.inputs),
+                "total": len(view.inputs),
                 "unextracted": [a.id for a in unread],
             },
-            "last_run": ledger.last_run.to_dict(),
-            "last_run_age": _age(ledger.last_run.when),
             "site": _site_brief(site_info),
             "problems": problems,
         })
         return 0
 
-    sys.stdout.write(report.render_terminal(ledger, registry, stale=stale))
-
-    entry = ledger.meta.model_entry or "(none recorded)"
-    if model_error:
-        _say(f"model: {entry} — DOES NOT LOAD: {model_error.splitlines()[0]}")
-    elif projection is not None:
-        _say(f"model: {entry} — hash {modelio.model_hash(projection)} ({stale_why})")
+    sys.stdout.write(report.render_terminal(view, registry, stale_gates=stale_gates))
+    for line in _stale_lines(resolution, registry, model_error=model_error):
+        _say(line)
+    if last_when:
+        age = (f" ({human_duration(last_age)} ago)" if last_age is not None and last_age >= 0
+               else " (in the future)" if last_age is not None else "")
+        _say(f"last check: {last_when}{age}")
     else:
-        _say(f"model: {entry} — set one with `atompipe model --set-entry model/<thing>.py`")
+        _say("last check: never")
+    for line in _note_lines(resolution):
+        _say(line)
+    if model_error:
+        entry = view.meta.model_entry or "(none recorded)"
+        _say(f"model: {entry} DOES NOT LOAD — {model_error.splitlines()[0]}")
 
     if installed:
         _say(f"packs: {', '.join(installed)} "
@@ -808,13 +981,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     elif available:
         _say(f"packs: none installed; {len(available)} available "
              f"({', '.join(available[:6])}) — `atompipe packs add <name>`")
-
-    if ledger.last_run.when:
-        age = _age(ledger.last_run.when)
-        _say(f"last sweep: {ledger.last_run.when} ({age}), tier {ledger.last_run.tier}, "
-             f"{human_duration(ledger.last_run.duration_s)}")
-    else:
-        _say("last sweep: never — `atompipe check`")
 
     # Mentioned only when the project has one: a line telling every project
     # without a site that it does not have a site is noise in the one command
@@ -933,26 +1099,90 @@ def _junit_write(path: str | None, render: Callable[[], str]) -> str | None:
 # --------------------------------------------------------------------------- #
 # check
 # --------------------------------------------------------------------------- #
-def cmd_check(args: argparse.Namespace) -> int:
-    """Run the gates, record the run, and exit non-zero while anything critical blocks.
+#: Where a cached row's `cached` mark starts: `f"{line:<77} cached"` puts it at
+#: column 79, the transcript's column (spec §7). Readable in 80 columns, and the
+#: shape test pins `\s+cached$`, never the padding, so a row longer than the
+#: column still reads as cached. *Rejected:* a tab (renders per terminal); a
+#: changed tag such as `[fail]` for a cached FAIL (breaks every grep for `[FAIL]`).
+_CACHED_COLUMN = 77
 
-    The whole loop lives in this function: load the model, project it, load the
-    gates, sweep them at the requested tier, stream one line each as they land,
-    write the verdicts into the ledger, append the run to the history, then ask
-    `claims.blocking` whether a spend would be reckless.
+
+def _check_row_line(row: verdicts.SweepRow) -> str | None:
+    """How one sweep row streams, or None when it does not.
+
+    An executed row, a refusal (`not admitted`) and a cached row that did not
+    pass each print; a cached pass does not — the inner loop is for what moved
+    or what is wrong, and five unchanged `[ok  ]` lines between you and the FAIL
+    you came for is the wall `_skip_digest` exists to collapse. Skips are that
+    digest's, after the summary.
+    """
+    verdict = row.verdict
+    if verdict.skipped:
+        return None
+    if row.cached:
+        if verdict.ok:
+            return None
+        return f"{verdict.render():<{_CACHED_COLUMN}} cached"
+    return verdict.render()
+
+
+def _check_summary(rows: list[verdicts.SweepRow], counts: Mapping[str, int], tier: int) -> str:
+    """`6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0` (spec §3.13).
+
+    What left the line, and why: the elapsed time (a mostly-cached sweep takes
+    no time worth reading, and `--json` keeps `duration_s`), and the model hash
+    (one hash of the projection said THAT something moved; which check it
+    touched is `status`'s `stale:` line now). FAIL, skipped and errored appear
+    only when non-zero, as they always did."""
+    outcomes = [row.verdict.outcome for row in rows]
+    line = (f"{len(rows)} gates: {counts.get('executed', 0)} executed, "
+            f"{counts.get('cached', 0)} cached — {outcomes.count('pass')} ok")
+    for outcome, word in (("fail", "FAIL"), ("skipped", "skipped"), ("error", "errored")):
+        if outcomes.count(outcome):
+            line += f", {outcomes.count(outcome)} {word}"
+    return f"{line} — tier {tier}"
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Run what moved, serve what did not, and exit non-zero while anything critical blocks.
+
+    **Affected-only** (D-05). `verdicts.sweep` is the loop: per selected gate,
+    in registration order, availability, then admission (the gate's negative
+    control, run on a control-entry miss — S-05: a logger with a declared
+    control produced PROVEN rows because nothing here ever ran a control), then
+    the verdict cache (a Fresh entry is served, unless a crash at its inputs
+    superseded it), then the run. Every selected gate gets a row — executed,
+    cached, or refused — so `check --json` still lists `bracket.deflection` on a
+    fresh clone whose first check is all cache hits (cli:H1).
 
     Exit 1 on a blocking critical claim is the point of the command. It is not
     "exit 1 if a gate failed" — an UNCLAIMED, PENDING or BLOCKED critical claim
     blocks too, because none of them is evidence and all of them are routinely
     read as "no news is good news". That is what makes this usable as a pre-spend
-    gate and in CI.
+    gate and in CI. The claims are judged from `_resolved`'s view with this
+    sweep's rows laid over the gates it selected (`_swept`).
 
-    `--only` deliberately does NOT advance `last_run`. A filtered sweep leaves
-    most verdicts untouched, and advancing the recorded model hash would launder
-    every one of those older verdicts into "current" — the exact staleness lie
-    the hash exists to catch. So a filtered run records its history file, updates
-    the verdicts it actually produced, and leaves the staleness clock where it
-    was.
+    Flags, and what each writes:
+
+    * `--force` re-runs every selected gate AND its control, cache or no cache
+      (R-9): the inner loop may trust the committed cache, a money boundary
+      re-proves it, and CI runs the bracket this way.
+    * `--no-record` is a dry sweep: nothing under `.atompipe/` but gate scratch in
+      `out/` — no cache or control entry, no obs, no remembered outcome, no
+      `last_check.json`, and the ledger is not saved (S-32: it used to write the
+      ledger anyway and read its own fresh passes as STALE, because the one
+      global clock had not moved; there is no global clock now).
+    * `--only` and `--tier` select as they always did; a filtered sweep writes
+      its entries but no `last_check.json` — a partial sweep's summary would
+      stand for the whole project's.
+    * Otherwise, after the sweep: `verdicts.write_last_check`, then (1.2 only,
+      while claims still live in the ledger) the RECORDS ledger is saved with
+      `verdicts=[]` and `Param.gates` from `verdicts.last_read_sets` — never the
+      view (PD-31, cli:H3). No run history, no `last_run` (S-89: every recorded
+      check rewrote the tracked ledger and appended a tracked run file).
+
+    The clock is stamped ONCE (`now`): obs, remembered outcomes,
+    `last_check.json` and the JUnit report carry the same instant.
 
     `--junit [PATH]` writes the same judgement as JUnit XML (`report.render_junit`).
     The target is removed before anything can fail and written at the one exit,
@@ -967,6 +1197,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     root = _root(args)
     tier = int(args.tier)
     only = list(args.only) if args.only else None
+    record = not args.no_record
+    force = bool(getattr(args, "force", False))
+    now = utcnow_iso()
 
     with _lock(root):
         ledger = store.load(root)
@@ -975,8 +1208,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         # Refresh the ledger's parameter records from the model before sweeping.
         # The model owns every value; the ledger owns the provenance accumulated
         # around it (rejected alternatives, grounding, which gates protect it).
-        # Without this the ledger's params stay empty forever and `atompipe why`
-        # — the whole point of recording provenance — can never find anything.
+        # In memory here; saved below only when this run records (1.2 — the
+        # records move to files in 1.3 and check stops writing them).
         # ONE call, to `modelio.sync_params`: see the note above `_link_grounding`
         # for the second implementation that used to run here and the field it ate.
         if model is not None:
@@ -991,129 +1224,127 @@ def cmd_check(args: argparse.Namespace) -> int:
             _warn("warning: no model entry recorded — gates that read ctx.params "
                   "will error. `atompipe model --set-entry model/<thing>.py`")
 
-        # Record which parameters each gate reads, so `Param.gates` stops being a
-        # field nothing ever assigned. `run_all` may `dataclasses.replace` the
-        # context to reconcile its tier; that copies the field by reference, so
-        # the same recorder survives the swap.
-        reads = _ParamReads(ctx.params)
-        ctx.params = reads
-        param_reads: dict[str, set[str]] = {}
-
-        def _landed(verdict: Verdict) -> None:
-            # `run_all` calls this the instant a gate returns, before the next one
-            # starts, which is the whole reason the attribution is per-gate and
-            # not one undifferentiated pile of keys at the end of the sweep.
-            param_reads[verdict.gate] = reads.take()
-            # Only verdicts that RAN stream. Skips are collapsed by reason after
-            # the sweep (see `_skip_digest`) — they are the rows that used to bury
-            # the one FAIL the command was run for.
-            if not args.json and not verdict.skipped:
-                _say(verdict.render())
+        def _landed(row: verdicts.SweepRow) -> None:
+            # `sweep` calls this the instant a gate's row exists, before the next
+            # gate starts: a tier-2 sweep streams, it does not go quiet for minutes.
+            line = None if args.json else _check_row_line(row)
+            if line is not None:
+                _say(line)
 
         started = time.perf_counter()
-        verdicts = gates.run_all(registry, ctx, max_tier=tier, only=only,
-                                 on_verdict=_landed)
+        result = verdicts.sweep(root, registry, ctx, projection=projection, ledger=ledger,
+                                max_tier=tier, only=only, force=force, record=record,
+                                now=now, on_row=_landed)
         elapsed = time.perf_counter() - started
 
-        swept = {verdict.gate for verdict in verdicts}
-        for verdict in verdicts:
-            ledger.upsert_verdict(verdict)
-        _refresh_param_gates(ledger, param_reads, replace=only is None)
+        view, resolution = _resolved(root, ledger, registry, projection, "", now=now,
+                                     model=model, sweep=result)
+        if record:
+            verdicts.write_last_check(root, result, resolution, now=now)
+            # 1.2 only: the records still live in the ledger. Saved with no verdict
+            # (they live in the cache) and with `Param.gates` from the entries'
+            # read sets — read straight off the cache, never off the view, which is
+            # a reader's and is never written (the AST rule in test_check_cache).
+            read_sets = verdicts.last_read_sets(root)
+            attributed = _param_gates(ledger, read_sets, registry)
+            store.save(root, dataclasses.replace(
+                ledger, verdicts=[],
+                params=[dataclasses.replace(param, gates=attributed.get(param.name, []))
+                        for param in ledger.params]))
 
-        # The clock, once for the whole command: the run record and the JUnit
-        # report carry the same instant (spec §0.6).
-        now = utcnow_iso()
-        run_meta = RunMeta(
-            when=now,
-            tier=tier,
-            model_hash=modelio.model_hash(projection) if projection else "",
-            inputs_hash=artifacts.inputs_hash(ledger),
-            spine_version=__version__,
-            duration_s=round(elapsed, 4),
-        )
-        run_path = ""
-        if not args.no_record:
-            run_path = store.record_run(root, verdicts, run_meta)
-            if only is None:
-                ledger.last_run = run_meta
-            store.save(root, ledger)
+        stale_gates = resolution.stale_gates
+        blockers = claims.blocking(view, registry, stale_gates=stale_gates)
+        summary = claims.summarise(view, registry, stale_gates=stale_gates)
 
-        stale, stale_why = _staleness(ledger, projection)
-        blockers = claims.blocking(ledger, registry, stale=stale)
-        summary = claims.summarise(ledger, registry, stale=stale)
-
-    ran = [v for v in verdicts if v.ok]
-    failed = [v for v in verdicts if not v.ok and not v.skipped and not v.error]
-    skipped = [v for v in verdicts if v.skipped]
-    errored = [v for v in verdicts if v.error]
-    carried = [v for v in ledger.verdicts if v.gate not in swept]
+    rows = list(result.rows)
+    selected = {row.verdict.gate for row in rows}
+    # Registered gates this sweep did not select (above the ceiling, outside
+    # `--only`) that still have an effective verdict. An unregistered gate's row
+    # is not "carried over" by anything: it is an orphan, stale by definition,
+    # and `doctor` names it.
+    registered = set(registry.ids())
+    carried = [v for v in view.verdicts if v.gate not in selected and v.gate in registered]
+    stale_reasons = {gid: row.stale_reason for gid, row in resolution.rows.items()
+                     if gid in stale_gates}
+    counts = {
+        "ran": sum(1 for row in rows if row.verdict.ok),
+        "failed": sum(1 for row in rows if row.verdict.outcome == "fail"),
+        "skipped": sum(1 for row in rows if row.verdict.outcome == "skipped"),
+        "errored": sum(1 for row in rows if row.verdict.outcome == "error"),
+        "executed": int(result.counts.get("executed", 0)),
+        "cached": int(result.counts.get("cached", 0)),
+        "controls": {key: int(result.controls.get(key, 0))
+                     for key in ("executed", "cached", "reverified")},
+    }
 
     # A project with no claims has proven nothing, and this command's exit code is
     # the only part of it CI reads. It used to print "an empty ledger is not a
     # clean bill of health" and then return 0 — a message and a return code
     # disagreeing, with the machine believing the one that laundered. Zero
     # blocking claims out of zero claims is not readiness, so it is not a zero.
-    ready = bool(ledger.claims) and not blockers
+    ready = bool(view.claims) and not blockers
     # THE exit code. Every line below prints from it and the JUnit report is
     # rendered from it; nothing after this point decides anything.
     code = 0 if ready else 1
 
-    # Registered gates this run did not sweep, and why: a JUnit consumer counts
-    # testcases, and a gate that vanished from the file between two runs reads
-    # as a gate that was removed.
-    not_run = {spec.id: ("excluded by --only" if only is not None
-                         else "above the tier ceiling")
-               for spec in registry.specs() if spec.id not in swept}
+    spine = verdicts.spine_digest()
     written = _junit_write(junit, lambda: report.render_junit(
-        ledger, verdicts, registry, tier=tier, ready=ready, exit_code=code,
-        when=now, not_run=not_run, stale=stale))
+        view, [row.verdict for row in rows], registry, tier=tier, ready=ready,
+        exit_code=code, when=now, not_run=result.not_run,
+        cached={row.verdict.gate for row in rows if row.cached}, spine=spine,
+        stale_gates=stale_gates))
 
     if args.json:
         _dump({
             "tier": tier,
             "only": only,
-            "verdicts": [_verdict_row(v) for v in verdicts],
-            "counts": {"ran": len(ran), "failed": len(failed),
-                       "skipped": len(skipped), "errored": len(errored)},
-            "carried_over": [v.gate for v in carried],
+            "verdicts": [_verdict_row(row.verdict, cached=row.cached, fresh=row.fresh,
+                                      stale_reason=row.stale_reason, executed=row.executed)
+                         for row in rows],
+            "counts": counts,
+            "carried_over": [_resolved_row(v, resolution) for v in carried],
             "summary": summary,
             "blocking": [{"claim": claim.id, "status": str(status),
                           "statement": claim.statement} for claim, status in blockers],
             "ready": ready,
-            "claims_recorded": len(ledger.claims),
-            "stale": stale,
-            "stale_reason": stale_why,
-            "run": rel(run_path, root) if run_path else "",
-            "model_hash": run_meta.model_hash,
-            "duration_s": run_meta.duration_s,
+            "claims_recorded": len(view.claims),
+            # Stale BEFORE the sweep (cli:H19): after a recorded full sweep
+            # everything it touched is current by construction, so "stale" read
+            # afterwards could only ever say False.
+            "stale": bool(result.stale_before),
+            "stale_reason": "; ".join(f"{gid}: {why}"
+                                      for gid, why in result.stale_before.items()),
+            # No run history to point at (S-89); kept as null so a reader that
+            # looked for the key finds it, and finds nothing there (SF PD-13).
+            "run": None,
+            "model_hash": modelio.model_hash(projection) if projection else "",
+            "duration_s": round(elapsed, 4),
+            "spine": spine,
             "junit": written,
         })
         return code
 
-    bits = [f"{len(verdicts)} gates", f"{len(ran)} ok"]
-    if failed:
-        bits.append(f"{len(failed)} FAIL")
-    if skipped:
-        bits.append(f"{len(skipped)} skipped")
-    if errored:
-        bits.append(f"{len(errored)} errored")
-    _say(f"{', '.join(bits)} in {human_duration(elapsed)} — tier {tier}"
-         + (f", model {run_meta.model_hash}" if run_meta.model_hash else ""))
+    _say(_check_summary(rows, result.counts, tier))
+    if counts["controls"]["executed"] or counts["controls"]["reverified"]:
+        controls = counts["controls"]
+        _say(f"controls: {controls['executed']} executed, {controls['cached']} cached, "
+             f"{controls['reverified']} re-verified")
 
     # The skips, one line per distinct reason instead of one per gate. They come
     # after the summary and before the blockers on purpose: the summary already
     # carries the count, and the thing you must act on has to stay at the bottom
     # of the screen where the eye lands.
-    for line in _skip_digest(skipped):
+    for line in _skip_digest([row.verdict for row in rows if row.verdict.skipped]):
         _say(line)
 
     if carried:
         shown = ", ".join(v.gate for v in carried[:4])
         more = f", +{len(carried) - 4}" if len(carried) > 4 else ""
-        _say(f"note: {len(carried)} verdict(s) predate this sweep ({shown}{more}) — "
-             f"they were not re-run")
+        stale_n = sum(1 for v in carried if v.gate in stale_gates)
+        _say(f"note: {len(carried)} gate(s) outside this sweep keep their last verdict "
+             f"({shown}{more})" + (f" — {stale_n} of them stale" if stale_n else ""))
 
-    if not ledger.claims:
+    if not view.claims:
         # "ready" on a project that has never stated what must be true is the
         # laundering this whole tool exists to refuse: zero blocking claims
         # out of zero claims is not evidence of anything. Non-zero, so that the
@@ -1126,7 +1357,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     else:
         _say(f"BLOCKING — {len(blockers)} critical claim(s) must not be spent against:")
         for claim, status in blockers:
-            _say(_blocking_line(claim, status, _blocking_reason(ledger, claim, status)))
+            _say(_blocking_line(claim, status,
+                                _blocking_reason(view, claim, status, stale=stale_reasons)))
     return code
 
 
@@ -1146,7 +1378,8 @@ def _blocking_line(claim: Claim, status: ClaimStatus, reason: str) -> str:
     return f"{report.status_tag(status)} {claim.id} {claim.statement} — {reason}"
 
 
-def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus) -> str:
+def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus, *,
+                     stale: Mapping[str, str] | None = None) -> str:
     """The shortest true sentence about why one claim blocks.
 
     A failing gate's own detail beats any phrasing invented here: it carries the
@@ -1166,19 +1399,36 @@ def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus) -> str:
     is `claims.explaining_verdict` now — ran-and-failed, then errored, then
     skipped — and both callers format it the same way, `gate : body`, the
     separator `Verdict.render` and `status` already use.
+
+    `stale` is `{gate: why}` for the gates whose verdict is not current (the
+    resolution's). A FAIL that is stale stays FAIL (D-08) and says so —
+    `gate : body (stale: why)` — because the refutation was measured against
+    inputs that have since moved, and the reader should know which before
+    arguing with it. A STALE claim names its stale gates: what it replaced,
+    "it passed against a model that has since moved", was the one sentence one
+    project-wide hash could say, and false for a moved data file or an
+    undemonstrated control. The UNCLAIMED reason is "no gate covers it" and stops
+    there: the `gap --propose` suffix was advice in a column that states facts.
     """
+    stale = dict(stale or {})
     verdict = claims.explaining_verdict(claim, ledger.verdicts)
     if verdict is not None:
         body = verdict.detail or verdict.error or verdict.skip_reason
-        return f"{verdict.gate} : {body}" if body else f"{verdict.gate} did not pass"
+        text = f"{verdict.gate} : {body}" if body else f"{verdict.gate} did not pass"
+        if verdict.outcome == "fail" and stale.get(verdict.gate):
+            text += f" (stale: {stale[verdict.gate]})"
+        return text
     if status is ClaimStatus.UNCLAIMED:
-        return "no gate covers it — `atompipe gap --propose`"
+        return "no gate covers it"
     if status is ClaimStatus.PENDING:
         return "its gates have never run"
     if status is ClaimStatus.BLOCKED:
         return "its gates could not run here (missing tooling)"
     if status is ClaimStatus.STALE:
-        return "it passed against a model that has since moved"
+        named = [f"{gate}: {stale[gate]}" for gate in (claim.gates or ()) if stale.get(gate)]
+        if named:
+            return "passed, but not current — " + "; ".join(named)
+        return "passed, but not against the current inputs"
     return str(status)
 
 
@@ -1432,12 +1682,13 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
     root = _root(args)
     ledger = store.load(root)
     registry, _ = _registry(root, ledger, strict=False)
-    _model, projection, _err = _projection_safe(root, ledger)
-    stale, _why = _staleness(ledger, projection)
-    resolved = claims.statuses(ledger, stale=stale, registry=registry)
-    cover = claims.coverage(ledger, registry)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    resolved = claims.statuses(view, registry=registry, stale_gates=resolution.stale_gates)
+    cover = claims.coverage(view, registry)
 
-    rows = list(ledger.claims)
+    rows = list(view.claims)
     if args.status:
         rows = [c for c in rows if str(resolved.get(c.id)) == args.status]
     if args.kind:
@@ -1448,11 +1699,12 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
     if args.json:
         _dump({"claims": [dict(c.to_dict(), status=str(resolved.get(c.id)),
                                covered_by=cover.get(c.id, [])) for c in rows],
-               "stale": stale})
+               "stale": bool(resolution.stale_gates),
+               "stale_gates": _stale_gate_list(resolution)})
         return 0
 
     if not rows:
-        _say("no claims recorded" if not ledger.claims else "no claims match that filter")
+        _say("no claims recorded" if not view.claims else "no claims match that filter")
         return 0
     for claim in rows:
         status = resolved.get(claim.id, ClaimStatus.UNCLAIMED)
@@ -1472,23 +1724,28 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
     """
     root = _root(args)
     ledger = store.load(root)
-    claim = ledger.claim(args.id)
-    if claim is None:
+    if ledger.claim(args.id) is None:
         raise AtompipeError(f"no claim {args.id!r} — `atompipe claim list` shows what exists")
     registry, _ = _registry(root, ledger, strict=False)
-    _model, projection, _err = _projection_safe(root, ledger)
-    stale, _why = _staleness(ledger, projection)
-    status = claims.resolve_status(claim, ledger.verdicts, stale=stale)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    # The view's claim: its `gates` are the registry's coverage over the records'
+    # cached opinion (cli:H5). This command used to resolve the bare record with
+    # no registry at all — `claim list` said PENDING while `claim show` said
+    # UNCLAIMED for the same claim, one command apart.
+    claim = view.claim(args.id)
+    status = claims.resolve_status(claim, view.verdicts, stale_gates=resolution.stale_gates)
 
     if args.json:
         _dump(dict(claim.to_dict(), status=str(status),
-                   covered_by=claims.coverage(ledger, registry).get(claim.id, []),
-                   verdicts=[_verdict_row(v)
-                             for v in claims.covering_verdicts(claim, ledger.verdicts)],
-                   why=decisions.why(ledger, claim.id)))
+                   covered_by=claims.coverage(view, registry).get(claim.id, []),
+                   verdicts=[_resolved_row(v, resolution)
+                             for v in claims.covering_verdicts(claim, view.verdicts)],
+                   why=decisions.why(view, claim.id)))
         return 0
     _say(f"{report.status_tag(status)} {claim.id}")
-    sys.stdout.write(decisions.why(ledger, claim.id))
+    sys.stdout.write(decisions.why(view, claim.id))
     return 0
 
 
@@ -1738,8 +1995,67 @@ def cmd_gate_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _last_selftest(admission: verdicts.Admission) -> dict[str, Any] | None:
+    """`gate show --json`'s `last_selftest`, from how the gate's control stands
+    at its current version (`verdicts.admission_state`), or None when no control
+    was ever demonstrated for it.
+
+    `outcome` is the selftest's own (the verdict on the INSTRUMENT): `"pass"` —
+    it fired, admitted or pending; `"fail"` — it PASSED its own known-bad input;
+    `"error"` — it crashed, its fixture was unusable, or two recorded outcomes
+    disagree. `control` is the control entry's rho (the text prints its first
+    12), `at_this_version` whether that entry is at the gate's current static
+    part, `admission` the state, `detail` the reason or the entry's words.
+
+    What slipped through (S-08): this read a ledger key `<gate>#selftest` that
+    `gate selftest` deliberately never wrote, so every gate read "(never run)"
+    forever, including the six the selftest had just demonstrated.
+    """
+    state, entry = admission.state, admission.entry
+    if entry is None and state == "undemonstrated":
+        return None
+    if state in ("admitted", "pending"):
+        outcome = "pass"
+    elif state == "not-admitted":
+        outcome = "fail" if entry is not None and entry.bad == "pass" else "error"
+    else:                                     # an entry at another version
+        outcome = "pass" if entry.bad == "fail" else "fail"
+    return {
+        "outcome": outcome,
+        "control": entry.rho if entry is not None else None,
+        "at_this_version": state != "undemonstrated",
+        "admission": state,
+        "detail": admission.reason or (entry.detail if entry is not None else ""),
+    }
+
+
+def _last_selftest_line(admission: verdicts.Admission) -> str:
+    """`gate show`'s last line (spec §3.13): fired, PASSED its own known-bad,
+    pending re-verification, or not demonstrated — each at this version, with
+    the control entry's rho to 12 places where there is one."""
+    state, entry = admission.state, admission.entry
+    control = f" (control {entry.rho[:12]})" if entry is not None else ""
+    if state == "admitted":
+        return f"  last selftest: {_tag('ok')} fired at this version{control}"
+    if state == "pending":
+        return (f"  last selftest: pending — control inputs moved; the next check "
+                f"re-verifies{control}")
+    if state == "not-admitted" and entry is not None and entry.bad == "pass":
+        return f"  last selftest: {_tag('FAIL')} PASSED its own known-bad at this version{control}"
+    if state == "not-admitted":
+        return f"  last selftest: {_tag('FAIL')} not admitted at this version — {admission.reason}"
+    return "  last selftest: not demonstrated at this version"
+
+
 def cmd_gate_show(args: argparse.Namespace) -> int:
-    """Everything about one gate: what it settles, what it needs, how it last ran."""
+    """Everything about one gate: what it settles, what it needs, how it last ran,
+    and whether its control is demonstrated at this version.
+
+    `last verdict` is the resolver's (`_resolved`), with why it is not current
+    when it is not; `last selftest` is read off the control entries by
+    `verdicts.admission_state`, which never runs a fixture — `check` and `gate
+    selftest` are the commands that spend that time.
+    """
     root = _root(args)
     ledger = store.load(root)
     registry, _ = _registry(root, ledger, strict=False)
@@ -1747,15 +2063,20 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     if entry is None:
         known = ", ".join(registry.ids()[:12]) or "(none registered)"
         raise AtompipeError(f"no gate {args.id!r}. Registered: {known}")
-    spec, _fn = entry
+    spec, fn = entry
     ok, reason = gates.availability(spec)
-    verdict = ledger.verdict(spec.id)
-    control = ledger.verdict(f"{spec.id}#selftest")
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    verdict = view.verdict(spec.id)
+    row = resolution.rows.get(spec.id)
+    admission = verdicts.admission_state(root, spec, fn, projection=projection,
+                                         anchors=resolution.anchors)
 
     if args.json:
         _dump({"gate": spec.to_dict(), "available": ok, "availability": reason,
-               "last_verdict": _verdict_row(verdict) if verdict else None,
-               "last_selftest": _verdict_row(control) if control else None})
+               "last_verdict": _resolved_row(verdict, resolution) if verdict else None,
+               "last_selftest": _last_selftest(admission)})
         return 0
 
     _say(gates.describe(spec))
@@ -1771,8 +2092,9 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
             _say(f"           {spec.negative_control.note}")
     else:
         _say("  control: NONE — this gate cannot be shown to fail, so it is a logger")
-    _say(f"  last verdict: {verdict.render() if verdict else '(never run)'}")
-    _say(f"  last selftest: {control.render() if control else '(never run)'}")
+    stale = f" (stale: {row.stale_reason})" if row is not None and row.stale_reason else ""
+    _say(f"  last verdict: {verdict.render() + stale if verdict else '(never run)'}")
+    _say(_last_selftest_line(admission))
     return 0
 
 
@@ -1818,6 +2140,44 @@ def _say_empty(allow_empty: bool, why: str) -> None:
              f"nothing is expected here)")
 
 
+def _selftest_one(root: str, spec: Any, fn: Any, ctx: gates.GateContext, *,
+                  projection: dict | None, record: bool, now: str,
+                  anchors: verdicts.Anchors, digests: FileDigests) -> Verdict:
+    """One control, run and filed as `check` files it; the row `gate selftest` prints.
+
+    Where the gate's tools are missing nothing runs and nothing is filed: the
+    row is `gates.selftest`'s own skip. Otherwise `verdicts.admission` with
+    `force=True` runs fixture and gate and files the outcome (`record`), and the
+    row is read back from what it decided: fired (admitted) is a passing row
+    carrying the entry's words and numbers; PASSED its own known-bad input, a
+    crash, an unusable fixture or an outcome that contradicts a cached entry is a
+    failing row with the reason; tools that vanished mid-run a skip. Its time is
+    the wall time of that one call.
+    """
+    ok, _why = gates.availability(spec)
+    if not ok:
+        return gates.selftest(spec, fn, ctx)
+    clock = time.perf_counter()
+    judged = verdicts.admission(root, spec, fn, ctx, force=True, record=record,
+                                projection=projection, digests=digests, anchors=anchors,
+                                when=now)
+    elapsed = round(time.perf_counter() - clock, 6)
+    base: dict[str, Any] = {"gate": f"{spec.id}#selftest", "tier": Tier(int(spec.tier)),
+                            "pack": spec.pack or "", "claims": [], "duration_s": elapsed}
+    entry = judged.entry
+    numbers: dict[str, Any] = ({"measured": entry.measured, "limit": entry.limit,
+                                "units": entry.units} if entry is not None else {})
+    if judged.state == "admitted" and entry is not None:
+        return Verdict(passed=True, detail=entry.detail, **numbers, **base)
+    if judged.state == "undemonstrated":
+        return Verdict(passed=False, skipped=True,
+                       skip_reason=judged.reason or "its tooling is not available", **base)
+    passed_bad = entry is not None and entry.bad == "pass" and \
+        (judged.reason or "").startswith("PASSED its own known-bad")
+    detail = entry.detail if passed_bad else (judged.reason or "control not demonstrated")
+    return Verdict(passed=False, detail=detail, **numbers, **base)
+
+
 def cmd_gate_selftest(args: argparse.Namespace) -> int:
     """Run every gate against its own known-bad input, and fail if one does not fail.
 
@@ -1848,9 +2208,20 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
     before `_root`, `_lock`, `store.load` and `_projection` (cli:H8): each of them
     assumes a project, and a broken model must not stop a pack's controls.
 
-    The selftest verdicts are appended to the run history but NOT written into
-    the ledger's verdict list: they are filed under `<gate>#selftest` and carry
-    no claims, and proof that the instrument works must never resolve a claim.
+    **Project mode files what it demonstrates** (D-07, S-08). Every selected
+    control runs — fixture and gate, never served from the cache — through
+    `verdicts.admission(..., force=True)`, the same code `check` runs a control
+    with, so the entry it files is byte for byte the one `check` would: a
+    project fixture is handed the known-good design (`selftest/known_good.py`,
+    D-27), a pack's the live host; each gets its own emptied scratch under
+    `.atompipe/out/controls/<gate>/`. A measurement becomes a control entry
+    (`.atompipe/verdicts/<gate>/control-<rho16>-<out8>.json`, O_EXCL: an
+    unchanged control re-creates the same name and writes nothing) and a control
+    obs row; a crash or an unusable fixture is remembered and never cached.
+    `--no-record` writes none of it. What slipped through before: the verdicts
+    went to the run history only, so `check` never learned a control had been
+    shown to fire and `gate show` read "(never run)" forever (S-08). The rows
+    carry no claims: proof that the instrument works must never resolve one.
     """
     junit_arg = _junit_arg(args)
     root = store.find_root(getattr(args, "dir", None))
@@ -1860,6 +2231,8 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
 
     max_tier = ALL_TIERS if args.tier is None else int(args.tier)
     selection = list(args.gates or []) + list(args.only or [])
+    record = not args.no_record
+    now = utcnow_iso()
 
     with _lock(root):
         ledger = store.load(root)
@@ -1871,6 +2244,12 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
         # eventually disagree with the first — always in the permissive
         # direction, which here would silently test fewer controls than asked.
         specs = gates._selected(registry, max_tier, selection or None)
+        # The sweep's anchors, not each control's defaults: an entry spells its
+        # paths against them, and a different spelling is a different
+        # rho_control — `gate selftest` would file a second entry beside the one
+        # `check` filed for the same demonstration.
+        anchors = verdicts.anchors_for(root, registry, out_dir=ctx.out_dir)
+        digests = FileDigests()
 
         started = time.perf_counter()
         results: list[Verdict] = []
@@ -1878,19 +2257,13 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
             pair = registry.get(spec.id)
             if pair is None:                        # pragma: no cover - defensive
                 continue
-            verdict = gates.selftest(spec, pair[1], ctx)
+            verdict = _selftest_one(root, spec, pair[1], ctx, projection=projection,
+                                    record=record, now=now, anchors=anchors,
+                                    digests=digests)
             results.append(verdict)
             if not args.json:
                 _say(verdict.render())
         elapsed = time.perf_counter() - started
-
-        now = utcnow_iso()
-        if results and not args.no_record:
-            store.record_run(root, results, RunMeta(
-                when=now, tier=max_tier,
-                model_hash=modelio.model_hash(projection) if projection else "",
-                inputs_hash=artifacts.inputs_hash(ledger),
-                spine_version=__version__, duration_s=round(elapsed, 4)))
         installed = packs.installed(root, ledger=ledger)
 
     broken = [v for v in results if not v.ok and not v.skipped]
@@ -2333,20 +2706,23 @@ def cmd_report(args: argparse.Namespace) -> int:
     root = _root(args)
     ledger = store.load(root)
     registry, problems = _registry(root, ledger, strict=False)
-    _model, projection, model_error = _projection_safe(root, ledger)
-    stale, stale_why = _staleness(ledger, projection)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    stale_gates = resolution.stale_gates
     banner = _load_failure_banner(problems, model_error)
 
     if args.json:
-        resolved = claims.statuses(ledger, stale=stale, registry=registry)
+        resolved = claims.statuses(view, registry=registry, stale_gates=stale_gates)
         _dump({
-            "summary": claims.summarise(ledger, registry, stale=stale),
+            "summary": claims.summarise(view, registry, stale_gates=stale_gates),
             "claims": {cid: str(status) for cid, status in resolved.items()},
-            "coverage": claims.coverage(ledger, registry),
-            "gaps": [need.to_dict() for need in claims.find_gaps(ledger, registry)],
-            "verdicts": [_verdict_row(v) for v in ledger.verdicts],
-            "stale": stale,
-            "stale_reason": stale_why,
+            "coverage": claims.coverage(view, registry),
+            "gaps": [need.to_dict() for need in claims.find_gaps(view, registry)],
+            "verdicts": [_resolved_row(v, resolution) for v in view.verdicts],
+            "stale": bool(stale_gates),
+            "stale_reason": _stale_summary(resolution),
+            "stale_gates": _stale_gate_list(resolution),
             "problems": problems,
             "model_error": model_error,
             "coverage_understated": bool(banner),
@@ -2355,7 +2731,7 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     if args.write:
         with _lock(root):
-            path = report.write_report(root, ledger, registry, stale=stale)
+            path = report.write_report(root, view, registry, stale_gates=stale_gates)
         _say(rel(path, root))
         # To stderr, because the one line on stdout is the path and scripts read
         # it. A caveat that breaks `report --write` as a shell substitution would
@@ -2364,7 +2740,8 @@ def cmd_report(args: argparse.Namespace) -> int:
             _warn(line)
         return 0
     sys.stdout.write(_with_banner(
-        report.render_markdown(ledger, registry, stale=stale), banner))
+        report.render_markdown(view, registry, stale_gates=stale_gates,
+                               model_error=model_error, root=root), banner))
     return 0
 
 
@@ -2411,10 +2788,20 @@ def cmd_why(args: argparse.Namespace) -> int:
     The context-window win: value, what it derives from, the rationale, every
     rejected alternative with the concrete reason it lost, the gates that protect
     it, the evidence that grounds it, and the decisions that moved it.
+
+    Rendered from `_resolved`'s view (cli:H3): the gate lines are the effective
+    verdicts, the claim's gates its registry coverage, a parameter's gates the
+    ones that read it when they last ran. What slipped through before: this
+    loaded the ledger alone — no registry, no cache — so it quoted whatever
+    verdict the last `check` had written into the ledger, current or not.
     """
     root = _root(args)
     ledger = store.load(root)
-    text = decisions.why(ledger, args.name)
+    registry, _problems = _registry(root, ledger, strict=False)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, _resolution = _resolved(root, ledger, registry, projection, model_error,
+                                  now=utcnow_iso(), model=model)
+    text = decisions.why(view, args.name)
     if args.json:
         _dump({"name": args.name, "why": text})
         return 0
@@ -3062,8 +3449,8 @@ def cmd_site_init(args: argparse.Namespace) -> int:
 def cmd_site_build(args: argparse.Namespace) -> int:
     """Run the viewgens, collect the ledger, and write `site/data/` + `site/assets/`.
 
-    **This never runs gates.** It reads the verdicts already recorded and stamps
-    each with its own age. A build that re-ran the cheap gates on the way past
+    **This never runs gates.** It renders the verdict cache as `_resolved`
+    judges it and stamps each verdict with its own age. A build that re-ran the cheap gates on the way past
     would publish a page whose tier-0 numbers are ten seconds old beside tier-2
     numbers from last week, under one "built at" stamp, with nothing on the page
     saying which is which. If the results are stale the honest fix is
@@ -3095,8 +3482,14 @@ def cmd_site_build(args: argparse.Namespace) -> int:
         registry, _ = _registry(root, ledger)
         view_registry, _ = _view_registry(root, ledger)
         model, projection = _projection(root, ledger)
-        summary = site.build(root, ledger, registry, view_registry,
-                             model=model, projection=projection, now=utcnow_iso())
+        now = utcnow_iso()
+        # The page renders the resolver's answer, the one every other reader
+        # prints (`_resolved`, R-5), handed over rather than recomputed: the page
+        # and `status` built from one resolution cannot disagree about a gate.
+        view, resolution = _resolved(root, ledger, registry, projection, "", now=now,
+                                     model=model)
+        summary = site.build(root, view, registry, view_registry, model=model,
+                             projection=projection, now=now, resolution=resolution)
 
     problems = summary.get("locator_problems") or []
     counts = summary.get("counts") or {}
@@ -3468,6 +3861,10 @@ def _ledger_problems(root: str, ledger: Ledger, registry: gates.Registry) -> lis
     claim id means one of two claims is invisible to every lookup; a verdict for
     a gate nobody can find is a green tick with no instrument behind it; a
     missing artifact file is provenance that no longer resolves.
+
+    `ledger` is `_resolved`'s view: its verdicts are the resolver's, so a gate
+    that is not registered here shows up by its cache entries or its remembered
+    outcome, not only by a row the ledger file happened to keep.
     """
     problems: list[str] = []
 
@@ -3488,15 +3885,15 @@ def _ledger_problems(root: str, ledger: Ledger, registry: gates.Registry) -> lis
     orphaned = sorted({v.gate for v in ledger.verdicts
                        if not v.gate.endswith("#selftest") and v.gate not in known_gates})
     if orphaned and known_gates:
-        # These verdicts still resolve their claims (`claims.covering_verdicts`
-        # matches on the verdict, not on whether the gate still exists), so a
-        # removed pack can leave passes standing that this machine cannot
-        # reproduce. That is a readiness problem, not a tidiness one.
+        # The resolver reads these stale — "gate not registered in this project"
+        # — so they never count (tests:H2); they still reach the page and the
+        # report as rows nothing here can re-run, which is a readiness problem,
+        # not a tidiness one: a removed pack's passes, standing unexplained.
         problems.append(
             f"{len(orphaned)} verdict(s) from gates that are not registered here "
-            f"({', '.join(orphaned[:4])}{'...' if len(orphaned) > 4 else ''}) — they still "
-            f"resolve their claims but nothing here can re-run them; reinstall the pack "
-            f"or drop the verdicts")
+            f"({', '.join(orphaned[:4])}{'...' if len(orphaned) > 4 else ''}) — they read "
+            f"stale and never count, and nothing here can re-run them; reinstall the "
+            f"pack or remove their entries")
     for claim in ledger.claims:
         for gate_id in claim.gates or ():
             if known_gates and gate_id not in known_gates:
@@ -3615,6 +4012,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     model = None
     projection = None
+    model_error = ""
     if not (ledger.meta.model_entry or "").strip():
         _check(results, "model", "warn",
                "no model entry recorded — `atompipe model --set-entry model/<thing>.py`")
@@ -3622,6 +4020,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         try:
             model, projection = _projection(root, ledger)
         except AtompipeError as exc:
+            model_error = str(exc)
             _check(results, "model", "FAIL", str(exc).replace("\n", " "))
         else:
             _check(results, "model", "ok",
@@ -3659,7 +4058,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # boat measured against a 220 mm printer bed, or an envelope claim that
     # silently went unheld. A warning, not a failure: the collision is latent until
     # the project publishes the bare key, and `live` says when it has.
-    flat_keys, _conflicts = _flat_params(projection)
+    flat_keys, _conflicts = modelio.flat_params(projection)
     for collision in packs.key_collisions(installed, root, projection_keys=flat_keys):
         meanings = "; ".join(
             f"{name}: {_first_sentence(collision.meanings.get(name))}"
@@ -3671,12 +4070,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                   " (this project does not publish it yet)")
                + f" — {collision.fix()}. {meanings}")
 
-    stale, why = _staleness(ledger, projection)
-    _check(results, "staleness", "warn" if stale else "ok",
-           why + (" — verdicts describe a model that no longer exists; `atompipe check`"
-                  if stale else ""))
-
-    problems = _ledger_problems(root, ledger, registry)
+    # No global staleness row: one hash of the projection against the last
+    # sweep's said THAT something moved, never which check it touched, and a
+    # model that did not load compared equal (S-21). Which gates are current is
+    # `status`'s `stale:` block now, per gate, from the resolver.
+    view, _resolution = _resolved(root, ledger, registry, projection, model_error,
+                                  now=utcnow_iso(), model=model)
+    problems = _ledger_problems(root, view, registry)
     _check(results, "ledger-integrity", "FAIL" if problems else "ok",
            "; ".join(problems[:4]) + (f" (+{len(problems) - 4} more)" if len(problems) > 4 else "")
            if problems else "records all resolve")
@@ -3806,8 +4206,13 @@ def build_parser() -> argparse.ArgumentParser:
                    help="cost ceiling: 0 instant (default), 1 build, 2 solve, 3 external")
     p.add_argument("--only", action="append", metavar="GATE",
                    help="gate id, pack name or glob (repeatable); runs it above its tier too")
+    p.add_argument("--force", action="store_true",
+                   help="re-run every selected gate and its control, ignoring the "
+                        "verdict cache (what CI runs: a cache is re-proven, not trusted)")
     p.add_argument("--no-record", action="store_true",
-                   help="do not write verdicts or run history (a dry sweep)")
+                   help="a dry sweep: write nothing under .atompipe/ except gate scratch "
+                        "in out/ — no cache or control entry, obs, last_check.json or "
+                        "ledger")
     _junit_flag(p, "this run")
     p.set_defaults(func=cmd_check)
 
@@ -3960,7 +4365,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="same as the positional form (repeatable)")
     p.add_argument("--tier", type=int, default=None,
                    help="cap the cost; the default runs every tier's control")
-    p.add_argument("--no-record", action="store_true", help="do not append to the run history")
+    p.add_argument("--no-record", action="store_true",
+                   help="run every control but file nothing: no control entry, obs or "
+                        "cache under .atompipe/")
     p.add_argument("--pack", action="append", metavar="NAME|DIR",
                    help="pack mode: demonstrate this pack, or every pack in this "
                         "directory (repeatable). Without a project, pack mode runs "

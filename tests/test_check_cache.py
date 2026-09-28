@@ -456,8 +456,10 @@ class CliKeepsNoCopyOfTheRules(unittest.TestCase):
         self.assertEqual(defined & {"_staleness", "_flat_params", "_ParamReads",
                                     "_refresh_param_gates"}, set())
         attrs = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
-        self.assertEqual(attrs & {"record_run", "last_run", "inputs_hash"}, set(),
-                         "the cli still records or compares a global sweep")
+        # `inputs_hash` and `model_hash` stay, as display ids (`ingest --json`,
+        # `check --json`'s `model_hash`); what goes is comparing them.
+        self.assertEqual(attrs & {"record_run", "last_run"}, set(),
+                         "the cli still records a sweep or reads the last one")
         imported = {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
                     for alias in node.names}
         self.assertNotIn("RunMeta", imported)
@@ -558,36 +560,55 @@ class SweepsThatKeepNothingOrEverything(_env.EnvCase):
         self.assertEqual(full.returncode, 1, full.stdout + full.stderr)
         self.assertTrue(os.path.isfile(last))
 
+        # The gates a filtered sweep leaves out keep their effective verdicts,
+        # as rows that say whether each is current (spec §3.13, `carried_over`).
+        again = _json(_run(self.project, "check", "--only", "bracket.deflection", "--json"))
+        carried = {row["gate"]: row for row in again["carried_over"]}
+        self.assertEqual(sorted(carried), sorted(BRACKET_GATES[1:]))
+        for gate, row in carried.items():
+            with self.subTest(gate=gate):
+                self.assertTrue(row["fresh"] and row["cached"], row)
+                self.assertNotIn("duration_s", row)
+
     def test_a_cached_pass_where_its_tool_is_missing(self):
         """Invariant 1 through `check`: a Fresh PASS whose gate declares a module
         this machine lacks resolves skipped — "cached pass exists; …" — and its
         claim BLOCKED, never PASS. S-30: the skipped gate keeps the parameters it
-        read when it last ran."""
+        read when it last ran.
+
+        `bracket.bearing` because it is C3's only gate: a skip beside a pass on
+        a claim two gates cover reads PASS with the skip named PARTIAL (the
+        report's rule until P2's Kleene rule), which would test that rule
+        instead of this one. Availability is patched in-process rather than a
+        module hidden: the property is what the spine does with the answer."""
         first = _run(self.project, "check")
         self.assertEqual(first.returncode, 1, first.stdout + first.stderr)
         real = gates_mod.availability
         why = "requires python planted_probe (not importable)"
 
         def patched(spec):
-            return (False, why) if spec.id == "bracket.bed_fit" else real(spec)
+            return (False, why) if spec.id == "bracket.bearing" else real(spec)
 
         with mock.patch.object(gates_mod, "availability", side_effect=patched):
             code, out, err = _in_process(["check", "--json", "-C", self.project])
             status_code, status_out, _err = _in_process(["status", "--json", "-C", self.project])
         self.assertEqual(code, 1, out + err)
         data = json.loads(out)
-        row = _rows(data)["bracket.bed_fit"]
+        row = _rows(data)["bracket.bearing"]
         self.assertTrue(row["skipped"], row)
         self.assertEqual(row["skip_reason"], f"cached pass exists; {why} here")
-        self.assertIn({"claim": "C4", "status": "blocked"},
+        self.assertFalse(row["cached"], "a skip is not the cached PASS")
+        self.assertIn({"claim": "C3", "status": "blocked"},
                       [{"claim": b["claim"], "status": b["status"]} for b in data["blocking"]])
         self.assertEqual(status_code, 0)
-        self.assertEqual(json.loads(status_out)["claims"]["C4"], "blocked")
+        self.assertEqual(json.loads(status_out)["claims"]["C3"], "blocked")
 
         with open(_state(self.project, "ledger.json"), encoding="utf-8") as fh:
             params = {p["name"]: p["gates"] for p in json.load(fh)["params"]}
-        self.assertIn("bracket.bed_fit", params["bed_xy"], "S-30: the skip erased it")
-        self.assertIn("bracket.bed_fit", params["brim_mm"], "S-30: the skip erased it")
+        # `n_bolts` is the one config field `bracket.bearing` reads by name (its
+        # other inputs reach it through `bearing_area`, which `Param.gates` does
+        # not follow — see `cli._param_gates`).
+        self.assertEqual(params["n_bolts"], ["bracket.bearing"], "S-30: the skip erased it")
 
 
 class SelftestFilesItsControls(_env.EnvCase):
