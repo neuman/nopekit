@@ -117,7 +117,7 @@ class KeyCollision(Record):     # one projection key two installed packs read di
 class ProjectMeta(Record):
     name: str = ""; summary: str = ""; created: str = ""; revision: str = "v0.1"
     model_entry: str = ""; packs: list[str]; spine_version: str = ""
-class Ledger(Record):           # the whole project state: .atompipe/ledger.json
+class Ledger(Record):           # the whole project, in memory (store.load assembles it)
     meta: ProjectMeta; claims: list[Claim]; params: list[Param]
     inputs: list[InputArtifact]; needs: list[Need]; decisions: list[Decision]
     verdicts: list[Verdict]                                              # latest per gate
@@ -125,6 +125,31 @@ class Ledger(Record):           # the whole project state: .atompipe/ledger.json
     def claim(cid) | param(name) | artifact(aid) | need(nid) | verdict(gate_id) -> record | None
     def verdicts_for(cid) -> list[Verdict];  def upsert_verdict(verdict) -> None
 ```
+**Records as files** (checkpoint 1.3). Three constants tell `store` how a record
+becomes a file and back; they live here because they are facts about the record
+types, not about the disk:
+```python
+RECORD_KINDS: dict[str, type]    # record dir -> kind: claims Claim, params Param,
+                                 # decisions Decision, needs Need, inputs InputArtifact,
+                                 # results PhysicalResult, views View (store.RECORD_DIRS' order)
+FORBIDDEN_KEYS: dict[str, dict[str, str]]   # class name -> {key: the home that owns it};
+                                 # "*" applies at every depth of every kind
+ALWAYS_WRITTEN: frozenset[tuple[str, str]]  # {("Claim", "kind"), ("Acceptance", "comparator")}
+```
+`FORBIDDEN_KEYS` is what a record FILE may never carry, each with its owner named in the
+refusal: `Claim.gates` (derived from gate coverage), `Claim.physical_result` (its home is
+`results/<id>.json`), `Param.value` and `Param.derived_from` (the model — `{model}` is
+filled with `meta.model_entry`), `Param.gates` and `Param.changed_in` (derived),
+`InputArtifact.bytes` (computed from the file), and `"*"`: `independence` anywhere —
+derived from origin, never a field the proposer fills in. The **dataclass fields stay**:
+`claims.resolve_status` still reads `Claim.gates` in memory, `Ledger.verdicts` is still
+filled by readers, and `Ledger.to_dict()` still emits `verdicts` (tests:H4); only the
+on-disk homes go. `Record.from_dict` stays lenient (unknown keys dropped) for dicts in
+memory; the reader of a record file is `store.read_record`, which is strict — a dropped
+`rejectd` was erased by the next save (S-40). `ALWAYS_WRITTEN` is what the writer keeps
+at its default: a claim file without its `kind`, or a limit without its direction, is
+unreadable to the human editing it.
+
 The ledger keeps **no run record** (checkpoint 1.2). It used to carry the previous
 sweep's model and inputs hashes, and staleness was one comparison against them: a model
 that failed to import compared equal and three claims read PROVEN (S-21), and one
@@ -221,25 +246,48 @@ repository takes seconds; *rejected:* unbounded (a hung credential helper hangs
 common case (verify.sh), so every caller has a non-git path.
 
 ### `store.py`  (deps: models, util)
-Persistence. The project lives in `<root>/.atompipe/`.
+Persistence: where a project lives on disk. **Never imports `modelio` or `verdicts`**
+(spec §3.1): the migration's reader of what the model states is injected.
 ```python
 ATOMPIPE_DIR = ".atompipe"
-LEDGER_NAME  = "ledger.json"
+LEDGER_NAME  = "ledger.json"          # the GENERATED index (records project); the records (legacy)
+PROJECT_NAME = "project.json"         # .atompipe/project.json — meta, and the commit marker
+LEGACY_LEDGER_NAME = "ledger.legacy.json"   # what a migrated ledger.json is renamed to
+PROJECT_SCHEMA = 2                    # project.json's schema; a newer one is refused
+RECORD_DIRS = ("claims", "params", "decisions", "needs", "inputs", "results", "views")
+VERDICTS_NAME = "verdicts"; CACHE_NAME = "cache"; OBS_NAME = "obs"   # under .atompipe/
+INDEX_BANNER: str                     # the index's "generated" value: edit the records, never this
+LEGACY_GITIGNORE_TEMPLATES: tuple[str, str]  # init's .atompipe/.gitignore at 1e09113, and at 1.2
 INPUT_BUCKETS = ("sketches", "references", "cad", "screenshots",
                  "datasheets", "specs", "measurements", "data")
 BUCKET_FOR_KIND: dict[ArtifactKind, str]                # which inputs/ bucket a kind lands in
 def find_root(start: str | None = None) -> str | None   # walk up for a MARKER; stop at .git
 def require_root(start=None) -> str                     # raises AtompipeError if none
 def atompipe_dir(root) -> str                           # <root>/.atompipe
-def ledger_path(root) -> str
-def load(root) -> Ledger                                # missing file -> empty Ledger
-def save(root, ledger: Ledger) -> None                  # atomic
-def init(root, meta: ProjectMeta) -> Ledger             # creates dirs, refuses only on a marker
+def ledger_path(root) -> str                            # <root>/.atompipe/ledger.json
 def inputs_dir(root) -> str                             # inputs/   (NOT hidden - users put files here)
 def out_dir(root) -> str                                # .atompipe/out/  gate scratch + evidence
 def docs_dir(root) -> str                               # docs/  generated report + decision log
 def model_dir(root) -> str                              # model/ the single source of truth
 def project_paths(root) -> dict[str, str]              # every well-known path, by name
+
+def read_project(root) -> ProjectMeta                   # .atompipe/project.json, strict
+def write_project(root, meta) -> str | None             # the path, or None when unchanged
+def read_record(path, kind, *, model_entry="") -> Record | list[PhysicalResult]   # STRICT
+def write_record(root, kind, record, *, record_id=None) -> str | None             # None: unchanged
+def load(root) -> Ledger                # the records; a legacy ledger migrated IN MEMORY; verdicts []
+def save(root, ledger: Ledger) -> None  # tests and the migration only (see below)
+def is_legacy(root) -> bool             # ledger.json present, project.json absent
+def build_index(root, *, digests: FileDigests | None = None) -> dict   # pure
+def write_index(root) -> bool           # True when .atompipe/ledger.json changed; best-effort
+def agree(root) -> list[str]            # every way the index disagrees with the records
+def records_digest(root) -> str         # sha256 over the record files and project.json
+class MigrationPlan(NamedTuple):
+    ledger: Ledger; files: dict[str, bytes]; notice: str
+def migrate_legacy(root, *, apply: bool, when: str,
+                   model_prose: Callable[[str, str], dict] | None = None) -> MigrationPlan
+def ensure_ignore_blocks(root) -> list[str]             # the files changed; idempotent
+def init(root, meta: ProjectMeta) -> Ledger             # the records layout; refuses only on a marker
 ```
 **A project is where its marker is.** `find_root` walks up from `start` (default: the
 cwd), and at each level checks **first** for a marker — `.atompipe/project.json`, or
@@ -256,32 +304,155 @@ checked before the boundary). `require_root`'s message names both markers and th
 refuses **only when a marker exists**: a directory holding only `.atompipe/packs/`
 is not a project, and `init` there succeeds.
 
-`project_paths` is the layout in one call (`"ledger"`, `"readiness"`, `"decisions"`,
-`"inputs_<bucket>"`, ...), whether or not the paths exist yet: this is the map, not an
-inventory. No other module joins a well-known path by hand, so moving the layout is
-one edit here instead of a grep across the spine.
-Layout created by `init`:
+`project_paths` is the layout in one call (`"ledger"`, `"project"`, `"legacy_ledger"`,
+`"readiness"`, `"decisions"`, `"inputs_<bucket>"`, ...), whether or not the paths exist
+yet: this is the map, not an inventory. No other module joins a well-known path by
+hand, so moving the layout is one edit here instead of a grep across the spine.
+
+**The layout** (checkpoint 1.3; relative to the project root):
 ```
-.atompipe/ledger.json   .atompipe/.gitignore   .atompipe/out/
-inputs/{sketches,references,cad,screenshots,datasheets,specs,measurements,data}/
-docs/   model/
+.atompipe/project.json     TRACKED  {"schema": 2, name, summary, created, revision,
+                                     model_entry, packs, spine_version} — written LAST
+.atompipe/.gitignore       TRACKED  the marked deny-list block (below)
+.gitignore, .gitattributes TRACKED  marked blocks: bytecode; LF, binary kinds -text
+.atompipe/ledger.json      IGNORED  the generated index — an output, never read for truth
+.atompipe/verdicts/**      TRACKED  cache and control entries (verdicts.py)
+claims/<id>.json           TRACKED  one Claim; the stem IS the id; no "gates"
+params/<name>.json         TRACKED  SPARSE: only what the model cannot hold
+decisions/<slug>.json      TRACKED  one Decision
+needs/<id>.json            TRACKED  SPARSE: only an enriched Need
+inputs/<id>.json           TRACKED  one InputArtifact; its bytes stay in inputs/<bucket>/
+results/<claim-id>.json    TRACKED  {"results": [PhysicalResult, ...]}, append-only
+views/<id>.json            TRACKED  declared views, beside the viewgens views/*.py
 ```
+`init` writes the empty record directories, the input buckets and `inputs/README.md`
+(only when missing), `docs/`, `model/`, the three blocks, and `project.json` **last** —
+**never a `ledger.json`**: a new project born in the legacy layout would need a migration
+on its first command. The record reader and the index read only `views/*.json`; the
+viewgen loader only `views/*.py`. Every top-level `inputs/*.json` IS a record; evidence
+bytes live in the bucket subdirectories.
+
+**The writer.** `write_record(root, kind, record)` writes `<root>/<kind>/<id>.json`:
+dataclass field order; the id omitted (the stem is the id; `name` for a param); every
+field at its default omitted except `models.ALWAYS_WRITTEN`; a nested record equal to
+its whole default omitted; every `models.FORBIDDEN_KEYS` key omitted;
+`json.dumps(indent=2, ensure_ascii=False, allow_nan=False) + "\n"`; written atomically
+and **only when the bytes differ** — so the bracket's C1 is phase-1's example key for
+key, and a second write changes no byte. `results` is the one list kind: pass the
+`PhysicalResult`s with `record_id=<claim id>`. An id that cannot be a file name (empty,
+a leading `.`, `/`, `\`, `:`) or that differs only in case from an existing record is
+refused. `write_project` writes every `ProjectMeta` field after `"schema"`.
+
+**The reader is strict** (Q1.9). `read_record(path, kind)` refuses, naming the file,
+the key and the `difflib` suggestion: an unknown key at any depth
+(`claims/C1.json: unknown key "limt" at acceptance.limt (did you mean "limit"?)`); a
+key written twice; NaN or ±Infinity (and a literal like `1e999`); an empty file; a
+non-object; an `id` that disagrees with the stem; a `FORBIDDEN_KEYS` key, naming its
+owner (`model_entry` names the model file); `independence` anywhere. A failing
+top-level `inputs/*.json` is most likely stray evidence, and the message names
+`atompipe ingest` and the buckets. A results file must be `{"results": [...]}` whose
+items say `passed` as a bool. `load` also refuses two record files whose stems differ
+only in case. *Rejected:* quarantining a file that does not read as an index `problem` —
+a typo'd real record would vanish (S-40's shape). `Record.from_dict` stays lenient.
+
+**`load`** reads the records (each kind in natural id order — C2 before C10 —,
+decisions newest first by `when`), sets each claim's in-memory `physical_result` to the
+LAST of `results/<id>.json`, each input's `bytes` from its file's size, and `verdicts`
+to `[]` (they live in the verdict cache). On a legacy project it is
+`migrate_legacy(root, apply=False, when="").ledger`: the same Ledger the migration will
+write, so a command answers the same before and after it. Neither marker: an empty
+`Ledger`. **No spine code reads `.atompipe/ledger.json` for truth** on a records project.
+
+**`save(root, ledger)`** stays for tests and the migration (from U28 an AST test forbids
+it in `cli.py`: a command writes exactly the record it was asked to). On a records
+project it writes `project.json` and one file per record, removes the file of a record
+no longer in the ledger (a param with nothing to hold writes none), APPENDS a claim's
+`physical_result` to `results/<id>.json` when it is not already the last one — a
+result is never removed —, then rebuilds the index. On a legacy project it writes the
+legacy `ledger.json` with `verdicts: []` and no `last_run`, and does not migrate.
+
+**The index** is `build_index(root)`, a pure function of the record files and the bytes
+of the inputs they name — no clock, model, registry or listing order. Keys, in order:
+`generated` (`INDEX_BANNER`), `schema`, `records_digest`, `meta`, `claims`, `params`,
+`decisions`, `needs`, `inputs`, `results`, `views`, `unregistered_inputs`, `problems`.
+Each record row is its file's content plus its id. Each input row adds `sha256` (the
+digest of the bytes NOW, through `util.FileDigests` and the untracked
+`.atompipe/cache/digests.json`, read, never written), `pinned` (the record's sha256),
+`drift` and `exists` (`null` for an input with no path). `unregistered_inputs` lists
+evidence bytes under `inputs/` — not a top-level `*.json`, not `inputs/README.md`, not a
+dot-file — that no record's `path` names. `problems`: missing bytes, drift, dangling
+`grounded_by`/`claim_ids`/`claims_changed` links, results for a claim with no file. It
+**never** holds a status, coverage or a verdict — those sit in `last_check.json`, and an
+index that carried them could disagree with them. What slipped through without the
+computed digest (S-45): evidence was hashed at ingest and never again, so tampered bytes
+read as unchanged. `write_index` rewrites `.atompipe/ledger.json` only when its bytes
+change, only on a records project (on a legacy one that file IS the records), and
+best-effort (a read-only filesystem warns on stderr). `agree(root)` lists every way the
+file on disk differs from a fresh build — records compared by id, so a hand-edited
+limit reads `claims.C1.acceptance.limit: the index says 5.0, the records say 0.5` —
+and is `[]` on a legacy project or before any index exists (invariant 8). `doctor`
+never writes it. `records_digest` hashes the record files' paths and bytes plus
+`project.json` (a legacy project: its `ledger.json`); it moves when a record moves,
+never when the index is rewritten.
+
+**The migration**, `migrate_legacy(root, *, apply, when, model_prose=None)`: a pure
+function of the legacy JSON and of `model_prose(root, meta.model_entry)` —
+`{name: {"rationale", "units"}}`, what the model STATES, read statically; the CLI passes
+`modelio.static_param_prose`. Before a byte is written it refuses an unknown key at every
+level (`rejectd` → `.atompipe/ledger.json: param "thickness": unknown key "rejectd" (did
+you mean "rejected"?)`, S-40), `independence`, a NaN inside a record, an id that cannot
+be a file name or collides (exactly or by case), a `ledger.json` with a `generated` key
+and no `project.json`, and record files a crashed migration left that differ from the
+plan (both named). Legacy `verdicts` and `last_run` are dropped unread (D-09).
+`apply=True` writes the record files, then `ensure_ignore_blocks`, then `project.json`
+**last** (the commit marker: a crash before it leaves a legacy project whose next run
+re-derives the same bytes and completes), then renames `ledger.json` to
+`ledger.legacy.json` — never deleted. `apply=False` writes nothing; `load` and `doctor`
+use it. `MigrationPlan.ledger` is the plan read back through the strict reader;
+`files` maps each root-relative path (including `.atompipe/project.json`) to its bytes;
+`notice` is one stderr paragraph for the CLI — with `apply`, it ends with
+`git rm --cached .atompipe/ledger.json` (the spine runs no git); without, it says the
+project "will migrate … on the next check". On a project already migrated it returns
+the loaded records, `{}` and `""`, and changes no byte (it only finishes a rename a crash
+interrupted). It never takes the build lock and never reads the clock: `when` appears
+only in the notice.
+
+What reaches no record: `Claim.gates`, `Param.value`/`derived_from`/`gates`/`changed_in`,
+`InputArtifact.bytes`; `physical_result` moves to `results/<id>.json`; a need `gap`
+would derive by itself (one claim, OPEN, nothing chosen, the claim's own quantity)
+writes no file. **The params rule:** a param keeps `source`, `grounded_by`, `tags`,
+`rejected`; it keeps `rationale` unless the model states one, and `units` unless the
+model states them; a param left with nothing writes no file. It loses nothing: the
+legacy `sync_params` overwrote a record's rationale with the model's whenever the model
+stated one, so a hand-written rationale survives in a legacy ledger only where the model
+is silent. With `model_prose=None` it is lossless. For the bracket every Config field
+has a docstring and every legacy `units` is `""`, so no `params/*.json` is written — by
+the rule. *Rejected:* dropping units/rationale whenever `model_entry` is set (erases a
+hand-written rationale the model lacks); keeping everything and hand-deleting the
+bracket's twelve duplicates (a generated output edited by hand).
+
+**`ensure_ignore_blocks(root)`** keeps three marked blocks (`# atompipe:begin` …
+`# atompipe:end`), each at the top of its file, idempotently:
+`.atompipe/.gitignore` — the deny-list `ledger.json ledger.legacy.json obs/ cache/ out/
+export/ runs/ *.tmp *.lock` (never an allow-list: `.atompipe/packs/` is source and
+`model.json` is reviewed; `verdicts/` is evidence and stays tracked); the root
+`.gitignore` — `__pycache__/`, `*.py[cod]`; the root `.gitattributes` —
+`* text=auto eol=lf` and `*.stl`, `*.step`, `*.glb`, `*.png`, `*.jpg` `-text`, one
+pattern per line. A `.atompipe/.gitignore` that **begins with** a
+`LEGACY_GITIGNORE_TEMPLATES` text has that prefix replaced by the block; a line outside
+the block equal to `!ledger.json` or `!runs/` is removed with a stderr notice (it would
+re-add the index on the next `git add -A`, undoing D-06); a line duplicating a block
+line is removed, and a paragraph left holding only the comments that explained such
+lines goes with them (the bracket's appended `cache/`/`obs/`); every other user line is
+kept, in order, after the block. What slipped through (S-76): `init` wrote an ignore
+file that allowed the ledger, and nothing ignored `cache/`.
+
 **No run history** (checkpoint 1.2). `init` makes no `.atompipe/runs/`, and the store
 has no run API: every `check` and every `gate selftest` used to append a tracked run
 file, so the suite dirtied the tree it verified (S-89), and `<gate>#selftest` rows sat
 in the same series as the sweep's with no latency reader filtering them (S-31). Git and
 the verdict cache are the history; what runs cost is `.atompipe/obs/`, gate runs and
 control runs apart (`verdicts.record_obs`).
-
-`.atompipe/.gitignore` as `init` writes it ignores `out/`, `*.tmp`, `*.lock`,
-**`cache/` and `obs/`** — this checkout's memory (file digests, `last_check.json`,
-remembered outcomes, re-verified controls) and what each run cost — and keeps
-`!ledger.json`. What slipped through (cli:H2, S-76): 1.2 began writing both and nothing
-ignored them, so the first `check` in a clean clone dirtied `git status`. The verdict
-cache, `.atompipe/verdicts/`, is evidence and stays tracked. The 1.3 migration
-recognises this text, like the 1e09113 template before it, as a prefix it replaces with
-a marked block; the bracket's tracked file keeps the 1e09113 template and APPENDS the
-two lines, so that recognition still holds for it.
 
 ### `modelio.py`  (deps: models, util, store)
 The model contract. A project's model is a **Python module** exposing:
@@ -342,6 +513,31 @@ the owning directory, and `fallback` says so. The closure is stored on the modul
 it still hashes the same, else purges the recorded helpers and re-executes (the gates
 it registered are re-adopted into the caller's registry). `load_model` records the
 model's closure the same way.
+
+**The model owns the value** (checkpoint 1.3, U27). A param record holds only what the
+model cannot (`source`, `grounded_by`, `tags`, and `rejected`/`units`/`rationale` only
+where the model states none — `store.migrate_legacy`'s params rule); everything else is
+read off the model when it is shown, never copied into a record:
+```python
+def static_param_prose(root, entry) -> dict[str, dict[str, str]]
+    # {param: {"rationale": str, "units": str}} — what the model STATES, by parsing the
+    # entry file: every class's AST attribute docstrings (field_docstrings' normalisation)
+    # plus rationale/units constants of PARAMS items that are dict literals or Param(...)
+    # calls with constant keywords. Parses, never imports or runs; {} when it cannot parse.
+    # The CLI passes it to store.migrate_legacy as model_prose.
+class ParamView:                 # one parameter as a reader shows it
+    # value, units, rationale, derived_from — from the model (value None when it does not load);
+    # rejected — the union of the model's PARAMS and the record's, each tagged with its
+    #   origin ("model/bracket.py PARAMS" or "params/<name>.json");
+    # source, grounded_by, tags — from the record; model_error — why there is no value
+def param_view(ledger, model, *, model_error="") -> list[ParamView]
+```
+`param_view` replaces the mutating `sync_params` (which stays until U29 removes it):
+the value on screen is the model's current one (S-39), a `PARAMS` rejection added after
+the params exist appears (S-38), and a model that does not load shows "model does not
+load: …" and no number — never a cached one. `orphan_params` works off the records;
+`_explicit_params` refuses an unknown key in a `PARAMS` dict item with a `difflib`
+suggestion (the model-side cousin of S-40).
 
 ### `verdicts.py`  (deps: models, util, store, modelio, vcs; gates, packs and claims only inside functions)
 What a gate read, so its verdict can be keyed by it — the home of per-gate
@@ -1351,10 +1547,19 @@ def add(ledger, *, title, summary, when, rejected=(), params_changed=(),
         claims_changed=(), body="", evidence=()) -> Decision
 def render_log(ledger) -> str                # markdown, NEWEST FIRST
 def write_log(root, ledger) -> str           # docs/decisions.md
-def why(ledger, name: str) -> str            # one param or claim: value, rationale,
+def why(ledger, name: str, *, view=None, coverage=None, read_sets=None,
+        verdicts=None) -> str                # one param or claim: value, rationale,
                                              # rejected alternatives, gates, grounding,
                                              # and the decisions that moved it
+def changed_in(ledger, name: str) -> str     # the decision that last moved a param: derived
 ```
+From checkpoint 1.3 (U27) `add` no longer sets `Param.changed_in` — a copy in the param
+record would be a second home for "which decision moved it" — and `changed_in` derives
+it from the decisions' `params_changed`. `why`'s keywords are all
+optional and every default keeps the old rendering: with a `modelio.ParamView` as `view`
+it prints the model's value and where it lives (`param thickness = 7.0 mm
+(model/bracket.py Config.thickness)`) and each rejection with its origin; a model that
+does not load prints `model does not load: …` and no number.
 `why` is the context-window win: an agent pulls one parameter's full history
 instead of reading a 1,672-line decision log.
 
