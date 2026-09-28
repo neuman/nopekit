@@ -19,6 +19,9 @@ positive control, that the claim WAS PASS before.
   inode can see it. **The racy tick** — the same-size edit landing in the tick
   the digest cache was written — only the racy-clean rule can see.
 * a subprocess reading a file its argv does not name — opaque, so never Fresh.
+  And a worker the spawn start method started (review round 3, ``probe.mp``):
+  exec'd by ``_posixsubprocess.fork_exec``, which raises no audit event, so
+  its read was recorded nowhere and no channel made the entry opaque.
 * the channels no ``open`` reported (review round 1): an environment variable —
   named opaque, so never Fresh; a sqlite database, opened in C — a read, and a
   writable connection opaque; a data file read through linecache or tokenize,
@@ -168,10 +171,12 @@ def stat_{name}(ctx):
 
 GATES = '''\
 import ast
+import concurrent.futures
 import copy
 import glob
 import json
 import linecache
+import multiprocessing
 import os
 import py_compile
 import pathlib
@@ -221,6 +226,19 @@ def through_a_process(ctx):
                          cwd=ctx.root, capture_output=True, text=True, check=True)
     value = float(out.stdout)
     return Verdict(gate="t.sub", passed=value >= 1.0, measured=value, limit=1.0)
+
+
+@gate(id="t.spawned", title="t", claims=["spawned"], negative_control=_nc("low_root"))
+def in_a_spawned_worker(ctx):
+    # The worker opens data/spawned.txt; this process only pickles its path. A
+    # spawn worker is a fresh interpreter exec'd by _posixsubprocess.fork_exec
+    # (_winapi.CreateProcess on Windows) — the default start method on macOS
+    # and Windows — and on POSIX no audit event names it.
+    path = pathlib.Path(ctx.root, "data", "spawned.txt")
+    spawn = multiprocessing.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(1, mp_context=spawn) as pool:
+        value = float(pool.submit(path.read_text, encoding="utf-8").result())
+    return Verdict(gate="t.spawned", passed=value >= 1.0, measured=value, limit=1.0)
 
 
 @gate(id="t.claim", title="t", claims=["claimread"], negative_control=_nc("bad_claim"))
@@ -580,7 +598,8 @@ def bad_x(ctx):
     return _ctx(ctx, {"x": 50.0, "config": {"x": 50.0}})
 '''
 
-TAGS = {"C_ST": "stress", "C_FI": "file", "C_SU": "sub", "C_CL": "claimread",
+TAGS = {"C_ST": "stress", "C_FI": "file", "C_SU": "sub", "C_SP": "spawned",
+        "C_CL": "claimread",
         "C_OP": "opt", "C_MA": "memo_a", "C_MB": "memo_b", "C_CR": "crashy",
         "C_SA": "same", "C_HE": "helped", "C_BA": "buf_a", "C_BB": "buf_b",
         "C_NA": "named", "C_CE": "cert", "C_GS": "getsize", "C_ES": "entry_size",
@@ -620,7 +639,7 @@ def plant(root: str) -> str:
     for rel in set(MEMO_FILES.values()):
         write(root, rel, "2.0\n")
     write(root, "selftest/bad.py", FIXTURES)
-    for name in ("limit", "shared", "hidden"):
+    for name in ("limit", "shared", "hidden", "spawned"):
         write(root, f"data/{name}.txt", "2.0\n")
         write(root, f"selftest/low/data/{name}.txt", "0.5\n")
     for data in ("data", "selftest/low/data"):
@@ -1173,6 +1192,33 @@ class StaleIsNotCurrent(_env.EnvCase):
         write(p.root, "data/hidden.txt", "0.5\n")
         self.assertNotEqual(p.statuses(base)["C_SU"], PASS)
         got = row(p.sweep(base, only=["t.sub"]), "t.sub")
+        self.assertTrue(got.executed, "an opaque entry is never served from the cache")
+        self.assertFalse(got.cached)
+        self.assertEqual(got.verdict.outcome, "fail")
+
+    def test_a_spawned_worker_reading_a_project_file_is_never_fresh(self):
+        """V: the false-fresh review's ``probe.mp`` (round 3). A gate read its
+        limit in a ``ProcessPoolExecutor`` worker of the spawn context — the
+        default start method on macOS and Windows. The worker is exec'd by
+        ``_posixsubprocess.fork_exec``, which raises no audit event (on Windows
+        ``_winapi.CreateProcess`` does, and no handler took it), so the entry
+        recorded ``files={} opaque=[]``: after the file went to 0 a plain check
+        served the PASS ``cached``, ``status`` named nothing stale, ``doctor``
+        said ``opaque-inputs ok``, and ``check --force`` failed it at the same
+        rho. Like ``t.sub``, what the worker read is an input
+        nothing can re-check without running it, so the entry is never Fresh."""
+        p = Project(self)
+        base = projection()
+        got = row(p.sweep(base, only=["t.spawned"]), "t.spawned")
+        self.assertEqual((got.verdict.outcome, got.executed), ("pass", True))
+        opaque = p.entry("t.spawned").reads["opaque"]
+        self.assertTrue(any(name.startswith("subprocess:") for name in opaque), opaque)
+        self.assertIn("t.spawned", p.resolve(base).stale_gates)
+        self.assertNotEqual(p.statuses(base)["C_SP"], PASS)
+
+        write(p.root, "data/spawned.txt", "0.0\n")
+        self.assertNotEqual(p.statuses(base)["C_SP"], PASS)
+        got = row(p.sweep(base, only=["t.spawned"]), "t.spawned")
         self.assertTrue(got.executed, "an opaque entry is never served from the cache")
         self.assertFalse(got.cached)
         self.assertEqual(got.verdict.outcome, "fail")

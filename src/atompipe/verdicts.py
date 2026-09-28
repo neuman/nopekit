@@ -2022,15 +2022,79 @@ def _on_fork(traces: tuple, args: tuple) -> None:
         trace.opaque.add("subprocess:fork")
 
 
+def _on_fork_exec(traces: tuple, args: tuple) -> None:
+    """``_posixsubprocess.fork_exec(argv, executable_list, close_fds, pass_fds,
+    cwd, ...)`` — five leading arguments whose order every CPython since 3.8 has
+    kept (what follows them has changed). Raised by
+    ``_process_probe``, never by the interpreter (see ``_install_process_probe``)."""
+    padded = tuple(args) + (None,) * 5
+    candidates = padded[1]              # the PATH candidates, bytes; all share a basename
+    executable = (candidates[0] if isinstance(candidates, (list, tuple)) and candidates
+                  else None)
+    _process(traces, executable, padded[0], padded[4])
+
+
+def _command_words(command: Any) -> list[str]:
+    """A Windows command line as its words, ``CommandLineToArgvW``'s quoting near
+    enough: a double-quoted run is one word, its quotes dropped. Only names a
+    channel and finds argv files — the entry is opaque whatever it finds."""
+    text = _text(command)
+    if text is None:
+        return []
+    return [quoted or bare for quoted, bare in re.findall(r'"([^"]*)"?|(\S+)', text)
+            if quoted or bare]
+
+
+def _on_create_process(traces: tuple, args: tuple) -> None:
+    """``_winapi.CreateProcess``: ``(application_name, command_line,
+    current_directory)``. Every process Windows starts goes through it, and
+    multiprocessing's spawn — the only start method there — calls it directly,
+    with no ``subprocess.Popen`` event before it (review round 3, ``probe.mp``)."""
+    padded = tuple(args) + (None,) * 3
+    _process(traces, padded[0], _command_words(padded[1]), padded[2])
+
+
+#: The module that asks a running forkserver for a child, and the modules its
+#: request passes through on the way to the socket: this one (the hook's own
+#: frames) and ``multiprocessing.reduction`` (``sendfds``, the ``sendmsg`` that
+#: hands the child its fds).
+_FORKSERVER = "multiprocessing.forkserver"
+_FORKSERVER_VIA = frozenset({__name__, "multiprocessing.reduction"})
+
+
+def _forkserver_request() -> bool:
+    """Whether the socket event being handled is a request to a forkserver: the
+    first frame outside ``_FORKSERVER_VIA`` is ``multiprocessing.forkserver``'s."""
+    frame = sys._getframe(1)
+    while frame is not None and frame.f_globals.get("__name__") in _FORKSERVER_VIA:
+        frame = frame.f_back
+    return frame is not None and frame.f_globals.get("__name__") == _FORKSERVER
+
+
 def _on_network(traces: tuple, args: tuple) -> None:
+    """``network`` — or, for a request to a forkserver, ``subprocess:forkserver``.
+
+    A forkserver (the default start method on Linux from 3.14) forks each child
+    from a server process started once; a later gate's child is asked for over a
+    unix socket, and that request is the only event this process raises for it.
+    What slipped through (review round 3, ``probe.mp``): such a child was opaque
+    only by accident, named ``network`` — a gate that reads nothing remote was
+    reported as reading the network, and a fix that stopped treating local
+    sockets as network would have made it invisible. *Rejected:* naming every
+    ``AF_UNIX`` socket a subprocess (a unix socket to a database server is not
+    one), and the server's ``_forkserver_address`` (private, and per version)."""
+    channel = "subprocess:forkserver" if _forkserver_request() else "network"
     for trace in traces:
-        trace.opaque.add("network")
+        trace.opaque.add(channel)
 
 
 #: Event -> handler. ``os.replace`` audits as ``os.rename`` on CPython; both
 #: names are here in case another implementation does not. ``os.fork`` and the
 #: datagram sends go beyond the plan's table: a forked child's reads are as
 #: invisible as a spawned one's, and a UDP send needs no ``connect``.
+#: ``_winapi.CreateProcess`` and ``_posixsubprocess.fork_exec`` are how
+#: multiprocessing's spawn and forkserver methods start an interpreter; what
+#: slipped through without them is ``_install_process_probe``'s story.
 _HANDLERS: dict[str, Callable[[tuple, tuple], None]] = {
     "open": _on_open,
     "os.listdir": _on_listdir,
@@ -2045,6 +2109,8 @@ _HANDLERS: dict[str, Callable[[tuple, tuple], None]] = {
     "os.startfile": _on_exec,
     "os.fork": _on_fork,
     "os.forkpty": _on_fork,
+    "_winapi.CreateProcess": _on_create_process,
+    "_posixsubprocess.fork_exec": _on_fork_exec,
     "socket.connect": _on_network,
     "socket.sendto": _on_network,
     "socket.sendmsg": _on_network,
@@ -2267,6 +2333,69 @@ def _install_stat_probes() -> None:
 
 
 _install_stat_probes()
+
+
+# --------------------------------------------------------------------------- #
+# the process probe
+# --------------------------------------------------------------------------- #
+# On POSIX, ``_posixsubprocess.fork_exec`` is how Python execs a new program
+# without ``os.exec*`` or ``os.posix_spawn``, and it raises no audit event.
+# ``subprocess.Popen`` raises its own first; multiprocessing does not. What
+# slipped through (review round 3, ``probe.mp``): a gate that read its limit in
+# a spawn-context ``ProcessPoolExecutor`` worker — spawn is the default start
+# method on macOS and Windows — recorded ``files={} opaque=[]``; after the file
+# went to 0 a plain check served the PASS ``cached``, ``status`` named nothing
+# stale, ``doctor`` said ``opaque-inputs ok``, and ``check --force`` failed it
+# at the same rho. On Windows the same start raises
+# ``_winapi.CreateProcess``, which no handler took. And a forkserver child was
+# opaque only by accident, as ``network`` (``_on_network``).
+
+
+def _process_probe(original: Callable[..., Any]) -> Callable[..., Any]:
+    """``original``, first reported to the hook as the event
+    ``_posixsubprocess.fork_exec`` — through ``_audit`` itself, so the
+    re-entrancy guard, the loader's bookkeeping and every open window are the
+    hook's own. Outside a window it is one list check and the original call."""
+
+    @functools.wraps(original)
+    def probe(*args: Any, **kwargs: Any) -> Any:
+        if _STACK:
+            _audit("_posixsubprocess.fork_exec", args)
+        return original(*args, **kwargs)
+
+    probe.__atompipe_probe__ = True             # type: ignore[attr-defined]
+    return probe
+
+
+def _install_process_probe() -> None:
+    """Replace ``_posixsubprocess.fork_exec`` with ``_process_probe`` — once per
+    process, at import, for the stat probes' reason: a module that binds the
+    function binds whatever it is then.
+
+    multiprocessing looks it up on the module at every call
+    (``util.spawnv_passfds``: each spawn worker, a forkserver's server, the
+    resource tracker), so replacing the attribute reaches them all.
+    ``subprocess`` bound the original at its own import and is not affected; it
+    audits ``subprocess.Popen`` itself. *Rejected:* wrapping
+    ``spawnv_passfds`` (multiprocessing's door only — any other caller of
+    ``fork_exec`` would still be invisible); calling every import of
+    multiprocessing opaque (a gate whose library merely imports it would never
+    be Fresh). Windows has no ``_posixsubprocess`` and needs no probe:
+    ``_winapi.CreateProcess`` audits itself. Named residual: a module that
+    bound ``fork_exec`` before the spine was imported, and a C extension that
+    forks or execs in C.
+    """
+    try:
+        import _posixsubprocess
+    except ImportError:
+        return
+    original = getattr(_posixsubprocess, "fork_exec", None)
+    if original is None or getattr(original, "__atompipe_probe__", False):
+        return
+    _posixsubprocess.fork_exec = _process_probe(original)
+
+
+_install_process_probe()
 
 
 # --------------------------------------------------------------------------- #

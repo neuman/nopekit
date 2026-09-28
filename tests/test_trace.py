@@ -20,6 +20,11 @@ These are the trace primitives of `atompipe.verdicts` (PLAN M11.2, M13.7):
   module's SOURCE is linecache's: a data file read through it, through tokenize
   or through `pkgutil.get_data` is the gate's, and so is a sqlite database, which
   SQLite opens in C (review round 1, `probe.linecache`, `probe.sqlite`).
+* Process starts that raise no audit event — ``_posixsubprocess.fork_exec``,
+  how multiprocessing's spawn and forkserver methods exec an interpreter on
+  POSIX — and ``_winapi.CreateProcess``, which does raise one that no handler
+  took. A spawn worker reading a project file was invisible (review round 3,
+  ``probe.mp``); a forkserver's child was named ``network``.
 * The environment — no audit event at all; each variable a gate reads is named as
   the opaque channel `env:<NAME>` (review round 1, `probe.env`).
 * The stat probes — the paths a gate asked the existence, kind or size of.
@@ -50,6 +55,7 @@ import pickle
 import site
 import socket
 import sys
+import textwrap
 import threading
 import tokenize
 import traceback
@@ -1199,6 +1205,100 @@ class AuditTrace(_env.EnvCase):
             client.connect(server.getsockname())
         self.assertEqual(trace.opaque, {"network"})
 
+    def test_a_worker_of_every_start_method_is_a_process(self):
+        """V: the false-fresh review's ``probe.mp`` (round 3). A spawn worker —
+        the default start method on macOS and Windows — is exec'd by
+        ``_posixsubprocess.fork_exec``, which raises no audit event, so a gate
+        that read its limit in one recorded ``opaque=[]`` and kept a Fresh PASS
+        after the file went to 0. A forkserver's child was opaque only by
+        accident, as ``network`` (the unix socket the request goes over).
+        Each method, twice in one fresh process — the second forkserver window
+        finds its server running, so its child's only trace is the request on
+        the server's socket — must name a process, and never the network."""
+        code = textwrap.dedent("""\
+            import concurrent.futures, json, multiprocessing, pathlib, sys
+            from atompipe.verdicts import GateTrace, tracing
+            seen = {}
+            for method in multiprocessing.get_all_start_methods():
+                windows = []
+                for _ in range(2):
+                    trace = GateTrace()
+                    context = multiprocessing.get_context(method)
+                    with tracing(trace):
+                        with concurrent.futures.ProcessPoolExecutor(
+                                1, mp_context=context) as pool:
+                            pool.submit(pathlib.Path(sys.argv[1]).read_text).result()
+                    windows.append(sorted(trace.opaque))
+                seen[method] = windows
+            print(json.dumps(seen))
+            """)
+        proc = _env.run([sys.executable, "-c", code, self.path], cwd=self.dir)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        seen = json.loads(proc.stdout)
+        self.assertIn("spawn", seen, "spawn is a start method on every platform")
+        for method, windows in seen.items():
+            for i, opaque in enumerate(windows):
+                with self.subTest(method=method, window=i):
+                    self.assertTrue(any(c.startswith("subprocess:") for c in opaque),
+                                    f"a {method} worker read a file and no channel named it")
+                    self.assertNotIn("network", opaque,
+                                     "a forkserver's child is a process, not the network")
+                    if method == "forkserver":
+                        self.assertIn("subprocess:forkserver", opaque)
+
+    def test_the_fork_exec_probe_records_and_hands_the_call_through(self):
+        """V: ``_posixsubprocess.fork_exec`` raises no audit event, so it is
+        replaced by a probe. The probe must record the process and the argv
+        files on every open window, pass the call through untouched — same
+        arguments, same result — and record nothing outside a window. A stub
+        stands in for the C function: no process is started here."""
+        calls: list = []
+
+        def original(*args, **kwargs):
+            calls.append((args, kwargs))
+            return 4242
+
+        probe = verdicts._process_probe(original)
+        tool = os.path.join(self.dir, "bin", "omc")
+        argv = [os.fsencode(tool), b"--check", os.fsencode(self.path), b"--not-a-file"]
+        args = (argv, [os.fsencode(tool)], True, (), self.dir, None) + (-1,) * 8
+        outer, inner = GateTrace(), GateTrace()
+        with tracing(outer):
+            with tracing(inner):
+                self.assertEqual(probe(*args), 4242)
+        self.assertEqual(calls, [(args, {})], "the call must reach the original as made")
+        for trace in (outer, inner):
+            self.assertEqual(trace.opaque, {"subprocess:omc"})
+            self.assertEqual(trace.files_read, [self.path])
+
+        after = GateTrace()
+        with tracing(after):
+            pass
+        self.assertEqual(probe(*args), 4242)
+        self.assertEqual((after.opaque, after.files_read), (set(), []))
+
+        try:
+            posix = importlib.import_module("_posixsubprocess")
+        except ImportError:                    # Windows: CreateProcess audits itself
+            posix = None
+        if posix is not None:
+            self.assertTrue(getattr(posix.fork_exec, "__atompipe_probe__", False),
+                            "the probe must be installed where the function exists")
+
+    def test_winapi_create_process_is_opaque_and_names_its_argv_files(self):
+        """V: on Windows every process multiprocessing starts — spawn is the
+        only method there — goes through ``_winapi.CreateProcess``, which
+        raises its own audit event, and no handler took it. Driven through
+        ``sys.audit`` so the whole hook runs, on any platform."""
+        trace = GateTrace()
+        with tracing(trace):
+            sys.audit("_winapi.CreateProcess", sys.executable,
+                      f'"{sys.executable}" -c pass "{self.path}" --not-a-file', self.dir)
+            sys.audit("_winapi.CreateProcess", None, "omc.exe --check", None)
+        self.assertEqual(trace.opaque, {f"subprocess:{os.path.basename(sys.executable)}",
+                                        "subprocess:omc.exe"})
+        self.assertEqual(trace.files_read, [self.path])
+
     def test_nested_traces_both_receive_the_event(self):
         outer, inner = GateTrace(), GateTrace()
         later = self.file("later.csv")
@@ -1230,6 +1330,12 @@ class AuditTrace(_env.EnvCase):
             ("os.system", (b"\xff",)), ("os.exec", (1, 2, 3)), ("os.spawn", (None,)),
             ("os.posix_spawn", ("p", object(), None)),
             ("socket.connect", ()), ("socket.connect", (None, None)),
+            ("_winapi.CreateProcess", ()), ("_winapi.CreateProcess", (None, None, None)),
+            ("_winapi.CreateProcess", (b"\xff", '"unterminated', 5)),
+            ("_winapi.CreateProcess", (object(), object(), object())),
+            ("_posixsubprocess.fork_exec", ()),
+            ("_posixsubprocess.fork_exec", (object(), object(), None, None, 3)),
+            ("_posixsubprocess.fork_exec", ([b"\xff"], [], True, (), b"\x00")),
         ]
         with tracing(trace):
             for event, args in odd:

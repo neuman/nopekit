@@ -1,13 +1,13 @@
 {
   "schema": 1,
   "kind": "control",
-  "gate": "bracket.bending_stress",
-  "rho": "81b86cf48747c27d57c7fb0f6b6204fca4752673bfc62405298ba126f5c41b94",
-  "static": "c5ef87b5d50dc0106666d2ee39cd42e4c4278c2ea35dfa3f7cbf92d418412848",
+  "gate": "bracket.bearing",
+  "rho": "80b3b443e8428b4548ca4063c97986c4715333c9935995234be49921506f3a5b",
+  "static": "bf691f0d19ebf4fb5a5bca266158585b57882681038914ce79fe46ae695a3c21",
   "static_parts": {
-    "spine": "dcec081e9fe0475600285cb718d89dceb5fb1d3061917ce6fa2b6413bc6f9a7a",
+    "spine": "b7a4095d5830b4b68d878b1c41be195842990333412ea588aa4fcd2b06988a6f",
     "code": {
-      "digest": "ecb243127adfd6b89f2897742cc0147950bd1dcadcc9634cdad80b42ca853f1d",
+      "digest": "89dbe7ad367bba659945b1733eeaee11c7f6baf1e42098bc9b962b9050e461d0",
       "files": [
         "gates/structural.py"
       ]
@@ -20,9 +20,9 @@
       }
     },
     "nc": {
-      "fixture": "selftest/bad_configs.py:overloaded",
+      "fixture": "selftest/bad_configs.py:thin_bearing",
       "expect": "fail",
-      "note": "same bracket at 20x load; stress is linear in load so this lands far past yield while the geometry is untouched"
+      "note": "one bolt in a thin plate: bearing area collapses while the beam itself is unchanged, so only this gate should trip"
     }
   },
   "host": "known-good",
@@ -38,31 +38,32 @@
     "params": [
       [
         [
-          "design_stress"
+          "bearing_area"
         ],
         "ebba79ab141196dc837e68076acefab0008dd922d4303bcbc512ac3d0c2290c3",
         15.0
       ],
       [
         [
-          "material"
+          "bearing_stress"
         ],
-        "a50c640b14039d114f7d84de6a83462ce40ccf1c59db1c94ad9c2adffaa97aa7",
-        "petg"
+        "0b6d7c97a70b04380fddb8c6c7fc64f4818ea0c8220aebc61ea65336ee1d863c",
+        26.666666666666668
       ],
       [
         [
-          "stress_root"
+          "config",
+          "n_bolts"
         ],
-        "753aa254e0ff01ef4326a6fa9cf7ca5cae36958cf8759e90463bad009000aa64",
-        56.25
+        "4313a362f11904b1b9ce281385042a105d626ba98dfec7bd4b06b0fce07666b6",
+        1
       ],
       [
         [
-          "utilisation"
+          "design_stress"
         ],
-        "80dfa3ef4076a600862c08777157954c186abde34d1a7ca81eac92e42a76fc00",
-        3.75
+        "ebba79ab141196dc837e68076acefab0008dd922d4303bcbc512ac3d0c2290c3",
+        15.0
       ]
     ],
     "files": {},
@@ -74,9 +75,9 @@
   "bad": "fail",
   "good": null,
   "admitted": "reject-only",
-  "detail": "correctly failed on selftest/bad_configs.py:overloaded (same bracket at 20x load; stress is linear in load so this lands far past yield while the geometry is untouched): 56.2 MPa vs 15.0 MPa allowable (util 3.75, petg)",
-  "measured": 3.75,
-  "limit": 1.0,
-  "units": "utilisation",
-  "digest": "2bb9b7e3761468b75ec5b20c0e95c7e8c6afde7228ab50cc5e4b84866f6c2668"
+  "detail": "correctly failed on selftest/bad_configs.py:thin_bearing (one bolt in a thin plate: bearing area collapses while the beam itself is unchanged, so only this gate should trip): 26.67 MPa on 15 mm^2 across 1 bolt(s), allowable 15.0 MPa",
+  "measured": 26.667,
+  "limit": 15.0,
+  "units": "MPa",
+  "digest": "0cd354818d4b934057e05ca2237b2e1e27d1e6fc3fece721796d1a64e88c8207"
 }

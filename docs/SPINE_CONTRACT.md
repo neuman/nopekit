@@ -856,9 +856,13 @@ traceback. The hook never raises and never opens a file; with no window open it 
 at once. It records `open` by mode — or by flags for `os.open` — as a read, a write
 (`w`, `a`, `x`, `+`, `O_CREAT`...) or both (`r+`), ignoring int fds and directory fds;
 `os.listdir`/`os.scandir` as a listed dir; `os.rename`/`os.replace` as writes;
-`subprocess.Popen`, `os.system`, `os.exec*`, `os.spawn*`, `os.posix_spawn` and `os.fork`
-as opaque `subprocess:<name>`, plus any argv element naming an existing file as a read;
-`socket.connect`/`sendto`/`sendmsg` as opaque `network`; `sqlite3.connect` as a read of
+`subprocess.Popen`, `os.system`, `os.exec*`, `os.spawn*`, `os.posix_spawn`, `os.fork`,
+`_winapi.CreateProcess` and `_posixsubprocess.fork_exec` (the process probe, below) as
+opaque `subprocess:<name>`, plus any argv element naming an existing file as a read;
+`socket.connect`/`sendto`/`sendmsg` as opaque `network` — except a request to a
+multiprocessing forkserver (the first caller outside the hook and
+`multiprocessing.reduction` is `multiprocessing.forkserver`), which is the child it asks
+for: `subprocess:forkserver`; `sqlite3.connect` as a read of
 the database file and of its `-wal` (SQLite opens both in C, so no `open` names them; in
 WAL mode committed rows wait in the `-wal`), plus, unless the connection is read-only
 (`file:<path>?mode=ro` or `immutable=1`, `uri=True`), the opaque channel
@@ -942,6 +946,23 @@ gate's question. A path this window wrote first is its own output and is not
 noted. Not seen, and named: a module that bound the original before the spine was
 imported; `os.DirEntry.stat()`, which is C and calls nothing — a listing's digest
 carries each entry's kind and size instead.
+
+**The process probe.** On POSIX, `_posixsubprocess.fork_exec` execs a new program and
+raises no audit event; `subprocess.Popen` audits itself first, multiprocessing does not.
+What slipped through (review round 3, `probe.mp`): a gate that read its limit in a
+spawn-context `ProcessPoolExecutor` worker — spawn is the default start method on macOS
+and Windows — recorded `files={} opaque=[]`, a plain check served its PASS `cached`
+after the file went to 0, `doctor` said `opaque-inputs ok`, and `check --force` failed
+it at the same rho. So when `verdicts` is imported,
+`_posixsubprocess.fork_exec` is replaced by a probe that, while a window is open, hands
+its arguments to the hook as the event `_posixsubprocess.fork_exec` — a
+`subprocess:<basename of the executable>` channel and the argv files — and then calls
+the original unchanged. multiprocessing looks the function up at every call (each spawn
+worker, a forkserver's server, the resource tracker); `subprocess` bound the original at
+its own import and is reported by its own event. On Windows, where `_posixsubprocess`
+does not exist, `_winapi.CreateProcess` audits itself and is handled. Not seen, and
+named: a module that bound `fork_exec` before the spine was imported, and a C extension
+that forks or execs in C.
 
 **`replay(recorded, trace=None)`** records again what the hook and the probes routed to
 `recorded` — `files_read`, `sources` and `stats` (first, each with whether it existed),
