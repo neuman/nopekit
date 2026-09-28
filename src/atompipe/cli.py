@@ -1306,7 +1306,10 @@ def cmd_check(args: argparse.Namespace) -> int:
     control, run on a control-entry miss — S-05: a logger with a declared
     control produced PROVEN rows because nothing here ever ran a control), then
     the verdict cache (a Fresh entry is served, unless a crash at its inputs
-    superseded it), then the run. Every selected gate gets a row — executed,
+    superseded it; two outcomes at its inputs are served as `status`'s error and
+    never re-run — a run agrees with one of the two and settles nothing), then
+    the run. The sweep's notes (the writer's warnings) print as `note:` lines,
+    and are `notes` in `--json`. Every selected gate gets a row — executed,
     cached, or refused — so `check --json` still lists `bracket.deflection` on a
     fresh clone whose first check is all cache hits (cli:H1).
 
@@ -1442,6 +1445,12 @@ def cmd_check(args: argparse.Namespace) -> int:
     # rendered from it; nothing after this point decides anything.
     code = 0 if ready else 1
 
+    # The sweep's own notes — the writer's warnings, entries it ignored. They
+    # were collected and printed nowhere: a forced run that wrote a FAIL beside
+    # its PASS at one rho said nothing, and `doctor` was the first to know (the
+    # review). Each once, in the order they arose.
+    notes = [str(note) for note in dict.fromkeys(result.notes)]
+
     spine = verdicts.spine_digest()
     written = _junit_write(junit, lambda: report.render_junit(
         view, [row.verdict for row in rows], registry, tier=tier, ready=ready,
@@ -1476,6 +1485,7 @@ def cmd_check(args: argparse.Namespace) -> int:
             "duration_s": round(elapsed, 4),
             "spine": spine,
             "junit": written,
+            "notes": notes,
         })
         return code
 
@@ -1484,6 +1494,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         controls = counts["controls"]
         _say(f"controls: {controls['executed']} executed, {controls['cached']} cached, "
              f"{controls['reverified']} re-verified")
+    for note in notes:
+        _say(f"note: {note}")
 
     # The skips, one line per distinct reason instead of one per gate. They come
     # after the summary and before the blockers on purpose: the summary already

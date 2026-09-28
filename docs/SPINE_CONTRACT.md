@@ -1168,7 +1168,7 @@ class SweepResult:
     not_run: list[tuple[str, str]]  # (gate, "above the tier ceiling" | "excluded by --only")
     before: dict                    # freshness(), computed before anything ran (cli:H19)
     stale_before: dict[str, str]    # selected gates Stale or Unknown before the sweep: the reason
-    notes: list[str]                # writer warnings, ignored entries
+    notes: list[str]                # writer warnings, ignored entries; `check` prints them
     only; max_tier: int; force: bool; record: bool; when: str   # how it ran
     ledger; registry; anchors       # what write_last_check needs
 def sweep(root, registry, ctx, *, projection, ledger, max_tier, only=None, force=False,
@@ -1234,9 +1234,19 @@ skipped, `cached pass exists; <why> here` over a Fresh PASS (invariant 1), remem
 as `availability`; no control runs (CI has no trimesh: a skip, never "not admitted").
 2. *admission* — not admitted: `error="not admitted: <why>"`, `fn` never called. 3.
 unless `force`, a *Fresh* entry is served — unless a remembered crash or self-skip at
-its rho superseded it (§3.9), which re-runs the gate. 4. *run*, traced with the sweep's
+its rho superseded it (§3.9), which re-runs the gate; *two outcomes* at the current rho
+(a Stale `conflict`) are served as `resolve`'s error, `two outcomes recorded for
+identical inputs (<names>)`, and `fn` is not called — under the same supersede rule
+(`_crash_applies`, one predicate for `resolve` and the sweep). What slipped through:
+only Fresh was served here, so a conflict re-ran on every check and `check` showed that
+run's answer — `[ok  ]`, ready, exit 0, a green JUnit, `last_check.json` saying pass —
+for a claim `status` and `doctor` FAILed. 4. *run*, traced with the sweep's
 anchors: a pass or fail is keyed and cached (clearing any remembered outcome), anything
-else remembered under the rho computed before the run; every run appends obs. The
+else remembered under the rho computed before the run; every run appends obs. A pass or
+fail landing where the other outcome is recorded at its rho under the same instruments
+(`--force` over a conflict, or a run that just made one) is filed, and its row is that
+same error (`_contradicted`, asked of the writer's `_siblings`), recorded or not — an
+entry with an opaque channel excepted, which `_judge` never matches either. The
 gate runs INSIDE `before`, not in `run_all`'s own loop: that loop's trace carries no
 anchors, and a path-valued param digested without them (fdm's absolute mesh paths,
 packs:H6) differs per checkout — never Fresh anywhere, rewritten per clone. A row is
@@ -2156,14 +2166,17 @@ registered gates this sweep did not select that have an effective verdict. `coun
 controls: {executed, cached, reverified}}`. `stale` means some selected gate was stale
 BEFORE the sweep (cli:H19), `stale_reason` names each; `run` is `null` (no run history;
 kept so a reader finds the key and nothing in it); `model_hash` is a display id; adds
-`spine` and `junit`.
+`spine`, `junit` and `notes` (`SweepResult.notes`, each once: the writer's warnings and
+ignored entries).
 
 `check` text: executed rows stream as they land; a cached row prints only when it did
 not pass, as `f"{line:<77} cached"`; then
 `6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0` (`, S skipped` and
 `, R errored` when non-zero; the time and the model hash left this line), then
 `controls: E executed, C cached, R re-verified` when a control executed or was
-re-verified, the skip digest, a note for gates outside the sweep, and the BLOCKING
+re-verified, a `note: <note>` line per `SweepResult.notes` entry (the writer's
+`two outcomes recorded for identical inputs` among them — collected and printed nowhere
+until the review), the skip digest, a note for gates outside the sweep, and the BLOCKING
 list.
 
 **`status`** text: `render_terminal`'s block, then in this order — `stale: <gate> —

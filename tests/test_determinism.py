@@ -41,6 +41,7 @@ import difflib
 import json
 import os
 import shutil
+import xml.etree.ElementTree as ET
 
 from atompipe import gates, verdicts
 from atompipe import report as report_mod
@@ -51,6 +52,12 @@ import _projects
 #: The bracket's six gates, spelled here (see test_admission.BRACKET_GATES).
 BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearing",
                  "bracket.model_validity", "bracket.bed_fit", "bracket.min_wall")
+
+#: The environment variable ``TwoOutcomes``' planted nondeterminism reads. No
+#: trace keys the environment, so a run with it set and one without share a rho —
+#: what a gate that reads the clock or an unseeded random looks like from outside.
+#: Not ``ATOMPIPE_``-prefixed: nothing in the spine may mistake it for its own.
+_FLIP = "BED_FIT_FLIP"
 
 #: What a cold run starts without. The whole project is restored from a pristine
 #: copy before each run, so nothing a previous run wrote — its cache, its
@@ -209,6 +216,34 @@ class TwoOutcomes(_env.EnvCase):
         self.assertEqual(text.count("\n" + heading), 1, text)
         return text.split("\n" + heading, 1)[1].split("\n## ", 1)[0]
 
+    def _check(self, project: str, *argv: str, code: int, env=None) -> dict:
+        """``check --json`` (plus ``argv``), its exit code asserted; the document."""
+        proc = _env.atompipe(["check", "--json", *argv], cwd=project, env=env)
+        self.assertEqual(proc.returncode, code, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def _last_check(self, project: str) -> dict:
+        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+                  encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _refused_by_check(self, project: str, doc: dict, gate_id: str, claim: str) -> None:
+        """``check``'s own row for ``gate_id`` is the error ``status`` reads,
+        served without a run, and ``claim`` blocks — in the document, the exit
+        code the caller asserted, and ``last_check.json``. What slipped through
+        (the review): the sweep special-cased only a Fresh entry, so a
+        contradiction on disk was re-run on every check and the run's own
+        answer laid over the resolver's error."""
+        row = {r["gate"]: r for r in doc["verdicts"]}[gate_id]
+        self.assertEqual(row["outcome"], "error", row)
+        self.assertIn("two outcomes recorded for identical inputs", row.get("error", ""), row)
+        self.assertNotIn("duration_s", row, f"{gate_id} ran again: a run can only agree "
+                                            f"with one of the two and settles nothing")
+        self.assertIn(claim, [b["claim"] for b in doc["blocking"]], doc["blocking"])
+        self.assertFalse(doc["ready"])
+        self.assertEqual(self._last_check(project)["statuses"][claim], "fail",
+                         "last_check.json recorded what status does not say")
+
     def test_equal_instruments_is_an_error(self):
         self.assertIs(verdicts.TWO_OUTCOMES_IS_ERROR, True,
                       "staged until EntriesAreDeterministic measured the corpus (R-4)")
@@ -228,10 +263,23 @@ class TwoOutcomes(_env.EnvCase):
         self.assertEqual(status["claims"]["C4"], "fail", status["freshness"]["bracket.bed_fit"])
         self.assertNotIn("**C4**", self._proven(project))
 
-        # A re-run agrees with one of the two and settles nothing: the entry it
-        # writes already exists, both files stay, and the claim still FAILs.
-        proc = _env.atompipe(["check"], cwd=project)
-        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        # check reads it as status does. The bracket's C1 fails anyway, so the
+        # exit code alone could never have shown C4 passing here (the review):
+        # C4 itself must be among the blockers, in the document and the summary.
+        self._refused_by_check(project, self._check(project, code=1),
+                               "bracket.bed_fit", "C4")
+        self.assertEqual(len(verdicts.read_entries(project, "bracket.bed_fit")), 2)
+        self.assertEqual(self._status(project)["claims"]["C4"], "fail")
+
+        # A forced re-run agrees with one of the two and settles nothing: the
+        # entry it writes already exists, both files stay, and the claim still
+        # FAILs — in check's own row, not only in status afterwards.
+        forced = self._check(project, "--force", code=1)
+        row = {r["gate"]: r for r in forced["verdicts"]}["bracket.bed_fit"]
+        self.assertEqual(row["outcome"], "error", row)
+        self.assertIn("two outcomes recorded for identical inputs", row.get("error", ""), row)
+        self.assertIn("C4", [b["claim"] for b in forced["blocking"]])
+        self.assertEqual(self._last_check(project)["statuses"]["C4"], "fail")
         self.assertEqual(len(verdicts.read_entries(project, "bracket.bed_fit")), 2)
         self.assertEqual(self._status(project)["claims"]["C4"], "fail")
 
@@ -246,3 +294,92 @@ class TwoOutcomes(_env.EnvCase):
         self.assertEqual(code, 0, rows)
         self.assertEqual(self._status(project)["claims"]["C4"], "pass",
                          "the entry recorded under this machine's instruments wins")
+        # check agrees, plain and forced: its refusal of two outcomes is keyed on
+        # equal instruments exactly as the resolver's is.
+        for argv in ((), ("--force",)):
+            doc = self._check(project, *argv, code=1)
+            row = {r["gate"]: r for r in doc["verdicts"]}["bracket.bed_fit"]
+            self.assertEqual(row["outcome"], "pass", (argv, row))
+            self.assertNotIn("C4", [b["claim"] for b in doc["blocking"]], argv)
+            self.assertEqual(self._last_check(project)["statuses"]["C4"], "pass", argv)
+
+    def test_check_refuses_what_status_and_doctor_refuse(self):
+        """V: the review's repro, through the CLI a person runs. A gate that
+        answers differently for the same inputs — here it reads an environment
+        variable, which no trace keys, the shape of a gate that reads the clock
+        or an unseeded random — passed at 8 mm, then under ``--force`` wrote a
+        FAIL at the same rho under the same instruments. ``status`` FAILed C4
+        and ``doctor`` FAILed ``two-outcomes``; ``check`` re-ran the gate,
+        printed ``[ok  ] bracket.bed_fit``, said ready, exited 0, wrote a JUnit
+        report with no failure and recorded C4 as ``pass`` in
+        ``last_check.json`` — every check, since nothing it wrote settled the
+        contradiction. The forced run's writer warning went to
+        ``SweepResult.notes``, which nothing printed."""
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"),
+                                         thickness=8.0, migrated=True)
+        gates_py = os.path.join(project, "gates", "structural.py")
+        with open(gates_py, encoding="utf-8", newline="") as fh:
+            text = fh.read()
+        for old, new in (("from __future__ import annotations\n",
+                          "from __future__ import annotations\n\nimport os\n"),
+                         ("        passed=big <= usable,\n",
+                          f"        passed=big <= usable and not os.environ.get({_FLIP!r}),\n")):
+            self.assertEqual(text.count(old), 1, f"{gates_py}: the plant needs one {old!r}")
+            text = text.replace(old, new)
+        with open(gates_py, "w", encoding="utf-8", newline="") as fh:
+            fh.write(text)
+        # C7 (first mode) has no gate on the bracket: UNCLAIMED blocks, and the
+        # exit code could not show the laundered C4 while it stands.
+        os.remove(os.path.join(project, "claims", "C7.json"))
+
+        first = self._check(project, code=0)
+        passed = {r["gate"]: r for r in first["verdicts"]}["bracket.bed_fit"]
+        self.assertEqual(passed["outcome"], "pass", "the positive control: the bracket is ready")
+        self.assertTrue(first["ready"])
+
+        proc = _env.atompipe(["check", "--force"], cwd=project, env={_FLIP: "1"})
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertIn("note: bracket.bed_fit: two outcomes recorded for identical inputs",
+                      proc.stdout, "the writer's warning was not printed")
+        self.assertIn("[ERR ] bracket.bed_fit : two outcomes recorded for identical inputs",
+                      proc.stdout, "the forced run presented its own answer as the answer")
+        # (the committed cache's entry at the bracket's own thickness stays beside them)
+        entries = [e for e in verdicts.read_entries(project, "bracket.bed_fit")
+                   if e.rho == passed["rho"]]
+        self.assertEqual(len({verdicts.out8(e.verdict) for e in entries}), 2,
+                         f"the forced run did not land a second outcome at {passed['rho']}: "
+                         f"{[e.name for e in entries]}")
+
+        junit = os.path.join(self.tmp(), "junit.xml")
+        doc = self._check(project, "--junit", junit, code=1)
+        self._refused_by_check(project, doc, "bracket.bed_fit", "C4")
+        self.assertEqual(doc["counts"]["executed"], 0, doc["counts"])
+        suites = ET.parse(junit).getroot()
+        self.assertEqual(suites.find("properties/property[@name='exit_code']").get("value"),
+                         "1")
+        gate = suites.find("testsuite[@name='gates']/testcase[@name='bracket.bed_fit']")
+        self.assertIsNotNone(gate.find("error"), ET.tostring(gate, encoding="unicode"))
+        red = sum(int(s.get("failures")) + int(s.get("errors"))
+                  for s in suites.findall("testsuite"))
+        self.assertGreater(red, 0)
+
+        # A dry forced run writes nothing and still refuses: the run agrees with
+        # one of the two, and presenting it would be the same laundering.
+        dry = self._check(project, "--force", "--no-record", code=1)
+        row = {r["gate"]: r for r in dry["verdicts"]}["bracket.bed_fit"]
+        self.assertEqual(row["outcome"], "error", row)
+        self.assertIn("C4", [b["claim"] for b in dry["blocking"]])
+
+        proc = _env.atompipe(["check"], cwd=project)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertNotIn("[ok  ] bracket.bed_fit", proc.stdout)
+        self.assertIn("[ERR ] bracket.bed_fit : two outcomes recorded for identical inputs",
+                      proc.stdout)
+        self.assertIn("BLOCKING", proc.stdout)
+
+        self.assertEqual(self._status(project)["claims"]["C4"], "fail")
+        code, rows = self._doctor(project)
+        self.assertEqual((code, rows["two-outcomes"]["status"]), (1, "FAIL"),
+                         rows["two-outcomes"])
+        self.assertEqual(self._last_check(project)["statuses"]["C4"],
+                         self._status(project)["claims"]["C4"])

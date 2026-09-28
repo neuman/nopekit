@@ -4756,6 +4756,52 @@ def _synthesized(spec: Any, **fields: Any) -> Verdict:
                    pack=spec.pack or "", passed=False, **fields)
 
 
+def _crash_applies(record: Mapping[str, Any] | None, state: Any) -> bool:
+    """Does a remembered crash or self-skip stand at ``state``'s inputs (§3.9)?
+    Over a Fresh entry, at exactly its rho; otherwise at any rho current now,
+    or anywhere when nothing better exists (S-68: with no entry at all, "never
+    run" would be false). ONE predicate for ``resolve``'s step 2 and the sweep's
+    step 3. They were two copies, and the sweep's answered only for Fresh —
+    enough while Fresh was all the sweep served. Once it serves a two-outcomes
+    conflict too, a copy without the Stale rule would serve the conflict where
+    ``status`` shows the crash that superseded it."""
+    if record is None or record["kind"] not in ("error", "self-skip"):
+        return False
+    if isinstance(state, Fresh):
+        return record["input_rho"] == state.entry.rho
+    return isinstance(state, Never) or record["input_rho"] == "" \
+        or record["input_rho"] in state.current
+
+
+def _contradicted(root: str, entry: Entry) -> str:
+    """The error a run's ``entry`` resolves to once it is on disk, or ``""``:
+    another outcome already recorded at its rho under the same instruments is
+    §3.7's two outcomes, ``resolve``'s error (``TWO_OUTCOMES_IS_ERROR``), in
+    ``resolve``'s words — every entry at that rho named, sorted, as
+    ``_fresh_or_conflict`` names them. Asked of the files the writer asks
+    (``_siblings``), so the error and the writer's warning cannot disagree, and
+    asked whether or not the run is recorded: ``--no-record`` writes nothing,
+    and still must not present one of two answers as the answer. What slipped
+    through: ``check --force`` re-ran a gate that reads the environment, wrote
+    a FAIL beside its PASS at one rho, and the next plain ``check`` re-ran it
+    again and showed whichever answer that run gave; ``status`` FAILed the
+    claim, ``check`` said ready and exited 0 (the review).
+
+    An entry with an opaque channel is never a contradiction, as ``_judge``
+    never counts one a match: its rho does not name what the channel read (a
+    subprocess's own files), so another outcome there is an input that moved
+    unseen, not two answers to one question. Without this the first draft
+    turned ``t.sub``'s honest FAIL, after the file its child reads changed,
+    into an error (``StaleIsNotCurrent``)."""
+    if not TWO_OUTCOMES_IS_ERROR or (entry.reads or {}).get("opaque"):
+        return ""
+    others = _siblings(_gate_dir(root, entry.gate), entry.name, entry.rho, control=False)
+    if not any(other.instruments == entry.instruments for other in others):
+        return ""
+    names = ", ".join(sorted({entry.name, *(other.name for other in others)}))
+    return f"{_TWO_OUTCOMES} ({names})"
+
+
 def _orphan_entries(root: str, registered: set, notes: list) -> dict[str, list[Entry]]:
     base = os.path.join(root, _STATE_DIR, _VERDICTS_DIR)
     try:
@@ -4881,21 +4927,13 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
 
         # 2. a remembered crash or self-skip
         record = held.get(gid)
-        if record is not None and record["kind"] in ("error", "self-skip"):
-            if isinstance(state, Fresh):
-                applies = record["input_rho"] == state.entry.rho
-            else:
-                # With no entry at all there is nothing better to show, and
-                # "never run" would be false (S-68): the crash is the outcome.
-                applies = isinstance(state, Never) or record["input_rho"] == "" \
-                    or record["input_rho"] in state.current
-            if applies:
-                extra = (f"supersedes the cached {entry.name}",) if isinstance(state, Fresh) \
-                    else ()
-                emit(_as_spec(record["verdict"], spec),
-                     Row(gid, state.state, entry=entry, when=record["when"],
-                         notes=row_notes + (f"remembered {record['kind']}",) + extra))
-                continue
+        if _crash_applies(record, state):
+            extra = (f"supersedes the cached {entry.name}",) if isinstance(state, Fresh) \
+                else ()
+            emit(_as_spec(record["verdict"], spec),
+                 Row(gid, state.state, entry=entry, when=record["when"],
+                     notes=row_notes + (f"remembered {record['kind']}",) + extra))
+            continue
 
         # 3. a Fresh entry, under admission
         if isinstance(state, Fresh):
@@ -5544,7 +5582,9 @@ class SweepResult:
     ``before`` — ``freshness`` as it stood BEFORE anything ran (cli:H19: what
     was stale is decided before the sweep makes it current), and
     ``stale_before`` — ``{gate: reason}`` for the selected gates it called Stale
-    or Unknown; ``notes`` — writer warnings and ignored entries. The rest is how
+    or Unknown; ``notes`` — writer warnings and ignored entries, which ``check``
+    prints (they were collected and never shown: the writer's "two outcomes
+    recorded for identical inputs" reached nobody). The rest is how
     it ran — ``only``, ``max_tier``, ``force``, ``record``, ``when`` — and what
     ``write_last_check`` needs: ``ledger``, ``registry``, ``anchors``.
     """
@@ -5605,14 +5645,22 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
                                rho=state.rho if isinstance(state, Fresh) else "")
         return SweepRow(refused, admission=judged)
 
-    # 3. the cache — unless a remembered crash at these inputs superseded it
-    if not force and isinstance(state, Fresh):
-        held = s.held.get(gid)
-        superseded = (held is not None and held["kind"] in ("error", "self-skip")
-                      and held["input_rho"] == state.rho)
-        if not superseded:
+    # 3. the cache — unless a remembered crash at these inputs superseded it.
+    # Two outcomes at the current rho are the cache's answer too: resolve's
+    # error, served as it is, never re-run. What slipped through (the review):
+    # only Fresh was special-cased here, so the conflict fell to step 4 on every
+    # check, and `_swept` laid whichever answer that run gave over the error
+    # `status` and `doctor` read — `[ok  ]`, ready, exit 0, a green JUnit and
+    # `last_check.json` saying pass for a claim `status` FAILed. A run cannot
+    # settle it: it agrees with one of the two, and both files stay.
+    if not force and isinstance(state, (Fresh, Stale)) \
+            and not _crash_applies(s.held.get(gid), state):
+        if isinstance(state, Fresh):
             return SweepRow(_as_spec(state.entry.to_verdict(), spec), cached=True, fresh=True,
                             rho=state.entry.rho, admission=judged)
+        if state.conflict and TWO_OUTCOMES_IS_ERROR:
+            return SweepRow(_synthesized(spec, error=state.reasons[0], rho=state.rho),
+                            rho=state.rho, admission=judged)
 
     # 4. run, traced with the sweep's anchors, and key what it read
     trace = GateTrace(anchors=s.anchors)
@@ -5622,9 +5670,14 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     verdict = dataclasses.replace(verdict, rho=keyed.rho)
     measured = verdict.outcome in ("pass", "fail")
     name = ""
+    clash = ""
     if measured:
         entry = _entry_for(spec, verdict, keyed, s.anchors)
         name = entry.name
+        # `--force` (or a remembered crash) ran it over a conflict, or this run
+        # just made one: the row is the error the resolver will read, not the
+        # run's own answer. The entry is still filed — it is what the gate said.
+        clash = _contradicted(s.root, entry)
         if s.record:
             wrote = write_entry(s.root, entry)
             s.notes.extend(wrote.warnings)
@@ -5636,6 +5689,10 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     if s.record:
         record_obs(s.root, gid, entry=name, when=s.when, duration_s=verdict.duration_s,
                    cpu_s=verdict.cpu_s)
+    if clash:
+        refused = dataclasses.replace(_synthesized(spec, error=clash, rho=keyed.rho),
+                                      duration_s=verdict.duration_s, cpu_s=verdict.cpu_s)
+        return SweepRow(refused, executed=True, rho=keyed.rho, admission=judged)
     return SweepRow(verdict, executed=True, fresh=measured, rho=keyed.rho, admission=judged)
 
 
@@ -5658,11 +5715,19 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
        admitted: ``error="not admitted: <why>"``, ``fn`` never called.
     3. Unless ``force``, a **Fresh** entry is served — unless a remembered crash
        or self-skip at its rho superseded it (§3.9: a crash proves nothing, and
-       neither does the PASS it followed), which re-runs the gate.
+       neither does the PASS it followed), which re-runs the gate. **Two
+       outcomes** at the current rho (a Stale ``conflict``) are served as
+       ``resolve``'s error, ``two outcomes recorded for identical inputs
+       (<names>)``, and the gate is not run — under the same supersede rule
+       (``_crash_applies``, shared with ``resolve``).
     4. **Run**, traced with the sweep's anchors. A pass or fail is keyed and
        cached (``write_entry``), clearing any remembered outcome; anything else
        is remembered under the rho freshness computed before the run
-       (``input_rho``). Every run appends obs.
+       (``input_rho``). Every run appends obs. A pass or fail landing at a rho
+       where the other outcome is recorded under the same instruments — a
+       forced re-run of a conflict, or a run that just made one — is filed and
+       its row is that same error (``_contradicted``), recorded or not; an
+       entry with an opaque channel never is, as ``_judge`` never matches one.
 
     The gate runs INSIDE ``before`` rather than in ``run_all``'s own loop: that
     loop's trace carries no anchors, and a path-valued param digested without
