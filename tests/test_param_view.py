@@ -37,7 +37,6 @@ Run:  PYTHONPATH=src python3 -m unittest tests.test_param_view -v
 from __future__ import annotations
 
 import os
-import re
 import sys
 import textwrap
 import unittest
@@ -398,22 +397,23 @@ class StaticProse(_Bracket):
         its prose, and the marker is never touched."""
         root = self.bracket()
         marker = os.path.join(self.tmp(), "imported")
-        path = os.path.join(root, *ENTRY.split("/"))
-        with open(path, encoding="utf-8") as fh:
-            text = fh.read()
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(f"open({marker!r}, 'w').close()\n"
-                     "raise ImportError('this model must never be imported by the reader')\n"
-                     + text)
+        # After the imports (a statement before `from __future__` would make the
+        # control below fail as a SyntaxError, proving nothing), before Config.
+        anchor = "from dataclasses import dataclass, asdict\n"
+        _replace_once(root, anchor, anchor
+                      + f"open({marker!r}, 'w').close()\n"
+                      + "raise ImportError('this model must never be imported by the reader')\n")
         before = set(sys.modules)
         prose = modelio.static_param_prose(root, ENTRY)
         self.assertFalse(os.path.exists(marker), "static_param_prose ran the model")
         self.assertEqual(set(sys.modules) - before, set())
         self.assertEqual(len(prose), 12)
         self.assertEqual(prose["thickness"]["units"], "mm")
-        # The control: the same entry really does raise when it is run.
-        with self.assertRaises(AtompipeError):
+        # The control: the same entry really does raise when it is run, after
+        # touching the marker.
+        with self.assertRaises(AtompipeError) as caught:
             modelio.load_model(root, ENTRY)
+        self.assertIn("this model must never be imported", str(caught.exception))
         self.assertTrue(os.path.exists(marker))
 
     def test_dict_items_param_calls_and_the_config_class(self):

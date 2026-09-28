@@ -6,7 +6,7 @@ simplest thing that still exercises every rule in METHOD.md:
 
   rule 1  everything downstream is generated from Config + build()
   rule 2  section properties, stresses and deflections are DERIVED, never typed twice
-  rule 3  every parameter carries its rationale and what was rejected (see PARAMS)
+  rule 3  every parameter carries its rationale; what was tried and lost is in PARAMS
   rule 10 build() is pure arithmetic, so the whole gate sweep runs in milliseconds
 
 It has zero dependencies. Standard library only, like the spine — you can run the
@@ -57,9 +57,9 @@ class Config:
     # --- geometry ---
     arm_length: float = 60.0
     """mm, wall face to the load point. The design's driving dimension: deflection
-    goes as L^3, so a 25% longer arm is very nearly a doubling. 80 was the first
-    number asked for and it put deflection at 1.7mm — over three times the limit —
-    with no thickness that recovered it inside the print time budget."""
+    goes as L^3, so a 25% longer arm is very nearly a doubling, and no thickness
+    inside the print time budget buys a longer arm back. What lost, and by how
+    much, is in PARAMS."""
 
     width: float = 30.0
     """mm, across the bracket. Stiffness is linear in width and cubic in thickness,
@@ -72,12 +72,12 @@ class Config:
     The default is left marginal so `atompipe check` on a fresh clone shows a real
     gate catching a real problem, and so the fix is one parameter you can watch turn
     green. Deflection goes as 1/t^3, which is why thickness is the cheap lever;
-    4.0 was tried and misses by ~5x."""
+    4.0 was tried: 3.75 mm, 7.5x the limit — see PARAMS."""
 
     # --- mounting ---
     hole_d: float = 5.5
-    """mm, clearance for an M5 fastener. M5 free-fit is 5.5; 5.0 would be a
-    line-to-line fit that an FDM hole will not hold to."""
+    """mm, clearance for an M5 fastener: 5.5 is M5 free-fit. The tighter hole that
+    lost is in PARAMS."""
 
     n_bolts: int = 2
     """Two bolts, not one: a single fastener lets the bracket rotate about it under
@@ -120,6 +120,37 @@ class Config:
 
 
 CONFIG = Config()
+
+
+# --- what lost ----------------------------------------------------------------
+# Rule 3's other half: the alternatives that were tried and did not win, next to
+# the values they lost to. A Config docstring says why THIS value; an entry here
+# says what lost and by how much, once, where `atompipe why <param>` finds it.
+#
+# Only the three fields with a real loser are listed. Every other field's
+# rationale is its docstring, and an entry per field would be a parallel table
+# of the field list — a second source for it, which drifts the first time a
+# field is added (see `modelio.field_docstrings`). No entry states a value: the
+# dataclass owns every value, and a number repeated here would be a second copy.
+#
+# Plain dicts, not `atompipe.models.Param`/`Rejected` records, so the model keeps
+# zero dependencies and still runs by hand (`python3 model/bracket.py`); the spine
+# reads a dict item exactly as it reads a Param, and refuses a misspelt key.
+#
+# The numbers are the model's own, at the default config with one field changed,
+# against C1's 0.5 mm limit: build(Config(thickness=4.0)) deflects 3.75 mm, and
+# build(Config(arm_length=80.0)) 1.66 mm. What slipped through before: the module
+# docstring promised "see PARAMS" and there was none — every parameter carried
+# `rejected: []` — and the thickness docstring said 4.0 missed by "~5x", which no
+# run of this model ever said (S-42).
+PARAMS = [
+    {"name": "thickness", "units": "mm", "rejected": [
+        {"value": "4.0 mm", "why": "3.75 mm deflection, 7.5x the limit"}]},
+    {"name": "arm_length", "units": "mm", "rejected": [
+        {"value": "80 mm", "why": "1.7 mm deflection, over 3x the limit"}]},
+    {"name": "hole_d", "units": "mm", "rejected": [
+        {"value": "5.0 mm", "why": "line-to-line fit an FDM hole will not hold"}]},
+]
 
 
 def build(config: Config | None = None) -> dict:
