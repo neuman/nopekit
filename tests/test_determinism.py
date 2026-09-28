@@ -167,3 +167,82 @@ class EntriesAreDeterministic(_env.EnvCase):
                         self.assertEqual(mine, [], f"{spec_id} cannot run here and wrote "
                                                    f"{mine}")
         self.assertGreater(written["entries"], 0)
+
+
+# --------------------------------------------------------------------------- #
+class TwoOutcomes(_env.EnvCase):
+    """Two outcomes for one rho: an error under equal instruments, never under
+    different ones. Planted on a checked bracket copy; read through the CLI."""
+
+    def _checked(self) -> str:
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"))
+        proc = _env.atompipe(["check"], cwd=project)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        return project
+
+    def _plant(self, project: str, gate_id: str, *, instruments=None) -> None:
+        """A second entry for ``gate_id`` at the same rho, with the other answer —
+        what a nondeterministic gate, or a merged hand edit, leaves behind."""
+        [entry] = verdicts.read_entries(project, gate_id)
+        other = dataclasses.replace(
+            entry, verdict={**entry.verdict, "passed": not entry.verdict["passed"]},
+            instruments=entry.instruments if instruments is None else instruments)
+        result = verdicts.write_entry(project, other)
+        self.assertEqual(result.status, "written", result)
+        self.assertEqual(len(verdicts.read_entries(project, gate_id)), 2)
+
+    def _doctor(self, project: str) -> tuple[int, dict]:
+        proc = _env.atompipe(["doctor", "--json"], cwd=project)
+        rows = {row["check"]: row for row in json.loads(proc.stdout)["checks"]}
+        return proc.returncode, rows
+
+    def _status(self, project: str) -> dict:
+        proc = _env.atompipe(["status", "--json"], cwd=project)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)
+
+    def _proven(self, project: str) -> str:
+        proc = _env.atompipe(["report"], cwd=project)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        text = proc.stdout
+        heading = report_mod.SECTION_PROVEN
+        self.assertEqual(text.count("\n" + heading), 1, text)
+        return text.split("\n" + heading, 1)[1].split("\n## ", 1)[0]
+
+    def test_equal_instruments_is_an_error(self):
+        self.assertIs(verdicts.TWO_OUTCOMES_IS_ERROR, True,
+                      "staged until EntriesAreDeterministic measured the corpus (R-4)")
+        project = self._checked()
+        self.assertEqual(self._status(project)["claims"]["C4"], "pass",
+                         "the positive control: bed_fit and min_wall pass C4")
+        self._plant(project, "bracket.bed_fit")
+
+        code, rows = self._doctor(project)
+        self.assertEqual(code, 1, rows)
+        row = rows["two-outcomes"]
+        self.assertEqual(row["status"], "FAIL", row)
+        self.assertIn("bracket.bed_fit", row["detail"])
+        self.assertIn("two outcomes recorded for identical inputs", row["detail"])
+
+        status = self._status(project)
+        self.assertEqual(status["claims"]["C4"], "fail", status["freshness"]["bracket.bed_fit"])
+        self.assertNotIn("**C4**", self._proven(project))
+
+        # A re-run agrees with one of the two and settles nothing: the entry it
+        # writes already exists, both files stay, and the claim still FAILs.
+        proc = _env.atompipe(["check"], cwd=project)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertEqual(len(verdicts.read_entries(project, "bracket.bed_fit")), 2)
+        self.assertEqual(self._status(project)["claims"]["C4"], "fail")
+
+    def test_different_instruments_is_not_an_error(self):
+        # The negative half: an entry merged from a machine with another numpy
+        # is provenance, not a contradiction (Q1.3). A detector that flagged
+        # this would turn every cross-machine merge red.
+        project = self._checked()
+        self._plant(project, "bracket.bed_fit", instruments={"numpy": "0.0.0-elsewhere"})
+        code, rows = self._doctor(project)
+        self.assertNotEqual(rows["two-outcomes"]["status"], "FAIL", rows["two-outcomes"])
+        self.assertEqual(code, 0, rows)
+        self.assertEqual(self._status(project)["claims"]["C4"], "pass",
+                         "the entry recorded under this machine's instruments wins")
