@@ -209,7 +209,7 @@ class ParamTraceRecords(unittest.TestCase):
                 self.assertEqual(str(caught.exception),
                                  f"a gate cannot write another gate's inputs: {where}")
         self.assertEqual(self.data, _params(), "a refused write still landed")
-        self.assertEqual(dict.copy(self.p)["config"], _params()["config"])
+        self.assertEqual(dict(dict.items(self.p))["config"], _params()["config"])
 
     def test_host_view_is_writable_and_recorded(self):
         trace = GateTrace(kind="control")
@@ -702,6 +702,17 @@ class AuditTrace(_env.EnvCase):
         self.assertEqual((inside.files_read, after.files_read), ([], []))
         self.assertNotIn(after, verdicts._STACK, "an exception must still close the window")
 
+    def test_a_pseudo_filename_is_not_a_file(self):
+        """3.13's traceback parses line fragments for its carets; the SyntaxError
+        that often raises makes CPython open "<unknown>" to quote the line."""
+        import ast
+        trace = GateTrace()
+        with tracing(trace):
+            with self.assertRaises(SyntaxError):
+                ast.parse("x = (", filename="<unknown>")
+            verdicts._audit("open", ("<string>", "r", 0))
+        self.assertEqual(trace.files_read, [])
+
     def test_interpreter_and_user_site_are_excluded(self):
         control = GateTrace()
         with tracing(control):
@@ -729,6 +740,29 @@ class AuditTrace(_env.EnvCase):
                 open(library, "rb").close()
         self.assertEqual(user.files_read, [],
                          "trimesh and numpy live in the user site on the dev box")
+
+    def test_packs_shipped_inside_the_wheel_are_not_library(self):
+        """pyproject maps packs/ onto atompipe/bundled/, under site-packages AND
+        the atompipe package: a bundled pack's data read must still record."""
+        verdicts.spine_digest()                    # memoised before __file__ is patched
+        site_packages = self.tmp()
+        package = os.path.join(site_packages, "atompipe")
+        data = os.path.join(package, "bundled", "fdm-print", "selftest", "baseline.json")
+        spine_file = os.path.join(package, "site_template", "index.html")
+        for path in (data, spine_file):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("{}")
+        self.addCleanup(verdicts._library_roots.cache_clear)
+        with mock.patch.object(verdicts, "__file__", os.path.join(package, "verdicts.py")), \
+                mock.patch.object(site, "getsitepackages", lambda: [site_packages],
+                                  create=True):
+            verdicts._library_roots.cache_clear()
+            trace = GateTrace()
+            with tracing(trace):
+                open(spine_file, "rb").close()
+                open(data, "rb").close()
+        self.assertEqual(trace.files_read, [data])
 
     def test_popen_is_opaque_and_names_its_argv_files(self):
         trace = GateTrace()
@@ -789,6 +823,21 @@ class AuditTrace(_env.EnvCase):
                     verdicts._audit(event, args)
             sys.audit("open", object(), 5, "not-flags")
             sys.audit("os.listdir", None)
+
+    def test_the_hook_is_not_reentered_by_its_own_work(self):
+        """`sys._getframe` audits itself; a hook that re-enters on its own events
+        recursed to the limit and aborted the `open` it was auditing."""
+        calls: list = []
+
+        def handler(traces, args):
+            calls.append(args[0])
+            with open(self.path, "rb"):             # a handled event, from inside the hook
+                pass
+
+        with mock.patch.dict(verdicts._HANDLERS, {"open": handler}):
+            with tracing(GateTrace()):
+                open(self.path, "rb").close()
+        self.assertEqual(len(calls), 1)
 
     def test_the_hook_is_installed_once(self):
         with tracing(GateTrace()):

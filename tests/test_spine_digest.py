@@ -98,7 +98,7 @@ async def fetch(source, *, retries: int = 3, **options):
 #: `canonical_ast_digest(FIXTURE)`, computed on 3.12.3 and confirmed on 3.13.
 #: If this moves, every committed verdict entry in every project goes stale:
 #: change the walk only on purpose, and say why in the commit.
-PINNED = "PLACEHOLDER"
+PINNED = "ac1045eea43f2b2a11abf95798130fb2dcf6a45003ed23aceba631e575731786"
 
 
 def _edit(source: str, old: str, new: str) -> str:

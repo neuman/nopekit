@@ -74,6 +74,8 @@ Two more, learned the hard way and enforced in `tests/test_packs.py`:
 | Path | What |
 |---|---|
 | `src/atompipe/` | the spine — stdlib-only modules; `models.py` is the type contract |
+| `src/atompipe/verdicts.py` | what a gate read, so its verdict can be keyed by it: the trace (`ParamTrace`, `LedgerView`, the audit hook), portable digests, the spine digest — and, as Phase 1.2 lands, the per-gate verdict cache, freshness and admission |
+| `src/atompipe/vcs.py` | the only git edge: argv form, a clean environment, a timeout, never raises |
 | `site/` | a project's site — scaffolded by `atompipe site init` from `src/atompipe/site_template/`. Plain HTML/CSS/ES modules, no build step |
 | `packs/` | domain packs. Ordinary directories: no build step, no registration |
 | `skills/` | the Claude Code skills (`atompipe`, `pack-authoring`) |
