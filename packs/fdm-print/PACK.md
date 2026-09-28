@@ -337,13 +337,17 @@ no geometry could change the answer.
 
 ### Cost
 
-Every mesh is loaded **once per sweep, not once per gate**. `fdm.overhang` and
-`fdm.bridge_span` read the same files back to back, so a cache on the gate context
-halves the reads: thirteen real parts through both gates is **13 loads, not 26**,
-and the second gate drops from 38 ms to 5 ms on this set. The key carries the
-file's mtime and size, so a re-export between two gates in one sweep is a miss and
-never a stale hit — the whole reason anybody re-runs a sweep is that they just
-rebuilt their meshes.
+Each distinct file is loaded **once per sweep by the spine's memo** and recorded
+for every gate that asks for it. `fdm.overhang` and `fdm.bridge_span` read the
+same files back to back and both go through `ctx.load_file`, so thirteen real
+parts through both gates is **13 loads, not 26**, and the second gate drops from
+38 ms to 5 ms on this set. The memo re-loads a file whose bytes moved between two
+gates of one sweep, so a re-export is a miss and never a stale hit — the whole
+reason anybody re-runs a sweep is that they just rebuilt their meshes. And a hit
+still counts as a read: each gate's verdict names the part among its inputs, so
+it goes stale when the part changes. The cache this pack used to keep on
+`ctx.extra` did not do that — its hits opened nothing, and the second gate's
+verdict named no file at all.
 
 That is the cheap half of the cost. The expensive half is upstream and this pack
 cannot help with it: a tier-1 sweep is dominated by the model rebuilding and
@@ -457,8 +461,8 @@ minute usually means `volume_mm3` is actually cm³.
 ## Where to look next
 
 - `gates/fdm_print_fold.py` — how one verdict is folded out of N parts: the
-  outcome ladder, the locator budget, the per-part table, and the sweep's mesh
-  cache. Read it before changing what a multi-part verdict says.
+  outcome ladder, the locator budget and the per-part table. Read it before
+  changing what a multi-part verdict says.
 - `selftest/baseline.json` — a worked projection of a part that passes every gate
   here, with a one-line note on each key and its unit. It is the fastest way to
   learn what this pack expects a model to project, and it is what the negative

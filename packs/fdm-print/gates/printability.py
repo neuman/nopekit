@@ -21,50 +21,38 @@ model says otherwise via ``build_axis``. Every length in and out is mm.
 """
 from __future__ import annotations
 
-import importlib.util as _importlib_util
 import math
 import os as _os
-import sys as _sys
 from typing import Any, Iterable, Sequence
 
 from atompipe.gates import gate, GateContext, SCOPE_SEP
+from atompipe.modelio import load_path as _load_path
 from atompipe.models import Locator, NegativeControl, Tier, Verdict
 
+# Shared helpers, loaded BY PATH through the spine's loader rather than imported
+# by name: ``packs.load_gates`` puts the pack directory on ``sys.path`` only
+# while gate modules load, so a by-name import works at load time and not at
+# fixture time, and ``selftest/bad_params.py`` has to load the same helper — the
+# gate and its control must read ONE copy of the arithmetic, not two that can
+# drift (rule 2). ``load_path`` names each module after its absolute path: the
+# gate and the fixture asking for one file get one module, and a second copy of
+# this pack in the same process gets its own. What slipped through when the
+# name was fixed (``atompipe_pack_fdm_print__process_model``) and whatever
+# ``sys.modules`` held under it was served: a twin of this pack computed its
+# print time with the FIRST copy's model, and never ran an edit to its own
+# (S-26, packs:H4).
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
 
-def _sibling_module(name: str, filename: str):
-    """Load a shared helper that sits next to this file, by path.
-
-    ``packs.load_gates`` puts the pack directory on ``sys.path`` while it imports
-    gate modules and takes it off again afterwards, so an ordinary ``import`` of
-    a sibling works at load time and not at fixture time. Resolving by path works
-    in both, which matters because ``selftest/bad_params.py`` loads the same
-    helper the same way — the gate and its control have to be reading one copy of
-    the arithmetic, not two that can drift (rule 2).
-    """
-    cached = _sys.modules.get(name)
-    if cached is not None:
-        return cached
-    path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), filename)
-    spec = _importlib_util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:             # pragma: no cover - packaging bug
-        raise ImportError(f"cannot load {path}")
-    module = _importlib_util.module_from_spec(spec)
-    _sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_pm = _sibling_module("atompipe_pack_fdm_print__process_model", "_process_model.py")
+_pm = _load_path(_os.path.join(_HERE, "_process_model.py"))
 
 # What the part is called once ``views/part.py`` has drawn it. Loaded the same way
 # and for the same reason as the arithmetic above: the node name a locator carries
-# is an interface, and an interface in two copies drifts.
-_PARTS = _sibling_module("atompipe_pack_fdm_print__parts",
-                         _os.path.join(_os.pardir, "fdm_print_parts.py"))
+# is an interface, and an interface in two copies drifts. ``gates/mesh.py`` loads
+# the same file and gets this same module.
+_PARTS = _load_path(_os.path.join(_os.path.dirname(_HERE), "fdm_print_parts.py"))
 
-# One verdict over a set of parts. Loaded the same way, under the same module
-# name ``gates/mesh.py`` uses, so both gate modules share one copy of the fold.
-_FOLD = _sibling_module("atompipe_pack_fdm_print__fold", "fdm_print_fold.py")
+# One verdict over a set of parts, the same module ``gates/mesh.py`` holds.
+_FOLD = _load_path(_os.path.join(_HERE, "fdm_print_fold.py"))
 
 # --------------------------------------------------------------------------- #
 # domain constants — properties of the process, not of any project
