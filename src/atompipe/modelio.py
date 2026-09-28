@@ -63,6 +63,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import difflib
 import hashlib
 import inspect
 
@@ -82,7 +83,7 @@ from dataclasses import dataclass, field
 from typing import Any, Iterable, Iterator, Mapping
 
 from . import store
-from .models import Param, _enc
+from .models import Param, Rejected, _enc
 from .util import AtompipeError, atomic_write_json, rel, short_hash
 
 __all__ = [
@@ -99,6 +100,9 @@ __all__ = [
     "load_source_module",
     "load_path",
     "code_closure",
+    "static_param_prose",
+    "ParamView",
+    "param_view",
 ]
 
 #: Loaded model modules are registered in `sys.modules` under this prefix rather
@@ -1750,12 +1754,76 @@ def write_projection(root: str, projection: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 # parameters and their provenance
 # --------------------------------------------------------------------------- #
+#: How a refusal spells one rejected alternative in a PARAMS dict item.
+_LOSER = '{"value": ..., "why": ...}'
+
+
+def _unknown_key(entry: str, where: str, key: Any, known: Iterable[str]) -> AtompipeError:
+    """The refusal for a key a PARAMS dict item does not know, with a suggestion."""
+    names = sorted(known)
+    close = (difflib.get_close_matches(key, names, n=1, cutoff=0.6)
+             if isinstance(key, str) else [])
+    hint = f" — did you mean {close[0]!r}?" if close else ""
+    return AtompipeError(
+        f"{entry}: {where} has an unknown key {key!r}{hint} It takes "
+        f"{', '.join(names)}. A key it does not know used to be dropped without a "
+        f"word, and whatever it carried — the units, the loser and why it lost — "
+        f"with it"
+    )
+
+
+def _strict_item(item: dict, entry: str, where: str) -> None:
+    """Refuse a PARAMS dict item whose keys `Param.from_dict` would drop.
+
+    What slipped through (the model-side cousin of S-40): `Param.from_dict` keeps
+    only the keys it knows, so `{"name": "thickness", "unit": "mm"}` loaded as a
+    parameter with no units, and a rejection spelt `{"value": ..., "whi": ...}`
+    crashed on a TypeError from inside the dataclass. Both now stop the load
+    with the key, the entry and the nearest real key. Measured first (R-4,
+    R-10): the bracket's PARAMS is the only bundled one, and it loads.
+    """
+    param_keys = {f.name for f in dataclasses.fields(Param)}
+    rejected_keys = {f.name for f in dataclasses.fields(Rejected)}
+    for key in item:
+        if key not in param_keys:
+            raise _unknown_key(entry, where, key, param_keys)
+    rejected = item.get("rejected")
+    if rejected is None:
+        return
+    if isinstance(rejected, (str, bytes, dict)) or not isinstance(rejected, (list, tuple)):
+        raise AtompipeError(
+            f"{entry}: {where} `rejected` is a {type(rejected).__name__}; it takes a "
+            f"list of {_LOSER} items, one per alternative that lost"
+        )
+    for index, loser in enumerate(rejected):
+        if isinstance(loser, Rejected):
+            continue
+        if not isinstance(loser, dict):
+            raise AtompipeError(
+                f"{entry}: {where} rejected[{index}] is a {type(loser).__name__}; each "
+                f"alternative that lost is a {_LOSER} item — "
+                f"a loser with no reason is re-proposed by the next reader"
+            )
+        for key in loser:
+            if key not in rejected_keys:
+                raise _unknown_key(entry, f"{where} rejected[{index}]", key, rejected_keys)
+        for key in ("value", "why"):
+            if key not in loser:
+                raise AtompipeError(
+                    f"{entry}: {where} rejected[{index}] has no {key!r}: an alternative "
+                    f"that lost is what lost AND why"
+                )
+
+
 def _explicit_params(module: Any, entry: str) -> list[Param]:
-    """Read the model's optional `PARAMS`, tolerantly but not silently.
+    """Read the model's optional `PARAMS`: tolerant of its shape, strict on its keys.
 
     Dicts are accepted alongside `Param` instances because a model that
     generates its parameter table (from a CSV of stock sizes, say) naturally
-    produces dicts, and `Param.from_dict` is the contract's own reader.
+    produces dicts, and a model with zero dependencies (the bracket) writes
+    dicts so it still runs without atompipe on the path. `Param.from_dict` is
+    the contract's own reader, but it is lenient — so a dict item's keys are
+    checked first (`_strict_item`).
     """
     raw = getattr(module, "PARAMS", None)
     if raw is None:
@@ -1770,6 +1838,9 @@ def _explicit_params(module: Any, entry: str) -> list[Param]:
     seen: dict[str, int] = {}
     for index, item in enumerate(raw):
         if isinstance(item, dict):
+            label = item.get("name")
+            _strict_item(item, entry, f"PARAMS[{index}]" + (
+                f" ({label!r})" if isinstance(label, str) and label.strip() else ""))
             # `value` is a required field on Param but a POINTLESS one to write
             # here: for anything that is also a config field the dataclass owns
             # the value and this one is overwritten below. Defaulting it to None
@@ -1826,7 +1897,7 @@ def field_docstrings(entry: str, class_name: str) -> dict[str, str]:
         @dataclass
         class Config:
             thickness: float = 7.0
-            '''mm. 4.0 was tried and misses the deflection limit by ~5x.'''
+            '''mm. Deflection goes as 1/t^3, so thickness is the cheap lever.'''
 
     ...but that is exactly where a careful author writes the rationale, because it
     is the idiomatic place and it sits against the value it explains. Parsing it
@@ -1838,7 +1909,10 @@ def field_docstrings(entry: str, class_name: str) -> dict[str, str]:
 
     So: `PARAMS` stays available for what a docstring cannot carry (rejected
     alternatives, units as data, gate bindings), and the docstring carries the
-    prose. An explicit `PARAMS` rationale wins over a docstring when both exist.
+    prose — why THIS value; what lost goes in `PARAMS` (the bracket's docstring
+    quoted a loser's margin as "~5x" where the model said 7.5x, S-42: a number in
+    prose is a number nobody recomputes). An explicit `PARAMS` rationale wins
+    over a docstring when both exist.
 
     Returns {} on any parse failure — a model that cannot be parsed can still be
     imported and run, and losing prose is not a reason to refuse to load.
@@ -1851,22 +1925,33 @@ def field_docstrings(entry: str, class_name: str) -> dict[str, str]:
 
     out: dict[str, str] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            out.update(_attribute_docstrings(node))
+    return out
+
+
+def _attribute_docstrings(node: ast.ClassDef) -> dict[str, str]:
+    """`{field: docstring}` for one class body, whitespace collapsed.
+
+    The one reading of "the string after a field", shared by `field_docstrings`
+    (the loaded model) and `static_param_prose` (the model's text, never run),
+    so the two cannot normalise the same docstring two ways.
+    """
+    out: dict[str, str] = {}
+    body = node.body
+    for i, stmt in enumerate(body):
+        # A field is `name: type` or `name: type = default`; its docstring is
+        # the bare string expression immediately after it.
+        if not isinstance(stmt, ast.AnnAssign) or not isinstance(stmt.target, ast.Name):
             continue
-        body = node.body
-        for i, stmt in enumerate(body):
-            # A field is `name: type` or `name: type = default`; its docstring is
-            # the bare string expression immediately after it.
-            if not isinstance(stmt, ast.AnnAssign) or not isinstance(stmt.target, ast.Name):
-                continue
-            if i + 1 >= len(body):
-                continue
-            nxt = body[i + 1]
-            if (isinstance(nxt, ast.Expr) and isinstance(nxt.value, ast.Constant)
-                    and isinstance(nxt.value.value, str)):
-                text = " ".join(nxt.value.value.split())
-                if text:
-                    out[stmt.target.id] = text
+        if i + 1 >= len(body):
+            continue
+        nxt = body[i + 1]
+        if (isinstance(nxt, ast.Expr) and isinstance(nxt.value, ast.Constant)
+                and isinstance(nxt.value.value, str)):
+            text = " ".join(nxt.value.value.split())
+            if text:
+                out[stmt.target.id] = text
     return out
 
 
@@ -1926,6 +2011,418 @@ def params_from_model(model: LoadedModel) -> list[Param]:
     return merged
 
 
+# --------------------------------------------------------------------------- #
+# what the model states, read and never run  (the migration's params rule)
+# --------------------------------------------------------------------------- #
+def static_param_prose(root: str, entry: str | None) -> dict[str, dict[str, str]]:
+    """`{name: {"rationale": str, "units": str}}`: what the model's TEXT states.
+
+    The 1.3 migration keeps a param record's `rationale` and `units` only where
+    the model states none (spec §3.15, the params rule), and it has to ask "does
+    the model state one?" without running the model: the migration is a pure
+    function of the legacy ledger and this, it runs on a project whose model may
+    not import at all, and `store` must never execute user code. So this PARSES
+    the entry file — `ast.parse`, never an import — and reads two things:
+
+    * the attribute docstrings of the config class, normalised exactly as
+      `field_docstrings` normalises them (one helper, `_attribute_docstrings`);
+    * `rationale` and `units` string constants from the `PARAMS` items that are
+      dict literals or `Param(...)` calls (keywords, or positions in `Param`'s
+      field order).
+
+    A name appears only when something is stated, with `""` for the half that is
+    not. An empty or missing entry, a directory without `__init__.py`, or a file
+    that does not parse states nothing — `{}` — and the migration is then
+    lossless.
+
+    The one property that matters: it never says the model states something the
+    running model does not. Saying too MUCH drops a hand-written rationale the
+    model lacks — the lossy migration this rule exists to prevent; saying too
+    little keeps a duplicate, which costs a line. So every reading it cannot be
+    sure of reads as "not stated": a non-constant (`units=UNITS`), a `**spread`
+    in an item, a `PARAMS` built by a comprehension, an item added inside an
+    `if`. `tests/test_param_view.StaticProse` holds it equal to the loaded
+    bracket, field for field, and a subset of a model that computes its units.
+
+    Which class's docstrings: the one the loader would resolve as the config —
+    the class `CONFIG = X(...)` (or `CONFIG = X`) names, else `Config`, which is
+    `_resolve_config`'s rule. The spec says "every class in the entry file";
+    that over-claims for a model with a second dataclass sharing a field name
+    (a `Fixture.c` with a docstring beside an undocumented `Config.c` would
+    read as "the model states c's rationale", and the migration would drop the
+    record's — the loss itself). Every class is still the fallback when the
+    config cannot be named from the text (`CONFIG = make_config()`); a config
+    imported from another file states nothing here.
+    """
+    path = _static_entry(root, entry)
+    if path is None:
+        return {}
+    try:
+        with open(path, "rb") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    stated = {name: {"rationale": text, "units": ""}
+              for name, text in _static_docstrings(tree).items()}
+    for name, row in _static_params(tree).items():
+        target = stated.setdefault(name, {"rationale": "", "units": ""})
+        # An explicit PARAMS rationale wins over the docstring, as it does in
+        # `params_from_model`; units have no other home.
+        for key in ("rationale", "units"):
+            if row.get(key):
+                target[key] = row[key]
+    return {name: row for name, row in stated.items() if row["rationale"] or row["units"]}
+
+
+def _static_entry(root: str, entry: str | None) -> str | None:
+    """The entry's file, as `_resolve_entry` finds it — minus every fallback that
+    reads the ledger or lists `model/`: the migration calls this while the ledger
+    is the thing being migrated."""
+    entry = entry.strip() if isinstance(entry, str) else ""
+    if not entry:
+        return None
+    path = os.path.abspath(entry if os.path.isabs(entry) else os.path.join(root, entry))
+    if os.path.isdir(path):
+        path = os.path.join(path, "__init__.py")
+    return path if os.path.isfile(path) else None
+
+
+def _static_docstrings(tree: ast.Module) -> dict[str, str]:
+    """The config class's attribute docstrings, read from the module's text."""
+    classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    name, external = _static_config_class(tree)
+    if name is not None:
+        chosen = [node for node in classes if node.name == name]
+        if chosen:
+            out: dict[str, str] = {}
+            for node in chosen:              # the order `field_docstrings` merges in
+                out.update(_attribute_docstrings(node))
+            return out
+        external = external or name in _imported_names(tree)
+    if external:
+        return {}
+    out = {}
+    for node in classes:
+        for field_name, text in _attribute_docstrings(node).items():
+            out.setdefault(field_name, text)
+    return out
+
+
+def _static_config_class(tree: ast.Module) -> tuple[str | None, bool]:
+    """`(class name, defined elsewhere)` for the config, read as `_resolve_config` reads it.
+
+    The LAST module-level binding of `CONFIG` is the one the loader sees. No
+    `CONFIG` at all means `Config`. `CONFIG = mod.Config()` names a class in
+    another module: `(None, True)`. Anything else (`CONFIG = make()` of a def,
+    a subscript) cannot be named from the text: `(None, False)`, or the name of a
+    def, which the caller finds is no class here.
+    """
+    value: ast.expr | None = None
+    bound = False
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, rhs = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, rhs = [node.target], node.value
+        else:
+            continue
+        if any(isinstance(t, ast.Name) and t.id == "CONFIG" for t in targets):
+            value, bound = rhs, True
+    if not bound:
+        return "Config", False
+    if isinstance(value, ast.Call):
+        value = value.func
+    if isinstance(value, ast.Name):
+        return value.id, False
+    if isinstance(value, ast.Attribute):
+        return None, True
+    return None, False
+
+
+def _imported_names(tree: ast.Module) -> set[str]:
+    """Names a module-level import binds (`import a.b` binds `a`)."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+    return names
+
+
+def _static_params(tree: ast.Module) -> dict[str, dict[str, str]]:
+    """`{name: {"rationale", "units"}}` from the module-level `PARAMS` literal.
+
+    Followed in statement order the way the module would run it: an assignment
+    of a list or tuple literal replaces the items, `PARAMS += [...]`,
+    `PARAMS.append(item)` and `PARAMS.extend([...])` add to them, and any other
+    rebinding forgets them (whatever it builds is not readable here). The first
+    item naming a param is the one read; the loader refuses a second.
+    """
+    items: list[ast.expr] = []
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if node.value is None or not any(
+                    isinstance(t, ast.Name) and t.id == "PARAMS" for t in targets):
+                continue
+            items = list(_literal_items(node.value) or ())
+        elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+              and node.target.id == "PARAMS"):
+            more = _literal_items(node.value) if isinstance(node.op, ast.Add) else None
+            items = items + list(more) if more is not None else []
+        elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+              and isinstance(node.value.func, ast.Attribute)
+              and isinstance(node.value.func.value, ast.Name)
+              and node.value.func.value.id == "PARAMS"
+              and len(node.value.args) == 1 and not node.value.keywords):
+            method, arg = node.value.func.attr, node.value.args[0]
+            if method == "append":
+                items.append(arg)
+            elif method == "extend":
+                items += _literal_items(arg) or []
+    out: dict[str, dict[str, str]] = {}
+    for item in items:
+        read = _static_item(item)
+        if read is not None and read[0] not in out:
+            out[read[0]] = read[1]
+    return out
+
+
+def _literal_items(node: ast.expr) -> list[ast.expr] | None:
+    """The elements of a list or tuple literal, or None for anything else."""
+    if isinstance(node, (ast.List, ast.Tuple)) and not any(
+            isinstance(e, ast.Starred) for e in node.elts):
+        return list(node.elts)
+    return None
+
+
+def _static_item(node: ast.expr) -> tuple[str, dict[str, str]] | None:
+    """`(name, {"rationale", "units"})` from one dict literal or `Param(...)` call."""
+    given: dict[str, ast.expr] = {}
+    if isinstance(node, ast.Dict):
+        if any(key is None for key in node.keys):       # a **spread may override
+            return None
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                given[key.value] = value
+    elif isinstance(node, ast.Call) and _called(node.func) == "Param":
+        if any(isinstance(a, ast.Starred) for a in node.args) or any(
+                k.arg is None for k in node.keywords):
+            return None
+        order = [f.name for f in dataclasses.fields(Param)]
+        for position, arg in enumerate(node.args[:len(order)]):
+            given[order[position]] = arg
+        for keyword in node.keywords:
+            given[str(keyword.arg)] = keyword.value
+    else:
+        return None
+    name = _constant_str(given.get("name"))
+    if not name:
+        return None
+    return name, {"rationale": _constant_str(given.get("rationale")),
+                  "units": _constant_str(given.get("units"))}
+
+
+def _called(func: ast.expr) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _constant_str(node: ast.expr | None) -> str:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# the parameter as a reader sees it: the model's number, both homes' losers
+# --------------------------------------------------------------------------- #
+#: Where a param record lives, relative to the project root (phase-1's layout).
+#: Spelt here rather than asked of `store`, because it is a DISPLAY tag — the
+#: origin printed after a rejection — and it names the file a human opens to edit
+#: it whether or not the project has migrated yet.
+_RECORD_DIR = "params"
+
+#: The reason a view carries when the caller loaded no model and gave no reason.
+#: A view without a model must never pass for one with it; an empty
+#: `model_error` next to `value=None` would read as "the model says None".
+_NO_MODEL = "no model was loaded"
+
+
+@dataclass(frozen=True)
+class ParamView:
+    """One parameter as every reader shows it, assembled from its two homes.
+
+    The model owns `value`, `units`, `rationale` and `derived_from`, and its own
+    `PARAMS` losers. The param record (`params/<name>.json`) owns `source`,
+    `grounded_by` and `tags`, may carry losers of its own, and carries `units`
+    or `rationale` only where the model states none (spec §3.15). `rejected` is
+    the union, each row `(Rejected, origin)`, origin the place it lives —
+    `"model/bracket.py PARAMS"` or `"params/<name>.json"` — the model's first,
+    a loser both homes state shown once, as the model's.
+
+    `home` is where the value lives (`"model/bracket.py Config.thickness"`, or
+    `"<entry> PARAMS"` for a constant only PARAMS declares); `""` means the
+    model does not hold this parameter — either it did not load (`model_error`
+    says why) or the record outlived its field (an orphan). `value` is `None`
+    in both cases and never a copy from anywhere else: S-39 was `why` quoting
+    the ledger's 7 after the model said 8.0. `record` is the record's path, or
+    `""` when no record exists.
+
+    Not persisted; `to_dict` is the JSON shape for readers that write one
+    (`last_check.json`'s `params`).
+    """
+
+    name: str
+    value: Any = None
+    units: str = ""
+    rationale: str = ""
+    derived_from: tuple[str, ...] = ()
+    rejected: tuple[tuple[Rejected, str], ...] = ()
+    source: str = ""
+    grounded_by: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    home: str = ""
+    record: str = ""
+    model_error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name, "value": self.value, "units": self.units,
+            "rationale": self.rationale, "derived_from": list(self.derived_from),
+            "rejected": [{"value": item.value, "why": item.why,
+                          "evidence": item.evidence, "origin": origin}
+                         for item, origin in self.rejected],
+            "source": self.source, "grounded_by": list(self.grounded_by),
+            "tags": list(self.tags), "home": self.home, "record": self.record,
+            "model_error": self.model_error,
+        }
+
+
+def param_view(ledger, model: LoadedModel | None, *,
+               model_error: str = "") -> list[ParamView]:
+    """Every parameter, value from the model, provenance from the record.
+
+    `ledger` supplies the records (`ledger.params`); nothing but its names,
+    `source`, `grounded_by`, `tags`, `rejected`, and — where the model states
+    none — `units` and `rationale` is read from them. Their `value`,
+    `derived_from`, `gates` and `changed_in` are never read: the model owns the
+    first two, the last two are derived (`why` takes read sets; `decisions.
+    changed_in`).
+
+    Order: the model's (field order, then PARAMS-only constants), then records
+    the model does not define, in record order — each with `value=None` and no
+    `home`, which is what `orphan_params` lists.
+
+    `model=None` (it did not load, or the project has none): one view per
+    record, `value=None`, `model_error` set — to `model_error`, else
+    `"no model was loaded"`. No number is shown where the model should answer.
+
+    Replaces `sync_params`, which copied the model into the ledger and kept
+    the record's `rejected` whole: a loser added to PARAMS after the param
+    existed never reached anything a reader saw (S-38). Nothing is copied here,
+    so there is nothing to fall behind.
+    """
+    records: dict[str, Param] = {}
+    for record in list(getattr(ledger, "params", None) or ()):
+        records.setdefault(record.name, record)         # first wins, as Ledger.param
+    if model is None:
+        error = " ".join(str(model_error or "").split()) or _NO_MODEL
+        return [_record_view(record, model_error=error) for record in records.values()]
+
+    declared = model.params or params_from_model(model)
+    fields = {f.name for f in dataclasses.fields(model.config)}
+    config_home = (f"{_entry_relative(model, _config_source(model))} "
+                   f"{type(model.config).__name__}")
+    params_home = f"{model.entry} PARAMS"
+    views: list[ParamView] = []
+    for param in declared:
+        record = records.get(param.name)
+        views.append(ParamView(
+            name=param.name,
+            value=param.value,
+            units=param.units or (record.units if record else "") or "",
+            rationale=param.rationale or (record.rationale if record else "") or "",
+            derived_from=tuple(param.derived_from or ()),
+            rejected=_union([(item, params_home) for item in param.rejected or ()]
+                            + _record_losers(record)),
+            # The record's provenance; a PARAMS entry fills only what no record says.
+            source=(record.source if record else "") or param.source or "",
+            grounded_by=tuple((record.grounded_by if record else None)
+                              or param.grounded_by or ()),
+            tags=tuple((record.tags if record else None) or param.tags or ()),
+            home=f"{config_home}.{param.name}" if param.name in fields else params_home,
+            record=_record_path(param.name) if record else "",
+        ))
+    live = {param.name for param in declared}
+    views += [_record_view(record) for name, record in records.items() if name not in live]
+    return views
+
+
+def _record_path(name: str) -> str:
+    return f"{_RECORD_DIR}/{name}.json"
+
+
+def _record_losers(record: Param | None) -> list[tuple[Rejected, str]]:
+    if record is None:
+        return []
+    origin = _record_path(record.name)
+    out = []
+    for item in record.rejected or ():
+        if isinstance(item, dict):
+            item = Rejected(value=str(item.get("value", "")), why=str(item.get("why", "")),
+                            evidence=str(item.get("evidence", "")))
+        if isinstance(item, Rejected):
+            out.append((item, origin))
+    return out
+
+
+def _union(rows: list[tuple[Rejected, str]]) -> tuple[tuple[Rejected, str], ...]:
+    """Rows in order, each loser once. Case-folded on (value, why), the rule
+    `decisions` already uses: a record that repeats the model's loser is the same
+    loser, and the first home to state it — the model — is the one shown."""
+    seen: set[tuple[str, str]] = set()
+    out = []
+    for item, origin in rows:
+        key = (" ".join(str(item.value).split()).casefold(),
+               " ".join(str(item.why).split()).casefold())
+        if key not in seen:
+            seen.add(key)
+            out.append((item, origin))
+    return tuple(out)
+
+
+def _record_view(record: Param, *, model_error: str = "") -> ParamView:
+    """A record alone: its own provenance, no number, no home."""
+    return ParamView(
+        name=record.name, value=None, units=record.units or "",
+        rationale=record.rationale or "", rejected=_union(_record_losers(record)),
+        source=record.source or "", grounded_by=tuple(record.grounded_by or ()),
+        tags=tuple(record.tags or ()), home="", record=_record_path(record.name),
+        model_error=model_error)
+
+
+def _entry_relative(model: LoadedModel, path: str) -> str:
+    """`path` relative to the project root the model was loaded from, posix.
+
+    The root is not on `LoadedModel`, but `entry` is `file` relative to it, so
+    it is recovered by walking up one directory per entry component. The
+    config class usually lives in the entry itself; a model that grew into a
+    package names the module that defines it.
+    """
+    if not path or not os.path.isabs(path) or _norm(path) == _norm(model.file):
+        return model.entry
+    root = model.file
+    for _part in model.entry.replace("\\", "/").split("/"):
+        root = os.path.dirname(root)
+    try:
+        return os.path.relpath(path, root).replace(os.sep, "/")
+    except ValueError:                             # another drive, on Windows
+        return model.entry
+
 
 def sync_params(ledger, model: LoadedModel) -> list[Param]:
     """Refresh `ledger.params` from the model, preserving ledger-only provenance.
@@ -1945,6 +2442,11 @@ def sync_params(ledger, model: LoadedModel) -> list[Param]:
     destroy the record of why it once existed — and a parameter that disappears
     without explanation is exactly the kind of hole the decision log exists to
     prevent. Call it whenever the model is loaded.
+
+    Superseded by `param_view`, and deleted with the last caller (spec U29). The
+    merge below keeps the record's `rejected` whole, so a loser added to the
+    model's PARAMS after the param existed never reached the ledger (S-38); the
+    view reads both homes on every call instead of copying one into the other.
     """
     from_model = {p.name: p for p in params_from_model(model)}
     existing = {p.name: p for p in ledger.params}
@@ -1973,14 +2475,20 @@ def sync_params(ledger, model: LoadedModel) -> list[Param]:
 
 
 def orphan_params(ledger, model: LoadedModel) -> list[str]:
-    """Ledger params the model no longer defines.
+    """Param records (`ledger.params`) the model no longer defines, in record order.
 
     Either the model dropped a parameter and the record should be retired with a
     decision entry, or the parameter was renamed and its provenance is now
     stranded — pointing at nothing while every `grounded_by` still references it.
     Both are worth a line in the report rather than a silent deletion.
+
+    It reads the records and the model and nothing else: never a merged copy.
+    `sync_params` used to keep an orphan in `ledger.params` so this could find
+    it there; from 1.3 the records are the files under `params/`, and a param the
+    model owns entirely has no record at all, so an orphan is exactly a record
+    with no field behind it — the views `param_view` returns with no `home`.
     """
-    live = {p.name for p in params_from_model(model)}
+    live = {p.name for p in (model.params or params_from_model(model))}
     return [p.name for p in ledger.params if p.name not in live]
 
 def undocumented_params(model: LoadedModel) -> list[str]:
