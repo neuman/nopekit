@@ -558,11 +558,12 @@ def _skipped_ids(entries: list[str]) -> set[str]:
 
 
 #: What a child process prints for DemonstrateAgrees: both verdicts on one
-#: planted pack, as ONE JSON document on its last stdout line. A child because
-#: pack modules are cached by pack NAME in sys.modules, and a second copy of a
-#: pack in one process is refused or — worse — answered from the first copy's
-#: code (tests:H6, core:§5.12). `demonstrate` runs first, so its own loader meets
-#: the pack cold; the oracle then loads it by name, as every class above does.
+#: planted pack, and `packs.validate`'s, as ONE JSON document on its last stdout
+#: line. A child because pack modules are cached by pack NAME in sys.modules, and
+#: a second copy of a pack in one process is refused or — worse — answered from
+#: the first copy's code (tests:H6, core:§5.12). `demonstrate` runs first, so its
+#: own loader meets the pack cold; the oracle then loads it by name, as every
+#: class above does.
 _AGREE_SCRIPT = """\
 import json, os, sys
 tests_dir, root, name = sys.argv[1:4]
@@ -574,10 +575,13 @@ pack_dir = os.path.join(root, ".atompipe", "packs", name)
 demo = packs.demonstrate(pack_dir, tier=Tier.EXTERNAL)
 registry = gates.Registry()
 packs.load_gates(name, registry, root=root)
-print(json.dumps({"gates": registry.ids(),
-                  "oracle": T._oracle(pack_dir, registry),
+oracle = T._oracle(pack_dir, registry)
+notes = []
+validated = packs.validate(pack_dir, notes=notes)
+print(json.dumps({"gates": registry.ids(), "oracle": oracle,
                   "demonstrate": {"problems": demo.problems, "skipped": demo.skipped,
-                                  "ran": demo.ran}}))
+                                  "ran": demo.ran},
+                  "validate": validated, "notes": notes}))
 """
 
 #: The line each plant anchors on. Exactly one occurrence is demanded, so an edit
@@ -633,8 +637,8 @@ def _changed(before: dict[str, tuple], after: dict[str, tuple]) -> list[str]:
 class DemonstrateAgrees(unittest.TestCase):
     """``packs.demonstrate`` names exactly the gates this file's oracle names (D-25).
 
-    `pack validate` and pack-mode `gate selftest` run the spine's COPY of the gate
-    on the gates. The classes above keep their own assertions as an independent
+    `pack validate` runs the spine's COPY of the gate on the gates. The classes
+    above keep their own assertions as an independent
     oracle rather than delegating to that copy: a test that calls the code it
     guards is relaxed by relaxing the code, with no test file touched (R-6). This
     class is what stops the two drifting apart — on every bundled pack, and on
@@ -703,16 +707,23 @@ class DemonstrateAgrees(unittest.TestCase):
         self.assertTrue(any(phrase in line for line in demo),
                         f"demonstrate named {gate_id} for another reason than "
                         f"{phrase!r}: {demo}")
+        # `pack validate` refuses it too, with nothing else to say: the copy is
+        # otherwise publishable, and before demonstrate this list was empty for a
+        # planted logger (S-09).
+        self.assertEqual(out["validate"], demo)
 
     def test_the_planted_copy_is_clean_when_nothing_is_planted(self):
-        """The positive control for the three below: the copy itself — new
-        directory, new pack name, a cold process — is clean on both sides, so
-        they fail for what was planted and not for the copying."""
+        """The positive control for the violators below: the copy itself — new
+        directory, new pack name, a cold process — is clean on both sides and
+        publishable, so each of them fails for what was planted and not for the
+        copying."""
         out = self._planted()
         self.assertEqual(out["oracle"]["problems"], [])
         self.assertEqual(out["demonstrate"]["problems"], [])
         self.assertEqual(out["demonstrate"]["skipped"], [])
         self.assertEqual(out["demonstrate"]["ran"], len(out["gates"]))
+        self.assertEqual(out["validate"], [])
+        self.assertEqual(out["notes"], [])
 
     def test_a_gate_that_always_passes_is_named(self):
         """``return True``: passes its baseline, and its known-bad input too."""
@@ -734,7 +745,49 @@ class DemonstrateAgrees(unittest.TestCase):
                 'if k != "deflection_limit_mm"}\n'
                 '    return dataclasses.replace(ctx, params=params)\n')
         out = self._planted(lambda d: _plant(d, "selftest/bad_beams.py", _SHALLOW_DEF, body))
-        self._assert_named(out, "beam.deflection", "while its tools are present")
+        self._assert_named(out, "beam.deflection",
+                           "control did not fire: skipped on its own known-bad input")
+
+    def test_a_gate_that_skips_its_own_baseline_is_named(self):
+        """The gate reads a key its pack's baseline never states, so it skips
+        the good design with every tool it declares present: never shown to
+        accept anything (S-12)."""
+        body = ('    if "planted_key_mm" not in ctx.params:\n'
+                '        return Verdict(gate="beam.deflection", passed=False, skipped=True,\n'
+                '                       skip_reason="no planted_key_mm in the projection")\n')
+        out = self._planted(lambda d: _plant(d, "gates/beam.py", _DEFLECTION_DEF, body))
+        self._assert_named(out, "beam.deflection",
+                           "skips its own baseline while its tools are present")
+
+    def test_a_fixture_that_inherits_from_the_host_is_named(self):
+        """The seal probe, shown to refuse: the fixture layers its bad limit over
+        whatever the host states instead of over the pack's own baseline. Over
+        the baseline it fires; over an empty host the gate has nothing to read
+        (invariant 5)."""
+        body = ('    return dataclasses.replace(\n'
+                '        ctx, params={**ctx.params, "deflection_limit_mm": 1e-6})\n')
+        out = self._planted(lambda d: _plant(d, "selftest/bad_beams.py", _SHALLOW_DEF, body))
+        self._assert_named(out, "beam.deflection", "fires only with the baseline as host")
+
+    def test_a_missing_fixture_file_is_named_once_by_validate(self):
+        """Both sides name a control whose fixture file does not exist; `pack
+        validate` names it ONCE, by its root cause, not again as a control that
+        did not fire."""
+        def plant(pack_dir: str) -> None:
+            path = os.path.join(pack_dir, "gates", "beam.py")
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+            ref = 'fixture="selftest/bad_beams.py:shallow_section"'
+            self.assertEqual(text.count(ref), 1)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text.replace(ref, 'fixture="selftest/no_such_fixture.py"'))
+
+        out = self._planted(plant)
+        self.assertEqual(_flagged(out["oracle"]["problems"]), {"beam.deflection"})
+        self.assertEqual(_flagged(out["demonstrate"]["problems"]), {"beam.deflection"})
+        about = [line for line in out["validate"] if "beam.deflection" in line]
+        self.assertEqual(len(about), 1, out["validate"])
+        self.assertIn("does not exist", about[0])
 
     # -- nothing written into a pack ----------------------------------------- #
     def test_openmodelica_selftest_writes_nothing_in_the_pack(self):

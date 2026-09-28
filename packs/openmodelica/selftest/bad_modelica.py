@@ -58,11 +58,21 @@ of a generated file is not reproducible by a reader. They are real Modelica and
 omc genuinely rejects all three — which is why those controls will fire wherever
 omc is installed even though they skip on a machine without it.
 
-The five tier-0 fixtures are GENERATED into ``selftest/.generated/`` from the
-pack's own assets at fixture time, because they must be derived from the limits
-in ``baseline.json`` (see above) and a checked-in copy would silently stop
-matching the moment a limit moved. The generated files stay on disk after a run;
-they are meant to be opened and diffed against the originals.
+The five tier-0 fixtures are GENERATED from the pack's own assets at fixture
+time, because they must be derived from the limits in ``baseline.json`` (see
+above) and a checked-in copy would silently stop matching the moment a limit
+moved. They are written under the CALLER's ``out_dir``
+(``<out_dir>/openmodelica/known-bad/``), and stay there after a run to be opened
+and diffed against the originals.
+
+Never into this directory. What slipped through: they used to go to
+``selftest/.generated/`` whatever ``out_dir`` the caller gave, falling back to one
+fixed ``$TMPDIR/atompipe-openmodelica`` shared by every user of the machine — so
+a wheel install wrote into site-packages, the repository's own suite rewrote four
+files inside the tree it was testing on every run, and two users' runs could
+collide in one directory (packs:H16). Rejected: keeping the in-pack directory
+because a reader can find it there — a fixture that writes into the pack it is
+proving makes the proof depend on whether that directory is writable.
 """
 from __future__ import annotations
 
@@ -71,8 +81,8 @@ import csv
 import dataclasses
 import json
 import os
+import shutil
 import sys
-import tempfile
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PACK_DIR = os.path.dirname(_HERE)
@@ -137,25 +147,20 @@ def _with(ctx, **overrides):
     return dataclasses.replace(ctx, params=params, ledger=Ledger())
 
 
-def _generated(*parts: str) -> str:
-    """A path under ``selftest/.generated/``, created, falling back to a temp dir.
+#: Where under the caller's ``out_dir`` the generated known-bad files go. Named
+#: for the pack, so a project that runs several packs' controls into one
+#: ``out_dir`` cannot have two packs' fixtures collide.
+_GENERATED = ("openmodelica", "known-bad")
 
-    The pack directory is preferred because a fixture a reader cannot open is a
-    fixture a reader has to believe. A read-only checkout (a wheel, a container
-    layer, someone else's site-packages) falls back to the temp directory rather
-    than turning every control in the pack into an ERROR.
+
+def _generated(ctx, *parts: str) -> str:
+    """A path for a generated known-bad file, under ``ctx.out_dir``; its directory
+    is created.
+
+    Through ``ctx.out_path``, the spine's one answer to "where does this run
+    write". See the module docstring for why it is never this pack's directory.
     """
-    for base in (os.path.join(_HERE, ".generated"),
-                 os.path.join(tempfile.gettempdir(), "atompipe-openmodelica")):
-        target = os.path.join(base, *parts)
-        try:
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            with open(target, "a", encoding="utf-8"):
-                pass
-            return target
-        except OSError:
-            continue
-    raise OSError("nowhere writable to build the known-bad fixture")
+    return ctx.out_path(*_GENERATED, *parts)
 
 
 def _read_rows(path: str) -> tuple[list[str], list[list[str]]]:
@@ -219,7 +224,11 @@ def stripped_declarations(ctx):
     if not files:
         return _with(ctx)
 
-    out_dir = os.path.dirname(_generated("stripped", ".keep"))
+    # Emptied first: the gate walks this directory, and a .mo file an earlier run
+    # left there (a source since renamed) would be read as part of the model.
+    out_dir = _generated(ctx, "stripped")
+    shutil.rmtree(out_dir, ignore_errors=True)
+    os.makedirs(out_dir, exist_ok=True)
     written: list[str] = []
     for path in files:
         with open(path, "r", encoding="utf-8") as handle:
@@ -313,7 +322,7 @@ def run_truncated(ctx):
             kept.append(row)
     if len(kept) < 2:
         kept = rows[:max(2, len(rows) // 2)]
-    target = _generated("truncated_res.csv")
+    target = _generated(ctx, "truncated_res.csv")
     _write_rows(target, header, kept)
     return _with(ctx, modelica_result_csv=target)
 
@@ -349,7 +358,7 @@ def nan_injected(ctx):
             row.append("0")
         row[column] = "nan"
         rows[len(rows) // 2] = row
-    target = _generated("nan_res.csv")
+    target = _generated(ctx, "nan_res.csv")
     _write_rows(target, header, rows)
     return _with(ctx, modelica_result_csv=target)
 
@@ -407,7 +416,7 @@ def claim_exceeded(ctx):
         except (TypeError, ValueError, IndexError):
             pass
         moved.append(row)
-    target = _generated("claim_exceeded_res.csv")
+    target = _generated(ctx, "claim_exceeded_res.csv")
     _write_rows(target, header, moved)
     return _with(ctx, modelica_result_csv=target)
 
@@ -460,7 +469,7 @@ def mirror_drifted(ctx):
         offset = max((1.0 + MARGIN) * band, MARGIN_FLOOR)
         row[column] = repr(value + offset)
         drifted.append(row)
-    target = _generated("drifted_mirror.csv")
+    target = _generated(ctx, "drifted_mirror.csv")
     _write_rows(target, header, drifted)
     return _with(ctx, modelica_mirror_csv=target)
 
