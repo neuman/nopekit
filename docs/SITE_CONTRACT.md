@@ -264,7 +264,8 @@ an agent can read the site's state without a browser.
   `fresh` — and it is current and counts (its inputs, code and control are the ones
   it was measured with); `stale_reason` — why it is not current, in the resolver's
   words (`config.bed_xy 220.0 -> 250.0`, `control not demonstrated at this version —
-  run atompipe check`, `gate not registered in this project`), `""` when it is. A
+  run atompipe check`, or `… check --tier 2` for a costlier path's entry, `gate not
+  registered in this project`), `""` when it is. A
   claim covered by a row with a `stale_reason` is never `pass`.
 - `when` is the time the result dates from: the obs run that last wrote or hit its
   entry, else the entry's git commit time, else `""`. `age_s` is `when` measured

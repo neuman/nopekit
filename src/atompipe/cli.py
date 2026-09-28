@@ -403,6 +403,14 @@ def _swept(resolution: verdicts.Resolution, result: verdicts.SweepResult,
     it just did from what it did, and every gate it did not select — above the
     ceiling, outside `--only` — from the resolver, stale or not (S-20: those can
     go stale now, because nothing but their inputs decides it).
+
+    The one exception is a row the sweep itself served stale
+    (`SweepRow.stale_reason`: a costlier tier's entry whose path no current
+    control shows, which this sweep's ceiling cannot demonstrate). It stays in
+    `stale_gates` with the sweep's reason on its resolution row. What slipped through (review,
+    `repro_undemonstrated`): the sweep served that gate as a skip and this
+    dropped it from the stale set, so `check --junit` exited 0 ready while
+    `status` read the claim STALE.
     """
     rows = {row.verdict.gate: row for row in result.rows}
     resolved = {verdict.gate: verdict for verdict in resolution.verdicts}
@@ -415,9 +423,16 @@ def _swept(resolution: verdicts.Resolution, result: verdicts.SweepResult,
             merged.append(resolved[gate_id])
     registered = set(order)
     merged += [v for v in resolution.verdicts if v.gate not in registered]
+    served_stale = {gid: row for gid, row in rows.items() if row.stale_reason}
+    by_gate = dict(resolution.rows)
+    for gate_id, row in served_stale.items():
+        held = by_gate.get(gate_id) or verdicts.Row(gate_id, "fresh", cached=row.cached)
+        by_gate[gate_id] = dataclasses.replace(held, fresh=False,
+                                               stale_reason=row.stale_reason)
     return dataclasses.replace(
-        resolution, verdicts=merged,
-        stale_gates=frozenset(g for g in resolution.stale_gates if g not in rows))
+        resolution, verdicts=merged, rows=by_gate,
+        stale_gates=frozenset([*(g for g in resolution.stale_gates if g not in rows),
+                               *served_stale]))
 
 
 def _resolved(root: str, ledger: Ledger, registry: gates.Registry | None,

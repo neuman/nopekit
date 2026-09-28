@@ -78,7 +78,11 @@ library and the CLI never asked. On the bracket and on wrapped pack baselines
   — is keyed: an identity fixture on that known-good host is refused once the
   model passes, a defused helper is refused, a tightened limit fails, and the
   second gate served the cached helper keys it as the first did (admission
-  review, round 2).
+  review, round 2);
+* a costlier tier's entry whose path no current control shows reads STALE to
+  `check` — plain, `--junit` and `--force` — exactly as to `status`, never a
+  skip that a second passing gate turns into readiness, and its reason names
+  the one check that settles it, `--tier 2` (review, `repro_undemonstrated`).
 
 Scenarios that edit code run the sweep in a fresh process (`_DRIVER`, through
 `_env.run`), per spec §0.4: an in-process module cache must never be what makes
@@ -99,6 +103,7 @@ import re
 import sys
 import textwrap
 import unittest
+import xml.etree.ElementTree as ET
 from unittest import mock
 
 from atompipe import claims, gates, modelio, store, verdicts
@@ -637,6 +642,36 @@ def span(ctx):
         return Verdict(gate="shelf.span", passed=True, measured=s, limit=100.0, units="mm")
     return Verdict(gate="shelf.span", passed=s <= 100.0, measured=s, limit=100.0,
                    units="mm")
+'''
+
+#: The review's repro (``repro_undemonstrated``): the shelf gate honest on every
+#: tier's path, reading ``ctx.tier`` as ``GateContext`` allows — so the entry a
+#: tier-2 sweep files is the one every reader serves at tier 0 too
+#: (``_most_thorough``) — beside a second gate on the same claim that never
+#: reads the tier. The second is what turned the first's skip into readiness:
+#: one gate passing and one skipped reads PASS (partial), and that does not block.
+SHELF_GATES_TIERED = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+LIMITS = {0: 100.0, 1: 100.0, 2: 100.0, 3: 100.0}
+
+
+@gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def span(ctx):
+    s = float(ctx.params["span"])
+    limit = LIMITS[int(ctx.tier)]
+    return Verdict(gate="shelf.span", passed=s <= limit, measured=s, limit=limit,
+                   units="mm", detail=f"{s} mm (limit {limit})")
+
+
+@gate(id="shelf.reach", claims=["span"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def reach(ctx):
+    s = float(ctx.params["span"])
+    return Verdict(gate="shelf.reach", passed=s <= 100.0, measured=s, limit=100.0,
+                   units="mm", detail=f"{s} mm (limit 100.0)")
 '''
 
 #: The same known-bad span on a live host, with a ledger the fixture states
@@ -1478,6 +1513,110 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual((code, verdict_row(data, "shelf.span")["outcome"]), (0, "pass"), data)
         self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
         self.assertIn("**C1**", proven_section(self, project))
+
+    def test_cli_a_control_undemonstrated_on_the_costlier_path_reads_stale_to_check_too(self):
+        """V: the review's repro (``repro_undemonstrated``). A tier-0 check serves
+        the tier-2 entry of a gate that read ``ctx.tier`` (``_most_thorough``),
+        and judges that entry's control by the records alone — the tier-2 path is
+        above its ceiling. Once any edit under ``selftest/`` moved the control's
+        static part, nothing current demonstrates that path. ``resolve`` read it
+        as it should, the cached PASS stale; the sweep turned the same judgement
+        into a SKIPPED row, and ``_swept`` dropped the gate from the stale set.
+        With a second gate passing on C1 the skip read PASS (partial): ``check
+        --junit`` exited 0 with C1 ``skipped partial`` and ``last_check.json``
+        saying pass, while ``status`` said NOT READY, C1 STALE — and neither a
+        second ``check`` nor ``check --force`` changed either answer. Only
+        ``check --tier 2`` can settle it, so that is what the reason says."""
+        project = os.path.join(self.tmp(), "shelf")
+        write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
+        write(project, "gates/g.py", SHELF_GATES_TIERED)
+        write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
+        write(project, "selftest/known_good.py", SHELF_KNOWN_GOOD)
+        write(project, "selftest/bad.py", SHELF_LONG)
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        junit = os.path.join(project, ".atompipe", "out", "junit.xml")
+        last_check = os.path.join(project, ".atompipe", "cache", "last_check.json")
+        advice = "run atompipe check --tier 2"
+
+        # The positive controls: tier 2 proves C1, and a plain tier-0 check
+        # serves that tier-2 entry as current — admitted by the records alone.
+        code, data = check_json(self, project, "--tier", "2")
+        self.assertEqual((code, verdict_row(data, "shelf.span")["outcome"]), (0, "pass"), data)
+        [name] = entry_names(project, "shelf.span")
+        with open(os.path.join(project, ".atompipe", "verdicts", "shelf.span", name),
+                  encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["reads"].get("tier"), 2,
+                             "the precondition: the entry took the tier-2 path")
+        code, data = check_json(self, project)
+        got = verdict_row(data, "shelf.span")
+        self.assertEqual((code, got["outcome"], got["cached"], got["fresh"]),
+                         (0, "pass", True, True), got)
+        self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertIn("**C1**", proven_section(self, project))
+
+        # Any edit under selftest/ moves every control's static part.
+        write(project, "selftest/README.txt", "note\n")
+        shown = status_json(self, project)
+        self.assertEqual(shown["claims"]["C1"], "stale", "the precondition: status reads it")
+        self.assertEqual(shown["freshness"]["shelf.span"]["admission"], "undemonstrated")
+        [why] = shown["freshness"]["shelf.span"]["reasons"]
+        self.assertTrue(why.endswith(advice),
+                        f"status sends the reader to a check that cannot settle it: {why!r}")
+
+        def agrees(what: str) -> None:
+            """After ``what``, every reader still says C1 STALE — ``status``, the
+            ``last_check.json`` that check wrote, and the report's PROVEN section."""
+            status = status_json(self, project)
+            self.assertEqual(status["claims"]["C1"], "stale", f"{what}: {status['claims']}")
+            with open(last_check, encoding="utf-8") as fh:
+                last = json.load(fh)
+            self.assertEqual(last["statuses"]["C1"], "stale",
+                             f"{what}: last_check.json disagrees with status: "
+                             f"{last['statuses']}")
+            self.assertNotIn("**C1**", proven_section(self, project), what)
+
+        # The review's invocation, CI's: a plain check with --junit.
+        proc = cli(project, "check", "--junit")
+        self.assertEqual(proc.returncode, 1,
+                         f"check exits ready while status says NOT READY:\n{proc.stdout}")
+        self.assertIn(advice, proc.stdout, proc.stdout)
+        root = ET.parse(junit).getroot()
+        exit_codes = [p.get("value") for p in root.iter("property")
+                      if p.get("name") == "exit_code"]
+        self.assertEqual(exit_codes, ["1"], exit_codes)
+        [c1] = [case for case in root.iter("testcase")
+                if case.get("classname") == "claims.critical" and case.get("name") == "C1"]
+        self.assertIsNotNone(c1.find("failure"),
+                             f"C1 is not red in the JUnit: {ET.tostring(c1, 'unicode')}")
+        agrees("check --junit")
+
+        for argv in ((), ("--force",)):
+            what = " ".join(("check",) + argv)
+            code, data = check_json(self, project, *argv)
+            got = verdict_row(data, "shelf.span")
+            self.assertEqual((code, data["ready"]), (1, False), f"{what}: {data['blocking']}")
+            self.assertEqual(blocking_ids(data).get("C1"), "stale", f"{what}: {data['blocking']}")
+            self.assertEqual((got["outcome"], got["fresh"]), ("pass", False),
+                             f"{what}: the row is not the cached PASS, not current: {got}")
+            self.assertTrue(got.get("stale_reason", "").endswith(advice), f"{what}: {got}")
+            self.assertTrue(got.get("rho", "").startswith(name[:16]),
+                            f"{what}: the row is not the tier-2 entry's ({name}): {got}")
+            if argv:
+                # --force did run the cheap path, and says why its PASS is not the row
+                self.assertFalse(got["cached"], f"{what} served instead of running: {got}")
+                self.assertTrue(any(note.startswith("shelf.span: ran at tier 0 (PASS)")
+                                    and note.endswith("(PASS, not current)")
+                                    for note in data["notes"]), f"{what}: {data['notes']}")
+            agrees(what)
+
+        # And the one command that does settle it.
+        code, data = check_json(self, project, "--tier", "2")
+        self.assertEqual((code, verdict_row(data, "shelf.span")["outcome"]), (0, "pass"), data)
+        self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertIn("**C1**", proven_section(self, project))
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, "the settled tier-2 path is served to a plain check again")
 
     def _shelf_from_claim(self, fixture: str, known_good: str | None = None) -> str:
         """The repro A project: span 80 live, C1 at 100 mm, ``shelf.span``

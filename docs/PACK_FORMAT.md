@@ -632,8 +632,9 @@ to fail **at the gate's current version** (invariant 9):
   known-bad input, or whose control crashed, returned an unusable context or skipped
   itself with its tools present, gets `error="not admitted: <why>"` and its function
   is never called. A PASS whose control is not on record at the current version
-  reads stale — `control not demonstrated at this version — run atompipe check` — and
-  never under PROVEN. A missing tool is a skip, never a failed admission.
+  reads stale — `control not demonstrated at this version — run atompipe check`, with
+  `--tier <t>` when the verdict took the path a costlier `ctx.tier` picks — and
+  never under PROVEN, in `check` as in every reader. A missing tool is a skip, never a failed admission.
 - **This is the reject half.** It shows the gate can refuse. It does not yet show
   that the gate accepts a known-good design: Phase 2 adds that half. A pack's
   `selftest/baseline.json` already carries it for pack gates — `pack validate` and

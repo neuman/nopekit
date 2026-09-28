@@ -1401,7 +1401,11 @@ registered gate, in registration order, the first that applies:
    Invariant 2: a crash proves nothing, and neither does the PASS it followed.
 3. A Fresh entry under admission (PD-08, X14): PASS + admitted or pending counts;
    PASS + undemonstrated is stale, `control not demonstrated at this version — run
-   atompipe check`; not admitted is an error `not admitted: <why>`; a FAIL stays FAIL
+   atompipe check` — `… run atompipe check --tier <t>` when the entry's run took the
+   path `ctx.tier` t ≥ 1 picks, since a check below t judges that path's control by the
+   records alone and never runs it (`_undemonstrated`; review, `repro_undemonstrated`:
+   the plain words sent the reader to a check that served the same stale row forever);
+   not admitted is an error `not admitted: <why>`; a FAIL stays FAIL
    (undemonstrated, it is also listed stale) — admission gates what may COUNT as a pass.
 4. The latest entry, stale with its reasons, or Unknown with its reason (`model_error`
    joins "the model does not load"). Two outcomes: an error while
@@ -1522,7 +1526,14 @@ named above the ceiling runs, control included. `freshness` is computed first. P
 selected gate: 1. *availability* fails — a Fresh FAIL is served (R-3); otherwise
 skipped, `cached pass exists; <why> here` over a Fresh PASS (invariant 1), remembered
 as `availability` (never over a crash or self-skip at the same rho); no control runs (CI has no trimesh: a skip, never "not admitted").
-2. *admission* — not admitted: `error="not admitted: <why>"`, `fn` never called. 3.
+2. *admission* — not admitted: `error="not admitted: <why>"`, `fn` never called. A
+Fresh entry of a costlier tier is judged at its own tier by the records alone;
+undemonstrated there, the row is what `resolve` serves — the entry's verdict, cached,
+`stale_reason` `control not demonstrated at this version — run atompipe check --tier
+<t>` — and `check` keeps the gate in `stale_gates`. What slipped through (review,
+`repro_undemonstrated`): the sweep made that a skipped row and `_swept` dropped the gate
+from the stale set, so with a second gate passing on the claim it read PASS (partial) —
+`check --junit` exit 0, `last_check.json` saying pass — while `status` read it STALE. 3.
 unless `force`, a *Fresh* entry is served — unless a remembered crash or self-skip at
 a rho current now superseded it (§3.9), which re-runs the gate; *two outcomes* at the current rho
 (a Stale `conflict`) are served as `resolve`'s error, `two outcomes recorded for
@@ -1541,8 +1552,10 @@ entry with an opaque channel excepted, which `_judge` never matches either. 5. A
 over a current answer — `--force`, or a crash that superseded it — is one entry beside
 that answer: the gate is re-judged at the sweep's tier with the run's entry filed (in
 memory under `record=False`), and where the records resolve to another outcome — a
-Fresh entry of a costlier tier (`_most_thorough`), or two outcomes — that is the row,
-under its own tier's admission and with a `note:` saying so (`_outranked`). What
+Fresh entry of a costlier tier (`_most_thorough`), or two outcomes, or the same outcome
+from a costlier entry whose own tier's admission does not count (stale, or not
+admitted) — that is the row, under its own tier's admission and with a `note:` saying
+so (`… and it stands (PASS, not current)`; `_outranked`). What
 slipped through: `check --force --junit`, CI's invocation at tier 0, re-ran a gate that
 reads `ctx.tier` on its cheap path and laid that PASS over the tier-2 FAIL every reader
 served — exit 0, a green JUnit, `last_check.json` saying pass. The
@@ -2440,7 +2453,9 @@ def _resolved(root, ledger, registry, projection, model_error, *, now, model=Non
   ledger-integrity row, and `check` with its JUnit all render it. `sweep=` (from
   `check` only) lays that sweep's rows over the gates it selected: a row the sweep
   produced is current by construction, and under `--no-record` nothing reached disk
-  for the resolver to find.
+  for the resolver to find — except a row the sweep served stale
+  (`SweepRow.stale_reason`, a costlier tier's undemonstrated entry), which stays in
+  `stale_gates` with its reason on the resolution row.
 - **The view is never saved.** It holds cache verdicts, and coverage and read sets
   the records do not own. `tests/test_check_cache.py` walks this file's AST and
   refuses any `store.save` argument that flows from `_resolved`.

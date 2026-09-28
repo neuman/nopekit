@@ -4854,6 +4854,7 @@ MAX_STALE_REASONS = 3
 #: fail is a logger's output: it reads stale — never PASS — until a check runs
 #: the control. Pinned by ``tests/test_freshness.py``.
 _UNDEMONSTRATED = "control not demonstrated at this version — run atompipe check"
+
 #: The other fixed reasons a row reads stale for, in the spec's words (§3.10),
 #: which the transcript and the readers' tests match on: a ledger verdict from
 #: before 1.2 names no inputs (Q1.4); an unregistered gate's verdict still
@@ -4864,6 +4865,22 @@ _TWO_OUTCOMES = "two outcomes recorded for identical inputs"
 _NO_MODEL = "the model does not load"
 _NO_SPINE = ("the spine cannot digest its own sources (atompipe installed without .py "
              "files), so no entry can say what semantics it was computed under")
+
+
+def _undemonstrated(at: int | None) -> str:
+    """``_UNDEMONSTRATED`` for an entry whose run took the path ``ctx.tier``
+    ``at`` picks: the check that can settle it names that tier, ``… run
+    atompipe check --tier 2``, since a sweep below it judges that path's control
+    by the records alone and never runs it (Q1.6). ``at`` ``None`` (the gate
+    never read the tier) or 0 is the plain words, which a default check settles.
+
+    What slipped through (review, ``repro_undemonstrated``): the words said
+    ``run atompipe check`` for a tier-2 entry. That check served the same stale
+    row every time, and ``check --force`` re-proved only the cheap path, so the
+    advice was a loop. *Rejected:* the admission's own reason (``no control
+    entry at this version``) — it says why, not what settles it, and every
+    reader matches the fixed words."""
+    return f"{_UNDEMONSTRATED} --tier {at}" if at else _UNDEMONSTRATED
 
 
 # --------------------------------------------------------------------------- #
@@ -5915,9 +5932,11 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
        crash proves nothing, and neither does the PASS it followed.
     3. A **Fresh** entry, then admission (PD-08, X14): a PASS counts when its
        control is admitted or pending; undemonstrated, it reads stale
-       (``control not demonstrated at this version — run atompipe check``); not
-       admitted, an error ``not admitted: <why>``. A FAIL stays FAIL unless not
-       admitted (then that error; it blocks either way).
+       (``control not demonstrated at this version — run atompipe check``, with
+       ``--tier <t>`` for an entry that took a costlier tier's path:
+       ``_undemonstrated``); not admitted, an error ``not admitted: <why>``. A
+       FAIL stays FAIL unless not admitted (then that error; it blocks either
+       way).
     4. Otherwise the **latest entry**, stale with its reasons (Unknown with its
        reason; ``model_error`` joins the "model does not load" one). Two
        outcomes at the current rho: stale, or an error once
@@ -6013,8 +6032,8 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
         # 3. a Fresh entry, under admission
         if isinstance(state, Fresh):
             verdict = _as_spec(entry.to_verdict(), spec)
-            admission = _admission(here, spec, fn, held, notes, verified,
-                                   at=_read_tier(entry.reads))
+            at = _read_tier(entry.reads)
+            admission = _admission(here, spec, fn, held, notes, verified, at=at)
             when = when_of(entry, order)
             if admission.state == "not-admitted":
                 emit(_synthesized(spec, error=f"not admitted: {admission.reason}",
@@ -6022,8 +6041,9 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
                      Row(gid, state.state, entry=entry, admission=admission, when=when,
                          notes=row_notes))
             elif admission.state == "undemonstrated":
-                emit(verdict, Row(gid, state.state, cached=True, stale_reason=_UNDEMONSTRATED,
-                                  entry=entry, admission=admission, when=when, notes=row_notes))
+                emit(verdict, Row(gid, state.state, cached=True,
+                                  stale_reason=_undemonstrated(at), entry=entry,
+                                  admission=admission, when=when, notes=row_notes))
             else:
                 pending = (admission.reason,) if admission.state == "pending" else ()
                 notes.extend(f"{gid} — {note}" for note in pending)
@@ -6741,8 +6761,11 @@ class SweepRow:
     served), ``executed`` — its function ran on the real design in this sweep;
     ``cached`` — its verdict is a cache entry's; ``fresh`` — a pass or fail keyed
     at the current inputs (executed or cached), never a skip, a crash or a
-    refusal; ``stale_reason`` — why a row the sweep served is not current
-    (``""``: every row a sweep produces is); ``rho``; ``admission`` — how the
+    refusal; ``stale_reason`` — why a row the sweep served is not current, as
+    ``resolve`` says it: one kind, a costlier tier's entry whose path no control
+    current now shows, which this sweep's ceiling cannot run (``_undemonstrated``;
+    ``""`` on every other row, which is current by construction); ``rho``;
+    ``admission`` — how the
     gate's control was judged, ``None`` where it was not asked (a missing tool,
     a lost control)."""
 
@@ -6814,11 +6837,13 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
     outcomes) — ``--force``, or a crash that superseded it; any other run makes
     the only current entry, and a clash at its own rho is ``_contradicted``'s.
 
-    Then: a Fresh entry at other inputs with another outcome is served as step 3
+    Then: a Fresh entry at other inputs with another outcome — or with the same
+    outcome, when its own tier's admission does not count — is served as step 3
     serves one, under its own tier's admission (records alone above this
     sweep's tier, as step 2 judges a costlier entry — Q1.6), costed with this
-    run's time; two outcomes are ``resolve``'s error. A note says why the run's
-    own answer is not the row.
+    run's time: undemonstrated there, its verdict stale (``_undemonstrated``);
+    not admitted, that error. Two outcomes are ``resolve``'s error. A note says
+    why the run's own answer is not the row.
 
     What slipped through (review, ``check --force``): the forced run re-ran a
     gate that reads ``ctx.tier`` on its tier-0 path, got a PASS at the tier-0
@@ -6844,22 +6869,38 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
         refused = dataclasses.replace(_synthesized(spec, error=after.reasons[0],
                                                    rho=after.rho), **cost)
         return SweepRow(refused, executed=True, rho=after.rho, admission=judged)
-    if not isinstance(after, Fresh) or after.entry.rho == entry.rho \
-            or out8(after.entry.verdict) == out8(entry.verdict):
+    if not isinstance(after, Fresh) or after.entry.rho == entry.rho:
         return None
     served = after.entry
     tier = _read_tier(served.reads)
+    above = tier is not None and tier != s.now.tier
     # The served tier's admission, carrying what this sweep's own control run
     # did: the counts say a forced control executed, whichever tier it decided.
-    admitted = judged if tier is None or tier == s.now.tier else dataclasses.replace(
+    admitted = judged if not above else dataclasses.replace(
         _admit(s, spec, fn, run_ctx, may_run=False, force=False, at=tier),
         executed=judged.executed, reverified=judged.reverified)
+    # The same outcome is the run's own answer only while the served entry
+    # COUNTS. What slipped through (review, `repro_undemonstrated`): a forced
+    # tier-0 PASS matched a tier-2 PASS whose path no current control shows,
+    # so the run's fresh row stood — `check --force` exited 0 ready while
+    # `resolve` served that tier-2 entry stale and `status` read NOT READY.
+    if out8(served.verdict) == out8(entry.verdict) and admitted.state in ("admitted",
+                                                                          "pending"):
+        return None
     shown = _as_spec(served.to_verdict(), spec)
+    stands = shown.outcome.upper() + {"undemonstrated": ", not current",
+                                      "not-admitted": ", not admitted"}.get(admitted.state, "")
     s.notes.append(f"{ran}; the tier-{tier} entry {served.name} at these inputs is the "
-                   f"more thorough answer, and it stands ({shown.outcome.upper()})"
-                   if tier is not None and tier != s.now.tier else
+                   f"more thorough answer, and it stands ({stands})"
+                   if above else
                    f"{ran}; the entry {served.name} at these inputs is the answer the "
-                   f"records resolve to, and it stands ({shown.outcome.upper()})")
+                   f"records resolve to, and it stands ({stands})")
+    if admitted.state == "undemonstrated" and above:
+        # `resolve`'s reading and `_sweep_one` step 2's: the entry's verdict,
+        # stale until `check --tier <tier>` runs that path's control.
+        return SweepRow(dataclasses.replace(shown, **cost), executed=True,
+                        stale_reason=_undemonstrated(tier), rho=served.rho,
+                        admission=admitted)
     if admitted.state == "undemonstrated":
         return SweepRow(dataclasses.replace(
             _synthesized(spec, skipped=True, skip_reason=admitted.reason), **cost),
@@ -6899,9 +6940,25 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     served = (not force and isinstance(state, Fresh)
               and _standing(s.held.get(gid), state) is None)
     at = _read_tier(state.entry.reads) if served else s.now.tier
-    judged = _admit(s, spec, fn, run_ctx, may_run=at is None or at == s.now.tier,
-                    force=force, at=at)
+    may_run = at is None or at == s.now.tier
+    judged = _admit(s, spec, fn, run_ctx, may_run=may_run, force=force, at=at)
+    if judged.state == "undemonstrated" and not may_run:
+        # The costlier path's entry, with no control current on that path: what
+        # `resolve` reads, the entry's verdict and stale, never a skip. What
+        # slipped through (review, `repro_undemonstrated`): this returned the
+        # skip below, and `_swept` dropped the gate from the stale set — with a
+        # second gate passing on the claim, the skip read PASS (partial), so
+        # `check --junit` exited 0 ready and `last_check.json` said pass, while
+        # `status` read the claim STALE. A tier-0 check cannot settle it and
+        # must not pretend to: only `check --tier <at>` runs that path's
+        # control. *Rejected:* running the control here at `at` — the sweep's
+        # ceiling is what the caller paid for (Q1.6), and a tier-2 path may be
+        # the minutes-long one.
+        return SweepRow(_as_spec(state.entry.to_verdict(), spec), cached=True,
+                        stale_reason=_undemonstrated(at), rho=state.entry.rho,
+                        admission=judged)
     if judged.state == "undemonstrated":
+        # A control whose tools went missing while it ran: a skip, BLOCKED.
         return SweepRow(_synthesized(spec, skipped=True, skip_reason=judged.reason),
                         admission=judged)
     if judged.state == "not-admitted":
@@ -6985,7 +7042,11 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
        remembered as ``availability`` (never over a crash or self-skip at the
        same rho); no control runs, ``fn`` is never called.
     2. **Admission** (``admission``'s steps; ``force`` re-runs the control). Not
-       admitted: ``error="not admitted: <why>"``, ``fn`` never called.
+       admitted: ``error="not admitted: <why>"``, ``fn`` never called. A Fresh
+       entry of a costlier tier is judged at ITS tier by the records alone;
+       undemonstrated there, it is served as ``resolve`` serves it — its
+       verdict, cached, stale ``control not demonstrated at this version — run
+       atompipe check --tier <t>`` — never a skip.
     3. Unless ``force``, a **Fresh** entry is served — unless a remembered crash
        or self-skip at a rho current now superseded it (§3.9: a crash proves
        nothing, and neither does the PASS it followed), which re-runs the gate. **Two
@@ -7004,7 +7065,8 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
     5. A run over a **current answer** — ``force``, or a crash that superseded
        it — is re-judged with its entry filed (``_outranked``): where the
        records resolve to another outcome (a costlier tier's Fresh entry, two
-       outcomes), that is the row, and a note says so.
+       outcomes), or to the same outcome from a costlier entry that does not
+       count, that is the row, and a note says so.
 
     The gate runs INSIDE ``before`` rather than in ``run_all``'s own loop: that
     loop's trace carries no anchors, and a path-valued param digested without
