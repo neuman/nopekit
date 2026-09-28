@@ -14,7 +14,7 @@ anything critical is failing, stale, blocked, unrun or ungated, the verdict says
 so before it says anything good. A report that leads with the good news and
 buries the gap is a marketing document.
 
-Four rules are made mechanical here, each because the corresponding mistake is
+Five rules are made mechanical here, each because the corresponding mistake is
 easy and has been made:
 
 1. **The PROVEN table is built from `Verdict.ok`, never from `Verdict.passed`.**
@@ -43,6 +43,13 @@ easy and has been made:
    never be verified. All three get their own lines, because none of them shows up
    as a failing gate and all three sink builds.
 
+5. **JUnit is never greener than the exit code.** CI renders the XML, not the
+   exit code, and a test tab of "12 passed, 3 skipped" beside a job that exited 1
+   invites somebody to fix the "flaky" exit code. So a testcase is childless only
+   for `outcome == "pass"`, the critical-claims suite fails exactly where
+   `claims.blocking` does, and an exit code the rendered verdicts do not explain
+   is itself rendered as a failure (`render_junit`, `render_selftest_junit`).
+
 Nothing in this module reads a clock or a module-level registry. The run time
 comes from `ledger.last_run.when` (contract rule 3) and the registry is passed in
 — a report that reached for `gates.REGISTRY` could only be tested against a
@@ -50,9 +57,12 @@ project it had already imported.
 """
 from __future__ import annotations
 
+import math
 import os
+import re
 from typing import Any, Iterable
 
+from . import __version__
 from . import claims as claim_logic
 from . import store
 from .artifacts import unextracted
@@ -199,9 +209,10 @@ def _num(value: Any) -> str:
     return str(value)
 
 
-def _trunc(text: str, limit: int) -> str:
+def _trunc(text: str, limit: int | None) -> str:
+    """One line of `text`, cut to `limit` characters; `None` normalises and never cuts."""
     text = " ".join((text or "").split())
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+    return text if limit is None or len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def _cell(text: str) -> str:
@@ -1141,7 +1152,7 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False) -> st
 
 
 def _terminal_reason(ledger: Ledger, claim: Claim, status: ClaimStatus,
-                     cover: dict[str, list[str]]) -> str:
+                     cover: dict[str, list[str]], *, full: bool = False) -> str:
     """The shortest true explanation of why this claim is not settled.
 
     The verdict cited is `claims.explaining_verdict`'s, the same one `atompipe
@@ -1155,21 +1166,26 @@ def _terminal_reason(ledger: Ledger, claim: Claim, status: ClaimStatus,
 
     The body prefers `detail`, then `error`, then `skip_reason`: the same order as
     `cli._blocking_reason`, so the words agree as well as the gate. It is only
-    truncated here, because this line shares a terminal row with the claim.
+    truncated here, because this line shares a terminal row with the claim;
+    `full=True` keeps the words and drops the cut, for the JUnit `message` — a
+    third caller that reuses this reason rather than writing a third copy of it.
     """
+    def cut(text: str, limit: int) -> str:
+        return _trunc(text, None if full else limit)
+
     if status is ClaimStatus.UNCLAIMED:
         return "no gate covers it"
     if status is ClaimStatus.UNVERIFIED:
         return "needs the real object"
     if status is ClaimStatus.ASSERTED:
-        return _trunc(claim.rationale or claim.source or "standing assumption", 52)
+        return cut(claim.rationale or claim.source or "standing assumption", 52)
     if status is ClaimStatus.REFUTED:
         res = claim.physical_result
-        return _trunc(res.detail if res and res.detail else "refuted in hardware", 60)
+        return cut(res.detail if res and res.detail else "refuted in hardware", 60)
     v = claim_logic.explaining_verdict(claim, ledger.verdicts)
     if v is not None:
         body = v.detail or v.error or v.skip_reason
-        return f"{v.gate} : {_trunc(body, 56)}" if body else f"{v.gate} did not pass"
+        return f"{v.gate} : {cut(body, 56)}" if body else f"{v.gate} did not pass"
     gates = cover.get(claim.id) or list(claim.gates or [])
     if status is ClaimStatus.STALE:
         passed = [v.gate for v in _ok_verdicts(ledger, claim)]
@@ -1197,11 +1213,416 @@ def write_report(root: str, ledger: Ledger, registry: Any, *,
     return path
 
 
+# --------------------------------------------------------------------------- #
+# JUnit: the same judgement, in the one format every CI already renders
+# --------------------------------------------------------------------------- #
+#: Where `check --junit` and `gate selftest --junit` write when given no path,
+#: relative to the project root.
+#:
+#: Why this value: `.atompipe/out/` is gate scratch, ignored both by the
+#: `.atompipe/.gitignore` that `init` writes and by this repository's own
+#: `.gitignore`, so a `check --junit` in CI or on a laptop never dirties the tree.
+#: *Rejected:* the project root — tracked, so every run would leave a modified
+#: file behind and the clean-tree gate (G5) would read red for a report.
+JUNIT_DEFAULT = ".atompipe/out/junit.xml"
+
+#: The suites `render_junit` always writes, in this order, even when one is
+#: empty: a CI step (and `tests/oracle/bracket_signature.py`) finds them by name.
+#: The claims are split by criticality because only the critical suite is the
+#: exit code's judgement — its red count IS `len(claims.blocking())`.
+#: *Rejected:* writing a suite only when it has testcases — an absent suite reads
+#: exactly like one that had nothing to say; one suite for every claim — a failing
+#: nice-to-have would then sit in the count the exit code is held to.
+_JUNIT_SUITES = ("gates", "claims.critical", "claims.not-critical")
+
+#: The prefix a verdict's `error` carries when the gate was refused because its
+#: negative control is not demonstrated at this version (Phase 1.2's admission).
+#: It renders `<error type="not-admitted">` rather than `type="error"`, because
+#: "the instrument is not trusted" and "the instrument crashed" send a reader to
+#: different places. *Rejected:* a substring match — an exception whose text
+#: merely quotes the phrase is still a crash, so only the start counts.
+_NOT_ADMITTED = "not admitted:"
+
+#: The code points XML 1.0 forbids (its `Char` production): C0 controls other
+#: than tab, LF and CR; the surrogates, which a Python `str` can hold alone (bytes
+#: decoded with `surrogateescape`) and UTF-8 cannot encode; and U+FFFE/U+FFFF.
+#: What slipped through while designing this (the slice probe behind phase-1.md
+#: 1.1): ElementTree writes every one of them raw — an ANSI colour escape from a
+#: solver's log (`\x1b`), a NUL from a C string, a form feed from a pager — and the
+#: file then fails to parse, so the CI step that reads it shows no failures at
+#: all. *Rejected:* dropping them (the text a reader needs to recognise, an escape
+#: sequence, vanishes); XML 1.1 (most CI parsers refuse it).
+_XML_ILLEGAL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
+def junit_safe(text: Any) -> str:
+    """`text` with every code point XML 1.0 forbids shown as visible `\\xNN` / `\\uNNNN`.
+
+    `"\\x1b[31mred"` becomes the eleven visible characters `\\x1b[31mred`, so the
+    escape a gate's log carried is still recognisable where CI shows it. Tab, LF,
+    CR and every other character (accents, emoji, U+007F) are left alone.
+    Backslashes are not escaped: a Windows path in a message must read as one.
+    `None` is `""`; anything else is `str()`-ed first.
+    """
+    if text is None:
+        return ""
+    return _XML_ILLEGAL.sub(
+        lambda m: (f"\\x{ord(m.group()):02x}" if ord(m.group()) < 0x100
+                   else f"\\u{ord(m.group()):04x}"),
+        str(text))
+
+
+def _xml_sub(parent: Any, tag: str, **attrs: Any) -> Any:
+    """A child element whose every attribute went through `junit_safe`.
+
+    Built through this helper only, so no value reaches the tree unsanitised —
+    a second, direct `SubElement` call is how one field would slip past.
+    `makeelement` + `append` is what `SubElement` does, without an import here.
+    """
+    child = parent.makeelement(tag, {k: junit_safe(v) for k, v in attrs.items()})
+    parent.append(child)
+    return child
+
+
+def _xml_text(element: Any, text: Any) -> None:
+    safe = junit_safe(text)
+    if safe:
+        element.text = safe
+
+
+def _xml_properties(parent: Any, pairs: Iterable[tuple[str, Any]]) -> None:
+    props = _xml_sub(parent, "properties")
+    for name, value in pairs:
+        _xml_sub(props, "property", name=name, value=value)
+
+
+def _junit_time(seconds: Any) -> str:
+    """Seconds as a plain decimal (`0.0004`, never `4e-04`): JUnit's schema types
+    `time` as xs:decimal, and a parser that follows it rejects an exponent."""
+    try:
+        value = float(seconds)
+    except (TypeError, ValueError):
+        return "0"
+    if not math.isfinite(value) or value <= 0:
+        return "0"
+    return f"{value:.6f}".rstrip("0").rstrip(".") or "0"
+
+
+def _junit_measured(verdict: Verdict) -> str:
+    """`measured 0.699718 mm vs limit 0.5 mm`, then one line per evidence file."""
+    units = f" {verdict.units}" if verdict.units else ""
+    lines: list[str] = []
+    if verdict.measured is not None:
+        line = f"measured {_num(verdict.measured)}{units}"
+        if verdict.limit is not None:
+            line += f" vs limit {_num(verdict.limit)}{units}"
+        lines.append(line)
+    elif verdict.limit is not None:
+        lines.append(f"limit {_num(verdict.limit)}{units}")
+    lines += [f"evidence: {path}" for path in verdict.evidence or []]
+    return "\n".join(lines)
+
+
+def _junit_outcome(case: Any, verdict: Verdict) -> None:
+    """The outcome child of one gate's testcase: nothing, iff `outcome == "pass"`.
+
+    Keyed off `Verdict.outcome`, the one definition, and never off `passed`: a
+    writer reading the flag renders a skip that also said `passed=True` as a
+    green testcase — the generous direction phase-1.md names as this format's
+    failure (R-5; `RenderersAgree.test_junit` holds all 8 flag combinations).
+    """
+    outcome = verdict.outcome
+    if outcome == "pass":
+        return
+    if outcome == "fail":
+        child = _xml_sub(case, "failure", type="fail",
+                         message=verdict.detail or "the gate reported a failure")
+        _xml_text(child, _junit_measured(verdict))
+    elif outcome == "error":
+        error = str(verdict.error)
+        child = _xml_sub(case, "error",
+                         type="not-admitted" if error.startswith(_NOT_ADMITTED) else "error",
+                         message=error)
+        _xml_text(child, verdict.detail)
+    else:
+        _xml_sub(case, "skipped", message=verdict.skip_reason or "skipped")
+
+
+def _junit_gate_case(suite: Any, gate_id: str, pack: str, verdict: Verdict | None, *,
+                     cached: bool = False, not_run: str = "") -> None:
+    """One gate's testcase. No verdict is a skip — "not run: <why>" — never a pass.
+
+    A cached testcase has `time="0"` (a cached row never replays a duration: the
+    run took none) and carries `<properties><property name="cached"
+    value="true"/></properties>`, which is metadata, not an outcome.
+    """
+    case = _xml_sub(suite, "testcase",
+                    classname=f"pack.{pack}" if pack else "project", name=gate_id,
+                    time="0" if cached or verdict is None
+                    else _junit_time(verdict.duration_s))
+    if verdict is None:
+        # A registered gate with nothing to say is the quiet failure rule 2 in
+        # this module's docstring describes; here it stays visible as a skip.
+        _xml_sub(case, "skipped",
+                 message=f"not run: {not_run}" if not_run
+                 else "not run: no verdict in this run")
+        return
+    if cached:
+        _xml_properties(case, [("cached", "true")])
+    _junit_outcome(case, verdict)
+
+
+def _junit_red(element: Any) -> int:
+    """Testcases under `element` with a failure or an error: what CI paints red."""
+    return sum(1 for case in element.iter("testcase")
+               if case.find("failure") is not None or case.find("error") is not None)
+
+
+def _junit_tally(element: Any, suites: Iterable[Any]) -> None:
+    """Set `tests failures errors skipped time` on `element` from the testcases
+    inside `suites` — counted, never carried: a CI summary reads these
+    attributes, and a count kept beside the children drifts from them."""
+    cases = [case for suite in suites for case in suite.iter("testcase")]
+    element.set("tests", str(len(cases)))
+    element.set("failures", str(sum(1 for c in cases if c.find("failure") is not None)))
+    element.set("errors", str(sum(1 for c in cases if c.find("error") is not None)))
+    element.set("skipped", str(sum(1 for c in cases if c.find("skipped") is not None)))
+    element.set("time", _junit_time(sum(float(c.get("time") or 0) for c in cases)))
+
+
+def _junit_serialise(root: Any, suites: list[Any]) -> str:
+    import xml.etree.ElementTree as ET
+    for suite in suites:
+        _junit_tally(suite, [suite])
+    _junit_tally(root, suites)
+    ET.indent(root, space="  ")
+    return ('<?xml version="1.0" encoding="UTF-8"?>\n'
+            + ET.tostring(root, encoding="unicode") + "\n")
+
+
+def _claim_case(suite: Any, ledger: Ledger, claim: Claim, status: ClaimStatus,
+                cover: dict[str, list[str]], *, red: bool) -> None:
+    """One claim's testcase, asserting "this claim does not block the spend".
+
+    `red` is the caller's: blocking (critical) or FAIL/REFUTED (not critical).
+    A red claim whose status came from a gate that crashed is an `error` — a crash
+    reads louder than a failure (invariant 2) — else a `failure` typed with the
+    status. Everything short of settled is skipped with its words: `partial: …`
+    for a PASS that rests on fewer gates than cover it, `needs a real part`,
+    `assumed`. Childless only for PASS with every covering gate passed, and for
+    VERIFIED.
+    """
+    case = _xml_sub(suite, "testcase", classname=suite.get("name"), name=claim.id,
+                    time="0")
+    rendered = claim.acceptance.render() if claim.acceptance else ""
+    words = (claim.statement or "") + (f"\nacceptance: {rendered}" if rendered else "")
+    if red:
+        reason = _terminal_reason(ledger, claim, status, cover, full=True)
+        explaining = claim_logic.explaining_verdict(claim, ledger.verdicts)
+        # Only a FAIL can come from a crash. A REFUTED claim with a crashed
+        # modelled-half gate beside it is refuted by the real object, and saying
+        # "error" there would send the reader to the gate instead of the part.
+        if (status is ClaimStatus.FAIL and explaining is not None
+                and explaining.outcome == "error"):
+            child = _xml_sub(case, "error", type="error", message=reason)
+        else:
+            child = _xml_sub(case, "failure", type=status.value, message=reason)
+        _xml_text(child, words)
+        return
+    if status is ClaimStatus.PASS:
+        unproven = _unproven_for(claim.id, cover, ledger)
+        if unproven:
+            _xml_sub(case, "skipped", message="partial: " + "; ".join(
+                f"{gid} {why}" for gid, why in unproven))
+        return
+    if status is ClaimStatus.VERIFIED:
+        return
+    if status is ClaimStatus.UNVERIFIED:
+        _xml_sub(case, "skipped", message="needs a real part")
+    elif status is ClaimStatus.ASSERTED:
+        _xml_sub(case, "skipped", message="assumed")
+    else:
+        _xml_sub(case, "skipped", message=f"{status.value}: "
+                 f"{_terminal_reason(ledger, claim, status, cover, full=True)}")
+
+
+def render_junit(ledger: Ledger, verdicts: Iterable[Verdict], registry: Any, *,
+                 tier: Any, ready: bool, exit_code: int, when: str,
+                 not_run: Any = None, cached: Iterable[str] = frozenset(),
+                 stale: bool = False, spine: str = "") -> str:
+    """This command's run as JUnit XML — never greener than its exit code.
+
+    A CI system renders this file, not the exit code, so the file carries the
+    same judgement the exit code was made from and may only ever be redder:
+
+    * **`gates`** — one testcase per REGISTERED gate, in registry order, so the
+      count is stable between runs. Its outcome is the gate's verdict in
+      `verdicts` (this command's rows): childless iff `outcome == "pass"`; fail
+      -> `<failure type="fail">`; error -> `<error type="error">`, or
+      `type="not-admitted"` for an error that starts `not admitted:`; skipped ->
+      `<skipped>`. A gate with no row is `<skipped message="not run: <why>">`,
+      the why from `not_run` (`(gate, reason)` pairs or a mapping, e.g. "above
+      the tier ceiling", "excluded by --only"). Gates in `cached` get `time="0"`
+      and a `cached` property.
+    * **`claims.critical`** — one testcase per critical claim, each asserting
+      "does not block the spend". Its red testcases are exactly
+      `claims.blocking(ledger, registry, stale=stale)`, so failures plus errors
+      equal `len(blocking())`; zero claims adds one failing `no claims recorded`
+      (zero blocking claims out of zero is not readiness, and `check` exits 1).
+    * **`claims.not-critical`** — FAIL and REFUTED red; every other non-pass
+      skipped with its reason.
+
+    `ledger` must be the ledger the exit code was judged from, and `stale` the
+    flag it was judged with: the claim suites are recomputed from them, never
+    from `verdicts`. Should a caller hand over an exit code the claims do not
+    explain anyway — a non-zero code with nothing blocking, as a stale project
+    rendered without `stale=True` would give — `claims.critical` gains one
+    failing `exit code` testcase saying so. A caller's disagreement surfaces as
+    red, never as a green file beside a red job.
+
+    Root `<properties>`: `spine_version`, `exit_code`, `tier`, `ready`, `when`,
+    and `spine` when given (the spine digest, from Phase 1.2). `when` is the
+    caller's timestamp; this function reads no clock. Every attribute and text
+    value goes through `junit_safe`, so the file parses whatever a gate wrote.
+    """
+    import xml.etree.ElementTree as ET        # ~6 ms; only `--junit` pays it
+
+    code = int(exit_code)
+    root = ET.Element("testsuites", {"name": "atompipe check"})
+    props = [("spine_version", __version__), ("exit_code", str(code)),
+             ("tier", str(_int_or(tier))), ("ready", "true" if ready else "false"),
+             ("when", when)]
+    if spine:
+        props.append(("spine", spine))
+    _xml_properties(root, props)
+    suites = {name: _xml_sub(root, "testsuite", name=name) for name in _JUNIT_SUITES}
+
+    rows = list(verdicts or ())
+    by_gate = {v.gate: v for v in rows}
+    reasons = dict(not_run or ())
+    cached = frozenset(cached or ())
+    if registry is not None:
+        gates = [(spec.id, spec.pack) for spec in _specs(registry)]
+    else:
+        # No registry, no list of what should have run: fall back to the rows
+        # themselves, in order, rather than render an empty and green suite.
+        gates = [(gate_id, "") for gate_id in dict.fromkeys(v.gate for v in rows)]
+    for gate_id, pack in gates:
+        verdict = by_gate.get(gate_id)
+        _junit_gate_case(suites["gates"], gate_id, pack or (verdict.pack if verdict else ""),
+                         verdict, cached=gate_id in cached,
+                         not_run=str(reasons.get(gate_id, "")))
+
+    st = _statuses(ledger, registry, stale)
+    cover = _coverage(ledger, registry)
+    blocking = {c.id for c, _ in claim_logic.blocking(ledger, registry, stale=stale)}
+    for claim in ledger.claims:
+        status = st[claim.id]
+        if claim.critical:
+            _claim_case(suites["claims.critical"], ledger, claim, status, cover,
+                        red=claim.id in blocking)
+        else:
+            _claim_case(suites["claims.not-critical"], ledger, claim, status, cover,
+                        red=status in (ClaimStatus.FAIL, ClaimStatus.REFUTED))
+
+    critical = suites["claims.critical"]
+    if not ledger.claims:
+        case = _xml_sub(critical, "testcase", classname="claims.critical",
+                        name="no claims recorded", time="0")
+        _xml_sub(case, "failure", type="no-claims",
+                 message="no claims recorded, so nothing was checked — an empty "
+                         "ledger is not a clean bill of health")
+    if code != 0 and _junit_red(critical) == 0:
+        case = _xml_sub(critical, "testcase", classname="claims.critical",
+                        name="exit code", time="0")
+        _xml_sub(case, "failure", type="exit-code",
+                 message=f"the command exits {code} and no claim here blocks: the "
+                         f"exit code and these verdicts disagree, and the exit code "
+                         f"is the one CI obeys")
+    return _junit_serialise(root, list(suites.values()))
+
+
+#: The suffix `gates.selftest` files a control's verdict under (`f"{spec.id}#selftest"`,
+#: spelled inline there). The `controls` testcase drops it: the suite already
+#: says these are controls, and the bare gate id is what a reader searches the
+#: code for. A result without the suffix keeps its name as it is. *Rejected:*
+#: keeping it — `bracket.deflection#selftest` beside a suite named `controls` is
+#: the same fact twice, and a CI that splits `classname.name` on dots reads it oddly.
+_SELFTEST_SUFFIX = "#selftest"
+
+
+def render_selftest_junit(results: Iterable[Verdict], *, exit_code: int, when: str,
+                          baselines: Iterable[Verdict] | None = None) -> str:
+    """`gate selftest` as JUnit XML — never greener than its exit code.
+
+    * **`controls`** — one testcase per result of `gates.selftest`, named for
+      the gate (the `#selftest` suffix dropped; the suite says what it is).
+      Childless iff the control fired (`outcome == "pass"`); a control that did
+      not fire, or crashed, is red; a tooling skip is `<skipped>`.
+    * **`baselines`** — pack mode only (`baselines` not None): each gate's
+      verdict on its pack's own `selftest/baseline.json`, childless iff it passed.
+
+    A selftest that ran nothing and exits 1 (no `--allow-empty`) gains one
+    failing `no controls ran` testcase; any other non-zero exit with nothing red
+    gains a failing `exit code` testcase. An empty file beside a red job is the
+    "ran zero controls and reported success" failure, in XML.
+    """
+    import xml.etree.ElementTree as ET        # ~6 ms; only `--junit` pays it
+
+    code = int(exit_code)
+    results = list(results or ())
+    root = ET.Element("testsuites", {"name": "atompipe gate selftest"})
+    _xml_properties(root, [("spine_version", __version__), ("exit_code", str(code)),
+                           ("when", when)])
+    controls = _xml_sub(root, "testsuite", name="controls")
+    suites = [controls]
+    for verdict in results:
+        gate_id = verdict.gate
+        if gate_id.endswith(_SELFTEST_SUFFIX):
+            gate_id = gate_id[: -len(_SELFTEST_SUFFIX)]
+        _junit_gate_case(controls, gate_id, verdict.pack, verdict)
+    if baselines is not None:
+        base = _xml_sub(root, "testsuite", name="baselines")
+        suites.append(base)
+        for verdict in baselines:
+            _junit_gate_case(base, verdict.gate, verdict.pack, verdict)
+
+    if code != 0 and _junit_red(root) == 0:
+        if not results:
+            case = _xml_sub(controls, "testcase", classname="controls",
+                            name="no controls ran", time="0")
+            _xml_sub(case, "failure", type="empty",
+                     message=f"no control ran and the command exits {code}: a "
+                             f"selftest that exercised nothing has shown no gate "
+                             f"can fail")
+        else:
+            case = _xml_sub(controls, "testcase", classname="controls",
+                            name="exit code", time="0")
+            _xml_sub(case, "failure", type="exit-code",
+                     message=f"the command exits {code} and no control or "
+                             f"baseline here failed: the exit code and these "
+                             f"results disagree, and the exit code is the one CI "
+                             f"obeys")
+    return _junit_serialise(root, suites)
+
+
+def _int_or(value: Any) -> Any:
+    """`int(value)` when it has one (a `Tier` renders as `0`, not `Tier.INSTANT`)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
 __all__ = [
     "STATUS_TAG",
     "SECTION_PROVEN",
+    "JUNIT_DEFAULT",
     "status_tag",
     "render_terminal",
     "render_markdown",
     "write_report",
+    "render_junit",
+    "render_selftest_junit",
+    "junit_safe",
 ]

@@ -171,13 +171,13 @@ LEDGER_NAME  = "ledger.json"
 INPUT_BUCKETS = ("sketches", "references", "cad", "screenshots",
                  "datasheets", "specs", "measurements", "data")
 BUCKET_FOR_KIND: dict[ArtifactKind, str]                # which inputs/ bucket a kind lands in
-def find_root(start: str | None = None) -> str | None   # walk up for .atompipe/
+def find_root(start: str | None = None) -> str | None   # walk up for a MARKER; stop at .git
 def require_root(start=None) -> str                     # raises AtompipeError if none
 def atompipe_dir(root) -> str                           # <root>/.atompipe
 def ledger_path(root) -> str
 def load(root) -> Ledger                                # missing file -> empty Ledger
 def save(root, ledger: Ledger) -> None                  # atomic
-def init(root, meta: ProjectMeta) -> Ledger             # creates dirs, refuses if exists
+def init(root, meta: ProjectMeta) -> Ledger             # creates dirs, refuses only on a marker
 def runs_dir(root) -> str                               # .atompipe/runs/
 def record_run(root, verdicts, run_meta) -> str         # append-only history; returns path
 def load_runs(root, limit=20) -> list[dict]
@@ -187,6 +187,21 @@ def docs_dir(root) -> str                               # docs/  generated repor
 def model_dir(root) -> str                              # model/ the single source of truth
 def project_paths(root) -> dict[str, str]              # every well-known path, by name
 ```
+**A project is where its marker is.** `find_root` walks up from `start` (default: the
+cwd), and at each level checks **first** for a marker — `.atompipe/project.json`, or
+the legacy `.atompipe/ledger.json` — returning that directory; **then** returns `None`
+if the level holds a `.git` entry (a directory, or the *file* a linked worktree or
+submodule has); else it walks up. A bare `.atompipe/` directory is not a marker.
+What slipped through (S-64): any `.atompipe/` made a project, and `~/.atompipe/` is
+the user-pack home, so on a pack author's machine every directory under `~` was
+"inside a project" and pack-mode `gate selftest` could never be reached there (nor,
+later, Phase 3's Stop-hook fast exit and `/start`'s `init`). The `.git` boundary is
+why a nested worktree inside a project resolves to `None` rather than to the trunk's
+ledger, while a project that is its own git root is still found (the marker is
+checked before the boundary). `require_root`'s message names both markers and the git boundary. `init`
+refuses **only when a marker exists**: a directory holding only `.atompipe/packs/`
+is not a project, and `init` there succeeds.
+
 `project_paths` is the layout in one call (`"ledger"`, `"readiness"`, `"decisions"`,
 `"inputs_<bucket>"`, ...), whether or not the paths exist yet: this is the map, not an
 inventory. No other module joins a well-known path by hand, so moving the layout is
@@ -416,18 +431,28 @@ GATES_DIR = "gates"; GENERATORS_DIR = "generators"; SELFTEST_DIR = "selftest"
 BASELINE_NAME = "baseline.json"; LENSES_NAME = "lenses.md"; SOURCING_NAME = "sourcing.md"
 PACK_PATH_ENV = "ATOMPIPE_PACK_PATH"         # extra search roots, os.pathsep-separated
 BUNDLED_PACKS: str                           # where the shipped packs live (checkout or wheel)
-def search_paths(root=None) -> list[str]     # project .atompipe/packs, ~/.atompipe/packs, bundled packs/
+def search_paths(root=None, *, existing_only=True, include_env=True,
+                 include_user=True) -> list[str]
+    # $ATOMPIPE_PACK_PATH, project .atompipe/packs, ~/.atompipe/packs, bundled packs/
 def discover(root=None) -> list[PackManifest]              # reads pack.json only (tier 1)
 def discover_dirs(root=None) -> list[tuple[str, PackManifest]]   # (pack_dir, manifest), precedence order
-def find(name, root=None) -> str | None                    # directory
+def find(name, root=None, *, include_env=True, include_user=True) -> str | None   # directory
 def origin_of(pack_dir, root=None) -> str                  # "project" | "user" | "bundled" | "path"
 def read_manifest(pack_dir) -> PackManifest
-def load_gates(name, registry, root=None) -> list[GateSpec]  # imports pack gates/*.py
+def load_gates(name, registry, root=None, *, include_env=True,
+               include_user=True) -> list[GateSpec]        # imports pack gates/*.py
 def load_all_gates(names, registry, root=None) -> list[GateSpec]
 def pack_doc(name, root=None) -> str                       # PACK.md  (tier 2)
 def reference_doc(name, ref, root=None) -> str             # references/<ref>.md (tier 3)
 def references(name, root=None) -> list[str]               # tier-3 names, none loaded
-def validate(pack_dir) -> list[str]                        # problems; empty = ok
+def validate(pack_dir, *, tier=Tier.BUILD, notes=None) -> list[str]   # problems; empty = ok
+def baseline_context(pack_dir, *, out_dir) -> GateContext  # the ONE sealed baseline context
+def demonstrate(pack_dir, *, tier=Tier.BUILD, out_dir=None) -> Demonstration
+@dataclass
+class Demonstration:                         # what `demonstrate` saw, gate by gate
+    problems: list[str]                      # baseline failed, control did not fire, unsealed
+    skipped: list[str]                       # availability skips: reported, never a problem
+    ran: int                                 # controls actually exercised
 def match(need: Need, manifests) -> list[PackManifest]      # gap -> candidate packs, by `settles`
 def score(need: Need, manifest) -> float                   # 0 = no signal; what `match` ranks by
 def installed(root, *, ledger=None) -> list[str]           # the project's opted-in packs, in order
@@ -451,6 +476,33 @@ module-level `PACK = "<name>"`; gate modules use the `@gate` decorator. A gate
 registered with a blank `pack` is stamped through `Registry.set_pack`, never by
 mutating the spec the registry stores.
 
+**The host machine cannot change what is tested.** `search_paths`, `find` and
+`load_gates` take `include_env=` and `include_user=`: `False` drops
+`$ATOMPIPE_PACK_PATH` and `~/.atompipe/packs` respectively, so a pack is loaded alone,
+from where it was named, and a stray copy on the author's machine cannot shadow it
+(S-87). The defaults keep today's precedence.
+
+**`demonstrate` is admission, run.** `demonstrate(pack_dir, *, tier=Tier.BUILD,
+out_dir=None)` loads the pack alone (env and user packs excluded) into a fresh
+`Registry` and, per gate within `tier`: the gate must pass its own
+`selftest/baseline.json`; its negative control must fire; a skip is allowed only when
+`availability(spec)` fails, and is reported in `skipped`, never in `problems`; and
+the **seal probe** — the control must also fire against an empty host (`params={}`,
+`extra={}`, an empty `Ledger`), which is invariant 5 (SEALED) checked by running it.
+Every run gets an explicit temp `out_dir` when none is given, so nothing is written
+into the pack — including a wheel's site-packages. `baseline_context(pack_dir, *,
+out_dir)` is the one sealed baseline context everything builds from: the raw
+`baseline.json` **including `_notes` and `_aliases`**, exactly as the test oracle
+builds it, `root=pack_dir`, an empty `Ledger`, `extra={}`, the given `out_dir`, tier
+`EXTERNAL`. `validate(pack_dir, *, tier=Tier.BUILD, notes=None)` calls `demonstrate`
+once the gates load; a missing-tool skip is appended to `notes` when a list is
+given and **never** to the returned problems, so `validate(dir) == []` on a CI runner
+with no solvers. What slipped through: `pack validate` never ran a control and
+certified a planted `return True` as publishable (S-09); `gate selftest` tests only
+the reject half, so an always-False gate passed it — the baseline run is the accept
+half (S-04, packs); and the controls wrote into the pack directory on every run
+(phase-1.md Q1.8).
+
 `origin_of` is printed everywhere a pack is listed, because a pack that is not the
 one you are editing looks exactly like one that is: a tester pulled a fix, watched
 the gate fail to appear, and lost ten minutes before finding the live copy was the
@@ -473,10 +525,17 @@ instead of reading a 1,672-line decision log.
 ```python
 STATUS_TAG: dict[ClaimStatus, str]           # PASS -> "ok   ", FAIL -> "FAIL ", ...
 SECTION_PROVEN = "## What is PROVEN"         # the PROVEN heading, as emitted and as tests find it
+JUNIT_DEFAULT = ".atompipe/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
 def status_tag(status) -> str                # "[FAIL ]": the one fixed-width spelling of a status
 def render_terminal(ledger, registry, *, stale=False) -> str
 def render_markdown(ledger, registry, *, stale=False, title="") -> str
 def write_report(root, ledger, registry, *, stale=False) -> str   # docs/readiness.md
+def render_junit(ledger, verdicts, registry, *, tier, ready, exit_code, when,
+                 not_run=None, cached=frozenset(), stale=False, spine="") -> str
+    # `check --junit`: suites gates / claims.critical / claims.not-critical
+def render_selftest_junit(results, *, exit_code, when, baselines=None) -> str
+    # `gate selftest --junit`: suite controls, plus baselines in pack mode
+def junit_safe(text) -> str                  # XML-1.0-illegal code points -> visible "\xNN" / "\uNNNN"
 ```
 The markdown report has this shape, generated:
 **Verdict** (one honest sentence) / **PROVEN** table with evidence per row /
@@ -510,6 +569,64 @@ marked **PARTIAL**, names that gate and the reason (`never run`, the skip reason
 `errored`, `failed`), and says how many of the covering gates the row rests on.
 Coverage for that check comes from `claims.effective_gates` — the union — so the
 caveat survives the pack going missing, which is when it matters most.
+
+**JUnit is never greener than the exit code.** CI renders the XML, not the exit
+code, so `render_junit` carries the judgement the exit code was made from and may
+only ever be redder. Built with `xml.etree.ElementTree` (imported inside the two
+renderers: about 6 ms that only `--junit` should pay). The shape (PLAN §3 row M2.1a,
+phase-1.md 1.1):
+```
+<testsuites name="atompipe check" tests= failures= errors= skipped= time=>
+  <properties> spine_version exit_code tier ready when [spine] </properties>
+  <testsuite name="gates">            one testcase per REGISTERED gate, registry order
+    <testcase classname="project"|"pack.<pack>" name="<gate id>" time="<duration_s>"/>
+  <testsuite name="claims.critical">  one per critical claim: "does not block the spend"
+  <testsuite name="claims.not-critical">
+```
+- **`gates`.** A testcase is childless **iff** its verdict's `outcome == "pass"` —
+  `Verdict.outcome`, never `passed`, so a skip that also says `passed=True` is a
+  `<skipped>` (R-5). fail → `<failure type="fail" message=detail>measured … vs limit
+  …</failure>`; error → `<error type="error">`, or `type="not-admitted"` when the error
+  **starts with** `not admitted:`; skipped → `<skipped message=skip_reason>`. A
+  registered gate with no row in `verdicts` → `<skipped message="not run: <why>">`,
+  the why from `not_run` (`(gate, reason)` pairs or a mapping: `above the tier
+  ceiling`, `excluded by --only`), else `no verdict in this run`. A gate in `cached`
+  has `time="0"` and `<properties><property name="cached" value="true"/></properties>`
+  — metadata, not an outcome.
+- **`claims.critical`** is recomputed from `ledger` with `stale`, never from
+  `verdicts`: its red testcases are exactly `claims.blocking(ledger, registry,
+  stale=stale)`, so **failures + errors == `len(blocking())`**, and `check` exits 1
+  iff that count is positive. A blocking claim whose FAIL came from a crashed gate
+  (its explaining verdict errored) is `<error type="error">`; any other is
+  `<failure type="<status>" message="<gate> : <body>">` — the reason `status` and
+  `check` print. A PASS that rests on fewer gates than cover it → `<skipped
+  message="partial: <gate> <why>; …">`, never childless (invariant 4's PARTIAL);
+  UNVERIFIED → `<skipped message="needs a real part">`; ASSERTED → `<skipped
+  message="assumed">`. Zero claims → one failing testcase `no claims recorded`.
+- **`claims.not-critical`**: FAIL and REFUTED red (the same error-vs-failure rule);
+  every other non-pass `<skipped message="<status>: <reason>">`.
+- **An exit code nothing explains is itself red.** If `exit_code != 0` and
+  `claims.critical` has nothing red — a caller that judged a stale project stale and
+  rendered it with `stale=False` — a failing testcase `exit code` is added. The
+  caller's disagreement shows as red, never as a green file beside a red job. Pass
+  the ledger, and the `stale` flag, the exit code was judged from.
+- **`render_selftest_junit`**: suite `controls`, one testcase per `gates.selftest`
+  result named for the gate (`#selftest` dropped), childless iff the control fired;
+  a control that did not fire or crashed is red; a tooling skip is `<skipped>`. In
+  pack mode (`baselines` not None) a `baselines` suite holds each gate's verdict on
+  its own `selftest/baseline.json`. Exit non-zero with nothing red adds a failing
+  `no controls ran` (no results) or `exit code` testcase: zero controls is never an
+  empty, green file.
+- **`junit_safe`** replaces the code points XML 1.0 forbids — `\x00`–`\x08`,
+  `\x0b`, `\x0c`, `\x0e`–`\x1f`, every surrogate, U+FFFE, U+FFFF — with visible
+  `\xNN`/`\uNNNN` text; tab, LF, CR and everything else are kept. Every attribute
+  and text value goes through it. What slipped through while designing it: ElementTree
+  writes each of them raw — an ANSI escape from a solver log, a NUL, a lone surrogate
+  from `surrogateescape` bytes — and the file fails to parse, so CI shows no
+  failures at all.
+- `when` is the caller's timestamp (contract rule 3); `spine` is the spine digest,
+  passed by the CLI from Phase 1.2. The CLI edge — unlink the target first, one exit
+  code, write atomically at the single exit, the `.xml` suffix rule — is `cli.py`'s.
 
 ### `site.py`  (deps: models, util, store, claims, report, artifacts, modelio, gates)
 The project site's spine half: viewgens, and the one JSON document the page reads.

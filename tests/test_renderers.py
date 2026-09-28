@@ -27,6 +27,7 @@ import os
 import re
 import shutil
 import unittest
+import xml.etree.ElementTree as ET
 
 import _env
 from atompipe import claims as claims_mod
@@ -57,6 +58,17 @@ EXPECTED = {
     "fail":    (False, "[FAIL]", ClaimStatus.FAIL),
 }
 
+#: outcome -> (the JUnit child of the gate's testcase, the JUnit child of the
+#: critical claim it alone covers); None is a childless testcase. Written out for
+#: the same reason as EXPECTED. A skip blocks the claim, so the claim is red where
+#: the gate is only skipped; a crash is an `error` on both.
+JUNIT = {
+    "error":   ("error", "error"),
+    "skipped": ("skipped", "failure"),
+    "pass":    (None, None),
+    "fail":    ("failure", "failure"),
+}
+
 
 class RenderersAgree(unittest.TestCase):
 
@@ -78,6 +90,37 @@ class RenderersAgree(unittest.TestCase):
                 self.assertTrue(v.render().startswith(tag), v.render())
                 self.assertEqual(claims_mod.resolve_status(_claim(gates=["g.one"]), [v]),
                                  status)
+
+    def test_junit(self):
+        """`check --junit` is the fourth reader the table above was written for.
+        Its testcase for a gate, and for the one critical claim that gate covers,
+        say what `outcome` says for all 8 combinations — childless only for a
+        pass, and never for a skip that also said `passed=True`."""
+        spec = GateSpec(id="g.one", claims=["C1"], tier=Tier.INSTANT,
+                        negative_control=NegativeControl(fixture="x:y"))
+        for passed, skipped, error in itertools.product((False, True), (False, True),
+                                                        ("", "ZeroDivisionError: x")):
+            with self.subTest(passed=passed, skipped=skipped, error=error):
+                v = Verdict(gate="g.one", claims=["C1"], passed=passed, skipped=skipped,
+                            error=error, skip_reason="requires openfoam" if skipped else "")
+                ledger = Ledger(meta=ProjectMeta(name="t", revision="v0.1"),
+                                claims=[_claim(gates=["g.one"])], verdicts=[v])
+                blockers = claims_mod.blocking(ledger, _Specs([spec]))
+                root = ET.fromstring(report_mod.render_junit(
+                    ledger, [v], _Specs([spec]), tier=0, ready=not blockers,
+                    exit_code=1 if blockers else 0, when="2026-09-27T00:00:00Z"))
+                kinds = []
+                for suite, name in (("gates", "g.one"), ("claims.critical", "C1")):
+                    case = root.find(f"testsuite[@name='{suite}']/testcase[@name='{name}']")
+                    self.assertIsNotNone(case, f"{suite} has no testcase {name}")
+                    children = [c.tag for c in case]
+                    self.assertLessEqual(len(children), 1, children)
+                    kinds.append(children[0] if children else None)
+                ok, _tag, status = EXPECTED[v.outcome]
+                self.assertEqual(tuple(kinds), JUNIT[v.outcome])
+                self.assertEqual(kinds[0] is None, ok)
+                self.assertEqual(kinds[1] in ("failure", "error"),
+                                 status in BLOCKING_STATUSES)
 
     def test_a_truthy_non_bool_is_a_fail_everywhere(self):
         """A record nobody stamped — read from a hand-edited file, built by a
