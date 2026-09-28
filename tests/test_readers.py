@@ -426,6 +426,23 @@ class SiteResolvesForItself(_Project):
         self.assertEqual(payload["verdicts"], [])
         self.assertEqual(self._claim_status(payload), "pending")
 
+    def test_a_cached_row_shows_the_tier_and_pack_it_ran_under(self):
+        """The resolver re-stamps a stale verdict with the gate's current spec,
+        because its claims decide coverage; the page takes the claims from it,
+        and shows the tier and pack the entry was measured under beside why it
+        is not current. The claim still reads stale, never pass."""
+        planted = dataclasses.replace(_pass(claims=("C9",)), tier=Tier.BUILD,
+                                      pack="elsewhere")
+        verdicts_mod.record_verdict(self.root, None, None, planted)   # unkeyed code
+        payload = site_mod.state(self.root, self.ledger, self.registry)
+        row = [v for v in payload["verdicts"] if v["gate"] == "r.stiff"][0]
+        self.assertTrue(row["cached"])
+        self.assertFalse(row["fresh"])
+        self.assertTrue(row["stale_reason"])
+        self.assertEqual((row["tier"], row["pack"]), (int(Tier.BUILD), "elsewhere"))
+        self.assertEqual(row["claims"], ["C1"], "coverage is the resolver's, not the entry's")
+        self.assertEqual(self._claim_status(payload), "stale")
+
     def test_the_site_keeps_no_copy_of_the_rules(self):
         """S-28, the site half: no staleness rule, no flattening, no run-history
         dating of its own. `verdicts.resolve` decides what is current and
