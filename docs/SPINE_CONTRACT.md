@@ -329,8 +329,10 @@ model's closure the same way.
 What a gate read, so its verdict can be keyed by it — the home of per-gate
 content-addressed verdicts (PLAN D-05). Its first half is the primitives (below);
 its second half turns a trace into entries you can commit (part two, further down);
-freshness and admission build on both. It never reads the wall clock (a `when`
-arrives from the CLI edge) and never takes the build lock. `gates` imports it, so it
+freshness, admission state and the resolver read both (part three); admission's
+runner, the sweep and `last_check.json` are what `check` runs (part four). It never
+reads the wall clock (a `when` arrives from the CLI edge) and never takes the build
+lock. `gates` imports it, so it
 never imports `gates` at module level: a function that needs a gate type receives
 the object.
 ```python
@@ -747,6 +749,7 @@ class Resolution:
     stale_gates: frozenset[str]     # Stale, Unknown, undemonstrated, legacy, orphan
     rows: dict[str, Row]; notes: list[str]
     read_sets: dict[str, set[tuple]]   # last_read_sets: Param.gates and why (S-30)
+    anchors: Anchors | None            # what the entries were judged against (watched_paths)
 def resolve(root, registry, projection, ledger, *, model_error="", availability=None,
             digests=None, anchors=None, now="", model=None) -> Resolution
 ```
@@ -791,8 +794,9 @@ counts: the bracket's fixtures load its model, so a `bed_xy` edit moves every cl
 without moving a control value. A remembered control crash, unusable fixture or
 self-skip at this static (`control:<gate>`) → `"not-admitted"`, `control <kind>: <why>`
 (an availability skip is not held against it). No current candidate →
-`"undemonstrated"`. The sweep's `controls.json` re-verification hint is U20's; until
-then a moved closure reads pending.
+`"undemonstrated"`. A candidate whose closure moved but that a sweep re-verified by
+its values under the closure as it is now (`CONTROLS_CACHE`, part four) counts as an
+unchanged one: after a `check` the note goes, until the next edit.
 
 **`resolve`** — the ONE effective-verdict producer every reader uses (R-5). Per
 registered gate, in registration order, the first that applies:
@@ -821,6 +825,127 @@ identity). The ledger is read, never written: callers lay the resolution over it
 view and never save it. `notes` gathers ignored (hand-edited) entries, instrument
 mismatches, opaque channels, two outcomes, pending admissions and defining-file digests,
 one line each (`<gate> — <note>`).
+
+**Part four: admission at its current version, the sweep, `last_check.json`.** What
+`check` runs. It may run a control (fixture and gate) or a fixture alone; it never
+takes the lock, and a `when` arrives from the CLI.
+```python
+CONTROLS_CACHE = ".atompipe/cache/controls.json"   # re-verified fixture closures; untracked, a hint
+WATCHED = ("claims/**", "params/**", "decisions/**", "needs/**", "inputs/**", "results/**",
+           "views/**", ".atompipe/verdicts/**", "model/**", "gates/**", "selftest/**",
+           ".atompipe/project.json", ".atompipe/packs/**", "objectives.json")
+
+def known_good_context(root, ctx) -> GateContext | None   # <root>/selftest/known_good.py's context(ctx)
+def admission(root, spec, fn, host_ctx, *, may_run=True, force=False, record=True,
+              projection=None, digests=None, anchors=None, when="") -> Admission
+
+@dataclass(frozen=True)
+class SweepRow:
+    verdict: Verdict; executed: bool; cached: bool; fresh: bool
+    stale_reason: str; rho: str; admission: Admission | None
+@dataclass
+class SweepResult:
+    rows: list[SweepRow]            # one per selected gate, registration order
+    counts: dict                    # {"executed", "cached"}
+    controls: dict                  # {"executed", "cached", "reverified", "not_admitted"}
+    not_run: list[tuple[str, str]]  # (gate, "above the tier ceiling" | "excluded by --only")
+    before: dict                    # freshness(), computed before anything ran (cli:H19)
+    stale_before: dict[str, str]    # selected gates Stale or Unknown before the sweep: the reason
+    notes: list[str]                # writer warnings, ignored entries
+    only; max_tier: int; force: bool; record: bool; when: str   # how it ran
+    ledger; registry; anchors       # what write_last_check needs
+def sweep(root, registry, ctx, *, projection, ledger, max_tier, only=None, force=False,
+          record=True, now="", on_verdict=None, anchors=None, digests=None,
+          on_row=None) -> SweepResult
+
+def write_last_check(root, result, resolution, *, now, params=None,
+                     digests=None) -> str | None   # None: a filtered or dry sweep writes nothing
+def watched_paths(root, resolution=None) -> list[str]   # absolute, sorted
+def fingerprint(root, paths, *, digests=None) -> str
+```
+**`admission`** is `admission_state`'s judgement, allowed to run what the records
+cannot settle (§3.8). 1. *Static*: candidates are control entries at the current
+`static`; none is a miss. 2. *Current*: no opaque channel, file and listing digests
+current, and — the fixture having had the LIVE host — its host-param reads match
+`projection`'s params (else the host context's). 3. *Hint*: current candidates whose
+fixture closure is unchanged, or was re-verified under the closure as it is now
+(`CONTROLS_CACHE`), settle it with nothing run — all fired: `admitted`; the latest
+PASSED its known-bad input: `not-admitted`, `PASSED its own known-bad fixture <ref>`;
+they disagree: `not-admitted`, `two control outcomes recorded for identical inputs`.
+4. *Re-verify* (`may_run`): otherwise the fixture runs ALONE (`gates.run_fixture`),
+traced, in the control `out_dir`, and what it built is compared with each current
+candidate's recorded reads — params by digest (`ABSENT` for a miss), ledger reads. A
+match settles it as 3 does with `reverified=True`: the gate is not called and no
+tracked file is written; `controls.json` remembers the closure. The comparison is
+sound only for what an entry keys, so a fixture that writes files, moves `ctx.root`,
+`out_dir` or `tier`, hands its gate `ctx.extra`, reads a file the entry does not
+key, or touches an opaque channel sends the control to a full run instead — a cost,
+never a wrong admission (what would have slipped through: a fixture writing the
+known-bad mesh its gate reads, which the gate's trace drops as its own output). This
+is the early cutoff: a Config-default edit moves every bracket fixture's closure (they
+build through the model) but no control value — six fixture runs, zero controls
+executed, zero new files — while a `build()` edit that moves a control input misses
+and re-runs it, and one that defuses it is not admitted (S-19's model-code half).
+5. *Miss*: the control runs, fixture and gate, and is filed unless `record=False`:
+`bad: "fail"` admitted reject-only; `bad: "pass"` not admitted. A crash, an unusable
+fixture (a `known_good.py` that will not load included) or a self-skip with the tools
+present is remembered under `control:<gate>` at the current static — `not-admitted`,
+`control <kind>: <why>` — and a remembered one at this static is re-run, never served
+(the control analogue of §3.9's supersede). A new outcome at the `rho_control` of a
+cached entry with the other `bad` is `not-admitted`. 6. *`force`* skips 1-4, and an
+outcome that differs from a cached entry at the same `rho_control` is `not-admitted`,
+`control outcome differs from its cached entry` (R-9). With the gate's tools missing
+nothing runs: the records answer.
+
+**The known-good host (D-27, S-07).** A PROJECT gate's fixture is handed
+`known_good_context(root, host)` — `selftest/known_good.py`'s `context(ctx)`, loaded
+through `modelio.load_source_module`, called on a copy — and the entry says `host:
+"known-good"` (its host reads are not keyed: they are reads of a design the owner's
+`selftest/` defines). A pack's fixture gets the live host (`host: "live"`, host reads
+keyed); SEALED is the seal detector's job. So the literal identity fixture `return ctx`
+hands its gate the known-good design, passes, and is not admitted — on the live
+bracket, which fails on purpose, it "fired" and certified nothing. The known-good
+module's code closure joins the fixture's lookup hint. Each control gets its own memo
+and its own emptied scratch, `<root>/.atompipe/out/controls/<gate>/` (never the
+sweep's `out_dir`).
+
+**`sweep`** is `check`'s loop, driven through `gates.run_all(..., before=)` so order,
+the tier ceiling, `--only` and the lost-control refusal stay in one place; a gate
+named above the ceiling runs, control included. `freshness` is computed first. Per
+selected gate: 1. *availability* fails — a Fresh FAIL is served (R-3); otherwise
+skipped, `cached pass exists; <why> here` over a Fresh PASS (invariant 1), remembered
+as `availability`; no control runs (CI has no trimesh: a skip, never "not admitted").
+2. *admission* — not admitted: `error="not admitted: <why>"`, `fn` never called. 3.
+unless `force`, a *Fresh* entry is served — unless a remembered crash or self-skip at
+its rho superseded it (§3.9), which re-runs the gate. 4. *run*, traced with the sweep's
+anchors: a pass or fail is keyed and cached (clearing any remembered outcome), anything
+else remembered under the rho computed before the run; every run appends obs. The
+gate runs INSIDE `before`, not in `run_all`'s own loop: that loop's trace carries no
+anchors, and a path-valued param digested without them (fdm's absolute mesh paths,
+packs:H6) differs per checkout — never Fresh anywhere, rewritten per clone. A row is
+`fresh` when its verdict is a pass or fail keyed at the current inputs. `record=False`
+writes nothing under `.atompipe/` but scratch in `out/`: no entry, control entry,
+remembered outcome, obs, `controls.json` or `digests.json` — and since nothing global
+is compared, a dry sweep reads nothing stale (S-32). A first sweep filtered by `--only`
+goes stale like any other (S-20): there is no clock to not advance. `digests` defaults
+to the `.atompipe/cache/digests.json` stat cache, saved after a recorded sweep.
+`on_verdict` streams each verdict, `on_row` its row.
+
+**`last_check.json`** (`.atompipe/cache/`, untracked; `write_last_check`, after a FULL
+RECORDED sweep only — a filtered or dry one returns `None` and writes nothing) holds,
+in this order: `when` (the CLI's stamp), `spine`, `fingerprint` (of `watched_paths`),
+`reads` (per gate, the reads of the entry the resolution used: `param:<json path>`,
+`file:<path>`, `dir:<path>`, `ledger:<key>`, `model`, `opaque:<channel>`),
+`statuses` (every claim under the resolution), `counts` (the sweep's, with
+`controls`), `worst` (the first blocking claim, its explaining gate and words; nulls
+when nothing blocks), `params` (from 1.3) and `influence` (P3), empty until then.
+Nothing in the sweep reads it. **`watched_paths`** is the `WATCHED` files (a single
+file listed whether or not it exists: its appearing is a change), the files, listings
+and code files of every entry the resolution used, and each loaded pack's `gates/`
+and `pack.json`; `__pycache__`, bytecode, dot-files, `*.tmp` and `*.lock` are never
+watched. **`fingerprint`** digests the spine digest and `{path: digest}` (a directory
+by its listing, a missing file `null`): the one question P3's Stop hook asks without
+importing a project's code.
 
 ### `gates.py`  (deps: models, util, modelio, verdicts)
 ```python
@@ -1221,9 +1346,9 @@ STATUS_TAG: dict[ClaimStatus, str]           # PASS -> "ok   ", FAIL -> "FAIL ",
 SECTION_PROVEN = "## What is PROVEN"         # the PROVEN heading, as emitted and as tests find it
 JUNIT_DEFAULT = ".atompipe/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
 def status_tag(status) -> str                # "[FAIL ]": the one fixed-width spelling of a status
-def render_terminal(ledger, registry, *, stale=False) -> str
-def render_markdown(ledger, registry, *, stale=False, title="") -> str
-def write_report(root, ledger, registry, *, stale=False) -> str   # docs/readiness.md
+def render_terminal(ledger, registry, *, stale=False, stale_gates=()) -> str
+def render_markdown(ledger, registry, *, stale=False, stale_gates=(), model_error="") -> str
+def write_report(root, ledger, registry, *, stale=False, stale_gates=()) -> str   # docs/readiness.md
 def render_junit(ledger, verdicts, registry, *, tier, ready, exit_code, when,
                  not_run=None, cached=frozenset(), stale=False, spine="") -> str
     # `check --junit`: suites gates / claims.critical / claims.not-critical
@@ -1237,9 +1362,17 @@ The markdown report has this shape, generated:
 (assumptions) / **Reproduce** (the exact commands). It must never call a skipped
 or unrun gate "proven".
 
+**Staleness is per gate** (Phase 1.2). The renderers take the resolution's
+`stale_gates` (`verdicts.resolve`): a PASS whose covering gate is in it reads STALE and
+is never under PROVEN; a stale FAIL stays FAIL (`claims.resolve_status`). `stale=True`
+stays the all-gates override. The report reads no sweep time and no rho: its title is
+`(<rev>)`, and `## Reproduce` lists `atompipe check` and each gate's code files, so a
+regenerated `docs/readiness.md` changes only when the claims or the verdict outcomes
+do.
+
 The PROVEN section's heading line **starts with `SECTION_PROVEN`** (its qualifier,
-"(machine-verified this run)", follows on the same line and is not part of the
-constant). Invariant 4's tests find the section by that constant and fail when it is
+"(machine-verified, current)" from Phase 1.2 — a cached verdict is current but not
+"this run" — follows on the same line and is not part of the constant). Invariant 4's tests find the section by that constant and fail when it is
 absent, duplicated or empty. What slipped through (S-15): they searched for a literal
 copy of the heading and read "no heading" as an empty section, so `assertNotIn` passed
 on nothing, and a rename would have kept the invariant green while it tested no
@@ -1322,7 +1455,7 @@ phase-1.md 1.1):
   passed by the CLI from Phase 1.2. The CLI edge — unlink the target first, one exit
   code, write atomically at the single exit, the `.xml` suffix rule — is `cli.py`'s.
 
-### `site.py`  (deps: models, util, store, claims, report, artifacts, modelio, gates)
+### `site.py`  (deps: models, util, store, claims, report, artifacts, modelio, gates; verdicts from Phase 1.2)
 The project site's spine half: viewgens, and the one JSON document the page reads.
 The page's half is plain HTML, CSS and ES modules in `site_template/`, copied by
 `scaffold`; the data contract between the two is `docs/SITE_CONTRACT.md`.
@@ -1351,15 +1484,21 @@ def run_all_viewgens(registry, ctx, *, only=None) -> tuple[list, list]   # (view
 def derive_explode(bounds, *, overrides=None) -> dict      # a FIRST DRAFT explode manifest
 def locator_problems(views, verdicts) -> list[dict]         # every locator that cannot be drawn
 def scaffold(root, *, force=False) -> list                  # copy the template; index.html only with force
-def build(root, ledger, registry, view_registry, *, model=None, projection=None, now="") -> dict
-def state(root, ledger, registry, *, now="", stale=None) -> dict   # the state.json payload
+def build(root, ledger, registry, view_registry, *, model=None, projection=None, now="",
+          resolution=None) -> dict
+def state(root, ledger, registry, *, now="", stale=None, resolution=None) -> dict   # state.json
 def clean_assets(root, keep) -> list                        # delete unreferenced site/assets/ files
 def vendor_urls() -> dict                                   # {site-relative path: URL} for `site vendor`
 ```
-**`build` never runs gates**, and never writes the ledger back. It reads the verdicts
-already recorded and stamps each with its own age; a build that re-ran the cheap
-gates on the way past would publish ten-second-old tier-0 numbers beside week-old
-tier-2 numbers under one "built at" stamp. `state` borrows every judgement —
+**`build` never runs gates**, and never writes the ledger back. It renders a
+`verdicts.Resolution` — the caller's `resolution=`, or, when none is handed, one it
+resolves for itself with the projection it already builds. *Rejected:* a library
+default that lists the recorded entries with no stale gates — a caller that forgot
+to pass a resolution would serve every cached PASS as current and skip admission
+(invariant 7 by omission). `stale=True` stays an all-stale override. It stamps each
+verdict with its own age — obs `when`, else the entry's commit time, else `null`; a
+build that re-ran the cheap gates on the way past would publish ten-second-old tier-0
+numbers beside week-old tier-2 numbers under one "built at" stamp. `state` borrows every judgement —
 statuses from `claims`, the readiness sentence and the PARTIAL logic from `report` —
 because a second implementation would give the page and the readiness document two
 opinions about one ledger (the site renders the ledger; it never computes truth).

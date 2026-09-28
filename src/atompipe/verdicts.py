@@ -67,11 +67,26 @@ running anything:
   availability, remembered crashes, Fresh entries under admission, the latest
   entry marked stale, legacy ledger rows, orphans.
 
-Admission's runner and the sweep build on all three (U20). None of it reads the
-wall clock (``test_meta``) — a ``when`` arrives from the CLI edge — takes the
-build lock, or imports ``gates`` at module level: ``gates`` imports this module,
-so anything here that needs a gate type receives the object, and ``resolve``
-reaches ``gates.availability`` from inside the function.
+Its fourth half is what ``check`` runs:
+
+* ``admission`` — the same judgement, allowed to run what the records cannot
+  settle: a fixture alone when only its code moved (the values it built are
+  compared with the control's recorded reads — equal, and nothing else runs and
+  nothing tracked is written), the whole control on a miss. Project fixtures
+  get the known-good design (``known_good_context``), so the identity fixture
+  that certified nothing (S-07) passes its own known-bad input and is not
+  admitted; a model edit that defuses a control misses its entry (S-19).
+* ``sweep`` — per selected gate: availability, admission, the cache, the run.
+  A logger's PASS never counts (S-05); a filtered first sweep goes stale like
+  any other (S-20); a dry one writes nothing and reads nothing stale (S-32).
+* ``write_last_check``, ``WATCHED``, ``fingerprint`` — the full sweep's summary
+  for readers that must not import a project's code.
+
+None of it reads the wall clock (``test_meta``) — a ``when`` arrives from the
+CLI edge — takes the build lock, or imports ``gates`` at module level: ``gates``
+imports this module, so anything here that needs a gate type receives the
+object, and ``resolve``, ``admission`` and ``sweep`` reach ``gates`` from inside
+the function.
 
 Imports: ``models``, ``util``, ``store``, ``modelio`` and ``vcs``, standard
 library otherwise, including every function-local import (CI's AST walk).
@@ -92,6 +107,7 @@ import math
 import numbers
 import os
 import re
+import shutil
 import sys
 import tempfile
 import threading
@@ -100,7 +116,7 @@ from typing import Any, Callable, ClassVar, Collection, Iterable, Mapping
 
 from . import modelio, store, vcs
 from .models import Ledger, Locator, Tier, Verdict
-from .util import AtompipeError, FileDigests, atomic_write_json
+from .util import AtompipeError, FileDigests, atomic_write_json, atomic_write_text
 
 
 __all__ = [
@@ -121,6 +137,9 @@ __all__ = [
     # part three: freshness, admission state, the one resolver (U19)
     "MAX_STALE_REASONS", "Fresh", "Stale", "Unknown", "Never", "freshness",
     "Admission", "admission_state", "Row", "Resolution", "resolve",
+    # part four: admission at its current version, the sweep, last_check (U20)
+    "CONTROLS_CACHE", "WATCHED", "known_good_context", "admission", "SweepRow",
+    "SweepResult", "sweep", "write_last_check", "watched_paths", "fingerprint",
 ]
 
 
@@ -3023,6 +3042,29 @@ def record_verdict(root: str, spec: Any, fn: Any, verdict: Verdict, *,
         raise AtompipeError(f"a verdict for {verdict.gate!r} cannot be recorded as "
                             f"{gate_id!r}'s")
     anchors = anchors if anchors is not None else _default_anchors(root, spec, fn)
+    keyed = _keyed(gate_id, spec, fn, trace=trace, reads=reads, anchors=anchors,
+                   digests=digests)
+    result = write_entry(root, _entry_for(spec, verdict, keyed, anchors))
+    forget(root, gate_id)
+    return result
+
+
+@dataclass(frozen=True)
+class _Keyed:
+    """One run, keyed: its code, its classified read set, the spine, its rho."""
+
+    gate: str
+    code: CodeRef
+    reads: Reads
+    spine: str
+    rho: str
+
+
+def _keyed(gate_id: str, spec: Any, fn: Any, *, trace: GateTrace | None, reads: Any,
+           anchors: Anchors, digests: FileDigests | None) -> _Keyed:
+    """``record_verdict``'s addressing, without the write: the sweep keys every
+    run it executes — a crash's rho is shown on its row — and under
+    ``record=False`` writes none of them (S-32)."""
     code = code_digest(spec, fn, anchors=anchors) if spec is not None and fn is not None \
         else CodeRef.unrecorded()
     if reads is not None:
@@ -3034,14 +3076,15 @@ def record_verdict(root: str, spec: Any, fn: Any, verdict: Verdict, *,
     if code.opaque:
         read_set = read_set.with_opaque(f"code: {code.opaque}")
     spine = spine_digest()
-    address = rho(gate_id, spine, code, read_set)
-    entry = Entry(gate=gate_id, rho=address, code=code.to_dict(), spine=spine,
-                  reads=read_set.to_dict(),
-                  instruments=instruments_for(spec, code) if spec is not None else {},
-                  verdict=_verdict_block(verdict, anchors))
-    result = write_entry(root, entry)
-    forget(root, gate_id)
-    return result
+    return _Keyed(gate_id, code, read_set, spine, rho(gate_id, spine, code, read_set))
+
+
+def _entry_for(spec: Any, verdict: Verdict, keyed: _Keyed, anchors: Anchors) -> Entry:
+    """The entry a keyed pass or fail is written as."""
+    return Entry(gate=keyed.gate, rho=keyed.rho, code=keyed.code.to_dict(), spine=keyed.spine,
+                 reads=keyed.reads.to_dict(),
+                 instruments=instruments_for(spec, keyed.code) if spec is not None else {},
+                 verdict=_verdict_block(verdict, anchors))
 
 
 # --------------------------------------------------------------------------- #
@@ -3378,10 +3421,52 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
     """
     if host not in _HOSTS:
         raise AtompipeError(f"host must be one of {list(_HOSTS)}, not {host!r}")
+    built = _control_entry(root, spec, fn, result=result, trace=trace, host=host, bad=bad,
+                           detail=detail, digests=digests, anchors=anchors)
+    key = f"control:{spec.id}"
+    if built.entry is None:
+        remember(root, key, built.held, input_rho=built.static, kind=built.kind, when=when)
+        return None
+    written = write_control(root, built.entry)
+    forget(root, key)
+    return written
+
+
+@dataclass(frozen=True)
+class _BuiltControl:
+    """A control run as ``record_control`` would file it, before anything is
+    written: ``entry`` for a measurement, else ``held`` — the verdict to
+    remember — and its ``kind``; ``static`` the part it is keyed by."""
+
+    static: str
+    entry: ControlEntry | None = None
+    kind: str = ""
+    held: Verdict | None = None
+
+
+def _held_control(result: Verdict, kind: str) -> Verdict:
+    """What a control that proved nothing is remembered as.
+
+    A crash on the fixture comes back from ``gates.selftest`` as a failed
+    selftest with no ``error`` — the selftest's verdict on the GATE. Remembered,
+    it is what it is about the control: an error, never something that could
+    read as a measured fail.
+    """
+    if result.outcome != "fail":
+        return result
+    first = (result.detail or "").splitlines()[0] if result.detail else ""
+    return dataclasses.replace(result, error=f"control {kind}: {first}" if first
+                               else f"control {kind}")
+
+
+def _control_entry(root: str, spec: Any, fn: Any, *, result: Verdict | None,
+                   trace: GateTrace | None, host: str, bad: str | None, detail: str,
+                   digests: FileDigests | None, anchors: Anchors | None) -> _BuiltControl:
+    """``record_control``'s work up to the write, so the sweep can judge a
+    control run under ``record=False`` exactly as it would file it."""
     anchors = anchors if anchors is not None else _default_anchors(root, spec, fn)
     digests = digests if digests is not None else FileDigests()
     static, parts, code, owner = _static(spec, fn, root, digests=digests, anchors=anchors)
-    key = f"control:{spec.id}"
     measured = limit = None
     units = ""
     if bad is None:
@@ -3390,17 +3475,7 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
                                 f"or an explicit bad=")
         bad, kind = _control_outcome(spec, result)
         if bad is None:
-            held = result
-            if result.outcome == "fail":
-                # A crash on the fixture comes back from gates.selftest as a
-                # failed selftest with no `error` — the selftest's verdict on
-                # the GATE. Remembered, it is what it is about the control: an
-                # error, never something that could read as a measured fail.
-                held = dataclasses.replace(
-                    result, error=f"control {kind}: {(result.detail or '').splitlines()[0]}"
-                    if result.detail else f"control {kind}")
-            remember(root, key, held, input_rho=static, kind=kind, when=when)
-            return None
+            return _BuiltControl(static, kind=kind, held=_held_control(result, kind))
     elif bad not in ("fail", "pass"):
         raise AtompipeError(f"bad must be 'fail' or 'pass', not {bad!r}")
     if result is not None:
@@ -3425,9 +3500,7 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
                          admitted="reject-only" if bad == "fail" else "no",
                          detail=portable(detail, anchors), measured=measured, limit=limit,
                          units=units)
-    written = write_control(root, entry)
-    forget(root, key)
-    return written
+    return _BuiltControl(static, entry=entry)
 
 
 # --------------------------------------------------------------------------- #
@@ -3699,6 +3772,64 @@ class Never:
 # --------------------------------------------------------------------------- #
 # what is current: gathered once per call
 # --------------------------------------------------------------------------- #
+def _places_of(anchors: Anchors) -> dict[str, str]:
+    """``{token: absolute spelling}``, the anchors read backwards."""
+    places: dict[str, str] = {}
+    for spelling, token in anchors.pairs():
+        places.setdefault(token, spelling)
+    return places
+
+
+def _locate(spelled: Any, root: str, places: Mapping[str, str]) -> str | None:
+    """The absolute path a portable spelling names here, or ``None`` when this
+    checkout has no such anchor (a pack not loaded)."""
+    if not isinstance(spelled, str) or not spelled:
+        return None
+    if spelled.startswith("<"):
+        token, sep, rest = spelled.partition(">")
+        base = places.get(token + sep)
+        if base is None or (rest and not rest.startswith("/")):
+            return None
+        rest = rest[1:]
+        return os.path.join(base, *rest.split("/")) if rest else base
+    if spelled == "~" or spelled.startswith("~/"):
+        base = places.get("~")
+        if base is None:
+            return None
+        return os.path.join(base, *spelled[2:].split("/")) if len(spelled) > 2 else base
+    if os.path.isabs(spelled):
+        return spelled
+    if spelled == ".":
+        return root
+    return os.path.join(root, *spelled.split("/"))
+
+
+def _param_at(flat: Any, path: tuple, recorded: str, anchors: Anchors) -> tuple[str, Any]:
+    """``(digest, value or _MISSING)`` at ``path`` in ``flat`` — walked by
+    ``ParamTrace``'s own rules: through dicts only, ``ABSENT`` for a miss,
+    presence alone where only presence was recorded, else the digest of
+    whatever is there (a leaf, or a whole level read in bulk — the same
+    ``digest_value`` either way). ``flat`` may itself be a ``ParamTrace`` (a
+    fixture that handed back its host view): the walk reads storage through
+    ``dict``'s own methods, so it records nothing on it."""
+    node: Any = flat
+    for part in path:
+        if isinstance(node, dict):
+            try:
+                if dict.__contains__(node, part):
+                    node = dict.__getitem__(node, part)
+                    continue
+            except TypeError:                        # an unhashable key: not there
+                pass
+        node = _MISSING
+        break
+    if recorded == PRESENT:
+        return (ABSENT if node is _MISSING else PRESENT), node
+    if node is _MISSING:
+        return ABSENT, node
+    return _digest(node, anchors)[0], node
+
+
 class _Now:
     """What is on disk and in memory NOW, for one ``freshness``, ``resolve`` or
     ``admission_state`` call: the spine digest, the flattened projection (the
@@ -3724,55 +3855,17 @@ class _Now:
         self.spine = spine_digest()
         self.walks: dict = {}
         self._model: Any = _MISSING
-        self._places: dict[str, str] = {}
-        for spelling, token in anchors.pairs():
-            self._places.setdefault(token, spelling)
+        self._places = _places_of(anchors)
 
     def locate(self, spelled: Any) -> str | None:
         """The absolute path an entry's portable spelling names here, or
         ``None`` when this checkout has no such anchor (a pack not loaded)."""
-        if not isinstance(spelled, str) or not spelled:
-            return None
-        if spelled.startswith("<"):
-            token, sep, rest = spelled.partition(">")
-            base = self._places.get(token + sep)
-            if base is None or (rest and not rest.startswith("/")):
-                return None
-            rest = rest[1:]
-            return os.path.join(base, *rest.split("/")) if rest else base
-        if spelled == "~" or spelled.startswith("~/"):
-            base = self._places.get("~")
-            if base is None:
-                return None
-            return os.path.join(base, *spelled[2:].split("/")) if len(spelled) > 2 else base
-        if os.path.isabs(spelled):
-            return spelled
-        if spelled == ".":
-            return self.root
-        return os.path.join(self.root, *spelled.split("/"))
+        return _locate(spelled, self.root, self._places)
 
     def param(self, path: tuple, recorded: str) -> tuple[str, Any]:
-        """``(digest now, value or _MISSING)`` at ``path`` — walked by
-        ``ParamTrace``'s own rules: through dicts only, ``ABSENT`` for a miss,
-        presence alone where only presence was recorded, else the digest of
-        whatever is there now (a leaf, or a whole level read in bulk — the same
-        ``digest_value`` either way)."""
-        node: Any = self.flat
-        for part in path:
-            if isinstance(node, dict):
-                try:
-                    if dict.__contains__(node, part):
-                        node = dict.__getitem__(node, part)
-                        continue
-                except TypeError:                    # an unhashable key: not there
-                    pass
-            node = _MISSING
-            break
-        if recorded == PRESENT:
-            return (ABSENT if node is _MISSING else PRESENT), node
-        if node is _MISSING:
-            return ABSENT, node
-        return _digest(node, self.anchors)[0], node
+        """``(digest now, value or _MISSING)`` at ``path`` in the projection's
+        flat params (``_param_at``)."""
+        return _param_at(self.flat, path, recorded, self.anchors)
 
     def ledger_digest(self, key: str) -> str | None:
         """The digest a gate reading ledger ``key`` would record now, or
@@ -4173,12 +4266,32 @@ def _control_moved(control: ControlEntry, now: _Now) -> str:
 
 def _fixture_moved(control: ControlEntry, now: _Now) -> list[str]:
     """The files of the fixture's recorded code closure whose bytes moved."""
+    return _snapshot_moved(control.fixture, now)
+
+
+def _snapshot_moved(snapshot: Any, now: _Now) -> list[str]:
+    """The files of a fixture-closure snapshot (``{"digest", "files"}``) whose
+    bytes are not what it recorded — every one of them when it is no snapshot."""
+    files = (snapshot or {}).get("files") if isinstance(snapshot, Mapping) else None
+    if not isinstance(files, Mapping):
+        return ["(no recorded fixture closure)"]
     moved = []
-    for spelled, digest in sorted(((control.fixture or {}).get("files") or {}).items()):
+    for spelled, digest in sorted(files.items()):
         where = now.locate(spelled)
         if where is None or now.digests.digest(where) != digest:
             moved.append(spelled)
     return moved
+
+
+def _hint_holds(control: ControlEntry, now: _Now, verified: Mapping[str, Any]) -> bool:
+    """§3.8 step 3: the control was demonstrated on exactly this fixture code —
+    its own recorded closure is unchanged, or a re-verification recorded in
+    ``controls.json`` (``verified``: ``{entry name: snapshot}`` for this gate)
+    matched it against the closure as it is now."""
+    if not _fixture_moved(control, now):
+        return True
+    snapshot = verified.get(control.name) if isinstance(verified, Mapping) else None
+    return snapshot is not None and not _snapshot_moved(snapshot, now)
 
 
 def _control_order(root: str, gate_id: str) -> Callable[[ControlEntry], tuple]:
@@ -4189,9 +4302,13 @@ def _control_order(root: str, gate_id: str) -> Callable[[ControlEntry], tuple]:
 
 
 def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
-               notes: list | None = None) -> Admission:
-    """§3.8 steps 1-3 and the remembered control failure, from records alone."""
+               notes: list | None = None, verified: Mapping[str, Any] | None = None
+               ) -> Admission:
+    """§3.8 steps 1-3 and the remembered control failure, from records alone.
+    ``verified`` is ``controls.json`` (``_read_verified``): a closure a sweep
+    re-verified reads admitted, not pending."""
     static, _parts = now.static(spec, fn)
+    mine = (verified or {}).get(spec.id) or {}
     record = held.get(f"control:{spec.id}")
     # An availability skip of the control proves nothing either way, and is
     # re-evaluated where it is shown: while the tool is missing the GATE reads
@@ -4220,11 +4337,12 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
         return Admission("undemonstrated", max(candidates, key=order),
                          f"control inputs moved: {moved[0]}")
     # The fixture closure is a HINT (§3.8): an entry whose fixture code is
-    # unchanged was demonstrated on exactly this; one whose fixture code moved
-    # may still be (early cutoff) — only re-running the fixture can say, and
-    # nothing here runs. Among hint matches, disagreement is the control
-    # analogue of two outcomes; without one, every current candidate decides.
-    hinted = [c for c in current if not _fixture_moved(c, now)]
+    # unchanged — or that a sweep re-verified against the code as it is now —
+    # was demonstrated on exactly this; one whose fixture code moved may still
+    # be (early cutoff), but only re-running the fixture can say, and nothing
+    # here runs. Among hint matches, disagreement is the control analogue of two
+    # outcomes; without one, every current candidate decides.
+    hinted = [c for c in current if _hint_holds(c, now, mine)]
     pool = hinted or current
     chosen = max(pool, key=order)
     if len({c.bad for c in pool}) > 1:
@@ -4261,14 +4379,14 @@ def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
     ``"undemonstrated"`` — no current control.
 
     ``anchors`` defaults to the root's plus the pack ``fn`` came from (as
-    ``record_control``'s). The ``controls.json`` re-verification hint is the
-    sweep's (U20): until a check re-verifies, a moved fixture closure reads
-    pending, which counts.
+    ``record_control``'s). A moved fixture closure that a sweep re-verified by
+    its values (``CONTROLS_CACHE``) reads admitted; one nothing has re-run yet
+    reads pending, which counts.
     """
     if anchors is None:
         anchors = _default_anchors(root, spec, fn)
     now = _Now(root, projection, None, anchors=anchors, digests=digests)
-    return _admission(now, spec, fn, remembered(root))
+    return _admission(now, spec, fn, remembered(root), verified=_read_verified(now.root))
 
 
 # --------------------------------------------------------------------------- #
@@ -4311,13 +4429,15 @@ class Resolution:
     ignored (hand-edited) entries, two outcomes, pending admissions,
     defining-file digests, one line each; ``read_sets`` — ``last_read_sets``:
     which params each gate read when it last executed (``Param.gates``,
-    ``why``)."""
+    ``why``); ``anchors`` — the ones every entry was judged against, so a
+    reader can find a ``<pack:NAME>/...`` path the entries name (``watched_paths``)."""
 
     verdicts: list = field(default_factory=list)
     stale_gates: frozenset = frozenset()
     rows: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
     read_sets: dict = field(default_factory=dict)
+    anchors: Any = None
 
 
 def _as_spec(verdict: Verdict, spec: Any) -> Verdict:
@@ -4403,6 +4523,7 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
     pairs = list(registry.pairs()) if registry is not None else []
     registered = {spec.id for spec, _fn in pairs}
     held = remembered(root_abs)
+    verified = _read_verified(root_abs)
     entries = {spec.id: _gate_entries(root_abs, spec.id, notes) for spec, _fn in pairs}
     orphans = _orphan_entries(root_abs, registered, notes)
     obs = _obs_names(root_abs, list(entries) + list(orphans))
@@ -4476,7 +4597,7 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
         # 3. a Fresh entry, under admission
         if isinstance(state, Fresh):
             verdict = _as_spec(entry.to_verdict(), spec)
-            admission = _admission(here, spec, fn, held, notes)
+            admission = _admission(here, spec, fn, held, notes, verified)
             when = when_of(entry, order)
             if admission.state == "not-admitted":
                 emit(_synthesized(spec, error=f"not admitted: {admission.reason}",
@@ -4536,4 +4657,931 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
             emit(legacy[gid], Row(gid, "legacy", stale_reason=_LEGACY))
 
     return Resolution(verdicts=verdicts_out, stale_gates=frozenset(stale), rows=rows,
-                      notes=list(dict.fromkeys(notes)), read_sets=last_read_sets(root_abs))
+                      notes=list(dict.fromkeys(notes)), read_sets=last_read_sets(root_abs),
+                      anchors=here.anchors)
+
+
+# =========================================================================== #
+# part four: admission at its current version, the sweep, last_check
+# =========================================================================== #
+#: Where a sweep remembers the controls it re-verified by their values:
+#: ``{gate: {control entry name: {"digest", "files": {path: sha}}}}`` — the
+#: fixture closure as it was when the values last matched. Untracked (it names
+#: this checkout's fixture bytes), and a HINT only: an unreadable file reads as
+#: empty and costs one fixture run per control, never a wrong admission. Why a
+#: file of its own: a re-verification that found the control's values unmoved
+#: must write nothing tracked, and the entry's own ``fixture`` hint cannot be
+#: updated in place (O_EXCL). *Rejected:* a new tracked control entry per
+#: re-verification — six new files for every model edit, and the transcript's
+#: "nothing new" breaks; re-running the fixture on every check — the one cost
+#: the early cutoff exists to avoid.
+CONTROLS_CACHE = ".atompipe/cache/controls.json"
+
+#: What ``last_check.json``'s fingerprint watches, relative to the project root.
+#: The record directories (1.3's layout; empty until then), the verdict cache,
+#: the model, the project's gates and selftest, the project marker, project-local
+#: packs and the objectives file (P3). ``watched_paths`` adds, per entry the
+#: resolution used, the files and listings it read and its code files, plus each
+#: loaded pack's ``gates/`` and ``pack.json``; ``fingerprint`` adds the spine
+#: digest. It is the one export P3's Stop hook imports to ask "did anything a
+#: verdict stands on move since the last check?" without importing a project's
+#: code. ``.atompipe/ledger.json`` is deliberately absent: from 1.3 it is the
+#: generated index every command rewrites, and watching it would make every
+#: command look like a change.
+WATCHED = (
+    "claims/**", "params/**", "decisions/**", "needs/**", "inputs/**", "results/**",
+    "views/**", ".atompipe/verdicts/**", "model/**", "gates/**", "selftest/**",
+    ".atompipe/project.json", ".atompipe/packs/**", "objectives.json",
+)
+
+_LAST_CHECK = "last_check.json"
+_DIGESTS_NAME = "digests.json"
+_KNOWN_GOOD = "known_good.py"
+_ABOVE_CEILING = "above the tier ceiling"
+_EXCLUDED = "excluded by --only"
+
+#: Never watched: scratch the spine or Python writes beside what is.
+_UNWATCHED_SUFFIXES = (".tmp", ".lock") + _BYTECODE
+
+
+# --------------------------------------------------------------------------- #
+# the known-good host (D-27, S-07)
+# --------------------------------------------------------------------------- #
+def _known_good_module(root: str) -> Any:
+    """``<root>/selftest/known_good.py``, loaded fresh and recorded, or ``None``
+    when the project has none. A file that will not import raises
+    ``AtompipeError``: every project control is built on it, and a broken one
+    must read as a broken control, never as "no known-good design" — that would
+    quietly hand the fixtures the live host again."""
+    base = os.path.abspath(root)
+    path = os.path.join(base, _SELFTEST, _KNOWN_GOOD)
+    if not os.path.isfile(path):
+        return None
+    name = "_atompipe_known_good_" + hashlib.sha256(os.fsencode(path)).hexdigest()[:12]
+    try:
+        return modelio.load_source_module(path, name=name, roots=[base])
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:                   # SystemExit included: see gates.run_gate
+        raise AtompipeError(
+            f"{_SELFTEST}/{_KNOWN_GOOD} failed to import ({type(exc).__name__}: {exc}) — "
+            f"every project control is built on it, so none is demonstrated until it "
+            f"loads") from exc
+
+
+def _known_good(root: str, ctx: Any) -> tuple[Any, Any] | None:
+    """``(the known-good context, the module's code closure)``, or ``None``."""
+    module = _known_good_module(root)
+    make = getattr(module, "context", None) if module is not None else None
+    if not callable(make):
+        return None
+    # A copy: `context` is project code, and the context it is handed is the
+    # one every later gate of the sweep reads.
+    names = {f.name for f in dataclasses.fields(ctx)}
+    changes: dict[str, Any] = {"params": _plain(getattr(ctx, "params", None) or {}),
+                               "extra": dict(getattr(ctx, "extra", None) or {})}
+    ledger = getattr(ctx, "ledger", None)
+    if ledger is not None:
+        changes["ledger"] = LedgerView(ledger, None)
+    handed = dataclasses.replace(ctx, **{k: v for k, v in changes.items() if k in names})
+    try:
+        built = make(handed)
+    except KeyboardInterrupt:
+        raise
+    except BaseException as exc:
+        raise AtompipeError(
+            f"{_SELFTEST}/{_KNOWN_GOOD}: context() raised {type(exc).__name__}: {exc} — "
+            f"the known-good design could not be built, so no project control can be "
+            f"demonstrated") from exc
+    if not isinstance(built, type(ctx)):
+        raise AtompipeError(
+            f"{_SELFTEST}/{_KNOWN_GOOD}: context() returned {type(built).__name__}, not "
+            f"the {type(ctx).__name__} it was handed")
+    return built, modelio.code_closure(module)
+
+
+def known_good_context(root: str, ctx: Any) -> Any:
+    """The context every PROJECT control fixture is handed: ``ctx`` rebuilt by
+    ``<root>/selftest/known_good.py``'s ``context(ctx)`` — the design every
+    control is one change away from — or ``None`` when the project has no such
+    function (then the fixture gets the live host, and the control entry says
+    ``host: "live"``).
+
+    Why (S-07, D-27): a fixture handed the LIVE design builds its known-bad
+    input from whatever the live design is. The bracket's fails deflection on
+    purpose, so the identity fixture ``return ctx`` was reported "correctly
+    failed ... ~64x worse" and demonstrated nothing. On the known-good design
+    it passes, and a control that passes its own known-bad input is a logger:
+    not admitted. Pack fixtures never get it — SEALED is enforced for them by
+    the seal detector (``packs.seal_findings``), not by substitution.
+
+    Loaded through ``modelio.load_source_module`` (fresh bytes, recorded
+    closure); ``context`` receives a copy of ``ctx``. Raises ``AtompipeError``
+    when the module does not import, ``context`` raises, or it returns something
+    other than a context of ``ctx``'s type.
+    """
+    found = _known_good(root, ctx)
+    return None if found is None else found[0]
+
+
+def _control_host(root: str, spec: Any, fn: Any, host_ctx: Any) -> tuple[Any, str, Any]:
+    """``(the context a control's fixture is handed, "known-good" | "live", the
+    known-good module's code closure or None)``. Each control gets a memo of its
+    own: a known-bad mesh loaded into the sweep's memo is one sweep's accident
+    away from a real gate's read."""
+    if "memo" in {f.name for f in dataclasses.fields(host_ctx)}:
+        host_ctx = dataclasses.replace(host_ctx, memo={})
+    if _pack_dir_of(fn):
+        return host_ctx, "live", None
+    found = _known_good(root, host_ctx)
+    if found is None:
+        return host_ctx, "live", None
+    return found[0], "known-good", found[1]
+
+
+def _add_closure(trace: GateTrace, closure: Any) -> None:
+    """Fold the known-good module's closure into the fixture's recorded code:
+    the control's lookup hint must move when the known-good design's code does
+    (the bracket's model sits in both)."""
+    if not isinstance(closure, modelio.CodeClosure):
+        return
+    own = trace.fixture_code
+    files = dict(own.files) if isinstance(own, modelio.CodeClosure) else {}
+    for path, sha in closure.files:
+        files.setdefault(path, sha)
+    merged = tuple(sorted(files.items()))
+    trace.fixture_code = (dataclasses.replace(own, files=merged)
+                          if isinstance(own, modelio.CodeClosure)
+                          else modelio.CodeClosure(files=merged))
+
+
+def _fresh_control_dir(root: str, gate_id: str, sweep_out: str = "") -> str:
+    """``<root>/.atompipe/out/controls/<gate>/``, emptied (``CONTROL_OUT_DIR``):
+    a file a previous control left there must never become this one's read.
+    Refuses a directory that holds the sweep's own ``out_dir`` — the evidence a
+    cached PASS cites lives there (packs:H5)."""
+    path = os.path.join(os.path.abspath(root), *CONTROL_OUT_DIR.split("/"),
+                        _check_gate_id(gate_id))
+    if sweep_out:
+        out = os.path.abspath(sweep_out)
+        if out == path or out.startswith(path + os.sep):
+            raise AtompipeError(f"the control scratch {_shown(root, path)} holds the "
+                                f"sweep's out_dir {out}; refusing to empty it")
+    shutil.rmtree(path, ignore_errors=True)
+    return path
+
+
+# --------------------------------------------------------------------------- #
+# controls.json: re-verified fixture closures (untracked, a hint)
+# --------------------------------------------------------------------------- #
+def _verified_path(root: str) -> str:
+    return os.path.join(os.path.abspath(root), *CONTROLS_CACHE.split("/"))
+
+
+def _is_snapshot(snapshot: Any) -> bool:
+    return (isinstance(snapshot, dict) and isinstance(snapshot.get("digest"), str)
+            and isinstance(snapshot.get("files"), dict)
+            and all(isinstance(k, str) and (v is None or isinstance(v, str))
+                    for k, v in snapshot["files"].items()))
+
+
+def _read_verified(root: str) -> dict:
+    """``controls.json`` (``CONTROLS_CACHE``), or ``{}`` when there is none or
+    it cannot be read — a hint only (see the constant)."""
+    data_bytes = _file_bytes(_verified_path(root))
+    if data_bytes is None:
+        return {}
+    try:
+        data = _strict_json(data_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {gate: {name: snap for name, snap in names.items()
+                   if isinstance(name, str) and _is_snapshot(snap)}
+            for gate, names in data.items() if isinstance(gate, str) and isinstance(names, dict)}
+
+
+def _write_verified(root: str, updates: Mapping[str, Mapping[str, Any]]) -> None:
+    """Merge ``updates`` into ``controls.json``, dropping names whose control
+    entry is gone. Written only when something changed."""
+    if not updates:
+        return
+    before = _read_verified(root)
+    merged = {gate: dict(names) for gate, names in before.items()}
+    for gate, names in updates.items():
+        merged.setdefault(gate, {}).update(names)
+    kept: dict[str, dict] = {}
+    for gate, names in sorted(merged.items()):
+        try:
+            directory = _gate_dir(root, gate)
+        except AtompipeError:
+            continue
+        live = {name: snap for name, snap in sorted(names.items())
+                if os.path.isfile(os.path.join(directory, name + ".json"))}
+        if live:
+            kept[gate] = live
+    if kept != before:
+        atomic_write_json(_verified_path(root), _clean(kept))
+
+
+# --------------------------------------------------------------------------- #
+# admission, in check: run what the records cannot settle
+# --------------------------------------------------------------------------- #
+@dataclass
+class _Session:
+    """What one sweep — or one ``admission`` call — shares across its gates:
+    the current state (one ``selftest/`` walk per owner), the remembered
+    outcomes and ``controls.json`` as they were when it began, and what it has
+    to write at the end."""
+
+    root: str
+    now: _Now
+    anchors: Anchors
+    digests: FileDigests
+    held: dict
+    verified: dict
+    record: bool
+    when: str
+    out_dir: str = ""
+    verified_out: dict = field(default_factory=dict)
+    notes: list = field(default_factory=list)
+
+
+def _session(root: str, host_ctx: Any, *, projection: Any, anchors: Anchors,
+             digests: FileDigests, record: bool, when: str, out_dir: str = "") -> _Session:
+    base = os.path.abspath(root)
+    now = _Now(base, projection, None, anchors=anchors, digests=digests)
+    if projection is None and isinstance(getattr(host_ctx, "params", None), dict):
+        # No projection to re-read a live host's params from: the host the
+        # fixture is handed IS the live state, so its params are what a live
+        # control's host reads are compared against.
+        now.flat = host_ctx.params
+    return _Session(root=base, now=now, anchors=anchors, digests=digests,
+                    held=remembered(base), verified=_read_verified(base), record=record,
+                    when=when, out_dir=out_dir)
+
+
+def _passed_known_bad(spec: Any) -> str:
+    fixture = getattr(spec.negative_control, "fixture", "") or "its fixture"
+    return f"{_PASSED_ITS_KNOWN_BAD} {fixture}"
+
+
+def _decide(pool: list, spec: Any, order: Callable[[ControlEntry], tuple],
+            **flags: bool) -> Admission:
+    """The demonstrations in ``pool`` settle it: they disagree — not admitted
+    (the control analogue of two outcomes, §3.7); the latest PASSED its
+    known-bad input — not admitted; else admitted, reject-only."""
+    chosen = max(pool, key=order)
+    if len({c.bad for c in pool}) > 1:
+        names = ", ".join(sorted(c.name for c in pool))
+        return Admission("not-admitted", chosen,
+                         f"two control outcomes recorded for identical inputs ({names})",
+                         **flags)
+    if chosen.bad == "pass":
+        return Admission("not-admitted", chosen, _passed_known_bad(spec), **flags)
+    return Admission("admitted", chosen, "", **flags)
+
+
+def _ledger_now(ledger: Any, key: str) -> str | None:
+    """The digest a gate reading ledger ``key`` from ``ledger`` would record."""
+    if ledger is None or not isinstance(key, str):
+        return None
+    if key.startswith("claim:"):
+        cid = key[len("claim:"):]
+        return _claim_digest(next((c for c in (_peek(ledger, "claims") or ())
+                                   if getattr(c, "id", None) == cid), None))
+    if key in _LEDGER_WHOLE and key in _LEDGER_FIELD_SET:
+        return _ledger_digest(key, _peek(ledger, key))
+    return None
+
+
+def _unvouched(built: Any, given: Any, trace: GateTrace) -> str:
+    """Why a fixture-only run cannot stand in for the whole control, or ``""``.
+
+    The spec's comparison is the control-context VALUES the gate read (params
+    and ledger). That is sound only for what a control entry keys, so anything
+    a fixture hands its gate outside those channels sends the control to a full
+    run instead — a cost, never a wrong admission. What would have slipped
+    through: a fixture that WRITES the known-bad mesh the gate then reads (the
+    gate's read of a file written in its window is its own output and is never
+    keyed); one that moves ``ctx.root`` (the gate then reads another tree, and
+    ``test_freshness``'s ``file_bad`` does exactly that); one that returns a
+    dict, merged into ``extra``, which no trace records.
+    """
+    if trace.files_written:
+        return "the fixture wrote files its gate would read"
+    if trace.opaque:
+        return "the fixture used an input no trace can key"
+    for name in ("root", "out_dir", "tier"):
+        if getattr(built, name, None) != getattr(given, name, None):
+            return f"the fixture moved ctx.{name}"
+    extra_built, opaque_built = _digest(dict(getattr(built, "extra", None) or {}))
+    extra_given, _ = _digest(dict(getattr(given, "extra", None) or {}))
+    if opaque_built or extra_built != extra_given:
+        return "the fixture handed its gate ctx.extra, which no control entry keys"
+    return ""
+
+
+def _values_match(control: ControlEntry, built: Any, fixture_reads: Reads,
+                  anchors: Anchors) -> bool:
+    """§3.8 step 4: does the context the fixture built now hand the gate what
+    ``control`` recorded it read — every param path by digest (``ABSENT`` for a
+    miss), every ledger read — while the fixture read no file the entry does
+    not already key?"""
+    recorded = control.reads or {}
+    if not set(fixture_reads.files) <= set(recorded.get("files") or {}):
+        return False
+    if not set(fixture_reads.dirs) <= set(recorded.get("dirs") or {}):
+        return False
+    params = getattr(built, "params", None)
+    for row in recorded.get("params") or ():
+        digest, _value = _param_at(params, tuple(row[0]), row[1], anchors)
+        if digest != row[1]:
+            return False
+    ledger = getattr(built, "ledger", None)
+    for key, digest in (recorded.get("ledger") or {}).items():
+        if _ledger_now(ledger, key) != digest:
+            return False
+    return True
+
+
+def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
+              order: Callable[[ControlEntry], tuple]) -> Admission | None:
+    """Run the fixture alone and compare what it built with what each current
+    candidate's gate read (§3.8 step 4, the early cutoff). A match settles the
+    gate WITHOUT calling it — possibly a twenty-minute solver — and writes no
+    tracked file; ``controls.json`` remembers the closure it matched under.
+    ``None`` sends the control to a full run: the fixture is unusable (the full
+    run learns why, and remembers it), or it handed its gate something no entry
+    keys (``_unvouched``), or no candidate's values match."""
+    from . import gates as _gates                  # gates imports this module
+    out_dir = _fresh_control_dir(s.root, spec.id, s.out_dir)
+    try:
+        handed, _host, closure = _control_host(s.root, spec, fn, host_ctx)
+    except AtompipeError:
+        return None
+    trace = GateTrace(kind="control", anchors=s.anchors)
+    try:
+        built = _gates.run_fixture(spec, fn, handed, trace=trace, out_dir=out_dir)
+    except AtompipeError:
+        return None
+    _add_closure(trace, closure)
+    if _unvouched(built, dataclasses.replace(handed, out_dir=out_dir), trace):
+        return None
+    _static_digest, parts = s.now.static(spec, fn)
+    owner = _owner_dir(fn, s.root)
+    static_files = [os.path.join(owner, *rel.split("/")) for rel in parts["selftest"]["files"]]
+    fixture_reads = Reads.from_trace(trace, anchors=s.anchors, digests=s.digests,
+                                     static=static_files)
+    if fixture_reads.opaque or trace.model_used:
+        return None
+    matches = [c for c in current if _values_match(c, built, fixture_reads, s.anchors)]
+    if not matches:
+        return None
+    if s.record:
+        snapshot = _fixture_part(trace, s.anchors)
+        for control in matches:
+            s.verified_out.setdefault(spec.id, {})[control.name] = snapshot
+    return _decide(matches, spec, order, reverified=True)
+
+
+def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool) -> Admission:
+    """§3.8 steps 5-6: run the control — fixture and gate, traced, in its own
+    emptied ``out_dir`` — and file it: a measurement as a control entry, a
+    crash, an unusable fixture or a self-skip remembered under
+    ``control:<gate>``. Under ``record=False`` it is judged exactly as it would
+    be filed, and nothing is written."""
+    from . import gates as _gates
+    gid = spec.id
+    key = f"control:{gid}"
+    out_dir = _fresh_control_dir(s.root, gid, s.out_dir)
+    try:
+        handed, host, closure = _control_host(s.root, spec, fn, host_ctx)
+    except AtompipeError as exc:
+        held = Verdict(gate=f"{gid}#selftest", passed=False, tier=Tier(int(spec.tier)),
+                       pack=spec.pack or "", error=str(exc).splitlines()[0] if str(exc) else
+                       "negative control unusable")
+        if s.record:
+            remember(s.root, key, held, input_rho=s.now.static(spec, fn)[0], kind="error",
+                     when=s.when)
+        return Admission("not-admitted", None, _control_failure({"verdict": held,
+                                                                 "kind": "error"}),
+                         executed=True)
+    trace = GateTrace(kind="control", anchors=s.anchors)
+    result = _gates.selftest(spec, fn, handed, trace=trace, out_dir=out_dir)
+    _add_closure(trace, closure)
+    built = _control_entry(s.root, spec, fn, result=result, trace=trace, host=host, bad=None,
+                           detail="", digests=s.digests, anchors=s.anchors)
+    entry = built.entry
+    if s.record:
+        record_obs(s.root, gid, entry=entry.name if entry is not None else "", when=s.when,
+                   duration_s=result.duration_s, cpu_s=result.cpu_s, control=True)
+    if entry is None:
+        if built.kind == "availability":
+            # The tools went missing while it ran: a skip proves nothing either
+            # way, and the gate reads skipped (BLOCKED), never not admitted.
+            return Admission("undemonstrated", None,
+                             result.skip_reason or "its tooling is not available",
+                             executed=True)
+        if s.record:
+            remember(s.root, key, built.held, input_rho=built.static, kind=built.kind,
+                     when=s.when)
+        return Admission("not-admitted", None,
+                         _control_failure({"verdict": built.held, "kind": built.kind}),
+                         executed=True)
+    try:
+        existing = read_controls(s.root, gid)
+    except AtompipeError:
+        existing = []
+    clash = sorted(c.name for c in existing if c.rho == entry.rho and c.bad != entry.bad)
+    if s.record:
+        wrote = write_control(s.root, entry)
+        s.notes.extend(wrote.warnings)
+        forget(s.root, key)
+        # The entry on disk keeps the fixture hint it was FIRST written with
+        # (same inputs, same outcome: "exists"); the closure it was just
+        # demonstrated under is remembered beside it.
+        s.verified_out.setdefault(gid, {})[entry.name] = entry.fixture
+    if clash:
+        reason = (f"control outcome differs from its cached entry ({', '.join(clash)})"
+                  if force else f"two control outcomes recorded for identical inputs "
+                                f"({', '.join(clash + [entry.name])})")
+        return Admission("not-admitted", entry, reason, executed=True)
+    if entry.bad == "pass":
+        return Admission("not-admitted", entry, _passed_known_bad(spec), executed=True)
+    return Admission("admitted", entry, "", executed=True)
+
+
+def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
+           force: bool) -> Admission:
+    """§3.8 steps 1-6 for one gate (see ``admission``)."""
+    from . import gates as _gates
+    if not may_run:
+        return _admission(s.now, spec, fn, s.held, s.notes, s.verified)
+    ok, _why = _gates.availability(spec)
+    if not ok:
+        # A control runs its gate: where the gate cannot run, neither can it.
+        return _admission(s.now, spec, fn, s.held, s.notes, s.verified)
+    gid = spec.id
+    order = _control_order(s.root, gid)
+    if not force:
+        static, _parts = s.now.static(spec, fn)
+        record = s.held.get(f"control:{gid}")
+        failed_here = (record is not None and record["kind"] != "availability"
+                       and record["input_rho"] == static)
+        # A control that crashed at this static supersedes whatever entry it
+        # followed, like a gate's crash (§3.9): run it again, never serve it.
+        if not failed_here:
+            try:
+                controls = read_controls(s.root, gid, problems=s.notes)
+            except AtompipeError as exc:
+                s.notes.append(f"{gid}: {exc}")
+                controls = []
+            current = [c for c in controls if c.static == static and not _control_moved(c, s.now)]
+            if current:
+                mine = s.verified.get(gid) or {}
+                hinted = [c for c in current if _hint_holds(c, s.now, mine)]
+                if hinted:
+                    return _decide(hinted, spec, order)
+                found = _reverify(s, spec, fn, host_ctx, current, order)
+                if found is not None:
+                    return found
+    return _run_control(s, spec, fn, host_ctx, force=force)
+
+
+def admission(root: str, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool = True,
+              force: bool = False, record: bool = True, projection: Any = None,
+              digests: FileDigests | None = None, anchors: Anchors | None = None,
+              when: str = "") -> Admission:
+    """Is ``spec``'s control demonstrated at its current version — running what
+    the records cannot settle. ``check``'s form; ``admission_state`` is the
+    read-only one every other reader uses.
+
+    1. **Static.** Candidates: control entries whose ``static`` (spine, gate
+       code, the owner's ``selftest/`` walk, the NegativeControl fields) is the
+       current one. None — a miss.
+    2. **Current.** A candidate is current when it has no opaque channel, its
+       file and listing digests are current, and — its fixture having had the
+       LIVE host — its host-param reads match ``projection``'s (else the host
+       context's) params.
+    3. **Hint.** Current candidates whose fixture closure is unchanged, or was
+       re-verified under the closure as it is now (``CONTROLS_CACHE``), settle
+       it with nothing run: all fired — admitted; the latest PASSED its known-bad
+       input, or they disagree — not admitted.
+    4. **Re-verify** (``may_run``). Otherwise the fixture runs ALONE, traced, in
+       the control ``out_dir``, and what it built is compared with each current
+       candidate's recorded reads (params by digest, ledger reads). A match
+       settles it as 3 does, with ``reverified=True``: the gate is not called and
+       no tracked file is written (``controls.json`` remembers the closure). This
+       is how a model edit that moves every fixture's code, but no control
+       value, costs one fixture run per gate and nothing else — and how one that
+       DOES move a value (S-19's model-code half) misses.
+    5. **Miss.** The control runs — fixture and gate — and is filed (unless
+       ``record=False``): ``bad: "fail"`` admitted reject-only; ``bad: "pass"``
+       not admitted (``PASSED its own known-bad fixture <ref>``). A crash, an
+       unusable fixture or a self-skip with the tools present is remembered
+       under ``control:<gate>`` at the current static and not admitted
+       (``control <kind>: <why>``); a remembered one at this static is re-run,
+       never served.
+    6. **``force``** skips 1-4: the control always runs, and an outcome that
+       differs from a cached control entry at the same ``rho_control`` is not
+       admitted (``control outcome differs from its cached entry``, R-9).
+
+    A PROJECT control's fixture is handed ``known_good_context``'s design
+    (``host: "known-good"``); a pack's gets the live host. With the gate's tools
+    missing nothing runs: the records answer (the sweep asks availability
+    first and never gets here). ``when`` stamps a remembered failure and the
+    control obs; this module reads no clock.
+    """
+    if anchors is None:
+        anchors = _default_anchors(root, spec, fn)
+    s = _session(root, host_ctx, projection=projection, anchors=anchors,
+                 digests=digests if digests is not None else FileDigests(), record=record,
+                 when=when, out_dir=getattr(host_ctx, "out_dir", "") or "")
+    found = _admit(s, spec, fn, host_ctx, may_run=may_run, force=force)
+    if record:
+        _write_verified(s.root, s.verified_out)
+    return found
+
+
+# --------------------------------------------------------------------------- #
+# the sweep
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class SweepRow:
+    """One selected gate's row: ``verdict`` (``rho`` set when it ran or was
+    served), ``executed`` — its function ran on the real design in this sweep;
+    ``cached`` — its verdict is a cache entry's; ``fresh`` — a pass or fail keyed
+    at the current inputs (executed or cached), never a skip, a crash or a
+    refusal; ``stale_reason`` — why a row the sweep served is not current
+    (``""``: every row a sweep produces is); ``rho``; ``admission`` — how the
+    gate's control was judged, ``None`` where it was not asked (a missing tool,
+    a lost control)."""
+
+    verdict: Verdict
+    executed: bool = False
+    cached: bool = False
+    fresh: bool = False
+    stale_reason: str = ""
+    rho: str = ""
+    admission: Any = None
+
+
+@dataclass
+class SweepResult:
+    """What ``sweep`` did.
+
+    ``rows`` — one ``SweepRow`` per selected gate, registration order;
+    ``counts`` — ``{"executed", "cached"}``; ``controls`` — ``{"executed"``
+    (fixture and gate ran), ``"cached"`` (settled by the records),
+    ``"reverified"`` (the fixture alone ran, and the values held),
+    ``"not_admitted"}``; ``not_run`` — ``[(gate, "above the tier ceiling" |
+    "excluded by --only")]`` for every registered gate not selected;
+    ``before`` — ``freshness`` as it stood BEFORE anything ran (cli:H19: what
+    was stale is decided before the sweep makes it current), and
+    ``stale_before`` — ``{gate: reason}`` for the selected gates it called Stale
+    or Unknown; ``notes`` — writer warnings and ignored entries. The rest is how
+    it ran — ``only``, ``max_tier``, ``force``, ``record``, ``when`` — and what
+    ``write_last_check`` needs: ``ledger``, ``registry``, ``anchors``.
+    """
+
+    rows: list = field(default_factory=list)
+    counts: dict = field(default_factory=lambda: {"executed": 0, "cached": 0})
+    controls: dict = field(default_factory=lambda: {"executed": 0, "cached": 0,
+                                                    "reverified": 0, "not_admitted": 0})
+    not_run: list = field(default_factory=list)
+    before: dict = field(default_factory=dict)
+    stale_before: dict = field(default_factory=dict)
+    notes: list = field(default_factory=list)
+    only: Any = None
+    max_tier: int = 0
+    force: bool = False
+    record: bool = True
+    when: str = ""
+    ledger: Any = None
+    registry: Any = None
+    anchors: Any = None
+
+
+def _filtered(only: Any) -> bool:
+    """Did ``only`` name anything (``gates._selected``'s reading of it)?"""
+    if only is None:
+        return False
+    patterns = [only] if isinstance(only, str) else [str(o) for o in only]
+    return any(p.strip() for p in patterns)
+
+
+def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
+               force: bool) -> SweepRow:
+    """§3.11 for one selected gate: availability, admission, the cache, the run."""
+    from . import gates as _gates
+    gid = spec.id
+    # 1. availability: a skip, never "not admitted" — CI has no trimesh or omc
+    ok, why = _gates.availability(spec)
+    if not ok:
+        why = why or "its tooling is not available"
+        if isinstance(state, Fresh) and state.entry.verdict.get("passed") is False:
+            # R-3: a refutation keeps its power where the tool that made it is gone
+            return SweepRow(_as_spec(state.entry.to_verdict(), spec), cached=True,
+                            fresh=True, rho=state.entry.rho)
+        reason = f"cached pass exists; {why} here" if isinstance(state, Fresh) else why
+        skipped = _synthesized(spec, skipped=True, skip_reason=reason)
+        if s.record:
+            remember(s.root, gid, skipped, input_rho=state.rho, kind="availability",
+                     when=s.when)
+        return SweepRow(skipped)
+
+    # 2. admission (force re-runs the control)
+    judged = _admit(s, spec, fn, run_ctx, may_run=True, force=force)
+    if judged.state == "undemonstrated":
+        return SweepRow(_synthesized(spec, skipped=True, skip_reason=judged.reason),
+                        admission=judged)
+    if judged.state == "not-admitted":
+        refused = _synthesized(spec, error=f"not admitted: {judged.reason}",
+                               rho=state.rho if isinstance(state, Fresh) else "")
+        return SweepRow(refused, admission=judged)
+
+    # 3. the cache — unless a remembered crash at these inputs superseded it
+    if not force and isinstance(state, Fresh):
+        held = s.held.get(gid)
+        superseded = (held is not None and held["kind"] in ("error", "self-skip")
+                      and held["input_rho"] == state.rho)
+        if not superseded:
+            return SweepRow(_as_spec(state.entry.to_verdict(), spec), cached=True, fresh=True,
+                            rho=state.entry.rho, admission=judged)
+
+    # 4. run, traced with the sweep's anchors, and key what it read
+    trace = GateTrace(anchors=s.anchors)
+    verdict = _gates.run_gate(spec, fn, run_ctx, trace=trace)
+    keyed = _keyed(gid, spec, fn, trace=trace, reads=None, anchors=s.anchors,
+                   digests=s.digests)
+    verdict = dataclasses.replace(verdict, rho=keyed.rho)
+    measured = verdict.outcome in ("pass", "fail")
+    name = ""
+    if measured:
+        entry = _entry_for(spec, verdict, keyed, s.anchors)
+        name = entry.name
+        if s.record:
+            wrote = write_entry(s.root, entry)
+            s.notes.extend(wrote.warnings)
+            forget(s.root, gid)
+    elif s.record:
+        kind = ("error" if verdict.error
+                else "self-skip" if _gates.availability(spec)[0] else "availability")
+        remember(s.root, gid, verdict, input_rho=state.rho, kind=kind, when=s.when)
+    if s.record:
+        record_obs(s.root, gid, entry=name, when=s.when, duration_s=verdict.duration_s,
+                   cpu_s=verdict.cpu_s)
+    return SweepRow(verdict, executed=True, fresh=measured, rho=keyed.rho, admission=judged)
+
+
+def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
+          max_tier: int, only: Any = None, force: bool = False, record: bool = True,
+          now: str = "", on_verdict: Callable[[Verdict], Any] | None = None,
+          anchors: Anchors | None = None, digests: FileDigests | None = None,
+          on_row: Callable[[SweepRow], Any] | None = None) -> SweepResult:
+    """``check``'s loop: every selected gate, affected-only, under admission.
+
+    Driven through ``gates.run_all(..., before=)``, so order, the tier ceiling,
+    ``--only`` (a named gate above the ceiling runs, control included) and the
+    lost-control refusal stay in one place. ``freshness`` is computed BEFORE
+    anything runs (cli:H19). Per selected gate, in order (``_sweep_one``):
+
+    1. **Availability** fails: a Fresh FAIL is served (R-3); otherwise skipped —
+       ``cached pass exists; <why> here`` over a Fresh PASS (invariant 1) —
+       remembered as ``availability``; no control runs, ``fn`` is never called.
+    2. **Admission** (``admission``'s steps; ``force`` re-runs the control). Not
+       admitted: ``error="not admitted: <why>"``, ``fn`` never called.
+    3. Unless ``force``, a **Fresh** entry is served — unless a remembered crash
+       or self-skip at its rho superseded it (§3.9: a crash proves nothing, and
+       neither does the PASS it followed), which re-runs the gate.
+    4. **Run**, traced with the sweep's anchors. A pass or fail is keyed and
+       cached (``write_entry``), clearing any remembered outcome; anything else
+       is remembered under the rho freshness computed before the run
+       (``input_rho``). Every run appends obs.
+
+    The gate runs INSIDE ``before`` rather than in ``run_all``'s own loop: that
+    loop's trace carries no anchors, and a path-valued param digested without
+    them — fdm's absolute mesh paths (packs:H6) — differs per checkout, so the
+    entry could never read Fresh anywhere and would be rewritten per clone.
+
+    ``record=False`` (``--no-record``) writes nothing under ``.atompipe/`` but
+    gate and control scratch in ``out/``: no entry, control entry, remembered
+    outcome, obs, ``controls.json`` or ``digests.json`` (S-32: a dry sweep that
+    kept nothing and compared nothing global reads nothing as stale).
+    ``digests`` defaults to the ``.atompipe/cache/digests.json`` stat cache
+    (in-memory under ``record=False``), saved at the end of a recorded sweep.
+    ``now`` is the CLI's one clock stamp (obs, remembered outcomes).
+    ``on_verdict`` streams each final verdict as it lands, ``on_row`` its row.
+    Takes no lock: the CLI edge holds it.
+    """
+    from . import gates as _gates
+    root = os.path.abspath(root)
+    out_dir = getattr(ctx, "out_dir", "") or store.out_dir(root)
+    if anchors is None:
+        anchors = anchors_for(root, registry, out_dir=out_dir)
+    if digests is None:
+        digests = FileDigests(os.path.join(root, _STATE_DIR, _CACHE_DIR, _DIGESTS_NAME)
+                              if record else None)
+    before = freshness(root, registry, projection, ledger, digests=digests, anchors=anchors,
+                       model=getattr(ctx, "model", None))
+    s = _session(root, ctx, projection=projection, anchors=anchors, digests=digests,
+                 record=record, when=now, out_dir=out_dir)
+    # The context every gate of this sweep runs on: its tier the sweep's (a gate
+    # must not pick its cheap path under an expensive run), one memo shared by
+    # every gate (load_file), never left on the caller's context.
+    run_ctx = dataclasses.replace(ctx, tier=int(max_tier),
+                                  memo=ctx.memo if getattr(ctx, "memo", None) is not None
+                                  else {})
+    rows: dict[str, SweepRow] = {}
+
+    def before_hook(spec: Any, fn: Any) -> Verdict:
+        found = _sweep_one(s, spec, fn, before.get(spec.id) or Never(), run_ctx, force=force)
+        rows[spec.id] = found
+        return found.verdict
+
+    def landed(verdict: Verdict) -> None:
+        if on_verdict is not None:
+            on_verdict(verdict)
+        if on_row is not None:
+            on_row(rows.get(verdict.gate) or SweepRow(verdict))
+
+    swept = _gates.run_all(registry, run_ctx, max_tier=max_tier, only=only,
+                           on_verdict=landed, before=before_hook)
+
+    result = SweepResult(only=only, max_tier=int(max_tier), force=force, record=record,
+                         when=now, ledger=ledger, registry=registry, anchors=anchors,
+                         before=before, notes=s.notes)
+    for verdict in swept:
+        # a lost control is refused by run_all before `before` is asked: no row yet
+        found = rows.get(verdict.gate) or SweepRow(verdict)
+        result.rows.append(found)
+        result.counts["executed"] += found.executed
+        result.counts["cached"] += found.cached
+        judged = found.admission
+        if judged is not None:
+            if judged.executed:
+                result.controls["executed"] += 1
+            elif judged.reverified:
+                result.controls["reverified"] += 1
+            else:
+                result.controls["cached"] += 1
+            result.controls["not_admitted"] += judged.state == "not-admitted"
+        state = before.get(verdict.gate)
+        if isinstance(state, Stale):
+            result.stale_before[verdict.gate] = _stale_text(state.reasons)
+        elif isinstance(state, Unknown):
+            result.stale_before[verdict.gate] = state.reason
+    selected = {verdict.gate for verdict in swept}
+    reason = _EXCLUDED if _filtered(only) else _ABOVE_CEILING
+    result.not_run = [(spec.id, reason) for spec in registry.specs() if spec.id not in selected]
+    if record:
+        _write_verified(root, s.verified_out)
+        digests.save()
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# last_check.json, WATCHED, the fingerprint
+# --------------------------------------------------------------------------- #
+def _flat_reads(reads: Mapping[str, Any]) -> dict[str, str | None]:
+    """An entry's reads as ``{path: digest}``: ``param:<json path>``,
+    ``file:<path>``, ``dir:<path>``, ``ledger:<key>``, ``model``,
+    ``opaque:<channel>`` (digest ``None``: nothing can say)."""
+    out: dict[str, str | None] = {}
+    for row in reads.get("params") or ():
+        out["param:" + _canonical_json(row[0])] = row[1]
+    for kind, prefix in (("files", "file:"), ("dirs", "dir:")):
+        for spelled, digest in (reads.get(kind) or {}).items():
+            out[prefix + spelled] = digest
+    for key, digest in (reads.get("ledger") or {}).items():
+        out["ledger:" + key] = digest
+    if reads.get("model") is not None:
+        out["model"] = reads["model"]
+    for name in reads.get("opaque") or ():
+        out["opaque:" + name] = None
+    return dict(sorted(out.items()))
+
+
+def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, now: str,
+                     params: Mapping[str, Any] | None = None,
+                     digests: FileDigests | None = None) -> str | None:
+    """Write ``.atompipe/cache/last_check.json`` after a full recorded sweep;
+    return its path, or ``None`` — nothing written — when the sweep was
+    filtered (``--only``) or dry (``record=False``): a partial sweep's summary
+    would stand for the whole project's.
+
+    ``{"when", "spine", "fingerprint", "reads", "statuses", "counts", "worst",
+    "params", "influence"}``: the CLI's stamp; the spine digest; the
+    ``fingerprint`` of ``watched_paths``; per gate the reads of the entry the
+    resolution used (``param:<json path>``, ``file:``, ``dir:``, ``ledger:``,
+    ``model``, ``opaque:``) — what lets P3's hook say which checks a change
+    touched; each claim's status under ``resolution``; the sweep's counts with
+    its controls; the first blocking claim with the gate and words that explain
+    it (nulls when nothing blocks); ``params`` (the parameter view, from 1.3) and
+    ``influence`` (P3), empty until then. Untracked, and read by nothing in the
+    sweep: ``check`` never trusts its own summary of a previous run.
+    """
+    if not result.record or _filtered(result.only):
+        return None
+    from . import claims as _claims                # a reader's module: never at import (§3.1)
+    root = os.path.abspath(root)
+    base = result.ledger if result.ledger is not None else Ledger()
+    view = dataclasses.replace(base, verdicts=list(resolution.verdicts))
+    stale = resolution.stale_gates
+    statuses = _claims.statuses(view, registry=result.registry, stale_gates=stale)
+    worst: dict[str, Any] = {"claim": None, "gate": None, "detail": None}
+    blocking = (_claims.blocking(view, result.registry, stale_gates=stale)
+                if result.registry is not None else [])
+    if blocking:
+        claim, status = blocking[0]
+        why = _claims.explaining_verdict(claim, view.verdicts)
+        worst = {"claim": claim.id, "gate": why.gate if why is not None else None,
+                 "detail": ((why.detail or why.error or why.skip_reason) if why is not None
+                            else str(status.value))}
+    reads = {gid: _flat_reads(row.entry.reads or {})
+             for gid, row in sorted(resolution.rows.items()) if row.entry is not None}
+    data = {
+        "when": str(now or ""),
+        "spine": spine_digest(),
+        "fingerprint": fingerprint(root, watched_paths(root, resolution), digests=digests),
+        "reads": reads,
+        "statuses": {cid: str(status.value) for cid, status in statuses.items()},
+        "counts": {**result.counts, "controls": dict(result.controls)},
+        "worst": worst,
+        "params": dict(params or {}),
+        "influence": {},
+    }
+    path = os.path.join(root, _STATE_DIR, _CACHE_DIR, _LAST_CHECK)
+    # Fixed key order, as documented, rather than atomic_write_json's sorted one:
+    # the file is read by people debugging a hook as often as by the hook.
+    atomic_write_text(path, json.dumps(_clean(data), indent=2, ensure_ascii=False,
+                                       allow_nan=False) + "\n")
+    return path
+
+
+def _walk_watched(base: str) -> list[str]:
+    """Every file under ``base`` a fingerprint watches: no ``__pycache__``, no
+    dot-directory or dot-file (the writers' ``.<name>.tmp``), no bytecode, no
+    ``*.tmp``/``*.lock`` — each rewritten by running things, not by editing
+    them."""
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__" and not d.startswith("."))
+        for name in sorted(filenames):
+            if name.startswith(".") or name.endswith(_UNWATCHED_SUFFIXES):
+                continue
+            found.append(os.path.join(dirpath, name))
+    return found
+
+
+def watched_paths(root: str, resolution: Resolution | None = None) -> list[str]:
+    """Every path ``fingerprint`` digests, absolute and sorted: the ``WATCHED``
+    files (a single file is listed whether or not it exists — its appearing is
+    a change), the files, listings and code files of every entry
+    ``resolution`` used (a gate's ``cad/part.stl``, a pack's gate module), and
+    each loaded pack's ``gates/`` and ``pack.json``."""
+    base = os.path.abspath(root)
+    found: set[str] = set()
+    for pattern in WATCHED:
+        if pattern.endswith("/**"):
+            found.update(_walk_watched(os.path.join(base, *pattern[:-3].split("/"))))
+        else:
+            found.add(os.path.join(base, *pattern.split("/")))
+    anchors = getattr(resolution, "anchors", None)
+    if not isinstance(anchors, Anchors):
+        anchors = anchors_for(base, None, out_dir=store.out_dir(base))
+    places = _places_of(anchors)
+    for row in (getattr(resolution, "rows", None) or {}).values():
+        entry = getattr(row, "entry", None)
+        if entry is None:
+            continue
+        reads = entry.reads or {}
+        spelled = [*(reads.get("files") or {}), *(reads.get("dirs") or {}),
+                   *((entry.code or {}).get("files") or ())]
+        for name in spelled:
+            where = _locate(name, base, places)
+            if where:
+                found.add(os.path.abspath(where))
+    for _name, pack_dir in anchors.packs:
+        found.update(_walk_watched(os.path.join(pack_dir, "gates")))
+        found.add(os.path.join(pack_dir, "pack.json"))
+    return sorted(found)
+
+
+def fingerprint(root: str, paths: Iterable[str], *, digests: FileDigests | None = None) -> str:
+    """sha256 over the spine digest and ``{path: digest}`` for ``paths`` —
+    a file by its bytes (``None`` when missing), a directory by its listing —
+    keyed relative to ``root``. Moves when anything watched moves; stays put
+    when nothing does."""
+    base = os.path.abspath(root)
+    digests = digests if digests is not None else FileDigests()
+    table: dict[str, str | None] = {}
+    for path in sorted({os.path.abspath(p) for p in paths}):
+        key = _shown(base, path)
+        if os.path.isdir(path):
+            table[key + "/"] = _dir_digest(path)
+        else:
+            table[key] = digests.digest(path)
+    return _digest_of(_clean({"schema": SCHEMA, "spine": spine_digest(), "paths": table}))
