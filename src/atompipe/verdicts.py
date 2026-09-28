@@ -5193,6 +5193,10 @@ def _known_good(root: str, ctx: Any, trace: GateTrace | None = None) -> tuple[An
     blank: dict[str, Any] = {"params": {}, "ledger": Ledger(), "extra": {}, "model": None}
     handed = dataclasses.replace(ctx, **{k: blank[k] for k in _KNOWN_GOOD_BLANK if k in names})
     try:
+        # Its module-level memos emptied first, as a gate's and a fixture's
+        # are (`modelio.clear_caches`): every control that runs it reads its
+        # files itself, into that control's trace.
+        modelio.clear_caches(make)
         with tracing(trace) if trace is not None else contextlib.nullcontext():
             built = make(handed)
     except KeyboardInterrupt:

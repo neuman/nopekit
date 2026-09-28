@@ -538,6 +538,9 @@ def load_source_module(path, *, name, roots, registry=None, attrs=None) -> Modul
                          # before it runs (a pack's PACK, PACK_DIR), part of the cache key
 def load_path(path) -> ModuleType                        # a helper by path; module name salted by its abspath
 def code_closure(obj) -> CodeClosure | None              # a module's, or a function's module's
+def clear_caches(obj) -> tuple[str, ...]                 # empty the functools memos obj's code holds
+                         # at module level (its module, every module of its closure: globals
+                         # and the attributes of classes they define); the dotted names emptied
 ```
 **`flat_params` is the one copy** of "flatten a projection into `ctx.params`": derived
 values first, config on top, and the list of keys where the two disagree. It was
@@ -559,6 +562,24 @@ the owning directory, and `fallback` says so. The closure is stored on the modul
 it still hashes the same, else purges the recorded helpers and re-executes (the gates
 it registered are re-adopted into the caller's registry). `load_model` records the
 model's closure the same way.
+
+**A module-level memo is emptied before every run.** `clear_caches(obj)` empties every
+functools memo — an `lru_cache`, a `cache`, or a function carrying a `cache_clear` of
+its own, as cachetools' `cached` does — held by the code `obj` runs: a
+global, or a staticmethod, classmethod, method or property getter of a class the module
+defines, followed through `__wrapped__` — in `obj`'s module and every module whose file
+is in its closure. `gates.run_gate` calls it on the gate function, `_build_control` on
+the fixture and `verdicts._known_good` on `known_good.context`, each before the call, so
+every run opens its files itself inside its own trace window. What slipped through
+(review round 2): S-27 was closed for `ctx.extra` only, and an `lru_cache` around a file
+read is the same channel — the admission control runs its gate first, in the same
+process, so even a lone memoised gate was a hit on its real run: its entry keyed no
+file, and after the file was zeroed a plain `check` served the PASS as current while a
+forced run FAILed it. A memo that cannot empty itself (a dict filled from a function
+body, a `global` rebound from one, a mutable default written into) is not reached;
+`doctor`'s `memos` row names each one. *Rejected:* re-executing the module per run (it
+re-registers its gates, and pays an expensive import per gate); calling any
+`cache_clear` found by attribute lookup (a proxy's `__getattr__` runs code).
 
 **The model owns the value** (checkpoint 1.3, U27). A param record holds only what the
 model cannot (`source`, `grounded_by`, `tags`, and `rejected`/`units`/`rationale` only
@@ -1371,7 +1392,9 @@ never hands `fn` the caller's context. In order: availability (a skip never call
 and records nothing); `pack` and `key_scope` stamped; then `verdicts.traced_context` —
 `params` a read-only `ParamTrace`, `ledger` a `LedgerView` with no verdicts, `extra` the
 gate's own shallow copy, `model` a `ModelProxy` (`None` stays `None`), `memo` shared,
-`trace` set — and `fn` runs inside `verdicts.tracing(trace)`. `trace=None` makes a
+`trace` set — and, once `modelio.clear_caches(fn)` has emptied the module-level memos
+its code holds (a memo that will not empty is the run's error), `fn` runs inside
+`verdicts.tracing(trace)`. `trace=None` makes a
 throwaway trace, so the view is read-only on every path, not only in a sweep. It writes
 no file, consults no cache and enforces no admission. The window closes before a
 crash's traceback is formatted (linecache's reads are the formatter's). What slipped
@@ -1409,7 +1432,9 @@ inside the same window (a hand-run check script, packs:H15).
 **Controls, traced.** `selftest(spec, fn, ctx, *, trace=None, out_dir=None)`: the
 fixture gets a WRITABLE traced copy of `ctx` (`out_dir` replaced when given) — its
 writes never reach the sweep, its reads of the host land in `trace.host_reads` — and
-`make` runs inside `tracing(trace)`; `trace.fixture_code` is
+`make` runs inside `tracing(trace)`, its module-level memos emptied first
+(`modelio.clear_caches(make)`: re-verification runs a fixture and a miss runs it again,
+in one process); `trace.fixture_code` is
 `modelio.code_closure(make)`; the gate then runs through `run_gate` with the same trace.
 `duration_s` and `cpu_s` cover both. `run_fixture(spec, fn, ctx, *, trace, out_dir)`
 is the fixture half alone — for re-verifying a control whose fixture code moved without
@@ -2256,9 +2281,10 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 | `pending-controls` | warn | controls whose fixture code moved (`<k> control(s) pending — inputs moved (<files>); the next check re-verifies`, the sentence `status`'s note prints) |
 | `imports` | warn | a gate that imports a third-party module (`CodeRef.third_party`) it does not declare in `requires_python` or a `python:` entry of `requires_one_of`: where it is missing, the gate errors instead of reading SKIPPED. In the gate's own file, read by reach — module-level imports plus those inside the gate function and the module-level functions and classes it names, transitively; other closure files whole. A whole-file rule named `cad.bounding`, the one tier-0 gate of a module whose other gates import trimesh lazily |
 | `env-reads` | warn | the static env-read detector (spec §3.17): an AST scan of every registered gate's closure files for `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins), through any alias of `os` or a `from os import`. An environment read fires no audit event, so no entry keys on it (§8) |
+| `memos` | warn | the static memo detector: an AST scan of every registered gate's closure files for a module-global memo `modelio.clear_caches` cannot empty — a module-level container (a `{}`, `dict()`, `defaultdict` and the like) written into from a function body that does not bind the name itself, a module global a function rebinds under `global`, a mutable default argument its function writes into. The first gate to fill one opens the file; every later one opens nothing, and no entry keys it (review round 2) |
 | `sealed-fixtures` | FAIL | invariant 5 at runtime: every pack control run against this project's params through `packs.seal_findings`, into a temp `out_dir`; a control that reads its host is named with the paths it read |
 
-The two static detectors measured zero hits on the 54 bundled gates before they landed
+The three static detectors measured zero hits on the 54 bundled gates before they landed
 (R-4; `tests/test_doctor.py`). No staleness row: which gates are current is `status`'s
 `stale:` block. No run-history row: there is none to read (S-31).
 
@@ -2275,6 +2301,13 @@ a reader of the output meets it:
   every registered gate's closure (zero hits on the bundled corpus when it landed).
   *Rejected:* a dynamic proxy for `os.environ` — it changes what a subprocess started
   inside a gate inherits.
+- **Module-level memos.** A memo hit opens nothing, so no trace sees what it served.
+  functools' memos are emptied before every gate, fixture and known-good run
+  (`modelio.clear_caches`); any other memo held at module level cannot be emptied from
+  outside, and `doctor`'s `memos` row is a static detector for it (zero bundled hits
+  when it landed). Not reached: a memo held on a module-level INSTANCE (a
+  `cached_property`, a dict attribute), and one inside a third-party library the gate
+  calls.
 - **`ctx.model is None` is not recorded.** A gate that branches on whether a model is
   loaded at all is invisible to rho on that branch; `ModelProxy` records a real use of
   the model, never its absence. No bundled gate reads `ctx.model`.

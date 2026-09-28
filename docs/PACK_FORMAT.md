@@ -311,6 +311,16 @@ by exactly those reads (`rho`). So:
   to any of those between two gates of one sweep loads it again. A hit is the same
   object for every caller: copy it before you change it. Outside a sweep
   (`ctx.memo is None`, a hand-run script) it simply loads.
+- **A module-level memo is emptied before every run.** A `functools.lru_cache` or
+  `functools.cache` in your gate module or a helper it loads — a global, or a cached
+  method of a class the module defines — is cleared before each gate, fixture and
+  known-good run, so every run opens its files itself and they are its inputs. (What
+  slipped through: the admission control runs the gate first, in the same process, so
+  a memoised file read was a hit on the real run, the entry keyed no file, and a
+  zeroed limit file left a Fresh PASS.) Any other memo — a module-level dict filled
+  from a function, a `global` rebound from one, a mutable default argument — cannot be
+  emptied from outside: `atompipe doctor`'s `memos` row names it. Share a file between
+  gates with `ctx.load_file`.
 - **Asking whether a file is there is reading it.** `os.path.isfile`, `exists`,
   `isdir`, `getsize`, `pathlib.Path.exists`/`is_file`, a `glob` of a literal path: a
   path under the project or your pack that the gate asked about is one of its inputs —

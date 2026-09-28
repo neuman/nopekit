@@ -369,6 +369,101 @@ def helped(ctx):
 
 LIMITS = "LIMIT = 9.0\n"
 
+#: Gates that read their number through a module-level functools memo — no
+#: ``ctx.load_file``, no ``extra`` — in each spelling a gate module uses: an
+#: ``lru_cache``, a bare ``cache``, a cached staticmethod on a class, and a memo
+#: in a helper loaded by path (another module of the gate's closure). Every
+#: control is ``bad_x``, which keeps the root: the admission control calls the
+#: memo on the SAME path, in the same process, before the gate runs — the
+#: review's repro. ``t.memo_lru_b`` shares ``t.memo_lru``'s memo and file, the
+#: cross-gate shape S-27 had on ``extra``.
+MEMO = '''\
+import functools
+import os
+
+from atompipe.gates import gate
+from atompipe.modelio import load_path
+from atompipe.models import NegativeControl, Verdict
+
+helper = load_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_memo.py"))
+
+
+def _nc():
+    return NegativeControl(fixture="selftest/bad.py:bad_x")
+
+
+def _read(path):
+    with open(path, encoding="utf-8") as fh:
+        return float(fh.read())
+
+
+@functools.lru_cache(maxsize=None)
+def _lru(path):
+    return _read(path)
+
+
+@functools.cache
+def _cached(path):
+    return _read(path)
+
+
+class _Table:
+    @staticmethod
+    @functools.lru_cache(maxsize=None)
+    def number(path):
+        return _read(path)
+
+
+def _at(ctx, rel):
+    return os.path.join(ctx.root, *rel.split("/"))
+
+
+def _verdict(gate_id, ctx, value):
+    x = float(ctx.params["config"]["x"])
+    return Verdict(gate=gate_id, passed=value >= 1.0 and x < 10.0, measured=value, limit=1.0)
+
+
+@gate(id="t.memo_lru", title="t", claims=["memo_lru"], negative_control=_nc())
+def memo_lru(ctx):
+    return _verdict("t.memo_lru", ctx, _lru(_at(ctx, "data/memo_lru.txt")))
+
+
+@gate(id="t.memo_lru_b", title="t", claims=["memo_lru_b"], negative_control=_nc())
+def memo_lru_b(ctx):
+    return _verdict("t.memo_lru_b", ctx, _lru(_at(ctx, "data/memo_lru.txt")))
+
+
+@gate(id="t.memo_cache", title="t", claims=["memo_cache"], negative_control=_nc())
+def memo_cache(ctx):
+    return _verdict("t.memo_cache", ctx, _cached(_at(ctx, "data/memo_cache.txt")))
+
+
+@gate(id="t.memo_method", title="t", claims=["memo_method"], negative_control=_nc())
+def memo_method(ctx):
+    return _verdict("t.memo_method", ctx, _Table.number(_at(ctx, "data/memo_method.txt")))
+
+
+@gate(id="t.memo_helper", title="t", claims=["memo_helper"], negative_control=_nc())
+def memo_helper(ctx):
+    return _verdict("t.memo_helper", ctx, helper.number(_at(ctx, "data/memo_helper.txt")))
+'''
+
+MEMO_HELPER = '''\
+import functools
+
+
+@functools.lru_cache(maxsize=None)
+def number(path):
+    with open(path, encoding="utf-8") as fh:
+        return float(fh.read())
+'''
+
+#: Each memo gate and the file its number comes from.
+MEMO_FILES = {"t.memo_lru": "data/memo_lru.txt", "t.memo_lru_b": "data/memo_lru.txt",
+              "t.memo_cache": "data/memo_cache.txt", "t.memo_method": "data/memo_method.txt",
+              "t.memo_helper": "data/memo_helper.txt"}
+MEMO_GATES = list(MEMO_FILES)
+
 #: Sealed fixtures: each builds its own context and reads nothing of the host.
 FIXTURES = '''\
 import dataclasses
@@ -412,7 +507,7 @@ TAGS = {"C_ST": "stress", "C_FI": "file", "C_SU": "sub", "C_CL": "claimread",
         "C_SA": "same", "C_HE": "helped", "C_BA": "buf_a", "C_BB": "buf_b",
         "C_NA": "named", "C_CE": "cert", "C_GS": "getsize", "C_ES": "entry_size",
         "C_OU": "outside"}
-TAGS.update({f"C_{gid[len('t.'):]}": gid[len("t."):] for gid in BULK + STAT_GATES})
+TAGS.update({f"C_{gid[len('t.'):]}": gid[len("t."):] for gid in BULK + STAT_GATES + MEMO_GATES})
 CLAIM_OF = {f"t.{tag}": cid for cid, tag in TAGS.items()}
 CLAIM_OF["t.claim"] = "C_CL"
 
@@ -441,6 +536,10 @@ def plant(root: str) -> str:
     write(root, "gates/same.py", SAME)
     write(root, "gates/helped.py", HELPED)
     write(root, "model/limits.py", LIMITS)
+    write(root, "gates/memo.py", MEMO)
+    write(root, "gates/_memo.py", MEMO_HELPER)
+    for rel in set(MEMO_FILES.values()):
+        write(root, rel, "2.0\n")
     write(root, "selftest/bad.py", FIXTURES)
     for name in ("limit", "shared", "hidden"):
         write(root, f"data/{name}.txt", "2.0\n")
@@ -1105,6 +1204,59 @@ class StaleIsNotCurrent(_env.EnvCase):
             got = row(again, gate_id)
             self.assertTrue(got.executed, f"{gate_id} was served from the cache")
             self.assertEqual(got.verdict.outcome, "fail", "the new buffer was loaded")
+
+    def test_a_module_level_memo_keeps_its_file_an_input(self):
+        """V: a ``functools.lru_cache`` around a file read is a cross-gate
+        channel rho cannot see, and S-27 was closed for ``ctx.extra`` only. The
+        admission control runs its gate first, in the same process, on the same
+        path, so even a LONE memoised gate was a hit that opened nothing on its
+        real run: the entry keyed no file, the edit left the PASS Fresh, and a
+        forced run failed it (review round 2, ``probe.lru``: ``files={}`` while
+        its control named ``data/limit2.txt``). Every spelling below, the gate's
+        own module and a helper of its closure, must key the file on the real
+        run, go stale on the edit, and re-run on the new bytes."""
+        p = Project(self)
+        base = projection()
+        first = p.sweep(base, only=MEMO_GATES)
+        before = p.statuses(base)
+        for gate_id, rel in MEMO_FILES.items():
+            with self.subTest(gate=gate_id):
+                got = row(first, gate_id)
+                self.assertEqual(got.verdict.outcome, "pass", got.verdict)
+                self.assertTrue(got.admission.executed,
+                                "the control did not run in this process first — without "
+                                "that warm memo this scenario tests nothing")
+                self.assertEqual(before[CLAIM_OF[gate_id]], PASS, "the positive control")
+                self.assertIn(rel, p.entry(gate_id).reads["files"],
+                              f"{gate_id}: a memo the control warmed hid the file from the "
+                              f"gate's own run")
+
+        for rel in set(MEMO_FILES.values()):
+            write(p.root, rel, "0.5\n")
+        resolution = p.resolve(base)
+        after = p.statuses(base, resolution)
+        again = p.sweep(base, only=MEMO_GATES)
+        for gate_id, rel in MEMO_FILES.items():
+            with self.subTest(gate=gate_id):
+                self.assertIn(gate_id, resolution.stale_gates)
+                self.assertIn(f"{rel} changed", resolution.rows[gate_id].stale_reason)
+                self.assertNotEqual(after[CLAIM_OF[gate_id]], PASS)
+                got = row(again, gate_id)
+                self.assertTrue(got.executed, f"{gate_id} was served from the cache")
+                self.assertEqual(got.verdict.outcome, "fail",
+                                 "the memo served the old number to the re-run")
+
+    def test_a_module_level_memo_left_warm_hides_the_file(self):
+        """The scenario's own negative control: with the memos NOT emptied
+        (``modelio.clear_caches`` a no-op), the control's run warms each one and
+        the gate's real run keys no file — the defect, reproduced, so the test
+        above is known to be able to fail."""
+        p = Project(self)
+        with mock.patch.object(modelio, "clear_caches", lambda obj: ()):
+            p.sweep(projection(), only=MEMO_GATES)
+        for gate_id, rel in MEMO_FILES.items():
+            with self.subTest(gate=gate_id):
+                self.assertNotIn(rel, p.entry(gate_id).reads["files"])
 
     def test_a_hand_edited_entry(self):
         p = Project(self)

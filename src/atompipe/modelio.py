@@ -64,6 +64,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import difflib
+import functools
 import hashlib
 import inspect
 
@@ -100,6 +101,7 @@ __all__ = [
     "load_source_module",
     "load_path",
     "code_closure",
+    "clear_caches",
     "static_param_prose",
     "ParamView",
     "param_view",
@@ -1431,6 +1433,150 @@ def code_closure(obj: Any) -> CodeClosure | None:
         return None
     module = sys.modules.get(name) if isinstance(name, str) else None
     return _own_closure(module) if module is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# module-level memos:  emptied before every run of the code that holds them
+# --------------------------------------------------------------------------- #
+#: The type `functools.lru_cache` and `functools.cache` wrap a function in —
+#: taken from a wrapper rather than named, because its name is private.
+_LRU_WRAPPER = type(functools.lru_cache(maxsize=None)(lambda: None))
+
+#: How far `clear_caches` follows `__wrapped__` from a module global to a memo
+#: under it: a decorator stacked over a cache (`@traced @functools.cache`) hides
+#: the wrapper behind one level, and nobody stacks eight. Rejected: no limit — a
+#: hand-built `__wrapped__` that points back at itself would loop.
+_UNWRAP_DEPTH = 8
+
+
+def _home_module(obj: Any) -> Any:
+    """The module `obj` is, or the one that defines it (`code_closure`'s lookup)."""
+    if isinstance(obj, types.ModuleType):
+        return obj
+    target = getattr(obj, "__func__", obj)
+    try:
+        name = getattr(target, "__module__", None)
+    except Exception:                             # noqa: BLE001 - a proxy that refuses
+        return None
+    return sys.modules.get(name) if isinstance(name, str) else None
+
+
+def _closure_modules(obj: Any) -> list[types.ModuleType]:
+    """Every loaded module whose code `obj` runs: its own, and each module whose
+    file is in its recorded closure — in `sys.modules`, or held only by
+    reference (a helper some other machinery executed and never registered).
+    A module this loader did not run counts only outside the interpreter's
+    trees and the spine: a gate registered from Python in a test is keyed by its
+    defining file, and a `functools.partial` would otherwise hand over
+    `functools` itself."""
+    home = _home_module(obj)
+    if home is None:
+        return []
+    closure = _own_closure(home)
+    if closure is None:
+        where = _module_file(home)
+        if where is None or any(_under(_norm(where), d) for d in _excluded_dirs()):
+            return []
+        return [home]
+    files = {_norm(path) for path, _sha in closure.files}
+    found: dict[int, types.ModuleType] = {id(home): home}
+    for loaded in list(sys.modules.values()):
+        if isinstance(loaded, types.ModuleType) and id(loaded) not in found:
+            where = _module_file(loaded)
+            if where is not None and _norm(where) in files:
+                found[id(loaded)] = loaded
+    queue = list(found.values())
+    while queue:
+        for value in list(vars(queue.pop()).values()):
+            if isinstance(value, types.ModuleType) and id(value) not in found:
+                where = _module_file(value)
+                if where is not None and _norm(where) in files:
+                    found[id(value)] = value
+                    queue.append(value)
+    return list(found.values())
+
+
+def _memo_clearer(value: Any) -> Any:
+    """`value.cache_clear` when `value` — or what it wraps, `_UNWRAP_DEPTH` deep
+    — is a memo that knows how to empty itself, else None. functools' wrapper by
+    its type; a plain function carrying a callable `cache_clear` of its own
+    (cachetools' `cached` copies functools' protocol). Read through `vars`,
+    never `getattr`, on anything else: a module global may be a proxy whose
+    attribute lookup runs code."""
+    seen: set[int] = set()
+    for _depth in range(_UNWRAP_DEPTH):
+        if value is None or id(value) in seen:
+            return None
+        seen.add(id(value))
+        if isinstance(value, _LRU_WRAPPER):
+            return value.cache_clear
+        if not isinstance(value, types.FunctionType):
+            return None
+        own = vars(value)
+        if callable(own.get("cache_clear")):
+            return own["cache_clear"]
+        value = own.get("__wrapped__")
+    return None
+
+
+def _memos_in(module: types.ModuleType) -> list[tuple[str, Any]]:
+    """`(dotted name, cache_clear)` for every memo `module` holds at module
+    level: a global, or an attribute of a class the module defines — a cached
+    staticmethod, classmethod, method or property getter, which every instance
+    shares."""
+    name = getattr(module, "__name__", "?")
+    found: list[tuple[str, Any]] = []
+    for key, value in list(vars(module).items()):
+        clear = _memo_clearer(value)
+        if clear is not None:
+            found.append((f"{name}.{key}", clear))
+            continue
+        if not isinstance(value, type) or vars(value).get("__module__") != name:
+            continue
+        for attr, member in list(vars(value).items()):
+            if isinstance(member, (staticmethod, classmethod)):
+                member = member.__func__
+            elif isinstance(member, property):
+                member = member.fget
+            clear = _memo_clearer(member)
+            if clear is not None:
+                found.append((f"{name}.{key}.{attr}", clear))
+    return found
+
+
+def clear_caches(obj: Any) -> tuple[str, ...]:
+    """Empty every functools memo held at module level by the code `obj` runs
+    (`_closure_modules`); return the dotted names emptied, sorted.
+
+    `gates.run_gate` calls it on the gate function before the gate runs, and
+    `gates._build_control` and `verdicts._known_good` on the fixture and on
+    `known_good.context` before theirs, so every run reads its files itself,
+    inside its own trace window. What slipped through (review round 2): S-27
+    was closed for `ctx.extra` only. A `functools.lru_cache` around a file read
+    is the same cross-gate channel — the first caller opens the file, every
+    later one gets the value and opens nothing, so no audit event puts the file
+    in its read set. And the admission control runs its gate FIRST, in the same
+    process: even a lone memoised gate was a hit on its real run. `probe.lru`'s
+    entry keyed no file while its control named `data/limit2.txt`; after the file
+    was zeroed a plain `check` served the cached PASS as current and a forced run
+    FAILed it. Emptying the memo costs a re-read per run; a memo that survives
+    is an input nothing keys.
+
+    Only memos that can empty themselves are reached. Any other module-global
+    memo — a dict filled from a function body, a `global` rebound from one, a
+    mutable default argument — cannot be emptied from outside, and
+    `atompipe doctor`'s `memos` row names each one. *Rejected:* re-executing
+    the module before every run (it re-registers its gates, and a module whose
+    import is expensive — trimesh, a solver binding — pays that per gate);
+    clearing every `cache_clear` found by attribute lookup (a proxy's
+    `__getattr__` would run code the gate never called).
+    """
+    cleared: list[str] = []
+    for module in _closure_modules(obj):
+        for name, clear in _memos_in(module):
+            clear()
+            cleared.append(name)
+    return tuple(sorted(set(cleared)))
 
 
 # --------------------------------------------------------------------------- #

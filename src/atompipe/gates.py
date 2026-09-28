@@ -1661,6 +1661,12 @@ def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
 
     clock = _Clock()
     try:
+        # Every memo the gate's code holds at module level is emptied first,
+        # outside the window: its reads happen in this run, or not at all. A
+        # warm lru_cache — warmed by this gate's own control a moment ago, in
+        # this process — once made the real run open nothing (modelio.clear_caches).
+        # A memo that will not empty is this run's error, never a skipped step.
+        modelio.clear_caches(fn)
         with tracing(trace):
             result = fn(view)
     except (SystemExit, GeneratorExit) as exc:       # BaseException: see docstring.
@@ -2104,6 +2110,10 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
     try:
         make = load_fixture(nc.fixture, _fixture_root(spec, ctx, fn))
         trace.fixture_code = modelio.code_closure(make)
+        # The fixture's module-level memos too: re-verification runs a fixture
+        # and a miss then runs it again, in one process, and a hit on the second
+        # run would leave the file it built from out of the control's reads.
+        modelio.clear_caches(make)
         with tracing(trace):
             built = make(host)
     except AtompipeError as exc:

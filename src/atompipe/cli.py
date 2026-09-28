@@ -4295,6 +4295,131 @@ def _env_reads(registry: gates.Registry, root: str) -> list[str]:
     return lines
 
 
+#: The constructors a module-level memo is spelled with, by the name called
+#: (`dict()`, `collections.OrderedDict()`, `defaultdict(list)` alike). A display
+#: or comprehension counts too. Rejected: every module-level assignment (the
+#: bundled packs keep dozens of constant tables, and a warning on each would be
+#: noise nobody reads); only `{}` (the likeliest spelling, and `defaultdict` is
+#: the next).
+_MEMO_CONTAINERS = frozenset({"dict", "list", "set", "bytearray", "defaultdict", "OrderedDict",
+                              "Counter", "deque", "ChainMap", "WeakValueDictionary",
+                              "WeakKeyDictionary", "WeakSet"})
+
+#: The calls that WRITE into a container. A memo is a container filled from a
+#: function body; one that is only read there is a constant table. `pop`,
+#: `clear` and `remove` are left out: they evict, and a module that only evicts
+#: has nothing to serve.
+_MEMO_WRITES = frozenset({"setdefault", "update", "append", "extend", "insert", "add",
+                          "appendleft", "extendleft", "__setitem__", "__ior__"})
+
+
+def _is_container(node: Any) -> bool:
+    if isinstance(node, (ast.Dict, ast.List, ast.Set, ast.DictComp, ast.ListComp, ast.SetComp)):
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else \
+            func.attr if isinstance(func, ast.Attribute) else ""
+        return name in _MEMO_CONTAINERS
+    return False
+
+
+def _module_level(body: list) -> Iterable[Any]:
+    """The statements that run at import in module scope: the module body and
+    the bodies of its `if`/`try`/`with`/`for`/`while`, never a def or a class."""
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        yield node
+        for name in ("body", "orelse", "finalbody"):
+            yield from _module_level(getattr(node, name, None) or [])
+        for handler in getattr(node, "handlers", None) or ():
+            yield from _module_level(handler.body)
+
+
+def _written_into(func: Any, name: str) -> int | None:
+    """The line of the first write into container `name` inside `func` — an item
+    assigned, augmented or deleted, or a `_MEMO_WRITES` call — else None."""
+    for node in ast.walk(func):
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)) \
+                and isinstance(node.value, ast.Name) and node.value.id == name:
+            return node.lineno
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in _MEMO_WRITES and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id == name:
+            return node.lineno
+    return None
+
+
+def _memo_hits(tree: Any) -> list[tuple[int, str]]:
+    """`(line, name)` for every module-global memo in `tree` that the spine
+    cannot empty (`modelio.clear_caches` reaches functools' memos only): a
+    module-level container written into from a function body that does not
+    make the name its own; a module global a function rebinds under `global`;
+    a mutable default argument its function writes into. Each lives as long as
+    the process, so the first gate to fill it reads the file and every later
+    one does not."""
+    containers = set()
+    for node in _module_level(tree.body):
+        if isinstance(node, ast.Assign) and _is_container(node.value):
+            containers.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None \
+                and _is_container(node.value) and isinstance(node.target, ast.Name):
+            containers.add(node.target.id)
+    hits: set[tuple[int, str]] = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        args = func.args
+        params = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+        params += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+        declared = {n for node in ast.walk(func) if isinstance(node, ast.Global)
+                    for n in node.names}
+        bound = {node.id for node in ast.walk(func)
+                 if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))}
+        for name in declared & bound:
+            line = next(node.lineno for node in ast.walk(func)
+                        if isinstance(node, ast.Name) and node.id == name
+                        and isinstance(node.ctx, (ast.Store, ast.Del)))
+            hits.add((line, name))
+        for name in containers:
+            if name in params or (name in bound and name not in declared):
+                continue
+            line = _written_into(func, name)
+            if line is not None:
+                hits.add((line, name))
+        positional = args.posonlyargs + args.args
+        defaults = list(zip(positional[len(positional) - len(args.defaults):], args.defaults))
+        defaults += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+        for arg, default in defaults:
+            if _is_container(default):
+                line = _written_into(func, arg.arg)
+                if line is not None:
+                    hits.add((line, arg.arg))
+    return sorted(hits)
+
+
+def _memo_reads(registry: gates.Registry, root: str) -> list[str]:
+    """`<file>:<line> <name> (<gates>)` for every module-global memo the spine
+    cannot empty, in the code of every registered gate — its module and its
+    closure. Static, like `_env_reads`, and for the same reason: a memo hit
+    opens nothing, so no trace sees what it served. Zero bundled hits."""
+    cache: dict[str, Any] = {}
+    owners: dict[tuple[str, int, str], list[str]] = {}
+    for spec, fn in registry.pairs():
+        for path in _source_files(fn):
+            tree = _parse(path, cache)
+            for line, name in (_memo_hits(tree) if tree is not None else ()):
+                owners.setdefault((path, line, name), []).append(spec.id)
+    base = os.path.abspath(root)
+    lines = []
+    for (path, line, name), gate_ids in sorted(owners.items()):
+        shown = os.path.relpath(path, base).replace(os.sep, "/") \
+            if path.startswith(base + os.sep) else path
+        lines.append(f"{shown}:{line} {name} ({', '.join(sorted(set(gate_ids)))})")
+    return lines
+
+
 def _cache_notes(root: str, resolution: verdicts.Resolution) -> dict[str, list[str]]:
     """The resolver's notes, sorted into the doctor rows that own them — plus a
     strict read of every control entry on disk, because the resolver reads a
@@ -4376,6 +4501,14 @@ def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
            _listed(found) + " — an environment read fires no audit event, so no cache "
                             "entry keys on it; pass the value through the model"
            if found else "no gate's code reads the environment")
+
+    found = _memo_reads(registry, root)
+    _check(results, "memos", "warn" if found else "ok",
+           _listed(found) + " — a module-level memo outlives the gate that filled it: a "
+                            "file read behind it is opened by the first gate to ask and by "
+                            "no later one, so no cache entry keys it; share a file through "
+                            "ctx.load_file, which records it for every caller"
+           if found else "no gate's code keeps a module-level memo the spine cannot empty")
 
 
 def _doctor_seal_row(results: list[dict], registry: gates.Registry,

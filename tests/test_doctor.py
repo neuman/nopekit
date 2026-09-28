@@ -29,6 +29,12 @@ past a check without it:
 * **env-reads** — an environment read fires no audit event, so no entry can key
   on it: a gate whose limit comes from `os.environ` stays Fresh when the variable
   changes (spec §8). A static scan is the only thing that can see it.
+* **memos** — a module-level memo outlives the gate that filled it: the first
+  gate to ask opens the file, every later one gets the value and opens nothing,
+  and no entry keys what it served. functools' memos the spine empties before
+  every run (``modelio.clear_caches``); a dict filled from a function body, a
+  ``global`` rebound from one, a mutable default written into, it cannot — only
+  a static scan sees them.
 * **code-digest** — a gate registered from Python, with no recorded closure, is
   keyed by its defining file; a value its function closes over is not seen.
 * **pending-controls** — a control whose fixture code moved still counts until
@@ -40,7 +46,7 @@ past a check without it:
 
 Every row is tested with a planted trigger AND a clean counterpart: a detector
 that has never refused anything is a logger, and one that refuses everything is
-noise. The static detectors (imports, env-reads) are also measured on every
+noise. The static detectors (imports, env-reads, memos) are also measured on every
 bundled gate first (R-4): zero hits.
 
 Run:  PYTHONPATH=src python3 -m unittest tests.test_doctor -v
@@ -67,7 +73,7 @@ from atompipe.models import GateSpec, NegativeControl, Tier, Verdict
 
 #: The rows this file holds `doctor` to, by the name each prints.
 ROWS = ("instruments", "opaque-inputs", "cache-entries", "two-outcomes", "sealed-fixtures",
-        "imports", "env-reads", "code-digest", "pending-controls", "orphan-entries")
+        "imports", "env-reads", "memos", "code-digest", "pending-controls", "orphan-entries")
 
 #: A fixture every planted project gate can borrow: the bracket's own, which
 #: sags the known-good design 30 mm — past any limit the planted gates use.
@@ -214,6 +220,65 @@ def env_limit(ctx):
     scale = float(read_env("PLANTED_SCALE") or 1.0)
     value = float(ctx.params["deflection"]) * scale
     return Verdict(gate="bracket.env_limit", passed=value <= limit, measured=value,
+                   limit=limit, units="mm")
+'''
+
+_MEMO_GATE = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_doctor.py: every module-global memo the spine cannot empty,
+and three look-alikes it must not name."""
+import functools
+import os
+
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+_LIMITS = {{}}
+_TABLE = None
+_UNITS = {{"mm": 1.0}}
+_SCRATCH = {{}}
+
+
+def _read(path):
+    with open(path, encoding="utf-8") as fh:
+        return float(fh.read())
+
+
+def _limit(path):
+    if path not in _LIMITS:
+        _LIMITS[path] = _read(path)
+    return _LIMITS[path]
+
+
+def _table(path):
+    global _TABLE
+    if _TABLE is None:
+        _TABLE = _read(path)
+    return _TABLE
+
+
+def _once(path, _seen={{}}):
+    return _seen.setdefault(path, _read(path))
+
+
+@functools.lru_cache(maxsize=None)
+def _lru(path):
+    return _read(path)
+
+
+def _local(path):
+    _SCRATCH = {{}}
+    _SCRATCH[path] = _UNITS["mm"]
+    return _SCRATCH[path]
+
+
+@gate(id="bracket.memo_limit", title="a limit behind module-level memos", claims=["planted"],
+      tier=Tier.INSTANT, negative_control=NegativeControl(fixture={fixture!r}, note="planted"))
+def memo_limit(ctx):
+    path = os.path.join(ctx.root, "limit.txt")
+    limit = min(_limit(path), _table(path), _once(path), _lru(path), _local(path))
+    value = float(ctx.params["deflection"])
+    return Verdict(gate="bracket.memo_limit", passed=value <= limit, measured=value,
                    limit=limit, units="mm")
 '''
 
@@ -454,6 +519,23 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         registry = _bundled_registry()
         self.assertGreaterEqual(len(registry.ids()), 50, "the bundled corpus did not load")
         self.assertEqual(cli_mod._env_reads(registry, _env.REPO), [])
+
+    def test_memos(self):
+        project = self.copy()
+        _write(project, "gates/planted_memo.py", _MEMO_GATE.format(fixture=_FIXTURE))
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "memos", "warn", "gates/planted_memo.py:",
+                             " _LIMITS (bracket.memo_limit)", " _TABLE (bracket.memo_limit)",
+                             " _seen (bracket.memo_limit)", "ctx.load_file",
+                             absent=("_lru", "_UNITS", "_SCRATCH", "structural.py"))
+        self.assertEqual(code, 0, row)
+        self.assertClean("memos")
+
+    def test_no_bundled_gate_keeps_a_memo_the_spine_cannot_empty(self):
+        """R-4: zero bundled hits, measured before the row landed."""
+        registry = _bundled_registry()
+        self.assertGreaterEqual(len(registry.ids()), 50, "the bundled corpus did not load")
+        self.assertEqual(cli_mod._memo_reads(registry, _env.REPO), [])
 
     def test_code_digest_names_a_gate_keyed_by_its_defining_file(self):
         project = self.copy()

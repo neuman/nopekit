@@ -579,6 +579,34 @@ def make(ctx):
     return dataclasses.replace(ctx, params={"span_mm": bad})
 """
 
+#: ``_TRACED_FIXTURE`` with its file read behind a module-level ``lru_cache``.
+_MEMO_FIXTURE = """\
+import dataclasses, functools, json, os
+
+@functools.lru_cache(maxsize=None)
+def _bad_span(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)["bad_span_mm"]
+
+def make(ctx):
+    return dataclasses.replace(
+        ctx, params={"span_mm": _bad_span(os.path.join(ctx.root, "data", "limits.json"))})
+"""
+
+#: A known-good design built from a file read behind a module-level ``cache``.
+_MEMO_KNOWN_GOOD = """\
+import dataclasses, functools, json, os
+
+@functools.cache
+def _span(path):
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)["good_span_mm"]
+
+def context(ctx):
+    return dataclasses.replace(
+        ctx, params={"span_mm": _span(os.path.join(ctx.root, "data", "good.json"))})
+"""
+
 _MUTATING_FIXTURE = """\
 def make(ctx):
     ctx.params["span_mm"] = 99.0
@@ -660,6 +688,55 @@ class SelftestTraces(_env.EnvCase):
         self.assertEqual(seen["seen_out"], control_out,
                          "the fixture wrote into the host out_dir, where a cached PASS "
                          "keeps its evidence (packs:H5)")
+
+    def test_a_fixture_memo_is_emptied_before_every_control_run(self):
+        """V: a control runs its fixture more than once in one process —
+        re-verification runs it alone, and a miss then runs it again with the
+        gate — so a fixture that reads its known-bad input through a module-level
+        ``lru_cache`` opened the file on the first run only, and the control
+        entry the second run filed keyed nothing it was built from (the gate-side
+        hole, ``probe.lru``, on the fixture's side). Every run, gate or fixture,
+        reads its files itself."""
+        spec, fn = self._gate(_MEMO_FIXTURE, name="memo_bad.py")
+        limits = os.path.join(self.root, "data", "limits.json")
+        control_out = os.path.join(self.root, "controls", "g.span")
+        first = GateTrace(kind="control")
+        gates_mod.run_fixture(spec, fn, self._host(span_mm=5.0), trace=first,
+                              out_dir=control_out)
+        self.assertIn(limits, first.files_read, "the positive control: a miss opens it")
+        for run in range(2):
+            with self.subTest(run=run):
+                trace = GateTrace(kind="control")
+                v = gates_mod.selftest(spec, fn, self._host(span_mm=5.0), trace=trace)
+                self.assertTrue(v.ok, v.detail or v.error)
+                self.assertIn(limits, trace.files_read,
+                              "a warm fixture memo hid its known-bad input from the "
+                              "control's trace")
+        # The test's own negative control: the memo left warm hides the file.
+        with mock.patch.object(gates_mod.modelio, "clear_caches", lambda obj: ()):
+            warm = GateTrace(kind="control")
+            gates_mod.run_fixture(spec, fn, self._host(span_mm=5.0), trace=warm,
+                                  out_dir=control_out)
+        self.assertNotIn(limits, warm.files_read)
+
+    def test_a_known_good_memo_is_emptied_before_every_control_run(self):
+        """V: the same hole in ``selftest/known_good.py``, whose ``context`` runs
+        inside each project control's trace window: a memo it filled for one
+        control opened nothing for the next."""
+        _write(os.path.join(self.root, "data", "good.json"), '{"good_span_mm": 5.0}\n')
+        _write(os.path.join(self.root, "selftest", "known_good.py"), _MEMO_KNOWN_GOOD)
+        good = os.path.join(self.root, "data", "good.json")
+        for run in range(2):
+            with self.subTest(run=run):
+                trace = GateTrace(kind="control")
+                built, _closure = verdicts._known_good(self.root, self._host(), trace)
+                self.assertEqual(built.params, {"span_mm": 5.0})
+                self.assertIn(good, trace.files_read,
+                              "a warm known-good memo hid its file from this control")
+        with mock.patch.object(verdicts.modelio, "clear_caches", lambda obj: ()):
+            warm = GateTrace(kind="control")
+            verdicts._known_good(self.root, self._host(), warm)
+        self.assertNotIn(good, warm.files_read, "the test's own negative control")
 
     def test_run_fixture_does_not_call_the_gate(self):
         spec, fn = self._gate(_TRACED_FIXTURE)

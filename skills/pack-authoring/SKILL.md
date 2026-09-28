@@ -77,6 +77,11 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
   `.bin` buffers). Pass a module-level function as the loader, and
   copy the result before changing it (every caller gets the same object). A cache on
   `extra` once made the second gate's read of a part invisible.
+- **Keep no memo of your own.** An `lru_cache` at module level is emptied before every
+  run, so it saves nothing across gates; a module-level dict you fill from a function
+  is never emptied, and the second gate to ask gets a value whose file it never opened
+  — no verdict keys it (`atompipe doctor` names it under `memos`). `ctx.load_file` is
+  the one shared cache that records the file for every caller.
 - **Load helpers by path with `atompipe.modelio.load_path(path)`**, never with
   `spec_from_file_location` under a fixed name: it runs the bytes on disk, never a
   stale `.pyc`, keeps two copies of your pack from sharing one helper, and records the
