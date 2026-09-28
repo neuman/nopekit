@@ -432,18 +432,20 @@ class CodeClosure:
     """The code one module ran, as recorded while it ran. Stored on the module.
 
     * `files` — `(absolute path, sha256 of the bytes)` for every Python file
-      under the owning roots that this module executed or depends on: itself,
+      that is code (`_code_root`: under the owning roots, or beside them and
+      not installed) that this module executed or depends on: itself,
       every helper imported by name, through a namespace package or by path,
       every cached helper it picked up from `sys.modules` (by the helper's own
       recorded closure), and every local module a function body imports lazily
       (read statically). Sorted by path.
     * `fallback` — empty, or why the recording gave up on precision and took
       every `*.py` under the owning root instead: computed source compiled or
-      executed from a frame under the roots, or an import under the roots that
-      resolved to something that is not Python source.
+      executed from a frame in code, or an import of code that resolved to
+      something that is not Python source.
     * `third_party` — the top-level names the files import, read from their
-      source (module and function level), that are not under the roots, not the
-      standard library and not `atompipe`. Static on purpose: a list built from
+      source (module and function level), that are not code — installed
+      (`_installed`), or not importable at all — not the standard library and
+      not `atompipe`. Static on purpose: a list built from
       import events depends on what an earlier gate happened to import first,
       and two identical runs would disagree about it (packs:H3).
     * `spine_extras` — the `atompipe.*` modules the files import that the
@@ -500,12 +502,13 @@ def _excluded_dirs() -> tuple[str, ...]:
 
 
 def _owning_root(path: str, roots: Iterable[str]) -> str | None:
-    """The (normalised) root that owns `path`, or None when it is not project code.
+    """The (normalised) root that owns `path`, or None when it is under no root.
 
     The deepest root containing the path wins. An interpreter tree wins over a
     root only when it sits INSIDE that root — a virtualenv under the project, a
     test tree under the repository that holds the spine — so a pack installed
-    inside site-packages still owns its own files.
+    inside site-packages still owns its own files. None does not yet mean "not
+    code": `_code_root` decides that.
     """
     target = _norm(path)
     best = ""
@@ -518,6 +521,55 @@ def _owning_root(path: str, roots: Iterable[str]) -> str | None:
         if excluded != best and _under(excluded, best) and _under(target, excluded):
             return None
     return best
+
+
+#: Directory names that make a tree installed third-party code wherever it sits:
+#: pip, venv, conda and Debian's python all install into one of these, and a
+#: tree put on `sys.path` by hand keeps its name (ROS's
+#: `/opt/ros/<distro>/lib/python3.x/site-packages` on PYTHONPATH is under none of
+#: this interpreter's prefixes). Matched as a whole path component, and only for
+#: a file under no root, so a project's own tree never changes owner by it.
+#: Rejected: distribution metadata as the test — an editable install has
+#: metadata too, and its source is somebody's working copy, the very case that
+#: slipped through; and no name rule at all, which files a second interpreter's
+#: site-packages as the project's code, fresh-compiled and digested file by
+#: file on every load.
+_SITE_DIR_NAMES = frozenset({"site-packages", "dist-packages"})
+
+
+def _installed(target: str) -> bool:
+    """Is normalised `target` installed third-party code: under one of the
+    interpreter's trees (`_excluded_dirs`), the spine included, or under a
+    directory named like a site dir (`_SITE_DIR_NAMES`)?"""
+    if any(_under(target, excluded) for excluded in _excluded_dirs()):
+        return True
+    return any(part in _SITE_DIR_NAMES for part in target.split(os.sep)[:-1])
+
+
+def _code_root(path: str, roots: Iterable[str]) -> str | None:
+    """The (normalised) root that owns `path` as CODE, or None when it is an
+    instrument: installed third-party code, provenance and never rho (Q1.3).
+
+    A root that owns it (`_owning_root`) first. A Python file under no root is
+    still code unless it is installed (`_installed`), and owns itself: its
+    directory is its root, for a message and for a fallback walk. What slipped
+    through with the roots alone (review round 1, the `mono` probe): a
+    monorepo's `shared/beamlib.py`, beside the project and put on `sys.path` by
+    a gate module, was declined by the recording finder, so the stock loader ran
+    it from its `__pycache__`, the closure left it out, and the static pass
+    listed `beamlib` as third-party — an instrument, "unknown". After its
+    allowable went 5.0 -> 0.1 a plain `check` served the PASS as cached and
+    current, where `--force` FAILed it 0.700 vs 0.1; and a same-second edit ran
+    the old bytecode, S-26 again. Rejected: making such a gate opaque (never
+    Fresh, so re-run on every check, and its import still reads the pyc).
+    """
+    root = _owning_root(path, roots)
+    if root is not None:
+        return root
+    target = _norm(path)
+    if _installed(target):
+        return None
+    return os.path.dirname(target)
 
 
 def _roots(roots: Iterable[str] | None, path: str) -> tuple[str, ...]:
@@ -726,14 +778,15 @@ _STACK: list[_Recording] = []
 
 
 class _RecordingFinder:
-    """At `sys.meta_path[0]` while a recording runs: fresh-loads imports under the roots.
+    """At `sys.meta_path[0]` while a recording runs: fresh-loads imports that are code.
 
     It asks the stock `PathFinder` where a name lives — the same answer the
     import system would reach, from the same `sys.path` — and when that is a
-    Python source file under the recording's roots, hands back the spec with a
-    `_FreshLoader` in place of the stock one. So a helper imported by name is
-    compiled from its bytes (no pyc) and recorded, exactly like the module that
-    imported it. Everything else — the standard library, third-party packages,
+    Python source file that is code (`_code_root`: under the recording's roots,
+    or beside them and not installed), hands back the spec with a `_FreshLoader`
+    in place of the stock one. So a helper imported by name is compiled from its
+    bytes (no pyc) and recorded, exactly like the module that imported it.
+    Everything else — the standard library, installed third-party packages,
     namespace packages (fluids-analytic's `gates`, whose `__file__` is None) —
     is declined and resolves exactly as it would have.
     """
@@ -762,9 +815,9 @@ def _fresh_spec(fullname: str, path: Any) -> Any:
         return None                               # not found, or a namespace package
     recording = _STACK[-1]
     origin = os.path.abspath(spec.origin)
-    root = _owning_root(origin, recording.roots)
+    root = _code_root(origin, recording.roots)
     if root is None:
-        return None
+        return None                               # installed: an instrument
     loader = spec.loader
     if isinstance(loader, importlib.machinery.SourceFileLoader):
         if not isinstance(loader, _FreshLoader):
@@ -781,7 +834,7 @@ _HOOKED = False
 
 
 def _audit(event: str, args: tuple) -> None:
-    """Notice computed source compiled or executed from a frame under the roots.
+    """Notice computed source compiled or executed from a frame in code (`_code_root`).
 
     The calling frame is the whole test. `@dataclass` and `namedtuple` compile
     and exec generated source on every class they build, from a frame in the
@@ -808,7 +861,7 @@ def _audit(event: str, args: tuple) -> None:
         # absolute they would land under whatever the working directory is.
         if not filename or not os.path.isabs(filename):
             return
-        root = _owning_root(filename, recording.roots)
+        root = _code_root(filename, recording.roots)
         if root is None:
             return
         recording.give_up(f"{_FALLBACK_COMPUTED}{_display(filename, root)}:{frame.f_lineno}", root)
@@ -942,7 +995,8 @@ def _walk_globals(module: Any, recording: _Recording) -> None:
     imported under two names, fluids-analytic's `from gates._fluids_analytic
     import …` in its second gate module. After the module runs, every global
     that IS a module, or whose `__module__` names one, is looked up; a module
-    under the roots contributes its own recorded closure. One some other
+    that is code (`_code_root`: under the roots, or beside them and not
+    installed) contributes its own recorded closure. One some other
     machinery loaded (no closure — `spec_from_file_location` by hand) is
     digested as it is on disk now, read statically, and walked in turn: the
     bytes it ran may predate that digest, which is why the bundled by-path
@@ -965,9 +1019,9 @@ def _walk_globals(module: Any, recording: _Recording) -> None:
             where = _module_file(target)
             if where is None:
                 continue                          # builtin, or a namespace package
-            root = _owning_root(where, recording.roots)
+            root = _code_root(where, recording.roots)
             if root is None:
-                continue
+                continue                          # installed: an instrument
             closure = _own_closure(target)
             if closure is not None:
                 recording.absorb(closure)
@@ -1056,8 +1110,9 @@ def _resolve_local(dotted: str, search: list[str], roots: tuple[str, ...]
                    ) -> tuple[bool, list[tuple[str, str, str]]]:
     """Where `dotted` lives, without importing anything.
 
-    Returns `(local, found)`: whether its top-level name resolves under the roots
-    at all, and `(fullname, path, root)` for each file on the way down. Namespace
+    Returns `(local, found)`: whether its top-level name resolves to code at all
+    (`_code_root`: under the roots, or beside them and not installed), and
+    `(fullname, path, root)` for each file on the way down. Namespace
     packages resolve and contribute no file. `PathFinder.find_spec` is used rather
     than `importlib.util.find_spec`, which imports every parent package to answer
     for a dotted name.
@@ -1076,13 +1131,13 @@ def _resolve_local(dotted: str, search: list[str], roots: tuple[str, ...]
             break
         if spec.origin is not None and spec.has_location:
             origin = os.path.abspath(spec.origin)
-            root = _owning_root(origin, roots)
+            root = _code_root(origin, roots)
             if root is None:
                 break
             found.append((fullname, origin, root))
         else:
             under = [loc for loc in (spec.submodule_search_locations or ())
-                     if _owning_root(loc, roots) is not None]
+                     if _code_root(loc, roots) is not None]
             if not under:
                 break
         if depth == 0:
@@ -1103,7 +1158,9 @@ def _static_pass(recording: _Recording) -> None:
       did not keep in its globals. Zero bundled hits today: every lazy import in
       the packs is third-party (R-4).
     * Every other top-level name that is not the standard library or `atompipe`
-      is a third-party name; `atompipe.*` names outside the spine digest are
+      is a third-party name: installed, or not importable at all. A name that
+      resolves on `sys.path` to code beside the roots (`_code_root`) is local,
+      like one under them. `atompipe.*` names outside the spine digest are
       `spine_extras`.
 
     A local file some module in `sys.modules` already ran contributes that
@@ -1120,6 +1177,13 @@ def _static_pass(recording: _Recording) -> None:
     shared += sorted({os.path.dirname(p) for p in recording.files})
     shared += [entry for entry in sys.path
                if isinstance(entry, str) and entry and _owning_root(entry, recording.roots)]
+    # Then the rest of `sys.path`, in its own order, after the file's own
+    # directory, so a local name still resolves where it did. What slipped
+    # through without it (review round 1, `mono`): a helper beside the project,
+    # imported only inside a gate function from a `shared/` the module put on
+    # `sys.path`, resolved nowhere and was listed as third-party — an instrument.
+    rest = [entry for entry in sys.path
+            if isinstance(entry, str) and entry and entry not in shared]
     done: set[str] = set()
     while pending:
         path, data = pending.pop()
@@ -1127,7 +1191,7 @@ def _static_pass(recording: _Recording) -> None:
             continue
         done.add(path)
         imports, attributes = _static_imports(path, data)
-        search = list(dict.fromkeys(shared + [os.path.dirname(path)]))
+        search = list(dict.fromkeys(shared + [os.path.dirname(path)] + rest))
         for level, module, names, _line in imports:
             if level:
                 base = os.path.dirname(path)
@@ -1185,11 +1249,13 @@ def _purge(previous: CodeClosure | None, roots: tuple[str, ...], *, keep: str,
            memo: dict[str, str | None], everything: bool = False) -> None:
     """Drop from `sys.modules` every module that would serve stale code to this load.
 
-    Two kinds. A module this loader ran, under the roots or in the previous
-    version's closure, whose own closure no longer matches the disk: the next
-    importer must re-run it, not pick up the old object (a helper edited after
-    its first importer loaded is otherwise served to the second one — S-26
-    in-process, no pyc involved). And a module some other machinery loaded
+    Two kinds. A module this loader ran — under the roots, beside them and not
+    installed (`_code_root`: a monorepo's `shared/` helper, imported by name, is
+    served to the next importer exactly like one under the roots), or in the
+    previous version's closure — whose own closure no longer matches the disk:
+    the next importer must re-run it, not pick up the old object (a helper
+    edited after its first importer loaded is otherwise served to the second
+    one — S-26 in-process, no pyc involved). And a module some other machinery loaded
     whose file the previous closure recorded at a digest it no longer has.
     `everything` drops the whole previous closure: the name now belongs to a
     different file, and none of the old one's helpers are this one's.
@@ -1204,7 +1270,7 @@ def _purge(previous: CodeClosure | None, roots: tuple[str, ...], *, keep: str,
         key = _norm(where)
         closure = _own_closure(loaded)
         if closure is not None:
-            if key not in recorded and _owning_root(where, roots) is None:
+            if key not in recorded and _code_root(where, roots) is None:
                 continue
             if (everything and key in recorded) or not _closure_current(closure, memo=memo):
                 sys.modules.pop(name, None)
@@ -1302,12 +1368,14 @@ def load_source_module(path: str, *, name: str, roots: Iterable[str],
     loaded by path (`load_path`). Four promises:
 
     * **Fresh bytes.** The source is read and those bytes compiled; no `.pyc` is
-      read or written, for the module or for any import under `roots` while it
-      runs (S-26).
-    * **A recorded closure.** Every file under `roots` that ran — or that a
-      function body imports lazily, read statically — is stored on the module as
+      read or written, for the module or for any import of code while it runs
+      (S-26). Code is `_code_root`'s: a file under `roots`, or beside them and
+      not installed — a monorepo's `shared/` helper is the gate's code, never a
+      third-party instrument.
+    * **A recorded closure.** Every file of code that ran — or that a function
+      body imports lazily, read statically — is stored on the module as
       `__atompipe_code__` (a `CodeClosure`; `code_closure` reads it). Computed
-      source compiled or executed from a frame under `roots`, or an import there
+      source compiled or executed from a frame in code, or an import of code
       that is not Python source, gives up precision for every `*.py` under the
       owning root, and says so in `fallback`.
     * **A content-keyed cache.** The module already in `sys.modules` under `name`

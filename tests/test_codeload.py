@@ -326,6 +326,25 @@ class RecordingLoader(_Sandbox):
         self.assertEqual(set(dict(closure.files)), {gate, bystander},
                          "the fallback digests every *.py under the owning root")
 
+    def test_exec_of_computed_source_beside_the_root_triggers_the_fallback(self):
+        # A helper beside the root is code (the `mono` repro), so computed source
+        # it executes is invisible code too: its directory is walked, as a root is.
+        shared = os.path.join(self.tmp, "shared")
+        name = self.n("rulebook")
+        rules = self.put("rules_src.py", "LIMIT = 3\n", base=shared)
+        self.put(f"{name}.py", """
+            import os
+            with open(os.path.join(os.path.dirname(__file__), "rules_src.py")) as fh:
+                exec(compile(fh.read(), "<rules>", "exec"))
+            """, base=shared)
+        self.on_path(shared)
+        self.put("gate.py", f"import {name}\nX = {name}.LIMIT\n")
+        closure = self.closure(self.load("gate.py"))
+        self.assertTrue(closure.fallback.startswith(f"computed source at {name}.py:"),
+                        closure.fallback)
+        self.assertIn(rules, dict(closure.files),
+                      "the fallback walks the helper's directory, where its source came from")
+
     def test_an_import_that_is_not_source_triggers_the_fallback(self):
         self.on_path(self.root)
         compiled = self.n("compiled")
@@ -430,7 +449,10 @@ class RecordingLoader(_Sandbox):
     # -- what the closure names beyond files -------------------------------- #
     def test_third_party_list_is_static_and_order_independent(self):
         self.on_path(self.root)
-        vendor = os.path.join(self.tmp, "vendor")          # outside the root
+        # Outside the root AND installed: a site-packages tree, as pip leaves one.
+        # A plain directory outside the root is code, not third-party (the
+        # `mono` repro, test_a_helper_beside_the_root_is_code_not_third_party).
+        vendor = os.path.join(self.tmp, "vendor", "site-packages")
         alpha, beta = self.n("alpha"), self.n("beta")
         missing = self.n("not_installed")
         self.put(f"{alpha}.py", "THING = 1\n", base=vendor)
@@ -471,6 +493,68 @@ class RecordingLoader(_Sandbox):
         reversed_order = (self.closure(self.load("two.py", name=self.n("two_b"))).third_party,
                           self.closure(self.load("one.py", name=self.n("one_b"))).third_party)
         self.assertEqual(set(in_order + reversed_order), {expected})
+
+    def test_a_helper_beside_the_root_is_code_not_third_party(self):
+        """V: the review's ``mono`` repro, at the loader. A monorepo's
+        ``shared/`` sits beside the project: under no root and under none of the
+        interpreter's trees. The recording finder declined every import from it,
+        so the stock loader ran it from its pyc, the closure left it out, the
+        static pass listed its name as third-party, and a verdict filed it as an
+        instrument (``unknown``) that is never part of rho: an edit to it moved
+        nothing, and a same-second edit ran the old bytecode (S-26 again)."""
+        shared = os.path.join(self.tmp, "shared")
+        name, lazy = self.n("beamlib"), self.n("lazylib")
+        helper = self.put(f"{name}.py", "ALLOWABLE = 5.0\n", base=shared)
+        lazy_helper = self.put(f"{lazy}.py", "X = 1\n", base=shared)
+        self.stale_pyc(helper)
+        self.on_path(shared)
+        # Beside the root too, but installed: an instrument, never code.
+        installed = os.path.join(self.tmp, "venv2", "lib", "site-packages")
+        library = self.n("installedlib")
+        library_file = self.put(f"{library}.py", "Y = 2\n", base=installed)
+        self.on_path(installed)
+        self.put("gate.py", f"""
+            import {name}
+            import {library}
+            SEEN = {name}.ALLOWABLE
+
+            def run():
+                import {lazy}
+                return {lazy}.X
+            """)
+        self.put("second.py", f"import {name}\nSEEN = {name}.ALLOWABLE\n")
+        gate_name = self.n("gate")
+
+        first = self.load("gate.py", name=gate_name)
+        self.assertEqual(first.SEEN, 5.0)
+        closure = self.closure(first)
+        with open(helper, "rb") as fh:
+            self.assertEqual(dict(closure.files).get(helper), _sha(fh.read()),
+                             "the helper beside the root is not in the closure")
+        self.assertIn(lazy_helper, dict(closure.files),
+                      "a lazy import beside the root is not in the closure")
+        self.assertNotIn(lazy, sys.modules, "the static supplement imported it")
+        self.assertEqual(closure.third_party, (library,),
+                         "a helper beside the root was listed as third-party, or an "
+                         "installed one was not")
+        self.assertNotIn(library_file, dict(closure.files),
+                         "an installed library was recorded as the gate's code")
+        self.assertIn(helper, self.files(sys.modules[name]),
+                      "the helper carries its own closure for the next importer")
+        # A second importer is served the module from sys.modules, with no
+        # import event: it is still that importer's code.
+        self.assertIn(helper, self.files(self.load("second.py")))
+
+        self.edit_same_size(helper, "5.0", "0.1")
+        # A first importer under a new name has no previous closure to purge by:
+        # the stale helper is dropped because it is code, as one under the root is.
+        self.assertEqual(self.load("second.py", name=self.n("second_after")).SEEN, 0.1,
+                         "a helper beside the root, edited after its first importer "
+                         "loaded, was served stale to the next (S-26, in-process)")
+        again = self.load("gate.py", name=gate_name)
+        self.assertIsNot(again, first, "an edit beside the root did not re-execute the module")
+        self.assertEqual(again.SEEN, 0.1, "the helper ran its stale pyc (S-26, beside the root)")
+        self.assertEqual(self.files(again)[helper], _sha(b"ALLOWABLE = 0.1\n"))
 
     def test_a_helper_on_a_path_the_module_adds_is_not_third_party(self):
         # beam, thermal and openmodelica fixtures put `gates/` on sys.path and

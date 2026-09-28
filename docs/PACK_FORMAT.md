@@ -344,7 +344,11 @@ by exactly those reads (`rho`). So:
   bytes on disk (a stale `__pycache__` once ran 7.0 after the source said 8.0), salts
   the module name with the path (two copies of one pack never run each other's
   helpers), and records the helper in the code of the gate that loaded it — so editing
-  the helper re-runs that gate.
+  the helper re-runs that gate. A helper imported by name from outside the pack or
+  project — a monorepo's `shared/` put on `sys.path` — is recorded the same way: any
+  Python file that is not installed (under the interpreter's own trees, or in a
+  `site-packages` / `dist-packages` directory) is the gate's code, never a third-party
+  instrument, and never runs from a stale `__pycache__`.
 
 `outcome` is the one derivation of what a verdict says: `"error"` if `error` is set,
 else `"skipped"` if `skipped`, else `"pass"` if `passed is True`, else `"fail"`.

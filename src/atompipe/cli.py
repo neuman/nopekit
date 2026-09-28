@@ -4235,8 +4235,9 @@ def _undeclared_imports(registry: gates.Registry) -> list[str]:
     raises — an error (a FAIL, and CI red for a tooling gap, spec §5 risk 5)
     where a declared one reads SKIPPED, BLOCKED, with its reason. Third party
     means what the recorded closure says it is (`CodeRef.third_party`: not the
-    standard library, not atompipe, not a file under the gate's own roots).
-    Measured on every bundled gate: zero (`test_doctor`).
+    standard library, not atompipe, not code — a file under the gate's own
+    roots, or beside them and not installed, is code). Measured on every
+    bundled gate: zero (`test_doctor`).
     """
     cache: dict[str, Any] = {}
     found: list[str] = []

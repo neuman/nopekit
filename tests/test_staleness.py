@@ -79,6 +79,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import py_compile
 import re
 import shutil
 import sys
@@ -161,6 +162,7 @@ import copy
 import glob
 import json
 import os
+import py_compile
 import pathlib
 import shutil
 import subprocess
@@ -351,6 +353,7 @@ def same(ctx):
 #: part of the gate's code, recorded while the module loaded.
 HELPED = '''\
 import os
+import py_compile
 
 from atompipe.gates import gate
 from atompipe.modelio import load_path
@@ -380,6 +383,7 @@ LIMITS = "LIMIT = 9.0\n"
 MEMO = '''\
 import functools
 import os
+import py_compile
 
 from atompipe.gates import gate
 from atompipe.modelio import load_path
@@ -468,6 +472,7 @@ MEMO_GATES = list(MEMO_FILES)
 FIXTURES = '''\
 import dataclasses
 import os
+import py_compile
 
 from atompipe.models import Acceptance, Claim, Ledger
 
@@ -829,6 +834,7 @@ _OPENS_GATE = '''\
 # SPDX-License-Identifier: Apache-2.0
 """Planted by tests/test_staleness.py: a gate whose limit is a file it opens."""
 import os
+import py_compile
 
 from atompipe.gates import gate
 from atompipe.models import NegativeControl, Tier, Verdict
@@ -846,6 +852,41 @@ def opens(ctx):
         limit = float(fh.read().split()[-1])
     value = float(ctx.params[{param!r}])
     return Verdict(gate={gate_id!r}, passed=value <= limit, measured=value, limit=limit)
+'''
+
+
+#: A gate whose allowable lives in a monorepo's ``shared/`` directory, BESIDE the
+#: project: outside every recording root and outside every interpreter tree. It
+#: puts that directory on ``sys.path`` and imports the helper by name, as the
+#: review's ``mono`` probe did.
+_SHARED_GATE = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_staleness.py: an allowable from a sibling shared/ helper."""
+import os
+import py_compile
+import sys
+
+_SHARED = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__)))), "shared")
+if _SHARED not in sys.path:
+    sys.path.insert(0, _SHARED)
+
+import beamlib  # noqa: E402
+
+from atompipe.gates import gate  # noqa: E402
+from atompipe.models import NegativeControl, Tier, Verdict  # noqa: E402
+
+
+@gate(id="mono.allowable", title="tip deflection against the shared allowable",
+      claims=["shared-allowable"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/planted.py:far_past",
+                                       note="the deflection pushed far past any allowable"))
+def allowable(ctx):
+    """Passes while the deflection stays within the shared allowable."""
+    d = float(ctx.params["deflection"])
+    limit = beamlib.ALLOWABLE_DEFLECTION_MM
+    return Verdict(gate="mono.allowable", passed=d <= limit, measured=d, limit=limit,
+                   units="mm")
 '''
 
 
@@ -1513,6 +1554,73 @@ class StaleIsNotCurrent(_env.EnvCase):
         again = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
         self.assertFalse(again["cached"], "the cached PASS was served after B.mo appeared")
         self.assertEqual(again["outcome"], "fail")
+
+    def test_cli_a_gate_helper_beside_the_project_is_code_not_an_instrument(self):
+        """V: the review's repro (false-fresh probes, round 1, ``mono``), through
+        the CLI a person runs. A monorepo keeps its allowable in a sibling
+        ``shared/beamlib.py``, which a project gate imports by name after putting
+        ``shared/`` on ``sys.path``. The recording finder declined it — under no
+        root — so the stock loader ran it (its ``__pycache__`` included), the
+        closure left it out, and the entry filed it as an instrument, ``beamlib:
+        unknown``, which is never part of rho. After the allowable went 5.0 ->
+        0.1 a plain ``check`` said ``0 executed, 1 cached``, and ``--force``
+        FAILed it: ``0.700 vs 0.1``. The edit here is S-26's — same size, mtime
+        put back, a pyc the stock loader trusts beside it — so the re-run must
+        also be the new bytes, not the stale bytecode."""
+        mono = self.tmp()
+        project = _projects.bracket_copy(os.path.join(mono, "proj"), migrated=True)
+        helper = _put(mono, "shared/beamlib.py", "ALLOWABLE_DEFLECTION_MM = 5.0\n")
+        _put(project, "selftest/planted.py", _PLANTED_FIXTURES)
+        _put(project, "gates/allowable.py", _SHARED_GATE)
+        _put(project, "claims/C8.json", json.dumps(
+            {"statement": "Tip sags within the shared allowable", "kind": "measurable",
+             "acceptance": {"quantity": "tip deflection", "comparator": "<=",
+                            "limit": 5.0, "units": "mm"},
+             "tags": ["shared-allowable"]}) + "\n")
+
+        gate_id = "mono.allowable"
+        first = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
+        self.assertEqual((first["outcome"], first["limit"]), ("pass", 5.0),
+                         "the positive control")
+        seen, proven = _seen(project)
+        self.assertEqual(seen["C8"], "pass", "the positive control")
+        self.assertIn("C8", proven, "the positive control: C8 is PROVEN before the edit")
+        entry = _entry_docs(project)[gate_id]
+        self.assertTrue([f for f in entry["code"]["files"] if f.endswith("shared/beamlib.py")],
+                        f"the helper the gate ran is not in its code: {entry['code']}")
+        self.assertNotIn("beamlib", entry["instruments"],
+                         "a helper beside the project was filed as a third-party instrument")
+
+        # S-26's edit, on the helper: a pyc the stock loader would trust...
+        pyc = importlib.util.cache_from_source(helper)
+        py_compile.compile(helper, cfile=pyc, doraise=True,
+                           invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+        before = os.stat(helper)
+        _replace_once(mono, "shared/beamlib.py", "5.0", "0.1")
+        os.utime(helper, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(helper)
+        self.assertEqual((after.st_size, after.st_mtime_ns),
+                         (before.st_size, before.st_mtime_ns), "same size, same second")
+        # ...and does: the negative control. If the stock loader ever stops
+        # serving it, the scenario is gone and the re-run below proves nothing.
+        stock_spec = importlib.util.spec_from_file_location(
+            f"stock_beamlib_{os.getpid()}", helper)
+        stock = importlib.util.module_from_spec(stock_spec)
+        stock_spec.loader.exec_module(stock)
+        self.assertEqual(stock.ALLOWABLE_DEFLECTION_MM, 5.0,
+                         "the stock loader no longer serves the stale pyc")
+
+        status = _doc(_cli(project, "status", "--json"), 0)
+        self.assertIn(gate_id, status["stale_gates"],
+                      "the helper's allowable moved and the PASS read current")
+        seen, proven = _seen(project)
+        self.assertNotEqual(seen["C8"], "pass", "a moved helper left its claim PASS")
+        self.assertNotIn("C8", proven, "a moved helper left its claim under PROVEN")
+
+        again = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
+        self.assertFalse(again["cached"], "the cached PASS was served after the helper moved")
+        self.assertEqual((again["outcome"], again["limit"]), ("fail", 0.1),
+                         "the re-run ran the stale bytecode, not the helper's new bytes")
 
 
 # --------------------------------------------------------------------------- #

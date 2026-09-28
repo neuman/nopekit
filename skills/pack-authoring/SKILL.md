@@ -85,7 +85,9 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
 - **Load helpers by path with `atompipe.modelio.load_path(path)`**, never with
   `spec_from_file_location` under a fixed name: it runs the bytes on disk, never a
   stale `.pyc`, keeps two copies of your pack from sharing one helper, and records the
-  helper as part of the gate's code, so editing it re-runs the gate.
+  helper as part of the gate's code, so editing it re-runs the gate. A helper imported
+  by name from a `shared/` beside the pack is the gate's code too; only an installed
+  library (site-packages) is a third-party instrument.
 - **Leave `rho` and `cpu_s` alone.** `run_gate` measures `cpu_s` (child processes
   included: a solver subprocess is not free) and `duration_s`, and the sweep sets
   `rho`. Anything a gate puts in them is overwritten.

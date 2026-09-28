@@ -529,7 +529,8 @@ def flat_params(projection) -> tuple[dict, list[str]]   # derived first, config 
 class CodeClosure:                                       # what a loaded module's code IS
     files        # ((abspath, sha256 of the bytes compiled), ...)
     fallback     # "", or why the closure is a whole directory: "computed source at <file>:<line>"
-    third_party  # static top-level imports resolving outside the roots (not stdlib, not atompipe)
+    third_party  # static top-level imports that are not code: installed, or not importable
+                 # (not stdlib, not atompipe; a file beside the roots and not installed is code)
     spine_extras # atompipe.* modules it imports that are not in verdicts.SPINE_MODULES
 def load_source_module(path, *, name, roots, registry=None, attrs=None) -> ModuleType
                          # fresh bytes, recorded closure, content-keyed; registry: where its
@@ -553,11 +554,21 @@ the bytes, records `(abspath, sha256)`, and compiles THOSE bytes — no `.pyc` i
 written for these modules. What slipped through: after a same-size, same-second edit,
 gate modules and pack helpers ran the old bytecode — source said 8.0, the verdict came
 from 7.0 (S-26); `_FreshLoader` had fixed that for the model entry only. While a module
-executes, a recording finder attributes every import under `roots` to it; a walk of its
+executes, a recording finder attributes every import of code to it; a walk of its
 globals attributes helpers found already in `sys.modules`; a static pass adds lazy
-imports inside function bodies. Only `exec` of computed source from a frame under
-`roots`, or an import that cannot be mapped to a file, falls back to every `*.py` under
-the owning directory, and `fallback` says so. The closure is stored on the module as
+imports inside function bodies. **Code** is a Python file under `roots`, or beside them
+and not installed; installed means under one of the interpreter's trees (prefixes,
+stdlib, site and user site, the spine) or under a directory named `site-packages` or
+`dist-packages`, and only installed modules are third-party — instruments, provenance,
+never rho (Q1.3). What slipped through with `roots` alone (review round 1): a monorepo's
+`shared/beamlib.py`, put on `sys.path` by a gate module, ran from its `__pycache__`, was
+left out of the closure and filed as an instrument `beamlib: unknown` — an edit to its
+allowable kept the PASS Fresh, and a same-second edit ran the old bytecode. *Rejected:*
+distribution metadata as the test of installed (an editable install has it, and its
+source is a working copy); making such a gate opaque (re-run on every check, still from
+the pyc). Only `exec` of computed source from a frame in code, or an import of code that
+cannot be mapped to a file, falls back to every `*.py` under the owning directory, and
+`fallback` says so. The closure is stored on the module as
 `__atompipe_code__`; a later load returns the cached module only while every file in
 it still hashes the same, else purges the recorded helpers and re-executes (the gates
 it registered are re-adopted into the caller's registry). `load_model` records the
@@ -992,7 +1003,8 @@ digest, the reads (`reads=`, else `trace` through `Reads.from_trace`), rho and
 
 **`instruments_for`** — provenance, never rho (Q1.3): for each module in
 `requires_python`, the `python:` entries of `requires_one_of`, and the closure's
-**static** third-party imports (`CodeRef.third_party`), its `importlib.metadata`
+**static** third-party imports (`CodeRef.third_party`: installed or not importable —
+a helper beside the project that is not installed is code, never an instrument), its `importlib.metadata`
 version, `"unknown"` when importable without metadata, `"absent"` when not importable.
 It never imports anything. Never from `import` audit events: those fire once per
 process, so only the first mesh gate saw trimesh, and `--only` and a full sweep wrote

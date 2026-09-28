@@ -2428,9 +2428,15 @@ def instruments_for(spec: Any, code: Any) -> dict[str, str]:
     The modules: ``spec.requires_python``, the ``python:`` entries of
     ``spec.requires_one_of``, and the STATIC third-party imports of the gate's
     closure files (``code.third_party``: every top-level import name, module or
-    function level, resolving outside the closure roots, not stdlib, not
-    atompipe). The version: ``importlib.metadata``'s, ``"unknown"`` when
+    function level, resolving to an installed tree or to nothing, not stdlib,
+    not atompipe). The version: ``importlib.metadata``'s, ``"unknown"`` when
     importable without metadata, ``"absent"`` when not importable.
+
+    A module beside the project that is not installed — a monorepo's
+    ``shared/beamlib.py`` on ``sys.path`` — is never here: it is the gate's
+    code, in its closure and its rho (``modelio._code_root``). Filed here as
+    ``beamlib: unknown`` it once kept a PASS Fresh after its allowable moved
+    (review round 1, ``mono``).
 
     Never from ``import`` audit events: those fire once per process, on the
     first actual load, so only the first mesh gate of a sweep "saw" trimesh, and
