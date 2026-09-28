@@ -166,20 +166,25 @@ the refusal.
 ```python
 class FileDigests:                                   # sha256 of a file's BYTES, behind a stat cache
     def __init__(self, cache_path: str | None = None)   # .atompipe/cache/digests.json (untracked)
-    def digest(self, path) -> str | None             # None when the file is missing
-    def save(self) -> None                           # best-effort; a failed save costs a re-hash
+    def digest(self, path) -> str | None             # None: missing, not a regular file, unreadable
+    def save(self) -> bool                           # best-effort; True when written
 ```
 **Digests come from bytes.** `FileDigests` is how every Phase 1.2 digest of a file is
 taken — a gate's opened files, the selftest walk, the verdict cache. The cache key is
-`(size, mtime_ns, ctime_ns, ino, dev)`; an entry whose `mtime_ns >= written_ns` — the
-cache file's own mtime after its last write — is re-hashed (git's racy-clean rule,
-against its index mtime; no fixed window). What slipped through before it:
+`(size, mtime_ns, ctime_ns, ino, dev)`; an entry whose `max(mtime_ns, ctime_ns) >=
+written_ns` — the cache file's own mtime after its last write — is re-hashed (git's
+racy-clean rule, against its index mtime; no fixed window). ctime counts as well as
+mtime because an edit whose mtime was restored to the past, landing in the tick the
+cache was written, keeps an old mtime and a ctime in that tick. A racy entry that this
+process never re-hashed is dropped on `save`, not written back under a newer write time
+(which would launder it); nothing hashed before the first write of a cache file is
+trusted until that write. A FIFO or directory is never opened. What slipped through before it:
 `inputs_hash` hashed digests stored at ingest, never the bytes, so a limit file edited
 under a project gate left the claim reading pass (S-22, S-45). *Rejected:* size and
 mtime alone (a same-size edit with its mtime restored — `os.utime` cannot restore
 ctime); a fixed 2 s window (misattributed to git in an earlier draft).
 
-### `vcs.py`  (deps: util)
+### `vcs.py`  (no deps)
 The **only** git edge. Nothing else under `src/` starts a `git` process
 (`test_meta.NoGitOutsideVcs`).
 ```python
@@ -194,7 +199,11 @@ Argv form with `-C root`, never a shell string. The environment strips `GIT_DIR`
 `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
 `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`,
 `GIT_CEILING_DIRECTORIES` and `GIT_CONFIG_PARAMETERS` — a git hook exports them, and
-every call would then answer for the OUTER repository — and sets
+every call would then answer for the OUTER repository — plus the rest of what the
+installed git prints for `git rev-parse --local-env-vars` (`GIT_CONFIG_COUNT`,
+`GIT_CONFIG`, `GIT_SHALLOW_FILE`, …) and `GIT_QUARANTINE_PATH`; `vcs._STRIPPED` is the
+list, and a test holds it against the installed git's. It does not strip every `GIT_*`:
+the user's `GIT_CONFIG_GLOBAL` and `GIT_AUTHOR_NAME` must still reach git. It sets
 `GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0` and `LC_ALL=C`. `ls_files` with
 `others` is `--cached --others --exclude-standard`: tracked plus untracked-not-ignored.
 `ident` is `git -c user.useConfigOnly=true var GIT_AUTHOR_IDENT`. **Every function
@@ -285,7 +294,11 @@ class CodeClosure:                                       # what a loaded module'
     fallback     # "", or why the closure is a whole directory: "computed source at <file>:<line>"
     third_party  # static top-level imports resolving outside the roots (not stdlib, not atompipe)
     spine_extras # atompipe.* modules it imports that are not in verdicts.SPINE_MODULES
-def load_source_module(path, *, name, roots) -> ModuleType   # fresh bytes, recorded closure, content-keyed
+def load_source_module(path, *, name, roots, registry=None, attrs=None) -> ModuleType
+                         # fresh bytes, recorded closure, content-keyed; registry: where its
+                         # gates are recorded and re-adopted (the caller also wraps the call in
+                         # gates.use_registry — modelio cannot import gates); attrs: globals set
+                         # before it runs (a pack's PACK, PACK_DIR), part of the cache key
 def load_path(path) -> ModuleType                        # a helper by path; module name salted by its abspath
 def code_closure(obj) -> CodeClosure | None              # a module's, or a function's module's
 ```
