@@ -211,8 +211,10 @@ def _root(args: argparse.Namespace) -> str:
     """The project root for this invocation, or an AtompipeError saying there is none.
 
     `-C/--dir` sets where the search STARTS, not where it ends: like git, the
-    walk goes up until it finds `.atompipe/`, so running from `model/` or
-    `inputs/cad/` hits the same project.
+    walk goes up until it finds a project marker (`.atompipe/project.json`, or a
+    legacy `.atompipe/ledger.json`) and stops at the repository's `.git`, so
+    running from `model/` or `inputs/cad/` hits the same project (S-64: any
+    `.atompipe/` used to count, and `~/.atompipe/packs/` made all of `~` one).
     """
     return store.require_root(getattr(args, "dir", None))
 
@@ -3025,11 +3027,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check(results, "spine", "ok",
            f"atompipe {__version__} from {os.path.dirname(os.path.abspath(__file__))}")
 
-    root = store.find_root(getattr(args, "dir", None))
-    if root is None:
-        where = os.path.abspath(getattr(args, "dir", None) or os.getcwd())
-        _check(results, "project", "FAIL",
-               f"no .atompipe/ in {where} or any parent — run `atompipe init`")
+    # `require_root`'s own message, not a second spelling of it. What slipped
+    # through (S-64): this line said "no .atompipe/ in <dir> or any parent" after
+    # the marker became a FILE and the walk began stopping at `.git`, so doctor
+    # told a user standing beside a bare `.atompipe/`, or in a worktree whose
+    # trunk is a project, that the directory it could see was not there.
+    try:
+        root = store.require_root(getattr(args, "dir", None))
+    except AtompipeError as exc:
+        _check(results, "project", "FAIL", str(exc))
         return _doctor_finish(args, results)
     _check(results, "project", "ok", root)
 

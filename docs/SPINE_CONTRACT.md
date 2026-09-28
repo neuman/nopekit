@@ -483,20 +483,23 @@ from where it was named, and a stray copy on the author's machine cannot shadow 
 (S-87). The defaults keep today's precedence.
 
 **`demonstrate` is admission, run.** `demonstrate(pack_dir, *, tier=Tier.BUILD,
-out_dir=None)` loads the pack alone (env and user packs excluded) into a fresh
-`Registry` and, per gate within `tier`: the gate must pass its own
+out_dir=None)` loads the pack alone, from `pack_dir` itself with no lookup by name
+(so env and user packs cannot stand in for it), into a fresh `Registry` and, per
+gate within `tier`: the gate must pass its own
 `selftest/baseline.json`; its negative control must fire; a skip is allowed only when
 `availability(spec)` fails, and is reported in `skipped`, never in `problems`; and
 the **seal probe** — the control must also fire against an empty host (`params={}`,
 `extra={}`, an empty `Ledger`), which is invariant 5 (SEALED) checked by running it.
 Every run gets an explicit temp `out_dir` when none is given, so nothing is written
-into the pack — including a wheel's site-packages. `baseline_context(pack_dir, *,
+into the pack — including a wheel's site-packages; a given `out_dir` holds
+`<gate id>/{baseline,control,sealed}`, each emptied before its run. `baseline_context(pack_dir, *,
 out_dir)` is the one sealed baseline context everything builds from: the raw
 `baseline.json` **including `_notes` and `_aliases`**, exactly as the test oracle
 builds it, `root=pack_dir`, an empty `Ledger`, `extra={}`, the given `out_dir`, tier
 `EXTERNAL`. `validate(pack_dir, *, tier=Tier.BUILD, notes=None)` calls `demonstrate`
-once the gates load; a missing-tool skip is appended to `notes` when a list is
-given and **never** to the returned problems, so `validate(dir) == []` on a CI runner
+once the gates load; a missing-tool skip, and the gates above `tier` that were not
+run, are appended to `notes` when a list is given and **never** to the returned
+problems, so `validate(dir) == []` on a CI runner
 with no solvers. What slipped through: `pack validate` never ran a control and
 certified a planted `return True` as publishable (S-09); `gate selftest` tests only
 the reject half, so an always-False gate passed it — the baseline run is the accept
