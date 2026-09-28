@@ -363,8 +363,9 @@ to `[]` (they live in the verdict cache). On a legacy project it is
 write, so a command answers the same before and after it. Neither marker: an empty
 `Ledger`. **No spine code reads `.atompipe/ledger.json` for truth** on a records project.
 
-**`save(root, ledger)`** stays for tests and the migration (from U28 an AST test forbids
-it in `cli.py`: a command writes exactly the record it was asked to). On a records
+**`save(root, ledger)`** stays for tests and the migration (an AST test,
+`tests/test_shims.py`, forbids it in `cli.py`: a command writes exactly the record it
+was asked to). On a records
 project it writes `project.json` and one file per record, removes the file of a record
 no longer in the ledger (a param with nothing to hold writes none), APPENDS a claim's
 `physical_result` to `results/<id>.json` when it is not already the last one — a
@@ -1411,17 +1412,30 @@ def kind_for(path) -> ArtifactKind   # by extension + directory hint
 def bucket_for(kind) -> str          # the inputs/ subdirectory a kind belongs in
 def find_by_hash(ledger, sha) -> InputArtifact | None   # already ingested? by digest
 def ingest(root, ledger, src, *, kind=None, description="", when="", copy=True,
-           licence="", note="") -> InputArtifact     # copies into inputs/<bucket>/, hashes
+           licence="", note="") -> InputArtifact     # copies into inputs/<bucket>/, hashes;
+                                                     # returns the record to write
 def ingest_link(root, ledger, url, *, description="", kind=ArtifactKind.LINK, when="") -> InputArtifact
 def add_extraction(ledger, artifact_id, extraction: Extraction) -> InputArtifact
+                                                     # the artifact's record, extraction appended
 def inputs_hash(ledger) -> str                       # over sorted (id, sha256); a display id
 def unextracted(ledger) -> list[InputArtifact]       # evidence nobody read = decoration
-def grounding(ledger) -> dict[str, list[str]]        # param/claim id -> artifact ids
+def grounding(ledger, *, include_declared=True) -> dict[str, list[str]]
+                                                     # param/claim id -> artifact ids, DERIVED
 def requests_by_kind(ledger, *, project_kind="", limit=6) -> list[tuple[str, str]]  # (kind, prompt)
 def suggest_requests(ledger, *, project_kind="") -> list[str]
     # the ASK list, filtered to what is MISSING. This is what makes intake actively
     # solicit files instead of waiting for the user to think of them.
 ```
+`ingest`, `ingest_link` and `add_extraction` write nothing: each returns the
+`InputArtifact` the CLI's shim writes as `inputs/<id>.json`, the one record it
+touches, and updates the in-memory `ledger` so a command handling several files
+dedupes against its own earlier ones. `grounding` inverts the extractions every time
+it is read and adds the `grounded_by` a human declared on a param or claim record; the
+edge an extraction implies is never copied into the record it grounds. What slipped
+through (S-36): `extract` used to copy it (`cli._link_grounding`), so a deleted
+extraction's grounding lived on — `why arm_length` said "GROUNDED BY arm" while
+`inputs` said `arm` was "NEVER READ".
+
 `ASK_FOR` must cover at minimum: sketch, reference, cad, screenshot, datasheet,
 spec, measurement, standard, data — each with 2-4 concrete, domain-neutral prompts
 phrased as things to ask a human ("a photo of the closest existing product you'd
@@ -1465,7 +1479,8 @@ class SealFinding:                           # one unsealed control (invariant 5
     host_paths: tuple[str, ...]              # the host-param paths read, sorted, dotted; "(all params)" = the top level
 def match(need: Need, manifests) -> list[PackManifest]      # gap -> candidate packs, by `settles`
 def score(need: Need, manifest) -> float                   # 0 = no signal; what `match` ranks by
-def installed(root, *, ledger=None) -> list[str]           # the project's opted-in packs, in order
+def installed(root, *, ledger=None) -> list[str]           # the project's opted-in packs, in order:
+                                                             # project.json's `packs`, via store.load
 def available(root=None) -> list[str]                      # every pack name discovery can see
 def key_scope(manifest) -> str                             # "fdm-print" -> "fdm" (from its gate ids)
 def key_vocabulary(name, root=None) -> dict[str, dict]     # every projection key the pack reads
@@ -1546,7 +1561,7 @@ one inside the installed wheel.
 def add(ledger, *, title, summary, when, rejected=(), params_changed=(),
         claims_changed=(), body="", evidence=()) -> Decision
 def render_log(ledger) -> str                # markdown, NEWEST FIRST
-def write_log(root, ledger) -> str           # docs/decisions.md
+def write_log(root, ledger) -> str           # docs/decisions.md — `report --write`'s output
 def why(ledger, name: str, *, view=None, coverage=None, read_sets=None,
         verdicts=None) -> str                # one param or claim: value, rationale,
                                              # rejected alternatives, gates, grounding,
@@ -1748,19 +1763,80 @@ printed in a document against the parser instead of against memory. `main` catch
 `AtompipeError`, prints `error: <msg>` to stderr, and returns 2.
 ```
 atompipe init [--name] [--summary]        atompipe status
-atompipe claim add|list|show|edit|physical  atompipe gap [--propose]
+atompipe claim list|show|physical         atompipe gap [--propose]
 atompipe ingest <path...> [--kind] [--desc]   atompipe inputs [--unextracted]
 atompipe extract <artifact> --what ... --grounds ...
 atompipe ask [--kind]                     # what evidence to request from the user
 atompipe check [--tier N] [--only GATE] [--force] [--no-record]   atompipe gate list|selftest|show
 atompipe report [--write]                 atompipe why <param-or-claim>
-atompipe decide --title ... --summary ...  atompipe packs [list|show|validate]
+atompipe decide --title ... --summary ...  atompipe packs [list|show|validate|add]
 atompipe model [--write]                  atompipe doctor
 atompipe check [--junit [PATH]]
 atompipe gate selftest [GATE ...] [--pack NAME|DIR] [--user-packs] [--allow-empty] [--junit [PATH]]
 ```
 Output is terse and machine-parseable by default (one line per verdict);
 `--json` on every read command.
+
+**Records at the edge** (checkpoint 1.3, spec §3.15). A record is a file, and a
+command writes exactly the one record it was asked to write — never the whole
+project. What slipped through before: every writing command loaded the whole ledger
+and saved the whole ledger, so `decide` rewrote every claim to add one decision, and
+`check`, a sweep, rewrote the records on every run (parameters re-synced from the
+model, grounding back-references copied into parameters, coverage into
+`claim.gates`): a claim edited by hand between two commands was put back by the
+second, `claim edit --gates X` was reverted by the next check (S-37), and a deleted
+extraction's grounding lived on in the parameter it had been copied into (S-36).
+`tests/test_shims.py` (`NoWholeLedgerWriterInCli`) walks `cli.py`'s AST and refuses
+any reference to `store.save` — a call, a bare reference, `getattr`, an import under
+another name.
+```python
+def _migrate(root, *, apply, now) -> Ledger
+    # store.migrate_legacy(root, apply=apply, when=now,
+    #                      model_prose=modelio.static_param_prose); its notice to stderr
+def _touch_index(root, *, quiet=False) -> None
+    # store.write_index on a MIGRATED project, best-effort; re-run while records_digest moves
+```
+- **The migration's triggers** are `check` and the shims (Q1.5): under the held lock
+  and before anything reads the project, `_migrate` runs the legacy migration with
+  `apply` — once, with ONE stderr notice ending `git rm --cached
+  .atompipe/ledger.json` (the spine runs no git). `check --no-record` runs it in
+  memory only and says the project "will migrate … on the next check". Every other
+  command reads a legacy project through `store.load`, in memory, and writes nothing
+  of it.
+- **The shims**, each under the lock with `now` stamped at the edge, each migrating
+  first, each writing **exactly one record file** (plus the ignored index):
+  `ingest` — the bytes into `inputs/<bucket>/` (the payload, not a record) and
+  `inputs/<id>.json`, content-deduped, sha256 pinned (permanent: it moves bytes);
+  `extract` — rewrites `inputs/<id>.json`, and nothing it grounds (grounding is
+  derived, `artifacts.grounding`); `decide` — `decisions/<slug>.json`, `when` the
+  edge's stamp (**no `--when`**: it backdated a decision, S-44), and no
+  `docs/decisions.md` (an output of `report --write` whenever a decision exists);
+  `packs add` — `.atompipe/project.json`'s `packs`, after loading the pack into a
+  fresh `Registry` so a broken one fails before anything is written; `claim physical`
+  — APPENDS one `PhysicalResult` to `results/<claim-id>.json` (append-only, D-11;
+  `--who`/`--when` stay until P2.5, D-12). Its refusal on a non-physical claim names
+  the file edit, `"kind": "physical"` in `claims/<id>.json`.
+- **Removed** (PLAN A-8): `claim add` and `claim edit` (a claim is the file
+  `claims/<id>.json`, read strictly), and `packs remove` (delete the name from
+  `packs` in `.atompipe/project.json`). argparse answers `invalid choice`.
+  `model --set-entry` is the last of A-8's removals; until it goes it writes
+  `project.json` alone, migrating first.
+- **`gap` is a read**: no lock, no write (S-43: it persisted every gap it derived,
+  rewriting the ledger on every run). A Need is a record, `needs/<id>.json`, only
+  when someone enriched it. **`model`** writes no record either: `--write` writes the
+  one output it names, `.atompipe/model.json`, and nothing primes the parameter
+  records from the model any more.
+- **The index after every command.** `main` calls `_touch_index` after the command
+  returns or is refused (not when interrupted), on a MIGRATED project only — never on
+  a legacy one, where `ledger.json` is still the records — and never after `doctor`
+  (it writes nothing), `init` (it never writes a `ledger.json`), or a `--no-record`
+  run (nothing under `.atompipe/` but scratch). `store.write_index` rewrites the file
+  only when its bytes change, so a read command that finds it current writes nothing.
+  The rebuild takes no lock, so `status` stays usable while a sweep holds it; a record
+  written by another command between this one's build and its write is caught by
+  re-reading `records_digest` (up to `_INDEX_ROUNDS = 3`). A record that does not read,
+  or a read-only checkout, leaves the index as it was with one stderr line and never
+  changes the exit code.
 
 **`--junit [PATH]` at the edge** (`check`, `gate selftest`; the XML itself is
 `report.render_junit` / `render_selftest_junit`). Three rules, each because of what
@@ -1882,16 +1958,19 @@ obs, remembered outcomes, `last_check.json` and the JUnit report carry one insta
   with it.
 - `--no-record` is a dry sweep: nothing under `.atompipe/` but gate scratch in
   `out/` — no cache or control entry, obs, remembered outcome, `controls.json`,
-  `digests.json`, `last_check.json`, and no ledger save (S-32: it used to save the
-  ledger and read its own fresh passes as STALE, the one global clock not having
-  moved).
+  `digests.json`, `last_check.json` or index, and a legacy ledger migrates in memory
+  only (S-32: it used to save the ledger and read its own fresh passes as STALE, the
+  one global clock not having moved).
 - `--only`/`--tier` select as before; a filtered sweep writes its entries and obs but
   no `last_check.json`.
-- Otherwise, after the sweep: `verdicts.write_last_check`, and — 1.2 only, while
-  claims live in the ledger — the RECORDS ledger (parameters refreshed from the model,
-  grounding linked, coverage refreshed) is saved with `verdicts=[]` and `Param.gates`
-  from `verdicts.last_read_sets`. There is no run history (S-89: every recorded check
-  rewrote the tracked ledger and appended a tracked run file).
+- Otherwise, after the sweep: `verdicts.write_last_check`, then the index, under the
+  lock. There is no run history (S-89: every recorded check rewrote the tracked
+  ledger and appended a tracked run file).
+- **`check` writes no record** (checkpoint 1.3): no `sync_params`, no grounding or
+  coverage copied into records, no `store.save`. The one record write it may make is
+  the one-time migration of a legacy ledger, first, under the held lock (`_migrate`
+  above); after it, a check writes verdict entries and ignored scratch only, and a
+  second check on unchanged inputs changes no byte outside `.atompipe/{out,cache,obs}/`.
 
 `check --json` (§3.13; verify.sh and CI parse `verdicts[]`): `verdicts[]` holds a row
 for **every selected gate** — executed, cached or refused — in registration order, so

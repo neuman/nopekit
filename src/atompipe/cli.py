@@ -68,12 +68,10 @@ from typing import Any, Callable, Iterable, Mapping
 from . import __version__
 from . import artifacts, claims, decisions, gates, modelio, packs, report, site, store, verdicts
 from .models import (
-    Acceptance,
     ArtifactKind,
     Claim,
     ClaimKind,
     ClaimStatus,
-    Comparator,
     Extraction,
     Ledger,
     PhysicalResult,
@@ -489,81 +487,106 @@ def _last_check(root: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-#: Parameter sync lives in `modelio.sync_params` and NOWHERE ELSE.
-#:
-#: There used to be a second implementation right here, and `cmd_check` called
-#: both of them twelve lines apart. This one rebuilt `ledger.params` from the
-#: model and carried over only `grounded_by`, `gates`, `tags` and `changed_in`,
-#: so every `atompipe check` silently deleted `Param.rejected` — the record of
-#: what was TRIED AND LOST, which rule 3 calls the highest-value field in the
-#: system — and `Param.source` along with it. A project could accumulate a year
-#: of rejected alternatives in the ledger and have the inner-loop command wipe
-#: them on the next run, with nothing printed and nothing to diff against.
-#:
-#: `modelio.sync_params` merges the other way round — it keeps the ledger's
-#: whole record and replaces only value/units/rationale/derived_from, the four
-#: fields the model actually owns — so it is the only one that survives. If a
-#: merge is ever needed again, extend that function; do not write a second one
-#: here, because two merges in one process will disagree and the destructive one
-#: always runs last.
+# --------------------------------------------------------------------------- #
+# the records, at the edge: migrate once, write one, keep the index current
+# --------------------------------------------------------------------------- #
+#: What slipped through before checkpoint 1.3: every writing command loaded the
+#: WHOLE project and saved the whole project. `decide` asked to record one
+#: decision rewrote every claim and parameter beside it; `check`, a sweep, rewrote
+#: the records on every run — parameters re-synced from the model, grounding
+#: back-references written by `_link_grounding`, coverage written into
+#: `claim.gates` by `_refresh_coverage` — so a claim a human edited between two
+#: commands was put back by the second from its in-memory copy, `claim edit
+#: --gates X` was silently reverted by the next check (S-37), and a deleted
+#: extraction's grounding lived on in the parameter it had been copied into
+#: (S-36). A record is a file now and a command writes the ONE record it was asked
+#: to (`store.write_record`, `store.write_project`); coverage and grounding are
+#: derived where they are read; `tests/test_shims.py` walks this file's AST and
+#: refuses any reference to `store.save`, the whole-ledger writer, which stays for
+#: tests and the migration only.
 
 
-def _link_grounding(ledger: Ledger) -> list[str]:
-    """Write the back-reference an extraction implies. Returns names that match nothing.
+def _migrate(root: str, *, apply: bool, now: str) -> Ledger:
+    """The project's records, migrating a legacy `ledger.json` first. Under the lock.
 
-    `Extraction.grounds` points outward ("this photo grounds `hull_beam`"), and
-    `artifacts.grounding` inverts that on demand — but `Param.grounded_by` and
-    `Claim.grounded_by` are the *stored* form of the same edge, and
-    `decisions.why` reads only the stored one. Without this, an agent that
-    ingested a datasheet, extracted the figure and grounded a parameter on it
-    would still be told by `atompipe why` that the parameter is "asserted, not
-    evidenced" — the exact opposite of what happened.
+    `check` and the shims are the migration's triggers (spec Q1.5): with `apply`
+    a legacy project becomes record files here, once, and the one notice —
+    ending in the `git rm --cached .atompipe/ledger.json` line, because the spine
+    runs no git — goes to stderr, never into `--json`'s stdout. Without `apply`
+    (`check --no-record`) the same pure function runs in memory, writes nothing,
+    and says the project will migrate on the next check. On a migrated project it
+    is `store.load`, silently.
 
-    Idempotent (ids are added once) and additive only: an edge a human declared
-    by hand is never removed here, because this function cannot tell a
-    hand-declared edge from a stale one and guessing wrong deletes provenance.
-
-    Names that match no parameter and no claim are returned rather than dropped.
-    They are usually an ordering artefact — the extraction was recorded before
-    the model declared the parameter — and they resolve themselves on the next
-    `check`. A typo looks the same from here, so the caller says so out loud.
+    What the model STATES is read statically (`modelio.static_param_prose`: it
+    parses the entry and never imports or runs it), so a migration can drop a
+    param record's rationale or units only where the model already says them —
+    and a model that does not load cannot wedge the migration.
     """
-    from_extractions = artifacts.grounding(ledger, include_declared=False)
-    unmatched: list[str] = []
-    for name, artifact_ids in from_extractions.items():
-        param = ledger.param(name)
-        claim = ledger.claim(name)
-        target = param or claim
-        if target is None:
-            unmatched.append(name)
-            continue
-        current = list(target.grounded_by or [])
-        for artifact_id in artifact_ids:
-            if artifact_id not in current:
-                current.append(artifact_id)
-        target.grounded_by = current
-    return sorted(unmatched)
+    plan = store.migrate_legacy(root, apply=apply, when=now,
+                                model_prose=modelio.static_param_prose)
+    if plan.notice:
+        _warn(plan.notice)
+    return plan.ledger
 
 
-def _refresh_coverage(ledger: Ledger, registry: gates.Registry) -> None:
-    """Write live gate coverage into `claim.gates`. Only `check` may call this.
+#: Commands after which the index is NOT rebuilt. `doctor` reports on the
+#: project and never writes a byte of it (it compares the index with the records
+#: instead). `init` never writes a `ledger.json` (spec §3.15): a new project's
+#: first index comes from its first command, like every later one.
+_INDEX_UNTOUCHED = frozenset({"doctor", "init"})
 
-    `claim.gates` is a cache of a fact the registry owns, and `claims.py` says so
-    in as many words. The cache still has to exist, because the things that read
-    a ledger WITHOUT a registry — `decisions.why` above all — otherwise report
-    "no gate can settle it" for a claim three gates are covering. An agent that
-    trusts that sentence goes off to install a solver the project already has.
+#: How many times `_touch_index` rebuilds when the records move underneath it.
+#: The rebuild takes no lock — `status` must stay usable while a tier-2 `check`
+#: holds the build lock for an hour — so a shim that writes a record between this
+#: command's build and its write would leave an index one record behind, written
+#: AFTER the shim's own correct one. Re-reading `records_digest` catches that; three
+#: rounds is the writers racing twice in a row. *Rejected:* taking the build lock
+#: (a read command blocked by a sweep); one round (the race above lands silently).
+_INDEX_ROUNDS = 3
 
-    Refreshed only in `check`, and refreshed by REPLACEMENT rather than union,
-    because `check` is the one command that has loaded every pack the ledger
-    declares (`_registry(strict=True)` refuses to proceed otherwise). So the
-    coverage it computes is the project's complete gate set at that moment, and
-    a stale id left over from a pack that was removed should disappear rather
-    than keep a dead gate's name on a claim forever.
+
+def _touch_index(root: str, *, quiet: bool = False) -> None:
+    """Rebuild `.atompipe/ledger.json` from the records, best-effort.
+
+    Run at the end of every command on a MIGRATED project (`main`, minus
+    `_INDEX_UNTOUCHED`, and never under `--no-record`), so an agent reading the
+    one generated file after any command reads what the record files say —
+    including an edit a human made by hand since the last command (invariant 8:
+    the index never disagrees with the records). Never on a legacy project, where
+    `ledger.json` IS the records until `check` or a shim migrates it. Rewritten
+    only when its bytes change (`store.write_index`), so a read command that finds
+    it current writes nothing.
+
+    Best-effort: a record that does not read, or a read-only checkout, leaves the
+    index as it was with one stderr line (none when `quiet`: the command already
+    failed and said why), and never changes the command's exit code — the records
+    are the truth, and a command whose own work succeeded must not fail on its
+    output's output.
     """
-    live = claims.coverage(ledger, registry)
-    for claim in ledger.claims:
-        claim.gates = live.get(claim.id, [])
+    try:
+        if store.is_legacy(root) or not os.path.isfile(store.project_paths(root)["project"]):
+            return
+        for _ in range(_INDEX_ROUNDS):
+            before = store.records_digest(root)
+            store.write_index(root)
+            if store.records_digest(root) == before:
+                return
+    except (AtompipeError, OSError) as exc:
+        if not quiet:
+            _warn(f"warning: the index {store.ATOMPIPE_DIR}/{store.LEDGER_NAME} was not "
+                  f"rebuilt ({exc}); the records are unchanged and are still the truth")
+
+
+def _after(args: argparse.Namespace, *, quiet: bool = False) -> None:
+    """`_touch_index` for the project this command ran in, when it should run."""
+    if getattr(args, "command", None) in _INDEX_UNTOUCHED or getattr(args, "no_record", False):
+        return
+    try:
+        root = store.find_root(getattr(args, "dir", None))
+    except (AtompipeError, OSError):
+        return
+    if root is not None:
+        _touch_index(root, quiet=quiet)
 
 
 def _skip_digest(skipped: list[Verdict], *, width: int = 96) -> list[str]:
@@ -760,7 +783,8 @@ def cmd_init(args: argparse.Namespace) -> int:
             "meta": ledger.meta.to_dict(),
             "next": [
                 "atompipe ask",
-                "atompipe claim add --statement ... --quantity ... --cmp '<=' --limit ...",
+                "write claims/C1.json: {\"statement\": ..., \"acceptance\": "
+                "{\"quantity\": ..., \"comparator\": \"<=\", \"limit\": ...}}",
                 "atompipe model --set-entry model/<thing>.py",
             ],
         })
@@ -778,8 +802,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     _say("     atompipe ingest <files> --kind sketch --desc '...'")
     _say("     atompipe extract <id> --what '...' --grounds <param>   (an artifact with")
     _say("     no extraction is decoration)")
-    _say("  2. atompipe claim add --statement 'floats with the full payload at <=60% draft' \\")
-    _say("       --quantity 'draft fraction' --cmp '<=' --limit 0.6 --units ''")
+    _say("  2. write claims/C1.json — one claim per file, what must be true:")
+    _say('       {"statement": "floats with the full payload at <=60% draft",')
+    _say('        "acceptance": {"quantity": "draft fraction", "comparator": "<=", "limit": 0.6}}')
     _say("  3. write model/<thing>.py — a dataclass CONFIG plus build(config) -> dict —")
     _say("     then: atompipe model --set-entry model/<thing>.py && atompipe check")
     return 0
@@ -1181,21 +1206,30 @@ def cmd_check(args: argparse.Namespace) -> int:
       re-proves it, and CI runs the bracket this way.
     * `--no-record` is a dry sweep: nothing under `.atompipe/` but gate scratch in
       `out/` — no cache or control entry, no obs, no remembered outcome, no
-      `last_check.json`, and the ledger is not saved (S-32: it used to write the
-      ledger anyway and read its own fresh passes as STALE, because the one
-      global clock had not moved; there is no global clock now).
+      `last_check.json`, no index, and a legacy ledger migrates in memory only
+      (S-32: it used to write the ledger anyway and read its own fresh passes as
+      STALE, because the one global clock had not moved; there is no global
+      clock now).
     * `--only` and `--tier` select as they always did; a filtered sweep writes
       its entries but no `last_check.json` — a partial sweep's summary would
       stand for the whole project's.
-    * Otherwise, after the sweep: `verdicts.write_last_check`, then (1.2 only,
-      while claims still live in the ledger) the RECORDS ledger is saved with
-      `verdicts=[]` and `Param.gates` from `verdicts.last_read_sets` — never the
-      view (PD-31, cli:H3). No run history and no run record in the ledger
-      (S-89: every recorded check rewrote the tracked ledger and appended a
-      tracked run file).
+    * Otherwise, after the sweep: `verdicts.write_last_check`, and the index is
+      rebuilt from the records. No run history (S-89: every recorded check
+      rewrote the tracked ledger and appended a tracked run file).
+
+    **`check` writes no record** (checkpoint 1.3). It used to re-sync every
+    parameter from the model, copy grounding back-references into parameters
+    and coverage into claims, and save the whole ledger — so a sweep rewrote
+    what humans edit (S-36, S-37; see `_migrate`'s section). The one record
+    write it may make is the one-time migration of a legacy `ledger.json`, under
+    the held lock and before anything reads the project (`_migrate`): the
+    records, the ignore blocks, `project.json` last, the legacy file renamed,
+    one stderr notice. A second check finds a migrated project and writes only
+    verdict entries and ignored scratch.
 
     The clock is stamped ONCE (`now`): obs, remembered outcomes,
-    `last_check.json` and the JUnit report carry the same instant.
+    `last_check.json`, the migration's notice and the JUnit report carry the
+    same instant.
 
     `--junit [PATH]` writes the same judgement as JUnit XML (`report.render_junit`).
     The target is removed before anything can fail and written at the one exit,
@@ -1215,22 +1249,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     now = utcnow_iso()
 
     with _lock(root):
-        ledger = store.load(root)
+        # First, under the lock and before anything reads the project: a legacy
+        # ledger migrates here, once (in memory under `--no-record`).
+        ledger = _migrate(root, apply=record, now=now)
         registry, _ = _registry(root, ledger, strict=True)
         model, projection = _projection(root, ledger)
-        # Refresh the ledger's parameter records from the model before sweeping.
-        # The model owns every value; the ledger owns the provenance accumulated
-        # around it (rejected alternatives, grounding, which gates protect it).
-        # In memory here; saved below only when this run records (1.2 — the
-        # records move to files in 1.3 and check stops writing them).
-        # ONE call, to `modelio.sync_params`: see the note above `_link_grounding`
-        # for the second implementation that used to run here and the field it ate.
-        if model is not None:
-            modelio.sync_params(ledger, model)
-        # After the sync, not before: a parameter that only just appeared in the
-        # ledger is exactly the one whose evidence has been waiting to attach.
-        _link_grounding(ledger)
-        _refresh_coverage(ledger, registry)
         ctx = _context(root, ledger, model, projection, tier, quiet=args.json)
 
         if projection is None and registry.specs():
@@ -1254,16 +1277,11 @@ def cmd_check(args: argparse.Namespace) -> int:
                                      model=model, sweep=result)
         if record:
             verdicts.write_last_check(root, result, resolution, now=now)
-            # 1.2 only: the records still live in the ledger. Saved with no verdict
-            # (they live in the cache) and with `Param.gates` from the entries'
-            # read sets — read straight off the cache, never off the view, which is
-            # a reader's and is never written (the AST rule in test_check_cache).
-            read_sets = verdicts.last_read_sets(root)
-            attributed = _param_gates(ledger, read_sets, registry)
-            store.save(root, dataclasses.replace(
-                ledger, verdicts=[],
-                params=[dataclasses.replace(param, gates=attributed.get(param.name, []))
-                        for param in ledger.params]))
+            # The index, still under the lock, so the sweep that just migrated a
+            # legacy project leaves it indexed before any reader can look.
+            # `main` touches it again after the command; unchanged, that writes
+            # nothing.
+            _touch_index(root)
 
         stale_gates = resolution.stale_gates
         blockers = claims.blocking(view, registry, stale_gates=stale_gates)
@@ -1362,8 +1380,9 @@ def cmd_check(args: argparse.Namespace) -> int:
         # laundering this whole tool exists to refuse: zero blocking claims
         # out of zero claims is not evidence of anything. Non-zero, so that the
         # exit code says the same thing this line says.
-        _say("no claims recorded, so nothing was checked — an empty ledger is not a "
-             "clean bill of health. `atompipe claim add --statement ...`")
+        _say("no claims recorded, so nothing was checked — a project with no claims "
+             "is not a clean bill of health. Write the first as claims/C1.json: a "
+             "statement and an acceptance")
     elif not blockers:
         _say("ready: no critical claim is blocking "
              "(physical and assumed claims are still listed in `atompipe report`)")
@@ -1504,25 +1523,31 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     half they drop is `extract`, and an artifact with no extraction grounds
     nothing, proves nothing, and makes the project *look* evidenced in the file
     listing while not one parameter traces back to it.
+
+    A shim, and a permanent one (spec §3.15): under the lock, with the clock read
+    here, it migrates a legacy ledger first, then per path copies the bytes into
+    `inputs/<bucket>/` (the payload, not a record) and writes exactly one record,
+    `inputs/<id>.json`, pinning the sha256. Bytes already ingested come back as
+    their existing record and rewrite nothing.
     """
     root = _root(args)
-    when = utcnow_iso()
+    now = utcnow_iso()
     landed: list[Any] = []
 
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         for source in args.paths:
             if source.startswith(("http://", "https://")):
                 artifact = artifacts.ingest_link(
                     root, ledger, source, description=args.desc,
-                    kind=args.kind or ArtifactKind.LINK, when=when)
+                    kind=args.kind or ArtifactKind.LINK, when=now)
             else:
                 artifact = artifacts.ingest(
                     root, ledger, source, kind=args.kind, description=args.desc,
-                    when=when, copy=not args.no_copy, licence=args.licence,
+                    when=now, copy=not args.no_copy, licence=args.licence,
                     note=args.note)
+            store.write_record(root, "inputs", artifact)
             landed.append(artifact)
-        store.save(root, ledger)
 
     if args.json:
         _dump({"ingested": [a.to_dict() for a in landed],
@@ -1578,16 +1603,37 @@ def cmd_inputs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _unmatched_grounds(root: str, ledger: Ledger, names: Iterable[str]) -> tuple[list[str], str]:
+    """`(names, model_error)`: the grounds that name no claim, no parameter record
+    and no parameter the model defines. Only for a warning — grounding is derived
+    from the extraction on read (`artifacts.grounding`), so a name that matches
+    nothing today links the moment the model or a claim gains it."""
+    known = {claim.id for claim in ledger.claims} | {param.name for param in ledger.params}
+    model, _, model_error = _projection_safe(root, ledger)
+    if model is not None:
+        known |= {param.name for param in model.params}
+    return [name for name in names if name not in known], model_error
+
+
 def cmd_extract(args: argparse.Namespace) -> int:
     """Record what was actually read out of an artifact, and what that grounds.
 
     This is the step that converts a photograph into provenance: after it,
     `atompipe why <param>` can answer "what is this number standing on?" with a
     file, a sentence and a confidence, instead of silence.
+
+    A shim (spec §3.15): under the lock it migrates a legacy ledger first, then
+    rewrites exactly one record, the artifact's `inputs/<id>.json`. It no longer
+    copies the edge into the parameter or claim it grounds. What slipped through
+    (S-36): that copy (`_link_grounding`) was a second home for one fact, so
+    deleting the extraction left `why arm_length` saying "GROUNDED BY arm" while
+    `inputs` said `arm` was "NEVER READ" — forever. The extraction is the one
+    home; grounding is derived from it where it is read.
     """
     root = _root(args)
+    now = utcnow_iso()
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         extraction = Extraction(
             what=args.what,
             grounds=_collect(args.grounds),
@@ -1595,8 +1641,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
             note=args.note or "",
         )
         artifact = artifacts.add_extraction(ledger, args.artifact, extraction)
-        unmatched = _link_grounding(ledger)
-        store.save(root, ledger)
+        store.write_record(root, "inputs", artifact)
+    unmatched, model_error = _unmatched_grounds(root, ledger, extraction.grounds)
 
     if args.json:
         _dump(dict(artifact.to_dict(), unmatched_grounds=unmatched))
@@ -1604,11 +1650,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
     _say(f"{artifact.id}: {extraction.what}  [{extraction.confidence}]")
     if extraction.grounds:
         _say(f"  grounds: {', '.join(extraction.grounds)}")
-        pending = [name for name in extraction.grounds if name in unmatched]
-        if pending:
-            _warn(f"warning: nothing in the ledger is named {', '.join(pending)} yet — "
-                  f"if that is a model parameter it links on the next `atompipe check`; "
-                  f"if it is a typo, nothing will ever stand on this evidence")
+        if unmatched:
+            unsure = (" (the model did not load, so its parameters were not checked)"
+                      if model_error else "")
+            _warn(f"warning: no claim or parameter is named {', '.join(unmatched)}"
+                  f"{unsure} — if the model or a claim gains that name, this evidence "
+                  f"grounds it from then on; if it is a typo, nothing ever will")
     else:
         _say("  grounds nothing yet — `--grounds <param-or-claim>` is what makes this "
              "traceable from the other end")
@@ -1618,73 +1665,15 @@ def cmd_extract(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # claims
 # --------------------------------------------------------------------------- #
-def _acceptance_from(args: argparse.Namespace, existing: Acceptance | None = None) -> Acceptance:
-    """Build (or patch) an `Acceptance` from the threshold flags.
-
-    Patching rather than replacing so `claim edit --limit 0.4` does not silently
-    wipe the quantity and units someone wrote last week.
-    """
-    base = existing or Acceptance()
-    comparator = base.comparator
-    if getattr(args, "cmp", None):
-        comparator = Comparator(args.cmp)
-    return Acceptance(
-        quantity=args.quantity if args.quantity is not None else base.quantity,
-        comparator=comparator,
-        limit=args.limit if args.limit is not None else base.limit,
-        limit_hi=args.limit_hi if args.limit_hi is not None else base.limit_hi,
-        units=args.units if args.units is not None else base.units,
-    )
-
-
-def cmd_claim_add(args: argparse.Namespace) -> int:
-    """Add one claim. Warns — loudly — when it has no machine-checkable threshold.
-
-    The warning rather than a refusal is deliberate. "A claim without an
-    acceptance is a wish" (models.Acceptance), and a wish must not be allowed to
-    look settled — but claims are captured during intake, often before anyone
-    knows the number, and a CLI that refuses the first half of the thought gets
-    replaced by a text file. So it is recorded, and it nags every time it is
-    printed.
-    """
-    root = _root(args)
-    with _lock(root):
-        ledger = store.load(root)
-        claim_id = (args.id or "").strip() or claims.next_claim_id(ledger, args.prefix)
-        if ledger.claim(claim_id):
-            raise AtompipeError(
-                f"claim {claim_id!r} already exists — use `atompipe claim edit {claim_id}`")
-        claim = Claim(
-            id=claim_id,
-            statement=args.statement.strip(),
-            kind=ClaimKind(args.kind),
-            acceptance=_acceptance_from(args),
-            rationale=args.rationale or "",
-            source=args.source or "",
-            grounded_by=_collect(args.grounds),
-            gates=_collect(args.gates),
-            tags=_collect(args.tags),
-            critical=not args.nice_to_have,
-            note=args.note or "",
-        )
-        ledger.claims.append(claim)
-        store.save(root, ledger)
-
-    if args.json:
-        _dump(claim.to_dict())
-        return 0
-    _say(f"{claim.id}  {claim.statement}  [{claim.kind}]"
-         f"{'' if claim.critical else '  (nice-to-have)'}")
-    rendered = claim.acceptance.render()
-    if rendered:
-        _say(f"  accepts: {rendered}")
-    if claim.acceptance.limit is None and claim.kind is ClaimKind.MEASURABLE:
-        _warn(f"warning: {claim.id} has no acceptance threshold — 'strong enough' is not "
-              f"a claim. Add one: atompipe claim edit {claim.id} "
-              f"--quantity '<what is measured>' --cmp '<=' --limit <number> --units mm")
-    return 0
-
-
+# A claim is a file, `claims/<id>.json`, and it is written by editing it: there
+# is no `claim add` and no `claim edit` (PLAN A-8, removed at checkpoint 1.3). What
+# slipped through while they existed (S-37): `claim edit --gates X` stored a
+# coverage the registry owns, and the next `check` silently put the registry's
+# answer back — a flag that looked like it bound a gate and bound nothing. Two
+# commands that re-typed a record's fields as flags were a second, lossy spelling
+# of a file the strict reader already checks, with a `difflib` suggestion for every
+# typo. `claim physical` stays: it is the signing channel for a real-world result
+# (D-12), and it writes one file.
 def cmd_claim_list(args: argparse.Namespace) -> int:
     """One line per claim: status, id, statement, acceptance.
 
@@ -1762,50 +1751,6 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_claim_edit(args: argparse.Namespace) -> int:
-    """Change one claim in place. Only the flags you pass are touched.
-
-    Every field is optional and `None` means "leave it": an edit command that
-    reset unmentioned fields to defaults would quietly delete a rationale every
-    time someone retagged a claim.
-    """
-    root = _root(args)
-    with _lock(root):
-        ledger = store.load(root)
-        claim = ledger.claim(args.id)
-        if claim is None:
-            raise AtompipeError(f"no claim {args.id!r}")
-        if args.statement is not None:
-            claim.statement = args.statement.strip()
-        if args.kind is not None:
-            claim.kind = ClaimKind(args.kind)
-        if args.rationale is not None:
-            claim.rationale = args.rationale
-        if args.source is not None:
-            claim.source = args.source
-        if args.note is not None:
-            claim.note = args.note
-        if args.tags is not None:
-            claim.tags = _collect(args.tags)
-        if args.gates is not None:
-            claim.gates = _collect(args.gates)
-        if args.grounds is not None:
-            claim.grounded_by = _collect(args.grounds)
-        if args.critical:
-            claim.critical = True
-        if args.nice_to_have:
-            claim.critical = False
-        claim.acceptance = _acceptance_from(args, claim.acceptance)
-        store.save(root, ledger)
-
-    if args.json:
-        _dump(claim.to_dict())
-        return 0
-    _say(f"{claim.id}  {claim.statement}  [{claim.kind}]  "
-         f"{claim.acceptance.render() or 'NO THRESHOLD'}")
-    return 0
-
-
 def cmd_claim_physical(args: argparse.Namespace) -> int:
     """Record a real-world result against a PHYSICAL claim.
 
@@ -1816,20 +1761,30 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
 
     Refuses on a MEASURABLE claim on purpose: hand-recording a pass for something
     a gate is supposed to prove is exactly how a readiness report stops meaning
-    anything.
+    anything. The refusal names the file edit that changes a claim's kind on
+    purpose, `"kind": "physical"` in `claims/<id>.json` — it used to name `claim
+    edit`, which is gone.
+
+    A shim (spec §3.15): under the lock, with the clock read here, it migrates a
+    legacy ledger first, then APPENDS one `PhysicalResult` to
+    `results/<claim-id>.json` and writes nothing else. Append-only (D-11): a
+    second result never replaces the first — a refutation recorded last week is
+    evidence, and the claim reads its latest. `--who`/`--when` stay until the
+    signed result of P2.5 (D-12).
     """
     root = _root(args)
+    now = utcnow_iso()
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         claim = ledger.claim(args.id)
         if claim is None:
-            raise AtompipeError(f"no claim {args.id!r}")
+            raise AtompipeError(f"no claim {args.id!r} — `atompipe claim list` shows what exists")
         if claim.kind is not ClaimKind.PHYSICAL:
             raise AtompipeError(
                 f"claim {claim.id!r} is {claim.kind}, not physical. A hand-recorded "
                 f"result on a measurable claim is an unchecked assertion wearing a "
-                f"gate's clothes — run the gate, or change the claim's kind on purpose "
-                f"with `atompipe claim edit {claim.id} --kind physical`")
+                f"gate's clothes — run the gate, or change the claim's kind on purpose: "
+                f"\"kind\": \"physical\" in claims/{claim.id}.json")
         # Two spellings because two exist in the wild: `--pass`/`--fail` is what
         # the generated readiness report tells the user to run, and a bare
         # `pass`/`fail` is what people type. Accepting only one of them would
@@ -1841,22 +1796,25 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
                     f"say what happened: `atompipe claim physical {args.id} pass` "
                     f"or `--fail`, with --detail describing what was actually observed")
             passed = args.result == "pass"
-        claim.physical_result = PhysicalResult(
+        result = PhysicalResult(
             passed=passed,
-            when=(args.when or utcnow_iso()),
+            when=(args.when or now),
             who=args.who or "",
             detail=args.detail or "",
             evidence=_collect(args.evidence),
         )
-        store.save(root, ledger)
+        path = os.path.join(root, "results", f"{claim.id}.json")
+        earlier = store.read_record(path, "results") if os.path.isfile(path) else []
+        store.write_record(root, "results", [*earlier, result], record_id=claim.id)
+        claim = dataclasses.replace(claim, physical_result=result)
 
-    status = ClaimStatus.VERIFIED if claim.physical_result.passed else ClaimStatus.REFUTED
+    status = ClaimStatus.VERIFIED if result.passed else ClaimStatus.REFUTED
     if args.json:
         _dump(dict(claim.to_dict(), status=str(status)))
         return 0
     _say(f"{report.status_tag(status)} {claim.id} {claim.statement} — "
-         f"{claim.physical_result.detail or ('pass' if passed else 'fail')} "
-         f"({claim.physical_result.who or 'unattributed'}, {claim.physical_result.when})")
+         f"{result.detail or ('pass' if passed else 'fail')} "
+         f"({result.who or 'unattributed'}, {result.when})")
     return 0
 
 
@@ -1867,27 +1825,22 @@ def cmd_gap(args: argparse.Namespace) -> int:
     """Measurable claims no gate covers — and, with `--propose`, packs that might.
 
     A gap is a growth signal, not a failure: the system is admitting there is a
-    physical quantity it cannot currently check. The Needs are PERSISTED so that
-    the classification and the candidate costs an agent records against one
-    survive to the next session — `find_gaps` matches existing Needs by claim id
-    and keeps everything that was written on them.
+    physical quantity it cannot currently check. `find_gaps` matches the Need
+    records (`needs/<id>.json`) by claim id and keeps everything written on them,
+    so the classification and the candidate costs an agent records against a
+    gap — by editing that file — show here in the next session.
 
-    Needs that are no longer gaps are left in the ledger untouched rather than
-    deleted. A closed gap is a fact about the project's history, and deciding it
-    is `SATISFIED` is a judgement this command is not entitled to make.
+    A READ: no lock, no write. What slipped through (S-43): it persisted every gap
+    it derived, so a command that reads like a query rewrote the whole ledger on
+    every run, and a gap it could re-derive at will became a record nobody wrote.
+    A Need is a record only when someone enriched it (`needs/` is sparse), so
+    there is nothing here to write. Deciding a closed gap is `SATISFIED` is still
+    a judgement this command is not entitled to make.
     """
     root = _root(args)
-    with _lock(root):
-        ledger = store.load(root)
-        registry, _ = _registry(root, ledger, strict=False)
-        gaps = claims.find_gaps(ledger, registry)
-        by_id = {need.id: index for index, need in enumerate(ledger.needs)}
-        for need in gaps:
-            if need.id in by_id:
-                ledger.needs[by_id[need.id]] = need
-            else:
-                ledger.needs.append(need)
-        store.save(root, ledger)
+    ledger = store.load(root)
+    registry, _ = _registry(root, ledger, strict=False)
+    gaps = claims.find_gaps(ledger, registry)
 
     manifests = packs.discover(root) if args.propose else []
     proposals: dict[str, list[Any]] = {
@@ -2703,8 +2656,11 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     Prints the markdown by default because the markdown IS the deliverable — the
     thing you hand someone before they spend money. `--write` puts it at
-    `docs/readiness.md`; `atompipe status` is the compressed terminal view of the
-    same ledger.
+    `docs/readiness.md`, and — whenever a decision exists — regenerates the
+    decision log, `docs/decisions.md`, beside it: from checkpoint 1.3 `decide`
+    writes one record and no generated document, so the log is an output of the
+    command that writes outputs. `atompipe status` is the compressed terminal
+    view of the same records.
 
     `strict=False` here is deliberate — a report must render on a machine where
     the packs are not installed — but the *failures it swallows* were being
@@ -2745,6 +2701,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.write:
         with _lock(root):
             path = report.write_report(root, view, registry, stale_gates=stale_gates)
+            if view.decisions:
+                decisions.write_log(root, view)
         _say(rel(path, root))
         # To stderr, because the one line on stdout is the path and scripts read
         # it. A caveat that breaks `report --write` as a shell substitution would
@@ -2807,6 +2765,15 @@ def cmd_why(args: argparse.Namespace) -> int:
     ones that read it when they last ran. What slipped through before: this
     loaded the ledger alone — no registry, no cache — so it quoted whatever
     verdict the last `check` had written into the ledger, current or not.
+
+    A parameter is read from the model (`modelio.param_view`: the value, and
+    where it lives), and the gates that protect it from their last executed
+    runs (`verdicts.last_read_sets`), never from a record. From checkpoint 1.3
+    a parameter the model states entirely HAS no record — `check` stopped
+    copying the model into the records, and the migration writes a param record
+    only for what the model cannot hold — so a `why` that looked for one
+    answered "no parameter named thickness" about the number the bracket's
+    failing claim turns on.
     """
     root = _root(args)
     ledger = store.load(root)
@@ -2814,7 +2781,12 @@ def cmd_why(args: argparse.Namespace) -> int:
     model, projection, model_error = _projection_safe(root, ledger)
     view, _resolution = _resolved(root, ledger, registry, projection, model_error,
                                   now=utcnow_iso(), model=model)
-    text = decisions.why(view, args.name)
+    registered = set(registry.ids())
+    read_sets = {gate: reads for gate, reads in verdicts.last_read_sets(root).items()
+                 if gate in registered}
+    text = decisions.why(view, args.name,
+                         view=modelio.param_view(ledger, model, model_error=model_error),
+                         read_sets=read_sets)
     if args.json:
         _dump({"name": args.name, "why": text})
         return 0
@@ -2829,9 +2801,21 @@ def cmd_decide(args: argparse.Namespace) -> int:
     corridor"` is the highest-value thing this whole system stores. Without it
     every fresh context window re-proposes every settled number. A rejection with
     no reason is refused by `decisions.add`, which is why the flag takes a pair.
+
+    A shim (spec §3.15): under the lock it migrates a legacy ledger first, then
+    writes exactly one record, `decisions/<slug>.json`. It no longer regenerates
+    `docs/decisions.md` — a second file per decision, and a generated one; the log
+    is an output of `report --write` whenever a decision exists.
+
+    `when` is the clock read here and nothing else. What slipped through (S-44):
+    a `--when` flag backdated a decision, and since the log renders in storage
+    order a backdated entry sat on top as the newest — the one command whose
+    record says WHEN something was decided let the caller say it. Removed; the
+    one caller-stated time left is `claim physical --when`, a result observed
+    before it was typed in, until the signed result of P2.5 (D-12).
     """
     root = _root(args)
-    when = args.when or utcnow_iso()
+    now = utcnow_iso()
     rejected: list[Any] = []
     for raw in args.rejected or ():
         parts = [piece.strip() for piece in raw.split("|")]
@@ -2841,28 +2825,28 @@ def cmd_decide(args: argparse.Namespace) -> int:
         rejected.append(tuple(parts) if len(parts) >= 2 else raw)
 
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         decision = decisions.add(
             ledger,
             title=args.title,
             summary=args.summary,
-            when=when,
+            when=now,
             rejected=rejected,
             params_changed=_collect(args.param),
             claims_changed=_collect(args.claim),
             body=args.body or "",
             evidence=_collect(args.evidence),
         )
-        store.save(root, ledger)
-        log_path = decisions.write_log(root, ledger)
+        path = store.write_record(root, "decisions", decision) or os.path.join(
+            root, "decisions", f"{decision.id}.json")
 
     if args.json:
-        _dump(dict(decision.to_dict(), log=rel(log_path, root)))
+        _dump(dict(decision.to_dict(), record=rel(path, root)))
         return 0
     _say(f"{decision.id}  {decision.title}  ({decision.when})")
     for item in decision.rejected:
         _say(f"  rejected {item.value}: {item.why}")
-    _say(f"  log: {rel(log_path, root)}")
+    _say(f"  record: {rel(path, root)}")
     return 0
 
 
@@ -2989,62 +2973,45 @@ def cmd_packs_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_packs_add(args: argparse.Namespace) -> int:
-    """Opt this project into a pack: append it to `meta.packs`.
+    """Opt this project into a pack: append it to `project.json`'s `packs`.
 
     Installed is a project decision, not a filesystem accident — a pack sitting
     in `~/.atompipe/packs` is available to every project on the machine and must
-    not start contributing gates to this one until the ledger says so. The pack
-    is loaded immediately so a broken one fails here, where the user is looking,
-    rather than in the middle of the next `check`.
+    not start contributing gates to this one until the project says so. The pack
+    is loaded immediately, into a fresh registry, so a broken one fails here,
+    where the user is looking, rather than in the middle of the next `check` —
+    and before anything is written.
+
+    A shim (spec §3.15): under the lock it migrates a legacy ledger first, then
+    writes exactly one file, `.atompipe/project.json`. There is no `packs remove`
+    (PLAN A-8): opting out is deleting the name from `packs` in that file, which
+    is what the command did, and its verdict entries stay in the cache either way
+    — orphans that never count and that `doctor` names.
     """
     root = _root(args)
+    now = utcnow_iso()
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         added: list[str] = []
+        names = list(ledger.meta.packs or [])
         for name in args.names:
             if not packs.find(name, root):
                 looked = "\n  ".join(packs.search_paths(root, existing_only=False))
                 raise AtompipeError(f"no pack {name!r} found. Searched:\n  {looked}")
-            if name in (ledger.meta.packs or []):
+            if name in names:
                 continue
-            ledger.meta.packs = list(ledger.meta.packs or []) + [name]
+            names.append(name)
             added.append(name)
         registry = gates.Registry()
-        specs = packs.load_all_gates(ledger.meta.packs, registry, root)
-        store.save(root, ledger)
+        specs = packs.load_all_gates(names, registry, root)
+        store.write_project(root, dataclasses.replace(ledger.meta, packs=names))
 
     if args.json:
-        _dump({"added": added, "packs": ledger.meta.packs,
+        _dump({"added": added, "packs": names,
                "gates": [spec.id for spec in specs]})
         return 0
-    _say(f"packs: {', '.join(ledger.meta.packs) or '(none)'}")
+    _say(f"packs: {', '.join(names) or '(none)'}")
     _say(f"{len(specs)} gate(s) now available: {', '.join(s.id for s in specs[:8])}")
-    return 0
-
-
-def cmd_packs_remove(args: argparse.Namespace) -> int:
-    """Drop a pack from `meta.packs`. Its past verdicts stay in the ledger.
-
-    Deliberately: a verdict is a record of something that was true when it ran,
-    and deleting the evidence because the tooling was uninstalled would make the
-    history lie. The claims those gates covered simply stop being covered, which
-    `status` will report as UNCLAIMED — the honest answer.
-    """
-    root = _root(args)
-    with _lock(root):
-        ledger = store.load(root)
-        before = list(ledger.meta.packs or [])
-        ledger.meta.packs = [name for name in before if name not in set(args.names)]
-        store.save(root, ledger)
-    dropped = [name for name in before if name not in ledger.meta.packs]
-
-    if args.json:
-        _dump({"removed": dropped, "packs": ledger.meta.packs})
-        return 0
-    _say(f"removed {', '.join(dropped) or '(nothing)'}; "
-         f"packs now: {', '.join(ledger.meta.packs) or '(none)'}")
-    _say("past verdicts from those gates are kept — `atompipe status` will now show "
-         "the claims they covered as uncovered")
     return 0
 
 
@@ -3063,15 +3030,18 @@ def cmd_model(args: argparse.Namespace) -> int:
     root = _root(args)
 
     if args.set_entry:
+        # One file, `project.json`, like the `packs add` shim: checked before
+        # anything is written, and a legacy ledger migrates first.
+        candidate = os.path.join(root, args.set_entry)
+        if not os.path.exists(candidate) and not os.path.isabs(args.set_entry):
+            raise AtompipeError(
+                f"{args.set_entry} does not exist (looked at {candidate}) — "
+                f"create the model first, then record it")
+        now = utcnow_iso()
         with _lock(root):
-            ledger = store.load(root)
-            candidate = os.path.join(root, args.set_entry)
-            if not os.path.exists(candidate) and not os.path.isabs(args.set_entry):
-                raise AtompipeError(
-                    f"{args.set_entry} does not exist (looked at {candidate}) — "
-                    f"create the model first, then record it")
-            ledger.meta.model_entry = args.set_entry
-            store.save(root, ledger)
+            ledger = _migrate(root, apply=True, now=now)
+            store.write_project(root, dataclasses.replace(ledger.meta,
+                                                          model_entry=args.set_entry))
     ledger = store.load(root)
 
     model, projection = _projection(root, ledger, entry=args.entry)
@@ -3086,25 +3056,19 @@ def cmd_model(args: argparse.Namespace) -> int:
     # Plain `atompipe model` is a READ. It used to take the build lock and save
     # the ledger unconditionally, three lines below the comment promising it did
     # not — so printing the projection while a sweep was in flight contended for
-    # the lock, and a `model` in a loop rewrote the ledger's mtime forever. The
-    # write now happens only for the two spellings that are already writes.
+    # the lock, and a `model` in a loop rewrote the ledger's mtime forever.
     #
-    # `--set-entry` and `--write` both prime the ledger's parameter table from
-    # the model, so `atompipe why <param>` answers straight after either one
-    # rather than only after the first gate sweep.
+    # Nor does `--write` (or `--set-entry`) prime the parameter records from the
+    # model any more: that copied every value, unit and rationale into a second
+    # home, stale the moment the model moved (S-39), and a param record may not
+    # hold a value at all now. The model is read where a parameter is shown.
+    # `--write` writes the one output it names, `.atompipe/model.json`.
     written = ""
-    if args.set_entry or args.write:
+    if args.write:
         with _lock(root):
-            fresh = store.load(root)
-            modelio.sync_params(fresh, model)
-            orphans = modelio.orphan_params(fresh, model)
-            store.save(root, fresh)
-            if args.write:
-                written = modelio.write_projection(root, projection)
-    else:
-        # Lock-free: `orphan_params` only compares two in-memory lists, and the
-        # ledger already in hand is the one we would have re-read anyway.
-        orphans = modelio.orphan_params(ledger, model)
+            written = modelio.write_projection(root, projection)
+    # Lock-free: `orphan_params` only compares the records with the model.
+    orphans = modelio.orphan_params(ledger, model)
 
     if args.json:
         _dump({"entry": model.entry, "hash": digest, "projection": projection,
@@ -4572,7 +4536,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-record", action="store_true",
                    help="a dry sweep: write nothing under .atompipe/ except gate scratch "
                         "in out/ — no cache or control entry, obs, last_check.json or "
-                        "ledger")
+                        "index; a legacy ledger migrates in memory only")
     _junit_flag(p, "this run")
     p.set_defaults(func=cmd_check)
 
@@ -4618,32 +4582,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_extract)
 
     # -- claim ------------------------------------------------------------ #
-    claim = sub.add_parser("claim", help="add, list, show, edit and settle claims")
+    # No `claim add` and no `claim edit` (PLAN A-8): a claim is the file
+    # `claims/<id>.json`, written and edited as one.
+    claim = sub.add_parser("claim", help="list and show claims, and record a physical result "
+                                         "(a claim itself is the file claims/<id>.json)")
     claim_sub = claim.add_subparsers(dest="claim_command", metavar="<sub>")
     claim.set_defaults(func=lambda args: _needs_subcommand(claim))
-
-    p = claim_sub.add_parser("add", parents=[common], help="add a claim")
-    p.add_argument("--statement", required=True, help="what must be true for this to work")
-    p.add_argument("--kind", default=ClaimKind.MEASURABLE.value,
-                   choices=[k.value for k in ClaimKind])
-    p.add_argument("--id", default="", help="explicit id (default: next free C<n>)")
-    p.add_argument("--prefix", default="C", help="id prefix when generating (default C)")
-    p.add_argument("--quantity", default=None, help='what is measured, e.g. "tip deflection"')
-    p.add_argument("--cmp", default=None, choices=[c.value for c in Comparator],
-                   help="comparator for the threshold")
-    p.add_argument("--limit", type=float, default=None)
-    p.add_argument("--limit-hi", type=float, default=None, help="upper bound for `between`")
-    p.add_argument("--units", default=None)
-    p.add_argument("--rationale", default="", help="why this matters; what breaks if false")
-    p.add_argument("--source", default="")
-    p.add_argument("--tags", action="append", default=[],
-                   help="tags packs bind gates to (comma-separated or repeated)")
-    p.add_argument("--gates", action="append", default=[], help="gate ids that cover it")
-    p.add_argument("--grounds", action="append", default=[], help="artifact ids behind it")
-    p.add_argument("--note", default="")
-    p.add_argument("--nice-to-have", action="store_true",
-                   help="not critical: never blocks a spend")
-    p.set_defaults(func=cmd_claim_add)
 
     p = claim_sub.add_parser("list", parents=[common], help="one line per claim")
     p.add_argument("--status", choices=[s.value for s in ClaimStatus])
@@ -4654,26 +4598,6 @@ def build_parser() -> argparse.ArgumentParser:
     p = claim_sub.add_parser("show", parents=[common], help="one claim's whole history")
     p.add_argument("id")
     p.set_defaults(func=cmd_claim_show)
-
-    p = claim_sub.add_parser("edit", parents=[common],
-                             help="change a claim; unmentioned fields are untouched")
-    p.add_argument("id")
-    p.add_argument("--statement", default=None)
-    p.add_argument("--kind", default=None, choices=[k.value for k in ClaimKind])
-    p.add_argument("--quantity", default=None)
-    p.add_argument("--cmp", default=None, choices=[c.value for c in Comparator])
-    p.add_argument("--limit", type=float, default=None)
-    p.add_argument("--limit-hi", type=float, default=None)
-    p.add_argument("--units", default=None)
-    p.add_argument("--rationale", default=None)
-    p.add_argument("--source", default=None)
-    p.add_argument("--note", default=None)
-    p.add_argument("--tags", action="append", default=None)
-    p.add_argument("--gates", action="append", default=None)
-    p.add_argument("--grounds", action="append", default=None)
-    p.add_argument("--critical", action="store_true", help="mark critical (blocks a spend)")
-    p.add_argument("--nice-to-have", action="store_true", help="mark non-critical")
-    p.set_defaults(func=cmd_claim_edit)
 
     p = claim_sub.add_parser("physical", parents=[common],
                              help="record a real-world result on a physical claim")
@@ -4754,7 +4678,6 @@ def build_parser() -> argparse.ArgumentParser:
                        help="record a decision, including what LOST and why")
     p.add_argument("--title", required=True)
     p.add_argument("--summary", required=True)
-    p.add_argument("--when", default="", help="ISO timestamp (default: now)")
     p.add_argument("--rejected", action="append", default=[], metavar="VALUE|WHY",
                    help='what lost and the concrete reason: "0.5 mm|the router could not close"')
     p.add_argument("--param", action="append", default=[], help="param names this moved")
@@ -4785,13 +4708,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="pack name or directory")
     p.set_defaults(func=cmd_packs_validate)
 
+    # No `packs remove` (PLAN A-8): opting out is deleting the name from `packs`
+    # in `.atompipe/project.json`.
     p = pack_sub.add_parser("add", parents=[common], help="opt this project into a pack")
     p.add_argument("names", nargs="+")
     p.set_defaults(func=cmd_packs_add)
-
-    p = pack_sub.add_parser("remove", parents=[common], help="drop a pack from this project")
-    p.add_argument("names", nargs="+")
-    p.set_defaults(func=cmd_packs_remove)
 
     # -- model / doctor --------------------------------------------------- #
     p = sub.add_parser("model", parents=[common], help="the model, projected")
@@ -4857,7 +4778,7 @@ def _tag_subparsers(parser: argparse.ArgumentParser) -> None:
 
     argparse fills defaults from the innermost parser last (each subparser parses
     into a fresh namespace that is then copied outward), so `args._parser` ends
-    up as the deepest one that matched: `claim add`, not `claim`.
+    up as the deepest one that matched: `claim show`, not `claim`.
 
     `_actions` is private, but the alternative is repeating `set_defaults` on
     thirty subparsers, where the thirty-first would be added without it and
@@ -4899,6 +4820,12 @@ def main(argv: list[str] | None = None) -> int:
     is a normal thing to type, and Python's default behaviour there is a
     confusing "Exception ignored" block at interpreter shutdown. stdout is
     redirected to devnull so the flush at exit has somewhere harmless to go.
+
+    After the command — succeeded or refused, never interrupted — the index is
+    rebuilt from the records on a migrated project (`_touch_index`), so the one
+    generated file an agent reads first says what the record files say, a hand
+    edit made since the last command included. Its exit code is never the
+    index's: the rebuild is best-effort.
     """
     parser = build_parser()
     try:
@@ -4920,9 +4847,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        return int(handler(args) or 0)
+        code = int(handler(args) or 0)
     except AtompipeError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        _after(args, quiet=True)
         return 2
     except BrokenPipeError:
         devnull = os.open(os.devnull, os.O_WRONLY)
@@ -4931,6 +4859,8 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    _after(args)
+    return code
 
 
 if __name__ == "__main__":              # pragma: no cover - `python -m atompipe.cli`

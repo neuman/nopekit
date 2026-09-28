@@ -409,6 +409,80 @@ class CheckMigratesOnce(_env.EnvCase):
 
 
 # --------------------------------------------------------------------------- #
+# the index after every command
+# --------------------------------------------------------------------------- #
+def _edit_limit(project: str, claim: str, limit: float) -> None:
+    """A hand edit of one record, as a human (or an agent's Edit) makes it."""
+    path = os.path.join(project, "claims", f"{claim}.json")
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    data["acceptance"]["limit"] = limit
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+class IndexIsTouched(_env.EnvCase):
+    """`_touch_index`: every command on a migrated project leaves the index
+    agreeing with the records — a hand edit made since the last command
+    included — except `doctor`, `init` and a `--no-record` run, which write
+    nothing of it; and a legacy project, whose `ledger.json` IS the records, is
+    never indexed."""
+
+    def _index(self, project: str) -> bytes | None:
+        try:
+            with open(os.path.join(project, INDEX), "rb") as fh:
+                return fh.read()
+        except FileNotFoundError:
+            return None
+
+    def test_a_read_command_indexes_a_hand_edit(self):
+        project = _migrated(os.path.join(self.tmp(), "bracket"))
+        self.assertIsNone(self._index(project), "the in-process migration wrote an index")
+        _edit_limit(project, "C1", 0.4)
+        proc = _run(project, "claim", "list")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(store.agree(project), [])
+        index = json.loads(self._index(project))
+        (c1,) = [c for c in index["claims"] if c["id"] == "C1"]
+        self.assertEqual(c1["acceptance"]["limit"], 0.4)
+
+        again = self._index(project)
+        _run(project, "status")
+        self.assertEqual(self._index(project), again, "an unchanged index was rewritten")
+
+    def test_doctor_and_a_dry_run_leave_it(self):
+        project = _migrated(os.path.join(self.tmp(), "bracket"))
+        _run(project, "status")
+        _edit_limit(project, "C1", 0.4)
+        stale = self._index(project)
+        self.assertTrue(store.agree(project), "the precondition: the edit staled the index")
+        for argv in (["doctor"], ["check", "--no-record"], ["gate", "selftest", "--no-record"]):
+            with self.subTest(argv=argv):
+                proc = _run(project, *argv)
+                self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
+                self.assertEqual(self._index(project), stale, f"{argv} wrote the index")
+
+    def test_a_legacy_project_is_never_indexed(self):
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "legacy"))
+        legacy = self._index(project)
+        for argv in (["status"], ["claim", "list"], ["report"], ["why", "C1"]):
+            with self.subTest(argv=argv):
+                proc = _run(project, *argv)
+                self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
+                self.assertEqual(self._index(project), legacy, f"{argv} overwrote the legacy ledger")
+                self.assertFalse(os.path.exists(os.path.join(project, ".atompipe",
+                                                             "project.json")),
+                                 f"{argv} migrated a project it was only reading")
+
+    def test_init_writes_no_index(self):
+        root = os.path.join(self.tmp(), "fresh")
+        proc = _env.atompipe(["init", "--name", "fresh", "-C", root], cwd=self.tmp())
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(root, ".atompipe", "project.json")))
+        self.assertIsNone(self._index(root), "init wrote a ledger.json")
+
+
+# --------------------------------------------------------------------------- #
 # the AST rule: no whole-ledger writer in the CLI
 # --------------------------------------------------------------------------- #
 def _read(path: str) -> str:

@@ -365,15 +365,34 @@ class CheckServesTheCache(unittest.TestCase):
         self.assertEqual(shown["covered_by"], ["bracket.deflection", "bracket.model_validity"])
 
     def test_effective_ledger_is_never_saved(self):
-        """The saved ledger holds no cache verdict (PD-31), and no reader writes
-        the ledger or the cache: the view `_resolved` builds is shown, never kept."""
+        """No cache verdict and no derived field reaches disk (PD-31), and no
+        reader writes the index, a record or the cache: the view `_resolved`
+        builds is shown, never kept.
+
+        From checkpoint 1.3 the first check migrates the copy, so what is on disk
+        is the RECORDS — `claims/*.json` and no `params/*.json` for the bracket —
+        and `.atompipe/ledger.json` is their generated index, which has no
+        `verdicts` key at all. `Param.gates` (S-30's attribution) is derived where
+        it is read, from each gate's last executed run: `why` names the gate."""
         ledger_path = _state(self.project, "ledger.json")
         with open(ledger_path, encoding="utf-8") as fh:
             saved = json.load(fh)
-        self.assertEqual(saved["verdicts"], [], "a check saved verdicts into the ledger")
-        params = {p["name"]: p["gates"] for p in saved["params"]}
-        self.assertIn("bracket.bed_fit", params["bed_xy"], params)
-        self.assertIn("bracket.deflection", params["load_n"], params)
+        self.assertTrue(saved.get("generated"), "ledger.json is not the generated index")
+        self.assertNotIn("verdicts", saved, "a check saved verdicts into the index")
+        for row in saved["claims"] + saved["params"]:
+            self.assertNotIn("gates", row, "a check saved a derived coverage into a record")
+        def on_disk() -> dict[str, bytes]:
+            return {rel: data for rel, data in _tree(self.project).items()
+                    if rel.split("/", 1)[0] in ("claims", "params", "decisions", "needs",
+                                                "inputs", "results", "views")
+                    or rel == ".atompipe/project.json"}
+
+        records = on_disk()
+        self.assertTrue(any(rel.startswith("claims/") for rel in records), sorted(records))
+        for name, gate in (("bed_xy", "bracket.bed_fit"), ("load_n", "bracket.deflection")):
+            with self.subTest(param=name):
+                why = _json(_run(self.project, "why", name, "--json"))["why"]
+                self.assertIn(gate, why.partition("GATES (")[2].split("\n\n")[0], why)
 
         with open(ledger_path, "rb") as fh:
             before = fh.read()
@@ -387,6 +406,7 @@ class CheckServesTheCache(unittest.TestCase):
                 self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
                 with open(ledger_path, "rb") as fh:
                     self.assertEqual(fh.read(), before, f"{argv} wrote the ledger")
+                self.assertEqual(on_disk(), records, f"{argv} wrote a record")
                 self.assertEqual(_tree(_state(self.project, "verdicts")), cache,
                                  f"{argv} wrote the verdict cache")
         self.assertEqual(_tree(_state(self.project, "runs")), self.runs,
@@ -603,12 +623,18 @@ class SweepsThatKeepNothingOrEverything(_env.EnvCase):
         self.assertEqual(status_code, 0)
         self.assertEqual(json.loads(status_out)["claims"]["C3"], "blocked")
 
-        with open(_state(self.project, "ledger.json"), encoding="utf-8") as fh:
-            params = {p["name"]: p["gates"] for p in json.load(fh)["params"]}
         # `n_bolts` is the one config field `bracket.bearing` reads by name (its
         # other inputs reach it through `bearing_area`, which `Param.gates` does
-        # not follow — see `cli._param_gates`).
-        self.assertEqual(params["n_bolts"], ["bracket.bearing"], "S-30: the skip erased it")
+        # not follow — see `cli._param_gates`). From 1.3 no record holds that
+        # attribution; `why` derives it from the gate's last EXECUTED run, asked
+        # here with the tool still missing, after the sweep that skipped it.
+        with mock.patch.object(gates_mod, "availability", side_effect=patched):
+            why_code, why_out, why_err = _in_process(["why", "n_bolts", "--json",
+                                                      "-C", self.project])
+        self.assertEqual(why_code, 0, why_out + why_err)
+        gates_part = json.loads(why_out)["why"].partition("GATES (")[2].split("\n\n")[0]
+        self.assertTrue(gates_part.startswith("1)"), gates_part)
+        self.assertIn("bracket.bearing", gates_part, "S-30: the skip erased it")
 
 
 class SelftestFilesItsControls(_env.EnvCase):

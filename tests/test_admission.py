@@ -1012,8 +1012,8 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                                                          "demonstrates nothing")
 
     def test_cli_bytecode_in_selftest_writes_no_new_control_entry(self):
-        # A `git ls-files` walk sees untracked-not-ignored files, and the
-        # bracket ignores no bytecode (spec §3.8's walk excludes it itself). A
+        # A `git ls-files` walk sees untracked-not-ignored files, and a project
+        # may ignore no bytecode (spec §3.8's walk excludes it itself). A
         # `.pyc` header carries an mtime and the interpreter's name, so were it
         # an input every interpreter and every import would write new control
         # entries into a tracked cache.
@@ -1021,6 +1021,11 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         check_json(self, project)
         before = control_names(project)
         self.assertEqual(sorted(before), sorted(BRACKET_GATES))
+        # From 1.3 that first check migrated the copy, and the migration's root
+        # `.gitignore` block ignores bytecode — which would hide the case this
+        # test is for. A user may delete the block; the walk must exclude
+        # bytecode by itself, so the block goes before the bytecode arrives.
+        os.remove(os.path.join(project, ".gitignore"))
         proc = _env.run([sys.executable, "-m", "compileall", "-q", "selftest"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         pyc = [p for p in untracked(project) if p.startswith("selftest/__pycache__/")]

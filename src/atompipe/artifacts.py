@@ -339,13 +339,21 @@ def ingest(
     licence: str = "",
     note: str = "",
 ) -> InputArtifact:
-    """Take a real file into the project: copy, hash, register. Mutates `ledger`.
+    """Take a real file into the project: copy, hash, and return its RECORD.
+
+    Returns the `InputArtifact` the caller writes as `inputs/<id>.json` — the
+    one record an ingest touches (the `ingest` shim, `store.write_record`). The
+    in-memory `ledger` is updated too, so several files ingested by one command
+    dedupe against each other; nothing here writes a record or saves a ledger.
+    What slipped through before records were files: the CLI saved the whole
+    ledger after every ingest, rewriting every claim and parameter to add one
+    artifact.
 
     The copy is the point. A record that says `/home/eric/Downloads/pump.pdf` is
     a record that stops resolving the first time someone clears their Downloads
     folder or opens the project on another machine, and the evidence for a
     decision has to outlive the browser session that produced it. So by default
-    the bytes move into `inputs/<bucket>/` and the ledger stores a repo-relative
+    the bytes move into `inputs/<bucket>/` and the record stores a repo-relative
     path.
 
     Three behaviours worth knowing:
@@ -366,10 +374,10 @@ def ingest(
       untouched, nothing is copied, nothing is appended. See `find_by_hash` for
       why that is not signalled in the return value.
     * **Same path, new bytes** (an in-place file the user edited) -> the existing
-      record's digest and size are refreshed and its id is KEPT. Minting a fresh
-      id would orphan every `grounded_by` and every `Extraction` pointing at the
-      old one, which is the same as deleting the provenance — and the digest
-      change is exactly what `inputs_hash` needs to see so the gates go stale.
+      record's digest is refreshed and its id is KEPT. Minting a fresh id would
+      orphan every `grounded_by` and every `Extraction` pointing at the old one,
+      which is the same as deleting the provenance — and the new pin is what
+      clears the index's `drift` for bytes the user meant to change.
 
     `when` is the caller's ISO timestamp (spine rule 3: no function stamps its
     own clock). `copy=False` records an outside file where it lies, absolute
@@ -503,7 +511,11 @@ def ingest_link(
     kind: ArtifactKind | str = ArtifactKind.LINK,
     when: str = "",
 ) -> InputArtifact:
-    """Register a URL as evidence. No file, no fetch. Mutates `ledger`.
+    """Register a URL as evidence. No file, no fetch. Returns its record.
+
+    Like `ingest`: the `InputArtifact` comes back for the caller to write as
+    `inputs/<id>.json`, and the in-memory `ledger` is updated so a second call in
+    the same command dedupes against it.
 
     The spine never goes to the network — it is stdlib-only, it runs offline, and
     a gate sweep that silently depends on a vendor's CDN being up is not a gate
@@ -560,7 +572,12 @@ def ingest_link(
 # extraction:  what was actually read out of the evidence
 # --------------------------------------------------------------------------- #
 def add_extraction(ledger: Ledger, artifact_id: str, extraction: Extraction) -> InputArtifact:
-    """Record what was read out of an artifact. Returns the artifact. Mutates `ledger`.
+    """Record what was read out of an artifact; return the artifact's RECORD.
+
+    The extraction is appended to the artifact (in `ledger`, in memory), and the
+    artifact comes back for the caller to write as `inputs/<id>.json` — the ONE
+    file an extraction touches. It writes no back-reference into the parameter
+    or claim it grounds: `grounding` derives that edge on read (S-36).
 
     This is the step that converts a photograph into provenance. A generated
     layout that carries the sentence *"digitised from inputs/sketches/panel.png,
@@ -613,6 +630,14 @@ def grounding(ledger: Ledger, *, include_declared: bool = True) -> dict[str, lis
     written on the param instead of on the artifact. `include_declared=False`
     gets the strict inversion of extractions alone, for a caller auditing the
     extraction records themselves.
+
+    **Derived, never stored.** The edge an extraction implies lives in the
+    extraction and nowhere else; this inverts it every time it is read. What
+    slipped through (S-36): the CLI used to COPY it into the grounded parameter's
+    `grounded_by` (`_link_grounding`), so deleting the extraction left its
+    grounding behind forever — `why arm_length` said "GROUNDED BY arm" while
+    `inputs` said `arm` was "NEVER READ". A `grounded_by` in a record is now only
+    what a human declared there by hand.
 
     Artifact ids are de-duplicated and keep first-seen order, so the output is
     stable enough to diff between runs.

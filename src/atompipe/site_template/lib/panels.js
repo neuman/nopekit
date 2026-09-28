@@ -164,7 +164,8 @@ export function claimsPanel(state, app) {
     panelHead("Claims", plural(claims.length, "claim"),
       "What has to be true for this design to work, and what settled it."),
     ...(sections.length ? sections : [emptyNote("This project has recorded no claims yet. " +
-      "`atompipe claim add` is where a project starts: a design with no claims has nothing to prove.")]));
+      "A claim is a file, `claims/<id>.json`, and it is where a project starts: a design with " +
+      "no claims has nothing to prove.")]));
 }
 
 function claimRow(claim, state, app) {

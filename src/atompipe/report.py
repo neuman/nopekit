@@ -475,8 +475,8 @@ def _verdict_sentence(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any,
 
     if total == 0:
         return bold(f"{rev} has no claims recorded, so nothing has been proven.") + \
-            " An empty ledger is not a clean bill of health — start with" \
-            " `atompipe claim add`."
+            " A project with no claims is not a clean bill of health — start with" \
+            " one: write `claims/C1.json`, a statement and an acceptance."
 
     critical_bad = [c for c in ledger.claims
                     if c.critical and st.get(c.id) in BLOCKING_STATUSES]

@@ -1870,18 +1870,23 @@ def match(need: Need, manifests: Sequence[PackManifest]) -> list[PackManifest]:
 # installed vs available
 # --------------------------------------------------------------------------- #
 def installed(root: str, *, ledger: Ledger | None = None) -> list[str]:
-    """Pack names this project has opted into — ``ledger.meta.packs``, in order.
+    """Pack names this project has opted into — ``packs`` in
+    ``.atompipe/project.json``, in order, read through ``store.load(root).meta``.
 
     Installed is a *project* fact, not a filesystem fact. A pack sitting in
     ``~/.atompipe/packs`` is available to every project on the machine; it only
-    becomes part of this one when the ledger says so. Keeping the two concepts
-    apart is what stops a gate sweep from silently changing because somebody
-    cloned a pack into their home directory last week.
+    becomes part of this one when ``project.json`` says so (``atompipe packs
+    add``, or an edit of that file — there is no ``packs remove``). Keeping the
+    two concepts apart is what stops a gate sweep from silently changing because
+    somebody cloned a pack into their home directory last week. On a legacy
+    project ``store.load`` reads the same list out of its ``ledger.json``, in
+    memory, so the answer does not change when the project migrates. The
+    generated index is never read for it: it is an output.
 
     Order is preserved (it is gate-id precedence for ``load_all_gates``) and
     duplicates are dropped. Pass ``ledger`` when you already have one loaded —
-    the CLI usually does, and re-reading the ledger to answer a listing question
-    is a wasted file read on every command.
+    the CLI usually does, and re-reading the records to answer a listing
+    question is a wasted walk on every command.
     """
     from . import store                      # local: keeps module import cost flat
 
