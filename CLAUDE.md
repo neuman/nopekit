@@ -24,6 +24,16 @@ No install step and no dependencies. `trimesh` + `numpy` are needed only to exer
 the two mesh packs; without them those gates report SKIPPED, which is correct
 behaviour and is itself tested.
 
+`examples/bracket` commits its verdict cache, so that last command is six cache hits
+and leaves `git status` clean. The entries are keyed on the spine that wrote them: a
+code edit (not a comment or docstring) to `models.py`, `gates.py`, `modelio.py` or
+`verdicts.py`, or to the bracket's model, gates or selftest, must regenerate them in
+the same change. `tests/test_bracket_cache.py` goes red until it does and names the
+commands; `examples/bracket/README.md` ("The committed cache") has them in full.
+(What slipped through before the cache was committed: every verification run
+rewrote the bracket's tracked ledger and added a run file, so `git status` was never
+clean and nobody read it.)
+
 ## Invariants — do not break these
 
 The entire value of this project is that its report refuses to claim anything it has
@@ -144,7 +154,8 @@ layout in full, with each writer.
 | `examples/bracket/` | the reference project — zero dependencies, runs the whole loop |
 | `tests/` | the honesty invariants and the pack gate-on-the-gates |
 | `tests/_env.py` | the one environment every test subprocess runs in (`_env.run`): a temp `HOME`, no user packs, git isolated from the machine, the tools still visible |
-| `tests/_projects.py` | test projects built once: a bracket copy, and a pack's baseline wrapped as a project |
+| `tests/_projects.py` | test projects built once: a bracket copy (the legacy bracket by default, the committed one with `migrated=True`), and a pack's baseline wrapped as a project |
+| `tests/bracket_legacy/` | a fixture: the bracket's `.atompipe/` as it stood before its 1.3 migration (ledger, run history, ignore file), which `_projects.bracket_copy` puts back around today's sources. Never edited to make a test pass |
 | `tests/_transcript.py` | Phase 1's target transcript as data: replayed on a fresh clone by `test_fresh_clone.py`, its lines held to their shapes by `test_shapes.py` |
 | `tests/oracle/` | scripts, not tests: CI's bracket failure signature (`bracket_signature.py`) and the R-8 differential oracle run at phase review (`r8_statuses.py`) |
 | `METHOD.md` | the doctrine |
