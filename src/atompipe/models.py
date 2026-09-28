@@ -226,6 +226,12 @@ class Record:
 
     Unknown keys on the way in are DROPPED rather than raising, so a newer pack
     writing an extra field cannot break an older spine reading the file.
+
+    That leniency is for dicts in memory and for files a pack writes. A record
+    FILE a human edits (`claims/C1.json`, …) is read by `store.read_record`,
+    which refuses an unknown key with a suggestion instead: dropped here, a
+    typo'd `rejectd` vanished on load and was erased from disk by the next save
+    (S-40).
     """
 
     def to_dict(self) -> dict[str, Any]:
@@ -855,10 +861,14 @@ class ProjectMeta(Record):
 
 @dataclass
 class Ledger(Record):
-    """The whole project state. Persisted as .atompipe/ledger.json.
+    """The whole project state, in memory.
 
-    Deliberately one file: an agent reads it once and holds the entire shape of
-    the project - claims, evidence, gaps, decisions - in a few hundred lines.
+    On disk it is one file per record (`RECORD_KINDS`) plus
+    `.atompipe/project.json` for `meta`; `store.load` assembles this from them.
+    `.atompipe/ledger.json` is the GENERATED index of those files — the whole
+    project in one read for an agent, as the single ledger file was — and is
+    never read back for truth. `verdicts`, `Claim.gates` and `Param.gates` are
+    filled in memory by readers and never written to a record.
     """
 
     meta: ProjectMeta = field(default_factory=ProjectMeta)
@@ -920,6 +930,78 @@ class Ledger(Record):
         )
 
 
+# --------------------------------------------------------------------------- #
+# records as files (checkpoint 1.3)
+# --------------------------------------------------------------------------- #
+#: Each record directory under the project root -> the kind a file in it holds.
+#: One file per record, the stem is the id (`claims/C1.json` is claim C1), so a
+#: branch that edits one claim conflicts with nothing but an edit of that claim.
+#: What slipped through with one `ledger.json`: every command rewrote the whole
+#: file, so a candidate branch that touched one number conflicted with every
+#: other branch on the same file — the merge-conflict argument for one file
+#: inverts once a branch is a candidate (brief). `results/<claim-id>.json` holds
+#: a claim's PhysicalResults as `{"results": [...]}`, append-only (D-11), apart
+#: from the claim so a candidate's refutation survives a trade overlay (Q1.10).
+#: `views/` holds viewgens too; only its `*.json` files are records.
+#: The order is `store.RECORD_DIRS`' and a test holds the two equal. Rejected: a
+#: `ledger.json` sharded by kind (`claims.json`, …) — the same conflict per kind.
+RECORD_KINDS: dict[str, type] = {
+    "claims": Claim,
+    "params": Param,
+    "decisions": Decision,
+    "needs": Need,
+    "inputs": InputArtifact,
+    "results": PhysicalResult,
+    "views": View,
+}
+
+#: Keys a record FILE may never carry, per kind (the class name), each with the
+#: home that owns the fact instead; `"*"` applies at every level of every kind.
+#: The dataclass fields stay (tests:H4: `claims.resolve_status` still reads
+#: `Claim.gates` in memory) — only their on-disk home goes. A copy on disk is a
+#: second source that goes stale the moment the owner moves: `check` rewrote
+#: `claim.gates` into the ledger on every run (S-37), and a param record's
+#: `value` kept saying 7 after the model said 8 (S-39). `{model}` is filled with
+#: the project's `model_entry`, because "the model owns it" is only useful when it
+#: says which file. `Claim.physical_result` is here because its home moved to
+#: `results/<id>.json`; two homes for a result is how one of them gets believed.
+#: `independence` is NEVER a field the proposer fills in (brief): it is derived
+#: from origin, and a record that states its own would launder a claim of it.
+#: Rejected: dropping these keys silently on read — the lenient reader is exactly
+#: how a typo'd key vanished and was then erased from disk (S-40).
+FORBIDDEN_KEYS: dict[str, dict[str, str]] = {
+    "Claim": {
+        "gates": "derived from gate coverage — the registry says which gates cover a claim",
+        "physical_result": "a claim's results live in results/<id>.json, append-only",
+    },
+    "Param": {
+        "value": "the model ({model}) owns it",
+        "derived_from": "the model ({model}) owns it",
+        "gates": "derived — the gates that read it when they last ran",
+        "changed_in": "derived — the decisions that name it in params_changed",
+    },
+    "InputArtifact": {
+        "bytes": "computed from the file",
+    },
+    "*": {
+        "independence": "derived from origin (pack, human, agent session, external "
+                        "solver), never a field the proposer fills in",
+    },
+}
+
+#: `(class, field)` pairs the record writer writes even at their defaults. The
+#: writer omits every other default so a record says only what was decided — but
+#: a claim file without its `kind`, or a limit without its direction, is
+#: unreadable to the human editing it, and phase-1's C1 example writes both.
+#: Rejected: omitting every default (C1 would lose `kind` and `comparator`); writing
+#: every default (a claim file would carry `"physical_result": null`, `"note": ""`
+#: and seven more keys that decide nothing).
+ALWAYS_WRITTEN: frozenset[tuple[str, str]] = frozenset({
+    ("Claim", "kind"),
+    ("Acceptance", "comparator"),
+})
+
+
 __all__ = [
     "StrEnum", "ClaimKind", "ClaimStatus", "BLOCKING_STATUSES", "Tier", "ViewKind",
     "ArtifactKind", "EXT_KIND_HINTS", "NeedStatus", "Comparator",
@@ -928,4 +1010,5 @@ __all__ = [
     "Verdict", "NegativeControl", "GateSpec",
     "ToolCandidate", "Need", "Extraction", "InputArtifact", "Decision",
     "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta", "Ledger",
+    "RECORD_KINDS", "FORBIDDEN_KEYS", "ALWAYS_WRITTEN",
 ]

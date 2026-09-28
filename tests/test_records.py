@@ -160,7 +160,7 @@ def _rich_legacy() -> dict:
             {"name": "width", "value": 30.0, "units": "", "rationale": "the docstring's prose",
              "rejected": [], "source": "", "grounded_by": [], "gates": ["g.one"],
              "derived_from": [], "changed_in": "", "tags": []},
-            {"name": "span", "value": 90.0, "units": "mm", "rationale": "", "rejected": [],
+            {"name": "span", "value": 90.0, "units": "", "rationale": "", "rejected": [],
              "source": "", "grounded_by": [], "gates": [], "derived_from": ["width"],
              "changed_in": "", "tags": []},
         ],
@@ -246,12 +246,16 @@ def _bracket(test: _env.EnvCase) -> str:
 
 
 def _registry_covering(*pairs: tuple[str, str]):
-    """A fresh registry: one always-passing gate per ``(gate id, claim id)``."""
+    """A fresh registry: one always-passing gate per id, covering the claims
+    paired with it in ``(gate id, claim id)`` pairs."""
     from atompipe import gates as gates_mod
-    registry = gates_mod.Registry()
+    covers: dict[str, list[str]] = {}
     for gid, cid in pairs:
+        covers.setdefault(gid, []).append(cid)
+    registry = gates_mod.Registry()
+    for gid, cids in covers.items():
         registry.register(
-            GateSpec(id=gid, claims=[cid],
+            GateSpec(id=gid, claims=cids,
                      negative_control=NegativeControl(fixture="selftest/bad.py")),
             lambda ctx: Verdict(gate="x", passed=True))
     return registry
@@ -715,7 +719,8 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
             self.assertFalse({"gates", "status", "physical_result"} & set(row), row)
         for row in index["params"]:
             self.assertFalse({"value", "gates", "derived_from", "changed_in"} & set(row), row)
-        self.assertFalse(_keys_anywhere(index) & {"verdicts", "status", "statuses", "last_run"})
+        # A Need's own `status` (open, proposed, …) is a record field, not a verdict.
+        self.assertFalse(_keys_anywhere(index) & {"verdicts", "statuses", "last_run"})
 
     def test_the_records_digest_moves_with_a_record_and_not_with_the_index(self):
         digest = store.records_digest(self.root)
@@ -996,13 +1001,13 @@ class LegacyLedgerMigrates(_env.EnvCase):
     def test_an_old_shape_ledger_holding_a_forged_pass_changes_no_status(self):
         root = _migrated(self)
         registry = _registry_covering(("g.one", "C1"), ("g.one", "C5"))
-        before = claims_mod.statuses(store.load(root), registry)
+        before = claims_mod.statuses(store.load(root), registry=registry)
         forged = _rich_legacy()
         forged["verdicts"][0]["detail"] = "written by an older spine"
         _write(os.path.join(root, ".atompipe", "ledger.json"), json.dumps(forged, indent=2))
         after = store.load(root)
         self.assertEqual(after.verdicts, [])
-        self.assertEqual(claims_mod.statuses(after, registry), before)
+        self.assertEqual(claims_mod.statuses(after, registry=registry), before)
         self.assertNotEqual(before["C1"], ClaimStatus.PASS)
 
     def test_no_migrated_legacy_verdict_can_make_pass(self):
@@ -1013,7 +1018,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
                 plan = self._migrate(root, apply=apply)
                 for ledger in (plan.ledger, store.load(root)):
                     self.assertEqual(ledger.verdicts, [])
-                    statuses = claims_mod.statuses(ledger, registry)
+                    statuses = claims_mod.statuses(ledger, registry=registry)
                     self.assertEqual((statuses["C1"], statuses["C5"]),
                                      (ClaimStatus.PENDING, ClaimStatus.PENDING))
 

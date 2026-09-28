@@ -418,18 +418,24 @@ class RunHistoryIsGone(_env.EnvCase):
         for line in ("out/", "cache/", "obs/"):
             self.assertIn(line, patterns)
         self.assertNotIn("!runs/", patterns)
+        self.assertNotIn("!ledger.json", patterns)
 
         # git agrees: the checkout's memory is ignored; the project and the
-        # verdict cache are not.
+        # verdict cache are not. From checkpoint 1.3 the project is its records
+        # and `.atompipe/project.json`, and `.atompipe/ledger.json` is their
+        # GENERATED index (D-06) — an output, ignored like the rest, with the
+        # ledger a legacy project migrated from (U26 moved it across).
         _ok(self, _env.git(["-c", "init.defaultBranch=main", "init", "-q"], cwd=root))
         for rel in (".atompipe/cache/last_check.json", ".atompipe/obs/g.json",
                     ".atompipe/out/mesh.stl", ".atompipe/ledger.json",
+                    ".atompipe/ledger.legacy.json", "claims/C1.json",
                     ".atompipe/verdicts/g/0123456789abcdef-01234567.json"):
             _write(root, rel, "{}\n")
         for rel in (".atompipe/cache/last_check.json", ".atompipe/obs/g.json",
-                    ".atompipe/out/mesh.stl"):
+                    ".atompipe/out/mesh.stl", ".atompipe/ledger.json",
+                    ".atompipe/ledger.legacy.json"):
             self.assertTrue(_ignored(root, rel), f"{rel} is not ignored")
-        for rel in (".atompipe/ledger.json",
+        for rel in (".atompipe/project.json", "claims/C1.json",
                     ".atompipe/verdicts/g/0123456789abcdef-01234567.json"):
             self.assertFalse(_ignored(root, rel), f"{rel} is ignored")
 
