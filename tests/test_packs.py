@@ -9,6 +9,8 @@ Run:  PYTHONPATH=src python3 -m unittest discover -s tests -v
 """
 from __future__ import annotations
 
+import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -19,6 +21,7 @@ import unittest
 import uuid
 from unittest import mock
 
+import _env
 from atompipe import gates as gates_mod
 from atompipe import packs as packs_mod
 from atompipe.models import Ledger, ProjectMeta, Tier
@@ -70,6 +73,29 @@ def _read_baseline(pack_dir: str) -> dict | None:
         return json.load(fh)
 
 
+#: The one temp directory this process's contexts write under, removed at exit.
+_OUT_ROOT: list[str] = []
+
+
+def _scratch_out() -> str:
+    """A fresh, empty ``out_dir`` under the temp dir, for one context.
+
+    What slipped through: every context here pointed ``out_dir`` at
+    ``<pack>/.selftest-out``, so the suite wrote 33 gates' evidence and the fdm
+    fixtures' exported meshes into the tree it was testing — kept out of a commit
+    only by an ignore rule, and on a wheel install written into site-packages
+    (packs:H16). One directory per context, never one per pack: a file a
+    previous run left behind must not become something the next run reads
+    (packs:H5). The root goes at process exit, so a child process that imports
+    these helpers cleans up after itself too.
+    """
+    if not _OUT_ROOT:
+        root = tempfile.mkdtemp(prefix="atompipe-test-packs-out-")
+        atexit.register(shutil.rmtree, root, True)
+        _OUT_ROOT.append(root)
+    return tempfile.mkdtemp(prefix="ctx-", dir=_OUT_ROOT[0])
+
+
 def _pack_ctx(pack_dir: str, params: dict) -> gates_mod.GateContext:
     """A context carrying ``params`` as the projection, rooted in the pack.
 
@@ -80,10 +106,13 @@ def _pack_ctx(pack_dir: str, params: dict) -> gates_mod.GateContext:
     `selftest/baseline.json`: a plausible, physically coherent projection that
     every one of its gates PASSES. The fixtures then move one thing and the
     gate must flip to FAIL.
+
+    Its evidence goes to a fresh temp directory (``_scratch_out``), never into
+    the pack under test.
     """
     return gates_mod.GateContext(
         root=pack_dir, ledger=Ledger(meta=ProjectMeta(name="selftest")), model=None,
-        params=params, out_dir=os.path.join(pack_dir, ".selftest-out"), tier=3,
+        params=params, out_dir=_scratch_out(), tier=3,
         log=lambda _m: None, extra={})
 
 
@@ -479,7 +508,7 @@ class ControlsAreSealed(unittest.TestCase):
                 return gates_mod.GateContext(
                     root=path, ledger=Ledger(meta=ProjectMeta(name="sealed")),
                     model=None, params=params,
-                    out_dir=os.path.join(path, ".selftest-out"), tier=3,
+                    out_dir=_scratch_out(), tier=3,
                     log=lambda _m: None, extra={})
 
             for spec in registry.specs():
@@ -497,6 +526,300 @@ class ControlsAreSealed(unittest.TestCase):
                         f"instead of stating everything its gate reads, so installing "
                         f"this pack in a different project can silently defuse it "
                         f"({bare.skip_reason or bare.detail})")
+
+
+# --------------------------------------------------------------------------- #
+# the spine's copy of the gate on the gates, held to this file's (D-25)
+# --------------------------------------------------------------------------- #
+def _oracle(pack_dir: str, registry: gates_mod.Registry) -> dict[str, list[str]]:
+    """This file's own verdict on one pack, as the classes above compute it.
+
+    Three passes: the pack's baseline (NegativeControlsFire), each control over
+    that baseline (NegativeControlsFire), and each control over an EMPTY host
+    (ControlsAreSealed's probe). Problems and tooling skips, each line starting
+    with the gate id it is about.
+    """
+    skipped: list[str] = []
+    problems = _baseline_problems(pack_dir, registry, skipped=skipped)
+    problems += _control_problems(pack_dir, registry, host=_read_baseline(pack_dir) or {},
+                                  skipped=skipped)
+    problems += _control_problems(pack_dir, registry, host={}, skipped=skipped)
+    return {"problems": problems, "skipped": skipped}
+
+
+def _flagged(problems: list[str]) -> set[str]:
+    """The gate ids a list of ``"<gate id>: <why>"`` lines is about."""
+    return {line.split(":", 1)[0] for line in problems}
+
+
+def _skipped_ids(entries: list[str]) -> set[str]:
+    """The gate ids a list of ``"<gate id> (<reason>)"`` skip lines names."""
+    return {entry.split(" (", 1)[0] for entry in entries}
+
+
+#: What a child process prints for DemonstrateAgrees: both verdicts on one
+#: planted pack, and `packs.validate`'s, as ONE JSON document on its last stdout
+#: line. A child because pack modules are cached by pack NAME in sys.modules, and
+#: a second copy of a pack in one process is refused or — worse — answered from
+#: the first copy's code (tests:H6, core:§5.12). `demonstrate` runs first, so its
+#: own loader meets the pack cold; the oracle then loads it by name, as every
+#: class above does.
+_AGREE_SCRIPT = """\
+import json, os, sys
+tests_dir, root, name = sys.argv[1:4]
+sys.path.insert(0, tests_dir)
+import test_packs as T
+from atompipe import gates, packs
+from atompipe.models import Tier
+pack_dir = os.path.join(root, ".atompipe", "packs", name)
+demo = packs.demonstrate(pack_dir, tier=Tier.EXTERNAL)
+registry = gates.Registry()
+packs.load_gates(name, registry, root=root)
+oracle = T._oracle(pack_dir, registry)
+notes = []
+validated = packs.validate(pack_dir, notes=notes)
+print(json.dumps({"gates": registry.ids(), "oracle": oracle,
+                  "demonstrate": {"problems": demo.problems, "skipped": demo.skipped,
+                                  "ran": demo.ran},
+                  "validate": validated, "notes": notes}))
+"""
+
+#: The line each plant anchors on. Exactly one occurrence is demanded, so an edit
+#: to beam-analytic that moves it turns these tests red instead of planting
+#: nothing and passing on a clean pack.
+_DEFLECTION_DEF = "def deflection(ctx: GateContext) -> Verdict:\n"
+_SHALLOW_DEF = "def shallow_section(ctx):\n"
+
+
+def _plant(pack_dir: str, rel: str, anchor: str, body: str) -> None:
+    """Insert ``body`` as the first statement after ``anchor`` in one pack file."""
+    path = os.path.join(pack_dir, *rel.split("/"))
+    with open(path, "r", encoding="utf-8") as fh:
+        text = fh.read()
+    if text.count(anchor) != 1:
+        raise AssertionError(f"{rel}: expected exactly one {anchor.strip()!r} to plant "
+                             f"after, found {text.count(anchor)}")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(anchor, anchor + body))
+
+
+def _snapshot(root: str) -> dict[str, tuple]:
+    """Every directory and file under ``root``: size, mtime and the bytes' digest.
+
+    ``__pycache__`` is left out by name: Python's import system writes bytecode
+    beside a module the first time anything imports it — the pack's code writes
+    none of it, the tree ignores it, and whether it is already there depends on
+    which test ran first. A directory is a key with no stamp: a new one is
+    caught, while its mtime would move with that bytecode.
+    """
+    out: dict[str, tuple] = {}
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        out[os.path.relpath(dirpath, root) + "/"] = ()
+        for filename in sorted(filenames):
+            full = os.path.join(dirpath, filename)
+            info = os.lstat(full)
+            with open(full, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+            out[os.path.relpath(full, root)] = (info.st_size, info.st_mtime_ns, digest)
+    return out
+
+
+def _changed(before: dict[str, tuple], after: dict[str, tuple]) -> list[str]:
+    """What differs between two snapshots, one line per path."""
+    lines = [f"{p}: created" for p in sorted(set(after) - set(before))]
+    lines += [f"{p}: removed" for p in sorted(set(before) - set(after))]
+    lines += [f"{p}: rewritten" for p in sorted(set(before) & set(after))
+              if before[p] != after[p]]
+    return lines
+
+
+class DemonstrateAgrees(unittest.TestCase):
+    """``packs.demonstrate`` names exactly the gates this file's oracle names (D-25).
+
+    `pack validate` runs the spine's COPY of the gate on the gates. The classes
+    above keep their own assertions as an independent
+    oracle rather than delegating to that copy: a test that calls the code it
+    guards is relaxed by relaxing the code, with no test file touched (R-6). This
+    class is what stops the two drifting apart — on every bundled pack, and on
+    planted violators, because a rule that has only met honest packs has never
+    been shown to refuse anything.
+
+    Before it: `pack validate` never ran a control and certified a planted
+    ``return True`` as publishable (S-09), and `gate selftest` tested only the
+    reject half, so an always-False gate passed it (S-04).
+    """
+
+    def test_bundled_packs(self):
+        """Both sides empty on every bundled pack, openmodelica's three SOLVE
+        gates included or availability-skipped on both sides alike."""
+        for path in _pack_dirs():
+            name = os.path.basename(path)
+            with self.subTest(pack=name):
+                registry = gates_mod.Registry()
+                packs_mod.load_gates(name, registry, root=REPO)
+                oracle = _oracle(path, registry)
+                demo = packs_mod.demonstrate(path, tier=Tier.EXTERNAL)
+                self.assertEqual(_flagged(demo.problems), _flagged(oracle["problems"]),
+                                 f"demonstrate: {demo.problems}\noracle: {oracle['problems']}")
+                self.assertEqual(demo.problems, [], "\n".join(demo.problems))
+                skipped = _skipped_ids(demo.skipped)
+                self.assertEqual(skipped, _skipped_ids(oracle["skipped"]))
+                # At tier 3 every gate is in scope: each one either ran its
+                # control or was skipped for missing tooling. A demonstration
+                # that dropped a gate would otherwise read as a clean one.
+                self.assertEqual(demo.ran + len(skipped), len(registry.specs()),
+                                 f"{name}: ran {demo.ran}, skipped {sorted(skipped)}, "
+                                 f"of {registry.ids()}")
+
+    # -- planted violators, each in its own process -------------------------- #
+    def _planted(self, plant=None) -> dict:
+        """A copy of beam-analytic under a unique directory AND pack name, with
+        ``plant(pack_dir)`` applied, judged by both sides in a child process."""
+        root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-planted-beam-"))
+        self.addCleanup(shutil.rmtree, root, True)
+        name = f"beam-planted-{uuid.uuid4().hex[:12]}"
+        pack_dir = os.path.join(root, ".atompipe", "packs", name)
+        shutil.copytree(os.path.join(PACKS_DIR, "beam-analytic"), pack_dir,
+                        ignore=shutil.ignore_patterns("__pycache__", ".selftest-out"))
+        manifest_path = os.path.join(pack_dir, "pack.json")
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        manifest["name"] = name
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2)
+        if plant is not None:
+            plant(pack_dir)
+        tests_dir = os.path.dirname(os.path.abspath(__file__))
+        proc = _env.run([sys.executable, "-c", _AGREE_SCRIPT, tests_dir, root, name],
+                        cwd=root)
+        self.assertEqual(proc.returncode, 0, f"the agreement child failed:\n{proc.stderr}")
+        lines = proc.stdout.strip().splitlines()
+        self.assertTrue(lines, f"the agreement child printed nothing:\n{proc.stderr}")
+        return json.loads(lines[-1])
+
+    def _assert_named(self, out: dict, gate_id: str, phrase: str) -> None:
+        oracle = out["oracle"]["problems"]
+        demo = out["demonstrate"]["problems"]
+        self.assertEqual(_flagged(oracle), {gate_id}, f"the oracle: {oracle}")
+        self.assertEqual(_flagged(demo), {gate_id},
+                         f"demonstrate disagrees with the oracle ({oracle}): {demo}")
+        self.assertTrue(any(phrase in line for line in demo),
+                        f"demonstrate named {gate_id} for another reason than "
+                        f"{phrase!r}: {demo}")
+        # `pack validate` refuses it too, with nothing else to say: the copy is
+        # otherwise publishable, and before demonstrate this list was empty for a
+        # planted logger (S-09).
+        self.assertEqual(out["validate"], demo)
+
+    def test_the_planted_copy_is_clean_when_nothing_is_planted(self):
+        """The positive control for the violators below: the copy itself — new
+        directory, new pack name, a cold process — is clean on both sides and
+        publishable, so each of them fails for what was planted and not for the
+        copying."""
+        out = self._planted()
+        self.assertEqual(out["oracle"]["problems"], [])
+        self.assertEqual(out["demonstrate"]["problems"], [])
+        self.assertEqual(out["demonstrate"]["skipped"], [])
+        self.assertEqual(out["demonstrate"]["ran"], len(out["gates"]))
+        self.assertEqual(out["validate"], [])
+        self.assertEqual(out["notes"], [])
+
+    def test_a_gate_that_always_passes_is_named(self):
+        """``return True``: passes its baseline, and its known-bad input too."""
+        out = self._planted(lambda d: _plant(d, "gates/beam.py", _DEFLECTION_DEF,
+                                             "    return True\n"))
+        self._assert_named(out, "beam.deflection", "control did not fire")
+
+    def test_a_gate_that_always_fails_is_named(self):
+        """``return False``: its control fires, and proves nothing, because it
+        fails the good design as well (S-04)."""
+        out = self._planted(lambda d: _plant(d, "gates/beam.py", _DEFLECTION_DEF,
+                                             "    return False\n"))
+        self._assert_named(out, "beam.deflection", "fails its own baseline")
+
+    def test_a_fixture_that_deletes_a_key_is_named(self):
+        """The control removes the input the gate reads instead of making it bad,
+        so the gate skips on its known-bad input with its tools present (S-12)."""
+        body = ('    params = {k: v for k, v in BASELINE.items() '
+                'if k != "deflection_limit_mm"}\n'
+                '    return dataclasses.replace(ctx, params=params)\n')
+        out = self._planted(lambda d: _plant(d, "selftest/bad_beams.py", _SHALLOW_DEF, body))
+        self._assert_named(out, "beam.deflection",
+                           "control did not fire: skipped on its own known-bad input")
+
+    def test_a_gate_that_skips_its_own_baseline_is_named(self):
+        """The gate reads a key its pack's baseline never states, so it skips
+        the good design with every tool it declares present: never shown to
+        accept anything (S-12)."""
+        body = ('    if "planted_key_mm" not in ctx.params:\n'
+                '        return Verdict(gate="beam.deflection", passed=False, skipped=True,\n'
+                '                       skip_reason="no planted_key_mm in the projection")\n')
+        out = self._planted(lambda d: _plant(d, "gates/beam.py", _DEFLECTION_DEF, body))
+        self._assert_named(out, "beam.deflection",
+                           "skips its own baseline while its tools are present")
+
+    def test_a_fixture_that_inherits_from_the_host_is_named(self):
+        """The seal probe, shown to refuse: the fixture layers its bad limit over
+        whatever the host states instead of over the pack's own baseline. Over
+        the baseline it fires; over an empty host the gate has nothing to read
+        (invariant 5)."""
+        body = ('    return dataclasses.replace(\n'
+                '        ctx, params={**ctx.params, "deflection_limit_mm": 1e-6})\n')
+        out = self._planted(lambda d: _plant(d, "selftest/bad_beams.py", _SHALLOW_DEF, body))
+        self._assert_named(out, "beam.deflection", "fires only with the baseline as host")
+
+    def test_a_missing_fixture_file_is_named_once_by_validate(self):
+        """Both sides name a control whose fixture file does not exist; `pack
+        validate` names it ONCE, by its root cause, not again as a control that
+        did not fire."""
+        def plant(pack_dir: str) -> None:
+            path = os.path.join(pack_dir, "gates", "beam.py")
+            with open(path, "r", encoding="utf-8") as fh:
+                text = fh.read()
+            ref = 'fixture="selftest/bad_beams.py:shallow_section"'
+            self.assertEqual(text.count(ref), 1)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text.replace(ref, 'fixture="selftest/no_such_fixture.py"'))
+
+        out = self._planted(plant)
+        self.assertEqual(_flagged(out["oracle"]["problems"]), {"beam.deflection"})
+        self.assertEqual(_flagged(out["demonstrate"]["problems"]), {"beam.deflection"})
+        about = [line for line in out["validate"] if "beam.deflection" in line]
+        self.assertEqual(len(about), 1, out["validate"])
+        self.assertIn("does not exist", about[0])
+
+    # -- nothing written into a pack ----------------------------------------- #
+    def test_openmodelica_selftest_writes_nothing_in_the_pack(self):
+        """Running every openmodelica control — this file's way and the spine's —
+        leaves the pack directory byte- and mtime-identical.
+
+        What slipped through: its five tier-0 fixtures wrote their known-bad
+        files into ``selftest/.generated/`` whatever ``out_dir`` the caller gave,
+        falling back to a fixed ``$TMPDIR/atompipe-openmodelica`` shared by every
+        user on the machine — so a wheel install wrote into site-packages, and
+        the repository's own suite rewrote files inside the tree it tests
+        (packs:H16).
+        """
+        pack = os.path.join(PACKS_DIR, "openmodelica")
+        registry = gates_mod.Registry()
+        packs_mod.load_gates("openmodelica", registry, root=REPO)
+        before = _snapshot(pack)
+
+        skipped: list[str] = []
+        _control_problems(pack, registry, host=_read_baseline(pack) or {}, skipped=skipped)
+        _control_problems(pack, registry, host={}, skipped=skipped)
+        # Not vacuous: the tier-0 gates declare no tools, so their controls — the
+        # five fixtures that generate files — ran in both passes.
+        writers = {s.id for s in registry.specs() if int(s.tier) == int(Tier.INSTANT)}
+        self.assertEqual(len(writers), 5, registry.ids())
+        self.assertFalse(writers & _skipped_ids(skipped), skipped)
+        self.assertEqual(_changed(before, _snapshot(pack)), [],
+                         "this file's controls wrote into packs/openmodelica")
+
+        packs_mod.demonstrate(pack, tier=Tier.EXTERNAL)
+        self.assertEqual(_changed(before, _snapshot(pack)), [],
+                         "packs.demonstrate wrote into packs/openmodelica")
 
 
 # --------------------------------------------------------------------------- #
