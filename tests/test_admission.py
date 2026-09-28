@@ -46,7 +46,10 @@ library and the CLI never asked. On the bracket and on wrapped pack baselines
 
 * a no-op fixture, an always-True gate, and both spellings of S-07's identity
   fixture (`return ctx`, `return _with(ctx)`) are not admitted, and their claims
-  never read PASS — in `status`, in `check`'s BLOCKING list, or under PROVEN;
+  never read PASS — in `status`, in `check`'s BLOCKING list, or under PROVEN; a
+  logger that never produced an entry at all is held to the sweep's own answer
+  (`check`'s BLOCKING list and `last_check.json`), since no entry of it exists
+  for a reader to judge;
 * an edit to a `.mo`, an `.stl` or a `baseline.json` value inside a pack's
   `selftest/` misses every control entry of that pack and re-runs it (where the
   tool is missing, the availability skip is the asserted outcome — never a skip
