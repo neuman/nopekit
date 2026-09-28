@@ -9,8 +9,9 @@ what is wrong with it, line by line — built from the shapes in
 `tests/_transcript.py` (spec §3.13), and each matcher is run twice:
 
 * on a REAL transcript: a copy of the bracket, driven through the transcript's
-  own steps (`check` twice, the `bed_xy` edit, `status`, `check`, `gate show`,
-  `gate selftest`), which it must accept; and
+  own steps (`check` twice, the `bed_xy` edit, `status`, `check`, `why thickness`,
+  `gate show`, `gate selftest`, and last `why thickness` on a model that no longer
+  loads), which it must accept; and
 * on MUTATED copies of that transcript — a line added, `cached` removed, the age
   removed, the control id removed, the time removed — each of which it must
   refuse. A matcher that accepts its mutant is a logger.
@@ -264,6 +265,85 @@ def gate_show_problems(stdout: str) -> list[str]:
     return problems
 
 
+#: `why <param>`'s sections after the value line and its facts, in order: each
+#: head preceded by one blank line. The counted ones carry their count.
+WHY_SECTIONS = (
+    ("WHY", re.compile(r"^WHY$")),
+    ("REJECTED", T.WHY_REJECTED_HEAD),
+    ("GATES", re.compile(r"^GATES \((?P<count>\d+)\)$")),
+    ("GROUNDED BY", re.compile(r"^GROUNDED BY \((?P<count>\d+)\)$")),
+    ("DECISIONS", re.compile(r"^DECISIONS \((?P<count>\d+), newest first\)$")),
+)
+#: The value line when the model does not hold a number: the name, and the
+#: record's path when there is one — never a `=`.
+WHY_NO_VALUE = re.compile(r"^param \S+(?:   \(\S+\))?$")
+#: Every line under the value line and under a section head: indented.
+WHY_BODY = re.compile(r"^  +\S.*$")
+#: A row under REJECTED that is not a loser: none recorded, or a loser's evidence.
+WHY_REJECTED_NONE = re.compile(r"^  \(none recorded.*\)$")
+WHY_EVIDENCE = re.compile(r"^      evidence: .+$")
+#: One artifact under GROUNDED BY, one decision under DECISIONS; the lines under
+#: each are indented further.
+WHY_ITEM = re.compile(r"^  - \S.*$")
+#: What a section says when it has nothing to list, on one line.
+WHY_EMPTY = re.compile(r"^  \(.+\)$")
+
+
+def why_problems(stdout: str) -> list[str]:
+    """`why <param>` text: the model's value and where it lives (or no number, when
+    the model does not load), its facts, then WHY, REJECTED (n), GATES (n),
+    GROUNDED BY (n), DECISIONS (n, newest first) — each after one blank line, every
+    line under it indented. Every loser under REJECTED names the file it lives in,
+    and each count is the rows'."""
+    lines = stdout.splitlines()
+    problems: list[str] = []
+    numbered = bool(lines) and T.WHY_PARAM.fullmatch(lines[0]) is not None
+    if not lines or not (numbered or WHY_NO_VALUE.fullmatch(lines[0])):
+        return [f"why: line 1 is not the value line: {lines[0] if lines else ''!r}"]
+    at = 1
+    while at < len(lines) and lines[at] != "":
+        if not WHY_BODY.fullmatch(lines[at]):
+            problems.append(f"why: line {at + 1} is not a fact: {lines[at]!r}")
+        if numbered and lines[at].startswith("  model does not load: "):
+            problems.append("why: a number beside `model does not load`")
+        at += 1
+    for name, head in WHY_SECTIONS:
+        if at < len(lines) and lines[at] == "":
+            at += 1
+        match = head.fullmatch(lines[at]) if at < len(lines) else None
+        if match is None:
+            got = repr(lines[at]) if at < len(lines) else "the end of the output"
+            return problems + [f"why: expected {name} after one blank line, at line "
+                               f"{at + 1}; got {got}"]
+        at += 1
+        body: list[str] = []
+        while at < len(lines) and lines[at] != "":
+            if not WHY_BODY.fullmatch(lines[at]):
+                problems.append(f"why: line {at + 1} under {name} is not indented: "
+                                f"{lines[at]!r}")
+            body.append(lines[at])
+            at += 1
+        want = int(match.group("count")) if "count" in head.groupindex else None
+        if not body:
+            problems.append(f"why: {name} lists nothing and says nothing")
+        elif want == 0 and not (len(body) == 1 and WHY_EMPTY.fullmatch(body[0])):
+            problems.append(f"why: {name} (0) must say why in one line, got {body}")
+        if name == "REJECTED":
+            rows = [line for line in body if T.WHY_REJECTED_ROW.fullmatch(line)]
+            problems += [f"why: a REJECTED row that names no home: {line!r}"
+                         for line in body if not (T.WHY_REJECTED_ROW.fullmatch(line)
+                                                  or WHY_REJECTED_NONE.fullmatch(line)
+                                                  or WHY_EVIDENCE.fullmatch(line))]
+            if len(rows) != want:
+                problems.append(f"why: REJECTED says {want}, {len(rows)} row(s) listed")
+        elif name in ("GROUNDED BY", "DECISIONS") and want:
+            items = sum(1 for line in body if WHY_ITEM.fullmatch(line))
+            if items != want:
+                problems.append(f"why: {name} says {want}, {items} listed")
+    _trailing(lines, at, problems, "why")
+    return problems
+
+
 def selftest_problems(stdout: str) -> list[str]:
     """`gate selftest` text (project mode): one row per control, the summary
     (spec §3.13), then — only when something needs saying — why nothing ran, or
@@ -357,8 +437,13 @@ class _Transcript:
             fh.write(text.replace("bed_xy: float = 220.0", "bed_xy: float = 250.0"))
         steps["status-stale"] = run("status")
         steps["check-after-edit"] = run("check")
+        steps["why-thickness"] = run("why", "thickness")
         steps["gate-show"] = run("gate", "show", "bracket.deflection")
         steps["selftest"] = run("gate", "selftest")
+        # Last, because it breaks the model: `why` with no number to show.
+        with open(path, "a", encoding="utf-8", newline="") as fh:
+            fh.write('\nraise RuntimeError("the model is mid-edit")\n')
+        steps["why-no-model"] = run("why", "thickness")
         cls.steps = steps
         return steps
 
@@ -470,6 +555,48 @@ class GateShowShape(_ShapeCase):
         text = self.out("gate-show", 0)
         self.refuses(sub_line(text, T.LAST_SELFTEST_FIRED, r" \(control [0-9a-f]{12}\)$", ""),
                      "a last selftest that names no control entry")
+
+
+class WhyShape(_ShapeCase):
+    """`why <param>` (spec U29): the model's value and its home, the sections in
+    order, every loser tagged with the file it lives in, counts that are the rows'."""
+    matcher = staticmethod(why_problems)
+
+    def test_the_real_transcript_matches(self):
+        text = self.out("why-thickness", 0)
+        self.accepts(text)
+        lines = text.splitlines()
+        self.assertTrue(T.WHY_PARAM.fullmatch(lines[0]), text)
+        self.assertEqual(sum(1 for line in lines if T.WHY_REJECTED_ROW.fullmatch(line)), 1)
+        broken = self.out("why-no-model", 0)
+        self.accepts(broken)
+        self.assertIn("  model does not load: ", broken)
+
+    def test_a_line_added_is_refused(self):
+        text = self.out("why-thickness", 0)
+        for where, after in (("after the value", T.WHY_PARAM.fullmatch),
+                             ("after REJECTED", T.WHY_REJECTED_HEAD.fullmatch),
+                             ("after a loser", T.WHY_REJECTED_ROW.fullmatch)):
+            with self.subTest(where=where):
+                self.refuses(add_line(text, after), f"prose {where}")
+        self.refuses(text + PROSE + "\n", "prose after DECISIONS")
+
+    def test_a_home_removed_is_refused(self):
+        text = self.out("why-thickness", 0)
+        self.refuses(sub_line(text, T.WHY_REJECTED_ROW, r"   \([^()]+\)$", ""),
+                     "a loser that names no file")
+        self.refuses(sub_line(text, T.WHY_PARAM, r"   \([^()]+\)$", ""),
+                     "a value that names no home")
+
+    def test_a_count_that_lies_is_refused(self):
+        text = self.out("why-thickness", 0)
+        self.refuses(sub_line(text, T.WHY_REJECTED_HEAD, r"\(1\)", "(2)"),
+                     "REJECTED (2) over one row")
+
+    def test_a_number_beside_a_broken_model_is_refused(self):
+        lines = self.out("why-no-model", 0).splitlines()
+        lines[0] = "param thickness = 7.0 mm   (model/bracket.py Config.thickness)"
+        self.refuses("\n".join(lines) + "\n", "a number where the model does not load")
 
 
 class SelftestShape(_ShapeCase):

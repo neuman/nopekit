@@ -753,19 +753,43 @@ class SiteStatusReports(_SiteCase):
         self.assertTrue(payload["has_dangling_locators"])
         self.assertEqual(len(payload["locator_problems"]), 1)
 
-    def test_a_ledger_written_after_the_build_reads_as_stale(self):
-        """A stale sweep must LOOK stale, and so must a stale page."""
+    def test_records_moved_after_the_build_read_as_stale(self):
+        """A stale page must LOOK stale — and a current one must not.
+
+        The page records the digest of the records it was built from
+        (`meta.records_digest`), and `_site_state` compares it with
+        `store.records_digest` now (cli:H16). What it replaced compared the
+        mtimes of `ledger.json` and `state.json`: from checkpoint 1.3 the ledger
+        is a generated index that every command rewrites, so a page built from
+        unchanged records read stale after any `status` — and a record edited by
+        hand, before a command had rebuilt the index, read current."""
         self._ledger(claims=[self._claim("C1")])
         _capture(["site", "init", "-C", self.root])
         _capture(["site", "build", "-C", self.root])
+        self.assertEqual(self._state()["meta"]["records_digest"],
+                         store_mod.records_digest(self.root))
         self.assertFalse(cli_mod._site_state(self.root)["stale"])
 
+        # The negative half: the index rewritten and every mtime moved past the
+        # build, the records' bytes untouched — still current.
         state_path = os.path.join(self.root, site_mod.SITE_DIR,
                                   site_mod.DATA_DIR, site_mod.STATE_NAME)
-        ledger_path = store_mod.ledger_path(self.root)
-        mtime = os.path.getmtime(state_path)
-        os.utime(ledger_path, (mtime + 60, mtime + 60))
+        claim_path = os.path.join(self.root, "claims", "C1.json")
+        index_path = store_mod.ledger_path(self.root)
+        with open(index_path, "a", encoding="utf-8") as fh:
+            fh.write("\n")
+        later = os.path.getmtime(state_path) + 60
+        for path in (index_path, claim_path):
+            os.utime(path, (later, later))
+        info = cli_mod._site_state(self.root)
+        self.assertFalse(info["stale"], info["stale_reason"])
 
+        # One record moves, and nothing is rebuilt: stale, and the fix is named.
+        with open(claim_path, encoding="utf-8") as fh:
+            record = json.load(fh)
+        record["statement"] += " (edited by hand)"
+        with open(claim_path, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
         info = cli_mod._site_state(self.root)
         self.assertTrue(info["stale"])
         self.assertIn("site build", info["stale_reason"])
