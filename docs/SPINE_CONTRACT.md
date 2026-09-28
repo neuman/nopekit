@@ -995,11 +995,11 @@ class Demonstration:                         # what `demonstrate` saw, gate by g
     ran: int                                 # controls actually exercised
 def seal_findings(registry, host_ctx, *, tier=Tier.EXTERNAL,
                   out_dir=None) -> list[SealFinding]        # controls whose fixture read the HOST's params
-@dataclass
+@dataclass(frozen=True)
 class SealFinding:                           # one unsealed control (invariant 5, checked at runtime)
     gate: str                                # the gate whose control read the host
     fixture: str                             # its NegativeControl.fixture
-    host_paths: list[str]                    # the host-param paths read, dotted
+    host_paths: tuple[str, ...]              # the host-param paths read, sorted, dotted; "(all params)" = the top level
 def match(need: Need, manifests) -> list[PackManifest]      # gap -> candidate packs, by `settles`
 def score(need: Need, manifest) -> float                   # 0 = no signal; what `match` ranks by
 def installed(root, *, ledger=None) -> list[str]           # the project's opted-in packs, in order
@@ -1059,13 +1059,17 @@ half (S-04, packs); and the controls wrote into the pack directory on every run
 (phase-1.md Q1.8).
 
 **`seal_findings` is SEALED, checked by running it** (invariant 5, M2.1e). It runs
-every control in `registry` up to `tier` against `host_ctx` — a rich host, the pack's
+every **pack** control in `registry` (`spec.pack` set: a project's fixture deriving from
+its own model is correct there) up to `tier` against `host_ctx` — a rich host, the pack's
 own baseline in the gate-on-the-gates — and reads `trace.host_reads`: every param a
 fixture (or a gate on a context its fixture returned unchanged) read from the HOST
 rather than from what the fixture built. A sealed fixture reads none. The spine's own
-`_fixture_root` lookups are `extra`, not params, and are not findings. `demonstrate`
-turns each finding into a problem, so `pack validate` exits non-zero on an unsealed
-fixture. What slipped through before it: a fixture that layered its bad value over
+`_fixture_root` lookups are `extra`, not params, and are not findings; nor, in P1, are a
+fixture's reads of the host's `extra` or `ledger` — the trace cannot yet tell them from
+its gate's (a named residual, P2.3 / D-26). `demonstrate` runs the same check as its
+fourth step, over step 2's traced control run with the pack's baseline as the host,
+and turns each finding into a `control` problem, so `pack validate` and
+`gate selftest --pack` refuse an unsealed fixture. What slipped through before it: a fixture that layered its bad value over
 the host's `ctx.params` fired in the pack's CI and was defused in a project whose
 host happened to state the key it forgot — invariant 5 held only by review.
 

@@ -250,8 +250,9 @@ atompipe gate selftest --pack <name> --junit <file>.xml
 ```
 
 `pack validate` checks the layout and demonstrates tiers 0–1: each gate passes the
-pack's own baseline, its control fires, and the control still fires against an empty
-host (the seal probe). `gate selftest --pack` runs the same checks at every tier and
+pack's own baseline, its control fires, the control still fires against an empty
+host (the seal probe), and it read nothing of its host's `ctx.params` on the way (the
+seal, read off the trace). `gate selftest --pack` runs the same checks at every tier and
 writes them as JUnit XML — that file is the admission evidence, and it goes with the
 PR. A control that could not run for want of a tool is reported as a skip, never as
 fired; say so in the PR rather than letting the file speak for it. The directory

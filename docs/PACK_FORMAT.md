@@ -498,7 +498,11 @@ does not fail — it **skips**, and a skip is not a control.
 
 `tests/test_packs.py::ControlsAreSealed` enforces this by running every control
 against an empty projection as well as the baseline: a sealed fixture behaves
-identically, an inheriting one skips or flips.
+identically, an inheriting one skips or flips. The outcome alone cannot see a fixture
+that layers the pack's *whole* baseline over the host (`{**ctx.params, **BASELINE,
+<bad>}`) — it fires identically over both — so the control's trace is read too:
+any key of the host's `ctx.params` the fixture read (or its gate read, through a
+context the fixture handed back unchanged) is named, and `pack validate` refuses it.
 
 Project-local fixtures are exempt. A fixture in your own repo deriving from your
 own model is correct — it keeps the control one change away from *this* design.
@@ -656,7 +660,8 @@ substantive, every declared gate actually registers, every gate has a negative
 control, `max_tier` matches the gates, the description is one line, and every
 file-based fixture exists — and then **demonstrates** the pack at tiers 0–1, gate by
 gate, with the pack loaded alone: its own `selftest/baseline.json` passes, its
-control fires, and the control still fires against an empty host (the seal probe).
+control fires, the control still fires against an empty host (the seal probe), and it
+read nothing of its host's `ctx.params` on the way (the seal, read off the trace).
 A gate whose declared tooling is absent on this machine is printed as a `note:` and
 not demonstrated — not a problem, and not a pass either. Tiers 0–1 call no external
 solver, so this stays seconds long; the rest waits for
