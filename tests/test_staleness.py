@@ -252,11 +252,13 @@ CLAIM_OF["t.claim"] = "C_CL"
 
 
 def projection(derived: dict | None = None, **over) -> dict:
-    """``config`` the inputs, ``derived`` what a build() would return:
-    stress = 0.013 x load, 0.195 MPa at the 15 N default (S-20's number)."""
+    """``config`` the inputs, ``derived`` what a build() would return — the
+    bracket's shape, which echoes ``config`` back, so ``modelio.flat_params``
+    hands a gate both ``x`` and ``config.x``: stress = 0.013 x load, 0.195 MPa
+    at the 15 N default (S-20's number)."""
     cfg = {"x": 1.0, "load_n": 15.0}
     cfg.update(over)
-    built = {"stress": round(cfg["load_n"] * 0.013, 6)}
+    built = {"stress": round(cfg["load_n"] * 0.013, 6), "config": dict(cfg)}
     built.update(derived or {})
     return {"config": cfg, "derived": built}
 
@@ -343,7 +345,8 @@ class StaleIsNotCurrent(_env.EnvCase):
         moved = projection(load_n=20000.0)
         resolution = p.resolve(moved)
         self.assertIn("t.stress", resolution.stale_gates)
-        self.assertIn("load_n 15.0 -> 20000.0", resolution.rows["t.stress"].stale_reason)
+        # it read the derived stress, not load_n: the move it names is the one it saw
+        self.assertIn("stress 0.195 -> 260.0", resolution.rows["t.stress"].stale_reason)
         self.assertNotEqual(p.statuses(moved, resolution)["C_ST"], PASS)
 
         again = p.sweep(moved)
