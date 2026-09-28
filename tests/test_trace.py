@@ -16,7 +16,12 @@ These are the trace primitives of `atompipe.verdicts` (PLAN M11.2, M13.7):
   would write a new tracked entry per clone (packs:H6).
 * The audit hook — the files a gate opened. Import machinery, linecache, the
   interpreter's own trees and the user site are noise no gate decides on
-  (packs:H1-H2): the first mesh gate alone opened 719 `.pyc` files.
+  (packs:H1-H2): the first mesh gate alone opened 719 `.pyc` files. But only a
+  module's SOURCE is linecache's: a data file read through it, through tokenize
+  or through `pkgutil.get_data` is the gate's, and so is a sqlite database, which
+  SQLite opens in C (review round 1, `probe.linecache`, `probe.sqlite`).
+* The environment — no audit event at all; each variable a gate reads is named as
+  the opaque channel `env:<NAME>` (review round 1, `probe.env`).
 * The stat probes — the paths a gate asked the existence, kind or size of.
   `os.stat` raises no audit event, so `os.path.isfile` on a named input that
   was not there yet recorded nothing, and bundled `modelica.source_hygiene`
@@ -45,6 +50,7 @@ import site
 import socket
 import sys
 import threading
+import tokenize
 import traceback
 import unittest
 import uuid
@@ -655,6 +661,14 @@ class PortableText(unittest.TestCase):
         self.assertEqual(small_value("/w/proj/m.stl", self.ANCHORS), (True, "<root>/m.stl"))
 
 
+def _swallow(kind: type, read) -> None:
+    """``read()``, with ``kind`` raised by it ignored: a lookup that misses."""
+    try:
+        read()
+    except kind:
+        pass
+
+
 class AuditTrace(_env.EnvCase):
     def setUp(self):
         self.dir = self.tmp()
@@ -824,6 +838,192 @@ class AuditTrace(_env.EnvCase):
                 ast.parse("x = (", filename="<unknown>")
             verdicts._audit("open", ("<string>", "r", 0))
         self.assertEqual(trace.files_read, [])
+
+    # -- the source readers read data too ------------------------------------ #
+    def test_a_data_file_read_through_a_source_reader_is_recorded(self):
+        """V: linecache, tokenize and import machinery were excluded whole, as
+        readers of a module's source — so a gate's data read through them
+        recorded nothing (review round 1, ``probe.linecache``: ``files={}``, a
+        Fresh PASS after the file went to 0). Each spelling must record the data
+        file, and ``linecache.checkcache``'s stat of it is a question like any
+        other."""
+        lines = self.file("lines.txt", "5\n")
+        tokens = self.file("tokens.txt", "5\n")
+        package = os.path.join(self.dir, f"datapkg_{uuid.uuid4().hex}")
+        os.mkdir(package)
+        with open(os.path.join(package, "__init__.py"), "w", encoding="utf-8"):
+            pass
+        table = os.path.join(package, "table.txt")
+        with open(table, "w", encoding="utf-8") as fh:
+            fh.write("5\n")
+        sys.path.insert(0, self.dir)
+        self.addCleanup(sys.path.remove, self.dir)
+        self.addCleanup(sys.modules.pop, os.path.basename(package), None)
+        importlib.invalidate_caches()
+        importlib.import_module(os.path.basename(package))
+        import pkgutil
+
+        trace = GateTrace()
+        with tracing(trace):
+            linecache.checkcache(lines)
+            self.assertEqual(linecache.getline(lines, 1), "5\n")
+            with tokenize.open(tokens) as fh:
+                self.assertEqual(fh.read(), "5\n")
+            self.assertEqual(pkgutil.get_data(os.path.basename(package), "table.txt"), b"5\n")
+        self.assertEqual(trace.files_read, [lines, tokens, table])
+        self.assertIn(lines, trace.stats, "linecache's stat of a data file is not the "
+                                          "formatter's")
+
+    def test_a_window_forgets_linecache_data_but_keeps_sources(self):
+        """linecache is a memo: a data file it read before the window opened is
+        served with no open — the admission control's run warms it for the
+        gate's. A window's push forgets data lines; a source's lines, and a
+        pseudo-named entry nothing can read again, stay for the formatter."""
+        data = self.file("warm.txt", "5\n")
+        source, _ns = self._fresh_function("def h():\n    return 1\n")
+        linecache.getline(data, 1)
+        linecache.getline(source, 1)
+        linecache.cache["<atompipe-trace-probe>"] = (1, None, ["x = 1\n"], "<atompipe-trace-probe>")
+        self.addCleanup(linecache.cache.pop, "<atompipe-trace-probe>", None)
+        trace = GateTrace()
+        with tracing(trace):
+            self.assertEqual(linecache.getline(data, 1), "5\n")
+        self.assertEqual(trace.files_read, [data], "a warm linecache hid the file")
+        self.assertIn(source, linecache.cache)
+        self.assertIn("<atompipe-trace-probe>", linecache.cache)
+
+    # -- sqlite ------------------------------------------------------------ #
+    def _db(self, name: str) -> str:
+        import sqlite3
+        path = os.path.join(self.dir, name)
+        con = sqlite3.connect(path)
+        con.execute("create table t (v real)")
+        con.execute("insert into t values (5)")
+        con.commit()
+        con.close()
+        return path
+
+    def test_a_sqlite_database_is_a_read_and_a_writable_one_is_opaque(self):
+        """V: SQLite opens its files in C — no ``open`` event — so a gate's
+        database recorded nothing (review round 1, ``probe.sqlite``: ``files={}
+        opaque=[]``). A read-only connection reads the file and its ``-wal``; a
+        writable one is named opaque; a private in-memory one reads nothing."""
+        import sqlite3
+        ro, rw = self._db("ro.db"), self._db("rw.db")
+        read_only, writable, memory = GateTrace(), GateTrace(), GateTrace()
+        with tracing(read_only):
+            con = sqlite3.connect(pathlib.Path(ro).as_uri() + "?mode=ro", uri=True)
+            con.execute("select v from t").fetchone()
+            con.close()
+        with tracing(writable):
+            con = sqlite3.connect(rw)
+            con.execute("select v from t").fetchone()
+            con.close()
+        with tracing(memory):
+            sqlite3.connect(":memory:").close()
+            sqlite3.connect("file::memory:?cache=shared", uri=True).close()
+            sqlite3.connect("file:mem_probe?mode=memory&cache=shared", uri=True).close()
+        self.assertEqual(read_only.files_read, [ro, ro + "-wal"])
+        self.assertEqual(read_only.opaque, set())
+        self.assertEqual(writable.files_read, [rw, rw + "-wal"])
+        self.assertEqual(writable.opaque, {f"sqlite-writable:{rw}"})
+        self.assertEqual((memory.files_read, memory.opaque), ([], set()))
+
+    def test_a_sqlite_uri_is_read_as_sqlite_reads_it(self):
+        cases = {
+            "": (None, False),
+            ":memory:": (None, False),
+            "data/m.db": ("data/m.db", True),
+            "file:data/m.db": ("data/m.db", True),
+            "file:data/m.db?mode=ro": ("data/m.db", False),
+            "file:data/m.db?immutable=1": ("data/m.db", False),
+            "file:data/m.db?mode=rw#frag": ("data/m.db", True),
+            "file:///w/a%20b.db?mode=ro": ("/w/a b.db", False),
+            "file://localhost/w/m.db": ("/w/m.db", True),
+            "file://elsewhere/w/m.db": (None, False),
+            "file::memory:": (None, False),
+            "file:x?mode=memory": (None, False),
+        }
+        for database, expected in cases.items():
+            with self.subTest(database=database):
+                self.assertEqual(verdicts._sqlite_target(database), expected)
+
+    # -- the environment --------------------------------------------------- #
+    def test_an_environment_read_is_named_opaque(self):
+        """V: an environment read fires no audit event, so a gate that decided on
+        a variable recorded nothing (review round 1, ``probe.env``). Each
+        spelling names the variable — a miss included, since its absence is
+        what the gate decided on — and a bulk read names the whole
+        environment."""
+        name = f"ATOMPIPE_TRACE_PROBE_{uuid.uuid4().hex.upper()}"
+        spellings = {
+            "os.environ.get": lambda: os.environ.get(name),
+            "os.getenv": lambda: os.getenv(name),
+            "in": lambda: name in os.environ,
+            "[]": lambda: _swallow(KeyError, lambda: os.environ[name]),
+            "os.environb.get": lambda: os.environb.get(os.fsencode(name)),
+            "expandvars": lambda: os.path.expandvars(f"${name}"),
+        }
+        for label, read in spellings.items():
+            with self.subTest(spelling=label):
+                trace = GateTrace()
+                with tracing(trace):
+                    read()
+                self.assertEqual(trace.opaque, {f"env:{name}"})
+        for label, read in {"dict": lambda: dict(os.environ),
+                            "copy": os.environ.copy,
+                            "items": lambda: list(os.environ.items()),
+                            "len": lambda: len(os.environ)}.items():
+            with self.subTest(spelling=label):
+                trace = GateTrace()
+                with tracing(trace):
+                    read()
+                self.assertEqual(trace.opaque, {"env:*"})
+
+    def test_the_environment_a_library_reads_is_not_the_gates(self):
+        """The cost side: the variables the standard library reads on a gate's
+        behalf — ``PATH`` for ``shutil.which`` and a subprocess, ``TMPDIR`` for
+        ``tempfile`` — and the spine's own reads are not the gate's, or every
+        gate that starts a tool would be opaque twice over."""
+        import shutil
+        import tempfile
+        trace = GateTrace()
+        with tracing(trace):
+            shutil.which("atompipe-no-such-tool")
+            with mock.patch.object(tempfile, "tempdir", None):
+                tempfile.gettempdir()               # TMPDIR, TEMP, TMP, through os.getenv
+        self.assertEqual(trace.opaque, set())
+        # the test's own negative control: the same variable, asked by the gate
+        with tracing(trace):
+            os.get_exec_path()
+        self.assertEqual(trace.opaque, {"env:PATH"})
+
+    def test_the_environment_is_the_same_object_and_writes_are_untouched(self):
+        """What a replacement proxy would have broken (``doctor``'s reason for
+        rejecting one): the object every binding holds, and the ``putenv`` each
+        write makes, which is what a subprocess started with no ``env=``
+        inherits. Only reads are recorded; a write goes through
+        ``os._Environ``'s own methods."""
+        before = os.environ
+        with tracing(GateTrace()):
+            pass
+        self.assertIs(os.environ, before)
+        self.assertIsInstance(os.environ, os._Environ)
+        for method in ("__setitem__", "__delitem__"):
+            self.assertIs(getattr(type(os.environ), method), getattr(os._Environ, method))
+        name = f"ATOMPIPE_TRACE_CHILD_{uuid.uuid4().hex.upper()}"
+        with mock.patch.dict(os.environ):
+            with tracing(GateTrace()):
+                os.environ[name] = "inherited"
+                out = _env.run([sys.executable, "-c", f"import os; print(os.environ[{name!r}])"],
+                               cwd=self.dir)
+        self.assertEqual((out.returncode, out.stdout.strip()), (0, "inherited"), out.stderr)
+        self.assertNotIn(name, os.environ)
+        outside = GateTrace()
+        with tracing(outside):
+            pass
+        os.environ.get(name)
+        self.assertEqual(outside.opaque, set(), "a read outside every window was recorded")
 
     def test_interpreter_and_user_site_are_excluded(self):
         control = GateTrace()

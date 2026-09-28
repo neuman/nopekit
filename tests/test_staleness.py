@@ -19,6 +19,11 @@ positive control, that the claim WAS PASS before.
   inode can see it. **The racy tick** — the same-size edit landing in the tick
   the digest cache was written — only the racy-clean rule can see.
 * a subprocess reading a file its argv does not name — opaque, so never Fresh.
+* the channels no ``open`` reported (review round 1): an environment variable —
+  named opaque, so never Fresh; a sqlite database, opened in C — a read, and a
+  writable connection opaque; a data file read through linecache or tokenize,
+  whose events were dropped whole as the traceback formatter's, and which
+  linecache then served from its own memo.
 * **S-23** — a claim record a gate reads (openmodelica reads limits that way).
 * **S-25** — every bulk reader, top level and nested: ``dict()``, ``{**p}``,
   ``json.dumps``, ``items()``, ``repr``, ``deepcopy``, ``f(**p)``.
@@ -82,6 +87,7 @@ import os
 import py_compile
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 import unittest
@@ -161,13 +167,16 @@ import ast
 import copy
 import glob
 import json
+import linecache
 import os
 import py_compile
 import pathlib
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+import tokenize
 
 from atompipe.gates import gate
 from atompipe.models import NegativeControl, Verdict
@@ -330,6 +339,63 @@ def outside(ctx):
     os.path.realpath(_at(ctx, "data/limit.txt"))
     value = _number(ctx, "data/limit.txt")
     return Verdict(gate="t.outside", passed=value >= 1.0, measured=value, limit=1.0)
+
+
+# The channels no audit event of an ``open`` reported (review round 1, the
+# ``probe.env``/``probe.sqlite``/``probe.linecache`` repro). Every control is
+# ``bad_x``, which keeps the root: the control reads the SAME variable, database
+# and file as the real run, in the same process, first.
+def _x_ok(ctx):
+    return float(ctx.params["config"]["x"]) < 10.0
+
+
+@gate(id="t.env", title="t", claims=["env"], negative_control=_nc("bad_x"))
+def from_env(ctx):
+    vetoed = os.environ.get("ATOMPIPE_TEST_ENV_VETO") is not None
+    return Verdict(gate="t.env", passed=_x_ok(ctx) and not vetoed, measured=float(vetoed),
+                   limit=0.0)
+
+
+def _db_number(target, **kw):
+    con = sqlite3.connect(target, **kw)
+    try:
+        (value,) = con.execute("select v from t").fetchone()
+    finally:
+        con.close()
+    return float(value)
+
+
+@gate(id="t.sqlite", title="t", claims=["sqlite"], negative_control=_nc("bad_x"))
+def from_sqlite(ctx):
+    # read-only, by URI: sqlite opens the file in C, so no ``open`` event fires
+    uri = pathlib.Path(_at(ctx, "data/mat.db")).as_uri() + "?mode=ro"
+    value = _db_number(uri, uri=True)
+    return Verdict(gate="t.sqlite", passed=_x_ok(ctx) and value >= 1.0, measured=value,
+                   limit=1.0)
+
+
+@gate(id="t.sqlite_rw", title="t", claims=["sqlite_rw"], negative_control=_nc("bad_x"))
+def from_sqlite_rw(ctx):
+    # the default connection, read-write: the gate could have written what it read
+    value = _db_number(_at(ctx, "data/mat_rw.db"))
+    return Verdict(gate="t.sqlite_rw", passed=_x_ok(ctx) and value >= 1.0, measured=value,
+                   limit=1.0)
+
+
+@gate(id="t.linecache", title="t", claims=["linecache"], negative_control=_nc("bad_x"))
+def from_linecache(ctx):
+    # no checkcache: a line linecache already holds is served without a stat
+    value = float(linecache.getline(_at(ctx, "data/lines.txt"), 1) or 0.0)
+    return Verdict(gate="t.linecache", passed=_x_ok(ctx) and value >= 1.0, measured=value,
+                   limit=1.0)
+
+
+@gate(id="t.tokenize", title="t", claims=["tokenize"], negative_control=_nc("bad_x"))
+def from_tokenize(ctx):
+    with tokenize.open(_at(ctx, "data/tokens.txt")) as fh:
+        value = float(fh.read())
+    return Verdict(gate="t.tokenize", passed=_x_ok(ctx) and value >= 1.0, measured=value,
+                   limit=1.0)
 ''' + "".join(_STAT_GATE.format(name=name, expr=STATS[name]) for name in STATS) \
     + "".join(_BULK_GATE.format(r=r, l=l, expr=READERS[r].format(p=LEVELS[l]))
               for r in READERS for l in LEVELS)
@@ -511,7 +577,8 @@ TAGS = {"C_ST": "stress", "C_FI": "file", "C_SU": "sub", "C_CL": "claimread",
         "C_OP": "opt", "C_MA": "memo_a", "C_MB": "memo_b", "C_CR": "crashy",
         "C_SA": "same", "C_HE": "helped", "C_BA": "buf_a", "C_BB": "buf_b",
         "C_NA": "named", "C_CE": "cert", "C_GS": "getsize", "C_ES": "entry_size",
-        "C_OU": "outside"}
+        "C_OU": "outside", "C_EN": "env", "C_SQ": "sqlite", "C_SW": "sqlite_rw",
+        "C_LC": "linecache", "C_TK": "tokenize"}
 TAGS.update({f"C_{gid[len('t.'):]}": gid[len("t."):] for gid in BULK + STAT_GATES + MEMO_GATES})
 CLAIM_OF = {f"t.{tag}": cid for cid, tag in TAGS.items()}
 CLAIM_OF["t.claim"] = "C_CL"
@@ -565,7 +632,23 @@ def plant(root: str) -> str:
     write(root, "selftest/low/data/sizes/x.txt", "a line far past ten bytes\n")
     for name in STATS:
         write(root, "selftest/low/" + _veto(name), "veto\n")
+    for rel in ("data/mat.db", "data/mat_rw.db"):
+        set_db_number(os.path.join(root, *rel.split("/")), 2.0)
+    write(root, "data/lines.txt", "2.0\n")
+    write(root, "data/tokens.txt", "2.0\n")
     return root
+
+
+def set_db_number(path: str, value: float) -> None:
+    """The one row ``t.sqlite``'s and ``t.sqlite_rw``'s number comes from."""
+    con = sqlite3.connect(path)
+    try:
+        con.execute("create table if not exists t (v real)")
+        con.execute("delete from t")
+        con.execute("insert into t values (?)", (value,))
+        con.commit()
+    finally:
+        con.close()
 
 
 class Project:
@@ -1205,6 +1288,127 @@ class StaleIsNotCurrent(_env.EnvCase):
         write(p.root, "unrelated.txt", "x\n")
         self.assertNotIn("t.outside", p.resolve(base).stale_gates,
                          "a directory whose kind the gate asked was keyed by its listing")
+
+    def test_an_environment_read_is_named_and_never_fresh(self):
+        """V: an environment read fires no audit event, so a gate that decided
+        on a variable recorded nothing at all: the review's ``probe.env`` entry
+        read ``files={} opaque=[]``, a plain check served its cached PASS after
+        ``PROBE_MODE`` moved, and a forced run failed it. rho cannot key a
+        variable (§8), so the entry must NAME it — and an entry with an opaque
+        channel is never Fresh. (The cost side is ``t.outside``: the variables
+        ``shutil.which`` and ``tempfile`` read on a gate's behalf are theirs,
+        and it stays opaque-free.)"""
+        p = Project(self)
+        base = projection()
+        with mock.patch.dict(os.environ):
+            os.environ.pop("ATOMPIPE_TEST_ENV_VETO", None)
+            got = row(p.sweep(base, only=["t.env"]), "t.env")
+            self.assertEqual((got.verdict.outcome, got.executed), ("pass", True),
+                             "the positive control")
+            opaque = p.entry("t.env").reads["opaque"]
+            self.assertEqual(opaque, ["env:ATOMPIPE_TEST_ENV_VETO"],
+                             "the variable the gate decided on is not named")
+            self.assertIn("t.env", p.resolve(base).stale_gates)
+            self.assertNotEqual(p.statuses(base)["C_EN"], PASS)
+
+            os.environ["ATOMPIPE_TEST_ENV_VETO"] = "1"
+            got = row(p.sweep(base, only=["t.env"]), "t.env")
+        self.assertTrue(got.executed, "an entry that read the environment was served "
+                                      "from the cache")
+        self.assertFalse(got.cached)
+        self.assertEqual(got.verdict.outcome, "fail")
+
+    def test_a_database_read_in_c_is_an_input(self):
+        """V: sqlite opens its file in C — no ``open`` event — so a gate whose
+        number came out of a database recorded no file: ``probe.sqlite`` read
+        ``files={} opaque=[]``, and a plain check served the cached PASS after
+        the row moved to 0, which a forced run failed. A read-only connection is
+        a read of the database; a writable one is named opaque, because nothing
+        can tell whether the gate wrote what it read."""
+        p = Project(self)
+        base = projection()
+        both = ["t.sqlite", "t.sqlite_rw"]
+        first = p.sweep(base, only=both)
+        for gate_id in both:
+            self.assertEqual(row(first, gate_id).verdict.outcome, "pass", gate_id)
+        self.assertEqual(p.statuses(base)["C_SQ"], PASS, "the positive control")
+        reads = p.entry("t.sqlite").reads
+        self.assertIn("data/mat.db", reads["files"], "the database the gate read is no input")
+        self.assertEqual(reads["opaque"], [], "a read-only connection is keyed, never opaque")
+        writable = p.entry("t.sqlite_rw").reads["opaque"]
+        self.assertTrue(any(name.startswith("sqlite-writable:")
+                            and name.endswith("data/mat_rw.db") for name in writable),
+                        writable)
+        self.assertIn("t.sqlite_rw", p.resolve(base).stale_gates,
+                      "a writable connection was served as Fresh")
+
+        for rel in ("data/mat.db", "data/mat_rw.db"):
+            set_db_number(p.path(rel), 0.5)
+        resolution = p.resolve(base)
+        self.assertIn("t.sqlite", resolution.stale_gates)
+        self.assertIn("data/mat.db changed", resolution.rows["t.sqlite"].stale_reason)
+        self.assertNotEqual(p.statuses(base, resolution)["C_SQ"], PASS)
+        again = p.sweep(base, only=both)
+        for gate_id in both:
+            with self.subTest(gate=gate_id):
+                got = row(again, gate_id)
+                self.assertTrue(got.executed, f"{gate_id} was served from the cache")
+                self.assertEqual(got.verdict.outcome, "fail")
+
+    #: The two gates that read a data file through a source reader, and the file.
+    SOURCE_READERS = {"t.linecache": "data/lines.txt", "t.tokenize": "data/tokens.txt"}
+
+    def test_a_data_file_read_through_linecache_or_tokenize_is_an_input(self):
+        """V: the hook dropped every event whose caller was linecache or
+        tokenize — they read a module's SOURCE to quote a line in a traceback or
+        a warning — and so dropped a gate's data read through them too:
+        ``probe.linecache`` read ``files={}``, a plain check served the cached
+        PASS after ``data/limit3.txt`` went to 0, and a forced run failed it.
+        Only a module's source is the formatter's. And linecache is a memo: the
+        control reads the same file first, in the same process, so the real run
+        must not be served out of ``linecache.cache`` — the shape of the
+        ``lru_cache`` hole, in the standard library."""
+        gate_ids = list(self.SOURCE_READERS)
+        p = Project(self)
+        base = projection()
+        first = p.sweep(base, only=gate_ids)
+        before = p.statuses(base)
+        for gate_id, rel in self.SOURCE_READERS.items():
+            with self.subTest(gate=gate_id):
+                got = row(first, gate_id)
+                self.assertEqual(got.verdict.outcome, "pass", got.verdict)
+                self.assertTrue(got.admission.executed,
+                                "the control did not run in this process first — without "
+                                "that warm linecache this scenario tests less")
+                self.assertEqual(before[CLAIM_OF[gate_id]], PASS, "the positive control")
+                self.assertIn(rel, p.entry(gate_id).reads["files"],
+                              f"{gate_id}: a data file read through a source reader is "
+                              f"no input")
+
+        for rel in self.SOURCE_READERS.values():
+            write(p.root, rel, "0.5\n")
+        resolution = p.resolve(base)
+        after = p.statuses(base, resolution)
+        again = p.sweep(base, only=gate_ids)
+        for gate_id, rel in self.SOURCE_READERS.items():
+            with self.subTest(gate=gate_id):
+                self.assertIn(gate_id, resolution.stale_gates)
+                self.assertIn(f"{rel} changed", resolution.rows[gate_id].stale_reason)
+                self.assertNotEqual(after[CLAIM_OF[gate_id]], PASS)
+                got = row(again, gate_id)
+                self.assertTrue(got.executed, f"{gate_id} was served from the cache")
+                self.assertEqual(got.verdict.outcome, "fail",
+                                 "linecache served the old line to the re-run")
+
+    def test_a_warm_linecache_hides_the_file(self):
+        """The scenario's own negative control: with linecache's data lines NOT
+        forgotten when a window opens, the control's run warms the cache and
+        the gate's real run opens nothing — so the test above is known to be
+        able to fail on the memo, not only on the frame rule."""
+        p = Project(self)
+        with mock.patch.object(verdicts, "_forget_data_lines", lambda: None):
+            p.sweep(projection(), only=["t.linecache"])
+        self.assertNotIn("data/lines.txt", p.entry("t.linecache").reads["files"])
 
     def test_s27_a_memo_shared_file_edit_stales_both_gates(self):
         p = Project(self)

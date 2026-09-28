@@ -4108,14 +4108,19 @@ _NOTE_ROWS = (
 
 #: The names through which gate code reaches the process environment. What
 #: slipped through, as a residual the spec names (§3.17, §8): an environment
-#: read fires no audit event, so no trace records it and no entry can key on
-#: it — a gate whose limit comes from `os.environ` stays Fresh when the variable
-#: changes. `putenv` writes, and is here because a gate that sets a variable is
-#: handing a later gate an input the same way. Rejected: a dynamic proxy for
-#: `os.environ` during a gate (it changes the environment a gate's subprocess
-#: inherits — the omc gates depend on it); scanning only the gate function's
-#: own body (a module-level `LIMIT = os.getenv(...)` is read once, at import,
-#: and is the likeliest spelling).
+#: read fires no audit event, so no trace recorded it and no entry keyed on
+#: it — a gate whose limit comes from `os.environ` stayed Fresh when the
+#: variable changed (review round 1, `probe.env`). A read inside a window is now
+#: named opaque (`env:<NAME>`, `verdicts._RecordingEnviron`), so such a gate
+#: re-runs on every check; this row still names each one, because that is a
+#: cost, and because a module-level `LIMIT = os.getenv(...)` is read once, at
+#: import, before any window — the likeliest spelling, and seen by nothing
+#: else. `putenv` writes, and is here because a gate that sets a variable is
+#: handing a later gate an input the same way. Rejected: a proxy OBJECT put in
+#: place of `os.environ` during a gate (it changes the environment a gate's
+#: subprocess inherits — the omc gates depend on it; the recorder changes the
+#: class of the same object instead); scanning only the gate function's own
+#: body (the import-time read above).
 _ENV_NAMES = frozenset({"environ", "environb", "getenv", "getenvb", "putenv"})
 
 
@@ -4499,8 +4504,10 @@ def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
 
     found = _env_reads(registry, root)
     _check(results, "env-reads", "warn" if found else "ok",
-           _listed(found) + " — an environment read fires no audit event, so no cache "
-                            "entry keys on it; pass the value through the model"
+           _listed(found) + " — an environment variable is never a cache key: a read "
+                            "while the gate runs makes its entry opaque (re-run on every "
+                            "check), one at import is seen by nothing; pass the value "
+                            "through the model"
            if found else "no gate's code reads the environment")
 
     found = _memo_reads(registry, root)

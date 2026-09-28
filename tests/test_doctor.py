@@ -26,9 +26,10 @@ past a check without it:
   others. The known-bad input must come from the pack's own baseline.
 * **imports** — a gate that imports a third-party module it does not declare is
   run where the module is missing and errors, instead of reading SKIPPED.
-* **env-reads** — an environment read fires no audit event, so no entry can key
-  on it: a gate whose limit comes from `os.environ` stays Fresh when the variable
-  changes (spec §8). A static scan is the only thing that can see it.
+* **env-reads** — an environment variable is never a cache key (spec §8): a read
+  while the gate runs names the entry opaque (`env:<NAME>`), so it re-runs on every
+  check, and a module-level read at import, before any window, is seen by nothing
+  at all. A static scan is the only thing that sees both.
 * **memos** — a module-level memo outlives the gate that filled it: the first
   gate to ask opens the file, every later one gets the value and opens nothing,
   and no entry keys what it served. functools' memos the spine empties before

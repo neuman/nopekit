@@ -682,7 +682,7 @@ class TierRead:                                 # ctx.tier in a gate's view; NOT
 class GateInputWriteError(AtompipeError): ...  # "a gate cannot write another gate's inputs: ctx.params['x']"
 
 def traced_context(ctx, trace, *, readonly=True)   # -> the same dataclass type as ctx
-def tracing(trace)                                 # `with tracing(t):` routes audit events and stats to t
+def tracing(trace)                                 # `with tracing(t):` routes audit events, stats and env reads to t
 def replay(recorded, trace=None)                   # recorded's files, stats, dirs, opaque, tier -> every open trace and trace
 def canonical_ast_digest(source) -> str            # "" when it does not parse
 def spine_digest() -> str                          # "" when a SPINE_MODULES source is unreadable
@@ -768,20 +768,54 @@ at once. It records `open` by mode — or by flags for `os.open` — as a read, 
 `os.listdir`/`os.scandir` as a listed dir; `os.rename`/`os.replace` as writes;
 `subprocess.Popen`, `os.system`, `os.exec*`, `os.spawn*`, `os.posix_spawn` and `os.fork`
 as opaque `subprocess:<name>`, plus any argv element naming an existing file as a read;
-`socket.connect`/`sendto`/`sendmsg` as opaque `network`. A read of a path this window
-already wrote is not recorded (the gate's own output); a path read and then written is
-listed by `self_modified()`. Excluded: events whose calling frame is import machinery,
-`linecache`, `tokenize`, `warnings` or `traceback` (the first mesh gate opened 719
-`.pyc` files on import alone); pseudo-filenames like `<unknown>` (3.13's traceback
-parses line fragments for its carets, and the SyntaxError opens `<unknown>`); and paths
-under the interpreter's prefixes and library directories, site-packages, the USER site
-(trimesh and numpy live in `~/.local`), the installed atompipe package, `/proc`, `/sys`,
-`/dev`, or ending `.pyc` — machine-specific reads that would make every entry stale on
-every other machine. Not seen, and named: every environment read fires no event; a
-subprocess's own reads (hence opaque); an `os.open` or `os.stat` relative to a `dir_fd`.
-What slipped through while writing it: `sys._getframe` raises an audit event of its
-own, so the hook re-entered itself until the recursion limit and aborted the `open` it
-was auditing — it now carries a per-thread re-entrancy guard.
+`socket.connect`/`sendto`/`sendmsg` as opaque `network`; `sqlite3.connect` as a read of
+the database file and of its `-wal` (SQLite opens both in C, so no `open` names them; in
+WAL mode committed rows wait in the `-wal`), plus, unless the connection is read-only
+(`file:<path>?mode=ro` or `immutable=1`, `uri=True`), the opaque channel
+`sqlite-writable:<path>` — its writes are C-level too, and nothing can tell whether the
+gate wrote what it read; a `:memory:`, temporary or `mode=memory` database reads
+nothing. A read of a path this window already wrote is not recorded (the gate's own
+output); a path read and then written is listed by `self_modified()`. Excluded: events
+whose calling frame is `zipimport` or `importlib.metadata`; everything import machinery,
+`linecache`, `tokenize`, `warnings` or `traceback` do (the first mesh gate opened 719
+`.pyc` files on import alone) EXCEPT a read-only `open`, or a stat, of a path that is not
+a module's source (`.py`, `.pyw`) — a gate's data read through `linecache.getline`,
+`tokenize.open` or `pkgutil.get_data` is its read. What slipped through (review round 1,
+`probe.linecache`): those modules were excluded whole, and a gate reading its limit with
+`linecache.getline` recorded `files={}`. linecache is also a memo — the admission
+control warmed it, in the same process, for its gate's real run — so each window's push
+forgets linecache's lines for every file that is not a module's source
+(`_forget_data_lines`; sources and pseudo-named entries stay for the formatter). Also
+excluded: pseudo-filenames like `<unknown>` (3.13's traceback parses line fragments for
+its carets, and the SyntaxError opens `<unknown>`); and paths under the interpreter's
+prefixes and library directories, site-packages, the USER site (trimesh and numpy live
+in `~/.local`), the installed atompipe package, `/proc`, `/sys`, `/dev`, or ending
+`.pyc` — machine-specific reads that would make every entry stale on every other
+machine. Not seen, and named: a subprocess's own reads (hence opaque); an `os.open` or
+`os.stat` relative to a `dir_fd`; a database `ATTACH`-ed from SQL and any file a C
+extension opens itself (no event names either); a data file named `*.py` read through
+linecache (taken for source). What slipped through while writing it: `sys._getframe`
+raises an audit event of its own, so the hook re-entered itself until the recursion
+limit and aborted the `open` it was auditing — it now carries a per-thread re-entrancy
+guard.
+
+**The environment.** An environment read fires no audit event. With the hook,
+`os.environ` and `os.environb` get a recording subclass of `os._Environ` — the CLASS of
+the one object is changed, never the object replaced, so every binding of it (`from os
+import environ`, `os.getenv`'s global) is covered, and the data and the `putenv` each
+write makes are untouched: a subprocess a gate starts inherits exactly what it did.
+While a window is open, a variable read (`[]`, `get`, `in`, `os.getenv`,
+`os.path.expandvars`, a tilde `expanduser`) adds the opaque channel `env:<NAME>` to every
+open trace, and a bulk read (iteration, `keys`/`items`/`values`, `copy`, `dict(...)`,
+`len`) adds `env:*` — rho never keys a variable's value, which differs per machine and
+per shell. A read counts when the first frame outside `os`, `_collections_abc`, the path
+modules and `pathlib` is not library code (the library roots below, or a `<frozen ...>`
+module): the `PATH` `shutil.which` and `subprocess` read, and `tempfile`'s `TMPDIR`, are
+theirs. What slipped through (review round 1, `probe.env`): a gate passing on
+`os.environ.get("PROBE_MODE", "ok") == "ok"` recorded `files={} opaque=[]`, and a plain
+check served its PASS after the variable moved. Named residual: a value read at import
+by a module-level `LIMIT = os.getenv(...)` of a module imported before the window
+(`doctor`'s `env-reads` row names that), and an `environ` that is not `os._Environ`.
 
 **The stat probes.** `os.stat` raises no audit event, and every existence, kind and
 size question the standard library asks ends in it or in `os.lstat`: `os.path.exists`,
@@ -797,10 +831,12 @@ and whether it existed on every open trace (`GateTrace.stats`); the probes join 
 `os.supports_*` sets the originals are in. At import, not on the first push: the
 registry imports every gate module before a window opens, and a `from os import stat`
 there binds whatever `os.stat` is then. Excluded like the hook's events: the hook's own
-questions (the re-entrancy guard), paths under the library roots, and questions whose
+questions (the re-entrancy guard), paths under the library roots, questions whose
 first caller outside `os`/`genericpath`/`posixpath`/`ntpath`/`pathlib`/`glob` is
-import machinery, `linecache` (which stats every source it caches), `tokenize`,
-`warnings` or `traceback`. A path this window wrote first is its own output and is not
+`zipimport` or `importlib.metadata`, and questions about a module's source whose first
+such caller is import machinery, `linecache` (which stats every source it caches),
+`tokenize`, `warnings` or `traceback` — `linecache.checkcache` of a data file is the
+gate's question. A path this window wrote first is its own output and is not
 noted. Not seen, and named: a module that bound the original before the spine was
 imported; `os.DirEntry.stat()`, which is C and calls nothing — a listing's digest
 carries each entry's kind and size instead.
@@ -2325,13 +2361,13 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 |---|---|---|
 | `orphan-entries` | warn | verdicts of gates this project does not register (the resolver's orphan rows): stale, never counting, nothing here can re-run them. A warning, not a ledger-integrity FAIL — nothing is corrupt, something was uninstalled |
 | `instruments` | warn | an entry recorded under another library version (`recorded under numpy 1.26.4; here 2.1.0`, and "outcome differs across instruments"): provenance, never staleness (Q1.3) |
-| `opaque-inputs` | warn | an entry with an opaque channel (a subprocess's own reads, a file outside the project, `self-modified:`): never served from the cache |
+| `opaque-inputs` | warn | an entry with an opaque channel (a subprocess's own reads, a file outside the project, `self-modified:`, `env:<NAME>`, `sqlite-writable:`): never served from the cache |
 | `cache-entries` | warn | every verdict or control entry the strict readers ignored, a `hand-edited entry` (digest mismatch) by name; any resolver note no other row claims lands here |
 | `two-outcomes` | FAIL while `verdicts.TWO_OUTCOMES_IS_ERROR` (True since U25), else warn | two outcomes recorded for identical inputs, read at call time; **two control outcomes** at one rho_control FAIL always (the gate is not admitted). Controls are read for every gate on disk, not only for the gates whose verdict is Fresh |
 | `code-digest` | warn | a gate keyed by its defining file (registered from Python, no recorded closure): a value its function closes over is not seen. The CLI never makes one |
 | `pending-controls` | warn | controls whose fixture code moved (`<k> control(s) pending — inputs moved (<files>); the next check re-verifies`, the sentence `status`'s note prints) |
 | `imports` | warn | a gate that imports a third-party module (`CodeRef.third_party`) it does not declare in `requires_python` or a `python:` entry of `requires_one_of`: where it is missing, the gate errors instead of reading SKIPPED. In the gate's own file, read by reach — module-level imports plus those inside the gate function and the module-level functions and classes it names, transitively; other closure files whole. A whole-file rule named `cad.bounding`, the one tier-0 gate of a module whose other gates import trimesh lazily |
-| `env-reads` | warn | the static env-read detector (spec §3.17): an AST scan of every registered gate's closure files for `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins), through any alias of `os` or a `from os import`. An environment read fires no audit event, so no entry keys on it (§8) |
+| `env-reads` | warn | the static env-read detector (spec §3.17): an AST scan of every registered gate's closure files for `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins), through any alias of `os` or a `from os import`. rho never keys a variable (§8): a read inside a window is named opaque (`env:<NAME>`) and costs a re-run on every check, and a module-level read made at import, before any window, is seen by nothing else |
 | `memos` | warn | the static memo detector: an AST scan of every registered gate's closure files for a module-global memo `modelio.clear_caches` cannot empty — a module-level container (a `{}`, `dict()`, `defaultdict` and the like) written into from a function body that does not bind the name itself, a module global a function rebinds under `global`, a mutable default argument its function writes into. The first gate to fill one opens the file; every later one opens nothing, and no entry keys it (review round 2) |
 | `sealed-fixtures` | FAIL | invariant 5 at runtime: every pack control run against this project's params through `packs.seal_findings`, into a temp `out_dir`; a control that reads its host is named with the paths it read |
 
@@ -2348,10 +2384,17 @@ a limit must be visible, not just true). Phase 1 closes with these, each stated 
 a reader of the output meets it:
 
 - **Environment reads.** A gate that reads `os.environ` or `os.getenv` fires no audit
-  event, so rho cannot key it. `doctor`'s `env-reads` row is a static detector over
-  every registered gate's closure (zero hits on the bundled corpus when it landed).
-  *Rejected:* a dynamic proxy for `os.environ` — it changes what a subprocess started
-  inside a gate inherits.
+  event, and rho does not key a variable's value (it differs per machine and per
+  shell). A read inside a window is NAMED instead — the opaque channel `env:<NAME>`
+  (`env:*` for the whole environment), recorded by the class `os.environ` gets with
+  the hook — so the entry is never Fresh and `status` says why. What slipped through
+  (review round 1, `probe.env`): the read was recorded nowhere, and a plain check
+  served the PASS after the variable moved. A module-level `LIMIT = os.getenv(...)`
+  read at import, before any window, is still seen by nothing; `doctor`'s `env-reads`
+  row is a static detector over every registered gate's closure (zero hits on the
+  bundled corpus when it landed). *Rejected:* a proxy OBJECT put in place of
+  `os.environ` — it changes what a subprocess started inside a gate inherits; the
+  class change keeps the object, its data and its `putenv`s.
 - **Module-level memos.** A memo hit opens nothing, so no trace sees what it served.
   functools' memos are emptied before every gate, fixture and known-good run
   (`modelio.clear_caches`); any other memo held at module level cannot be emptied from

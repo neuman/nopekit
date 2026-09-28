@@ -53,10 +53,15 @@ import _projects
 BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearing",
                  "bracket.model_validity", "bracket.bed_fit", "bracket.min_wall")
 
-#: The environment variable ``TwoOutcomes``' planted nondeterminism reads. No
-#: trace keys the environment, so a run with it set and one without share a rho —
-#: what a gate that reads the clock or an unseeded random looks like from outside.
-#: Not ``ATOMPIPE_``-prefixed: nothing in the spine may mistake it for its own.
+#: The environment variable ``TwoOutcomes``' planted nondeterminism reads — at
+#: IMPORT, into a module global, before any trace window opens, so a run with it
+#: set and one without share a rho: what a gate that reads the clock or an
+#: unseeded random looks like from outside. (Read inside the gate it would be
+#: named opaque, ``env:BED_FIT_FLIP``, and never a contradiction: the first plant
+#: did exactly that, and stopped planting anything once review round 1's
+#: ``probe.env`` was closed. The import-time read is the residual the contract
+#: names and ``doctor``'s ``env-reads`` row warns of.) Not ``ATOMPIPE_``-prefixed:
+#: nothing in the spine may mistake it for its own.
 _FLIP = "BED_FIT_FLIP"
 
 #: What a cold run starts without. The whole project is restored from a pristine
@@ -306,8 +311,9 @@ class TwoOutcomes(_env.EnvCase):
     def test_check_refuses_what_status_and_doctor_refuse(self):
         """V: the review's repro, through the CLI a person runs. A gate that
         answers differently for the same inputs — here it reads an environment
-        variable, which no trace keys, the shape of a gate that reads the clock
-        or an unseeded random — passed at 8 mm, then under ``--force`` wrote a
+        variable at import, which no trace keys (``_FLIP``), the shape of a gate
+        that reads the clock or an unseeded random — passed at 8 mm, then under
+        ``--force`` wrote a
         FAIL at the same rho under the same instruments. ``status`` FAILed C4
         and ``doctor`` FAILed ``two-outcomes``; ``check`` re-ran the gate,
         printed ``[ok  ] bracket.bed_fit``, said ready, exited 0, wrote a JUnit
@@ -321,9 +327,10 @@ class TwoOutcomes(_env.EnvCase):
         with open(gates_py, encoding="utf-8", newline="") as fh:
             text = fh.read()
         for old, new in (("from __future__ import annotations\n",
-                          "from __future__ import annotations\n\nimport os\n"),
+                          "from __future__ import annotations\n\nimport os\n\n"
+                          f"_FLIPPED = bool(os.environ.get({_FLIP!r}))\n"),
                          ("        passed=big <= usable,\n",
-                          f"        passed=big <= usable and not os.environ.get({_FLIP!r}),\n")):
+                          "        passed=big <= usable and not _FLIPPED,\n")):
             self.assertEqual(text.count(old), 1, f"{gates_py}: the plant needs one {old!r}")
             text = text.replace(old, new)
         with open(gates_py, "w", encoding="utf-8", newline="") as fh:

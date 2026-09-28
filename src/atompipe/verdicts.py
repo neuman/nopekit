@@ -35,7 +35,12 @@ content address (rho) built from it. Its first half is the primitives:
   paths it asked the existence, kind or size of, which raise no audit event:
   bundled ``modelica.source_hygiene`` skipped a named ``.mo`` that was not there
   yet on an ``os.path.isfile``, recorded nothing, and kept a Fresh PASS after it
-  appeared (review round 1).
+  appeared (review round 1). And the channels no ``open`` reports: a sqlite
+  database (opened in C), a data file read through linecache or tokenize (whose
+  events were dropped whole, as the traceback formatter's), and the process
+  environment, which fires no event at all and is named opaque (``env:<NAME>``).
+  All three kept a Fresh PASS after their input moved (review round 1,
+  ``probe.sqlite``, ``probe.linecache``, ``probe.env``).
 * ``spine_digest`` — the spine's own version, taken from what the verdict-path
   modules SAY rather than from ``__version__``. 1e09113 changed verdict semantics
   (a NaN that read ``[ok]`` now errors) with the version string untouched (S-29).
@@ -111,6 +116,7 @@ import hashlib
 import importlib.metadata
 import importlib.util
 import json
+import linecache
 import math
 import numbers
 import operator
@@ -120,6 +126,7 @@ import shutil
 import sys
 import tempfile
 import threading
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Collection, Iterable, Mapping
 
@@ -1480,18 +1487,37 @@ _HOOK_LOCK = threading.Lock()
 #: operation being audited, here every ``open`` in the process.
 _BUSY = threading.local()
 
-#: Modules whose OWN file activity is never a gate input: import machinery (the
-#: ``.pyc`` and source opens and the ``sys.path`` listings of every import —
-#: ``import bracket`` lists ``model/``, whose listing changes once
-#: ``__pycache__`` appears), and linecache, tokenize, warnings and traceback,
-#: which read source files to format a message (the first warning only, which
-#: makes it order-dependent too).
-_EXCLUDED_MODULES = frozenset({
-    "importlib._bootstrap", "importlib._bootstrap_external", "zipimport",
+#: Modules whose OWN file activity is never a gate input, whatever it touches:
+#: zipimport (an archive on ``sys.path`` is code) and importlib.metadata (below).
+_EXCLUDED_MODULES = frozenset({"zipimport", "importlib.metadata"})
+
+#: Modules that read a module's SOURCE on the program's behalf: import machinery
+#: (the ``.pyc`` and source opens, the ``.pyc`` writes and the ``sys.path``
+#: listings of every import — ``import bracket`` lists ``model/``, whose listing
+#: changes once ``__pycache__`` appears), and linecache, tokenize, warnings and
+#: traceback, which read source files to quote a line in a message (the first
+#: warning only, which makes it order-dependent too). Everything they do is
+#: dropped EXCEPT a read, or a stat, of a path that is not a module's source
+#: (``_module_source``). What slipped through (review round 1, ``probe.
+#: linecache``): these modules were excluded whole, so a gate that read its
+#: limit with ``linecache.getline`` — or ``tokenize.open``, or
+#: ``pkgutil.get_data``, which reads through ``FileLoader.get_data`` — recorded
+#: ``files={}``, and a plain check served its PASS after the file went to 0.
+#: *Rejected:* matching the path against ``sys.modules``' ``__file__``s (a
+#: helper loaded by path with ``spec_from_file_location``, fdm-print's way, is
+#: in no ``sys.modules``, and ``exec`` of a compiled file leaves no module at
+#: all — both would have their tracebacks recorded as reads).
+_SOURCE_READERS = frozenset({
+    "importlib._bootstrap", "importlib._bootstrap_external",
     "_frozen_importlib", "_frozen_importlib_external",
     "linecache", "tokenize", "warnings", "traceback",
-    "importlib.metadata",
 })
+
+#: What a module's source is spelled as: the suffixes ``SourceFileLoader``
+#: compiles (``.pyw`` is Windows'; listed everywhere so an entry reads the same
+#: on every machine). Bytecode is ``_library_path``'s. Named residual: a data
+#: file named ``*.py`` read through linecache is taken for source and dropped.
+_SOURCE_SUFFIXES = (".py", ".pyw")
 
 #: And every submodule of these. ``importlib.metadata`` is import machinery in
 #: all but name: distribution discovery. What slipped through the first list
@@ -1503,10 +1529,15 @@ _EXCLUDED_MODULES = frozenset({
 #: different entry for ``--only`` than for a full sweep. Library versions are
 #: provenance (``instruments_for``), never rho.
 _EXCLUDED_PREFIXES = tuple(f"{name}." for name in ("importlib.metadata",))
-_EXCLUDED_CODE = frozenset({
+_EXCLUDED_CODE = frozenset({"<frozen zipimport>"})
+_SOURCE_READER_CODE = frozenset({
     "<frozen importlib._bootstrap>", "<frozen importlib._bootstrap_external>",
-    "<frozen zipimport>",
 })
+
+#: ``_frame_kind``'s answers: a frame whose file activity is dropped whole, and
+#: one that is a source reader.
+_EXCLUDED = "excluded"
+_SOURCE = "source"
 
 #: Arguments beyond this many in one ``argv`` are not checked for files: a
 #: process started with ten thousand arguments is opaque already.
@@ -1517,7 +1548,9 @@ class _Window:
     """``with tracing(trace):`` — push on enter, pop (by identity) on exit.
 
     The pop runs before any ``except`` clause of the caller, so a traceback the
-    caller formats after the block is never inside the window (packs:H2).
+    caller formats after the block is never inside the window (packs:H2). The
+    push forgets linecache's data lines first (``_forget_data_lines``), so a
+    file read through it is opened, and seen, inside this window.
     """
 
     __slots__ = ("trace",)
@@ -1527,6 +1560,7 @@ class _Window:
 
     def __enter__(self) -> GateTrace:
         _install_hook()
+        _forget_data_lines()
         _STACK.append(self.trace)
         return self.trace
 
@@ -1538,10 +1572,39 @@ class _Window:
         return False
 
 
+def _module_source(path: str) -> bool:
+    """Whether ``path`` is spelled as a module's source (``_SOURCE_SUFFIXES``)."""
+    return os.path.normcase(path).endswith(_SOURCE_SUFFIXES)
+
+
+def _forget_data_lines() -> None:
+    """Drop every line linecache holds for a file that is not a module's source.
+
+    linecache is a memo: ``getline`` serves a file it has read once from
+    ``linecache.cache`` with no open and no stat. What slipped through with the
+    source-reader rule alone: the admission control runs its gate first, in the
+    same process, on the same root, so the gate's real run was a hit that opened
+    nothing and keyed no file — the ``lru_cache`` hole of review round 2
+    (``modelio.clear_caches``), in the standard library. Sources, and the lazy
+    and pseudo-named entries (``<doctest ...>``, code registered by a tool) that
+    cannot be read again, are kept: a traceback quotes those, and no gate
+    decides on them. *Rejected:* ``linecache.clearcache()`` (it drops exactly
+    those, and a traceback formatted later has nothing to quote).
+    """
+    cache = getattr(linecache, "cache", None)
+    if not isinstance(cache, dict):
+        return
+    for name in list(cache):
+        if (isinstance(name, str) and not (name.startswith("<") and name.endswith(">"))
+                and not _module_source(name)):
+            cache.pop(name, None)
+
+
 def tracing(trace: GateTrace) -> _Window:
     """Route every file, directory, process and network event — and every
-    existence, kind or size question (``_stat_probe``) — to ``trace`` while the
-    block runs (and to every enclosing trace as well).
+    existence, kind or size question (``_stat_probe``), every sqlite database
+    opened and every environment variable read — to ``trace`` while the block
+    runs (and to every enclosing trace as well).
 
     The hook is installed on the first push, at most once per process, and does
     nothing at all while no window is open.
@@ -1603,6 +1666,7 @@ def _install_hook() -> None:
         if _HOOK_INSTALLS:
             return
         _library_roots()             # computed here, outside any window
+        _install_env_recorder()
         sys.addaudithook(_audit)
         _HOOK_INSTALLS += 1
 
@@ -1736,6 +1800,81 @@ def _on_open(traces: tuple, args: tuple) -> None:
             trace._note_write(path)
 
 
+def _on_source_read(traces: tuple, args: tuple) -> None:
+    """An ``open`` by a source reader (``_SOURCE_READERS``): recorded only when
+    it reads, writes nothing, and names a file that is not a module's source —
+    a gate's data read through ``linecache.getline``, ``tokenize.open`` or
+    ``pkgutil.get_data``. The ``.pyc`` an import writes, and the sources it and
+    the formatters read, stay the import system's and the formatter's."""
+    path = _path_arg(args[0] if args else None)
+    if path is None or _module_source(path):
+        return
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 else 0
+    reads, writes = _open_intent(mode, flags)
+    if reads and not writes:
+        _on_open(traces, args)
+
+
+def _sqlite_target(database: str) -> tuple[str | None, bool]:
+    """``(file, writable)`` for ``sqlite3.connect(database)``: the file the
+    connection opens — ``None`` for a private in-memory or temporary database,
+    which nothing outside the gate can have written — and whether it may write
+    it. A ``file:`` name is read as a URI (SQLite's own rule once ``uri=True``,
+    which the audit event does not carry): its path percent-decoded, a
+    ``localhost`` authority allowed, ``mode=ro`` or ``immutable=1`` read-only,
+    ``mode=memory`` no file at all."""
+    if database in ("", ":memory:"):
+        return None, False
+    if not database.startswith("file:"):
+        return database, True
+    rest = database[len("file:"):].split("#", 1)[0]
+    rest, _, query = rest.partition("?")
+    if rest.startswith("//"):
+        authority, slash, tail = rest[2:].partition("/")
+        if authority.lower() not in ("", "localhost"):
+            return None, False                  # SQLite refuses it: nothing is opened
+        rest = slash + tail
+    options = dict(urllib.parse.parse_qsl(query, keep_blank_values=True))
+    if options.get("mode") == "memory" or rest in ("", ":memory:"):
+        return None, False
+    readonly = (options.get("mode") == "ro"
+                or options.get("immutable", "").lower() in ("1", "yes", "true", "on"))
+    return urllib.parse.unquote(rest), not readonly
+
+
+def _on_sqlite(traces: tuple, args: tuple) -> None:
+    """``sqlite3.connect``: a read of the database file and of its ``-wal``.
+
+    SQLite opens its files in C, so no ``open`` event ever named them. What
+    slipped through (review round 1, ``probe.sqlite``): a gate that took its
+    limit from a table recorded ``files={} opaque=[]``, and a plain check served
+    its PASS after the row went to 0. The ``-wal`` is part of the database a
+    reader sees — in WAL mode committed rows wait there until a checkpoint moves
+    them into the main file — so it is read too, missing or not. A connection
+    that may write is named opaque, ``sqlite-writable:<path>``: its writes are
+    C-level as well, and nothing can tell whether the gate wrote what it read
+    (a result memoised in the database it reads is the S-27 shape). Open it
+    ``file:<path>?mode=ro`` with ``uri=True`` and the entry can be Fresh.
+    *Rejected:* a read alone for every connection (a gate that updates the row
+    it read keys the updated bytes, and is Fresh on an input it never saw).
+    Named residual: a database ``ATTACH``-ed from SQL, and any file a C
+    extension opens itself — no event names either.
+    """
+    text = _text(args[0] if args else None)
+    if text is None:
+        return
+    target, writable = _sqlite_target(text)
+    path = _path_arg(target) if target is not None else None
+    if path is None or _library_path(path):
+        return
+    for trace in traces:
+        trace._note_read(path)
+        trace._note_read(path + "-wal")
+        if writable:
+            trace.opaque.add(f"sqlite-writable:{path}")
+
+
 def _on_listdir(traces: tuple, args: tuple) -> None:
     raw = args[0] if args else None
     path = _path_arg(os.curdir if raw is None else raw)
@@ -1837,16 +1976,22 @@ _HANDLERS: dict[str, Callable[[tuple, tuple], None]] = {
     "socket.connect": _on_network,
     "socket.sendto": _on_network,
     "socket.sendmsg": _on_network,
+    "sqlite3.connect": _on_sqlite,
 }
 
 
-def _excluded_frame(frame: Any) -> bool:
+def _frame_kind(frame: Any) -> str:
+    """``_EXCLUDED``, ``_SOURCE`` (a source reader's frame) or ``""``."""
     if frame is None:
-        return False
+        return ""
     name = frame.f_globals.get("__name__")
-    if name in _EXCLUDED_MODULES or (isinstance(name, str) and name.startswith(_EXCLUDED_PREFIXES)):
-        return True
-    return frame.f_code.co_filename in _EXCLUDED_CODE
+    code = frame.f_code.co_filename
+    if (name in _EXCLUDED_MODULES or code in _EXCLUDED_CODE
+            or isinstance(name, str) and name.startswith(_EXCLUDED_PREFIXES)):
+        return _EXCLUDED
+    if name in _SOURCE_READERS or code in _SOURCE_READER_CODE:
+        return _SOURCE
+    return ""
 
 
 def _audit(event: str, args: tuple) -> None:
@@ -1863,7 +2008,10 @@ def _audit(event: str, args: tuple) -> None:
             frame = sys._getframe(1)
         except ValueError:
             frame = None
-        if not _excluded_frame(frame):
+        kind = _frame_kind(frame)
+        if kind == _SOURCE:
+            handler = _on_source_read if event == "open" else None
+        if kind != _EXCLUDED and handler is not None:
             traces = tuple(_STACK)
             if traces:
                 handler(traces, tuple(args) if isinstance(args, tuple) else ())
@@ -1907,7 +2055,7 @@ _STAT_PREDICATES = ("exists", "lexists", "isfile", "isdir", "islink", "isjunctio
 
 #: Modules a stat passes THROUGH on its way from the question to ``os.stat``.
 #: The frame that decides whether the question was import machinery's or
-#: linecache's (``_EXCLUDED_MODULES``) is the first one outside these: linecache
+#: linecache's (``_frame_kind``) is the first one outside these: linecache
 #: calls ``os.stat`` itself, importlib.metadata asks through ``pathlib``.
 _STAT_VIA = frozenset({"os", "genericpath", "posixpath", "ntpath", "pathlib",
                        "pathlib._local", "pathlib._abc", "glob"})
@@ -1925,7 +2073,8 @@ def _on_stat(args: tuple, kwargs: dict, existed: bool | None) -> None:
     frame = sys._getframe(2)                    # past this function and the probe
     while frame is not None and frame.f_globals.get("__name__") in _STAT_VIA:
         frame = frame.f_back
-    if _excluded_frame(frame):
+    kind = _frame_kind(frame)
+    if kind == _EXCLUDED or kind == _SOURCE and _module_source(path):
         return
     for trace in tuple(_STACK):
         trace._note_stat(path, existed)
@@ -2001,6 +2150,116 @@ def _install_stat_probes() -> None:
 
 
 _install_stat_probes()
+
+
+# --------------------------------------------------------------------------- #
+# the environment
+# --------------------------------------------------------------------------- #
+# An environment read fires no audit event, so a gate that decided on a
+# variable recorded nothing at all. What slipped through (review round 1,
+# ``probe.env``): a gate passing while ``os.environ.get("PROBE_MODE", "ok") ==
+# "ok"`` recorded ``files={} opaque=[]``, a plain check served its PASS after
+# the variable moved, and a forced run failed it. rho does not key a variable's
+# value (§8: an environment differs per machine and per shell, and a digest of
+# it would make every entry stale in every other terminal); the entry NAMES the
+# variable instead, as the opaque channel ``env:<NAME>`` — ``env:*`` for the
+# whole environment (``dict(os.environ)``, a ``keys()``, ``len``) — and an
+# entry with an opaque channel is never Fresh. ``doctor``'s ``env-reads`` row
+# still names each read statically: every one costs a re-run per check.
+
+#: Modules an environment read passes THROUGH on its way to ``os.environ``:
+#: ``os.getenv``, ``Mapping.get``/``__contains__``/``keys()`` (``_collections_abc``),
+#: ``os.path.expanduser``/``expandvars`` and ``pathlib``'s ``home()``. The first
+#: frame outside them is the one whose read it is.
+_ENV_VIA = _STAT_VIA | {"_collections_abc", "collections.abc"}
+
+
+class _RecordingEnviron(os._Environ):
+    """``os.environ``'s own class, recording each variable read while a window
+    is open.
+
+    Installed by changing the CLASS of the one ``os.environ`` object (and of
+    ``os.environb``), never by replacing it: every binding of it — ``from os
+    import environ`` in a gate module, ``os.getenv``'s global — sees the change,
+    and the object, its data and the ``putenv`` each write makes stay exactly
+    what they were, so a subprocess a gate starts inherits what it always did.
+    That is the reason ``doctor``'s ``env-reads`` row gave for rejecting a
+    dynamic proxy (the omc gates' tool inherits the environment), and it held
+    against a replacement object, not against this. A read is the gate's only
+    when the first frame outside ``_ENV_VIA`` is not library code: the
+    variables ``shutil.which`` (``PATH``), ``tempfile`` (``TMPDIR``) and
+    ``subprocess`` read on a gate's behalf are theirs, and a gate that asks
+    them is not made opaque by it (``t.outside``).
+    """
+
+    def __getitem__(self, key: Any) -> Any:
+        if _STACK and not getattr(_BUSY, "on", False):
+            _env_read(key)
+        return super().__getitem__(key)
+
+    def __iter__(self) -> Any:
+        if _STACK and not getattr(_BUSY, "on", False):
+            _env_read(None)
+        return super().__iter__()
+
+    def __len__(self) -> int:
+        if _STACK and not getattr(_BUSY, "on", False):
+            _env_read(None)
+        return super().__len__()
+
+
+def _env_read(key: Any) -> None:
+    """Record ``env:<key>`` (``env:*`` for ``None``) on every open trace, when the
+    read is the gate's. Called from a ``_RecordingEnviron`` method; never raises."""
+    _BUSY.on = True
+    try:
+        if key is None:
+            name = "*"
+        elif isinstance(key, (str, bytes)):
+            text = os.fsdecode(key)
+            # an undecodable byte must not become a lone surrogate in a channel
+            # name the entry writer encodes as UTF-8 (``_process``'s rule)
+            name = text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+        else:
+            return                              # the lookup raises TypeError itself
+        frame = sys._getframe(2)                # past this function and the method
+        while frame is not None and frame.f_globals.get("__name__") in _ENV_VIA:
+            frame = frame.f_back
+        if frame is None or _frame_kind(frame) or _library_code(frame):
+            return
+        whole = "env:*"
+        for trace in tuple(_STACK):
+            if whole not in trace.opaque:
+                trace.opaque.add(f"env:{name}")
+    except Exception:
+        pass
+    finally:
+        _BUSY.on = False
+
+
+def _library_code(frame: Any) -> bool:
+    """Whether ``frame`` runs library code: frozen (the standard library's
+    ``<frozen os>``), or from a file under the library roots. Code with any
+    other pseudo-filename (``<string>``) is not — its reads are the gate's."""
+    filename = frame.f_code.co_filename
+    if not isinstance(filename, str) or filename.startswith("<frozen "):
+        return True
+    path = _path_arg(filename)
+    return path is not None and _library_path(path)
+
+
+def _install_env_recorder() -> None:
+    """Give ``os.environ`` and ``os.environb`` the recording class — once, with
+    the hook (the same object is changed, so no binding made earlier misses it).
+    Named residual: an ``environ`` that is not ``os._Environ`` (replaced by a
+    test's ``mock.patch.object``, or another implementation's) records nothing."""
+    for name in ("environ", "environb"):
+        env = getattr(os, name, None)
+        if type(env) is os._Environ:
+            try:
+                env.__class__ = _RecordingEnviron
+            except TypeError:
+                pass
 
 
 # --------------------------------------------------------------------------- #
@@ -2916,8 +3175,8 @@ class Reads:
         ``anchors`` defaults to ``trace.anchors``, else to ``<tmp>`` and ``~``
         only — then every project file is outside and opaque: an unanchored
         trace is never Fresh rather than wrongly portable. The trace's own
-        opaque channels (``subprocess:omc``, ``network``, a non-JSON param) pass
-        through; a gate that used the model is keyed by ``model`` (see
+        opaque channels (``subprocess:omc``, ``network``, ``env:<NAME>``,
+        ``sqlite-writable:<path>``, a non-JSON param) pass through; a gate that used the model is keyed by ``model`` (see
         ``model_digest``) or, with none given, opaque — and a control that used
         it is opaque, because its fixture context carries the live model.
         """
