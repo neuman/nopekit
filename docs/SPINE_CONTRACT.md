@@ -507,7 +507,7 @@ OBS_KEEP = 20                 # runs kept per gate, per kind
 SPEC_FIELDS_IN_RHO = ("id", "claims", "tier", "pack", "requires_tools",
                       "requires_python", "requires_one_of", "settles")
 CONTROL_OUT_DIR = ".atompipe/out/controls"   # + "/<gate id>/": where a control runs
-TWO_OUTCOMES_IS_ERROR = False # a warning (the gate reads stale) until U25 flips it
+TWO_OUTCOMES_IS_ERROR = True  # an error; a warning (the gate read stale) until U25 measured the corpus
 
 def anchors_for(root, registry, *, out_dir) -> Anchors   # <root>, <pack:NAME> from registry.pack_dirs, <out>, <out:controls>
 def code_digest(spec, fn, *, anchors=None) -> CodeRef
@@ -831,8 +831,8 @@ registered gate, in registration order, the first that applies:
    atompipe check`; not admitted is an error `not admitted: <why>`; a FAIL stays FAIL
    (undemonstrated, it is also listed stale) — admission gates what may COUNT as a pass.
 4. The latest entry, stale with its reasons, or Unknown with its reason (`model_error`
-   joins "the model does not load"). Two outcomes: stale, an error once
-   `TWO_OUTCOMES_IS_ERROR` is True.
+   joins "the model does not load"). Two outcomes: an error while
+   `TWO_OUTCOMES_IS_ERROR` is True (since U25), stale were it False.
 5. A `ledger.verdicts` row with no rho: stale, `recorded before per-gate tracing` (Q1.4).
 6. Nothing: no row — the claim reads PENDING.
 
@@ -1751,7 +1751,7 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 | `instruments` | warn | an entry recorded under another library version (`recorded under numpy 1.26.4; here 2.1.0`, and "outcome differs across instruments"): provenance, never staleness (Q1.3) |
 | `opaque-inputs` | warn | an entry with an opaque channel (a subprocess's own reads, a file outside the project, `self-modified:`): never served from the cache |
 | `cache-entries` | warn | every verdict or control entry the strict readers ignored, a `hand-edited entry` (digest mismatch) by name; any resolver note no other row claims lands here |
-| `two-outcomes` | warn, FAIL once `verdicts.TWO_OUTCOMES_IS_ERROR` | two outcomes recorded for identical inputs, read at call time; **two control outcomes** at one rho_control FAIL always (the gate is not admitted). Controls are read for every gate on disk, not only for the gates whose verdict is Fresh |
+| `two-outcomes` | FAIL while `verdicts.TWO_OUTCOMES_IS_ERROR` (True since U25), else warn | two outcomes recorded for identical inputs, read at call time; **two control outcomes** at one rho_control FAIL always (the gate is not admitted). Controls are read for every gate on disk, not only for the gates whose verdict is Fresh |
 | `code-digest` | warn | a gate keyed by its defining file (registered from Python, no recorded closure): a value its function closes over is not seen. The CLI never makes one |
 | `pending-controls` | warn | controls whose fixture code moved (`<k> control(s) pending — inputs moved (<files>); the next check re-verifies`, the sentence `status`'s note prints) |
 | `imports` | warn | a gate that imports a third-party module (`CodeRef.third_party`) it does not declare in `requires_python` or a `python:` entry of `requires_one_of`: where it is missing, the gate errors instead of reading SKIPPED. In the gate's own file, read by reach — module-level imports plus those inside the gate function and the module-level functions and classes it names, transitively; other closure files whole. A whole-file rule named `cad.bounding`, the one tier-0 gate of a module whose other gates import trimesh lazily |

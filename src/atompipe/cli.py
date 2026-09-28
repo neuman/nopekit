@@ -4188,10 +4188,11 @@ def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
            _listed(found) + " — an ignored entry never counts; its gate re-runs"
            if found else "every cache entry reads back strictly")
 
-    # Two answers for identical inputs. A gate's is a warning until
-    # `TWO_OUTCOMES_IS_ERROR` flips (spec §3.7, R-4: an error only once the
-    # bundled corpus is proven deterministic); read at call time, so the flip is
-    # one constant. A control's is a failure already: its gate is not admitted.
+    # Two answers for identical inputs. A gate's was a warning while
+    # `TWO_OUTCOMES_IS_ERROR` was staged, and is a failure since U25 flipped it
+    # (spec §3.7, R-4: an error only once EntriesAreDeterministic had proven the
+    # bundled corpus deterministic); read at call time, so the flip was one
+    # constant. A control's always was a failure: its gate is not admitted.
     outcomes, controls = notes.get("two-outcomes", []), notes.get("two-controls", [])
     failing = bool(controls) or (bool(outcomes) and verdicts.TWO_OUTCOMES_IS_ERROR)
     _check(results, "two-outcomes",
