@@ -207,14 +207,18 @@ class RecordingLoader(_Sandbox):
         self.put("first.py", f"import {helper_name}\n")
         self.put("by_module.py", f"import {helper_name} as shared\n")
         self.put("by_name.py", f"from {helper_name} import fold\n")
+        # No import statement names it, so only the globals walk can see it.
+        self.put("by_lookup.py", f"import importlib\nH = importlib.import_module({helper_name!r})\n")
 
         self.load("first.py")
         cached = sys.modules[helper_name]
         by_module = self.load("by_module.py")      # fires no import event at all
         by_name = self.load("by_name.py")          # binds a function, not the module
+        by_lookup = self.load("by_lookup.py")
         self.assertIs(sys.modules[helper_name], cached, "the helper ran twice")
         self.assertIn(helper, self.files(by_module))
         self.assertIn(helper, self.files(by_name))
+        self.assertIn(helper, self.files(by_lookup))
 
     def test_a_helper_through_a_namespace_package_is_attributed(self):
         self.on_path(self.root)
@@ -349,6 +353,21 @@ class RecordingLoader(_Sandbox):
         self.assertEqual(second.SEEN, 8)
         self.assertIsNot(sys.modules[helper_name], old_helper,
                          "the stale helper was not purged from sys.modules")
+
+    def test_a_second_importer_never_gets_a_stale_helper(self):
+        # The first importer is never reloaded here, so nothing re-executes on
+        # its account: only a purge before the second importer runs keeps the
+        # cached helper object from answering with the old value.
+        self.on_path(self.root)
+        helper_name = self.n("fold")
+        helper = self.put(f"{helper_name}.py", "LIMIT = 4\n")
+        self.put("first.py", f"import {helper_name}\nSEEN = {helper_name}.LIMIT\n")
+        self.put("second.py", f"import {helper_name}\nSEEN = {helper_name}.LIMIT\n")
+        self.assertEqual(self.load("first.py").SEEN, 4)
+        self.edit_same_size(helper, "4", "5")
+        self.assertEqual(self.load("second.py").SEEN, 5,
+                         "a helper edited after its first importer loaded was served "
+                         "stale to the second (S-26, in-process)")
 
     # -- gates: recorded, re-adopted ---------------------------------------- #
     def _gate_source(self, gate_id: str, verdict: str) -> str:

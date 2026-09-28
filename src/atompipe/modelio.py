@@ -40,6 +40,21 @@ traditional:
   model that cannot pass this one has a clock, a `set`, or a `random` in it, and
   every hash-based staleness check downstream is already lying.
 
+* **The code that runs is the code on disk, and it is written down.**
+  `load_source_module` is the one loader for every Python file the spine
+  executes on a project's behalf — gate modules, fixtures, helpers loaded by
+  path, and (through `load_model`) the model and its siblings. It compiles the
+  bytes it read, never a `.pyc`; it records every file under the owning roots
+  that ran, as `(path, sha256)`, on the module (`__atompipe_code__`); and it
+  serves a module from `sys.modules` only while every recorded file still has
+  the recorded digest. What slipped through without it (S-26): only the model
+  entry was fresh-compiled, so a same-size, same-second edit to a gate module
+  or a pack helper ran the stale bytecode — the source said 8.0 and the verdict
+  came from 7.0 — and an in-process reload served the old module with no pyc
+  involved at all. A per-gate verdict keyed on the file's bytes would then have
+  filed the old behaviour under the new digest. `verdicts` digests these
+  closures; this module never imports `verdicts` or `gates`.
+
 Time policy (contract rule 3): nothing here reads the clock. `build()` is
 supposed to be pure, and a model that stamps its own timestamp fails
 `check_determinism` on purpose.
@@ -47,6 +62,8 @@ supposed to be pure, and a model that stamps its own timestamp fails
 from __future__ import annotations
 
 import ast
+import contextlib
+import hashlib
 import inspect
 
 import dataclasses
@@ -55,10 +72,14 @@ import importlib.util
 import json
 import math
 import os
+import re
+import site
 import sys
+import sysconfig
 import traceback
+import types
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Iterable, Iterator, Mapping
 
 from . import store
 from .models import Param, _enc
@@ -68,11 +89,16 @@ __all__ = [
     "LoadedModel",
     "load_model",
     "project",
+    "flat_params",
     "model_hash",
     "write_projection",
     "params_from_model",
     "undocumented_params",
     "check_determinism",
+    "CodeClosure",
+    "load_source_module",
+    "load_path",
+    "code_closure",
 ]
 
 #: Loaded model modules are registered in `sys.modules` under this prefix rather
@@ -85,6 +111,47 @@ _MODULE_PREFIX = "atompipe_model_"
 
 #: This file, so user tracebacks can be trimmed of spine frames.
 _THIS_FILE = os.path.abspath(__file__)
+
+#: The installed spine package. Never part of a project's code closure (its
+#: modules reach a verdict through the spine digest or `spine_extras`), even when
+#: a project root happens to contain it — a test tree under the repository does.
+_PKG_DIR = os.path.dirname(_THIS_FILE)
+
+#: Where a module's recorded closure and its gate registrations live: on the
+#: module object itself. A module served from `sys.modules` fires no import
+#: event, so a closure recorded anywhere else is lost to the second importer —
+#: `packs.load_gates` reuses cached modules, and every later registry (validate,
+#: pack mode, a test's fresh `Registry`) would otherwise see a module with no
+#: code at all.
+_CODE_ATTR = "__atompipe_code__"
+_GATES_ATTR = "__atompipe_gates__"
+
+#: Module names for helpers loaded by path are salted with a digest of the
+#: absolute path. fdm-print loaded its helpers under a fixed name
+#: (`atompipe_pack_fdm_print__fold`), so a second copy of the pack in one
+#: process — `test_pack_keys`' `fdm-twin`, a project-local shadow, a user pack —
+#: silently ran the FIRST copy's helper while every message named the second
+#: (packs:H4). 12 hex chars, like every other short digest here: two paths
+#: colliding is not a failure mode worth a longer name. Rejected: the stem alone
+#: (that is the bug), and a counter (a name that depends on load order is a
+#: name two processes disagree about).
+_PATH_PREFIX = "atompipe_path_"
+
+#: The modules `verdicts.SPINE_MODULES` digests into every verdict. Mirrored
+#: here, not imported: `verdicts` imports this module, so the dependency cannot
+#: run the other way. `test_codeload` holds the two equal. An `atompipe.*` import
+#: OUTSIDE this set is recorded per module as a `spine_extras` name, because the
+#: spine digest does not cover it — fdm-print and cad-solid import `atompipe.site`
+#: for the node separator their locators carry (packs:H4).
+_SPINE_MODULE_FILES = frozenset({"models.py", "gates.py", "modelio.py", "verdicts.py"})
+
+#: Top-level names that are never a project's code and never a third-party
+#: instrument. `sys.stdlib_module_names` is 3.10+, the CI floor.
+_STDLIB = frozenset(sys.stdlib_module_names) | frozenset(sys.builtin_module_names)
+
+#: The prefix of a fallback that came from computed source, as opposed to an
+#: import that resolved to something that is not Python source.
+_FALLBACK_COMPUTED = "computed source at "
 
 
 # --------------------------------------------------------------------------- #
@@ -351,8 +418,425 @@ def _model_candidates(root: str) -> list[str]:
     ][:8]
 
 
+# --------------------------------------------------------------------------- #
+# the recording loader:  fresh bytes, a recorded closure, a content-keyed cache
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class CodeClosure:
+    """The code one module ran, as recorded while it ran. Stored on the module.
+
+    * `files` — `(absolute path, sha256 of the bytes)` for every Python file
+      under the owning roots that this module executed or depends on: itself,
+      every helper imported by name, through a namespace package or by path,
+      every cached helper it picked up from `sys.modules` (by the helper's own
+      recorded closure), and every local module a function body imports lazily
+      (read statically). Sorted by path.
+    * `fallback` — empty, or why the recording gave up on precision and took
+      every `*.py` under the owning root instead: computed source compiled or
+      executed from a frame under the roots, or an import under the roots that
+      resolved to something that is not Python source.
+    * `third_party` — the top-level names the files import, read from their
+      source (module and function level), that are not under the roots, not the
+      standard library and not `atompipe`. Static on purpose: a list built from
+      import events depends on what an earlier gate happened to import first,
+      and two identical runs would disagree about it (packs:H3).
+    * `spine_extras` — the `atompipe.*` modules the files import that the
+      spine digest does not cover, digested per module by `verdicts`.
+
+    A closure whose files no longer all have their recorded digest is stale, and
+    `load_source_module` re-executes the module rather than serve it.
+    """
+
+    files: tuple[tuple[str, str], ...] = ()
+    fallback: str = ""
+    third_party: tuple[str, ...] = ()
+    spine_extras: tuple[str, ...] = ()
+
+
+def _norm(path: str) -> str:
+    """The comparison form of a path: absolute and case-folded where the OS folds."""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _under(path: str, directory: str) -> bool:
+    """Is normalised `path` inside normalised `directory` (or equal to it)?"""
+    if path == directory:
+        return True
+    return path.startswith(directory if directory.endswith(os.sep) else directory + os.sep)
+
+
+#: The interpreter's own trees: never a project's code, even under a root.
+_EXCLUDED: tuple[str, ...] | None = None
+
+
+def _excluded_dirs() -> tuple[str, ...]:
+    """Interpreter prefixes, the stdlib and site dirs, user site, the spine package.
+
+    User site is the one that bites in practice: trimesh and numpy live in
+    `~/.local` on the machine this was written on, which is under no prefix, and
+    a project root that is a home directory would otherwise "own" them. Computed
+    once; `site.getsitepackages` is missing from some embedded interpreters, so
+    every source is optional.
+    """
+    global _EXCLUDED
+    if _EXCLUDED is None:
+        found = {sys.prefix, sys.base_prefix, sys.exec_prefix,
+                 getattr(sys, "base_exec_prefix", ""), _PKG_DIR}
+        with contextlib.suppress(Exception):
+            paths = sysconfig.get_paths()
+            found.update(paths.get(k) or "" for k in ("stdlib", "platstdlib", "purelib", "platlib"))
+        with contextlib.suppress(Exception):
+            found.update(site.getsitepackages())
+        with contextlib.suppress(Exception):
+            found.add(site.getusersitepackages())
+        _EXCLUDED = tuple(sorted({_norm(p) for p in found if p}))
+    return _EXCLUDED
+
+
+def _owning_root(path: str, roots: Iterable[str]) -> str | None:
+    """The (normalised) root that owns `path`, or None when it is not project code.
+
+    The deepest root containing the path wins. An interpreter tree wins over a
+    root only when it sits INSIDE that root — a virtualenv under the project, a
+    test tree under the repository that holds the spine — so a pack installed
+    inside site-packages still owns its own files.
+    """
+    target = _norm(path)
+    best = ""
+    for root in roots:
+        if _under(target, root) and len(root) > len(best):
+            best = root
+    if not best:
+        return None
+    for excluded in _excluded_dirs():
+        if excluded != best and _under(excluded, best) and _under(target, excluded):
+            return None
+    return best
+
+
+def _roots(roots: Iterable[str] | None, path: str) -> tuple[str, ...]:
+    """Normalise the caller's roots; a loader with none owns the file's own directory."""
+    found = [_norm(r) for r in (roots or ()) if r]
+    if not found:
+        found = [_norm(os.path.dirname(os.path.abspath(path)))]
+    return tuple(dict.fromkeys(found))
+
+
+def _display(path: str, root: str) -> str:
+    """`gates/mesh.py`: a path relative to its root, in posix form, for a message."""
+    try:
+        return os.path.relpath(path, root).replace(os.sep, "/")
+    except ValueError:                            # another drive on Windows
+        return path
+
+
+#: Reads code bytes through the import system's own reader, so the read is
+#: attributed to import machinery — which is what it is — by a trace window's
+#: audit hook. Hashing a helper for its closure is the loader's read, not a
+#: gate's input; filed as a gate read, it would put every helper digest into a
+#: gate's ρ a second time, keyed on whether the helper was cached.
+_READER = importlib.machinery.SourceFileLoader("atompipe_modelio_reader", _THIS_FILE)
+
+
+def _read(path: str) -> bytes | None:
+    try:
+        return _READER.get_data(path)
+    except OSError:
+        return None
+
+
+def _file_sha(path: str, memo: dict[str, str | None] | None = None) -> str | None:
+    """sha256 of the bytes at `path` now, or None when it cannot be read."""
+    key = _norm(path)
+    if memo is not None and key in memo:
+        return memo[key]
+    data = _read(path)
+    digest = hashlib.sha256(data).hexdigest() if data is not None else None
+    if memo is not None:
+        memo[key] = digest
+    return digest
+
+
+def _module_file(module: Any) -> str | None:
+    """A module's absolute `__file__`, or None (builtins, namespace packages)."""
+    try:
+        where = vars(module).get("__file__")
+    except TypeError:
+        return None
+    return os.path.abspath(where) if isinstance(where, str) and where else None
+
+
+def _own_closure(module: Any) -> CodeClosure | None:
+    """The closure this loader recorded on `module`, read without `__getattr__`.
+
+    A package with a PEP 562 `__getattr__` (the spine's own `atompipe` is one)
+    would otherwise be asked for a name it does not have, and may import
+    something to answer.
+    """
+    try:
+        found = vars(module).get(_CODE_ATTR)
+    except TypeError:
+        return None
+    return found if isinstance(found, CodeClosure) else None
+
+
+def _closure_current(closure: CodeClosure, *, roots: Iterable[str] = (),
+                     memo: dict[str, str | None] | None = None) -> bool:
+    """Does every recorded file still have its recorded digest?
+
+    A fallback closure is also stale when a new `*.py` appears under a root it
+    walked: "every file under the directory" is a statement about the listing,
+    not only about the files that were there.
+    """
+    for path, digest in closure.files:
+        if not digest or _file_sha(path, memo) != digest:
+            return False
+    if closure.fallback:
+        recorded = {_norm(p) for p, _ in closure.files}
+        for root in roots:
+            if not any(_under(p, root) for p in recorded):
+                continue
+            if any(_norm(p) not in recorded for p in _py_files_under(root)):
+                return False
+    return True
+
+
+def _py_files_under(root: str) -> Iterator[str]:
+    """Every `*.py` under `root`, sorted, for a fallback closure.
+
+    Skips `__pycache__`, dot-directories (`.git`, `.venv`, `.atompipe`), any
+    interpreter tree inside the root, and any directory holding a `pyvenv.cfg`:
+    a virtualenv is somebody else's code however it is named, and walking one
+    would make every fallback closure thousands of files long.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        kept = []
+        for name in sorted(dirnames):
+            full = os.path.join(dirpath, name)
+            if name == "__pycache__" or name.startswith("."):
+                continue
+            if os.path.isfile(os.path.join(full, "pyvenv.cfg")):
+                continue
+            if _owning_root(full, (root,)) is None:
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        for name in sorted(filenames):
+            if name.endswith(".py"):
+                yield os.path.join(dirpath, name)
+
+
+class _Recording:
+    """One module execution's closure while it is being built.
+
+    Nested recordings are the rule, not the exception: a helper imported while a
+    gate module runs gets its own recording (so it carries its own closure for
+    the next importer), and folds into its importer's when it finishes.
+    """
+
+    __slots__ = ("name", "path", "roots", "memo", "files", "sources", "foreign",
+                 "fallback", "fallback_root", "third_party", "spine_extras")
+
+    def __init__(self, name: str, path: str, roots: tuple[str, ...],
+                 memo: dict[str, str | None] | None = None) -> None:
+        self.name = name
+        self.path = path
+        self.roots = roots
+        self.memo: dict[str, str | None] = {} if memo is None else memo
+        self.files: dict[str, str] = {}
+        self.sources: dict[str, bytes] = {}       # files THIS recording compiled
+        self.foreign: dict[str, bytes] = {}       # local files read, not compiled here
+        self.fallback = ""
+        self.fallback_root = ""
+        self.third_party: set[str] = set()
+        self.spine_extras: set[str] = set()
+
+    def note(self, path: str, digest: str) -> None:
+        """Record one file. Two different digests for one path mean two versions
+        of it ran inside one closure; "" never matches a file, so the closure is
+        stale at the next look rather than quietly keeping either."""
+        known = self.files.get(path)
+        self.files[path] = digest if known in (None, digest) else ""
+
+    def compiled(self, path: str, data: bytes) -> None:
+        digest = hashlib.sha256(data).hexdigest()
+        self.memo[_norm(path)] = digest
+        self.sources[path] = data
+        self.note(path, digest)
+
+    def read_foreign(self, path: str) -> None:
+        """A local file this recording did not compile: digest what is on disk
+        now, and queue its source for the static pass."""
+        if path in self.files or path in self.foreign:
+            return
+        data = _read(path)
+        if data is None:
+            self.note(path, "")
+            return
+        self.memo[_norm(path)] = digest = hashlib.sha256(data).hexdigest()
+        self.note(path, digest)
+        self.foreign[path] = data
+
+    def give_up(self, why: str, root: str) -> None:
+        """Take every `*.py` under `root`. The first reason is the one named; a
+        reason absorbed from a helper does not stop this module's own root being
+        walked, because the helper's walk covered the helper's root."""
+        if not self.fallback:
+            self.fallback = why
+        if not self.fallback_root:
+            self.fallback_root = root
+
+    def unmappable(self, name: str, path: str, root: str) -> None:
+        """An import under the roots that resolved to something that is not Python
+        source (an extension module, a sourceless `.pyc`): its own bytes go in,
+        and so does every `*.py` beside it, because what it runs is invisible."""
+        digest = _file_sha(path, self.memo)
+        self.note(path, digest or "")
+        self.give_up(f"import {name} resolves to {_display(path, root)}, which is not "
+                     f"Python source", root)
+
+    def absorb(self, closure: CodeClosure) -> None:
+        for path, digest in closure.files:
+            self.note(path, digest)
+        if closure.fallback and not self.fallback:
+            self.fallback = closure.fallback      # its walk is already in its files
+        self.third_party.update(closure.third_party)
+        self.spine_extras.update(closure.spine_extras)
+
+    def closure(self) -> CodeClosure:
+        return CodeClosure(
+            files=tuple(sorted(self.files.items())),
+            fallback=self.fallback,
+            third_party=tuple(sorted(self.third_party)),
+            spine_extras=tuple(sorted(self.spine_extras)),
+        )
+
+
+#: The recordings in progress, innermost last. Process-global, like the import
+#: system it shadows; loads happen on the CLI's one thread (see `use_registry`
+#: in gates.py for the same reasoning), and a lock here could deadlock against
+#: the import system's per-module locks.
+_STACK: list[_Recording] = []
+
+
+class _RecordingFinder:
+    """At `sys.meta_path[0]` while a recording runs: fresh-loads imports under the roots.
+
+    It asks the stock `PathFinder` where a name lives — the same answer the
+    import system would reach, from the same `sys.path` — and when that is a
+    Python source file under the recording's roots, hands back the spec with a
+    `_FreshLoader` in place of the stock one. So a helper imported by name is
+    compiled from its bytes (no pyc) and recorded, exactly like the module that
+    imported it. Everything else — the standard library, third-party packages,
+    namespace packages (fluids-analytic's `gates`, whose `__file__` is None) —
+    is declined and resolves exactly as it would have.
+    """
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        try:
+            return _fresh_spec(fullname, path)
+        except Exception:                         # noqa: BLE001 - never break an import
+            return None
+
+    def invalidate_caches(self) -> None:          # the PathFinder it asks has its own
+        pass
+
+
+_FINDER = _RecordingFinder()
+
+
+def _fresh_spec(fullname: str, path: Any) -> Any:
+    if not _STACK:
+        return None
+    top = fullname.partition(".")[0]
+    if top in _STDLIB or top == "atompipe":
+        return None
+    spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+    if spec is None or spec.origin is None or not spec.has_location:
+        return None                               # not found, or a namespace package
+    recording = _STACK[-1]
+    origin = os.path.abspath(spec.origin)
+    root = _owning_root(origin, recording.roots)
+    if root is None:
+        return None
+    loader = spec.loader
+    if isinstance(loader, importlib.machinery.SourceFileLoader):
+        if not isinstance(loader, _FreshLoader):
+            spec.loader = _FreshLoader(fullname, spec.origin)
+        return spec
+    recording.unmappable(fullname, origin, root)
+    return None
+
+
+#: One audit hook per process, installed on the first recording. There is no
+#: way to remove an audit hook, so it routes only while a recording runs and
+#: returns at once otherwise.
+_HOOKED = False
+
+
+def _audit(event: str, args: tuple) -> None:
+    """Notice computed source compiled or executed from a frame under the roots.
+
+    The calling frame is the whole test. `@dataclass` and `namedtuple` compile
+    and exec generated source on every class they build, from a frame in the
+    standard library; keyed on the event alone, every pack that defines a
+    dataclass would fall back to a whole-directory digest (fdm-print's fold,
+    cad-solid, openmodelica — core:§0). `exec(compile(src, ...))` in a gate
+    module's body comes from a frame in the gate module, and that is the case
+    whose code the recording cannot see.
+
+    Never raises: an exception from an audit hook aborts the operation that
+    raised the event, and this one sees every compile in the process.
+    """
+    if event != "exec" and event != "compile":
+        return
+    if not _STACK:
+        return
+    try:
+        recording = _STACK[-1]
+        if recording.fallback_root:
+            return
+        frame = sys._getframe(1)
+        filename = frame.f_code.co_filename
+        # `<frozen importlib._bootstrap>` and `<string>` are not files; made
+        # absolute they would land under whatever the working directory is.
+        if not filename or not os.path.isabs(filename):
+            return
+        root = _owning_root(filename, recording.roots)
+        if root is None:
+            return
+        recording.give_up(f"{_FALLBACK_COMPUTED}{_display(filename, root)}:{frame.f_lineno}", root)
+    except Exception:                             # noqa: BLE001 - see docstring
+        return
+
+
+@contextlib.contextmanager
+def _recording(recording: _Recording) -> Iterator[_Recording]:
+    """Push `recording`, with the finder at `sys.meta_path[0]` and the hook live."""
+    global _HOOKED
+    if not _HOOKED:
+        sys.addaudithook(_audit)
+        _HOOKED = True
+    inserted = _FINDER not in sys.meta_path
+    if inserted:
+        sys.meta_path.insert(0, _FINDER)
+    _STACK.append(recording)
+    try:
+        yield recording
+    finally:
+        # Pop OUR entry, not the top one: a module that broke the stack must not
+        # leave the next import attributed to a load that already finished.
+        for index in range(len(_STACK) - 1, -1, -1):
+            if _STACK[index] is recording:
+                del _STACK[index]
+                break
+        if inserted and not _STACK:
+            with contextlib.suppress(ValueError):
+                sys.meta_path.remove(_FINDER)
+
+
 class _FreshLoader(importlib.machinery.SourceFileLoader):
-    """A source loader that never consults or writes `__pycache__`.
+    """A source loader that never consults or writes `__pycache__`, and records.
 
     This is not an optimisation, it is a correctness fix, and it was found by
     smoke-testing the obvious thing: load the model, edit `thickness: float =
@@ -368,22 +852,578 @@ class _FreshLoader(importlib.machinery.SourceFileLoader):
     the projection did not — arriving through the back door.
 
     Overriding `get_code` to compile the source every time costs a millisecond
-    on a file a human wrote and closes it. `source_to_code` still compiles with
+    on a file a human wrote and closes it. It compiles the very bytes it read
+    and records their digest, so the closure names the code that ran, not the
+    code on disk a moment later. `source_to_code` still compiles with
     `dont_inherit=True`, so the spine's own `from __future__ import annotations`
     does not silently leak into a model that never asked for it.
 
-    Residual, and worth knowing when a model is split across files: only the
-    ENTRY module is loaded this way. Sibling modules go through the normal
-    import machinery and can still be served from a `__pycache__` left behind by
-    running the model by hand. By contract every INPUT lives in the entry file's
-    `CONFIG` dataclass, so the constants people actually edit are covered.
+    This used to be the model ENTRY's loader only, with the residual written
+    here: sibling modules went through the normal import machinery and could be
+    served from a `__pycache__` left behind by running the model by hand. The
+    same hole ran every gate module and pack helper (S-26). Now every module the
+    spine loads for a project, and every import under its roots while one runs,
+    comes through here.
     """
 
+    def __init__(self, fullname: str, path: str, *, roots: tuple[str, ...] | None = None,
+                 memo: dict[str, str | None] | None = None) -> None:
+        super().__init__(fullname, path)
+        self.roots = roots
+        self.memo = memo
+
     def get_code(self, fullname: str) -> Any:
-        return self.source_to_code(self.get_source(fullname), self.path)
+        data = self.get_data(self.path)
+        if _STACK and _STACK[-1].path == os.path.abspath(self.path):
+            _STACK[-1].compiled(os.path.abspath(self.path), data)
+        return self.source_to_code(data, self.path)
+
+    def exec_module(self, module: Any) -> None:
+        path = os.path.abspath(self.path)
+        parent = _STACK[-1] if _STACK else None
+        roots = self.roots or (parent.roots if parent is not None else _roots((), path))
+        memo = self.memo if self.memo is not None else (parent.memo if parent is not None else None)
+        recording = _Recording(module.__name__, path, roots, memo)
+        with _recording(recording):
+            try:
+                super().exec_module(module)
+            except BaseException:
+                # What failed still decided the importer's behaviour (a local
+                # `try: import helper / except ImportError:` takes the other
+                # branch), so its files stay in the importer's closure: an edit
+                # that fixes it must make the importer stale.
+                if parent is not None:
+                    for failed_path, digest in recording.files.items():
+                        parent.note(failed_path, digest)
+                raise
+            closure = _seal(module, recording)
+        if parent is not None:
+            parent.absorb(closure)
 
 
-def _import_file(path: str) -> Any:
+def _seal(module: Any, recording: _Recording) -> CodeClosure:
+    """Finish a recording after its module ran, and store the closure on it."""
+    _walk_globals(module, recording)
+    _static_pass(recording)
+    if recording.fallback_root:
+        known = {_norm(p) for p in recording.files}
+        for path in _py_files_under(recording.fallback_root):
+            if _norm(path) not in known:
+                recording.note(path, _file_sha(path, recording.memo) or "")
+    closure = recording.closure()
+    setattr(module, _CODE_ATTR, closure)
+    return closure
+
+
+def _module_of(value: Any, own: str) -> Any:
+    """The module a global belongs to: itself when it is one, else by `__module__`."""
+    if isinstance(value, types.ModuleType):
+        return value
+    try:
+        name = getattr(value, "__module__", None)
+    except Exception:                             # noqa: BLE001 - a proxy that refuses
+        return None
+    if not isinstance(name, str) or name == own:
+        return None
+    return sys.modules.get(name)
+
+
+def _walk_globals(module: Any, recording: _Recording) -> None:
+    """Attribute the helpers a module holds but did not import during its run.
+
+    A helper already in `sys.modules` fires no import event at all, so the
+    recording finder never sees it: fdm-print's shared fold, `fdm_print_parts`
+    imported under two names, fluids-analytic's `from gates._fluids_analytic
+    import …` in its second gate module. After the module runs, every global
+    that IS a module, or whose `__module__` names one, is looked up; a module
+    under the roots contributes its own recorded closure. One some other
+    machinery loaded (no closure — `spec_from_file_location` by hand) is
+    digested as it is on disk now, read statically, and walked in turn: the
+    bytes it ran may predate that digest, which is why the bundled by-path
+    loaders move onto `load_path`.
+    """
+    seen = {id(module)}
+    queue = [module]
+    while queue:
+        current = queue.pop()
+        try:
+            values = list(vars(current).values())
+        except TypeError:
+            continue
+        own = getattr(current, "__name__", "")
+        for value in values:
+            target = _module_of(value, own)
+            if target is None or id(target) in seen:
+                continue
+            seen.add(id(target))
+            where = _module_file(target)
+            if where is None:
+                continue                          # builtin, or a namespace package
+            root = _owning_root(where, recording.roots)
+            if root is None:
+                continue
+            closure = _own_closure(target)
+            if closure is not None:
+                recording.absorb(closure)
+                continue
+            if not where.endswith(tuple(importlib.machinery.SOURCE_SUFFIXES)):
+                recording.unmappable(getattr(target, "__name__", "?"), where, root)
+                continue
+            recording.read_foreign(where)
+            queue.append(target)
+
+
+#: `(path, sha256) -> (imports, attributes read off a bare `import atompipe`)`.
+#: A helper shared by seven gate modules is parsed once.
+_STATIC: dict[tuple[str, str], tuple[tuple, frozenset]] = {}
+
+
+def _static_imports(path: str, data: bytes) -> tuple[tuple, frozenset]:
+    """`((level, module, names, line), …)` for every import in the file, at any depth."""
+    key = (_norm(path), hashlib.sha256(data).hexdigest())
+    cached = _STATIC.get(key)
+    if cached is not None:
+        return cached
+    try:
+        tree = ast.parse(data, filename=path)
+    except (SyntaxError, ValueError):
+        _STATIC[key] = ((), frozenset())
+        return _STATIC[key]
+    found: list[tuple] = []
+    bare: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.append((0, alias.name, (), node.lineno))
+                if alias.name == "atompipe" or (alias.name.startswith("atompipe.")
+                                                and alias.asname is None):
+                    bare.add(alias.asname or "atompipe")
+        elif isinstance(node, ast.ImportFrom):
+            found.append((node.level or 0, node.module or "",
+                          tuple(a.name for a in node.names), node.lineno))
+    attributes = frozenset(
+        node.attr for node in ast.walk(tree)
+        if bare and isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name) and node.value.id in bare
+    )
+    _STATIC[key] = (tuple(found), attributes)
+    return _STATIC[key]
+
+
+def _spine_names(module: str, names: tuple[str, ...]) -> set[str]:
+    """The `atompipe` modules one import statement reaches."""
+    parts = module.split(".")
+    if len(parts) > 1:
+        return {f"atompipe.{parts[1]}"}
+    if not names:
+        return {"atompipe"}                       # `import atompipe`: see the attributes
+    found: set[str] = set()
+    for name in names:
+        found |= _package_attribute(name)
+    return found
+
+
+def _package_attribute(name: str) -> set[str]:
+    """What `atompipe.<name>` resolves to, without importing it.
+
+    A submodule is itself. Anything else is answered by the package's
+    `__getattr__` — from `models` (a spine module) or an alias (`AtompipeError`
+    lives in `util`) — so the package module is in it too.
+    """
+    if name != "*" and (os.path.isfile(os.path.join(_PKG_DIR, f"{name}.py"))
+                        or os.path.isfile(os.path.join(_PKG_DIR, name, "__init__.py"))):
+        return {f"atompipe.{name}"}
+    found = {"atompipe"}
+    package = sys.modules.get("atompipe")
+    aliases = vars(package).get("_ALIASES", {}) if package is not None else {}
+    if isinstance(aliases, dict) and isinstance(aliases.get(name), str):
+        found.add(f"atompipe.{aliases[name]}")
+    return found
+
+
+def _is_spine(module: str) -> bool:
+    parts = module.split(".")
+    return len(parts) > 1 and f"{parts[1]}.py" in _SPINE_MODULE_FILES
+
+
+def _resolve_local(dotted: str, search: list[str], roots: tuple[str, ...]
+                   ) -> tuple[bool, list[tuple[str, str, str]]]:
+    """Where `dotted` lives, without importing anything.
+
+    Returns `(local, found)`: whether its top-level name resolves under the roots
+    at all, and `(fullname, path, root)` for each file on the way down. Namespace
+    packages resolve and contribute no file. `PathFinder.find_spec` is used rather
+    than `importlib.util.find_spec`, which imports every parent package to answer
+    for a dotted name.
+    """
+    found: list[tuple[str, str, str]] = []
+    parts = dotted.split(".")
+    locations: list[str] = list(search)
+    local = False
+    for depth in range(len(parts)):
+        fullname = ".".join(parts[:depth + 1])
+        try:
+            spec = importlib.machinery.PathFinder.find_spec(fullname, locations)
+        except (ImportError, ValueError, OSError, AttributeError):
+            break
+        if spec is None:
+            break
+        if spec.origin is not None and spec.has_location:
+            origin = os.path.abspath(spec.origin)
+            root = _owning_root(origin, roots)
+            if root is None:
+                break
+            found.append((fullname, origin, root))
+        else:
+            under = [loc for loc in (spec.submodule_search_locations or ())
+                     if _owning_root(loc, roots) is not None]
+            if not under:
+                break
+        if depth == 0:
+            local = True
+        locations = list(spec.submodule_search_locations or ())
+        if not locations:
+            break
+    return local, found
+
+
+def _static_pass(recording: _Recording) -> None:
+    """Everything the recording can learn from source without running it.
+
+    * Every local import, at any depth, is resolved to its file. The recording
+      finder already saw the ones that ran; this adds the ones that did not — an
+      import inside a function body (`build()` or a gate importing a helper
+      lazily), and a module-level import of a cached module whose name the file
+      did not keep in its globals. Zero bundled hits today: every lazy import in
+      the packs is third-party (R-4).
+    * Every other top-level name that is not the standard library or `atompipe`
+      is a third-party name; `atompipe.*` names outside the spine digest are
+      `spine_extras`.
+
+    A local file some module in `sys.modules` already ran contributes that
+    module's closure; any other is digested as it is on disk and read in turn.
+    """
+    by_file: dict[str, Any] | None = None
+    pending = list(recording.sources.items()) + list(recording.foreign.items())
+    done: set[str] = set()
+    while pending:
+        path, data = pending.pop()
+        if path in done:
+            continue
+        done.add(path)
+        imports, attributes = _static_imports(path, data)
+        search = list(recording.roots) + [os.path.dirname(path)]
+        for level, module, names, _line in imports:
+            if level:
+                base = os.path.dirname(path)
+                for _ in range(level - 1):
+                    base = os.path.dirname(base)
+                targets = [module] if module else []
+                targets += [f"{module}.{n}" if module else n for n in names if n != "*"]
+                lookup = [base]
+            else:
+                top = module.partition(".")[0]
+                if top == "atompipe":
+                    recording.spine_extras.update(
+                        m for m in _spine_names(module, names) if not _is_spine(m))
+                    continue
+                if not top or top in _STDLIB:
+                    continue
+                local, _found = _resolve_local(top, search, recording.roots)
+                if not local:
+                    recording.third_party.add(top)
+                    continue
+                targets = [module] + [f"{module}.{n}" for n in names if n != "*"]
+                lookup = search
+            for target in targets:
+                _local, found = _resolve_local(target, lookup, recording.roots)
+                for fullname, origin, root in found:
+                    if origin in recording.files:
+                        continue
+                    if not origin.endswith(tuple(importlib.machinery.SOURCE_SUFFIXES)):
+                        recording.unmappable(fullname, origin, root)
+                        continue
+                    if by_file is None:
+                        # One file can be in sys.modules twice (fdm-print loads
+                        # `fdm_print_parts` by name and by path); the copy this
+                        # loader ran carries the closure, so it wins.
+                        by_file = {}
+                        for loaded in list(sys.modules.values()):
+                            where = _module_file(loaded)
+                            if where is not None and (_norm(where) not in by_file
+                                                      or _own_closure(loaded) is not None):
+                                by_file[_norm(where)] = loaded
+                    loaded = by_file.get(_norm(origin))
+                    closure = _own_closure(loaded) if loaded is not None else None
+                    if closure is not None:
+                        recording.absorb(closure)
+                        continue
+                    recording.read_foreign(origin)
+                    if origin in recording.foreign:
+                        pending.append((origin, recording.foreign[origin]))
+        for attribute in attributes:
+            recording.spine_extras.update(
+                m for m in _package_attribute(attribute) if not _is_spine(m))
+
+
+def _purge(previous: CodeClosure | None, roots: tuple[str, ...], *, keep: str,
+           memo: dict[str, str | None], everything: bool = False) -> None:
+    """Drop from `sys.modules` every module that would serve stale code to this load.
+
+    Two kinds. A module this loader ran, under the roots or in the previous
+    version's closure, whose own closure no longer matches the disk: the next
+    importer must re-run it, not pick up the old object (a helper edited after
+    its first importer loaded is otherwise served to the second one — S-26
+    in-process, no pyc involved). And a module some other machinery loaded
+    whose file the previous closure recorded at a digest it no longer has.
+    `everything` drops the whole previous closure: the name now belongs to a
+    different file, and none of the old one's helpers are this one's.
+    """
+    recorded = {_norm(p): digest for p, digest in (previous.files if previous else ())}
+    for name, loaded in list(sys.modules.items()):
+        if name == keep or not isinstance(loaded, types.ModuleType):
+            continue
+        where = _module_file(loaded)
+        if where is None:
+            continue
+        key = _norm(where)
+        closure = _own_closure(loaded)
+        if closure is not None:
+            if key not in recorded and _owning_root(where, roots) is None:
+                continue
+            if (everything and key in recorded) or not _closure_current(closure, memo=memo):
+                sys.modules.pop(name, None)
+        elif key in recorded and (everything or _file_sha(where, memo) != recorded[key]):
+            sys.modules.pop(name, None)
+
+
+def _registered(registry: Any) -> list[tuple[str, Any]]:
+    """`(gate id, fn)` for everything `registry` holds, via `ids()` and `get()`."""
+    pairs = []
+    for gate_id in list(registry.ids()):
+        entry = registry.get(gate_id)
+        if entry is not None:
+            pairs.append((gate_id, entry[1]))
+    return pairs
+
+
+def _signature(fn: Any) -> tuple[Any, Any]:
+    return getattr(fn, "__module__", None), getattr(fn, "__qualname__", None)
+
+
+def _drop_stale_gates(registry: Any, name: str, previous: Any) -> None:
+    """Unregister what an earlier run of module `name` put into `registry`.
+
+    Before a re-execution, and before a re-adoption: the new functions are
+    different objects under the same ids, and `Registry.register` rightly refuses
+    a second function for an id it holds. A gate is this module's when its
+    function is one the previous run recorded, or was defined in the module.
+    """
+    old = vars(previous).get(_GATES_ATTR) if previous is not None else None
+    old_fns = {id(fn) for _spec, fn in (old or ())}
+    for gate_id, fn in _registered(registry):
+        if id(fn) in old_fns or getattr(fn, "__module__", None) == name:
+            registry.unregister(gate_id)
+
+
+def _readopt(registry: Any, module: Any, name: str) -> None:
+    """Put a cached module's recorded `(spec, fn)` pairs into `registry`.
+
+    A module served from the cache does not run, so its `@gate` decorators do
+    not fire, and a fresh `Registry` — one per command, one per in-process test —
+    would come back empty: a pack that looks like it ships no gates, which is
+    the silent under-reporting `use_registry` exists to prevent. Stale entries
+    go first: any function from this module that is not a current one, or an
+    older version of a current one (same module and qualname).
+    """
+    pairs = vars(module).get(_GATES_ATTR) or ()
+    current = {id(fn) for _spec, fn in pairs}
+    versions = {_signature(fn) for _spec, fn in pairs}
+    for gate_id, fn in _registered(registry):
+        if id(fn) in current:
+            continue
+        if getattr(fn, "__module__", None) == name or _signature(fn) in versions:
+            registry.unregister(gate_id)
+    for spec, fn in pairs:
+        entry = registry.get(spec.id)
+        if entry is not None and entry[1] is fn:
+            continue
+        registry.register(spec, fn)
+
+
+def _reusable(cached: Any, path: str, roots: tuple[str, ...], registry: Any,
+              attrs: Mapping[str, Any] | None, memo: dict[str, str | None]) -> bool:
+    """May `load_source_module` hand back the module already in `sys.modules`?
+
+    Only the module this loader ran from this very file, with the globals the
+    caller seeds (a pack's `PACK_DIR`) unchanged, with its gate registrations
+    recorded when a registry is asking for them, and with every file of its
+    recorded closure still at its recorded digest. Anything else runs again.
+    """
+    if not isinstance(cached, types.ModuleType):
+        return False
+    where = _module_file(cached)
+    if where is None or _norm(where) != _norm(path):
+        return False
+    closure = _own_closure(cached)
+    if closure is None:
+        return False
+    namespace = vars(cached)
+    if registry is not None and namespace.get(_GATES_ATTR) is None:
+        return False
+    for key, value in (attrs or {}).items():
+        if key not in namespace or namespace[key] != value:
+            return False
+    return _closure_current(closure, roots=roots, memo=memo)
+
+
+def load_source_module(path: str, *, name: str, roots: Iterable[str],
+                       registry: Any = None,
+                       attrs: Mapping[str, Any] | None = None) -> types.ModuleType:
+    """Execute `path` as module `name`, fresh and recorded; or serve it unchanged.
+
+    The one loader for Python the spine runs on a project's behalf: pack gate
+    modules, project gate modules, fixtures, the known-good module and helpers
+    loaded by path (`load_path`). Four promises:
+
+    * **Fresh bytes.** The source is read and those bytes compiled; no `.pyc` is
+      read or written, for the module or for any import under `roots` while it
+      runs (S-26).
+    * **A recorded closure.** Every file under `roots` that ran — or that a
+      function body imports lazily, read statically — is stored on the module as
+      `__atompipe_code__` (a `CodeClosure`; `code_closure` reads it). Computed
+      source compiled or executed from a frame under `roots`, or an import there
+      that is not Python source, gives up precision for every `*.py` under the
+      owning root, and says so in `fallback`.
+    * **A content-keyed cache.** The module already in `sys.modules` under `name`
+      is returned only if this loader ran it from this file and every recorded
+      file still has its recorded digest. Otherwise every stale module it
+      depended on is purged from `sys.modules` and it runs again. In-process
+      callers — a test's second `cli.main`, `pack validate` after an edit — then
+      never run old code under a new digest.
+    * **Gates follow the module.** With `registry`, the `(spec, fn)` pairs the
+      module registered into it while running are recorded as
+      `__atompipe_gates__`; a cache hit re-adopts them into the `registry` the
+      caller passes now, dropping stale ids first, so a fresh `Registry` is never
+      handed back empty. `registry` must be the one `@gate` decorates into
+      during the load — the caller wraps this call in `gates.use_registry(...)`;
+      this module never imports `gates`.
+
+    `attrs` are set on the module before it runs (a pack's `PACK` and
+    `PACK_DIR`, which a gate module may read at import time) and are part of the
+    cache key. `__file__` is `os.path.abspath(path)`, never a realpath:
+    fluids-analytic's control finds its gate module by scanning `sys.modules`
+    for exactly that (packs:H14).
+
+    Raises whatever the module raised, after removing it from `sys.modules` and
+    unregistering what it managed to register: a module that failed to import
+    has registered nothing. The caller words the error; this is not the place
+    that knows whether the file was a pack's or the project's.
+
+    `sys.path` is the caller's: a pack loader puts its directory there for the
+    duration, exactly as before.
+    """
+    abspath = os.path.abspath(path)
+    owned = _roots(roots, abspath)
+    for running in _STACK:
+        if running.name == name:
+            # A module loading itself while it runs: import semantics, the
+            # partially initialised module, rather than infinite recursion.
+            partial = sys.modules.get(name)
+            if partial is not None:
+                return partial
+    memo: dict[str, str | None] = {}
+    cached = sys.modules.get(name)
+    if cached is not None and _reusable(cached, abspath, owned, registry, attrs, memo):
+        if _STACK:
+            # Served, not run: it is still the caller's code (a helper loaded by
+            # path from a gate module's body).
+            _STACK[-1].absorb(_own_closure(cached))
+        if registry is not None:
+            _readopt(registry, cached, name)
+        return cached
+
+    previous = _own_closure(cached) if cached is not None else None
+    moved = cached is not None and _norm(_module_file(cached) or "") != _norm(abspath)
+    _purge(previous, owned, keep=name, memo=memo, everything=moved)
+    if registry is not None:
+        _drop_stale_gates(registry, name, cached)
+
+    loader = _FreshLoader(name, abspath, roots=owned, memo=memo)
+    spec = importlib.util.spec_from_file_location(name, abspath, loader=loader)
+    if spec is None:                              # pragma: no cover - defensive
+        raise ImportError(f"cannot load {abspath}: no import machinery accepted it")
+    module = importlib.util.module_from_spec(spec)
+    for key, value in (attrs or {}).items():
+        setattr(module, key, value)
+    before = set(registry.ids()) if registry is not None else set()
+    # Registered BEFORE execution: a module that imports itself, a dataclass
+    # that resolves its own annotations, and `@gate` reading the module's `PACK`
+    # all look the module up by name while the body is still running.
+    sys.modules[name] = module
+    try:
+        loader.exec_module(module)
+    except BaseException:
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+        if registry is not None:
+            for gate_id in list(registry.ids()):
+                if gate_id not in before:
+                    registry.unregister(gate_id)
+        raise
+    if registry is not None:
+        added = []
+        for gate_id in registry.ids():
+            if gate_id not in before:
+                entry = registry.get(gate_id)
+                if entry is not None:
+                    added.append((entry[0], entry[1]))
+        setattr(module, _GATES_ATTR, tuple(added))
+    return module
+
+
+def load_path(path: str) -> types.ModuleType:
+    """Load a helper by its path, under a name salted with that path.
+
+    For a helper a gate module and its fixture must share, where the directory
+    is on `sys.path` only while gates load (fdm-print's fold and process model).
+    Two copies of one pack in a process get two names, so neither runs the
+    other's helper (packs:H4); two gate modules loading one path get one module,
+    content-keyed like everything `load_source_module` serves. Called while a
+    module is being loaded, the helper joins that module's closure whether it
+    runs or is served from the cache.
+    """
+    abspath = os.path.abspath(path)
+    stem = re.sub(r"\W", "_", os.path.splitext(os.path.basename(abspath))[0]) or "module"
+    salt = hashlib.sha256(os.fsencode(abspath)).hexdigest()[:12]
+    parent = _STACK[-1] if _STACK else None
+    roots = (parent.roots if parent is not None and _owning_root(abspath, parent.roots)
+             else _roots((), abspath))
+    return load_source_module(abspath, name=f"{_PATH_PREFIX}{stem}_{salt}", roots=roots)
+
+
+def code_closure(obj: Any) -> CodeClosure | None:
+    """The recorded closure of a module, or of the module that defines `obj`.
+
+    None for anything this loader did not run — a gate registered from Python
+    in a test, a lambda — which `verdicts.code_digest` then digests by its
+    defining file, or reports as opaque; never as a digest of nothing.
+    """
+    if isinstance(obj, types.ModuleType):
+        return _own_closure(obj)
+    target = getattr(obj, "__func__", obj)        # a bound method's function
+    try:
+        name = getattr(target, "__module__", None)
+    except Exception:                             # noqa: BLE001 - a proxy that refuses
+        return None
+    module = sys.modules.get(name) if isinstance(name, str) else None
+    return _own_closure(module) if module is not None else None
+
+
+# --------------------------------------------------------------------------- #
+# loading the model
+# --------------------------------------------------------------------------- #
+def _import_file(path: str, roots: Iterable[str] | None = None) -> Any:
     """Execute the model file as a module, with its own directory importable.
 
     The directory goes on `sys.path` so a model can split itself across several
@@ -393,10 +1433,18 @@ def _import_file(path: str) -> Any:
     shadow the standard library for every later import in the process,
     including the spine's own. The window is kept as short as the import itself.
 
+    The model always runs again — every load is a fresh `CONFIG` — and while it
+    runs it is recorded like any other module: siblings imported under `roots`
+    come through the fresh loader, and a sibling whose file changed since the
+    last load is purged first, so `import geometry` cannot hand back the old
+    module (S-26, which the entry-only fresh loader left open for siblings).
+
     The consequence, which is worth knowing when you split a model: import your
     sibling modules at MODULE level, not lazily inside `build()`. By the time
     `build()` runs, the path is back to normal — module-level imports are
-    already cached in `sys.modules`, a first lazy import is not.
+    already cached in `sys.modules`, a first lazy import is not. (Its file is
+    still in the model's closure, read statically; the bytes it runs are the
+    stock import system's.)
 
     Only paths this function actually ADDED are removed, so a model that
     legitimately extends `sys.path` for itself keeps its addition.
@@ -414,10 +1462,13 @@ def _import_file(path: str) -> Any:
     stem = os.path.basename(directory) if is_package else os.path.splitext(os.path.basename(path))[0]
     name = _MODULE_PREFIX + (stem or "model")
 
+    owned = _roots(roots, path)
+    memo: dict[str, str | None] = {}
+    loader = _FreshLoader(name, path, roots=owned, memo=memo)   # never a stale .pyc
     spec = importlib.util.spec_from_file_location(
         name,
         path,
-        loader=_FreshLoader(name, path),          # never a stale .pyc; see above
+        loader=loader,
         submodule_search_locations=[directory] if is_package else None,
     )
     if spec is None or spec.loader is None:       # a .py we cannot make a spec for
@@ -434,9 +1485,12 @@ def _import_file(path: str) -> Any:
     # that resolves its own annotations, and pickling all look the module up by
     # name while the body is still running.
     previous = sys.modules.get(name)
+    moved = previous is not None and _norm(_module_file(previous) or "") != _norm(path)
+    _purge(_own_closure(previous) if previous is not None else None, owned,
+           keep=name, memo=memo, everything=moved)
     sys.modules[name] = module
     try:
-        spec.loader.exec_module(module)
+        loader.exec_module(module)
     except BaseException as exc:                  # noqa: BLE001 - re-raised below
         if previous is None:
             sys.modules.pop(name, None)
@@ -515,7 +1569,12 @@ def load_model(root: str, entry: str | None = None) -> LoadedModel:
     often has something to say.
     """
     path = _resolve_entry(root, entry)
-    module = _import_file(path)
+    # The project root owns the model's code, so a sibling under `model/` and a
+    # helper the model imports from elsewhere in the project are both recorded;
+    # the model's own directory is a root too, for an entry that lives outside
+    # the project, and so that computed source in the model falls back to the
+    # model's directory rather than every `*.py` in the project.
+    module = _import_file(path, roots=(root, os.path.dirname(path)))
     relative = rel(path, root)
 
     config = _resolve_config(module, relative)
@@ -577,6 +1636,44 @@ def project(model: LoadedModel) -> dict[str, Any]:
         "config": _safe(model.config, "config"),
         "derived": _safe(derived, "derived"),
     }
+
+
+def flat_params(projection: dict | None) -> tuple[dict[str, Any], list[str]]:
+    """Flatten a projection to `{name: value}` for `GateContext.params`, with conflicts.
+
+    Derived values first, then config over the top, so an INPUT always wins a
+    name collision. `build()` returning a key that shares a config field's name
+    is common and harmless when the values agree (the reference model echoes
+    `material` straight back); when they do NOT agree, one of the two numbers a
+    gate could read is not the model's input, and which one it got would depend
+    on dict ordering. So the input wins, and the disagreement is returned to be
+    reported rather than resolved silently — that is rule 6, cross-representation
+    agreement, applied at the cheapest place it can be applied.
+
+    The one copy (S-28). `cli` flattened for `GateContext.params` and `site` for
+    `ViewContext.params`, each with its own copy of these lines, kept
+    "byte-for-byte" in sync by a comment — and a viewgen and a gate that read one
+    name must get one number, or the picture is of a different design from the
+    one that was measured. It lives here because the projection does, and
+    because a verdict's inputs are digested from exactly this dict: a second
+    copy that drifted would key a verdict on values no gate read.
+
+    Equality is Python's: `7.0` against `7`, or `True` against `1`, is not a
+    conflict. `tests/test_codeload.FlatParamsIsTheOldShape` pins the output —
+    order and types included — to what the two copies produced.
+    """
+    if not projection:
+        return {}, []
+    config = dict(projection.get("config") or {})
+    derived = dict(projection.get("derived") or {})
+    conflicts = [
+        f"{name}: config {config[name]!r} vs build() {derived[name]!r}"
+        for name in sorted(set(config) & set(derived))
+        if config[name] != derived[name]
+    ]
+    flat = dict(derived)
+    flat.update(config)
+    return flat, conflicts
 
 
 def _canonical(projection: dict[str, Any]) -> str:
