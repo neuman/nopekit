@@ -77,6 +77,8 @@ __all__ = [
     "Demonstration",
     "baseline_context",
     "demonstrate",
+    "SealFinding",
+    "seal_findings",
     "match",
     "score",
     "installed",
@@ -1566,6 +1568,132 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
         if out_dir is None:
             shutil.rmtree(base, ignore_errors=True)
     return shown
+
+
+# --------------------------------------------------------------------------- #
+# the seal, read off the trace:  invariant 5 at runtime
+# --------------------------------------------------------------------------- #
+@dataclasses.dataclass(frozen=True)
+class SealFinding:
+    """One pack control that read its HOST's ``ctx.params`` (invariant 5, SEALED).
+
+    ``gate``        the gate whose control it is.
+    ``fixture``     the negative-control reference, as the gate declares it.
+    ``host_paths``  every host-param path the control read, sorted and dotted;
+                    ``"(all params)"`` is the whole top level (``dict(ctx.params)``,
+                    ``{**ctx.params}``, ``len``, ``bool`` ...). A key the host did
+                    not have is a read too: in a host that states it, the value
+                    arrives.
+    """
+
+    gate: str
+    fixture: str
+    host_paths: tuple[str, ...]
+
+
+#: How many host paths a seal problem line names before ``(+n more)``. Why 3: the
+#: same budget a stale reason gets (``verdicts.MAX_STALE_REASONS``), for the same
+#: reason — one line an author reads to the end. Rejected: every path (an identity
+#: fixture hands the gate the host itself, and a gate that probes synonym families
+#: then reads dozens of absent keys through it); one (it cannot say whether the
+#: fixture read one key or copied the whole projection — "(all params)" sorts
+#: first, so it is always among the three when it happened).
+_SEAL_PATHS_SHOWN = 3
+
+
+def _host_path(path: tuple) -> str:
+    """A host-read path, dotted as a stale reason spells a param."""
+    return ".".join(str(part) for part in path) or "(all params)"
+
+
+def _seal_finding(spec: GateSpec, trace: Any) -> SealFinding | None:
+    """The finding in one control's trace, or ``None`` when it read nothing of the
+    host's params.
+
+    ``trace.host_reads`` is filled by the host view ``gates.selftest`` hands the
+    fixture (``verdicts.ParamTrace(host=True)``), so it holds reads of the host's
+    ``ctx.params`` and nothing else: the fixture's own, and the gate's through a
+    context the fixture handed back unchanged. The spine's own ``_fixture_root``
+    lookups (``extra["pack_dirs"]``, ``extra["pack_dir"]``) — the only host reads
+    the P1 probe found on the bundled packs (packs:§2) — read the caller's
+    untraced ``extra`` and never reach it.
+    """
+    paths = tuple(sorted({_host_path(path) for path in (getattr(trace, "host_reads", None) or {})}))
+    if not paths:
+        return None
+    nc = spec.negative_control
+    return SealFinding(gate=spec.id, fixture=(nc.fixture if nc else "") or "", host_paths=paths)
+
+
+def seal_findings(registry: Any, host_ctx: "GateContext", *, tier: int = Tier.EXTERNAL,
+                  out_dir: str | None = None) -> list[SealFinding]:
+    """Every pack control in ``registry`` that reads its host's ``ctx.params``.
+
+    Each pack gate at or below ``tier`` runs its control (:func:`gates.selftest`)
+    with ``host_ctx`` as the host and a trace of its own; a control whose trace
+    recorded any host-param read is a finding. A SEALED fixture builds its
+    known-bad context from the pack's own ``selftest/baseline.json`` and reads
+    nothing of the host (docs/PACK_FORMAT.md, "Fixtures must be SEALED").
+
+    What slipped through without it: SEALED was checked only by outcome — the
+    control run again over an empty host must still fire (the seal probe in
+    :func:`demonstrate` and ``tests/test_packs.py``). A fixture that layers the
+    pack's WHOLE baseline over the host (``{**ctx.params, **BASELINE, <bad>}``)
+    fires identically over both, so the probe passed it, and `pack validate`
+    certified it publishable — while any key the host states beyond the
+    baseline (a synonym, a derived quantity: the waterplane inertia that defused
+    a hull control) still reaches the gate. An identity fixture over a host that
+    is itself bad "fires" for the host's reason; the trace names it anyway. The
+    outcome of a control over one host cannot show what another host would do;
+    what the control READ can.
+
+    * **Pack gates only** (``spec.pack`` set). A project's fixture deriving from
+      its own model is correct there; the rule is for packs, which ship to
+      strangers (CLAUDE.md, invariant 5).
+    * **Host reads only.** Pass a RICH host — a project's live context, or the
+      pack's own baseline as ``ControlsAreSealed`` does: a read of a key the host
+      lacks is recorded too, but a fixture that reads nothing of a host stating
+      every key its gate reads cannot be reading anything a stranger's project
+      could change. Reads of the host's ``extra`` and ``ledger`` are not
+      host reads here: the trace does not tell a fixture's from its gate's on
+      those channels, and cad-solid's ``_sealed`` merges ``extra`` by design
+      (channel parity is P2.3, D-26).
+    * A gate whose tools are absent is not run and reads nothing: ``selftest``
+      asks :func:`gates.availability` before it builds anything.
+    * ``out_dir`` None: a temp directory made here and removed before returning,
+      so nothing lands in a pack (packs:H16). Given: ``<out_dir>/<gate id>/seal``,
+      emptied before its run.
+
+    Never raises for a pack's fault: ``selftest`` turns a broken fixture or a
+    crashing gate into a verdict, and a control that crashed after reading the
+    host has still read it. :func:`demonstrate` makes every finding a problem,
+    so `pack validate` and `gate selftest --pack` refuse on it.
+    """
+    from . import gates as _gates          # local import: see _fresh_registry
+    from .verdicts import GateTrace        # local: the same edge, the same reason
+
+    in_scope = [spec for spec in registry.specs()
+                if (spec.pack or "").strip() and int(spec.tier) <= int(tier)]
+    findings: list[SealFinding] = []
+    if not in_scope:
+        return findings
+    base = out_dir if out_dir is not None else tempfile.mkdtemp(prefix="atompipe-seal-")
+    try:
+        for spec in in_scope:
+            entry = registry.get(spec.id)
+            if entry is None:                       # pragma: no cover - defensive
+                continue
+            _spec, fn = entry
+            trace = GateTrace(kind="control")
+            _gates.selftest(spec, fn, host_ctx, trace=trace,
+                            out_dir=_run_dir(base, spec.id, "seal"))
+            finding = _seal_finding(spec, trace)
+            if finding is not None:
+                findings.append(finding)
+    finally:
+        if out_dir is None:
+            shutil.rmtree(base, ignore_errors=True)
+    return findings
 
 
 # --------------------------------------------------------------------------- #
