@@ -63,7 +63,7 @@ RECORD_DIRS = ("claims", "params", "decisions", "needs", "inputs", "results", "v
 
 #: `why`'s GROUNDED BY section, and one artifact under it.
 GROUNDED_HEAD = re.compile(r"^GROUNDED BY \((?P<count>\d+)\)$")
-GROUNDED_ROW = re.compile(r"^  - (?P<id>\S+)  \[")
+GROUNDED_ROW = re.compile(r"^  - (?P<id>\S+) +\[")
 
 
 # --------------------------------------------------------------------------- #
@@ -229,7 +229,8 @@ class DoctorWritesNothing(_env.EnvCase):
         self.assertIn("will migrate on next command", rows["records"]["detail"])
         self.assertIn("will migrate on next command", text.stdout)
         self.assertEqual(rows["run-history"]["status"], "warn")
-        self.assertIn(".atompipe/runs", rows["run-history"]["detail"])
+        self.assertIn("`runs/`", rows["run-history"]["detail"])
+        self.assertIn("nothing reads it", rows["run-history"]["detail"])
         self.assertFalse(os.path.exists(os.path.join(project, ".atompipe", "project.json")))
 
     def test_on_a_migrated_project_whose_index_is_behind(self):

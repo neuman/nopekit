@@ -2321,10 +2321,12 @@ def param_view(ledger, model: LoadedModel | None, *,
     record, `value=None`, `model_error` set — to `model_error`, else
     `"no model was loaded"`. No number is shown where the model should answer.
 
-    Replaces `sync_params`, which copied the model into the ledger and kept
-    the record's `rejected` whole: a loser added to PARAMS after the param
-    existed never reached anything a reader saw (S-38). Nothing is copied here,
-    so there is nothing to fall behind.
+    Replaces the mutating parameter sync (`sync_params`, deleted at checkpoint
+    1.3 with its last caller), which copied the model into the ledger on every
+    check and kept the record's `rejected` whole: a loser added to PARAMS after
+    the param existed never reached anything a reader saw (S-38), and `why`
+    quoted the copy's value after the model moved (S-39). Nothing is copied
+    here, so there is nothing to fall behind.
     """
     records: dict[str, Param] = {}
     for record in list(getattr(ledger, "params", None) or ()):
@@ -2424,56 +2426,6 @@ def _entry_relative(model: LoadedModel, path: str) -> str:
         return model.entry
 
 
-def sync_params(ledger, model: LoadedModel) -> list[Param]:
-    """Refresh `ledger.params` from the model, preserving ledger-only provenance.
-
-    Two stores hold a parameter and neither is redundant:
-
-    * the **model** owns the VALUE, the units and the rationale. It is the single
-      source of truth (rule 1), and re-reading it on every sweep is what stops the
-      ledger defending a number the design no longer has.
-    * the **ledger** owns everything the model cannot express and a human or agent
-      accumulated over time: rejected alternatives, which input artifacts ground
-      it, which gates protect it, which decision last moved it.
-
-    So this merges rather than replaces. A param the model still defines keeps its
-    ledger provenance and takes the model's current value; a param the model has
-    DROPPED is kept, flagged by `orphan_params`, because deleting it would silently
-    destroy the record of why it once existed — and a parameter that disappears
-    without explanation is exactly the kind of hole the decision log exists to
-    prevent. Call it whenever the model is loaded.
-
-    Superseded by `param_view`, and deleted with the last caller (spec U29). The
-    merge below keeps the record's `rejected` whole, so a loser added to the
-    model's PARAMS after the param existed never reached the ledger (S-38); the
-    view reads both homes on every call instead of copying one into the other.
-    """
-    from_model = {p.name: p for p in params_from_model(model)}
-    existing = {p.name: p for p in ledger.params}
-    merged: list[Param] = []
-
-    for name, fresh in from_model.items():
-        old = existing.get(name)
-        if old is None:
-            merged.append(fresh)
-            continue
-        # Model wins on value/units/derivation; ledger wins on accumulated provenance.
-        merged.append(dataclasses.replace(
-            old,
-            value=fresh.value,
-            units=fresh.units or old.units,
-            rationale=fresh.rationale or old.rationale,
-            derived_from=fresh.derived_from or old.derived_from,
-        ))
-
-    for name, old in existing.items():
-        if name not in from_model:
-            merged.append(old)          # orphan: kept, reported, never silently dropped
-
-    ledger.params = merged
-    return merged
-
-
 def orphan_params(ledger, model: LoadedModel) -> list[str]:
     """Param records (`ledger.params`) the model no longer defines, in record order.
 
@@ -2483,10 +2435,11 @@ def orphan_params(ledger, model: LoadedModel) -> list[str]:
     Both are worth a line in the report rather than a silent deletion.
 
     It reads the records and the model and nothing else: never a merged copy.
-    `sync_params` used to keep an orphan in `ledger.params` so this could find
-    it there; from 1.3 the records are the files under `params/`, and a param the
-    model owns entirely has no record at all, so an orphan is exactly a record
-    with no field behind it — the views `param_view` returns with no `home`.
+    The parameter sync used to keep an orphan in `ledger.params` so this could
+    find it there; from 1.3 the records are the files under `params/`, and a
+    param the model owns entirely has no record at all, so an orphan is exactly
+    a record with no field behind it — the views `param_view` returns with no
+    `home`. `model` and `doctor` both list them from here.
     """
     live = {p.name for p in (model.params or params_from_model(model))}
     return [p.name for p in ledger.params if p.name not in live]

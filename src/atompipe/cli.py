@@ -291,6 +291,28 @@ def _projection(root: str, ledger: Ledger, *, entry: str | None = None) -> tuple
     return model, modelio.project(model)
 
 
+def _entry_edit(root: str) -> str:
+    """Where a project's model entry is recorded, as the file edit that records it.
+
+    `.atompipe/project.json` owns it (checkpoint 1.3); a legacy project keeps it
+    in its ledger's `meta` until a check or a shim migrates it. What slipped
+    through: four messages — `init`'s next step, `check`'s warning, `model`'s
+    refusal, `doctor`'s row — named `model --set-entry`, a flag PLAN A-8
+    removed: a command whose only job was to write one key of one record, which
+    the human and the agent edit as a file like every other record.
+    """
+    if store.is_legacy(root):
+        return (f'"model_entry" under "meta" in {store.ATOMPIPE_DIR}/{store.LEDGER_NAME} '
+                f"(the legacy layout, until a check migrates it)")
+    return f'"model_entry" in {store.ATOMPIPE_DIR}/{store.PROJECT_NAME}'
+
+
+def _no_entry(root: str) -> str:
+    """The one sentence every command says when no model entry is recorded."""
+    return (f'no model entry recorded — set {_entry_edit(root)} to the model file, '
+            f'e.g. "model/<thing>.py"')
+
+
 def _projection_safe(root: str, ledger: Ledger) -> tuple[Any, dict | None, str]:
     """`_projection`, with the failure returned instead of raised.
 
@@ -749,10 +771,92 @@ def _resolved_row(verdict: Verdict, resolution: verdicts.Resolution) -> dict[str
 
 
 # --------------------------------------------------------------------------- #
+# parameters and grounding, read where they are shown
+# --------------------------------------------------------------------------- #
+def _param_views(root: str, ledger: Ledger, model: Any,
+                 model_error: str) -> list[modelio.ParamView]:
+    """`modelio.param_view`, plus — when the model does not load — one bare view
+    per parameter the model's TEXT states and no record holds.
+
+    Why the second half: from checkpoint 1.3 a parameter the model states
+    entirely has no record (`check` stopped copying the model into the records,
+    and the migration writes a param record only for what the model cannot
+    hold), so with the model mid-edit `param_view` knew nothing of `thickness`,
+    and `why thickness` answered "no parameter named thickness" about the
+    number the bracket's failing claim turns on. The names come from
+    `modelio.static_param_prose` — the entry parsed, never imported or run —
+    and each view says why it has no number (`model_error`), never a cached one
+    (S-39)."""
+    views = modelio.param_view(ledger, model, model_error=model_error)
+    if model is None and model_error:
+        held = {view.name for view in views}
+        error = " ".join(model_error.split())
+        stated = modelio.static_param_prose(root, ledger.meta.model_entry)
+        views += [modelio.ParamView(name=name, model_error=error)
+                  for name in stated if name not in held]
+    return views
+
+
+def _grounding(ledger: Ledger, views: Iterable[modelio.ParamView]) -> dict[str, list[str]]:
+    """`{parameter or claim: [artifact ids]}`, derived on every read: the
+    extractions' `grounds`, then what a record declares by hand
+    (`artifacts.grounding`), then what the model's `PARAMS` declares (each
+    view's `grounded_by`) — first-seen order, each id once.
+
+    `why` and `inputs` both read THIS map, so they cannot disagree (S-36). What
+    slipped through: the edge an extraction implies was copied into the
+    parameter it grounds, so deleting the extraction left `why arm_length`
+    saying "GROUNDED BY arm" while `inputs` said `arm` was "NEVER READ"; and once
+    the copy was gone, with nothing derived in its place, the two disagreed the
+    other way round — `inputs` said `arm` grounds `arm_length`, `why` said
+    nothing did."""
+    found = {name: list(ids) for name, ids in artifacts.grounding(ledger).items()}
+    for view in views:
+        bucket = found.setdefault(view.name, [])
+        bucket += [aid for aid in view.grounded_by if aid not in bucket]
+    return {name: ids for name, ids in found.items() if ids}
+
+
+def _why_text(root: str, ledger: Ledger, registry: gates.Registry, model: Any,
+              model_error: str, view: Ledger, resolution: verdicts.Resolution,
+              name: str) -> str:
+    """`decisions.why` with all four of its inputs from where they live now
+    (spec §3.10, U29): each parameter from `param_view` (the model's value, and
+    what lost in both homes); a claim's gates from registry coverage
+    (`claims.effective_gates`); a parameter's gates from what each gate read when
+    it last executed (`verdicts.last_read_sets`, registered gates only); every gate
+    line from the resolver's effective verdicts; and grounding from the
+    extractions (`_grounding`). Nothing here is a stored copy: a record may no
+    longer hold `gates`, `value` or a grounding back-reference at all."""
+    registered = set(registry.ids())
+    read_sets = {gate: reads for gate, reads in verdicts.last_read_sets(root).items()
+                 if gate in registered}
+    views = _param_views(root, ledger, model, model_error)
+    grounds = _grounding(ledger, views)
+    views = [dataclasses.replace(v, grounded_by=tuple(grounds.get(v.name, ())))
+             for v in views]
+    shown = dataclasses.replace(
+        view, claims=[dataclasses.replace(claim, grounded_by=list(grounds.get(claim.id, ())))
+                      for claim in view.claims])
+    return decisions.why(shown, name, view=views,
+                         coverage=claims.effective_gates(ledger, registry),
+                         read_sets=read_sets, verdicts=resolution.verdicts)
+
+
+# --------------------------------------------------------------------------- #
 # init
 # --------------------------------------------------------------------------- #
 def cmd_init(args: argparse.Namespace) -> int:
-    """Create the project layout, the starter ledger, and the next three steps.
+    """Create the records layout, and print the next three steps.
+
+    Born migrated (checkpoint 1.3): `store.init` writes `.atompipe/project.json`
+    LAST, the empty record directories, the input buckets, and the three marked
+    ignore/attribute blocks — and no `ledger.json`. What slipped through before:
+    `init` wrote the whole project into a `ledger.json`, the layout 1.3 migrates
+    away from, so every new project was a legacy one, migrated by its first
+    `check` with a `git rm --cached` notice about a file git had never tracked
+    (phase-1.md's V row: `init` then `status` prints no notice). The index is a
+    command's output, never `init`'s (`_INDEX_UNTOUCHED`).
 
     The last part is not decoration. `init` that prints "initialised." leaves a
     new user staring at eight empty directories with no idea which one is theirs,
@@ -760,7 +864,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     evidence is gathered — which is how numbers arrive with no provenance and
     stay that way. The three steps are printed in the order that produces a
     project with grounds: ask for evidence, write the claims it supports, then
-    the model.
+    the model. The third names the file edit that records the model's entry — it
+    named `model --set-entry` until PLAN A-8 removed the flag, and
+    `project.json` is the one home of the entry.
     """
     root = os.path.abspath(getattr(args, "dir", None) or os.getcwd())
     name = (args.name or os.path.basename(root.rstrip(os.sep)) or "project").strip()
@@ -774,26 +880,33 @@ def cmd_init(args: argparse.Namespace) -> int:
         spine_version=__version__,
     )
     ledger = store.init(root, meta)
-    paths = store.project_paths(root)
+    project = rel(store.project_paths(root)["project"], root)
+    entry = ledger.meta.model_entry
+    model_step = (f"write {entry} — a dataclass CONFIG plus build(config) -> dict — "
+                  f"then: atompipe check" if entry else
+                  f"write model/<thing>.py — a dataclass CONFIG plus build(config) -> dict "
+                  f"— then record it as \"model_entry\": \"model/<thing>.py\" in {project}, "
+                  f"and: atompipe check")
 
     if args.json:
         _dump({
             "root": root,
-            "ledger": rel(paths["ledger"], root),
+            "project": project,
             "meta": ledger.meta.to_dict(),
             "next": [
                 "atompipe ask",
                 "write claims/C1.json: {\"statement\": ..., \"acceptance\": "
                 "{\"quantity\": ..., \"comparator\": \"<=\", \"limit\": ...}}",
-                "atompipe model --set-entry model/<thing>.py",
+                model_step,
             ],
         })
         return 0
 
     _say(f"initialised atompipe project {name!r} at {root}")
-    _say(f"  {rel(paths['ledger'], root):<24} the whole project state — claims, evidence,"
-         f" decisions")
-    _say(f"  {'inputs/':<24} evidence you put in by hand ({len(store.INPUT_BUCKETS)} buckets)")
+    _say(f"  {project:<24} the project: its name, model entry and packs")
+    _say(f"  {'claims/':<24} one file per claim — what must be true")
+    _say(f"  {'inputs/':<24} evidence you put in by hand ({len(store.INPUT_BUCKETS)} buckets),"
+         f" one record per artifact")
     _say(f"  {'model/':<24} the parametric model: the only source of truth")
     _say(f"  {'docs/':<24} generated readiness report and decision log")
     _say("")
@@ -805,8 +918,13 @@ def cmd_init(args: argparse.Namespace) -> int:
     _say("  2. write claims/C1.json — one claim per file, what must be true:")
     _say('       {"statement": "floats with the full payload at <=60% draft",')
     _say('        "acceptance": {"quantity": "draft fraction", "comparator": "<=", "limit": 0.6}}')
-    _say("  3. write model/<thing>.py — a dataclass CONFIG plus build(config) -> dict —")
-    _say("     then: atompipe model --set-entry model/<thing>.py && atompipe check")
+    if entry:
+        _say(f"  3. write {entry} — a dataclass CONFIG plus build(config) -> dict —")
+        _say("     then: atompipe check")
+    else:
+        _say("  3. write model/<thing>.py — a dataclass CONFIG plus build(config) -> dict —")
+        _say(f'     then record it as "model_entry": "model/<thing>.py" in {project},')
+        _say("     and: atompipe check")
     return 0
 
 
@@ -1257,8 +1375,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         ctx = _context(root, ledger, model, projection, tier, quiet=args.json)
 
         if projection is None and registry.specs():
-            _warn("warning: no model entry recorded — gates that read ctx.params "
-                  "will error. `atompipe model --set-entry model/<thing>.py`")
+            _warn(f"warning: {_no_entry(root)} — until then, gates that read "
+                  f"ctx.params will error")
 
         def _landed(row: verdicts.SweepRow) -> None:
             # `sweep` calls this the instant a gate's row exists, before the next
@@ -1276,7 +1394,13 @@ def cmd_check(args: argparse.Namespace) -> int:
         view, resolution = _resolved(root, ledger, registry, projection, "", now=now,
                                      model=model, sweep=result)
         if record:
-            verdicts.write_last_check(root, result, resolution, now=now)
+            # `params` is the parameter view (1.3): the model's value and where it
+            # lives, and what lost in both homes — beside the statuses, so the
+            # agent's second read has the numbers `why` would print. It was `{}`
+            # from 1.2 until the view existed.
+            views = modelio.param_view(ledger, model)
+            verdicts.write_last_check(root, result, resolution, now=now,
+                                      params={view.name: view.to_dict() for view in views})
             # The index, still under the lock, so the sweep that just migrated a
             # legacy project leaves it indexed before any reader can look.
             # `main` touches it again after the command; unchanged, that writes
@@ -1565,24 +1689,62 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _input_bytes(root: str, artifact: Any, digests: FileDigests) -> dict[str, Any]:
+    """What an artifact's record says about its bytes, beside what the bytes say
+    now: `record` (its file), `sha256` (the digest of the bytes NOW, `None` when
+    they are missing), `pinned` (the digest the record pinned at ingest),
+    `drift` and `exists` (`None` for a link, which has no bytes) — the keys, and
+    the rule, of the index's input rows (`store.build_index`), so `inputs` and
+    `.atompipe/ledger.json` never disagree about a file. What slipped through
+    before (S-45): evidence was hashed at ingest and never again, and nothing a
+    human ran said that tampered bytes had moved."""
+    pinned = artifact.sha256 or ""
+    facts: dict[str, Any] = {"record": f"{store.INPUTS_NAME}/{artifact.id}.json",
+                             "sha256": None, "pinned": pinned, "drift": False,
+                             "exists": None}
+    if artifact.path:
+        path = artifact.path.replace("\\", "/")
+        full = path if os.path.isabs(path) else os.path.join(root, *path.split("/"))
+        computed = digests.digest(full)
+        facts.update(sha256=computed, exists=computed is not None,
+                     drift=bool(pinned) and computed is not None and computed != pinned)
+    return facts
+
+
 def cmd_inputs(args: argparse.Namespace) -> int:
     """List ingested evidence; `--unextracted` lists only the decorations.
 
     The `[!]` marker on an unread artifact is the whole reason this listing
     exists as its own command rather than a line in `status`: a project with
     twelve files and two extractions looks grounded from the outside and is not.
+
+    Each row carries its record (`inputs/<id>.json`), the digest of its bytes
+    now against the one pinned at ingest — `DRIFT` when they differ, `MISSING`
+    when the bytes are gone (`_input_bytes`) — and what it grounds, from the
+    same derived map `why` reads (`_grounding`, S-36). A READ: no lock, no
+    record, and the digest cache is consulted, never saved.
     """
     root = _root(args)
     ledger = store.load(root)
+    model, _projection_unused, model_error = _projection_safe(root, ledger)
+    grounds = _grounding(ledger, _param_views(root, ledger, model, model_error))
+    grounded: dict[str, list[str]] = {}
+    for target, ids in grounds.items():
+        for aid in ids:
+            grounded.setdefault(aid, []).append(target)
+    digests = FileDigests(os.path.join(store.atompipe_dir(root), store.CACHE_NAME,
+                                       store._DIGESTS_NAME))
     rows = artifacts.unextracted(ledger) if args.unextracted else list(ledger.inputs)
     if args.kind:
         rows = [a for a in rows if str(a.kind) == args.kind]
+    facts = {a.id: _input_bytes(root, a, digests) for a in rows}
 
     if args.json:
-        _dump({"inputs": [a.to_dict() for a in rows],
+        _dump({"inputs": [dict(a.to_dict(), **facts[a.id], grounds=grounded.get(a.id, []))
+                          for a in rows],
                "total": len(ledger.inputs),
                "unextracted": len(artifacts.unextracted(ledger)),
-               "grounding": artifacts.grounding(ledger)})
+               "grounding": grounds})
         return 0
 
     if not rows:
@@ -1595,6 +1757,15 @@ def cmd_inputs(args: argparse.Namespace) -> int:
         where = artifact.path or artifact.url
         note = (f"{len(artifact.extractions)} extraction(s)" if artifact.extractions
                 else "NEVER READ")
+        targets = grounded.get(artifact.id, [])
+        if targets:
+            note += f" — grounds {', '.join(targets)}"
+        row = facts[artifact.id]
+        if row["exists"] is False:
+            note += f" — MISSING: {row['record']} names bytes that are not there"
+        elif row["drift"]:
+            note += (f" — DRIFT: changed since it was ingested (pinned "
+                     f"{row['pinned'][:12]}, now {row['sha256'][:12]})")
         _say(f"{mark} {artifact.id:<20} {str(artifact.kind):<12} {where:<40} {note}")
     unread = [a for a in rows if not a.extractions]
     if unread:
@@ -1720,9 +1891,10 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
 def cmd_claim_show(args: argparse.Namespace) -> int:
     """One claim's whole provenance — the same view `atompipe why` gives.
 
-    Routed through `decisions.why` rather than re-rendered here, because two
-    renderings of one claim's history is two places to forget the rejected
-    alternatives.
+    Routed through `_why_text` — `decisions.why` with the same coverage,
+    verdicts and derived grounding `why` passes — rather than re-rendered here,
+    because two renderings of one claim's history is two places to forget the
+    rejected alternatives.
     """
     root = _root(args)
     ledger = store.load(root)
@@ -1739,15 +1911,16 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
     claim = view.claim(args.id)
     status = claims.resolve_status(claim, view.verdicts, stale_gates=resolution.stale_gates)
 
+    why = _why_text(root, ledger, registry, model, model_error, view, resolution, claim.id)
     if args.json:
         _dump(dict(claim.to_dict(), status=str(status),
                    covered_by=claims.coverage(view, registry).get(claim.id, []),
                    verdicts=[_resolved_row(v, resolution)
                              for v in claims.covering_verdicts(claim, view.verdicts)],
-                   why=decisions.why(view, claim.id)))
+                   why=why))
         return 0
     _say(f"{report.status_tag(status)} {claim.id}")
-    sys.stdout.write(decisions.why(view, claim.id))
+    sys.stdout.write(why)
     return 0
 
 
@@ -2773,20 +2946,19 @@ def cmd_why(args: argparse.Namespace) -> int:
     copying the model into the records, and the migration writes a param record
     only for what the model cannot hold — so a `why` that looked for one
     answered "no parameter named thickness" about the number the bracket's
-    failing claim turns on.
+    failing claim turns on; with the model mid-edit it still names it, and says
+    the model does not load instead of a number (`_param_views`). What grounds
+    it is derived from the extractions, the map `inputs` reads (`_grounding`,
+    S-36). All of it through `_why_text`, which `claim show` shares.
     """
     root = _root(args)
     ledger = store.load(root)
     registry, _problems = _registry(root, ledger, strict=False)
     model, projection, model_error = _projection_safe(root, ledger)
-    view, _resolution = _resolved(root, ledger, registry, projection, model_error,
-                                  now=utcnow_iso(), model=model)
-    registered = set(registry.ids())
-    read_sets = {gate: reads for gate, reads in verdicts.last_read_sets(root).items()
-                 if gate in registered}
-    text = decisions.why(view, args.name,
-                         view=modelio.param_view(ledger, model, model_error=model_error),
-                         read_sets=read_sets)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    text = _why_text(root, ledger, registry, model, model_error, view, resolution,
+                     args.name)
     if args.json:
         _dump({"name": args.name, "why": text})
         return 0
@@ -3023,56 +3195,49 @@ def cmd_model(args: argparse.Namespace) -> int:
 
     `--write` produces `.atompipe/model.json`, the diffable view: sorted keys,
     one value per line, so a parameter change reads as `deflection 0.70 -> 0.47`
-    in `git diff` instead of as one enormous line. `--set-entry` records which
-    file is the model — the loader deliberately never guesses, because "the only
-    .py in model/" works right up until there are two.
+    in `git diff` instead of as one enormous line. `--entry` projects another
+    file without recording it. Which file IS the model is recorded in
+    `.atompipe/project.json` (`"model_entry"`) and nowhere else — the loader
+    deliberately never guesses, because "the only .py in model/" works right up
+    until there are two.
+
+    What slipped through, three times over. Plain `model` took the build lock
+    and saved the whole ledger, three lines below a comment promising it did
+    not — so printing the projection while a sweep was in flight contended for
+    the lock, and a `model` in a loop rewrote the ledger forever. `--write`
+    primed the parameter records from the model (`sync_params`): every value,
+    unit and rationale copied into a second home, stale the moment the model
+    moved (S-39). And `--set-entry` was a command whose only job was to write
+    one key of one record (PLAN A-8 removed it: the entry is edited in the file
+    like every other record). Now `model` is a read, `--write` writes the one
+    output it names, and no record is touched.
+
+    Orphans — param records whose field the model no longer defines — are read
+    off the records (`modelio.orphan_params`): a parameter the model owns
+    entirely has no record, and is no orphan.
     """
     root = _root(args)
-
-    if args.set_entry:
-        # One file, `project.json`, like the `packs add` shim: checked before
-        # anything is written, and a legacy ledger migrates first.
-        candidate = os.path.join(root, args.set_entry)
-        if not os.path.exists(candidate) and not os.path.isabs(args.set_entry):
-            raise AtompipeError(
-                f"{args.set_entry} does not exist (looked at {candidate}) — "
-                f"create the model first, then record it")
-        now = utcnow_iso()
-        with _lock(root):
-            ledger = _migrate(root, apply=True, now=now)
-            store.write_project(root, dataclasses.replace(ledger.meta,
-                                                          model_entry=args.set_entry))
     ledger = store.load(root)
 
     model, projection = _projection(root, ledger, entry=args.entry)
     if projection is None:
         raise AtompipeError(
-            "no model entry recorded — `atompipe model --set-entry model/<thing>.py` "
-            "(the model is a dataclass CONFIG plus build(config) -> dict)")
+            f"{_no_entry(root)} (the model is a dataclass CONFIG plus build(config) -> "
+            f"dict); `atompipe model --entry <file>` projects one without recording it")
 
     digest = modelio.model_hash(projection)
     undocumented = modelio.undocumented_params(model)
 
-    # Plain `atompipe model` is a READ. It used to take the build lock and save
-    # the ledger unconditionally, three lines below the comment promising it did
-    # not — so printing the projection while a sweep was in flight contended for
-    # the lock, and a `model` in a loop rewrote the ledger's mtime forever.
-    #
-    # Nor does `--write` (or `--set-entry`) prime the parameter records from the
-    # model any more: that copied every value, unit and rationale into a second
-    # home, stale the moment the model moved (S-39), and a param record may not
-    # hold a value at all now. The model is read where a parameter is shown.
-    # `--write` writes the one output it names, `.atompipe/model.json`.
     written = ""
     if args.write:
         with _lock(root):
             written = modelio.write_projection(root, projection)
-    # Lock-free: `orphan_params` only compares the records with the model.
     orphans = modelio.orphan_params(ledger, model)
 
     if args.json:
         _dump({"entry": model.entry, "hash": digest, "projection": projection,
                "params": [param.to_dict() for param in model.params],
+               "orphans": orphans,
                "undocumented": undocumented,
                "written": rel(written, root) if written else ""})
         return 0
@@ -3081,12 +3246,12 @@ def cmd_model(args: argparse.Namespace) -> int:
     derived = projection.get("derived") or {}
     _say(f"model: {model.entry}  hash {digest}")
     if orphans:
-        _say(f"  {len(orphans)} ledger param(s) the model no longer defines: "
+        _say(f"  {len(orphans)} param record(s) the model no longer defines: "
              f"{', '.join(orphans[:6])}"
              + ("..." if len(orphans) > 6 else "")
              + "  — renamed, or dropped without a decision entry?")
     _say(f"  {len(config)} config value(s), {len(derived)} derived value(s), "
-         f"{len(model.params)} param record(s)")
+         f"{len(model.params)} param(s)")
     if undocumented:
         _say(f"  no rationale: {', '.join(undocumented)} — a number with no rationale "
              f"gets re-litigated by every fresh reader")
@@ -3262,12 +3427,21 @@ def _site_state(root: str) -> dict:
     into three opinions about whether the site is current — which is the
     property the site itself exists to have.
 
-    Staleness here is the SITE's staleness (was the ledger written after
-    `state.json`?), which is a different question from the verdicts' staleness
-    (has the model moved since the sweep?). Both are reported, separately,
-    because the fixes are different commands: `atompipe site build` for the
-    first and `atompipe check` for the second. Collapsing them into one "stale"
-    flag sends half the readers to the wrong one.
+    Staleness here is the SITE's staleness (were the records the page was built
+    from moved since?), which is a different question from the verdicts'
+    staleness (did a gate's inputs move since its verdict?). Both are reported,
+    separately, because the fixes are different commands: `atompipe site build`
+    for the first and `atompipe check` for the second. Collapsing them into one
+    "stale" flag sends half the readers to the wrong one.
+
+    The page records the digest of the records it was built from
+    (`meta.records_digest`), and this compares it with `store.records_digest`
+    now (cli:H16). What it replaced compared the mtimes of `ledger.json` and
+    `state.json`: from checkpoint 1.3 `ledger.json` is a generated index that
+    every command rewrites, so a page built from unchanged records read stale
+    after any `status`, and a record edited by hand — before a command had
+    rebuilt the index — read current. A page with no digest was built by an
+    older spine and cannot say what it was built from: stale.
     """
     site_dir = os.path.join(root, site.SITE_DIR)
     state_path = os.path.join(site_dir, site.DATA_DIR, site.STATE_NAME)
@@ -3344,19 +3518,24 @@ def _site_state(root: str) -> dict:
     info["claims"] = len(payload.get("claims") or [])
     info["verdicts"] = len(payload.get("verdicts") or [])
 
-    # mtime, not the two timestamps: `built` is when the build ran and the
-    # ledger carries no "written at" field at all, so comparing the files
-    # themselves is the only comparison that is a fact rather than an inference.
-    ledger_path = store.ledger_path(root)
+    built_from = str(meta.get("records_digest") or "")
     try:
-        if os.path.getmtime(ledger_path) > os.path.getmtime(state_path):
-            info["stale"] = True
-            info["stale_reason"] = ("the ledger has changed since the site was built "
-                                    "— `atompipe site build`")
-    except OSError:                     # pragma: no cover - the ledger was just read
-        pass
-    if not info["stale"]:
-        info["stale_reason"] = "current with the ledger"
+        records_now = store.records_digest(root)
+    except (AtompipeError, OSError) as exc:
+        info["stale"] = True
+        info["stale_reason"] = (f"the records cannot be read ({exc}) — fix them, then "
+                                f"`atompipe site build`")
+        return info
+    if not built_from:
+        info["stale"] = True
+        info["stale_reason"] = ("the page does not say which records it was built from "
+                                "(an older build) — `atompipe site build`")
+    elif built_from != records_now:
+        info["stale"] = True
+        info["stale_reason"] = ("the records have changed since the site was built "
+                                "— `atompipe site build`")
+    else:
+        info["stale_reason"] = "current with the records"
     return info
 
 
@@ -3387,7 +3566,7 @@ def _site_line(info: dict) -> str:
     if dangling:
         bits.append(f"{dangling} dangling locator(s)")
     if info["stale"]:
-        bits.append("STALE: the ledger has moved — `atompipe site build`")
+        bits.append("STALE: the records have moved — `atompipe site build`")
     elif info["age"]:
         bits.append(f"built {info['age']}")
     return f"site: {', '.join(bits)}"
@@ -4219,6 +4398,105 @@ def _doctor_seal_row(results: list[dict], registry: gates.Registry,
            f"none reads them" + (f" ({missing} not run: tools missing here)" if missing else ""))
 
 
+#: The legacy run history's directory, `.atompipe/runs/`. Nothing reads it
+#: since checkpoint 1.2 (git and the verdict cache are the history, S-89); the
+#: migration leaves it where it was, and `doctor` names it until it is removed.
+_LEFTOVER_RUNS = "runs"
+
+
+def _record_problems(root: str) -> list[str]:
+    """Every record file the strict reader refuses, one sentence each — the
+    project file first, then each kind's files in order. `[]` on a legacy
+    project, whose one file is the ledger (its refusal is the load's own)."""
+    if store.is_legacy(root):
+        return []
+    try:
+        meta = store.read_project(root)
+    except AtompipeError as exc:
+        return [str(exc)]
+    problems: list[str] = []
+    for kind in store.RECORD_DIRS:
+        try:
+            files = store._record_files(root, kind)
+        except AtompipeError as exc:
+            problems.append(str(exc))
+            continue
+        for _stem, path in files:
+            try:
+                store.read_record(path, kind, model_entry=meta.model_entry)
+            except AtompipeError as exc:
+                problems.append(str(exc))
+    return problems
+
+
+def _doctor_records_rows(results: list[dict], root: str, ledger: Ledger) -> None:
+    """The rows about where the project's facts live: `records` (the layout, and
+    what a legacy ledger will become), `run-history` (a leftover `runs/`), and
+    `index` (does `.atompipe/ledger.json` agree with the records?).
+
+    Each one WRITES NOTHING, and that is the design, not a limitation: a doctor
+    that migrated a legacy project, or rebuilt the index it is comparing, would
+    hide the problem from the next run — so a legacy ledger is migrated in
+    memory only (`store.migrate_legacy(apply=False)`, the plan `check` would
+    carry out) and "will migrate on next command" is said, not done. An index
+    behind the records is a warning: it is what a hand edit leaves until the
+    next command rebuilds it, and the records are the truth either way."""
+    legacy = store.is_legacy(root)
+    counts = (f"{len(ledger.claims)} claims, {len(ledger.params)} "
+              f"{'params' if legacy else 'param records'}, "
+              f"{len(ledger.inputs)} artifacts, {len(ledger.needs)} needs, "
+              f"{len(ledger.decisions)} decisions")
+    if legacy:
+        plan = store.migrate_legacy(root, apply=False, when="",
+                                    model_prose=modelio.static_param_prose)
+        kinds: dict[str, int] = {}
+        for rel_path in plan.files:
+            kind = rel_path.split("/", 1)[0]
+            if kind in store.RECORD_DIRS:
+                kinds[kind] = kinds.get(kind, 0) + 1
+        into = ", ".join(f"{kinds[k]} {k}/" for k in store.RECORD_DIRS if kinds.get(k))
+        _check(results, "records", "warn",
+               f"legacy {store.ATOMPIPE_DIR}/{store.LEDGER_NAME} ({counts}), read in "
+               f"memory — it will migrate on next command that writes (check, or a shim: "
+               f"ingest, extract, decide, packs add, claim physical) into "
+               f"{into or 'no record files'} and {store.ATOMPIPE_DIR}/{store.PROJECT_NAME}; "
+               f"doctor writes nothing")
+    else:
+        _check(results, "records", "ok", f"{counts} — every record file reads strictly")
+
+    # The row names the directory and never opens a file in it: a corrupt run
+    # file is no command's problem (`test_status_stale.RunHistoryIsGone` holds
+    # doctor to never naming one), and the directory's name is said as `runs/`
+    # under `.atompipe/` for the same test, which reads any row naming
+    # `.atompipe/runs` as a reader of the history.
+    runs = os.path.join(store.atompipe_dir(root), _LEFTOVER_RUNS)
+    if os.path.isdir(runs):
+        _check(results, "run-history", "warn",
+               f"`{_LEFTOVER_RUNS}/` is left in `{store.ATOMPIPE_DIR}/` from the run "
+               f"history, and nothing reads it any more (git and the verdict cache are "
+               f"the history) — remove it with `git rm -r`, when you are ready")
+
+    if legacy:
+        _check(results, "index", "ok",
+               f"none: on a legacy project {store.ATOMPIPE_DIR}/{store.LEDGER_NAME} is "
+               f"still the records")
+        return
+    if not os.path.isfile(store.ledger_path(root)):
+        _check(results, "index", "ok",
+               f"not written yet — the next command writes {store.ATOMPIPE_DIR}/"
+               f"{store.LEDGER_NAME} from the records")
+        return
+    try:
+        behind = store.agree(root)
+    except (AtompipeError, OSError) as exc:
+        _check(results, "index", "warn", f"could not be compared with the records: {exc}")
+        return
+    _check(results, "index", "warn" if behind else "ok",
+           f"{store.ATOMPIPE_DIR}/{store.LEDGER_NAME} is behind the records: "
+           f"{_listed(behind)} — any command but doctor rebuilds it; the records are "
+           f"the truth" if behind else "agrees with the records")
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Everything that could be wrong with this environment, in one pass.
 
@@ -4239,6 +4517,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     gates are current is `status`'s `stale:` block, per gate, from the resolver.
     It never writes, and it runs no project gate — only pack controls, traced,
     into a temp directory, to see whether they read their host.
+
+    From checkpoint 1.3 it also says where the project's facts live, and still
+    writes nothing (`_doctor_records_rows`): `records` — the record files, each
+    one the strict reader refuses a FAIL row of its own (the load stops at the
+    first, and a human needs the list), or, on a legacy project, the ledger read
+    in memory and what it "will migrate on next command" into, never migrated
+    here; `run-history` — a leftover `.atompipe/runs/`; `index` — whether
+    `.atompipe/ledger.json` agrees with the records, never rebuilt here (it is
+    the one command `_touch_index` skips).
 
     Exit 1 on any FAIL so it is usable in CI as an environment gate. Warnings do
     not fail: a solver that is not installed here is a real fact about the
@@ -4268,12 +4555,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     try:
         ledger = store.load(root)
     except AtompipeError as exc:
-        _check(results, "ledger", "FAIL", str(exc))
+        # One FAIL row per record the strict reader refuses, never an exit 2:
+        # `doctor` is where a human finds out WHICH files, and the load stops at
+        # the first.
+        for problem in _record_problems(root) or [str(exc)]:
+            _check(results, "records", "FAIL", problem)
         return _doctor_finish(args, results)
-    _check(results, "ledger", "ok",
-           f"{len(ledger.claims)} claims, {len(ledger.params)} params, "
-           f"{len(ledger.inputs)} artifacts, {len(ledger.needs)} needs, "
-           f"{len(ledger.decisions)} decisions, {len(ledger.verdicts)} verdicts")
+    _doctor_records_rows(results, root, ledger)
 
     paths = store.project_paths(root)
     missing = [key for key in ("out", "inputs", "docs", "model")
@@ -4333,8 +4621,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     projection = None
     model_error = ""
     if not (ledger.meta.model_entry or "").strip():
-        _check(results, "model", "warn",
-               "no model entry recorded — `atompipe model --set-entry model/<thing>.py`")
+        _check(results, "model", "warn", _no_entry(root))
     else:
         try:
             model, projection = _projection(root, ledger)
@@ -4358,15 +4645,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                f"{len(undocumented)} param(s) with no rationale: "
                f"{', '.join(undocumented[:6])}" if undocumented
                else "every param carries a rationale")
-        # Checked against a COPY: doctor never writes, and a diagnostic that
-        # silently repaired what it was diagnosing would hide the problem from
-        # the next run.
-        declared = {param.name for param in (model.params or [])}
-        orphans = [param.name for param in ledger.params if param.name not in declared]
+        # Off the records (`modelio.orphan_params`): a param record whose field
+        # the model no longer defines. A parameter the model owns entirely has
+        # no record, and is no orphan.
+        orphans = modelio.orphan_params(ledger, model)
         _check(results, "model-params", "warn" if orphans else "ok",
-               f"{len(orphans)} ledger param(s) the model no longer declares: "
+               f"{len(orphans)} param record(s) the model no longer defines: "
                f"{', '.join(orphans[:6])} — renamed, or removed and still grounded"
-               if orphans else f"{len(declared)} param(s), all still in the model")
+               if orphans else f"{len(model.params)} param(s); every param record "
+                               f"names one the model defines")
 
     # Two packs, one word, two meanings. The spine knows which packs are installed
     # and what each of them reads, so a collision between their key vocabularies is
@@ -4715,11 +5002,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_packs_add)
 
     # -- model / doctor --------------------------------------------------- #
+    # No `--set-entry` (PLAN A-8): the entry is `"model_entry"` in
+    # `.atompipe/project.json`, edited as the file it is.
     p = sub.add_parser("model", parents=[common], help="the model, projected")
     p.add_argument("--write", action="store_true", help="write .atompipe/model.json")
     p.add_argument("--entry", default=None, help="project this file instead of the recorded one")
-    p.add_argument("--set-entry", default="", metavar="PATH",
-                   help="record this file as the project's model")
     p.set_defaults(func=cmd_model)
 
     # -- site ------------------------------------------------------------- #
@@ -4771,10 +5058,11 @@ def _tag_subparsers(parser: argparse.ArgumentParser) -> None:
     """Give every subparser a `_parser` default pointing at itself.
 
     So that `main` can hand a bad flag back to the parser the user was actually
-    using. `atompipe check --tierr 1` printed the two-line TOP-LEVEL usage —
-    `usage: atompipe [-h] [--version] [-C DIR] <command> ...` — which lists the
-    subcommands and not one of `check`'s own flags, so the reader learns nothing
-    about the flag they got wrong and has to go and type `--help` separately.
+    using. A typo'd flag on `check` (`--tierr 1`) printed the two-line TOP-LEVEL
+    usage — `usage: atompipe [-h] [--version] [-C DIR] <command> ...` — which
+    lists the subcommands and not one of `check`'s own flags, so the reader
+    learns nothing about the flag they got wrong and has to go and type `--help`
+    separately.
 
     argparse fills defaults from the innermost parser last (each subparser parses
     into a fresh namespace that is then copied outward), so `args._parser` ends

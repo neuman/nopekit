@@ -100,6 +100,7 @@ from typing import Any, Callable, Iterable
 from . import claims as claim_logic
 from . import modelio
 from . import report as report_logic
+from . import store
 from . import verdicts as verdict_logic
 from .gates import availability as _gate_availability
 from .models import Ledger, Locator, Verdict, View, ViewKind
@@ -1852,6 +1853,13 @@ def state(
             "stale": everything or bool(stale_gates),
             "stale_reason": (_MARKED_STALE if everything
                              else _stale_reason(resolution, stale_gates)),
+            # Which records this page was built from: `store.records_digest`,
+            # over the record files' paths and bytes and `project.json`. The
+            # page's own staleness (`cli._site_state`) compares it with the
+            # records now. What it replaced compared mtimes with `ledger.json`,
+            # which from 1.3 is a generated index every command rewrites — a page
+            # of unchanged records read stale after any `status` (cli:H16).
+            "records_digest": store.records_digest(root),
             # Stated on the artifact itself, because someone will find this file
             # on its own and wonder whether editing it does anything.
             "generated": "atompipe site build — an output of the ledger and its verdict "

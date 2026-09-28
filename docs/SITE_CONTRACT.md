@@ -220,6 +220,7 @@ was the one a reader of the contract would never look for.
                 "packs": [ … ], "spine_version": …,            // ProjectMeta, verbatim
                 "built": …, "stale": true,
                 "stale_reason": "bracket.bed_fit: config.bed_xy 220.0 -> 250.0",
+                "records_digest": "<64 hex>",           // the records it was built from
                 "generated": "atompipe site build — an output … not a source …" },
   "readiness": { "verdict": "…one honest sentence…", "counts": {…}, "kinds": {…},
                  "ready": false, "blocking": ["C1", "C7"], "n_claims": 7, "n_critical": 7,
@@ -273,6 +274,18 @@ an agent can read the site's state without a browser.
   `meta.last_run`: the run history is gone (the verdict cache and git are the
   history), and one sweep's time and one model hash could say THAT something moved,
   never which result it touched.
+- `meta.records_digest` is `store.records_digest` of the project at build time: a
+  sha256 over the record files' paths and bytes and `.atompipe/project.json` (on a
+  legacy project, its `ledger.json`). It is how the PAGE's own staleness is decided —
+  a different question from `meta.stale`, which is the verdicts':
+  `atompipe site status`, `status` and `doctor` compare it with the records now, and
+  a page whose records moved reads "the records have changed since the site was
+  built", with the fix, `atompipe site build` (a page with no digest, from an older
+  build, reads stale too). What it replaced compared the mtimes of `ledger.json` and
+  `state.json`; from checkpoint 1.3 `ledger.json` is a generated index every command
+  rewrites, so a page built from unchanged records read stale after any `status`, and
+  a record edited by hand read current until a command caught the index up
+  (cli:H16). The page itself computes nothing from it.
 - `locator_problems` lists every locator that cannot be drawn — `missing-view` (it
   names a view that does not exist) or `unknown-target` (a node the view does not
   declare). The locator itself stays on its verdict; nothing is dropped.

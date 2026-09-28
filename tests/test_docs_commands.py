@@ -289,9 +289,9 @@ def _read(path: str) -> str:
 SOURCE_GLOBS = ("src/atompipe/**/*.py", "src/atompipe/site_template/**/*.js")
 
 #: The fewest commands the spine's strings must yield. Measured 2026-09-28 on the
-#: checkpoint-1.3 tree: 160 in 17 files. The floor sits well below it so a
-#: message rewrite does not trip it, and far above zero so a broken extractor
-#: does. *Rejected:* "at least one", for the reason `MIN_COMMANDS` gives.
+#: checkpoint-1.3 tree (U29): 158 commands in 16 of 23 files. The floor sits well
+#: below it so a message rewrite does not trip it, and far above zero so a broken
+#: extractor does. *Rejected:* "at least one", for the reason `MIN_COMMANDS` gives.
 MIN_SOURCE_COMMANDS = 100
 
 #: What may lead a bare command in a printed line: indentation, a list marker, or

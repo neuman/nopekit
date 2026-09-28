@@ -424,7 +424,7 @@ would derive by itself (one claim, OPEN, nothing chosen, the claim's own quantit
 writes no file. **The params rule:** a param keeps `source`, `grounded_by`, `tags`,
 `rejected`; it keeps `rationale` unless the model states one, and `units` unless the
 model states them; a param left with nothing writes no file. It loses nothing: the
-legacy `sync_params` overwrote a record's rationale with the model's whenever the model
+legacy parameter sync overwrote a record's rationale with the model's whenever the model
 stated one, so a hand-written rationale survives in a legacy ledger only where the model
 is silent. With `model_prose=None` it is lossless. For the bracket every Config field
 has a docstring and every legacy `units` is `""`, so no `params/*.json` is written — by
@@ -533,12 +533,17 @@ class ParamView:                 # one parameter as a reader shows it
     # source, grounded_by, tags — from the record; model_error — why there is no value
 def param_view(ledger, model, *, model_error="") -> list[ParamView]
 ```
-`param_view` replaces the mutating `sync_params` (which stays until U29 removes it):
-the value on screen is the model's current one (S-39), a `PARAMS` rejection added after
-the params exist appears (S-38), and a model that does not load shows "model does not
-load: …" and no number — never a cached one. `orphan_params` works off the records;
-`_explicit_params` refuses an unknown key in a `PARAMS` dict item with a `difflib`
-suggestion (the model-side cousin of S-40).
+```python
+def orphan_params(ledger, model) -> list[str]   # param RECORDS whose field the model no longer defines
+```
+`param_view` replaces the mutating parameter sync, deleted with its last caller at
+checkpoint 1.3 (it copied the model into the records on every check): the value on
+screen is the model's current one (S-39), a `PARAMS` rejection added after the params
+exist appears (S-38), and a model that does not load shows "model does not load: …"
+and no number — never a cached one. `orphan_params` works off the records (a parameter
+the model owns entirely has no record, and is no orphan); `model` and `doctor` list
+them from it. `_explicit_params` refuses an unknown key in a `PARAMS` dict item with a
+`difflib` suggestion (the model-side cousin of S-40).
 
 ### `verdicts.py`  (deps: models, util, store, modelio, vcs; gates, packs and claims only inside functions)
 What a gate read, so its verdict can be keyed by it — the home of per-gate
@@ -1701,7 +1706,7 @@ phase-1.md 1.1):
   passed by the CLI from Phase 1.2. The CLI edge — unlink the target first, one exit
   code, write atomically at the single exit, the `.xml` suffix rule — is `cli.py`'s.
 
-### `site.py`  (deps: models, util, claims, report, modelio, gates, verdicts)
+### `site.py`  (deps: models, util, store, claims, report, modelio, gates, verdicts)
 The project site's spine half: viewgens, and the one JSON document the page reads.
 The page's half is plain HTML, CSS and ES modules in `site_template/`, copied by
 `scaffold`; the data contract between the two is `docs/SITE_CONTRACT.md`.
@@ -1749,7 +1754,9 @@ statuses from `claims`, the readiness sentence and the PARTIAL logic from `repor
 because a second implementation would give the page and the readiness document two
 opinions about one ledger (the site renders the ledger; it never computes truth).
 `now` is the caller's timestamp: without it every `age_s` is `null`, never 0, since
-an age of zero renders as "just now".
+an age of zero renders as "just now". `meta.records_digest` is `store.records_digest(root)`
+at build time — which records the page was built from; the CLI's site staleness compares
+it with the records now (see `cli.py`), never an mtime.
 
 A locator is never dropped for being undrawable: it stays on its verdict, and
 `locator_problems` publishes the problem beside it in `state.json`, because a gate
@@ -1818,14 +1825,16 @@ def _touch_index(root, *, quiet=False) -> None
   the file edit, `"kind": "physical"` in `claims/<id>.json`.
 - **Removed** (PLAN A-8): `claim add` and `claim edit` (a claim is the file
   `claims/<id>.json`, read strictly), and `packs remove` (delete the name from
-  `packs` in `.atompipe/project.json`). argparse answers `invalid choice`.
-  `model --set-entry` is the last of A-8's removals; until it goes it writes
-  `project.json` alone, migrating first.
+  `packs` in `.atompipe/project.json`) — argparse answers `invalid choice`; and
+  `model --set-entry` (the entry is `"model_entry"` in `.atompipe/project.json`,
+  edited as the file it is) — argparse answers `unrecognized arguments`. Every
+  message that named one names the file edit instead (`_entry_edit`, below).
 - **`gap` is a read**: no lock, no write (S-43: it persisted every gap it derived,
   rewriting the ledger on every run). A Need is a record, `needs/<id>.json`, only
   when someone enriched it. **`model`** writes no record either: `--write` writes the
   one output it names, `.atompipe/model.json`, and nothing primes the parameter
-  records from the model any more.
+  records from the model any more. Its orphans (`--json` `orphans`) are param records
+  whose field the model no longer defines (`modelio.orphan_params`).
 - **The index after every command.** `main` calls `_touch_index` after the command
   returns or is refused (not when interrupted), on a MIGRATED project only — never on
   a legacy one, where `ledger.json` is still the records — and never after `doctor`
@@ -1837,6 +1846,64 @@ def _touch_index(root, *, quiet=False) -> None
   re-reading `records_digest` (up to `_INDEX_ROUNDS = 3`). A record that does not read,
   or a read-only checkout, leaves the index as it was with one stderr line and never
   changes the exit code.
+
+**The readers on records** (checkpoint 1.3, spec U29). Each reads a fact where it
+lives, and none writes a record:
+```python
+def _entry_edit(root) -> str        # '"model_entry" in .atompipe/project.json' (legacy: under
+                                    # "meta" in .atompipe/ledger.json, until a check migrates it)
+def _param_views(root, ledger, model, model_error) -> list[modelio.ParamView]
+    # param_view, plus — when the model does not load — a bare view (no value, model_error
+    # set) for each name modelio.static_param_prose finds in the model's TEXT and no record holds
+def _grounding(ledger, views) -> dict[str, list[str]]
+    # {param or claim: [artifact ids]}: extractions, then records' grounded_by
+    # (artifacts.grounding), then PARAMS' grounded_by — derived on every read
+def _why_text(root, ledger, registry, model, model_error, view, resolution, name) -> str
+    # decisions.why with view=_param_views (grounded_by from _grounding),
+    # coverage=claims.effective_gates, read_sets=verdicts.last_read_sets, verdicts=resolved
+def _input_bytes(root, artifact, digests) -> dict
+    # {"record", "sha256" (now), "pinned", "drift", "exists"} — the index's input-row rule
+```
+- **`init`** is born migrated: `store.init` writes the records layout, the three
+  marked ignore/attribute blocks, and `project.json` last — never a `ledger.json`, so
+  `init` then `status` prints no migration notice and leaves no `ledger.legacy.json`
+  (what slipped through: every new project was born legacy and migrated by its first
+  `check`, with a `git rm --cached` notice about a file git never tracked). Its next
+  steps name the file edit that records the model (`"model_entry"` in
+  `.atompipe/project.json`); `--json` names `project` (the file it wrote), `meta` and
+  `next`.
+- **`why`** (and `claim show`, through the same `_why_text`) prints the model's value
+  where it lives — `param thickness = 8.0 mm   (model/bracket.py Config.thickness)`
+  the moment the model says 8.0, with no check (S-39) — every loser tagged with its
+  home, the gates from registry coverage and last executed reads, and grounding from
+  the extractions. A model that does not load prints `param <name>` and `  model does
+  not load: …`, never a number; a record carrying `value` is refused naming the model
+  file.
+- **`inputs`** shows, per artifact, its record, the digest of its bytes now against
+  the pinned one (`DRIFT` when they differ, `MISSING` when the bytes are gone), and what
+  it grounds — the `_grounding` map `why` reads, so deleting an extraction moves both
+  (S-36: `why arm_length` said "GROUNDED BY arm" while `inputs` said `arm` was "NEVER
+  READ"; then, with the copy gone and nothing derived, the other way round). `--json`
+  rows carry `record`, `sha256`, `pinned`, `drift`, `exists` and `grounds`, plus the
+  whole `grounding` map. The digest cache is consulted, never saved.
+- **`doctor`** writes nothing on a legacy project or a migrated one (a byte snapshot of
+  the tree, `tests/test_record_commands.py`), and adds three rows: `records` — the
+  record files, each one the strict reader refuses a FAIL row of its own (never an exit
+  2; the load stops at the first), or, on a legacy project, the ledger read in memory
+  and what it "will migrate on next command" into (`store.migrate_legacy(apply=False)`);
+  `run-history` — a leftover `runs/` directory, which it names and never opens;
+  `index` — `store.agree`, a warning when the index is behind the records (what a
+  hand edit leaves until the next command; `doctor` is the one command that never
+  rebuilds it).
+- **The site's own staleness** (`_site_state`, shared by `site status`, `status` and
+  `doctor`) compares the page's `meta.records_digest` with `store.records_digest(root)`
+  now (cli:H16) — never mtimes, which the index rewrite on every command made
+  meaningless: a page of unchanged records read stale after any `status`, and a record
+  edited by hand before the index caught up read current. A page with no digest (an
+  older build) reads stale.
+- **`last_check.json`'s `params`** is `{name: ParamView.to_dict()}` from
+  `modelio.param_view` at the end of a recorded full `check`: the model's values and
+  what lost, beside the statuses — the agent's second read.
 
 **`--junit [PATH]` at the edge** (`check`, `gate selftest`; the XML itself is
 `report.render_junit` / `render_selftest_junit`). Three rules, each because of what
@@ -1966,7 +2033,7 @@ obs, remembered outcomes, `last_check.json` and the JUnit report carry one insta
 - Otherwise, after the sweep: `verdicts.write_last_check`, then the index, under the
   lock. There is no run history (S-89: every recorded check rewrote the tracked
   ledger and appended a tracked run file).
-- **`check` writes no record** (checkpoint 1.3): no `sync_params`, no grounding or
+- **`check` writes no record** (checkpoint 1.3): no parameter sync, no grounding or
   coverage copied into records, no `store.save`. The one record write it may make is
   the one-time migration of a legacy ledger, first, under the held lock (`_migrate`
   above); after it, a check writes verdict entries and ignored scratch only, and a
@@ -2025,8 +2092,9 @@ known-good design (D-27). `--no-record` files nothing.
 
 **`doctor`** names what the verdict cache cannot key on and a status line will not say
 (checkpoint 1.2, spec §4 U23). It never writes, and runs no project gate. Besides the
-environment rows (python, spine, project, ledger, layout, packs, gates, tools, model,
-determinism, provenance, pack keys, ledger integrity, site, lock), one row per kind below,
+environment rows (python, spine, project, records, run-history, index, layout, packs,
+gates, tools, model, determinism, provenance, pack keys, ledger integrity, site, lock),
+one row per kind below,
 each `ok` when there is nothing to say — a clean project shows that it looked:
 
 | Row | Status when found | What it reads |
