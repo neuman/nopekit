@@ -17,6 +17,31 @@ Hard rules for the whole spine:
 6. `from __future__ import annotations` at the top of every module.
 7. Errors the user caused raise `AtompipeError` (from `util.py`); bugs raise normally.
 
+## Where facts live
+
+Each fact has one home, and every other place that shows it is an output of that
+home (METHOD rule 1). The layout, the writer, the strict reader and the index are
+`store.py`'s section below; the verdict cache is `verdicts.py`'s; what `check` writes
+is `cli.py`'s.
+
+| Fact | Home | Git | Written by |
+|---|---|---|---|
+| a claim, a decision, an enriched need, an input's record, a param's provenance, a declared view | `claims/`, `decisions/`, `needs/`, `inputs/<id>.json`, `params/`, `views/*.json` — one file per record | tracked | a human or the agent, editing the file; the shims `ingest`, `extract`, `decide` |
+| project meta, the model entry, the live packs | `.atompipe/project.json` | tracked | the same; `init`; `packs add` |
+| a physical result | `results/<claim-id>.json`, append-only | tracked | `claim physical` |
+| a parameter's value, units, rationale and what lost to it | the model (`model/*.py`: `Config`, its docstrings, `PARAMS`) | tracked | the model's author |
+| a gate's verdict, and its control's | `.atompipe/verdicts/<gate id>/`, one file per rho, never rewritten | tracked | `check`, `gate selftest` |
+| every record, in one read | `.atompipe/ledger.json` — the **index**, generated | ignored | every command but `doctor`, `init` and `--no-record` runs |
+| statuses, counts, the worst claim, the parameter view, as the last full check saw them | `.atompipe/cache/last_check.json` | ignored | a full recorded `check` |
+| what a run cost, when it ran | `.atompipe/obs/` | ignored | every recorded run of a gate or a control |
+| a crash or a self-skip, remembered — never evidence | `.atompipe/cache/last_outcomes.json` | ignored | `check`, `gate selftest` |
+| time savers: file digests, re-verified fixtures | `.atompipe/cache/digests.json`, `controls.json` | ignored | `check`; losing either costs a re-hash or a fixture run, never a verdict |
+| gate scratch and evidence | `.atompipe/out/` (a control's: `out/controls/<gate id>/`) | ignored | gates |
+
+The index and `last_check.json` are the whole project in two reads (D-06); neither
+is read for truth by any spine code, and the index never holds a status, a coverage
+or a verdict. There is no run history: git and the verdict cache are the history.
+
 ## Module map and public surface
 
 Every `src/atompipe/*.py` except `__init__` and `__main__` has a heading below, and
@@ -24,9 +49,20 @@ every name in its `__all__` is written in code form in that module's section.
 `tests/test_contracts.py` holds that (PLAN R-14): a module with no heading, or an
 exported name nobody wrote down, turns it red. `models.py` and `site.py` had no
 heading at all until it landed, and 42 exported names were in no section — a map of
-a smaller spine than the one an agent was about to edit. During Phase 1 the check
-runs one way (code ⊆ docs), so a wave's doc owner may document a surface before the
-unit that builds it merges.
+a smaller spine than the one an agent was about to edit.
+
+It holds the other direction too, from the Phase 1 commit (`DocumentedNamesExist`):
+every call form written in a module's section — `store.load(root)`,
+`ctx.param(...)` — names something that module, a class it defines, a spine
+module or the builtins has (a parameter called by name, `before(spec, fn)`, counts);
+every name a fenced line defines at column 0 (`def`, `class`, `CONSTANT =`) is a
+binding of the module; every member a `class` block lists is a member of that class.
+And `RemovedNamesAreGone` holds that no document an agent reads still names what
+Phase 1 removed. During the phase the check ran one way, so a wave's doc owner could
+document a surface before the unit that built it merged; what that left open was
+this page describing a spine that no longer existed — it said the legacy save wrote
+no sweep record by the removed record's own name, and explained bulk reads through a
+recorder that had been deleted.
 
 ### `models.py`  (no deps — the type contract)
 Every type that crosses a module boundary, and nothing else. Records round-trip
@@ -370,7 +406,7 @@ project it writes `project.json` and one file per record, removes the file of a 
 no longer in the ledger (a param with nothing to hold writes none), APPENDS a claim's
 `physical_result` to `results/<id>.json` when it is not already the last one — a
 result is never removed —, then rebuilds the index. On a legacy project it writes the
-legacy `ledger.json` with `verdicts: []` and no `last_run`, and does not migrate.
+legacy `ledger.json` with `verdicts: []` and no sweep record, and does not migrate.
 
 **The index** is `build_index(root)`, a pure function of the record files and the bytes
 of the inputs they name — no clock, model, registry or listing order. Keys, in order:
@@ -404,7 +440,7 @@ level (`rejectd` → `.atompipe/ledger.json: param "thickness": unknown key "rej
 you mean "rejected"?)`, S-40), `independence`, a NaN inside a record, an id that cannot
 be a file name or collides (exactly or by case), a `ledger.json` with a `generated` key
 and no `project.json`, and record files a crashed migration left that differ from the
-plan (both named). Legacy `verdicts` and `last_run` are dropped unread (D-09).
+plan (both named). Legacy `verdicts` and the old sweep record are dropped unread (D-09).
 `apply=True` writes the record files, then `ensure_ignore_blocks`, then `project.json`
 **last** (the commit marker: a crash before it leaves a legacy project whose next run
 re-derives the same bytes and completes), then renames `ledger.json` to
@@ -455,19 +491,28 @@ in the same series as the sweep's with no latency reader filtering them (S-31). 
 the verdict cache are the history; what runs cost is `.atompipe/obs/`, gate runs and
 control runs apart (`verdicts.record_obs`).
 
-### `modelio.py`  (deps: models, util, store)
-The model contract. A project's model is a **Python module** exposing:
+### A project's model  (not a spine module: what `modelio.py` loads)
+The model contract. A project's model is a **Python module** — the file
+`"model_entry"` names in `.atompipe/project.json` — exposing:
 ```python
 CONFIG: dataclass instance          # or  Config: type  +  CONFIG = Config()
 def build(config) -> dict           # the resolved geometry/state; pure, deterministic
 PARAMS: list[Param] = [...]         # optional explicit provenance; else inferred from fields
 ```
+It is the one home of a parameter's value, units and rationale (a `Config` field and
+its docstring) and of the alternatives that lost to it (`PARAMS`' `rejected`): see
+"The model owns the value" under `modelio.py`. Its own heading, because none of these
+names is `modelio`'s — the reverse contract check reads every fenced `def` in a
+module's section as that module's, and filed here the three read as a spine API.
+
+### `modelio.py`  (deps: models, util, store)
+The spine's half of the model contract.
 ```python
 @dataclass
 class LoadedModel:
     module: Any; config: Any; entry: str; params: list[Param]
     file -> str; directory -> str                # properties: the file executed, and its dir
-def load_model(root, entry: str | None = None) -> LoadedModel   # entry from ledger.meta
+def load_model(root, entry: str | None = None) -> LoadedModel   # entry: project.json's model_entry
 def project(model: LoadedModel) -> dict      # {"config": {...}, "derived": {...}} JSON-safe
 def model_hash(projection: dict) -> str      # stable; a display id (staleness is per gate)
 def write_projection(root, projection) -> str   # .atompipe/model.json  (the diffable view)
@@ -613,8 +658,9 @@ value read supersedes `PRESENT`. Every bulk access — `__iter__`, `keys`, `valu
 pickling, `|` on either side, `reversed` — records the digest of the whole level and adds
 its path to `whole`. `__iter__` must be overridden for that to hold: CPython's
 dict-merge fast path reads a dict subclass's storage directly for `dict(p)`, `{**p}`
-and `f(**p)` unless `tp_iter` is overridden, and those were exactly the silent reads
-(S-25: `_ParamReads` recorded nothing for bulk access). Copies are plain dicts. Every
+and a `**p` call unless `tp_iter` is overridden, and those were exactly the silent reads
+(S-25: the CLI's flat read recorder that this replaced saw nothing of bulk access).
+Copies are plain dicts. Every
 mutator raises `GateInputWriteError` on a read-only view: `ctx.params` was one mutable
 dict shared by every gate, so one gate could forge the next gate's inputs (S-24). It
 stays a `dict` subclass for `GateContext._exact`'s `isinstance`. Named residuals: an
@@ -642,7 +688,7 @@ model's code); copying the context or truth-testing the model does not. `None` s
 
 **`digest_value`** is sha256 over `atompipe-v1:` + canonical JSON (`sort_keys`, compact,
 `ensure_ascii=False`, `allow_nan=False`) of a tagged form: NaN and the infinities
-become `{"$float": ...}` (the bracket's `build()` returns `inf`); a user key starting
+become `{"$float": ...}` (the bracket's model `build` returns `inf`); a user key starting
 `$` is escaped to `$$`, so no model value can spell a tag; tuples become lists; a 0-d
 numpy-like becomes its `.item()` (duck-typed, never imported); a non-string key becomes
 `"$k:<repr>"`; an absolute path under an anchor becomes its portable form; anything
@@ -837,7 +883,7 @@ it. **`out8`** is the first 8 hex of sha256 of `[passed, measured, limit, units]
 outcome, never the text.
 
 **The entry file** is written once (`O_EXCL` semantics: the bytes go to a `*.tmp` file
-in the same directory, which is hard-linked to the final name — `link(2)` fails when
+in the same directory, which is hard-linked to the final name — a hard link fails when
 the name exists, and the name only ever holds complete bytes; a filesystem without
 hard links gets a plain `O_CREAT|O_EXCL` write). Keys in this order: `schema, gate,
 rho, code, spine, reads, instruments, verdict, digest`; `reads` keys `params, files,
@@ -1104,7 +1150,7 @@ never a wrong admission (what would have slipped through: a fixture writing the
 known-bad mesh its gate reads, which the gate's trace drops as its own output). This
 is the early cutoff: a Config-default edit moves every bracket fixture's closure (they
 build through the model) but no control value — six fixture runs, zero controls
-executed, zero new files — while a `build()` edit that moves a control input misses
+executed, zero new files — while an edit to the model's `build` that moves a control input misses
 and re-runs it, and one that defuses it is not admitted (S-19's model-code half).
 5. *Miss*: the control runs, fixture and gate, and is filed unless `record=False`:
 `bad: "fail"` admitted reject-only; `bad: "pass"` not admitted. A crash, an unusable
@@ -1118,8 +1164,8 @@ outcome that differs from a cached entry at the same `rho_control` is `not-admit
 nothing runs: the records answer.
 
 **The known-good host (D-27, S-07).** A PROJECT gate's fixture is handed
-`known_good_context(root, host)` — `selftest/known_good.py`'s `context(ctx)`, loaded
-through `modelio.load_source_module`, called on a copy — and the entry says `host:
+`known_good_context(root, host)` — the `context` function of `selftest/known_good.py`,
+loaded through `modelio.load_source_module` and called on a copy of the host — and the entry says `host:
 "known-good"` (its host reads are not keyed: they are reads of a design the owner's
 `selftest/` defines). A pack's fixture gets the live host (`host: "live"`, host reads
 keyed); SEALED is the seal detector's job. So the literal identity fixture `return ctx`
@@ -1522,7 +1568,7 @@ out_dir=None)` loads the pack alone, from `pack_dir` itself with no lookup by na
 (so env and user packs cannot stand in for it), into a fresh `Registry` and, per
 gate within `tier`: the gate must pass its own
 `selftest/baseline.json`; its negative control must fire; a skip is allowed only when
-`availability(spec)` fails, and is reported in `skipped`, never in `problems`; and
+`gates.availability(spec)` fails, and is reported in `skipped`, never in `problems`; and
 the **seal probe** — the control must also fire against an empty host (`params={}`,
 `extra={}`, an empty `Ledger`), which is invariant 5 (SEALED) checked by running it.
 Every run gets an explicit temp `out_dir` when none is given, so nothing is written
@@ -1791,7 +1837,7 @@ and saved the whole ledger, so `decide` rewrote every claim to add one decision,
 `check`, a sweep, rewrote the records on every run (parameters re-synced from the
 model, grounding back-references copied into parameters, coverage into
 `claim.gates`): a claim edited by hand between two commands was put back by the
-second, `claim edit --gates X` was reverted by the next check (S-37), and a deleted
+second, a claim's hand-set gate list was reverted by the next check (S-37), and a deleted
 extraction's grounding lived on in the parameter it had been copied into (S-36).
 `tests/test_shims.py` (`NoWholeLedgerWriterInCli`) walks `cli.py`'s AST and refuses
 any reference to `store.save` — a call, a bare reference, `getattr`, an import under
@@ -1823,12 +1869,15 @@ def _touch_index(root, *, quiet=False) -> None
   — APPENDS one `PhysicalResult` to `results/<claim-id>.json` (append-only, D-11;
   `--who`/`--when` stay until P2.5, D-12). Its refusal on a non-physical claim names
   the file edit, `"kind": "physical"` in `claims/<id>.json`.
-- **Removed** (PLAN A-8): `claim add` and `claim edit` (a claim is the file
-  `claims/<id>.json`, read strictly), and `packs remove` (delete the name from
-  `packs` in `.atompipe/project.json`) — argparse answers `invalid choice`; and
-  `model --set-entry` (the entry is `"model_entry"` in `.atompipe/project.json`,
-  edited as the file it is) — argparse answers `unrecognized arguments`. Every
-  message that named one names the file edit instead (`_entry_edit`, below).
+- **Commands that only mutated a record are gone** (PLAN A-8), and the file edit is
+  the command: a claim is written and changed as `claims/<id>.json` (read strictly),
+  so `claim` keeps only `list`, `show` and `physical`; a pack leaves the project when
+  its name leaves `packs` in `.atompipe/project.json`, so `packs` adds and never
+  removes; and the model entry is `"model_entry"` in the same file, so `model` takes
+  no flag that sets it. argparse refuses each old spelling (`invalid choice`,
+  `unrecognized arguments`), and every message that named one names the file edit
+  instead (`_entry_edit`, below); `RemovedNamesAreGone` keeps them out of every
+  document an agent reads.
 - **`gap` is a read**: no lock, no write (S-43: it persisted every gap it derived,
   rewriting the ledger on every run). A Need is a record, `needs/<id>.json`, only
   when someone enriched it. **`model`** writes no record either: `--write` writes the
@@ -1901,7 +1950,7 @@ def _input_bytes(root, artifact, digests) -> dict
   meaningless: a page of unchanged records read stale after any `status`, and a record
   edited by hand before the index caught up read current. A page with no digest (an
   older build) reads stale.
-- **`last_check.json`'s `params`** is `{name: ParamView.to_dict()}` from
+- **`last_check.json`'s `params`** is `{name: modelio.ParamView.to_dict()}` from
   `modelio.param_view` at the end of a recorded full `check`: the model's values and
   what lost, beside the statuses — the agent's second read.
 
@@ -2113,3 +2162,68 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 The two static detectors measured zero hits on the 54 bundled gates before they landed
 (R-4; `tests/test_doctor.py`). No staleness row: which gates are current is `status`'s
 `stale:` block. No run-history row: there is none to read (S-31).
+
+## Limits: what the spine cannot see, named
+
+A verdict is keyed by what its gate was SEEN to read (rho), a control counts only when
+it was SEEN to fail, and a record is read strictly from its file. Each of those has an
+edge, and an edge nobody wrote down is where the next false PASS comes from (PLAN §18:
+a limit must be visible, not just true). Phase 1 closes with these, each stated where
+a reader of the output meets it:
+
+- **Environment reads.** A gate that reads `os.environ` or `os.getenv` fires no audit
+  event, so rho cannot key it. `doctor`'s `env-reads` row is a static detector over
+  every registered gate's closure (zero hits on the bundled corpus when it landed).
+  *Rejected:* a dynamic proxy for `os.environ` — it changes what a subprocess started
+  inside a gate inherits.
+- **`ctx.model is None` is not recorded.** A gate that branches on whether a model is
+  loaded at all is invisible to rho on that branch; `ModelProxy` records a real use of
+  the model, never its absence. No bundled gate reads `ctx.model`.
+- **Admission outside `check` is static.** `status`, `report` and `site build` judge a
+  control from its entry's static part, its recorded files and host reads, and its
+  fixture closure's digests — none of them runs a fixture. When a fixture's code moved
+  they count the control **pending**, with a note (`<k> control(s) pending — inputs
+  moved …`), until the next `check`, `gate selftest` or `check --force` re-verifies it
+  by the values it feeds its gate. So a model edit that defuses a bracket control is
+  caught at the next `check` and is never counted as demonstrated in the meantime
+  without that note; CI and P2's `export` re-run it (R-9).
+- **Opaque gates are never Fresh.** openmodelica's `checks`, `compiles` and `simulates`
+  do their reading inside `omc`, a subprocess the audit hook cannot see into
+  (`subprocess:omc`). They re-run on every `check` where omc exists (about 0.6–1.0 s
+  each, their controls too), skip where it does not, and read STALE (`opaque inputs`)
+  in `status` between checks — the honest price of an input the tracer cannot see. A
+  project that points `modelica_result_csv` at another gate's output under `out/`
+  makes `modelica.result_claim` opaque too (`out:<rel>`). `doctor`'s `opaque-inputs`
+  row lists them.
+- **Instruments are not in rho, but are in the entry's bytes.** Two machines with
+  different trimesh or numpy versions that record the same rho and outcome write one
+  path with different bytes: an add/add merge conflict where either copy is correct
+  (equal outcomes). `doctor`'s `instruments` row notes the mismatch; staleness never
+  depends on it (Q1.3, M11.5).
+- **A gate registered from Python is keyed by its defining file.** Values its function
+  closes over (a lambda over a local variable) are not in that digest. The CLI never
+  registers one; `doctor`'s `code-digest` row names every gate keyed this way.
+- **A pack fixture's host reads are keyed only when the host is live.** SEALED
+  (invariant 5) is enforced by the seal detector (`packs.seal_findings`, `doctor`'s
+  `sealed-fixtures`, `pack validate`), not by substituting a clean host.
+- **The committed bracket cache is held to the running spine unconditionally.**
+  `BracketCacheIsCurrent` compares every committed entry's spine digest with this
+  interpreter's; if the canonical AST walk is not portable to 3.10 or 3.13, CI goes red
+  there at that test and at `SpineDigestIsPortable` together — the true state, since
+  the committed cache would then be stale for those users. Only 3.12 was available
+  where this phase was built.
+- **Spines older than this layout are not guarded.** An atompipe from before the
+  records layout reads `.atompipe/ledger.json` as the records and may rewrite it;
+  nothing written now can stop it. `project.json`'s `schema` refuses NEWER layouts,
+  going forward only. The README says so.
+- **The tracked cache is forgeable in the inner loop.** An entry's `digest` is
+  integrity (a hand edit is ignored as `hand-edited entry`), not authentication:
+  a hand-made entry with a matching digest is served until something re-runs it. R-9
+  is the defence — `check --force` in CI, and P2's `export` — never the cache.
+- **A concurrent writer during a gate run is not detected.** File digests are taken
+  after the gate returns, so a file rewritten while the gate read it keys the rewrite.
+- **Smaller edges, named in their sections:** an explicit `dict.__getitem__` call on
+  `ctx.params` is not recorded, and a mutable non-JSON leaf is handed out by reference
+  (`ParamTrace`); `os.stat` fires no audit event, and an `os.open` relative to a
+  `dir_fd` is not resolved (the audit hook); a subprocess's own reads are opaque, never
+  covered.

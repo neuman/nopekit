@@ -131,6 +131,18 @@ what it claims.
 Then actually run it: `atompipe gate selftest --only <id>`. A gate that passes its
 own known-bad fixture is reported as broken, loudly.
 
+`atompipe check` holds you to it as well. A gate's verdicts count only while its
+control has been seen to fail at the gate's current code, fixtures and spine, and
+`check` runs the control itself whenever that is not on record; a gate whose control
+passed is not admitted, and its function is never called (the "Admission" section of
+[`PACK_FORMAT.md`](PACK_FORMAT.md)). For a gate that lives in the project, write
+`selftest/known_good.py` first — a `context(ctx)` returning a design that passes
+every gate, every field stated — and build each fixture from it with one thing
+changed: the fixture is handed that design, never the live one, so it stays
+diagnostic even while the live design already fails. Commit what `check` records
+under `.atompipe/verdicts/` with the gate; the next clone reads the verdict and its
+control from there instead of running them again.
+
 ### 6. Record provenance for every solver setting
 
 Mesh density, turbulence model, timestep, convergence criterion, boundary

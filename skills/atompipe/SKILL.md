@@ -32,11 +32,47 @@ alias atompipe='python3 -m atompipe'
 ```
 
 `atompipe doctor` is the first thing to run whenever something is confusing — it
-checks the environment, the model, determinism, staleness, pack discovery, per-gate
-tool availability and ledger integrity, and says which of those is wrong.
+checks the environment, the model, determinism, the records and their index, pack
+discovery, per-gate tool availability, and what the verdict cache cannot see, and
+says which of those is wrong. It never writes anything.
 
 Every read command takes `--json`. Prefer it when you are parsing rather than
 reading: `atompipe check --json` is a few KB where the human output is prose.
+
+## The project is files
+
+**Read the whole project in two reads.** `.atompipe/ledger.json` is every record —
+the claims, parameters' provenance, decisions, needs, inputs, physical results, views
+and the project's meta — in one generated file. `.atompipe/cache/last_check.json` is
+what the last full `atompipe check` concluded: every claim's status, the counts, the
+worst blocking claim with the gate and the words that explain it, and every
+parameter as the model states it, with what lost. Read those two before you open
+anything else. Both are outputs, rebuilt by the commands: never edit either, and
+never treat them as newer than the last command — `atompipe status` says what is
+stale now.
+
+**Change a record by editing its file**, then run `atompipe check`:
+
+| File | Holds |
+|---|---|
+| `claims/<id>.json` | one claim — the file name is its id |
+| `decisions/<slug>.json` | one decision, including what LOST |
+| `inputs/<id>.json` | one piece of evidence and what was extracted from it (its bytes stay in `inputs/<bucket>/`) |
+| `params/<name>.json` | only the provenance the model cannot hold: `source`, `grounded_by`, `tags` |
+| `needs/<id>.json` | a gap someone enriched (candidates, a chosen tool) |
+| `.atompipe/project.json` | the project: `"model_entry"` — the model file that is the single source of truth — and `"packs"`, the live packs |
+
+Every record file is read strictly: a misspelled key is refused, naming the file,
+the key and the suggestion, instead of being dropped. A parameter's value, units and
+rationale live in the model (its `Config` field and that field's docstring), and the
+alternatives that lost in the model's `PARAMS` — never copy them into `params/`.
+
+Five commands write one record for you, with the time stamped for you:
+`atompipe ingest` (copies the file in and pins its hash), `atompipe extract`,
+`atompipe decide`, `atompipe packs add` and `atompipe claim physical`. `check` writes
+no record — only verdicts under `.atompipe/verdicts/`, which you commit with the
+records, and ignored scratch (the one exception: a project still in the old one-file
+layout is migrated to record files by its first `check`).
 
 ## The shape
 
@@ -46,7 +82,8 @@ claims  ->  gates  ->  packs  ->  readiness report
 
 A **claim** is something that must be true for the design to work. A **gate** is an
 executable that settles a claim *and is capable of failing*. A **pack** supplies
-gates for one physical domain. The **readiness report** is the ledger rendered.
+gates for one physical domain. The **readiness report** is the claims and their
+verdicts, rendered.
 
 Your job is to keep that chain honest. The failure mode you are guarding against is
 not "the design is wrong" — it is "the design looks validated and is not".
@@ -88,6 +125,18 @@ ASSUMPTION claims so they stay visible.
 
 Turn the brief into claims that must be true, each with a **machine-checkable
 acceptance**. "Strong enough" is not a claim. `≤0.5 mm tip deflection at 3 N` is.
+Write each one as its own file, `claims/<id>.json`:
+
+```json
+{"statement": "Tip sags no more than 0.5 mm at rated load", "kind": "measurable",
+ "acceptance": {"quantity": "tip deflection", "comparator": "<=", "limit": 0.5, "units": "mm"},
+ "rationale": "past ~0.5 mm the droop is visible against a level shelf edge",
+ "tags": ["stiffness"]}
+```
+
+Give each the narrowest `tags` that describe what it asserts: a gate covers a claim
+by its id or by a shared tag, so a broad tag drags in gates that measure something
+else.
 
 Classify each one honestly:
 
@@ -98,8 +147,9 @@ Classify each one honestly:
 | `assumption` | Taken on faith. Recorded so it stays visible. |
 
 Say the physical ones out loud early: *"C5 can't be validated by any tool — it needs
-a real hull in real water. It goes in the ledger as UNVERIFIED and stays there until
-you test it."* This builds trust and sets expectations correctly.
+a real hull in real water. It stays UNVERIFIED until you test it."* This builds trust
+and sets expectations correctly. When the test happens, record what was observed:
+`atompipe claim physical C5 pass --who <name> --detail "<what was seen>"`.
 
 ### 3. Reach first light fast
 
@@ -149,8 +199,9 @@ how the human sees what you have done without reading a transcript. The cost is 
 command.
 
 **Rebuild it after a check sweep.** `site build` does not run gates — it renders the
-verdicts already in the ledger and marks how old each one is — so a page you forgot
-to rebuild shows the last sweep, honestly labelled but not the one you just ran.
+verdicts already in the verdict cache and marks how old each one is — so a page you
+forgot to rebuild shows the last sweep, honestly labelled but not the one you just
+ran.
 
 **Use it to explain a failure instead of describing coordinates in prose.** When a
 gate fails somewhere specific, attach `Locator`s to the verdict and say *"open the
@@ -165,10 +216,11 @@ a part name that no view publishes. Check it after renaming anything in the mode
 A gate that thinks it is highlighting something and is not looks exactly like a gate
 that found nothing, from both ends.
 
-The site never computes truth; it renders the ledger. Everything on the page is in
-`site/data/state.json`, so read that rather than the HTML when you want the state
-back. A project with no geometry still gets a useful site — claims, verdicts,
-evidence, provenance, readiness. Contract: `docs/SITE_CONTRACT.md`.
+The site never computes truth; it renders the records and the verdict cache.
+Everything on the page is in `site/data/state.json`, so read that rather than the
+HTML when you want the state back. A project with no geometry still gets a useful
+site — claims, verdicts, evidence, provenance, readiness. Contract:
+`docs/SITE_CONTRACT.md`.
 
 ## Rules you will be tempted to break
 
@@ -228,10 +280,10 @@ them. The most expensive mistakes are the ones that get built.
 
 ## Adopting an existing project
 
-`atompipe init` in the repo, then point the model entry at whatever already exists.
-Infer claims from what the code already asserts, ask about the rest, and write gates
-around the existing behaviour before changing anything. Most people are not starting
-from zero.
+`atompipe init` in the repo, then set `"model_entry"` in `.atompipe/project.json` to
+the model file that already exists. Infer claims from what the code already asserts,
+ask about the rest, and write gates around the existing behaviour before changing
+anything. Most people are not starting from zero.
 
 ## Reference
 

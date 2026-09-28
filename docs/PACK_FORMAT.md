@@ -539,6 +539,64 @@ while its tools are present fails.
 `atompipe gate selftest` runs every control and **fails any gate that passes its own
 known-bad input**.
 
+### Admission: a control counts at the gate's current version
+
+Declaring a control is what the registry checks. Whether the gate's verdicts COUNT
+is decided in the project, every `check`, from the control having been run and seen
+to fail **at the gate's current version** (invariant 9):
+
+- **The version is everything the control's outcome could depend on**: the spine,
+  the gate's own code (its module and every helper it loaded, by bytes), every source
+  file under the owner's `selftest/` — the pack's, or the project's — the
+  `NegativeControl` fields, and whatever the fixture and the gate read on the control
+  input (a `baseline.json` value, a known-bad mesh, a `.mo` under `assets/`). Each
+  control run is recorded beside the gate's verdicts, as
+  `.atompipe/verdicts/<gate id>/control-<rhoC16>-<out8>.json`, tracked and never
+  rewritten.
+- **`check` runs the control whenever none is on record at that version** — a fresh
+  clone of a project that committed its entries runs none; editing the gate, a
+  fixture or a known-bad asset runs it again. A gate named explicitly above the tier
+  ceiling runs its control too. When only the fixture's own code moved (the bracket's
+  fixtures build through the project's model, so any model edit moves them), the
+  fixture alone is re-run and what it builds is compared with what the recorded
+  control fed its gate: equal values re-verify it with no gate call and no new file.
+- **Not admitted is an error, not a fail.** A gate whose control PASSED its own
+  known-bad input, or whose control crashed, returned an unusable context or skipped
+  itself with its tools present, gets `error="not admitted: <why>"` and its function
+  is never called. A PASS whose control is not on record at the current version
+  reads stale — `control not demonstrated at this version — run atompipe check` — and
+  never under PROVEN. A missing tool is a skip, never a failed admission.
+- **This is the reject half.** It shows the gate can refuse. It does not yet show
+  that the gate accepts a known-good design: Phase 2 adds that half. A pack's
+  `selftest/baseline.json` already carries it for pack gates — `pack validate` and
+  `gate selftest --pack` require every gate to pass it.
+
+**A project fixture is handed the known-good design, not the live one.** When the
+project has `selftest/known_good.py` defining `context(ctx)` — the design every
+control is one change away from, every field stated — a project gate's fixture
+receives that context, and builds its known-bad input from a design that passes.
+What slipped through before (S-07): handed the live design, which in the reference
+project fails on purpose, the identity fixture `return ctx` was reported "correctly
+failed … ~64x worse" and certified nothing; on the known-good design it passes its
+own known-bad input and is not admitted. A project with no `known_good.py` hands its
+fixtures the live host, and the control entry says so (`"host": "live"`). **Pack
+fixtures always get the live host** — they must be SEALED (above), which the seal
+detector checks by running them; a clean host is never substituted for a leaky
+fixture.
+
+**A control writes into its own scratch.** Every control runs with `ctx.out_dir` set
+to `.atompipe/out/controls/<gate id>/`, emptied before each run — never the sweep's
+`out_dir`. A known-bad fixture that writes a mesh or a report there can neither
+overwrite the evidence a cached PASS cites nor leave a stale file for the next run to
+read as an input. In pack mode, and in `pack validate`, every control gets a
+temporary directory and nothing is written into the pack.
+
+In a project, `atompipe gate selftest` re-runs every control — never served from the
+record — and files exactly the entries `check` would (an unchanged control finds its
+file already there and writes nothing); `--no-record` files nothing. What slipped
+through before any of this (S-05): nothing ever ran a declared control during a
+sweep, so a gate that returned `True` with a control on paper produced PROVEN rows.
+
 ## Views and locators
 
 A pack can also draw what its gates measure. `views/*.py` holds **viewgens**, which

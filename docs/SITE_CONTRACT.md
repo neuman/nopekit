@@ -19,10 +19,11 @@ that needs npm is a project site that rots — and the spine is standard-library
 only for exactly this reason. three.js loads from a CDN by import map, with
 `atompipe site vendor` to pull it local for offline or archival use.
 
-**The site never computes truth.** It renders the ledger, and each gate's verdict
-as `verdicts.resolve` finds it in the verdict cache — the one resolver every reader
-uses. If a number on the page is wrong, the ledger or the cache is wrong. It is an
-output, not a source (rule 1).
+**The site never computes truth.** It renders the project's records — `claims/`,
+`params/`, `inputs/`, `decisions/`, `.atompipe/project.json` and the model — and each
+gate's verdict as `verdicts.resolve` finds it in the verdict cache, the one resolver
+every reader uses. If a number on the page is wrong, a record or the cache is wrong.
+It is an output, not a source (rule 1).
 
 **It degrades all the way down.** A project with no geometry — a chemical process,
 a supply chain — still gets claims, verdicts, evidence, provenance and the
@@ -52,7 +53,7 @@ site/
 
 ```sh
 atompipe site init          # scaffold site/ (refuses to clobber index.html)
-atompipe site build         # run viewgens, collect the ledger, write data/ + assets/
+atompipe site build         # run viewgens, resolve the verdicts, write data/ + assets/
 atompipe site serve [-p]    # python3 -m http.server, no dependencies
 atompipe site vendor        # pull three.js local so the site works offline
 ```
@@ -269,28 +270,43 @@ an agent can read the site's state without a browser.
   entry, else the entry's git commit time, else `""`. `age_s` is `when` measured
   against `meta.built` — `null`, never 0, when either is unknown: an age of zero
   renders as "just now", the exact lie a staleness display exists to prevent.
-- `meta.stale` is true when any row is not current; `meta.stale_reason` names the
-  stale gates with their reasons (the first three, then `(+n more)`). There is no
-  `meta.last_run`: the run history is gone (the verdict cache and git are the
-  history), and one sweep's time and one model hash could say THAT something moved,
-  never which result it touched.
-- `meta.records_digest` is `store.records_digest` of the project at build time: a
-  sha256 over the record files' paths and bytes and `.atompipe/project.json` (on a
-  legacy project, its `ledger.json`). It is how the PAGE's own staleness is decided —
-  a different question from `meta.stale`, which is the verdicts':
-  `atompipe site status`, `status` and `doctor` compare it with the records now, and
-  a page whose records moved reads "the records have changed since the site was
-  built", with the fix, `atompipe site build` (a page with no digest, from an older
-  build, reads stale too). What it replaced compared the mtimes of `ledger.json` and
-  `state.json`; from checkpoint 1.3 `ledger.json` is a generated index every command
-  rewrites, so a page built from unchanged records read stale after any `status`, and
-  a record edited by hand read current until a command caught the index up
-  (cli:H16). The page itself computes nothing from it.
 - `locator_problems` lists every locator that cannot be drawn — `missing-view` (it
   names a view that does not exist) or `unknown-target` (a node the view does not
   declare). The locator itself stays on its verdict; nothing is dropped.
 - A view whose inline `data` is too big to sit in the summary is split into
   `data/views/<id>.json`: its row keeps `"data": {}` and gains `data_url`.
+
+### `meta`
+
+Every key of `meta`, and where it comes from. `tests/test_contracts.py`
+(`SiteMetaKeysAreDocumented`) builds the bracket's page and fails on a key this table
+does not name — the top-level check passes a `meta` whatever it holds, and `meta` is
+where the page's staleness lives.
+
+| Key | From | What it says |
+|---|---|---|
+| `name`, `summary`, `created`, `revision`, `model_entry`, `packs`, `spine_version` | `.atompipe/project.json`, verbatim (`ProjectMeta`) | the project, as its own record states it; a field `ProjectMeta` gains arrives here and in this table together |
+| `built` | the CLI's clock, stamped once per `site build` | when the page was built — never when a gate ran (each row's `when`) |
+| `stale` | the resolution: any row not current | whether the VERDICTS are current |
+| `stale_reason` | the resolution | the stale gates with their reasons (the first three, then `(+n more)`) |
+| `records_digest` | `store.records_digest(root)` at build time | which records the page was built from — whether the PAGE is current |
+| `generated` | a constant | that this file is an output of the records and the verdict cache, not a source |
+
+- `stale` and `stale_reason` answer for the verdicts, per gate. There is no sweep
+  timestamp: the run history is gone (the verdict cache and git are the history), and
+  one sweep's time and one model hash could say THAT something moved, never which
+  result it touched.
+- `records_digest` is a sha256 over the record files' paths and bytes and
+  `.atompipe/project.json` (on a legacy project, its `ledger.json`). It is how the
+  PAGE's own staleness is decided — a different question from `stale`:
+  `atompipe site status`, `status` and `doctor` compare it with the records now, and a
+  page whose records moved reads "the records have changed since the site was built",
+  with the fix, `atompipe site build` (a page with no digest, from an older build,
+  reads stale too). What it replaced compared the mtimes of `ledger.json` and
+  `state.json`; from checkpoint 1.3 `ledger.json` is a generated index every command
+  rewrites, so a page built from unchanged records read stale after any `status`, and
+  a record edited by hand read current until a command caught the index up (cli:H16).
+  The page itself computes nothing from it.
 
 ## What the page must show
 
