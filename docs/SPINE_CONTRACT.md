@@ -325,12 +325,14 @@ it still hashes the same, else purges the recorded helpers and re-executes (the 
 it registered are re-adopted into the caller's registry). `load_model` records the
 model's closure the same way.
 
-### `verdicts.py`  (deps: models, util; gates, packs and claims only inside functions)
+### `verdicts.py`  (deps: models, util, store, modelio, vcs; gates, packs and claims only inside functions)
 What a gate read, so its verdict can be keyed by it — the home of per-gate
-content-addressed verdicts (PLAN D-05). This is its first half, the primitives; the
-entry files, rho, freshness and admission build on them. It never reads the wall
-clock and never takes the build lock. `gates` imports it, so it never imports `gates`
-at module level: a function that needs a gate type receives the object.
+content-addressed verdicts (PLAN D-05). Its first half is the primitives (below);
+its second half turns a trace into entries you can commit (part two, further down);
+freshness and admission build on both. It never reads the wall clock (a `when`
+arrives from the CLI edge) and never takes the build lock. `gates` imports it, so it
+never imports `gates` at module level: a function that needs a gate type receives
+the object.
 ```python
 ABSENT: str                  # sha256(b"atompipe:absent\0") — a key the gate asked for, not there
 PRESENT: str                 # sha256(b"atompipe:present\0") — `k in params`, presence only
@@ -476,6 +478,236 @@ wheel without `.py` files) gives `""`: every entry is then Unknown, never Fresh.
 `tests/test_spine_digest.py` pins a fixture's digest — f-strings with nested specs,
 `!r`, `{x=}`, `match`, walrus, decorators, async — and CI asserts it on 3.10, 3.12 and
 3.13.
+
+**Part two: rho, entries, controls, remembered outcomes, obs.**
+```python
+SCHEMA = 1                    # inside every entry, control entry, rho and code payload
+RHO_CHARS = 16; OUT_CHARS = 8 # file-name widths: <rho16>-<out8>.json
+OBS_KEEP = 20                 # runs kept per gate, per kind
+SPEC_FIELDS_IN_RHO = ("id", "claims", "tier", "pack", "requires_tools",
+                      "requires_python", "requires_one_of", "settles")
+CONTROL_OUT_DIR = ".atompipe/out/controls"   # + "/<gate id>/": where a control runs
+TWO_OUTCOMES_IS_ERROR = False # a warning (the gate reads stale) until U25 flips it
+
+def anchors_for(root, registry, *, out_dir) -> Anchors   # <root>, <pack:NAME> from registry.pack_dirs, <out>, <out:controls>
+def code_digest(spec, fn, *, anchors=None) -> CodeRef
+def model_digest(projection, model=None, *, anchors=None) -> str   # "" when the model's code was not recorded
+def rho(gate_id, spine, code, reads) -> str               # code: CodeRef | digest; reads: Reads | an entry's block
+def rho_control(gate_id, static, reads) -> str
+def out8(verdict) -> str                                  # Verdict or an entry's verdict block
+def instruments_for(spec, code) -> dict[str, str]         # {module: version | "unknown" | "absent"}
+
+@dataclass(frozen=True)
+class CodeRef:
+    digest: str; files: tuple; fallback: str; opaque: str; third_party: tuple
+    @classmethod
+    def unrecorded(cls, why=...) -> CodeRef               # opaque: a verdict planted with no gate
+    def to_dict(self) -> dict                             # {"digest", "files", "fallback"}
+
+@dataclass
+class Reads:
+    params: list          # [[path, digest], ...] or [[path, digest, small], ...]; path a JSON list
+    files: dict           # {portable path: sha256 | None}   None: missing, itself an input
+    dirs: dict            # {portable path: digest of sorted entry names | None}
+    ledger: dict          # {"claim:<id>" | "claims" | ...: digest}
+    model: str | None     # model_digest, when the gate used ctx.model
+    opaque: list          # sorted channel names: an entry with any is never Fresh
+    host: list            # a control's host-param reads: [[path, digest], ...]
+    @classmethod
+    def from_trace(cls, trace, *, anchors=None, digests=None, model=None, static=None) -> Reads
+    @classmethod
+    def from_dict(cls, data) -> Reads
+    def to_dict(self, *, control=False) -> dict           # keys in file order
+    def keyed(self, *, control=False) -> dict             # what rho sees: display values dropped
+    def with_opaque(self, *names) -> Reads
+
+@dataclass
+class Entry:                                              # .atompipe/verdicts/<gate>/<rho16>-<out8>.json
+    gate: str; rho: str; code: dict; spine: str; reads: dict; instruments: dict
+    verdict: dict; digest: str; path: str
+    name: str                                             # property: "<rho16>-<out8>"
+    def body(self) -> dict;  def to_verdict(self) -> Verdict;  def read_set(self) -> Reads
+
+@dataclass
+class ControlEntry:                                       # .../control-<rhoC16>-<out8>.json
+    gate: str; rho: str; static: str; static_parts: dict; host: str; fixture: dict
+    reads: dict; bad: str; good: None; admitted: str; detail: str
+    measured: float | None; limit: float | None; units: str; digest: str; path: str
+    name: str                                             # property: "control-<rhoC16>-<out8>"
+    def body(self) -> dict;  def read_set(self) -> Reads
+
+@dataclass(frozen=True)
+class WriteResult:
+    status: str           # "written" | "exists" | "kept-first"
+    path: str; name: str; rho: str; warnings: tuple
+    written: bool         # property
+
+def write_entry(root, entry) -> WriteResult
+def read_entries(root, gate_id, *, problems=None, instruments=None) -> list[Entry]
+def record_verdict(root, spec, fn, verdict, *, trace=None, reads=None, anchors=None,
+                   digests=None) -> WriteResult | None    # None: a skip or an error, never cached
+def selftest_walk(owner_dir, *, digests=None) -> dict[str, str | None]
+def control_static(spec, fn, root, *, digests=None, anchors=None) -> tuple[str, dict]
+def write_control(root, entry) -> WriteResult
+def read_controls(root, gate_id, *, problems=None) -> list[ControlEntry]
+def record_control(root, spec, fn, *, result=None, trace=None, host="live", bad=None,
+                   detail="", digests=None, anchors=None, when="") -> WriteResult | None
+def remember(root, key, verdict, *, input_rho, kind, when) -> None
+def remembered(root) -> dict      # {key: {"input_rho", "kind", "verdict": Verdict, "when"}}
+def forget(root, key) -> bool
+def record_obs(root, gate_id, *, entry, when, duration_s, cpu_s, control=False) -> None
+def read_obs(root, gate_id, *, control=False) -> list[dict]   # [{"entry", "when", "duration_s", "cpu_s"}]
+def last_read_sets(root) -> dict[str, set[tuple]]    # {gate: {param path}}: Param.gates and why, never rho
+```
+**The code digest.** `code_digest(spec, fn)` is sha256 of canonical JSON of the
+closure `modelio` recorded while the gate's module ran (`{portable path: sha}` — a
+project gate's `gates/structural.py`, a pack's `<pack:NAME>/gates/mesh.py`; the bytes
+that executed, S-26), the `canonical_ast_digest` of each `atompipe.*` module the
+closure imports that `SPINE_MODULES` does not cover (cad and fdm import
+`atompipe.site`: a page change re-runs their gates and nobody else's), the
+`SPEC_FIELDS_IN_RHO` values, and the closure's `fallback`. Not `title`,
+`description` (prose), `negative_control` (it is in `rho_control`'s static part) or
+`entry` (discovery). A function with **no recorded closure** — a test's lambda, a gate
+registered from Python — is digested as its **defining file**
+(`fallback="defining-file"`; `doctor` names every one, and the CLI never makes one).
+With no file at all (`<string>`, `exec`) it is `CodeRef(digest="", opaque="code not
+loaded from a file")`: opaque, never a digest of nothing. A closure that recorded two
+versions of one file, or an unreadable `atompipe.*` source, is opaque too. The sweep
+passes its anchors; the default spells a pack gate's files under `<pack:NAME>` and
+everything else under `<tmp>`/`~`.
+
+**`Reads.from_trace` — the classification** (first match wins), for every path a
+trace read (files and listed directories alike): 1. under the interpreter's prefixes,
+site and user site, the atompipe package, `/proc`, `/sys`, `/dev`, or bytecode —
+dropped; 2. read and then written in the window — opaque `self-modified:<path>`
+(a path written first and read after never reaches the trace: the gate's own output);
+3. under a pack — a read `<pack:NAME>/<rel>`; 4. under the sweep's or the control's
+`out_dir` and not written in the window — opaque `out:<rel> (not written by this
+gate)` (another gate's output is a cross-gate channel shaped like S-27); 5. under
+`<root>/.atompipe/` — opaque `atompipe-state:<rel>`; 6. under the root — a read
+`<rel>` (bare, posix); 7. anything else — opaque `file-outside-project:<path>`. In a
+**control** trace a read under the owner's `selftest/` is dropped: the static walk
+keys it, and a fixture module's import-time read of `baseline.json` happens only on
+its first load in a process. `static=` (the files the walk covered) narrows that to
+exactly those files. Files are digested after the gate returns, through `digests`
+(`util.FileDigests`); a listing is the digest of its sorted entry names without
+`__pycache__` or bytecode. `anchors` defaults to `trace.anchors`, else to `<tmp>`/`~`
+only — every project file then reads as outside, opaque: an unanchored trace is never
+Fresh rather than wrongly portable. The trace's own channels pass through
+(`subprocess:omc`, `network`, `param <path>: <Type> is not JSON`). A gate that used
+`ctx.model` is keyed by `model=` (`model_digest(projection, loaded_model)`: the whole
+projection and the model's closure) or, with none, opaque; a control that used it is
+opaque. **Measured (R-4), every bundled baseline and control with trimesh, numpy and
+omc present:** the only opaque channels are `subprocess:omc` on the three omc gates
+(and their controls), plus `out:omc/ThermalTank.TankRun_res.csv` on
+`modelica.simulates`, which reads the result omc wrote — already opaque through its
+subprocess. What slipped through while measuring: `importlib.metadata`'s distribution
+discovery (numpy.testing asks it at import) listed every `sys.path` entry for the
+first mesh gate of each process; its frames are now excluded like the import
+machinery's.
+
+**`rho`** = sha256 of canonical JSON of `{"schema": 1, "gate", "spine", "code":
+<code digest>, "params": [[path, digest], ...], "files", "dirs", "ledger", "model",
+"opaque"}`. Canonical JSON everywhere in this module: `sort_keys`, compact separators,
+`ensure_ascii=False`, `allow_nan=False`, no salt — anyone can recompute any digest
+from this rule. Display values, instruments and a prerequisite's outcome are never in
+it. **`out8`** is the first 8 hex of sha256 of `[passed, measured, limit, units]`: the
+outcome, never the text.
+
+**The entry file** is written once (`O_EXCL` semantics: the bytes go to a `*.tmp` file
+in the same directory, which is hard-linked to the final name — `link(2)` fails when
+the name exists, and the name only ever holds complete bytes; a filesystem without
+hard links gets a plain `O_CREAT|O_EXCL` write). Keys in this order: `schema, gate,
+rho, code, spine, reads, instruments, verdict, digest`; `reads` keys `params, files,
+dirs, ledger, model, opaque`; bytes `json.dumps(indent=2, ensure_ascii=False,
+allow_nan=False) + "\n"`. The `verdict` block is a **whitelist**: `passed` (a bool),
+`measured`, `limit`, `units`, `detail`, `evidence`, `locators`, `claims`, `tier`,
+`pack` — `duration_s`, `cpu_s` and `rho` stay out (costs live in obs). `detail`,
+`evidence` and locator strings are portable (`Anchors`), and evidence under no anchor
+is dropped from the entry (the live row keeps it). `digest` = sha256 of canonical JSON
+of every other field: integrity, not a forgery defence (R-9 is). Writer outcomes: the
+same bytes — `"exists"`, nothing written; the same name with bytes differing only in
+`instruments` — `"exists"` with a note (the same outcome under another library
+version, §8); other bytes — `"kept-first"`, warning `"nondeterministic detail"`;
+another outcome already recorded for this rho — written, warning `"two outcomes
+recorded for identical inputs"` (equal instruments) or `"outcome differs across
+instruments"`, and both files stay. `write_entry` computes `digest` itself and refuses
+(`AtompipeError`) anything its reader would refuse.
+
+**The strict reader** (`read_entries`): not strict JSON (NaN, a duplicate key), a key
+too many or too few, a non-bool `passed`, a non-number `measured`/`limit`, a name its
+content does not produce, or a `digest` that does not match (`"hand-edited entry"`) —
+the file is ignored (the gate is then a miss and runs) and one line naming it goes to
+`problems`. Two outcomes for one rho are both returned, with a problem line; with
+`instruments=` (this machine's), entries that differ only across instruments are
+narrowed to the one recorded here, or none — a local re-run, never a pick.
+`Entry.to_verdict()` is the verdict with its full `rho` and `duration_s = cpu_s = 0.0`.
+
+**`record_verdict`** caches only a verdict that ran and passed or failed; a skip or an
+error returns `None` and writes nothing (the caller `remember`s it). It computes the
+code digest (`spec=None` or `fn=None`: `CodeRef.unrecorded()`, and the entry names
+`code: ...` as an opaque channel — how `test_site` plants a verdict), the spine
+digest, the reads (`reads=`, else `trace` through `Reads.from_trace`), rho and
+`instruments_for`; writes the entry; and `forget`s the gate's remembered outcome.
+
+**`instruments_for`** — provenance, never rho (Q1.3): for each module in
+`requires_python`, the `python:` entries of `requires_one_of`, and the closure's
+**static** third-party imports (`CodeRef.third_party`), its `importlib.metadata`
+version, `"unknown"` when importable without metadata, `"absent"` when not importable.
+It never imports anything. Never from `import` audit events: those fire once per
+process, so only the first mesh gate saw trimesh, and `--only` and a full sweep wrote
+different bytes for one rho (packs:H3).
+
+**Control entries** — `control-<rhoC16>-<out8>.json`, written once, keys: `schema,
+kind ("control"), gate, rho, static, static_parts {spine, code {digest, files},
+selftest {digest, files}, nc {fixture, expect, note}}, host ("known-good" | "live"),
+fixture {digest, files}, reads {params, files, dirs, ledger, host, opaque}, bad
+("fail" | "pass"), good (null until P2), admitted ("reject-only" | "no"), detail,
+measured, limit, units, digest`. `static` (`control_static`) = sha256 of the spine
+digest, the gate's code digest, the owner's `selftest_walk` and the NegativeControl
+fields. **`rho_control`** = sha256 of `{"schema", "gate", "static", "reads"}`. The
+`fixture` block — the fixture's recorded code closure — is a lookup **hint, not an
+input**: the bracket's fixtures import the model, so keyed on it every Config edit
+would write six tracked control files. Bytes that differ only in `fixture` are the
+same control (`write_control` answers `"exists"`, no warning). Host-param reads are
+keyed only when the host was live (a known-good host is a design the fixture's own
+`selftest/` files define).
+
+**`selftest_walk(owner_dir)`** — the owner is the pack directory (`PACK_DIR` on the
+gate's module) or the project root. `vcs.ls_files(owner_dir, ["selftest"])`, asked of
+the OWNER's repository (a bundled pack's is atompipe's), tracked plus
+untracked-not-ignored; outside git, a walk. Both leave out `__pycache__/`,
+`*.py[cod]` and dot-directories (openmodelica's `.generated/`), so the git and non-git
+answers agree — verify.sh `--dir` copies have no `.git` (tests:H11), and a project with
+no ignore rule for `selftest/__pycache__` would otherwise key its controls on
+bytecode. Where git lists nothing and the walk finds files, the walk wins.
+
+**`record_control`** — the sweep's form passes the `gates.selftest` result and its
+trace: fired → `bad: "fail"`, admitted reject-only; the gate PASSED its known-bad
+input → `bad: "pass"`, admitted `"no"` (both measurements, cached). A crash on the
+fixture, an unusable fixture, a self-skip with the tools present or an availability
+skip is `remember`-ed under `control:<gate id>`, keyed by the current `static`, and
+returns `None`. The forged form, `record_control(root, spec, fn, bad="fail",
+detail=...)` with no result and no trace, writes an entry with empty reads — how a
+renderer test plants an admission; it forges only the inner loop (R-9). Writing one
+`forget`s the gate's remembered control failure.
+
+**Remembered outcomes** — `.atompipe/cache/last_outcomes.json` (untracked): `{key:
+{"input_rho", "kind", "verdict", "when"}}`, key a gate id or `control:<gate id>`,
+`kind` `"error"`, `"self-skip"` or `"availability"`. Keyed by **`input_rho`** — the rho
+computed from current digests just before the run (a Fresh entry's, the recomputed
+rho of the latest entry's read signature, or `""`), or a control's current `static` —
+never the failing run's own rho, which a crash at partial reads makes different from
+the PASS it followed. Remembering a pass or a fail is refused: nothing remembered is
+evidence. An unparseable file raises, naming it: read as empty it would hand the next
+check the PASS a crash superseded.
+
+**Obs** — `.atompipe/obs/<gate>.json` and `<gate>.control.json` (untracked), each
+`{"gate", "kind", "runs": [{"entry", "when", "duration_s", "cpu_s"}]}`, the last
+`OBS_KEEP`. Split because the run history mixed `<gate>#selftest` rows with sweep rows
+and no latency reader filtered them (S-31). A file naming another gate or kind — gate
+`x`'s control and a gate called `x.control` share one name — reads as no runs and is
+replaced on the next write: never a mixed series.
 
 ### `gates.py`  (deps: models, util, modelio, verdicts)
 ```python
@@ -761,6 +993,13 @@ class Demonstration:                         # what `demonstrate` saw, gate by g
     problems: list[str]                      # baseline failed, control did not fire, unsealed
     skipped: list[str]                       # availability skips: reported, never a problem
     ran: int                                 # controls actually exercised
+def seal_findings(registry, host_ctx, *, tier=Tier.EXTERNAL,
+                  out_dir=None) -> list[SealFinding]        # controls whose fixture read the HOST's params
+@dataclass
+class SealFinding:                           # one unsealed control (invariant 5, checked at runtime)
+    gate: str                                # the gate whose control read the host
+    fixture: str                             # its NegativeControl.fixture
+    host_paths: list[str]                    # the host-param paths read, dotted
 def match(need: Need, manifests) -> list[PackManifest]      # gap -> candidate packs, by `settles`
 def score(need: Need, manifest) -> float                   # 0 = no signal; what `match` ranks by
 def installed(root, *, ledger=None) -> list[str]           # the project's opted-in packs, in order
@@ -818,6 +1057,17 @@ certified a planted `return True` as publishable (S-09); `gate selftest` tests o
 the reject half, so an always-False gate passed it — the baseline run is the accept
 half (S-04, packs); and the controls wrote into the pack directory on every run
 (phase-1.md Q1.8).
+
+**`seal_findings` is SEALED, checked by running it** (invariant 5, M2.1e). It runs
+every control in `registry` up to `tier` against `host_ctx` — a rich host, the pack's
+own baseline in the gate-on-the-gates — and reads `trace.host_reads`: every param a
+fixture (or a gate on a context its fixture returned unchanged) read from the HOST
+rather than from what the fixture built. A sealed fixture reads none. The spine's own
+`_fixture_root` lookups are `extra`, not params, and are not findings. `demonstrate`
+turns each finding into a problem, so `pack validate` exits non-zero on an unsealed
+fixture. What slipped through before it: a fixture that layered its bad value over
+the host's `ctx.params` fired in the pack's CI and was defused in a project whose
+host happened to state the key it forgot — invariant 5 held only by review.
 
 `origin_of` is printed everywhere a pack is listed, because a pack that is not the
 one you are editing looks exactly like one that is: a tester pulled a fix, watched

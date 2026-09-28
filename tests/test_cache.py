@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import os
@@ -745,6 +746,24 @@ class ControlEntries(_env.EnvCase):
         verdicts.record_control(root, spec, fn, bad="fail", detail="planted")
         self.assertNotIn("control:t.g", verdicts.remembered(root))
 
+    def test_a_self_skip_is_remembered_as_one(self):
+        # S-12's shape on a control: the gate decides its known-bad input does
+        # not apply. Not a measurement; remembered, and its wording pinned.
+        root, _r, spec, fn = self._project('''
+            if float(ctx.params["x"]) > 1.0:
+                return Verdict(gate="t.g", skipped=True, skip_reason="not my input")
+            return Verdict(gate="t.g", passed=True)
+        ''', self._BAD)
+        result, trace = self._selftest(root, spec, fn)
+        self.assertEqual(result.outcome, "error")
+        self.assertTrue(result.error.startswith(
+            "skipped on its own known-bad input while its tools are present"), result.error)
+        self.assertIsNone(verdicts.record_control(root, spec, fn, result=result, trace=trace))
+        held = verdicts.remembered(root)["control:t.g"]
+        self.assertEqual(held["kind"], "self-skip")
+        self.assertEqual(held["verdict"].outcome, "error")
+        self.assertEqual(_entry_files(root, "t.g", controls=True), [])
+
     def test_the_forged_form(self):
         # test_site plants an admission this way (U21); it is a forgery of the
         # inner loop only, which R-9's re-execution at the boundary answers.
@@ -903,8 +922,14 @@ def reader(ctx):
         before it binds. An ``out:`` channel on a gate that is not already opaque
         through a subprocess would make an honest gate never Fresh.
 
-        Measured 2026-09-27 with trimesh, numpy and omc present: see the
-        assertion message for the table this run saw.
+        Measured 2026-09-27 with trimesh, numpy and omc present, 108 traces
+        (54 gates, baseline and control each): one hit, ``modelica.simulates``
+        on its baseline, reading ``omc/ThermalTank.TankRun_res.csv`` — the result
+        omc itself wrote, so the gate is already opaque through
+        ``subprocess:omc``. The same sweep found the first mesh gate of the
+        process listing every ``sys.path`` entry through importlib.metadata
+        (``ImportNoise`` below); with that excluded, the only opaque channels on
+        any bundled gate are omc's.
         """
         hits: dict[str, list[str]] = {}
         unexplained: dict[str, list[str]] = {}
@@ -940,6 +965,25 @@ def reader(ctx):
         self.assertGreater(traced, 20, "the measurement traced almost nothing")
         self.assertEqual(unexplained, {},
                          f"out-dir reads on gates the tracer can otherwise see; all hits: {hits}")
+
+
+class ImportNoise(_env.EnvCase):
+    def test_distribution_discovery_is_not_a_gate_read(self):
+        # What the R-4 sweep above found first: numpy.testing asks
+        # importlib.metadata for a distribution at import time, which lists
+        # every sys.path entry. Only the first mesh gate of a process imports
+        # it, so that gate alone carried `file-outside-project` channels —
+        # never Fresh, and a different entry under `--only` than in a sweep.
+        noise = self.tmp()
+        read = self.tmp()
+        sys.path.append(noise)
+        self.addCleanup(lambda: sys.path.remove(noise) if noise in sys.path else None)
+        trace = GateTrace()
+        with verdicts.tracing(trace):
+            list(importlib.metadata.distributions())
+            os.listdir(read)                         # the positive control
+        self.assertNotIn(noise, trace.dirs, "distribution discovery was filed as a gate read")
+        self.assertIn(read, trace.dirs)
 
 
 # --------------------------------------------------------------------------- #

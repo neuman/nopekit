@@ -6,8 +6,7 @@ had no idea what those were: staleness was ONE hash of the whole projection plus
 one hash of every ingested input, so a comment edit in the model re-ran
 everything and a limit file edited under a project gate re-ran nothing (S-22).
 This module is the single home of the answer — the per-gate read set, and the
-content address (rho) built from it. This file holds its first half, the
-primitives:
+content address (rho) built from it. Its first half is the primitives:
 
 * ``ParamTrace`` — ``ctx.params`` as a gate sees it: every leaf read recorded as
   ``(path, digest)``, every bulk read recorded as a dependency on the whole
@@ -33,21 +32,46 @@ primitives:
   modules SAY rather than from ``__version__``. 1e09113 changed verdict semantics
   (a NaN that read ``[ok]`` now errors) with the version string untouched (S-29).
 
-The rest — ``code_digest``, rho, the entry files, freshness, admission — builds on
-these (U16, U19, U20). None of it reads the wall clock (``test_meta``), takes the
-build lock, or imports ``gates``: ``gates`` imports this module, so anything here
-that needs a gate type receives the object.
+The second half turns a trace into something you can commit:
 
-Imports: ``models`` and ``util`` only, standard library otherwise, including every
-function-local import (CI's AST walk).
+* ``code_digest`` — the code a verdict came from: the recorded closure of the
+  gate's module, the ``atompipe.*`` modules it imports that the spine digest
+  does not cover, and the spec fields that shape a verdict. A gate registered
+  from Python with no recorded closure is digested as its defining file; one
+  with no file at all is opaque, never a digest of nothing.
+* ``Reads.from_trace`` — a trace classified into what rho keys on (params,
+  files, directory listings, claims, the model) and the opaque channels that
+  make an entry never Fresh.
+* ``rho`` and the entry files — ``.atompipe/verdicts/<gate>/<rho16>-<out8>.json``,
+  written once, byte-identical from every checkout, read back strictly. Only a
+  gate that ran and passed or failed is cached; a skip or a crash is
+  ``remember``-ed, keyed by the rho it superseded, and is never evidence.
+* control entries — the demonstration that a gate can fail, keyed by
+  ``rho_control``: the gate's code, its owner's ``selftest/`` walk, the control's
+  own reads. The fixture's code closure rides along as a lookup hint and is NOT
+  an input.
+* obs — what each run cost, untracked, gate runs and control runs in separate
+  files (S-31).
+
+Freshness, admission and the resolver build on these (U19, U20). None of it
+reads the wall clock (``test_meta``) — a ``when`` arrives from the CLI edge —
+takes the build lock, or imports ``gates``: ``gates`` imports this module, so
+anything here that needs a gate type receives the object.
+
+Imports: ``models``, ``util``, ``store``, ``modelio`` and ``vcs``, standard
+library otherwise, including every function-local import (CI's AST walk).
 """
 from __future__ import annotations
 
 import ast
+import contextlib
 import copy
 import dataclasses
+import enum
 import functools
 import hashlib
+import importlib.metadata
+import importlib.util
 import json
 import math
 import numbers
@@ -57,10 +81,11 @@ import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Collection, Iterable, Mapping
 
-from .models import Ledger
-from .util import AtompipeError
+from . import modelio, store, vcs
+from .models import Ledger, Locator, Tier, Verdict
+from .util import AtompipeError, FileDigests, atomic_write_json
 
 
 __all__ = [
@@ -69,6 +94,15 @@ __all__ = [
     "spine_digest", "canonical_ast_digest",
     "Anchors", "ParamTrace", "LedgerView", "ModelProxy", "GateTrace",
     "GateInputWriteError",
+    # part two: rho, entries, controls, remembered outcomes, obs (U16)
+    "SCHEMA", "RHO_CHARS", "OUT_CHARS", "OBS_KEEP", "SPEC_FIELDS_IN_RHO",
+    "CONTROL_OUT_DIR", "TWO_OUTCOMES_IS_ERROR",
+    "CodeRef", "Reads", "Entry", "ControlEntry", "WriteResult",
+    "anchors_for", "code_digest", "model_digest", "rho", "rho_control", "out8",
+    "instruments_for", "write_entry", "read_entries", "record_verdict",
+    "selftest_walk", "control_static", "write_control", "read_controls",
+    "record_control", "remember", "remembered", "forget", "record_obs", "read_obs",
+    "last_read_sets",
 ]
 
 
@@ -1190,7 +1224,19 @@ _EXCLUDED_MODULES = frozenset({
     "importlib._bootstrap", "importlib._bootstrap_external", "zipimport",
     "_frozen_importlib", "_frozen_importlib_external",
     "linecache", "tokenize", "warnings", "traceback",
+    "importlib.metadata",
 })
+
+#: And every submodule of these. ``importlib.metadata`` is import machinery in
+#: all but name: distribution discovery. What slipped through the first list
+#: (measured by U16's R-4 sweep over every bundled baseline): numpy.testing asks
+#: ``importlib.metadata.distribution(...)`` at import time, which LISTS every
+#: ``sys.path`` entry — the checkout's ``src/``, the script's directory, a pack's
+#: ``gates/`` left on the path — so the first mesh gate of every process carried
+#: ``file-outside-project`` channels no later gate did: never Fresh, and a
+#: different entry for ``--only`` than for a full sweep. Library versions are
+#: provenance (``instruments_for``), never rho.
+_EXCLUDED_PREFIXES = tuple(f"{name}." for name in ("importlib.metadata",))
 _EXCLUDED_CODE = frozenset({
     "<frozen importlib._bootstrap>", "<frozen importlib._bootstrap_external>",
     "<frozen zipimport>",
@@ -1484,7 +1530,8 @@ _HANDLERS: dict[str, Callable[[tuple, tuple], None]] = {
 def _excluded_frame(frame: Any) -> bool:
     if frame is None:
         return False
-    if frame.f_globals.get("__name__") in _EXCLUDED_MODULES:
+    name = frame.f_globals.get("__name__")
+    if name in _EXCLUDED_MODULES or (isinstance(name, str) and name.startswith(_EXCLUDED_PREFIXES)):
         return True
     return frame.f_code.co_filename in _EXCLUDED_CODE
 
@@ -1657,3 +1704,1870 @@ def spine_digest() -> str:
         result = hashlib.sha256(_SPINE_SALT + text.encode("ascii")).hexdigest()
     _SPINE_MEMO.append(result)
     return result
+
+
+# =========================================================================== #
+# part two: rho, entries, controls, remembered outcomes, obs
+# =========================================================================== #
+#: The shape of every entry, control entry, rho payload and code-digest payload
+#: this module writes. It sits INSIDE each payload rather than beside it, so a
+#: future shape can never collide with this one's digests: it produces new
+#: addresses, and every entry keyed by the old ones reads stale, never fresh.
+#: *Rejected:* no version at all (a changed canonical form would silently key
+#: old bytes as new).
+SCHEMA = 1
+
+#: Hex characters of rho in an entry's file name, and of the outcome digest.
+#: Why 16: 64 bits keep a collision among one gate's entries below 1e-9 up to
+#: 10^5 entries (PLAN D-05's arithmetic), and the full rho is inside the file,
+#: so a prefix collision is detected rather than served (``write_entry`` refuses
+#: to call a different rho under the same name "exists"). Why 8 for the outcome:
+#: it only has to separate the outcomes recorded for ONE rho. *Rejected:* full
+#: 64-hex file names — 130-character names against Windows' 260-character path
+#: limit, unreadable in a ``git status``.
+RHO_CHARS = 16
+OUT_CHARS = 8
+
+#: Runs kept per gate, per kind (gate runs and control runs are separate files).
+#: 20 covers a working session with enough samples for a median. *Rejected:* 5
+#: (too few for a median to mean anything); unbounded (that is the run history
+#: the brief removes, rebuilt in another directory).
+OBS_KEEP = 20
+
+#: The ``GateSpec`` fields that enter a gate's code digest: the ones that shape
+#: a verdict or what it settles. *Rejected:* ``title`` and ``description``
+#: (prose — a docstring edit would re-run the gate); ``negative_control``
+#: (it belongs to ``rho_control``'s static part, where a fixture rename re-runs
+#: the control, not the gate); ``entry`` (discovery only); hashing ``pack.json``
+#: (no manifest field reaches a GateSpec at runtime — and it would miss the
+#: decorator, which is where the spec is actually written).
+SPEC_FIELDS_IN_RHO = ("id", "claims", "tier", "pack", "requires_tools",
+                      "requires_python", "requires_one_of", "settles")
+
+#: Where a control runs: ``<root>/.atompipe/out/controls/<gate id>/``, emptied
+#: before each run by whoever runs it. Why its own directory: controls wrote the
+#: SAME evidence file names as the gate's real run (``beam-analytic/
+#: deflection.json``, ``omc/check.mos``), so running a control on a cache miss
+#: overwrote the evidence a cached PASS cites with the known-bad working
+#: (packs:H5) — and a stale file left there must never become something the next
+#: run reads. *Rejected:* the host ``out_dir`` (today's clobbering).
+CONTROL_OUT_DIR = ".atompipe/out/controls"
+
+#: Two outcomes recorded for one rho under the same instruments: a WARNING (and
+#: the gate reads stale) while this is False, an error once it is True. Staged
+#: on purpose (R-4): the refusal lands only after ``EntriesAreDeterministic``
+#: (U25) has shown that every bundled gate writes the same bytes from two
+#: directories and two cold processes, so the flip cannot turn an honest gate
+#: red. *Rejected:* an error from the start — an omc-style nondeterminism would
+#: have flagged honest gates red mid-phase, before anyone had measured it;
+#: "worse outcome wins", which picks silently.
+TWO_OUTCOMES_IS_ERROR = False
+
+_STATE_DIR = ".atompipe"
+_VERDICTS_DIR = "verdicts"
+_OBS_DIR = "obs"
+_CACHE_DIR = "cache"
+_LAST_OUTCOMES = "last_outcomes.json"
+_SELFTEST = "selftest"
+_CONTROL_PREFIX = "control-"
+_ENTRY_NAME = re.compile(rf"^[0-9a-f]{{{RHO_CHARS}}}-[0-9a-f]{{{OUT_CHARS}}}\.json$")
+_CONTROL_NAME = re.compile(
+    rf"^{_CONTROL_PREFIX}[0-9a-f]{{{RHO_CHARS}}}-[0-9a-f]{{{OUT_CHARS}}}\.json$")
+_HEX64 = re.compile(r"^[0-9a-f]{64}$")
+
+#: Never a selftest input, never an entry in a directory listing: bytecode. Its
+#: header embeds an mtime and the interpreter's name, so a digest over it moves
+#: on every machine and every Python (``*.py[cod]``).
+_BYTECODE = (".pyc", ".pyo", ".pyd")
+
+#: What a remembered outcome can be (§3.9): a crash, a skip the gate chose while
+#: its tools were present, and a skip availability chose.
+_REMEMBER_KINDS = ("error", "self-skip", "availability")
+
+_ENTRY_FIELDS = ("schema", "gate", "rho", "code", "spine", "reads", "instruments",
+                 "verdict", "digest")
+_CODE_FIELDS = ("digest", "files", "fallback")
+_READ_FIELDS = ("params", "files", "dirs", "ledger", "model", "opaque")
+_CONTROL_READ_FIELDS = ("params", "files", "dirs", "ledger", "host", "opaque")
+
+#: The verdict block's WHITELIST, in the order it is written. What is left out,
+#: and why: ``duration_s``, ``cpu_s`` (costs are observations; they live in obs,
+#: and a tracked duration would make two identical runs two different files);
+#: ``rho`` (the entry's own, one level up); ``skipped``, ``skip_reason``,
+#: ``error`` (never cached — see ``record_verdict``); ``gate`` (one level up).
+#: A field added to ``Verdict`` later is left out until someone decides it
+#: belongs in a tracked file — never by default.
+_VERDICT_FIELDS = ("passed", "measured", "limit", "units", "detail", "evidence",
+                   "locators", "claims", "tier", "pack")
+
+_CONTROL_FIELDS = ("schema", "kind", "gate", "rho", "static", "static_parts", "host",
+                   "fixture", "reads", "bad", "good", "admitted", "detail", "measured",
+                   "limit", "units", "digest")
+_STATIC_PARTS = ("spine", "code", "selftest", "nc")
+_HOSTS = ("live", "known-good")
+
+#: The words ``gates.selftest`` uses for the two control outcomes that are not
+#: plain "fired": the gate PASSING its known-bad input (a measurement — the gate
+#: is a logger), and a self-skip with the tools present (not a measurement).
+#: Read here because a selftest verdict carries no other field that tells a
+#: logger from a crash (both are ``passed=False`` with no ``error``); pinned by
+#: ``tests/test_cache.ControlEntries`` so a reworded message turns a test red
+#: instead of filing a logger as a crash.
+_PASSED_ITS_KNOWN_BAD = "PASSED its own known-bad fixture"
+_SELF_SKIPPED = "skipped on its own known-bad input while its tools are present"
+
+
+def _digest_of(form: Any) -> str:
+    """sha256 of canonical JSON (``sort_keys``, compact, ``ensure_ascii=False``,
+    ``allow_nan=False``) — the one rule for rho, rho_control, out8, the code
+    digest and an entry's integrity ``digest``. No salt: ``SCHEMA`` is inside
+    each payload, and a human can recompute any of them from the documented
+    rule."""
+    return hashlib.sha256(_canonical_json(form).encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _clean(value: Any) -> Any:
+    """``value`` with every string encodable as UTF-8 and every tuple a list.
+
+    A gate's detail or an undecodable file name can carry a lone surrogate, which
+    no UTF-8 file can hold: written raw, the entry could not be written at all.
+    It becomes its visible ``\\udcxx`` spelling instead.
+    """
+    if isinstance(value, str):
+        try:
+            value.encode("utf-8")
+            return str.__str__(value)
+        except UnicodeEncodeError:
+            return value.encode("utf-8", "backslashreplace").decode("utf-8")
+    if isinstance(value, dict):
+        return {_clean(k): _clean(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clean(v) for v in value]
+    return value
+
+
+def _dump(form: dict) -> bytes:
+    """The bytes of a tracked file: indent 2, ``ensure_ascii=False``,
+    ``allow_nan=False``, one trailing newline. Key order is the caller's —
+    fixed, and documented — never sorted: the file is read by people."""
+    return (json.dumps(form, indent=2, ensure_ascii=False, allow_nan=False)
+            + "\n").encode("utf-8")
+
+
+def _strict_json(text: str) -> Any:
+    """``json.loads`` that refuses a duplicate key and NaN / Infinity.
+
+    Python's default keeps the LAST of two duplicate keys and parses ``NaN``: a
+    hand edit that appended ``"passed": true`` after ``"passed": false`` would be
+    read as a pass, and a digest recomputed over the parsed form would agree.
+    """
+    def pairs(items: list) -> dict:
+        out: dict = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError(f"duplicate key {key!r}")
+            out[key] = value
+        return out
+
+    def constant(name: str) -> Any:
+        raise ValueError(f"{name} is not a number JSON allows")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=constant)
+
+
+def _check_gate_id(gate_id: Any) -> str:
+    """``gate_id``, or ``AtompipeError`` when it cannot name a directory.
+
+    The same characters ``Registry.register`` refuses (``/``, ``\\``, ``..``,
+    ``:``), re-checked here because a verdict or an obs file can be written for
+    a gate nobody registered (a test plants one; ``doctor`` reads an orphan).
+    """
+    if not isinstance(gate_id, str) or not gate_id.strip() or "\x00" in gate_id \
+            or any(bad in gate_id for bad in ("/", "\\", "..", ":")):
+        raise AtompipeError(
+            f"gate id {gate_id!r} cannot name a directory in the verdict cache "
+            f"(.atompipe/verdicts/<gate id>/): no '/', '\\\\', '..' or ':'")
+    return gate_id
+
+
+def _gate_dir(root: str, gate_id: str) -> str:
+    return os.path.join(root, _STATE_DIR, _VERDICTS_DIR, _check_gate_id(gate_id))
+
+
+def _shown(root: str, path: str) -> str:
+    """``path`` relative to ``root`` for a message, posix."""
+    try:
+        return os.path.relpath(path, root).replace(os.sep, "/")
+    except ValueError:                                         # another drive
+        return path
+
+
+def _file_bytes(path: str) -> bytes | None:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read()
+    except OSError:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# anchors for a project
+# --------------------------------------------------------------------------- #
+def anchors_for(root: str, registry: Any, *, out_dir: str) -> Anchors:
+    """The anchors a project's entries are spelled against.
+
+    ``<root>`` the project, ``<pack:NAME>`` every pack ``registry`` loaded (its
+    ``pack_dirs``: only the load knows where a pack lives — a checkout, a
+    project's ``.atompipe/packs``, site-packages), ``<out>`` the sweep's
+    ``out_dir``, ``<out:controls>`` the control ``out_dir`` (``CONTROL_OUT_DIR``),
+    plus ``<tmp>`` and ``~``. ``registry`` may be ``None``: no packs.
+    """
+    base = os.path.abspath(root) if root else ""
+    pack_dirs = getattr(registry, "pack_dirs", None) if registry is not None else None
+    packs = {str(name): os.path.abspath(path)
+             for name, path in dict(pack_dirs or {}).items() if path}
+    return Anchors(root=base, packs=packs,
+                   out=os.path.abspath(out_dir) if out_dir else "",
+                   controls_out=os.path.join(base, *CONTROL_OUT_DIR.split("/")) if base else "")
+
+
+def _pack_dir_of(fn: Any) -> str:
+    """``PACK_DIR`` of the module that defines ``fn`` (``packs.load_gates`` sets
+    it before the module runs), or ``""`` for a project's own gate."""
+    target = getattr(fn, "__func__", fn)
+    module = sys.modules.get(getattr(target, "__module__", None) or "")
+    pack_dir = vars(module).get("PACK_DIR") if module is not None else None
+    return os.path.abspath(pack_dir) if isinstance(pack_dir, str) and pack_dir else ""
+
+
+def _default_anchors(root: str, spec: Any, fn: Any) -> Anchors:
+    """``anchors_for(root, None, ...)`` plus the pack ``fn`` came from, for a
+    caller that did not pass the sweep's anchors."""
+    base = anchors_for(root, None, out_dir=store.out_dir(root) if root else "")
+    pack_dir = _pack_dir_of(fn)
+    if not pack_dir:
+        return base
+    name = getattr(spec, "pack", "") or os.path.basename(pack_dir.rstrip(os.sep))
+    return dataclasses.replace(base, packs={name: pack_dir})
+
+
+def _spell(path: Any, anchors: Anchors) -> str | None:
+    """How an entry names ``path``: ``model/x.stl`` under the root (bare, posix),
+    ``<pack:NAME>/...``, ``<out>/...``, ``<tmp>/...``, ``~/...``; ``None`` for an
+    absolute path under no anchor."""
+    spelled = anchors.portable_path(path)
+    if spelled is None:
+        return None
+    if spelled == "<root>":
+        return "."
+    if spelled.startswith("<root>/"):
+        return spelled[len("<root>/"):]
+    return spelled
+
+
+def _spell_code(path: str, anchors: Anchors) -> str:
+    """``_spell``, falling back to the absolute path: a code file is always
+    named, even where no anchor reaches it (then only this machine's entries
+    agree — and only an in-process gate, which the CLI never has, gets there)."""
+    spelled = _spell(path, anchors)
+    return spelled if spelled is not None else os.path.abspath(path).replace(os.sep, "/")
+
+
+# --------------------------------------------------------------------------- #
+# the code digest
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class CodeRef:
+    """The code a verdict came from.
+
+    ``digest`` — sha256 of the closure's ``{portable path: sha}``, its
+    ``spine_extras`` digests, the ``SPEC_FIELDS_IN_RHO`` values and
+    ``fallback``; ``files`` — the portable paths; ``fallback`` — why the closure
+    is coarser than exact (``"defining-file"``, or modelio's "computed source at
+    ..."); ``opaque`` — why it cannot be keyed at all (``""`` when it can);
+    ``third_party`` — the closure's static third-party imports (for
+    ``instruments_for``, never for rho).
+    """
+
+    digest: str = ""
+    files: tuple = ()
+    fallback: str = ""
+    opaque: str = ""
+    third_party: tuple = ()
+
+    @classmethod
+    def unrecorded(cls, why: str = "code not recorded: no registered gate to read it "
+                                   "from") -> "CodeRef":
+        """The code of a verdict whose gate is unknown (``record_verdict`` with
+        ``spec=None``): opaque — an entry keyed by it is never Fresh — and never
+        a digest of nothing."""
+        return cls(opaque=why)
+
+    def to_dict(self) -> dict:
+        """The entry's ``code`` block: ``{"digest", "files", "fallback"}``."""
+        return {"digest": self.digest, "files": list(self.files), "fallback": self.fallback}
+
+
+def _spec_value(value: Any) -> Any:
+    if isinstance(value, enum.Enum):
+        return _spec_value(value.value)
+    if isinstance(value, (list, tuple)):
+        return [_spec_value(item) for item in value]
+    return value
+
+
+def _defining_file(fn: Any) -> str | None:
+    """The file ``fn``'s code was compiled from, or ``None`` when there is none
+    (``<string>``, ``exec``, a builtin)."""
+    target = getattr(fn, "__func__", fn)
+    if isinstance(target, functools.partial):
+        target = target.func
+    code = getattr(target, "__code__", None)
+    if code is None:
+        code = getattr(getattr(type(target), "__call__", None), "__code__", None)
+    filename = getattr(code, "co_filename", "") if code is not None else ""
+    if not isinstance(filename, str) or not filename or (
+            filename.startswith("<") and filename.endswith(">")):
+        return None
+    return os.path.abspath(filename)
+
+
+def _spine_extra_digest(name: str) -> str:
+    """``canonical_ast_digest`` of an ``atompipe.*`` module beside this file, or
+    ``""`` when its source cannot be read (a wheel without ``.py`` files)."""
+    parts = name.split(".")
+    if not parts or parts[0] != "atompipe":
+        return ""
+    here = os.path.dirname(os.path.abspath(__file__))
+    rest = parts[1:]
+    candidates = ([os.path.join(here, *rest) + ".py", os.path.join(here, *rest, "__init__.py")]
+                  if rest else [os.path.join(here, "__init__.py")])
+    for candidate in candidates:
+        data = _file_bytes(candidate)
+        if data is not None:
+            return canonical_ast_digest(data)
+    return ""
+
+
+def _code_payload(files: dict, extras: dict, spec_part: dict, fallback: str) -> str:
+    return _digest_of({"schema": SCHEMA, "files": files, "spine_extras": extras,
+                       "spec": spec_part, "fallback": fallback})
+
+
+def code_digest(spec: Any, fn: Any, *, anchors: Anchors | None = None) -> CodeRef:
+    """The code ``fn`` (registered as ``spec``) runs, as a ``CodeRef``.
+
+    From the closure ``modelio`` recorded while the gate's module ran: every
+    file under its roots, by the bytes that executed (a same-size, same-second
+    edit ran the old bytecode before, S-26), spelled portably (``anchors``; a
+    project's gate reads ``gates/structural.py``, a pack's
+    ``<pack:NAME>/gates/mesh.py``); plus each ``atompipe.*`` module it imports
+    that ``SPINE_MODULES`` does not cover, by canonical AST (cad and fdm import
+    ``atompipe.site``: a page change re-runs their gates, nobody else's); plus
+    the ``SPEC_FIELDS_IN_RHO`` values.
+
+    A function with NO recorded closure — a test's lambda, a gate registered in
+    process from Python — is digested as its defining file
+    (``fallback="defining-file"``): an edit of that file moves it. What it cannot
+    see is named: a value the function closes over (``doctor`` lists every
+    defining-file gate; the CLI never produces one). With no file at all
+    (``<string>``, ``exec``) it is ``CodeRef(digest="", opaque="code not loaded
+    from a file")`` — opaque, never Fresh, never a digest of nothing. A closure
+    that recorded two versions of one file, or an ``atompipe.*`` module whose
+    source cannot be read, is opaque too.
+
+    ``anchors`` defaults to the pack ``fn`` came from plus ``<tmp>`` and ``~``:
+    pass the sweep's for an entry that is the same in every checkout.
+    """
+    if spec is None or fn is None:
+        return CodeRef.unrecorded()
+    if anchors is None:
+        anchors = _default_anchors("", spec, fn)
+    spec_part = {name: _spec_value(getattr(spec, name, None)) for name in SPEC_FIELDS_IN_RHO}
+    closure = modelio.code_closure(fn)
+    if closure is None:
+        path = _defining_file(fn)
+        data = _file_bytes(path) if path else None
+        if data is None:
+            return CodeRef(opaque="code not loaded from a file")
+        spelled = _clean(_spell_code(path, anchors))
+        files = {spelled: hashlib.sha256(data).hexdigest()}
+        return CodeRef(digest=_code_payload(files, {}, spec_part, "defining-file"),
+                       files=(spelled,), fallback="defining-file")
+
+    files: dict[str, str | None] = {}
+    torn: list[str] = []
+    for path, sha in closure.files:
+        spelled = _clean(_spell_code(path, anchors))
+        files[spelled] = sha or None
+        if not sha:
+            torn.append(spelled)
+    extras = {name: _spine_extra_digest(name) for name in sorted(closure.spine_extras)}
+    unreadable = [name for name, digest in extras.items() if not digest]
+    fallback = _clean(portable(closure.fallback, anchors))
+    opaque = ""
+    if torn:
+        # modelio writes "" when two versions of one file ran inside one closure
+        # (or the file could not be read): no digest names the code that ran.
+        opaque = f"code closure inconsistent: {', '.join(sorted(torn))}"
+    elif unreadable:
+        opaque = f"spine module source unreadable: {', '.join(unreadable)}"
+    files = dict(sorted(files.items()))
+    return CodeRef(digest=_code_payload(files, extras, spec_part, fallback),
+                   files=tuple(files), fallback=fallback, opaque=opaque,
+                   third_party=tuple(sorted(closure.third_party)))
+
+
+def model_digest(projection: Any, model: Any = None, *,
+                 anchors: Anchors | None = None) -> str:
+    """What a gate that touched ``ctx.model`` depended on: the whole projection
+    and the model's recorded code closure, as one digest — or ``""`` when the
+    model's code was not recorded (then a gate that used it is opaque).
+
+    ``ModelProxy`` sets ``trace.model_used`` on any real use; the caller that
+    built the projection passes this as ``Reads.from_trace(..., model=...)``.
+    A gate that reaches the model directly could have read anything in it, so
+    nothing narrower is honest. No bundled gate touches ``ctx.model``.
+    """
+    module = getattr(model, "module", model)
+    closure = modelio.code_closure(module) if module is not None else None
+    if closure is None:
+        return ""
+    anchors = anchors or Anchors()
+    code = {_clean(_spell_code(path, anchors)): sha or None for path, sha in closure.files}
+    if any(sha is None for sha in code.values()):
+        return ""
+    return _digest_of({"schema": SCHEMA, "projection": digest_value(projection, anchors),
+                       "code": dict(sorted(code.items())),
+                       "fallback": _clean(portable(closure.fallback, anchors))})
+
+
+# --------------------------------------------------------------------------- #
+# instruments: provenance, never rho
+# --------------------------------------------------------------------------- #
+@functools.lru_cache(maxsize=1)
+def _distributions() -> dict:
+    """``{top-level module: [distribution names]}``, once per process."""
+    try:
+        return {k: list(v) for k, v in importlib.metadata.packages_distributions().items()}
+    except Exception:                                          # noqa: BLE001 - metadata is best-effort
+        return {}
+
+
+def _version_of(name: str) -> str:
+    """The installed version behind module ``name``: the distribution version,
+    ``"unknown"`` when it is importable with no metadata, ``"absent"`` when it is
+    not importable. Never imports it."""
+    top = name.split(".")[0]
+    try:
+        found = importlib.util.find_spec(top) if top else None
+    except (ImportError, ValueError, AttributeError):
+        found = None
+    if found is None:
+        return "absent"
+    versions = set()
+    for dist in _distributions().get(top, ()):
+        try:
+            versions.add(importlib.metadata.version(dist))
+        except Exception:                                      # noqa: BLE001
+            continue
+    return ",".join(sorted(versions)) if versions else "unknown"
+
+
+def instruments_for(spec: Any, code: Any) -> dict[str, str]:
+    """``{module: version}`` for the third-party code a verdict may depend on.
+
+    The modules: ``spec.requires_python``, the ``python:`` entries of
+    ``spec.requires_one_of``, and the STATIC third-party imports of the gate's
+    closure files (``code.third_party``: every top-level import name, module or
+    function level, resolving outside the closure roots, not stdlib, not
+    atompipe). The version: ``importlib.metadata``'s, ``"unknown"`` when
+    importable without metadata, ``"absent"`` when not importable.
+
+    Never from ``import`` audit events: those fire once per process, on the
+    first actual load, so only the first mesh gate of a sweep "saw" trimesh, and
+    ``check --only fdm.bridge_span`` and a full sweep wrote different bytes for
+    one rho (packs:H3). Instruments are provenance, never part of rho (Q1.3): an
+    entry recorded under another numpy stays Fresh, with a note.
+    """
+    names: set[str] = set()
+    for module in getattr(spec, "requires_python", None) or ():
+        if isinstance(module, str) and module.strip():
+            names.add(module.strip())
+    for entry in getattr(spec, "requires_one_of", None) or ():
+        kind, _, module = str(entry).partition(":")
+        if kind.strip() == "python" and module.strip():
+            names.add(module.strip())
+    names.update(getattr(code, "third_party", None) or ())
+    return {name: _version_of(name) for name in sorted(names)}
+
+
+# --------------------------------------------------------------------------- #
+# Reads: a trace, classified
+# --------------------------------------------------------------------------- #
+def _json_path(path: tuple) -> list:
+    """A param path as JSON: a list, because flat keys such as ``fdm.bbox_mm``
+    hold dots. A key that is neither a str nor an int is its ``$k:<repr>``."""
+    out: list = []
+    for part in path:
+        if isinstance(part, str):
+            out.append(str.__str__(part))
+        elif isinstance(part, int) and not isinstance(part, bool):
+            out.append(int(part))
+        else:
+            out.append(_key_form(part))
+    return out
+
+
+def _dir_digest(path: str) -> str | None:
+    """A listing, digested as its sorted entry names — bytecode left out, so
+    the first run's ``__pycache__`` does not move it — or ``None`` when there is
+    no directory to list."""
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return None
+    kept = sorted(name for name in names
+                  if name != "__pycache__" and not name.endswith(_BYTECODE))
+    return _digest_of(_clean(kept))
+
+
+def _walkable(rel: str) -> bool:
+    """Would the selftest walk keep ``rel`` (posix, owner-relative)? No
+    ``__pycache__``, no dot-directory, no bytecode, no git directory marker."""
+    if not rel or rel.endswith("/"):
+        return False
+    parts = rel.split("/")
+    if any(part == "__pycache__" or part.startswith(".") for part in parts[:-1]):
+        return False
+    return not parts[-1].endswith(_BYTECODE)
+
+
+def _norm(path: str) -> str:
+    return os.path.normcase(os.path.normpath(os.path.abspath(path)))
+
+
+class _Places:
+    """The anchors as the classification rules need them: each anchor's
+    spellings (``abspath`` and ``realpath``), normalised."""
+
+    def __init__(self, anchors: Anchors) -> None:
+        by_token: dict[str, list[str]] = {}
+        for spelling, token in anchors.pairs():
+            by_token.setdefault(token, []).append(os.path.normcase(spelling))
+        self.anchors = anchors
+        self.packs = [(token[len("<pack:"):-1], by_token[token])
+                      for token in sorted(by_token) if token.startswith("<pack:")]
+        self.root = by_token.get("<root>", [])
+        self.out = by_token.get("<out>", [])
+        self.controls = by_token.get("<out:controls>", [])
+
+    @staticmethod
+    def rel(path: str, spellings: list[str]) -> str | None:
+        """``path`` relative to the first spelling that contains it, posix."""
+        for base in spellings:
+            if path == base:
+                return ""
+            if path.startswith(base + os.sep):
+                return path[len(base) + 1:].replace(os.sep, "/")
+        return None
+
+    def shown(self, path: str) -> str:
+        spelled = self.anchors.portable_path(path)
+        return spelled if spelled is not None else path.replace(os.sep, "/")
+
+
+def _classify(path: str, places: _Places, *, is_dir: bool, control: bool,
+              selfmod: set, written: list, static: set | None) -> tuple[str, str]:
+    """``("drop", "")``, ``("read", <portable>)`` or ``("opaque", <channel>)``
+    for one path a trace read — spec §3.4's rules, first match wins."""
+    p = _norm(path)
+    # 1. the interpreter's and the libraries' own files; bytecode
+    if _library_path(p):
+        return "drop", ""
+    # 2. read, and later written, in this window: its pre-write bytes are gone.
+    #    (Written first and read after never reached the read list at all.)
+    if not is_dir and p in selfmod:
+        return "opaque", f"self-modified:{places.shown(p)}"
+
+    def selftest_covered(rel: str) -> bool:
+        if not control or not (rel == _SELFTEST or rel.startswith(_SELFTEST + "/")):
+            return False
+        if is_dir:
+            return True
+        return p in static if static is not None else _walkable(rel)
+
+    # 3. under a pack
+    for name, spellings in places.packs:
+        rel = places.rel(p, spellings)
+        if rel is not None:
+            if selftest_covered(rel):
+                return "drop", ""
+            return "read", f"<pack:{name}>/{rel}" if rel else f"<pack:{name}>"
+    # 4. under the sweep's or the control's out_dir, and not this window's output
+    for prefix, spellings in (("controls/", places.controls), ("", places.out)):
+        rel = places.rel(p, spellings)
+        if rel is None:
+            continue
+        if is_dir and any(w == p or w.startswith(p + os.sep) for w in written):
+            return "drop", ""                   # a listing of what it wrote itself
+        where = (prefix + rel) if rel else (prefix.rstrip("/") or ".")
+        return "opaque", f"out:{where} (not written by this gate)"
+    rel = places.rel(p, places.root)
+    if rel is not None:
+        # 5. the spine's own state is never an input
+        if rel == _STATE_DIR or rel.startswith(_STATE_DIR + "/"):
+            return "opaque", f"atompipe-state:{rel}"
+        # 6. the project
+        if selftest_covered(rel):
+            return "drop", ""
+        return "read", rel or "."
+    # 7. anything else
+    return "opaque", f"file-outside-project:{places.shown(p)}"
+
+
+@dataclass
+class Reads:
+    """What one run read, as an entry keys it.
+
+    ``params`` — ``[[path, digest], ...]`` or ``[[path, digest, small], ...]``
+    (``path`` a JSON list; ``small`` only when the value is small, for a stale
+    line that says ``config.bed_xy 220.0 -> 250.0``); ``files`` and ``dirs`` —
+    ``{portable path: sha | None}`` (``None``: missing, which is itself an
+    input); ``ledger`` — ``{"claim:<id>" | "<list>": digest}``; ``model`` — the
+    ``model_digest`` when the gate used ``ctx.model``; ``opaque`` — sorted
+    channel names; ``host`` — a control's host-param reads, ``[[path,
+    digest], ...]``. Only the display values are left out of rho.
+    """
+
+    params: list = field(default_factory=list)
+    files: dict = field(default_factory=dict)
+    dirs: dict = field(default_factory=dict)
+    ledger: dict = field(default_factory=dict)
+    model: str | None = None
+    opaque: list = field(default_factory=list)
+    host: list = field(default_factory=list)
+
+    @classmethod
+    def from_trace(cls, trace: GateTrace, *, anchors: Anchors | None = None,
+                   digests: FileDigests | None = None, model: str | None = None,
+                   static: Collection[str] | None = None) -> "Reads":
+        """Classify ``trace`` (spec §3.4) and digest what it read, now.
+
+        Files and listings are digested when this is called — after the gate
+        returned — through ``digests`` (a ``util.FileDigests``; a fresh one when
+        ``None``). Each path a trace read is, first match wins:
+
+        1. under the interpreter's prefixes, site and user site, the atompipe
+           package, ``/proc``, ``/sys``, ``/dev``, or bytecode — dropped;
+        2. read and then written in this window — opaque
+           ``self-modified:<path>`` (its pre-write bytes are gone);
+        3. under a pack — a read ``<pack:NAME>/<rel>``;
+        4. under the sweep's or the control's ``out_dir``, not this window's
+           output — opaque ``out:<rel> (not written by this gate)``: another
+           gate's output is a cross-gate channel shaped like S-27 (SF PD-11);
+        5. under ``<root>/.atompipe/`` — opaque ``atompipe-state:<rel>``;
+        6. under the root — a read ``<rel>``;
+        7. anything else — opaque ``file-outside-project:<path>``.
+
+        In a CONTROL trace, reads under the owner's ``selftest/`` are dropped:
+        the static walk covers them, and a fixture module's import-time read of
+        ``baseline.json`` happens only on its first load in a process, so keying
+        it would make rho_control depend on module-cache state. ``static`` — the
+        absolute paths the walk actually covered — narrows that to exactly those
+        files (a git-ignored file a fixture reads is still an input); without it,
+        any walkable file under a ``selftest/`` is dropped.
+
+        ``anchors`` defaults to ``trace.anchors``, else to ``<tmp>`` and ``~``
+        only — then every project file is outside and opaque: an unanchored
+        trace is never Fresh rather than wrongly portable. The trace's own
+        opaque channels (``subprocess:omc``, ``network``, a non-JSON param) pass
+        through; a gate that used the model is keyed by ``model`` (see
+        ``model_digest``) or, with none given, opaque — and a control that used
+        it is opaque, because its fixture context carries the live model.
+        """
+        anchors = anchors or getattr(trace, "anchors", None) or Anchors()
+        digests = digests if digests is not None else FileDigests()
+        control = getattr(trace, "kind", "gate") == "control"
+        places = _Places(anchors)
+        static_set = None if static is None else {_norm(p) for p in static}
+        written = sorted(_norm(p) for p in trace.files_written)
+        selfmod = {_norm(p) for p in trace.self_modified()}
+
+        params = []
+        for path, digest in trace.params.items():
+            row: list = [_json_path(path), digest]
+            if path in trace.values:
+                row.append(trace.values[path])
+            params.append(_clean(row))
+        params.sort(key=lambda row: _canonical_json(row[0]))
+        host = sorted((_clean([_json_path(path), digest])
+                       for path, digest in trace.host_reads.items()),
+                      key=lambda row: _canonical_json(row[0]))
+
+        opaque = {_clean(portable(name, anchors)) for name in trace.opaque}
+        files: dict[str, str | None] = {}
+        for path in trace.files_read:
+            action, what = _classify(path, places, is_dir=False, control=control,
+                                     selfmod=selfmod, written=written, static=static_set)
+            if action == "read":
+                files[_clean(what)] = digests.digest(path)
+            elif action == "opaque":
+                opaque.add(_clean(what))
+        dirs: dict[str, str | None] = {}
+        for path in sorted(trace.dirs):
+            action, what = _classify(path, places, is_dir=True, control=control,
+                                     selfmod=selfmod, written=written, static=static_set)
+            if action == "read":
+                dirs[_clean(what)] = _dir_digest(path)
+            elif action == "opaque":
+                opaque.add(_clean(what))
+
+        model_value = None
+        if trace.model_used:
+            if control:
+                opaque.add("model: read on a control (its context carries the live model)")
+            elif model:
+                model_value = model
+            else:
+                opaque.add("model: used, and no digest of it was given")
+        return cls(params=params, files=dict(sorted(files.items())),
+                   dirs=dict(sorted(dirs.items())),
+                   ledger=_clean(dict(sorted(trace.ledger.items()))),
+                   model=model_value, opaque=sorted(opaque), host=host)
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Reads":
+        """An entry's ``reads`` block (gate or control shape) back into ``Reads``."""
+        data = data or {}
+        return cls(params=[list(row) for row in data.get("params") or []],
+                   files=dict(data.get("files") or {}), dirs=dict(data.get("dirs") or {}),
+                   ledger=dict(data.get("ledger") or {}), model=data.get("model"),
+                   opaque=sorted(data.get("opaque") or []),
+                   host=[list(row) for row in data.get("host") or []])
+
+    def to_dict(self, *, control: bool = False) -> dict:
+        """The entry's ``reads`` block, keys in their fixed order: ``params, files,
+        dirs, ledger, model, opaque`` — or, for a control, ``host`` in place of
+        ``model``."""
+        out: dict = {"params": [list(row) for row in self.params],
+                     "files": dict(sorted(self.files.items())),
+                     "dirs": dict(sorted(self.dirs.items())),
+                     "ledger": dict(sorted(self.ledger.items()))}
+        if control:
+            out["host"] = [list(row) for row in self.host]
+        else:
+            out["model"] = self.model
+        out["opaque"] = sorted(self.opaque)
+        return _clean(out)
+
+    def with_opaque(self, *names: str) -> "Reads":
+        """A copy with ``names`` added to its opaque channels."""
+        return dataclasses.replace(self, opaque=sorted(set(self.opaque) | set(names)))
+
+    def keyed(self, *, control: bool = False) -> dict:
+        """The read set as rho sees it: display values dropped."""
+        out = self.to_dict(control=control)
+        out["params"] = [row[:2] for row in out["params"]]
+        return out
+
+
+def _as_reads(reads: Any) -> Reads:
+    if isinstance(reads, Reads):
+        return reads
+    return Reads.from_dict(reads or {})
+
+
+def rho(gate_id: str, spine: str, code: Any, reads: Any) -> str:
+    """The content address of a verdict: sha256 of canonical JSON of
+    ``{"schema", "gate", "spine", "code", "params", "files", "dirs", "ledger",
+    "model", "opaque"}`` — the gate, the spine digest, the code digest (a
+    ``CodeRef`` or its digest string) and what the gate read (``Reads`` or an
+    entry's ``reads`` block). Display values never enter it; instruments never
+    do (Q1.3); a prerequisite's outcome never does (Q1.7, which keeps P2's
+    ``needs`` additive)."""
+    code_digest_ = code.digest if isinstance(code, CodeRef) else str(code or "")
+    keyed = _as_reads(reads).keyed()
+    return _digest_of({"schema": SCHEMA, "gate": gate_id, "spine": spine or "",
+                       "code": code_digest_, **keyed})
+
+
+def rho_control(gate_id: str, static: str, reads: Any) -> str:
+    """The content address of a control: sha256 of canonical JSON of
+    ``{"schema", "gate", "static", "reads"}`` — the static part (spine, code,
+    the owner's ``selftest/`` walk, the NegativeControl fields) and what the
+    fixture and the gate read on the control (display values dropped). The
+    fixture's code closure is NOT in it: that is a lookup hint, so re-verifying
+    a control after the model moved writes no new file when the values did not
+    move (§3.8)."""
+    return _digest_of({"schema": SCHEMA, "gate": gate_id, "static": static or "",
+                       "reads": _as_reads(reads).keyed(control=True)})
+
+
+def _outcome_form(passed: Any, measured: Any, limit: Any, units: Any) -> list:
+    return _clean([passed, measured, limit, units or ""])
+
+
+def out8(verdict: Any) -> str:
+    """The first ``OUT_CHARS`` hex of sha256 over ``[passed, measured, limit,
+    units]`` — the OUTCOME, never the text: a detail-only difference is the same
+    outcome and keeps the first file (D-05). Takes a ``Verdict`` or an entry's
+    ``verdict`` block."""
+    if isinstance(verdict, Mapping):
+        form = _outcome_form(verdict.get("passed") is True, verdict.get("measured"),
+                             verdict.get("limit"), verdict.get("units"))
+    else:
+        form = _outcome_form(verdict.outcome == "pass", _number(verdict.measured, "measured"),
+                             _number(verdict.limit, "limit"), verdict.units)
+    return _digest_of(form)[:OUT_CHARS]
+
+
+def _control_out8(bad: str, measured: Any, limit: Any, units: Any) -> str:
+    return _digest_of(_outcome_form(bad, measured, limit, units))[:OUT_CHARS]
+
+
+# --------------------------------------------------------------------------- #
+# entries
+# --------------------------------------------------------------------------- #
+def _number(value: Any, what: str) -> Any:
+    """``None``, or ``value`` as a plain finite ``int``/``float`` — else
+    ``AtompipeError``. ``run_gate`` already refuses the rest (U02); this is the
+    same rule at the door of a tracked file, for a verdict that never went
+    through it."""
+    if value is None:
+        return None
+    item = _scalar_item(value)
+    if item is not _MISSING:
+        value = item
+    if isinstance(value, bool) or not isinstance(value, numbers.Real):
+        raise AtompipeError(f"a verdict entry's {what} must be a real number or null, "
+                            f"not {value!r} ({type(value).__name__})")
+    number = int(value) if isinstance(value, numbers.Integral) else float(value)
+    if isinstance(number, float) and not math.isfinite(number):
+        raise AtompipeError(f"a verdict entry's {what} must be finite, not {number!r}")
+    return number
+
+
+def _locator_form(locator: Any, anchors: Anchors | None) -> dict:
+    form = locator.to_dict() if hasattr(locator, "to_dict") else dict(locator)
+    return {key: portable(value, anchors) if isinstance(value, str) else value
+            for key, value in form.items()}
+
+
+def _verdict_block(verdict: Verdict, anchors: Anchors | None) -> dict:
+    """The whitelisted, portable ``verdict`` block of an entry."""
+    evidence = [str(path) for path in verdict.evidence or ()]
+    return _clean({
+        "passed": verdict.outcome == "pass",
+        "measured": _number(verdict.measured, "measured"),
+        "limit": _number(verdict.limit, "limit"),
+        "units": str(verdict.units or ""),
+        "detail": portable(str(verdict.detail or ""), anchors),
+        "evidence": anchors.evidence(evidence) if anchors is not None else evidence,
+        "locators": [_locator_form(loc, anchors) for loc in verdict.locators or ()],
+        "claims": [str(c) for c in verdict.claims or ()],
+        "tier": int(verdict.tier),
+        "pack": str(verdict.pack or ""),
+    })
+
+
+def _problem_in_block(block: Any) -> str:
+    """Why a ``verdict`` block cannot be read as one, or ``""``."""
+    if not isinstance(block, dict):
+        return "verdict is not an object"
+    if list(block) != list(_VERDICT_FIELDS):
+        return (f"verdict keys are {list(block)}, not the whitelist "
+                f"{list(_VERDICT_FIELDS)}")
+    if not isinstance(block["passed"], bool):
+        return f"verdict.passed must be true or false, not {block['passed']!r}"
+    for what in ("measured", "limit"):
+        value = block[what]
+        if value is not None and (isinstance(value, bool)
+                                  or not isinstance(value, (int, float))
+                                  or not math.isfinite(value)):
+            return f"verdict.{what} must be a number or null, not {value!r}"
+    for what in ("units", "detail", "pack"):
+        if not isinstance(block[what], str):
+            return f"verdict.{what} must be a string"
+    for what in ("evidence", "claims"):
+        if not isinstance(block[what], list) or not all(isinstance(v, str) for v in block[what]):
+            return f"verdict.{what} must be a list of strings"
+    if not isinstance(block["locators"], list) or not all(isinstance(v, dict)
+                                                          for v in block["locators"]):
+        return "verdict.locators must be a list of objects"
+    tier = block["tier"]
+    if isinstance(tier, bool) or not isinstance(tier, int) or tier not in {t.value for t in Tier}:
+        return f"verdict.tier must be one of {[t.value for t in Tier]}, not {tier!r}"
+    return ""
+
+
+def _problem_in_reads(reads: Any, *, control: bool) -> str:
+    keys = _CONTROL_READ_FIELDS if control else _READ_FIELDS
+    if not isinstance(reads, dict) or list(reads) != list(keys):
+        return f"reads must be an object with keys {list(keys)}"
+    for row in reads["params"]:
+        if not (isinstance(row, list) and len(row) in (2, 3) and isinstance(row[0], list)
+                and isinstance(row[1], str)):
+            return f"reads.params has a malformed row {row!r}"
+    for what in ("files", "dirs", "ledger"):
+        table = reads[what]
+        if not isinstance(table, dict) or not all(
+                isinstance(k, str) and (isinstance(v, str) or (v is None and what != "ledger"))
+                for k, v in table.items()):
+            return f"reads.{what} must map paths to digests"
+    if control:
+        if not isinstance(reads["host"], list) or not all(
+                isinstance(row, list) and len(row) == 2 for row in reads["host"]):
+            return "reads.host must be a list of [path, digest]"
+    elif reads["model"] is not None and not isinstance(reads["model"], str):
+        return "reads.model must be a digest or null"
+    if not isinstance(reads["opaque"], list) or not all(isinstance(v, str)
+                                                        for v in reads["opaque"]):
+        return "reads.opaque must be a list of strings"
+    return ""
+
+
+@dataclass
+class Entry:
+    """One cached verdict: ``.atompipe/verdicts/<gate>/<rho16>-<out8>.json``.
+
+    Fields in file order — ``schema`` (always ``SCHEMA``, not stored here),
+    ``gate``, ``rho`` (64 hex), ``code`` (``{"digest", "files", "fallback"}``),
+    ``spine``, ``reads`` (``Reads.to_dict()``), ``instruments``, ``verdict``
+    (the whitelist) — then ``digest``, sha256 of canonical JSON of all the
+    others: integrity against a hand edit, not a defence against forgery (R-9
+    is: ``check --force`` re-executes at every boundary that costs money).
+    ``path`` is where it was read from; it is not part of the file.
+    """
+
+    gate: str
+    rho: str
+    code: dict
+    spine: str
+    reads: dict
+    instruments: dict
+    verdict: dict
+    digest: str = ""
+    path: str = field(default="", compare=False, repr=False)
+
+    @property
+    def name(self) -> str:
+        """``<rho16>-<out8>``: the file name without ``.json``."""
+        return f"{self.rho[:RHO_CHARS]}-{out8(self.verdict)}"
+
+    def body(self) -> dict:
+        """Every field but ``digest``, in file order."""
+        return {"schema": SCHEMA, "gate": self.gate, "rho": self.rho, "code": self.code,
+                "spine": self.spine, "reads": self.reads, "instruments": self.instruments,
+                "verdict": self.verdict}
+
+    def to_verdict(self) -> Verdict:
+        """The cached verdict: ``rho`` the full address, ``duration_s`` and
+        ``cpu_s`` 0.0 — a cache hit never replays a cost (obs has the runs)."""
+        v = self.verdict
+        return Verdict(gate=self.gate, passed=v["passed"] is True,
+                       claims=list(v.get("claims") or []), measured=v.get("measured"),
+                       limit=v.get("limit"), units=v.get("units") or "",
+                       detail=v.get("detail") or "", evidence=list(v.get("evidence") or []),
+                       tier=Tier(int(v.get("tier") or 0)), pack=v.get("pack") or "",
+                       locators=[Locator.from_dict(loc) for loc in v.get("locators") or []],
+                       rho=self.rho, duration_s=0.0, cpu_s=0.0)
+
+    def read_set(self) -> Reads:
+        return Reads.from_dict(self.reads)
+
+
+@dataclass(frozen=True)
+class WriteResult:
+    """What a writer did: ``status`` ``"written"`` (a new file), ``"exists"``
+    (these bytes, or the same entry recorded under other instruments or with
+    another fixture hint, were already there — no write) or ``"kept-first"``
+    (same name, different bytes: the first is kept, and ``warnings`` says
+    why); the file's ``path`` and ``name``; the full ``rho``; ``warnings`` —
+    two outcomes for one rho, a detail that is not deterministic."""
+
+    status: str
+    path: str
+    name: str
+    rho: str
+    warnings: tuple = ()
+
+    @property
+    def written(self) -> bool:
+        return self.status == "written"
+
+
+def _write_once(directory: str, filename: str, data: bytes) -> tuple[str, bytes | None]:
+    """Create ``directory/filename`` holding ``data`` unless it exists:
+    ``("written", None)``, ``("exists", None)`` or ``("differs", <its bytes>)``.
+
+    O_EXCL semantics, and never a torn file: the bytes go to a temporary file
+    in the same directory, flushed, which is then hard-linked to the final name
+    — ``link(2)`` fails when the name exists, exactly like ``O_EXCL``, and the
+    name only ever holds complete bytes. Where the filesystem has no hard links
+    it falls back to a plain ``O_CREAT | O_EXCL`` write. The temporary name ends
+    in ``.tmp``, which every project's ``.atompipe/.gitignore`` ignores.
+    """
+    os.makedirs(directory, exist_ok=True)
+    final = os.path.join(directory, filename)
+
+    def seen() -> tuple[str, bytes | None]:
+        existing = _file_bytes(final)
+        if existing is None:
+            raise AtompipeError(f"{final} exists and cannot be read")
+        return ("exists", None) if existing == data else ("differs", existing)
+
+    if os.path.lexists(final):
+        return seen()
+    fd, tmp = tempfile.mkstemp(prefix=f".{filename}.", suffix=".tmp", dir=directory)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(tmp, 0o644)
+        except OSError:
+            pass
+        try:
+            os.link(tmp, final)
+        except FileExistsError:
+            return seen()
+        except (OSError, NotImplementedError):
+            try:
+                out = os.open(final, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                              | getattr(os, "O_BINARY", 0), 0o644)
+            except FileExistsError:
+                return seen()
+            try:
+                with os.fdopen(out, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(final)
+                raise
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+    return "written", None
+
+
+def _siblings(directory: str, name: str, rho_full: str, *, control: bool) -> list[Any]:
+    """The readable entries (or control entries) in ``directory`` with the same
+    full rho as ``name`` and a different outcome."""
+    prefix = name[:name.rindex("-") + 1]
+    pattern = _CONTROL_NAME if control else _ENTRY_NAME
+    found = []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return found
+    for other in names:
+        if other == name + ".json" or not other.startswith(prefix) or not pattern.match(other):
+            continue
+        loader = _load_control if control else _load_entry
+        parsed, _why = loader(os.path.join(directory, other), None)
+        if parsed is not None and parsed.rho == rho_full:
+            found.append(parsed)
+    return found
+
+
+def _existing_differs(existing: bytes, body: dict, gate: str, name: str,
+                      *, hint: str) -> tuple[str, str]:
+    """Same name, different bytes: ``("exists", note)`` when the only difference
+    is ``hint`` (a gate entry's instruments, a control's fixture closure),
+    ``("kept-first", warning)`` otherwise. The first file is kept either way."""
+    try:
+        parsed = _strict_json(existing.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return "kept-first", (f"{gate}: {name}.json exists and does not parse ({exc}); "
+                              f"the first file is kept")
+    if not isinstance(parsed, dict) or parsed.get("rho") != body.get("rho"):
+        return "kept-first", (f"{gate}: {name}.json holds a different rho with the same "
+                              f"{RHO_CHARS}-character prefix; the first file is kept")
+    moved = [key for key in body if parsed.get(key) != body[key]]
+    if moved == [hint]:
+        if hint == "instruments":
+            return "exists", (f"{gate}: {name} was recorded under other instruments "
+                              f"({_canonical_json(parsed.get(hint))}; here "
+                              f"{_canonical_json(body[hint])}); the first entry is kept")
+        return "exists", ""
+    return "kept-first", (f"nondeterministic detail: {gate} {name} — the same inputs and "
+                          f"the same outcome wrote different bytes in {', '.join(moved)}; "
+                          f"the first entry is kept")
+
+
+def _entry_body(entry: Entry) -> dict:
+    """``entry``'s fields, validated and in file order — or ``AtompipeError``:
+    the writer never puts something on disk its own reader would refuse."""
+    _check_gate_id(entry.gate)
+    body = _clean(entry.body())
+    if not isinstance(body["rho"], str) or not _HEX64.match(body["rho"]):
+        raise AtompipeError(f"{entry.gate}: an entry's rho must be 64 hex characters")
+    code = body["code"]
+    if not isinstance(code, dict) or not all(k in code for k in _CODE_FIELDS):
+        raise AtompipeError(f"{entry.gate}: an entry's code block needs {list(_CODE_FIELDS)}")
+    body["code"] = {"digest": str(code["digest"]), "files": [str(f) for f in code["files"]],
+                    "fallback": str(code["fallback"])}
+    body["reads"] = _as_reads(body["reads"]).to_dict()
+    body["instruments"] = {str(k): str(v) for k, v in sorted((body["instruments"] or {}).items())}
+    body["verdict"] = {key: body["verdict"].get(key) if isinstance(body["verdict"], dict)
+                       else None for key in _VERDICT_FIELDS}
+    why = (_problem_in_block(body["verdict"]) or _problem_in_reads(body["reads"], control=False))
+    if why:
+        raise AtompipeError(f"{entry.gate}: refusing to write an entry its reader would "
+                            f"refuse: {why}")
+    return body
+
+
+def write_entry(root: str, entry: Entry) -> WriteResult:
+    """Write ``entry`` at ``.atompipe/verdicts/<gate>/<rho16>-<out8>.json``, once.
+
+    The bytes: keys in file order, ``indent=2``, ``ensure_ascii=False``,
+    ``allow_nan=False``, a trailing newline, ``digest`` computed here (whatever
+    ``entry.digest`` said). Never rewritten (O_EXCL, see ``_write_once``):
+
+    * the same bytes already there — ``"exists"``, nothing written;
+    * the same name, bytes differing only in ``instruments`` — ``"exists"``,
+      with a note: the same outcome under another library version, and either
+      copy is correct (§8);
+    * the same name, other bytes — ``"kept-first"`` with the warning
+      ``"nondeterministic detail"`` (D-05: same inputs, same outcome tuple,
+      different text);
+    * another outcome already recorded for this rho — written, with the
+      warning ``"two outcomes recorded for identical inputs"`` (equal
+      instruments) or ``"outcome differs across instruments"``. Both files stay;
+      neither outcome is silently picked (``TWO_OUTCOMES_IS_ERROR``).
+    """
+    body = _entry_body(entry)
+    data = _dump({**body, "digest": _digest_of(body)})
+    name = f"{body['rho'][:RHO_CHARS]}-{out8(body['verdict'])}"
+    directory = _gate_dir(root, body["gate"])
+    warnings: list[str] = []
+    for other in _siblings(directory, name, body["rho"], control=False):
+        if other.instruments == body["instruments"]:
+            warnings.append(f"{body['gate']}: two outcomes recorded for identical inputs "
+                            f"({other.name}, {name})")
+        else:
+            warnings.append(f"{body['gate']}: outcome differs across instruments "
+                            f"({other.name} under {_canonical_json(other.instruments)}, "
+                            f"{name} under {_canonical_json(body['instruments'])})")
+    status, existing = _write_once(directory, name + ".json", data)
+    if status == "differs":
+        status, note = _existing_differs(existing, body, body["gate"], name, hint="instruments")
+        if note:
+            warnings.append(note)
+    return WriteResult(status=status, path=os.path.join(directory, name + ".json"),
+                       name=name, rho=body["rho"], warnings=tuple(warnings))
+
+
+def _load_entry(path: str, gate_id: str | None) -> tuple[Entry | None, str]:
+    """``(entry, "")`` or ``(None, why it is ignored)``."""
+    data_bytes = _file_bytes(path)
+    if data_bytes is None:
+        return None, "unreadable"
+    try:
+        data = _strict_json(data_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return None, f"not strict JSON ({exc})"
+    if not isinstance(data, dict):
+        return None, "not a JSON object"
+    if list(data) != list(_ENTRY_FIELDS):
+        return None, f"keys are {list(data)}, not {list(_ENTRY_FIELDS)}"
+    if data["schema"] != SCHEMA or isinstance(data["schema"], bool):
+        return None, f"schema {data['schema']!r} is not {SCHEMA}: written by another spine"
+    if not isinstance(data["gate"], str) or (gate_id is not None and data["gate"] != gate_id):
+        return None, f"gate {data['gate']!r} is not the directory's {gate_id!r}"
+    if not isinstance(data["rho"], str) or not _HEX64.match(data["rho"]):
+        return None, "rho is not 64 hex characters"
+    code = data["code"]
+    if not (isinstance(code, dict) and list(code) == list(_CODE_FIELDS)
+            and isinstance(code["digest"], str) and isinstance(code["fallback"], str)
+            and isinstance(code["files"], list)
+            and all(isinstance(f, str) for f in code["files"])):
+        return None, f"code must be an object with keys {list(_CODE_FIELDS)}"
+    if not isinstance(data["spine"], str):
+        return None, "spine must be a string"
+    why = _problem_in_reads(data["reads"], control=False)
+    if why:
+        return None, why
+    if not isinstance(data["instruments"], dict) or not all(
+            isinstance(k, str) and isinstance(v, str) for k, v in data["instruments"].items()):
+        return None, "instruments must map module names to versions"
+    why = _problem_in_block(data["verdict"])
+    if why:
+        return None, why
+    body = {key: data[key] for key in _ENTRY_FIELDS if key != "digest"}
+    if data["digest"] != _digest_of(body):
+        return None, "hand-edited entry: its digest does not match its content"
+    entry = Entry(gate=data["gate"], rho=data["rho"], code=code, spine=data["spine"],
+                  reads=data["reads"], instruments=data["instruments"],
+                  verdict=data["verdict"], digest=data["digest"], path=path)
+    if os.path.basename(path) != entry.name + ".json":
+        return None, f"its name does not match its content (it holds {entry.name}.json)"
+    return entry, ""
+
+
+def read_entries(root: str, gate_id: str, *, problems: list | None = None,
+                 instruments: Mapping[str, str] | None = None) -> list[Entry]:
+    """Every readable verdict entry of ``gate_id``, sorted by name. Strict.
+
+    A file that is not strict JSON (NaN, a duplicate key), has a key too many or
+    too few, a non-bool ``passed``, a non-number ``measured``/``limit``, a name
+    its content does not produce, or a ``digest`` that does not match its
+    content (``"hand-edited entry"``) is IGNORED — the gate is then a cache miss
+    and runs — and one line naming the file and the reason is appended to
+    ``problems`` (``doctor`` shows them). Control entries are ``read_controls``'.
+
+    Two outcomes for one rho are both returned, with a problem line: ``"two
+    outcomes recorded for identical inputs"`` when their instruments are equal,
+    ``"outcome differs across instruments"`` otherwise. With ``instruments``
+    (this machine's), the latter case keeps only the entry recorded under
+    exactly these instruments, or none — a local re-run, never a pick.
+    """
+    notes = problems if problems is not None else []
+    directory = _gate_dir(root, gate_id)
+    try:
+        names = sorted(os.listdir(directory))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError as exc:
+        notes.append(f"{_shown(root, directory)}: cannot be listed ({exc})")
+        return []
+    found: list[Entry] = []
+    for filename in names:
+        if not filename.endswith(".json") or filename.startswith(_CONTROL_PREFIX):
+            continue
+        path = os.path.join(directory, filename)
+        if not _ENTRY_NAME.match(filename):
+            notes.append(f"{_shown(root, path)}: not a verdict entry name "
+                         f"(<rho16>-<out8>.json); ignored")
+            continue
+        entry, why = _load_entry(path, gate_id)
+        if entry is None:
+            notes.append(f"{_shown(root, path)}: {why}; ignored")
+            continue
+        found.append(entry)
+
+    groups: dict[str, list[Entry]] = {}
+    for entry in found:
+        groups.setdefault(entry.rho, []).append(entry)
+    kept: list[Entry] = []
+    for group in groups.values():
+        if len(group) == 1:
+            kept.extend(group)
+            continue
+        names_ = ", ".join(e.name for e in group)
+        if len({_canonical_json(e.instruments) for e in group}) == 1:
+            notes.append(f"{gate_id}: two outcomes recorded for identical inputs ({names_})")
+            kept.extend(group)
+            continue
+        notes.append(f"{gate_id}: outcome differs across instruments ({names_})")
+        if instruments is None:
+            kept.extend(group)
+            continue
+        local = [e for e in group if e.instruments == dict(instruments)]
+        if len(local) > 1:
+            notes.append(f"{gate_id}: two outcomes recorded for identical inputs "
+                         f"({', '.join(e.name for e in local)})")
+        kept.extend(local)
+    return sorted(kept, key=lambda e: e.name)
+
+
+def record_verdict(root: str, spec: Any, fn: Any, verdict: Verdict, *,
+                   trace: GateTrace | None = None, reads: Any = None,
+                   anchors: Anchors | None = None,
+                   digests: FileDigests | None = None) -> WriteResult | None:
+    """Cache ``verdict`` if it is a measurement; return what the writer did.
+
+    Only a gate that RAN and passed or failed is cached. A skip proves nothing
+    and an error proves less (invariants 1 and 2): for those this returns
+    ``None`` and writes nothing — the caller ``remember``-s them. For a pass or
+    a fail it computes the code digest (``code_digest``; ``spec=None`` or
+    ``fn=None`` — a verdict planted without its gate — is
+    ``CodeRef.unrecorded()``, and the entry names ``code: ...`` as an opaque
+    channel), the spine digest, the read set (``reads``, else ``trace``
+    classified by ``Reads.from_trace``, else nothing), rho, and
+    ``instruments_for``; writes the entry (``write_entry``); and clears any
+    remembered outcome of this gate — a cacheable outcome at these inputs is
+    newer than the crash it supersedes (§3.9).
+
+    ``anchors`` defaults to ``root``'s, with the pack ``fn`` came from; pass the
+    sweep's (``anchors_for``). ``digests`` defaults to a fresh
+    ``util.FileDigests`` (no stat cache: correct, and slower).
+    """
+    if verdict.outcome not in ("pass", "fail"):
+        return None
+    gate_id = spec.id if spec is not None else verdict.gate
+    if verdict.gate != gate_id:
+        raise AtompipeError(f"a verdict for {verdict.gate!r} cannot be recorded as "
+                            f"{gate_id!r}'s")
+    anchors = anchors if anchors is not None else _default_anchors(root, spec, fn)
+    code = code_digest(spec, fn, anchors=anchors) if spec is not None and fn is not None \
+        else CodeRef.unrecorded()
+    if reads is not None:
+        read_set = _as_reads(reads)
+    elif trace is not None:
+        read_set = Reads.from_trace(trace, anchors=anchors, digests=digests)
+    else:
+        read_set = Reads()
+    if code.opaque:
+        read_set = read_set.with_opaque(f"code: {code.opaque}")
+    spine = spine_digest()
+    address = rho(gate_id, spine, code, read_set)
+    entry = Entry(gate=gate_id, rho=address, code=code.to_dict(), spine=spine,
+                  reads=read_set.to_dict(),
+                  instruments=instruments_for(spec, code) if spec is not None else {},
+                  verdict=_verdict_block(verdict, anchors))
+    result = write_entry(root, entry)
+    forget(root, gate_id)
+    return result
+
+
+# --------------------------------------------------------------------------- #
+# control entries
+# --------------------------------------------------------------------------- #
+def _walk_selftest(owner: str) -> list[str]:
+    """Every walkable file under ``owner/selftest``, owner-relative and posix:
+    no ``__pycache__``, no dot-directory (openmodelica's ``.generated/``), no
+    bytecode."""
+    base = os.path.join(owner, _SELFTEST)
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__" and not d.startswith("."))
+        for filename in sorted(filenames):
+            rel = os.path.relpath(os.path.join(dirpath, filename), owner).replace(os.sep, "/")
+            if _walkable(rel):
+                found.append(rel)
+    return found
+
+
+def selftest_walk(owner_dir: str, *, digests: FileDigests | None = None) -> dict[str, str | None]:
+    """``{owner-relative path: sha256}`` of every file under ``owner_dir/selftest``.
+
+    ``owner_dir`` is the pack directory for a pack's gate and the project root
+    for a project's. Which files: ``vcs.ls_files(owner_dir, ["selftest"])`` —
+    tracked plus untracked-not-ignored, asked of the OWNER's own repository (a
+    bundled pack's repository is atompipe's, not the project's) — or, where git
+    cannot answer (no repository: verify.sh's ``--dir`` copies, a wheel), a walk
+    that leaves out ``__pycache__/``, ``*.py[cod]`` and dot-directories. Git's
+    answer is filtered by the same rules, so the two agree: a checked-out
+    project with no ignore rule for ``selftest/__pycache__`` would otherwise key
+    its controls on bytecode, whose header embeds an mtime and the
+    interpreter's name. Where git lists nothing and the walk finds files (the
+    whole directory ignored), the walk wins: an input git was told to ignore is
+    still an input. Each file is digested from its bytes (``digests``); a
+    tracked file missing on disk digests ``None``, which is a change.
+    """
+    owner = os.path.abspath(owner_dir)
+    listed = vcs.ls_files(owner, [_SELFTEST])
+    walked = _walk_selftest(owner) if listed is None or not listed else None
+    if listed is None or (not listed and walked):
+        rels = walked or []
+    else:
+        rels = [rel for rel in listed if _walkable(rel)]
+    digests = digests if digests is not None else FileDigests()
+    return {rel: digests.digest(os.path.join(owner, *rel.split("/")))
+            for rel in sorted(set(rels))}
+
+
+def _owner_dir(fn: Any, root: str) -> str:
+    """Whose ``selftest/`` a gate's control lives in: its pack's, else the
+    project's (the same answer ``gates._fixture_root`` reaches through
+    ``PACK_DIR``)."""
+    return _pack_dir_of(fn) or os.path.abspath(root)
+
+
+def _static(spec: Any, fn: Any, root: str, *, digests: FileDigests | None,
+            anchors: Anchors | None) -> tuple[str, dict, CodeRef, str]:
+    anchors = anchors if anchors is not None else _default_anchors(root, spec, fn)
+    code = code_digest(spec, fn, anchors=anchors)
+    owner = _owner_dir(fn, root)
+    files = selftest_walk(owner, digests=digests)
+    nc = getattr(spec, "negative_control", None)
+    parts = _clean({
+        "spine": spine_digest(),
+        "code": {"digest": code.digest, "files": list(code.files)},
+        "selftest": {"digest": _digest_of(files), "files": files},
+        "nc": None if nc is None else {"fixture": nc.fixture, "expect": nc.expect,
+                                       "note": nc.note},
+    })
+    return _digest_of({"schema": SCHEMA, **parts}), parts, code, owner
+
+
+def control_static(spec: Any, fn: Any, root: str, *, digests: FileDigests | None = None,
+                   anchors: Anchors | None = None) -> tuple[str, dict]:
+    """``(static, parts)``: the part of ``rho_control`` known without running.
+
+    ``parts`` = ``{"spine", "code": {"digest", "files"}, "selftest": {"digest",
+    "files": {path: sha}}, "nc": {"fixture", "expect", "note"}}`` — the spine
+    digest, the gate's code digest, the owner's ``selftest_walk`` and the
+    NegativeControl fields; ``static`` = sha256 of canonical JSON of them. It
+    moves when the gate's code, anything under its owner's ``selftest/``, the
+    control's declaration or the spine moves — and NOT when the model does: the
+    bracket's ``bed_xy`` edit leaves all six statics where they were (E4).
+    """
+    static, parts, _code, _owner = _static(spec, fn, root, digests=digests, anchors=anchors)
+    return static, parts
+
+
+@dataclass
+class ControlEntry:
+    """One demonstration: ``.atompipe/verdicts/<gate>/control-<rhoC16>-<out8>.json``.
+
+    ``rho`` is ``rho_control``; ``static``/``static_parts`` the static part;
+    ``host`` ``"known-good"`` or ``"live"`` — which context the fixture got;
+    ``fixture`` ``{"digest", "files"}`` — the fixture's recorded code closure, a
+    lookup HINT, not an input; ``reads`` — what the fixture and the gate read on
+    the control (``host`` keyed only when the host was live); ``bad`` —
+    ``"fail"`` (the gate rejected its known-bad input: fired) or ``"pass"``
+    (it did not: a logger); ``good`` — ``None`` until P2 runs the known-good
+    half; ``admitted`` — ``"reject-only"`` or ``"no"``; ``detail``,
+    ``measured``, ``limit``, ``units`` from the run; ``digest`` as for an
+    ``Entry``.
+    """
+
+    gate: str
+    rho: str
+    static: str
+    static_parts: dict
+    host: str
+    fixture: dict
+    reads: dict
+    bad: str
+    good: Any = None
+    admitted: str = ""
+    detail: str = ""
+    measured: Any = None
+    limit: Any = None
+    units: str = ""
+    digest: str = ""
+    path: str = field(default="", compare=False, repr=False)
+
+    @property
+    def name(self) -> str:
+        """``control-<rhoC16>-<out8>``: the file name without ``.json``."""
+        return (f"{_CONTROL_PREFIX}{self.rho[:RHO_CHARS]}-"
+                f"{_control_out8(self.bad, self.measured, self.limit, self.units)}")
+
+    def body(self) -> dict:
+        """Every field but ``digest``, in file order."""
+        return {"schema": SCHEMA, "kind": "control", "gate": self.gate, "rho": self.rho,
+                "static": self.static, "static_parts": self.static_parts, "host": self.host,
+                "fixture": self.fixture, "reads": self.reads, "bad": self.bad,
+                "good": self.good, "admitted": self.admitted, "detail": self.detail,
+                "measured": self.measured, "limit": self.limit, "units": self.units}
+
+    def read_set(self) -> Reads:
+        return Reads.from_dict(self.reads)
+
+
+def _problem_in_control(data: Any) -> str:
+    if not isinstance(data, dict):
+        return "not a JSON object"
+    if list(data) != list(_CONTROL_FIELDS):
+        return f"keys are {list(data)}, not {list(_CONTROL_FIELDS)}"
+    if data["schema"] != SCHEMA or isinstance(data["schema"], bool):
+        return f"schema {data['schema']!r} is not {SCHEMA}: written by another spine"
+    if data["kind"] != "control":
+        return f"kind {data['kind']!r} is not 'control'"
+    for what in ("rho", "static"):
+        if not isinstance(data[what], str) or not _HEX64.match(data[what]):
+            return f"{what} is not 64 hex characters"
+    parts = data["static_parts"]
+    if not isinstance(parts, dict) or list(parts) != list(_STATIC_PARTS):
+        return f"static_parts must be an object with keys {list(_STATIC_PARTS)}"
+    if data["host"] not in _HOSTS:
+        return f"host must be one of {list(_HOSTS)}, not {data['host']!r}"
+    fixture = data["fixture"]
+    if not (isinstance(fixture, dict) and list(fixture) == ["digest", "files"]
+            and isinstance(fixture["files"], dict)):
+        return "fixture must be an object with keys ['digest', 'files']"
+    why = _problem_in_reads(data["reads"], control=True)
+    if why:
+        return why
+    if data["bad"] not in ("fail", "pass"):
+        return f"bad must be 'fail' or 'pass', not {data['bad']!r}"
+    if data["good"] is not None:
+        return "good must be null until the known-good half exists (P2)"
+    if data["admitted"] != ("reject-only" if data["bad"] == "fail" else "no"):
+        return f"admitted {data['admitted']!r} does not follow from bad {data['bad']!r}"
+    for what in ("measured", "limit"):
+        value = data[what]
+        if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
+                                  or not math.isfinite(value)):
+            return f"{what} must be a number or null, not {value!r}"
+    if not isinstance(data["detail"], str) or not isinstance(data["units"], str):
+        return "detail and units must be strings"
+    return ""
+
+
+def _load_control(path: str, gate_id: str | None) -> tuple[ControlEntry | None, str]:
+    data_bytes = _file_bytes(path)
+    if data_bytes is None:
+        return None, "unreadable"
+    try:
+        data = _strict_json(data_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        return None, f"not strict JSON ({exc})"
+    why = _problem_in_control(data)
+    if why:
+        return None, why
+    if not isinstance(data["gate"], str) or (gate_id is not None and data["gate"] != gate_id):
+        return None, f"gate {data['gate']!r} is not the directory's {gate_id!r}"
+    body = {key: data[key] for key in _CONTROL_FIELDS if key != "digest"}
+    if data["digest"] != _digest_of(body):
+        return None, "hand-edited entry: its digest does not match its content"
+    entry = ControlEntry(**{key: data[key] for key in _CONTROL_FIELDS
+                            if key not in ("schema", "kind")}, path=path)
+    if os.path.basename(path) != entry.name + ".json":
+        return None, f"its name does not match its content (it holds {entry.name}.json)"
+    return entry, ""
+
+
+def write_control(root: str, entry: ControlEntry) -> WriteResult:
+    """Write ``entry`` at ``.atompipe/verdicts/<gate>/control-<rhoC16>-<out8>.json``,
+    once — ``write_entry``'s rules, with one difference: bytes that differ only
+    in ``fixture`` are the same control (``"exists"``, no warning). The fixture
+    closure is a hint; a model edit moves it on every control, and re-verifying
+    must write no new file when the control's values did not move (§3.8)."""
+    _check_gate_id(entry.gate)
+    body = _clean(entry.body())
+    body["reads"] = _as_reads(body["reads"]).to_dict(control=True)
+    why = _problem_in_control({**body, "digest": ""})
+    if why:
+        raise AtompipeError(f"{entry.gate}: refusing to write a control entry its reader "
+                            f"would refuse: {why}")
+    data = _dump({**body, "digest": _digest_of(body)})
+    name = (f"{_CONTROL_PREFIX}{body['rho'][:RHO_CHARS]}-"
+            f"{_control_out8(body['bad'], body['measured'], body['limit'], body['units'])}")
+    directory = _gate_dir(root, body["gate"])
+    warnings = [f"{body['gate']}: two control outcomes recorded for identical inputs "
+                f"({other.name}, {name})"
+                for other in _siblings(directory, name, body["rho"], control=True)]
+    status, existing = _write_once(directory, name + ".json", data)
+    if status == "differs":
+        status, note = _existing_differs(existing, body, body["gate"], name, hint="fixture")
+        if note:
+            warnings.append(note)
+    return WriteResult(status=status, path=os.path.join(directory, name + ".json"),
+                       name=name, rho=body["rho"], warnings=tuple(warnings))
+
+
+def read_controls(root: str, gate_id: str, *, problems: list | None = None) -> list[ControlEntry]:
+    """Every readable control entry of ``gate_id``, sorted by name; strict, as
+    ``read_entries`` (a hand-edited or malformed file is ignored with a line in
+    ``problems``). Two outcomes for one rho_control are both returned, with a
+    problem line; admission (U20) reads that as not admitted."""
+    notes = problems if problems is not None else []
+    directory = _gate_dir(root, gate_id)
+    try:
+        names = sorted(os.listdir(directory))
+    except (FileNotFoundError, NotADirectoryError):
+        return []
+    except OSError as exc:
+        notes.append(f"{_shown(root, directory)}: cannot be listed ({exc})")
+        return []
+    found: list[ControlEntry] = []
+    for filename in names:
+        if not filename.startswith(_CONTROL_PREFIX) or not filename.endswith(".json"):
+            continue
+        path = os.path.join(directory, filename)
+        if not _CONTROL_NAME.match(filename):
+            notes.append(f"{_shown(root, path)}: not a control entry name; ignored")
+            continue
+        entry, why = _load_control(path, gate_id)
+        if entry is None:
+            notes.append(f"{_shown(root, path)}: {why}; ignored")
+            continue
+        found.append(entry)
+    by_rho: dict[str, list[ControlEntry]] = {}
+    for entry in found:
+        by_rho.setdefault(entry.rho, []).append(entry)
+    for group in by_rho.values():
+        if len(group) > 1:
+            notes.append(f"{gate_id}: two control outcomes recorded for identical inputs "
+                         f"({', '.join(e.name for e in group)})")
+    return found
+
+
+def _control_outcome(spec: Any, result: Verdict) -> tuple[str | None, str]:
+    """``(bad, "")`` for a measurement, ``(None, kind)`` for an outcome that is
+    remembered and never cached."""
+    outcome = result.outcome
+    if outcome == "pass":
+        return "fail", ""                              # the gate rejected its known-bad input
+    if outcome == "skipped":
+        return None, "availability"
+    if outcome == "error":
+        return None, ("self-skip" if (result.error or "").startswith(_SELF_SKIPPED)
+                      else "error")
+    if (result.detail or "").startswith(f"{spec.id} {_PASSED_ITS_KNOWN_BAD}"):
+        return "pass", ""                              # a logger: measured, not admitted
+    # crashed on its fixture, or disagreed with an expect="error" control: an
+    # exception is not a measurement, and neither is a control that did not run
+    return None, "error"
+
+
+def _fixture_part(trace: Any, anchors: Anchors) -> dict:
+    closure = getattr(trace, "fixture_code", None) if trace is not None else None
+    files: dict[str, str | None] = {}
+    if isinstance(closure, modelio.CodeClosure):
+        for path, sha in closure.files:
+            files[_clean(_spell_code(path, anchors))] = sha or None
+    files = dict(sorted(files.items()))
+    return {"digest": _digest_of(files), "files": files}
+
+
+def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = None,
+                   trace: GateTrace | None = None, host: str = "live",
+                   bad: str | None = None, detail: str = "",
+                   digests: FileDigests | None = None, anchors: Anchors | None = None,
+                   when: str = "") -> WriteResult | None:
+    """Record one control run of ``spec`` as a control entry; return what the
+    writer did, or ``None`` when the outcome is not a measurement.
+
+    **The sweep's form** passes the ``gates.selftest`` ``result`` and the
+    ``trace`` it ran under. A fired control (the gate rejected its known-bad
+    input) is ``bad: "fail"``, admitted reject-only; a gate that PASSED its
+    known-bad input is ``bad: "pass"``, not admitted — both are measurements and
+    are cached. A crash, an unusable fixture, a self-skip with the tools
+    present, or an availability skip proves nothing about the gate: it is
+    ``remember``-ed under ``control:<gate id>``, keyed by the current static part
+    (``when`` from the caller: this module reads no clock), and ``None`` is
+    returned.
+
+    **The forged form** passes ``bad="fail"`` (and a ``detail``) with no result
+    and no trace: an entry with empty reads, which a renderer test uses to plant
+    an admission. It forges only the inner loop; R-9's re-execution at every
+    money boundary is the defence, not this function.
+
+    ``host``: ``"known-good"`` (the spine handed a project fixture
+    ``selftest/known_good.py``'s context, D-27) or ``"live"``; host-param reads
+    are keyed in rho_control only when live. Writing a control entry clears any
+    remembered control failure of this gate.
+    """
+    if host not in _HOSTS:
+        raise AtompipeError(f"host must be one of {list(_HOSTS)}, not {host!r}")
+    anchors = anchors if anchors is not None else _default_anchors(root, spec, fn)
+    digests = digests if digests is not None else FileDigests()
+    static, parts, code, owner = _static(spec, fn, root, digests=digests, anchors=anchors)
+    key = f"control:{spec.id}"
+    measured = limit = None
+    units = ""
+    if bad is None:
+        if result is None:
+            raise AtompipeError(f"{spec.id}: record_control needs the selftest result "
+                                f"or an explicit bad=")
+        bad, kind = _control_outcome(spec, result)
+        if bad is None:
+            held = result
+            if result.outcome == "fail":
+                # A crash on the fixture comes back from gates.selftest as a
+                # failed selftest with no `error` — the selftest's verdict on
+                # the GATE. Remembered, it is what it is about the control: an
+                # error, never something that could read as a measured fail.
+                held = dataclasses.replace(
+                    result, error=f"control {kind}: {(result.detail or '').splitlines()[0]}"
+                    if result.detail else f"control {kind}")
+            remember(root, key, held, input_rho=static, kind=kind, when=when)
+            return None
+    elif bad not in ("fail", "pass"):
+        raise AtompipeError(f"bad must be 'fail' or 'pass', not {bad!r}")
+    if result is not None:
+        measured = _number(result.measured, "measured")
+        limit = _number(result.limit, "limit")
+        units = str(result.units or "")
+        detail = detail or str(result.detail or "")
+
+    static_files = [os.path.join(owner, *rel.split("/")) for rel in parts["selftest"]["files"]]
+    reads = (Reads.from_trace(trace, anchors=anchors, digests=digests, static=static_files)
+             if trace is not None else Reads())
+    if code.opaque:
+        reads = reads.with_opaque(f"code: {code.opaque}")
+    if host == "known-good":
+        # reads of a design the fixture's own selftest files define: the static
+        # walk already keys them
+        reads = dataclasses.replace(reads, host=[])
+    entry = ControlEntry(gate=spec.id, rho=rho_control(spec.id, static, reads),
+                         static=static, static_parts=parts, host=host,
+                         fixture=_fixture_part(trace, anchors),
+                         reads=reads.to_dict(control=True), bad=bad, good=None,
+                         admitted="reject-only" if bad == "fail" else "no",
+                         detail=portable(detail, anchors), measured=measured, limit=limit,
+                         units=units)
+    written = write_control(root, entry)
+    forget(root, key)
+    return written
+
+
+# --------------------------------------------------------------------------- #
+# remembered outcomes (untracked)
+# --------------------------------------------------------------------------- #
+def _outcomes_path(root: str) -> str:
+    return os.path.join(root, _STATE_DIR, _CACHE_DIR, _LAST_OUTCOMES)
+
+
+def _read_outcomes(root: str) -> dict:
+    path = _outcomes_path(root)
+    data_bytes = _file_bytes(path)
+    if data_bytes is None:
+        return {}
+    try:
+        data = _strict_json(data_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        data = exc
+    if not isinstance(data, dict) or not all(
+            isinstance(key, str) and isinstance(rec, dict)
+            and set(rec) == {"input_rho", "kind", "verdict", "when"}
+            and rec["kind"] in _REMEMBER_KINDS and isinstance(rec["input_rho"], str)
+            and isinstance(rec["verdict"], dict) and isinstance(rec["when"], str)
+            for key, rec in (data.items() if isinstance(data, dict) else ())):
+        # Loud, not empty: an unreadable file read as "nothing remembered" would
+        # hand the next check the PASS a crash superseded (invariant 2).
+        raise AtompipeError(
+            f"{_shown(root, path)} is not a remembered-outcomes file"
+            f"{f' ({data})' if isinstance(data, Exception) else ''}. It is untracked: "
+            f"delete it, then re-run every gate it named — a plain check would serve "
+            f"any cached PASS a remembered crash had superseded")
+    return data
+
+
+def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str,
+             when: str) -> None:
+    """Remember a non-cacheable outcome in ``.atompipe/cache/last_outcomes.json``.
+
+    ``key`` is a gate id, or ``control:<gate id>``; ``kind`` ``"error"``,
+    ``"self-skip"`` or ``"availability"``; ``when`` the CLI's clock. **Keyed by
+    ``input_rho``** — the rho the sweep computed for that gate from current
+    digests just BEFORE the run (a Fresh entry's, the recomputed rho of the
+    latest entry's read signature, or ``""`` when it never ran); for a control,
+    the current static part. *Rejected:* the failing run's own rho — a crash at
+    partial reads has a different rho than the PASS it followed, so "supersede at
+    the same rho" would never match and the next plain check would serve the old
+    PASS. Nothing remembered is evidence, so remembering a pass or a fail is
+    refused: those are cached.
+    """
+    if kind not in _REMEMBER_KINDS:
+        raise AtompipeError(f"a remembered outcome is one of {list(_REMEMBER_KINDS)}, "
+                            f"not {kind!r}")
+    if verdict.outcome in ("pass", "fail"):
+        raise AtompipeError(f"{verdict.gate}: a pass or a fail is a measurement and is "
+                            f"cached (record_verdict), never remembered")
+    gate_id = key.split(":", 1)[1] if key.startswith("control:") else key
+    _check_gate_id(gate_id)
+    data = _read_outcomes(root)
+    data[key] = {"input_rho": str(input_rho or ""), "kind": kind,
+                 "verdict": _clean(verdict.to_dict()), "when": str(when or "")}
+    atomic_write_json(_outcomes_path(root), data)
+
+
+def remembered(root: str) -> dict:
+    """``{key: {"input_rho", "kind", "verdict": Verdict, "when"}}`` — every
+    remembered outcome. Raises ``AtompipeError`` naming the file when it does not
+    parse (see ``_read_outcomes``)."""
+    return {key: {"input_rho": rec["input_rho"], "kind": rec["kind"],
+                  "verdict": Verdict.from_dict(rec["verdict"]), "when": rec["when"]}
+            for key, rec in sorted(_read_outcomes(root).items())}
+
+
+def forget(root: str, key: str) -> bool:
+    """Drop the remembered outcome ``key``; ``True`` when there was one. Called
+    whenever a cacheable outcome (or a control entry) is recorded for it."""
+    path = _outcomes_path(root)
+    if not os.path.exists(path):
+        return False
+    data = _read_outcomes(root)
+    if key not in data:
+        return False
+    del data[key]
+    atomic_write_json(path, data)
+    return True
+
+
+# --------------------------------------------------------------------------- #
+# obs: what runs cost (untracked)
+# --------------------------------------------------------------------------- #
+def _obs_path(root: str, gate_id: str, control: bool) -> str:
+    suffix = ".control.json" if control else ".json"
+    return os.path.join(root, _STATE_DIR, _OBS_DIR, _check_gate_id(gate_id) + suffix)
+
+
+def read_obs(root: str, gate_id: str, *, control: bool = False) -> list[dict]:
+    """The recorded runs of ``gate_id`` (or of its control), oldest first:
+    ``[{"entry", "when", "duration_s", "cpu_s"}, ...]``, at most ``OBS_KEEP``.
+    ``[]`` when there are none — or when the file is unreadable or belongs to
+    another gate: obs is latency, never truth, and a mixed series is worse than
+    none."""
+    data_bytes = _file_bytes(_obs_path(root, gate_id, control))
+    if data_bytes is None:
+        return []
+    try:
+        data = _strict_json(data_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("gate") != gate_id \
+            or data.get("kind") != ("control" if control else "gate") \
+            or not isinstance(data.get("runs"), list):
+        return []
+    keys = {"entry", "when", "duration_s", "cpu_s"}
+    return [dict(run) for run in data["runs"] if isinstance(run, dict) and set(run) == keys]
+
+
+def record_obs(root: str, gate_id: str, *, entry: str, when: str, duration_s: float,
+               cpu_s: float, control: bool = False) -> None:
+    """Append one executed run to ``.atompipe/obs/<gate>.json`` — or, for a
+    control run, ``<gate>.control.json`` — keeping the last ``OBS_KEEP``.
+
+    Split by kind because the run history mixed ``<gate>#selftest`` rows with
+    sweep rows and no latency reader filtered them (S-31): a median over both
+    is the cost of neither. Each file also names its gate and kind, so the one
+    name two ids could share (gate ``x``'s control and a gate called
+    ``x.control``) never yields a mixed series: the reader refuses the other's
+    file, and the writer replaces it. ``entry`` is the entry name the run wrote
+    or hit (``""`` for none); ``when`` arrives from the CLI.
+    """
+    runs = read_obs(root, gate_id, control=control)
+    runs.append({"entry": str(entry or ""), "when": str(when or ""),
+                 "duration_s": float(duration_s), "cpu_s": float(cpu_s)})
+    atomic_write_json(_obs_path(root, gate_id, control),
+                      {"gate": gate_id, "kind": "control" if control else "gate",
+                       "runs": runs[-OBS_KEEP:]})
+
+
+def last_read_sets(root: str) -> dict[str, set]:
+    """``{gate id: {param path tuple, ...}}`` from each gate's latest executed
+    entry — the newest obs run whose entry is still there, else the sole entry,
+    else (several entries, no obs) the union of their reads.
+
+    It feeds ``Param.gates`` and ``why`` ("which checks read this number"),
+    never rho: a gate that did not execute this time (an availability skip)
+    keeps the reads of its last executed run, where a full sweep used to erase
+    them (S-30).
+    """
+    base = os.path.join(root, _STATE_DIR, _VERDICTS_DIR)
+    try:
+        gate_ids = sorted(os.listdir(base))
+    except OSError:
+        return {}
+    out: dict[str, set] = {}
+    for gate_id in gate_ids:
+        try:
+            entries = read_entries(root, gate_id)
+        except AtompipeError:
+            continue
+        if not entries:
+            continue
+        by_name = {entry.name: entry for entry in entries}
+        chosen = None
+        for run in reversed(read_obs(root, gate_id)):
+            if run.get("entry") in by_name:
+                chosen = [by_name[run["entry"]]]
+                break
+        if chosen is None:
+            chosen = entries
+        out[gate_id] = {tuple(row[0]) for entry in chosen
+                        for row in entry.reads.get("params") or []}
+    return out
