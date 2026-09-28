@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.model_validity",
+  "rho": "3401b90f3eace7d76126137f185c6d826f4ff0eac65b9aed483e82c77ff135c6",
+  "static": "5eebb0ae995493a95ea5a7117e460a5ba9c7817de8b9293db40e755c43d9ac4e",
+  "static_parts": {
+    "spine": "6a92c2354d7e16105cd3301fc54a178363c85ea6f791f5e7f9a425830ee444fa",
+    "code": {
+      "digest": "39d61919722454e4ef0d2aabc1ab1d898e89de9793e2ea4f69534bb75b675636",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "8567982bfc847ab0009a59f2ff579c84eac5b2cbe627717a952810ec9712f590",
+      "files": {
+        "selftest/bad_configs.py": "99613d17104e2b50c015996cc8af6906c82cb78311092dea69fb434591ac364c",
+        "selftest/known_good.py": "7b440d74870e884891b876beb17586d704b0846baa79e24839e6fff265e83987"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:stubby",
+      "expect": "fail",
+      "note": "a short, deep arm (L/h below 5) where shear deflection stops being negligible and the other structural gates quietly become optimistic"
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "3d1ef2e0c3f47bee66fc9e525eb3b66af895ef15f0793a2e2d0e90c81e2b18f2",
+    "files": {
+      "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
+      "selftest/bad_configs.py": "99613d17104e2b50c015996cc8af6906c82cb78311092dea69fb434591ac364c",
+      "selftest/known_good.py": "7b440d74870e884891b876beb17586d704b0846baa79e24839e6fff265e83987"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "slenderness"
+        ],
+        "f8aab7494f263c43bfcaef3cc59d24c9091020b5f418aa2ef0639b13f9ae8442",
+        2.5
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "good": null,
+  "admitted": "reject-only",
+  "detail": "correctly failed on selftest/bad_configs.py:stubby (a short, deep arm (L/h below 5) where shear deflection stops being negligible and the other structural gates quietly become optimistic): slenderness 2.5 (>= 5.0 for Euler-Bernoulli; below this the deflection gate under-predicts)",
+  "measured": 2.5,
+  "limit": 5.0,
+  "units": "L/h",
+  "digest": "8bc31a91101a6fc0f76d2ed4ab14ed21c4fa9d6b41742165ec22e40914986770"
+}

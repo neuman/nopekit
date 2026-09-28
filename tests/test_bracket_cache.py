@@ -45,7 +45,6 @@ import os
 import platform
 import re
 import unittest
-from typing import Any
 
 import _env
 import _projects

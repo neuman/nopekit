@@ -5,13 +5,14 @@ Not a test module (no ``test_`` prefix, so discovery never collects it). Two
 builders, each written once so every later test that needs a planted project
 gets the same one:
 
-* :func:`bracket_copy` — the reference project as a clone would hold it, with an
-  optional thickness edit and an optional repository around it. The file list is
-  ``test_fresh_clone``'s (U10): ``git ls-files --cached --others
-  --exclude-standard`` where a repository tracks the bracket, the bytecode- and
-  output-free walk where none does (verify.sh ``--dir`` copies the tree without
-  its ``.git``). One list, so a copy here and the transcript's copy can never
-  disagree about what a fresh clone contains.
+* :func:`bracket_copy` — the reference project, with an optional thickness edit
+  and an optional repository around it. With ``migrated=True`` it is the bracket
+  as a clone would hold it; by default it is the bracket as it stood before its
+  own migration (below). The file list is ``test_fresh_clone``'s (U10): ``git
+  ls-files --cached --others --exclude-standard`` where a repository tracks the
+  bracket, the bytecode- and output-free walk where none does (verify.sh
+  ``--dir`` copies the tree without its ``.git``). One list, so a copy here and
+  the transcript's copy can never disagree about what a fresh clone contains.
 * :func:`wrap_pack_baseline` — a project whose MODEL is a pack's
   ``selftest/baseline.json``: the pack's known-good design, run through
   ``check`` the way a user's project would run it, with one claim per gate so
@@ -30,6 +31,25 @@ in this file: never through ``store.init`` or ``Ledger.to_dict``. Those are the
 spine's, and the spine this phase is changing; a fixture written by the code
 under test changes shape with it, and "the old spine reads it natively" would
 quietly stop being true at the commit that moves the layout.
+
+**The bracket before its migration.** Checkpoint 1.3 (U32) migrated the tracked
+bracket: records, ``project.json``, a committed verdict cache, no ledger, no run
+history. Every test written before that commit copied the bracket expecting what
+it then was — a legacy ledger for the migration to start from, a run history for
+``doctor`` to warn about, no cache so the first ``check`` runs every gate and every
+control — and the R-8 oracle needs a bracket the OLD spine reads natively. What
+slipped through: the unit that migrated the bracket found forty-five failures
+across eight test files for no reason but that their fixture had moved under
+them, and none of those tests was wrong. So the default copy is the bracket's own sources (model, gates, selftest,
+as they are now) around the bracket's legacy state, byte for byte as the last
+commit before the migration tracked it, frozen in ``tests/bracket_legacy/``.
+*Rejected:* ``migrated`` as the default, with every legacy caller naming
+``legacy=True`` — some forty call sites in twelve files rewritten to keep meaning
+what they already meant (R-6: an existing test stays byte-identical);
+*rejected:* deriving the legacy ledger from the records through ``store`` or
+``Ledger.to_dict`` — the spine under test writing its own fixture, the thing the
+paragraph above refuses; *rejected:* reading it from git history — a verify.sh
+``--dir`` copy has none.
 
 Run:  (a helper; the tests that use it say how to run them)
 """
@@ -51,6 +71,40 @@ BRACKET = test_fresh_clone.BRACKET
 
 #: The bundled packs in this checkout.
 PACKS = os.path.join(_env.REPO, "packs")
+
+#: The bracket's legacy state — its ``.atompipe/.gitignore`` (as ``gitignore``: a
+#: dot-file here would be an ignore file git applies to this directory), its
+#: ``ledger.json`` and its run history — byte for byte as ``examples/bracket``
+#: tracked them at 801cece, the last commit before its migration (U32). A copy
+#: of these bytes, not a pointer to history: see the module docstring.
+LEGACY_BRACKET = os.path.join(_env.REPO, "tests", "bracket_legacy")
+
+#: Where each file of ``LEGACY_BRACKET`` goes in a legacy copy, as
+#: ``(fixture path, project path)``, `/`-separated. Listed, not walked, so a
+#: stray file dropped into the fixture directory never rides into a project.
+LEGACY_BRACKET_FILES: tuple[tuple[str, str], ...] = (
+    ("gitignore", ".atompipe/.gitignore"),
+    ("ledger.json", ".atompipe/ledger.json"),
+    ("runs/0001-7d24ce6c.json", ".atompipe/runs/0001-7d24ce6c.json"),
+    ("runs/0002-6a57e5fa.json", ".atompipe/runs/0002-6a57e5fa.json"),
+    ("runs/0003-e44e8096.json", ".atompipe/runs/0003-e44e8096.json"),
+    ("runs/0004-05329ee2.json", ".atompipe/runs/0004-05329ee2.json"),
+    ("runs/0005-25c288bb.json", ".atompipe/runs/0005-25c288bb.json"),
+)
+
+#: What the migration wrote into the bracket, which a legacy copy leaves out:
+#: the project marker, the three marked ignore/attribute files, the records and
+#: the verdict cache. A path under ``.atompipe/`` that is none of these (and not
+#: the ignored index the walk may list) is refused rather than guessed at: the
+#: day the bracket gains, say, ``.atompipe/packs/``, whoever added it decides
+#: whether the legacy bracket had it. Spelled here, not read from
+#: ``store.RECORD_DIRS``: a fixture that takes its shape from the spine under
+#: test moves with it.
+_MIGRATED_FILES = frozenset({".atompipe/project.json", ".atompipe/.gitignore",
+                             ".gitignore", ".gitattributes",
+                             ".atompipe/ledger.json", ".atompipe/ledger.legacy.json"})
+_MIGRATED_DIRS = (".atompipe/verdicts/", "claims/", "params/", "decisions/", "needs/",
+                  "results/")
 
 #: The thickness default in `model/bracket.py`, as the model spells it. Exactly
 #: one line may match: a second match (a comment quoting the line, a second
@@ -162,8 +216,30 @@ def _commit_all(project: str, message: str) -> None:
                                  f"{proc.stderr.strip()}")
 
 
-def bracket_copy(dest: str, *, thickness: float | None = None, git: bool = False) -> str:
+def _migrated_path(rel: str) -> bool:
+    """Whether ``rel`` (bracket-relative) is something the bracket's migration
+    wrote, which a legacy copy leaves out. Refuses an ``.atompipe/`` path it does
+    not know (see ``_MIGRATED_FILES``)."""
+    if rel in _MIGRATED_FILES or rel.startswith(_MIGRATED_DIRS):
+        return True
+    if rel.startswith(".atompipe/"):
+        raise AssertionError(
+            f"examples/bracket/{rel}: bracket_copy does not know whether the legacy "
+            "bracket had this file; say so in tests/_projects.py (_MIGRATED_FILES) "
+            "or add it to tests/bracket_legacy/")
+    return False
+
+
+def bracket_copy(dest: str, *, thickness: float | None = None, git: bool = False,
+                 migrated: bool = False) -> str:
     """Copy the bracket into ``dest`` (made if missing); return its absolute path.
+
+    ``migrated=True``: the bracket as a clone holds it — records,
+    ``.atompipe/project.json``, the committed verdict cache. Default: the bracket
+    before its migration — the same model, gates and selftest, around the legacy
+    ledger, ignore file and run history of ``LEGACY_BRACKET``, with no record, no
+    marker block and no cache, so the first ``check`` migrates it and runs every
+    gate and control (module docstring).
 
     ``thickness`` edits the model's default after the copy (:func:`set_thickness`);
     ``git`` then makes ``dest`` its own repository with one commit of everything,
@@ -176,10 +252,15 @@ def bracket_copy(dest: str, *, thickness: float | None = None, git: bool = False
     if not files:
         raise AssertionError(f"the {source} listing of the bracket is empty")
     os.makedirs(dest, exist_ok=True)
-    for rel in files:
+    copies = [(os.path.join(BRACKET, *rel.split("/")), rel) for rel in files
+              if migrated or not _migrated_path(rel)]
+    if not migrated:
+        copies += [(os.path.join(LEGACY_BRACKET, *fixture.split("/")), rel)
+                   for fixture, rel in LEGACY_BRACKET_FILES]
+    for src, rel in copies:
         target = os.path.join(dest, *rel.split("/"))
         os.makedirs(os.path.dirname(target), exist_ok=True)
-        shutil.copy2(os.path.join(BRACKET, *rel.split("/")), target)
+        shutil.copy2(src, target)
     if thickness is not None:
         set_thickness(dest, thickness)
     if git:

@@ -494,12 +494,35 @@ class ProjectsHelpers(_env.EnvCase):
     """`tests/_projects.py` builds what it says, under today's spine."""
 
     def test_bracket_copy_holds_what_a_clone_holds(self):
-        root = _projects.bracket_copy(os.path.join(self.tmp(), "b"))
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True)
         _source, files = _projects.test_fresh_clone.bracket_listing()
         self.assertEqual(sorted(_listing(root)), sorted(files))
         self.assertFalse(any("__pycache__" in f or f.endswith(".pyc") for f in files))
         with open(os.path.join(_projects.BRACKET, "model", "bracket.py"), "rb") as fh:
             self.assertEqual(_listing(root)["model/bracket.py"], fh.read())
+
+    def test_the_default_copy_is_the_bracket_before_its_migration(self):
+        """Today's sources around the legacy state, and nothing the migration wrote:
+        the project every test before 1.3 was written against (U32)."""
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "b"))
+        got = _listing(root)
+        _source, files = _projects.test_fresh_clone.bracket_listing()
+        sources = {f for f in files if f.startswith(("model/", "gates/", "selftest/"))}
+        self.assertTrue(sources, "the listing holds none of the bracket's sources")
+        for rel in sources:
+            with open(os.path.join(_projects.BRACKET, *rel.split("/")), "rb") as fh:
+                self.assertEqual(got.get(rel), fh.read(), rel)
+        for fixture, rel in _projects.LEGACY_BRACKET_FILES:
+            with open(os.path.join(_projects.LEGACY_BRACKET, *fixture.split("/")), "rb") as fh:
+                self.assertEqual(got.get(rel), fh.read(), rel)
+        written = sorted(rel for rel in got if rel in (".atompipe/project.json", ".gitignore",
+                                                        ".gitattributes")
+                         or rel.startswith(("claims/", "params/", ".atompipe/verdicts/")))
+        self.assertEqual(written, [], "a legacy copy carries what the migration wrote")
+        self.assertIsNotNone(json.loads(got[".atompipe/ledger.json"]).get("claims"))
+        # A state file nobody decided about is refused, never silently copied or dropped.
+        with self.assertRaises(AssertionError):
+            _projects._migrated_path(".atompipe/packs/beam-analytic/pack.json")
 
     def test_thickness_is_one_line(self):
         root = _projects.bracket_copy(os.path.join(self.tmp(), "b"), thickness=8.0)

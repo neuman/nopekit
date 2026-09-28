@@ -1,0 +1,10 @@
+{
+  "schema": 2,
+  "name": "wall-bracket",
+  "summary": "Shelf bracket: 1.5 kg static load on a 60 mm arm, printed in PETG",
+  "created": "2026-09-11T23:31:00Z",
+  "revision": "v0.1",
+  "model_entry": "model/bracket.py",
+  "packs": [],
+  "spine_version": "0.1.0"
+}

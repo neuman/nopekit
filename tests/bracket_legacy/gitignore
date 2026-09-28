@@ -1,0 +1,23 @@
+# Generated files are outputs, not sources.
+#
+# out/ is gate scratch and evidence: meshes, plots, solver working directories.
+# All of it is rebuildable from the model plus inputs/, and committing it turns
+# every check run into a thousand-line diff.
+out/
+*.tmp
+*.lock
+
+# ...but the ledger and the run history ARE the project. They carry the rejected
+# alternatives and the proof that a gate once passed; neither can be regenerated.
+# These lines are redundant against the patterns above and deliberately so —
+# they state the intent where the next person will look for it.
+!ledger.json
+!runs/
+
+# Checkpoint 1.2 writes cache/ (file digests, the last check's summary,
+# remembered outcomes) and obs/ (what each run cost), and nothing above ignored
+# them, so the first check dirtied git status (cli:H2). Appended, not merged into
+# the lines above: the 1.3 migration recognises everything above as init's
+# template and replaces it with a marked block.
+cache/
+obs/
