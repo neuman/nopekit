@@ -54,7 +54,7 @@ from unittest import mock
 from atompipe import verdicts
 from atompipe.gates import GateContext
 from atompipe.models import (
-    Acceptance, Claim, Ledger, Param, PhysicalResult, ProjectMeta, Verdict,
+    Acceptance, Claim, Ledger, Param, PhysicalResult, ProjectMeta, Tier, Verdict,
 )
 from atompipe.util import AtompipeError
 from atompipe.verdicts import (
@@ -467,6 +467,110 @@ class ModelProxyRecords(unittest.TestCase):
     def test_no_model_stays_none(self):
         ctx = traced_context(GateContext(model=None), GateTrace())
         self.assertIsNone(ctx.model)
+
+
+class TierReadRecords(unittest.TestCase):
+    """``ctx.tier`` as a gate sees it: every use of the value is a read.
+
+    ``GateContext`` tells a gate it may pick a cheaper path by the sweep's tier,
+    and nothing recorded that one had: rho never keyed it, and a PASS from the
+    cheap path at tier 0 was served Fresh to ``check --tier 2`` (false-fresh
+    probes, round 1, ``probe.tier``). An ``int`` subclass would miss the uses
+    CPython serves from the integer's own digits without calling a method —
+    indexing, ``range``, slicing — so the view is an integer-like object whose
+    every extraction of the value goes through it."""
+
+    def _view(self, tier: int = 2):
+        trace = GateTrace()
+        return traced_context(GateContext(tier=tier), trace), trace
+
+    def test_passing_it_around_is_not_a_read(self):
+        ctx, trace = self._view()
+        dataclasses.replace(ctx, out_dir="/o")
+        copy.deepcopy(ctx)
+        copy.copy(ctx.tier)
+        self.assertIsNotNone(ctx.tier)
+        self.assertIsNone(trace.tier, "carrying the context is not reading its tier")
+
+    def test_every_use_of_the_value_is_a_read(self):
+        uses = {
+            "a comparison": lambda t: t < 2,
+            "a reflected comparison": lambda t: 2 > t,
+            "equality with a Tier": lambda t: t == Tier.SOLVE,
+            "a Tier's equality with it": lambda t: Tier.SOLVE == t,
+            "truth": lambda t: bool(t),
+            "int()": lambda t: int(t),
+            "indexing a table": lambda t: ("a", "b", "c", "d")[t],
+            "range()": lambda t: list(range(t)),
+            "a slice": lambda t: "abcd"[:t],
+            "arithmetic": lambda t: t + 1,
+            "reflected arithmetic": lambda t: 1 + t,
+            "Tier()": lambda t: Tier(t),
+            "a dict key": lambda t: {2: "x"}[t],
+            "an f-string": lambda t: f"{t}",
+            "%d": lambda t: "%d" % t,
+            "str()": lambda t: str(t),
+            "isinstance(int)": lambda t: isinstance(t, int),
+            "pickling": lambda t: pickle.dumps(t),
+            "an int method": lambda t: t.bit_length(),
+            "math": lambda t: math.floor(t),
+        }
+        for name, use in uses.items():
+            with self.subTest(use=name):
+                ctx, trace = self._view()
+                use(ctx.tier)
+                self.assertEqual(trace.tier, 2, f"{name} used ctx.tier and recorded nothing")
+
+    def test_it_behaves_as_the_int_it_is(self):
+        ctx, _trace = self._view(2)
+        tier = ctx.tier
+        self.assertEqual(tier, 2)
+        self.assertTrue(tier == Tier.SOLVE and Tier.SOLVE == tier and not tier != 2)
+        self.assertIs(Tier(tier), Tier.SOLVE)
+        self.assertEqual(("a", "b", "c", "d")[tier], "c")
+        self.assertEqual(hash(tier), hash(2))
+        self.assertIsInstance(tier, int)
+        self.assertEqual((f"{tier:02d}", str(tier), repr(tier)), ("02", "2", "2"))
+        self.assertTrue(tier < 3 and tier >= 2 and 1 < tier and max(tier, 1) == 2)
+        loaded = pickle.loads(pickle.dumps(tier))
+        self.assertIs(type(loaded), int, "what leaves by pickle is a plain int")
+        self.assertEqual(json.dumps(int(tier)), "2")
+        with self.assertRaisesRegex(TypeError, "Object of type TierRead is not JSON"):
+            json.dumps(tier)          # loud, and naming the view: not "type int"
+
+    def test_a_fixture_view_hands_its_gate_the_same_read(self):
+        """A control's gate reads the tier its fixture was handed — the sweep's,
+        wrapped on the control's trace as ``_control_host`` hands it — and the
+        read lands there; a tier the fixture chose itself is a constant of the
+        fixture, not an input of the control."""
+        trace = GateTrace(kind="control")
+        host = traced_context(GateContext(tier=verdicts.TierRead(2, trace)), trace,
+                              readonly=False)
+        passed = traced_context(dataclasses.replace(host, params={"x": 1}), trace)
+        self.assertIs(passed.tier, host.tier, "the host's tier was re-wrapped")
+        self.assertIsNone(trace.tier)
+        _ = passed.tier < 2
+        self.assertEqual(trace.tier, 2, "the gate read the host's tier and the control "
+                                        "recorded nothing")
+        chosen = GateTrace(kind="control")
+        view = traced_context(GateContext(tier=3), chosen)
+        _ = view.tier < 2
+        self.assertIsNone(chosen.tier, "a tier the fixture set is its own constant")
+
+    def test_the_value_read_is_keyed_and_an_unread_tier_is_not(self):
+        ctx, trace = self._view(0)
+        _ = ctx.tier < 2
+        reads = verdicts.Reads.from_trace(trace)
+        self.assertEqual(reads.tier, 0)
+        self.assertEqual(reads.to_dict()["tier"], 0)
+        unread = verdicts.Reads.from_trace(GateTrace())
+        self.assertIsNone(unread.tier)
+        self.assertNotIn("tier", unread.to_dict(),
+                         "a gate that never read the tier is keyed exactly as before")
+        at_two = dataclasses.replace(reads, tier=2)
+        self.assertNotEqual(verdicts.rho("g", "s", "c", reads), verdicts.rho("g", "s", "c", at_two))
+        self.assertEqual(verdicts.rho("g", "s", "c", unread), verdicts.rho("g", "s", "c", {}),
+                         "no tier read, no tier in rho")
 
 
 class TracedContextShape(unittest.TestCase):

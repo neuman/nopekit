@@ -262,7 +262,8 @@ class GateContext:                     # a gate's one argument — a traced view
     model: Any | None                  # the loaded model, or None
     params: dict                       # the projection, flattened: read numbers here. READ-ONLY
     out_dir: str                       # scratch and evidence
-    tier: int                          # the sweep's tier; never a reason to lower the standard
+    tier: int                          # the sweep's tier; never a reason to lower the standard.
+                                       #   A TierRead in your view: every use is a read (below)
     log: Callable[[str], None]         # one-line progress sink
     extra: dict                        # where a dict-returning fixture lands; THIS gate's own copy
     pack: str; key_scope: str          # stamped by run_gate: whose namespace param() reads
@@ -335,6 +336,19 @@ by exactly those reads (`rho`). So:
 - **`ctx.ledger` holds no verdicts.** A gate that read other gates' verdicts would put
   verdicts inside its own content address. Claims are readable; `ctx.ledger.claim(id)`
   makes that claim an input.
+- **Reading `ctx.tier` makes the tier an input.** A gate may pick a cheaper path by
+  it — `if ctx.tier < Tier.SOLVE`, `PATHS[ctx.tier]` — and then its verdict is keyed
+  on the tier it read: a sweep at tier N serves an entry recorded at N or above (the
+  costlier path's answer, the highest first), and re-runs one recorded below. (What
+  slipped through: nothing recorded the read, and a PASS from the tier-0 path was
+  served Fresh to `check --tier 2`, whose path failed the design.) Your control is
+  keyed the same way — one shown on the tier-0 path does not admit the tier-2 path,
+  and a gate that passes its known-bad input on either path is not admitted on any.
+  In your view `ctx.tier` is a `verdicts.TierRead`: it compares, indexes, hashes and
+  formats as the int it is and `isinstance(ctx.tier, int)` holds, but it is not an
+  `int` subclass (CPython reads an int subclass's index without asking it), so
+  `json.dumps(ctx.tier)` raises — write `int(ctx.tier)`. A gate that never reads the
+  tier is keyed exactly as before.
 - **`Verdict.rho` and `Verdict.cpu_s` are not yours to set.** `run_gate` measures
   `duration_s` and `cpu_s` (the `os.times()` delta, child processes included — a gate
   that shells out to a solver is not free) and clears `rho`, which the sweep computes
@@ -611,7 +625,7 @@ project fails on purpose, the identity fixture `return ctx` was reported "correc
 failed … ~64x worse" and certified nothing; on the known-good design it passes its
 own known-bad input and is not admitted. `context` is handed the host with no
 params, an empty ledger, no `extra` and no model — `root`, `out_dir` and `tier` are
-kept — so it must state its design itself (the bracket's states every Config field),
+kept, and a read of the tier keys every control built on it — so it must state its design itself (the bracket's states every Config field),
 and a file it reads is keyed as an input of every control built on it. What slipped
 through before: it was handed a copy of the live host, and a `context` that kept
 `ctx.params` passed the live design through unkeyed, so the identity fixture was

@@ -20,6 +20,10 @@ content address (rho) built from it. Its first half is the primitives:
 * ``LedgerView`` and ``ModelProxy`` — the other two ways a gate reaches the
   project. openmodelica reads a claim's limit through ``ctx.ledger`` (S-23), so
   that read is an input too.
+* ``TierRead`` — ``ctx.tier`` as a gate sees it. ``GateContext`` lets a gate pick
+  a cheaper path by the sweep's tier, and nothing recorded that one had: a PASS
+  from the cheap path at tier 0 was served Fresh to ``check --tier 2`` (review
+  round 1, ``probe.tier``).
 * ``digest_value`` and ``Anchors`` — a digest of a value that is the same in
   every checkout. Fixtures set absolute mesh and ``.mo`` paths, and a raw digest
   of those would write a new tracked entry per clone and per run (packs:H6).
@@ -109,6 +113,7 @@ import importlib.util
 import json
 import math
 import numbers
+import operator
 import os
 import re
 import shutil
@@ -127,7 +132,7 @@ __all__ = [
     "ABSENT", "PRESENT", "DIRECTORY", "SPINE_MODULES", "SMALL_VALUE_MAX_CHARS",
     "digest_value", "small_value", "portable", "traced_context", "tracing", "replay",
     "spine_digest", "canonical_ast_digest",
-    "Anchors", "ParamTrace", "LedgerView", "ModelProxy", "GateTrace",
+    "Anchors", "ParamTrace", "LedgerView", "ModelProxy", "TierRead", "GateTrace",
     "GateInputWriteError",
     # part two: rho, entries, controls, remembered outcomes, obs (U16)
     "SCHEMA", "RHO_CHARS", "OUT_CHARS", "OBS_KEEP", "SPEC_FIELDS_IN_RHO",
@@ -534,7 +539,10 @@ class GateTrace:
     it), each with whether it existed when first asked; ``host_reads`` is what
     a control's fixture — or anyone reading through its host view — read from
     the HOST context (the seal detector's input). ``anchors`` makes path-valued
-    param digests portable; the sweep sets it.
+    param digests portable; the sweep sets it. ``tier`` is the value this window
+    read through ``ctx.tier`` (a ``TierRead``), ``None`` when it never did; a
+    second, different value makes the trace opaque (``tier: read at … and …``),
+    since no single tier then names what it decided on.
     """
 
     kind: str = "gate"
@@ -551,6 +559,7 @@ class GateTrace:
     host_reads: dict = field(default_factory=dict)
     fixture_code: Any = None
     anchors: Any = None
+    tier: Any = None
     _read_set: set = field(default_factory=set, init=False, repr=False)
     _existed: dict = field(default_factory=dict, init=False, repr=False)
     _host_whole: set = field(default_factory=set, init=False, repr=False)
@@ -586,6 +595,12 @@ class GateTrace:
 
     def _note_write(self, path: str) -> None:
         self.files_written.add(path)
+
+    def _note_tier(self, value: int) -> None:
+        if self.tier is None:
+            self.tier = value
+        elif self.tier != value:
+            self.opaque.add(f"tier: read at {self.tier} and {value}")
 
 
 def _merge(table: dict, path: tuple, digest: str) -> None:
@@ -1228,6 +1243,176 @@ class ModelProxy:
 
 
 # --------------------------------------------------------------------------- #
+# TierRead
+# --------------------------------------------------------------------------- #
+def _plain_tier(value: Any) -> Any:
+    """``value`` with a ``TierRead`` unwrapped WITHOUT recording a read — for
+    the spine's own comparisons, which are not the gate's. Anything else is
+    returned as it is."""
+    if type(value) is TierRead:
+        return object.__getattribute__(value, "_tr_value")
+    return value
+
+
+def _note_tier(trace: Any, value: int) -> None:
+    """``value`` was read as ``ctx.tier``: record it on ``trace`` and on every
+    trace opened inside ``trace``'s window since — a ``load_file`` loader's (its
+    hit replays it to the next gate) or a nested gate's. Never on the traces
+    around it: a tier a gate hands a nested gate is the gate's own choice."""
+    if trace is None:
+        return
+    targets = [trace]
+    for index, open_trace in enumerate(_STACK):
+        if open_trace is trace:
+            targets.extend(t for t in _STACK[index + 1:] if t is not trace)
+            break
+    for target in targets:
+        target._note_tier(value)
+
+
+#: What ``ctx.tier.__class__`` reports: an ``int`` subclass that is never
+#: instantiated, named for the view. ``isinstance(ctx.tier, int)`` holds through
+#: it, and an error that names the type names this one: with plain ``int`` there,
+#: ``json.dumps(ctx.tier)`` said "Object of type int is not JSON serializable",
+#: which reads as a bug in json (found writing this). ``type(ctx.tier)`` is still
+#: ``TierRead``.
+_TIER_CLASS = type("TierRead", (int,), {"__module__": __name__,
+                                        "__doc__": "What ctx.tier reports as its class."})
+
+
+def _tier_binary(fn: Callable[[Any, Any], Any], *, reflected: bool = False) -> Callable:
+    def method(self: "TierRead", other: Any) -> Any:
+        value = TierRead._tr_use(self)
+        if type(other) is TierRead:
+            other = TierRead._tr_use(other)
+        return fn(other, value) if reflected else fn(value, other)
+    return method
+
+
+def _tier_unary(fn: Callable[..., Any]) -> Callable:
+    def method(self: "TierRead", *args: Any) -> Any:
+        return fn(TierRead._tr_use(self), *args)
+    return method
+
+
+class TierRead:
+    """``ctx.tier`` as a gate sees it: the sweep's tier, and every use of the
+    value is a read.
+
+    ``TierRead(value, trace)``. ``GateContext`` tells a gate it may use the tier
+    "to pick a cheaper path", and ``sweep`` stamps the sweep's own — but no view
+    recorded that a gate had looked, so rho never keyed it. A gate passing on
+    its tier-0 path was served ``pass cached fresh`` to ``check --tier 2``,
+    whose path never ran; ``--force`` there FAILed it (review round 1,
+    ``probe.tier``). Now comparing, hashing, formatting, converting, indexing
+    with it, arithmetic, truth, pickling and any ``int`` attribute record the
+    value on ``trace`` (``GateTrace.tier``), and rho carries it (``Reads.tier``).
+    Copying it (``copy``, ``deepcopy``, ``dataclasses.replace`` of the context)
+    and passing it around are not reads; ``isinstance(t, int)`` is, and is True.
+
+    Not an ``int`` subclass, on purpose. CPython serves an ``int`` subclass's
+    value from its digits without calling a method wherever it wants an index —
+    ``table[ctx.tier]``, ``range(ctx.tier)``, a slice — so the natural way to
+    "pick a path" would have recorded nothing. Here every extraction goes
+    through ``__index__``, ``__int__`` or an operator. The cost: C code that
+    type-checks for ``int`` — ``json.dumps(ctx.tier)`` — raises (loudly: the gate
+    errors, never passes); ``int(ctx.tier)`` is the plain value, and a read.
+    *Rejected:* recording at attribute access on the context (``run_gate``'s
+    ``dataclasses.replace`` and every fixture read every field, as for the
+    model); keying rho on the tier for every gate (the six bracket gates never
+    read it, and would re-run and re-write per tier); a static scan for
+    ``.tier`` in the gate's closure (blind to ``getattr`` and to a helper
+    outside it, and it keys a gate on a branch it did not take).
+    """
+
+    __slots__ = ("_tr_value", "_tr_trace")
+
+    def __init__(self, value: Any, trace: Any) -> None:
+        object.__setattr__(self, "_tr_value", int(_plain_tier(value)))
+        object.__setattr__(self, "_tr_trace", trace)
+
+    def _tr_use(self) -> int:
+        value = object.__getattribute__(self, "_tr_value")
+        _note_tier(object.__getattribute__(self, "_tr_trace"), value)
+        return value
+
+    @property                                      # type: ignore[misc]
+    def __class__(self) -> type:                   # isinstance(ctx.tier, int): a read, True
+        TierRead._tr_use(self)
+        return _TIER_CLASS
+
+    def __getattr__(self, name: str) -> Any:        # bit_length, real, to_bytes, ...
+        if name.startswith("_tr_"):
+            raise AttributeError(name)
+        return getattr(TierRead._tr_use(self), name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("ctx.tier is read-only in a gate's view")
+
+    def __copy__(self) -> "TierRead":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "TierRead":
+        return self
+
+    def __reduce_ex__(self, protocol: Any) -> tuple:
+        return (int, (TierRead._tr_use(self),))
+
+    def __reduce__(self) -> tuple:
+        return self.__reduce_ex__(2)
+
+    __lt__ = _tier_binary(operator.lt)
+    __le__ = _tier_binary(operator.le)
+    __eq__ = _tier_binary(operator.eq)             # type: ignore[assignment]
+    __ne__ = _tier_binary(operator.ne)             # type: ignore[assignment]
+    __gt__ = _tier_binary(operator.gt)
+    __ge__ = _tier_binary(operator.ge)
+    __add__ = _tier_binary(operator.add)
+    __radd__ = _tier_binary(operator.add, reflected=True)
+    __sub__ = _tier_binary(operator.sub)
+    __rsub__ = _tier_binary(operator.sub, reflected=True)
+    __mul__ = _tier_binary(operator.mul)
+    __rmul__ = _tier_binary(operator.mul, reflected=True)
+    __truediv__ = _tier_binary(operator.truediv)
+    __rtruediv__ = _tier_binary(operator.truediv, reflected=True)
+    __floordiv__ = _tier_binary(operator.floordiv)
+    __rfloordiv__ = _tier_binary(operator.floordiv, reflected=True)
+    __mod__ = _tier_binary(operator.mod)
+    __rmod__ = _tier_binary(operator.mod, reflected=True)
+    __divmod__ = _tier_binary(divmod)
+    __rdivmod__ = _tier_binary(divmod, reflected=True)
+    __pow__ = _tier_binary(operator.pow)
+    __rpow__ = _tier_binary(operator.pow, reflected=True)
+    __lshift__ = _tier_binary(operator.lshift)
+    __rlshift__ = _tier_binary(operator.lshift, reflected=True)
+    __rshift__ = _tier_binary(operator.rshift)
+    __rrshift__ = _tier_binary(operator.rshift, reflected=True)
+    __and__ = _tier_binary(operator.and_)
+    __rand__ = _tier_binary(operator.and_, reflected=True)
+    __or__ = _tier_binary(operator.or_)
+    __ror__ = _tier_binary(operator.or_, reflected=True)
+    __xor__ = _tier_binary(operator.xor)
+    __rxor__ = _tier_binary(operator.xor, reflected=True)
+    __neg__ = _tier_unary(operator.neg)
+    __pos__ = _tier_unary(operator.pos)
+    __abs__ = _tier_unary(abs)
+    __invert__ = _tier_unary(operator.invert)
+    __bool__ = _tier_unary(bool)
+    __int__ = _tier_unary(int)
+    __index__ = _tier_unary(int)
+    __float__ = _tier_unary(float)
+    __complex__ = _tier_unary(complex)
+    __hash__ = _tier_unary(hash)                   # type: ignore[assignment]
+    __round__ = _tier_unary(round)
+    __trunc__ = _tier_unary(math.trunc)
+    __floor__ = _tier_unary(math.floor)
+    __ceil__ = _tier_unary(math.ceil)
+    __str__ = _tier_unary(str)
+    __repr__ = _tier_unary(repr)
+    __format__ = _tier_unary(format)
+
+
+# --------------------------------------------------------------------------- #
 # the traced context
 # --------------------------------------------------------------------------- #
 def traced_context(ctx: Any, trace: GateTrace, *, readonly: bool = True) -> Any:
@@ -1241,6 +1426,15 @@ def traced_context(ctx: Any, trace: GateTrace, *, readonly: bool = True) -> Any:
     rode on a shared ``extra``, S-27), ``model`` a ``ModelProxy`` (``None``
     stays ``None``), and ``trace`` set when the context type has that field.
     ``memo`` is shared by reference, which is the point of it.
+
+    ``tier``: a GATE's view wraps an integer tier in a ``TierRead`` on ``trace``.
+    A ``TierRead`` already there is kept as it is — the host's tier passed
+    through a fixture, or a gate's own view handed to a nested gate — so its
+    reads land where the value came from. A CONTROL trace's views wrap nothing:
+    the sweep's tier reaches a control already wrapped (``_control_host``), and
+    a plain integer there is one the fixture chose — a constant of the fixture,
+    not an input of the control. Keying it would miss the control entry at
+    every other sweep tier and re-run it on every check.
 
     Not a ``GateContext`` subclass: defining one here would make this module
     import ``gates``, which imports this module.
@@ -1256,6 +1450,10 @@ def traced_context(ctx: Any, trace: GateTrace, *, readonly: bool = True) -> Any:
     changes["ledger"] = None if ledger is None else LedgerView(ledger, trace)
     model = getattr(ctx, "model", None)
     changes["model"] = None if model is None else ModelProxy(model, trace)
+    tier = getattr(ctx, "tier", None)
+    if (type(tier) is not TierRead and getattr(trace, "kind", "gate") != "control"
+            and isinstance(tier, int) and not isinstance(tier, bool)):
+        changes["tier"] = TierRead(tier, trace)
     if "trace" in names:
         changes["trace"] = trace
     return dataclasses.replace(ctx, **{k: v for k, v in changes.items() if k in names})
@@ -1371,7 +1569,11 @@ def replay(recorded: GateTrace, trace: GateTrace | None = None) -> None:
     here too, and one it wrote and then read is its output, never a read. The hook's filters
     (library paths, import machinery) already ran when ``recorded`` was filled.
     Params, the ledger and the model are the views' channels, not the hook's,
-    and are not replayed. *Rejected:* re-raising the ``open`` events through
+    and are not replayed. The tier is replayed: a loader closing over its
+    gate's view that reads ``ctx.tier`` records it on the loader's own trace
+    (``_note_tier`` routes a read to the traces opened inside its view's), so
+    the value it loaded is keyed on the tier for every gate the entry serves.
+    *Rejected:* re-raising the ``open`` events through
     ``sys.audit`` as ``_report_read`` does for one path (a listing and a child
     process have no event a replay could raise without running them).
     """
@@ -1389,6 +1591,8 @@ def replay(recorded: GateTrace, trace: GateTrace | None = None) -> None:
             target._note_write(path)
         target.dirs.update(recorded.dirs)
         target.opaque.update(recorded.opaque)
+        if recorded.tier is not None:
+            target._note_tier(recorded.tier)
 
 
 def _install_hook() -> None:
@@ -2037,6 +2241,11 @@ _ENTRY_FIELDS = ("schema", "gate", "rho", "code", "spine", "reads", "instruments
 _CODE_FIELDS = ("digest", "files", "fallback")
 _READ_FIELDS = ("params", "files", "dirs", "ledger", "model", "opaque")
 _CONTROL_READ_FIELDS = ("params", "files", "dirs", "ledger", "host", "opaque")
+#: The one optional key of a ``reads`` block, written just before ``opaque`` and
+#: only by a run that read ``ctx.tier`` (``Reads.tier``). Optional rather than
+#: always written as ``null``: every entry of a gate that never looks at the tier
+#: keeps the block, and the rho, it had.
+_TIER_READ = "tier"
 
 #: The verdict block's WHITELIST, in the order it is written. What is left out,
 #: and why: ``duration_s``, ``cpu_s`` (costs are observations; they live in obs,
@@ -2652,7 +2861,11 @@ class Reads:
     ``{portable path: listing digest | None}``; ``ledger`` — ``{"claim:<id>" | "<list>": digest}``; ``model`` — the
     ``model_digest`` when the gate used ``ctx.model``; ``opaque`` — sorted
     channel names; ``host`` — a control's host-param reads, ``[[path,
-    digest], ...]``. Only the display values are left out of rho.
+    digest], ...]``; ``tier`` — the sweep tier the gate (or a control's fixture
+    and gate) read through ``ctx.tier``, ``None`` when it never looked, and
+    then absent from the block and from rho, so an entry of a gate that never
+    reads it is keyed exactly as before. Only the display values are left out
+    of rho.
     """
 
     params: list = field(default_factory=list)
@@ -2662,6 +2875,7 @@ class Reads:
     model: str | None = None
     opaque: list = field(default_factory=list)
     host: list = field(default_factory=list)
+    tier: int | None = None
 
     @classmethod
     def from_trace(cls, trace: GateTrace, *, anchors: Anchors | None = None,
@@ -2777,10 +2991,12 @@ class Reads:
                 model_value = model
             else:
                 opaque.add("model: used, and no digest of it was given")
+        tier = getattr(trace, "tier", None)
         return cls(params=params, files=dict(sorted(files.items())),
                    dirs=dict(sorted(dirs.items())),
                    ledger=_clean(dict(sorted(trace.ledger.items()))),
-                   model=model_value, opaque=sorted(opaque), host=host)
+                   model=model_value, opaque=sorted(opaque), host=host,
+                   tier=None if tier is None else int(tier))
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Reads":
@@ -2790,12 +3006,13 @@ class Reads:
                    files=dict(data.get("files") or {}), dirs=dict(data.get("dirs") or {}),
                    ledger=dict(data.get("ledger") or {}), model=data.get("model"),
                    opaque=sorted(data.get("opaque") or []),
-                   host=[list(row) for row in data.get("host") or []])
+                   host=[list(row) for row in data.get("host") or []],
+                   tier=data.get("tier"))
 
     def to_dict(self, *, control: bool = False) -> dict:
         """The entry's ``reads`` block, keys in their fixed order: ``params, files,
         dirs, ledger, model, opaque`` — or, for a control, ``host`` in place of
-        ``model``."""
+        ``model`` — with ``tier`` before ``opaque`` only when one was read."""
         out: dict = {"params": [list(row) for row in self.params],
                      "files": dict(sorted(self.files.items())),
                      "dirs": dict(sorted(self.dirs.items())),
@@ -2804,6 +3021,8 @@ class Reads:
             out["host"] = [list(row) for row in self.host]
         else:
             out["model"] = self.model
+        if self.tier is not None:
+            out["tier"] = int(self.tier)
         out["opaque"] = sorted(self.opaque)
         return _clean(out)
 
@@ -2824,14 +3043,21 @@ def _as_reads(reads: Any) -> Reads:
     return Reads.from_dict(reads or {})
 
 
+def _read_tier(reads: Any) -> int | None:
+    """The tier an entry's or a control entry's ``reads`` block recorded, or
+    ``None`` when its run never read ``ctx.tier``."""
+    tier = (reads or {}).get(_TIER_READ) if isinstance(reads, Mapping) else None
+    return None if isinstance(tier, bool) or not isinstance(tier, int) else tier
+
+
 def rho(gate_id: str, spine: str, code: Any, reads: Any) -> str:
     """The content address of a verdict: sha256 of canonical JSON of
     ``{"schema", "gate", "spine", "code", "params", "files", "dirs", "ledger",
-    "model", "opaque"}`` — the gate, the spine digest, the code digest (a
-    ``CodeRef`` or its digest string) and what the gate read (``Reads`` or an
-    entry's ``reads`` block). Display values never enter it; instruments never
-    do (Q1.3); a prerequisite's outcome never does (Q1.7, which keeps P2's
-    ``needs`` additive)."""
+    "model", "opaque"}``, plus ``"tier"`` when the gate read ``ctx.tier`` — the
+    gate, the spine digest, the code digest (a ``CodeRef`` or its digest string)
+    and what the gate read (``Reads`` or an entry's ``reads`` block). Display
+    values never enter it; instruments never do (Q1.3); a prerequisite's outcome
+    never does (Q1.7, which keeps P2's ``needs`` additive)."""
     code_digest_ = code.digest if isinstance(code, CodeRef) else str(code or "")
     keyed = _as_reads(reads).keyed()
     return _digest_of({"schema": SCHEMA, "gate": gate_id, "spine": spine or "",
@@ -2948,9 +3174,16 @@ def _problem_in_block(block: Any) -> str:
 
 
 def _problem_in_reads(reads: Any, *, control: bool) -> str:
-    keys = _CONTROL_READ_FIELDS if control else _READ_FIELDS
-    if not isinstance(reads, dict) or list(reads) != list(keys):
-        return f"reads must be an object with keys {list(keys)}"
+    keys = list(_CONTROL_READ_FIELDS if control else _READ_FIELDS)
+    tiered = keys[:-1] + [_TIER_READ] + keys[-1:]
+    if not isinstance(reads, dict) or list(reads) not in (keys, tiered):
+        return f"reads must be an object with keys {keys} ({_TIER_READ!r} before 'opaque' " \
+               f"when ctx.tier was read)"
+    if _TIER_READ in reads:
+        tier = reads[_TIER_READ]
+        if isinstance(tier, bool) or not isinstance(tier, int) \
+                or tier not in {t.value for t in Tier}:
+            return f"reads.tier must be one of {[t.value for t in Tier]}, not {tier!r}"
     for row in reads["params"]:
         if not (isinstance(row, list) and len(row) in (2, 3) and isinstance(row[0], list)
                 and isinstance(row[1], str)):
@@ -4148,11 +4381,16 @@ class _Now:
     ``admission_state`` call: the spine digest, the flattened projection (the
     one ``modelio.flat_params``, so a param is compared in exactly the shape a
     gate was handed it — S-28), the ledger, file digests, the anchors read
-    backwards, and one ``selftest/`` walk per owner."""
+    backwards, and one ``selftest/`` walk per owner. ``tier`` is the sweep's
+    tier when a sweep is asking, ``None`` for a reader — which has no tier of
+    its own, and judges a tier-reading entry by the most thorough tier recorded
+    (``_judge``)."""
 
     def __init__(self, root: str, projection: Any, ledger: Any, *, anchors: Anchors,
-                 digests: FileDigests | None, model: Any = None) -> None:
+                 digests: FileDigests | None, model: Any = None,
+                 tier: int | None = None) -> None:
         self.root = os.path.abspath(root)
+        self.tier = None if tier is None else int(_plain_tier(tier))
         self.anchors = anchors
         self.digests = digests if digests is not None else FileDigests()
         self.projection = projection
@@ -4201,10 +4439,12 @@ class _Now:
 
 
 def _now_for(root: str, registry: Any, projection: Any, ledger: Any, *,
-             anchors: Anchors | None, digests: FileDigests | None, model: Any) -> _Now:
+             anchors: Anchors | None, digests: FileDigests | None, model: Any,
+             tier: int | None = None) -> _Now:
     if anchors is None:
         anchors = anchors_for(root, registry, out_dir=store.out_dir(root) if root else "")
-    return _Now(root, projection, ledger, anchors=anchors, digests=digests, model=model)
+    return _Now(root, projection, ledger, anchors=anchors, digests=digests, model=model,
+                tier=tier)
 
 
 # --------------------------------------------------------------------------- #
@@ -4215,9 +4455,12 @@ def _signature(entry: Entry) -> str:
     recomputed over. Entries of one gate that read different paths (a branch on
     a mode switch) are judged each against its own paths. A presence-only read
     is its own kind of address: ``k in p`` recomputes to PRESENT/ABSENT, a value
-    read to the value's digest."""
+    read to the value's digest. The tier an entry read is part of its address
+    as a VALUE: the tier is not re-read from anything, so each group is one
+    tier, judged against the asking sweep's (``_judge``)."""
     reads = entry.reads or {}
     return _canonical_json({
+        "tier": _read_tier(reads),
         "params": [[row[0], row[1] == PRESENT] for row in reads.get("params") or ()],
         "files": sorted(reads.get("files") or {}),
         "dirs": sorted(reads.get("dirs") or {}),
@@ -4260,8 +4503,10 @@ def _reads_now(reads: Mapping[str, Any], now: _Now) -> tuple[Reads | None, str]:
         model = now.model_digest()
         if model is None:
             return None, "it used ctx.model, and no loaded model was given to digest"
+    # The tier is carried as recorded: what a sweep's own tier makes of it is
+    # `_judge`'s serving rule, not a digest re-read here.
     return Reads(params=params, files=files, dirs=dirs, ledger=ledger, model=model,
-                 opaque=list(reads.get("opaque") or ())), ""
+                 opaque=list(reads.get("opaque") or ()), tier=_read_tier(reads)), ""
 
 
 def _display(digest: str, value: Any, small: bool) -> str | None:
@@ -4322,6 +4567,9 @@ def _reasons(entry: Entry, reads_now: Reads, code: CodeRef, now: _Now) -> tuple:
         (inputs if _is_input(path, now) else derived).append(text)
     reasons = inputs or derived
     reads = entry.reads or {}
+    recorded_tier = _read_tier(reads)
+    if recorded_tier is not None and reads_now.tier != recorded_tier:
+        reasons.append(f"ctx.tier {recorded_tier} -> {reads_now.tier}")
     if reads.get("model") != reads_now.model:
         reasons.append("model changed")
     for key, digest in sorted((reads.get("ledger") or {}).items()):
@@ -4373,9 +4621,38 @@ def _entry_rel(root: str, entry: Any) -> str:
     return _shown(root, entry.path) if getattr(entry, "path", "") else ""
 
 
+def _most_thorough(matches: list[Entry]) -> list[Entry]:
+    """``matches`` narrowed to the entries of the highest tier any of them read;
+    an entry that never read the tier is kept as it is.
+
+    The serving rule for a gate that read ``ctx.tier``: a sweep at tier N may
+    serve an entry recorded at t when ``t >= N`` (``_judge`` makes a group below
+    N stale), the highest t first; a reader, with no tier of its own, takes the
+    highest t there is. A gate "may use [the tier] to pick a cheaper path, but
+    must not use it to lower its own standard" (``GateContext``), so the
+    costlier path is the more thorough answer to the same question, and serving
+    it costs nothing. What slipped through (review round 1, ``probe.tier``):
+    nothing keyed the tier at all, and a tier-0 PASS was served to ``check
+    --tier 2``. *Rejected:* exact match only (t == N) — a tier-0 ``check``
+    would serve its cheap PASS over the costlier path's FAIL at the same inputs
+    while ``status`` showed the FAIL, and a refutation keeps its power (R-3);
+    calling two tiers' different outcomes "two outcomes for identical inputs" —
+    they are not identical, and a cheap bound that FAILs where the solver
+    PASSes is an honest gate.
+    """
+    tiers = [t for t in (_read_tier(e.reads) for e in matches) if t is not None]
+    if not tiers:
+        return matches
+    top = max(tiers)
+    return [e for e in matches if _read_tier(e.reads) in (None, top)]
+
+
 def _judge(spec: Any, code: CodeRef, entries: list[Entry], now: _Now,
            order: Callable[[Entry], tuple]) -> Fresh | Stale | Unknown | Never:
-    """One gate's state, from its entries. Never runs the gate."""
+    """One gate's state, from its entries. Never runs the gate. A group that
+    read ``ctx.tier`` below the asking sweep's is not current: its rho now is
+    the address a run at the sweep's tier would have, which none of its
+    entries is at (``_most_thorough``)."""
     if not entries:
         return Never()
     gate_id = spec.id
@@ -4390,6 +4667,9 @@ def _judge(spec: Any, code: CodeRef, entries: list[Entry], now: _Now,
     for sig, group in groups.items():
         reads_now, why = _reads_now(group[0].reads or {}, now)
         why = blocked or why
+        if (not why and reads_now is not None and reads_now.tier is not None
+                and now.tier is not None and reads_now.tier < now.tier):
+            reads_now = dataclasses.replace(reads_now, tier=now.tier)
         rho_now = "" if why else rho(gate_id, now.spine, code, reads_now)
         judged[sig] = (rho_now, why, reads_now)
         if rho_now:
@@ -4398,7 +4678,7 @@ def _judge(spec: Any, code: CodeRef, entries: list[Entry], now: _Now,
                 matches.extend(e for e in group if e.rho == rho_now)
     known = frozenset(current)
     if matches:
-        return _fresh_or_conflict(spec, code, matches, known, order)
+        return _fresh_or_conflict(spec, code, _most_thorough(matches), known, order)
     latest = max(entries, key=order)
     rho_now, why, reads_now = judged[_signature(latest)]
     if why:
@@ -4465,7 +4745,8 @@ def _obs_names(root: str, gate_ids: Iterable[str]) -> set[tuple[str, str]]:
 
 def freshness(root: str, registry: Any, projection: Any, ledger: Any, *,
               digests: FileDigests | None = None, anchors: Anchors | None = None,
-              model: Any = None) -> dict[str, Fresh | Stale | Unknown | Never]:
+              model: Any = None, tier: int | None = None
+              ) -> dict[str, Fresh | Stale | Unknown | Never]:
     """``{gate id: Fresh | Stale | Unknown | Never}`` for every registered gate.
 
     **It never runs a gate or a fixture** (the verifying-trace shape, M11.11):
@@ -4490,9 +4771,14 @@ def freshness(root: str, registry: Any, projection: Any, ledger: Any, *,
     the sweep's; entries recorded under other anchors spell paths differently
     and read stale. ``model`` is the loaded model (``modelio.LoadedModel``): an
     entry of a gate that used ``ctx.model`` is Unknown without it.
+
+    ``tier`` is the asking sweep's (``sweep`` passes its ``max_tier``): an entry
+    whose gate read ``ctx.tier`` below it is Stale — ``ctx.tier 0 -> 2`` — and
+    one at or above it is served, the highest first (``_most_thorough``).
+    ``None``, a reader's, serves the highest tier recorded.
     """
     now = _now_for(root, registry, projection, ledger, anchors=anchors, digests=digests,
-                   model=model)
+                   model=model, tier=tier)
     pairs = list(registry.pairs()) if registry is not None else []
     problems: list[str] = []
     entries = {spec.id: _gate_entries(now.root, spec.id, problems) for spec, _fn in pairs}
@@ -4676,6 +4962,26 @@ def _hint_holds(control: ControlEntry, now: _Now, verified: Mapping[str, Any]) -
     return snapshot is not None and not _snapshot_moved(snapshot, now)
 
 
+def _at_tier(controls: Iterable[ControlEntry], at: int | None) -> bool:
+    """Is some control in ``controls`` a demonstration of the path tier ``at``
+    picks — one run at ``at``, or one whose run never read ``ctx.tier`` (then
+    every tier's path is the same path)? Always, when ``at`` is ``None``."""
+    return at is None or any(_read_tier(c.reads) in (None, at) for c in controls)
+
+
+def _disagree(pool: list[ControlEntry]) -> str:
+    """Why controls in ``pool`` that disagree are not admitted: two answers to
+    one question, or — when they were run at different tiers — a gate that
+    fires on its known-bad input on one tier's path and passes it on another's.
+    A gate that can pass a known-bad design is a logger at every tier: nothing
+    a claim reads says which path its verdict took."""
+    names = ", ".join(sorted(c.name for c in pool))
+    if len({_read_tier(c.reads) for c in pool}) > 1:
+        return (f"control outcomes differ by ctx.tier ({names}): on one tier's path it "
+                f"passes its own known-bad input")
+    return f"two control outcomes recorded for identical inputs ({names})"
+
+
 def _control_order(root: str, gate_id: str) -> Callable[[ControlEntry], tuple]:
     last: dict[str, tuple[str, int]] = {}
     for index, run in enumerate(read_obs(root, gate_id, control=True)):
@@ -4684,11 +4990,21 @@ def _control_order(root: str, gate_id: str) -> Callable[[ControlEntry], tuple]:
 
 
 def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
-               notes: list | None = None, verified: Mapping[str, Any] | None = None
-               ) -> Admission:
+               notes: list | None = None, verified: Mapping[str, Any] | None = None,
+               at: int | None = None) -> Admission:
     """§3.8 steps 1-3 and the remembered control failure, from records alone.
     ``verified`` is ``controls.json`` (``_read_verified``): a closure a sweep
-    re-verified reads admitted, not pending."""
+    re-verified reads admitted, not pending.
+
+    ``at`` is the tier whose path the counted verdict took — the entry's
+    recorded ``ctx.tier`` (``resolve``), or the tier a sweep will run the gate
+    at — and a control that read ``ctx.tier`` demonstrates only the path its
+    own tier picked: with none current at ``at`` (``_at_tier``) the gate is
+    undemonstrated there. Every current control counts toward the decision
+    whatever tier it ran at (``_disagree``). What slipped through (review round
+    1, ``probe.tier``): rho_control never keyed the tier, so a control shown on
+    the tier-0 path was served to ``check --tier 2`` and admitted a costlier
+    path that passed its own known-bad input."""
     static, _parts = now.static(spec, fn)
     mine = (verified or {}).get(spec.id) or {}
     record = held.get(f"control:{spec.id}")
@@ -4718,6 +5034,10 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
     if not current:
         return Admission("undemonstrated", max(candidates, key=order),
                          f"control inputs moved: {moved[0]}")
+    if not _at_tier(current, at):
+        return Admission("undemonstrated", max(current, key=order),
+                         f"no control shown on the path ctx.tier {at} picks — run "
+                         f"atompipe check --tier {at}")
     # The fixture closure is a HINT (§3.8): an entry whose fixture code is
     # unchanged — or that a sweep re-verified against the code as it is now —
     # was demonstrated on exactly this; one whose fixture code moved may still
@@ -4725,12 +5045,12 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
     # here runs. Among hint matches, disagreement is the control analogue of two
     # outcomes; without one, every current candidate decides.
     hinted = [c for c in current if _hint_holds(c, now, mine)]
+    if not _at_tier(hinted, at):
+        hinted = []                  # none shown on `at`'s path is unmoved: pending, as below
     pool = hinted or current
     chosen = max(pool, key=order)
     if len({c.bad for c in pool}) > 1:
-        names = ", ".join(sorted(c.name for c in pool))
-        return Admission("not-admitted", chosen,
-                         f"two control outcomes recorded for identical inputs ({names})")
+        return Admission("not-admitted", chosen, _disagree(pool))
     if chosen.bad == "pass":
         fixture = getattr(spec.negative_control, "fixture", "") or "its fixture"
         return Admission("not-admitted", chosen, f"PASSED its own known-bad fixture {fixture}")
@@ -5023,7 +5343,8 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
         # 3. a Fresh entry, under admission
         if isinstance(state, Fresh):
             verdict = _as_spec(entry.to_verdict(), spec)
-            admission = _admission(here, spec, fn, held, notes, verified)
+            admission = _admission(here, spec, fn, held, notes, verified,
+                                   at=_read_tier(entry.reads))
             when = when_of(entry, order)
             if admission.state == "not-admitted":
                 emit(_synthesized(spec, error=f"not admitted: {admission.reason}",
@@ -5253,9 +5574,17 @@ def _control_host(root: str, spec: Any, fn: Any, host_ctx: Any,
     own: a known-bad mesh loaded into the sweep's memo is one sweep's accident
     away from a real gate's read. ``trace`` is the control's: the known-good
     ``context`` runs inside its window, so what it opens is keyed with the
-    rest of the control's reads."""
-    if "memo" in {f.name for f in dataclasses.fields(host_ctx)}:
+    rest of the control's reads — and the sweep's tier is handed as a
+    ``TierRead`` on it, so a read of it by ``context``, the fixture or the gate
+    on what they pass through is an input of the control (``traced_context``
+    wraps nothing on a control's views: a tier the fixture sets is its own)."""
+    names = {f.name for f in dataclasses.fields(host_ctx)}
+    if "memo" in names:
         host_ctx = dataclasses.replace(host_ctx, memo={})
+    tier = getattr(host_ctx, "tier", None)
+    if (trace is not None and "tier" in names and type(tier) is not TierRead
+            and isinstance(tier, int) and not isinstance(tier, bool)):
+        host_ctx = dataclasses.replace(host_ctx, tier=TierRead(tier, trace))
     if _pack_dir_of(fn):
         return host_ctx, "live", None
     found = _known_good(root, host_ctx, trace)
@@ -5377,13 +5706,18 @@ class _Session:
 
 
 def _session(root: str, host_ctx: Any, *, projection: Any, anchors: Anchors,
-             digests: FileDigests, record: bool, when: str, out_dir: str = "") -> _Session:
+             digests: FileDigests, record: bool, when: str, out_dir: str = "",
+             tier: int | None = None) -> _Session:
     base = os.path.abspath(root)
     # The ledger a live-host fixture is handed is the host's own, so it is what
     # a control's ledger reads are vouched for against (`_ledger_moved`). It was
     # `None` here, and nothing compared them (admission review, round 1, A).
+    # `tier` is the tier its controls run at: the sweep's, else the host's.
+    if tier is None:
+        tier = _plain_tier(getattr(host_ctx, "tier", None))
     now = _Now(base, projection, getattr(host_ctx, "ledger", None), anchors=anchors,
-               digests=digests)
+               digests=digests,
+               tier=tier if isinstance(tier, int) and not isinstance(tier, bool) else None)
     if projection is None and isinstance(getattr(host_ctx, "params", None), dict):
         # No projection to re-read a live host's params from: the host the
         # fixture is handed IS the live state, so its params are what a live
@@ -5406,10 +5740,7 @@ def _decide(pool: list, spec: Any, order: Callable[[ControlEntry], tuple],
     known-bad input — not admitted; else admitted, reject-only."""
     chosen = max(pool, key=order)
     if len({c.bad for c in pool}) > 1:
-        names = ", ".join(sorted(c.name for c in pool))
-        return Admission("not-admitted", chosen,
-                         f"two control outcomes recorded for identical inputs ({names})",
-                         **flags)
+        return Admission("not-admitted", chosen, _disagree(pool), **flags)
     if chosen.bad == "pass":
         return Admission("not-admitted", chosen, _passed_known_bad(spec), **flags)
     return Admission("admitted", chosen, "", **flags)
@@ -5446,7 +5777,9 @@ def _unvouched(built: Any, given: Any, trace: GateTrace) -> str:
     if trace.opaque:
         return "the fixture used an input no trace can key"
     for name in ("root", "out_dir", "tier"):
-        if getattr(built, name, None) != getattr(given, name, None):
+        # Unwrapped without a read: this comparison is the spine's, and a
+        # ``TierRead`` compared here would land on the control's trace.
+        if _plain_tier(getattr(built, name, None)) != _plain_tier(getattr(given, name, None)):
             return f"the fixture moved ctx.{name}"
     extra_built, opaque_built = _digest(dict(getattr(built, "extra", None) or {}))
     extra_given, _ = _digest(dict(getattr(given, "extra", None) or {}))
@@ -5463,6 +5796,14 @@ def _values_match(control: ControlEntry, built: Any, fixture_reads: Reads,
     not already key?"""
     recorded = control.reads or {}
     if not set(fixture_reads.files) <= set(recorded.get("files") or {}):
+        return False
+    # The tier, like a file: a fixture that reads it now where the entry keyed
+    # none, or a gate that read another tier than the one it would be handed,
+    # is not vouched for by values that happen to match.
+    recorded_tier = _read_tier(recorded)
+    if fixture_reads.tier is not None and fixture_reads.tier != recorded_tier:
+        return False
+    if recorded_tier is not None and recorded_tier != _plain_tier(getattr(built, "tier", None)):
         return False
     if not set(fixture_reads.dirs) <= set(recorded.get("dirs") or {}):
         return False
@@ -5588,45 +5929,74 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
 
 
 def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
-           force: bool) -> Admission:
-    """§3.8 steps 1-6 for one gate (see ``admission``)."""
+           force: bool, at: int | None = None) -> Admission:
+    """§3.8 steps 1-6 for one gate (see ``admission``). ``at`` is the tier
+    whose path the counted verdict takes (``_admission``): with no current
+    control shown on that path the control runs — at the session's tier, which
+    is the one a caller that may run passes as ``at``."""
     from . import gates as _gates
     if not may_run:
-        return _admission(s.now, spec, fn, s.held, s.notes, s.verified)
+        return _admission(s.now, spec, fn, s.held, s.notes, s.verified, at=at)
     ok, _why = _gates.availability(spec)
     if not ok:
         # A control runs its gate: where the gate cannot run, neither can it.
-        return _admission(s.now, spec, fn, s.held, s.notes, s.verified)
+        return _admission(s.now, spec, fn, s.held, s.notes, s.verified, at=at)
     gid = spec.id
     order = _control_order(s.root, gid)
+    static, _parts = s.now.static(spec, fn)
+    # Read under `force` too — only to hold a forced run's outcome against the
+    # other tiers' (`_other_tiers`); what it ignores is noted only when it is
+    # the cache being consulted, as before.
+    try:
+        controls = read_controls(s.root, gid, problems=None if force else s.notes)
+    except AtompipeError as exc:
+        if not force:
+            s.notes.append(f"{gid}: {exc}")
+        controls = []
+    current = [c for c in controls if c.static == static and not _control_moved(c, s.now)]
     if not force:
-        static, _parts = s.now.static(spec, fn)
         record = s.held.get(f"control:{gid}")
         failed_here = (record is not None and record["kind"] != "availability"
                        and record["input_rho"] == static)
         # A control that crashed at this static supersedes whatever entry it
         # followed, like a gate's crash (§3.9): run it again, never serve it.
-        if not failed_here:
-            try:
-                controls = read_controls(s.root, gid, problems=s.notes)
-            except AtompipeError as exc:
-                s.notes.append(f"{gid}: {exc}")
-                controls = []
-            current = [c for c in controls if c.static == static and not _control_moved(c, s.now)]
-            if current:
-                mine = s.verified.get(gid) or {}
-                # A live ledger that differs from what a control recorded is
-                # not a miss yet: only its fixture can say whether it builds
-                # anything else from it (`_ledger_moved`), and `_reverify`
-                # compares the ledger it built key by key.
-                vouched = [c for c in current if not _ledger_moved(c, s.now, mine)]
-                hinted = [c for c in vouched if _hint_holds(c, s.now, mine)]
-                if hinted:
-                    return _decide(hinted, spec, order)
-                found = _reverify(s, spec, fn, host_ctx, current, order)
-                if found is not None:
-                    return found
-    return _run_control(s, spec, fn, host_ctx, force=force)
+        if not failed_here and current and _at_tier(current, at):
+            mine = s.verified.get(gid) or {}
+            # A live ledger that differs from what a control recorded is
+            # not a miss yet: only its fixture can say whether it builds
+            # anything else from it (`_ledger_moved`), and `_reverify`
+            # compares the ledger it built key by key.
+            vouched = [c for c in current if not _ledger_moved(c, s.now, mine)]
+            hinted = [c for c in vouched if _hint_holds(c, s.now, mine)]
+            # Settled by the hints only when one of them was shown on the path
+            # `at` picks; else the fixture decides, as for a moved closure.
+            if hinted and _at_tier(hinted, at):
+                return _decide(hinted, spec, order)
+            found = _reverify(s, spec, fn, host_ctx, current, order)
+            if found is not None:
+                return _other_tiers(found, current, s, spec)
+    return _other_tiers(_run_control(s, spec, fn, host_ctx, force=force), current, s, spec)
+
+
+def _other_tiers(found: Admission, current: list, s: _Session, spec: Any) -> Admission:
+    """``found``, unless a current control shown on ANOTHER tier's path
+    disagrees with it — then not admitted, as a reader will judge the same
+    pool (``_admission``: every hinted control counts, whatever its tier).
+    What would slip through otherwise: a tier-0 control that fired kept a
+    gate whose tier-2 path passes its known-bad input admitted in the sweep
+    that found it, while ``status`` refused it."""
+    entry = found.entry
+    if found.state != "admitted" or entry is None:
+        return found
+    mine = s.verified.get(spec.id) or {}
+    others = [c for c in current
+              if c.name != entry.name and _read_tier(c.reads) != _read_tier(entry.reads)
+              and not _ledger_moved(c, s.now, mine) and _hint_holds(c, s.now, mine)]
+    pool = [entry, *others]
+    if len({c.bad for c in pool}) > 1:
+        return Admission("not-admitted", entry, _disagree(pool), executed=found.executed,
+                         reverified=found.reverified)
+    return found
 
 
 def admission(root: str, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool = True,
@@ -5678,7 +6048,7 @@ def admission(root: str, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool = T
     s = _session(root, host_ctx, projection=projection, anchors=anchors,
                  digests=digests if digests is not None else FileDigests(), record=record,
                  when=when, out_dir=getattr(host_ctx, "out_dir", "") or "")
-    found = _admit(s, spec, fn, host_ctx, may_run=may_run, force=force)
+    found = _admit(s, spec, fn, host_ctx, may_run=may_run, force=force, at=s.now.tier)
     if record:
         _write_verified(s.root, s.verified_out)
     return found
@@ -5773,8 +6143,15 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
                      when=s.when)
         return SweepRow(skipped)
 
-    # 2. admission (force re-runs the control)
-    judged = _admit(s, spec, fn, run_ctx, may_run=True, force=force)
+    # 2. admission (force re-runs the control), on the path the counted verdict
+    # takes: a Fresh entry that read ctx.tier took its own tier's, anything
+    # else is run at this sweep's. An entry from a costlier tier is judged by
+    # the records alone — its control is above this sweep's ceiling (Q1.6).
+    served = (not force and isinstance(state, Fresh)
+              and not _crash_applies(s.held.get(gid), state))
+    at = _read_tier(state.entry.reads) if served else s.now.tier
+    judged = _admit(s, spec, fn, run_ctx, may_run=at is None or at == s.now.tier,
+                    force=force, at=at)
     if judged.state == "undemonstrated":
         return SweepRow(_synthesized(spec, skipped=True, skip_reason=judged.reason),
                         admission=judged)
@@ -5891,9 +6268,9 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
         digests = FileDigests(os.path.join(root, _STATE_DIR, _CACHE_DIR, _DIGESTS_NAME)
                               if record else None)
     before = freshness(root, registry, projection, ledger, digests=digests, anchors=anchors,
-                       model=getattr(ctx, "model", None))
+                       model=getattr(ctx, "model", None), tier=int(max_tier))
     s = _session(root, ctx, projection=projection, anchors=anchors, digests=digests,
-                 record=record, when=now, out_dir=out_dir)
+                 record=record, when=now, out_dir=out_dir, tier=int(max_tier))
     # The context every gate of this sweep runs on: its tier the sweep's (a gate
     # must not pick its cheap path under an expensive run), one memo shared by
     # every gate (load_file), never left on the caller's context.
@@ -5953,8 +6330,9 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
 # --------------------------------------------------------------------------- #
 def _flat_reads(reads: Mapping[str, Any]) -> dict[str, str | None]:
     """An entry's reads as ``{path: digest}``: ``param:<json path>``,
-    ``file:<path>``, ``dir:<path>``, ``ledger:<key>``, ``model``,
-    ``opaque:<channel>`` (digest ``None``: nothing can say)."""
+    ``file:<path>``, ``dir:<path>``, ``ledger:<key>``, ``model``, ``tier`` (the
+    tier it read, as a string), ``opaque:<channel>`` (digest ``None``: nothing
+    can say)."""
     out: dict[str, str | None] = {}
     for row in reads.get("params") or ():
         out["param:" + _canonical_json(row[0])] = row[1]
@@ -5965,6 +6343,8 @@ def _flat_reads(reads: Mapping[str, Any]) -> dict[str, str | None]:
         out["ledger:" + key] = digest
     if reads.get("model") is not None:
         out["model"] = reads["model"]
+    if _read_tier(reads) is not None:
+        out["tier"] = str(_read_tier(reads))
     for name in reads.get("opaque") or ():
         out["opaque:" + name] = None
     return dict(sorted(out.items()))

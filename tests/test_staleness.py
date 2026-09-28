@@ -890,6 +890,35 @@ def allowable(ctx):
 '''
 
 
+#: A gate that picks its path by ``ctx.tier``, as ``GateContext`` says it may:
+#: a closed-form bound the design meets below tier 2, and the costlier path's
+#: tighter allowable, which it does not. The tier is read by INDEXING a table —
+#: the use an ``int`` subclass would hand CPython without calling any method of
+#: it, so recording it proves the read is recorded wherever the value is used.
+_TIERED_GATE = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_staleness.py: a gate whose path is the sweep's tier."""
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+#: The allowable each tier's path judges against (mm): the cheap bound at 0 and
+#: 1, the costlier path's at 2 and 3.
+ALLOWABLE_MM = (5.0, 5.0, 0.5, 0.5)
+
+
+@gate(id="tiered.path", title="tip deflection, by the path the sweep's tier picks",
+      claims=["tiered"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/planted.py:far_past",
+                                       note="the deflection pushed far past any allowable"))
+def path(ctx):
+    """The cheap bound below tier 2, the costlier path's allowable at 2 and up."""
+    d = float(ctx.params["deflection"])
+    limit = ALLOWABLE_MM[ctx.tier]
+    return Verdict(gate="tiered.path", passed=d <= limit, measured=d, limit=limit,
+                   units="mm")
+'''
+
+
 def _plant_opener(project: str, *, gate_id: str, rel: str, tag: str, param: str,
                   fixture: str) -> None:
     _put(project, "selftest/planted.py", _PLANTED_FIXTURES)
@@ -1621,6 +1650,61 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertFalse(again["cached"], "the cached PASS was served after the helper moved")
         self.assertEqual((again["outcome"], again["limit"]), ("fail", 0.1),
                          "the re-run ran the stale bytecode, not the helper's new bytes")
+
+    def test_cli_a_pass_from_the_cheap_path_is_never_served_to_a_costlier_tier(self):
+        """V: the review's repro (false-fresh probes, round 1, ``probe.tier``),
+        through the CLI a person runs. ``GateContext.tier`` tells a gate it may
+        pick a cheaper path by the sweep's tier, and ``sweep`` stamps it — but
+        nothing recorded that a gate had read it, so rho never keyed it. A gate
+        passing on its tier-0 path was served ``pass cached fresh`` to ``check
+        --tier 2``, whose path never ran; ``--force --no-record`` there FAILed it,
+        and called the two answers "two outcomes recorded for identical inputs".
+        The inputs were not identical: the tier is one of them."""
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        _put(project, "selftest/planted.py", _PLANTED_FIXTURES)
+        _put(project, "gates/tiered.py", _TIERED_GATE)
+        _put(project, "claims/C8.json", json.dumps(
+            {"statement": "Tip sags within the allowable of the path that judged it",
+             "kind": "measurable",
+             "acceptance": {"quantity": "tip deflection", "comparator": "<=",
+                            "limit": 5.0, "units": "mm"},
+             "tags": ["tiered"]}) + "\n")
+
+        gate_id = "tiered.path"
+        first = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
+        self.assertEqual((first["outcome"], first["limit"]), ("pass", 5.0),
+                         "the positive control: the cheap path passes the design")
+        seen, proven = _seen(project)
+        self.assertEqual(seen["C8"], "pass", "the positive control")
+        self.assertIn("C8", proven, "the positive control: C8 is PROVEN at tier 0")
+        docs = _entry_docs(project)
+        self.assertEqual(docs[gate_id]["reads"].get("tier"), 0,
+                         f"the tier the gate read is not in its entry: {docs[gate_id]['reads']}")
+        for other in BRACKET_GATES:
+            self.assertNotIn("tier", docs[other]["reads"],
+                             f"{other} never reads ctx.tier and was keyed on it")
+
+        forced = _doc(_cli(project, "check", "--tier", "2", "--force", "--no-record",
+                           "--json"))
+        self.assertEqual(_rows(forced)[gate_id]["outcome"], "fail",
+                         f"the costlier path at tier 2 is not what ran: {_rows(forced)[gate_id]}")
+
+        costly = _doc(_cli(project, "check", "--tier", "2", "--json"))
+        row_ = _rows(costly)[gate_id]
+        self.assertFalse(row_["cached"], "the tier-0 PASS was served to a tier-2 sweep")
+        self.assertEqual((row_["outcome"], row_["limit"]), ("fail", 0.5), row_)
+        self.assertEqual(_executed(costly), {gate_id},
+                         "keying the tier re-ran a gate that never reads it")
+        self.assertIn(f"{gate_id}: ctx.tier 0 -> 2", costly["stale_reason"])
+        seen, proven = _seen(project)
+        self.assertEqual(seen["C8"], "fail",
+                         "the costlier path refuted the design and status reads the cheap PASS")
+        self.assertNotIn("C8", proven, "a PASS the costlier path refuted is under PROVEN")
+
+        again = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
+        self.assertEqual((again["outcome"], again["cached"]), ("fail", True),
+                         "a tier-0 check served its cheap PASS over the costlier path's "
+                         f"FAIL at the same inputs: {again}")
 
 
 # --------------------------------------------------------------------------- #

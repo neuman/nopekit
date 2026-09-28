@@ -251,6 +251,14 @@ class GateContext:
                  goes here; see :meth:`out_path`.
     ``tier``     the tier of the sweep in progress. A gate may use it to pick a
                  cheaper path, but must not use it to lower its own standard.
+                 In the gate's view it is a ``verdicts.TierRead``: it compares,
+                 indexes, hashes and formats as the int it is, and every use
+                 is recorded, so a verdict that read it is keyed on it — a
+                 sweep at tier N serves one recorded at N or above, never a
+                 cheaper path's. What slipped through before (review round 1,
+                 ``probe.tier``): nothing recorded the read, and a tier-0 PASS
+                 was served Fresh to ``check --tier 2``. ``int(ctx.tier)`` is
+                 the plain value (what ``json.dumps`` needs), and a read too.
     ``log``      one-line progress sink. Defaults to a no-op.
     ``extra``    free-form. The negative-control machinery merges a fixture's
                  dict in here, and a caller may put ``pack_dirs`` /``pack_dir``

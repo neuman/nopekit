@@ -667,6 +667,7 @@ class GateTrace:
     host_reads: dict[tuple, str]       # what a control read from the HOST context
     fixture_code: Any                  # the fixture's CodeClosure, set by gates.selftest
     anchors: Anchors | None            # makes path-valued param digests portable
+    tier: int | None                   # the value read through ctx.tier (a TierRead); None: never
     def self_modified(self) -> list[str]   # read, THEN written, in this window
     def stat_existed(self, path) -> bool | None   # what the first question found; None: cannot say
 
@@ -676,11 +677,13 @@ class LedgerView(Ledger):
     def __init__(self, ledger=None, trace=None, **fields)   # **fields: dataclasses.replace's path
 class ModelProxy:
     def __init__(self, target, trace)
+class TierRead:                                 # ctx.tier in a gate's view; NOT an int subclass
+    def __init__(self, value, trace)            # every use of the value records it on trace
 class GateInputWriteError(AtompipeError): ...  # "a gate cannot write another gate's inputs: ctx.params['x']"
 
 def traced_context(ctx, trace, *, readonly=True)   # -> the same dataclass type as ctx
 def tracing(trace)                                 # `with tracing(t):` routes audit events and stats to t
-def replay(recorded, trace=None)                   # recorded's files, stats, dirs, opaque -> every open trace and trace
+def replay(recorded, trace=None)                   # recorded's files, stats, dirs, opaque, tier -> every open trace and trace
 def canonical_ast_digest(source) -> str            # "" when it does not parse
 def spine_digest() -> str                          # "" when a SPINE_MODULES source is unreadable
 ```
@@ -720,7 +723,22 @@ gate read), or `ABSENT`. Reading `claims`, `params`, `inputs`, `needs`, `decisio
 `ctx.ledger` (S-23), which is why this is an input at all. **`ModelProxy`**: any real
 use of `ctx.model` sets `model_used` (rho then carries the whole projection and the
 model's code); copying the context or truth-testing the model does not. `None` stays
-`None`.
+`None`. **`TierRead`**: `ctx.tier` in a gate's view (`traced_context` wraps an integer
+tier on a gate's trace; a `TierRead` already there is kept, so a tier passed through a
+fixture or to a nested gate records where it came from). Comparing, hashing, indexing
+(`table[ctx.tier]`, `range`, a slice), arithmetic, truth, conversion, formatting,
+pickling (to a plain `int`), any `int` attribute and `isinstance(t, int)` (True) set
+`GateTrace.tier` — on the view's trace and on every trace opened inside its window
+since, so a `load_file` loader that reads it keys the hit too (`replay` carries it);
+two different values make the trace opaque. Copying and passing it around do not.
+It is deliberately not an `int` subclass: CPython reads an int subclass's index from
+its digits without calling a method, so `PATHS[ctx.tier]` — the natural way to pick a
+path — would record nothing; the cost is that `json.dumps(ctx.tier)` raises (write
+`int(ctx.tier)`). A control trace's views wrap nothing: `_control_host` hands the
+sweep's tier to a control already wrapped on its trace, and a plain integer there is
+one the fixture chose — a constant, not an input. What slipped through (review round
+1, `probe.tier`): `GateContext` told a gate it may use the tier to pick a cheaper path,
+nothing recorded that one had, and a tier-0 PASS was served Fresh to `check --tier 2`.
 
 **`digest_value`** is sha256 over `atompipe-v1:` + canonical JSON (`sort_keys`, compact,
 `ensure_ascii=False`, `allow_nan=False`) of a tagged form: NaN and the infinities
@@ -848,6 +866,8 @@ class Reads:
     model: str | None     # model_digest, when the gate used ctx.model
     opaque: list          # sorted channel names: an entry with any is never Fresh
     host: list            # a control's host-param reads: [[path, digest], ...]
+    tier: int | None      # the sweep tier it read through ctx.tier; None: never, and then
+                          #   absent from the block and from rho (keyed as before)
     @classmethod
     def from_trace(cls, trace, *, anchors=None, digests=None, model=None, static=None) -> Reads
     @classmethod
@@ -959,7 +979,7 @@ machinery's.
 
 **`rho`** = sha256 of canonical JSON of `{"schema": 1, "gate", "spine", "code":
 <code digest>, "params": [[path, digest], ...], "files", "dirs", "ledger", "model",
-"opaque"}`. Canonical JSON everywhere in this module: `sort_keys`, compact separators,
+"opaque"}`, plus `"tier"` when the gate read `ctx.tier`. Canonical JSON everywhere in this module: `sort_keys`, compact separators,
 `ensure_ascii=False`, `allow_nan=False`, no salt — anyone can recompute any digest
 from this rule. Display values, instruments and a prerequisite's outcome are never in
 it. **`out8`** is the first 8 hex of sha256 of `[passed, measured, limit, units]`: the
@@ -970,7 +990,8 @@ in the same directory, which is hard-linked to the final name — a hard link fa
 the name exists, and the name only ever holds complete bytes; a filesystem without
 hard links gets a plain `O_CREAT|O_EXCL` write). Keys in this order: `schema, gate,
 rho, code, spine, reads, instruments, verdict, digest`; `reads` keys `params, files,
-dirs, ledger, model, opaque`; bytes `json.dumps(indent=2, ensure_ascii=False,
+dirs, ledger, model, opaque` — with `tier` before `opaque` only when the gate read
+`ctx.tier` (then rho carries it too); bytes `json.dumps(indent=2, ensure_ascii=False,
 allow_nan=False) + "\n"`. The `verdict` block is a **whitelist**: `passed` (a bool),
 `measured`, `limit`, `units`, `detail`, `evidence`, `locators`, `claims`, `tier`,
 `pack` — `duration_s`, `cpu_s` and `rho` stay out (costs live in obs). `detail`,
@@ -1013,7 +1034,7 @@ different bytes for one rho (packs:H3).
 **Control entries** — `control-<rhoC16>-<out8>.json`, written once, keys: `schema,
 kind ("control"), gate, rho, static, static_parts {spine, code {digest, files},
 selftest {digest, files}, nc {fixture, expect, note}}, host ("known-good" | "live"),
-fixture {digest, files}, reads {params, files, dirs, ledger, host, opaque}, bad
+fixture {digest, files}, reads {params, files, dirs, ledger, host, [tier,] opaque}, bad
 ("fail" | "pass"), good (null until P2), admitted ("reject-only" | "no"), detail,
 measured, limit, units, digest`. `static` (`control_static`) = sha256 of the spine
 digest, the gate's code digest, the owner's `selftest_walk` and the NegativeControl
@@ -1078,7 +1099,7 @@ class Unknown: entry: Entry | None; reason: str; rho: str; current: frozenset # 
 class Never:   ...                    # state = "never"; entry None, rho "", current frozenset()
 
 def freshness(root, registry, projection, ledger, *, digests=None, anchors=None,
-              model=None) -> dict[str, Fresh | Stale | Unknown | Never]   # every registered gate
+              model=None, tier=None) -> dict[str, Fresh | Stale | Unknown | Never]   # every registered gate
 
 @dataclass(frozen=True)
 class Admission:
@@ -1130,6 +1151,14 @@ spine changed`; at most `MAX_STALE_REASONS`, then `(+n more)`. Two outcomes at t
 current rho with equal instruments are Stale with `conflict` set; with different
 instruments the entry recorded under this machine's wins, else a local run decides.
 Nothing global is compared any more: an unread datasheet ingested moves no gate (S-33).
+**The tier a gate read** is part of its entry's address as a value, never re-read:
+`freshness(..., tier=N)` — the sweep's `max_tier` — makes a group recorded below N
+Stale (`ctx.tier 0 -> 2`; its rho now is the address a run at N would have) and serves
+one recorded at N or above, the highest tier first (`_most_thorough`); a reader, with
+no tier of its own (`tier=None`, `resolve`), serves the highest recorded. A gate "must
+not use [the tier] to lower its own standard", so the costlier path is the more
+thorough answer to the same question. *Rejected:* exact match only — a tier-0 `check`
+would then serve the cheap PASS over the costlier FAIL that `status` shows.
 
 **`admission_state`** — is the gate's control demonstrated at its current version, from
 records alone (only `check` may spend a fixture's time). A candidate is a control entry
@@ -1155,7 +1184,17 @@ decide first: all fired → `"admitted"`; one PASSED its known-bad input →
 unchanged-closure candidate, the current ones decide the same way, but a fired control
 is `"pending"` — `control inputs moved (<files>); the next check re-verifies` — and
 counts: the bracket's fixtures load its model, so a `bed_xy` edit moves every closure
-without moving a control value. A remembered control crash, unusable fixture or
+without moving a control value. A control whose run read `ctx.tier` shows only the
+path its tier picked: admission is asked AT the tier whose path the counted verdict
+takes — the entry's recorded tier in `resolve`, the tier a sweep runs the gate at
+(or a served entry's) in `check` — and with no current control at that tier, or one
+that never read it, the gate is `"undemonstrated"` (`no control shown on the path
+ctx.tier <t> picks`); `check` runs the control at its own tier on that miss, never
+above its ceiling. Current controls of every tier decide together: when they
+disagree the reason is `control outcomes differ by ctx.tier (<names>)` — a gate that
+passes its known-bad input on one tier's path is a logger on every path (review round
+1, `probe.tier`: rho_control never keyed the tier, and a control shown on the tier-0
+path admitted a tier-2 path that passed a 400 mm span). A remembered control crash, unusable fixture or
 self-skip at this static (`control:<gate>`) → `"not-admitted"`, `control <kind>: <why>`
 (an availability skip is not held against it). No current candidate →
 `"undemonstrated"`. A candidate whose closure moved but that a sweep re-verified by
@@ -1324,7 +1363,7 @@ to the `.atompipe/cache/digests.json` stat cache, saved after a recorded sweep.
 RECORDED sweep only — a filtered or dry one returns `None` and writes nothing) holds,
 in this order: `when` (the CLI's stamp), `spine`, `fingerprint` (of `watched_paths`),
 `reads` (per gate, the reads of the entry the resolution used: `param:<json path>`,
-`file:<path>`, `dir:<path>`, `ledger:<key>`, `model`, `opaque:<channel>`),
+`file:<path>`, `dir:<path>`, `ledger:<key>`, `model`, `tier`, `opaque:<channel>`),
 `statuses` (every claim under the resolution), `counts` (the sweep's, with
 `controls`), `worst` (the first blocking claim, its explaining gate and words; nulls
 when nothing blocks), `params` (from 1.3) and `influence` (P3), empty until then.

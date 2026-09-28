@@ -603,6 +603,25 @@ def span(ctx):
                    units="mm", detail=f"{s} mm (limit {limit})")
 '''
 
+#: A gate whose costlier path judges nothing: below tier 2 it holds the span to
+#: 100 mm, and at tier 2 and up it passes whatever it is handed. Its control
+#: fires on the cheap path and on no other, so a demonstration made at tier 0
+#: says nothing about the path a tier-2 sweep runs.
+SHELF_GATE_COSTLY_LOGGER = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def span(ctx):
+    s = float(ctx.params["span"])
+    if ctx.tier >= Tier.SOLVE:
+        return Verdict(gate="shelf.span", passed=True, measured=s, limit=100.0, units="mm")
+    return Verdict(gate="shelf.span", passed=s <= 100.0, measured=s, limit=100.0,
+                   units="mm")
+'''
+
 #: The same known-bad span on a live host, with a ledger the fixture states
 #: itself — openmodelica's shape (``ledger=Ledger()``): the gate reads the
 #: fixture's C1, never the host's, so no live claim edit can move this control.
@@ -1221,6 +1240,58 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         code, data = check_json(self, project)
         self.assertEqual(code, 0, data)
         self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
+        self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertIn("**C1**", proven_section(self, project))
+
+    def test_cli_a_control_shown_on_the_cheap_path_does_not_admit_the_costlier_one(self):
+        """V: the control half of the review's ``probe.tier`` (false-fresh
+        probes, round 1). A gate may pick its path by ``ctx.tier``, and a control
+        runs its gate at the sweep's tier — so a demonstration made at tier 0
+        exercised the cheap path only. rho_control never keyed the tier either:
+        ``check --tier 2`` served that control ``cached``, admitted a costlier
+        path that passes a 400 mm span, and C1 read PASS. The control a tier-2
+        sweep counts is one its own path fired."""
+        project = os.path.join(self.tmp(), "shelf")
+        write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
+        write(project, "gates/g.py", SHELF_GATE_COSTLY_LOGGER)
+        write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
+        write(project, "selftest/known_good.py", SHELF_KNOWN_GOOD)
+        write(project, "selftest/bad.py", SHELF_LONG)
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
+        self.assertIn("**C1**", proven_section(self, project), "the positive control")
+        [cheap] = control_names(project)["shelf.span"]
+        self.assertEqual(read_control(project, "shelf.span", cheap)["reads"].get("tier"), 0,
+                         "the tier the control's gate read is not keyed")
+
+        code, data = check_json(self, project, "--tier", "2")
+        got = verdict_row(data, "shelf.span")
+        self.assertEqual(got["outcome"], "error", got)
+        self.assertIn("not admitted: PASSED its own known-bad fixture selftest/bad.py:long",
+                      got["error"])
+        self.assertEqual(data["counts"]["controls"]["executed"], 1,
+                         "the tier-2 path's control never ran: the tier-0 one was served")
+        self.assertEqual(code, 1, "a tier-2 sweep admitted a path that passes 400 mm")
+        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass",
+                            "a reader admitted the costlier path on the cheap path's control")
+        self.assertNotIn("**C1**", proven_section(self, project))
+
+        # The cheap loop keeps what the costlier path showed: a gate that passes
+        # a known-bad design at any tier is a logger at every tier.
+        code, data = check_json(self, project)
+        self.assertEqual((code, verdict_row(data, "shelf.span")["outcome"]), (1, "error"), data)
+        self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
+
+        # The positive control: the costlier path made honest is admitted at
+        # tier 2, so the refusal above was the logger's, not the tier's.
+        edit(project, "gates/g.py", "passed=True, measured=s", "passed=s <= 100.0, measured=s")
+        code, data = check_json(self, project, "--tier", "2")
+        self.assertEqual((code, verdict_row(data, "shelf.span")["outcome"]), (0, "pass"), data)
         self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
         self.assertIn("**C1**", proven_section(self, project))
 
