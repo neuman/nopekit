@@ -163,6 +163,47 @@ file, and the page advised `site build`, which cannot fix it (S-47). Every write
 above it — the ledger, the page's state, every Phase 1 cache and index file — inherits
 the refusal.
 
+```python
+class FileDigests:                                   # sha256 of a file's BYTES, behind a stat cache
+    def __init__(self, cache_path: str | None = None)   # .atompipe/cache/digests.json (untracked)
+    def digest(self, path) -> str | None             # None when the file is missing
+    def save(self) -> None                           # best-effort; a failed save costs a re-hash
+```
+**Digests come from bytes.** `FileDigests` is how every Phase 1.2 digest of a file is
+taken — a gate's opened files, the selftest walk, the verdict cache. The cache key is
+`(size, mtime_ns, ctime_ns, ino, dev)`; an entry whose `mtime_ns >= written_ns` — the
+cache file's own mtime after its last write — is re-hashed (git's racy-clean rule,
+against its index mtime; no fixed window). What slipped through before it:
+`inputs_hash` hashed digests stored at ingest, never the bytes, so a limit file edited
+under a project gate left the claim reading pass (S-22, S-45). *Rejected:* size and
+mtime alone (a same-size edit with its mtime restored — `os.utime` cannot restore
+ctime); a fixed 2 s window (misattributed to git in an earlier draft).
+
+### `vcs.py`  (deps: util)
+The **only** git edge. Nothing else under `src/` starts a `git` process
+(`test_meta.NoGitOutsideVcs`).
+```python
+VCS_TIMEOUT_S = 10
+def is_repo(path) -> bool
+def git_head(root) -> str | None                     # HEAD's sha; None outside git
+def ls_files(root, relpaths, *, others=True) -> list[str] | None   # -z; relative to root
+def ident(root) -> str | None                        # author identity, timestamp dropped
+def commit_times(root, relpaths) -> dict[str, str]   # path -> its last commit's time
+```
+Argv form with `-C root`, never a shell string. The environment strips `GIT_DIR`,
+`GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`,
+`GIT_CEILING_DIRECTORIES` and `GIT_CONFIG_PARAMETERS` — a git hook exports them, and
+every call would then answer for the OUTER repository — and sets
+`GIT_OPTIONAL_LOCKS=0`, `GIT_TERMINAL_PROMPT=0` and `LC_ALL=C`. `ls_files` with
+`others` is `--cached --others --exclude-standard`: tracked plus untracked-not-ignored.
+`ident` is `git -c user.useConfigOnly=true var GIT_AUTHOR_IDENT`. **Every function
+returns `None` (or `{}`) on any failure and never raises**: a project outside git, a
+missing `git`, a timeout. `VCS_TIMEOUT_S` is 10 because `git ls-files` on a cold, large
+repository takes seconds; *rejected:* unbounded (a hung credential helper hangs
+`check`) and 1–2 s (network filesystems). A `--dir` copy with no `.git` is the
+common case (verify.sh), so every caller has a non-git path.
+
 ### `store.py`  (deps: models, util)
 Persistence. The project lives in `<root>/.atompipe/`.
 ```python
@@ -236,6 +277,190 @@ def check_determinism(model, runs=2) -> tuple[bool, str]   # build twice; the pr
 Rule enforced here: a projection value that is a dataclass/enum is encoded via
 `models._enc`. Non-JSON-safe values raise `AtompipeError` naming the field —
 silent coercion is how a model and its projection drift apart.
+
+```python
+def flat_params(projection) -> tuple[dict, list[str]]   # derived first, config on top; + conflicts
+class CodeClosure:                                       # what a loaded module's code IS
+    files        # ((abspath, sha256 of the bytes compiled), ...)
+    fallback     # "", or why the closure is a whole directory: "computed source at <file>:<line>"
+    third_party  # static top-level imports resolving outside the roots (not stdlib, not atompipe)
+    spine_extras # atompipe.* modules it imports that are not in verdicts.SPINE_MODULES
+def load_source_module(path, *, name, roots) -> ModuleType   # fresh bytes, recorded closure, content-keyed
+def load_path(path) -> ModuleType                        # a helper by path; module name salted by its abspath
+def code_closure(obj) -> CodeClosure | None              # a module's, or a function's module's
+```
+**`flat_params` is the one copy** of "flatten a projection into `ctx.params`": derived
+values first, config on top, and the list of keys where the two disagree. It was
+written twice, in `cli` and in `site`, kept in sync by a comment (S-28).
+
+**One loader for every piece of code a verdict depends on.** `load_source_module` loads
+pack gate modules, project gate modules, fixtures, the known-good module, and helpers
+loaded by path (`load_path`, which replaces fdm-print's `_sibling_module`). It reads
+the bytes, records `(abspath, sha256)`, and compiles THOSE bytes — no `.pyc` is read or
+written for these modules. What slipped through: after a same-size, same-second edit,
+gate modules and pack helpers ran the old bytecode — source said 8.0, the verdict came
+from 7.0 (S-26); `_FreshLoader` had fixed that for the model entry only. While a module
+executes, a recording finder attributes every import under `roots` to it; a walk of its
+globals attributes helpers found already in `sys.modules`; a static pass adds lazy
+imports inside function bodies. Only `exec` of computed source from a frame under
+`roots`, or an import that cannot be mapped to a file, falls back to every `*.py` under
+the owning directory, and `fallback` says so. The closure is stored on the module as
+`__atompipe_code__`; a later load returns the cached module only while every file in
+it still hashes the same, else purges the recorded helpers and re-executes (the gates
+it registered are re-adopted into the caller's registry). `load_model` records the
+model's closure the same way.
+
+### `verdicts.py`  (deps: models, util; gates, packs and claims only inside functions)
+What a gate read, so its verdict can be keyed by it — the home of per-gate
+content-addressed verdicts (PLAN D-05). This is its first half, the primitives; the
+entry files, rho, freshness and admission build on them. It never reads the wall
+clock and never takes the build lock. `gates` imports it, so it never imports `gates`
+at module level: a function that needs a gate type receives the object.
+```python
+ABSENT: str                  # sha256(b"atompipe:absent\0") — a key the gate asked for, not there
+PRESENT: str                 # sha256(b"atompipe:present\0") — `k in params`, presence only
+SPINE_MODULES = ("models.py", "gates.py", "modelio.py", "verdicts.py")
+SMALL_VALUE_MAX_CHARS = 80   # a str this short (any bool, int, finite float) is shown beside its digest
+
+def digest_value(value, anchors=None) -> str             # canonical, tagged, portable; never raises
+def small_value(value, anchors=None) -> tuple[bool, Any]  # (True, display) | (False, None)
+def portable(text, anchors) -> str                       # anchored absolute paths -> <root>/..., ~/...
+
+@dataclass(frozen=True)
+class Anchors:
+    root: str; packs: {name: dir}; out: str; controls_out: str; tmp: str; home: str
+    def pairs(self) -> tuple[tuple[str, str], ...]       # (absolute spelling, token), longest first
+    def portable(self, text) -> str
+    def portable_path(self, path) -> str | None          # None: absolute and under no anchor
+    def evidence(self, paths) -> list[str]               # portable; outside-anchor paths dropped
+
+@dataclass(eq=False)                                     # identity: two empty traces are two traces
+class GateTrace:
+    kind: str = "gate"                 # "gate" | "control"
+    params: dict[tuple, str]           # path -> ABSENT | PRESENT | value digest | whole-level digest
+    values: dict[tuple, Any]           # path -> small display value of a leaf read
+    whole: set[tuple]                  # paths read in bulk; () is the top level
+    ledger: dict[str, str]             # "claim:<id>" | "claims" | "params" | "meta" | ... -> digest
+    files_read: list[str]              # absolute, first-read order, never this window's own output
+    files_written: set[str]
+    dirs: set[str]                     # directories listed
+    opaque: set[str]                   # "subprocess:omc", "network", "param mesh: <Type> is not JSON"
+    model_used: bool
+    host_reads: dict[tuple, str]       # what a control read from the HOST context
+    fixture_code: Any                  # the fixture's CodeClosure, set by gates.selftest
+    anchors: Anchors | None            # makes path-valued param digests portable
+    def self_modified(self) -> list[str]   # read, THEN written, in this window
+
+class ParamTrace(dict):
+    def __init__(self, data=None, trace=None, *, path=(), readonly=True, host=False)
+class LedgerView(Ledger):
+    def __init__(self, ledger=None, trace=None, **fields)   # **fields: dataclasses.replace's path
+class ModelProxy:
+    def __init__(self, target, trace)
+class GateInputWriteError(AtompipeError): ...  # "a gate cannot write another gate's inputs: ctx.params['x']"
+
+def traced_context(ctx, trace, *, readonly=True)   # -> the same dataclass type as ctx
+def tracing(trace)                                 # `with tracing(t):` routes audit events to t
+def canonical_ast_digest(source) -> str            # "" when it does not parse
+def spine_digest() -> str                          # "" when a SPINE_MODULES source is unreadable
+```
+**`ParamTrace` — what each access records.** A leaf read (`p[k]`, `p.get(k)`) records
+`(path, digest_value(v))` and, when small, the value; a list leaf comes back as a copy.
+A nested dict read records nothing and returns a nested view at the extended path,
+identity-stable — a whole-value read there would stale `bracket.deflection` on every
+Config edit. A miss records `ABSENT`; `k in p` records `PRESENT` or `ABSENT`, and a later
+value read supersedes `PRESENT`. Every bulk access — `__iter__`, `keys`, `values`,
+`items`, `len`, `bool`, `==`, `!=`, `repr`, `copy`, `copy.copy`, `copy.deepcopy`,
+pickling, `|` on either side, `reversed` — records the digest of the whole level and adds
+its path to `whole`. `__iter__` must be overridden for that to hold: CPython's
+dict-merge fast path reads a dict subclass's storage directly for `dict(p)`, `{**p}`
+and `f(**p)` unless `tp_iter` is overridden, and those were exactly the silent reads
+(S-25: `_ParamReads` recorded nothing for bulk access). Copies are plain dicts. Every
+mutator raises `GateInputWriteError` on a read-only view: `ctx.params` was one mutable
+dict shared by every gate, so one gate could forge the next gate's inputs (S-24). It
+stays a `dict` subclass for `GateContext._exact`'s `isinstance`. Named residuals: an
+explicit `dict.__getitem__(p, k)` is not recorded, and a mutable non-JSON leaf is
+handed out by reference.
+
+**Host views.** `traced_context(ctx, trace, readonly=False)` — what a control's
+fixture receives — gives a writable PRIVATE copy (`host=True`): a fixture's edit never
+reaches the sweep's context, and its reads land in `trace.host_reads`, not
+`trace.params`. A view built over a host view — the gate on a context its fixture
+returned unchanged, or on `dict(host.params)` with one value layered on — keeps
+recording host reads too, for any reader; a path the fixture itself wrote is never a
+host read. That is the seal detector's input: a SEALED fixture reads no host param.
+
+**`LedgerView`** is a lazily copied ledger whose `verdicts` (and `last_run`) read
+empty — a gate reading other gates' verdicts would put verdicts inside rho.
+`claim(cid)` records `"claim:<cid>"` with the digest of that claim, its in-memory
+`gates` and `physical_result` stripped (coverage and a bench result are not what a
+gate read), or `ABSENT`. Reading `claims`, `params`, `inputs`, `needs`, `decisions`,
+`views` or `meta` records the whole list. openmodelica reads a claim's limit through
+`ctx.ledger` (S-23), which is why this is an input at all. **`ModelProxy`**: any real
+use of `ctx.model` sets `model_used` (rho then carries the whole projection and the
+model's code); copying the context or truth-testing the model does not. `None` stays
+`None`.
+
+**`digest_value`** is sha256 over `atompipe-v1:` + canonical JSON (`sort_keys`, compact,
+`ensure_ascii=False`, `allow_nan=False`) of a tagged form: NaN and the infinities
+become `{"$float": ...}` (the bracket's `build()` returns `inf`); a user key starting
+`$` is escaped to `$$`, so no model value can spell a tag; tuples become lists; a 0-d
+numpy-like becomes its `.item()` (duck-typed, never imported); a non-string key becomes
+`"$k:<repr>"`; an absolute path under an anchor becomes its portable form; anything
+else non-JSON — a mesh object, a set, a self-containing list — becomes
+`{"$opaque": "<module>.<qualname>"}`, a digest of its type only, and the view names the
+opaque channel `param <path>: <Type> is not JSON` so the entry is never Fresh.
+
+**`Anchors` and `portable`.** A verdict entry is a tracked file, so it must be the same
+bytes in every checkout: omc's errors embed absolute `.mo` paths, 33 of 54 bundled gates
+cite absolute evidence, and fixtures set absolute mesh paths in params. Tokens, longest
+spelling first: `<root>`, `<pack:NAME>`, `<out>`, `<out:controls>`, `<tmp>`, `~`; each
+anchor also matches its `realpath`; a filesystem root is never one; a match must start
+and end on a path boundary (`/w/proj` never rewrites `/w/project2`). Evidence under no
+anchor is dropped from the entry and kept in the live row.
+
+**The audit hook.** `tracing(trace)` pushes `trace` onto one process-global stack and
+installs one `sys.addaudithook` on the first push, at most once per process; every
+event goes to every open trace (a fixture's nested `run_gate` feeds both, and worker
+threads are routed too). The window pops on exit, before a caller's `except` formats a
+traceback. The hook never raises and never opens a file; with no window open it returns
+at once. It records `open` by mode — or by flags for `os.open` — as a read, a write
+(`w`, `a`, `x`, `+`, `O_CREAT`...) or both (`r+`), ignoring int fds and directory fds;
+`os.listdir`/`os.scandir` as a listed dir; `os.rename`/`os.replace` as writes;
+`subprocess.Popen`, `os.system`, `os.exec*`, `os.spawn*`, `os.posix_spawn` and `os.fork`
+as opaque `subprocess:<name>`, plus any argv element naming an existing file as a read;
+`socket.connect`/`sendto`/`sendmsg` as opaque `network`. A read of a path this window
+already wrote is not recorded (the gate's own output); a path read and then written is
+listed by `self_modified()`. Excluded: events whose calling frame is import machinery,
+`linecache`, `tokenize`, `warnings` or `traceback` (the first mesh gate opened 719
+`.pyc` files on import alone); pseudo-filenames like `<unknown>` (3.13's traceback
+parses line fragments for its carets, and the SyntaxError opens `<unknown>`); and paths
+under the interpreter's prefixes and library directories, site-packages, the USER site
+(trimesh and numpy live in `~/.local`), the installed atompipe package, `/proc`, `/sys`,
+`/dev`, or ending `.pyc` — machine-specific reads that would make every entry stale on
+every other machine. Not seen, and named: `os.stat` and every environment read fire no
+event; a subprocess's own reads (hence opaque); an `os.open` relative to a `dir_fd`.
+What slipped through while writing it: `sys._getframe` raises an audit event of its
+own, so the hook re-entered itself until the recursion limit and aborted the `open` it
+was auditing — it now carries a per-thread re-entrancy guard.
+
+**`spine_digest`** is the spine's version for rho, taken from what `SPINE_MODULES` say:
+`canonical_ast_digest` of each, read from the files beside `verdicts.py`, memoised per
+process. The walk emits each node's type, then its fields in sorted name order;
+`type_params`, `type_comment` and `kind` are skipped, and so are empty lists, `None`,
+location attributes and every bare string statement at every depth (module, class and
+function docstrings, and the attribute docstrings `models.py` writes after its fields);
+constants are tagged with their type; an f-string's constant parts are merged. So a
+comment or a docstring re-runs nothing, and `<` becoming `<=` re-runs everything.
+What slipped through: 1e09113 changed verdict semantics (a NaN that read `[ok]` now
+errors) with `__version__` still 0.1.0 (S-29). *Rejected:* `ast.dump` (3.12 adds
+`type_params=[]` and 3.13 omits empty fields, so every committed entry would be stale on
+two of CI's three Pythons); `tokenize` (layout-sensitive); the version string; the
+bytes of the whole spine (every comment re-runs every gate). An unreadable source (a
+wheel without `.py` files) gives `""`: every entry is then Unknown, never Fresh.
+`tests/test_spine_digest.py` pins a fixture's digest — f-strings with nested specs,
+`!r`, `{x=}`, `match`, walrus, decorators, async — and CI asserts it on 3.10, 3.12 and
+3.13.
 
 ### `gates.py`  (deps: models, util, store)
 ```python
