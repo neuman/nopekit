@@ -731,6 +731,12 @@ def _verdict_row(verdict: Verdict) -> dict[str, Any]:
     # which is 22 characters saying "instant" in the least readable way available.
     row["duration_s"] = round(float(row.get("duration_s") or 0.0), 4)
     row["ok"] = verdict.ok
+    # Set by hand, like `ok`: `to_dict` serialises dataclass fields and `outcome`
+    # is a property, so without this line it is silently missing. It is the one
+    # four-way answer — "pass" | "fail" | "error" | "skipped" — that the tag and
+    # the claim status are read from, so a consumer never re-derives it from the
+    # three flags and gets the precedence wrong (PLAN R-5).
+    row["outcome"] = verdict.outcome
     return row
 
 
@@ -1067,9 +1073,24 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     _say(f"BLOCKING — {len(blockers)} critical claim(s) must not be spent against:")
     for claim, status in blockers:
-        reason = _blocking_reason(ledger, claim, status)
-        _say(f"{_tag(str(status)[:4])} {claim.id} {claim.statement} — {reason}")
+        _say(_blocking_line(claim, status, _blocking_reason(ledger, claim, status)))
     return 1
+
+
+def _blocking_line(claim: Claim, status: ClaimStatus, reason: str) -> str:
+    """`[FAIL ] C1 <statement> — <reason>`: one blocking claim, as `check` prints it.
+
+    The tag is `report.status_tag`, the one spelling `status`, `claim list` and the
+    readiness report already use. What slipped through (S-69): this line built its
+    tag from the first four letters of the status, so the same claim read
+    `[fail]` here and `[FAIL ]` in `status`, and a claim with no gate read `[uncl]`
+    here and `[gap  ]` there — two vocabularies one screen apart, and a reader who
+    had to learn that they meant the same thing. *Rejected:* keeping `_tag`'s
+    four-wide field so `check`'s lines align with its verdict lines above them:
+    those are GATE outcomes (four states, `Verdict.render`), these are CLAIM
+    statuses (ten), and squeezing ten into four is how `uncl` got invented.
+    """
+    return f"{report.status_tag(status)} {claim.id} {claim.statement} — {reason}"
 
 
 def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus) -> str:
@@ -1086,18 +1107,17 @@ def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus) -> str:
     does not provide ...`, which sends the reader to look for a missing parameter
     when the real answer is that their part sags 0.7 mm. So a FAIL cites a gate
     that actually ran and failed, in preference to one that skipped or errored.
+
+    That ranking used to live here, privately, and the fix above never reached
+    `report._terminal_reason`, which kept citing the skip in `status` (S-68). It
+    is `claims.explaining_verdict` now — ran-and-failed, then errored, then
+    skipped — and both callers format it the same way, `gate : body`, the
+    separator `Verdict.render` and `status` already use.
     """
-    covering = list(claims.covering_verdicts(claim, ledger.verdicts))
-    # Real measurements first: a gate that RAN and failed explains a FAIL. Then
-    # errors (a crash is louder than a missing tool), then skips.
-    ranked = (
-        [v for v in covering if not v.ok and not v.skipped and not v.error]
-        + [v for v in covering if v.error]
-        + [v for v in covering if v.skipped]
-    )
-    for verdict in ranked:
+    verdict = claims.explaining_verdict(claim, ledger.verdicts)
+    if verdict is not None:
         body = verdict.detail or verdict.error or verdict.skip_reason
-        return f"{verdict.gate}: {body}" if body else f"{verdict.gate} did not pass"
+        return f"{verdict.gate} : {body}" if body else f"{verdict.gate} did not pass"
     if status is ClaimStatus.UNCLAIMED:
         return "no gate covers it — `atompipe gap --propose`"
     if status is ClaimStatus.PENDING:

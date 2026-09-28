@@ -95,6 +95,26 @@ STATUS_TAG: dict[ClaimStatus, str] = {
     ClaimStatus.ASSERTED: "assum",     # standing assumption, unevidenced
 }
 
+#: The PROVEN section's heading, as the report emits it and as every test that
+#: inspects that section finds it. The section's qualifier ("(machine-verified
+#: this run)") follows it on the same line and is NOT part of it.
+#:
+#: What slipped through (S-15): invariant 4's tests located the section by a
+#: literal copy of this text and read "no heading" as "an empty section", so
+#: `assertNotIn(gate, section)` passed on nothing. A rename of the heading —
+#: which P2's REPORT.md proposes (PLAN D-14, ask A-11) — would have kept the
+#: invariant green while it tested no report at all. Now the report and the tests
+#: share this one constant, and the tests fail when the report stops emitting it.
+#:
+#: Why this value: it is today's heading, so no rendered report changes; METHOD
+#: rule 9 and invariant 4 both say PROVEN, and changing the word is a METHOD edit
+#: (A-11), so a rename changes this constant's TEXT, never its name. *Rejected:*
+#: the qualifier inside the constant — it is prose that changes on its own (P1.2
+#: makes it "machine-verified, current"), and every such edit would move the key
+#: the tests search for. *Rejected:* matching any heading containing "PROVEN" —
+#: a second section that happened to use the word would be tested in its place.
+SECTION_PROVEN = "## What is PROVEN"
+
 #: Order used for the counts line. Good news first *in the counts only*, because
 #: a count is arithmetic; the verdict sentence and the problem list below it are
 #: ordered by severity, because those are judgements.
@@ -503,8 +523,12 @@ def _verdict_sentence(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any,
 # --------------------------------------------------------------------------- #
 def _section_proven(ledger: Ledger, st: dict[str, ClaimStatus],
                     cover: dict[str, list[str]], *, stale: bool) -> list[str]:
-    """The PROVEN table. Every row cites a gate that ran and the file it wrote."""
-    out = ["## What is PROVEN (machine-verified this run)", ""]
+    """The PROVEN table. Every row cites a gate that ran and the file it wrote.
+
+    The heading starts with `SECTION_PROVEN`, never a literal: invariant 4's tests
+    find the section by that constant, and fail when it is missing.
+    """
+    out = [f"{SECTION_PROVEN} (machine-verified this run)", ""]
     rows: list[str] = []
 
     for claim in ledger.claims:
@@ -1118,7 +1142,21 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False) -> st
 
 def _terminal_reason(ledger: Ledger, claim: Claim, status: ClaimStatus,
                      cover: dict[str, list[str]]) -> str:
-    """The shortest true explanation of why this claim is not settled."""
+    """The shortest true explanation of why this claim is not settled.
+
+    The verdict cited is `claims.explaining_verdict`'s, the same one `atompipe
+    check` cites under BLOCKING, in the same `gate : body` words. What slipped
+    through (S-68): this function cited the FIRST covering verdict that did not
+    pass, so a claim covered by a gate that ran and measured 0.7 mm against 0.5
+    and a pack gate that skipped for a missing parameter read, in `status`, as
+    failing for the missing parameter — while `check`, whose private copy of the
+    ranking had been fixed, cited the 0.7 mm. The fix reached one caller of two;
+    the ranking now lives in `claims`, where neither can keep its own copy.
+
+    The body prefers `detail`, then `error`, then `skip_reason`: the same order as
+    `cli._blocking_reason`, so the words agree as well as the gate. It is only
+    truncated here, because this line shares a terminal row with the claim.
+    """
     if status is ClaimStatus.UNCLAIMED:
         return "no gate covers it"
     if status is ClaimStatus.UNVERIFIED:
@@ -1128,10 +1166,10 @@ def _terminal_reason(ledger: Ledger, claim: Claim, status: ClaimStatus,
     if status is ClaimStatus.REFUTED:
         res = claim.physical_result
         return _trunc(res.detail if res and res.detail else "refuted in hardware", 60)
-    for v in _claim_verdicts(ledger, claim):
-        if not v.ok:
-            body = v.detail or v.skip_reason or v.error or "no detail"
-            return f"{v.gate} : {_trunc(body, 56)}"
+    v = claim_logic.explaining_verdict(claim, ledger.verdicts)
+    if v is not None:
+        body = v.detail or v.error or v.skip_reason
+        return f"{v.gate} : {_trunc(body, 56)}" if body else f"{v.gate} did not pass"
     gates = cover.get(claim.id) or list(claim.gates or [])
     if status is ClaimStatus.STALE:
         passed = [v.gate for v in _ok_verdicts(ledger, claim)]
@@ -1161,6 +1199,7 @@ def write_report(root: str, ledger: Ledger, registry: Any, *,
 
 __all__ = [
     "STATUS_TAG",
+    "SECTION_PROVEN",
     "status_tag",
     "render_terminal",
     "render_markdown",

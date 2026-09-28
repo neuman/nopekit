@@ -472,6 +472,7 @@ instead of reading a 1,672-line decision log.
 ### `report.py`  (deps: models, util, store, claims, artifacts)
 ```python
 STATUS_TAG: dict[ClaimStatus, str]           # PASS -> "ok   ", FAIL -> "FAIL ", ...
+SECTION_PROVEN = "## What is PROVEN"         # the PROVEN heading, as emitted and as tests find it
 def status_tag(status) -> str                # "[FAIL ]": the one fixed-width spelling of a status
 def render_terminal(ledger, registry, *, stale=False) -> str
 def render_markdown(ledger, registry, *, stale=False, title="") -> str
@@ -482,6 +483,22 @@ The markdown report has this shape, generated:
 **NOT VERIFIED** list with why / **OPEN GAPS** (Needs) / **STANDING CONSTRAINTS**
 (assumptions) / **Reproduce** (the exact commands). It must never call a skipped
 or unrun gate "proven".
+
+The PROVEN section's heading line **starts with `SECTION_PROVEN`** (its qualifier,
+"(machine-verified this run)", follows on the same line and is not part of the
+constant). Invariant 4's tests find the section by that constant and fail when it is
+absent, duplicated or empty. What slipped through (S-15): they searched for a literal
+copy of the heading and read "no heading" as an empty section, so `assertNotIn` passed
+on nothing, and a rename would have kept the invariant green while it tested no
+report. A rename changes the constant's text, never its name (PLAN D-14, A-11).
+
+`render_terminal`'s one line per unsettled claim is `status_tag(status)`, the claim,
+and a reason. Where a verdict explains the status, the reason is
+`claims.explaining_verdict`'s gate, formatted `gate : body` (body = the verdict's
+`detail`, else `error`, else `skip_reason`; `gate did not pass` when all are empty) —
+the same verdict and the same words `atompipe check` prints under BLOCKING. What
+slipped through (S-68): `status` cited the first non-passing verdict, a skip, while
+`check` cited the gate that ran and failed.
 
 `store` is in the deps for one reason: `write_report` takes its destination from
 `store.project_paths(root)["readiness"]`. Layout is `store`'s job alone, and a
@@ -561,3 +578,19 @@ atompipe model [--write]                  atompipe doctor
 ```
 Output is terse and machine-parseable by default (one line per verdict);
 `--json` on every read command.
+
+`check` and `status` say the same thing about a blocking claim, through three
+private helpers (named here because tests hold them to it):
+```python
+def _blocking_line(claim, status, reason) -> str   # "[FAIL ] C1 <statement> — <reason>"
+def _blocking_reason(ledger, claim, status) -> str  # "gate : body" from the explaining verdict, else a status sentence
+def _verdict_row(verdict) -> dict                   # one verdict as JSON: its fields plus `ok` and `outcome`
+```
+- The BLOCKING tag is `report.status_tag`, never a status truncated to four letters:
+  `check` printed `[fail]`/`[uncl]` where `status` printed `[FAIL ]`/`[gap  ]` for the
+  same claims (S-69).
+- The reason is `claims.explaining_verdict`'s, formatted exactly as
+  `render_terminal` formats it (S-68): ran-and-failed, then errored, then skipped.
+- A verdict row in `--json` carries `outcome` (`"pass" | "fail" | "error" |
+  "skipped"`, `Verdict.outcome`) next to `ok`. Both are set explicitly: `to_dict`
+  serialises dataclass fields only, and both are properties.

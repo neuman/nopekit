@@ -13,6 +13,10 @@ that set the status. ``status`` used to cite a gate that SKIPPED for a missing
 parameter as the reason a claim FAILED, while ``check`` cited the gate that ran
 and measured 0.7 mm against 0.5 mm — two commands, two stories, one ledger.
 
+And one tag: a claim status is spelled by ``report.status_tag`` wherever it is
+printed. ``check`` used to print ``[fail]`` and ``[uncl]`` for the claims
+``status`` printed as ``[FAIL ]`` and ``[gap  ]``.
+
 Run:  PYTHONPATH=src python3 -m unittest discover -s tests -v
 """
 from __future__ import annotations
@@ -209,6 +213,25 @@ class ReasonsAgree(unittest.TestCase):
                                     row)
                     self.assertTrue(row.endswith(" — " + want), row)
                     self.assertNotIn("g.two", row, "the skip was cited over the failure")
+
+
+class VerdictRowSaysOutcome(unittest.TestCase):
+    """`check --json` carries `outcome` beside `ok`, from `Verdict.outcome`.
+
+    `_verdict_row` serialises dataclass fields, and `outcome` is a property: a row
+    without it leaves every JSON consumer to re-derive the four-way answer from
+    three flags, which is the re-derivation this file exists to stop."""
+
+    def test_all_eight_combinations(self):
+        for passed, skipped, error in itertools.product((False, True), (False, True),
+                                                        ("", "ZeroDivisionError: x")):
+            with self.subTest(passed=passed, skipped=skipped, error=error):
+                v = Verdict(gate="g.one", claims=["C1"], passed=passed, skipped=skipped,
+                            error=error)
+                row = cli_mod._verdict_row(v)
+                self.assertEqual(row["outcome"], v.outcome)
+                self.assertEqual(row["ok"], row["outcome"] == "pass")
+                json.dumps(row, allow_nan=False)
 
 
 class BlockingTagIsStatusTag(_env.EnvCase):
