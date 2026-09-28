@@ -49,6 +49,7 @@ never write the first one.
 from __future__ import annotations
 
 import argparse
+import ast
 import dataclasses
 import importlib.util
 import json
@@ -842,22 +843,33 @@ def _stale_lines(resolution: verdicts.Resolution, registry: gates.Registry | Non
     return lines
 
 
+def _pending(resolution: verdicts.Resolution) -> tuple[list[str], str]:
+    """`(gates, moved)`: the gates whose control is pending re-verification, and
+    the files that moved under their fixtures, merged — one sentence for all of
+    them, which `status`'s note and `doctor`'s row both print."""
+    pending = [row.gate for row in resolution.rows.values()
+               if row.admission is not None and row.admission.state == "pending"]
+    files: list[str] = []
+    for gate_id in pending:
+        match = _PENDING_REASON.fullmatch(resolution.rows[gate_id].admission.reason or "")
+        for name in (match.group("files").split(", ") if match else ()):
+            if name and name not in files:
+                files.append(name)
+    return pending, ", ".join(sorted(files)) or "fixture code"
+
+
+def _pending_sentence(count: int, moved: str) -> str:
+    return (f"{count} control(s) pending — inputs moved ({moved}); "
+            f"the next check re-verifies")
+
+
 def _note_lines(resolution: verdicts.Resolution) -> list[str]:
     """`status`'s `note:` lines: one per instrument mismatch, then at most one
     for every control pending re-verification, its moved files merged."""
     lines = [f"note: {note}" for note in resolution.notes if _INSTRUMENT_NOTE.fullmatch(note)]
-    pending = [row for row in resolution.rows.values()
-               if row.admission is not None and row.admission.state == "pending"]
+    pending, moved = _pending(resolution)
     if pending:
-        files: list[str] = []
-        for row in pending:
-            match = _PENDING_REASON.fullmatch(row.admission.reason or "")
-            for name in (match.group("files").split(", ") if match else ()):
-                if name and name not in files:
-                    files.append(name)
-        moved = ", ".join(sorted(files)) or "fixture code"
-        lines.append(f"note: {len(pending)} control(s) pending — inputs moved ({moved}); "
-                     f"the next check re-verifies")
+        lines.append(f"note: {_pending_sentence(len(pending), moved)}")
     return lines
 
 
@@ -1178,8 +1190,9 @@ def cmd_check(args: argparse.Namespace) -> int:
     * Otherwise, after the sweep: `verdicts.write_last_check`, then (1.2 only,
       while claims still live in the ledger) the RECORDS ledger is saved with
       `verdicts=[]` and `Param.gates` from `verdicts.last_read_sets` — never the
-      view (PD-31, cli:H3). No run history, no `last_run` (S-89: every recorded
-      check rewrote the tracked ledger and appended a tracked run file).
+      view (PD-31, cli:H3). No run history and no run record in the ledger
+      (S-89: every recorded check rewrote the tracked ledger and appended a
+      tracked run file).
 
     The clock is stamped ONCE (`now`): obs, remembered outcomes,
     `last_check.json` and the JUnit report carry the same instant.
@@ -3853,20 +3866,27 @@ def _check(results: list[dict], name: str, status: str, detail: str) -> None:
     results.append({"check": name, "status": status, "detail": detail})
 
 
-def _ledger_problems(root: str, ledger: Ledger, registry: gates.Registry) -> list[str]:
-    """Everything structurally wrong with this ledger, as sentences.
+def _ledger_problems(root: str, ledger: Ledger,
+                     registry: gates.Registry) -> tuple[list[str], list[str]]:
+    """`(problems, warnings)`: everything structurally wrong with this ledger,
+    and what is only out of place, as sentences.
 
     Integrity here means "the records still refer to things that exist". Every
-    one of these is a way the project can look fine and be wrong: a duplicate
-    claim id means one of two claims is invisible to every lookup; a verdict for
-    a gate nobody can find is a green tick with no instrument behind it; a
-    missing artifact file is provenance that no longer resolves.
+    problem is a way the project can look fine and be wrong: a duplicate claim
+    id means one of two claims is invisible to every lookup; a missing artifact
+    file is provenance that no longer resolves.
 
     `ledger` is `_resolved`'s view: its verdicts are the resolver's, so a gate
     that is not registered here shows up by its cache entries or its remembered
-    outcome, not only by a row the ledger file happened to keep.
+    outcome, not only by a row the ledger file happened to keep. Those orphans
+    are a WARNING, not a problem: the resolver reads them stale and they never
+    count (tests:H2), and nothing is corrupt — a pack was uninstalled, or a gate
+    renamed. As a FAIL they made `doctor` exit 1 on a project whose only fault
+    was a removed pack's evidence. (The run history this also read, and the
+    `#selftest` rows it skipped, are gone: S-31.)
     """
     problems: list[str] = []
+    warnings: list[str] = []
 
     def duplicates(values: Iterable[str], what: str) -> None:
         seen: set[str] = set()
@@ -3882,14 +3902,11 @@ def _ledger_problems(root: str, ledger: Ledger, registry: gates.Registry) -> lis
     duplicates([d.id for d in ledger.decisions], "decision id")
 
     known_gates = set(registry.ids())
-    orphaned = sorted({v.gate for v in ledger.verdicts
-                       if not v.gate.endswith("#selftest") and v.gate not in known_gates})
+    orphaned = sorted({v.gate for v in ledger.verdicts if v.gate not in known_gates})
     if orphaned and known_gates:
-        # The resolver reads these stale — "gate not registered in this project"
-        # — so they never count (tests:H2); they still reach the page and the
-        # report as rows nothing here can re-run, which is a readiness problem,
-        # not a tidiness one: a removed pack's passes, standing unexplained.
-        problems.append(
+        # They still reach the page and the report as rows nothing here can
+        # re-run: a readiness fact worth a line, not an integrity failure.
+        warnings.append(
             f"{len(orphaned)} verdict(s) from gates that are not registered here "
             f"({', '.join(orphaned[:4])}{'...' if len(orphaned) > 4 else ''}) — they read "
             f"stale and never count, and nothing here can re-run them; reinstall the "
@@ -3906,10 +3923,335 @@ def _ledger_problems(root: str, ledger: Ledger, registry: gates.Registry) -> lis
         for cid in need.claim_ids or ():
             if cid not in claim_ids:
                 problems.append(f"need {need.id} refers to claim {cid!r}, which does not exist")
-    for record in store.load_runs(root, limit=50):
-        if record.get("error"):
-            problems.append(f"run {record.get('path')}: {record['error']}")
-    return problems
+    return problems, warnings
+
+
+# --------------------------------------------------------------------------- #
+# doctor: what rho cannot see
+# --------------------------------------------------------------------------- #
+#: How many items one doctor row names before `(+n more)`. Why 4: the
+#: ledger-integrity row's budget, so every row reads the same way — enough to
+#: tell one planted problem from a pattern. Rejected: every item (one row per
+#: omc gate in an openmodelica project would bury the rest of the screen); one
+#: (cannot say whether a problem is local or everywhere).
+_DOCTOR_SHOWN = 4
+
+#: The resolver's notes, by the doctor row that owns each (`verdicts.resolve`
+#: words them; `read_entries`/`read_controls` word the per-file ones). First match
+#: wins; a note no pattern claims lands in `cache-entries`, so nothing the
+#: resolver said is dropped on the way to the screen.
+_NOTE_ROWS = (
+    ("two-outcomes", re.compile(r"^\S+: two outcomes recorded for identical inputs \(.+\)$")),
+    ("two-controls", re.compile(
+        r"^\S+: two control outcomes recorded for identical inputs \(.+\)$")),
+    ("instruments", re.compile(r"^\S+ — recorded under \S+ \S+; here \S+$"
+                               r"|outcome differs across instruments")),
+    ("opaque-inputs", re.compile(r"^\S+ — opaque inputs: ")),
+    ("code-digest", re.compile(r"^\S+ — code digested as its defining file")),
+    ("pending", re.compile(r"^\S+ — control inputs moved \(")),
+)
+
+#: The names through which gate code reaches the process environment. What
+#: slipped through, as a residual the spec names (§3.17, §8): an environment
+#: read fires no audit event, so no trace records it and no entry can key on
+#: it — a gate whose limit comes from `os.environ` stays Fresh when the variable
+#: changes. `putenv` writes, and is here because a gate that sets a variable is
+#: handing a later gate an input the same way. Rejected: a dynamic proxy for
+#: `os.environ` during a gate (it changes the environment a gate's subprocess
+#: inherits — the omc gates depend on it); scanning only the gate function's
+#: own body (a module-level `LIMIT = os.getenv(...)` is read once, at import,
+#: and is the likeliest spelling).
+_ENV_NAMES = frozenset({"environ", "environb", "getenv", "getenvb", "putenv"})
+
+
+def _listed(items: list[str], sep: str = "; ") -> str:
+    """The first `_DOCTOR_SHOWN` of `items`, then how many more."""
+    shown = sep.join(items[:_DOCTOR_SHOWN])
+    return shown + (f" (+{len(items) - _DOCTOR_SHOWN} more)" if len(items) > _DOCTOR_SHOWN else "")
+
+
+def _source_files(fn: Any) -> list[str]:
+    """The Python files a gate's code is: its recorded closure (`modelio`), or —
+    for a gate registered from Python, with none — the file it was defined in."""
+    closure = modelio.code_closure(fn)
+    if closure is not None:
+        return [path for path, _sha in closure.files]
+    code = getattr(getattr(fn, "__func__", fn), "__code__", None)
+    name = getattr(code, "co_filename", "") or ""
+    if name and not (name.startswith("<") and name.endswith(">")) and os.path.isfile(name):
+        return [os.path.abspath(name)]
+    return []
+
+
+def _parse(path: str, cache: dict[str, Any]) -> Any:
+    """`ast.parse` of `path`, once per command; None when it cannot be read."""
+    if path not in cache:
+        try:
+            with open(path, "rb") as fh:
+                cache[path] = ast.parse(fh.read(), path)
+        except (OSError, SyntaxError, ValueError):
+            cache[path] = None
+    return cache[path]
+
+
+def _top_names(nodes: Iterable[Any]) -> set[str]:
+    """The top-level module names the `Import`/`ImportFrom` nodes among `nodes`
+    bring in. A relative import names a file beside it, never a third party."""
+    names: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            names.update(alias.name.partition(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            names.add(node.module.partition(".")[0])
+    return names
+
+
+def _outside_functions(node: Any) -> Iterable[Any]:
+    """Every node under `node` that runs when its module is imported: function
+    and lambda bodies are skipped, class bodies are not."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _outside_functions(child)
+
+
+def _reached_imports(tree: Any, name: str) -> set[str] | None:
+    """The imports inside module-level function `name` and every module-level
+    function or class it names, transitively; None when `name` is not a
+    module-level definition of `tree` (the caller then counts the whole file)."""
+    defs = {node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    if name not in defs:
+        return None
+    seen: set[str] = set()
+    queue = [name]
+    found: set[str] = set()
+    while queue:
+        current = queue.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for node in ast.walk(defs[current]):
+            if isinstance(node, ast.Name) and node.id in defs and node.id not in seen:
+                queue.append(node.id)
+        found |= _top_names(ast.walk(defs[current]))
+    return found
+
+
+def _gate_imports(fn: Any, cache: dict[str, Any]) -> set[str]:
+    """The top-level names a gate's code imports on its way to a verdict.
+
+    In the file that defines the gate: what the module runs on import, plus what
+    the gate function — and every module-level function or class it names,
+    transitively — imports inside its body. In every other file of its closure:
+    all of it (a helper's lazy import is a dependency of whoever calls the
+    helper, and a static walk cannot say who does). Measured on the bundled
+    corpus, which is why the defining file is read by reach and not whole:
+    `cad.bounding` is the one tier-0 gate of a module whose other gates import
+    trimesh inside their own bodies, and a whole-file rule named it — a warning
+    nobody could act on (declaring trimesh would make the one gate that runs
+    without a mesh library skip where it is missing).
+    """
+    target = getattr(fn, "__func__", fn)
+    code = getattr(target, "__code__", None)
+    home = os.path.abspath(code.co_filename) if code is not None else ""
+    names: set[str] = set()
+    for path in _source_files(fn):
+        tree = _parse(path, cache)
+        if tree is None:
+            continue
+        if os.path.abspath(path) == home:
+            reached = _reached_imports(tree, getattr(code, "co_name", ""))
+            if reached is not None:
+                names |= _top_names(_outside_functions(tree)) | reached
+                continue
+        names |= _top_names(ast.walk(tree))
+    return names
+
+
+def _undeclared_imports(registry: gates.Registry) -> list[str]:
+    """`<gate> imports <module, ...>` for every gate whose code imports a
+    third-party module its spec does not declare (`requires_python`, or a
+    `python:` entry of `requires_one_of`).
+
+    What slipped through without it: availability reads only what a gate
+    DECLARES, so an undeclared import is run where the module is missing and
+    raises — an error (a FAIL, and CI red for a tooling gap, spec §5 risk 5)
+    where a declared one reads SKIPPED, BLOCKED, with its reason. Third party
+    means what the recorded closure says it is (`CodeRef.third_party`: not the
+    standard library, not atompipe, not a file under the gate's own roots).
+    Measured on every bundled gate: zero (`test_doctor`).
+    """
+    cache: dict[str, Any] = {}
+    found: list[str] = []
+    for spec, fn in registry.pairs():
+        third = set(verdicts.code_digest(spec, fn).third_party)
+        if not third:
+            continue
+        declared = {str(name).strip().partition(".")[0]
+                    for name in (spec.requires_python or ())}
+        for entry in spec.requires_one_of or ():
+            kind, _, module = str(entry).partition(":")
+            if kind.strip() == "python":
+                declared.add(module.strip().partition(".")[0])
+        missing = sorted((_gate_imports(fn, cache) & third) - declared)
+        if missing:
+            found.append(f"{spec.id} imports {', '.join(missing)}")
+    return found
+
+
+def _env_hits(tree: Any) -> list[tuple[int, str]]:
+    """`(line, "os.<name>")` for every reach into the environment in `tree`:
+    `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins) through any
+    alias of `os`, and a `from os import <name>` of one of them."""
+    aliases = {"os"}
+    hits: set[tuple[int, str]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases.update(alias.asname or "os" for alias in node.names if alias.name == "os")
+        elif isinstance(node, ast.ImportFrom) and node.module == "os" and not node.level:
+            hits.update((node.lineno, f"os.{alias.name}") for alias in node.names
+                        if alias.name in _ENV_NAMES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _ENV_NAMES \
+                and isinstance(node.value, ast.Name) and node.value.id in aliases:
+            hits.add((node.lineno, f"os.{node.attr}"))
+    return sorted(hits)
+
+
+def _env_reads(registry: gates.Registry, root: str) -> list[str]:
+    """`<file>:<line> os.<name> (<gates>)` for every environment read in the code
+    of every registered gate — its module and its closure (spec §3.17). Static,
+    because nothing dynamic sees it: see `_ENV_NAMES`. Zero bundled hits."""
+    cache: dict[str, Any] = {}
+    owners: dict[tuple[str, int, str], list[str]] = {}
+    for spec, fn in registry.pairs():
+        for path in _source_files(fn):
+            tree = _parse(path, cache)
+            for line, name in (_env_hits(tree) if tree is not None else ()):
+                owners.setdefault((path, line, name), []).append(spec.id)
+    base = os.path.abspath(root)
+    lines = []
+    for (path, line, name), gate_ids in sorted(owners.items()):
+        shown = os.path.relpath(path, base).replace(os.sep, "/") \
+            if path.startswith(base + os.sep) else path
+        lines.append(f"{shown}:{line} {name} ({', '.join(sorted(set(gate_ids)))})")
+    return lines
+
+
+def _cache_notes(root: str, resolution: verdicts.Resolution) -> dict[str, list[str]]:
+    """The resolver's notes, sorted into the doctor rows that own them — plus a
+    strict read of every control entry on disk, because the resolver reads a
+    gate's controls only while its verdict is Fresh, and a disagreeing or
+    hand-edited control must not wait for that to be seen."""
+    notes = list(resolution.notes)
+    base = os.path.join(store.atompipe_dir(root), verdicts._VERDICTS_DIR)
+    try:
+        gate_dirs = sorted(name for name in os.listdir(base)
+                           if os.path.isdir(os.path.join(base, name)))
+    except OSError:
+        gate_dirs = []
+    for gate_id in gate_dirs:
+        try:
+            verdicts.read_controls(root, gate_id, problems=notes)
+        except AtompipeError as exc:
+            notes.append(f"{gate_id}: {exc}")
+    sorted_notes: dict[str, list[str]] = {}
+    for note in dict.fromkeys(notes):
+        row = next((name for name, pattern in _NOTE_ROWS if pattern.search(note)),
+                   "cache-entries")
+        sorted_notes.setdefault(row, []).append(note)
+    return sorted_notes
+
+
+def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
+                       resolution: verdicts.Resolution) -> None:
+    """The rows for what the verdict cache knows and rho cannot key: one row each,
+    `ok` when there is nothing to say, so a clean project shows it looked."""
+    notes = _cache_notes(root, resolution)
+
+    found = notes.get("instruments", [])
+    _check(results, "instruments", "warn" if found else "ok",
+           _listed(found) + " — provenance, never staleness: the entry stays current"
+           if found else "every cached verdict was recorded under the library versions "
+                         "installed here")
+
+    found = notes.get("opaque-inputs", [])
+    _check(results, "opaque-inputs", "warn" if found else "ok",
+           _listed(found) + " — never served from the cache: re-run on every check, "
+                            "stale between checks"
+           if found else "no cached verdict read through a channel the tracer cannot see")
+
+    found = notes.get("cache-entries", [])
+    _check(results, "cache-entries", "warn" if found else "ok",
+           _listed(found) + " — an ignored entry never counts; its gate re-runs"
+           if found else "every cache entry reads back strictly")
+
+    # Two answers for identical inputs. A gate's is a warning until
+    # `TWO_OUTCOMES_IS_ERROR` flips (spec §3.7, R-4: an error only once the
+    # bundled corpus is proven deterministic); read at call time, so the flip is
+    # one constant. A control's is a failure already: its gate is not admitted.
+    outcomes, controls = notes.get("two-outcomes", []), notes.get("two-controls", [])
+    failing = bool(controls) or (bool(outcomes) and verdicts.TWO_OUTCOMES_IS_ERROR)
+    _check(results, "two-outcomes",
+           "FAIL" if failing else "warn" if outcomes else "ok",
+           _listed(controls + outcomes) + " — the same inputs gave two answers: the gate is "
+                                          "not deterministic, and neither answer counts"
+           if controls or outcomes else "no gate recorded two outcomes for identical inputs")
+
+    found = notes.get("code-digest", [])
+    _check(results, "code-digest", "warn" if found else "ok",
+           _listed(found) if found else "every gate's code was recorded as it loaded")
+
+    pending, moved = _pending(resolution)
+    _check(results, "pending-controls", "warn" if pending else "ok",
+           f"{_pending_sentence(len(pending), moved)}: {_listed(pending, ', ')}" if pending
+           else "no control is waiting to be re-verified")
+
+    found = _undeclared_imports(registry)
+    _check(results, "imports", "warn" if found else "ok",
+           _listed(found) + " — undeclared, so where it is missing the gate errors "
+                            "instead of reading SKIPPED; add it to requires_python"
+           if found else "every third-party module a gate imports is declared")
+
+    found = _env_reads(registry, root)
+    _check(results, "env-reads", "warn" if found else "ok",
+           _listed(found) + " — an environment read fires no audit event, so no cache "
+                            "entry keys on it; pass the value through the model"
+           if found else "no gate's code reads the environment")
+
+
+def _doctor_seal_row(results: list[dict], registry: gates.Registry,
+                     host: gates.GateContext) -> None:
+    """Invariant 5 at runtime: every pack control run against THIS project's
+    params, traced (`packs.seal_findings`). `pack validate` refuses an unsealed
+    fixture before a pack ships; this is where a project finds out that one it
+    installed — from before the detector, or from someone else — reads its host,
+    so that its control fires here and may not fire in the next project. A
+    temp `out_dir`, nothing written to the project."""
+    pack_gates = [spec for spec in registry.specs() if (spec.pack or "").strip()]
+    if not pack_gates:
+        _check(results, "sealed-fixtures", "ok", "no pack gates installed")
+        return
+    try:
+        findings = packs.seal_findings(registry, host)
+    except AtompipeError as exc:
+        _check(results, "sealed-fixtures", "FAIL", f"the seal probe did not run: {exc}")
+        return
+    if findings:
+        shown = [f"{f.gate}: {f.fixture} reads the host's "
+                 f"{', '.join(f.host_paths[:3])}"
+                 + (f" (+{len(f.host_paths) - 3} more)" if len(f.host_paths) > 3 else "")
+                 for f in findings]
+        _check(results, "sealed-fixtures", "FAIL",
+               _listed(shown) + " — a pack control must build its known-bad input from its "
+                                "own selftest/baseline.json (SEALED, invariant 5)")
+        return
+    missing = sum(1 for spec in pack_gates if not gates.availability(spec)[0])
+    _check(results, "sealed-fixtures", "ok",
+           f"{len(pack_gates) - missing} pack control(s) run against this project's params; "
+           f"none reads them" + (f" ({missing} not run: tools missing here)" if missing else ""))
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -3918,8 +4260,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     This is the first thing anyone runs when confused, so it is diagnostic rather
     than decorative: every row names what was checked, what was found, and — when
     it is wrong — what to do. It survives every failure it reports (a broken
-    pack, a model that will not import, a corrupt run file), because a doctor that
-    dies on the first problem cannot tell you about the second.
+    pack, a model that will not import, a corrupt cache entry), because a doctor
+    that dies on the first problem cannot tell you about the second.
+
+    Since 1.2 it is also where a human learns what the verdict cache cannot key
+    on and the resolver will not say in a status line (spec §4 U23): entries
+    recorded under other library versions, opaque channels, ignored entries, two
+    outcomes for one input, unsealed pack controls, undeclared third-party
+    imports, environment reads, gates keyed by their defining file, controls
+    pending re-verification, and verdicts of gates no longer registered. None of
+    those changes a claim's status by itself, which is exactly why `check` and
+    `status` are the wrong place to hear about them. No staleness row: which
+    gates are current is `status`'s `stale:` block, per gate, from the resolver.
+    It never writes, and it runs no project gate — only pack controls, traced,
+    into a temp directory, to see whether they read their host.
 
     Exit 1 on any FAIL so it is usable in CI as an environment gate. Warnings do
     not fail: a solver that is not installed here is a real fact about the
@@ -3957,7 +4311,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
            f"{len(ledger.decisions)} decisions, {len(ledger.verdicts)} verdicts")
 
     paths = store.project_paths(root)
-    missing = [key for key in ("runs", "out", "inputs", "docs", "model")
+    missing = [key for key in ("out", "inputs", "docs", "model")
                if not os.path.isdir(paths[key])]
     _check(results, "layout", "warn" if missing else "ok",
            f"missing: {', '.join(missing)} (recreated on demand)" if missing
@@ -4074,12 +4428,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # sweep's said THAT something moved, never which check it touched, and a
     # model that did not load compared equal (S-21). Which gates are current is
     # `status`'s `stale:` block now, per gate, from the resolver.
-    view, _resolution = _resolved(root, ledger, registry, projection, model_error,
-                                  now=utcnow_iso(), model=model)
-    problems = _ledger_problems(root, view, registry)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    problems, orphans = _ledger_problems(root, view, registry)
     _check(results, "ledger-integrity", "FAIL" if problems else "ok",
-           "; ".join(problems[:4]) + (f" (+{len(problems) - 4} more)" if len(problems) > 4 else "")
-           if problems else "records all resolve")
+           _listed(problems) if problems else "records all resolve")
+    _check(results, "orphan-entries", "warn" if orphans else "ok",
+           _listed(orphans) if orphans
+           else "every cached verdict belongs to a gate registered here")
+    _doctor_cache_rows(results, root, registry, resolution)
+    _doctor_seal_row(results, registry,
+                     _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
 
     site_info = _site_state(root)
     if site_info["present"]:

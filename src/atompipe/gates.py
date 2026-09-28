@@ -78,8 +78,9 @@ without the registry in the way.
 
 Time policy (contract rule 3): nothing here stamps a timestamp. Durations are
 *measured*, which is not the same thing — a wall-clock duration cannot be passed
-in by a caller who is waiting on the result, and ``RunMeta.when`` still arrives
-from the CLI edge. The same goes for ``cpu_s`` (``os.times``).
+in by a caller who is waiting on the result, and every ``when`` (obs,
+``last_check.json``) still arrives from the CLI edge. The same goes for
+``cpu_s`` (``os.times``).
 """
 from __future__ import annotations
 

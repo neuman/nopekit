@@ -854,18 +854,6 @@ class ProjectMeta(Record):
 
 
 @dataclass
-class RunMeta(Record):
-    """Bookkeeping for one gate sweep."""
-
-    when: str = ""
-    tier: int = 0
-    model_hash: str = ""             # hash of the resolved parameter projection
-    inputs_hash: str = ""            # hash over ingested artifact digests
-    spine_version: str = ""
-    duration_s: float = 0.0
-
-
-@dataclass
 class Ledger(Record):
     """The whole project state. Persisted as .atompipe/ledger.json.
 
@@ -881,7 +869,15 @@ class Ledger(Record):
     decisions: list[Decision] = field(default_factory=list)
     verdicts: list[Verdict] = field(default_factory=list)   # latest per gate
     views: list[View] = field(default_factory=list)
-    last_run: RunMeta = field(default_factory=RunMeta)
+    # No run record. The ledger used to carry the previous sweep's model and
+    # inputs hashes, and staleness was ONE comparison against them: a model that
+    # failed to import compared equal, and three claims read PROVEN for a design
+    # that could not be built (S-21); ingesting one unread datasheet staled every
+    # measurable claim (S-33). A verdict is current by its own inputs now
+    # (`verdicts.freshness`), and when a check last ran is
+    # `.atompipe/cache/last_check.json`, untracked. `from_dict` ignores the old
+    # key, so a ledger an older spine wrote still loads (R-2), and the next save
+    # simply does not carry it.
 
     # -- lookups ---------------------------------------------------------- #
     def claim(self, cid: str) -> Claim | None:
@@ -921,7 +917,6 @@ class Ledger(Record):
             decisions=[Decision.from_dict(d) for d in data.get("decisions") or []],
             verdicts=[Verdict.from_dict(v) for v in data.get("verdicts") or []],
             views=[View.from_dict(v) for v in data.get("views") or []],
-            last_run=RunMeta.from_dict(data.get("last_run") or {}),
         )
 
 
@@ -932,6 +927,5 @@ __all__ = [
     "Rejected", "Param", "Acceptance", "PhysicalResult", "Claim",
     "Verdict", "NegativeControl", "GateSpec",
     "ToolCandidate", "Need", "Extraction", "InputArtifact", "Decision",
-    "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta",
-    "RunMeta", "Ledger",
+    "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta", "Ledger",
 ]

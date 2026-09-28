@@ -975,10 +975,10 @@ _LEDGER_WHOLE = frozenset({"claims", "params", "inputs", "needs", "decisions",
                            "views", "meta"})
 
 #: Never an input: a gate that read other gates' verdicts would put verdicts
-#: inside rho, a staleness that feeds itself. ``last_run`` is run history of the
-#: same kind (the previous sweep's hashes), and is hidden for the same reason
-#: until U23 removes it.
-_LEDGER_HIDDEN = frozenset({"verdicts", "last_run"}) & _LEDGER_FIELD_SET
+#: inside rho, a staleness that feeds itself. (The ledger's run record — the
+#: previous sweep's hashes — was hidden here for the same reason until 1.2
+#: removed it from the ledger altogether.)
+_LEDGER_HIDDEN = frozenset({"verdicts"}) & _LEDGER_FIELD_SET
 
 #: Filled in memory from somewhere other than the record: `Claim.gates` from
 #: registry coverage, `physical_result` from `results/`, `Param.gates` from the
@@ -1017,9 +1017,8 @@ class LedgerView(Ledger):
     """``ctx.ledger`` as a gate sees it: a private copy, recorded.
 
     ``LedgerView(ledger, trace)``. Fields are copied lazily, on first access, so a
-    gate that never looks at the ledger costs nothing. ``verdicts`` (and the run
-    history in ``last_run``) read empty: a gate reading other gates' verdicts
-    would put verdicts inside rho. ``claim(cid)`` records ``"claim:<cid>"`` with
+    gate that never looks at the ledger costs nothing. ``verdicts`` reads
+    empty: a gate reading other gates' verdicts would put verdicts inside rho. ``claim(cid)`` records ``"claim:<cid>"`` with
     the digest of THAT claim — its in-memory ``gates`` and ``physical_result``
     stripped — or ``ABSENT``. Reading ``claims``, ``params``, ``inputs``,
     ``needs``, ``decisions``, ``views`` or ``meta`` records the whole list.

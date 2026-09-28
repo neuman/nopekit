@@ -645,8 +645,10 @@ def grounding(ledger: Ledger, *, include_declared: bool = True) -> dict[str, lis
 def inputs_hash(ledger: Ledger) -> str:
     """Stable digest over every ingested artifact's (id, sha256).
 
-    `RunMeta.inputs_hash` is half of the staleness test: a verdict recorded
-    against one set of evidence is not a verdict about a different set. Sorted by
+    A display id (`ingest --json`). It was half of the staleness test until 1.2 —
+    recorded with each sweep, compared against the next — and ingesting one
+    unread datasheet staled every measurable claim through it (S-33); a verdict
+    is keyed by the files its own gate read now (`verdicts.freshness`). Sorted by
     id so the value does not depend on ingest order, and folding in the id as
     well as the digest so that re-filing the same bytes under a new artifact
     (which changes what the extractions hang off) still moves the hash.

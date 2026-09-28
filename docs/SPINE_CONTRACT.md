@@ -117,17 +117,22 @@ class KeyCollision(Record):     # one projection key two installed packs read di
 class ProjectMeta(Record):
     name: str = ""; summary: str = ""; created: str = ""; revision: str = "v0.1"
     model_entry: str = ""; packs: list[str]; spine_version: str = ""
-class RunMeta(Record):          # bookkeeping for one sweep
-    when: str = ""; tier: int = 0; model_hash: str = ""; inputs_hash: str = ""
-    spine_version: str = ""; duration_s: float = 0.0
 class Ledger(Record):           # the whole project state: .atompipe/ledger.json
     meta: ProjectMeta; claims: list[Claim]; params: list[Param]
     inputs: list[InputArtifact]; needs: list[Need]; decisions: list[Decision]
     verdicts: list[Verdict]                                              # latest per gate
-    views: list[View]; last_run: RunMeta
+    views: list[View]
     def claim(cid) | param(name) | artifact(aid) | need(nid) | verdict(gate_id) -> record | None
     def verdicts_for(cid) -> list[Verdict];  def upsert_verdict(verdict) -> None
 ```
+The ledger keeps **no run record** (checkpoint 1.2). It used to carry the previous
+sweep's model and inputs hashes, and staleness was one comparison against them: a model
+that failed to import compared equal and three claims read PROVEN (S-21), and one
+unread datasheet staled every measurable claim (S-33). Staleness is per gate now
+(`verdicts.freshness`); when the last full check ran is `.atompipe/cache/last_check.json`.
+`Ledger.from_dict` ignores the old key, so a ledger an older spine wrote still loads
+(R-2), and the next save does not carry it.
+
 `Verdict`, `NegativeControl` and `GateSpec` are records too. Their fields and
 properties are listed once, in `docs/PACK_FORMAT.md` ("The surface a gate sees"),
 because a pack author is the reader who sets them; two copies of one field list is
@@ -230,9 +235,6 @@ def ledger_path(root) -> str
 def load(root) -> Ledger                                # missing file -> empty Ledger
 def save(root, ledger: Ledger) -> None                  # atomic
 def init(root, meta: ProjectMeta) -> Ledger             # creates dirs, refuses only on a marker
-def runs_dir(root) -> str                               # .atompipe/runs/
-def record_run(root, verdicts, run_meta) -> str         # append-only history; returns path
-def load_runs(root, limit=20) -> list[dict]
 def inputs_dir(root) -> str                             # inputs/   (NOT hidden - users put files here)
 def out_dir(root) -> str                                # .atompipe/out/  gate scratch + evidence
 def docs_dir(root) -> str                               # docs/  generated report + decision log
@@ -260,10 +262,26 @@ inventory. No other module joins a well-known path by hand, so moving the layout
 one edit here instead of a grep across the spine.
 Layout created by `init`:
 ```
-.atompipe/ledger.json   .atompipe/runs/   .atompipe/out/
+.atompipe/ledger.json   .atompipe/.gitignore   .atompipe/out/
 inputs/{sketches,references,cad,screenshots,datasheets,specs,measurements,data}/
 docs/   model/
 ```
+**No run history** (checkpoint 1.2). `init` makes no `.atompipe/runs/`, and the store
+has no run API: every `check` and every `gate selftest` used to append a tracked run
+file, so the suite dirtied the tree it verified (S-89), and `<gate>#selftest` rows sat
+in the same series as the sweep's with no latency reader filtering them (S-31). Git and
+the verdict cache are the history; what runs cost is `.atompipe/obs/`, gate runs and
+control runs apart (`verdicts.record_obs`).
+
+`.atompipe/.gitignore` as `init` writes it ignores `out/`, `*.tmp`, `*.lock`,
+**`cache/` and `obs/`** — this checkout's memory (file digests, `last_check.json`,
+remembered outcomes, re-verified controls) and what each run cost — and keeps
+`!ledger.json`. What slipped through (cli:H2, S-76): 1.2 began writing both and nothing
+ignored them, so the first `check` in a clean clone dirtied `git status`. The verdict
+cache, `.atompipe/verdicts/`, is evidence and stays tracked. The 1.3 migration
+recognises this text, like the 1e09113 template before it, as a prefix it replaces with
+a marked block; the bracket's tracked file keeps the 1e09113 template and APPENDS the
+two lines, so that recognition still holds for it.
 
 ### `modelio.py`  (deps: models, util, store)
 The model contract. A project's model is a **Python module** exposing:
@@ -279,7 +297,7 @@ class LoadedModel:
     file -> str; directory -> str                # properties: the file executed, and its dir
 def load_model(root, entry: str | None = None) -> LoadedModel   # entry from ledger.meta
 def project(model: LoadedModel) -> dict      # {"config": {...}, "derived": {...}} JSON-safe
-def model_hash(projection: dict) -> str      # stable; drives staleness
+def model_hash(projection: dict) -> str      # stable; a display id (staleness is per gate)
 def write_projection(root, projection) -> str   # .atompipe/model.json  (the diffable view)
 def params_from_model(model) -> list[Param]  # merge PARAMS with dataclass fields+defaults
 def undocumented_params(model) -> list[str]  # no rationale: the report's nag list
@@ -409,7 +427,7 @@ returned unchanged, or on `dict(host.params)` with one value layered on — keep
 recording host reads too, for any reader; a path the fixture itself wrote is never a
 host read. That is the seal detector's input: a SEALED fixture reads no host param.
 
-**`LedgerView`** is a lazily copied ledger whose `verdicts` (and `last_run`) read
+**`LedgerView`** is a lazily copied ledger whose `verdicts` read
 empty — a gate reading other gates' verdicts would put verdicts inside rho.
 `claim(cid)` records `"claim:<cid>"` with the digest of that claim, its in-memory
 `gates` and `physical_result` stripped (coverage and a bench result are not what a
@@ -1200,7 +1218,7 @@ def ingest(root, ledger, src, *, kind=None, description="", when="", copy=True,
            licence="", note="") -> InputArtifact     # copies into inputs/<bucket>/, hashes
 def ingest_link(root, ledger, url, *, description="", kind=ArtifactKind.LINK, when="") -> InputArtifact
 def add_extraction(ledger, artifact_id, extraction: Extraction) -> InputArtifact
-def inputs_hash(ledger) -> str                       # over sorted (id, sha256)
+def inputs_hash(ledger) -> str                       # over sorted (id, sha256); a display id
 def unextracted(ledger) -> list[InputArtifact]       # evidence nobody read = decoration
 def grounding(ledger) -> dict[str, list[str]]        # param/claim id -> artifact ids
 def requests_by_kind(ledger, *, project_kind="", limit=6) -> list[tuple[str, str]]  # (kind, prompt)
@@ -1720,3 +1738,26 @@ so it files byte for byte the control entry `check` would (O_EXCL: an unchanged
 control re-creates the same name and writes nothing), plus a control obs row; a crash
 or an unusable fixture is remembered, never cached. Project fixtures get the
 known-good design (D-27). `--no-record` files nothing.
+
+**`doctor`** names what the verdict cache cannot key on and a status line will not say
+(checkpoint 1.2, spec §4 U23). It never writes, and runs no project gate. Besides the
+environment rows (python, spine, project, ledger, layout, packs, gates, tools, model,
+determinism, provenance, pack keys, ledger integrity, site, lock), one row per kind below,
+each `ok` when there is nothing to say — a clean project shows that it looked:
+
+| Row | Status when found | What it reads |
+|---|---|---|
+| `orphan-entries` | warn | verdicts of gates this project does not register (the resolver's orphan rows): stale, never counting, nothing here can re-run them. A warning, not a ledger-integrity FAIL — nothing is corrupt, something was uninstalled |
+| `instruments` | warn | an entry recorded under another library version (`recorded under numpy 1.26.4; here 2.1.0`, and "outcome differs across instruments"): provenance, never staleness (Q1.3) |
+| `opaque-inputs` | warn | an entry with an opaque channel (a subprocess's own reads, a file outside the project, `self-modified:`): never served from the cache |
+| `cache-entries` | warn | every verdict or control entry the strict readers ignored, a `hand-edited entry` (digest mismatch) by name; any resolver note no other row claims lands here |
+| `two-outcomes` | warn, FAIL once `verdicts.TWO_OUTCOMES_IS_ERROR` | two outcomes recorded for identical inputs, read at call time; **two control outcomes** at one rho_control FAIL always (the gate is not admitted). Controls are read for every gate on disk, not only for the gates whose verdict is Fresh |
+| `code-digest` | warn | a gate keyed by its defining file (registered from Python, no recorded closure): a value its function closes over is not seen. The CLI never makes one |
+| `pending-controls` | warn | controls whose fixture code moved (`<k> control(s) pending — inputs moved (<files>); the next check re-verifies`, the sentence `status`'s note prints) |
+| `imports` | warn | a gate that imports a third-party module (`CodeRef.third_party`) it does not declare in `requires_python` or a `python:` entry of `requires_one_of`: where it is missing, the gate errors instead of reading SKIPPED. In the gate's own file, read by reach — module-level imports plus those inside the gate function and the module-level functions and classes it names, transitively; other closure files whole. A whole-file rule named `cad.bounding`, the one tier-0 gate of a module whose other gates import trimesh lazily |
+| `env-reads` | warn | the static env-read detector (spec §3.17): an AST scan of every registered gate's closure files for `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins), through any alias of `os` or a `from os import`. An environment read fires no audit event, so no entry keys on it (§8) |
+| `sealed-fixtures` | FAIL | invariant 5 at runtime: every pack control run against this project's params through `packs.seal_findings`, into a temp `out_dir`; a control that reads its host is named with the paths it read |
+
+The two static detectors measured zero hits on the 54 bundled gates before they landed
+(R-4; `tests/test_doctor.py`). No staleness row: which gates are current is `status`'s
+`stale:` block. No run-history row: there is none to read (S-31).

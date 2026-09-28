@@ -50,6 +50,29 @@ Two more, learned the hard way and enforced in `tests/test_packs.py`:
 6. **Every pack ships a baseline its gates all pass**, so its controls can actually be
    exercised in CI. A skipped control is not a passing control.
 
+Checkpoint 1.2 serves verdicts from a per-gate cache, which opens two new ways to show
+a PASS nothing earned; enforced in `tests/test_staleness.py` and
+`tests/test_admission.py`:
+
+7. **A stale verdict is never served as current.** A verdict is keyed by the hash of
+   what its gate actually read — parameters, files, claim records, its own code, the
+   spine. When any of those moves, its PASS reads STALE until the gate runs again.
+   (Observed before this: one hash of the whole model decided every gate, and a model
+   that failed to import compared equal, so three claims read PROVEN for a design that
+   could not be built.)
+
+Invariant 8 — the records index never disagrees with the records — arrives with the
+records layout in checkpoint 1.3.
+
+9. **A verdict counts only from a gate admitted at its current version.** Its negative
+   control must have been run, and must have failed, at the gate's current code,
+   fixture inputs and spine; `check` runs it whenever that is not on record. A PASS
+   from an undemonstrated gate reads stale, and a gate whose control passed its own
+   known-bad input is not admitted at all. This is the reject half: it shows the gate
+   can refuse, not yet that it accepts a known-good design. (Observed: a gate that
+   returned `True` with a declared control produced PROVEN rows, because nothing ever
+   ran the control.)
+
 ## House rules
 
 - **`src/atompipe/` is standard library only.** No third-party imports, ever — the

@@ -35,7 +35,7 @@ from atompipe import site as site_mod
 from atompipe import store as store_mod
 from atompipe.models import (
     Acceptance, Claim, Comparator, Locator, NegativeControl, ProjectMeta,
-    RunMeta, Tier, Verdict, View, ViewKind,
+    Tier, Verdict, View, ViewKind,
 )
 from atompipe.util import AtompipeError
 

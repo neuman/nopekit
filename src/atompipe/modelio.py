@@ -1711,17 +1711,19 @@ def _canonical(projection: dict[str, Any]) -> str:
 
 
 def model_hash(projection: dict[str, Any]) -> str:
-    """Stable short hash of a projection. Drives staleness, and nothing else.
+    """Stable short hash of a projection: a display id, and nothing else.
 
-    Staleness is the quiet failure this exists to prevent: gates pass, someone
-    edits `thickness`, and the report keeps showing yesterday's green. Recording
-    this hash with a run (`RunMeta.model_hash`) makes "these verdicts describe a
-    model that no longer exists" a computable fact instead of a habit.
+    Staleness is the quiet failure this was built to prevent: gates pass, someone
+    edits `thickness`, and the report keeps showing yesterday's green. Until 1.2
+    it was recorded with each sweep and compared against the next — one hash
+    deciding every gate, which a model that failed to import made compare equal
+    (S-21). Staleness is per gate now (`verdicts.freshness`); this hash survives
+    as a display id (`check --json`'s `model_hash`, `doctor`, `status --json`).
 
     Stable means stable across PROCESSES, not just within one — which is why
     `project()` rejects sets (hash-randomised iteration order) and why this
     sorts keys. 12 hex chars: enough to distinguish revisions, short enough to
-    sit in a run filename and be compared by eye.
+    be compared by eye.
     """
     return short_hash(_canonical(projection))
 

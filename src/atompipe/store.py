@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 """atompipe.store — where a project lives on disk, and the rules for touching it.
 
-The whole project state is `<root>/.atompipe/ledger.json` plus an append-only run
-history in `<root>/.atompipe/runs/`. Everything else under `.atompipe/` is scratch.
+The project's records are `<root>/.atompipe/ledger.json`; the verdict cache
+beside it, `.atompipe/verdicts/`, is evidence and is committed too
+(`verdicts.py` owns it). Everything else under `.atompipe/` is this checkout's:
+scratch (`out/`), memory (`cache/`), and what runs cost (`obs/`) — all ignored.
 
 Three decisions are baked in here and are worth the words:
 
@@ -15,31 +17,32 @@ Three decisions are baked in here and are worth the words:
    it is unrecoverable in a way that losing generated CAD is not. So a second
    `init` is a user error, not an overwrite.
 
-3. **Runs are files, not ledger rows.** `record_run` appends; nothing ever
-   rewrites history. The ledger keeps only the LATEST verdict per gate (see
-   `Ledger.upsert_verdict`), which is what staleness is judged against; the
-   history is how you answer "when did this last pass?" without bloating the
-   file an agent has to read on every command.
+3. **No run history.** There used to be one: every `check` and every `gate
+   selftest` appended a tracked `.atompipe/runs/NNNN-<hash>.json`, so the
+   verification suite dirtied the tree it verified (S-89), and it filed
+   `<gate>#selftest` rows in the same series as the sweep's rows, which no
+   latency reader filtered — a median over both is the cost of neither (S-31).
+   Git and the verdict cache are the history now: an entry is written once, when
+   a gate's inputs are new, and never rewritten. What each run cost is
+   `.atompipe/obs/`, gate runs and control runs apart; when the last full check
+   ran is `.atompipe/cache/last_check.json`. Both are untracked.
 
-Nothing in this module stamps its own time. Run timestamps come in on `RunMeta`
-(contract rule 3): a store that reached for the clock could not be tested, and a
-run history that disagreed with the ledger about *when* would be worse than none.
+Nothing in this module stamps its own time: `init` gets `meta.created` from its
+caller (contract rule 3). A store that reached for the clock could not be
+tested, and one that disagreed with the CLI about *when* would be worse than none.
 """
 from __future__ import annotations
 
 import os
-import re
-from typing import Any, Iterable
 
-from .models import ArtifactKind, Ledger, ProjectMeta, RunMeta, Verdict
-from .util import AtompipeError, atomic_write_json, ensure_dir, read_json, short_hash
+from .models import ArtifactKind, Ledger, ProjectMeta
+from .util import AtompipeError, atomic_write_json, ensure_dir, read_json
 
 # --------------------------------------------------------------------------- #
 # layout constants
 # --------------------------------------------------------------------------- #
 ATOMPIPE_DIR = ".atompipe"
 LEDGER_NAME = "ledger.json"
-RUNS_NAME = "runs"
 OUT_NAME = "out"
 PACKS_NAME = "packs"                 # project-local packs, searched first by packs.py
 PROJECTION_NAME = "model.json"       # modelio.write_projection lands here
@@ -113,9 +116,19 @@ BUCKET_FOR_KIND: dict[ArtifactKind, str] = {
     ArtifactKind.LINK: "",
 }
 
-#: run files are `0001-<hash>.json`; the counter sorts, the hash identifies.
-_RUN_FILE_RE = re.compile(r"^(\d{4,})-([0-9a-f]+)\.json$")
-
+#: What `init` writes to `.atompipe/.gitignore`. Checkpoint 1.2's text: `cache/`
+#: and `obs/` added, `!runs/` gone with the run history. What slipped through
+#: (cli:H2, S-76): 1.2 began writing `.atompipe/cache/` (file digests,
+#: `last_check.json`, remembered outcomes, re-verified controls) and
+#: `.atompipe/obs/` (what each run cost), and nothing ignored either, so the first
+#: `check` in a clean clone dirtied `git status`. The verdict cache,
+#: `verdicts/`, is deliberately NOT here: it is evidence and is committed.
+#: Rejected: ignoring `cache/` and `obs/` from the project root's `.gitignore`
+#: (the rule would live away from the directory it describes, and a project that
+#: is not its own repository root would miss it); an allow-list (`*` then `!`
+#: lines — every new kind of evidence would arrive ignored). The 1.3 migration
+#: recognises this text, like the 1e09113 template before it, as a prefix it
+#: replaces with a marked block.
 _GITIGNORE = """\
 # Generated files are outputs, not sources.
 #
@@ -126,12 +139,16 @@ out/
 *.tmp
 *.lock
 
-# ...but the ledger and the run history ARE the project. They carry the rejected
-# alternatives and the proof that a gate once passed; neither can be regenerated.
-# These lines are redundant against the patterns above and deliberately so —
-# they state the intent where the next person will look for it.
+# cache/ and obs/ are this checkout's memory, not the project's: file digests,
+# the last check's summary, remembered crashes, what each run cost. The verdict
+# cache (verdicts/) is evidence and stays tracked.
+cache/
+obs/
+
+# ...but the ledger IS the project. It carries the rejected alternatives, which
+# cannot be regenerated. This line is redundant against the patterns above and
+# deliberately so — it states the intent where the next person will look for it.
 !ledger.json
-!runs/
 """
 
 _INPUTS_README = """\
@@ -270,11 +287,6 @@ def ledger_path(root: str) -> str:
     return os.path.join(atompipe_dir(root), LEDGER_NAME)
 
 
-def runs_dir(root: str) -> str:
-    """`<root>/.atompipe/runs/` — append-only gate-sweep history. Tracked in git."""
-    return os.path.join(atompipe_dir(root), RUNS_NAME)
-
-
 def out_dir(root: str) -> str:
     """`<root>/.atompipe/out/` — gate scratch and evidence. Git-ignored by `init`.
 
@@ -317,7 +329,6 @@ def project_paths(root: str) -> dict[str, str]:
         "root": root,
         "atompipe": dot,
         "ledger": ledger_path(root),
-        "runs": runs_dir(root),
         "out": out_dir(root),
         "packs": os.path.join(dot, PACKS_NAME),
         "projection": os.path.join(dot, PROJECTION_NAME),
@@ -433,7 +444,6 @@ def init(root: str, meta: ProjectMeta) -> Ledger:
 
     ensure_dir(root)
     ensure_dir(dot)
-    ensure_dir(runs_dir(root))
     ensure_dir(out_dir(root))
     ensure_dir(inputs_dir(root))
     for bucket in INPUT_BUCKETS:
@@ -458,137 +468,10 @@ def init(root: str, meta: ProjectMeta) -> Ledger:
     return ledger
 
 
-# --------------------------------------------------------------------------- #
-# run history
-# --------------------------------------------------------------------------- #
-def _as_dict(obj: Any) -> dict[str, Any]:
-    """Accept a model object or an already-serialised dict. Callers vary."""
-    if isinstance(obj, dict):
-        return obj
-    to_dict = getattr(obj, "to_dict", None)
-    if callable(to_dict):
-        return to_dict()
-    raise TypeError(f"cannot serialise {type(obj).__name__} for the run history")
-
-
-def _next_index(directory: str) -> int:
-    """One past the highest counter already on disk (MAX, not COUNT).
-
-    Counting files would reuse a number after someone deletes an old run, and two
-    different sweeps sharing a filename is how a history stops being a history.
-    """
-    highest = 0
-    if os.path.isdir(directory):
-        for name in os.listdir(directory):
-            m = _RUN_FILE_RE.match(name)
-            if m:
-                highest = max(highest, int(m.group(1)))
-    return highest + 1
-
-
-def record_run(root: str, verdicts: Iterable[Verdict], run_meta: RunMeta) -> str:
-    """Append one run to `.atompipe/runs/` and return the file path.
-
-    The filename is `NNNN-<hash>.json`: a zero-padded counter so `ls` sorts
-    chronologically, and a short hash of the run's identity (when + model hash +
-    inputs hash + tier + the gates that ran) so two runs are visibly different
-    files even at a glance.
-
-    The name deliberately does NOT embed a timestamp this function generates.
-    `run_meta.when` is supplied by the caller and is the single authority on when
-    a sweep happened; a filename minted from `datetime.now()` would eventually
-    disagree with it (timezones, a sweep that spans midnight, a replayed run) and
-    the disagreement would be invisible.
-
-    Append-only: an existing file is never rewritten, and if a name is somehow
-    taken (two sweeps racing) the counter advances until it is free.
-    """
-    directory = runs_dir(root)
-    if not os.path.isdir(atompipe_dir(root)):
-        raise AtompipeError(
-            f"no {ATOMPIPE_DIR}/ directory at {os.path.abspath(root)} — "
-            f"run `atompipe init` before recording a run"
-        )
-    ensure_dir(directory)
-
-    meta = _as_dict(run_meta)
-    rows = [_as_dict(v) for v in (verdicts or [])]
-
-    # Identity seed: what was run, on what, when. Not the duration — a rerun of
-    # the identical sweep should be recognisable as such.
-    seed = "|".join([
-        str(meta.get("when", "")),
-        str(meta.get("model_hash", "")),
-        str(meta.get("inputs_hash", "")),
-        str(meta.get("tier", "")),
-        ",".join(str(r.get("gate", "")) for r in rows),
-    ])
-    digest = short_hash(seed, 8)
-
-    index = _next_index(directory)
-    while True:
-        path = os.path.join(directory, f"{index:04d}-{digest}.json")
-        if not os.path.exists(path):
-            break
-        index += 1
-
-    atomic_write_json(path, {"index": index, "meta": meta, "verdicts": rows})
-    return path
-
-
-def load_runs(root: str, limit: int = 20) -> list[dict]:
-    """Read the run history, NEWEST FIRST. `limit <= 0` means all of it.
-
-    Each returned dict is the stored record plus a `path` key added here (derived
-    at read time, not duplicated into the file — the file's own name is already
-    the truth about where it lives).
-
-    A record that will not parse is returned with an `error` key and empty
-    `verdicts` rather than being dropped. Silently skipping it would make a
-    corrupted history look like a short one, and "the gate passed last Tuesday"
-    is exactly the kind of claim that must not quietly evaporate.
-    """
-    directory = runs_dir(root)
-    if not os.path.isdir(directory):
-        return []
-
-    names = sorted(
-        (n for n in os.listdir(directory) if _RUN_FILE_RE.match(n)),
-        key=lambda n: int(_RUN_FILE_RE.match(n).group(1)),   # type: ignore[union-attr]
-        reverse=True,
-    )
-    if limit and limit > 0:
-        names = names[:limit]
-
-    out: list[dict] = []
-    for name in names:
-        path = os.path.join(directory, name)
-        index = int(_RUN_FILE_RE.match(name).group(1))       # type: ignore[union-attr]
-        try:
-            data = read_json(path, default=None)
-        except Exception as exc:                             # noqa: BLE001 - reported, not raised
-            data = None
-            err = str(exc)
-        else:
-            err = "unreadable or not a JSON object" if not isinstance(data, dict) else ""
-        if err:
-            out.append({"index": index, "path": path, "meta": {},
-                        "verdicts": [], "error": err})
-            continue
-        record = dict(data)                                  # type: ignore[arg-type]
-        record.setdefault("index", index)
-        record.setdefault("meta", {})
-        record.setdefault("verdicts", [])
-        record["path"] = path
-        out.append(record)
-    return out
-
-
 __all__ = [
     "ATOMPIPE_DIR", "LEDGER_NAME", "INPUT_BUCKETS", "BUCKET_FOR_KIND",
     "find_root", "require_root",
-    "atompipe_dir", "ledger_path", "runs_dir", "out_dir", "inputs_dir",
+    "atompipe_dir", "ledger_path", "out_dir", "inputs_dir",
     "docs_dir", "model_dir", "project_paths",
     "load", "save", "init",
-    "record_run", "load_runs",
 ]

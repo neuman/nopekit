@@ -59,17 +59,18 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     4: "test_invariants.ReportNeverOverclaims",
     5: "test_packs.ControlsAreSealed",
     6: "test_packs.NegativeControlsFire",
+    7: "test_staleness.StaleIsNotCurrent",
+    9: "test_admission.AdmissionIsDemonstrated",
 }
 
 #: Classes Phase 1 will make invariants 7-9. Guarded against skips from the
 #: commit that creates each one: R-7 has to bite from a class's first line, not
 #: from the later commit that writes its number into CLAUDE.md — by then a skip
-#: could already be load-bearing.
+#: could already be load-bearing. 7 and 9 moved to INVARIANT_CLASSES when
+#: CLAUDE.md numbered them (checkpoint 1.2); 8 follows with the records layout.
 PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {
-    7: "test_staleness.StaleIsNotCurrent",
     8: ["test_records.IndexNeverDisagreesWithRecords",
         "test_records.NoCommandWritesARecord"],
-    9: "test_admission.AdmissionIsDemonstrated",
 }
 
 
@@ -140,6 +141,20 @@ class EveryInvariantHasItsTest(unittest.TestCase):
             "7. **A planted invariant.** Nobody wrote its test.\n\nTwo more, learned the hard way")
         self.assertIn(7, _numbered_invariants(planted))
         self.assertTrue(_mapping_problems(planted, INVARIANT_CLASSES))
+
+    def test_a_planted_unmapped_number_is_caught(self):
+        """The unmapped path on its own. Once CLAUDE.md numbered 7, the planted
+        7 above is caught as a duplicate instead; this keeps the "an invariant
+        with no test class" refusal exercised by a number nothing maps."""
+        number = max(INVARIANT_CLASSES) + 10
+        planted = _read(CLAUDE_MD).replace(
+            "Two more, learned the hard way",
+            f"{number}. **A planted invariant.** Nobody wrote its test.\n\n"
+            f"Two more, learned the hard way")
+        self.assertIn(number, _numbered_invariants(planted))
+        problems = _mapping_problems(planted, INVARIANT_CLASSES)
+        self.assertTrue(any("INVARIANT_CLASSES maps" in p for p in problems), problems)
+        self.assertFalse(any("twice" in p for p in problems), problems)
 
     def test_a_planted_missing_class_is_caught(self):
         mapping = dict(INVARIANT_CLASSES)
