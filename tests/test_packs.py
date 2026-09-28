@@ -25,6 +25,7 @@ import _env
 from atompipe import gates as gates_mod
 from atompipe import packs as packs_mod
 from atompipe.models import Ledger, ProjectMeta, Tier
+from atompipe.verdicts import GateTrace
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKS_DIR = os.path.join(REPO, "packs")
@@ -471,6 +472,66 @@ class NegativeControlsFire(unittest.TestCase):
                         skipped_ctl)
 
 
+# --------------------------------------------------------------------------- #
+# the seal, read off the trace (invariant 5 at runtime)
+# --------------------------------------------------------------------------- #
+def _host_reads(spec, fn, host: gates_mod.GateContext) -> tuple[str, ...] | None:
+    """This file's own reading of one control's trace: every host-param path its
+    fixture read — or its gate read, through a context the fixture handed back —
+    dotted, ``"(all params)"`` for the whole top level. ``None`` when the gate's
+    tools are absent, so the control could not run and read nothing.
+
+    Kept beside ``packs.seal_findings`` rather than trusting it alone, for the
+    reason DemonstrateAgrees gives: a test that only calls the code it guards is
+    relaxed by relaxing that code, with no test file touched (R-6). A detector
+    that quietly stopped looking at some gates would still return ``[]``.
+    """
+    if _tooling_absent(spec):
+        return None
+    trace = GateTrace(kind="control")
+    gates_mod.selftest(spec, fn, host, trace=trace, out_dir=_scratch_out())
+    return tuple(sorted(".".join(str(part) for part in path) or "(all params)"
+                        for path in trace.host_reads))
+
+
+def _beam_copy(case: unittest.TestCase, plant=None) -> tuple[str, str]:
+    """``(root, pack_dir)``: beam-analytic copied under a unique directory AND pack
+    name, with ``plant(pack_dir)`` applied. Unplanted, the copy is publishable
+    (DemonstrateAgrees' positive control), so a plant is the only thing `pack
+    validate` can object to. Judge it in a child process only: pack modules are
+    cached by pack name, one directory per name per process (tests:H6)."""
+    root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-sealed-beam-"))
+    case.addCleanup(shutil.rmtree, root, True)
+    name = f"beam-sealed-{uuid.uuid4().hex[:12]}"
+    pack_dir = os.path.join(root, ".atompipe", "packs", name)
+    shutil.copytree(os.path.join(PACKS_DIR, "beam-analytic"), pack_dir,
+                    ignore=shutil.ignore_patterns("__pycache__", ".selftest-out"))
+    manifest_path = os.path.join(pack_dir, "pack.json")
+    with open(manifest_path, "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    manifest["name"] = name
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+    if plant is not None:
+        plant(pack_dir)
+    return root, pack_dir
+
+
+#: The unsealed form PACK_FORMAT warns about, planted in beam.deflection's
+#: fixture: the pack's WHOLE baseline and the bad limit, layered over the host's
+#: ctx.params. Over the baseline it fires, and over an empty host it fires
+#: identically — it states every key its gate reads — so the empty-host probe
+#: passes it. What it lets through is any key the host states and the baseline
+#: does not: a synonym, a derived quantity, the waterplane inertia that defused
+#: a hull control in the case the class docstring below tells.
+_LAYERED_OVER_HOST = ('    return dataclasses.replace(\n'
+                      '        ctx, params={**ctx.params, **BASELINE, '
+                      '"deflection_limit_mm": 1e-6})\n')
+
+#: The words every seal problem starts with, after ``"<gate id>: "``.
+_SEAL_PHRASE = "control reads the host's ctx.params"
+
+
 class ControlsAreSealed(unittest.TestCase):
     """A pack's negative control must fire in EVERY project, not just a friendly one.
 
@@ -493,6 +554,15 @@ class ControlsAreSealed(unittest.TestCase):
     behaves identically; an inheriting one skips or flips. Project-local fixtures
     are exempt from this — deriving from the project's own model is correct there
     — but a pack's are not.
+
+    The probe sees only what an empty host changes, and that is not everything:
+    a fixture that layers the pack's WHOLE baseline over the host fires the same
+    both ways and passes it, while any key the host states beyond the baseline
+    still reaches the gate. So the seal is also read off the trace: every read a
+    control makes through its host's ``ctx.params`` is recorded, and a SEALED
+    fixture makes none (``packs.seal_findings``, which ``pack validate`` refuses
+    on). Staged as R-4 asks: zero findings over the bundled controls first, then
+    the planted violators.
     """
 
     def test_controls_fire_without_a_host_projection(self):
@@ -526,6 +596,116 @@ class ControlsAreSealed(unittest.TestCase):
                         f"instead of stating everything its gate reads, so installing "
                         f"this pack in a different project can silently defuse it "
                         f"({bare.skip_reason or bare.detail})")
+
+    # -- the trace sees what the probe cannot (R-4: the measurement first) --- #
+    def test_no_bundled_fixture_reads_host_params(self):
+        """Every bundled control, against a RICH host — its pack's own baseline,
+        every key its gates read there to be read — reads nothing of the host's
+        ``ctx.params``: by the spine's detector, and by this file's own reading
+        of the same traces. This is the measurement the refusal stands on (R-4):
+        a detector with hits on honest bundled code would turn the suite red the
+        moment it refused.
+
+        Measured when it landed (2026-09-27, U18): zero host reads over 54 of 54
+        controls with trimesh, numpy and omc present.
+        """
+        exercised = 0
+        skipped: list[str] = []
+        for path in _pack_dirs():
+            name = os.path.basename(path)
+            registry = gates_mod.Registry()
+            packs_mod.load_gates(name, registry, root=REPO)
+            host = _pack_ctx(path, _read_baseline(path) or {})
+            with self.subTest(pack=name):
+                findings = packs_mod.seal_findings(registry, host, tier=Tier.EXTERNAL,
+                                                   out_dir=_scratch_out())
+                own: dict[str, tuple[str, ...]] = {}
+                for spec in registry.specs():
+                    _spec, fn = registry.get(spec.id)
+                    reads = _host_reads(spec, fn, host)
+                    if reads is None:
+                        skipped.append(f"{spec.id} ({_tooling_absent(spec)})")
+                        continue
+                    exercised += 1
+                    if reads:
+                        own[spec.id] = reads
+                self.assertEqual(own, {}, f"{name}: fixtures reading the host's ctx.params, "
+                                          f"by this file's reading of the traces: {own}")
+                self.assertEqual(findings, [], f"{name}: {findings}")
+        # Not vacuous: the analytic packs declare no tools, so on any machine —
+        # a CI runner without trimesh or omc included — their controls ran.
+        self.assertGreater(exercised, 0, "no control ran, so nothing was measured")
+        if skipped:
+            print(f"\n  note: seal detector: {exercised} control(s) traced, "
+                  f"{len(skipped)} skipped for missing tooling: "
+                  f"{', '.join(skipped[:4])}" + ("..." if len(skipped) > 4 else ""))
+
+    def test_planted_unsealed_fixture_is_caught(self):
+        """V: a fixture that layers over the host is named even where the
+        empty-host probe cannot see it — by the detector, by ``demonstrate``,
+        and by `pack validate`'s exit status.
+
+        End to end first, because that is the hole: a copy of beam-analytic
+        whose deflection fixture states the whole baseline over the host
+        (``_LAYERED_OVER_HOST``) fires with any host, so before the detector
+        `pack validate` certified it publishable. It is the only thing wrong
+        with the copy, so the exit status is about it and nothing else.
+        """
+        root, pack_dir = _beam_copy(self, lambda d: _plant(
+            d, "selftest/bad_beams.py", _SHALLOW_DEF, _LAYERED_OVER_HOST))
+        proc = _env.atompipe(["pack", "validate", pack_dir, "--json"], cwd=root)
+        self.assertEqual(proc.returncode, 1,
+                         f"pack validate certified an unsealed fixture as publishable:\n"
+                         f"{proc.stdout}\n{proc.stderr}")
+        problems = json.loads(proc.stdout)["problems"]
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(problems[0].startswith(f"beam.deflection: {_SEAL_PHRASE} ("),
+                        problems)
+
+        # In process, on the scratch pack: its `too_long` fixture copies the
+        # host's params and moves the one input. The probe passes it — it fires
+        # over the baseline and over an empty host alike — and the trace does not.
+        pack_dir, registry, gate_id = _scratch_pack(self, baseline={"span_mm": 50.0})
+        baseline = _read_baseline(pack_dir)
+        self.assertEqual(_control_problems(pack_dir, registry, host=baseline), [])
+        self.assertEqual(_control_problems(pack_dir, registry, host={}), [])
+        host = _pack_ctx(pack_dir, baseline)
+        findings = packs_mod.seal_findings(registry, host, out_dir=_scratch_out())
+        self.assertEqual([f.gate for f in findings], [gate_id], findings)
+        self.assertEqual(findings[0].fixture, "selftest/bad.py:too_long")
+        self.assertIn("(all params)", findings[0].host_paths)   # dict(ctx.params)
+        _spec, fn = registry.get(gate_id)
+        self.assertEqual(findings[0].host_paths, _host_reads(_spec, fn, host))
+        shown = packs_mod.demonstrate(pack_dir, tier=Tier.EXTERNAL)
+        self.assertEqual(len(shown.problems), 1, shown.problems)
+        self.assertTrue(shown.problems[0].startswith(f"{gate_id}: {_SEAL_PHRASE} ("),
+                        shown.problems)
+
+    def test_identity_fixture_in_a_pack_is_caught(self):
+        """V: ``return ctx`` hands the gate the host's own projection, so the
+        gate's reads through the host view are the findings. Against a good
+        host its control does not fire; against a host that is itself bad it
+        "fires" — for the host's reason, not its own — and the trace names it
+        just the same, which no outcome-based probe over that host could."""
+        pack_dir, registry, gate_id = _scratch_pack(self, baseline={"span_mm": 50.0},
+                                                    fixture="identity")
+        with open(os.path.join(pack_dir, "selftest", "bad.py"), "a", encoding="utf-8") as fh:
+            fh.write('\n\ndef identity(ctx):\n'
+                     '    """Planted: the host context, handed back untouched."""\n'
+                     '    return ctx\n')
+        _spec, fn = registry.get(gate_id)
+        for span in (50.0, 500.0):
+            with self.subTest(host_span_mm=span):
+                host = _pack_ctx(pack_dir, {"span_mm": span})
+                fired = gates_mod.selftest(_spec, fn, host)
+                self.assertEqual(fired.passed, span > 100.0, fired.detail or fired.error)
+                findings = packs_mod.seal_findings(registry, host, out_dir=_scratch_out())
+                self.assertEqual([(f.gate, f.fixture, f.host_paths) for f in findings],
+                                 [(gate_id, "selftest/bad.py:identity", ("span_mm",))])
+                self.assertEqual(_host_reads(_spec, fn, host), ("span_mm",))
+        shown = packs_mod.demonstrate(pack_dir, tier=Tier.EXTERNAL)
+        self.assertTrue(any(line.startswith(f"{gate_id}: {_SEAL_PHRASE} (span_mm)")
+                            for line in shown.problems), shown.problems)
 
 
 # --------------------------------------------------------------------------- #
