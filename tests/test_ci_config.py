@@ -462,6 +462,24 @@ def _has_flag(args: list[str], flag: str) -> bool:
     return any(a == flag or a.startswith(flag + "=") for a in args)
 
 
+def force_problems(yaml_text: str) -> list[str]:
+    """R-9: the bracket's `check --junit` in CI re-executes every gate and its
+    control (`--force`) rather than serving the committed cache.
+
+    What would slip through without it: from 1.2 a check serves the tracked
+    verdict cache, and an entry is only as honest as whoever committed it — a
+    hand-placed entry, or one written by a spine with a bug since fixed, would
+    read green in CI forever without a single gate running. The inner loop may
+    trust the cache; the money boundary re-runs it (PLAN R-9)."""
+    checks = [c for c in atompipe_calls(yaml_text)
+              if c["path"] == "check" and _has_flag(c["args"], "--junit") and c["cwd"] != "."]
+    if not checks:
+        return ["no `atompipe check --junit` runs against a copy of the bracket"]
+    return [f"ci.yml:{c['line']}: `atompipe check --junit` without `--force` serves the "
+            f"committed cache instead of re-running it (R-9)"
+            for c in checks if not _has_flag(c["args"], "--force")]
+
+
 class CiRunsWhatTheDocsSay(unittest.TestCase):
     def test_gate_selftest_runs_at_the_repo_root(self):
         """S-11: every bundled pack's controls run in CI, as the docs say they do."""
@@ -499,6 +517,28 @@ class CiRunsWhatTheDocsSay(unittest.TestCase):
             "        run: |", "        working-directory: examples\n        run: |")
         self.assertEqual(root_selftests(moved), [])
         self.assertTrue(root_selftests(_workflow("python -m atompipe gate selftest --junit")))
+
+
+class CiReExecutesTheCache(unittest.TestCase):
+    """R-9 at the money boundary CI is: the bracket's check re-runs every gate
+    and its control (`check --force`), so a committed cache entry is re-proven
+    on every push instead of trusted."""
+
+    def test_the_bracket_check_runs_with_force(self):
+        problems = force_problems(_read(CI))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_a_check_without_force_is_refused(self):
+        """V: the step as it stood at 1.1 — a copy, the exit code captured, the
+        signature compared — still serves the cache, and is refused for it."""
+        text = _read(CI)
+        stripped = re.sub(r"(atompipe -C \"\$copy\" check) --force", r"\1", text)
+        self.assertTrue(stripped != text, "the bracket step no longer reads "
+                        "`atompipe -C \"$copy\" check --force ...`; update the planted form")
+        self.assertTrue(force_problems(stripped))
+        self.assertEqual(signature_problems(stripped), [],
+                         "the planted step must differ from the real one in --force only")
+        self.assertTrue(force_problems(OLD_BRACKET_STEP))
 
 
 # --------------------------------------------------------------------------- #
