@@ -20,6 +20,8 @@ here exists because it is the route of least resistance (R-6, R-7):
   ``_env.run``, the one environment that is the same on a dev box and a runner.
 * **NoWallClockBelowTheEdge** — only ``cli.py`` reads the clock; the modules
   that shape a verdict or a record take ``now`` as an argument (spec §0.6).
+* **NoGitOutsideVcs** — only ``src/atompipe/vcs.py`` starts git, so one clean
+  environment, one timeout and one never-raise rule cover every git call.
 * **EnvIsFaithful** — ``_env`` hides the machine without hiding the tools.
 
 Every static check is a pure function of source text, and each has a planted
@@ -574,6 +576,166 @@ class NoWallClockBelowTheEdge(unittest.TestCase):
                   "cpu = os.times()\nelapsed = time.perf_counter() - started\n"
                   "def f(now): return now\n")
         self.assertEqual(_clock_findings(source), [])
+
+
+# --------------------------------------------------------------------------- #
+# NoGitOutsideVcs
+# --------------------------------------------------------------------------- #
+#: The one spine module that may start git (spec §3.1). A git call anywhere else
+#: inherits the process's GIT_DIR — a hook's OUTER repository — has no timeout,
+#: and can raise where "not a repository" is the honest answer; vcs.py exists so
+#: those three rules are written once.
+GIT_EDGE = os.path.join("atompipe", "vcs.py")
+
+#: Calls that start a process, by the name they are reached through:
+#: subprocess's, the os spawners NoSubprocessOutsideRun already knows, asyncio's.
+_PROCESS_CALLS = frozenset({
+    "run", "call", "check_call", "check_output", "Popen", "getoutput", "getstatusoutput",
+})
+
+
+def _is_git_program(text: str) -> bool:
+    """``git``, ``/usr/bin/git``, ``C:\\...\\git.exe`` — an argv[0] naming git."""
+    return text.replace("\\", "/").rsplit("/", 1)[-1].lower() in {"git", "git.exe"}
+
+
+def _starts_process(func: ast.AST) -> bool:
+    name = (func.attr if isinstance(func, ast.Attribute)
+            else func.id if isinstance(func, ast.Name) else "")
+    return name in _PROCESS_CALLS or _os_spawner(name) or name.startswith("create_subprocess")
+
+
+def _is_which_git(node: ast.AST) -> bool:
+    """``shutil.which("git")``: locating git is reaching for it."""
+    if not (isinstance(node, ast.Call) and node.args):
+        return False
+    func = node.func
+    name = (func.attr if isinstance(func, ast.Attribute)
+            else func.id if isinstance(func, ast.Name) else "")
+    first = node.args[0]
+    return (name == "which" and isinstance(first, ast.Constant)
+            and isinstance(first.value, str) and _is_git_program(first.value))
+
+
+def _names_git(node: ast.AST, aliases: set[str]) -> bool:
+    """``node`` evaluates to the git program: the string, a name bound to it, or
+    ``shutil.which("git")``."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return _is_git_program(node.value)
+    if isinstance(node, ast.Name):
+        return node.id in aliases
+    return _is_which_git(node)
+
+
+def _is_git_shell(node: ast.AST) -> bool:
+    """A shell command whose first word is git: ``"git status"``, ``f"git log {x}"``."""
+    if isinstance(node, ast.JoinedStr) and node.values:
+        node = node.values[0]
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        words = node.value.split()
+        return bool(words) and _is_git_program(words[0])
+    return False
+
+
+def _git_findings(source: str, filename: str = "<planted>") -> list[str]:
+    """Every place ``source`` could start git.
+
+    An argv literal whose program is git counts wherever it appears — assembled
+    in a variable and passed along later is still a git call — as does a process
+    call whose first argument or ``executable=`` names git, a shell string that
+    starts with git, and ``shutil.which("git")``. A tuple that merely starts with
+    the word ("git", "hg") reads as an argv too: rename it rather than teach the
+    scanner an exception. What does not count: ``".git"``, prose, a dict key.
+    """
+    tree = ast.parse(source, filename)
+    aliases: set[str] = set()
+    for node in ast.walk(tree):                   # GIT = "git"; GIT = shutil.which("git")
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            if _names_git(node.value, set()):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                aliases.update(t.id for t in targets if isinstance(t, ast.Name))
+    findings: list[str] = []
+
+    def hit(node: ast.AST, what: str) -> None:
+        findings.append(f"{filename}:{getattr(node, 'lineno', '?')}: {what}")
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+            if _names_git(node.elts[0], aliases):
+                hit(node, "an argv whose program is git")
+        elif isinstance(node, ast.Call):
+            if _is_which_git(node):
+                hit(node, "which('git')")
+            elif _starts_process(node.func):
+                first = node.args[0] if node.args else None
+                if first is not None and (_names_git(first, aliases) or _is_git_shell(first)):
+                    hit(node, "a process call that starts git")
+                for keyword in node.keywords:
+                    if keyword.arg in ("executable", "args") and (
+                            _names_git(keyword.value, aliases) or _is_git_shell(keyword.value)):
+                        hit(node, f"{keyword.arg}= names git")
+    return sorted(set(findings))
+
+
+def _spine_sources() -> list[str]:
+    out: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(_env.SRC):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+        out += [os.path.join(dirpath, f) for f in sorted(filenames) if f.endswith(".py")]
+    return out
+
+
+class NoGitOutsideVcs(unittest.TestCase):
+    def test_no_git_outside_vcs(self):
+        sources = _spine_sources()
+        edge = os.path.join(_env.SRC, GIT_EDGE)
+        self.assertIn(edge, sources, f"src/{GIT_EDGE} is missing")
+        findings: list[str] = []
+        for path in sources:
+            if path != edge:
+                findings += _git_findings(_read(path), os.path.relpath(path, _env.REPO))
+        self.assertEqual(
+            findings, [],
+            "git is started only from src/atompipe/vcs.py — its clean environment, "
+            "timeout and never-raise rule are the reason it exists; add the question "
+            "to vcs instead: " + "; ".join(findings))
+
+    def test_the_edge_itself_is_seen(self):
+        """The positive control: the scanner recognises vcs.py's own git call, so
+        an empty result above is a spine without git, not a scanner that is blind."""
+        self.assertTrue(_git_findings(_read(os.path.join(_env.SRC, GIT_EDGE))))
+
+    def test_planted_git_calls_are_caught(self):
+        planted = [
+            "import subprocess\nsubprocess.run(['git', 'status'])\n",
+            "import subprocess as sp\nsp.check_output(('git', 'rev-parse', 'HEAD'))\n",
+            "from subprocess import Popen\nPopen(['/usr/bin/git', 'log'])\n",
+            "import os\nos.system('git status --porcelain')\n",
+            "import os\nos.execvp('git', argv)\n",
+            "cmd = ['git']\ncmd += ['log']\n",
+            "GIT = 'git'\nimport subprocess\nsubprocess.run([GIT, 'log'])\n",
+            "import shutil\nexe = shutil.which('git')\n",
+            "import subprocess\nsubprocess.run(f'git log {ref}', shell=True)\n",
+            "import asyncio\nasyncio.create_subprocess_exec('git', 'log')\n",
+            "def f():\n    import subprocess\n    return subprocess.run(['git.exe', 'log'])\n",
+            "import subprocess\nsubprocess.run(argv, executable='git')\n",
+        ]
+        for source in planted:
+            with self.subTest(source=source):
+                self.assertTrue(_git_findings(source), f"not caught: {source!r}")
+
+    def test_talking_about_git_is_not_calling_it(self):
+        source = textwrap.dedent('''
+            """Stops at the repository's `.git`; `git ls-files` is vcs's job."""
+            import os, subprocess
+            _GIT_ENTRY = ".git"
+            marker = os.path.join(root, ".git")
+            names = {"git": "the one VCS"}
+            print("git status")
+            subprocess.run(["python3", "-c", "print('git')"])
+            ignores = [".gitignore", ".gitattributes"]
+        ''')
+        self.assertEqual(_git_findings(source), [])
 
 
 # --------------------------------------------------------------------------- #
