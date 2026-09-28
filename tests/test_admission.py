@@ -37,6 +37,27 @@ What each class holds against:
   "not admitted": CI has no trimesh); a gate named above the tier ceiling runs its
   control; a dry sweep writes nothing but scratch; a control's scratch is its own.
 
+The same holes, closed through the command a human types (the `test_cli_*`
+methods of AdmissionIsDemonstrated, U25). The library tests above prove the
+sweep; these prove that `check`, `status` and `report` on a real project are
+wired to it — the S-05 shape exactly: every piece of admission existed in a
+library and the CLI never asked. On the bracket and on wrapped pack baselines
+(`tests/_projects.py`), one fresh process per command:
+
+* a no-op fixture, an always-True gate, and both spellings of S-07's identity
+  fixture (`return ctx`, `return _with(ctx)`) are not admitted, and their claims
+  never read PASS — in `status`, in `check`'s BLOCKING list, or under PROVEN;
+* an edit to a `.mo`, an `.stl` or a `baseline.json` value inside a pack's
+  `selftest/` misses every control entry of that pack and re-runs it (where the
+  tool is missing, the availability skip is the asserted outcome — never a skip
+  of the test: this class carries invariant 9);
+* bytecode under `selftest/` in a git copy is never a selftest input: no new
+  control entry;
+* a Config default edit re-verifies all six controls by their fixtures alone
+  (nothing executed, nothing new on disk), while a `build()` edit that moves a
+  value a control fed its gate writes a new control entry for exactly the gates
+  whose recorded control reads moved (S-19's model-code half).
+
 Scenarios that edit code run the sweep in a fresh process (`_DRIVER`, through
 `_env.run`), per spec §0.4: an in-process module cache must never be what makes
 an edit visible or invisible. Everything else runs in-process on a fresh
@@ -50,15 +71,18 @@ import dataclasses
 import glob
 import json
 import os
+import re
 import sys
 import textwrap
 import unittest
 from unittest import mock
 
 from atompipe import claims, gates, modelio, store, verdicts
+from atompipe import report as report_mod
 from atompipe.models import Claim, ClaimStatus, GateSpec, Ledger, NegativeControl, Verdict
 
 import _env
+import _projects
 
 NOW = "2026-09-27T10:00:00Z"
 
@@ -439,6 +463,150 @@ def row(result: verdicts.SweepResult, gate_id: str) -> verdicts.SweepRow:
 
 
 # --------------------------------------------------------------------------- #
+# the CLI: real projects, one fresh process per command
+# --------------------------------------------------------------------------- #
+#: The bracket's six gates. Spelled here rather than read off the bracket: an
+#: expectation taken from the project under test agrees with it by construction.
+BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearing",
+                 "bracket.model_validity", "bracket.bed_fit", "bracket.min_wall")
+
+#: The bracket's fixture for `bracket.deflection`, as `selftest/bad_configs.py`
+#: spells it — the line the identity-fixture test replaces.
+QUARTER_THICKNESS = 'return _with(ctx, thickness=known_good.CONFIG["thickness"] / 4.0)'
+
+#: A cache entry's file name inside its gate's directory (spec §3.7).
+ENTRY_NAME = re.compile(r"^[0-9a-f]{16}-[0-9a-f]{8}\.json$")
+
+#: One edit per asset kind the plan names (phase-1 "Admission at sweep": "editing
+#: a `.mo`, an `.stl` or a `baseline.json` value"), each made to the pack's COPY
+#: under `.atompipe/packs/<pack>/` and each chosen to change no answer: a load
+#: nudged 1/3 % on a baseline whose controls push one quantity many times past
+#: its limit; the 80-byte header of a binary STL, which carries no geometry; a
+#: trailing Modelica comment. `(pack, path in the pack, how, old bytes, new
+#: bytes)`, `how` one of "once" (exactly one occurrence replaced), "prefix" (the
+#: file must begin with `old`) and "append". The point is the bytes, not the
+#: meaning: a control is keyed by every file of its owner's `selftest/`, so any
+#: byte moved there must miss the entry, and an edit that moved an answer would
+#: prove something else.
+PACK_ASSET_EDITS = (
+    ("beam-analytic", "selftest/baseline.json", "once",
+     b'"load_n": 300.0', b'"load_n": 301.0'),
+    ("fdm-print", "selftest/baseline_part.stl", "prefix",
+     b"\0" * 26, b"atompipe: an edited header"),
+    ("openmodelica", "selftest/assets/model/ThermalTank.mo", "append",
+     b"", b"// an edit that changes no equation\n"),
+)
+
+
+def edit_bytes(path: str, how: str, old: bytes, new: bytes) -> None:
+    """One ``PACK_ASSET_EDITS`` edit, refusing unless its anchor is where it
+    says: an edit that silently matched nothing would re-run nothing and look
+    like a cache hit."""
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if how == "append":
+        data += new
+    elif how == "prefix":
+        assert data.startswith(old), (path, data[:len(old)])
+        data = new + data[len(old):]
+    else:
+        assert data.count(old) == 1, (path, old)
+        data = data.replace(old, new)
+    with open(path, "wb") as fh:
+        fh.write(data)
+
+
+def cli(project: str, *argv: str):
+    """``atompipe <argv>`` in ``project``, a fresh process through ``_env``."""
+    return _env.atompipe(list(argv), cwd=project)
+
+
+def check_json(case: unittest.TestCase, project: str, *argv: str) -> tuple[int, dict]:
+    """``check --json [argv]``: ``(exit code, document)``. Exit 0 or 1 only — 2
+    is a crash, and a crash is never an answer to read statuses off."""
+    proc = cli(project, "check", "--json", *argv)
+    case.assertIn(proc.returncode, (0, 1), f"check {argv} crashed:\n{proc.stdout}\n{proc.stderr}")
+    try:
+        return proc.returncode, json.loads(proc.stdout)
+    except ValueError as exc:                      # pragma: no cover - reported
+        raise AssertionError(f"check --json: {exc}\n{proc.stdout}\n{proc.stderr}")
+
+
+def status_json(case: unittest.TestCase, project: str) -> dict:
+    proc = cli(project, "status", "--json")
+    case.assertEqual(proc.returncode, 0, f"status crashed:\n{proc.stdout}\n{proc.stderr}")
+    return json.loads(proc.stdout)
+
+
+def verdict_row(data: dict, gate_id: str) -> dict:
+    """The one ``check --json`` row of ``gate_id``: every selected gate has one."""
+    found = [r for r in data["verdicts"] if r["gate"] == gate_id]
+    assert len(found) == 1, (gate_id, [r["gate"] for r in data["verdicts"]])
+    return found[0]
+
+
+def blocking_ids(data: dict) -> dict[str, str]:
+    """``{claim id: status}`` of ``check --json``'s BLOCKING list."""
+    return {b["claim"]: b["status"] for b in data["blocking"]}
+
+
+def control_names(project: str) -> dict[str, set[str]]:
+    """``{gate id: {control entry file names}}`` of a project's verdict cache."""
+    out: dict[str, set[str]] = {}
+    for path in glob.glob(os.path.join(project, ".atompipe", "verdicts", "*", "control-*.json")):
+        out.setdefault(os.path.basename(os.path.dirname(path)), set()).add(
+            os.path.basename(path))
+    return out
+
+
+def entry_names(project: str, gate_id: str) -> set[str]:
+    """The verdict entry (not control) file names of ``gate_id``."""
+    base = os.path.join(project, ".atompipe", "verdicts", gate_id)
+    return {n for n in (os.listdir(base) if os.path.isdir(base) else ())
+            if ENTRY_NAME.match(n)}
+
+
+def read_control(project: str, gate_id: str, name: str) -> dict:
+    with open(os.path.join(project, ".atompipe", "verdicts", gate_id, name),
+              encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def proven_section(case: unittest.TestCase, project: str) -> str:
+    """The body of ``report``'s PROVEN section. Fails — never returns "" — when
+    the report has no such heading, or more than one: an assertNotIn over a
+    missing section proves nothing (S-15)."""
+    proc = cli(project, "report")
+    case.assertEqual(proc.returncode, 0, f"report crashed:\n{proc.stdout}\n{proc.stderr}")
+    lines = proc.stdout.splitlines()
+    heading = report_mod.SECTION_PROVEN
+    at = [i for i, line in enumerate(lines) if line == heading or line.startswith(heading + " ")]
+    case.assertEqual(len(at), 1, f"{len(at)} {heading!r} headings in:\n{proc.stdout}")
+    body = []
+    for line in lines[at[0] + 1:]:
+        if line.startswith("## "):
+            break
+        body.append(line)
+    case.assertTrue("\n".join(body).strip(), "an empty PROVEN section")
+    return "\n".join(body)
+
+
+def untracked(project: str) -> list[str]:
+    """``??`` paths of ``git status --porcelain --untracked-files=all``."""
+    proc = _env.git(["status", "--porcelain", "--untracked-files=all"], cwd=project)
+    if proc.returncode != 0:
+        raise AssertionError(f"git status in {project}: {proc.stderr.strip()}")
+    return sorted(line[3:] for line in proc.stdout.splitlines() if line.startswith("?? "))
+
+
+def commit_all(project: str, message: str) -> None:
+    for argv, identity in ((["add", "-A"], False), (["commit", "-q", "-m", message], True)):
+        proc = _env.git(argv, cwd=project, identity=identity)
+        if proc.returncode != 0:
+            raise AssertionError(f"git {argv[0]} in {project}: {proc.stderr.strip()}")
+
+
+# --------------------------------------------------------------------------- #
 class AdmissionIsDemonstrated(_env.EnvCase):
     """A PASS counts only from a gate whose control fired at its current version."""
 
@@ -647,6 +815,285 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(got["admission"], "not-admitted", got)
         self.assertIn("PASSED its own known-bad", got["error"])
         self.assertNotEqual(second["statuses"]["C1"], "pass")
+
+    # -- the CLI: the same holes through `check`, `status` and `report` -------- #
+    def _bracket(self, *, git: bool = False) -> str:
+        return _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), git=git)
+
+    def test_cli_a_no_op_fixture_is_not_admitted_though_the_cache_would_hit(self):
+        # S-05 through the CLI. The bending-stress fixture edited into a no-op
+        # hands its gate the known-good design unchanged; the gate passes it. The
+        # gate's own verdict entry is untouched and Fresh — before 1.2 that alone
+        # served the PASS, and nothing on the way read a selftest.
+        project = self._bracket()
+        code, _first = check_json(self, project)
+        self.assertEqual(code, 1, "the bracket fails C1 on purpose")
+        self.assertEqual(status_json(self, project)["claims"]["C2"], "pass",
+                         "the positive control: an admitted, fresh PASS reads PASS")
+        edit(project, "selftest/bad_configs.py", "return _with(ctx, load_n=300.0)",
+             "return _with(ctx)")
+
+        before = status_json(self, project)
+        state = before["freshness"]["bracket.bending_stress"]
+        self.assertEqual(state["state"], "fresh", f"the verdict cache would hit: {state}")
+        self.assertEqual(state["admission"], "undemonstrated", state)
+        self.assertNotEqual(before["claims"]["C2"], "pass",
+                            "an undemonstrated control never lets the PASS count")
+
+        code, data = check_json(self, project)
+        self.assertEqual(code, 1)
+        got = verdict_row(data, "bracket.bending_stress")
+        self.assertEqual(got["outcome"], "error", got)
+        self.assertTrue(got["error"].startswith("not admitted: "), got)
+        self.assertIn("PASSED its own known-bad fixture selftest/bad_configs.py:overloaded",
+                      got["error"])
+        self.assertEqual(data["counts"]["executed"], 0,
+                         "no gate ran on the design: every entry was Fresh, and the "
+                         "refused gate is never called")
+        self.assertEqual(data["counts"]["controls"]["executed"], len(BRACKET_GATES),
+                         "bad_configs.py is every bracket control's static input")
+        self.assertEqual(blocking_ids(data).get("C2"), "fail", data["blocking"])
+        after = status_json(self, project)
+        self.assertEqual(after["claims"]["C2"], "fail")
+        self.assertEqual(after["freshness"]["bracket.bending_stress"]["admission"],
+                         "not-admitted")
+        self.assertNotIn("**C2**", proven_section(self, project))
+
+    def test_cli_an_always_true_gate_is_never_pass(self):
+        # S-05 in the shape it slipped through: the bracket fails C1 at 0.70 mm,
+        # the deflection gate is edited to stop depending on what it measures,
+        # and before 1.2 the report printed a PROVEN row showing 0.6997 mm
+        # against "<= 0.5 mm". A gate's code is part of its control's static, so
+        # the control runs again; the gate passes its own known-bad input and is
+        # refused — on this check and on every later one, which reuses the
+        # recorded refusal — and no reader lets C1 through.
+        project = self._bracket()
+        check_json(self, project)
+        self.assertEqual(status_json(self, project)["claims"]["C1"], "fail",
+                         "the precondition: the live design fails C1")
+        before = control_names(project)
+        edit(project, "gates/structural.py", "passed=d <= DEFLECTION_LIMIT_MM,", "passed=True,")
+        for attempt in ("first", "again"):
+            with self.subTest(check=attempt):
+                code, data = check_json(self, project)
+                self.assertEqual(code, 1)
+                got = verdict_row(data, "bracket.deflection")
+                self.assertEqual(got["outcome"], "error", got)
+                self.assertIn("not admitted: PASSED its own known-bad fixture "
+                              "selftest/bad_configs.py:quarter_thickness", got["error"])
+                self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+                if attempt == "first":
+                    # structural.py is every bracket gate's code: all six re-key,
+                    # five re-run, and the refused one is never called.
+                    self.assertEqual(data["counts"]["executed"], len(BRACKET_GATES) - 1)
+                    self.assertEqual(data["counts"]["controls"]["executed"],
+                                     len(BRACKET_GATES))
+                else:
+                    self.assertEqual(data["counts"]["executed"], 0)
+                    self.assertEqual(data["counts"]["controls"]["executed"], 0,
+                                     "the refusal is a recorded control entry, reused")
+                status = status_json(self, project)
+                self.assertEqual(status["claims"]["C1"], "fail")
+                self.assertNotEqual(status["freshness"]["bracket.deflection"]["state"],
+                                    "fresh", "a PASS from the logger was never recorded")
+                self.assertNotIn("**C1**", proven_section(self, project))
+        [name] = control_names(project)["bracket.deflection"] - before["bracket.deflection"]
+        entry = read_control(project, "bracket.deflection", name)
+        self.assertEqual((entry["bad"], entry["admitted"]), ("pass", "no"))
+
+    def test_cli_a_logger_with_no_honest_past_is_refused_by_check(self):
+        # The same logger on a project that never ran the gate honestly: there
+        # is no earlier entry to go stale, so the refusal is all there is.
+        # `check` asks admission before the verdict cache and before the run
+        # (spec §3.11): the gate is never called, the claim it covers FAILs in
+        # the sweep's BLOCKING list and in the statuses `last_check.json` keeps.
+        project = self._bracket()
+        edit(project, "gates/structural.py", "passed=u <= 1.0,", "passed=True,")
+        code, data = check_json(self, project)
+        self.assertEqual(code, 1)
+        got = verdict_row(data, "bracket.bending_stress")
+        self.assertEqual(got["outcome"], "error", got)
+        self.assertIn("not admitted: PASSED its own known-bad fixture "
+                      "selftest/bad_configs.py:overloaded", got["error"])
+        self.assertEqual(blocking_ids(data).get("C2"), "fail", data["blocking"])
+        self.assertEqual(data["counts"]["executed"], len(BRACKET_GATES) - 1,
+                         "every gate ran but the refused one")
+        self.assertEqual(entry_names(project, "bracket.bending_stress"), set(),
+                         "a refused gate records no verdict")
+        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["statuses"]["C2"], "fail")
+
+    def test_cli_identity_fixtures_for_deflection_are_not_admitted(self):
+        # S-07, D-27, in both spellings the plan names. The live bracket fails
+        # deflection (7.0 mm: 0.70 against 0.5), so on the LIVE host either
+        # fixture "fired" and was reported "correctly failed ... ~64x worse".
+        # Project fixtures now get the known-good host (8.0 mm, which passes):
+        # an identity fixture passes it, and a control that passes is refused
+        # even though the gate's own FAIL entry is Fresh and would be served.
+        for body in ("return ctx", "return _with(ctx)"):
+            with self.subTest(fixture=body):
+                project = self._bracket()
+                check_json(self, project)
+                # S-07's condition: the design a live host would hand this
+                # fixture fails the gate, so the lie would have "fired".
+                [live] = verdicts.read_entries(project, "bracket.deflection")
+                self.assertIs(live.verdict["passed"], False, live.verdict)
+                edit(project, "selftest/bad_configs.py", QUARTER_THICKNESS, body)
+                self.assertEqual(
+                    status_json(self, project)["freshness"]["bracket.deflection"]["state"],
+                    "fresh", "the verdict cache would serve the FAIL")
+
+                code, data = check_json(self, project)
+                self.assertEqual(code, 1)
+                got = verdict_row(data, "bracket.deflection")
+                self.assertEqual(got["outcome"], "error", got)
+                self.assertIn("not admitted: PASSED its own known-bad fixture "
+                              "selftest/bad_configs.py:quarter_thickness", got["error"])
+                newest = [read_control(project, "bracket.deflection", name)
+                          for name in control_names(project)["bracket.deflection"]]
+                refusals = [e for e in newest if e["bad"] == "pass"]
+                self.assertEqual(len(refusals), 1, newest)
+                self.assertEqual((refusals[0]["host"], refusals[0]["admitted"]),
+                                 ("known-good", "no"), refusals[0])
+                status = status_json(self, project)
+                self.assertEqual(status["claims"]["C1"], "fail", "a refused gate still blocks")
+                self.assertEqual(status["freshness"]["bracket.deflection"]["admission"],
+                                 "not-admitted")
+
+    def test_cli_a_pack_asset_edit_misses_the_control_entry_and_reruns_it(self):
+        # A pack control is keyed by its owner's whole `selftest/` (spec §3.8),
+        # so an edited mesh, Modelica source or baseline value there must miss
+        # every control entry of that pack. The copy under `.atompipe/packs/`
+        # is the pack the project loads; the bundled one is never touched.
+        for pack, rel, how, old, new in PACK_ASSET_EDITS:
+            with self.subTest(pack=pack, file=rel):
+                project = _projects.wrap_pack_baseline(
+                    pack, os.path.join(self.tmp(), pack), copy_pack=True)
+                specs = _projects.pack_gates(pack)
+                available = {spec.id: gates.availability(spec) for spec in specs}
+                here = sorted(gid for gid, (ok, _why) in available.items() if ok)
+                self.assertTrue(here, f"{pack}: no gate can run here, so no control "
+                                      f"could miss — the scenario would prove nothing")
+                check_json(self, project, "--tier", "3")
+                _code, second = check_json(self, project, "--tier", "3")
+                before = control_names(project)
+                self.assertLess(second["counts"]["controls"]["executed"], len(here),
+                                f"a second check re-ran every control: nothing is "
+                                f"cached, so a miss would be invisible "
+                                f"{second['counts']['controls']}")
+
+                edit_bytes(os.path.join(project, ".atompipe", "packs", pack,
+                                        *rel.split("/")), how, old, new)
+
+                _code, third = check_json(self, project, "--tier", "3")
+                after = control_names(project)
+                self.assertEqual(third["counts"]["controls"]["executed"], len(here),
+                                 third["counts"]["controls"])
+                for spec in specs:
+                    ok, why = available[spec.id]
+                    got = verdict_row(third, spec.id)
+                    new_names = after.get(spec.id, set()) - before.get(spec.id, set())
+                    if ok:
+                        self.assertEqual(len(new_names), 1,
+                                         f"{spec.id}: the edit did not miss its control "
+                                         f"entry ({sorted(after.get(spec.id, ()))})")
+                        self.assertEqual(got["outcome"], "pass",
+                                         f"{spec.id}: the edit changed an answer: {got}")
+                    else:
+                        # CI has neither trimesh nor omc: the asserted outcome is
+                        # the availability skip, never "not admitted".
+                        self.assertEqual((got["outcome"], got.get("skip_reason")),
+                                         ("skipped", why), got)
+                        self.assertNotIn(spec.id, after, "a gate that cannot run "
+                                                         "demonstrates nothing")
+
+    def test_cli_bytecode_in_selftest_writes_no_new_control_entry(self):
+        # A `git ls-files` walk sees untracked-not-ignored files, and the
+        # bracket ignores no bytecode (spec §3.8's walk excludes it itself). A
+        # `.pyc` header carries an mtime and the interpreter's name, so were it
+        # an input every interpreter and every import would write new control
+        # entries into a tracked cache.
+        project = self._bracket(git=True)
+        check_json(self, project)
+        before = control_names(project)
+        self.assertEqual(sorted(before), sorted(BRACKET_GATES))
+        proc = _env.run([sys.executable, "-m", "compileall", "-q", "selftest"], cwd=project)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        pyc = [p for p in untracked(project) if p.startswith("selftest/__pycache__/")]
+        self.assertTrue(pyc, "the precondition: git lists the bytecode as untracked, so "
+                             "a walk that did not exclude it would read it")
+
+        code, data = check_json(self, project)
+        self.assertEqual(code, 1)
+        self.assertEqual(control_names(project), before, "a new control entry")
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 0, "cached": len(BRACKET_GATES), "reverified": 0})
+
+    def test_cli_a_config_default_edit_reverifies_every_control_by_its_fixture(self):
+        # The transcript's edit (bed_xy 220 -> 250). Every fixture builds through
+        # model/bracket.py, so every control's fixture closure moved — but the
+        # known-good design states every Config field, so no value a control fed
+        # its gate moved. Six fixture-only re-runs, zero control runs, and not
+        # one new file for the tracked cache beyond the one gate that re-ran.
+        project = self._bracket(git=True)
+        check_json(self, project)
+        commit_all(project, "the first check's cache")
+        self.assertEqual(untracked(project), [])
+        controls = control_names(project)
+        edit(project, "model/bracket.py", "bed_xy: float = 220.0", "bed_xy: float = 250.0")
+
+        code, data = check_json(self, project)
+        self.assertEqual(code, 1)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 0, "cached": 0, "reverified": len(BRACKET_GATES)})
+        self.assertEqual(data["counts"]["executed"], 1, "bed_fit, and only bed_fit, re-ran")
+        new = untracked(project)
+        self.assertEqual(len(new), 1, new)
+        self.assertRegex(new[0], r"^\.atompipe/verdicts/bracket\.bed_fit/"
+                                 r"[0-9a-f]{16}-[0-9a-f]{8}\.json$")
+        self.assertEqual(control_names(project), controls, "a new control entry")
+
+        _code, again = check_json(self, project)
+        self.assertEqual(again["counts"]["controls"],
+                         {"executed": 0, "cached": len(BRACKET_GATES), "reverified": 0},
+                         "a re-verified closure is remembered: nothing runs twice")
+
+    def test_cli_a_build_edit_that_moves_a_control_input_writes_a_new_control_entry(self):
+        # S-19's model-code half through `check`: a formula edit in build()
+        # moves what a fixture hands its gate. The gates whose recorded control
+        # reads include the moved value miss their entry and run their control
+        # again; every other control is re-verified by its fixture alone.
+        project = self._bracket(git=True)
+        check_json(self, project)
+        commit_all(project, "the first check's cache")
+        before = control_names(project)
+        reads = {}
+        for gate_id, names in before.items():
+            [name] = names
+            entry = read_control(project, gate_id, name)
+            reads[gate_id] = {tuple(item[0]) for item in entry["reads"]["params"]}
+        moved = {gate_id for gate_id, paths in reads.items() if ("deflection",) in paths}
+        # Derived from the entries and typed from the gates' source, and the two
+        # must agree: a tracer that over-records moves the derived side only.
+        self.assertEqual(moved, {"bracket.deflection"}, reads)
+
+        edit(project, "model/bracket.py",
+             'c.load_n * c.arm_length ** 3 / (3.0 * mat["E"] * inertia)',
+             'c.load_n * c.arm_length ** 3 / (2.9 * mat["E"] * inertia)')
+        code, data = check_json(self, project)
+        self.assertEqual(code, 1)
+        after = control_names(project)
+        grew = {gate_id for gate_id in after if after[gate_id] - before.get(gate_id, set())}
+        self.assertEqual(grew, moved)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": len(moved), "cached": 0,
+                          "reverified": len(BRACKET_GATES) - len(moved)})
+        got = verdict_row(data, "bracket.deflection")
+        self.assertEqual(got["outcome"], "fail",
+                         f"the control still fires, so the live FAIL stands admitted: {got}")
+        [new] = after["bracket.deflection"] - before["bracket.deflection"]
+        self.assertEqual(read_control(project, "bracket.deflection", new)["bad"], "fail")
 
 
 # --------------------------------------------------------------------------- #
