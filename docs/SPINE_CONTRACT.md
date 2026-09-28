@@ -2177,6 +2177,8 @@ def scaffold(root, *, force=False) -> list                  # copy the template;
 def build(root, ledger, registry, view_registry, *, model=None, projection=None, now="",
           resolution=None) -> dict
 def state(root, ledger, registry, *, now="", stale=None, resolution=None) -> dict   # state.json
+def judgement_digest(payload) -> str                        # sha256 of what a state document judged
+def judgement_moved(shown, now) -> list[str]                # "C1 pass -> fail": what a rebuild would change
 def clean_assets(root, keep) -> list                        # delete unreferenced site/assets/ files
 def vendor_urls() -> dict                                   # {site-relative path: URL} for `site vendor`
 ```
@@ -2195,7 +2197,16 @@ opinions about one ledger (the site renders the ledger; it never computes truth)
 `now` is the caller's timestamp: without it every `age_s` is `null`, never 0, since
 an age of zero renders as "just now". `meta.records_digest` is `store.records_digest(root)`
 at build time — which records the page was built from; the CLI's site staleness compares
-it with the records now (see `cli.py`), never an mtime.
+it with the records now (see `cli.py`), never an mtime. `meta.judgement_digest` is
+`judgement_digest` of the finished document, set last by `state` itself: a sha256 over
+everything but the clock (`built`, each row's `when` and `age_s`), the two digests,
+`views` and `locator_problems` — a deny-list, so a key a later `state` adds is judged by
+default. It is the other half of what the page was built from: the resolver's judgement
+of the verdict cache against the live model, which no record holds (review,
+`repro_site`: a `check` that FAILed C1 moved no record, and the page's C1 PASS read
+current). `judgement_moved(shown, now)` names what a rebuild would change — claims whose
+status moved, else verdict rows whose outcome or measurement did — for the reason line;
+it reads both documents and judges neither.
 
 A locator is never dropped for being undrawable: it stays on its verdict, and
 `locator_problems` publishes the problem beside it in `state.json`, because a gate
@@ -2341,8 +2352,18 @@ def _input_bytes(root, artifact, digests) -> dict
   `doctor`) compares the page's `meta.records_digest` with `store.records_digest(root)`
   now (cli:H16) — never mtimes, which the index rewrite on every command made
   meaningless: a page of unchanged records read stale after any `status`, and a record
-  edited by hand before the index caught up read current. A page with no digest (an
-  older build) reads stale.
+  edited by hand before the index caught up read current. Then its
+  `meta.judgement_digest` with the digest of the document a rebuild would write now
+  (`_site_judgement`: `site.state` over `_resolved`'s view — the caller's
+  `resolved=(view, registry, resolution)` from `status` and `doctor`, or resolved there
+  as `status` resolves, strict=False and `_projection_safe`; no gate, fixture or
+  viewgen runs). What slipped through with the records alone (review, `repro_site`): a
+  check that FAILed C1 moved no record, and all three called a page still showing C1
+  PASS "current with the records". A moved judgement reads "the verdicts have changed
+  since the site was built (C1 pass -> fail) — `atompipe site build`"
+  (`site.judgement_moved`, at most `verdicts.MAX_STALE_REASONS` named); `status`'s
+  `site:` line carries that reason, never a fixed sentence. A page with either digest
+  missing (an older build) reads stale.
 - **`last_check.json`'s `params`** is `{name: modelio.ParamView.to_dict()}` from
   `modelio.param_view` at the end of a recorded full `check`: the model's values and
   what lost, beside the statuses — the agent's second read.

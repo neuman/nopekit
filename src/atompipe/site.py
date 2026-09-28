@@ -87,6 +87,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import fnmatch
+import json
 import os
 import posixpath
 import shutil
@@ -109,6 +110,7 @@ from .util import (
     atomic_write_json,
     atomic_write_text,
     ensure_dir,
+    sha256_text,
 )
 
 __all__ = [
@@ -133,6 +135,8 @@ __all__ = [
     "scaffold",
     "build",
     "state",
+    "judgement_digest",
+    "judgement_moved",
     "clean_assets",
     "vendor_urls",
 ]
@@ -1846,7 +1850,7 @@ def state(
     views = [v.to_dict() for v in view.views]
     problems = locator_problems(view.views, view.verdicts)
 
-    return {
+    payload = {
         "meta": {
             **view.meta.to_dict(),
             "built": now,
@@ -1858,7 +1862,9 @@ def state(
             # page's own staleness (`cli._site_state`) compares it with the
             # records now. What it replaced compared mtimes with `ledger.json`,
             # which from 1.3 is a generated index every command rewrites — a page
-            # of unchanged records read stale after any `status` (cli:H16).
+            # of unchanged records read stale after any `status` (cli:H16). The
+            # records are half of what the page renders; `judgement_digest`, set
+            # below, is the other half.
             "records_digest": store.records_digest(root),
             # Stated on the artifact itself, because someone will find this file
             # on its own and wonder whether editing it does anything.
@@ -1891,6 +1897,104 @@ def state(
         "gaps": [need.to_dict() for need in report_logic._needs(view, registry)],
         "decisions": [decision.to_dict() for decision in view.decisions],
     }
+    # What this page judged, so `cli._site_state` can ask whether a rebuild now
+    # would judge the same (`judgement_digest`). Set last, over the finished
+    # document, and by this function, so the build's digest and the reader's are
+    # one computation over one producer's output and cannot drift apart.
+    payload["meta"]["judgement_digest"] = judgement_digest(payload)
+    return payload
+
+
+# --------------------------------------------------------------------------- #
+# what a page judged
+# --------------------------------------------------------------------------- #
+#: What ``judgement_digest`` leaves out of a ``state`` document: the clock — the
+#: build's ``built`` stamp, and each verdict row's ``when`` (the obs run that
+#: last hit or wrote its entry) and ``age_s`` — the two digests, and the views
+#: with their ``locator_problems``. Everything else is judged, including keys a
+#: later ``state`` adds: a new clock-like key makes pages read stale after every
+#: check, which someone sees the same day; an unwatched judgement is the defect
+#: this digest exists for (review, ``repro_site``). *Rejected:* an allow-list of
+#: judged keys, which fails silent in exactly that direction; judging ``when``,
+#: which a check that changed nothing moves (a cache hit is an obs run), so every
+#: sweep would send the reader to rebuild a page whose every verdict still
+#: stands (cli:H16's complaint, in a new place). The views are page furniture,
+#: drawn by viewgens that a reader asking "is the page current?" never runs: a
+#: model edit that moves no verdict leaves the judgement current and the drawing
+#: old, and ``site build`` redraws it. Not a claim — no verdict rests on a view.
+_UNJUDGED_META = frozenset({"built", "records_digest", "judgement_digest"})
+_UNJUDGED_ROW = frozenset({"when", "age_s"})
+_UNJUDGED_KEYS = frozenset({"views", "locator_problems"})
+
+
+def judgement_digest(payload: Any) -> str:
+    """sha256 over what a ``state`` document judged: its claim statuses and
+    PARTIAL markers, the readiness sentence and counts, every verdict row with
+    how the resolver reached it (``cached``, ``fresh``, ``stale_reason``), the
+    parameters with the gates that read them, the gaps and the records it shows
+    — everything but ``_UNJUDGED_*``.
+
+    Why it exists: a page renders the records AND the resolver's judgement of
+    the verdict cache against the live model, and ``meta.records_digest`` sees
+    only the first. A ``check`` that FAILed C1 moved no record, so ``site
+    status``, ``status`` and ``doctor`` read a page showing C1 PASS as "current
+    with the records" (review, ``repro_site``). Before checkpoint 1.3 the check
+    rewrote ``ledger.json`` and the mtime rule caught it. *Rejected:* a
+    fingerprint of the files the resolution read (``verdicts.watched_paths``) —
+    a second opinion about whether the resolution moved, blind to what is not a
+    watched file (``controls.json`` admitting a control, a remembered crash, a
+    solver installed or removed); this asks the one resolver (R-5) and compares
+    its answer. Never a judgement itself: the page computes nothing from it.
+    """
+    meta = {key: value for key, value in (payload.get("meta") or {}).items()
+            if key not in _UNJUDGED_META}
+    rows = [{key: value for key, value in dict(row).items() if key not in _UNJUDGED_ROW}
+            for row in payload.get("verdicts") or ()]
+    judged = {key: value for key, value in payload.items()
+              if key not in _UNJUDGED_KEYS and key not in ("meta", "verdicts")}
+    judged["meta"], judged["verdicts"] = meta, rows
+    # allow_nan: a digest is not a file, and `atomic_write_json` already refuses
+    # the page a NaN names (S-47); refusing here too would turn "is the page
+    # current?" into a crash of `status`, the command run when something is wrong.
+    text = json.dumps(judged, sort_keys=True, ensure_ascii=False, allow_nan=True,
+                      separators=(",", ":"))
+    return sha256_text("atompipe-judgement-v1\n" + text)
+
+
+def judgement_moved(shown: Any, now: Any) -> list[str]:
+    """What a page shows that a rebuild would not, as short facts: each claim
+    whose status moved (``C1 pass -> fail``, ``C9 (none) -> pending`` for one
+    the page lacks), else each verdict row whose outcome or measurement moved
+    (``g.one pass 0.41 mm -> pass 0.29 mm``; ``… (stale)`` on a row that does
+    not count), in the documents' order. ``[]`` when neither moved — the
+    readiness, a parameter's gates, a stale reason's words: the caller then says
+    only THAT it moved. ``shown`` is the page's ``state.json``, ``now`` a
+    ``state`` document built now; both are read, never judged again."""
+    def claims_of(doc: Any) -> dict[str, str]:
+        return {str(row.get("id")): str(row.get("status") or "")
+                for row in (doc.get("claims") or ())}
+
+    def row_of(row: Any) -> str:
+        said = [str(row.get("status") or "")]
+        measured = row.get("measured")
+        if isinstance(measured, (int, float)) and not isinstance(measured, bool):
+            said.append(f"{measured:g}" + (f" {row['units']}" if row.get("units") else ""))
+        if row.get("stale_reason"):
+            said.append("(stale)")
+        return " ".join(said)
+
+    def gates_of(doc: Any) -> dict[str, str]:
+        return {str(row.get("gate")): row_of(row) for row in (doc.get("verdicts") or ())}
+
+    moved: list[str] = []
+    for before, after in ((claims_of(shown), claims_of(now)), (gates_of(shown), gates_of(now))):
+        for key in [*after, *(k for k in before if k not in after)]:
+            if before.get(key) != after.get(key):
+                moved.append(f"{key} {before.get(key) or '(none)'} -> "
+                             f"{after.get(key) or '(none)'}")
+        if moved:
+            return moved
+    return moved
 
 
 def _param_row(param: Any) -> dict:

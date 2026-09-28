@@ -39,6 +39,9 @@ from atompipe.models import (
 )
 from atompipe.util import AtompipeError
 
+import _env
+import _projects
+
 #: A three-plate stack: thin in z (9), widest in x (40). Used by the explode
 #: tests and by the fixture viewgen, so the node names the locator tests aim at
 #: are the same names a real `model3d` view would publish.
@@ -506,6 +509,65 @@ class StateIsJson(_SiteCase):
         _capture(["site", "build", "-C", self.root])
         self.assertIsInstance(self._state(), dict)
 
+    def test_the_judgement_digest_moves_with_a_judgement_and_not_with_the_clock(self):
+        """`meta.judgement_digest` is what the page judged (review, `repro_site`).
+
+        The negative half: the clock and the drawing move it not at all, or every
+        check would send the reader to rebuild a page whose verdicts all stand.
+        The positive half: a verdict's outcome, a claim's status, and a key no
+        one has classified yet each move it — the deny-list's direction, so a
+        judgement a later `state` adds is never silently unwatched."""
+        self._ledger(claims=[self._claim("C1")],
+                     verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
+                                       measured=0.31, limit=0.5, units="mm")])
+        payload = site_mod.state(self.root, store_mod.load(self.root),
+                                 self._registry(self._spec("g.one")),
+                                 now="2026-01-01T00:00:00Z")
+        digest = payload["meta"]["judgement_digest"]
+        self.assertEqual(site_mod.judgement_digest(payload), digest,
+                         "the digest `state` set is not the digest of what it returned")
+
+        def moved(change) -> bool:
+            copy = json.loads(json.dumps(payload))
+            change(copy)
+            return site_mod.judgement_digest(copy) != digest
+
+        def clock(doc):
+            doc["meta"]["built"] = "2027-01-01T00:00:00Z"
+            doc["verdicts"][0]["when"] = "2027-01-01T00:00:00Z"
+            doc["verdicts"][0]["age_s"] = 5.0
+            doc["meta"]["records_digest"] = "0" * 64
+            doc["views"] = [{"id": "assembly"}]
+            doc["locator_problems"] = [{"gate": "g.one"}]
+
+        self.assertFalse(moved(clock), "the clock or the drawing moved the judgement")
+        self.assertTrue(moved(lambda d: d["verdicts"][0].update(status="fail")))
+        self.assertTrue(moved(lambda d: d["verdicts"][0].update(fresh=True)))
+        self.assertTrue(moved(lambda d: d["claims"][0].update(status="pass")))
+        self.assertTrue(moved(lambda d: d["readiness"].update(ready=True)))
+        self.assertTrue(moved(lambda d: d.update(results=[{"claim": "C1"}])),
+                        "a key `state` adds later went unjudged")
+        self.assertTrue(moved(lambda d: d["meta"].update(stale_reason="")))
+
+    def test_what_moved_is_named_claims_first(self):
+        """The reason names what the page shows that a rebuild would not."""
+        shown = {"claims": [{"id": "C1", "status": "pass"}, {"id": "C2", "status": "pass"}],
+                 "verdicts": [{"gate": "g.one", "status": "pass", "measured": 0.41,
+                               "units": "mm", "stale_reason": ""}]}
+        now = json.loads(json.dumps(shown))
+        self.assertEqual(site_mod.judgement_moved(shown, now), [])
+        now["verdicts"][0].update(measured=0.29)
+        self.assertEqual(site_mod.judgement_moved(shown, now),
+                         ["g.one pass 0.41 mm -> pass 0.29 mm"])
+        now["verdicts"][0].update(stale_reason="config.thickness 8.0 -> 6.0")
+        self.assertEqual(site_mod.judgement_moved(shown, now),
+                         ["g.one pass 0.41 mm -> pass 0.29 mm (stale)"])
+        now["claims"][0].update(status="fail")
+        now["claims"].append({"id": "C9", "status": "pending"})
+        del now["claims"][1]
+        self.assertEqual(site_mod.judgement_moved(shown, now),
+                         ["C1 pass -> fail", "C9 (none) -> pending", "C2 pass -> (none)"])
+
 
 # --------------------------------------------------------------------------- #
 class HonestyOnThePage(_SiteCase):
@@ -794,6 +856,44 @@ class SiteStatusReports(_SiteCase):
         self.assertTrue(info["stale"])
         self.assertIn("site build", info["stale_reason"])
 
+    def test_a_verdict_written_after_the_build_reads_as_stale(self):
+        """A stale sweep must LOOK stale, and so must a stale page — the case
+        the `records_digest` rewrite lost (review, `repro_site`).
+
+        What this replaced touched `ledger.json` after the build, which is what
+        a `check` did before checkpoint 1.3: the verdicts lived in the ledger.
+        They live in the verdict cache now, which no record digest covers, so
+        its replacement edited a claim file and no longer guarded the risk it
+        was named for (R-6): a sweep lands after the build, not one record
+        moves, and the page still shows what it showed. `meta.judgement_digest`
+        is what the page judged; `_site_state` asks the resolver again."""
+        from atompipe import verdicts as verdicts_mod
+
+        self._ledger(claims=[self._claim("C1")],
+                     verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
+                                       measured=0.31, limit=0.5, units="mm")])
+        _capture(["site", "init", "-C", self.root])
+        _capture(["site", "build", "-C", self.root])
+        info = cli_mod._site_state(self.root)
+        self.assertFalse(info["stale"], info["stale_reason"])
+
+        # The sweep lands after the build: a verdict into the cache, no record.
+        records = store_mod.records_digest(self.root)
+        verdicts_mod.record_verdict(self.root, None, None, Verdict(
+            gate="g.two", claims=["C1"], passed=False, measured=0.71, limit=0.5,
+            units="mm"))
+        self.assertEqual(store_mod.records_digest(self.root), records,
+                         "the precondition: not one record moved")
+        info = cli_mod._site_state(self.root)
+        self.assertTrue(info["stale"], "a verdict the page does not show read current")
+        self.assertIn("site build", info["stale_reason"])
+
+        # The positive control: a rebuild shows it, and is current again.
+        _capture(["site", "build", "-C", self.root])
+        self.assertIn("g.two", [row["gate"] for row in self._state()["verdicts"]])
+        info = cli_mod._site_state(self.root)
+        self.assertFalse(info["stale"], info["stale_reason"])
+
     def test_status_and_doctor_mention_a_site_that_exists(self):
         self._ledger(claims=[self._claim("C1")])
         _capture(["site", "init", "-C", self.root])
@@ -823,6 +923,111 @@ class SiteStatusReports(_SiteCase):
         info = cli_mod._site_state(self.root)
         self.assertFalse(info["vendored"])
         self.assertEqual(info["vendor_files"], 1)
+
+
+# --------------------------------------------------------------------------- #
+class ThePageIsCurrentOnlyWithItsVerdicts(_env.EnvCase):
+    """Whether the PAGE is current, asked of what the page renders.
+
+    `state.json` renders the records AND the resolver's judgement of the verdict
+    cache against the live model. The records are one digest; the judgement is
+    neither in it nor in any record, so a page can be built from the records as
+    they are now and still show a PASS that every other reader calls FAIL.
+    """
+
+    def _run(self, project: str, *argv: str):
+        proc = _env.atompipe(list(argv), cwd=project)
+        self.assertIn(proc.returncode, (0, 1),
+                      f"{' '.join(argv)} crashed:\n{proc.stdout}\n{proc.stderr}")
+        return proc
+
+    def _json(self, project: str, *argv: str) -> dict:
+        proc = self._run(project, *argv, "--json")
+        try:
+            return json.loads(proc.stdout)
+        except ValueError as exc:                  # pragma: no cover - reported
+            raise AssertionError(f"{' '.join(argv)} --json: {exc}\n{proc.stdout}")
+
+    def _page(self, project: str) -> dict:
+        path = os.path.join(project, site_mod.SITE_DIR, site_mod.DATA_DIR,
+                            site_mod.STATE_NAME)
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _says_current(self, project: str, why: str) -> None:
+        """Every reader of the page's staleness says current: `site status`,
+        `status` (text and JSON) and `doctor`."""
+        shown = self._json(project, "site", "status")
+        self.assertFalse(shown["stale"], f"{why}: {shown['stale_reason']}")
+        self.assertFalse(self._json(project, "status")["site"]["stale"], why)
+        self.assertNotIn("STALE", self._site_line(project), why)
+        self.assertEqual(self._doctor_row(project)["status"], "ok", why)
+
+    def _site_line(self, project: str) -> str:
+        [line] = [text for text in self._run(project, "status").stdout.splitlines()
+                  if text.startswith("site:")]
+        return line
+
+    def _doctor_row(self, project: str) -> dict:
+        [row] = [row for row in self._json(project, "doctor")["checks"]
+                 if row["check"] == "site"]
+        return row
+
+    def test_cli_a_check_that_fails_a_claim_leaves_the_page_stale(self):
+        """V: the review's repro (``repro_site``). A page built while C1 passed,
+        then the model thinned from 8 mm to 6 mm and a ``check`` that FAILs C1:
+        ``status`` printed ``[FAIL ] C1`` and, two lines down, ``site: … built
+        0.8s ago``; ``site status`` said "current with the records", ``doctor``
+        ``[ok] site``, and the page still read C1 PASS and ready. The staleness
+        compared ``records_digest`` only, and a check moves no record: before
+        checkpoint 1.3 it rewrote ``ledger.json`` and the mtime rule caught it,
+        and the rewrite's test edited a claim file instead, so nothing guarded
+        the case any more (R-6)."""
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"),
+                                         thickness=8.0, migrated=True)
+        self._run(project, "check")
+        self.assertEqual(self._json(project, "status")["claims"]["C1"], "pass",
+                         "the precondition: C1 passes at 8 mm")
+        self.assertEqual(self._run(project, "site", "init").returncode, 0)
+        self.assertEqual(self._run(project, "site", "build").returncode, 0)
+        [shown] = [row for row in self._page(project)["claims"] if row["id"] == "C1"]
+        self.assertEqual(shown["status"], "pass", "the precondition: the page shows C1 PASS")
+
+        # The negative half (cli:H16's property, kept): readers and a check that
+        # changes nothing leave a current page current.
+        self._says_current(project, "a page read stale straight after its own build")
+        self._run(project, "check")
+        self._says_current(project, "a check that changed nothing made the page stale")
+
+        # The model moves and nothing has run: a rebuild would read C1 STALE,
+        # so the page's PASS is already not current.
+        _projects.set_thickness(project, 6.0)
+        shown = self._json(project, "site", "status")
+        self.assertTrue(shown["stale"], "a model edit left the page's PASS current")
+
+        # The check lands: C1 FAILs everywhere but on the page.
+        self.assertEqual(self._run(project, "check").returncode, 1)
+        self.assertEqual(self._json(project, "status")["claims"]["C1"], "fail",
+                         "the precondition: the check fails C1")
+        [shown] = [row for row in self._page(project)["claims"] if row["id"] == "C1"]
+        self.assertEqual(shown["status"], "pass", "the precondition: nothing rebuilt the page")
+        shown = self._json(project, "site", "status")
+        self.assertTrue(shown["stale"], "site status read a page showing C1 PASS as current "
+                                        "after a check that FAILs it")
+        self.assertIn("site build", shown["stale_reason"])
+        self.assertIn("C1 pass -> fail", shown["stale_reason"],
+                      "the reason must name what the page shows that is no longer so")
+        self.assertTrue(self._json(project, "status")["site"]["stale"])
+        self.assertIn("STALE", self._site_line(project))
+        row = self._doctor_row(project)
+        self.assertEqual(row["status"], "warn", row)
+        self.assertIn("C1 pass -> fail", row["detail"])
+
+        # The positive control: a rebuild shows the FAIL and is current again.
+        self.assertEqual(self._run(project, "site", "build").returncode, 0)
+        [shown] = [row for row in self._page(project)["claims"] if row["id"] == "C1"]
+        self.assertEqual(shown["status"], "fail")
+        self._says_current(project, "a rebuilt page read stale")
 
 
 # --------------------------------------------------------------------------- #

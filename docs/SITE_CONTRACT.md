@@ -222,6 +222,7 @@ was the one a reader of the contract would never look for.
                 "built": …, "stale": true,
                 "stale_reason": "bracket.bed_fit: config.bed_xy 220.0 -> 250.0",
                 "records_digest": "<64 hex>",           // the records it was built from
+                "judgement_digest": "<64 hex>",         // what it judged from them
                 "generated": "atompipe site build — an output … not a source …" },
   "readiness": { "verdict": "…one honest sentence…", "counts": {…}, "kinds": {…},
                  "ready": false, "blocking": ["C1", "C7"], "n_claims": 7, "n_critical": 7,
@@ -290,7 +291,8 @@ where the page's staleness lives.
 | `built` | the CLI's clock, stamped once per `site build` | when the page was built — never when a gate ran (each row's `when`) |
 | `stale` | the resolution: any row not current | whether the VERDICTS are current |
 | `stale_reason` | the resolution | the stale gates with their reasons (the first three, then `(+n more)`) |
-| `records_digest` | `store.records_digest(root)` at build time | which records the page was built from — whether the PAGE is current |
+| `records_digest` | `store.records_digest(root)` at build time | which records the page was built from — whether the PAGE is current, half one |
+| `judgement_digest` | `site.judgement_digest` of this document, set last by `site.state` | what the page judged from the records and the verdict cache — whether the PAGE is current, half two |
 | `generated` | a constant | that this file is an output of the records and the verdict cache, not a source |
 
 - `stale` and `stale_reason` answer for the verdicts, per gate. There is no sweep
@@ -298,8 +300,8 @@ where the page's staleness lives.
   one sweep's time and one model hash could say THAT something moved, never which
   result it touched.
 - `records_digest` is a sha256 over the record files' paths and bytes and
-  `.atompipe/project.json` (on a legacy project, its `ledger.json`). It is how the
-  PAGE's own staleness is decided — a different question from `stale`:
+  `.atompipe/project.json` (on a legacy project, its `ledger.json`). It is the first
+  half of how the PAGE's own staleness is decided — a different question from `stale`:
   `atompipe site status`, `status` and `doctor` compare it with the records now, and a
   page whose records moved reads "the records have changed since the site was built",
   with the fix, `atompipe site build` (a page with no digest, from an older build,
@@ -308,6 +310,27 @@ where the page's staleness lives.
   rewrites, so a page built from unchanged records read stale after any `status`, and
   a record edited by hand read current until a command caught the index up (cli:H16).
   The page itself computes nothing from it.
+- `judgement_digest` is a sha256 over this document less the clock (`meta.built`, each
+  verdict row's `when` and `age_s`), the two digests, `views` and `locator_problems`:
+  the claim statuses and PARTIAL markers, the readiness, every verdict row with
+  `cached`, `fresh` and `stale_reason`, the parameters with the gates that read them,
+  the gaps and the records shown. The page renders the resolver's judgement of the
+  verdict cache against the live model, which no record holds: a `check` that FAILs C1
+  moves no record, and with `records_digest` alone `site status`, `status` and `doctor`
+  called a page still showing C1 PASS "current with the records" (review,
+  `repro_site`). So, once the records match, the three build the document a rebuild
+  would write now — `site.state` over the same resolution `status` prints, never
+  running a gate, fixture or viewgen — and compare its digest. A page whose judgement
+  moved reads "the verdicts have changed since the site was built", naming up to three
+  claims whose status moved (`C1 pass -> fail`), else the verdict rows that did, with
+  the fix, `atompipe site build`; a page with no `judgement_digest` (an older build)
+  reads stale too. A model edited and not yet checked moves it as well: a rebuild would
+  show those rows stale. The clock is left out because a `check` that changed nothing
+  moves every `when` (a cache hit is an obs run); the views because they are drawn by
+  viewgens the question never runs, and no verdict rests on a view — a model edit no
+  gate reads leaves the judgement current and the drawing old until `site build`.
+  Anything a later `state` adds is judged by default. The page computes nothing from
+  it either.
 
 ## What the page must show
 

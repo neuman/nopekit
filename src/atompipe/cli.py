@@ -1096,7 +1096,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     undefended = [p.name for p in view.params if not (p.rationale or "").strip()]
     summary = claims.summarise(view, registry, stale_gates=stale_gates)
     resolved = claims.statuses(view, registry=registry, stale_gates=stale_gates)
-    site_info = _site_state(root)
+    site_info = _site_state(root, resolved=(view, registry, resolution))
     last = _last_check(root)
     last_when = str(last.get("when") or "")
     last_age = _seconds_between(last_when, now) if last_when else None
@@ -3450,28 +3450,40 @@ def _view_registry(root: str, ledger: Ledger, *,
     return registry, problems
 
 
-def _site_state(root: str) -> dict:
-    """What is on disk under `site/`, read-only and running nothing.
+def _site_state(root: str, *, resolved: tuple | None = None) -> dict:
+    """What is on disk under `site/`, read-only, running no gate, fixture or
+    viewgen.
 
     Shared by `site status`, `status` and `doctor` so the three cannot drift
     into three opinions about whether the site is current — which is the
     property the site itself exists to have.
 
-    Staleness here is the SITE's staleness (were the records the page was built
-    from moved since?), which is a different question from the verdicts'
-    staleness (did a gate's inputs move since its verdict?). Both are reported,
-    separately, because the fixes are different commands: `atompipe site build`
-    for the first and `atompipe check` for the second. Collapsing them into one
-    "stale" flag sends half the readers to the wrong one.
+    Staleness here is the SITE's staleness (would a rebuild now show something
+    else?), which is a different question from the verdicts' staleness (did a
+    gate's inputs move since its verdict?). Both are reported, separately,
+    because the fixes are different commands: `atompipe site build` for the
+    first and `atompipe check` for the second. Collapsing them into one "stale"
+    flag sends half the readers to the wrong one.
 
-    The page records the digest of the records it was built from
-    (`meta.records_digest`), and this compares it with `store.records_digest`
-    now (cli:H16). What it replaced compared the mtimes of `ledger.json` and
-    `state.json`: from checkpoint 1.3 `ledger.json` is a generated index that
-    every command rewrites, so a page built from unchanged records read stale
-    after any `status`, and a record edited by hand — before a command had
-    rebuilt the index — read current. A page with no digest was built by an
-    older spine and cannot say what it was built from: stale.
+    The page records what it was built from in two digests, and this compares
+    each with the same computation now. `meta.records_digest` against
+    `store.records_digest` (cli:H16): what it replaced compared the mtimes of
+    `ledger.json` and `state.json`, and from checkpoint 1.3 `ledger.json` is a
+    generated index every command rewrites, so a page built from unchanged
+    records read stale after any `status`, and a record edited by hand — before
+    a command had rebuilt the index — read current. Then `meta.judgement_digest`
+    against `site.state` over `_resolved`'s view now (`_site_judgement`): what
+    slipped through with the records alone (review, `repro_site`) — a check
+    that FAILed C1 moved no record, so all three readers called a page showing
+    C1 PASS and ready "current with the records". A page with either digest
+    missing was built by an older spine and cannot say what it was built from:
+    stale.
+
+    `resolved` — the caller's `(view, registry, resolution)`, from `_resolved`
+    with the registry it loaded, so `status` and `doctor` judge the page by the
+    resolution they print. Without it this resolves for itself exactly as they
+    do (strict=False, `_projection_safe`): it loads the model and the gates, as
+    `status` does, because only the resolver can say what a rebuild would show.
     """
     site_dir = os.path.join(root, site.SITE_DIR)
     state_path = os.path.join(site_dir, site.DATA_DIR, site.STATE_NAME)
@@ -3549,6 +3561,7 @@ def _site_state(root: str) -> dict:
     info["verdicts"] = len(payload.get("verdicts") or [])
 
     built_from = str(meta.get("records_digest") or "")
+    judged_from = str(meta.get("judgement_digest") or "")
     try:
         records_now = store.records_digest(root)
     except (AtompipeError, OSError) as exc:
@@ -3560,13 +3573,57 @@ def _site_state(root: str) -> dict:
         info["stale"] = True
         info["stale_reason"] = ("the page does not say which records it was built from "
                                 "(an older build) — `atompipe site build`")
-    elif built_from != records_now:
+        return info
+    if built_from != records_now:
         info["stale"] = True
         info["stale_reason"] = ("the records have changed since the site was built "
                                 "— `atompipe site build`")
-    else:
-        info["stale_reason"] = "current with the records"
+        return info
+    if not judged_from:
+        info["stale"] = True
+        info["stale_reason"] = ("the page does not say which verdicts it was built from "
+                                "(an older build) — `atompipe site build`")
+        return info
+    try:
+        now = _site_judgement(root, resolved)
+    except (AtompipeError, OSError) as exc:
+        info["stale"] = True
+        info["stale_reason"] = (f"what the page would show now cannot be worked out "
+                                f"({exc}) — fix that, then `atompipe site build`")
+        return info
+    if now["meta"]["judgement_digest"] != judged_from:
+        moved = site.judgement_moved(payload, now)
+        shown = moved[:verdicts.MAX_STALE_REASONS]
+        more = len(moved) - len(shown)
+        named = (f" ({'; '.join(shown)}{f' (+{more} more)' if more > 0 else ''})"
+                 if shown else "")
+        info["stale"] = True
+        info["stale_reason"] = (f"the verdicts have changed since the site was built"
+                                f"{named} — `atompipe site build`")
+        return info
+    info["stale_reason"] = "current with the records and the verdicts"
     return info
+
+
+def _site_judgement(root: str, resolved: tuple | None) -> dict:
+    """The `state.json` a `site build` would write now, less its views: the one
+    producer (`site.state`) over the one resolution (`_resolved`, R-5), handed
+    in by the caller or resolved here the way `status` resolves — the gates
+    loaded with strict=False and the model through `_projection_safe`, because
+    the question is asked by the commands that must survive a broken pack or a
+    model mid-edit. Where `site build` would refuse (it loads both strictly),
+    this judges what the project resolves to now, which is not what the page
+    shows: stale, correctly. No viewgen runs: the views are not judged
+    (`site._UNJUDGED_KEYS`)."""
+    if resolved is None:
+        ledger = store.load(root)
+        registry, _problems = _registry(root, ledger, strict=False)
+        model, projection, model_error = _projection_safe(root, ledger)
+        view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                     now="", model=model)
+    else:
+        view, registry, resolution = resolved
+    return site.state(root, view, registry, resolution=resolution)
 
 
 def _site_brief(info: dict) -> dict:
@@ -3596,7 +3653,11 @@ def _site_line(info: dict) -> str:
     if dangling:
         bits.append(f"{dangling} dangling locator(s)")
     if info["stale"]:
-        bits.append("STALE: the records have moved — `atompipe site build`")
+        # The reason `_site_state` found, never a fixed sentence: this line said
+        # "the records have moved" for every stale page, and from the verdicts'
+        # digest on (review, `repro_site`) a page goes stale with every record
+        # where it was — sending the reader to diff claim files that never moved.
+        bits.append(f"STALE: {info['stale_reason']}")
     elif info["age"]:
         bits.append(f"built {info['age']}")
     return f"site: {', '.join(bits)}"
@@ -4916,7 +4977,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _doctor_seal_row(results, registry,
                      _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
 
-    site_info = _site_state(root)
+    site_info = _site_state(root, resolved=(view, registry, resolution))
     if site_info["present"]:
         # Only when there is a site. A doctor row about a surface the project
         # never opted into is a row that is always there and never actionable,
