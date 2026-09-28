@@ -11,7 +11,7 @@ is a fresh context window reading a map of a smaller spine than the one it is
 about to edit, and nothing turned red when the map fell behind (the drift behind
 S-10, S-11 and S-41).
 
-Five checkers, each a PURE function of text inputs so each violation test plants
+The checkers, each a PURE function of text inputs so each violation test plants
 a string instead of editing the tree:
 
     SpineModulesAreDocumented   every src/atompipe/*.py has its ### `<module>.py`
@@ -25,13 +25,30 @@ a string instead of editing the tree:
     SiteStateKeysAreDocumented  a real `site init` + `site build` on a copy of
                                 the bracket; every top-level state.json key and
                                 every file under site/data/ is in SITE_CONTRACT
+    SiteMetaKeysAreDocumented   ... and every key of its `meta`, in SITE_CONTRACT's
+                                ### `meta` table
     ClosedRowsResolve           a PLAN §3 row marked closed names tests that exist
+    ClosedRowsStayClosed        the rows Phase 1 closed stay marked closed
+    DocumentedNamesExist        the reverse: every name SPINE_CONTRACT writes in a
+                                module's section — a `name(` call form, a fenced
+                                def / class / CONSTANT, a member of a `class`
+                                block — exists in that module, and every member
+                                PACK_FORMAT's `class` blocks list exists
+    RemovedNamesAreGone         no document an agent reads names what Phase 1
+                                removed (the run history, the record-mutating
+                                commands, the old recorders)
 
-**One direction only during Phase 1: code ⊆ docs.** Inside a phase the unit that
-owns a contract document writes the other units' surfaces into it before their
-code merges, so a documented name with no code yet must stay green. The reverse
-direction — a contract describing a spine that no longer exists — lands with the
-Phase 1 commit, as `DocumentedNamesExist` and `RemovedNamesAreGone`.
+**Both directions, from the Phase 1 commit.** During the phase the check ran one
+way, code ⊆ docs: the unit that owned a contract document wrote the other units'
+surfaces into it before their code merged, so a documented name with no code yet
+had to stay green. What that left open is R-14's own stated failure — a contract
+describing a spine that no longer exists. Phase 1 deleted the run history, three
+commands, a flag and the CLI's recorders, and a code ⊆ docs check cannot see a
+paragraph that goes on documenting any of them: SPINE_CONTRACT still told its
+reader that the legacy save wrote "no `last_run`" and that `_ParamReads` had
+missed bulk reads, and SITE_CONTRACT still explained the absence of a
+`meta.last_run` — each a name a fresh context window would grep for and act on.
+`DocumentedNamesExist` and `RemovedNamesAreGone` close that direction.
 
 "Appears" is deliberately stronger than a substring anywhere in the file. A
 field called `id`, `note` or `kind` appears in every contract document by
@@ -44,7 +61,11 @@ Run:  PYTHONPATH=src python3 -m unittest tests.test_contracts -v
 from __future__ import annotations
 
 import ast
+import builtins
 import contextlib
+import dataclasses
+import glob
+import importlib
 import io
 import json
 import os
@@ -528,6 +549,440 @@ def closed_row_problems(plan: str, index: dict) -> list[str]:
     return problems
 
 
+#: The §3 rows Phase 1 closed, and the checkpoints each carries `closed` before.
+#: `ClosedRowsResolve` checks a closed row's tests exist; nothing there notices a
+#: row that stops SAYING closed — the cheapest way to make a deleted proof go
+#: green is to strike the word. So the Phase 1 closures are pinned: a later phase
+#: adds its own `closed` marks and never removes these. *Rejected:* pinning every
+#: Ph cell verbatim (every honest later closure would turn this red).
+PHASE_1_CLOSURES: dict[str, tuple[str, ...]] = {
+    # closed in every phase they list
+    "M2.1a": ("1.0", "1.1"), "M2.1b": ("1.0",), "M2.1c": ("1.2",),
+    "M2.1e": ("1.1", "1.2"), "M5.1": ("1",), "M11.1": ("1.2",), "M11.2": ("1.2",),
+    "M11.4": ("1.2", "1.3"), "M11.5": ("1.2",), "M11.7": ("1.2",), "M11.9": ("1.2",),
+    "M11.11": ("1.2",),
+    # partial: only their Phase 1 checkpoints are closed
+    "M0.1": ("1",), "M2.1d": ("1.1", "1.2"), "M2.2b": ("1.2",), "M3.L": ("1.2",),
+    "M3.C": ("1.2",), "M9.2": ("1.3",), "M11.3": ("1.2",), "M11.6": ("1.2",),
+    "M13.3": ("1.2",), "M13.7": ("1.2",), "M14.3": ("1.2",), "M14.6": ("1",),
+    "M18.3": ("1",), "M18.5": ("1",),
+}
+
+
+def closed_phases(ph: str) -> set[str]:
+    """The phases a Ph cell marks `closed` (`closed 1.2, 2.4` -> {"1.2"}),
+    by `row_is_closed`'s rule: parenthesised notes dropped first."""
+    text = re.sub(r"\([^)]*\)", " ", ph)
+    return {m.group(0) for m in re.finditer(r"(?<![\w.])\d+(?:\.\d+)?(?![\w.])", text)
+            if re.search(r"closed\s+$", text[:m.start()])}
+
+
+def closure_problems(plan: str, pinned: dict[str, tuple[str, ...]] = PHASE_1_CLOSURES
+                     ) -> list[str]:
+    """Pinned closures a §3 row no longer carries (or a pinned row that is gone)."""
+    rows = {row["id"]: row for row in gap_map_rows(plan)}
+    problems: list[str] = []
+    for row_id, phases in pinned.items():
+        row = rows.get(row_id)
+        if row is None:
+            problems.append(f"{row_id} was closed by Phase 1 and is no longer a §3 row")
+            continue
+        lost = [p for p in phases if p not in closed_phases(row["ph"])]
+        if lost:
+            problems.append(f"{row_id} was closed at {', '.join(lost)} by Phase 1 and "
+                            f"its Ph cell no longer says so: {row['ph']!r}")
+    return problems
+
+
+# -- the reverse direction: what the contracts name exists (Phase 1 commit) -- #
+#: A call form inside an inline code span — `name(`, `store.load(`,
+#: `ctx.param(`. A word followed by `(s)` is English ("control(s)"), not a call.
+CALL_FORM = re.compile(r"(?<![\w.])([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\((?!s\))")
+#: What a fenced line DEFINES at column 0 of a module's section: `def name(`,
+#: `class Name`, `CONSTANT = ...` or `CONSTANT: type` — one per `;` statement.
+_TOP_NAME = re.compile(r"^\s*(?:(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(|class\s+([A-Za-z_]\w*)"
+                       r"|([A-Z][A-Z0-9_]*)\s*(?::(?!:)|=(?!=)))")
+#: A member a `class` block lists: `name: type` or `name -> type` (a property) at
+#: the start of a statement, and every `def name(`. Comments are cut first.
+_MEMBER = re.compile(r"(?:^|;)\s*([A-Za-z_]\w*)\s*(?::(?!:)|->)")
+_MEMBER_DEF = re.compile(r"\bdef\s+([A-Za-z_]\w*)\s*\(")
+_CLASS_HEAD = re.compile(r"^(\s*)class\s+([A-Za-z_]\w*)\s*(?:\([^)]*\))?\s*:?(.*)$")
+PACKAGE = "atompipe"
+
+
+@dataclasses.dataclass
+class ModuleIndex:
+    """What one spine module binds, read from its AST (never by importing it).
+
+    `names` maps every top-level binding — a def, a class, an assignment, an
+    import, including those under a top-level `if`/`try` — to the node that
+    binds it; `params` is every parameter name of every function and method,
+    so a doc may write `run_all`'s hook as `before(spec, fn)`."""
+
+    names: dict[str, ast.AST]
+    classes: dict[str, ast.ClassDef]
+    params: frozenset[str]
+
+
+def _target_names(target: ast.expr) -> list[str]:
+    if isinstance(target, ast.Name):
+        return [target.id]
+    if isinstance(target, (ast.Tuple, ast.List)):
+        return [n for elt in target.elts for n in _target_names(elt)]
+    return []
+
+
+def _bind(body: list[ast.stmt], out: dict[str, ast.AST]) -> None:
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            out[node.name] = node
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                out[alias.asname or alias.name.split(".")[0]] = node
+        elif isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                out[alias.asname or alias.name] = node
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                out.update((n, node) for n in _target_names(target))
+        elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+            out.update((n, node) for n in _target_names(node.target))
+        elif isinstance(node, (ast.If, ast.Try, ast.With, ast.For, ast.While)):
+            for block in ("body", "orelse", "finalbody"):
+                _bind(getattr(node, block, []) or [], out)
+            for handler in getattr(node, "handlers", []) or []:
+                _bind(handler.body, out)
+
+
+def module_index(source: str, filename: str = "<module>") -> ModuleIndex:
+    tree = ast.parse(source, filename=filename)
+    names: dict[str, ast.AST] = {}
+    _bind(tree.body, names)
+    classes = {n: node for n, node in names.items() if isinstance(node, ast.ClassDef)}
+    params = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            a = node.args
+            params.update(arg.arg for arg in a.posonlyargs + a.args + a.kwonlyargs)
+            params.update(arg.arg for arg in (a.vararg, a.kwarg) if arg is not None)
+    return ModuleIndex(names=names, classes=classes, params=frozenset(params))
+
+
+def _class_members(node: ast.ClassDef) -> set[str]:
+    """What a class body binds, plus every `self.<x> = ...` in its methods —
+    `Registry.pack_dirs` is set in `__init__`, and is as much a member as a field."""
+    members: dict[str, ast.AST] = {}
+    _bind(node.body, members)
+    out = set(members)
+    for sub in ast.walk(node):
+        targets: list[ast.expr] = []
+        if isinstance(sub, ast.Assign):
+            targets = list(sub.targets)
+        elif isinstance(sub, (ast.AnnAssign, ast.AugAssign)):
+            targets = [sub.target]
+        for target in targets:
+            for elt in (target.elts if isinstance(target, (ast.Tuple, ast.List)) else [target]):
+                if (isinstance(elt, ast.Attribute) and isinstance(elt.value, ast.Name)
+                        and elt.value.id == "self"):
+                    out.add(elt.attr)
+    return out
+
+
+def _dotted(expr: ast.expr) -> str:
+    if isinstance(expr, ast.Name):
+        return expr.id
+    if isinstance(expr, ast.Attribute):
+        head = _dotted(expr.value)
+        return f"{head}.{expr.attr}" if head else ""
+    if isinstance(expr, ast.Subscript):          # Generic[T], NamedTuple[...] and the like
+        return _dotted(expr.value)
+    return ""
+
+
+def _import_target(node: ast.AST, name: str) -> tuple[str, str] | None:
+    """`(module path, attribute or "")` a name an import binds refers to; None when
+    the node is no import. `from . import store` -> ("atompipe.store", "")."""
+    if isinstance(node, ast.Import):
+        for alias in node.names:
+            if (alias.asname or alias.name.split(".")[0]) == name:
+                return (alias.name if alias.asname else alias.name.split(".")[0], "")
+    if isinstance(node, ast.ImportFrom):
+        base = node.module or ""
+        if node.level:
+            base = PACKAGE + (f".{base}" if base else "")
+        for alias in node.names:
+            if (alias.asname or alias.name) == name:
+                return (base, alias.name)
+    return None
+
+
+def _stdlib_has(module: str, attrs: list[str]) -> bool:
+    """Does `module.<attrs...>` exist? Only ever a standard-library module: the
+    spine imports nothing else (CI's AST walk)."""
+    try:
+        obj = importlib.import_module(module)
+    except ImportError:
+        return False
+    path = module
+    for attr in attrs:
+        path = f"{path}.{attr}"
+        if hasattr(obj, attr):
+            obj = getattr(obj, attr)
+            continue
+        try:
+            obj = importlib.import_module(path)
+        except ImportError:
+            return False
+    return True
+
+
+def resolves_in(parts: list[str], stem: str, indexes: dict[str, ModuleIndex],
+                _depth: int = 0) -> bool:
+    """Does the dotted name `parts` resolve in spine module `stem`'s namespace —
+    its bindings, then a spine module's qualified name, then the builtins?"""
+    if _depth > 12:                               # a cycle of re-exports: say no
+        return False
+    index = indexes[stem]
+    head, rest = parts[0], list(parts[1:])
+    if head in index.classes:
+        return not rest or has_member(stem, head, rest[0], indexes, _depth + 1)
+    node = index.names.get(head)
+    if node is not None:
+        target = _import_target(node, head)
+        if target is None:
+            return True       # a def or an assignment: it exists; what it holds is not read
+        module, attr = target
+        chain = ([attr] if attr else []) + rest
+        spine = module[len(PACKAGE) + 1:] if module.startswith(PACKAGE + ".") else ""
+        if module == PACKAGE and attr in indexes:  # from atompipe import store
+            return not rest or resolves_in(rest, attr, indexes, _depth + 1)
+        if spine in indexes:
+            return not chain or resolves_in(chain, spine, indexes, _depth + 1)
+        return _stdlib_has(module, chain)
+    if head in indexes:                           # `store.load(` written in another section
+        return not rest or resolves_in(rest, head, indexes, _depth + 1)
+    if hasattr(builtins, head):
+        obj = getattr(builtins, head)
+        for attr in rest:
+            if not hasattr(obj, attr):
+                return False
+            obj = getattr(obj, attr)
+        return True
+    return False
+
+
+def has_member(stem: str, cls: str, member: str, indexes: dict[str, ModuleIndex],
+               _depth: int = 0) -> bool:
+    """Does class `cls` of module `stem` define or inherit `member`? Bases are
+    followed through the spine, the standard library and the builtins."""
+    node = indexes[stem].classes.get(cls)
+    if node is None or _depth > 12:
+        return False
+    if member in _class_members(node) or hasattr(object, member):
+        return True
+    return any(base and resolves_in(base.split(".") + [member], stem, indexes, _depth + 1)
+               for base in map(_dotted, node.bases))
+
+
+def call_form_resolves(token: str, stem: str, indexes: dict[str, ModuleIndex]) -> bool:
+    """A call form written in `stem`'s section names something that exists: a name
+    in the module's namespace (bindings, a spine module's qualified name, a
+    builtin); a parameter of one of its functions, called (`loader(abspath)`); or
+    a member of a class it defines, bare (`self_modified()`) or reached through an
+    instance (`ctx.param(`)."""
+    parts = token.split(".")
+    if resolves_in(parts, stem, indexes):
+        return True
+    if len(parts) == 1 and parts[0] in indexes[stem].params:
+        return True
+    return any(has_member(stem, cls, parts[-1], indexes) for cls in indexes[stem].classes)
+
+
+def _class_chunks(lines: list[str]) -> list[tuple[str, list[str]]]:
+    """`(class name, [the head's remainder] + body lines)` for every `class` line
+    in `lines`, the body read the way `class_block` reads one."""
+    chunks: list[tuple[str, list[str]]] = []
+    i = 0
+    while i < len(lines):
+        match = _CLASS_HEAD.match(lines[i])
+        if not match:
+            i += 1
+            continue
+        indent, name, remainder = len(match.group(1)), match.group(2), match.group(3)
+        body = [remainder]
+        i += 1
+        while i < len(lines) and (not lines[i].strip()
+                                  or len(lines[i]) - len(lines[i].lstrip()) > indent):
+            body.append(lines[i])
+            i += 1
+        chunks.append((name, body))
+    return chunks
+
+
+def listed_members(body: list[str]) -> list[str]:
+    """The members a `class` block lists (`_MEMBER`, `_MEMBER_DEF`), comments cut."""
+    out: list[str] = []
+    for line in body:
+        code = line.split("#", 1)[0]
+        out += [m.group(1) for m in _MEMBER.finditer(code)]
+        out += [m.group(1) for m in _MEMBER_DEF.finditer(code)]
+    return out
+
+
+def documented_names(section: str) -> dict[str, list]:
+    """What a module's SPINE_CONTRACT section names, by kind: `calls` (tokens of
+    inline code spans), `defined` (fenced column-0 names) and `members`
+    (`(class, member)` from fenced `class` blocks)."""
+    calls: list[str] = []
+    defined: list[str] = []
+    fenced: list[str] = []
+    for line, in_fence in _lines_outside_fences(section):
+        if in_fence:
+            if not _FENCE.match(line):
+                fenced.append(line)
+                if not line[:1].isspace():
+                    for stmt in line.split("#", 1)[0].split(";"):
+                        match = _TOP_NAME.match(stmt)
+                        if match:
+                            defined.append(next(g for g in match.groups() if g))
+            continue
+        for span in re.findall(r"`([^`\n]+)`", line):
+            calls += CALL_FORM.findall(span)
+    members = [(cls, m) for cls, body in _class_chunks(fenced) for m in listed_members(body)]
+    return {"calls": calls, "defined": defined, "members": members}
+
+
+def spine_indexes(sources: dict[str, str]) -> dict[str, ModuleIndex]:
+    return {name[:-3]: module_index(src, name) for name, src in sources.items()
+            if name.endswith(".py") and name not in NOT_SPINE_MODULES}
+
+
+def documented_name_problems(sources: dict[str, str], contract: str) -> list[str]:
+    """Names SPINE_CONTRACT writes in a module's section that the module lacks.
+
+    The reverse of `spine_problems`: that one finds code the contract does not
+    describe, this one a contract describing code that is gone. A section that
+    is missing is `spine_problems`' report, not this one's."""
+    indexes = spine_indexes(sources)
+    problems: list[str] = []
+    for stem in sorted(indexes):
+        filename = f"{stem}.py"
+        section = md_section(contract, r"^###\s+`" + re.escape(filename) + "`")
+        if section is None:
+            continue
+        names = documented_names(section)
+        for token in dict.fromkeys(names["calls"]):
+            if not call_form_resolves(token, stem, indexes):
+                problems.append(f"{filename}: `{token}(` is written in its SPINE_CONTRACT "
+                                f"section and names nothing {filename} has")
+        index = indexes[stem]
+        for name in dict.fromkeys(names["defined"]):
+            if name not in index.names:
+                problems.append(f"{filename}: its SPINE_CONTRACT section defines `{name}`, "
+                                f"which {filename} does not")
+        for cls, member in dict.fromkeys(names["members"]):
+            if cls in index.classes and not has_member(stem, cls, member, indexes):
+                problems.append(f"{filename}: SPINE_CONTRACT's `class {cls}` block lists "
+                                f"`{member}`, which {cls} does not have")
+    return problems
+
+
+def pack_member_problems(sources: dict[str, str], pack_format: str,
+                         surface=PACK_SURFACE) -> list[str]:
+    """Members PACK_FORMAT's `class` blocks list that the class does not have —
+    `pack_surface_problems` turned round."""
+    indexes = spine_indexes(sources)
+    problems: list[str] = []
+    for where, name, _groups in surface:
+        stem = where[:-3]
+        block = class_block(pack_format, name)
+        if block is None or stem not in indexes:
+            continue                               # the forward checker reports these
+        lines = [line for line in block.splitlines() if line.strip()]
+        head = _CLASS_HEAD.match(lines[0]) if lines else None
+        body = ([head.group(3)] if head else []) + lines[1:]
+        for member in dict.fromkeys(listed_members(body)):
+            if not has_member(stem, name, member, indexes):
+                problems.append(f"PACK_FORMAT's `class {name}` block lists `{member}`, "
+                                f"which {where}'s {name} does not have")
+    return problems
+
+
+# -- RemovedNamesAreGone -------------------------------------------------- #
+#: What Phase 1 removed, each with what replaced it. A document that still names
+#: one sends a reader after an API, a record or a command that is not there —
+#: argparse answers `invalid choice`, the import fails, the key is never written.
+#: *Rejected:* scanning only code spans (prose that says "run claim add" misleads
+#: exactly as much); a list derived from a diff (the names are few, and each needs
+#: its replacement said).
+REMOVED_NAMES: tuple[tuple[str, str], ...] = (
+    ("RunMeta", "the run record went at 1.2: git and the verdict cache are the history"),
+    ("record_run", "the run history went at 1.2 (S-89)"),
+    ("load_runs", "the run history went at 1.2 (S-31)"),
+    ("runs_dir", "the run history went at 1.2"),
+    ("RUNS_NAME", "the run history went at 1.2"),
+    ("last_run", "the ledger's sweep record went at 1.2: staleness is per gate, and the "
+                 "last full check is .atompipe/cache/last_check.json"),
+    ("_ParamReads", "the CLI's flat read recorder went at 1.2: verdicts.ParamTrace"),
+    ("_staleness", "the global staleness rule went at 1.2: verdicts.freshness and resolve"),
+    ("sync_params", "the parameter sync went at 1.3: modelio.param_view reads the model"),
+    ("claim add", "went at 1.3 (A-8): a claim is the file claims/<id>.json"),
+    ("claim edit", "went at 1.3 (A-8): edit claims/<id>.json"),
+    ("packs remove", "went at 1.3 (A-8): delete the name from packs in .atompipe/project.json"),
+    ("--set-entry", "went at 1.3 (A-8): \"model_entry\" in .atompipe/project.json"),
+    ("gate --selftest", "never parsed: the command is `gate selftest`"),
+    ("decide --when", "went at 1.3 (S-44): it backdated a decision; the edge stamps the time"),
+)
+
+#: The documents an agent reads for how atompipe works: the contract documents, the
+#: skills, README and CLAUDE.md (spec §3.16), and — because a removed name misleads
+#: from them as much — the rest of what `test_docs_commands` reads for commands.
+#: Never `docs/*.md`: the plan documents quote the removed names as the history
+#: they record, and the user's untracked draft lives there.
+REMOVED_NAME_DOCS = (
+    "README.md", "CLAUDE.md", "CONTRIBUTING.md", "METHOD.md",
+    "docs/SPINE_CONTRACT.md", "docs/PACK_FORMAT.md", "docs/SITE_CONTRACT.md",
+    "docs/EXTENSION_PROTOCOL.md",
+)
+REMOVED_NAME_GLOBS = ("skills/*/SKILL.md", "packs/*/PACK.md", "packs/*/references/*.md")
+
+
+def _removed_pattern(name: str) -> re.Pattern:
+    """An identifier as a whole identifier (`test_staleness` is not `_staleness`);
+    a command or flag as whole words, any whitespace between them (a line break
+    included), never a prefix (`claim edited` is not `claim edit`)."""
+    if re.fullmatch(r"[A-Za-z_]\w*", name):
+        return re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
+    words = r"\s+".join(re.escape(w) for w in name.split())
+    return re.compile(r"(?<![\w-])" + words + r"(?![\w-])")
+
+
+def removed_name_problems(docs: dict[str, str],
+                          names: tuple[tuple[str, str], ...] = REMOVED_NAMES) -> list[str]:
+    """`<path>:<line>: names <name> — <why>` for every removed name a document writes."""
+    problems: list[str] = []
+    for path in sorted(docs):
+        text = docs[path]
+        for name, why in names:
+            for match in _removed_pattern(name).finditer(text):
+                line = text.count("\n", 0, match.start()) + 1
+                problems.append(f"{path}:{line}: names `{name}`, which is gone — {why}")
+    return problems
+
+
+def site_meta_problems(meta_keys, site_contract: str) -> list[str]:
+    """`state.json` `meta` keys missing from SITE_CONTRACT's ### `meta` table.
+
+    Looked for in that subsection only: `name`, `summary` and `created` are in
+    every document by accident, so "somewhere" proves nothing."""
+    section = md_section(site_contract, r"^###\s+`meta`")
+    if section is None:
+        return ["SITE_CONTRACT has no ### `meta` section"]
+    code = code_text(section)
+    return [f"state.json meta key `{key}` is not in SITE_CONTRACT's ### `meta` section"
+            for key in sorted(meta_keys) if not mentions(code, key)]
+
+
 # --------------------------------------------------------------------------- #
 # the tree, read once
 # --------------------------------------------------------------------------- #
@@ -545,6 +1000,23 @@ def _test_sources() -> dict[str, str]:
                 path = os.path.join(dirpath, name)
                 out[os.path.relpath(path, TESTS_DIR)] = _read(path)
     return out
+
+
+def _removed_name_docs() -> dict[str, str]:
+    """The documents `RemovedNamesAreGone` reads, by repo-relative path."""
+    paths = list(REMOVED_NAME_DOCS)
+    for pattern in REMOVED_NAME_GLOBS:
+        paths += sorted(os.path.relpath(p, REPO).replace(os.sep, "/")
+                        for p in glob.glob(os.path.join(REPO, pattern)))
+    return {path: _read(os.path.join(REPO, path)) for path in paths}
+
+
+def _plant_in_section(contract: str, heading: str, text: str) -> str:
+    """`contract` with `text` inserted right under the first line matching `heading`."""
+    match = re.search(heading, contract, re.M)
+    assert match, heading
+    end = contract.index("\n", match.end()) + 1
+    return contract[:end] + text + contract[end:]
 
 
 def _plant_field(source: str, cls: str, line: str) -> str:
@@ -838,6 +1310,214 @@ class ClosedRowsResolve(unittest.TestCase):
         for token in ("test_y", "test_x.Nope", "Child.nope", "Nope",
                       "test_x.Child.nope", "test_nope"):
             self.assertFalse(resolves(token, index), token)
+
+
+class ClosedRowsStayClosed(unittest.TestCase):
+    """The rows Phase 1 closed keep saying so (`PHASE_1_CLOSURES`)."""
+
+    def test_every_phase_1_closure_is_still_marked(self):
+        problems = closure_problems(_read(PLAN))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_pin_is_not_vacuous(self):
+        """Twelve rows closed outright and fourteen in part: a pin that lost its
+        rows would hold nothing."""
+        full = [r for r in gap_map_rows(_read(PLAN)) if row_is_closed(r["ph"])]
+        self.assertGreaterEqual(len(full), 12, [r["id"] for r in full])
+        self.assertGreaterEqual(len(PHASE_1_CLOSURES), 26)
+
+    def test_a_struck_closure_is_caught(self):
+        plan = _read(PLAN)
+        row = next(line for line in plan.splitlines() if line.startswith("| M2.1b |"))
+        self.assertIn("| closed 1.0 |", row, "the planted edit has nothing to strike")
+        struck = plan.replace(row, row.replace("| closed 1.0 |", "| 1.0 |"))
+        self.assertEqual(closure_problems(struck),
+                         ["M2.1b was closed at 1.0 by Phase 1 and its Ph cell no "
+                          "longer says so: '1.0'"])
+
+    def test_a_partial_closure_keeps_only_its_phase(self):
+        self.assertEqual(closed_phases("closed 1.2, 2.4"), {"1.2"})
+        self.assertEqual(closed_phases("closed 1 (statement), 2, 2.5 (the line), 5"), {"1"})
+        self.assertEqual(closed_phases("closed 1.1, closed 1.2, 2.3, 5"), {"1.1", "1.2"})
+        self.assertEqual(closed_phases("1.2"), set())
+
+
+class DocumentedNamesExist(unittest.TestCase):
+    """The reverse direction (spec §3.16): what SPINE_CONTRACT writes in a module's
+    section, and what PACK_FORMAT's `class` blocks list, exists in the code.
+
+    Three kinds of name, each with its planted violator: a call form in an inline
+    code span (`` `store.load(` ``) resolves to an attribute of the module or of a
+    class it defines — a builtin, or a parameter called by name, counts; a name a
+    fenced line defines at column 0 (`def`, `class`, `CONSTANT =`) is a binding of
+    the module; a member a `class` block lists is a member of that class, its
+    bases' included. Each is read from the AST, never by importing the module, so
+    a planted edit to the SOURCE is a violator too — the real direction of the
+    drift, code moving under a document that stays."""
+
+    def test_spine_contract_names_only_what_exists(self):
+        problems = documented_name_problems(_spine_sources(), _read(SPINE_CONTRACT))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_pack_format_lists_only_members_that_exist(self):
+        sources = {name: _read(os.path.join(SPINE_SRC, name))
+                   for name in ("models.py", "gates.py")}
+        problems = pack_member_problems(sources, _read(PACK_FORMAT))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_walk_is_not_vacuous(self):
+        """Measured when this landed: 77 call forms, 298 fenced names and 320
+        members across the module sections. The floors sit well below, and far
+        above zero: a section parser that stopped seeing fences reads green."""
+        contract = _read(SPINE_CONTRACT)
+        counts = {"calls": 0, "defined": 0, "members": 0}
+        for name in _spine_sources():
+            if name in NOT_SPINE_MODULES:
+                continue
+            section = md_section(contract, r"^###\s+`" + re.escape(name) + "`") or ""
+            for kind, found in documented_names(section).items():
+                counts[kind] += len(found)
+        self.assertGreaterEqual(counts["calls"], 40, counts)
+        self.assertGreaterEqual(counts["defined"], 150, counts)
+        self.assertGreaterEqual(counts["members"], 150, counts)
+
+    def test_a_planted_call_form_is_caught(self):
+        contract = _plant_in_section(_read(SPINE_CONTRACT), r"^###\s+`store\.py`",
+                                     "It rebuilds with `store.rebuild_u31(root)`.\n")
+        self.assertEqual(documented_name_problems(_spine_sources(), contract),
+                         ["store.py: `store.rebuild_u31(` is written in its SPINE_CONTRACT "
+                          "section and names nothing store.py has"])
+
+    def test_a_planted_fenced_definition_is_caught(self):
+        contract = _plant_in_section(
+            _read(SPINE_CONTRACT), r"^###\s+`store\.py`",
+            "```python\ndef rebuild_u31(root) -> None\nREBUILT_U31 = 1\n```\n")
+        self.assertEqual(documented_name_problems(_spine_sources(), contract),
+                         ["store.py: its SPINE_CONTRACT section defines `rebuild_u31`, "
+                          "which store.py does not",
+                          "store.py: its SPINE_CONTRACT section defines `REBUILT_U31`, "
+                          "which store.py does not"])
+
+    def test_a_planted_class_member_is_caught(self):
+        contract = _plant_in_section(
+            _read(SPINE_CONTRACT), r"^###\s+`models\.py`",
+            "```python\nclass Claim(Record):\n    reviewed_u31: bool; statement: str\n```\n")
+        self.assertEqual(documented_name_problems(_spine_sources(), contract),
+                         ["models.py: SPINE_CONTRACT's `class Claim` block lists "
+                          "`reviewed_u31`, which Claim does not have"])
+
+    def test_a_function_removed_from_the_code_is_caught(self):
+        """The drift this class exists for: the code moves and the page stays."""
+        sources = _spine_sources()
+        self.assertIn("def records_digest(", sources["store.py"])
+        sources["store.py"] = sources["store.py"].replace(
+            "def records_digest(", "def records_digest_gone_u31(")
+        problems = documented_name_problems(sources, _read(SPINE_CONTRACT))
+        self.assertTrue(problems, "a documented function deleted from the code went unseen")
+        self.assertTrue(all("records_digest" in p for p in problems), problems)
+        self.assertIn("store.py: its SPINE_CONTRACT section defines `records_digest`, "
+                      "which store.py does not", problems)
+
+    def test_a_field_removed_from_verdict_is_caught(self):
+        sources = {name: _read(os.path.join(SPINE_SRC, name))
+                   for name in ("models.py", "gates.py")}
+        self.assertIn("    cpu_s: float = 0.0\n", sources["models.py"])
+        sources["models.py"] = sources["models.py"].replace(
+            "    cpu_s: float = 0.0\n", "    cpu_gone_u31: float = 0.0\n")
+        self.assertEqual(pack_member_problems(sources, _read(PACK_FORMAT)),
+                         ["PACK_FORMAT's `class Verdict` block lists `cpu_s`, which "
+                          "models.py's Verdict does not have"])
+
+    def test_what_resolves_and_what_does_not(self):
+        """Each rule once, on a planted module: the positive halves keep the check
+        from reading every English word as a stale name, the negative halves keep
+        the rules from reading anything as resolved."""
+        sources = {
+            "planted.py": ("import json\nfrom . import store\n"
+                           "from .models import Claim\n"
+                           "class Ctx(dict):\n    def param(self, name): pass\n"
+                           "    def __init__(self):\n        self.memo = {}\n"
+                           "def run_all(registry, *, before=None): pass\n"),
+            "store.py": "def load(root): pass\n",
+            "models.py": "class Record:\n    def to_dict(self): pass\n"
+                         "class Claim(Record):\n    statement: str = ''\n",
+        }
+        indexes = spine_indexes(sources)
+        for token in ("json.dumps", "store.load", "Claim.to_dict", "Claim.statement",
+                      "models.Claim", "dict", "isinstance", "before", "ctx.param",
+                      "param", "p.get", "Ctx.memo", "run_all"):
+            self.assertTrue(call_form_resolves(token, "planted", indexes), token)
+        for token in ("json.nope", "store.nope", "Claim.nope", "nope", "ctx.nope",
+                      "models.Nope", "registry_u31"):
+            self.assertFalse(call_form_resolves(token, "planted", indexes), token)
+        self.assertEqual(CALL_FORM.findall("<k> control(s) pending; run `load(root)`"),
+                         ["load"])
+
+
+class RemovedNamesAreGone(unittest.TestCase):
+    """No document an agent reads names what Phase 1 removed (spec §3.16)."""
+
+    def test_no_document_names_a_removed_name(self):
+        problems = removed_name_problems(_removed_name_docs())
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_documents_are_read(self):
+        """The spec's set is in the list and every file in it exists: a list that
+        read nothing would find nothing."""
+        docs = _removed_name_docs()
+        for path in ("README.md", "CLAUDE.md", "docs/SPINE_CONTRACT.md",
+                     "docs/PACK_FORMAT.md", "docs/SITE_CONTRACT.md",
+                     "skills/atompipe/SKILL.md", "skills/pack-authoring/SKILL.md"):
+            self.assertIn(path, docs)
+            self.assertGreater(len(docs[path]), 500, path)
+        self.assertGreaterEqual(len(docs), 15)
+
+    def test_every_planted_removed_name_is_caught(self):
+        for name, _why in REMOVED_NAMES:
+            for text in (f"intro\nRun `atompipe {name} x`.\n", f"intro\nthe {name} here\n"):
+                problems = removed_name_problems({"doc.md": text})
+                self.assertEqual(len(problems), 1, (name, text, problems))
+                self.assertTrue(problems[0].startswith(f"doc.md:2: names `{name}`"),
+                                problems)
+
+    def test_a_command_broken_across_lines_is_caught(self):
+        problems = removed_name_problems({"doc.md": "then run atompipe claim\n  add C9\n"})
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(problems[0].startswith("doc.md:1: names `claim add`"), problems)
+
+    def test_near_misses_are_not_removed_names(self):
+        text = ("`tests/test_staleness.py`; a claim edited by hand; `atompipe claim "
+                "physical C5 pass`; `atompipe packs add fdm-print`; `last_runs`; "
+                "`atompipe decide --title x`; `atompipe gate selftest`; "
+                "`--set-entry-point`; `records_run`\n")
+        self.assertEqual(removed_name_problems({"doc.md": text}), [])
+
+
+class SiteMetaKeysAreDocumented(unittest.TestCase):
+    """Every key of `state.json`'s `meta`, in SITE_CONTRACT's ### `meta` table.
+
+    The top-level check (SiteStateKeysAreDocumented) passes a `meta` whatever it
+    holds, and `meta` is where the page's staleness lives: `stale`,
+    `stale_reason`, `records_digest`. The same real build, borrowed."""
+
+    setUp = SiteStateKeysAreDocumented.setUp
+
+    def _meta_keys(self) -> list[str]:
+        with open(os.path.join(self.root, "site", "data", "state.json"),
+                  encoding="utf-8") as fh:
+            return sorted(json.load(fh)["meta"])
+
+    def test_every_meta_key_is_documented(self):
+        keys = self._meta_keys()
+        self.assertIn("records_digest", keys, "the build wrote no real meta")
+        problems = site_meta_problems(keys, _read(SITE_CONTRACT))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_a_planted_meta_key_is_caught(self):
+        problems = site_meta_problems(self._meta_keys() + ["planted_meta_u31"],
+                                      _read(SITE_CONTRACT))
+        self.assertEqual(problems, ["state.json meta key `planted_meta_u31` is not in "
+                                    "SITE_CONTRACT's ### `meta` section"])
 
 
 if __name__ == "__main__":
