@@ -990,7 +990,8 @@ input**: the bracket's fixtures import the model, so keyed on it every Config ed
 would write six tracked control files. Bytes that differ only in `fixture` are the
 same control (`write_control` answers `"exists"`, no warning). Host-param reads are
 keyed only when the host was live (a known-good host is a design the fixture's own
-`selftest/` files define).
+`selftest/` files and code define — enforced, not assumed: `context` is handed nothing
+of the live design, below).
 
 **`selftest_walk(owner_dir)`** — the owner is the pack directory (`PACK_DIR` on the
 gate's module) or the project root. `vcs.ls_files(owner_dir, ["selftest"])`, asked of
@@ -1216,10 +1217,20 @@ nothing runs: the records answer.
 
 **The known-good host (D-27, S-07).** A PROJECT gate's fixture is handed
 `known_good_context(root, host)` — the `context` function of `selftest/known_good.py`,
-loaded through `modelio.load_source_module` and called on a copy of the host — and the entry says `host:
-"known-good"` (its host reads are not keyed: they are reads of a design the owner's
-`selftest/` defines). A pack's fixture gets the live host (`host: "live"`, host reads
-keyed); SEALED is the seal detector's job. So the literal identity fixture `return ctx`
+loaded through `modelio.load_source_module` and called, inside the control's trace
+window, on the host with no params, an empty ledger, no `extra` and no model
+(`_KNOWN_GOOD_BLANK`: only `root`, `out_dir`, `tier` and the log sink come through) —
+and the entry says `host: "known-good"` (its host reads are not keyed: they are reads
+of a design the owner's `selftest/` and code define, and a file `context` opens is a
+control read like any other). What slipped through (admission review, round 1):
+`context` was called on a copy of the LIVE host, outside any window, so one that kept
+`ctx.params` made the known-good design the live one with nothing keying it — the
+identity fixture "fired" on a failing shelf, and after a model edit to a passing one
+`check` served that control cached, exited 0 and `report` listed the claim PROVEN.
+*Rejected:* filing such a control `live` whenever it read the host — every bracket
+fixture reads the known-good params through its host, so every Config edit would re-run
+all six controls (D-27's whole-value dependency). A pack's fixture gets the live host
+(`host: "live"`, host reads keyed); SEALED is the seal detector's job. So the literal identity fixture `return ctx`
 hands its gate the known-good design, passes, and is not admitted — on the live
 bracket, which fails on purpose, it "fired" and certified nothing. The known-good
 module's code closure joins the fixture's lookup hint. Each control gets its own memo

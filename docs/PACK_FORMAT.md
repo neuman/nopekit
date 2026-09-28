@@ -595,7 +595,13 @@ receives that context, and builds its known-bad input from a design that passes.
 What slipped through before (S-07): handed the live design, which in the reference
 project fails on purpose, the identity fixture `return ctx` was reported "correctly
 failed … ~64x worse" and certified nothing; on the known-good design it passes its
-own known-bad input and is not admitted. A project with no `known_good.py` hands its
+own known-bad input and is not admitted. `context` is handed the host with no
+params, an empty ledger, no `extra` and no model — `root`, `out_dir` and `tier` are
+kept — so it must state its design itself (the bracket's states every Config field),
+and a file it reads is keyed as an input of every control built on it. What slipped
+through before: it was handed a copy of the live host, and a `context` that kept
+`ctx.params` passed the live design through unkeyed, so the identity fixture was
+admitted on a design that later passed. A project with no `known_good.py` hands its
 fixtures the live host, and the control entry says so (`"host": "live"`). **Pack
 fixtures always get the live host** — they must be SEALED (above), which the seal
 detector checks by running them; a clean host is never substituted for a leaky

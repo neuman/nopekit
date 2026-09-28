@@ -175,6 +175,35 @@ def make(ctx):
     return ctx
 '''
 
+#: The known-good `context` of the synthetic project, as KNOWN_GOOD spells it —
+#: the block the known-good variants below replace.
+KNOWN_GOOD_CONTEXT = '''\
+def context(ctx):
+    return dataclasses.replace(ctx, params=params(), ledger=Ledger(), extra={})
+'''
+
+#: A known-good design read at CALL time from a data file outside `selftest/`
+#: (admission review, round 1). The file is an input of every control built on
+#: the design, and only the control's trace window can see a read `context`
+#: makes: the selftest walk does not cover `data/`, and the module's code
+#: closure holds code, not what the code opened.
+KNOWN_GOOD_FROM_DATA = KNOWN_GOOD.replace(KNOWN_GOOD_CONTEXT, '''\
+def context(ctx):
+    import json
+    with open(os.path.join(ctx.root, "data", "kg.json"), encoding="utf-8") as fh:
+        thickness = float(json.load(fh)["thickness"])
+    return dataclasses.replace(ctx, params=params(dict(CONFIG, thickness=thickness)),
+                               ledger=Ledger(), extra={})
+''')
+assert KNOWN_GOOD_FROM_DATA != KNOWN_GOOD, "the known-good variant replaced nothing"
+
+#: A known-good `context` that hands back whatever it was handed: what it
+#: returns is exactly the host the spine gives it.
+KNOWN_GOOD_ECHO = '''\
+def context(ctx):
+    return ctx
+'''
+
 GATES = '''\
 from atompipe.gates import gate
 from atompipe.models import NegativeControl, Verdict
@@ -477,6 +506,81 @@ BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearin
 #: spells it — the line the identity-fixture test replaces.
 QUARTER_THICKNESS = 'return _with(ctx, thickness=known_good.CONFIG["thickness"] / 4.0)'
 
+#: The admission review's one-gate project (round 1, repro B), file for file: a
+#: shelf whose span `shelf.span` holds to 100 mm, read from the params `check`
+#: hands it. `{span}` is the model default the test moves.
+SHELF_MODEL = '''\
+from dataclasses import dataclass
+
+
+@dataclass
+class Config:
+    span: float = {span}
+    """mm."""
+
+
+def build(config=None):
+    c = config or Config()
+    return {{"reach": c.span}}
+'''
+
+SHELF_GATE = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def span(ctx):
+    s = float(ctx.params["span"])
+    return Verdict(gate="shelf.span", passed=s <= 100.0, measured=s, limit=100.0,
+                   units="mm", detail=f"{s} mm (limit 100.0)")
+'''
+
+SHELF_CLAIM = {"statement": "Span within 100 mm", "kind": "measurable", "critical": True,
+               "acceptance": {"quantity": "span", "comparator": "<=", "limit": 100.0},
+               "tags": ["span"]}
+
+#: The review's known-good: it drops the ledger and `extra`, as the bracket's
+#: does, and keeps `ctx.params` — the live design, while the spine handed it one.
+SHELF_PASSTHROUGH_KNOWN_GOOD = '''\
+import dataclasses
+
+from atompipe.models import Ledger
+
+
+def context(ctx):
+    return dataclasses.replace(ctx, ledger=Ledger(), extra={})
+'''
+
+#: S-07's fixture, literally, under the name the gate declares.
+SHELF_IDENTITY = '''\
+def long(ctx):
+    return ctx
+'''
+
+#: The honest pair, the V: test's positive control: a known-good design that
+#: states its own span, and a fixture that changes that one value.
+SHELF_KNOWN_GOOD = '''\
+import dataclasses
+
+from atompipe.models import Ledger
+
+
+def context(ctx):
+    return dataclasses.replace(ctx, params={"span": 80.0}, ledger=Ledger(), extra={})
+'''
+
+SHELF_LONG = '''\
+import dataclasses
+
+
+def long(ctx):
+    params = dict(ctx.params)
+    params["span"] = 400.0
+    return dataclasses.replace(ctx, params=params)
+'''
+
 #: A cache entry's file name inside its gate's directory (spec §3.7).
 ENTRY_NAME = re.compile(r"^[0-9a-f]{16}-[0-9a-f]{8}\.json$")
 
@@ -694,6 +798,58 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         with open(os.path.join(live.root, ".atompipe", "verdicts",
                                control_files(live.root)[0]), encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["host"], "live")
+
+    def test_the_known_good_context_is_handed_nothing_of_the_live_design(self):
+        """V: ``known_good.context`` was called on a copy of the LIVE host, and
+        the entry it produced says ``host: "known-good"``, whose host reads are
+        never keyed. A ``context`` that kept any of what it was handed —
+        ``params``, the ledger, ``extra``, the model — passed the live design
+        through with nothing keying it (admission review, round 1). It is now
+        handed where the run lives and nothing else."""
+        p = Project(self, thickness=7.0)
+        write(p.root, "selftest/known_good.py", KNOWN_GOOD_ECHO)
+        host = dataclasses.replace(p.ctx(), model=sys.modules[__name__],
+                                   extra={"live": True}, tier=2)
+        self.assertTrue(host.params and host.ledger.claims,
+                        "the precondition: the host carries a live design")
+        got = verdicts.known_good_context(p.root, host)
+        self.assertEqual(dict(got.params), {}, "the live params reached context()")
+        self.assertEqual((got.ledger.claims, got.ledger.verdicts), ([], []),
+                         "the live ledger reached context()")
+        self.assertEqual(got.extra, {}, "the host's extra reached context()")
+        self.assertIsNone(got.model, "the live model reached context()")
+        self.assertEqual((got.root, got.out_dir, got.tier),
+                         (host.root, host.out_dir, host.tier),
+                         "where the run lives must survive: relative paths and scratch")
+
+    def test_a_file_the_known_good_design_reads_is_an_input_of_its_controls(self):
+        """V: ``context`` ran before the control's trace window opened, so a
+        known-good design read from a data file outside ``selftest/`` keyed
+        nothing. At thickness 2.0 in ``data/kg.json`` the identity fixture
+        "fires"; moved to 8.0 the design passes — and the entry, its static,
+        file reads and fixture closure all unmoved, served "admitted" with
+        nothing run (admission review, round 1)."""
+        p = Project(self)
+        write(p.root, "selftest/known_good.py", KNOWN_GOOD_FROM_DATA)
+        write(p.root, "data/kg.json", '{"thickness": 2.0}\n')
+        first = row(p.sweep(only=["t.ident"]), "t.ident")
+        self.assertEqual(first.admission.state, "admitted",
+                         f"the precondition: a failing known-good design makes the "
+                         f"identity fixture fire ({first.admission})")
+        [name] = control_files(p.root)
+        with open(os.path.join(p.root, ".atompipe", "verdicts", name), encoding="utf-8") as fh:
+            entry = json.load(fh)
+        self.assertEqual(entry["host"], "known-good")
+        self.assertIn("data/kg.json", entry["reads"]["files"],
+                      "the file the known-good design was read from is not a control input")
+
+        write(p.root, "data/kg.json", '{"thickness": 8.0}\n')
+        got = row(p.sweep(only=["t.ident"]), "t.ident")
+        self.assertEqual(got.admission.state, "not-admitted", got.admission)
+        self.assertTrue(got.admission.executed, "the moved input must re-run the control")
+        self.assertIn("PASSED its own known-bad fixture selftest/ident.py",
+                      got.admission.reason)
+        self.assertNotEqual(p.statuses()["C2"], ClaimStatus.PASS)
 
     def test_force_reruns_every_control_and_a_changed_outcome_is_not_admitted(self):
         p = Project(self)
@@ -963,6 +1119,49 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                 self.assertEqual(status["claims"]["C1"], "fail", "a refused gate still blocks")
                 self.assertEqual(status["freshness"]["bracket.deflection"]["admission"],
                                  "not-admitted")
+
+    def test_cli_a_known_good_that_passes_the_live_design_through_is_not_admitted(self):
+        """V: the review's repro (admission review, round 1, B), through the CLI
+        a person runs. ``known_good.context`` kept the ``ctx.params`` it was
+        handed — a copy of the LIVE host — and the fixture was ``return ctx``.
+        At span 150 the live design fails, so the control "fired"; the entry
+        said ``host: "known-good"`` and keyed no host read. Moved to span 80,
+        ``check`` exited 0 with ``controls: cached 1`` and ``report`` put C1
+        under PROVEN: the identity fixture admitted on a design nothing keyed —
+        S-07 again, and M13.3 broken."""
+        project = os.path.join(self.tmp(), "shelf")
+        write(project, "model/shelf.py", SHELF_MODEL.format(span="150.0"))
+        write(project, "gates/g.py", SHELF_GATE)
+        write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
+        write(project, "selftest/known_good.py", SHELF_PASSTHROUGH_KNOWN_GOOD)
+        write(project, "selftest/bad.py", SHELF_IDENTITY)
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+
+        code, _first = check_json(self, project)
+        self.assertEqual(code, 1, "the live design at span 150 fails")
+        edit(project, "model/shelf.py", "span: float = 150.0", "span: float = 80.0")
+
+        code, data = check_json(self, project)
+        got = verdict_row(data, "shelf.span")
+        self.assertEqual(got["outcome"], "error", got)
+        self.assertTrue(got["error"].startswith("not admitted: "), got)
+        self.assertEqual(code, 1, "an identity fixture admitted the live design")
+        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertNotIn("C1", proven_section(self, project))
+
+        # The positive control: the same project, the same live design, with a
+        # known-good that states its own span and a fixture that changes it. It
+        # is admitted and C1 reads PROVEN — so the refusal above was the
+        # identity fixture's, not the project's.
+        write(project, "selftest/known_good.py", SHELF_KNOWN_GOOD)
+        write(project, "selftest/bad.py", SHELF_LONG)
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
+        self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertIn("**C1**", proven_section(self, project))
 
     def test_cli_a_pack_asset_edit_misses_the_control_entry_and_reruns_it(self):
         # A pack control is keyed by its owner's whole `selftest/` (spec §3.8),

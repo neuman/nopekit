@@ -3794,7 +3794,11 @@ def _control_entry(root: str, spec: Any, fn: Any, *, result: Verdict | None,
         reads = reads.with_opaque(f"code: {code.opaque}")
     if host == "known-good":
         # reads of a design the fixture's own selftest files define: the static
-        # walk already keys them
+        # walk already keys them. That holds because `_known_good` hands
+        # `context` nothing of the live design (`_KNOWN_GOOD_BLANK`) and runs it
+        # inside this trace — handed a copy of the live host, a `context` that
+        # kept its params made these the live design's reads, dropped here
+        # unkeyed (admission review, round 1).
         reads = dataclasses.replace(reads, host=[])
     entry = ControlEntry(gate=spec.id, rho=rho_control(spec.id, static, reads),
                          static=static, static_parts=parts, host=host,
@@ -5070,23 +5074,48 @@ def _known_good_module(root: str) -> Any:
             f"loads") from exc
 
 
-def _known_good(root: str, ctx: Any) -> tuple[Any, Any] | None:
-    """``(the known-good context, the module's code closure)``, or ``None``."""
+#: What ``known_good.context`` is handed in place of the host's own: no params,
+#: an empty ledger, no ``extra``, no model — so only where the run lives
+#: (``root``, ``out_dir``, ``tier``) and the log sink come through. What slipped
+#: through (admission review, round 1): it was handed a COPY of the live host,
+#: and the entry says ``host: "known-good"``, whose host reads are never keyed.
+#: A ``context`` that replaced the ledger and ``extra`` but kept ``ctx.params``
+#: made the known-good design the live one, so the literal identity fixture
+#: "fired" while the live shelf failed at 150 mm, and after a model edit to 80
+#: mm ``check`` served that control ``cached``, exited 0, and ``report`` put the
+#: claim under PROVEN — S-07 back, and nothing keyed it. *Rejected:* keying the
+#: host reads of a known-good control after all (filing it ``live`` whenever it
+#: read any) — every bracket fixture reads the known-good params through its
+#: host, so every Config edit would re-run all six controls and write six
+#: tracked files, the whole-value dependency D-27 exists to cut; and a
+#: known-good design that depends on the live one is not a known-good design,
+#: so the spine does not hand it one to depend on. *Rejected:* keeping the live
+#: model: a ``context`` that projected ``ctx.model`` would be the same hole by
+#: another field.
+_KNOWN_GOOD_BLANK = ("params", "ledger", "extra", "model")
+
+
+def _known_good(root: str, ctx: Any, trace: GateTrace | None = None) -> tuple[Any, Any] | None:
+    """``(the known-good context, the module's code closure)``, or ``None``.
+
+    ``context`` is handed ``ctx`` with ``_KNOWN_GOOD_BLANK`` emptied, and runs
+    inside ``trace``'s window when one is given (the control's), so a file it
+    opens is an input of the control like any file its fixture opens. The
+    module itself loads outside it, as a fixture module does: what it runs at
+    import is its code closure, the lookup hint (the bracket's loads the model).
+    """
     module = _known_good_module(root)
     make = getattr(module, "context", None) if module is not None else None
     if not callable(make):
         return None
-    # A copy: `context` is project code, and the context it is handed is the
-    # one every later gate of the sweep reads.
+    # A fresh host: `context` is project code, and the one the sweep holds is
+    # the one every later gate reads. Nothing of the live design is in it.
     names = {f.name for f in dataclasses.fields(ctx)}
-    changes: dict[str, Any] = {"params": _plain(getattr(ctx, "params", None) or {}),
-                               "extra": dict(getattr(ctx, "extra", None) or {})}
-    ledger = getattr(ctx, "ledger", None)
-    if ledger is not None:
-        changes["ledger"] = LedgerView(ledger, None)
-    handed = dataclasses.replace(ctx, **{k: v for k, v in changes.items() if k in names})
+    blank: dict[str, Any] = {"params": {}, "ledger": Ledger(), "extra": {}, "model": None}
+    handed = dataclasses.replace(ctx, **{k: blank[k] for k in _KNOWN_GOOD_BLANK if k in names})
     try:
-        built = make(handed)
+        with tracing(trace) if trace is not None else contextlib.nullcontext():
+            built = make(handed)
     except KeyboardInterrupt:
         raise
     except BaseException as exc:
@@ -5117,7 +5146,10 @@ def known_good_context(root: str, ctx: Any) -> Any:
     the seal detector (``packs.seal_findings``), not by substitution.
 
     Loaded through ``modelio.load_source_module`` (fresh bytes, recorded
-    closure); ``context`` receives a copy of ``ctx``. Raises ``AtompipeError``
+    closure); ``context`` receives ``ctx`` with no params, an empty ledger, no
+    ``extra`` and no model (``_KNOWN_GOOD_BLANK``) — ``root``, ``out_dir`` and
+    ``tier`` are all it has to build from besides its own code and files, so
+    the design cannot be the live one passed through. Raises ``AtompipeError``
     when the module does not import, ``context`` raises, or it returns something
     other than a context of ``ctx``'s type.
     """
@@ -5125,16 +5157,19 @@ def known_good_context(root: str, ctx: Any) -> Any:
     return None if found is None else found[0]
 
 
-def _control_host(root: str, spec: Any, fn: Any, host_ctx: Any) -> tuple[Any, str, Any]:
+def _control_host(root: str, spec: Any, fn: Any, host_ctx: Any,
+                  trace: GateTrace | None = None) -> tuple[Any, str, Any]:
     """``(the context a control's fixture is handed, "known-good" | "live", the
     known-good module's code closure or None)``. Each control gets a memo of its
     own: a known-bad mesh loaded into the sweep's memo is one sweep's accident
-    away from a real gate's read."""
+    away from a real gate's read. ``trace`` is the control's: the known-good
+    ``context`` runs inside its window, so what it opens is keyed with the
+    rest of the control's reads."""
     if "memo" in {f.name for f in dataclasses.fields(host_ctx)}:
         host_ctx = dataclasses.replace(host_ctx, memo={})
     if _pack_dir_of(fn):
         return host_ctx, "live", None
-    found = _known_good(root, host_ctx)
+    found = _known_good(root, host_ctx, trace)
     if found is None:
         return host_ctx, "live", None
     return found[0], "known-good", found[1]
@@ -5358,11 +5393,11 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
     keys (``_unvouched``), or no candidate's values match."""
     from . import gates as _gates                  # gates imports this module
     out_dir = _fresh_control_dir(s.root, spec.id, s.out_dir)
+    trace = GateTrace(kind="control", anchors=s.anchors)
     try:
-        handed, _host, closure = _control_host(s.root, spec, fn, host_ctx)
+        handed, _host, closure = _control_host(s.root, spec, fn, host_ctx, trace)
     except AtompipeError:
         return None
-    trace = GateTrace(kind="control", anchors=s.anchors)
     try:
         built = _gates.run_fixture(spec, fn, handed, trace=trace, out_dir=out_dir)
     except AtompipeError:
@@ -5397,8 +5432,10 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
     gid = spec.id
     key = f"control:{gid}"
     out_dir = _fresh_control_dir(s.root, gid, s.out_dir)
+    # Opened before the known-good design is built: `context` runs inside it.
+    trace = GateTrace(kind="control", anchors=s.anchors)
     try:
-        handed, host, closure = _control_host(s.root, spec, fn, host_ctx)
+        handed, host, closure = _control_host(s.root, spec, fn, host_ctx, trace)
     except AtompipeError as exc:
         held = Verdict(gate=f"{gid}#selftest", passed=False, tier=Tier(int(spec.tier)),
                        pack=spec.pack or "", error=str(exc).splitlines()[0] if str(exc) else
@@ -5409,7 +5446,6 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
         return Admission("not-admitted", None, _control_failure({"verdict": held,
                                                                  "kind": "error"}),
                          executed=True)
-    trace = GateTrace(kind="control", anchors=s.anchors)
     result = _gates.selftest(spec, fn, handed, trace=trace, out_dir=out_dir)
     _add_closure(trace, closure)
     built = _control_entry(s.root, spec, fn, result=result, trace=trace, host=host, bad=None,

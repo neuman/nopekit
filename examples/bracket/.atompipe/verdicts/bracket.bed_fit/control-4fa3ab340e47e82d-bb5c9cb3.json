@@ -2,10 +2,10 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.bed_fit",
-  "rho": "1e0c9e1dec127b3eb3f9f8f4fd27064a8d47047fd5d7c0cb2e5d435a51c96732",
-  "static": "e14323a81ec269de358f8fcb1d9ab1ec55e1fe19a75f64c95eafcea5f1390e80",
+  "rho": "4fa3ab340e47e82d5f1f56d5f60b6404345eecbd97dbf54e3b09d05c2fa9d3a5",
+  "static": "058f13a53b65d313fa79d0fdbc436429cdfd129e4e0979610016fcd61df145ff",
   "static_parts": {
-    "spine": "1b319181a436370519b2e67c4208ae95a5fe0ff77acf469d1652dcfe51da1877",
+    "spine": "ac9774162057e0975d17e4450994401a3fa831a353344d538b18157c29ad0b15",
     "code": {
       "digest": "76dc047bfd0e854b2d8ec0fe23e599c3eac34bd8c81c9b29129c2d20c3518eb8",
       "files": [
@@ -13,10 +13,10 @@
       ]
     },
     "selftest": {
-      "digest": "8567982bfc847ab0009a59f2ff579c84eac5b2cbe627717a952810ec9712f590",
+      "digest": "ac80aa021322f40541c5d2889a435df02489d7eb04bbe92308495c42fb668232",
       "files": {
         "selftest/bad_configs.py": "99613d17104e2b50c015996cc8af6906c82cb78311092dea69fb434591ac364c",
-        "selftest/known_good.py": "7b440d74870e884891b876beb17586d704b0846baa79e24839e6fff265e83987"
+        "selftest/known_good.py": "012b169b23b77408b675bb14b52c98b57212a0c86b0aa9d4739d969e770cd318"
       }
     },
     "nc": {
@@ -27,11 +27,11 @@
   },
   "host": "known-good",
   "fixture": {
-    "digest": "3d1ef2e0c3f47bee66fc9e525eb3b66af895ef15f0793a2e2d0e90c81e2b18f2",
+    "digest": "cf9e6b49faa99a0fefbfe2ef5f6b5179d049b7ecef476155877f622e98d12b61",
     "files": {
       "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
       "selftest/bad_configs.py": "99613d17104e2b50c015996cc8af6906c82cb78311092dea69fb434591ac364c",
-      "selftest/known_good.py": "7b440d74870e884891b876beb17586d704b0846baa79e24839e6fff265e83987"
+      "selftest/known_good.py": "012b169b23b77408b675bb14b52c98b57212a0c86b0aa9d4739d969e770cd318"
     }
   },
   "reads": {
@@ -86,5 +86,5 @@
   "measured": 413.5,
   "limit": 204.0,
   "units": "mm",
-  "digest": "4aeb5429a5b03717302a52ebe96547e9a0f85f270eaa27f75a2047901ec8b34b"
+  "digest": "0fc6cd43d39d1bc70452ca070ed351378f70c5c1a552ed2f380fed51f8f40942"
 }

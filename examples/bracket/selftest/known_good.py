@@ -48,8 +48,11 @@ two copies would pass for that reason alone (packs:H4). A path-salted name is on
 module per file, content-keyed, and — loaded while the spine records a fixture —
 part of that fixture's recorded code.
 
-`ctx.model` is left as the host's: no bracket gate reads it, and a gate that did
-would be recorded as a model user by the trace, not handed a stale design.
+`ctx.model` is left as it was handed. On a control the spine hands `context` no model,
+no params, an empty ledger and no `extra` — only where the run lives — so nothing here
+can take the live design by keeping a field (admission review, round 1: a `context`
+that kept `ctx.params` made an identity fixture fire on a failing design, and stay
+admitted, unkeyed, once the design passed). No bracket gate reads `ctx.model`.
 """
 from __future__ import annotations
 

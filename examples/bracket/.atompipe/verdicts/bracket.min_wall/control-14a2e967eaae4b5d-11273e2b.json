@@ -2,10 +2,10 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.min_wall",
-  "rho": "467d846e15fa5802e3adfb76fd7ab82d0b799dc4bb0e0cd225a5dd3511ba89cf",
-  "static": "75cdd8edbe8479df727ac13208158b1886ccfa3219f84a91db8fdab2d6b29ffe",
+  "rho": "14a2e967eaae4b5d6511a339145d73b16faaf2c221736e0749517e7138e6ba94",
+  "static": "994cc14ad82d99510486df0a4371e2d07502f3bbbd8a0c1643ba12f72ba77b0c",
   "static_parts": {
-    "spine": "1b319181a436370519b2e67c4208ae95a5fe0ff77acf469d1652dcfe51da1877",
+    "spine": "ac9774162057e0975d17e4450994401a3fa831a353344d538b18157c29ad0b15",
     "code": {
       "digest": "8a38ef02571f2e879d2dbbbbd52e2383ef7c6d996751151d180016515e40e3b6",
       "files": [
@@ -13,10 +13,10 @@
       ]
     },
     "selftest": {
-      "digest": "8567982bfc847ab0009a59f2ff579c84eac5b2cbe627717a952810ec9712f590",
+      "digest": "ac80aa021322f40541c5d2889a435df02489d7eb04bbe92308495c42fb668232",
       "files": {
         "selftest/bad_configs.py": "99613d17104e2b50c015996cc8af6906c82cb78311092dea69fb434591ac364c",
-        "selftest/known_good.py": "7b440d74870e884891b876beb17586d704b0846baa79e24839e6fff265e83987"
+        "selftest/known_good.py": "012b169b23b77408b675bb14b52c98b57212a0c86b0aa9d4739d969e770cd318"
       }
     },
     "nc": {
@@ -27,11 +27,11 @@
   },
   "host": "known-good",
   "fixture": {
-    "digest": "3d1ef2e0c3f47bee66fc9e525eb3b66af895ef15f0793a2e2d0e90c81e2b18f2",
+    "digest": "cf9e6b49faa99a0fefbfe2ef5f6b5179d049b7ecef476155877f622e98d12b61",
     "files": {
       "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
       "selftest/bad_configs.py": "99613d17104e2b50c015996cc8af6906c82cb78311092dea69fb434591ac364c",
-      "selftest/known_good.py": "7b440d74870e884891b876beb17586d704b0846baa79e24839e6fff265e83987"
+      "selftest/known_good.py": "012b169b23b77408b675bb14b52c98b57212a0c86b0aa9d4739d969e770cd318"
     }
   },
   "reads": {
@@ -73,5 +73,5 @@
   "measured": 3.0,
   "limit": 3.6,
   "units": "mm",
-  "digest": "8167e5e90b236b7ecfafeddb27623df358c5c69018f04f216abea7db202f673c"
+  "digest": "bc6b1a98d90f9cf1cf70e15a335e467932f0993f962faf3d27b546561fcae6d7"
 }
