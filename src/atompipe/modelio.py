@@ -107,6 +107,7 @@ __all__ = [
     "recording",
     "dynamic_imports",
     "is_code",
+    "registered_by",
     "code_closure",
     "clear_caches",
     "static_param_prose",
@@ -1970,22 +1971,81 @@ def is_code(path: str, roots: Iterable[str] = ()) -> bool:
     return _code_root(path, owned) is not None
 
 
+def registered_by(fn: Any) -> tuple[types.ModuleType, ...]:
+    """Every module in `sys.modules` whose recorded registrations
+    (`__atompipe_gates__`, which `load_source_module` stamps) hold `fn` itself,
+    sorted by module name; `()` for a module, or for a function no recorded
+    load registered (a gate registered from Python in a test).
+
+    The module that REGISTERED a gate is that gate's code as surely as the one
+    that defines its function, and for a gate a factory makes they are two
+    modules. What slipped through while `code_closure` read `fn.__module__`
+    alone (Phase 1 review, repro ``p4``): ``gates/_gatekit.py`` held
+    ``limit_gate(...)``, ``gates/limits.py`` held ``MASS_LIMIT_G = 100.0`` and
+    the call. The function was the helper's, so ``code.files`` was
+    ``['gates/_gatekit.py']`` and the module holding the limit was in no
+    closure: set to 10.0, `check` served the PASS cached, `status` named
+    nothing stale, `doctor` said every gate's code was recorded, and
+    ``--force`` filed two outcomes for identical inputs. The same lookup put a
+    pack's factory-made gate under no pack: `PACK_DIR` is set on the module a
+    pack loads, never on the helper it imports.
+
+    Read from the modules as they are now, never remembered: a module that ran
+    again replaced itself in `sys.modules`, and its old registrations went with
+    it. By identity, never by id or qualname — every function a factory makes
+    shares one qualname. *Rejected:* stamping the registering module on the
+    function (a function registered under two ids by two modules has two, and
+    a cache hit re-adopts the function without running anything to stamp it);
+    the loader's `_STACK` at decoration time (empty by the time a digest is
+    asked for, and a served module never decorates again).
+    """
+    if fn is None or isinstance(fn, types.ModuleType):
+        return ()
+    found: dict[str, types.ModuleType] = {}
+    for loaded in list(sys.modules.values()):
+        if not isinstance(loaded, types.ModuleType):
+            continue
+        try:
+            namespace = vars(loaded)
+        except TypeError:
+            continue
+        pairs = namespace.get(_GATES_ATTR)
+        if not isinstance(pairs, tuple):
+            continue
+        if any(isinstance(pair, tuple) and len(pair) == 2 and pair[1] is fn for pair in pairs):
+            found[str(namespace.get("__name__", ""))] = loaded
+    return tuple(found[name] for name in sorted(found))
+
+
 def code_closure(obj: Any) -> CodeClosure | None:
-    """The recorded closure of a module, or of the module that defines `obj`.
+    """The recorded closure of a module; of a function, the closure of the
+    module that defines it merged with each one that registered it
+    (`registered_by`): a gate a factory in a helper makes is the helper's code
+    AND the code of the module that called the factory with its limit.
 
     None for anything this loader did not run — a gate registered from Python
     in a test, a lambda — which `verdicts.code_digest` then digests by its
-    defining file, or reports as opaque; never as a digest of nothing.
+    defining file, or reports as opaque; never as a digest of nothing. A gate
+    whose defining module and registering module are one (every gate written
+    with `@gate`) gets that module's closure object itself, unmerged. Merged
+    as a load folds a helper in (`_Recording.absorb`): a file the two closures
+    recorded at two digests is torn (""), and every entry keyed by it opaque.
     """
     if isinstance(obj, types.ModuleType):
         return _own_closure(obj)
-    target = getattr(obj, "__func__", obj)        # a bound method's function
-    try:
-        name = getattr(target, "__module__", None)
-    except Exception:                             # noqa: BLE001 - a proxy that refuses
-        return None
-    module = sys.modules.get(name) if isinstance(name, str) else None
-    return _own_closure(module) if module is not None else None
+    home = _home_module(obj)
+    own = _own_closure(home) if home is not None else None
+    others = [closure for closure in (_own_closure(module) for module in registered_by(obj)
+                                      if module is not home)
+              if closure is not None]
+    if not others:
+        return own
+    if own is None and len(others) == 1:
+        return others[0]
+    merged = _Recording("", "", ())
+    for closure in ([own] if own is not None else []) + others:
+        merged.absorb(closure)
+    return merged.closure()
 
 
 # --------------------------------------------------------------------------- #
@@ -2015,24 +2075,29 @@ def _home_module(obj: Any) -> Any:
 
 
 def _closure_modules(obj: Any) -> list[types.ModuleType]:
-    """Every loaded module whose code `obj` runs: its own, and each module whose
-    file is in its recorded closure — in `sys.modules`, or held only by
-    reference (a helper some other machinery executed and never registered).
-    A module this loader did not run counts only outside the interpreter's
-    trees and the spine: a gate registered from Python in a test is keyed by its
-    defining file, and a `functools.partial` would otherwise hand over
-    `functools` itself."""
+    """Every loaded module whose code `obj` runs: its own, each module that
+    registered it (`registered_by`: the factory's caller, which may hold a memo
+    the gate calls back into), and each module whose file is in its recorded
+    closure (`code_closure`) — in `sys.modules`, or held only by reference (a
+    helper some other machinery executed and never registered). A module this
+    loader did not run counts only outside the interpreter's trees and the
+    spine: a gate registered from Python in a test is keyed by its defining
+    file, and a `functools.partial` would otherwise hand over `functools`
+    itself."""
     home = _home_module(obj)
-    if home is None:
-        return []
-    closure = _own_closure(home)
-    if closure is None:
+    seeds = [module for module in registered_by(obj) if module is not home]
+    if home is not None:
         where = _module_file(home)
-        if where is None or any(_under(_norm(where), d) for d in _excluded_dirs()):
-            return []
-        return [home]
+        if _own_closure(home) is not None or not (
+                where is None or any(_under(_norm(where), d) for d in _excluded_dirs())):
+            seeds.insert(0, home)
+    if not seeds:
+        return []
+    closure = code_closure(obj)
+    if closure is None:
+        return seeds
     files = {_norm(path) for path, _sha in closure.files}
-    found: dict[int, types.ModuleType] = {id(home): home}
+    found: dict[int, types.ModuleType] = {id(module): module for module in seeds}
     for loaded in list(sys.modules.values()):
         if isinstance(loaded, types.ModuleType) and id(loaded) not in found:
             where = _module_file(loaded)

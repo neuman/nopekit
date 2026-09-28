@@ -1009,6 +1009,41 @@ def path(ctx):
 '''
 
 
+#: A project's gate factory: one limit gate per call. Its file name starts with
+#: ``_``, so ``load_project_gates`` never loads it as a gate module of its own;
+#: the gate module that calls it (``_KIT_LIMITS``) imports it by name.
+_KIT_FACTORY = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_staleness.py: a factory that makes one limit gate per row."""
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+def limit_gate(gate_id, key, limit, units, tag):
+    """A gate that passes while ``ctx.params[key]`` stays within ``limit``."""
+    def check(ctx):
+        value = float(ctx.params[key])
+        return Verdict(gate=gate_id, passed=value <= limit, measured=value, limit=limit,
+                       units=units)
+    check.__name__ = gate_id.replace(".", "_")
+    return gate(id=gate_id, title=f"{key} within the table's limit", claims=[tag],
+                tier=Tier.INSTANT,
+                negative_control=NegativeControl(fixture="selftest/planted.py:far_past",
+                                                 note="the value pushed far past any limit"))(check)
+'''
+
+#: The gate module that holds the limit and calls ``_KIT_FACTORY``'s factory.
+_KIT_LIMITS = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_staleness.py: the project's limit table, a factory call a row."""
+from gates._kit import limit_gate
+
+DEFLECTION_LIMIT_MM = 5.0
+
+limit_gate("kit.deflection", "deflection", DEFLECTION_LIMIT_MM, "mm", "kit-deflection")
+'''
+
+
 def _plant_opener(project: str, *, gate_id: str, rel: str, tag: str, param: str,
                   fixture: str) -> None:
     _put(project, "selftest/planted.py", _PLANTED_FIXTURES)
@@ -1979,6 +2014,51 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertFalse(again["cached"], "the cached PASS was served after the helper moved")
         self.assertEqual((again["outcome"], again["limit"]), ("fail", 0.1),
                          "the re-run ran the stale bytecode, not the helper's new bytes")
+
+    def test_cli_a_gate_a_factory_makes_is_keyed_on_the_module_that_registered_it(self):
+        """V: the review's repro (``p4``), through the CLI a person runs. A
+        project keeps one limit gate per table row: ``gates/_kit.py`` holds the
+        factory, ``gates/limits.py`` the limit and the call. The gate's function
+        is defined in the factory, so its ``__module__`` is the helper's, and
+        its code was read from the helper's closure alone: ``code.files`` was
+        ``['gates/_kit.py']``. After the limit moved, a plain ``check`` served
+        the PASS cached, ``status`` named nothing stale, ``doctor`` said every
+        gate's code was recorded, and ``check --force --no-record`` filed "two
+        outcomes recorded for identical inputs". The inputs were not identical:
+        the module that registered the gate is its code."""
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        _put(project, "selftest/planted.py", _PLANTED_FIXTURES)
+        _put(project, "gates/_kit.py", _KIT_FACTORY)
+        _put(project, "gates/limits.py", _KIT_LIMITS)
+        _put(project, "claims/C8.json", json.dumps(
+            {"statement": "Tip sags within the table's limit", "kind": "measurable",
+             "acceptance": {"quantity": "tip deflection", "comparator": "<=",
+                            "limit": 5.0, "units": "mm"},
+             "tags": ["kit-deflection"]}) + "\n")
+
+        gate_id = "kit.deflection"
+        first = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
+        self.assertEqual((first["outcome"], first["limit"]), ("pass", 5.0),
+                         "the positive control")
+        seen, proven = _seen(project)
+        self.assertEqual(seen["C8"], "pass", "the positive control")
+        self.assertIn("C8", proven, "the positive control: C8 is PROVEN before the edit")
+        code = _entry_docs(project)[gate_id]["code"]
+        self.assertIn("gates/limits.py", code["files"],
+                      f"the module that registered the gate is not in its code: {code}")
+        self.assertIn("gates/_kit.py", code["files"], f"the factory is not in its code: {code}")
+
+        _replace_once(project, "gates/limits.py", "5.0", "0.1")
+        status = _doc(_cli(project, "status", "--json"), 0)
+        self.assertIn(gate_id, status["stale_gates"],
+                      "the table's limit moved and the PASS read current")
+        seen, proven = _seen(project)
+        self.assertNotEqual(seen["C8"], "pass", "a moved limit left its claim PASS")
+        self.assertNotIn("C8", proven, "a moved limit left its claim under PROVEN")
+
+        again = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
+        self.assertFalse(again["cached"], "the cached PASS was served after the limit moved")
+        self.assertEqual((again["outcome"], again["limit"]), ("fail", 0.1), again)
 
     def test_cli_a_pass_from_the_cheap_path_is_never_served_to_a_costlier_tier(self):
         """V: the review's repro (false-fresh probes, round 1, ``probe.tier``),

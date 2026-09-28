@@ -2137,7 +2137,11 @@ def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | Non
     2. ``ctx.extra["pack_dir"]`` — a caller working inside one pack.
     3. ``PACK_DIR`` on the gate function's own module. ``packs.load_gates`` sets
        it before executing each gate module, so this works with no cooperation
-       from the caller at all, which is the case that actually happens.
+       from the caller at all, which is the case that actually happens. Else
+       on a module that registered it (``modelio.registered_by``): a gate a
+       factory in the pack's helper made is defined in a module no pack
+       loaded, and its fixture was looked for in the project (Phase 1 review,
+       ``p4`` — ``verdicts._pack_dir_of`` answers the same way).
     4. ``ctx.root`` — a project's own gates, whose ``selftest/`` sits beside the
        model.
 
@@ -2154,9 +2158,10 @@ def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | Non
         return single
     if fn is not None:
         module = sys.modules.get(getattr(fn, "__module__", "") or "")
-        pack_dir = getattr(module, "PACK_DIR", "") if module is not None else ""
-        if isinstance(pack_dir, str) and pack_dir:
-            return pack_dir
+        for owner in (module, *modelio.registered_by(fn)):
+            pack_dir = getattr(owner, "PACK_DIR", "") if owner is not None else ""
+            if isinstance(pack_dir, str) and pack_dir:
+                return pack_dir
     return ctx.root or os.curdir
 
 

@@ -764,6 +764,118 @@ class RecordingLoader(_Sandbox):
         self.assertIsNone(modelio.code_closure(lambda ctx: ctx),
                           "a function from a module this loader never ran has no closure")
 
+    def test_a_gate_a_factory_makes_is_keyed_on_the_module_that_registered_it(self):
+        """V: the review's repro (``p4``), at the loader. A project keeps one
+        limit gate per table row: a helper holds the factory, the gate module
+        holds the limit and calls it. The function the registry holds is
+        defined in the helper, so its ``__module__`` is the helper's, and
+        ``code_closure(fn)`` read the helper's closure alone: the module that
+        holds the limit — the one ``load_source_module`` stamped with
+        ``__atompipe_gates__`` — was in no closure. Editing the limit moved
+        neither the gate's code digest nor its control's static part, and a
+        memo that module holds for the gate was never emptied before a run."""
+        from atompipe import verdicts
+        self.on_path(self.root)
+        kit, table = self.n("kit"), self.n("limits")
+        gate_id = f"codeload.factory_{self.salt}"
+        kit_path = self.put(f"{kit}.py", """
+            from atompipe.gates import gate
+            from atompipe.models import NegativeControl, Verdict
+
+            def limit_gate(gate_id, limit, measure):
+                def check(ctx):
+                    value = measure()
+                    return Verdict(gate=gate_id, passed=value <= limit, measured=value,
+                                   limit=limit)
+                return gate(id=gate_id, negative_control=NegativeControl(
+                    fixture="selftest/bad.py:make", note="planted"))(check)
+            """)
+        table_path = self.put(f"{table}.py", f"""
+            import functools
+            from {kit} import limit_gate
+
+            MASS_LIMIT_G = 100.0
+
+            @functools.lru_cache(maxsize=None)
+            def mass_g():
+                return 40.0
+
+            limit_gate({gate_id!r}, MASS_LIMIT_G, mass_g)
+            """)
+        registry = gates.Registry()
+        with gates.use_registry(registry):
+            module = self.load(f"{table}.py", name=table, registry=registry)
+        spec, fn = registry.get(gate_id)
+        # The scenario itself: the registry holds the helper's function, and
+        # the module that registered it is another one.
+        self.assertEqual(fn.__module__, kit, "the planted gate is not the factory's")
+        self.assertIs(module.__atompipe_gates__[0][1], fn)
+        closure = dict(self.closure(fn).files)
+        self.assertIn(table_path, closure,
+                      "the module that registered the gate, holding its limit, is in no "
+                      "closure")
+        self.assertIn(kit_path, closure, "the factory is the gate's code too")
+        code = verdicts.code_digest(spec, fn)
+        static, _parts = verdicts.control_static(spec, fn, self.root)
+        self.assertIn(f"{table}.mass_g", modelio.clear_caches(fn),
+                      "a memo the registering module holds for the gate is not emptied "
+                      "before it runs")
+        self.assertEqual(fn(None).limit, 100.0)
+
+        self.edit_same_size(table_path, "100.0", "10.00")
+        with gates.use_registry(registry):
+            again = self.load(f"{table}.py", name=table, registry=registry)
+        self.assertIsNot(again, module, "an edit of the limit did not re-execute the table")
+        spec_after, fn_after = registry.get(gate_id)
+        self.assertEqual(fn_after(None).limit, 10.0, "the planted edit did not take")
+        self.assertNotEqual(verdicts.code_digest(spec_after, fn_after).digest, code.digest,
+                            "the limit moved and the gate's code digest did not")
+        self.assertNotEqual(verdicts.control_static(spec_after, fn_after, self.root)[0],
+                            static, "the limit moved and the control's static part did not")
+
+    def test_a_pack_gate_a_factory_makes_is_owned_by_the_pack_that_loaded_it(self):
+        """V: the same hole on the control's other static half. ``PACK_DIR`` is
+        set on the module a pack loads, never on a helper that module imports,
+        and the control's owner — whose ``selftest/`` is walked into its static
+        part — was found through the function's ``__module__``: a pack gate a
+        factory in the pack's helper made walked the PROJECT's ``selftest/``,
+        so an edit of the pack's fixture moved nothing, and its code was
+        spelled by an absolute path rather than ``<pack:NAME>``."""
+        from atompipe import verdicts
+        pack = os.path.join(self.tmp, "packs", "kitpack")
+        kit = self.n("packkit")
+        self.put(f"{kit}.py", """
+            from atompipe.gates import gate
+            from atompipe.models import NegativeControl, Verdict
+
+            def limit_gate(gate_id, limit):
+                def check(ctx):
+                    return Verdict(gate=gate_id, passed=True, measured=0.0, limit=limit)
+                return gate(id=gate_id, negative_control=NegativeControl(
+                    fixture="selftest/bad.py:make", note="planted"))(check)
+            """, base=pack)
+        self.put("gates/table.py", f"""
+            from {kit} import limit_gate
+
+            limit_gate("kitpack.limit_{self.salt}", 1.0)
+            """, base=pack)
+        self.put("selftest/bad.py", "def make(ctx):\n    return ctx\n", base=pack)
+        self.on_path(pack)
+        registry = gates.Registry()
+        with gates.use_registry(registry):
+            modelio.load_source_module(
+                os.path.join(pack, "gates", "table.py"), name=self.n("kitpack_table"),
+                roots=[pack], registry=registry,
+                attrs={"PACK": "kitpack", "PACK_DIR": pack})
+        spec, fn = registry.get(f"kitpack.limit_{self.salt}")
+        self.assertEqual(fn.__module__, kit, "the planted gate is not the factory's")
+        _static, parts = verdicts.control_static(spec, fn, self.root)
+        self.assertEqual(list(parts["selftest"]["files"]), ["selftest/bad.py"],
+                         "the control of a pack's factory-made gate walked the project's "
+                         "selftest/, not its pack's")
+        self.assertIn("<pack:kitpack>/gates/table.py", parts["code"]["files"],
+                      f"the pack's gate module is not spelled by its pack: {parts['code']}")
+
     # -- the model --------------------------------------------------------- #
     def test_load_model_runs_fresh_siblings_and_records_them(self):
         geom_name = self.n("geom")

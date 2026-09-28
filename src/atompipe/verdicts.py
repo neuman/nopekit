@@ -2793,11 +2793,20 @@ def anchors_for(root: str, registry: Any, *, out_dir: str) -> Anchors:
 
 def _pack_dir_of(fn: Any) -> str:
     """``PACK_DIR`` of the module that defines ``fn`` (``packs.load_gates`` sets
-    it before the module runs), or ``""`` for a project's own gate."""
+    it before the module runs), else of a module that registered it
+    (``modelio.registered_by``), or ``""`` for a project's own gate. What
+    slipped through with the defining module alone (Phase 1 review, ``p4``): a
+    pack gate a factory in the pack's helper made — the helper is imported,
+    not loaded by the pack, and carries no ``PACK_DIR`` — was owned by the
+    PROJECT, so its control's static part walked the project's ``selftest/``
+    and an edit of the pack's fixture moved nothing."""
     target = getattr(fn, "__func__", fn)
-    module = sys.modules.get(getattr(target, "__module__", None) or "")
-    pack_dir = vars(module).get("PACK_DIR") if module is not None else None
-    return os.path.abspath(pack_dir) if isinstance(pack_dir, str) and pack_dir else ""
+    home = sys.modules.get(getattr(target, "__module__", None) or "")
+    for module in (home, *modelio.registered_by(fn)):
+        pack_dir = vars(module).get("PACK_DIR") if module is not None else None
+        if isinstance(pack_dir, str) and pack_dir:
+            return os.path.abspath(pack_dir)
+    return ""
 
 
 def _default_anchors(root: str, spec: Any, fn: Any) -> Anchors:
@@ -2917,7 +2926,10 @@ def _code_payload(files: dict, extras: dict, spec_part: dict, fallback: str) -> 
 def code_digest(spec: Any, fn: Any, *, anchors: Anchors | None = None) -> CodeRef:
     """The code ``fn`` (registered as ``spec``) runs, as a ``CodeRef``.
 
-    From the closure ``modelio`` recorded while the gate's module ran: every
+    From the closure ``modelio`` recorded while the gate's module ran — the
+    defining module's merged with every module that registered ``fn``
+    (``modelio.code_closure``; a factory's function is the helper's, and the
+    limit the caller handed it once keyed nowhere, repro ``p4``): every
     file under its roots, by the bytes that executed (a same-size, same-second
     edit ran the old bytecode before, S-26), spelled portably (``anchors``; a
     project's gate reads ``gates/structural.py``, a pack's

@@ -550,10 +550,14 @@ def dynamic_imports(tree) -> list[tuple[int, str]]       # (line, call): import_
                                                          #   module a VALUE names; doctor's dynamic-imports
 def is_code(path, roots=()) -> bool                      # code (under roots, or beside them and not
                                                          #   installed), not an instrument; the finder's test
-def code_closure(obj) -> CodeClosure | None              # a module's, or a function's module's
+def registered_by(fn) -> tuple[ModuleType, ...]          # the modules whose __atompipe_gates__ hold fn
+                                                         #   itself (by identity), sorted by name
+def code_closure(obj) -> CodeClosure | None              # a module's; a function's: its defining
+                                                         #   module's merged with each registered_by
 def clear_caches(obj) -> tuple[str, ...]                 # empty the functools memos obj's code holds
-                         # at module level (its module, every module of its closure: globals
-                         # and the attributes of classes they define); the dotted names emptied
+                         # at module level (its module, each module that registered it, every
+                         # module of its closure: globals and the attributes of classes they
+                         # define); the dotted names emptied
 ```
 **`flat_params` is the one copy** of "flatten a projection into `ctx.params`": derived
 values first, config on top, and the list of keys where the two disagree. It was
@@ -585,6 +589,23 @@ cannot be mapped to a file, falls back to every `*.py` under the owning director
 it still hashes the same, else purges the recorded helpers and re-executes (the gates
 it registered are re-adopted into the caller's registry). `load_model` records the
 model's closure the same way.
+
+**A gate's code is the module that registered it, too.** `code_closure(fn)` merges the
+closure of the module that defines `fn` with that of every module whose
+`__atompipe_gates__` holds `fn` (`registered_by`, read from `sys.modules` as it is now),
+as a load folds in a helper: a file the two recorded at two digests is torn. For a gate
+written with `@gate` the two are one module and its closure comes back unmerged.
+`verdicts._pack_dir_of` (a control's owner, the default `<pack:NAME>` anchor) and
+`gates._fixture_root` read `PACK_DIR` from the defining module, else from a registering
+one. What slipped through (Phase 1 review, `p4`): a factory in `gates/_gatekit.py` made
+the gate `gates/limits.py` registered with its `MASS_LIMIT_G`; the function's
+`__module__` was the helper's, so `code.files` was `['gates/_gatekit.py']` — the limit
+went 100 -> 10 and `check` served the PASS cached, `status` named nothing stale, `doctor`
+said every gate's code was recorded, `--force` filed two outcomes for identical inputs;
+and a pack's factory-made gate was owned by the project, whose `selftest/` its control
+walked. *Rejected:* stamping the registering module on the function (one function
+registered under two ids has two, and a cache hit re-adopts without running anything to
+stamp); the loader's `_STACK` at decoration time (empty when a digest is asked for).
 
 **What a module reads at import is in its closure.** While a module executes, the
 loader's audit hook files every `open` that reads a file which is not an instrument's
@@ -644,8 +665,9 @@ DATA as the running gate's read, keyed on whether it was the first to load anyth
 functools memo — an `lru_cache`, a `cache`, or a function carrying a `cache_clear` of
 its own, as cachetools' `cached` does — held by the code `obj` runs: a
 global, or a staticmethod, classmethod, method or property getter of a class the module
-defines, followed through `__wrapped__` — in `obj`'s module and every module whose file
-is in its closure. `gates.run_gate` calls it on the gate function, `_build_control` on
+defines, followed through `__wrapped__` — in `obj`'s module, each module that registered
+it (`registered_by`: a factory's caller can hand the gate a memoised callback), and every
+module whose file is in its closure. `gates.run_gate` calls it on the gate function, `_build_control` on
 the fixture and `verdicts._known_good` on `known_good.context`, each before the call, so
 every run opens its files itself inside its own trace window. What slipped through
 (review round 2): S-27 was closed for `ctx.extra` only, and an `lru_cache` around a file
@@ -1033,7 +1055,8 @@ def read_obs(root, gate_id, *, control=False) -> list[dict]   # [{"entry", "when
 def last_read_sets(root) -> dict[str, set[tuple]]    # {gate: {param path}}: Param.gates and why, never rho
 ```
 **The code digest.** `code_digest(spec, fn)` is sha256 of canonical JSON of the
-closure `modelio` recorded while the gate's module ran (`{portable path: sha}` — a
+closure `modelio` recorded while the gate's module ran — the defining module's merged
+with every registering module's (`modelio.code_closure`) — as `{portable path: sha}` (a
 project gate's `gates/structural.py`, a pack's `<pack:NAME>/gates/mesh.py`; the bytes
 that executed, S-26), the `canonical_ast_digest` of each `atompipe.*` module the
 closure imports that `SPINE_MODULES` does not cover (cad and fdm import
@@ -1176,7 +1199,8 @@ keyed only when the host was live (a known-good host is a design the fixture's o
 of the live design, below).
 
 **`selftest_walk(owner_dir)`** — the owner is the pack directory (`PACK_DIR` on the
-gate's module) or the project root. `vcs.ls_files(owner_dir, ["selftest"])`, asked of
+gate's module, else on a module that registered it — `modelio.registered_by`) or the
+project root. `vcs.ls_files(owner_dir, ["selftest"])`, asked of
 the OWNER's repository (a bundled pack's is atompipe's), tracked plus
 untracked-not-ignored; outside git, a walk. Both leave out `__pycache__/`,
 `*.py[cod]` and dot-directories (openmodelica's `.generated/`), so the git and non-git
