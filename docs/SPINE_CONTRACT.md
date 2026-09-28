@@ -695,9 +695,65 @@ atompipe check [--tier N] [--only GATE]   atompipe gate list|selftest|show
 atompipe report [--write]                 atompipe why <param-or-claim>
 atompipe decide --title ... --summary ...  atompipe packs [list|show|validate]
 atompipe model [--write]                  atompipe doctor
+atompipe check [--junit [PATH]]
+atompipe gate selftest [GATE ...] [--pack NAME|DIR] [--user-packs] [--allow-empty] [--junit [PATH]]
 ```
 Output is terse and machine-parseable by default (one line per verdict);
 `--json` on every read command.
+
+**`--junit [PATH]` at the edge** (`check`, `gate selftest`; the XML itself is
+`report.render_junit` / `render_selftest_junit`). Three rules, each because of what
+slipped through while designing it (cli:H7):
+- **Unlinked first.** The target is removed at the top of the command — before
+  `_registry` and `_projection`, which exit 2 on a broken pack or model, and before
+  the lock. A run that ends early leaves no file: yesterday's all-green `junit.xml`
+  beside a job that exited 2 is what a CI system would otherwise render.
+- **One exit code, written last.** `check` returned from four places; the code is
+  now computed once and the XML rendered from it, atomically, at the single exit —
+  a report can never carry a judgement the return value did not make.
+- **A PATH ends in `.xml`**, else exit 2 with `--junit takes a path ending in .xml;
+  put gate ids before it`. The value is optional, so `gate selftest --junit
+  bracket.deflection` would otherwise read the gate id as the path.
+A bare `--junit` writes `report.JUNIT_DEFAULT` under the project root (ignored
+scratch); a PATH resolves against the directory the command started in (`-C`, else
+the cwd). `check --json` names the file written in `junit`.
+
+**`gate selftest` has two modes.** Inside a project it runs the project's controls
+against the project's model. With no project (`store.find_root()` is None — the
+repository root, where `CLAUDE.md` tells a pack author to run it) or with `--pack`, it
+runs **pack mode**, and branches before `_root`, `_lock`, `store.load` and
+`_projection`, each of which assumes a project (cli:H8). What slipped through (S-09):
+the command needed a project, so the prescribed merge check exited 2 where it was
+prescribed, and CI only ran it inside the bracket, which loads no pack.
+- **Targets.** `--pack NAME|DIR` (repeatable; a DIR that is not a pack means every
+  pack directly inside it), else every **bundled** pack. `$ATOMPIPE_PACK_PATH` and
+  `~/.atompipe/packs` are searched only under `--user-packs`: both outrank the
+  bundled packs, so without the switch the machine would choose which copy the merge
+  check tests (S-87). Inside a project, `--pack NAME` also searches its
+  `.atompipe/packs/`. Positional gate ids filter, by `gates._selected`'s rule, in
+  both modes.
+- **Each target goes through `packs.demonstrate(dir, tier=…)`** — the ceiling is
+  `Tier.EXTERNAL` unless `--tier` is given, raised to a gate named explicitly — with
+  a temp `out_dir` removed afterwards. Nothing is persisted: no ledger, no run
+  history, nothing in the pack (Q1.8). `demonstrate` returns counts and problem
+  lines, so the command first loads each pack through the same loader
+  (`packs._load_dir`, modules reused, never re-executed) for its gate list, reads the
+  result back per gate, and counts no control as fired unless `ran` adds up.
+- **Exit 1** on any BROKEN control, on a failed baseline (pack mode), and on **zero
+  controls exercised** — text and JSON paths both, in both modes — unless
+  `--allow-empty`. A tooling skip is not exercise. Before (cli:H8): a selftest with
+  nothing to run printed a sentence and exited 0, and `--json` said `"ok": true`.
+- **Output.** The summary, both modes: `<n> control(s) in <t>: <f> fired, <b>
+  BROKEN, <k> skipped (tooling)` — the last line of a clean run. Pack mode prints one
+  line per pack before it (`[ok  ] beam-analytic (bundled) : 8 fired`) and, when
+  any, `<m> baseline(s) failed:` rows after it. `--json` carries `mode`
+  (`"project" | "pack"`), `packs`, `counts`, `baselines` (pack mode; `null` in
+  project mode) and `ok`, which is `exit code == 0`. `--junit` writes suite
+  `controls`, plus `baselines` in pack mode.
+
+`packs validate` prints `demonstrate`'s notes — gates not demonstrated because their
+tools are absent, and gates above the tier — as `note:` lines (`notes` in `--json`).
+They are never problems, and never silent either.
 
 `check` and `status` say the same thing about a blocking claim, through three
 private helpers (named here because tests hold them to it):

@@ -30,10 +30,11 @@ CI:
 
     0   fine
     1   a gate-level verdict says stop  — `check` with a blocking critical claim,
-        `gate selftest` with a control that did not fire, `doctor` with a
-        hard failure. This is what makes `atompipe check` usable as a pre-spend
-        gate: it exits non-zero *while anything critical is unproven*, not only
-        when something failed.
+        `gate selftest` with a control that did not fire, a pack gate that
+        failed its own baseline, or no control exercised at all (unless
+        `--allow-empty`), `doctor` with a hard failure. This is what makes
+        `atompipe check` usable as a pre-spend gate: it exits non-zero *while
+        anything critical is unproven*, not only when something failed.
     2   the user did something the tool cannot act on (AtompipeError, bad args)
     130 interrupted
 
@@ -75,11 +76,13 @@ from .models import (
     PhysicalResult,
     ProjectMeta,
     RunMeta,
+    Tier,
     Verdict,
 )
 from .util import (
     AtompipeError,
     FileLock,
+    atomic_write_text,
     human_bytes,
     human_duration,
     read_json,
@@ -904,6 +907,101 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# --junit: unlinked first, written last
+# --------------------------------------------------------------------------- #
+class _JUnitDefault(str):
+    """`--junit` given with no PATH: `report.JUNIT_DEFAULT`, under the project root.
+
+    A `str` subclass so argparse can store it as the flag's `const` and the
+    command can still tell it from a PATH the user typed, which resolves against
+    the directory the command started in (`-C`, else the cwd) like any path
+    typed at a shell — git's `-C` rule. *Rejected:* comparing the value to
+    `JUNIT_DEFAULT` — a user who typed that exact string from a subdirectory
+    meant the subdirectory; a second `--junit-path` flag (spec §3.14) — two flags
+    for one file, and the bare one would still swallow a gate id.
+    """
+
+
+_JUNIT_DEFAULT = _JUnitDefault(report.JUNIT_DEFAULT)
+
+#: The suffix every `--junit PATH` must carry, and the message when it does not.
+#: What slipped through while designing the flag (cli:H7): `--junit` takes an
+#: OPTIONAL value and `gate selftest` takes gate ids positionally, so
+#: `gate selftest --junit bracket.deflection` parsed the gate id as the report's
+#: path, ran every control instead of the one named, and wrote XML to a file
+#: called `bracket.deflection`. No gate id ends in `.xml`; every JUnit consumer
+#: expects it to. *Rejected:* `--junit=PATH` only (argparse cannot require the
+#: `=`); a separate flag for the path (above).
+_JUNIT_SUFFIX = ".xml"
+_JUNIT_RULE = "--junit takes a path ending in .xml; put gate ids before it"
+
+
+def _junit_arg(args: argparse.Namespace) -> str | None:
+    """The `--junit` value, refused unless it ends in `.xml`. Called FIRST.
+
+    First, before anything reads the project: a refused value must stop the
+    command before it has run a gate or removed a file.
+    """
+    value = getattr(args, "junit", None)
+    if value is None:
+        return None
+    if not str(value).endswith(_JUNIT_SUFFIX):
+        raise AtompipeError(_JUNIT_RULE)
+    return value
+
+
+def _start(args: argparse.Namespace) -> str:
+    """The directory this command started in: `-C`, else the cwd."""
+    return os.path.abspath(getattr(args, "dir", None) or os.getcwd())
+
+
+def _junit_unlink(args: argparse.Namespace, value: str | None, *,
+                  root: str | None) -> str | None:
+    """Resolve the `--junit` target and remove whatever is there. Returns its path.
+
+    Called at the TOP of the command, before `_registry` and `_projection`, both
+    of which exit 2 on a broken pack or model. What slipped through while
+    designing this (cli:H7): "unlinked when the sweep starts" put the unlink after
+    them, so a crash left the previous run's all-green `junit.xml` on disk beside
+    a job that exited 2 — and a CI system renders the file, not the exit code. A
+    run that ends early now leaves no report at all, which every JUnit consumer
+    reads as missing, never as green.
+
+    The default resolves against `root` (the project, when there is one), an
+    explicit PATH against `_start`. Something at the path that cannot be removed
+    — a directory, a read-only parent — is refused before anything runs, rather
+    than discovered after the sweep, beside results nobody can then read.
+    """
+    if value is None:
+        return None
+    base = (root or _start(args)) if isinstance(value, _JUnitDefault) else _start(args)
+    path = os.path.abspath(os.path.join(base, value))
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise AtompipeError(
+            f"--junit {value}: cannot remove what is at {path} "
+            f"({exc.strerror or exc}); a report that cannot be replaced would be "
+            f"read as this run's") from exc
+    return path
+
+
+def _junit_write(path: str | None, render: Callable[[], str]) -> str | None:
+    """Write the report at the command's single exit; returns the path written.
+
+    `render` is called here, after the exit code exists, so the XML can only be
+    made from the code the command returns (spec §3.14: one exit code, one write).
+    Atomic (`atomic_write_text`): a reader never sees half a file.
+    """
+    if path is None:
+        return None
+    atomic_write_text(path, render())
+    return path
+
+
+# --------------------------------------------------------------------------- #
 # check
 # --------------------------------------------------------------------------- #
 def cmd_check(args: argparse.Namespace) -> int:
@@ -926,7 +1024,17 @@ def cmd_check(args: argparse.Namespace) -> int:
     the hash exists to catch. So a filtered run records its history file, updates
     the verdicts it actually produced, and leaves the staleness clock where it
     was.
+
+    `--junit [PATH]` writes the same judgement as JUnit XML (`report.render_junit`).
+    The target is removed before anything can fail and written at the one exit,
+    from the one exit code. What slipped through while designing it (cli:H7):
+    this function returned from four places, and a report written at one of them
+    carries a judgement the others never made — so the code is computed once,
+    below, and every path out prints from it.
     """
+    junit_arg = _junit_arg(args)
+    junit = _junit_unlink(args, junit_arg,
+                          root=store.find_root(getattr(args, "dir", None)))
     root = _root(args)
     tier = int(args.tier)
     only = list(args.only) if args.only else None
@@ -983,8 +1091,11 @@ def cmd_check(args: argparse.Namespace) -> int:
             ledger.upsert_verdict(verdict)
         _refresh_param_gates(ledger, param_reads, replace=only is None)
 
+        # The clock, once for the whole command: the run record and the JUnit
+        # report carry the same instant (spec §0.6).
+        now = utcnow_iso()
         run_meta = RunMeta(
-            when=utcnow_iso(),
+            when=now,
             tier=tier,
             model_hash=modelio.model_hash(projection) if projection else "",
             inputs_hash=artifacts.inputs_hash(ledger),
@@ -1014,6 +1125,19 @@ def cmd_check(args: argparse.Namespace) -> int:
     # disagreeing, with the machine believing the one that laundered. Zero
     # blocking claims out of zero claims is not readiness, so it is not a zero.
     ready = bool(ledger.claims) and not blockers
+    # THE exit code. Every line below prints from it and the JUnit report is
+    # rendered from it; nothing after this point decides anything.
+    code = 0 if ready else 1
+
+    # Registered gates this run did not sweep, and why: a JUnit consumer counts
+    # testcases, and a gate that vanished from the file between two runs reads
+    # as a gate that was removed.
+    not_run = {spec.id: ("excluded by --only" if only is not None
+                         else "above the tier ceiling")
+               for spec in registry.specs() if spec.id not in swept}
+    written = _junit_write(junit, lambda: report.render_junit(
+        ledger, verdicts, registry, tier=tier, ready=ready, exit_code=code,
+        when=now, not_run=not_run, stale=stale))
 
     if args.json:
         _dump({
@@ -1033,8 +1157,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             "run": rel(run_path, root) if run_path else "",
             "model_hash": run_meta.model_hash,
             "duration_s": run_meta.duration_s,
+            "junit": written,
         })
-        return 0 if ready else 1
+        return code
 
     bits = [f"{len(verdicts)} gates", f"{len(ran)} ok"]
     if failed:
@@ -1066,17 +1191,14 @@ def cmd_check(args: argparse.Namespace) -> int:
         # exit code says the same thing this line says.
         _say("no claims recorded, so nothing was checked — an empty ledger is not a "
              "clean bill of health. `atompipe claim add --statement ...`")
-        return 1
-
-    if not blockers:
+    elif not blockers:
         _say("ready: no critical claim is blocking "
              "(physical and assumed claims are still listed in `atompipe report`)")
-        return 0
-
-    _say(f"BLOCKING — {len(blockers)} critical claim(s) must not be spent against:")
-    for claim, status in blockers:
-        _say(_blocking_line(claim, status, _blocking_reason(ledger, claim, status)))
-    return 1
+    else:
+        _say(f"BLOCKING — {len(blockers)} critical claim(s) must not be spent against:")
+        for claim, status in blockers:
+            _say(_blocking_line(claim, status, _blocking_reason(ledger, claim, status)))
+    return code
 
 
 def _blocking_line(claim: Claim, status: ClaimStatus, reason: str) -> str:
@@ -1725,6 +1847,48 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _selftest_code(*, broken: int, baselines_failed: int, exercised: int,
+                   allow_empty: bool) -> int:
+    """`gate selftest`'s one exit code, in both modes.
+
+    1 on a control that did not fire (or crashed, or is gone), on a pack gate
+    that failed its own baseline, and on a run that exercised no control at all.
+    That last one is `--allow-empty`'s to waive and nobody else's. What slipped
+    through (cli:H8): with nothing registered the text path printed "no controls
+    to run" and returned 0, and the JSON path said `"ok": true` — a selftest that
+    passes by running nothing is a logger, the thing this command exists to
+    catch (PLAN G3). A tooling skip is not exercise: it tested nothing.
+    """
+    if broken or baselines_failed:
+        return 1
+    if exercised == 0 and not allow_empty:
+        return 1
+    return 0
+
+
+def _selftest_summary(controls: int, elapsed: float, fired: int, broken: int,
+                      skipped: int) -> str:
+    """`<n> control(s) in <t>: <f> fired, <b> BROKEN, <k> skipped (tooling)`.
+
+    One spelling for both modes (spec §3.13), and the last line of a clean run —
+    the fresh-clone transcript matches it there. `(tooling)` because a control can
+    only skip for missing tooling: `gates.selftest` turns any other skip into an
+    error (S-12), so the word says which skips these are.
+    """
+    return (f"{controls} control(s) in {human_duration(elapsed)}: {fired} fired, "
+            f"{broken} BROKEN, {skipped} skipped (tooling)")
+
+
+def _say_empty(allow_empty: bool, why: str) -> None:
+    """The line under a summary that counted zero controls exercised."""
+    if allow_empty:
+        _say(f"note: no control ran ({why}) — allowed by --allow-empty")
+    else:
+        _say(f"no control ran ({why}), so no gate was shown able to fail — a "
+             f"selftest that exercises nothing is not a pass (--allow-empty if "
+             f"nothing is expected here)")
+
+
 def cmd_gate_selftest(args: argparse.Namespace) -> int:
     """Run every gate against its own known-bad input, and fail if one does not fail.
 
@@ -1737,17 +1901,34 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
     (refusing by exploding is not detecting), and a fixture that is missing or
     broken (the control is gone, so the gate is unproven). A gate whose tooling
     is absent SKIPS and does not fail the command — nothing was tested, and that
-    is already visible as BLOCKED in the readiness report.
+    is already visible as BLOCKED in the readiness report. A run in which no
+    control ran at all exits 1 too, unless `--allow-empty` says that is expected
+    (`_selftest_code`).
 
     Every tier runs by default. Capping the default at tier 0 would leave the
     expensive gates — the ones nobody re-reads — permanently unproven, which is
     the exact shape of the failure this command exists to catch.
 
+    **Two modes.** Inside a project this runs the project's controls against the
+    project's model. With no project — the repository root, where `CLAUDE.md`
+    tells a pack author to run it — or with `--pack`, it runs **pack mode**
+    (`_selftest_packs`). What slipped through (S-09): the command needed a
+    project and exited 2 at the root, so the merge check `CLAUDE.md` and
+    `CONTRIBUTING.md` prescribe could not run where they prescribe it, and CI ran
+    it only inside the bracket, which loads no pack at all. The branch comes
+    before `_root`, `_lock`, `store.load` and `_projection` (cli:H8): each of them
+    assumes a project, and a broken model must not stop a pack's controls.
+
     The selftest verdicts are appended to the run history but NOT written into
     the ledger's verdict list: they are filed under `<gate>#selftest` and carry
     no claims, and proof that the instrument works must never resolve a claim.
     """
-    root = _root(args)
+    junit_arg = _junit_arg(args)
+    root = store.find_root(getattr(args, "dir", None))
+    junit = _junit_unlink(args, junit_arg, root=root)
+    if root is None or args.pack:
+        return _selftest_packs(args, root, junit)
+
     max_tier = ALL_TIERS if args.tier is None else int(args.tier)
     selection = list(args.gates or []) + list(args.only or [])
 
@@ -1774,37 +1955,429 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
                 _say(verdict.render())
         elapsed = time.perf_counter() - started
 
+        now = utcnow_iso()
         if results and not args.no_record:
             store.record_run(root, results, RunMeta(
-                when=utcnow_iso(), tier=max_tier,
+                when=now, tier=max_tier,
                 model_hash=modelio.model_hash(projection) if projection else "",
                 inputs_hash=artifacts.inputs_hash(ledger),
                 spine_version=__version__, duration_s=round(elapsed, 4)))
+        installed = packs.installed(root, ledger=ledger)
 
     broken = [v for v in results if not v.ok and not v.skipped]
     skipped = [v for v in results if v.skipped]
+    fired = len(results) - len(broken) - len(skipped)
+    code = _selftest_code(broken=len(broken), baselines_failed=0,
+                          exercised=fired + len(broken), allow_empty=args.allow_empty)
+    written = _junit_write(junit, lambda: report.render_selftest_junit(
+        results, exit_code=code, when=now))
 
     if args.json:
-        _dump({"selftests": [_verdict_row(v) for v in results],
+        _dump({"mode": "project",
+               "packs": [_pack_row(name, root) for name in installed],
+               "selftests": [_verdict_row(v) for v in results],
+               "baselines": None,
                "broken": [v.gate for v in broken],
                "skipped": [v.gate for v in skipped],
-               "ok": not broken})
-        return 1 if broken else 0
+               "counts": {"controls": len(results), "fired": fired,
+                          "broken": len(broken), "skipped": len(skipped)},
+               "allow_empty": bool(args.allow_empty),
+               "junit": written,
+               "ok": code == 0})
+        return code
 
-    if not results:
-        _say("no gates registered, so no controls to run")
-        return 0
-    _say(f"{len(results)} control(s) in {human_duration(elapsed)}: "
-         f"{len(results) - len(broken) - len(skipped)} fired, {len(broken)} BROKEN, "
-         f"{len(skipped)} skipped")
+    _say(_selftest_summary(len(results), elapsed, fired, len(broken), len(skipped)))
+    if fired + len(broken) == 0:
+        _say_empty(args.allow_empty,
+                   "no gates registered" if not results else "every control skipped")
     if broken:
         _say("these gates cannot be trusted — each one failed to reject its own "
              "known-bad input, or lost its control:")
         for verdict in broken:
             _say(f"{_tag('FAIL')} {verdict.gate} — "
                  f"{verdict.detail or verdict.error or 'no detail'}")
-        return 1
-    return 0
+    return code
+
+
+# --------------------------------------------------------------------------- #
+# gate selftest, pack mode:  the gate on the gates, where the packs are
+# --------------------------------------------------------------------------- #
+def _pack_row(name: str, root: str) -> dict[str, str]:
+    """One installed pack as `gate selftest --json` lists it in project mode:
+    its name, where it resolved from, and which search root that was."""
+    pack_dir = packs.find(name, root) or ""
+    return {"name": name, "dir": pack_dir,
+            "origin": packs.origin_of(pack_dir, root) if pack_dir else "missing"}
+
+
+def _packs_under(base: str) -> list[str]:
+    """Pack directories directly inside `base`, sorted — by `packs.discover_dirs`'
+    rules: a `pack.json` makes a directory a pack, and names starting `.` or `_`
+    are never one (`packs/__init__.py` sits beside the bundled packs)."""
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError:
+        return []
+    return [os.path.join(base, entry) for entry in entries
+            if not entry.startswith((".", "_"))
+            and os.path.isfile(os.path.join(base, entry, packs.MANIFEST_NAME))]
+
+
+#: The `skip_reason` prefix of a control `_read_back` could not count: its pack's
+#: demonstration stopped before it, or did not add up. Not a tooling skip, so it
+#: is left out of the `skipped (tooling)` count; the pack's own problem row is
+#: what fails the run.
+_NOT_RUN = "not run: "
+
+
+def _bare(gate_id: str) -> str:
+    """A control's gate id without `gates.selftest`'s `#selftest` suffix."""
+    return gate_id[: -len("#selftest")] if gate_id.endswith("#selftest") else gate_id
+
+
+def _pack_targets(args: argparse.Namespace, root: str | None) -> tuple[list[tuple[str, str]], list[str]]:
+    """`([(name, pack dir)], notes)`: what pack mode demonstrates, in order.
+
+    * `--pack DIR` — that pack, or, for a directory that is not one, every pack
+      directly inside it (`--pack packs/`, `--pack ~/.atompipe/packs`). A
+      directory holding none is a note and zero targets, which the exit code then
+      refuses unless `--allow-empty`.
+    * `--pack NAME` — resolved like a project resolves it, but with
+      `$ATOMPIPE_PACK_PATH` and `~/.atompipe/packs` searched only under
+      `--user-packs`; inside a project its `.atompipe/packs/` is searched too.
+    * neither — every bundled pack, plus the env and user packs under
+      `--user-packs`, first-found-wins by directory name as discovery resolves it.
+
+    What slipped through without the switch (S-87): the env and user entries
+    outrank the bundled packs, so on a pack author's machine a same-named copy in
+    `~/.atompipe/packs` would have been the one demonstrated while every line
+    named the bundled one. The machine does not get to choose what the merge
+    check tests. *Rejected:* refusing to run while a user pack shadows a bundled
+    one — the author's copy is often the point, and `--user-packs` names it.
+    """
+    include = bool(getattr(args, "user_packs", False))
+    project = root or ""          # "" keeps search_paths from finding one itself
+    out: list[tuple[str, str]] = []
+    notes: list[str] = []
+    seen: set[str] = set()
+
+    def add(pack_dir: str) -> None:
+        pack_dir = os.path.abspath(pack_dir)
+        key = os.path.normcase(pack_dir)
+        if key not in seen:
+            seen.add(key)
+            out.append((os.path.basename(pack_dir.rstrip(os.sep)), pack_dir))
+
+    if args.pack:
+        for value in args.pack:
+            if os.path.isdir(value):
+                if os.path.isfile(os.path.join(value, packs.MANIFEST_NAME)):
+                    add(value)
+                    continue
+                inside = _packs_under(value)
+                if not inside:
+                    notes.append(f"{os.path.abspath(value)} holds no pack: no "
+                                 f"{packs.MANIFEST_NAME} in it or directly below it")
+                for pack_dir in inside:
+                    add(pack_dir)
+                continue
+            if os.sep in value or (os.altsep and os.altsep in value):
+                raise AtompipeError(f"--pack {value}: no such directory")
+            found = packs.find(value, project, include_env=include, include_user=include)
+            if found is None:
+                looked = packs.search_paths(project, existing_only=False,
+                                            include_env=include, include_user=include)
+                where = "\n  ".join(looked) or "(no search paths)"
+                extra = "" if include else (
+                    f"\n($ATOMPIPE_PACK_PATH and ~/.atompipe/packs are searched only "
+                    f"with --user-packs)")
+                raise AtompipeError(f"no pack named {value!r} — searched:\n  {where}{extra}")
+            add(found)
+        return out, notes
+
+    claimed: set[str] = set()
+    for base in packs.search_paths(project, include_env=include, include_user=include):
+        for pack_dir in _packs_under(base):
+            name = os.path.normcase(os.path.basename(pack_dir))
+            if name in claimed:
+                continue                  # shadowed, exactly as a project would see it
+            claimed.add(name)
+            add(pack_dir)
+    return out, notes
+
+
+def _selftest_packs(args: argparse.Namespace, root: str | None, junit: str | None) -> int:
+    """`gate selftest` in pack mode: each target through `packs.demonstrate`.
+
+    Per gate, the same three runs `pack validate` makes: the pack's own baseline
+    must pass, the control must fire, and it must still fire against an empty
+    host (the seal probe). `demonstrate` is the one implementation of those rules;
+    this function only picks the packs, reads the result back per gate, and
+    renders it. Every run gets a temp `out_dir` that is removed afterwards, and
+    nothing is recorded — no project, no ledger, no run history (Q1.8).
+
+    The tier ceiling defaults to EXTERNAL: every control, as in a project. A gate
+    named explicitly (positionally or `--only`) runs above an explicit `--tier`,
+    because naming it is the opt-in to its cost — `gates._selected`'s rule, used
+    here per pack so the matching can never disagree with a project's.
+
+    Reading `Demonstration` back per gate needs each pack's gate list, which it
+    does not carry: counts and problem lines only. So each pack is loaded first
+    through `packs._load_dir` — the loader `demonstrate` itself uses, from the
+    same directory — into a registry of its own. A module is executed once per
+    process and reused after that, so the second load costs a lookup and cannot
+    see different code. The counts must then add up: if `demonstrate` ran a
+    different number of controls from the gates it was given, none of that
+    pack's controls is counted as fired. *Rejected:* re-running the baseline and
+    control here per gate — a second copy of the rules, which drifts from
+    `demonstrate` in whichever direction nobody tests (D-25).
+    """
+    ceiling = int(Tier.EXTERNAL) if args.tier is None else int(args.tier)
+    selection = [p for p in list(args.gates or []) + list(args.only or []) if str(p).strip()]
+    targets, notes = _pack_targets(args, root)
+    started = time.perf_counter()
+
+    # Pass 1: what each pack registers, and which of its gates the selection picks.
+    plans: list[dict[str, Any]] = []
+    hit: set[str] = set()
+    every_pack_loaded = True
+    for name, pack_dir in targets:
+        plan: dict[str, Any] = {
+            "name": name, "dir": pack_dir, "origin": packs.origin_of(pack_dir, root or ""),
+            "specs": [], "chosen": [], "problems": [],
+        }
+        plans.append(plan)
+        registry = gates.Registry()
+        try:
+            packs._load_dir(name, pack_dir, registry)
+        except AtompipeError as exc:
+            plan["problems"].append(f"{packs.GATES_DIR}/: {exc}")
+            every_pack_loaded = False
+            continue
+        plan["specs"] = registry.specs()
+        if not selection:
+            plan["chosen"] = [s.id for s in registry.by_tier(ceiling)]
+            continue
+        chosen: set[str] = set()
+        for pattern in selection:
+            try:
+                picked = gates._selected(registry, ceiling, [pattern])
+            except AtompipeError:
+                continue              # no hit in THIS pack; another may have it
+            if picked:
+                hit.add(pattern)
+                chosen.update(s.id for s in picked)
+        plan["chosen"] = [s.id for s in plan["specs"] if s.id in chosen]
+
+    unmatched = [p for p in selection if p not in hit]
+    if unmatched and every_pack_loaded:
+        # A pack that did not load might have held the gate, so only a complete
+        # picture may refuse the name; otherwise the load failure is reported.
+        raise AtompipeError(
+            f"no gate in {', '.join(n for n, _ in targets) or 'no pack'} matches "
+            f"{', '.join(repr(u) for u in unmatched)} — running zero controls and "
+            f"calling it a clean selftest is the failure this command exists to prevent")
+
+    # Pass 2: demonstrate, then read the result back per chosen gate.
+    controls: list[Verdict] = []
+    baselines: list[Verdict] = []
+    failed_rows: list[tuple[str, str]] = []      # (label, why): each failed baseline
+    with tempfile.TemporaryDirectory(prefix="atompipe-selftest-",
+                                     ignore_cleanup_errors=True) as scratch:
+        for index, plan in enumerate(plans):
+            if plan["chosen"]:
+                # Up to the dearest gate named: naming it opted into its cost.
+                tier = max([ceiling] + [int(s.tier) for s in plan["specs"]
+                                        if s.id in plan["chosen"]])
+                shown = packs.demonstrate(
+                    plan["dir"], tier=tier,
+                    out_dir=os.path.join(scratch, f"{index:03d}-{plan['name']}"))
+                _read_back(plan, shown, tier)
+            for problem in plan["problems"]:
+                baselines.append(Verdict(gate=plan["name"], pack=plan["name"],
+                                         passed=False, detail=problem))
+                failed_rows.append((plan["name"], problem))
+            controls.extend(plan.get("controls", []))
+            for verdict in plan.get("baselines", []):
+                baselines.append(verdict)
+                if verdict.outcome in ("fail", "error"):
+                    failed_rows.append((f"{verdict.gate} ({plan['name']})",
+                                        verdict.detail or verdict.error))
+    elapsed = time.perf_counter() - started
+    now = utcnow_iso()
+
+    broken = [v for v in controls if v.outcome in ("fail", "error")]
+    skipped = [v for v in controls if v.outcome == "skipped"
+               and not v.skip_reason.startswith(_NOT_RUN)]
+    fired = [v for v in controls if v.outcome == "pass"]
+    code = _selftest_code(broken=len(broken), baselines_failed=len(failed_rows),
+                          exercised=len(fired) + len(broken),
+                          allow_empty=args.allow_empty)
+    written = _junit_write(junit, lambda: report.render_selftest_junit(
+        controls, exit_code=code, when=now, baselines=baselines))
+
+    if args.json:
+        _dump({"mode": "pack",
+               "tier": ceiling,
+               "packs": [{"name": p["name"], "dir": p["dir"], "origin": p["origin"],
+                          "gates": list(p["chosen"]),
+                          "fired": sum(1 for v in p.get("controls", []) if v.ok),
+                          "broken": [_bare(v.gate) for v in p.get("controls", [])
+                                     if v.outcome in ("fail", "error")],
+                          "skipped": [_bare(v.gate) for v in p.get("controls", [])
+                                      if v.outcome == "skipped"
+                                      and not v.skip_reason.startswith(_NOT_RUN)],
+                          "baselines_failed": [v.gate for v in p.get("baselines", [])
+                                               if v.outcome in ("fail", "error")],
+                          "problems": list(p["problems"])} for p in plans],
+               "notes": notes,
+               "selftests": [_verdict_row(v) for v in controls],
+               "baselines": [_verdict_row(v) for v in baselines],
+               "broken": [_bare(v.gate) for v in broken],
+               "skipped": [_bare(v.gate) for v in skipped],
+               "baselines_failed": [label for label, _ in failed_rows],
+               "counts": {"controls": len(fired) + len(broken) + len(skipped),
+                          "fired": len(fired), "broken": len(broken),
+                          "skipped": len(skipped), "baselines_failed": len(failed_rows)},
+               "allow_empty": bool(args.allow_empty),
+               "junit": written,
+               "ok": code == 0})
+        return code
+
+    for note in notes:
+        _say(f"note: {note}")
+    for plan in plans:
+        line = _pack_line(plan, filtered=bool(selection), ceiling=ceiling)
+        if line:
+            _say(line)
+    _say(_selftest_summary(len(fired) + len(broken) + len(skipped), elapsed,
+                           len(fired), len(broken), len(skipped)))
+    if not fired and not broken:
+        _say_empty(args.allow_empty, "no pack to demonstrate" if not targets
+                   else "every control skipped" if skipped else "no gate selected")
+    if broken:
+        _say("these gates cannot be trusted — each one failed to reject its own "
+             "known-bad input, or lost its control:")
+        for verdict in broken:
+            _say(f"{_tag('FAIL')} {_bare(verdict.gate)} ({verdict.pack}) — "
+                 f"{verdict.detail or verdict.error or 'no detail'}")
+    if failed_rows:
+        _say(f"{len(failed_rows)} baseline(s) failed:")
+        for label, why in failed_rows:
+            _say(f"{_tag('FAIL')} {label} — {why}")
+    return code
+
+
+def _read_back(plan: dict[str, Any], shown: Any, tier: int) -> None:
+    """Turn one `packs.demonstrate` result into per-gate control and baseline verdicts.
+
+    `demonstrate` reports `"<gate id>: <why>"` per defect — `control …`
+    (`packs._CONTROL_PREFIX`) for the control and the seal probe, anything else for
+    the baseline — `"<gate id> (<reason>)"` per tooling skip, and a count of
+    controls run. A problem that names no gate of this pack is the pack's own (no
+    baseline file, a gate file that will not import). Sets `plan["controls"]`,
+    `plan["baselines"]`, and appends to `plan["problems"]`.
+    """
+    name = plan["name"]
+    in_scope = [s for s in plan["specs"] if int(s.tier) <= tier]
+    ids = {s.id for s in in_scope}
+    control_bad: dict[str, str] = {}
+    baseline_bad: dict[str, str] = {}
+    for line in shown.problems:
+        gate_id, sep, why = line.partition(": ")
+        if sep and gate_id in ids:
+            bucket = control_bad if why.startswith(packs._CONTROL_PREFIX) else baseline_bad
+            bucket.setdefault(gate_id, why)
+        else:
+            plan["problems"].append(line)
+    tooling: dict[str, str] = {}
+    for entry in shown.skipped:
+        gate_id, sep, reason = entry.partition(" (")
+        if sep and gate_id in ids:
+            tooling[gate_id] = reason[:-1] if reason.endswith(")") else reason
+        else:
+            plan["problems"].append(f"skipped an unknown gate: {entry}")
+
+    # The counts must add up before a single control is called fired. Every gate
+    # in scope either skipped for tooling or ran its control; a demonstration
+    # that stopped early (no baseline file) or dropped a gate ran fewer.
+    expected = len(ids) - len(tooling)
+    complete = shown.ran == expected
+    if not complete and not plan["problems"]:
+        plan["problems"].append(
+            f"the demonstration ran {shown.ran} control(s) of the {expected} this "
+            f"pack's gates call for — none of its controls is counted as fired")
+
+    controls: list[Verdict] = []
+    baselines: list[Verdict] = []
+    for spec in in_scope:
+        if spec.id not in plan["chosen"]:
+            continue
+        common = {"pack": spec.pack or name, "tier": Tier(int(spec.tier))}
+        if spec.id in control_bad:
+            control = Verdict(gate=f"{spec.id}#selftest", passed=False,
+                              detail=control_bad[spec.id], **common)
+        elif spec.id in tooling:
+            control = Verdict(gate=f"{spec.id}#selftest", skipped=True,
+                              skip_reason=tooling[spec.id], **common)
+        elif not complete:
+            control = Verdict(gate=f"{spec.id}#selftest", skipped=True,
+                              skip_reason=f"{_NOT_RUN}{name} could not be demonstrated",
+                              **common)
+        else:
+            control = Verdict(gate=f"{spec.id}#selftest", passed=True,
+                              detail="fired on its known-bad input, and again with an "
+                                     "empty host", **common)
+        controls.append(control)
+
+        if spec.id in baseline_bad:
+            baseline = Verdict(gate=spec.id, passed=False, detail=baseline_bad[spec.id],
+                               **common)
+        elif spec.id in tooling:
+            baseline = Verdict(gate=spec.id, skipped=True, skip_reason=tooling[spec.id],
+                               **common)
+        elif not complete:
+            baseline = Verdict(gate=spec.id, skipped=True,
+                               skip_reason=f"{_NOT_RUN}{name} could not be demonstrated",
+                               **common)
+        else:
+            baseline = Verdict(gate=spec.id, passed=True,
+                               detail=f"passed {packs.SELFTEST_DIR}/{packs.BASELINE_NAME}",
+                               **common)
+        baselines.append(baseline)
+    plan["controls"] = controls
+    plan["baselines"] = baselines
+
+
+def _pack_line(plan: dict[str, Any], *, filtered: bool, ceiling: int) -> str:
+    """One pack's line: `[ok  ] beam-analytic (bundled) : 8 fired`.
+
+    `(origin)` because a pack that is not the one you are editing looks exactly
+    like one that is (`packs.origin_of`). Nothing for a pack a gate filter left
+    untouched: it was not part of this run.
+    """
+    controls = plan.get("controls", [])
+    problems = plan["problems"]
+    if not controls and not problems:
+        if filtered:
+            return ""
+        what = "no gates" if not plan["specs"] else f"no gate at or below tier {ceiling}"
+        return f"{_tag('skip')} {plan['name']} ({plan['origin']}) : {what}"
+    fired = sum(1 for v in controls if v.outcome == "pass")
+    broken = sum(1 for v in controls if v.outcome in ("fail", "error"))
+    tooling = sum(1 for v in controls if v.outcome == "skipped"
+                  and not v.skip_reason.startswith(_NOT_RUN))
+    failed = sum(1 for v in plan.get("baselines", []) if v.outcome in ("fail", "error"))
+    failed += len(problems)
+    bits = [f"{fired} fired"]
+    if broken:
+        bits.append(f"{broken} BROKEN")
+    if tooling:
+        bits.append(f"{tooling} skipped (tooling)")
+    if failed:
+        bits.append(f"{failed} baseline(s) failed")
+    tag = "FAIL" if broken or failed else ("ok" if fired else "skip")
+    return f"{_tag(tag)} {plan['name']} ({plan['origin']}) : {', '.join(bits)}"
 
 
 # --------------------------------------------------------------------------- #
@@ -2064,16 +2637,24 @@ def cmd_packs_validate(args: argparse.Namespace) -> int:
     pack_dir = target if os.path.isdir(target) else (packs.find(target, root) or "")
     if not pack_dir:
         raise AtompipeError(f"no pack {target!r} on any search path, and no such directory")
-    problems = packs.validate(pack_dir)
+    # What `demonstrate` could not show here, printed rather than dropped: a gate
+    # whose tools are absent was not demonstrated, and one above the tier was not
+    # run. Neither is a problem (CI has no solvers), and neither may pass for a
+    # demonstration either — silence would let it (S-12, tests:H8).
+    notes: list[str] = []
+    problems = packs.validate(pack_dir, notes=notes)
 
     if args.json:
-        _dump({"pack": pack_dir, "problems": problems, "ok": not problems})
+        _dump({"pack": pack_dir, "problems": problems, "notes": notes,
+               "ok": not problems})
         return 1 if problems else 0
+    for problem in problems:
+        _say(f"{_tag('FAIL')} {problem}")
+    for note in notes:
+        _say(f"note: {note}")
     if not problems:
         _say(f"{_tag('ok')} {pack_dir}: publishable")
         return 0
-    for problem in problems:
-        _say(f"{_tag('FAIL')} {problem}")
     _say(f"{len(problems)} problem(s) in {pack_dir}")
     return 1
 
@@ -3243,6 +3824,19 @@ def _common() -> argparse.ArgumentParser:
     return common
 
 
+def _junit_flag(parser: argparse.ArgumentParser, what: str) -> None:
+    """`--junit [PATH]`, the same on `check` and `gate selftest`.
+
+    `nargs="?"` with the default as `const`, so a bare `--junit` writes
+    `report.JUNIT_DEFAULT` under the project. A PATH must end in `.xml`
+    (`_junit_arg`), which is what stops the optional value swallowing a gate id.
+    """
+    parser.add_argument("--junit", nargs="?", const=_JUNIT_DEFAULT, default=None,
+                        metavar="PATH",
+                        help=f"also write {what} as JUnit XML (default "
+                             f"{report.JUNIT_DEFAULT}; a PATH must end in .xml)")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The whole command surface.
 
@@ -3285,6 +3879,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="gate id, pack name or glob (repeatable); runs it above its tier too")
     p.add_argument("--no-record", action="store_true",
                    help="do not write verdicts or run history (a dry sweep)")
+    _junit_flag(p, "this run")
     p.set_defaults(func=cmd_check)
 
     # -- ask -------------------------------------------------------------- #
@@ -3437,6 +4032,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tier", type=int, default=None,
                    help="cap the cost; the default runs every tier's control")
     p.add_argument("--no-record", action="store_true", help="do not append to the run history")
+    p.add_argument("--pack", action="append", metavar="NAME|DIR",
+                   help="pack mode: demonstrate this pack, or every pack in this "
+                        "directory (repeatable). Without a project, pack mode runs "
+                        "every bundled pack")
+    p.add_argument("--user-packs", action="store_true",
+                   help="pack mode: also search $ATOMPIPE_PACK_PATH and "
+                        "~/.atompipe/packs (off, so the machine cannot choose the pack)")
+    p.add_argument("--allow-empty", action="store_true",
+                   help="exit 0 when no control ran (otherwise that is a failure)")
+    _junit_flag(p, "the controls (and, in pack mode, the baselines)")
     p.set_defaults(func=cmd_gate_selftest)
 
     # -- report / why / decide -------------------------------------------- #
