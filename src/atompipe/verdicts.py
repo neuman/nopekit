@@ -4177,16 +4177,8 @@ class _Now:
     def ledger_digest(self, key: str) -> str | None:
         """The digest a gate reading ledger ``key`` would record now, or
         ``None`` when it cannot be re-read (no ledger, a key this spine does
-        not know)."""
-        if self.ledger is None or not isinstance(key, str):
-            return None
-        if key.startswith("claim:"):
-            cid = key[len("claim:"):]
-            return _claim_digest(next((c for c in (self.ledger.claims or ()) if c.id == cid),
-                                      None))
-        if key in _LEDGER_WHOLE and key in _LEDGER_FIELD_SET:
-            return _ledger_digest(key, getattr(self.ledger, key))
-        return None
+        not know). One rule with ``_values_match``'s (``_ledger_now``)."""
+        return _ledger_now(self.ledger, key)
 
     def model_digest(self) -> str | None:
         if self._model is _MISSING:
@@ -4548,7 +4540,8 @@ def _control_moved(control: ControlEntry, now: _Now) -> str:
     """Why ``control``'s recorded inputs are not current, or ``""`` when they
     are: its files and listings by digest, and — when the fixture got the LIVE
     host — the host params it read, against the live projection. An opaque
-    control is never current."""
+    control is never current. A live host's LEDGER is ``_ledger_moved``'s: a
+    difference there is settled by re-running the fixture, not by this."""
     reads = control.reads or {}
     opaque = list(reads.get("opaque") or ())
     if opaque:
@@ -4569,6 +4562,82 @@ def _control_moved(control: ControlEntry, now: _Now) -> str:
             if digest != row[1]:
                 return f"host {_dotted(tuple(row[0]))} changed"
     return ""
+
+
+def _ledger_moved(control: ControlEntry, now: _Now, verified: Mapping[str, Any]) -> str:
+    """Why a LIVE-host control's ledger reads are not vouched for by the live
+    ledger, or ``""`` when they are — every key re-read now (``_ledger_now``)
+    equals what the entry recorded, or equals what a run or re-verification
+    of this control recorded in ``controls.json`` (``verified``, this gate's)
+    under a fixture closure that is still the one on disk.
+
+    What slipped through (admission review, round 1, repro A): the entry keyed
+    ``reads.ledger`` in rho_control and nothing here ever compared it —
+    ``_control_moved`` re-read files, listings and host params, and the
+    admission ``_Now`` was built with no ledger. A gate taking its limit from
+    ``ctx.ledger.claim("C1")``, C1 relaxed from 100 to 500 mm: the fixture's
+    400 mm became acceptable, ``gate selftest`` said PASSED its own known-bad,
+    and ``check`` served the control cached, exited 0 and ran no control.
+
+    Why not "moved" outright on any difference (the review's first fix): a
+    recorded ledger digest is of the ledger the GATE was handed, and a fixture
+    may state its own — openmodelica's hands ``Ledger()`` — whose digests never
+    equal a live one with claims. Compared against the live ledger alone every
+    check of such a project would re-run the control, and every reader would
+    call it undemonstrated. Only the fixture can say what it builds from the
+    live ledger, so a difference sends ``check`` to re-verify (``_reverify``
+    compares the ledger it built, key by key) and a reader, which runs nothing,
+    to undemonstrated until one has. The snapshot's closure must be the one on
+    disk too: a live ledger vouched for under other fixture code vouches for
+    nothing about this code. A KNOWN-GOOD host's ledger is never the live one
+    (``_KNOWN_GOOD_BLANK``): what ``context`` builds it from is its code (the
+    hint) and the files it opens in the control's window (keyed), so it is not
+    compared here. *Rejected* there: re-verifying every known-good control
+    that reads the ledger on every check — a fixture run per gate per check to
+    catch only an import-time read, which params share and which is not a
+    ledger question.
+    """
+    if control.host != "live":
+        return ""
+    recorded = (control.reads or {}).get("ledger") or {}
+    if not recorded:
+        return ""
+    live: dict[str, str] = {}
+    for key in recorded:
+        digest = now.ledger_digest(key)
+        if digest is None:
+            return f"cannot re-read ledger {key} here, and the control read the live host"
+        live[key] = digest
+    if live == dict(recorded):
+        return ""
+    snapshot = verified.get(control.name) if isinstance(verified, Mapping) else None
+    if isinstance(snapshot, Mapping) and snapshot.get("ledger") == live \
+            and not _snapshot_moved(snapshot, now):
+        return ""
+    moved = sorted(key for key in recorded if live[key] != recorded[key])
+    more = f" (+{len(moved) - 1} more)" if len(moved) > 1 else ""
+    return f"ledger {moved[0]} changed{more}"
+
+
+def _live_ledger(control: ControlEntry, now: _Now) -> dict[str, str] | None:
+    """What ``controls.json`` remembers beside a LIVE-host control that read
+    the ledger: each key's digest in the live ledger it was just demonstrated
+    or re-verified under (``_ledger_moved`` reads it back). ``None`` for any
+    other control, or when a key cannot be re-read — then nothing vouches."""
+    recorded = (control.reads or {}).get("ledger") or {}
+    if control.host != "live" or not recorded:
+        return None
+    live = {key: now.ledger_digest(key) for key in sorted(recorded)}
+    return None if any(v is None for v in live.values()) else live
+
+
+def _vouched(snapshot: Any, control: ControlEntry, now: _Now) -> Any:
+    """``snapshot`` (a fixture-closure snapshot) with ``_live_ledger`` beside it
+    when the control has one."""
+    live = _live_ledger(control, now)
+    if live is None or not isinstance(snapshot, Mapping):
+        return snapshot
+    return {**snapshot, "ledger": live}
 
 
 def _fixture_moved(control: ControlEntry, now: _Now) -> list[str]:
@@ -4635,7 +4704,7 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
     current: list[ControlEntry] = []
     moved: list[str] = []
     for control in candidates:
-        why = _control_moved(control, now)
+        why = _control_moved(control, now) or _ledger_moved(control, now, mine)
         if why:
             moved.append(why)
         else:
@@ -4667,7 +4736,7 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
 
 
 def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
-                    digests: FileDigests | None = None,
+                    ledger: Any = None, digests: FileDigests | None = None,
                     anchors: Anchors | None = None) -> Admission:
     """Is ``spec``'s control demonstrated at its current version? From the
     control entries and the remembered control failures alone: it **never runs
@@ -4676,10 +4745,12 @@ def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
     ``"admitted"`` — a control entry whose static part (spine, the gate's code,
     its owner's ``selftest/`` walk, the NegativeControl fields) is current, whose
     recorded file, listing and — for a live host — host-param reads are current
-    (against ``projection``'s flat params), and whose fixture closure is
-    unchanged. ``"pending"`` — the same, but the fixture's code closure moved
-    (the bracket's fixtures import its model): it counts, with the note
-    ``control inputs moved (<files>); the next check re-verifies``.
+    (against ``projection``'s flat params), whose live-host ledger reads are
+    vouched for by ``ledger`` (``_ledger_moved``: equal to it, or re-verified
+    under it), and whose fixture closure is unchanged. ``"pending"`` — the
+    same, but the fixture's code closure moved (the bracket's fixtures import
+    its model): it counts, with the note ``control inputs moved (<files>); the
+    next check re-verifies``.
     ``"not-admitted"`` — the current control PASSED its known-bad input, or two
     current controls disagree, or the control crashed, was unusable or skipped
     itself at this static part (remembered under ``control:<gate>``).
@@ -4689,10 +4760,14 @@ def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
     ``record_control``'s). A moved fixture closure that a sweep re-verified by
     its values (``CONTROLS_CACHE``) reads admitted; one nothing has re-run yet
     reads pending, which counts.
+
+    ``ledger`` is the live one, as ``check`` hands its gates. Without it a
+    live-host control that read the ledger has nothing to be compared against,
+    and reads undemonstrated — never admitted on a claim nothing re-read.
     """
     if anchors is None:
         anchors = _default_anchors(root, spec, fn)
-    now = _Now(root, projection, None, anchors=anchors, digests=digests)
+    now = _Now(root, projection, ledger, anchors=anchors, digests=digests)
     return _admission(now, spec, fn, remembered(root), verified=_read_verified(now.root))
 
 
@@ -5011,7 +5086,11 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
 # =========================================================================== #
 #: Where a sweep remembers the controls it re-verified by their values:
 #: ``{gate: {control entry name: {"digest", "files": {path: sha}}}}`` — the
-#: fixture closure as it was when the values last matched. Untracked (it names
+#: fixture closure as it was when the values last matched — and, for a
+#: live-host control that read the ledger, ``"ledger": {key: digest}``: the
+#: live ledger that run or re-verification was made under (``_ledger_moved``;
+#: admission review, round 1, A: a fixture may hand its gate a ledger of its
+#: own, whose recorded digests no live ledger ever equals). Untracked (it names
 #: this checkout's fixture bytes), and a HINT only: an unreadable file reads as
 #: empty and costs one fixture run per control, never a wrong admission. Why a
 #: file of its own: a re-verification that found the control's values unmoved
@@ -5215,10 +5294,13 @@ def _verified_path(root: str) -> str:
 
 
 def _is_snapshot(snapshot: Any) -> bool:
+    ledger = snapshot.get("ledger", {}) if isinstance(snapshot, dict) else None
     return (isinstance(snapshot, dict) and isinstance(snapshot.get("digest"), str)
             and isinstance(snapshot.get("files"), dict)
             and all(isinstance(k, str) and (v is None or isinstance(v, str))
-                    for k, v in snapshot["files"].items()))
+                    for k, v in snapshot["files"].items())
+            and isinstance(ledger, dict)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in ledger.items()))
 
 
 def _read_verified(root: str) -> dict:
@@ -5287,7 +5369,11 @@ class _Session:
 def _session(root: str, host_ctx: Any, *, projection: Any, anchors: Anchors,
              digests: FileDigests, record: bool, when: str, out_dir: str = "") -> _Session:
     base = os.path.abspath(root)
-    now = _Now(base, projection, None, anchors=anchors, digests=digests)
+    # The ledger a live-host fixture is handed is the host's own, so it is what
+    # a control's ledger reads are vouched for against (`_ledger_moved`). It was
+    # `None` here, and nothing compared them (admission review, round 1, A).
+    now = _Now(base, projection, getattr(host_ctx, "ledger", None), anchors=anchors,
+               digests=digests)
     if projection is None and isinstance(getattr(host_ctx, "params", None), dict):
         # No projection to re-read a live host's params from: the host the
         # fixture is handed IS the live state, so its params are what a live
@@ -5418,7 +5504,8 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
     if s.record:
         snapshot = _fixture_part(trace, s.anchors)
         for control in matches:
-            s.verified_out.setdefault(spec.id, {})[control.name] = snapshot
+            s.verified_out.setdefault(spec.id, {})[control.name] = _vouched(snapshot, control,
+                                                                           s.now)
     return _decide(matches, spec, order, reverified=True)
 
 
@@ -5479,7 +5566,7 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
         # The entry on disk keeps the fixture hint it was FIRST written with
         # (same inputs, same outcome: "exists"); the closure it was just
         # demonstrated under is remembered beside it.
-        s.verified_out.setdefault(gid, {})[entry.name] = entry.fixture
+        s.verified_out.setdefault(gid, {})[entry.name] = _vouched(entry.fixture, entry, s.now)
     if clash:
         reason = (f"control outcome differs from its cached entry ({', '.join(clash)})"
                   if force else f"two control outcomes recorded for identical inputs "
@@ -5518,7 +5605,12 @@ def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
             current = [c for c in controls if c.static == static and not _control_moved(c, s.now)]
             if current:
                 mine = s.verified.get(gid) or {}
-                hinted = [c for c in current if _hint_holds(c, s.now, mine)]
+                # A live ledger that differs from what a control recorded is
+                # not a miss yet: only its fixture can say whether it builds
+                # anything else from it (`_ledger_moved`), and `_reverify`
+                # compares the ledger it built key by key.
+                vouched = [c for c in current if not _ledger_moved(c, s.now, mine)]
+                hinted = [c for c in vouched if _hint_holds(c, s.now, mine)]
                 if hinted:
                     return _decide(hinted, spec, order)
                 found = _reverify(s, spec, fn, host_ctx, current, order)

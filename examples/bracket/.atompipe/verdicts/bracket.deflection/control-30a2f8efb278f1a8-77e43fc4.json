@@ -2,10 +2,10 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.deflection",
-  "rho": "fea83e15461a95e74a84f86eff6b2428dffe34bdf1ccfd621497b996c907e01b",
-  "static": "a59c7c934d0507d90a708b8ed5631ce2b3eaab42f8b6f9d6917b96596a91eba1",
+  "rho": "30a2f8efb278f1a823ed55a86bc4ac9ae4bf92425b1174acf922c634c98527bf",
+  "static": "8f1567296734afb45eaff572f1222e6ace4e99af4ce0d79332e722d1190eee3b",
   "static_parts": {
-    "spine": "ac9774162057e0975d17e4450994401a3fa831a353344d538b18157c29ad0b15",
+    "spine": "aa9a0397d313033312ebb18d2eddb2f40d5e68ad1a3396f3b4cce2b2063c310b",
     "code": {
       "digest": "7118bfb2ba36f3b46e5d4d079148ef3b38deab3420d9397b62e3d2c122ff1fe4",
       "files": [
@@ -65,5 +65,5 @@
   "measured": 30.0,
   "limit": 0.5,
   "units": "mm",
-  "digest": "641862dd5c31e25dfa21d4d83cd21153b08186e745c0a40a70dafe9a39635024"
+  "digest": "62cc8446aa10c7ef73e467c89d9da7a11d85afa502fd994a32a58712906b4f33"
 }

@@ -1054,7 +1054,8 @@ class Admission:
     reason: str           # why not admitted; for pending, the note
     executed: bool        # a fixture or control ran to decide it: never, from admission_state
     reverified: bool
-def admission_state(root, spec, fn, *, projection, digests=None, anchors=None) -> Admission
+def admission_state(root, spec, fn, *, projection, ledger=None, digests=None,
+                    anchors=None) -> Admission
 
 @dataclass(frozen=True)
 class Row:
@@ -1101,7 +1102,19 @@ Nothing global is compared any more: an unread datasheet ingested moves no gate 
 records alone (only `check` may spend a fixture's time). A candidate is a control entry
 whose `static` equals the current one (`control_static`); it is *current* when it has
 no opaque channel, its file and listing digests are current, and — when its fixture got
-the LIVE host — its host-param reads match `projection`'s flat params. Among current
+the LIVE host — its host-param reads match `projection`'s flat params and its ledger
+reads are vouched for by `ledger` (the live one; `_ledger_moved`): every key re-read
+equals what the entry recorded, or equals the live ledger a run or re-verification of
+this control recorded in `controls.json` under the fixture closure still on disk. What
+slipped through (admission review, round 1, A): `reads.ledger` was keyed in
+rho_control and never compared — the admission `_Now` had no ledger — so a gate taking
+its limit from `ctx.ledger.claim("C1")`, C1 relaxed from 100 to 500 mm, kept a control
+admitted whose 400 mm fixture it now passed. Not a plain comparison with the live
+ledger: a fixture may hand its gate a ledger of its own (openmodelica's `Ledger()`),
+whose digests no live ledger with claims ever equals. With no `ledger` given, a
+live-host control that read one is not current. A known-good host's ledger is not
+compared: `context` is handed an empty one, so what its gate reads comes from its code
+(the hint) and the files it opens in the control's window (keyed). Among current
 candidates, those whose fixture closure (`fixture.files`, the lookup hint) is unchanged
 decide first: all fired → `"admitted"`; one PASSED its known-bad input →
 `"not-admitted"`, `PASSED its own known-bad fixture <ref>`; they disagree →
@@ -1148,7 +1161,8 @@ one line each (`<gate> — <note>`).
 `check` runs. It may run a control (fixture and gate) or a fixture alone; it never
 takes the lock, and a `when` arrives from the CLI.
 ```python
-CONTROLS_CACHE = ".atompipe/cache/controls.json"   # re-verified fixture closures; untracked, a hint
+CONTROLS_CACHE = ".atompipe/cache/controls.json"   # re-verified fixture closures (+ the live
+                                                   # ledger a live-host control was vouched under); untracked, a hint
 WATCHED = ("claims/**", "params/**", "decisions/**", "needs/**", "inputs/**", "results/**",
            "views/**", ".atompipe/verdicts/**", "model/**", "gates/**", "selftest/**",
            ".atompipe/project.json", ".atompipe/packs/**", "objectives.json")
@@ -1186,15 +1200,19 @@ cannot settle (§3.8). 1. *Static*: candidates are control entries at the curren
 `static`; none is a miss. 2. *Current*: no opaque channel, file and listing digests
 current, and — the fixture having had the LIVE host — its host-param reads match
 `projection`'s params (else the host context's). 3. *Hint*: current candidates whose
-fixture closure is unchanged, or was re-verified under the closure as it is now
-(`CONTROLS_CACHE`), settle it with nothing run — all fired: `admitted`; the latest
+live-host ledger reads the host context's ledger vouches for (as `admission_state`'s)
+and whose fixture closure is unchanged, or was re-verified under the closure as it is
+now (`CONTROLS_CACHE`), settle it with nothing run — all fired: `admitted`; the latest
 PASSED its known-bad input: `not-admitted`, `PASSED its own known-bad fixture <ref>`;
 they disagree: `not-admitted`, `two control outcomes recorded for identical inputs`.
 4. *Re-verify* (`may_run`): otherwise the fixture runs ALONE (`gates.run_fixture`),
 traced, in the control `out_dir`, and what it built is compared with each current
 candidate's recorded reads — params by digest (`ABSENT` for a miss), ledger reads. A
 match settles it as 3 does with `reverified=True`: the gate is not called and no
-tracked file is written; `controls.json` remembers the closure. The comparison is
+tracked file is written; `controls.json` remembers the closure — and, for a live-host
+control that read the ledger, the live ledger it matched under, so a live ledger that
+differs from the recorded one costs one fixture run, not one per check (a full run
+records it the same way). The comparison is
 sound only for what an entry keys, so a fixture that writes files, moves `ctx.root`,
 `out_dir` or `tier`, hands its gate `ctx.extra`, reads a file the entry does not
 key, or touches an opaque channel sends the control to a full run instead — a cost,

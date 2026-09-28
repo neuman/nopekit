@@ -56,6 +56,10 @@ library and the CLI never asked. On the bracket and on wrapped pack baselines
   of the test: this class carries invariant 9);
 * bytecode under `selftest/` in a git copy is never a selftest input: no new
   control entry;
+* a claim edit that defuses a live-host control — its gate taking the limit
+  from `ctx.ledger` — is not admitted, to `check` or to a reader, while a
+  fixture that hands its gate a ledger of its own survives the same edit on
+  one fixture re-run (admission review, round 1, A);
 * a Config default edit re-verifies all six controls by their fixtures alone
   (nothing executed, nothing new on disk), while a `build()` edit that moves a
   value a control fed its gate writes a new control entry for exactly the gates
@@ -579,6 +583,63 @@ def long(ctx):
     params = dict(ctx.params)
     params["span"] = 400.0
     return dataclasses.replace(ctx, params=params)
+'''
+
+#: The admission review's repro A (round 1): the shelf gate taking its limit
+#: from the claim record, through ``ctx.ledger``, as a gate that states no
+#: number of its own does. With no ``selftest/known_good.py`` its fixture gets
+#: the LIVE host, so the control reads the live C1.
+SHELF_GATE_FROM_CLAIM = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def span(ctx):
+    s = float(ctx.params["span"])
+    limit = float(ctx.ledger.claim("C1").acceptance.limit)
+    return Verdict(gate="shelf.span", passed=s <= limit, measured=s, limit=limit,
+                   units="mm", detail=f"{s} mm (limit {limit})")
+'''
+
+#: The same known-bad span on a live host, with a ledger the fixture states
+#: itself — openmodelica's shape (``ledger=Ledger()``): the gate reads the
+#: fixture's C1, never the host's, so no live claim edit can move this control.
+SHELF_LONG_OWN_LEDGER = '''\
+import dataclasses
+
+from atompipe.models import Acceptance, Claim, Ledger
+
+
+def long(ctx):
+    params = dict(ctx.params)
+    params["span"] = 400.0
+    claim = Claim(id="C1", statement="Span within 100 mm",
+                  acceptance=Acceptance(quantity="span", limit=100.0))
+    return dataclasses.replace(ctx, params=params, ledger=Ledger(claims=[claim]))
+'''
+
+#: A known-good design that loads the project's own C1: it is handed an empty
+#: ledger (`_KNOWN_GOOD_BLANK`), so the ledger its gate reads comes from a file
+#: `context` opens inside the control's window — keyed there, which is why a
+#: known-good control's ledger reads are never compared with the live one.
+#: (Through `store.load` it would also read `.atompipe/project.json`, spine
+#: state, and the control would be opaque: re-run on every check, and never
+#: admitted to a reader — a cost, and not this test's question.)
+SHELF_KNOWN_GOOD_LOADS_CLAIMS = '''\
+import dataclasses
+import json
+import os
+
+from atompipe.models import Claim, Ledger
+
+
+def context(ctx):
+    with open(os.path.join(ctx.root, "claims", "C1.json"), encoding="utf-8") as fh:
+        c1 = Claim.from_dict(dict(json.load(fh), id="C1"))
+    return dataclasses.replace(ctx, params={"span": 80.0}, ledger=Ledger(claims=[c1]),
+                               extra={})
 '''
 
 #: A cache entry's file name inside its gate's directory (spec §3.7).
@@ -1162,6 +1223,133 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
         self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
         self.assertIn("**C1**", proven_section(self, project))
+
+    def _shelf_from_claim(self, fixture: str, known_good: str | None = None) -> str:
+        """The repro A project: span 80 live, C1 at 100 mm, ``shelf.span``
+        taking its limit from C1, ``fixture`` as ``selftest/bad.py`` and — with
+        no ``known_good`` — no known-good design, so a live host. Its first
+        check is the precondition: exit 0, the control an entry that read
+        ``claim:C1`` on the host it should have, and C1 under PROVEN."""
+        project = os.path.join(self.tmp(), "shelf")
+        write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
+        write(project, "gates/g.py", SHELF_GATE_FROM_CLAIM)
+        write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
+        write(project, "selftest/bad.py", fixture)
+        if known_good is not None:
+            write(project, "selftest/known_good.py", known_good)
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 1, "cached": 0, "reverified": 0}, data["counts"])
+        [name] = control_names(project)["shelf.span"]
+        entry = read_control(project, "shelf.span", name)
+        self.assertEqual((entry["host"], entry["bad"]),
+                         ("live" if known_good is None else "known-good", "fail"), entry)
+        self.assertIn("claim:C1", entry["reads"]["ledger"],
+                      "the precondition: the control read C1 through ctx.ledger")
+        self.assertIn("**C1**", proven_section(self, project))
+        return project
+
+    def _last_selftest(self, project: str) -> dict:
+        """``gate show shelf.span --json``'s ``last_selftest``: the read-only
+        judgement (``admission_state``), which never runs a fixture."""
+        proc = cli(project, "gate", "show", "shelf.span", "--json")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        return json.loads(proc.stdout)["last_selftest"]
+
+    def test_cli_a_claim_edit_that_defuses_a_live_control_is_not_admitted(self):
+        """V: the review's repro A (admission review, round 1). The control's
+        entry keyed ``reads.ledger["claim:C1"]`` in rho_control, but nothing on
+        the hint path ever compared it: ``_control_moved`` re-read files,
+        listings and host params, and the admission ``_Now`` was built with no
+        ledger at all. With C1's limit relaxed from 100 to 500 mm the fixture's
+        400 mm is acceptable — ``gate selftest`` said ``[FAIL] ... PASSED its
+        own known-bad fixture`` — while ``check`` served the control cached
+        and exited 0 with no control run."""
+        project = self._shelf_from_claim(SHELF_LONG)
+        self.assertEqual(self._last_selftest(project)["admission"], "admitted",
+                         "the precondition: the control fired at this version")
+        edit(project, "claims/C1.json", '"limit": 100.0', '"limit": 500.0')
+
+        # The read-only judgement, before anything re-runs: the input the
+        # control read moved, so it is demonstrated by nothing on disk.
+        shown = self._last_selftest(project)
+        self.assertEqual(shown["admission"], "undemonstrated", shown)
+        self.assertIn("claim:C1", shown["detail"], shown)
+
+        code, data = check_json(self, project)
+        self.assertEqual(data["counts"]["controls"]["executed"], 1,
+                         f"the moved claim must re-run the control: {data['counts']}")
+        got = verdict_row(data, "shelf.span")
+        self.assertEqual(got["outcome"], "error", got)
+        self.assertTrue(got["error"].startswith("not admitted: "), got)
+        self.assertIn("PASSED its own known-bad fixture selftest/bad.py:long", got["error"])
+        self.assertEqual(code, 1, "a control defused by a claim edit admitted its gate")
+        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertEqual(self._last_selftest(project)["admission"], "not-admitted")
+        self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertNotIn("C1", proven_section(self, project))
+
+        # And back: at 100 mm the first entry is current again and decides.
+        edit(project, "claims/C1.json", '"limit": 500.0', '"limit": 100.0')
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 0, "cached": 1, "reverified": 0}, data["counts"])
+        self.assertIn("**C1**", proven_section(self, project))
+
+    def test_cli_a_fixture_that_states_its_own_ledger_survives_a_claim_edit_unrun(self):
+        """V: the other side of repro A's fix, openmodelica's shape. A live-host
+        fixture that hands its gate a ledger of its own recorded reads of THAT
+        ledger, which never equal the live one: compared against the live
+        ledger alone, every claim edit — and every check of a project with
+        claims — would re-run the control, and every reader would call it
+        undemonstrated. The fixture re-run alone shows it hands its gate
+        exactly what the entry recorded: nothing executes, no control entry is
+        written, and the readers agree once the check has run."""
+        project = self._shelf_from_claim(SHELF_LONG_OWN_LEDGER)
+        before = control_names(project)
+        self.assertEqual(self._last_selftest(project)["admission"], "admitted",
+                         "the run that filed the control vouches for the live ledger")
+        _code, data = check_json(self, project)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 0, "cached": 1, "reverified": 0}, data["counts"])
+
+        edit(project, "claims/C1.json", '"limit": 100.0', '"limit": 500.0')
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 0, "cached": 0, "reverified": 1}, data["counts"])
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
+        self.assertEqual(control_names(project), before, "a new control entry")
+        self.assertEqual(self._last_selftest(project)["admission"], "admitted")
+        self.assertIn("**C1**", proven_section(self, project))
+        _code, again = check_json(self, project)
+        self.assertEqual(again["counts"]["controls"],
+                         {"executed": 0, "cached": 1, "reverified": 0},
+                         "a re-verified live ledger is remembered: nothing runs twice")
+
+    def test_cli_a_claim_edit_under_a_known_good_ledger_moves_the_file_it_came_from(self):
+        """V: why ``_ledger_moved`` leaves a known-good control's ledger reads
+        alone. ``context`` is handed an empty ledger, so a known-good design
+        whose gate reads C1 must load it — and the file it opens is a control
+        read like any other: the same claim edit misses the entry by
+        ``claims/C1.json``, re-runs the control and is not admitted."""
+        project = self._shelf_from_claim(SHELF_LONG, SHELF_KNOWN_GOOD_LOADS_CLAIMS)
+        [name] = control_names(project)["shelf.span"]
+        entry = read_control(project, "shelf.span", name)
+        self.assertIn("claims/C1.json", entry["reads"]["files"])
+        edit(project, "claims/C1.json", '"limit": 100.0', '"limit": 500.0')
+        shown = self._last_selftest(project)
+        self.assertEqual(shown["admission"], "undemonstrated", shown)
+        code, data = check_json(self, project)
+        self.assertEqual(data["counts"]["controls"]["executed"], 1, data["counts"])
+        got = verdict_row(data, "shelf.span")
+        self.assertIn("PASSED its own known-bad fixture selftest/bad.py:long", got["error"])
+        self.assertEqual(code, 1)
+        self.assertNotIn("C1", proven_section(self, project))
 
     def test_cli_a_pack_asset_edit_misses_the_control_entry_and_reruns_it(self):
         # A pack control is keyed by its owner's whole `selftest/` (spec §3.8),

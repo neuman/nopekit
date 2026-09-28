@@ -2222,7 +2222,7 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     verdict = view.verdict(spec.id)
     row = resolution.rows.get(spec.id)
     admission = verdicts.admission_state(root, spec, fn, projection=projection,
-                                         anchors=resolution.anchors)
+                                         ledger=ledger, anchors=resolution.anchors)
 
     if args.json:
         _dump({"gate": spec.to_dict(), "available": ok, "availability": reason,
