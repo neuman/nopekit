@@ -12,8 +12,8 @@ here exists because it is the route of least resistance (R-6, R-7):
   exactly the invariants mapped here: a new invariant without a test, or a test
   class renamed out from under its invariant, is red.
 * **InvariantClassesNeverSkip** — no skip and no expected-failure anywhere in
-  those classes, nor in the classes PLANNED to carry invariants 7-9, from the
-  commit that first creates them (before CLAUDE.md names them). A tool-dependent
+  those classes, nor in a class PLANNED to carry a later invariant, from the
+  commit that first creates it (before CLAUDE.md names it). A tool-dependent
   scenario inside one asserts the availability skip as its outcome instead
   (tests:H13). An expected failure is a red test wearing green.
 * **NoSubprocessOutsideRun** — every subprocess in ``tests/`` goes through
@@ -60,18 +60,19 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     5: "test_packs.ControlsAreSealed",
     6: "test_packs.NegativeControlsFire",
     7: "test_staleness.StaleIsNotCurrent",
+    8: ["test_records.IndexNeverDisagreesWithRecords",
+        "test_records.NoCommandWritesARecord"],
     9: "test_admission.AdmissionIsDemonstrated",
 }
 
-#: Classes Phase 1 will make invariants 7-9. Guarded against skips from the
-#: commit that creates each one: R-7 has to bite from a class's first line, not
-#: from the later commit that writes its number into CLAUDE.md — by then a skip
-#: could already be load-bearing. 7 and 9 moved to INVARIANT_CLASSES when
-#: CLAUDE.md numbered them (checkpoint 1.2); 8 follows with the records layout.
-PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {
-    8: ["test_records.IndexNeverDisagreesWithRecords",
-        "test_records.NoCommandWritesARecord"],
-}
+#: Classes a later checkpoint will make invariants, guarded against skips from
+#: the commit that creates each one: R-7 has to bite from a class's first line,
+#: not from the later commit that writes its number into CLAUDE.md — by then a
+#: skip could already be load-bearing. Phase 1 planned 7-9 here; 7 and 9 moved to
+#: INVARIANT_CLASSES when CLAUDE.md numbered them (checkpoint 1.2), and 8 with the
+#: records layout (1.3), each the day its number landed. Empty until the phase
+#: that adds invariant 10 creates its class — and that commit adds it here.
+PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {}
 
 
 def _refs(mapping: dict[int, str | list[str]]) -> list[str]:

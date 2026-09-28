@@ -1772,6 +1772,38 @@ class LastCheckWatches(_env.EnvCase):
         self.assertNotEqual(self._last()["fingerprint"], moved,
                             "a file a gate opened did not move the fingerprint")
 
+    def test_project_json_moves_the_fingerprint(self):
+        """`.atompipe/project.json` is the project marker, and since checkpoint 1.3
+        the one home of `packs` and `model_entry` — which gates exist, and which
+        model they read. What would slip through: those two moved out of
+        `ledger.json`, which is now the generated index and deliberately unwatched
+        (every command rewrites it), so a watch list that kept only the record
+        directories would be blind to a hand edit of the file that now holds them.
+        The edit here changes no verdict (the cache is asserted unchanged), so only
+        the watch can see it; and the fingerprint comes back when the bytes do — it
+        is a function of what is watched, not a count of checks."""
+        def checked() -> str:
+            _doc(_cli(self.project, "check", "--json"))
+            return self._last()["fingerprint"]
+
+        rel = ".atompipe/project.json"
+        self.assertTrue(os.path.isfile(os.path.join(self.project, *rel.split("/"))),
+                        "the first check did not migrate the bracket: there is no marker")
+        start = self._last()["fingerprint"]
+        self.assertEqual(checked(), start, "the negative control: nothing moved, and it did")
+        cache = _cache(self.project)
+
+        _replace_once(self.project, rel, "printed in PETG", "printed in PETG, edited by hand")
+        edited = checked()
+        self.assertEqual(_cache(self.project), cache,
+                         "the edit re-ran a gate, which moves the fingerprint by itself: "
+                         "this row would pass vacuously")
+        self.assertNotEqual(edited, start, f"{rel} did not move the fingerprint")
+
+        _replace_once(self.project, rel, "printed in PETG, edited by hand", "printed in PETG")
+        self.assertEqual(checked(), start,
+                         f"{rel} restored byte for byte, and the fingerprint did not come back")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -18,8 +18,20 @@ What slipped through before this existed:
   `git add -A` would track an output. The deny-list now lives in a marked block
   the migration rewrites idempotently, keeping every user line.
 
-`IndexNeverDisagreesWithRecords` is the library half of invariant 8 (the CLI
-half, every command leaving `agree()` empty, is U30's). It never skips.
+Invariant 8 is two classes, and neither ever skips:
+
+* `IndexNeverDisagreesWithRecords` — the library half (a hand-edited index loses
+  to the records; every record change reaches it; the build reads no clock and
+  no listing order) and the CLI half: every command, run after a record was
+  edited by hand, leaves `agree()` empty; a legacy project's index arrives with
+  its migration and agrees from its first byte.
+* `NoCommandWritesARecord` — every record's bytes, mtime and inode survive every
+  command that is not a shim, on a migrated project and on a legacy one (where
+  nothing migrates); and the property: every path `check` writes is ignored by
+  git at the instant it is written or is a new verdict entry, except the marked
+  blocks the ensure step writes once and the migration's own files. The instant
+  comes from an audit hook in the child (`_WRITES_DRIVER`), the verdict on
+  "ignored" from `git check-ignore` in a scratch repository.
 
 The params rule is tested with a FAKE `model_prose`: the migration is a pure
 function of the legacy file and what the model states, and the real reader of
@@ -37,14 +49,17 @@ import hashlib
 import io
 import json
 import os
+import sys
 import time
 import unittest
+from typing import Any, NamedTuple
 from unittest import mock
 
 import _env
 import _projects
+import _transcript
 from atompipe import claims as claims_mod
-from atompipe import models, store, util
+from atompipe import modelio, models, store, util
 from atompipe.models import (
     Acceptance,
     Claim,
@@ -738,6 +753,64 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
         self.assertEqual(store.agree(root), [])
         self.assertEqual(_read_bytes(ledger), before, "the index overwrote a legacy ledger")
 
+    # -- the CLI half: what a person or an agent sees after any command ----- #
+    # The library half above proves the index CAN be rebuilt from the records;
+    # this half proves every command DOES leave it so, including after a record
+    # was edited by hand since the last command — the index is the one file an
+    # agent reads first, and a hand edit is how records change (D-06). Each
+    # command runs in a fresh process on the enriched bracket (`_migrated_bracket`).
+    def test_every_command_leaves_the_index_agreeing(self):
+        """Before each command a record is edited by hand, so the index is behind;
+        after it, the index exists and agrees with the records. `doctor`, `init`
+        and the dry runs repair nothing by design — a doctor that rebuilt the index
+        would hide the disagreement it is there to name — so they run on an index
+        that agrees, and must leave it agreeing and unwritten."""
+        project = _migrated_bracket(os.path.join(self.tmp(), "bracket"))
+        index = os.path.join(project, ".atompipe", "ledger.json")
+        commands = ([argv for argv, _output in _NON_SHIM] + [("check",), ("check", "--force")]
+                    + [argv for argv, _named in _shims(self.tmp())])
+        for n, argv in enumerate(commands):
+            with self.subTest(argv=argv):
+                repairs = argv[0] not in ("doctor", "init") and "--no-record" not in argv
+                if repairs:
+                    _hand_edit(project, n)
+                    if os.path.isfile(index):
+                        self.assertNotEqual(store.agree(project), [],
+                                            "the hand edit left the index agreeing: this "
+                                            "row would pass without a rebuild")
+                else:
+                    self.assertEqual(store.agree(project), [])
+                    unwritten = _read_bytes(index) if os.path.isfile(index) else None
+                proc = _env.atompipe(list(argv), cwd=project)
+                self.assertIn(proc.returncode, _codes(argv), proc.stdout + proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+                if repairs:
+                    self.assertTrue(os.path.isfile(index),
+                                    f"`atompipe {' '.join(argv)}` left no index")
+                else:
+                    self.assertEqual(_read_bytes(index) if os.path.isfile(index) else None,
+                                     unwritten, f"`atompipe {' '.join(argv)}` wrote the index")
+                self.assertEqual(store.agree(project), [],
+                                 f"the index disagrees with the records after "
+                                 f"`atompipe {' '.join(argv)}`")
+
+    def test_a_migration_leaves_the_index_agreeing(self):
+        """On a legacy project the index arrives with the one-time migration —
+        `check` or a shim — and agrees from its first byte. Every other command
+        leaves a legacy `ledger.json`, which IS the records, as it was
+        (`NoCommandWritesARecord`)."""
+        for argv in [("check",)] + [argv for argv, _named in _shims(self.tmp())]:
+            with self.subTest(argv=argv[0]):
+                project = _legacy_bracket(os.path.join(self.tmp(), "legacy"))
+                proc = _env.atompipe(list(argv), cwd=project)
+                self.assertIn(proc.returncode, _WORKED, proc.stdout + proc.stderr)
+                self.assertFalse(store.is_legacy(project), "the trigger did not migrate")
+                with open(os.path.join(project, ".atompipe", "ledger.json"),
+                          encoding="utf-8") as fh:
+                    self.assertEqual(json.load(fh)["generated"], store.INDEX_BANNER,
+                                     "ledger.json is not the index after the migration")
+                self.assertEqual(store.agree(project), [])
+
 
 # --------------------------------------------------------------------------- #
 # the migration
@@ -1235,6 +1308,671 @@ class SaveWritesTheLayoutItFinds(_env.EnvCase):
         self.assertNotIn("last_run", saved)
         self.assertTrue(store.is_legacy(root), "save does not migrate")
         self.assertFalse(os.path.exists(os.path.join(root, "claims")))
+
+
+# --------------------------------------------------------------------------- #
+# invariant 8, CLI half: the projects every command runs on
+# --------------------------------------------------------------------------- #
+#: The stamp of the in-process migration that builds the migrated fixture. It
+#: appears only in the migration's notice, never in a record.
+_WHEN = "2026-09-28T00:00:00Z"
+
+#: The evidence bytes the enriched bracket ingested before checkpoint 1.3.
+_CALIPER = b"arm measured at 60.2 mm with calipers\n"
+
+#: The one ingested artifact of the enriched bracket, as its legacy ledger names it.
+_CALIPER_ID = "caliper-txt"
+
+#: The migration's rename: the legacy ledger goes, kept under its new name.
+_LEGACY_REL = f"{store.ATOMPIPE_DIR}/{store.LEDGER_NAME}"
+_KEPT_REL = f"{store.ATOMPIPE_DIR}/{store.LEGACY_LEDGER_NAME}"
+
+#: A claim the migrated fixture carries formatted as a person formats it (indent
+#: 4, keys in their own order, no trailing newline) rather than as `write_record`
+#: would: a command that loads a record it was only reading and saves it back
+#: "normalised" changes its bytes, and that is a write nobody asked for.
+_HAND_FORMATTED = "claims/C6.json"
+
+
+def _enrich(project: str) -> str:
+    """The bracket's legacy ledger with one record of every kind the bracket
+    lacks: an ingested measurement with an extraction, a decision that names what
+    lost, an enriched need, a physical result, a parameter's provenance and a view.
+
+    Written in the legacy file's own shape (keys sorted, indent 2), by hand —
+    never through the spine's writers, for `_projects`' reason: a fixture written
+    by the code under test changes shape with it. What it buys: a command that
+    rewrites a decision, a result or an input record can only be caught on a
+    project that HAS one, and the bracket has none."""
+    path = os.path.join(project, ".atompipe", "ledger.json")
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    _write(os.path.join(project, "inputs", "data", "caliper.txt"), _CALIPER)
+    data["inputs"].append({
+        "id": _CALIPER_ID, "path": "inputs/data/caliper.txt", "url": "",
+        "kind": "measurement", "description": "caliper reading of the printed arm",
+        "sha256": hashlib.sha256(_CALIPER).hexdigest(), "bytes": len(_CALIPER),
+        "added": "2026-09-20", "licence": "", "note": "",
+        "extractions": [{"what": "arm is 60.2 mm", "grounds": ["arm_length"],
+                         "confidence": "measured", "note": "calipers on the print"}]})
+    data["decisions"].append({
+        "id": "thickness-stays-7-mm", "title": "Thickness stays 7 mm",
+        "when": "2026-09-20T10:00:00Z", "summary": "4 mm sagged",
+        "rejected": [{"value": "4.0 mm", "why": "3.75 mm deflection, 7.5x the limit",
+                      "evidence": ""}],
+        "params_changed": ["thickness"], "claims_changed": ["C1"], "evidence": [],
+        "body": "### Why\n\nIt sagged."})
+    data["needs"].append({
+        "id": "N-C7", "claim_ids": ["C7"], "quantity": "first mode",
+        "claim_class": "structural-dynamics", "status": "proposed",
+        "candidates": [{"name": "modal-fea", "kind": "solver", "why": "beam theory is off",
+                        "cost": "~20 min", "install": "pip install x==1.0",
+                        "licence": "MIT", "pack_would_be": "modal"}],
+        "chosen": "modal-fea", "note": "asked on 09-20"})
+    data["views"].append({
+        "id": "deflection-curve", "kind": "chart", "title": "Tip deflection",
+        "src": "", "description": "", "gates": ["bracket.deflection"],
+        "data": {"series": [[4.0, 3.75], [7.0, 0.73]]}, "meta": {}, "pack": "",
+        "order": 10})
+    c5 = next(c for c in data["claims"] if c["id"] == "C5")
+    c5["physical_result"] = {"passed": True, "when": "2026-09-21", "who": "a tester",
+                             "detail": "one winter on the north wall, no chalking",
+                             "evidence": []}
+    thickness = next(p for p in data["params"] if p["name"] == "thickness")
+    thickness["source"] = "the 4 mm print, loaded on the bench"
+    _write(path, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    return project
+
+
+def _legacy_bracket(dest: str, *, template: bool = False) -> str:
+    """The enriched bracket, legacy: its ledger, and — with ``template`` — the
+    ignore file every project `init` made before checkpoint 1.2 carries, byte for
+    byte (`_projects.LEGACY_GITIGNORE`), instead of the bracket's own, to which
+    U23 appended `cache/` and `obs/`. Under the bare template nothing ignores
+    `cache/` or `obs/` until the migration's block lands, which is what makes
+    "ignored at the time of writing" bite."""
+    project = _enrich(_projects.bracket_copy(dest))
+    if template:
+        _write(os.path.join(project, ".atompipe", ".gitignore"), _projects.LEGACY_GITIGNORE)
+    return project
+
+
+def _migrated_bracket(dest: str) -> str:
+    """The enriched bracket, migrated in-process the way its first `check` would
+    (the real `static_param_prose`), with `_HAND_FORMATTED` rewritten by hand."""
+    project = _legacy_bracket(dest)
+    store.migrate_legacy(project, apply=True, when=_WHEN,
+                         model_prose=modelio.static_param_prose)
+    path = os.path.join(project, *_HAND_FORMATTED.split("/"))
+    data = json.loads(_read_bytes(path))
+    _write(path, json.dumps(dict(reversed(list(data.items()))), indent=4, ensure_ascii=False))
+    return project
+
+
+def _hand_edit(project: str, n: int) -> None:
+    """A record edited by hand between two commands, as a person (or an agent's
+    Edit) makes it — each ``n`` one of three kinds in turn: a claim changed in
+    place, a decision added, a parameter's provenance changed."""
+    if n % 3 == 0:
+        path = os.path.join(project, *_HAND_FORMATTED.split("/"))
+        data = json.loads(_read_bytes(path))
+        data["note"] = f"edited by hand before command {n}"
+        _write(path, json.dumps(data, indent=4, ensure_ascii=False))
+    elif n % 3 == 1:
+        _write(os.path.join(project, "decisions", f"hand-{n}.json"),
+               json.dumps({"title": f"By hand {n}", "summary": "written by a person"}) + "\n")
+    else:
+        path = os.path.join(project, "params", "thickness.json")
+        data = json.loads(_read_bytes(path))
+        data["source"] = f"the bench test, revisited before command {n}"
+        _write(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+
+
+def _records(root: str) -> dict[str, tuple[bytes, int, int]]:
+    """``{path: (bytes, mtime_ns, inode)}`` of every record: each file under the
+    record directories (evidence bytes and viewgens included; bytecode not —
+    importing a viewgen writes `__pycache__` beside it, which is Python's, cli:H15),
+    the project marker, the kept legacy ledger, and, while the project is legacy,
+    its `ledger.json`, which IS its records.
+
+    mtime and inode as well as bytes: a command that loads a record and saves it
+    back unchanged has still written it, and the day a person edits that file
+    between the command's load and its save, the edit is gone — the whole-ledger
+    writer's shape (S-37). Equal bytes cannot see that; a new mtime or inode can."""
+    found: list[str] = []
+    for kind in store.RECORD_DIRS:
+        for dirpath, dirnames, filenames in os.walk(os.path.join(root, kind)):
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+            found += [os.path.join(dirpath, name) for name in filenames]
+    dot = os.path.join(root, store.ATOMPIPE_DIR)
+    found += [os.path.join(dot, name) for name in (store.PROJECT_NAME, store.LEGACY_LEDGER_NAME)]
+    if store.is_legacy(root):
+        found.append(os.path.join(dot, store.LEDGER_NAME))
+    out: dict[str, tuple[bytes, int, int]] = {}
+    for path in found:
+        if os.path.isfile(path):
+            st = os.stat(path)
+            out[os.path.relpath(path, root).replace(os.sep, "/")] = (
+                _read_bytes(path), st.st_mtime_ns, st.st_ino)
+    return out
+
+
+def _touched_records(before: dict, after: dict) -> list[str]:
+    """Every record added, removed or written between two `_records` snapshots."""
+    return sorted(p for p in set(before) | set(after) if before.get(p) != after.get(p))
+
+
+#: Every command that is neither `check` nor a shim, as a person types it, in
+#: the order the tests run them (`site init` before the site commands that need
+#: a site), with ``True`` where the command was ASKED to write an output that is
+#: not a record — `report --write`'s `docs/readiness.md`, `model --write`'s
+#: `.atompipe/model.json`, the site's scaffold and `data/`. `init` refuses on a
+#: project before it writes anything; it is here so "every command" means every
+#: command. `check --no-record` and `gate selftest --no-record` are the dry runs.
+#: Not here: `site serve` (a server that does not return) and `site vendor` (the
+#: network); P3.1's `ask --next` joins when it exists — a strengthening, never an
+#: edit of what is here (PLAN §4.6).
+_NON_SHIM: tuple[tuple[tuple[str, ...], bool], ...] = (
+    (("status",), False), (("status", "--json"), False),
+    (("why", "thickness"), False), (("why", "C1"), False),
+    (("why", "arm_length", "--json"), False),
+    (("gap",), False), (("gap", "--json"), False), (("gap", "--propose"), False),
+    (("report",), False), (("report", "--json"), False),
+    (("gate", "list"), False), (("gate", "list", "--json"), False),
+    (("gate", "show", "bracket.deflection"), False),
+    (("gate", "selftest"), False), (("gate", "selftest", "--json"), False),
+    (("gate", "selftest", "--no-record"), False),
+    (("claim", "list"), False), (("claim", "list", "--json"), False),
+    (("claim", "show", "C1"), False), (("claim", "show", "C5", "--json"), False),
+    (("inputs",), False), (("inputs", "--json"), False),
+    (("ask",), False), (("ask", "--json"), False),
+    (("packs", "list"), False), (("packs", "list", "--json"), False),
+    (("packs", "show", "beam-analytic"), False),
+    (("packs", "validate", "beam-analytic"), False),
+    (("model",), False), (("model", "--json"), False),
+    (("doctor",), False), (("doctor", "--json"), False),
+    (("check", "--no-record"), False),
+    (("init",), False),
+    (("report", "--write"), True), (("model", "--write"), True),
+    (("site", "init"), True), (("site", "build"), True), (("site", "status"), False),
+)
+
+#: The exit codes each command may end with while doing its work: 1 is a
+#: verdict (`check`, `doctor`, `packs validate` reporting a problem), 2 is a
+#: refusal — the right answer only for `init` on a project. A command that
+#: crashed or was refused writes nothing and would pass vacuously.
+_WORKED = (0, 1)
+_REFUSED = (2,)
+
+
+def _codes(argv: tuple[str, ...]) -> tuple[int, ...]:
+    return _REFUSED if argv[0] == "init" else _WORKED
+
+
+def _shims(outside: str) -> list[tuple[tuple[str, ...], set[str] | None]]:
+    """Each shim with the record(s) it is asked to write; ``None`` for `ingest`,
+    whose record and bytes are named by its own `--json` answer."""
+    evidence = _write(os.path.join(outside, "notes.txt"), "the wall anchor is M5\n")
+    return [
+        (("decide", "--title", "Keep PETG", "--summary", "heat is fine"),
+         {"decisions/keep-petg.json"}),
+        (("extract", _CALIPER_ID, "--what", "arm is 60.2 mm", "--grounds", "arm_length",
+          "--confidence", "measured"), {f"inputs/{_CALIPER_ID}.json"}),
+        (("packs", "add", "beam-analytic"), {".atompipe/project.json"}),
+        (("claim", "physical", "C5", "--fail", "--who", "a tester",
+          "--detail", "chalked after the second winter"), {"results/C5.json"}),
+        (("ingest", evidence, "--desc", "the anchor's datasheet line", "--json"), None),
+    ]
+
+
+def _asked(named: set[str] | None, proc) -> set[str]:
+    """What a shim was asked to write: ``named``, or what `ingest --json` says it
+    landed — its record and its bytes."""
+    if named is not None:
+        return named
+    (artifact,) = json.loads(proc.stdout)["ingested"]
+    return {f"inputs/{artifact['id']}.json", artifact["path"]}
+
+
+# --------------------------------------------------------------------------- #
+# invariant 8, CLI half: what a command writes, and when
+# --------------------------------------------------------------------------- #
+#: The child every watched command runs in: ONE command, under an audit hook
+#: that records, in order, every path the process writes, renames or removes
+#: inside the project — opens for writing (`open()` and `os.open`, so the temp of
+#: every atomic write), renames and replaces, removals (a whole `rmtree` as its
+#: top directory: its fd-relative unlinks name no path), links and truncations.
+#: A snapshot diff alone cannot say WHEN a path was written, and "ignored at the
+#: time of writing" is a statement about when; it also cannot see a temp file
+#: that came and went.
+#:
+#: The hook opens no file and lists no directory. What slipped through while
+#: designing it: a first version read every `.gitignore` at each write to learn
+#: the rules in force — but the spine's own hook records what a gate reads while
+#: the gate runs, so a gate that wrote a file would have had the `.gitignore`
+#: files land in its rho, and the test would have changed the verdicts it
+#: watched. The rules at each write are reconstructed afterwards instead, from
+#: the rules before the run, after it, and the order of the writes (`_rules_at`).
+#: An exception inside an audit hook aborts the audited operation, so the hook
+#: never raises: it records what went wrong, and the test fails on that record.
+_WRITES_DRIVER = r'''
+import json, os, sys
+
+out, root, argv = sys.argv[1], os.path.realpath(sys.argv[2]), sys.argv[3:]
+WRITE_FLAGS = os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_APPEND | os.O_TRUNC
+events = []
+
+
+def inside(path):
+    try:
+        full = os.path.realpath(os.path.abspath(os.fsdecode(path)))
+    except (TypeError, ValueError):
+        return None
+    if not full.startswith(root + os.sep):
+        return None
+    return full[len(root) + 1:].replace(os.sep, "/")
+
+
+def note(op, *paths):
+    shown = [inside(path) for path in paths]
+    if any(path is not None for path in shown):
+        events.append([op, *shown])
+
+
+def hook(event, args):
+    try:
+        if event == "open":
+            path, mode, flags = args
+            if isinstance(path, int):
+                return
+            if mode is None and flags & WRITE_FLAGS:
+                note("write", path)
+            elif isinstance(mode, str) and set(mode) & set("wax+"):
+                note("write", path)
+        elif event == "os.rename":
+            note("rename", args[0], args[1])
+        elif event == "os.remove" and args[1] in (None, -1):
+            note("remove", args[0])
+        elif event == "shutil.rmtree":
+            note("remove-tree", args[0])
+        elif event in ("os.link", "os.symlink"):
+            note("write", args[1])
+        elif event == "os.truncate" and not isinstance(args[0], int):
+            note("write", args[0])
+    except Exception as exc:
+        events.append(["hook-error", repr(exc)])
+
+
+sys.addaudithook(hook)
+code = None
+try:
+    from atompipe import cli
+    code = cli.main(argv)
+finally:
+    done = list(events)
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump({"code": code, "events": done}, fh)
+sys.exit(code)
+'''
+
+#: The two files git reads rules from that the ensure step writes a marked block
+#: into (`.gitignore` for what is ignored, `.gitattributes` for line endings), by
+#: git's own names — the property names what the files ARE, never which ones.
+_GIT_RULE_FILES = (".gitignore", ".gitattributes")
+_BLOCK_BEGIN, _BLOCK_END = b"# atompipe:begin", b"# atompipe:end"
+
+
+class _Run(NamedTuple):
+    """One watched command: the process, the tree before and after it, and what
+    it wrote, in order."""
+
+    proc: Any
+    before: dict[str, bytes]
+    after: dict[str, bytes]
+    events: list[list]
+
+
+def _watched(test: _env.EnvCase, project: str, *argv: str) -> _Run:
+    """``atompipe <argv>`` in ``project``, in a fresh process under `_WRITES_DRIVER`."""
+    out = os.path.join(test.tmp(), "writes.json")
+    before = _tree(project)
+    proc = _env.run([sys.executable, "-c", _WRITES_DRIVER, out, project, *argv], cwd=project)
+    try:
+        with open(out, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise AssertionError(f"the watched `atompipe {' '.join(argv)}` left no record of "
+                             f"its writes ({exc}):\n{proc.stdout}\n{proc.stderr}") from None
+    errors = [e for e in data["events"] if e[0] == "hook-error"]
+    test.assertEqual(errors, [], "the audit hook failed: a write may have gone unseen")
+    return _Run(proc, before, _tree(project), data["events"])
+
+
+def _touches(run: _Run) -> list[tuple[int, str, str]]:
+    """``(instant, op, path)`` for every path ``run`` wrote (``write``), removed
+    (``remove``, ``remove-tree``) or renamed away (``remove``) inside the project.
+
+    The temp of an atomic write is folded into its destination: a rename's source
+    that did not exist before the run is the destination's bytes in transit
+    (`atomic_write_text` and Python's own bytecode writer both write a temp beside
+    the target, then replace), so its writes are not touches of their own, and the
+    rename is the write of the destination, at the instant of the rename."""
+    in_flight = {e[1] for e in run.events
+                 if e[0] == "rename" and e[1] is not None and e[1] not in run.before}
+    out: list[tuple[int, str, str]] = []
+    for i, event in enumerate(run.events):
+        op, paths = event[0], event[1:]
+        if op == "rename":
+            src, dst = paths
+            if src is not None and src not in in_flight:
+                out.append((i, "remove", src))
+            if dst is not None:
+                out.append((i, "write", dst))
+        elif paths[0] is not None and paths[0] not in in_flight:
+            out.append((i, op, paths[0]))
+    return out
+
+
+def _rule_files(tree: dict[str, bytes]) -> dict[str, bytes]:
+    return {p: b for p, b in tree.items() if p.rsplit("/", 1)[-1] == ".gitignore"}
+
+
+def _rules_at(instant: int, run: _Run, first: dict[str, int]) -> dict[str, bytes]:
+    """The `.gitignore` files git would read at ``instant``: each as it was before
+    the run until the run's one write of it (``first``: path -> the instant of its
+    first touch), as it is after the run from then on. A file written twice in one
+    run is refused by `_unexplained`: its rules between the two writes cannot be
+    known."""
+    rules: dict[str, bytes] = {}
+    for path in set(_rule_files(run.before)) | set(_rule_files(run.after)):
+        text = (run.after if first.get(path, len(run.events)) < instant else run.before).get(path)
+        if text is not None:
+            rules[path] = text
+    return rules
+
+
+def _ignored(test: _env.EnvCase, rules: dict[str, bytes],
+             queries: dict[str, bool]) -> set[str]:
+    """Which of ``queries`` (``{path: is a directory}``) git ignores under
+    ``rules``: asked of `git check-ignore` in a scratch repository holding exactly
+    those rule files and the queried paths — never the project, whose rules at
+    the instant of a write may be gone by the time the test asks."""
+    repo = test.tmp()
+    proc = _env.git(["init", "-q"], cwd=repo)
+    test.assertEqual(proc.returncode, 0, proc.stderr)
+    for rel, text in rules.items():
+        _write(os.path.join(repo, *rel.split("/")), text)
+    for rel, is_dir in queries.items():
+        full = os.path.join(repo, *rel.split("/"))
+        if is_dir:
+            os.makedirs(full, exist_ok=True)
+        elif not os.path.exists(full):
+            _write(full, b"")
+    # One path per line, unquoted: `-z` is refused without `--stdin`, and `_env.run`
+    # closes stdin so a child that asks a question fails instead of hanging.
+    proc = _env.git(["-c", "core.quotePath=false", "check-ignore", "--no-index", "--",
+                     *sorted(queries)], cwd=repo)
+    test.assertIn(proc.returncode, (0, 1), f"git check-ignore failed: {proc.stderr}")
+    return {p for p in proc.stdout.splitlines() if p}
+
+
+def _unexplained(test: _env.EnvCase, run: _Run, *, blocks: bool = False,
+                 carve_out: frozenset = frozenset()) -> list[str]:
+    """Every touch in ``run`` the property does not explain. A path a run writes
+    must be
+
+    * ignored by git at the instant it is written (or removed); or
+    * a NEW verdict or control entry: the entry shape, absent before the run and
+      present after it — an existing entry rewritten is not new; or
+    * with ``blocks``, a git rule file that now carries the marked block — the
+      ensure step, which writes each such file once; or
+    * one of ``carve_out``'s ``(op, path)`` touches: the one-time legacy
+      migration's own files, and a shim's own record.
+
+    A rule file written twice in one run is unexplained whatever it holds."""
+    touches = _touches(run)
+    first: dict[str, int] = {}
+    for i, _op, path in touches:
+        first.setdefault(path, i)
+    problems: list[str] = []
+    pending: dict[str, tuple[dict[str, bytes], dict[str, bool], list[tuple[int, str, str]]]] = {}
+    written: dict[str, int] = {}
+    for i, op, path in touches:
+        name = path.rsplit("/", 1)[-1]
+        if name in _GIT_RULE_FILES:
+            written[path] = written.get(path, 0) + 1
+        if (op, path) in carve_out:
+            continue
+        if (blocks and op == "write" and name in _GIT_RULE_FILES
+                and _BLOCK_BEGIN in run.after.get(path, b"")
+                and _BLOCK_END in run.after.get(path, b"")):
+            continue
+        if (op == "write" and path not in run.before and path in run.after
+                and (_transcript.ENTRY_PATH.fullmatch(path)
+                     or _transcript.CONTROL_ENTRY_PATH.fullmatch(path))):
+            continue
+        rules = _rules_at(i, run, first)
+        key = json.dumps({k: v.decode("utf-8", "replace") for k, v in rules.items()},
+                         sort_keys=True)
+        entry = pending.setdefault(key, (rules, {}, []))
+        entry[1][path] = entry[1].get(path, False) or op == "remove-tree"
+        entry[2].append((i, op, path))
+    for rules, queries, waiting in pending.values():
+        ignored = _ignored(test, rules, queries)
+        for i, op, path in waiting:
+            if path not in ignored:
+                problems.append(f"{op} {path} (event {i}): not ignored when it was written, "
+                                f"and not a new verdict entry")
+    for path, count in sorted(written.items()):
+        if count > 1:
+            problems.append(f"{path}: written {count} times in one run — the ensure step "
+                            f"writes a marked block once")
+    return sorted(set(problems))
+
+
+def _migration(project: str) -> tuple[store.MigrationPlan, frozenset]:
+    """The legacy ``project``'s migration plan (computed in memory, nothing
+    written) and the touches it licenses: each of its files written, the legacy
+    ledger renamed away, and its kept copy written."""
+    plan = store.migrate_legacy(project, apply=False, when="",
+                                model_prose=modelio.static_param_prose)
+    return plan, frozenset({("write", rel) for rel in plan.files}
+                           | {("remove", _LEGACY_REL), ("write", _KEPT_REL)})
+
+
+class NoCommandWritesARecord(_env.EnvCase):
+    """Invariant 8's second half: no command writes a record it was not asked to
+    write. The one carve-out is the one-time migration of a legacy ledger, which
+    only `check` and the shims perform.
+
+    What slipped through before checkpoint 1.3: `check`, a sweep, re-synced the
+    parameters from the model, copied grounding and coverage into records, and
+    saved the whole ledger on every run, so a claim a human edited between two
+    commands was put back from the sweep's memory (S-36, S-37); `gap`, which reads
+    like a query, filed every gap it found as a record nobody wrote (S-43).
+
+    Two statements, each on a migrated project and on a legacy one:
+
+    * every record's bytes, mtime and inode survive every command that is not a
+      shim — including the ones asked for an output (`report --write`, `model
+      --write`, the site) — and on a legacy project nothing migrates;
+    * **the property** — every path `check` writes is ignored by git at the
+      instant it is written, or is a new verdict entry, except the marked blocks
+      the ensure step writes once (and, on a legacy project, the migration's own
+      files). Stated as that property, never as a list of paths, so P2.5's
+      `REPORT.md` and P4.3's site rebuild meet it by adding an ignore rule first,
+      and never by widening this test (PLAN §4.6). It holds for every read
+      command on a migrated project too.
+
+    Every command runs in a fresh process (`_env`); the property's is watched by
+    an audit hook (`_WRITES_DRIVER`) and its ignore rules are asked of `git
+    check-ignore` in a scratch repository.
+    """
+
+    def _assert_worked(self, argv, proc, codes=_WORKED) -> None:
+        self.assertIn(proc.returncode, codes,
+                      f"`atompipe {' '.join(argv)}` did not do its work, so it proves "
+                      f"nothing about what it writes:\n{proc.stdout}\n{proc.stderr}")
+        self.assertNotIn("Traceback", proc.stderr)
+
+    def _no_record_written(self, project: str, *, legacy: bool, watched: bool) -> None:
+        for argv, output in _NON_SHIM:
+            with self.subTest(argv=argv):
+                before = _records(project)
+                if watched:
+                    run = _watched(self, project, *argv)
+                    proc = run.proc
+                else:
+                    proc = _env.atompipe(list(argv), cwd=project)
+                self._assert_worked(argv, proc, _codes(argv))
+                self.assertEqual(_touched_records(before, _records(project)), [],
+                                 f"`atompipe {' '.join(argv)}` wrote a record")
+                self.assertEqual(store.is_legacy(project), legacy,
+                                 f"`atompipe {' '.join(argv)}` migrated a project it was "
+                                 f"only reading" if legacy else "the project went legacy")
+                if watched and not output:
+                    self.assertEqual(_unexplained(self, run), [],
+                                     f"`atompipe {' '.join(argv)}` wrote what git would track")
+
+    # -- the non-shim commands ---------------------------------------------- #
+    def test_no_command_writes_a_record_on_a_migrated_project(self):
+        project = _migrated_bracket(os.path.join(self.tmp(), "migrated"))
+        kinds = {rel.split("/", 1)[0] for rel in _records(project)}
+        self.assertTrue(set(store.RECORD_DIRS) <= kinds,
+                        f"the fixture lacks a record kind, so a command that rewrites one "
+                        f"could not be seen: {sorted(set(store.RECORD_DIRS) - kinds)}")
+        self._no_record_written(project, legacy=False, watched=True)
+
+    def test_no_command_writes_a_record_on_a_legacy_project(self):
+        """A legacy `ledger.json` IS the records: every command but `check` and the
+        shims reads it — migrated in memory — and leaves it, and everything around
+        it, as it was."""
+        project = _legacy_bracket(os.path.join(self.tmp(), "legacy"))
+        self._no_record_written(project, legacy=True, watched=False)
+
+    # -- check -------------------------------------------------------------- #
+    def test_check_writes_only_ignored_paths_and_new_entries(self):
+        """On a migrated project `check` writes no record and meets the property
+        with no exception: the blocks are already there, so it writes none."""
+        project = _migrated_bracket(os.path.join(self.tmp(), "migrated"))
+        for argv in (("check",), ("check",), ("check", "--force", "--junit"),
+                     ("check", "--only", "bracket.deflection"), ("check", "--json")):
+            with self.subTest(argv=argv):
+                before = _records(project)
+                run = _watched(self, project, *argv)
+                self._assert_worked(argv, run.proc)
+                self.assertEqual(_touched_records(before, _records(project)), [],
+                                 f"`atompipe {' '.join(argv)}` wrote a record")
+                self.assertEqual(_unexplained(self, run), [])
+        self.assertTrue(any(_transcript.ENTRY_PATH.fullmatch(p) for p in _tree(project)),
+                        "no check wrote a verdict entry: the property held vacuously")
+
+    def test_check_on_a_legacy_project_writes_only_the_migration(self):
+        """The first `check` migrates: the records it writes are exactly the plan's,
+        byte for byte, the legacy ledger is kept under its new name, and every other
+        path is ignored when written, a new entry, or a block written once. The
+        second writes no record and no block. Under the bare legacy template too,
+        where `cache/` and `obs/` are ignored only once the block lands — so a
+        sweep that wrote there before the migration would be caught."""
+        for label, template in (("the bracket's ignore file", False),
+                                ("the legacy init template", True)):
+            with self.subTest(fixture=label):
+                project = _legacy_bracket(os.path.join(self.tmp(), "legacy"), template=template)
+                plan, carve_out = _migration(project)
+                self.assertTrue(plan.files)
+                legacy = _read_bytes(os.path.join(project, *_LEGACY_REL.split("/")))
+                before = _records(project)
+
+                first = _watched(self, project, "check")
+                self._assert_worked(("check",), first.proc)
+                self.assertFalse(store.is_legacy(project), "the first check did not migrate")
+                self.assertEqual(_unexplained(self, first, blocks=True, carve_out=carve_out), [])
+                after = _records(project)
+                self.assertEqual(
+                    set(_touched_records(before, after)),
+                    set(plan.files) | {_LEGACY_REL, _KEPT_REL},
+                    "the first check wrote a record beyond the migration's own")
+                for rel, data in plan.files.items():
+                    self.assertEqual(after[rel][0], data, f"{rel} is not the plan's bytes")
+                self.assertEqual(after[_KEPT_REL][0], legacy, "the legacy ledger was not kept")
+                blocks = [p for i, op, p in _touches(first)
+                          if p.rsplit("/", 1)[-1] in _GIT_RULE_FILES]
+                self.assertTrue(blocks, "the migration wrote no ignore block")
+
+                second = _watched(self, project, "check")
+                self._assert_worked(("check",), second.proc)
+                self.assertEqual(_touched_records(after, _records(project)), [])
+                self.assertEqual(_unexplained(self, second), [],
+                                 "the second check wrote what git would track — or a "
+                                 "block the first one already wrote")
+
+    # -- the shims on a legacy project --------------------------------------- #
+    def test_a_shim_on_a_legacy_project_writes_the_migration_and_its_record(self):
+        """Each shim migrates first, then writes the one record it was asked for:
+        nothing else it writes is a record, and nothing else would be tracked."""
+        outside = self.tmp()
+        for argv, named in _shims(outside):
+            with self.subTest(shim=argv[0]):
+                project = _legacy_bracket(os.path.join(self.tmp(), "legacy"))
+                plan, carve_out = _migration(project)
+                before = _records(project)
+                run = _watched(self, project, *argv)
+                self._assert_worked(argv, run.proc, (0,))
+                asked = _asked(named, run.proc)
+                touched = set(_touched_records(before, _records(project)))
+                self.assertTrue(asked <= touched, f"the shim did not write {asked}")
+                self.assertEqual(
+                    touched - asked - set(plan.files), {_LEGACY_REL, _KEPT_REL},
+                    f"`atompipe {argv[0]}` wrote a record it was not asked to")
+                licensed = carve_out | {("write", rel) for rel in asked}
+                self.assertEqual(_unexplained(self, run, blocks=True, carve_out=licensed), [])
+
+    # -- the checker refuses ------------------------------------------------- #
+    def test_the_property_refuses_what_it_forbids(self):
+        """V: each rule of `_unexplained` and `_records`, broken on a real run.
+
+        A shim's record, written with no licence, is the one thing named. A cache
+        file moved to before the migration's block is caught; the same file after
+        the block is not. An existing verdict entry rewritten is not a new one. A
+        block written twice is refused. A record saved back with equal bytes is a
+        write."""
+        project = _migrated_bracket(os.path.join(self.tmp(), "migrated"))
+        run = _watched(self, project, "decide", "--title", "Keep PETG", "--summary", "s")
+        self._assert_worked(("decide",), run.proc, (0,))
+        found = _unexplained(self, run)
+        self.assertEqual(len(found), 1, found)
+        self.assertTrue(found[0].startswith("write decisions/keep-petg.json "), found)
+
+        legacy = _legacy_bracket(os.path.join(self.tmp(), "legacy"), template=True)
+        _plan, carve_out = _migration(legacy)
+        first = _watched(self, legacy, "check")
+        self.assertEqual(_unexplained(self, first, blocks=True, carve_out=carve_out), [])
+        last = ".atompipe/cache/last_check.json"
+        self.assertIn(last, first.after, "the legacy check wrote no last_check.json")
+        moved = first._replace(events=[["write", last]] + first.events)
+        self.assertEqual([p for p in _unexplained(self, moved, blocks=True, carve_out=carve_out)
+                          if last in p],
+                         [f"write {last} (event 0): not ignored when it was written, and not "
+                          f"a new verdict entry"],
+                         "a write before the block landed was read as ignored — or the same "
+                         "file written after it was not")
+
+        second = _watched(self, legacy, "check")
+        entry = next(p for p in second.after if _transcript.ENTRY_PATH.fullmatch(p))
+        rewritten = second._replace(events=second.events + [["write", entry]])
+        self.assertTrue(any(p.startswith(f"write {entry} ") for p in _unexplained(self, rewritten)),
+                        "an existing verdict entry rewritten passed as a new one")
+        twice = first._replace(events=first.events + [["write", ".gitignore"]])
+        self.assertTrue(any(p.startswith(".gitignore: written 2 times")
+                            for p in _unexplained(self, twice, blocks=True, carve_out=carve_out)))
+
+        before = _records(project)
+        path = os.path.join(project, *_HAND_FORMATTED.split("/"))
+        _write(path + ".saved", before[_HAND_FORMATTED][0])
+        os.replace(path + ".saved", path)                  # an atomic save of the same bytes
+        self.assertEqual(_read_bytes(path), before[_HAND_FORMATTED][0])
+        self.assertEqual(_touched_records(before, _records(project)), [_HAND_FORMATTED],
+                         "a record saved back with equal bytes was not seen")
 
 
 if __name__ == "__main__":

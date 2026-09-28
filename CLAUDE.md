@@ -61,8 +61,24 @@ a PASS nothing earned; enforced in `tests/test_staleness.py` and
    that failed to import compared equal, so three claims read PROVEN for a design that
    could not be built.)
 
-Invariant 8 — the records index never disagrees with the records — arrives with the
-records layout in checkpoint 1.3.
+Checkpoint 1.3 makes the records files — `claims/`, `params/`, `decisions/`,
+`needs/`, `inputs/`, `results/`, `views/` and `.atompipe/project.json` — and
+`.atompipe/ledger.json` an index generated from them; enforced in
+`tests/test_records.py`:
+
+8. **The index never disagrees with the records, and no command writes a record
+   it was not asked to write.** The index is rebuilt from the records after every
+   command (`doctor`, `init` and `--no-record` runs write none of it), so a hand
+   edit made since the last command reaches it; nothing reads it for truth. `check`
+   writes no record: every path it writes is ignored by git at the moment it is
+   written, or is a new verdict entry. Each kept writer (`ingest`, `extract`,
+   `decide`, `packs add`, `claim physical`) writes the one record it was asked for.
+   The one carve-out is the one-time legacy migration, which only `check` and those
+   writers perform; every other command reads a legacy ledger in memory and writes
+   nothing. (Observed before this: `check`, a sweep, saved the whole ledger on
+   every run, so a claim a human edited between two commands was put back from the
+   sweep's memory, and `gap`, which reads like a query, filed every gap it found as
+   a record nobody wrote.)
 
 9. **A verdict counts only from a gate admitted at its current version.** Its negative
    control must have been run, and must have failed, at the gate's current code,
