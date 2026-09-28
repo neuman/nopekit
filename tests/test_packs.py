@@ -659,7 +659,7 @@ class ControlsAreSealed(unittest.TestCase):
                          f"{proc.stdout}\n{proc.stderr}")
         problems = json.loads(proc.stdout)["problems"]
         self.assertEqual(len(problems), 1, problems)
-        self.assertTrue(problems[0].startswith(f"beam.deflection: {_SEAL_PHRASE} ("),
+        self.assertTrue(problems[0].startswith(f"beam.deflection: {_SEAL_PHRASE}: "),
                         problems)
 
         # In process, on the scratch pack: its `too_long` fixture copies the
@@ -678,7 +678,7 @@ class ControlsAreSealed(unittest.TestCase):
         self.assertEqual(findings[0].host_paths, _host_reads(_spec, fn, host))
         shown = packs_mod.demonstrate(pack_dir, tier=Tier.EXTERNAL)
         self.assertEqual(len(shown.problems), 1, shown.problems)
-        self.assertTrue(shown.problems[0].startswith(f"{gate_id}: {_SEAL_PHRASE} ("),
+        self.assertTrue(shown.problems[0].startswith(f"{gate_id}: {_SEAL_PHRASE}: "),
                         shown.problems)
 
     def test_identity_fixture_in_a_pack_is_caught(self):
@@ -704,7 +704,7 @@ class ControlsAreSealed(unittest.TestCase):
                                  [(gate_id, "selftest/bad.py:identity", ("span_mm",))])
                 self.assertEqual(_host_reads(_spec, fn, host), ("span_mm",))
         shown = packs_mod.demonstrate(pack_dir, tier=Tier.EXTERNAL)
-        self.assertTrue(any(line.startswith(f"{gate_id}: {_SEAL_PHRASE} (span_mm)")
+        self.assertTrue(any(line.startswith(f"{gate_id}: {_SEAL_PHRASE}: span_mm — ")
                             for line in shown.problems), shown.problems)
 
 

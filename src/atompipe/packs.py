@@ -985,8 +985,9 @@ def validate(pack_dir: str, *, tier: int = Tier.BUILD,
     * **gate requirements appear in the manifest**, so tier 1 can tell the truth
       about what a pack will cost to run before anybody imports it.
     * **every gate at or below ``tier`` demonstrates** (:func:`demonstrate`): it
-      passes the pack's own baseline, its control fires, and the control still
-      fires against an empty host. Everything above was static, and static
+      passes the pack's own baseline, its control fires, the control still
+      fires against an empty host, and it reads nothing of its host's
+      ``ctx.params`` (:func:`seal_findings`). Everything above was static, and static
       certified a planted ``return True`` as publishable (S-09): a gate whose
       control is declared, exists and has never once fired reads exactly like one
       that works.
@@ -1442,6 +1443,10 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
        known-bad values over the host's projection instead of stating everything
        its gate reads fires in the pack's CI and can be defused by any project
        that happens to state the key it forgot (invariant 5, SEALED).
+    4. **the seal, read off the trace**: the control of step 2 must read nothing
+       of its host's ``ctx.params`` (:func:`seal_findings`, one line per gate).
+       Step 3 sees only what an EMPTY host changes; a fixture that layers the
+       whole baseline over the host fires the same both ways and passed it.
 
     A skip is honest only when :func:`gates.availability` says the gate's tools
     are absent; it goes to ``skipped``. A skip with the tools present is a
@@ -1466,6 +1471,7 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
     relaxed by relaxing that code, with no test file touched.
     """
     from . import gates as _gates          # local import: see _fresh_registry
+    from .verdicts import GateTrace        # local: the same edge, the same reason
 
     shown = Demonstration()
     pack_dir = os.path.abspath(pack_dir)
@@ -1537,9 +1543,12 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                     f"is not good or the gate is wrong, and its control proves nothing "
                     f"until one of them is fixed")
 
-            # 2. the known-bad input, over the pack's baseline
+            # 2. the known-bad input, over the pack's baseline — traced, so the
+            #    seal detector (4.) reads what the control took from its host
+            trace = GateTrace(kind="control")
             control = _gates.selftest(
-                spec, fn, baseline_context(pack_dir, out_dir=_run_dir(base, spec.id, "control")))
+                spec, fn, baseline_context(pack_dir, out_dir=_run_dir(base, spec.id, "control")),
+                trace=trace)
             if control.outcome == "skipped":
                 # gates.selftest turns a skip with the tools present into an
                 # error, so a skip here is availability's — asked again anyway.
@@ -1548,8 +1557,14 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                     shown.skipped.append(f"{spec.id} ({missing or 'not available here'})")
                     continue
             shown.ran += 1
+            # After what the control DID, never before: `gate selftest --pack`
+            # shows the first `control …` line per gate (cli._read_back), and a
+            # control that did not fire is the louder news.
+            unsealed = _seal_problem(_seal_finding(spec, trace))
             if control.outcome != "pass":
                 shown.problems.append(f"{spec.id}: {_CONTROL_PREFIX}did not fire: {_why(control)}")
+                if unsealed:
+                    shown.problems.append(unsealed)
                 continue
 
             # 3. the same known-bad input with nothing to inherit from
@@ -1564,6 +1579,10 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                     f"against an empty host it {how} ({_why(sealed)}); the fixture "
                     f"inherits from the host instead of stating everything its gate "
                     f"reads, so installing this pack in another project can defuse it")
+
+            # 4. the seal, read off step 2's trace: what the probe cannot see
+            if unsealed:
+                shown.problems.append(unsealed)
     finally:
         if out_dir is None:
             shutil.rmtree(base, ignore_errors=True)
@@ -1623,6 +1642,27 @@ def _seal_finding(spec: GateSpec, trace: Any) -> SealFinding | None:
         return None
     nc = spec.negative_control
     return SealFinding(gate=spec.id, fixture=(nc.fixture if nc else "") or "", host_paths=paths)
+
+
+def _seal_problem(finding: SealFinding | None) -> str:
+    """A finding as :func:`demonstrate` reports it, or ``""`` for none.
+
+    ``"<gate id>: control reads the host's ctx.params: a, b, c (+n more) — ..."``:
+    the ``control`` prefix (``_CONTROL_PREFIX``) files it with the control, so
+    `gate selftest --pack` counts the control BROKEN rather than the baseline
+    failed (``cli._read_back``).
+    """
+    if finding is None:
+        return ""
+    paths = ", ".join(finding.host_paths[:_SEAL_PATHS_SHOWN])
+    more = len(finding.host_paths) - _SEAL_PATHS_SHOWN
+    if more > 0:
+        paths += f" (+{more} more)"
+    return (f"{finding.gate}: {_CONTROL_PREFIX}reads the host's ctx.params: "
+            f"{paths} — {finding.fixture or 'its fixture'} builds its "
+            f"known-bad input over the host project's params instead of only the "
+            f"pack's own {SELFTEST_DIR}/{BASELINE_NAME}, so a project that states a key "
+            f"it does not can defuse it (invariant 5, SEALED)")
 
 
 def seal_findings(registry: Any, host_ctx: "GateContext", *, tier: int = Tier.EXTERNAL,
