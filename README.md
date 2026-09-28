@@ -19,8 +19,8 @@ claims  ->  gates  ->  packs  ->  readiness report
 
 A **claim** is something that must be true for the design to work. A **gate** is an
 executable that settles a claim *and is capable of failing*. A **pack** supplies gates
-for one physical domain. The **readiness report** is the ledger rendered: what is
-proven, what is not, and why.
+for one physical domain. The **readiness report** is the claims and their verdicts
+rendered: what is proven, what is not, and why.
 
 ## Install
 
@@ -51,8 +51,10 @@ atompipe gate selftest  # every gate proves it can fail on known-bad input
 atompipe why thickness  # one parameter's full history, including what was rejected
 ```
 
-It ships with its claims and its ledger, because the ledger *is* a source of truth —
-not a build artifact.
+It ships with its records and its verdicts, because those *are* sources of truth —
+not build artifacts: each claim is a file under `claims/`, and every gate's verdict
+is committed under `.atompipe/verdicts/`, so a fresh clone's first `check` is served
+from the cache and reads the same answer the author saw.
 
 Nothing heavy installs until a claim needs it and you have said yes. The two packs
 that want `trimesh` report their claims as **BLOCKED** — visibly — when it is absent,
@@ -120,6 +122,30 @@ bureaucracy — an agent that writes plausible code will write plausible validat
 and plausible validators are worse than none, because they launder assumption into
 apparent proof.
 
+## Where the facts live
+
+Records are files — one fact, one file, in the project, under git:
+
+```
+my-project/
+  model/bracket.py          the model: each parameter's value, why, and what lost (PARAMS)
+  gates/   selftest/        the project's own gates, and the known-bad inputs they must fail on
+  claims/C1.json            one claim per file: what must be true, and its limit
+  params/  decisions/  needs/  inputs/  results/  views/     one record per file
+  .atompipe/project.json    the project: its name, its model entry, its live packs
+  .atompipe/verdicts/       every gate's verdict, keyed by the hash of what it read (tracked)
+  .atompipe/ledger.json     an index of every record, generated (ignored: never edit it)
+  .atompipe/cache/  obs/  out/     the last check's statuses, what runs cost, scratch (ignored)
+```
+
+You — or the agent — edit a record the way you edit code, and `atompipe check`
+validates it: a misspelled key in `claims/C1.json` is refused with a suggestion, never
+silently dropped. A verdict goes stale when something its gate was seen to read
+changes — a parameter, a file, a claim, its own code — so an edit to one parameter
+re-runs only the gates that read it; what the tracer cannot see is named in
+[`docs/SPINE_CONTRACT.md`](docs/SPINE_CONTRACT.md)'s limits. There is no run history
+to keep: git and the verdict cache are the history.
+
 ## The method
 
 Ten rules, in [`METHOD.md`](METHOD.md). The short version:
@@ -170,9 +196,9 @@ atompipe site build     # run the viewgens, write site/data/ and site/assets/
 atompipe site serve     # python3 -m http.server. No build step, no npm, ever.
 ```
 
-`site build` never runs gates. It renders the verdicts already in the ledger and
-stamps each with its own age, because a page that re-ran the cheap gates and not the
-expensive ones would show a mixed-age picture under one timestamp. It also reports
+`site build` never runs gates. It renders the verdicts already in the verdict
+cache and stamps each with its own age, because a page that re-ran the cheap gates
+and not the expensive ones would show a mixed-age picture under one timestamp. It also reports
 every locator naming a view or a part that does not exist — a gate that thinks it is
 highlighting something and is not looks exactly like a gate that found nothing.
 
@@ -203,6 +229,15 @@ atompipe doctor                run this first when something is confusing
 
 Early. The spine and the first extracted packs work; the interfaces will move. It is
 Apache 2.0 — use it, fork it, or take the ten rules and ignore the code.
+
+**Do not run an older atompipe on a project in this layout.** A version from before
+records became files reads `.atompipe/ledger.json` as the project's records, and may
+rewrite it; nothing a newer version writes can stop it, because the older one
+predates every guard. (A project whose `.atompipe/project.json` says a newer `schema`
+than your atompipe knows is refused — that check runs only from this layout forward.)
+A project still in the old one-file layout migrates itself the first time `check`, or
+a command that writes a record, runs: its `ledger.json` becomes one file per record and
+is renamed `ledger.legacy.json`, never deleted.
 
 ## Licence
 
