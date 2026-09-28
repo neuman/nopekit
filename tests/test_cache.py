@@ -427,9 +427,10 @@ class OnlyMeasurementsAreCached(_env.EnvCase):
         verdicts.remember(root, "t.plain", crash, input_rho="", kind="error",
                           when="2026-09-27T10:00:00Z")
         held = verdicts.remembered(root)
-        self.assertEqual(held["t.plain"]["kind"], "error")
-        self.assertEqual(held["t.plain"]["verdict"].outcome, "error")
-        self.assertEqual(held["t.plain"]["when"], "2026-09-27T10:00:00Z")
+        self.assertEqual(list(held["t.plain"]), [""], "one record, at the rho it was given")
+        self.assertEqual(held["t.plain"][""]["kind"], "error")
+        self.assertEqual(held["t.plain"][""]["verdict"].outcome, "error")
+        self.assertEqual(held["t.plain"][""]["when"], "2026-09-27T10:00:00Z")
         self.assertTrue(os.path.isfile(
             os.path.join(root, ".atompipe", "cache", "last_outcomes.json")))
         # A remembered outcome is never a pass: remembering one is refused.
@@ -739,7 +740,7 @@ class ControlEntries(_env.EnvCase):
         self.assertIsNone(verdicts.record_control(root, spec, fn, result=result, trace=trace,
                                                   when="2026-09-27T10:00:00Z"))
         self.assertEqual(_entry_files(root, "t.g", controls=True), [])
-        held = verdicts.remembered(root)["control:t.g"]
+        [held] = verdicts.remembered(root)["control:t.g"].values()
         static, _parts = verdicts.control_static(spec, fn, root, digests=FileDigests())
         self.assertEqual(held["input_rho"], static, "a control crash is keyed by the static part")
         self.assertEqual(held["kind"], "error")
@@ -761,7 +762,7 @@ class ControlEntries(_env.EnvCase):
         self.assertTrue(result.error.startswith(
             "skipped on its own known-bad input while its tools are present"), result.error)
         self.assertIsNone(verdicts.record_control(root, spec, fn, result=result, trace=trace))
-        held = verdicts.remembered(root)["control:t.g"]
+        [held] = verdicts.remembered(root)["control:t.g"].values()
         self.assertEqual(held["kind"], "self-skip")
         self.assertEqual(held["verdict"].outcome, "error")
         self.assertEqual(_entry_files(root, "t.g", controls=True), [])
@@ -1151,20 +1152,84 @@ class Remembered(_env.EnvCase):
         crash = Verdict(gate="t.plain", error="RuntimeError: x", rho="partial" * 8)
         verdicts.remember(root, "t.plain", crash, input_rho="a" * 64, kind="error",
                           when="2026-09-27T10:00:00Z")
-        held = verdicts.remembered(root)["t.plain"]
+        [held] = verdicts.remembered(root)["t.plain"].values()
         self.assertEqual(held["input_rho"], "a" * 64)
         self.assertEqual(held["verdict"].rho, "partial" * 8)
         verdicts.remember(root, "control:t.plain", crash, input_rho="b" * 64,
                           kind="self-skip", when="")
         self.assertEqual(sorted(verdicts.remembered(root)), ["control:t.plain", "t.plain"])
 
-        # A recorded pass or fail for the gate clears its own record, not its control's.
+        # A recorded pass or fail clears the gate's record at ITS rho, and no
+        # other: not the crash at "a"*64 (remembered outcomes, round 1: it did,
+        # and the PASS at "a"*64 the crash had superseded was served again), and
+        # not its control's.
+        wrote = verdicts.record_verdict(root, _plain_spec(), _plain_gate,
+                                        Verdict(gate="t.plain", passed=True))
+        [entry] = verdicts.read_entries(root, "t.plain")
+        self.assertEqual(entry.path, wrote.path)
+        self.assertNotEqual(entry.rho, "a" * 64)
+        self.assertEqual(list(verdicts.remembered(root)["t.plain"]), ["a" * 64],
+                         "a pass at another rho forgot the crash at this one")
+        verdicts.remember(root, "t.plain", crash, input_rho=entry.rho, kind="error", when="")
         verdicts.record_verdict(root, _plain_spec(), _plain_gate,
                                 Verdict(gate="t.plain", passed=True))
+        self.assertEqual(list(verdicts.remembered(root)["t.plain"]), ["a" * 64],
+                         "a pass at its own rho clears it")
+        self.assertFalse(verdicts.forget(root, "t.plain", ["c" * 64]))
+        self.assertTrue(verdicts.forget(root, "t.plain", ["a" * 64]))
         self.assertEqual(sorted(verdicts.remembered(root)), ["control:t.plain"])
-        self.assertTrue(verdicts.forget(root, "control:t.plain"))
-        self.assertFalse(verdicts.forget(root, "control:t.plain"))
+        self.assertFalse(verdicts.forget(root, "control:t.plain", ["a" * 64]),
+                         "the control's record is at its own static part")
+        self.assertTrue(verdicts.forget(root, "control:t.plain", ["b" * 64]))
+        self.assertFalse(verdicts.forget(root, "control:t.plain", ["b" * 64]))
         self.assertEqual(verdicts.remembered(root), {})
+
+    def test_an_availability_skip_never_replaces_a_crash_or_a_self_skip(self):
+        # Remembered outcomes, round 1: the sweep remembers a skip for a missing
+        # tool under the rho a crash was remembered under, and it replaced the
+        # crash — which the resolver then never counted.
+        root = _project(self)
+        crash = Verdict(gate="t.plain", error="RuntimeError: x")
+        chose = Verdict(gate="t.plain", skipped=True, skip_reason="not my model")
+        missing = Verdict(gate="t.plain", skipped=True, skip_reason="requires python nothing")
+        a, b = "a" * 64, "b" * 64
+        verdicts.remember(root, "t.plain", crash, input_rho=a, kind="error", when="t1")
+        verdicts.remember(root, "t.plain", missing, input_rho=a, kind="availability", when="t2")
+        verdicts.remember(root, "t.plain", missing, input_rho=b, kind="availability", when="t2")
+        held = verdicts.remembered(root)["t.plain"]
+        self.assertEqual({r: (held[r]["kind"], held[r]["when"]) for r in held},
+                         {a: ("error", "t1"), b: ("availability", "t2")})
+        # an availability skip supersedes nothing: the newest one per gate is kept
+        c = "c" * 64
+        verdicts.remember(root, "t.plain", missing, input_rho=c, kind="availability", when="t2b")
+        held = verdicts.remembered(root)["t.plain"]
+        self.assertEqual({r: held[r]["kind"] for r in held}, {a: "error", c: "availability"})
+        verdicts.remember(root, "t.plain", missing, input_rho=b, kind="availability", when="t2c")
+        # a run that proved nothing replaces one that proved nothing, newest first
+        verdicts.remember(root, "t.plain", chose, input_rho=a, kind="self-skip", when="t3")
+        verdicts.remember(root, "t.plain", missing, input_rho=a, kind="availability", when="t4")
+        self.assertEqual(verdicts.remembered(root)["t.plain"][a]["kind"], "self-skip")
+        verdicts.remember(root, "t.plain", crash, input_rho=b, kind="error", when="t5")
+        self.assertEqual(verdicts.remembered(root)["t.plain"][b]["kind"], "error",
+                         "a crash replaces an availability skip at the same rho")
+        # the same rule for a control's records
+        verdicts.remember(root, "control:t.plain", crash, input_rho=a, kind="error", when="")
+        verdicts.remember(root, "control:t.plain", missing, input_rho=a,
+                          kind="availability", when="")
+        self.assertEqual(verdicts.remembered(root)["control:t.plain"][a]["kind"], "error")
+
+    def test_the_one_record_per_gate_shape_is_refused(self):
+        # The shape the hole was stored in: loud, never read as empty — an
+        # empty read would hand the next check the PASS a crash superseded.
+        root = _project(self)
+        path = os.path.join(root, ".atompipe", "cache", "last_outcomes.json")
+        os.makedirs(os.path.dirname(path))
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"t.plain": {"input_rho": "", "kind": "error", "when": "",
+                                   "verdict": {"gate": "t.plain", "error": "x"}}}, fh)
+        with self.assertRaises(AtompipeError) as caught:
+            verdicts.remembered(root)
+        self.assertIn("is not a remembered-outcomes file", str(caught.exception))
 
 
 # --------------------------------------------------------------------------- #

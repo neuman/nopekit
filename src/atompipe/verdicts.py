@@ -2495,6 +2495,17 @@ _BYTECODE = (".pyc", ".pyo", ".pyd")
 #: its tools were present, and a skip availability chose.
 _REMEMBER_KINDS = ("error", "self-skip", "availability")
 
+#: The kinds that SUPERSEDE a cached entry at their inputs (``_crash_applies``,
+#: a control's ``failed_here``): the gate ran and proved nothing. An
+#: availability skip never ran it, so it supersedes nothing — and it never
+#: replaces one of these at the same inputs (``remember``). What slipped through
+#: (remembered outcomes, round 1): the sweep remembered the skip under the very
+#: rho the crash was remembered under, one record per gate, so a crash, then a
+#: check without the tool, then a check with it, served the PASS the crash had
+#: superseded. *Rejected:* not remembering availability skips at all — the
+#: record is what a reader shows for a gate that never ran here (S-68).
+_SUPERSEDING_KINDS = ("error", "self-skip")
+
 _ENTRY_FIELDS = ("schema", "gate", "rho", "code", "spine", "reads", "instruments",
                  "verdict", "digest")
 _CODE_FIELDS = ("digest", "files", "fallback")
@@ -3828,9 +3839,12 @@ def record_verdict(root: str, spec: Any, fn: Any, verdict: Verdict, *,
     ``CodeRef.unrecorded()``, and the entry names ``code: ...`` as an opaque
     channel), the spine digest, the read set (``reads``, else ``trace``
     classified by ``Reads.from_trace``, else nothing), rho, and
-    ``instruments_for``; writes the entry (``write_entry``); and clears any
-    remembered outcome of this gate — a cacheable outcome at these inputs is
-    newer than the crash it supersedes (§3.9).
+    ``instruments_for``; writes the entry (``write_entry``); and clears the
+    gate's remembered outcomes at the entry's rho and at ``""`` (never ran) — a
+    cacheable outcome at these inputs is newer than the crash it supersedes
+    (§3.9), and says nothing about a crash at other inputs (``forget``). The
+    sweep clears more: every rho current before its run (``_superseded``),
+    which only it has.
 
     ``anchors`` defaults to ``root``'s, with the pack ``fn`` came from; pass the
     sweep's (``anchors_for``). ``digests`` defaults to a fresh
@@ -3846,7 +3860,7 @@ def record_verdict(root: str, spec: Any, fn: Any, verdict: Verdict, *,
     keyed = _keyed(gate_id, spec, fn, trace=trace, reads=reads, anchors=anchors,
                    digests=digests)
     result = write_entry(root, _entry_for(spec, verdict, keyed, anchors))
-    forget(root, gate_id)
+    forget(root, gate_id, ("", keyed.rho))
     return result
 
 
@@ -4217,8 +4231,9 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
 
     ``host``: ``"known-good"`` (the spine handed a project fixture
     ``selftest/known_good.py``'s context, D-27) or ``"live"``; host-param reads
-    are keyed in rho_control only when live. Writing a control entry clears any
-    remembered control failure of this gate.
+    are keyed in rho_control only when live. Writing a control entry clears the
+    remembered control failure of this gate at the entry's static part, and at
+    no other (``forget``).
     """
     if host not in _HOSTS:
         raise AtompipeError(f"host must be one of {list(_HOSTS)}, not {host!r}")
@@ -4229,7 +4244,7 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
         remember(root, key, built.held, input_rho=built.static, kind=built.kind, when=when)
         return None
     written = write_control(root, built.entry)
-    forget(root, key)
+    forget(root, key, (built.entry.static,))
     return written
 
 
@@ -4325,11 +4340,13 @@ def _read_outcomes(root: str) -> dict:
     except (UnicodeDecodeError, ValueError) as exc:
         data = exc
     if not isinstance(data, dict) or not all(
-            isinstance(key, str) and isinstance(rec, dict)
-            and set(rec) == {"input_rho", "kind", "verdict", "when"}
-            and rec["kind"] in _REMEMBER_KINDS and isinstance(rec["input_rho"], str)
-            and isinstance(rec["verdict"], dict) and isinstance(rec["when"], str)
-            for key, rec in (data.items() if isinstance(data, dict) else ())):
+            isinstance(key, str) and isinstance(records, dict) and records
+            and all(isinstance(input_rho, str) and isinstance(rec, dict)
+                    and set(rec) == {"kind", "verdict", "when"}
+                    and rec["kind"] in _REMEMBER_KINDS
+                    and isinstance(rec["verdict"], dict) and isinstance(rec["when"], str)
+                    for input_rho, rec in records.items())
+            for key, records in (data.items() if isinstance(data, dict) else ())):
         # Loud, not empty: an unreadable file read as "nothing remembered" would
         # hand the next check the PASS a crash superseded (invariant 2).
         raise AtompipeError(
@@ -4346,14 +4363,26 @@ def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str
 
     ``key`` is a gate id, or ``control:<gate id>``; ``kind`` ``"error"``,
     ``"self-skip"`` or ``"availability"``; ``when`` the CLI's clock. **Keyed by
-    ``input_rho``** — the rho the sweep computed for that gate from current
-    digests just BEFORE the run (a Fresh entry's, the recomputed rho of the
-    latest entry's read signature, or ``""`` when it never ran); for a control,
-    the current static part. *Rejected:* the failing run's own rho — a crash at
-    partial reads has a different rho than the PASS it followed, so "supersede at
-    the same rho" would never match and the next plain check would serve the old
-    PASS. Nothing remembered is evidence, so remembering a pass or a fail is
-    refused: those are cached.
+    ``(key, input_rho)``** — ``input_rho`` the rho the sweep computed for that
+    gate from current digests just BEFORE the run (a Fresh entry's, the
+    recomputed rho of the latest entry's read signature, or ``""`` when it
+    never ran); for a control, the current static part. *Rejected:* the failing
+    run's own rho — a crash at partial reads has a different rho than the PASS
+    it followed, so "supersede at the same rho" would never match and the next
+    plain check would serve the old PASS. Nothing remembered is evidence, so
+    remembering a pass or a fail is refused: those are cached.
+
+    One record per ``(key, input_rho)``, the newest — except that an
+    ``"availability"`` record never replaces an ``"error"`` or ``"self-skip"``
+    one (``_SUPERSEDING_KINDS``): a check that could not run the gate has
+    learned nothing that answers the crash. What slipped through (remembered
+    outcomes, round 1): ONE record per gate. A skip for a missing tool
+    overwrote the crash at the same rho, and a pass or fail at ANY rho forgot
+    it (``forget`` took the gate, not the rho); either way the next check at
+    the crashed inputs served the PASS the crash superseded — ``0 executed, 6
+    cached``. *Rejected:* a cap on records per gate — the record a cap evicts
+    is the PASS served again; the file is untracked and holds one small record
+    per rho a gate crashed at and has not since measured.
     """
     if kind not in _REMEMBER_KINDS:
         raise AtompipeError(f"a remembered outcome is one of {list(_REMEMBER_KINDS)}, "
@@ -4363,31 +4392,58 @@ def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str
                             f"cached (record_verdict), never remembered")
     gate_id = key.split(":", 1)[1] if key.startswith("control:") else key
     _check_gate_id(gate_id)
+    input_rho = str(input_rho or "")
     data = _read_outcomes(root)
-    data[key] = {"input_rho": str(input_rho or ""), "kind": kind,
-                 "verdict": _clean(verdict.to_dict()), "when": str(when or "")}
+    records = data.setdefault(key, {})
+    held = records.get(input_rho)
+    if kind not in _SUPERSEDING_KINDS:
+        if held is not None and held["kind"] in _SUPERSEDING_KINDS:
+            return
+        # One availability record per key, the newest: it supersedes nothing,
+        # so nothing reads it for its rho. *Rejected:* one per rho, like a
+        # crash — a machine without omc would grow the file by a record per
+        # model edit per omc gate, for no reader.
+        records = {r: rec for r, rec in records.items() if rec["kind"] in _SUPERSEDING_KINDS}
+    records[input_rho] = {"kind": kind, "verdict": _clean(verdict.to_dict()),
+                          "when": str(when or "")}
+    data[key] = dict(sorted(records.items()))
     atomic_write_json(_outcomes_path(root), data)
 
 
 def remembered(root: str) -> dict:
-    """``{key: {"input_rho", "kind", "verdict": Verdict, "when"}}`` — every
-    remembered outcome. Raises ``AtompipeError`` naming the file when it does not
-    parse (see ``_read_outcomes``)."""
-    return {key: {"input_rho": rec["input_rho"], "kind": rec["kind"],
-                  "verdict": Verdict.from_dict(rec["verdict"]), "when": rec["when"]}
-            for key, rec in sorted(_read_outcomes(root).items())}
+    """``{key: {input_rho: {"input_rho", "kind", "verdict": Verdict, "when"}}}``
+    — every remembered outcome, per key one record per ``input_rho``. Raises
+    ``AtompipeError`` naming the file when it does not parse (see
+    ``_read_outcomes``)."""
+    return {key: {input_rho: {"input_rho": input_rho, "kind": rec["kind"],
+                              "verdict": Verdict.from_dict(rec["verdict"]),
+                              "when": rec["when"]}
+                  for input_rho, rec in sorted(records.items())}
+            for key, records in sorted(_read_outcomes(root).items())}
 
 
-def forget(root: str, key: str) -> bool:
-    """Drop the remembered outcome ``key``; ``True`` when there was one. Called
-    whenever a cacheable outcome (or a control entry) is recorded for it."""
+def forget(root: str, key: str, input_rhos: Iterable[str]) -> bool:
+    """Drop ``key``'s remembered outcomes at ``input_rhos``; ``True`` when there
+    was one. Called when a cacheable outcome (or a control entry) is recorded
+    at those inputs — and ONLY those: a pass at B says nothing about the crash
+    at A, and forgetting A's there served A's superseded PASS once the inputs
+    came back (``remember``). The caller names the rhos: the new entry's own,
+    and the ones a crash at the inputs it ran on could be remembered under
+    (``_superseded``)."""
     path = _outcomes_path(root)
     if not os.path.exists(path):
         return False
     data = _read_outcomes(root)
-    if key not in data:
+    records = data.get(key) or {}
+    dropped = [rho_ for rho_ in {str(r or "") for r in input_rhos} if rho_ in records]
+    if not dropped:
         return False
-    del data[key]
+    for rho_ in dropped:
+        del records[rho_]
+    if records:
+        data[key] = records
+    else:
+        del data[key]
     atomic_write_json(path, data)
     return True
 
@@ -5266,12 +5322,13 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
     path that passed its own known-bad input."""
     static, _parts = now.static(spec, fn)
     mine = (verified or {}).get(spec.id) or {}
-    record = held.get(f"control:{spec.id}")
+    record = (held.get(f"control:{spec.id}") or {}).get(static)
     # An availability skip of the control proves nothing either way, and is
     # re-evaluated where it is shown: while the tool is missing the GATE reads
     # skipped before admission is asked; once it is here the record is moot.
-    if record is not None and record["kind"] != "availability" \
-            and record["input_rho"] == static:
+    # Only the record at THIS static: one at another version is that
+    # version's (remembered outcomes, round 1).
+    if record is not None and record["kind"] in _SUPERSEDING_KINDS:
         return Admission("not-admitted", None, _control_failure(record))
     try:
         controls = read_controls(now.root, spec.id, problems=notes)
@@ -5422,19 +5479,62 @@ def _synthesized(spec: Any, **fields: Any) -> Verdict:
 
 def _crash_applies(record: Mapping[str, Any] | None, state: Any) -> bool:
     """Does a remembered crash or self-skip stand at ``state``'s inputs (§3.9)?
-    Over a Fresh entry, at exactly its rho; otherwise at any rho current now,
-    or anywhere when nothing better exists (S-68: with no entry at all, "never
-    run" would be false). ONE predicate for ``resolve``'s step 2 and the sweep's
-    step 3. They were two copies, and the sweep's answered only for Fresh —
-    enough while Fresh was all the sweep served. Once it serves a two-outcomes
-    conflict too, a copy without the Stale rule would serve the conflict where
-    ``status`` shows the crash that superseded it."""
-    if record is None or record["kind"] not in ("error", "self-skip"):
+    Over a Fresh entry, at a rho current now (``Fresh.current``: the entry's,
+    and every other read signature's recomputed); otherwise at any rho current
+    now, or anywhere when nothing better exists (S-68: with no entry at all,
+    "never run" would be false). ONE predicate for ``resolve``'s step 2 and the
+    sweep's step 3. They were two copies, and the sweep's answered only for
+    Fresh — enough while Fresh was all the sweep served. Once it serves a
+    two-outcomes conflict too, a copy without the Stale rule would serve the
+    conflict where ``status`` shows the crash that superseded it.
+
+    Why ``current`` over a Fresh entry and not its rho alone: a crash is
+    remembered under the latest entry's signature, which need not be the Fresh
+    entry's — a crash at those same inputs, read through another signature,
+    stood behind a PASS it had superseded. And ``_superseded`` clears exactly
+    this set when a run measures, so a crash matched here is one no run at
+    these inputs has answered since. *Rejected:* the entry's rho alone (the
+    first rule) — it needs ``forget`` to clear the whole gate to stay
+    loop-free, and that was the hole (remembered outcomes, round 1)."""
+    if record is None or record["kind"] not in _SUPERSEDING_KINDS:
         return False
     if isinstance(state, Fresh):
-        return record["input_rho"] == state.entry.rho
+        return record["input_rho"] in state.current
     return isinstance(state, Never) or record["input_rho"] == "" \
         or record["input_rho"] in state.current
+
+
+def _standing(records: Mapping[str, Any] | None, state: Any) -> Mapping[str, Any] | None:
+    """The remembered crash or self-skip that stands at ``state``'s inputs, of
+    one key's records (``remembered``'s ``{input_rho: record}``), or ``None``.
+    Several can stand — a Stale gate's ``""`` and its current rho — and the one
+    shown is the newest (``when``), then the one at ``state.rho``, then by rho:
+    never by dict order."""
+    standing = [record for record in (records or {}).values()
+                if _crash_applies(record, state)]
+    if not standing:
+        return None
+    return max(standing, key=lambda r: (r["when"], r["input_rho"] == state.rho,
+                                        r["input_rho"]))
+
+
+def _latest_shown(records: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """An unregistered gate's newest crash or self-skip (``when``, then rho), or
+    ``None``: with no registration there are no inputs to match, and an
+    availability skip is not shown for a gate that never ran."""
+    shown = [record for record in (records or {}).values()
+             if record["kind"] in _SUPERSEDING_KINDS]
+    return max(shown, key=lambda r: (r["when"], r["input_rho"])) if shown else None
+
+
+def _superseded(state: Any, rho_: str) -> set[str]:
+    """The remembered rhos a pass or fail measured at ``rho_`` answers, the gate
+    having stood at ``state`` just before the run: its own rho, ``""`` (a
+    crash from before the gate had any entry — it has one now), and every rho
+    ``_crash_applies`` matched there (``state.rho``, ``state.current``) — the
+    run was made at those inputs. Nothing else: a crash at inputs this run was
+    not made at is still the last word there (remembered outcomes, round 1)."""
+    return {"", rho_, state.rho or "", *(state.current or ())}
 
 
 def _contradicted(root: str, entry: Entry) -> str:
@@ -5498,10 +5598,11 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
        without (invariant 1). A Fresh FAIL is still served (R-3: a refutation
        keeps its power everywhere).
     2. A **remembered** crash or self-skip (``last_outcomes.json``) that
-       supersedes — its ``input_rho`` is the Fresh entry's rho — or, with no
-       Fresh entry, is displayed — its ``input_rho`` is ``""`` or a rho
-       recomputable now, or the gate has no entry at all. Invariant 2: a crash
-       proves nothing, and neither does the PASS it followed.
+       supersedes — its ``input_rho`` is a rho recomputable now
+       (``Fresh.current``) — or, with no Fresh entry, is displayed — its
+       ``input_rho`` is ``""`` or a rho recomputable now, or the gate has no
+       entry at all (``_standing``: the newest when several do). Invariant 2: a
+       crash proves nothing, and neither does the PASS it followed.
     3. A **Fresh** entry, then admission (PD-08, X14): a PASS counts when its
        control is admitted or pending; undemonstrated, it reads stale
        (``control not demonstrated at this version — run atompipe check``); not
@@ -5590,8 +5691,8 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
             continue
 
         # 2. a remembered crash or self-skip
-        record = held.get(gid)
-        if _crash_applies(record, state):
+        record = _standing(held.get(gid), state)
+        if record is not None:
             extra = (f"supersedes the cached {entry.name}",) if isinstance(state, Fresh) \
                 else ()
             emit(_as_spec(record["verdict"], spec),
@@ -5644,9 +5745,9 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
         # 6. nothing: no row
 
     # orphans: what this project's cache and memory hold for gates it does not register
-    orphan_ids = set(orphans) | {key for key, rec in held.items()
-                                 if not key.startswith("control:") and key not in registered
-                                 and rec["kind"] != "availability"}
+    shown = {key: _latest_shown(records) for key, records in held.items()
+             if not key.startswith("control:") and key not in registered}
+    orphan_ids = set(orphans) | {key for key, record in shown.items() if record is not None}
     orphan_ids |= {gid for gid in legacy if gid not in registered}
     for gid in sorted(orphan_ids):
         if gid in orphans:
@@ -5654,8 +5755,8 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
             latest = max(orphans[gid], key=order)
             emit(latest.to_verdict(), Row(gid, "orphan", cached=True, stale_reason=_ORPHAN,
                                           entry=latest, when=when_of(latest, order)))
-        elif gid in held:
-            record = held[gid]
+        elif shown.get(gid) is not None:
+            record = shown[gid]
             emit(record["verdict"], Row(gid, "orphan", stale_reason=_ORPHAN,
                                         when=record["when"],
                                         notes=(f"remembered {record['kind']}",)))
@@ -6172,7 +6273,7 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
     if s.record:
         wrote = write_control(s.root, entry)
         s.notes.extend(wrote.warnings)
-        forget(s.root, key)
+        forget(s.root, key, (entry.static,))
         # The entry on disk keeps the fixture hint it was FIRST written with
         # (same inputs, same outcome: "exists"); the closure it was just
         # demonstrated under is remembered beside it.
@@ -6214,9 +6315,8 @@ def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
         controls = []
     current = [c for c in controls if c.static == static and not _control_moved(c, s.now)]
     if not force:
-        record = s.held.get(f"control:{gid}")
-        failed_here = (record is not None and record["kind"] != "availability"
-                       and record["input_rho"] == static)
+        record = (s.held.get(f"control:{gid}") or {}).get(static)
+        failed_here = record is not None and record["kind"] in _SUPERSEDING_KINDS
         # A control that crashed at this static supersedes whatever entry it
         # followed, like a gate's crash (§3.9): run it again, never serve it.
         if not failed_here and current and _at_tier(current, at):
@@ -6407,7 +6507,7 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     # else is run at this sweep's. An entry from a costlier tier is judged by
     # the records alone — its control is above this sweep's ceiling (Q1.6).
     served = (not force and isinstance(state, Fresh)
-              and not _crash_applies(s.held.get(gid), state))
+              and _standing(s.held.get(gid), state) is None)
     at = _read_tier(state.entry.reads) if served else s.now.tier
     judged = _admit(s, spec, fn, run_ctx, may_run=at is None or at == s.now.tier,
                     force=force, at=at)
@@ -6428,7 +6528,7 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     # `last_check.json` saying pass for a claim `status` FAILed. A run cannot
     # settle it: it agrees with one of the two, and both files stay.
     if not force and isinstance(state, (Fresh, Stale)) \
-            and not _crash_applies(s.held.get(gid), state):
+            and _standing(s.held.get(gid), state) is None:
         if isinstance(state, Fresh):
             return SweepRow(_as_spec(state.entry.to_verdict(), spec), cached=True, fresh=True,
                             rho=state.entry.rho, admission=judged)
@@ -6455,7 +6555,7 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         if s.record:
             wrote = write_entry(s.root, entry)
             s.notes.extend(wrote.warnings)
-            forget(s.root, gid)
+            forget(s.root, gid, _superseded(state, keyed.rho))
     elif s.record:
         kind = ("error" if verdict.error
                 else "self-skip" if _gates.availability(spec)[0] else "availability")
@@ -6484,20 +6584,21 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
 
     1. **Availability** fails: a Fresh FAIL is served (R-3); otherwise skipped —
        ``cached pass exists; <why> here`` over a Fresh PASS (invariant 1) —
-       remembered as ``availability``; no control runs, ``fn`` is never called.
+       remembered as ``availability`` (never over a crash or self-skip at the
+       same rho); no control runs, ``fn`` is never called.
     2. **Admission** (``admission``'s steps; ``force`` re-runs the control). Not
        admitted: ``error="not admitted: <why>"``, ``fn`` never called.
     3. Unless ``force``, a **Fresh** entry is served — unless a remembered crash
-       or self-skip at its rho superseded it (§3.9: a crash proves nothing, and
-       neither does the PASS it followed), which re-runs the gate. **Two
+       or self-skip at a rho current now superseded it (§3.9: a crash proves
+       nothing, and neither does the PASS it followed), which re-runs the gate. **Two
        outcomes** at the current rho (a Stale ``conflict``) are served as
        ``resolve``'s error, ``two outcomes recorded for identical inputs
        (<names>)``, and the gate is not run — under the same supersede rule
        (``_crash_applies``, shared with ``resolve``).
     4. **Run**, traced with the sweep's anchors. A pass or fail is keyed and
-       cached (``write_entry``), clearing any remembered outcome; anything else
-       is remembered under the rho freshness computed before the run
-       (``input_rho``). Every run appends obs. A pass or fail landing at a rho
+       cached (``write_entry``), clearing the remembered outcomes at the inputs
+       it ran on and no others (``_superseded``); anything else is remembered
+       under the rho freshness computed before the run (``input_rho``). Every run appends obs. A pass or fail landing at a rho
        where the other outcome is recorded under the same instruments — a
        forced re-run of a conflict, or a run that just made one — is filed and
        its row is that same error (``_contradicted``), recorded or not; an

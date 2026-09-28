@@ -39,7 +39,11 @@ positive control, that the claim WAS PASS before.
   cache must never be what makes an edit visible).
 * a hand-edited entry.
 * **PD-29** — a crash under ``--force`` at unchanged inputs, then a plain sweep:
-  it reads errored, never the cached PASS the crash superseded.
+  it reads errored, never the cached PASS the crash superseded. And the review's
+  follow-up (remembered outcomes, round 1): neither a measurement at other
+  inputs nor a skip for a missing tool erases that crash, so coming back to the
+  crashed inputs never serves the PASS — for a gate, through the CLI, and for a
+  control crash across a control entry at another version.
 
 The same class then drives four of those defects through the CLI a person runs,
 on a copy of the bracket, and reads the verdict where a person reads it: the
@@ -183,8 +187,9 @@ from atompipe.models import NegativeControl, Verdict
 
 #: t.crashy crashes on the REAL design (x below 10) while "crash" is set, and not
 #: on its control's known-bad input (x = 50): a crash of the gate, not of its
-#: control, at inputs that did not move.
-FLAGS = {"crash": False}
+#: control, at inputs that did not move. "control" is the other half: it crashes
+#: on the known-bad input only — a crash of the control, not of the gate.
+FLAGS = {"crash": False, "control": False}
 
 
 def _nc(name):
@@ -276,6 +281,8 @@ def crashy(ctx):
     x = float(ctx.params["config"]["x"])
     if FLAGS["crash"] and x < 10.0:
         raise RuntimeError("tripped over the real design")
+    if FLAGS["control"] and x >= 10.0:
+        raise RuntimeError("tripped over its known-bad input")
     return Verdict(gate="t.crashy", passed=x < 10.0, measured=x, limit=10.0)
 
 
@@ -1580,6 +1587,124 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertEqual(healed.verdict.outcome, "pass")
         self.assertEqual(p.statuses(base)["C_CR"], PASS, "a run that passes clears it")
 
+    def _crashed_at_base(self) -> tuple[Project, dict]:
+        """t.crashy PASSed at ``projection()``, then crashed there under
+        ``--force``: the PD-29 state, the crash remembered over the PASS. The
+        crash flag is left SET — whatever serves the PASS from here on serves it
+        for a gate that still crashes on these inputs."""
+        p = Project(self)
+        base = projection()
+        p.sweep(base, only=["t.crashy"])
+        self.assertEqual(p.statuses(base)["C_CR"], PASS, "the positive control")
+        p.gate_module.FLAGS["crash"] = True
+        self.addCleanup(p.gate_module.FLAGS.__setitem__, "crash", False)
+        forced = row(p.sweep(base, only=["t.crashy"], force=True), "t.crashy")
+        self.assertEqual(forced.verdict.outcome, "error", forced.verdict)
+        return p, base
+
+    def _served_back_at_base(self, p: Project, base: dict, why: str) -> None:
+        """Back at the inputs the gate crashed on: neither a reader nor a sweep
+        serves the PASS that crash superseded — the sweep runs the gate, and the
+        gate crashes again. Then a run that passes there clears it, and the
+        sweep after that is a cache hit: a crash at other inputs, still
+        remembered, is not re-run at these forever."""
+        resolved = {v.gate: v for v in p.resolve(base).verdicts}["t.crashy"]
+        self.assertEqual(resolved.outcome, "error", f"{why}: status serves {resolved}")
+        self.assertNotEqual(p.statuses(base)["C_CR"], PASS, why)
+        back = row(p.sweep(base, only=["t.crashy"]), "t.crashy")
+        self.assertFalse(back.cached, f"{why}: the sweep served the superseded PASS "
+                                      f"from the cache: {back.verdict}")
+        self.assertTrue(back.executed)
+        self.assertEqual(back.verdict.outcome, "error", "the gate still crashes here")
+        self.assertNotEqual(p.statuses(base)["C_CR"], PASS)
+
+        p.gate_module.FLAGS["crash"] = False
+        healed = row(p.sweep(base, only=["t.crashy"]), "t.crashy")
+        self.assertEqual((healed.verdict.outcome, healed.executed), ("pass", True))
+        self.assertEqual(p.statuses(base)["C_CR"], PASS, "a run that passes here clears it")
+        again = row(p.sweep(base, only=["t.crashy"]), "t.crashy")
+        self.assertTrue(again.cached, f"cleared, the PASS is a cache hit again: {again.verdict}")
+
+    def test_a_measurement_at_other_inputs_never_clears_a_crash_here(self):
+        """V: the review's repro (remembered outcomes, round 1). One record per
+        gate, and ``forget`` ran after ANY pass or fail at ANY rho: crash at A,
+        a FAIL at B, back to A — and the next check read ``0 executed, 6
+        cached``, serving A's PASS for a gate that still crashes at A."""
+        p, base = self._crashed_at_base()
+        moved = projection(x=20.0)
+        elsewhere = row(p.sweep(moved, only=["t.crashy"]), "t.crashy")
+        self.assertEqual((elsewhere.verdict.outcome, elsewhere.executed), ("fail", True),
+                         "the positive control: a measurement at other inputs")
+        self.assertEqual(p.statuses(moved)["C_CR"], ClaimStatus.FAIL)
+        self._served_back_at_base(p, base, "a FAIL at other inputs erased the crash")
+
+    def test_an_availability_skip_never_replaces_a_crash(self):
+        """V: the tool-missing half of the same repro. The sweep remembers an
+        availability skip under the same rho the crash is remembered under, and
+        it overwrote the crash — which ``_crash_applies`` never counts. The tool
+        back, the PASS the crash superseded was served from the cache."""
+        p, base = self._crashed_at_base()
+        real = gates.availability
+        missing = lambda spec: ((False, "requires python trimesh (not importable)")  # noqa: E731
+                                if spec.id == "t.crashy" else real(spec))
+        with mock.patch.object(gates, "availability", side_effect=missing):
+            skipped = row(p.sweep(base, only=["t.crashy"]), "t.crashy")
+        self.assertEqual(skipped.verdict.outcome, "skipped", "the positive control")
+        self.assertEqual(skipped.verdict.skip_reason,
+                         "cached pass exists; requires python trimesh (not importable) here")
+        self._served_back_at_base(p, base, "an availability skip replaced the crash")
+
+    def test_a_control_crash_is_not_erased_by_a_control_at_another_version(self):
+        """V: the same rule for a control. A crash of the control at static S1 is
+        remembered; a fixture edit (S2) runs the control again and it fires —
+        and that entry's ``forget`` erased the S1 crash. The edit reverted, the
+        S1 control entry recorded BEFORE the crash was served admitted, and the
+        gate's PASS counted though its control, still crashing, had shown
+        nothing."""
+        p = Project(self)
+        base = projection()
+        first = p.sweep(base, only=["t.crashy"])
+        self.assertEqual(row(first, "t.crashy").admission.state, "admitted")
+        self.assertEqual(p.statuses(base)["C_CR"], PASS, "the positive control")
+
+        flags = p.gate_module.FLAGS
+        flags["control"] = True
+        self.addCleanup(flags.__setitem__, "control", False)
+        forced = row(p.sweep(base, only=["t.crashy"], force=True), "t.crashy")
+        self.assertEqual(forced.admission.state, "not-admitted", forced.admission)
+        self.assertNotEqual(p.statuses(base)["C_CR"], PASS)
+
+        flags["control"] = False
+        fixture = p.path("selftest/bad.py")
+        with open(fixture, encoding="utf-8", newline="") as fh:
+            original = fh.read()
+        with open(fixture, "a", encoding="utf-8", newline="") as fh:
+            fh.write("\n# a comment: another version of the selftest\n")
+        moved = p.sweep(base, only=["t.crashy"])
+        self.assertEqual((row(moved, "t.crashy").admission.state, moved.controls["executed"]),
+                         ("admitted", 1), "the positive control: a control run at S2")
+        self.assertEqual(p.statuses(base)["C_CR"], PASS)
+
+        with open(fixture, "w", encoding="utf-8", newline="") as fh:
+            fh.write(original)
+        flags["control"] = True
+        self.assertNotEqual(p.statuses(base)["C_CR"], PASS,
+                            "a control run at another version erased the crash at this one")
+        back = p.sweep(base, only=["t.crashy"])
+        self.assertEqual(back.controls["executed"], 1,
+                         "the control entry the crash superseded was served from the cache")
+        self.assertEqual(row(back, "t.crashy").admission.state, "not-admitted",
+                         "the control still crashes here")
+        self.assertNotEqual(p.statuses(base)["C_CR"], PASS)
+
+        flags["control"] = False
+        healed = p.sweep(base, only=["t.crashy"])
+        self.assertEqual((row(healed, "t.crashy").admission.state,
+                          healed.controls["executed"]), ("admitted", 1))
+        self.assertEqual(p.statuses(base)["C_CR"], PASS, "a control that fires here clears it")
+        again = p.sweep(base, only=["t.crashy"])
+        self.assertEqual(again.controls["executed"], 0, "cleared, the control is a cache hit")
+
     # -- code edits: a fresh process per step ------------------------------- #
     def _driven(self) -> Driven:
         root = plant(os.path.join(self.tmp(), "project"))
@@ -1909,6 +2034,57 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertEqual((again["outcome"], again["cached"]), ("fail", True),
                          "a tier-0 check served its cheap PASS over the costlier path's "
                          f"FAIL at the same inputs: {again}")
+
+    def test_cli_a_pass_at_other_inputs_never_clears_a_crash_here(self):
+        """V: the review's repro (remembered outcomes, round 1), through the CLI a
+        person runs. ``bracket.bed_fit`` patched to crash on the real design under
+        ``FLAKY`` (read at import: an env read inside the gate is opaque, and an
+        opaque entry is never Fresh — the repro would prove nothing). A crash at
+        A under ``--force``; ``bed_xy`` moved and checked (a PASS at B); moved
+        back — and ``check`` said ``0 executed, 6 cached`` with C4 PASS: the
+        PASS the crash at A superseded, served because the PASS at B had
+        forgotten every remembered outcome of the gate."""
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        rel = "gates/structural.py"
+        _replace_once(project, rel, "from atompipe.models import NegativeControl, Tier, Verdict\n",
+                      "from atompipe.models import NegativeControl, Tier, Verdict\n"
+                      "import os\n\n_FLAKY = bool(os.environ.get(\"FLAKY\"))\n")
+        _replace_once(project, rel, '    usable = float(ctx.params["usable_bed"])\n',
+                      '    usable = float(ctx.params["usable_bed"])\n'
+                      '    if _FLAKY and big <= usable:\n'
+                      '        raise RuntimeError("flaked on the real design")\n')
+        gate_id = "bracket.bed_fit"
+
+        first = _rows(_doc(_cli(project, "check", "--json")))[gate_id]
+        self.assertEqual(first["outcome"], "pass", "the positive control")
+        seen, proven = _seen(project)
+        self.assertEqual(seen["C4"], "pass", "the positive control")
+        self.assertIn("C4", proven, "the positive control")
+
+        forced = _doc(_env.atompipe(["check", "--force", "--json"], cwd=project,
+                                    env={"FLAKY": "1"}))
+        self.assertEqual(_rows(forced)[gate_id]["outcome"], "error", _rows(forced)[gate_id])
+        self.assertEqual(_seen(project)[0]["C4"], "fail", "the crash at A is what status shows")
+
+        _set_default(project, "bed_xy", 250.0)
+        moved = _doc(_cli(project, "check", "--json"))
+        self.assertEqual(_executed(moved), {gate_id}, "the positive control: B re-runs it")
+        self.assertEqual(_rows(moved)[gate_id]["outcome"], "pass")
+
+        _set_default(project, "bed_xy", 220.0)
+        seen, proven = _seen(project)
+        self.assertEqual(seen["C4"], "fail",
+                         "back at A, status serves the PASS the crash there superseded")
+        self.assertNotIn("C4", proven, "a PASS a crash superseded is under PROVEN")
+        back = _doc(_cli(project, "check", "--json"))
+        self.assertFalse(_rows(back)[gate_id]["cached"],
+                         f"back at A, check served the superseded PASS: {_rows(back)[gate_id]}")
+        self.assertEqual(_executed(back), {gate_id},
+                         "the crash at A re-runs exactly the gate that crashed there")
+        self.assertEqual(_rows(back)[gate_id]["outcome"], "pass")
+        self.assertEqual(_seen(project)[0]["C4"], "pass", "a run that passes at A clears it")
+        again = _doc(_cli(project, "check", "--json"))
+        self.assertTrue(_rows(again)[gate_id]["cached"], "cleared, it is a cache hit again")
 
 
 # --------------------------------------------------------------------------- #

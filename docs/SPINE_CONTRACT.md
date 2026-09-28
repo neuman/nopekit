@@ -944,8 +944,8 @@ def read_controls(root, gate_id, *, problems=None) -> list[ControlEntry]
 def record_control(root, spec, fn, *, result=None, trace=None, host="live", bad=None,
                    detail="", digests=None, anchors=None, when="") -> WriteResult | None
 def remember(root, key, verdict, *, input_rho, kind, when) -> None
-def remembered(root) -> dict      # {key: {"input_rho", "kind", "verdict": Verdict, "when"}}
-def forget(root, key) -> bool
+def remembered(root) -> dict      # {key: {input_rho: {"input_rho", "kind", "verdict": Verdict, "when"}}}
+def forget(root, key, input_rhos) -> bool    # only the records at those rhos
 def record_obs(root, gate_id, *, entry, when, duration_s, cpu_s, control=False) -> None
 def read_obs(root, gate_id, *, control=False) -> list[dict]   # [{"entry", "when", "duration_s", "cpu_s"}]
 def last_read_sets(root) -> dict[str, set[tuple]]    # {gate: {param path}}: Param.gates and why, never rho
@@ -1056,7 +1056,9 @@ error returns `None` and writes nothing (the caller `remember`s it). It computes
 code digest (`spec=None` or `fn=None`: `CodeRef.unrecorded()`, and the entry names
 `code: ...` as an opaque channel — how `test_site` plants a verdict), the spine
 digest, the reads (`reads=`, else `trace` through `Reads.from_trace`), rho and
-`instruments_for`; writes the entry; and `forget`s the gate's remembered outcome.
+`instruments_for`; writes the entry; and `forget`s the gate's remembered outcomes at
+the entry's rho and at `""` — never at another rho (the sweep, which knows the rhos
+current before its run, forgets those too).
 
 **`instruments_for`** — provenance, never rho (Q1.3): for each module in
 `requires_python`, the `python:` entries of `requires_one_of`, and the closure's
@@ -1100,17 +1102,30 @@ skip is `remember`-ed under `control:<gate id>`, keyed by the current `static`, 
 returns `None`. The forged form, `record_control(root, spec, fn, bad="fail",
 detail=...)` with no result and no trace, writes an entry with empty reads — how a
 renderer test plants an admission; it forges only the inner loop (R-9). Writing one
-`forget`s the gate's remembered control failure.
+`forget`s the gate's remembered control failure at the entry's `static`, and at no other.
 
 **Remembered outcomes** — `.atompipe/cache/last_outcomes.json` (untracked): `{key:
-{"input_rho", "kind", "verdict", "when"}}`, key a gate id or `control:<gate id>`,
-`kind` `"error"`, `"self-skip"` or `"availability"`. Keyed by **`input_rho`** — the rho
-computed from current digests just before the run (a Fresh entry's, the recomputed
-rho of the latest entry's read signature, or `""`), or a control's current `static` —
-never the failing run's own rho, which a crash at partial reads makes different from
-the PASS it followed. Remembering a pass or a fail is refused: nothing remembered is
-evidence. An unparseable file raises, naming it: read as empty it would hand the next
-check the PASS a crash superseded.
+{input_rho: {"kind", "verdict", "when"}}}`, key a gate id or `control:<gate id>`,
+`kind` `"error"`, `"self-skip"` or `"availability"`. Keyed by **`(key, input_rho)`** —
+`input_rho` the rho computed from current digests just before the run (a Fresh
+entry's, the recomputed rho of the latest entry's read signature, or `""`), or a
+control's current `static` — never the failing run's own rho, which a crash at partial
+reads makes different from the PASS it followed. One record per `(key, input_rho)`,
+the newest, except that an `availability` record never replaces an `error` or
+`self-skip` one: a check that could not run the gate answered nothing — and a key
+keeps one `availability` record, the newest, since it supersedes nothing. A pass or fail
+clears only the records at the inputs it was measured at (`forget(root, key,
+input_rhos)`): the sweep's `_superseded` — the new entry's rho, `""`, and every rho
+current before the run — `record_verdict`'s the entry's rho and `""`, a control
+entry's its `static`. What slipped through (remembered outcomes, round 1): one record
+per gate, forgotten by a pass or fail at ANY rho and overwritten by an availability
+skip — a crash at A, then a PASS at B (or a check without the tool), and back at A
+`check` read `0 executed, 6 cached` and served the PASS the crash had superseded; the
+same for a control crash and a control entry at another `static`. No cap on crash records:
+the one a cap evicts is that PASS again. Remembering a pass or a fail is refused:
+nothing remembered is evidence. An unparseable file — the one-record-per-gate shape
+included — raises, naming it: read as empty it would hand the next check the PASS a
+crash superseded.
 
 **Obs** — `.atompipe/obs/<gate>.json` and `<gate>.control.json` (untracked), each
 `{"gate", "kind", "runs": [{"entry", "when", "duration_s", "cpu_s"}]}`, the last
@@ -1169,7 +1184,8 @@ spine digest, the code closure of the LOADED module (a newly added import counts
 params at each recorded path in `modelio.flat_params(projection)` walked by
 `ParamTrace`'s own leaf/presence/bulk rules (a miss is `ABSENT`), file and listing
 digests through `digests`, the claim records. An entry whose rho is the recomputed one
-is **Fresh** — its `rho` is what the sweep keys a remembered crash under — and an
+is **Fresh** — its `rho` is what the sweep keys a remembered crash under, and its
+`current` (every signature's rho recomputed now) what one is matched against — and an
 instruments difference is a note (`recorded under trimesh 4.0.0; here 5.1.0`), never
 staleness (Q1.3). **Unknown**, never Fresh: the projection is `None` and the entry read
 params (S-21: a model that failed to import used to turn staleness off — status said
@@ -1244,7 +1260,8 @@ registered gate, in registration order, the first that applies:
    PASS committed where trimesh is installed never reads PASS where it is not). A Fresh
    FAIL is still served (R-3).
 2. A remembered crash or self-skip that supersedes the Fresh entry (its `input_rho` is
-   the entry's rho) or, with none Fresh, is displayed (`input_rho` `""`, or a rho
+   a rho current now, `Fresh.current`: the entry's or another signature's — a record
+   at other inputs never does) or, with none Fresh, is displayed (`input_rho` `""`, or a rho
    recomputable now, or the gate has no entry at all — never "never run", S-68).
    Invariant 2: a crash proves nothing, and neither does the PASS it followed.
 3. A Fresh entry under admission (PD-08, X14): PASS + admitted or pending counts;
@@ -1335,7 +1352,8 @@ and re-runs it, and one that defuses it is not admitted (S-19's model-code half)
 fixture (a `known_good.py` that will not load included) or a self-skip with the tools
 present is remembered under `control:<gate>` at the current static — `not-admitted`,
 `control <kind>: <why>` — and a remembered one at this static is re-run, never served
-(the control analogue of §3.9's supersede). A new outcome at the `rho_control` of a
+(the control analogue of §3.9's supersede); a control entry written at another static
+leaves it standing. A new outcome at the `rho_control` of a
 cached entry with the other `bad` is `not-admitted`. 6. *`force`* skips 1-4, and an
 outcome that differs from a cached entry at the same `rho_control` is `not-admitted`,
 `control outcome differs from its cached entry` (R-9). With the gate's tools missing
@@ -1368,18 +1386,19 @@ the tier ceiling, `--only` and the lost-control refusal stay in one place; a gat
 named above the ceiling runs, control included. `freshness` is computed first. Per
 selected gate: 1. *availability* fails — a Fresh FAIL is served (R-3); otherwise
 skipped, `cached pass exists; <why> here` over a Fresh PASS (invariant 1), remembered
-as `availability`; no control runs (CI has no trimesh: a skip, never "not admitted").
+as `availability` (never over a crash or self-skip at the same rho); no control runs (CI has no trimesh: a skip, never "not admitted").
 2. *admission* — not admitted: `error="not admitted: <why>"`, `fn` never called. 3.
 unless `force`, a *Fresh* entry is served — unless a remembered crash or self-skip at
-its rho superseded it (§3.9), which re-runs the gate; *two outcomes* at the current rho
+a rho current now superseded it (§3.9), which re-runs the gate; *two outcomes* at the current rho
 (a Stale `conflict`) are served as `resolve`'s error, `two outcomes recorded for
 identical inputs (<names>)`, and `fn` is not called — under the same supersede rule
 (`_crash_applies`, one predicate for `resolve` and the sweep). What slipped through:
 only Fresh was served here, so a conflict re-ran on every check and `check` showed that
 run's answer — `[ok  ]`, ready, exit 0, a green JUnit, `last_check.json` saying pass —
 for a claim `status` and `doctor` FAILed. 4. *run*, traced with the sweep's
-anchors: a pass or fail is keyed and cached (clearing any remembered outcome), anything
-else remembered under the rho computed before the run; every run appends obs. A pass or
+anchors: a pass or fail is keyed and cached (clearing the remembered outcomes at the
+inputs it ran on, `_superseded`, and no others), anything else remembered under the
+rho computed before the run; every run appends obs. A pass or
 fail landing where the other outcome is recorded at its rho under the same instruments
 (`--force` over a conflict, or a run that just made one) is filed, and its row is that
 same error (`_contradicted`, asked of the writer's `_siblings`), recorded or not — an
