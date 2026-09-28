@@ -78,6 +78,7 @@ import re
 import site
 import sys
 import sysconfig
+import threading
 import traceback
 import types
 from dataclasses import dataclass, field
@@ -98,6 +99,7 @@ __all__ = [
     "undocumented_params",
     "check_determinism",
     "CodeClosure",
+    "NO_BYTES",
     "load_source_module",
     "load_path",
     "is_code",
@@ -451,15 +453,48 @@ class CodeClosure:
       and two identical runs would disagree about it (packs:H3).
     * `spine_extras` — the `atompipe.*` modules the files import that the
       spine digest does not cover, digested per module by `verdicts`.
+    * `data` — `(absolute path, sha256 of the bytes)` for every file that is
+      not an instrument's (`_code_root`) that code opened to READ while this
+      module, or a helper of its closure, was executing (`_on_open`): what a
+      module decides its globals on at import. `NO_BYTES` for one it found
+      nothing at. Sorted by path. Kept apart from `files`, which stays the
+      Python the module IS (`cli`'s AST scans read `files`).
 
-    A closure whose files no longer all have their recorded digest is stale, and
-    `load_source_module` re-executes the module rather than serve it.
+    A closure whose files or data no longer all have their recorded digest is
+    stale, and `load_source_module` re-executes the module rather than serve it.
+    What slipped through before `data` (admission review, round 1, D): a
+    fixture module read its known-bad span from `inputs/data/bad_span.json` at
+    import. Every module is loaded before any trace window opens, so the read
+    was on no trace; the closure held code only, so the control's fixture hint
+    held; `inputs/` is in no static walk. Defused 400 -> 40 mm, `check` said
+    `0 executed, 1 cached` and exited 0, and `gate selftest` said PASSED its own
+    known-bad fixture — the same for `selftest/known_good.py`, and for a gate
+    module's limit read at import, whose PASS stayed Fresh. *Rejected:* loading
+    the module inside the window — a module is executed once per process and
+    served from `sys.modules` after, so the read would land on the first
+    control's trace only, and rho would depend on module-cache state (the reason
+    a control drops its `selftest/` reads); re-executing it per control to keep
+    the read on every trace re-registers gates and re-runs the model the
+    known-good module loads, per control per check.
     """
 
     files: tuple[tuple[str, str], ...] = ()
     fallback: str = ""
     third_party: tuple[str, ...] = ()
     spine_extras: tuple[str, ...] = ()
+    data: tuple[tuple[str, str], ...] = ()
+
+
+#: The digest `CodeClosure.data` records for a file a module opened and found
+#: no bytes at: missing — the `try: open(override) / except FileNotFoundError`
+#: an optional input is read with — a directory, or unreadable. A tagged hash,
+#: never "", because "" is the torn digest (`_Recording.note`): it never
+#: matches, so the module would re-run on every load and every gate keyed by it
+#: be opaque, for an input that has not moved. It moves the moment the file
+#: appears. *Rejected:* not recording such an open (a file that appears would
+#: move nothing: repro D by absence); `verdicts.ABSENT` (a param key asked for
+#: and not there — another question, and `verdicts` imports this module).
+NO_BYTES = hashlib.sha256(b"atompipe:no-bytes\x00").hexdigest()
 
 
 def _norm(path: str) -> str:
@@ -596,12 +631,25 @@ def _display(path: str, root: str) -> str:
 #: gate's ρ a second time, keyed on whether the helper was cached.
 _READER = importlib.machinery.SourceFileLoader("atompipe_modelio_reader", _THIS_FILE)
 
+#: Set, per thread, while `_read` digests a file for the loader's own
+#: bookkeeping. `_on_open` attributes a read by the frames that made it, and a
+#: helper served from the cache is re-digested (`_closure_current`) under
+#: whatever frame called `load_path` — a fixture's body, which is code: the
+#: loader checking a digest would be filed as the fixture reading its input.
+#: *Rejected:* ending `_read_by_code`'s walk at any spine frame — a module that
+#: loads the project's own records through the spine at import decides on them.
+_BOOKKEEPING = threading.local()
+
 
 def _read(path: str) -> bytes | None:
+    was = getattr(_BOOKKEEPING, "on", False)
+    _BOOKKEEPING.on = True
     try:
         return _READER.get_data(path)
     except OSError:
         return None
+    finally:
+        _BOOKKEEPING.on = was
 
 
 def _file_sha(path: str, memo: dict[str, str | None] | None = None) -> str | None:
@@ -645,10 +693,14 @@ def _closure_current(closure: CodeClosure, *, roots: Iterable[str] = (),
 
     A fallback closure is also stale when a new `*.py` appears under a root it
     walked: "every file under the directory" is a statement about the listing,
-    not only about the files that were there.
+    not only about the files that were there. A data file is compared as it
+    was recorded: `NO_BYTES` holds while it still has none.
     """
     for path, digest in closure.files:
         if not digest or _file_sha(path, memo) != digest:
+            return False
+    for path, digest in closure.data:
+        if not digest or (_file_sha(path, memo) or NO_BYTES) != digest:
             return False
     if closure.fallback:
         recorded = {_norm(p) for p, _ in closure.files}
@@ -694,7 +746,8 @@ class _Recording:
     """
 
     __slots__ = ("name", "path", "roots", "memo", "files", "sources", "foreign",
-                 "fallback", "fallback_root", "third_party", "spine_extras")
+                 "fallback", "fallback_root", "third_party", "spine_extras",
+                 "opened", "data")
 
     def __init__(self, name: str, path: str, roots: tuple[str, ...],
                  memo: dict[str, str | None] | None = None) -> None:
@@ -709,6 +762,8 @@ class _Recording:
         self.fallback_root = ""
         self.third_party: set[str] = set()
         self.spine_extras: set[str] = set()
+        self.opened: dict[str, None] = {}         # read by code while this ran (`_on_open`)
+        self.data: dict[str, str] = {}            # ... and digested (`seal_data`)
 
     def note(self, path: str, digest: str) -> None:
         """Record one file. Two different digests for one path mean two versions
@@ -716,6 +771,21 @@ class _Recording:
         stale at the next look rather than quietly keeping either."""
         known = self.files.get(path)
         self.files[path] = digest if known in (None, digest) else ""
+
+    def note_data(self, path: str, digest: str) -> None:
+        """`note` for a data file: two digests of one file inside one closure
+        (a helper read it, it changed, the importer read it again) are ""."""
+        known = self.data.get(path)
+        self.data[path] = digest if known in (None, digest) else ""
+
+    def seal_data(self) -> None:
+        """Digest what code opened to read while this ran, as it is on disk now
+        — after the module finished, as a trace digests after its gate returns.
+        Named residual: a file the module rewrote after reading it is keyed by
+        the bytes it wrote."""
+        for path in self.opened:
+            self.note_data(path, _file_sha(path, self.memo) or NO_BYTES)
+        self.opened.clear()
 
     def compiled(self, path: str, data: bytes) -> None:
         digest = hashlib.sha256(data).hexdigest()
@@ -761,6 +831,8 @@ class _Recording:
             self.fallback = closure.fallback      # its walk is already in its files
         self.third_party.update(closure.third_party)
         self.spine_extras.update(closure.spine_extras)
+        for path, digest in closure.data:
+            self.note_data(path, digest)
 
     def closure(self) -> CodeClosure:
         return CodeClosure(
@@ -768,6 +840,7 @@ class _Recording:
             fallback=self.fallback,
             third_party=tuple(sorted(self.third_party)),
             spine_extras=tuple(sorted(self.spine_extras)),
+            data=tuple(sorted(self.data.items())),
         )
 
 
@@ -833,9 +906,146 @@ def _fresh_spec(fullname: str, path: Any) -> Any:
 #: returns at once otherwise.
 _HOOKED = False
 
+#: The import system, by module name and by the name its frozen code runs
+#: under. Above a frame of code it is an import in progress (`_read_by_code`);
+#: directly under an `open` it is reading on someone's behalf — a module's
+#: source, or a data file through `pkgutil.get_data`. *Rejected:* filing every
+#: open on the innermost recording whatever made it — a fixture's first
+#: `import matplotlib` would file its `matplotlibrc` and font cache as the
+#: fixture's data, and a process that had imported matplotlib earlier would not.
+_IMPORT_MODULES = frozenset({"importlib._bootstrap", "importlib._bootstrap_external",
+                             "_frozen_importlib", "_frozen_importlib_external"})
+_IMPORT_CODE = frozenset({"<frozen importlib._bootstrap>",
+                          "<frozen importlib._bootstrap_external>"})
+
+#: Modules that read a module's SOURCE to quote a line (a warning, a
+#: traceback): a read of a module file through them is theirs, a read of any
+#: other file is the caller's — `verdicts._SOURCE_READERS`' rule, mirrored
+#: (verdicts imports this module). *Rejected:* dropping them whole — a table
+#: read with `linecache.getline` is a read (verdicts' review round 1,
+#: `probe.linecache`).
+_SOURCE_READER_MODULES = frozenset({"linecache", "tokenize", "warnings", "traceback"})
+
+#: Whose file activity is never a module's input, whatever it touches: an
+#: archive on `sys.path` is code, and distribution metadata is provenance —
+#: `verdicts._EXCLUDED_MODULES`, mirrored. *Rejected:* recording them — a
+#: local `*.egg-info` that `importlib.metadata.version()` reads is a version,
+#: an instrument's, never rho (Q1.3).
+_NEVER_DATA_MODULES = frozenset({"zipimport", "importlib.metadata"})
+_NEVER_DATA_PREFIXES = ("importlib.metadata.",)
+_NEVER_DATA_CODE = frozenset({"<frozen zipimport>"})
+
+#: What a module's source is spelled as: read by a source reader or the import
+#: system it is theirs, never a module's data — `verdicts._SOURCE_SUFFIXES`,
+#: mirrored, with its named residual (a data file named `*.py` read through
+#: linecache is taken for source). Bytecode is never data, whoever reads it: it
+#: is the import system's cache of code the closure already digests by source.
+#: *Rejected:* `importlib.machinery.all_suffixes()` — an extension is loaded by
+#: `dlopen`, which raises no `open` event, so its suffixes filter nothing.
+_SOURCE_SUFFIXES = (".py", ".pyw")
+_BYTECODE_SUFFIXES = (".pyc", ".pyo")
+
+#: Machine state, not a project's input: `verdicts._library_roots` drops the
+#: same three. *Rejected:* recording them — `/proc/meminfo` read at import
+#: would move the closure on every load, and the gate would never be Fresh.
+_PSEUDO_FS = ("/proc", "/sys", "/dev") if os.name == "posix" else ()
+
+
+def _opened_path(args: tuple) -> str | None:
+    """The absolute path an `open` event reads what is at, or None: an fd, a
+    pseudo-name (`<string>`), a directory fd, or an open that writes without
+    reading prior bytes (`verdicts._open_intent`'s rule, mirrored)."""
+    target = args[0] if args else None
+    if target is None or isinstance(target, int):
+        return None
+    try:
+        text = os.fsdecode(os.fspath(target))
+    except (TypeError, ValueError):
+        return None
+    if not text or "\x00" in text or (text.startswith("<") and text.endswith(">")):
+        return None
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 and isinstance(args[2], int) else 0
+    if isinstance(mode, str):
+        plus = "+" in mode
+        writes = plus or any(c in mode for c in "wax")
+        reads = "r" in mode or ("a" in mode and plus) or not writes
+    else:
+        if flags & getattr(os, "O_DIRECTORY", 0):
+            return None
+        reads = (flags & 3) in (0, 2) and not flags & os.O_TRUNC
+    return os.path.abspath(text) if reads else None
+
+
+def _read_by_code(frame: Any, path: str, roots: tuple[str, ...]) -> bool:
+    """Did the code being recorded read `path`, rather than the import system,
+    a formatter, or an installed library running its OWN import?
+
+    Walked from the frame that opened it: the first frame of code
+    (`_code_root`) decides, through any library frames in between — a
+    `pathlib.read_text`, an `np.loadtxt`, a `pkgutil.get_data` is the caller's
+    read. An import in progress between them ends the walk: the frame opening
+    the file is an installed library's module body, and whether that body runs
+    at all depends on what happened to import it first (packs:H3 — two
+    identical runs would disagree about the closure; matplotlib reads a
+    `matplotlibrc` in the working directory on import). A source reader, or
+    the import system directly under the open, hands on only a file that is
+    not a module's source (`_SOURCE_SUFFIXES`).
+    """
+    reader = False
+    passed = False                                # a frame that is neither code nor import
+    while frame is not None:
+        code = frame.f_code.co_filename
+        name = frame.f_globals.get("__name__")
+        if (name in _NEVER_DATA_MODULES or code in _NEVER_DATA_CODE
+                or isinstance(name, str) and name.startswith(_NEVER_DATA_PREFIXES)):
+            return False
+        if name in _IMPORT_MODULES or code in _IMPORT_CODE:
+            if passed:
+                return False
+            reader = True
+        elif (isinstance(code, str) and os.path.isabs(code)
+              and _code_root(code, roots) is not None):
+            return not (reader and os.path.normcase(path).endswith(_SOURCE_SUFFIXES))
+        else:
+            reader = reader or name in _SOURCE_READER_MODULES
+            passed = True
+        frame = frame.f_back
+    return False
+
+
+def _on_open(args: tuple, frame: Any) -> None:
+    """File one `open` on the recording executing now, when code read a file
+    that is not an instrument's (`_code_root`) and not the loader's own
+    bookkeeping (`_BOOKKEEPING`). The innermost recording is the module whose
+    body is running; its importer gets the file through `absorb`, as it gets
+    the helper's code. Digested at the end (`_Recording.seal_data`), never
+    here: a hook that opened a file would audit itself.
+
+    Named residuals, all of them things a module can decide on at import that
+    no `open` names: a file it only asks about (`os.path.exists`) or lists
+    (`os.listdir`), a database `sqlite3.connect` opens in C, an environment
+    variable (`doctor`'s `env-reads` row), and a read made by a thread it
+    started once the module has finished. Read those in the gate or the
+    fixture's `make`, inside a trace window, where each is keyed or named."""
+    if getattr(_BOOKKEEPING, "on", False):
+        return
+    path = _opened_path(args)
+    if path is None:
+        return
+    norm = os.path.normcase(path)
+    if norm.endswith(_BYTECODE_SUFFIXES) or any(_under(norm, p) for p in _PSEUDO_FS):
+        return
+    recording = _STACK[-1]
+    if _code_root(path, recording.roots) is None:
+        return                                    # installed: an instrument's own file
+    if _read_by_code(frame, path, recording.roots):
+        recording.opened.setdefault(path, None)
+
 
 def _audit(event: str, args: tuple) -> None:
-    """Notice computed source compiled or executed from a frame in code (`_code_root`).
+    """Notice a file code reads while a module runs (`_on_open`), and computed
+    source compiled or executed from a frame in code (`_code_root`).
 
     The calling frame is the whole test. `@dataclass` and `namedtuple` compile
     and exec generated source on every class they build, from a frame in the
@@ -846,11 +1056,18 @@ def _audit(event: str, args: tuple) -> None:
     whose code the recording cannot see.
 
     Never raises: an exception from an audit hook aborts the operation that
-    raised the event, and this one sees every compile in the process.
+    raised the event, and this one sees every compile and every open in the
+    process.
     """
-    if event != "exec" and event != "compile":
-        return
     if not _STACK:
+        return
+    if event == "open":
+        try:
+            _on_open(tuple(args) if isinstance(args, tuple) else (), sys._getframe(1))
+        except Exception:                         # noqa: BLE001 - see docstring
+            pass
+        return
+    if event != "exec" and event != "compile":
         return
     try:
         recording = _STACK[-1]
@@ -875,6 +1092,7 @@ def _recording(recording: _Recording) -> Iterator[_Recording]:
     """Push `recording`, with the finder at `sys.meta_path[0]` and the hook live."""
     global _HOOKED
     if not _HOOKED:
+        _excluded_dirs()             # computed here: `_on_open` must not read to compute it
         sys.addaudithook(_audit)
         _HOOKED = True
     inserted = _FINDER not in sys.meta_path
@@ -953,8 +1171,11 @@ class _FreshLoader(importlib.machinery.SourceFileLoader):
                 # branch), so its files stay in the importer's closure: an edit
                 # that fixes it must make the importer stale.
                 if parent is not None:
+                    recording.seal_data()
                     for failed_path, digest in recording.files.items():
                         parent.note(failed_path, digest)
+                    for failed_path, digest in recording.data.items():
+                        parent.note_data(failed_path, digest)
                 raise
             closure = _seal(module, recording)
         if parent is not None:
@@ -963,6 +1184,7 @@ class _FreshLoader(importlib.machinery.SourceFileLoader):
 
 def _seal(module: Any, recording: _Recording) -> CodeClosure:
     """Finish a recording after its module ran, and store the closure on it."""
+    recording.seal_data()
     _walk_globals(module, recording)
     _static_pass(recording)
     if recording.fallback_root:
@@ -1375,16 +1597,18 @@ def load_source_module(path: str, *, name: str, roots: Iterable[str],
       third-party instrument.
     * **A recorded closure.** Every file of code that ran — or that a function
       body imports lazily, read statically — is stored on the module as
-      `__atompipe_code__` (a `CodeClosure`; `code_closure` reads it). Computed
+      `__atompipe_code__` (a `CodeClosure`; `code_closure` reads it), with every
+      file that code opened to read while it ran (`data`: a table read at
+      import decides a global as surely as the code does). Computed
       source compiled or executed from a frame in code, or an import of code
       that is not Python source, gives up precision for every `*.py` under the
       owning root, and says so in `fallback`.
     * **A content-keyed cache.** The module already in `sys.modules` under `name`
       is returned only if this loader ran it from this file and every recorded
-      file still has its recorded digest. Otherwise every stale module it
-      depended on is purged from `sys.modules` and it runs again. In-process
-      callers — a test's second `cli.main`, `pack validate` after an edit — then
-      never run old code under a new digest.
+      file, code and data, still has its recorded digest. Otherwise every stale
+      module it depended on is purged from `sys.modules` and it runs again.
+      In-process callers — a test's second `cli.main`, `pack validate` after an
+      edit — then never run old code under a new digest.
     * **Gates follow the module.** With `registry`, the `(spec, fn)` pairs the
       module registered into it while running are recorded as
       `__atompipe_gates__`; a cache hit re-adopts them into the `registry` the

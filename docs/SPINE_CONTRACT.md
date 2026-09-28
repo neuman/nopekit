@@ -532,6 +532,10 @@ class CodeClosure:                                       # what a loaded module'
     third_party  # static top-level imports that are not code: installed, or not importable
                  # (not stdlib, not atompipe; a file beside the roots and not installed is code)
     spine_extras # atompipe.* modules it imports that are not in verdicts.SPINE_MODULES
+    data         # ((abspath, sha256), ...): files that code opened to read while the module
+                 # (or a helper of its closure) ran — a table read at import; NO_BYTES if none
+NO_BYTES: str                                            # data digest of a file opened and found
+                                                         #   missing (or a directory, unreadable)
 def load_source_module(path, *, name, roots, registry=None, attrs=None) -> ModuleType
                          # fresh bytes, recorded closure, content-keyed; registry: where its
                          # gates are recorded and re-adopted (the caller also wraps the call in
@@ -575,6 +579,31 @@ cannot be mapped to a file, falls back to every `*.py` under the owning director
 it still hashes the same, else purges the recorded helpers and re-executes (the gates
 it registered are re-adopted into the caller's registry). `load_model` records the
 model's closure the same way.
+
+**What a module reads at import is in its closure.** While a module executes, the
+loader's audit hook files every `open` that reads a file which is not an instrument's
+(`_code_root`, so under the roots or beside them and not installed; bytecode and
+`/proc`, `/sys`, `/dev` never) in `CodeClosure.data`, digested when the module finishes —
+`NO_BYTES` for one it found missing, which holds while the file stays missing. An open
+counts when, walking out from the frame that made it, the first frame of code is
+reached through library frames alone (`pathlib`, `numpy`, `pkgutil.get_data` read on
+their caller's behalf); an import in progress on the way means an installed library's
+own module body opened it, which is dropped, because whether that body runs depends on
+what imported the library first (packs:H3). A module file read by the import system or
+a source reader (linecache, tokenize, warnings, traceback) is theirs, and the loader's
+own digests (`_read`) are never a read. A helper's data folds into its importer's
+closure as its code does, and a cached module whose data moved is re-executed.
+`verdicts` keys data exactly as code: in a gate's code digest, the model digest, and a
+control's fixture hint (the known-good module's included). What slipped through
+(admission review, round 1, D): every module loads before any trace window, and the
+closure held code only — a fixture module reading its known-bad span from
+`inputs/data/bad_span.json` at import was keyed nowhere, and defused 400 -> 40 mm it was
+served `cached` while `gate selftest` said PASSED its own known-bad fixture; the same
+for a known-good module's design and a gate module's limit. *Rejected:* loading the
+module inside the window (it runs once per process, so rho would depend on
+module-cache state). Named residuals: what a module only asks about (`os.path.exists`)
+or lists at import, a database opened in C, an environment variable (`env-reads`), and
+a read by a thread it started, once it has finished.
 
 **A module-level memo is emptied before every run.** `clear_caches(obj)` empties every
 functools memo — an `lru_cache`, a `cache`, or a function carrying a `cache_clear` of
@@ -1081,9 +1110,10 @@ fixture {digest, files}, reads {params, files, dirs, ledger, host, [tier,] opaqu
 measured, limit, units, digest`. `static` (`control_static`) = sha256 of the spine
 digest, the gate's code digest, the owner's `selftest_walk` and the NegativeControl
 fields. **`rho_control`** = sha256 of `{"schema", "gate", "static", "reads"}`. The
-`fixture` block — the fixture's recorded code closure — is a lookup **hint, not an
-input**: the bracket's fixtures import the model, so keyed on it every Config edit
-would write six tracked control files. Bytes that differ only in `fixture` are the
+`fixture` block — the fixture's recorded code closure, its `data` included (spelled
+with the code files; `NO_BYTES` holds while that file is still missing) — is a lookup
+**hint, not an input**: the bracket's fixtures import the model, so keyed on it every
+Config edit would write six tracked control files. Bytes that differ only in `fixture` are the
 same control (`write_control` answers `"exists"`, no warning). A fixture whose code no
 loader recorded — a `module:function` fixture the stock import served — files
 `{UNRECORDED_FIXTURE: null}`; a `null` digest never matches, so that hint never holds

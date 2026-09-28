@@ -2804,10 +2804,16 @@ def code_digest(spec: Any, fn: Any, *, anchors: Anchors | None = None) -> CodeRe
     file under its roots, by the bytes that executed (a same-size, same-second
     edit ran the old bytecode before, S-26), spelled portably (``anchors``; a
     project's gate reads ``gates/structural.py``, a pack's
-    ``<pack:NAME>/gates/mesh.py``); plus each ``atompipe.*`` module it imports
+    ``<pack:NAME>/gates/mesh.py``); plus every file that code read while it
+    ran (``CodeClosure.data``, spelled the same way — ``NO_BYTES`` for one it
+    found missing); plus each ``atompipe.*`` module it imports
     that ``SPINE_MODULES`` does not cover, by canonical AST (cad and fdm import
     ``atompipe.site``: a page change re-runs their gates, nobody else's); plus
-    the ``SPEC_FIELDS_IN_RHO`` values.
+    the ``SPEC_FIELDS_IN_RHO`` values. What slipped through before the data
+    (admission review, round 1, D, the verdict side): a gate module that read
+    its limit from ``inputs/data/limit.json`` at import — loaded before any
+    window, so on no trace — kept a Fresh PASS after the limit went 100 -> 50
+    mm under a design at 80.
 
     A function with NO recorded closure — a test's lambda, a gate registered in
     process from Python — is digested as its defining file
@@ -2840,7 +2846,7 @@ def code_digest(spec: Any, fn: Any, *, anchors: Anchors | None = None) -> CodeRe
 
     files: dict[str, str | None] = {}
     torn: list[str] = []
-    for path, sha in closure.files:
+    for path, sha in closure.files + closure.data:
         spelled = _clean(_spell_code(path, anchors))
         files[spelled] = sha or None
         if not sha:
@@ -2877,7 +2883,8 @@ def model_digest(projection: Any, model: Any = None, *,
     if closure is None:
         return ""
     anchors = anchors or Anchors()
-    code = {_clean(_spell_code(path, anchors)): sha or None for path, sha in closure.files}
+    code = {_clean(_spell_code(path, anchors)): sha or None
+            for path, sha in closure.files + closure.data}
     if any(sha is None for sha in code.values()):
         return ""
     return _digest_of({"schema": SCHEMA, "projection": digest_value(projection, anchors),
@@ -3194,10 +3201,12 @@ class Reads:
         In a CONTROL trace, reads under the owner's ``selftest/`` are dropped:
         the static walk covers them, and a fixture module's import-time read of
         ``baseline.json`` happens only on its first load in a process, so keying
-        it would make rho_control depend on module-cache state. ``static`` — the
-        absolute paths the walk actually covered — narrows that to exactly those
-        files (a git-ignored file a fixture reads is still an input); without it,
-        any walkable file under a ``selftest/`` is dropped.
+        it would make rho_control depend on module-cache state. (An import-time
+        read is never on a control's trace — the module loads before the window
+        — and is keyed by the fixture's closure instead: ``CodeClosure.data``.)
+        ``static`` — the absolute paths the walk actually covered — narrows that
+        to exactly those files (a git-ignored file a fixture reads is still an
+        input); without it, any walkable file under a ``selftest/`` is dropped.
 
         ``anchors`` defaults to ``trace.anchors``, else to ``<tmp>`` and ``~``
         only — then every project file is outside and opaque: an unanchored
@@ -4221,7 +4230,7 @@ def _fixture_part(trace: Any, anchors: Anchors) -> dict:
     closure = getattr(trace, "fixture_code", None) if trace is not None else None
     files: dict[str, str | None] = {}
     if isinstance(closure, modelio.CodeClosure):
-        for path, sha in closure.files:
+        for path, sha in closure.files + closure.data:
             files[_clean(_spell_code(path, anchors))] = sha or None
     if trace is not None and not files:
         files = {UNRECORDED_FIXTURE: None}
@@ -5281,14 +5290,16 @@ def _snapshot_moved(snapshot: Any, now: _Now) -> list[str]:
     A ``null`` digest names no bytes (``UNRECORDED_FIXTURE``, or a closure in
     which two versions of one file ran), so it is always moved: compared, it
     equalled the ``None`` a missing file digests to, and a hint that names
-    nothing held."""
+    nothing held. ``modelio.NO_BYTES`` — a data file the fixture module opened
+    at import and found nothing at — names exactly that, and holds while the
+    file still has no bytes."""
     files = (snapshot or {}).get("files") if isinstance(snapshot, Mapping) else None
     if not isinstance(files, Mapping):
         return [UNRECORDED_FIXTURE]
     moved = []
     for spelled, digest in sorted(files.items()):
         where = now.locate(spelled) if digest is not None else None
-        if where is None or now.digests.digest(where) != digest:
+        if where is None or (now.digests.digest(where) or modelio.NO_BYTES) != digest:
             moved.append(spelled)
     return moved
 
@@ -5895,7 +5906,10 @@ def _known_good(root: str, ctx: Any, trace: GateTrace | None = None) -> tuple[An
     inside ``trace``'s window when one is given (the control's), so a file it
     opens is an input of the control like any file its fixture opens. The
     module itself loads outside it, as a fixture module does: what it runs at
-    import is its code closure, the lookup hint (the bracket's loads the model).
+    import is its code closure, the lookup hint (the bracket's loads the model),
+    and what that code reads at import is in the closure's ``data`` (admission
+    review, round 1, D: a known-good span read from a JSON file at import went
+    80 -> 15, the five-fold fixture built 75 mm, and the hint held).
     """
     module = _known_good_module(root)
     make = getattr(module, "context", None) if module is not None else None
@@ -5995,7 +6009,11 @@ def _add_closure(trace: GateTrace, closure: Any) -> None:
     files = dict(own.files)
     for path, sha in closure.files:
         files.setdefault(path, sha)
-    trace.fixture_code = dataclasses.replace(own, files=tuple(sorted(files.items())))
+    data = dict(own.data)
+    for path, sha in closure.data:
+        data.setdefault(path, sha)
+    trace.fixture_code = dataclasses.replace(own, files=tuple(sorted(files.items())),
+                                             data=tuple(sorted(data.items())))
 
 
 def _fresh_control_dir(root: str, gate_id: str, sweep_out: str = "") -> str:

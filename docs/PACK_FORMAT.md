@@ -499,7 +499,12 @@ Fixtures live in `selftest/` and expose `make(ctx)` returning either a new
 module of your own is loaded fresh and keyed by the code closure recorded as it loads;
 a package's `__init__` or an installed module records none, and its control re-runs
 its fixture on every `check` (admission review, round 1, C: the form once
-recorded nothing, and a fixture edited into a no-op stayed admitted).
+recorded nothing, and a fixture edited into a no-op stayed admitted). A file a fixture
+module reads at import — `selftest/baseline.json`, a table outside `selftest/` — is
+recorded with its closure too, so an edit to it re-verifies the control (round 1, D:
+a known-bad span read from `inputs/` at import was keyed nowhere). What a module only
+asks about (`os.path.exists`), lists, or takes from the environment at import is not:
+do that in `make`, inside the control's trace window.
 
 **A fixture builds its own context.** The `ctx` a fixture receives is a writable copy
 of the host's, traced: what it writes there stays there — it never reaches the sweep

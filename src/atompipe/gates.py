@@ -2175,11 +2175,16 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
     or the gate's on a context the fixture returned unchanged — is recorded in
     ``trace.host_reads`` (what a SEALED fixture never makes), and ``make`` runs
     inside ``tracing(trace)`` so the files it opens are on the trace too. Loading
-    the fixture module is not in the window: code is the closure's business, and
-    ``trace.fixture_code`` records the closure of the module the reference
-    names (``None`` when the stock import system loaded it — an installed or a
-    package ``module:function`` fixture — which ``verdicts`` files as a hint
-    that never holds).
+    the fixture module is not in the window: what it runs and reads at import
+    is the closure's business, and ``trace.fixture_code`` records the closure
+    of the module the reference names — its code, and the files that code read
+    while it ran (``CodeClosure.data``) — or ``None`` when the stock import
+    system loaded it (an installed or a package ``module:function`` fixture),
+    which ``verdicts`` files as a hint that never holds. What slipped through
+    while the closure held code only (admission review, round 1, D): a fixture
+    module that read its known-bad span from ``inputs/data/bad_span.json`` at
+    import was keyed nowhere — the read came before this window, and
+    ``inputs/`` is in no static walk — so 400 -> 40 mm stayed admitted.
 
     A fixture that builds its own context keeps it as built: cad-solid's fixtures
     assign params on contexts they made from the pack baseline (packs:H15), and

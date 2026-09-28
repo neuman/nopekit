@@ -575,6 +575,96 @@ class RecordingLoader(_Sandbox):
         self.assertIn(helper, dict(closure.files))
         self.assertEqual(closure.third_party, (), "a local helper was listed as third-party")
 
+    # -- files a module reads while it runs -------------------------------- #
+    def test_a_file_read_at_import_is_in_the_closure_and_moves_it(self):
+        """V: the admission review's repro D (round 1), at the loader. A module
+        that reads a data file at import decides its globals on those bytes, but
+        only code was recorded: the closure never moved when the data did, so
+        the module was served from the cache with the old value, and every
+        entry keyed by the closure — a gate's code, a control's fixture hint —
+        held while the input under it had changed. Recorded now in ``data``,
+        by the bytes on disk when the module finished: through ``open``,
+        through a library call (``pathlib``), by a helper it imports (folded in
+        as the helper's code is), and a missing file as ``NO_BYTES``, which
+        holds while it stays missing. Not recorded: what an installed library
+        reads during ITS OWN import (whether it runs depends on what imported
+        it first, packs:H3), and what a function reads when it is called
+        later — that is a trace window's business."""
+        self.on_path(self.root)
+        data = self.put("inputs/limit.json", '{"span": 400.0}\n')
+        text = self.put("inputs/note.txt", "tall\n")
+        helper_data = self.put("inputs/helper.json", '{"k": 1}\n')
+        later = self.put("inputs/later.json", "{}\n")
+        optional = os.path.join(self.root, "inputs", "override.json")
+        library_rc = self.put("libx.rc", "ignored = 1\n")
+        vendor = os.path.join(self.tmp, "vendor", "site-packages")
+        library = self.n("libx")
+        self.put(f"{library}.py", f"""
+            with open({library_rc!r}, encoding="utf-8") as _fh:
+                RC = _fh.read()
+
+            def read(path):
+                with open(path, encoding="utf-8") as fh:
+                    return fh.read()
+            """, base=vendor)
+        self.on_path(vendor)
+        helper = self.n("datahelper")
+        self.put(f"{helper}.py", f"""
+            import json
+            with open({helper_data!r}, encoding="utf-8") as _fh:
+                K = json.load(_fh)["k"]
+            """)
+        self.put("bad.py", f"""
+            import json, os, pathlib
+            import {library}
+            import {helper}
+            _HERE = os.path.dirname(os.path.abspath(__file__))
+            with open(os.path.join(_HERE, "inputs", "limit.json"), encoding="utf-8") as _fh:
+                SPAN = float(json.load(_fh)["span"])
+            NOTE = pathlib.Path(_HERE, "inputs", "note.txt").read_text(encoding="utf-8")
+            try:
+                with open({optional!r}, encoding="utf-8") as _fh:
+                    SPAN = float(json.load(_fh)["span"])
+            except FileNotFoundError:
+                pass
+
+            def later():
+                return {library}.read({later!r})
+            """)
+        name = self.n("bad")
+        first = self.load("bad.py", name=name)
+        self.assertEqual(first.SPAN, 400.0)
+        first.later()                               # a read after import: not the closure's
+        recorded = dict(self.closure(first).data)
+        with open(data, "rb") as fh:
+            self.assertEqual(recorded.get(data), _sha(fh.read()),
+                             "a file read at import is not in the module's closure")
+        self.assertIn(text, recorded, "a file read at import through pathlib was missed")
+        self.assertIn(helper_data, recorded,
+                      "a file a helper read at import is not in its importer's closure")
+        self.assertEqual(recorded.get(optional), modelio.NO_BYTES,
+                         "a file opened at import and missing was not recorded as missing")
+        self.assertNotIn(library_rc, recorded,
+                         "an installed library's own import-time read was attributed")
+        self.assertNotIn(later, recorded, "a read after import was put in the closure")
+        self.assertFalse(any(path.endswith(".py") for path in recorded),
+                         f"code filed as data: {sorted(recorded)}")
+        self.assertIs(self.load("bad.py", name=name), first,
+                      "an unchanged module, a missing file still missing, was run twice")
+
+        with open(data, "w", encoding="utf-8") as fh:
+            fh.write('{"span": 40.0}\n')
+        second = self.load("bad.py", name=name)
+        self.assertIsNot(second, first, "a data edit did not re-execute the module")
+        self.assertEqual(second.SPAN, 40.0, "the module was served with the old data")
+        self.assertEqual(dict(self.closure(second).data)[data], _sha(b'{"span": 40.0}\n'))
+
+        with open(optional, "w", encoding="utf-8") as fh:
+            fh.write('{"span": 7.0}\n')
+        third = self.load("bad.py", name=name)
+        self.assertIsNot(third, second, "a file that appeared did not re-execute the module")
+        self.assertEqual(third.SPAN, 7.0)
+
     def test_spine_extras_record_an_atompipe_site_import(self):
         self.put("parts.py", """
             from atompipe.gates import gate
@@ -594,6 +684,20 @@ class RecordingLoader(_Sandbox):
         # mirrors the set; this is what keeps the mirror from drifting (rule 2).
         from atompipe import verdicts
         self.assertEqual(modelio._SPINE_MODULE_FILES, frozenset(verdicts.SPINE_MODULES))
+
+    def test_the_data_read_rules_are_the_verdicts_ones(self):
+        # The same mirror for what a read at import is (`modelio._on_open`)
+        # and what a read in a window is (`verdicts._audit`): a module that
+        # reads through linecache, or asks importlib.metadata, must be judged
+        # alike in a closure and on a trace.
+        from atompipe import verdicts
+        self.assertEqual(modelio._SOURCE_READER_MODULES | modelio._IMPORT_MODULES,
+                         verdicts._SOURCE_READERS)
+        self.assertEqual(modelio._IMPORT_CODE, verdicts._SOURCE_READER_CODE)
+        self.assertEqual(modelio._NEVER_DATA_MODULES, verdicts._EXCLUDED_MODULES)
+        self.assertEqual(modelio._NEVER_DATA_PREFIXES, verdicts._EXCLUDED_PREFIXES)
+        self.assertEqual(modelio._NEVER_DATA_CODE, verdicts._EXCLUDED_CODE)
+        self.assertEqual(modelio._SOURCE_SUFFIXES, verdicts._SOURCE_SUFFIXES)
 
     def test_code_closure_of_a_function_is_its_modules(self):
         self.put("fns.py", "def make(ctx):\n    return ctx\n")

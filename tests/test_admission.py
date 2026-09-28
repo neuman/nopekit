@@ -67,7 +67,11 @@ library and the CLI never asked. On the bracket and on wrapped pack baselines
 * a `module:function` fixture outside `selftest/` edited into a no-op — the
   same-size edit, over bytecode a hand run left beside it — is not admitted,
   and one whose code no loader records re-runs its fixture on every check
-  (admission review, round 1, C).
+  (admission review, round 1, C);
+* a data file a fixture module or the known-good module reads at import,
+  outside `selftest/`, edited so the control no longer fires, is not admitted;
+  and a gate module's limit read at import, tightened, does not keep its PASS
+  (admission review, round 1, D).
 
 Scenarios that edit code run the sweep in a fresh process (`_DRIVER`, through
 `_env.run`), per spec §0.4: an in-process module cache must never be what makes
@@ -677,6 +681,65 @@ SHELF_FIXTURE_DECL = 'fixture="selftest/bad.py:long"'
 #: the stock import runs the 400 mm bytecode (S-26).
 SHELF_BAD_SPAN = 'params["span"] = 400.0'
 SHELF_DEFUSED_SPAN = 'params["span"] = 040.0'
+
+#: The admission review's repro D (round 1): the shelf's known-bad span, read
+#: from a data file outside `selftest/` by the fixture module at IMPORT — before
+#: any trace window opens, and only on the module's first load in a process.
+#: `{name}` is the data file under `inputs/data/`, `{value}` the module global.
+_READS_AT_IMPORT = '''\
+import dataclasses
+import json
+import os
+
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+with open(os.path.join(_ROOT, "inputs", "data", "{name}"), encoding="utf-8") as _fh:
+    {value} = float(json.load(_fh)["span"])
+'''
+
+SHELF_LONG_FROM_DATA = _READS_AT_IMPORT.format(name="bad_span.json", value="BAD_SPAN") + '''
+
+def long(ctx):
+    params = dict(ctx.params)
+    params["span"] = BAD_SPAN
+    return dataclasses.replace(ctx, params=params)
+'''
+
+#: The same hole in the known-good module: its design's span read at import.
+#: Its fixture (`SHELF_FIVEFOLD`) is bad only relative to that design — 80 mm
+#: makes 400, 15 makes 75, which the gate accepts.
+SHELF_KNOWN_GOOD_FROM_DATA = _READS_AT_IMPORT.format(name="good_span.json",
+                                                     value="GOOD_SPAN") + '''
+from atompipe.models import Ledger
+
+
+def context(ctx):
+    return dataclasses.replace(ctx, params={"span": GOOD_SPAN}, ledger=Ledger(), extra={})
+'''
+
+SHELF_FIVEFOLD = '''\
+import dataclasses
+
+
+def long(ctx):
+    params = dict(ctx.params)
+    params["span"] = 5.0 * float(params["span"])
+    return dataclasses.replace(ctx, params=params)
+'''
+
+#: The shelf gate with its limit read at IMPORT from `inputs/data/limit.json`:
+#: the verdict side of repro D. A gate module is loaded before any window too.
+SHELF_GATE_LIMIT_FROM_DATA = _READS_AT_IMPORT.format(name="limit.json", value="LIMIT") + '''
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def span(ctx):
+    s = float(ctx.params["span"])
+    return Verdict(gate="shelf.span", passed=s <= LIMIT, measured=s, limit=LIMIT,
+                   units="mm", detail=f"{s} mm (limit {LIMIT})")
+'''
 
 #: A cache entry's file name inside its gate's directory (spec §3.7).
 ENTRY_NAME = re.compile(r"^[0-9a-f]{16}-[0-9a-f]{8}\.json$")
@@ -1693,6 +1756,74 @@ class AdmissionIsDemonstrated(_env.EnvCase):
 
                 edit(project, "fixtures/__init__.py", SHELF_BAD_SPAN, 'params["span"] = 40.0')
                 self._refused(project, ref)
+
+    def test_cli_a_file_a_fixture_module_reads_at_import_is_keyed(self):
+        """V: the admission review's repro D (round 1). A fixture module that
+        reads its known-bad span at IMPORT, from ``inputs/data/bad_span.json``:
+        the module was loaded before the control's trace window opened, so the
+        read was recorded nowhere — not on the trace, not in the closure the
+        hint is made of, and ``inputs/`` is no part of the static walk. Defused
+        400 -> 40 mm, ``check`` said ``0 executed, 1 cached`` and exited 0 while
+        ``gate selftest`` said PASSED its own known-bad fixture. The same held
+        for ``selftest/known_good.py``, loaded outside the window as well: its
+        design's span read at import went 80 -> 15, the five-fold fixture built
+        75 mm, and nothing moved. Each case ends with its positive control:
+        the data restored is admitted again, and C1 reads PROVEN."""
+        ref = "selftest/bad.py:long"
+        cases = (
+            ("fixture", {"selftest/bad.py": SHELF_LONG_FROM_DATA},
+             "inputs/data/bad_span.json", 400.0, 40.0),
+            ("known-good", {"selftest/bad.py": SHELF_FIVEFOLD,
+                            "selftest/known_good.py": SHELF_KNOWN_GOOD_FROM_DATA},
+             "inputs/data/good_span.json", 80.0, 15.0),
+        )
+        for which, files, data, bad, defused in cases:
+            with self.subTest(module=which):
+                files = dict(files)
+                files[data] = json.dumps({"span": bad}) + "\n"
+                project = self._shelf_module_fixture(ref, files)
+                [name] = control_names(project)["shelf.span"]
+                self.assertIn(data, read_control(project, "shelf.span", name)["fixture"]["files"],
+                              "a file the module read at import is not in the control's hint")
+
+                write(project, data, json.dumps({"span": defused}) + "\n")
+                self._refused(project, ref)
+
+                write(project, data, json.dumps({"span": bad}) + "\n")
+                code, out = check_json(self, project)
+                self.assertEqual(code, 0, out)
+                self.assertEqual(verdict_row(out, "shelf.span")["outcome"], "pass", out)
+                self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
+                self.assertIn("**C1**", proven_section(self, project))
+
+    def test_cli_a_limit_a_gate_module_reads_at_import_is_keyed(self):
+        """V: repro D's verdict side. A gate module is loaded before any window
+        too, so a limit it reads at import was keyed by no entry: tightened 100
+        -> 50 mm under a design at 80, a plain ``check`` served the PASS as
+        cached and exited 0, while ``--force`` failed it. The positive control
+        is the first check: the same project at 100 mm passes, so the refusal
+        is the edit's."""
+        project = os.path.join(self.tmp(), "shelf")
+        write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
+        write(project, "gates/g.py", SHELF_GATE_LIMIT_FROM_DATA)
+        write(project, "selftest/bad.py", SHELF_LONG)
+        write(project, "inputs/data/limit.json", json.dumps({"span": 100.0}) + "\n")
+        write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
+
+        write(project, "inputs/data/limit.json", json.dumps({"span": 50.0}) + "\n")
+        code, data = check_json(self, project)
+        self.assertEqual(data["counts"]["executed"], 1,
+                         f"the gate's PASS was served after the limit it read at import "
+                         f"moved: {data['counts']}")
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "fail", data)
+        self.assertEqual(code, 1, "a tightened limit read at import kept its PASS")
+        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
 
 
 # --------------------------------------------------------------------------- #
