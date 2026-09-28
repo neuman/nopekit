@@ -105,6 +105,18 @@ def _with_include(path: str) -> bytes:
         return fh.read()
 
 
+def _with_optional_sidecar(path: str) -> bytes:
+    """A loader that asks whether an optional sidecar exists (an ``.obj``'s
+    ``.mtl``) before opening it — a question, not a read, when it is absent."""
+    sidecar = os.path.splitext(path)[0] + ".mtl"
+    with open(path, "rb") as fh:
+        data = fh.read()
+    if os.path.exists(sidecar):
+        with open(sidecar, "rb") as fh:
+            data += fh.read()
+    return data
+
+
 def _with_include_and_a_child(path: str) -> bytes:
     """``_with_include`` after running a child process: an opaque channel too.
     ``HOME`` is the project root, so ``_env.run`` makes and removes no temp home
@@ -335,6 +347,44 @@ class LoadFileMemo(_env.EnvCase):
                 self.assertTrue(any(c.startswith("subprocess:") for c in trace.opaque),
                                 f"the child the loader ran is not opaque here: "
                                 f"{sorted(trace.opaque)}")
+
+    def test_a_hit_replays_the_loaders_existence_questions(self):
+        """V: a loader that asks ``os.path.exists`` of an optional sidecar and
+        finds none. The miss's trace holds the question; a hit must hand it to
+        its gate too, or the second gate's PASS outlives the sidecar appearing —
+        the fdm.bridge_span shape again, through a stat instead of an open."""
+        sidecar = os.path.abspath(os.path.join(self.root, "data", "part.mtl"))
+        registry = gates_mod.Registry()
+        for gate_id in ("g.first", "g.second"):
+            _register(registry, gate_id, lambda ctx: ctx.load_file(
+                "data/part.bin", loader=_with_optional_sidecar) == b"PART v1\n")
+        loads = []
+        real = gates_mod._load
+        with mock.patch.object(gates_mod, "_load", side_effect=lambda path, loader: (
+                loads.append(path), real(path, loader))[1]):
+            traces = self._sweep(registry)
+        self.assertEqual(len(loads), 1, "the second gate was not served by the memo")
+        for gate_id in ("g.first", "g.second"):
+            with self.subTest(gate=gate_id):
+                self.assertIn(sidecar, traces[gate_id].stats,
+                              f"{gate_id}: the sidecar the loader asked about is on no trace")
+                self.assertIs(traces[gate_id].stat_existed(sidecar), False)
+
+    def test_a_sidecar_that_appears_mid_sweep_is_loaded_again(self):
+        """The memo signs what a loader asked about as it signs what it read: a
+        sidecar missing at the first gate and present at the second is a miss."""
+        registry = gates_mod.Registry()
+        _register(registry, "g.first", lambda ctx: ctx.load_file(
+            "data/part.bin", loader=_with_optional_sidecar) == b"PART v1\n")
+
+        def plant(ctx):
+            _write(os.path.join(self.root, "data", "part.mtl"), "MTL\n")
+            return True
+
+        _register(registry, "g.plant", plant)
+        _register(registry, "g.second", lambda ctx: ctx.load_file(
+            "data/part.bin", loader=_with_optional_sidecar) == b"PART v1\nMTL\n")
+        self._sweep(registry)
 
     def test_an_include_rewritten_mid_sweep_is_loaded_again(self):
         """The memo's stat signature covers every file the loader read, not only the

@@ -60,8 +60,8 @@ claim has an order-of-magnitude answer sitting in a textbook.
 ### 3b. Write the gate for the context it actually gets
 
 A gate never sees the sweep's context. It gets a traced view of its own, and every
-read it makes — a parameter, a claim, a file — is recorded, because the verdict cache
-keys each verdict by exactly what it read. Write for that:
+read it makes — a parameter, a claim, a file, a question about a path — is recorded,
+because the verdict cache keys each verdict by exactly what it read. Write for that:
 
 - **Name the gate like a directory.** `<scope>.<what>` — `fdm.overhang`. Its cached
   verdicts live in `.atompipe/verdicts/<gate id>/`, so the registry refuses `/`, `\`,
@@ -86,6 +86,12 @@ keys each verdict by exactly what it read. Write for that:
   `rho`. Anything a gate puts in them is overwritten.
 - **Read claims through `ctx.ledger.claim(id)`**; the ledger a gate gets has no
   verdicts in it.
+- **`os.path.isfile` is a read.** A path under the project or your pack that the gate
+  asks about (`exists`, `isdir`, `getsize`, `pathlib`, a literal `glob`) is an input,
+  missing or not: a named file that appears later stales the verdict. `os.stat` raises
+  no audit event, so this once recorded nothing, and `modelica.source_hygiene` kept a
+  Fresh PASS after a `.mo` it had skipped appeared. Never decide on an mtime, or on a
+  path outside the project: neither is keyed.
 
 ### 4. Build the negative control, and run it
 

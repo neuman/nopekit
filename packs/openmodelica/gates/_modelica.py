@@ -614,6 +614,14 @@ def gather_mo_files(entries: Iterable[str], root: str = "") -> list[str]:
     the order ``package.mo`` first: that is how omc loads a structured package
     and loading the leaves first produces "class X not found" for a class that is
     in the very next file.
+
+    An entry that is neither a file nor a directory yet is skipped — and that
+    absence is an input of the calling gate: the spine records the
+    ``os.path.isfile``/``isdir`` questions below, so the verdict goes stale when
+    the file appears. What slipped through before it did (review round 1): with
+    ``[model/A.mo, model/B.mo]`` named and only A present, ``source_hygiene``
+    recorded ``{model/A.mo}`` and kept a Fresh PASS after B.mo appeared with an
+    undocumented, unitless parameter.
     """
     out: list[str] = []
     for entry in entries:

@@ -17,6 +17,10 @@ These are the trace primitives of `atompipe.verdicts` (PLAN M11.2, M13.7):
 * The audit hook — the files a gate opened. Import machinery, linecache, the
   interpreter's own trees and the user site are noise no gate decides on
   (packs:H1-H2): the first mesh gate alone opened 719 `.pyc` files.
+* The stat probes — the paths a gate asked the existence, kind or size of.
+  `os.stat` raises no audit event, so `os.path.isfile` on a named input that
+  was not there yet recorded nothing, and bundled `modelica.source_hygiene`
+  kept a Fresh PASS after the `.mo` it had skipped appeared (review round 1).
 
 Every recording test checks the trace, not just "no crash": a recorder that
 records nothing passes every "no exception" test there is.
@@ -28,6 +32,7 @@ from __future__ import annotations
 import contextlib
 import copy
 import dataclasses
+import glob
 import importlib
 import io
 import json
@@ -655,10 +660,11 @@ class AuditTrace(_env.EnvCase):
         with tracing(trace):
             module = importlib.import_module(name)
         self.assertEqual(module.VALUE, 42)
-        self.assertEqual((trace.files_read, trace.files_written, trace.dirs, trace.opaque),
-                         ([], set(), set(), set()),
-                         "import machinery's opens, listings and .pyc writes are not "
-                         "gate inputs (packs:H1)")
+        self.assertEqual((trace.files_read, trace.files_written, trace.dirs, trace.opaque,
+                          trace.stats),
+                         ([], set(), set(), set(), []),
+                         "import machinery's opens, listings, stats and .pyc writes are "
+                         "not gate inputs (packs:H1)")
 
     def _fresh_function(self, body: str):
         """A function compiled from a file linecache has never seen."""
@@ -682,6 +688,7 @@ class AuditTrace(_env.EnvCase):
         self.assertIn("warnings.warn('careful now'", stderr.getvalue(),
                       "linecache never read the source, so this test proves nothing")
         self.assertEqual(trace.files_read, [])
+        self.assertEqual(trace.stats, [], "linecache's own os.stat is the formatter's")
 
     def test_traceback_formatting_is_excluded(self):
         path, ns = self._fresh_function("def g():\n    raise ValueError('boom')\n")
@@ -700,6 +707,7 @@ class AuditTrace(_env.EnvCase):
             text = traceback.format_exc()                  # the window is closed by now
         self.assertIn("raise ValueError('boom')", text)
         self.assertEqual((inside.files_read, after.files_read), ([], []))
+        self.assertEqual((inside.stats, after.stats), ([], []))
         self.assertNotIn(after, verdicts._STACK, "an exception must still close the window")
 
     def test_a_pseudo_filename_is_not_a_file(self):
@@ -865,8 +873,101 @@ class AuditTrace(_env.EnvCase):
         with tracing(trace):
             pass
         open(self.path, "rb").close()
+        os.path.isfile(self.path)
         self.assertEqual(trace.files_read, [])
+        self.assertEqual(trace.stats, [])
         self.assertEqual(verdicts._STACK, [])
+
+    # -- the stat probes -------------------------------------------------- #
+    def test_every_existence_kind_and_size_question_is_recorded(self):
+        """V: ``os.stat`` raises no audit event, and every existence, kind and
+        size question the standard library asks ends in it (or in ``os.lstat``)
+        — so a gate that skipped a named input because ``os.path.isfile`` said
+        no had recorded nothing, and its PASS outlived the file appearing
+        (bundled ``modelica.source_hygiene``, review round 1). Each spelling,
+        asked of a path that is not there, must land on ``trace.stats`` — and
+        none is a read of bytes."""
+        missing = os.path.join(self.dir, "missing.txt")
+        spellings = {
+            "os.stat": os.stat,
+            "os.stat(follow_symlinks=False)": lambda p: os.stat(p, follow_symlinks=False),
+            "os.lstat": os.lstat,
+            "os.path.exists": os.path.exists,
+            "os.path.lexists": os.path.lexists,
+            "os.path.isfile": os.path.isfile,
+            "os.path.isdir": os.path.isdir,
+            "os.path.islink": os.path.islink,
+            "os.path.getsize": os.path.getsize,
+            "os.path.getmtime": os.path.getmtime,
+            "os.path.samefile": lambda p: os.path.samefile(p, self.path),
+            "Path.exists": lambda p: pathlib.Path(p).exists(),
+            "Path.is_file": lambda p: pathlib.Path(p).is_file(),
+            "Path.is_dir": lambda p: pathlib.Path(p).is_dir(),
+            "Path.stat": lambda p: pathlib.Path(p).stat(),
+            "glob of a literal path": glob.glob,
+            "bytes": lambda p: os.path.exists(os.fsencode(p)),
+        }
+        for name, ask in spellings.items():
+            with self.subTest(spelling=name):
+                trace = GateTrace()
+                with tracing(trace):
+                    try:
+                        ask(missing)
+                    except OSError:
+                        pass
+                self.assertIn(missing, trace.stats)
+                self.assertTrue(all(isinstance(p, str) for p in trace.stats))
+                self.assertEqual(trace.files_read, [], "a stat is not a read of bytes")
+
+    def test_a_relative_stat_and_nested_traces(self):
+        outer, inner = GateTrace(), GateTrace()
+        cwd = os.getcwd()
+        os.chdir(self.dir)
+        try:
+            with tracing(outer):
+                with tracing(inner):
+                    os.path.exists("relative.txt")
+        finally:
+            os.chdir(cwd)
+        where = os.path.join(self.dir, "relative.txt")
+        self.assertEqual((outer.stats, inner.stats), ([where], [where]))
+
+    def test_the_probes_answer_exactly_as_the_originals(self):
+        """A probe records and gets out of the way: same result, same errors,
+        keyword arguments passed through, and an fd (no path) records nothing."""
+        trace = GateTrace()
+        link = os.path.join(self.dir, "link")
+        with contextlib.suppress(OSError, NotImplementedError):
+            os.symlink(self.path, link)
+        with tracing(trace):
+            self.assertEqual(os.stat(self.path).st_size, os.path.getsize(self.path))
+            if os.path.islink(link):
+                self.assertNotEqual(os.stat(link, follow_symlinks=False).st_mode,
+                                    os.stat(link).st_mode)
+            with self.assertRaises(FileNotFoundError):
+                os.stat(os.path.join(self.dir, "nope"))
+            with open(self.path, "rb") as fh:
+                os.stat(fh.fileno())
+        self.assertIn(self.path, trace.stats)
+        self.assertNotIn(None, trace.stats)
+
+    def test_the_hooks_own_questions_are_not_the_gates(self):
+        """The hook asks ``os.path.isdir`` of an ``os.open`` path and
+        ``os.path.isfile`` of a child's argv: its own work, never the gate's."""
+        trace = GateTrace()
+        with tracing(trace):
+            os.close(os.open(self.path, os.O_RDONLY))
+        self.assertEqual(trace.files_read, [self.path])
+        self.assertEqual(trace.stats, [], "the hook's own isdir was filed as the gate's")
+
+    def test_a_stat_of_its_own_output_is_not_an_input(self):
+        out = os.path.join(self.dir, "out.png")
+        trace = GateTrace()
+        with tracing(trace):
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write("x")
+            os.path.getsize(out)
+        self.assertEqual(trace.stats, [], "written first, then asked about: its own output")
 
 
 if __name__ == "__main__":

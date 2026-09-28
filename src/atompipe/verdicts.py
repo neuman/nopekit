@@ -27,7 +27,11 @@ content address (rho) built from it. Its first half is the primitives:
   listed, the processes it started. One process-global hook, routed to a stack
   of traces, with the interpreter's own noise excluded: the first mesh gate of
   a sweep opened 719 ``.pyc`` files and listed 77 directories on import alone
-  (packs:H1), none of which it decided anything on.
+  (packs:H1), none of which it decided anything on. And the stat probes — the
+  paths it asked the existence, kind or size of, which raise no audit event:
+  bundled ``modelica.source_hygiene`` skipped a named ``.mo`` that was not there
+  yet on an ``os.path.isfile``, recorded nothing, and kept a Fresh PASS after it
+  appeared (review round 1).
 * ``spine_digest`` — the spine's own version, taken from what the verdict-path
   modules SAY rather than from ``__version__``. 1e09113 changed verdict semantics
   (a NaN that read ``[ok]`` now errors) with the version string untouched (S-29).
@@ -120,7 +124,7 @@ from .util import AtompipeError, FileDigests, atomic_write_json, atomic_write_te
 
 
 __all__ = [
-    "ABSENT", "PRESENT", "SPINE_MODULES", "SMALL_VALUE_MAX_CHARS",
+    "ABSENT", "PRESENT", "DIRECTORY", "SPINE_MODULES", "SMALL_VALUE_MAX_CHARS",
     "digest_value", "small_value", "portable", "traced_context", "tracing", "replay",
     "spine_digest", "canonical_ast_digest",
     "Anchors", "ParamTrace", "LedgerView", "ModelProxy", "GateTrace",
@@ -160,6 +164,18 @@ ABSENT = hashlib.sha256(b"atompipe:absent\x00").hexdigest()
 #: when the value moves. Superseded by the value's own digest when the gate then
 #: reads the value.
 PRESENT = hashlib.sha256(b"atompipe:present\x00").hexdigest()
+
+#: The digest recorded for a file input that is a directory: what a gate that
+#: asked ``os.path.isdir`` — or the root's kind, as every ``realpath`` of a
+#: project path does — decided on. A file input's digest is otherwise the
+#: sha256 of its bytes, or ``None`` when it is missing. What slipped through
+#: without it: ``FileDigests`` answers ``None`` for a directory too, so a named
+#: directory that appeared, or vanished, moved nothing — ``gather_mo_files``
+#: walks a ``modelica_sources`` entry only when ``os.path.isdir`` says so.
+#: *Rejected:* the directory's listing (every ``realpath`` of a project path
+#: lstats the root, so every file added at the top of a project would stale
+#: every gate that resolved a path); ``None`` (a directory reads as missing).
+DIRECTORY = hashlib.sha256(b"atompipe:directory\x00").hexdigest()
 
 #: The modules whose SEMANTICS shape a verdict: the types, the runner, the model
 #: loader and this file. ``spine_digest`` walks exactly these. *Rejected:* adding
@@ -513,10 +529,12 @@ class GateTrace:
     display values of leaf reads; ``whole`` the paths read in bulk (``()`` is
     the top level). ``ledger`` maps ``"claim:<id>"`` or a list name
     (``"claims"``) to a digest. ``files_read`` is in first-read order and never
-    holds a path this window wrote first; ``host_reads`` is what a control's
-    fixture — or anyone reading through its host view — read from the HOST
-    context (the seal detector's input). ``anchors`` makes path-valued param
-    digests portable; the sweep sets it.
+    holds a path this window wrote first; ``stats`` likewise, for the paths it
+    asked the existence, kind or size of (``os.stat`` and everything built on
+    it), each with whether it existed when first asked; ``host_reads`` is what
+    a control's fixture — or anyone reading through its host view — read from
+    the HOST context (the seal detector's input). ``anchors`` makes path-valued
+    param digests portable; the sweep sets it.
     """
 
     kind: str = "gate"
@@ -527,12 +545,14 @@ class GateTrace:
     files_read: list = field(default_factory=list)
     files_written: set = field(default_factory=set)
     dirs: set = field(default_factory=set)
+    stats: list = field(default_factory=list)
     opaque: set = field(default_factory=set)
     model_used: bool = False
     host_reads: dict = field(default_factory=dict)
     fixture_code: Any = None
     anchors: Any = None
     _read_set: set = field(default_factory=set, init=False, repr=False)
+    _existed: dict = field(default_factory=dict, init=False, repr=False)
     _host_whole: set = field(default_factory=set, init=False, repr=False)
 
     def self_modified(self) -> list[str]:
@@ -551,6 +571,18 @@ class GateTrace:
             return
         self._read_set.add(path)
         self.files_read.append(path)
+
+    def _note_stat(self, path: str, existed: bool | None) -> None:
+        """A path asked about: ``existed`` is what the question found the first
+        time (``None`` when the asker cannot say, a C predicate's bool)."""
+        if path in self.files_written or path in self._existed:
+            return
+        self._existed[path] = existed
+        self.stats.append(path)
+
+    def stat_existed(self, path: str) -> bool | None:
+        """Whether ``path`` existed when this window first asked about it."""
+        return self._existed.get(path)
 
     def _note_write(self, path: str) -> None:
         self.files_written.add(path)
@@ -1309,8 +1341,9 @@ class _Window:
 
 
 def tracing(trace: GateTrace) -> _Window:
-    """Route every file, directory, process and network event to ``trace`` while
-    the block runs (and to every enclosing trace as well).
+    """Route every file, directory, process and network event — and every
+    existence, kind or size question (``_stat_probe``) — to ``trace`` while the
+    block runs (and to every enclosing trace as well).
 
     The hook is installed on the first push, at most once per process, and does
     nothing at all while no window is open.
@@ -1319,9 +1352,10 @@ def tracing(trace: GateTrace) -> _Window:
 
 
 def replay(recorded: GateTrace, trace: GateTrace | None = None) -> None:
-    """Record again what the hook routed to ``recorded``: its reads, writes,
-    listed directories and opaque channels — into every trace open now, and into
-    ``trace`` (the calling view's own) even when no window is open around it.
+    """Record again what the hook and the stat probes routed to ``recorded``:
+    its reads, stats, writes, listed directories and opaque channels — into
+    every trace open now, and into ``trace`` (the calling view's own) even when
+    no window is open around it.
 
     For work done once and consumed many times: ``GateContext.load_file`` runs a
     loader under a trace of its own on a miss and replays that trace on every
@@ -1332,9 +1366,9 @@ def replay(recorded: GateTrace, trace: GateTrace | None = None) -> None:
     Fresh PASS after its buffers moved, and failed at 54 mm against a 30 mm limit
     when forced (review round 1).
 
-    Reads go first and writes after, which rebuilds ``recorded``'s own view of
-    each path: a path it read and then wrote is ``self_modified`` here too, and
-    one it wrote and then read is its output, never a read. The hook's filters
+    Reads and stats go first and writes after, which rebuilds ``recorded``'s
+    own view of each path: a path it read and then wrote is ``self_modified``
+    here too, and one it wrote and then read is its output, never a read. The hook's filters
     (library paths, import machinery) already ran when ``recorded`` was filled.
     Params, the ledger and the model are the views' channels, not the hook's,
     and are not replayed. *Rejected:* re-raising the ``open`` events through
@@ -1349,6 +1383,8 @@ def replay(recorded: GateTrace, trace: GateTrace | None = None) -> None:
     for target in targets:
         for path in recorded.files_read:
             target._note_read(path)
+        for path in recorded.stats:
+            target._note_stat(path, recorded.stat_existed(path))
         for path in sorted(recorded.files_written):
             target._note_write(path)
         target.dirs.update(recorded.dirs)
@@ -1631,6 +1667,136 @@ def _audit(event: str, args: tuple) -> None:
         pass
     finally:
         _BUSY.on = False
+
+
+# --------------------------------------------------------------------------- #
+# the stat probes
+# --------------------------------------------------------------------------- #
+# ``os.stat`` raises no audit event, and neither does anything built on it:
+# ``os.path.exists``/``isfile``/``isdir``/``getsize``/``getmtime``/``samefile``
+# (genericpath), ``lexists``/``islink``/``ismount``/``realpath`` (posixpath),
+# ``pathlib``'s ``stat``/``exists``/``is_file``/``is_dir``, and ``glob`` of a
+# literal path. So a gate that decided on a file's existence, kind or size
+# recorded nothing. What slipped through (review round 1): ``gather_mo_files``
+# skips a ``modelica_sources`` entry that ``os.path.isfile`` says is not there,
+# so bundled ``modelica.source_hygiene`` recorded ``{model/A.mo}``, kept a Fresh
+# PASS after ``model/B.mo`` appeared, and failed ``1/2 parameter(s)
+# undefendable`` when forced; a project gate passing on ``os.path.isfile(
+# "inputs/cert.pdf")`` stayed Fresh after the file was deleted. The hook cannot
+# see these, so the functions themselves are replaced, once, by probes that
+# record and then call the original.
+
+#: The ``os`` functions the probes replace. Every question listed above looks
+#: one of these up ON ``os`` at call time, so replacing the attribute reaches
+#: them all; import machinery binds ``posix.stat`` itself and is not affected.
+#: *Rejected:* wrapping each ``os.path`` function (dozens of names across
+#: ``genericpath``, ``posixpath``, ``pathlib`` and ``glob``, and every one still
+#: ends here); a ``sys.setprofile`` on C calls (it sees every call in the
+#: process and is per-thread, so a gate's worker threads would escape it).
+_STAT_FUNCTIONS = ("stat", "lstat")
+
+#: ``os.path`` predicates that are C on some platforms — ``nt._path_isdir`` and
+#: its siblings on Windows since 3.12 — and never reach ``os.stat``. Probed only
+#: where they are builtins, so POSIX records each question once.
+_STAT_PREDICATES = ("exists", "lexists", "isfile", "isdir", "islink", "isjunction",
+                    "isdevdrive")
+
+#: Modules a stat passes THROUGH on its way from the question to ``os.stat``.
+#: The frame that decides whether the question was import machinery's or
+#: linecache's (``_EXCLUDED_MODULES``) is the first one outside these: linecache
+#: calls ``os.stat`` itself, importlib.metadata asks through ``pathlib``.
+_STAT_VIA = frozenset({"os", "genericpath", "posixpath", "ntpath", "pathlib",
+                       "pathlib._local", "pathlib._abc", "glob"})
+
+def _on_stat(args: tuple, kwargs: dict, existed: bool | None) -> None:
+    """Record one question on every open trace. Called with ``_BUSY`` set, so
+    nothing it does — ``abspath``, the frame walk — records itself."""
+    raw = args[0] if args else kwargs.get("path")
+    text = _text(raw)
+    if text is None or kwargs.get("dir_fd") is not None and not os.path.isabs(text):
+        return            # an fd, or a path relative to a dir_fd: named, as for os.open
+    path = _path_arg(text)
+    if path is None or _library_path(path):
+        return
+    frame = sys._getframe(2)                    # past this function and the probe
+    while frame is not None and frame.f_globals.get("__name__") in _STAT_VIA:
+        frame = frame.f_back
+    if _excluded_frame(frame):
+        return
+    for trace in tuple(_STACK):
+        trace._note_stat(path, existed)
+
+
+def _stat_probe(original: Callable[..., Any], *, predicate: bool) -> Callable[..., Any]:
+    """``original``, recording its path on every open trace first — and, for
+    ``os.stat``/``os.lstat``, whether it existed. Outside a window, or inside
+    the hook's own work, it is one attribute check and the original call."""
+
+    @functools.wraps(original)
+    def probe(*args: Any, **kwargs: Any) -> Any:
+        if not _STACK or getattr(_BUSY, "on", False):
+            return original(*args, **kwargs)
+        existed: bool | None = None
+        try:
+            result = original(*args, **kwargs)
+            existed = None if predicate else True
+            return result
+        except OSError:
+            existed = False
+            raise
+        finally:
+            _BUSY.on = True
+            try:
+                _on_stat(args, kwargs, existed)
+            except Exception:
+                pass
+            finally:
+                _BUSY.on = False
+
+    probe.__atompipe_probe__ = True             # type: ignore[attr-defined]
+    return probe
+
+
+#: The capability sets that name ``os`` functions by identity. What would slip
+#: through without this: ``os.stat in os.supports_dir_fd`` turns False once
+#: ``os.stat`` is a probe, and a library that asks (``shutil``'s fd-based
+#: ``rmtree`` does, at its own import) quietly takes its slower, racier path.
+_SUPPORTS = ("supports_dir_fd", "supports_fd", "supports_follow_symlinks",
+             "supports_effective_ids")
+
+
+def _install_stat_probes() -> None:
+    """Replace ``os.stat``, ``os.lstat`` and any C ``os.path`` predicate with a
+    probe — once per process, at import.
+
+    At import rather than on the first window, as the hook is: a gate module
+    that says ``from os import stat`` binds whatever ``os.stat`` is when it is
+    imported, and the registry imports every gate module before the sweep opens
+    a single window. The spine is imported before any of them. A probe with no
+    window open costs one attribute check. Named residual: a module that bound
+    the original before the spine was imported, and ``os.DirEntry.stat()``,
+    which is C and calls nothing (``_dir_digest`` keys a listing on each
+    entry's kind and size instead).
+    """
+    for name in _STAT_FUNCTIONS:
+        original = getattr(os, name)
+        if getattr(original, "__atompipe_probe__", False):
+            continue
+        probe = _stat_probe(original, predicate=False)
+        for supports in _SUPPORTS:
+            known = getattr(os, supports, None)
+            if isinstance(known, set) and original in known:
+                known.add(probe)
+        setattr(os, name, probe)
+    for name in _STAT_PREDICATES:
+        original = getattr(os.path, name, None)
+        if (original is None or not isinstance(original, type(len))
+                or getattr(original, "__atompipe_probe__", False)):
+            continue                            # a Python function: it reaches os.stat
+        setattr(os.path, name, _stat_probe(original, predicate=True))
+
+
+_install_stat_probes()
 
 
 # --------------------------------------------------------------------------- #
@@ -2301,17 +2467,50 @@ def _json_path(path: tuple) -> list:
     return out
 
 
-def _dir_digest(path: str) -> str | None:
-    """A listing, digested as its sorted entry names — bytecode left out, so
-    the first run's ``__pycache__`` does not move it — or ``None`` when there is
-    no directory to list."""
+def _entry_form(entry: Any) -> Any:
+    """What a listing says of one entry: ``"dir"``, a regular file's size in
+    bytes, or ``"other"`` (a broken link, a FIFO, a vanished entry)."""
     try:
-        names = os.listdir(path)
+        if entry.is_dir():
+            return "dir"
+        if entry.is_file():
+            return int(entry.stat().st_size)
+    except OSError:
+        pass
+    return "other"
+
+
+def _dir_digest(path: str) -> str | None:
+    """A listing, digested as its sorted ``[name, kind or size]`` entries —
+    bytecode left out, so the first run's ``__pycache__`` does not move it — or
+    ``None`` when there is no directory to list.
+
+    Sizes and kinds because a listing is all a gate that iterates
+    ``os.scandir`` touched: ``DirEntry.is_file()`` comes from the listing and
+    ``DirEntry.stat()`` is C that calls nothing a probe or the hook can see. What
+    slipped through while it was names only: a gate deciding on the largest
+    file in a directory kept a Fresh PASS after one grew (review round 1).
+    *Rejected:* mtimes (they differ per checkout, so a committed entry would be
+    stale in every clone — a gate that decides on one is named residual);
+    a directory's own size (``st_size`` of a directory differs per filesystem);
+    the bytes of every entry (the listing would become a read of the whole tree).
+    """
+    try:
+        with os.scandir(path) as listing:
+            rows = [[entry.name, _entry_form(entry)] for entry in listing
+                    if entry.name != "__pycache__" and not entry.name.endswith(_BYTECODE)]
     except OSError:
         return None
-    kept = sorted(name for name in names
-                  if name != "__pycache__" and not name.endswith(_BYTECODE))
-    return _digest_of(_clean(kept))
+    return _digest_of(_clean(sorted(rows, key=lambda row: row[0])))
+
+
+def _path_digest(path: str, digests: FileDigests) -> str | None:
+    """A file input as rho keys it: the sha256 of its bytes, ``DIRECTORY`` for a
+    directory, ``None`` when it is missing or neither."""
+    digest = digests.digest(path)
+    if digest is None and os.path.isdir(path):
+        return DIRECTORY
+    return digest
 
 
 def _walkable(rel: str) -> bool:
@@ -2360,16 +2559,30 @@ class _Places:
 
 
 def _classify(path: str, places: _Places, *, is_dir: bool, control: bool,
-              selfmod: set, written: list, static: set | None) -> tuple[str, str]:
+              selfmod: set, written: list, static: set | None,
+              stat: bool = False) -> tuple[str, str]:
     """``("drop", "")``, ``("read", <portable>)`` or ``("opaque", <channel>)``
-    for one path a trace read — spec §3.4's rules, first match wins."""
+    for one path a trace read — spec §3.4's rules, first match wins.
+
+    ``stat=True`` classifies a path the trace only ASKED about (existence,
+    kind, size) and never opened or listed. Under the project or a pack that is
+    a file input like any read, and ``selfmod`` holds the paths whose answer
+    this window changed itself; everywhere else a question is not an input the
+    way a read is, because honest gates ask them constantly: ``shutil.which``
+    stats every ``PATH`` entry, ``realpath`` every ancestor of the root,
+    ``os.makedirs`` every ancestor of the out dir. So outside the project it is
+    dropped (named residual: a gate that decides on the existence of a file
+    outside its project), and under the out dir or the spine's state only a
+    FILE, or a missing path, that this window did not write is opaque — another
+    gate's output, the S-27 shape — while a directory there is scaffolding.
+    """
     p = _norm(path)
     # 1. the interpreter's and the libraries' own files; bytecode
     if _library_path(p):
         return "drop", ""
     # 2. read, and later written, in this window: its pre-write bytes are gone.
     #    (Written first and read after never reached the read list at all.)
-    if not is_dir and p in selfmod:
+    if not stat and not is_dir and p in selfmod:
         return "opaque", f"self-modified:{places.shown(p)}"
 
     def selftest_covered(rel: str) -> bool:
@@ -2379,19 +2592,26 @@ def _classify(path: str, places: _Places, *, is_dir: bool, control: bool,
             return True
         return p in static if static is not None else _walkable(rel)
 
+    def asked_mine() -> bool:
+        # a question about scaffolding, or about what this window wrote
+        return stat and (is_dir or any(w == p or w.startswith(p + os.sep) for w in written))
+
     # 3. under a pack
     for name, spellings in places.packs:
         rel = places.rel(p, spellings)
         if rel is not None:
             if selftest_covered(rel):
                 return "drop", ""
+            if stat and p in selfmod:
+                return "opaque", f"self-modified:{places.shown(p)}"
             return "read", f"<pack:{name}>/{rel}" if rel else f"<pack:{name}>"
     # 4. under the sweep's or the control's out_dir, and not this window's output
     for prefix, spellings in (("controls/", places.controls), ("", places.out)):
         rel = places.rel(p, spellings)
         if rel is None:
             continue
-        if is_dir and any(w == p or w.startswith(p + os.sep) for w in written):
+        if (is_dir and not stat and any(w == p or w.startswith(p + os.sep) for w in written)
+                or asked_mine()):
             return "drop", ""                   # a listing of what it wrote itself
         where = (prefix + rel) if rel else (prefix.rstrip("/") or ".")
         return "opaque", f"out:{where} (not written by this gate)"
@@ -2399,12 +2619,18 @@ def _classify(path: str, places: _Places, *, is_dir: bool, control: bool,
     if rel is not None:
         # 5. the spine's own state is never an input
         if rel == _STATE_DIR or rel.startswith(_STATE_DIR + "/"):
+            if asked_mine():
+                return "drop", ""
             return "opaque", f"atompipe-state:{rel}"
         # 6. the project
         if selftest_covered(rel):
             return "drop", ""
+        if stat and p in selfmod:
+            return "opaque", f"self-modified:{places.shown(p)}"
         return "read", rel or "."
     # 7. anything else
+    if stat:
+        return "drop", ""
     return "opaque", f"file-outside-project:{places.shown(p)}"
 
 
@@ -2414,9 +2640,10 @@ class Reads:
 
     ``params`` — ``[[path, digest], ...]`` or ``[[path, digest, small], ...]``
     (``path`` a JSON list; ``small`` only when the value is small, for a stale
-    line that says ``config.bed_xy 220.0 -> 250.0``); ``files`` and ``dirs`` —
-    ``{portable path: sha | None}`` (``None``: missing, which is itself an
-    input); ``ledger`` — ``{"claim:<id>" | "<list>": digest}``; ``model`` — the
+    line that says ``config.bed_xy 220.0 -> 250.0``); ``files`` —
+    ``{portable path: sha | DIRECTORY | None}`` (``None``: missing, which is
+    itself an input), every path opened or only asked about; ``dirs`` —
+    ``{portable path: listing digest | None}``; ``ledger`` — ``{"claim:<id>" | "<list>": digest}``; ``model`` — the
     ``model_digest`` when the gate used ``ctx.model``; ``opaque`` — sorted
     channel names; ``host`` — a control's host-param reads, ``[[path,
     digest], ...]``. Only the display values are left out of rho.
@@ -2451,6 +2678,12 @@ class Reads:
         5. under ``<root>/.atompipe/`` — opaque ``atompipe-state:<rel>``;
         6. under the root — a read ``<rel>``;
         7. anything else — opaque ``file-outside-project:<path>``.
+
+        A path the trace only asked about (``trace.stats``) and neither opened
+        nor listed follows ``_classify(stat=True)``: a file input under the root
+        or a pack (opaque ``self-modified:`` when the window changed the answer
+        itself), dropped outside them, and opaque under the out dir or the
+        spine's state only when it is another gate's file.
 
         In a CONTROL trace, reads under the owner's ``selftest/`` are dropped:
         the static walk covers them, and a fixture module's import-time read of
@@ -2493,7 +2726,7 @@ class Reads:
             action, what = _classify(path, places, is_dir=False, control=control,
                                      selfmod=selfmod, written=written, static=static_set)
             if action == "read":
-                files[_clean(what)] = digests.digest(path)
+                files[_clean(what)] = _path_digest(path, digests)
             elif action == "opaque":
                 opaque.add(_clean(what))
         dirs: dict[str, str | None] = {}
@@ -2502,6 +2735,31 @@ class Reads:
                                      selfmod=selfmod, written=written, static=static_set)
             if action == "read":
                 dirs[_clean(what)] = _dir_digest(path)
+            elif action == "opaque":
+                opaque.add(_clean(what))
+        # What the window only ASKED about. A path it also opened or listed is
+        # keyed there already (bytes and listings both move when the kind does).
+        # One whose answer the window changed itself — asked while missing and
+        # made (``os.makedirs``), asked while there and removed, or written after
+        # — has lost the state the gate decided on: self-modified, like a read.
+        # (An existence answer is compared both ways, followed and not, so a
+        # broken symlink asked through os.stat is not a flip.)
+        seen = {_norm(path) for path in trace.files_read} | {_norm(p) for p in trace.dirs}
+        stat_selfmod = set()
+        for path in trace.stats:
+            before = trace.stat_existed(path)
+            if (_norm(path) in written
+                    or before is not None and before != os.path.exists(path)
+                    and before != os.path.lexists(path)):
+                stat_selfmod.add(_norm(path))
+        for path in trace.stats:
+            if _norm(path) in seen:
+                continue
+            action, what = _classify(path, places, is_dir=os.path.isdir(path),
+                                     control=control, selfmod=stat_selfmod,
+                                     written=written, static=static_set, stat=True)
+            if action == "read":
+                files[_clean(what)] = _path_digest(path, digests)
             elif action == "opaque":
                 opaque.add(_clean(what))
 
@@ -3982,7 +4240,7 @@ def _reads_now(reads: Mapping[str, Any], now: _Now) -> tuple[Reads | None, str]:
         where = now.locate(spelled)
         if where is None:
             return None, f"cannot find {spelled} here"
-        files[spelled] = now.digests.digest(where)
+        files[spelled] = _path_digest(where, now.digests)
     dirs: dict[str, str | None] = {}
     for spelled in reads.get("dirs") or {}:
         where = now.locate(spelled)
@@ -4293,7 +4551,7 @@ def _control_moved(control: ControlEntry, now: _Now) -> str:
         return "opaque control inputs: " + ", ".join(opaque)
     for spelled, digest in (reads.get("files") or {}).items():
         where = now.locate(spelled)
-        if where is None or now.digests.digest(where) != digest:
+        if where is None or _path_digest(where, now.digests) != digest:
             return f"{spelled} changed"
     for spelled, digest in (reads.get("dirs") or {}).items():
         where = now.locate(spelled)

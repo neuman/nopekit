@@ -34,6 +34,7 @@ import importlib.metadata
 import importlib.util
 import json
 import os
+import shutil
 import sys
 import textwrap
 import unittest
@@ -97,6 +98,7 @@ def _project(case: _env.EnvCase) -> str:
 
 _GATE_HEAD = '''\
 import os
+import shutil
 from atompipe.gates import gate
 from atompipe.models import NegativeControl, Verdict
 '''
@@ -965,6 +967,137 @@ def reader(ctx):
         self.assertGreater(traced, 20, "the measurement traced almost nothing")
         self.assertEqual(unexplained, {},
                          f"out-dir reads on gates the tracer can otherwise see; all hits: {hits}")
+
+
+class StatReads(_env.EnvCase):
+    """What an existence, kind or size question becomes in an entry.
+
+    ``os.stat`` raises no audit event, so until the stat probes a gate that
+    decided on ``os.path.isfile`` recorded nothing: bundled
+    ``modelica.source_hygiene`` kept a Fresh PASS after a ``.mo`` it had named,
+    and skipped as missing, appeared (review round 1). Under the project or a
+    pack a question is a file input — its bytes, ``DIRECTORY``, or missing.
+    Everywhere else it must not become an opaque channel, or every gate that
+    looks a tool up on PATH would never be Fresh.
+    """
+
+    def setUp(self):
+        self.root = _project(self)
+        self.pack = os.path.join(self.tmp(), "pack")
+        os.makedirs(os.path.join(self.pack, "selftest"))
+        self.out = store.out_dir(self.root)
+        self.anchors = Anchors(root=self.root, packs={"p": self.pack}, out=self.out,
+                               controls_out=os.path.join(self.out, "controls"))
+
+    def at(self, *parts: str) -> str:
+        return os.path.join(self.root, *parts)
+
+    def reads(self, ask, *, kind: str = "gate", static=None) -> verdicts.Reads:
+        trace = GateTrace(kind=kind, anchors=self.anchors)
+        with verdicts.tracing(trace):
+            ask()
+        return verdicts.Reads.from_trace(trace, anchors=self.anchors, static=static)
+
+    def test_under_the_project_or_a_pack_a_question_is_a_file_input(self):
+        there = _write(self.root, "data/there.txt", "1\n")
+        os.makedirs(self.at("data", "sub"))
+        reads = self.reads(lambda: (
+            os.path.isfile(there),
+            os.path.exists(self.at("data", "gone.txt")),
+            os.path.isdir(self.at("data", "sub")),
+            os.path.isfile(os.path.join(self.pack, "table.csv"))))
+        self.assertEqual(reads.files, {
+            "<pack:p>/table.csv": None,
+            "data/gone.txt": None,
+            "data/sub": verdicts.DIRECTORY,
+            "data/there.txt": hashlib.sha256(b"1\n").hexdigest(),
+        })
+        self.assertEqual((reads.dirs, reads.opaque), ({}, []),
+                         "a kind question is not a listing, and not opaque")
+        self.assertNotIn(verdicts.DIRECTORY, (verdicts.ABSENT, verdicts.PRESENT))
+
+    def test_a_question_about_a_path_it_also_opened_or_listed_is_keyed_once(self):
+        there = _write(self.root, "data/there.txt", "1\n")
+
+        def ask():
+            os.path.isfile(there)
+            with open(there, encoding="utf-8") as fh:
+                fh.read()
+            os.path.isdir(self.at("data"))
+            os.listdir(self.at("data"))
+        reads = self.reads(ask)
+        self.assertEqual(list(reads.files), ["data/there.txt"])
+        self.assertEqual(list(reads.dirs), ["data"])
+
+    def test_outside_the_project_a_question_is_dropped_not_opaque(self):
+        elsewhere = self.tmp()
+        reads = self.reads(lambda: (
+            os.path.exists(os.path.join(elsewhere, "x")),
+            shutil.which("atompipe-no-such-tool"),
+            os.path.realpath(self.at("data", "x.txt"))))
+        self.assertEqual(reads.opaque, [])
+        self.assertTrue(all(not key.startswith(("/", "~", "<tmp>")) for key in reads.files),
+                        reads.files)
+        self.assertEqual(reads.files.get("."), verdicts.DIRECTORY,
+                         "realpath asked the root's kind: keyed as a kind, never a listing")
+
+    def test_under_the_out_dir_only_another_gates_file_is_opaque(self):
+        mine = os.path.join(self.out, "g", "mine.json")
+        theirs = _write(self.out, "theirs.json", "{}")
+
+        def ask():
+            os.makedirs(os.path.dirname(mine), exist_ok=True)
+            if not os.path.exists(mine):
+                with open(mine, "w", encoding="utf-8") as fh:
+                    fh.write("{}")
+            os.path.getsize(mine)
+            os.path.exists(theirs)
+        reads = self.reads(ask)
+        self.assertEqual(reads.files, {})
+        self.assertEqual(reads.opaque, ["out:theirs.json (not written by this gate)"])
+
+    def test_a_question_whose_answer_the_window_changed_is_self_modified(self):
+        made = self.at("data", "made")
+        removed = _write(self.root, "data/removed.txt", "x\n")
+        written = self.at("data", "written.txt")
+
+        def ask():
+            if not os.path.isdir(made):
+                os.makedirs(made)                   # asked while missing, then made
+            if os.path.isfile(removed):
+                os.remove(removed)                  # asked while there, then removed
+            if not os.path.exists(written):
+                with open(written, "w", encoding="utf-8") as fh:
+                    fh.write("x")                   # asked, then written
+        reads = self.reads(ask)
+        self.assertEqual(reads.opaque, sorted(f"self-modified:<root>/data/{name}"
+                                              for name in ("made", "removed.txt",
+                                                           "written.txt")))
+        self.assertEqual({k: v for k, v in reads.files.items() if k != "data"}, {})
+
+    def test_a_controls_question_about_its_own_selftest_is_the_walks(self):
+        _write(self.pack, "selftest/baseline.json", "{}")
+        reads = self.reads(lambda: (
+            os.path.isfile(os.path.join(self.pack, "selftest", "baseline.json")),
+            os.path.isdir(os.path.join(self.pack, "selftest"))), kind="control")
+        self.assertEqual((reads.files, reads.opaque), ({}, []))
+
+    def test_a_listing_keys_each_entrys_kind_and_size(self):
+        """``DirEntry.stat()`` is C and calls nothing a probe can see; the
+        listing is the whole read, so it carries each entry's kind and size."""
+        _write(self.root, "data/sizes/a.txt", "1\n")
+        os.makedirs(self.at("data", "sizes", "sub"))
+        before = verdicts._dir_digest(self.at("data", "sizes"))
+        _write(self.root, "data/sizes/a.txt", "1234567890\n")
+        grown = verdicts._dir_digest(self.at("data", "sizes"))
+        self.assertNotEqual(before, grown, "a size decided over os.scandir moved nothing")
+        os.rmdir(self.at("data", "sizes", "sub"))
+        _write(self.root, "data/sizes/sub", "now a file\n")
+        self.assertNotEqual(grown, verdicts._dir_digest(self.at("data", "sizes")),
+                            "an entry that changed kind under the same name moved nothing")
+        _write(self.root, "data/sizes/__pycache__/a.cpython-312.pyc", "bytecode")
+        self.assertEqual(verdicts._dir_digest(self.at("data", "sizes")),
+                         verdicts._dir_digest(self.at("data", "sizes")))
 
 
 class ImportNoise(_env.EnvCase):

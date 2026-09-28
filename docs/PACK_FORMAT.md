@@ -283,8 +283,9 @@ class GateContext:                     # a gate's one argument — a traced view
 
 **The context a gate receives is a traced view of its own.** `run_gate` never hands a
 gate the sweep's context. Every read of `ctx.params`, of a claim through `ctx.ledger`,
-and of a file the gate opens is recorded, because a verdict is only as current as the
-inputs it read — the verdict cache keys each verdict by exactly those reads (`rho`). So:
+of a file the gate opens, and every question it asks of a path, is recorded, because a
+verdict is only as current as the inputs it read — the verdict cache keys each verdict
+by exactly those reads (`rho`). So:
 
 - **`ctx.params` is read-only.** `ctx.params["load_n"] = 0` — or `update`, `pop`,
   `setdefault`, a write into a nested dict — raises `GateInputWriteError` ("a gate
@@ -310,6 +311,17 @@ inputs it read — the verdict cache keys each verdict by exactly those reads (`
   to any of those between two gates of one sweep loads it again. A hit is the same
   object for every caller: copy it before you change it. Outside a sweep
   (`ctx.memo is None`, a hand-run script) it simply loads.
+- **Asking whether a file is there is reading it.** `os.path.isfile`, `exists`,
+  `isdir`, `getsize`, `pathlib.Path.exists`/`is_file`, a `glob` of a literal path: a
+  path under the project or your pack that the gate asked about is one of its inputs —
+  a regular file by its bytes, a directory by its kind, a missing one as missing — so
+  the verdict goes stale when a named file appears, vanishes or changes. (What slipped
+  through before: `os.stat` raises no audit event, so `modelica.source_hygiene`
+  skipped a named `.mo` that was not there yet, recorded nothing, and kept a Fresh PASS
+  after it appeared.) A listing is keyed by each entry's name, kind and size, since
+  `DirEntry.stat()` is invisible otherwise. Not keyed: questions about paths outside
+  the project (every `shutil.which` asks dozens) and mtimes (they differ per
+  checkout) — never decide a verdict on either.
 - **`ctx.ledger` holds no verdicts.** A gate that read other gates' verdicts would put
   verdicts inside its own content address. Claims are readable; `ctx.ledger.claim(id)`
   makes that claim an input.

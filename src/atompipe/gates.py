@@ -504,9 +504,10 @@ class GateContext:
         loader runs inside this view's window and under a trace of its own
         (``verdicts.tracing``), so this gate and every trace open around it record
         what it opened as they would any open; the entry keeps that trace, and a
-        hit replays it (``verdicts.replay``) — files, listed directories and
-        opaque channels — into every caller. What slipped through before: the hit
-        reported only the file it was handed, so a ``.gltf``'s ``.bin`` buffers
+        hit replays it (``verdicts.replay``) — files, the paths it only asked
+        about, listed directories and opaque channels — into every caller. What
+        slipped through before: the hit reported only the file it was handed, so
+        a ``.gltf``'s ``.bin`` buffers
         (an ``.obj``'s ``.mtl``, any include a loader follows) were inputs of the
         gate that missed and of no gate that hit. Bundled ``fdm.bridge_span`` kept
         a Fresh PASS after the buffers moved, while ``fdm.overhang``, which had
@@ -523,9 +524,10 @@ class GateContext:
         inside the gate body never hits either — pass a module-level function. The
         entry holds the loader itself, so its ``id`` cannot be reused by a new
         function while the entry lives, and the stat signature of every path the
-        loader read or listed (``_signatures``), so bytes rewritten between two
-        gates of one sweep are loaded again — a hit on the old bytes would have
-        put the new bytes' digest on a verdict computed from the old ones. The
+        loader read, listed or asked about (``_signatures``), so bytes rewritten
+        between two gates of one sweep are loaded again — a hit on the old bytes
+        would have put the new bytes' digest on a verdict computed from the old
+        ones. The
         named file's signature is taken before the load and the rest after it,
         since only the load says what they are; a path the loader probed and
         found missing is signed as missing, and a hit needs it still missing.
@@ -587,8 +589,9 @@ def _load(abspath: str, loader: Callable[[str], Any] | None) -> Any:
 
 
 def _signatures(loaded: GateTrace, named: str) -> tuple:
-    """``((path, stat signature), ...)`` for every path a loader read or listed
-    but the one it was handed (signed before the load, by the caller).
+    """``((path, stat signature), ...)`` for every path a loader read, listed or
+    asked about (``os.path.exists`` on an optional sidecar) but the one it was
+    handed (signed before the load, by the caller).
 
     A read the loader made of a file it had itself written first never reaches
     ``files_read``, so a scratch file the loader writes and reads back is not
@@ -599,6 +602,7 @@ def _signatures(loaded: GateTrace, named: str) -> tuple:
     and the check would itself become a read of every trace open at the hit).
     """
     paths = [path for path in loaded.files_read if path != named]
+    paths += [path for path in loaded.stats if path != named]
     paths += sorted(loaded.dirs)
     return tuple((path, _stat_signature(path)) for path in dict.fromkeys(paths))
 

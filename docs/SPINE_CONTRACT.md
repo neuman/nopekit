@@ -603,6 +603,7 @@ the object.
 ```python
 ABSENT: str                  # sha256(b"atompipe:absent\0") — a key the gate asked for, not there
 PRESENT: str                 # sha256(b"atompipe:present\0") — `k in params`, presence only
+DIRECTORY: str               # sha256(b"atompipe:directory\0") — a file input that is a directory
 SPINE_MODULES = ("models.py", "gates.py", "modelio.py", "verdicts.py")
 SMALL_VALUE_MAX_CHARS = 80   # a str this short (any bool, int, finite float) is shown beside its digest
 
@@ -628,12 +629,14 @@ class GateTrace:
     files_read: list[str]              # absolute, first-read order, never this window's own output
     files_written: set[str]
     dirs: set[str]                     # directories listed
+    stats: list[str]                   # asked the existence, kind or size of; first-ask order
     opaque: set[str]                   # "subprocess:omc", "network", "param mesh: <Type> is not JSON"
     model_used: bool
     host_reads: dict[tuple, str]       # what a control read from the HOST context
     fixture_code: Any                  # the fixture's CodeClosure, set by gates.selftest
     anchors: Anchors | None            # makes path-valued param digests portable
     def self_modified(self) -> list[str]   # read, THEN written, in this window
+    def stat_existed(self, path) -> bool | None   # what the first question found; None: cannot say
 
 class ParamTrace(dict):
     def __init__(self, data=None, trace=None, *, path=(), readonly=True, host=False)
@@ -644,8 +647,8 @@ class ModelProxy:
 class GateInputWriteError(AtompipeError): ...  # "a gate cannot write another gate's inputs: ctx.params['x']"
 
 def traced_context(ctx, trace, *, readonly=True)   # -> the same dataclass type as ctx
-def tracing(trace)                                 # `with tracing(t):` routes audit events to t
-def replay(recorded, trace=None)                   # recorded's files, dirs, opaque -> every open trace and trace
+def tracing(trace)                                 # `with tracing(t):` routes audit events and stats to t
+def replay(recorded, trace=None)                   # recorded's files, stats, dirs, opaque -> every open trace and trace
 def canonical_ast_digest(source) -> str            # "" when it does not parse
 def spine_digest() -> str                          # "" when a SPINE_MODULES source is unreadable
 ```
@@ -724,14 +727,37 @@ parses line fragments for its carets, and the SyntaxError opens `<unknown>`); an
 under the interpreter's prefixes and library directories, site-packages, the USER site
 (trimesh and numpy live in `~/.local`), the installed atompipe package, `/proc`, `/sys`,
 `/dev`, or ending `.pyc` — machine-specific reads that would make every entry stale on
-every other machine. Not seen, and named: `os.stat` and every environment read fire no
-event; a subprocess's own reads (hence opaque); an `os.open` relative to a `dir_fd`.
+every other machine. Not seen, and named: every environment read fires no event; a
+subprocess's own reads (hence opaque); an `os.open` or `os.stat` relative to a `dir_fd`.
 What slipped through while writing it: `sys._getframe` raises an audit event of its
 own, so the hook re-entered itself until the recursion limit and aborted the `open` it
 was auditing — it now carries a per-thread re-entrancy guard.
 
-**`replay(recorded, trace=None)`** records again what the hook routed to `recorded` —
-`files_read` (reads first), `files_written`, `dirs`, `opaque` — into every trace open
+**The stat probes.** `os.stat` raises no audit event, and every existence, kind and
+size question the standard library asks ends in it or in `os.lstat`: `os.path.exists`,
+`isfile`, `isdir`, `getsize`, `getmtime`, `samefile`, `lexists`, `islink`, `realpath`,
+`pathlib`'s `stat`/`exists`/`is_file`/`is_dir`, a `glob` of a literal path. What
+slipped through (review round 1): `gather_mo_files` skips a `modelica_sources` entry
+`os.path.isfile` says is not there, so bundled `modelica.source_hygiene` recorded
+`{model/A.mo}`, kept a Fresh PASS after `model/B.mo` appeared, and failed `1/2
+parameter(s) undefendable` when forced. So when `verdicts` is imported, `os.stat` and
+`os.lstat` — and any `os.path` predicate that is C (Windows since 3.12) — are replaced
+by probes that call the original and, while a window is open, note the absolute path
+and whether it existed on every open trace (`GateTrace.stats`); the probes join the
+`os.supports_*` sets the originals are in. At import, not on the first push: the
+registry imports every gate module before a window opens, and a `from os import stat`
+there binds whatever `os.stat` is then. Excluded like the hook's events: the hook's own
+questions (the re-entrancy guard), paths under the library roots, and questions whose
+first caller outside `os`/`genericpath`/`posixpath`/`ntpath`/`pathlib`/`glob` is
+import machinery, `linecache` (which stats every source it caches), `tokenize`,
+`warnings` or `traceback`. A path this window wrote first is its own output and is not
+noted. Not seen, and named: a module that bound the original before the spine was
+imported; `os.DirEntry.stat()`, which is C and calls nothing — a listing's digest
+carries each entry's kind and size instead.
+
+**`replay(recorded, trace=None)`** records again what the hook and the probes routed to
+`recorded` — `files_read` and `stats` (first, each with whether it existed),
+`files_written`, `dirs`, `opaque` — into every trace open
 now and into `trace`, even with no window open around it; the views' channels (params,
 ledger, model) are not replayed. It is how `GateContext.load_file` makes a memo hit
 record every file the loader opened on the miss (a `.gltf`'s `.bin` buffers): the hit
@@ -784,8 +810,8 @@ class CodeRef:
 @dataclass
 class Reads:
     params: list          # [[path, digest], ...] or [[path, digest, small], ...]; path a JSON list
-    files: dict           # {portable path: sha256 | None}   None: missing, itself an input
-    dirs: dict            # {portable path: digest of sorted entry names | None}
+    files: dict           # {portable path: sha256 | DIRECTORY | None}   None: missing, itself an input
+    dirs: dict            # {portable path: digest of sorted [name, kind or size] | None}
     ledger: dict          # {"claim:<id>" | "claims" | ...: digest}
     model: str | None     # model_digest, when the gate used ctx.model
     opaque: list          # sorted channel names: an entry with any is never Fresh
@@ -862,13 +888,29 @@ dropped; 2. read and then written in the window — opaque `self-modified:<path>
 `out_dir` and not written in the window — opaque `out:<rel> (not written by this
 gate)` (another gate's output is a cross-gate channel shaped like S-27); 5. under
 `<root>/.atompipe/` — opaque `atompipe-state:<rel>`; 6. under the root — a read
-`<rel>` (bare, posix); 7. anything else — opaque `file-outside-project:<path>`. In a
+`<rel>` (bare, posix); 7. anything else — opaque `file-outside-project:<path>`.
+A path the trace only ASKED about (`stats`) and neither opened nor listed is a file
+input under the root or a pack, like a read; asked while missing and made, asked while
+there and removed, or asked and then written in the window, it is opaque
+`self-modified:<path>` instead — the state the gate decided on is gone. Everywhere else
+a question is not what a read is, because honest gates ask them constantly
+(`shutil.which` stats every `PATH` entry, `realpath` every ancestor of the root,
+`os.makedirs` every ancestor of the out dir): outside the root and the packs it is
+dropped (named residual: a gate deciding on a file outside its project), and under the
+out dir or `.atompipe/` a directory, or a path at or above what the window wrote, is
+dropped while any other file or missing path is opaque like a read there. In a
 **control** trace a read under the owner's `selftest/` is dropped: the static walk
 keys it, and a fixture module's import-time read of `baseline.json` happens only on
 its first load in a process. `static=` (the files the walk covered) narrows that to
 exactly those files. Files are digested after the gate returns, through `digests`
-(`util.FileDigests`); a listing is the digest of its sorted entry names without
-`__pycache__` or bytecode. `anchors` defaults to `trace.anchors`, else to `<tmp>`/`~`
+(`util.FileDigests`), a directory as `DIRECTORY` and a missing path as `None` (a
+directory was `None` too, so a named directory that appeared or vanished moved
+nothing); a listing is the digest of its sorted `[name, "dir" | size in bytes |
+"other"]` entries without `__pycache__` or bytecode — kinds and sizes because a gate
+that iterates `os.scandir` decides on `os.DirEntry.is_file()` and
+`os.DirEntry.stat()`, which the listing is the only record of. Mtimes are not in it
+(they differ per checkout): a gate deciding on one is a named residual. `anchors`
+defaults to `trace.anchors`, else to `<tmp>`/`~`
 only — every project file then reads as outside, opaque: an unanchored trace is never
 Fresh rather than wrongly portable. The trace's own channels pass through
 (`subprocess:omc`, `network`, `param <path>: <Type> is not JSON`). A gate that used
@@ -1318,10 +1360,11 @@ trace open around it — on EVERY call, hit or miss, and memoises `loader(abspat
 bytes by default) in `memo` on `(abspath, id(loader))` (a bound method by its object and
 function). The loader runs inside the view's window and, on a miss, under a `GateTrace`
 of its own that the entry keeps; a hit `replay`s it, so every caller records every file,
-directory and opaque channel the loader touched — a `.gltf`'s `.bin` buffers, an `.obj`'s
-`.mtl` — not only the named file. The entry is revalidated by the stat signature of the
-named file (taken before the load) and of every other path the loader read or listed
-(after it; a path probed and missing must still be missing). No memo: it just loads,
+question, directory and opaque channel the loader touched — a `.gltf`'s `.bin` buffers,
+an `.obj`'s `.mtl`, an `os.path.exists` on an optional sidecar — not only the named file.
+The entry is revalidated by the stat signature of the named file (taken before the load)
+and of every other path the loader read, listed or asked about (after it; a path probed
+and missing must still be missing). No memo: it just loads,
 inside the same window (a hand-run check script, packs:H15).
 
 **Controls, traced.** `selftest(spec, fn, ctx, *, trace=None, out_dir=None)`: the
@@ -2238,6 +2281,8 @@ a reader of the output meets it:
   after the gate returns, so a file rewritten while the gate read it keys the rewrite.
 - **Smaller edges, named in their sections:** an explicit `dict.__getitem__` call on
   `ctx.params` is not recorded, and a mutable non-JSON leaf is handed out by reference
-  (`ParamTrace`); `os.stat` fires no audit event, and an `os.open` relative to a
-  `dir_fd` is not resolved (the audit hook); a subprocess's own reads are opaque, never
-  covered.
+  (`ParamTrace`); an `os.open` or `os.stat` relative to a `dir_fd` is not resolved,
+  and a name bound to `os.stat` before the spine was imported is not probed (the audit
+  hook, the stat probes); an existence question outside the project is not an input,
+  and a decision on an mtime is not keyed (`Reads.from_trace`); a subprocess's own
+  reads are opaque, never covered.

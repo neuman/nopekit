@@ -124,13 +124,48 @@ def bulk_{r}_{l}(ctx):
     return Verdict(gate="t.bulk_{r}_{l}", passed=x < 10.0, measured=x, limit=10.0)
 '''
 
+#: One existence or kind question per standard-library spelling, each over a
+#: ``path`` the gate never opens. None raises an audit event: ``genericpath``,
+#: ``pathlib`` and a literal ``glob`` all end in ``os.stat`` / ``os.lstat``, and
+#: the gather_mo_files miss (review round 1) was the first of them.
+STATS = {
+    "isfile": "os.path.isfile(path)",
+    "exists": "os.path.exists(path)",
+    "lexists": "os.path.lexists(path)",
+    "isdir": "os.path.isdir(path)",
+    "stat": "_stats(path, os.stat)",
+    "lstat": "_stats(path, os.lstat)",
+    "path_exists": "pathlib.Path(path).exists()",
+    "path_is_file": "pathlib.Path(path).is_file()",
+    "glob": "bool(glob.glob(path))",
+}
+STAT_GATES = [f"t.stat_{name}" for name in STATS]
+
+#: What makes each veto exist: a directory for ``isdir``, a file otherwise.
+def _veto(name: str) -> str:
+    return f"data/veto_{name}/keep.txt" if name == "isdir" else f"data/veto_{name}"
+
+
+_STAT_GATE = '''
+
+@gate(id="t.stat_{name}", title="t", claims=["stat_{name}"], negative_control=_nc("low_root"))
+def stat_{name}(ctx):
+    path = _at(ctx, "data/veto_{name}")
+    vetoed = {expr}
+    return Verdict(gate="t.stat_{name}", passed=not vetoed, measured=float(vetoed), limit=0.0)
+'''
+
 GATES = '''\
 import ast
 import copy
+import glob
 import json
 import os
+import pathlib
+import shutil
 import subprocess
 import sys
+import tempfile
 
 from atompipe.gates import gate
 from atompipe.models import NegativeControl, Verdict
@@ -231,7 +266,70 @@ def crashy(ctx):
     if FLAGS["crash"] and x < 10.0:
         raise RuntimeError("tripped over the real design")
     return Verdict(gate="t.crashy", passed=x < 10.0, measured=x, limit=10.0)
-''' + "".join(_BULK_GATE.format(r=r, l=l, expr=READERS[r].format(p=LEVELS[l]))
+
+
+def _at(ctx, rel):
+    return os.path.join(ctx.root, *rel.split("/"))
+
+
+#: t.named's inputs: a list of files, not all of which need exist yet — the way
+#: openmodelica's ``modelica_sources`` names its ``.mo`` files.
+NAMED = ("data/named/a.txt", "data/named/b.txt")
+
+
+@gate(id="t.named", title="t", claims=["named"], negative_control=_nc("low_root"))
+def named(ctx):
+    # gather_mo_files' shape: a named file that is not there yet is skipped,
+    # decided by os.path.isfile — which opens nothing.
+    values = [_number(ctx, rel) for rel in NAMED if os.path.isfile(_at(ctx, rel))]
+    low = min(values)
+    return Verdict(gate="t.named", passed=low >= 1.0, measured=low, limit=1.0)
+
+
+def _stats(path, fn):
+    try:
+        fn(path)
+    except OSError:
+        return False
+    return True
+
+
+#: t.stat_<name>: passes while its veto ``data/veto_<name>`` is absent, asked
+#: through one existence or kind question and never opened.
+@gate(id="t.cert", title="t", claims=["cert"], negative_control=_nc("low_root"))
+def cert(ctx):
+    # the other direction: an input that must be there, and is removed
+    held = os.path.isfile(_at(ctx, "data/cert.pdf"))
+    return Verdict(gate="t.cert", passed=held, measured=float(held), limit=1.0)
+
+
+@gate(id="t.getsize", title="t", claims=["getsize"], negative_control=_nc("low_root"))
+def getsize(ctx):
+    size = float(os.path.getsize(_at(ctx, "data/sized.txt")))
+    return Verdict(gate="t.getsize", passed=size < 10.0, measured=size, limit=10.0)
+
+
+@gate(id="t.entry_size", title="t", claims=["entry_size"], negative_control=_nc("low_root"))
+def entry_size(ctx):
+    # DirEntry.stat() is C: no os.stat call, no audit event. The listing is the
+    # read, so the listing's digest must carry what the gate decided on.
+    with os.scandir(_at(ctx, "data/sizes")) as it:
+        size = float(max(entry.stat().st_size for entry in it))
+    return Verdict(gate="t.entry_size", passed=size < 10.0, measured=size, limit=10.0)
+
+
+@gate(id="t.outside", title="t", claims=["outside"], negative_control=_nc("low_root"))
+def outside(ctx):
+    # Existence questions every honest gate asks: a tool on PATH, the temp dir,
+    # a realpath (an lstat of every component, the project root included).
+    # None of them may make the gate never Fresh.
+    shutil.which("atompipe-no-such-tool")
+    os.path.isdir(tempfile.gettempdir())
+    os.path.realpath(_at(ctx, "data/limit.txt"))
+    value = _number(ctx, "data/limit.txt")
+    return Verdict(gate="t.outside", passed=value >= 1.0, measured=value, limit=1.0)
+''' + "".join(_STAT_GATE.format(name=name, expr=STATS[name]) for name in STATS) \
+    + "".join(_BULK_GATE.format(r=r, l=l, expr=READERS[r].format(p=LEVELS[l]))
               for r in READERS for l in LEVELS)
 
 #: S-26's gate, in a module of its own: an edit to it moves no other gate's code.
@@ -311,8 +409,10 @@ def bad_x(ctx):
 
 TAGS = {"C_ST": "stress", "C_FI": "file", "C_SU": "sub", "C_CL": "claimread",
         "C_OP": "opt", "C_MA": "memo_a", "C_MB": "memo_b", "C_CR": "crashy",
-        "C_SA": "same", "C_HE": "helped", "C_BA": "buf_a", "C_BB": "buf_b"}
-TAGS.update({f"C_{gid[len('t.'):]}": gid[len("t."):] for gid in BULK})
+        "C_SA": "same", "C_HE": "helped", "C_BA": "buf_a", "C_BB": "buf_b",
+        "C_NA": "named", "C_CE": "cert", "C_GS": "getsize", "C_ES": "entry_size",
+        "C_OU": "outside"}
+TAGS.update({f"C_{gid[len('t.'):]}": gid[len("t."):] for gid in BULK + STAT_GATES})
 CLAIM_OF = {f"t.{tag}": cid for cid, tag in TAGS.items()}
 CLAIM_OF["t.claim"] = "C_CL"
 
@@ -349,6 +449,18 @@ def plant(root: str) -> str:
         write(root, f"{data}/head.txt", "buffer buf.txt\n")
     write(root, "data/buf.txt", "2.0\n")
     write(root, "selftest/low/data/buf.txt", "0.5\n")
+    # the existence, kind and size channels: named-but-missing b.txt, a present
+    # cert, small sizes, and no veto — and a low root where each one fails
+    write(root, "data/named/a.txt", "2.0\n")
+    write(root, "selftest/low/data/named/a.txt", "0.5\n")
+    write(root, "data/cert.pdf", "%PDF-1.4\n")
+    write(root, "data/sized.txt", "2.0\n")
+    write(root, "selftest/low/data/sized.txt", "a line far past ten bytes\n")
+    for name in ("x", "y"):
+        write(root, f"data/sizes/{name}.txt", "2.0\n")
+    write(root, "selftest/low/data/sizes/x.txt", "a line far past ten bytes\n")
+    for name in STATS:
+        write(root, "selftest/low/" + _veto(name), "veto\n")
     return root
 
 
@@ -809,6 +921,122 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertNotEqual(p.statuses(grown, resolution)["C_OP"], PASS)
         self.assertEqual(row(p.sweep(grown, only=["t.opt"]), "t.opt").verdict.outcome, "fail")
 
+    def test_a_named_file_that_appears_after_its_existence_check(self):
+        """V: a gate skips a named input that is not there yet, deciding on
+        ``os.path.isfile`` — a stat, which raises no audit event, so the absence
+        was an input nothing recorded. Found live on the bundled pack:
+        ``modelica.source_hygiene`` names ``[model/A.mo, model/B.mo]``, finds only
+        A, passes; B.mo appears with ``parameter Real k = 0.62;`` and a plain
+        check served the cached PASS as current, where a forced run failed it
+        (1/2 parameters undefendable). The file the gate did not find is the
+        input its verdict rests on, missing — and its appearing is a move."""
+        p = Project(self)
+        base = projection()
+        p.sweep(base, only=["t.named"])
+        self.assertEqual(p.statuses(base)["C_NA"], PASS, "the positive control")
+        files = p.entry("t.named").reads["files"]
+        self.assertIn("data/named/a.txt", files)
+        self.assertIn("data/named/b.txt", files,
+                      "the named file the gate found missing is not recorded as an input")
+        self.assertIsNone(files["data/named/b.txt"], "recorded as missing")
+
+        write(p.root, "data/named/b.txt", "0.5\n")
+        resolution = p.resolve(base)
+        self.assertIn("t.named", resolution.stale_gates)
+        self.assertIn("data/named/b.txt added", resolution.rows["t.named"].stale_reason)
+        self.assertNotEqual(p.statuses(base, resolution)["C_NA"], PASS)
+        got = row(p.sweep(base, only=["t.named"]), "t.named")
+        self.assertTrue(got.executed, "a named input that appeared was served from the cache")
+        self.assertEqual(got.verdict.outcome, "fail")
+
+    def test_every_existence_and_kind_question_is_an_input(self):
+        """V: the same hole through every standard-library spelling of "is it
+        there" — ``exists``, ``lexists``, ``isfile``, ``isdir``, ``os.stat``,
+        ``os.lstat``, ``pathlib``'s ``exists``/``is_file``, a literal ``glob`` —
+        each a gate that passes while its veto is absent, and none of which
+        opens it."""
+        p = Project(self)
+        base = projection()
+        p.sweep(base, only=STAT_GATES)
+        before = p.statuses(base)
+        for name in STATS:
+            write(p.root, _veto(name), "veto\n")
+        resolution = p.resolve(base)
+        after = p.statuses(base, resolution)
+        again = p.sweep(base, only=STAT_GATES)
+        for name in STATS:
+            gate_id = f"t.stat_{name}"
+            cid = CLAIM_OF[gate_id]
+            with self.subTest(channel=name):
+                self.assertEqual(before[cid], PASS, "the positive control")
+                self.assertIn(gate_id, resolution.stale_gates,
+                              f"{STATS[name]}: the veto appeared and the PASS stayed Fresh")
+                self.assertIn(f"data/veto_{name} added", resolution.rows[gate_id].stale_reason)
+                self.assertNotEqual(after[cid], PASS)
+                got = row(again, gate_id)
+                self.assertTrue(got.executed)
+                self.assertEqual(got.verdict.outcome, "fail")
+
+    def test_a_file_whose_existence_was_checked_is_removed(self):
+        """V: the other direction — a gate that passes because a file is there
+        (the probe's ``os.path.isfile(inputs/cert.pdf)``) kept a Fresh PASS
+        after the file was deleted, and failed when forced."""
+        p = Project(self)
+        base = projection()
+        p.sweep(base, only=["t.cert"])
+        self.assertEqual(p.statuses(base)["C_CE"], PASS, "the positive control")
+        os.remove(p.path("data/cert.pdf"))
+        resolution = p.resolve(base)
+        self.assertIn("t.cert", resolution.stale_gates)
+        self.assertIn("data/cert.pdf removed", resolution.rows["t.cert"].stale_reason)
+        self.assertNotEqual(p.statuses(base, resolution)["C_CE"], PASS)
+        got = row(p.sweep(base, only=["t.cert"]), "t.cert")
+        self.assertTrue(got.executed)
+        self.assertEqual(got.verdict.outcome, "fail")
+
+    def test_a_size_decided_without_opening_the_file(self):
+        """V: ``os.path.getsize`` is a stat; ``DirEntry.stat()`` is not even
+        that — C, no ``os.stat`` call, no event — and a listing was digested as
+        its names, so a size decided over ``os.scandir`` moved nothing."""
+        p = Project(self)
+        base = projection()
+        gate_ids = ["t.getsize", "t.entry_size"]
+        p.sweep(base, only=gate_ids)
+        before = p.statuses(base)
+        write(p.root, "data/sized.txt", "a line far past ten bytes\n")
+        write(p.root, "data/sizes/y.txt", "a line far past ten bytes\n")
+        resolution = p.resolve(base)
+        after = p.statuses(base, resolution)
+        again = p.sweep(base, only=gate_ids)
+        for gate_id in gate_ids:
+            with self.subTest(gate=gate_id):
+                self.assertEqual(before[CLAIM_OF[gate_id]], PASS, "the positive control")
+                self.assertIn(gate_id, resolution.stale_gates)
+                self.assertNotEqual(after[CLAIM_OF[gate_id]], PASS)
+                got = row(again, gate_id)
+                self.assertTrue(got.executed)
+                self.assertEqual(got.verdict.outcome, "fail")
+
+    def test_existence_questions_outside_the_project_leave_a_gate_fresh(self):
+        """The cost side of the stat channel, which must stay a cost: a tool
+        looked up on PATH, the temp dir, and the lstat of every component a
+        realpath makes — the project root included — are not inputs that make
+        a gate never Fresh, and a file added beside a directory the gate only
+        asked the kind of does not stale it."""
+        p = Project(self)
+        base = projection()
+        got = row(p.sweep(base, only=["t.outside"]), "t.outside")
+        self.assertEqual(got.verdict.outcome, "pass")
+        entry = p.entry("t.outside")
+        self.assertEqual(entry.reads["opaque"], [], "an existence question outside the "
+                                                    "project was filed as an opaque input")
+        self.assertNotIn("t.outside", p.resolve(base).stale_gates)
+        self.assertEqual(p.statuses(base)["C_OU"], PASS)
+        write(p.root, "data/unrelated.txt", "x\n")
+        write(p.root, "unrelated.txt", "x\n")
+        self.assertNotIn("t.outside", p.resolve(base).stale_gates,
+                         "a directory whose kind the gate asked was keyed by its listing")
+
     def test_s27_a_memo_shared_file_edit_stales_both_gates(self):
         p = Project(self)
         base = projection()
@@ -1088,6 +1316,51 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertEqual(_rows(again)["bracket.datasheet"]["outcome"], "fail")
         seen, _proven_now = _seen(project)
         self.assertEqual(seen["C3"], "fail")
+
+    def test_cli_the_bundled_source_hygiene_sees_a_named_mo_that_appears(self):
+        """V: the review's repro, through the CLI a person runs, on the bundled
+        pack. ``modelica_sources`` names ``model/A.mo`` and ``model/B.mo``;
+        only A exists, and ``gather_mo_files`` skips B on an ``os.path.isfile``
+        that opened nothing. ``check`` passed and recorded ``{model/A.mo}``;
+        after B.mo appeared with an undocumented, unitless parameter a plain
+        ``check`` said ``0 executed, 1 cached — 1 ok``, and ``--force`` failed
+        it: ``1/2 parameter(s) undefendable … B.k``. The gate is tier 0 and
+        runs in CI."""
+        project = os.path.join(self.tmp(), "mo")
+        os.makedirs(project)
+        _text(_cli(project, "init"), 0)
+        _put(project, "model/m.py", "from dataclasses import dataclass, field\n\n\n"
+             "@dataclass\nclass Config:\n    modelica_sources: list = field("
+             "default_factory=lambda: [\"model/A.mo\", \"model/B.mo\"])\n\n\n"
+             "CONFIG = Config()\n\n\ndef build(config):\n    return {}\n")
+        _put(project, "model/A.mo",
+             'model A\n  parameter Real m(unit="kg") = 1.0 "mass";\nend A;\n')
+        meta_path = os.path.join(project, ".atompipe", "project.json")
+        with open(meta_path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+        meta.update(model_entry="model/m.py", packs=["openmodelica"])
+        _put(project, ".atompipe/project.json", json.dumps(meta, indent=2) + "\n")
+        _put(project, "claims/C1.json", json.dumps(
+            {"statement": "every parameter is defendable", "kind": "measurable",
+             "acceptance": {"quantity": "undefendable", "comparator": "<=", "limit": 0,
+                            "units": ""},
+             "tags": ["model-hygiene"]}) + "\n")
+
+        gate_id = "modelica.source_hygiene"
+        first = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
+        self.assertEqual(first["outcome"], "pass", "the positive control")
+        self.assertIn("model/B.mo", _entry_docs(project)[gate_id]["reads"]["files"],
+                      "the named .mo the gate found missing is not its input")
+
+        _put(project, "model/B.mo", "model B\n  parameter Real k = 0.62;\nend B;\n")
+        status = _doc(_cli(project, "status", "--json"), 0)
+        self.assertIn(gate_id, status["stale_gates"],
+                      "a named .mo appeared and the PASS read current")
+        self.assertIn("model/B.mo added", status["freshness"][gate_id]["reasons"][0])
+        self.assertNotEqual(status["claims"]["C1"], "pass")
+        again = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
+        self.assertFalse(again["cached"], "the cached PASS was served after B.mo appeared")
+        self.assertEqual(again["outcome"], "fail")
 
 
 # --------------------------------------------------------------------------- #
