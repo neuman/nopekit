@@ -63,7 +63,11 @@ library and the CLI never asked. On the bracket and on wrapped pack baselines
 * a Config default edit re-verifies all six controls by their fixtures alone
   (nothing executed, nothing new on disk), while a `build()` edit that moves a
   value a control fed its gate writes a new control entry for exactly the gates
-  whose recorded control reads moved (S-19's model-code half).
+  whose recorded control reads moved (S-19's model-code half);
+* a `module:function` fixture outside `selftest/` edited into a no-op — the
+  same-size edit, over bytecode a hand run left beside it — is not admitted,
+  and one whose code no loader records re-runs its fixture on every check
+  (admission review, round 1, C).
 
 Scenarios that edit code run the sweep in a fresh process (`_DRIVER`, through
 `_env.run`), per spec §0.4: an in-process module cache must never be what makes
@@ -76,8 +80,10 @@ from __future__ import annotations
 
 import dataclasses
 import glob
+import importlib.util
 import json
 import os
+import py_compile
 import re
 import sys
 import textwrap
@@ -660,6 +666,17 @@ def context(ctx):
     return dataclasses.replace(ctx, params={"span": 80.0}, ledger=Ledger(claims=[c1]),
                                extra={})
 '''
+
+#: The shelf gate's declaration, as `SHELF_GATE` spells it — the one line the
+#: module-form fixture tests replace with an importable `module:function`.
+SHELF_FIXTURE_DECL = 'fixture="selftest/bad.py:long"'
+
+#: The known-bad span line of `SHELF_LONG`, and the same-size edit that
+#: defuses it: `040.0` is 40 mm, which the gate accepts. Same size on purpose —
+#: with the source's mtime put back, a `.pyc` beside it still validates, and
+#: the stock import runs the 400 mm bytecode (S-26).
+SHELF_BAD_SPAN = 'params["span"] = 400.0'
+SHELF_DEFUSED_SPAN = 'params["span"] = 040.0'
 
 #: A cache entry's file name inside its gate's directory (spec §3.7).
 ENTRY_NAME = re.compile(r"^[0-9a-f]{16}-[0-9a-f]{8}\.json$")
@@ -1560,6 +1577,122 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                          f"the control still fires, so the live FAIL stands admitted: {got}")
         [new] = after["bracket.deflection"] - before["bracket.deflection"]
         self.assertEqual(read_control(project, "bracket.deflection", new)["bad"], "fail")
+
+    def _shelf_module_fixture(self, ref: str, files: dict[str, str]) -> str:
+        """The shelf at span 80 with its control's fixture declared as the
+        importable ``ref`` (``module:function``) and written as ``files`` —
+        outside ``selftest/``, so no byte of it is in the control's static part
+        (a ``selftest/known_good.py`` among ``files`` makes the host known-good,
+        else it is live). Its first check is the precondition: exit 0, the
+        control run and filed, C1 under PROVEN."""
+        project = os.path.join(self.tmp(), "shelf")
+        self.assertEqual(SHELF_GATE.count(SHELF_FIXTURE_DECL), 1)
+        write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
+        write(project, "gates/g.py", SHELF_GATE.replace(SHELF_FIXTURE_DECL, f'fixture="{ref}"'))
+        write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
+        for rel, text in files.items():
+            write(project, rel, text)
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(data["counts"]["controls"],
+                         {"executed": 1, "cached": 0, "reverified": 0}, data["counts"])
+        self.assertIn("**C1**", proven_section(self, project))
+        return project
+
+    def _refused(self, project: str, ref: str) -> None:
+        """The defused control, through every door: ``check`` re-runs it and
+        refuses the gate, BLOCKING names C1, no reader says PASS, the report
+        keeps it out of PROVEN, and ``gate selftest`` agrees."""
+        code, data = check_json(self, project)
+        self.assertEqual(data["counts"]["controls"]["executed"], 1,
+                         f"the defused fixture's control was served, not re-run: "
+                         f"{data['counts']}")
+        got = verdict_row(data, "shelf.span")
+        self.assertEqual(got["outcome"], "error", got)
+        self.assertIn(f"not admitted: PASSED its own known-bad fixture {ref}", got["error"])
+        self.assertEqual(code, 1, "a fixture edited into a no-op admitted its gate")
+        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertNotIn("**C1**", proven_section(self, project))
+        proc = cli(project, "gate", "selftest", "--no-record")
+        self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn(f"PASSED its own known-bad fixture {ref}", proc.stdout)
+
+    def test_cli_a_module_fixture_edited_into_a_no_op_is_not_admitted(self):
+        """V: the admission review's repro C (round 1). ``load_fixture``'s
+        ``module:function`` form went through ``importlib.import_module``, so
+        no loader recorded the fixture's closure and the control entry's hint
+        was ``{"files": {}}`` — an empty mapping never moves, so the hint always
+        held; and ``fixtures/bad.py`` sits outside ``selftest/``, so no byte of
+        it was in the static part either. Defused 400 -> 40 mm, ``check`` said
+        ``0 executed, 1 cached`` and exited 0 while ``gate selftest`` said
+        PASSED its own known-bad fixture. The edit here is the same-size one
+        over bytecode a hand run (``python -c "import fixtures.bad"``) left
+        beside it, the source's mtime put back: re-running the fixture through
+        the stock import alone would still build 400 mm from that ``.pyc``."""
+        ref = "fixtures.bad:long"
+        project = self._shelf_module_fixture(ref, {"fixtures/__init__.py": "",
+                                                   "fixtures/bad.py": SHELF_LONG})
+        [name] = control_names(project)["shelf.span"]
+        self.assertIn("fixtures/bad.py",
+                      read_control(project, "shelf.span", name)["fixture"]["files"],
+                      "the module fixture's code closure was not recorded")
+
+        path = os.path.join(project, "fixtures", "bad.py")
+        py_compile.compile(path, cfile=importlib.util.cache_from_source(path), doraise=True)
+        stat = os.stat(path)
+        edit(project, "fixtures/bad.py", SHELF_BAD_SPAN, SHELF_DEFUSED_SPAN)
+        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(os.stat(path).st_size, stat.st_size, "the edit is not same-size")
+        self._refused(project, ref)
+
+        # The positive control: the fixture restored is admitted again, and C1
+        # reads PROVEN — so the refusal above was the no-op's, not the form's.
+        edit(project, "fixtures/bad.py", SHELF_DEFUSED_SPAN, SHELF_BAD_SPAN)
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
+        self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertIn("**C1**", proven_section(self, project))
+
+    def test_cli_a_module_fixture_no_loader_records_is_reverified_on_every_check(self):
+        """V: the other half of repro C's fix. A ``module:function`` fixture
+        that is a package's ``__init__`` goes through the stock import (as an
+        installed module or an extension would), so no closure of it is
+        recorded. Its control's hint must then vouch for nothing: every
+        ``check`` re-runs the fixture alone and compares what it builds — never
+        a control entry written, the gate never called — so the same defusing
+        edit is caught on the next check. On a known-good host too: there the
+        known-good module's closure was folded into the fixture's, and with no
+        fixture closure to fold into it became the whole hint — one that held
+        while the fixture's code moved."""
+        ref = "fixtures:long"
+        for host, known_good in (("live", None), ("known-good", SHELF_KNOWN_GOOD)):
+            with self.subTest(host=host):
+                files = {"fixtures/__init__.py": SHELF_LONG}
+                if known_good is not None:
+                    files["selftest/known_good.py"] = known_good
+                project = self._shelf_module_fixture(ref, files)
+                before = control_names(project)
+                [name] = before["shelf.span"]
+                entry = read_control(project, "shelf.span", name)
+                self.assertEqual(entry["host"], host, entry)
+                self.assertEqual(entry["fixture"]["files"], {verdicts.UNRECORDED_FIXTURE: None},
+                                 "a fixture whose code no loader recorded filed a hint that "
+                                 "can hold")
+                code, data = check_json(self, project)
+                self.assertEqual(code, 0, data)
+                self.assertEqual(data["counts"]["controls"],
+                                 {"executed": 0, "cached": 0, "reverified": 1},
+                                 "an unrecorded fixture closure was served as a held hint")
+                self.assertEqual(data["counts"]["executed"], 0, data["counts"])
+                self.assertEqual(control_names(project), before,
+                                 "a re-verification wrote a file")
+
+                edit(project, "fixtures/__init__.py", SHELF_BAD_SPAN, 'params["span"] = 40.0')
+                self._refused(project, ref)
 
 
 # --------------------------------------------------------------------------- #

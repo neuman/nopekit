@@ -538,6 +538,8 @@ def load_source_module(path, *, name, roots, registry=None, attrs=None) -> Modul
                          # gates.use_registry — modelio cannot import gates); attrs: globals set
                          # before it runs (a pack's PACK, PACK_DIR), part of the cache key
 def load_path(path) -> ModuleType                        # a helper by path; module name salted by its abspath
+def is_code(path, roots=()) -> bool                      # code (under roots, or beside them and not
+                                                         #   installed), not an instrument; the finder's test
 def code_closure(obj) -> CodeClosure | None              # a module's, or a function's module's
 def clear_caches(obj) -> tuple[str, ...]                 # empty the functools memos obj's code holds
                          # at module level (its module, every module of its closure: globals
@@ -876,6 +878,8 @@ OBS_KEEP = 20                 # runs kept per gate, per kind
 SPEC_FIELDS_IN_RHO = ("id", "claims", "tier", "pack", "requires_tools",
                       "requires_python", "requires_one_of", "settles")
 CONTROL_OUT_DIR = ".atompipe/out/controls"   # + "/<gate id>/": where a control runs
+UNRECORDED_FIXTURE = "<unrecorded fixture code>"   # a control's fixture hint when no loader
+                                                   # recorded the fixture's code; never holds
 TWO_OUTCOMES_IS_ERROR = True  # an error; a warning (the gate read stale) until U25 measured the corpus
 
 def anchors_for(root, registry, *, out_dir) -> Anchors   # <root>, <pack:NAME> from registry.pack_dirs, <out>, <out:controls>
@@ -1080,7 +1084,14 @@ fields. **`rho_control`** = sha256 of `{"schema", "gate", "static", "reads"}`. T
 `fixture` block — the fixture's recorded code closure — is a lookup **hint, not an
 input**: the bracket's fixtures import the model, so keyed on it every Config edit
 would write six tracked control files. Bytes that differ only in `fixture` are the
-same control (`write_control` answers `"exists"`, no warning). Host-param reads are
+same control (`write_control` answers `"exists"`, no warning). A fixture whose code no
+loader recorded — a `module:function` fixture the stock import served — files
+`{UNRECORDED_FIXTURE: null}`; a `null` digest never matches, so that hint never holds
+and every `check` re-runs the fixture alone (a cost, never a wrong admission). What
+slipped through (admission review, round 1, C): it filed `{"files": {}}`, an empty
+mapping never moves, and a fixture outside `selftest/` — so in no static part either —
+defused 400 -> 40 mm was served `cached` while `gate selftest` said PASSED its own
+known-bad fixture. Only the forged form (no trace) files `{}`. Host-param reads are
 keyed only when the host was live (a known-good host is a design the fixture's own
 `selftest/` files and code define — enforced, not assumed: `context` is handed nothing
 of the live design, below).
@@ -1541,19 +1552,29 @@ writes never reach the sweep, its reads of the host land in `trace.host_reads` �
 `make` runs inside `tracing(trace)`, its module-level memos emptied first
 (`modelio.clear_caches(make)`: re-verification runs a fixture and a miss runs it again,
 in one process); `trace.fixture_code` is
-`modelio.code_closure(make)`; the gate then runs through `run_gate` with the same trace.
+`modelio.code_closure(<the module the reference names>)` — not `make`'s own module, so a
+fixture file that re-exports a helper's `make` is keyed by the file an edit moves — or
+`None` when the stock import served it; the gate then runs through `run_gate` with the same trace.
 `duration_s` and `cpu_s` cover both. `run_fixture(spec, fn, ctx, *, trace, out_dir)`
 is the fixture half alone — for re-verifying a control whose fixture code moved without
 re-running the gate — and raises `AtompipeError` when the control is unusable.
 
-**Code is loaded fresh.** `load_project_gates`, the path form of `load_fixture` and
+**Code is loaded fresh.** `load_project_gates`, `load_fixture` and
 `packs.load_gates` all go through `modelio.load_source_module`: the bytes that run are
 the bytes on disk, the code closure is recorded, and a cached module is served only
 while its closure still hashes the same — re-adopting its gates into the caller's
 registry. What slipped through: after a same-size, same-second edit, gate modules and
 fixtures ran their old bytecode, and an in-process re-load skipped any module already
 in `sys.modules` (S-26). `load_project_gates` moved here from the CLI so there is one
-copy; it returns the ids each module registered, cached or not.
+copy; it returns the ids each module registered, cached or not. `load_fixture`'s
+`module:function` form resolves the name with `importlib.util.find_spec` and loads it
+fresh under its own dotted name when it is a plain module of Python source that is code
+(`modelio.is_code` against the fixture's root); an installed module, a package's
+`__init__`, an extension or a namespace package goes through the stock import, records
+no closure, and its control's hint never holds (`verdicts.UNRECORDED_FIXTURE`). What
+slipped through (admission review, round 1, C): this form was `importlib.import_module`
+alone — no closure, so a hint of nothing that always held, and a same-size edit's old
+`.pyc` ran on the re-run.
 
 **A gate id names a directory.** `register` refuses an id containing `/`, `\`, `..`
 or `:` — `.atompipe/verdicts/<gate id>/` holds its cached verdicts — and an id that

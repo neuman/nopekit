@@ -100,6 +100,7 @@ __all__ = [
     "CodeClosure",
     "load_source_module",
     "load_path",
+    "is_code",
     "code_closure",
     "clear_caches",
     "static_param_prose",
@@ -1483,6 +1484,21 @@ def load_path(path: str) -> types.ModuleType:
     roots = (parent.roots if parent is not None and _owning_root(abspath, parent.roots)
              else _roots((), abspath))
     return load_source_module(abspath, name=f"{_PATH_PREFIX}{stem}_{salt}", roots=roots)
+
+
+def is_code(path: str, roots: Iterable[str] = ()) -> bool:
+    """Is the Python file at `path` code — under `roots`, or beside them and not
+    installed (`_code_root`) — rather than an installed instrument?
+
+    The one test the recording finder applies to an import, for a caller that
+    must decide before anything runs whether a module it was named is code to
+    load fresh and record (`gates.load_fixture`'s `module:function` form) or an
+    instrument the stock import system serves. Not `_roots`: with no roots it
+    makes the file's own directory one, and a root owns what is under it — a
+    module in site-packages would own itself and read as code.
+    """
+    owned = tuple(dict.fromkeys(_norm(r) for r in roots if r))
+    return _code_root(path, owned) is not None
 
 
 def code_closure(obj: Any) -> CodeClosure | None:

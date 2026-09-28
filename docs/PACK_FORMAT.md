@@ -494,7 +494,12 @@ handles garbage, not that it measures what it claims.
 
 Fixtures live in `selftest/` and expose `make(ctx)` returning either a new
 `GateContext` or a dict merged into `ctx.extra`. Reference them as
-`selftest/<file>.py` or `module:function`.
+`selftest/<file>.py` or `module:function`. Prefer the first: every byte under
+`selftest/` is part of the control's key. A `module:function` fixture that is a plain `.py`
+module of your own is loaded fresh and keyed by the code closure recorded as it loads;
+a package's `__init__` or an installed module records none, and its control re-runs
+its fixture on every `check` (admission review, round 1, C: the form once
+recorded nothing, and a fixture edited into a no-op stayed admitted).
 
 **A fixture builds its own context.** The `ctx` a fixture receives is a writable copy
 of the host's, traced: what it writes there stays there — it never reaches the sweep

@@ -90,6 +90,7 @@ import contextlib
 import dataclasses
 import fnmatch
 import importlib
+import importlib.machinery
 import importlib.util
 import numbers
 import os
@@ -1935,7 +1936,7 @@ def _looks_like_path(ref: str) -> bool:
     return ref.endswith(".py") or "/" in ref or os.sep in ref
 
 
-def _load_py_file(path: str, root: str = "") -> Any:
+def _load_py_file(path: str, root: str = "", name: str = "") -> Any:
     """Import a standalone .py file as a private module and return it.
 
     The module name is salted with a hash of the absolute path so two packs can
@@ -1952,10 +1953,12 @@ def _load_py_file(path: str, root: str = "") -> Any:
     ``root`` (the project or pack directory the fixture resolved against) is the
     closure's root when the file lies under it, so the fixture's own imports from
     the project — the bracket's fixtures ``import bracket`` from ``model/`` — are
-    recorded with it.
+    recorded with it. ``name`` is a ``module:function`` fixture's own dotted
+    name (:func:`_import_fixture_module`): its relative imports resolve against
+    its package, exactly as ``import name`` would have resolved them.
     """
     absolute = os.path.abspath(path)
-    module_name = f"_atompipe_fixture_{short_hash(absolute, 10)}"
+    module_name = name or f"_atompipe_fixture_{short_hash(absolute, 10)}"
     base = os.path.abspath(root) if root else ""
     roots = [base] if base and (absolute == base or absolute.startswith(base + os.sep)) else []
     try:
@@ -1997,7 +2000,22 @@ def load_fixture(ref: str, root: str) -> Any:
     pack-authoring mistake the user can fix, and it must surface loudly rather
     than degrade into "control unavailable, assume the gate is fine". That
     assumption is the one this module exists to refuse.
+
+    Both forms load code the way every other piece of code a verdict depends on
+    is loaded — fresh bytes, a recorded closure (``modelio.load_source_module``)
+    — wherever the module is code; see :func:`_import_fixture_module` for the
+    ``module:function`` form, and what slipped through before it.
     """
+    return _load_fixture(ref, root)[0]
+
+
+def _load_fixture(ref: str, root: str) -> tuple[Callable[..., Any], Any]:
+    """:func:`load_fixture`, returning ``(the callable, the module the
+    reference named)``. The control records the closure of that MODULE, not of
+    the module that defines the callable: a fixture file that re-exports
+    ``make`` from a helper is keyed by the file the reference names — the one
+    an edit to point it at another helper moves — and its closure already holds
+    the helper's (``modelio``'s walk of its globals)."""
     ref = (ref or "").strip()
     if not ref:
         raise AtompipeError("negative control has an empty fixture reference")
@@ -2022,22 +2040,7 @@ def load_fixture(ref: str, root: str) -> Any:
         wanted = func_name or "make"
         source = target
     else:
-        try:
-            module = importlib.import_module(target)
-        except ImportError as exc:
-            raise AtompipeError(
-                f"cannot import negative-control fixture module {target!r}: {exc}"
-            ) from exc
-        except SystemExit as exc:                # BaseException: see _load_py_file
-            raise AtompipeError(
-                f"negative-control fixture module {target!r} called sys.exit({exc.code!r}) "
-                f"while importing — the control cannot be built, so the gate is unproven"
-            ) from exc
-        except Exception as exc:                 # noqa: BLE001 - user's fixture code
-            raise AtompipeError(
-                f"negative-control fixture module {target!r} failed to import "
-                f"({type(exc).__name__}: {exc})"
-            ) from exc
+        module = _import_fixture_module(target, root or os.curdir)
         wanted = func_name or "make"
         source = target
 
@@ -2050,7 +2053,75 @@ def load_fixture(ref: str, root: str) -> Any:
         )
     if not callable(fn):
         raise AtompipeError(f"negative-control fixture {source}:{wanted} is not callable")
-    return fn
+    return fn, module
+
+
+def _import_fixture_module(name: str, root: str) -> Any:
+    """``import name`` for a ``module:function`` fixture — fresh and recorded
+    when ``name`` is a plain module of Python source that is code
+    (``modelio.is_code`` against ``root``), through the stock import otherwise.
+
+    What slipped through (admission review, round 1, C): this form was
+    ``importlib.import_module`` alone. No loader recorded the fixture's closure,
+    so its control entry filed ``fixture: {"files": {}}`` — and an empty
+    mapping never moves, so the lookup hint always held. A fixture outside
+    ``selftest/`` is not in the control's static part either, so its code was
+    keyed nowhere: ``fixtures/bad.py`` defused 400 -> 40 mm, ``check`` said
+    ``0 executed, 1 cached`` and exited 0 while ``gate selftest`` said PASSED
+    its own known-bad fixture. The stock import also ran a same-size,
+    same-second edit's old ``.pyc`` (S-26), so re-running the fixture alone
+    would still have built 400 mm.
+
+    What stays with the stock import — an installed module (an instrument), a
+    package's ``__init__``, an extension, a namespace package — records no
+    closure, and ``verdicts`` files that as ``UNRECORDED_FIXTURE``: a hint that
+    never holds, so every ``check`` re-runs the fixture and compares what it
+    builds. *Rejected:* that sentinel alone for every module fixture — one
+    fixture run per gate per check forever, and the re-run still read the stale
+    ``.pyc``. *Rejected:* digesting the defining file as ``code_digest`` does
+    for an in-process gate — it misses what the file imports, and a hint that
+    holds while the code under it moved is this defect again.
+    """
+    try:
+        # find_spec("a.b") imports "a" — the stock import, as `import a.b`
+        # would. Only the module the reference names is loaded fresh.
+        found = importlib.util.find_spec(name)
+    except ValueError:
+        found = None                             # in sys.modules with no __spec__: as it was
+    except ImportError as exc:
+        raise AtompipeError(
+            f"cannot import negative-control fixture module {name!r}: {exc}") from exc
+    except SystemExit as exc:                    # BaseException: see _load_py_file
+        raise AtompipeError(
+            f"negative-control fixture module {name!r} called sys.exit({exc.code!r}) "
+            f"while importing — the control cannot be built, so the gate is unproven"
+        ) from exc
+    except Exception as exc:                     # noqa: BLE001 - user's fixture code
+        raise AtompipeError(
+            f"negative-control fixture module {name!r} failed to import "
+            f"({type(exc).__name__}: {exc})") from exc
+    origin = getattr(found, "origin", None) if found is not None else None
+    if (found is not None and found.has_location and isinstance(origin, str)
+            and found.submodule_search_locations is None
+            and isinstance(found.loader, importlib.machinery.SourceFileLoader)
+            and modelio.is_code(origin, [root])):
+        return _load_py_file(origin, root, name=name)
+    try:
+        return importlib.import_module(name)
+    except ImportError as exc:
+        raise AtompipeError(
+            f"cannot import negative-control fixture module {name!r}: {exc}"
+        ) from exc
+    except SystemExit as exc:                    # BaseException: see _load_py_file
+        raise AtompipeError(
+            f"negative-control fixture module {name!r} called sys.exit({exc.code!r}) "
+            f"while importing — the control cannot be built, so the gate is unproven"
+        ) from exc
+    except Exception as exc:                     # noqa: BLE001 - user's fixture code
+        raise AtompipeError(
+            f"negative-control fixture module {name!r} failed to import "
+            f"({type(exc).__name__}: {exc})"
+        ) from exc
 
 
 def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | None = None) -> str:
@@ -2105,8 +2176,10 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
     ``trace.host_reads`` (what a SEALED fixture never makes), and ``make`` runs
     inside ``tracing(trace)`` so the files it opens are on the trace too. Loading
     the fixture module is not in the window: code is the closure's business, and
-    ``trace.fixture_code`` records the closure of the module ``make`` came from
-    (``None`` for a ``module:function`` fixture the stock import system loaded).
+    ``trace.fixture_code`` records the closure of the module the reference
+    names (``None`` when the stock import system loaded it — an installed or a
+    package ``module:function`` fixture — which ``verdicts`` files as a hint
+    that never holds).
 
     A fixture that builds its own context keeps it as built: cad-solid's fixtures
     assign params on contexts they made from the pack baseline (packs:H15), and
@@ -2116,8 +2189,8 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
     host = traced_context(dataclasses.replace(ctx, out_dir=out_dir) if out_dir else ctx,
                           trace, readonly=False)
     try:
-        make = load_fixture(nc.fixture, _fixture_root(spec, ctx, fn))
-        trace.fixture_code = modelio.code_closure(make)
+        make, module = _load_fixture(nc.fixture, _fixture_root(spec, ctx, fn))
+        trace.fixture_code = modelio.code_closure(module)
         # The fixture's module-level memos too: re-verification runs a fixture
         # and a miss then runs it again, in one process, and a hit on the second
         # run would leave the file it built from out of the control's reads.

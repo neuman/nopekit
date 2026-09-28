@@ -143,7 +143,7 @@ __all__ = [
     "GateInputWriteError",
     # part two: rho, entries, controls, remembered outcomes, obs (U16)
     "SCHEMA", "RHO_CHARS", "OUT_CHARS", "OBS_KEEP", "SPEC_FIELDS_IN_RHO",
-    "CONTROL_OUT_DIR", "TWO_OUTCOMES_IS_ERROR",
+    "CONTROL_OUT_DIR", "UNRECORDED_FIXTURE", "TWO_OUTCOMES_IS_ERROR",
     "CodeRef", "Reads", "Entry", "ControlEntry", "WriteResult",
     "anchors_for", "code_digest", "model_digest", "rho", "rho_control", "out8",
     "instruments_for", "write_entry", "read_entries", "record_verdict",
@@ -2455,6 +2455,22 @@ SPEC_FIELDS_IN_RHO = ("id", "claims", "tier", "pack", "requires_tools",
 #: run reads. *Rejected:* the host ``out_dir`` (today's clobbering).
 CONTROL_OUT_DIR = ".atompipe/out/controls"
 
+#: The one key of a control entry's ``fixture`` hint, with a ``null`` digest,
+#: when no loader recorded the fixture's code: a ``module:function`` fixture the
+#: stock import system loaded (an installed module, a package's ``__init__``, an
+#: extension — ``gates._import_fixture_module``). A ``null`` digest never
+#: matches (``_snapshot_moved``), so the hint never holds and every ``check``
+#: re-runs the fixture alone and compares what it builds (§3.8 step 4): a cost,
+#: one fixture run per check, never a wrong admission. Spelled as no path is —
+#: ``_locate`` finds no ``<anchor>`` by that name — and read as it stands in
+#: ``status``'s pending note. What slipped through (admission review, round 1,
+#: C): such a fixture filed ``{"files": {}}``, an empty mapping never moves, so
+#: the hint held for ever, and a fixture outside ``selftest/`` defused
+#: 400 -> 40 mm was served ``cached``. *Rejected:* reading every empty hint as
+#: moved — the forged form (``record_control(bad=...)``, no trace) files ``{}``
+#: on purpose, and a hint with nothing in it cannot say which case it is.
+UNRECORDED_FIXTURE = "<unrecorded fixture code>"
+
 #: Two outcomes recorded for one rho under the same instruments: an ERROR — the
 #: gate reads "two outcomes recorded for identical inputs", its claims FAIL and
 #: `doctor` fails the row. While False it was a warning and the gate read stale.
@@ -4197,11 +4213,18 @@ def _control_outcome(spec: Any, result: Verdict) -> tuple[str | None, str]:
 
 
 def _fixture_part(trace: Any, anchors: Anchors) -> dict:
+    """The ``fixture`` hint of a control run under ``trace``: its recorded code
+    closure, ``{"digest", "files": {portable path: sha}}``. A run whose fixture
+    code no loader recorded — no closure, or one naming no file — files
+    ``UNRECORDED_FIXTURE``, which never holds; only the forged form (no trace
+    at all) files ``{}``."""
     closure = getattr(trace, "fixture_code", None) if trace is not None else None
     files: dict[str, str | None] = {}
     if isinstance(closure, modelio.CodeClosure):
         for path, sha in closure.files:
             files[_clean(_spell_code(path, anchors))] = sha or None
+    if trace is not None and not files:
+        files = {UNRECORDED_FIXTURE: None}
     files = dict(sorted(files.items()))
     return {"digest": _digest_of(files), "files": files}
 
@@ -5254,13 +5277,17 @@ def _fixture_moved(control: ControlEntry, now: _Now) -> list[str]:
 
 def _snapshot_moved(snapshot: Any, now: _Now) -> list[str]:
     """The files of a fixture-closure snapshot (``{"digest", "files"}``) whose
-    bytes are not what it recorded — every one of them when it is no snapshot."""
+    bytes are not what it recorded — every one of them when it is no snapshot.
+    A ``null`` digest names no bytes (``UNRECORDED_FIXTURE``, or a closure in
+    which two versions of one file ran), so it is always moved: compared, it
+    equalled the ``None`` a missing file digests to, and a hint that names
+    nothing held."""
     files = (snapshot or {}).get("files") if isinstance(snapshot, Mapping) else None
     if not isinstance(files, Mapping):
-        return ["(no recorded fixture closure)"]
+        return [UNRECORDED_FIXTURE]
     moved = []
     for spelled, digest in sorted(files.items()):
-        where = now.locate(spelled)
+        where = now.locate(spelled) if digest is not None else None
         if where is None or now.digests.digest(where) != digest:
             moved.append(spelled)
     return moved
@@ -5956,17 +5983,19 @@ def _control_host(root: str, spec: Any, fn: Any, host_ctx: Any,
 def _add_closure(trace: GateTrace, closure: Any) -> None:
     """Fold the known-good module's closure into the fixture's recorded code:
     the control's lookup hint must move when the known-good design's code does
-    (the bracket's model sits in both)."""
-    if not isinstance(closure, modelio.CodeClosure):
-        return
+    (the bracket's model sits in both). A fixture whose own code no loader
+    recorded is left unrecorded (``UNRECORDED_FIXTURE``): merged, the
+    known-good module's files alone would stand as the whole hint, and it would
+    hold while the fixture's code moved — admission review, round 1, C, by
+    another door."""
     own = trace.fixture_code
-    files = dict(own.files) if isinstance(own, modelio.CodeClosure) else {}
+    if not isinstance(closure, modelio.CodeClosure) \
+            or not isinstance(own, modelio.CodeClosure):
+        return
+    files = dict(own.files)
     for path, sha in closure.files:
         files.setdefault(path, sha)
-    merged = tuple(sorted(files.items()))
-    trace.fixture_code = (dataclasses.replace(own, files=merged)
-                          if isinstance(own, modelio.CodeClosure)
-                          else modelio.CodeClosure(files=merged))
+    trace.fixture_code = dataclasses.replace(own, files=tuple(sorted(files.items())))
 
 
 def _fresh_control_dir(root: str, gate_id: str, sweep_out: str = "") -> str:
