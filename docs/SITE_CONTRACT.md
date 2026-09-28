@@ -19,8 +19,10 @@ that needs npm is a project site that rots — and the spine is standard-library
 only for exactly this reason. three.js loads from a CDN by import map, with
 `atompipe site vendor` to pull it local for offline or archival use.
 
-**The site never computes truth.** It renders the ledger. If a number on the page
-is wrong, the ledger is wrong. It is an output, not a source (rule 1).
+**The site never computes truth.** It renders the ledger, and each gate's verdict
+as `verdicts.resolve` finds it in the verdict cache — the one resolver every reader
+uses. If a number on the page is wrong, the ledger or the cache is wrong. It is an
+output, not a source (rule 1).
 
 **It degrades all the way down.** A project with no geometry — a chemical process,
 a supply chain — still gets claims, verdicts, evidence, provenance and the
@@ -55,9 +57,24 @@ atompipe site serve [-p]    # python3 -m http.server, no dependencies
 atompipe site vendor        # pull three.js local so the site works offline
 ```
 
-`site build` never runs gates. It reads the verdicts already in the ledger and says
-how old they are, because a site that silently re-ran the cheap gates and not the
-expensive ones would show a mixed-age picture with one timestamp on it.
+`site build` never runs gates. It renders what `verdicts.resolve` makes of the
+verdict cache (`.atompipe/verdicts/`) — which never runs a gate either — and says how
+old each result is and whether it is current, because a site that silently re-ran
+the cheap gates and not the expensive ones would show a mixed-age picture with one
+timestamp on it.
+
+**The page resolves for itself.** `site.state(root, ledger, registry, *, now="",
+stale=None, resolution=None)` and `site.build(…, resolution=None)` render the
+`resolution` their caller hands them; handed none, they call `verdicts.resolve`
+themselves, against the projection they build (the live model, loaded when the
+ledger names one; a model that does not load makes every verdict that read it not
+current). There is no generous default. What slipped through before 1.2: the site
+kept its own copy of the staleness rule — one hash of the whole projection against
+the last sweep's — and of the parameter flattening, "byte-for-byte" the CLI's and
+kept in sync by a comment (S-28). A default that listed recorded entries as current
+would serve every cached PASS whether or not its control was ever shown to fail.
+`stale=True` marks every verdict stale; `False` is no override — a caller cannot
+declare the cache current.
 
 ## View kinds
 
@@ -201,8 +218,8 @@ was the one a reader of the contract would never look for.
 {
   "meta":     { "name": …, "summary": …, "created": …, "revision": …, "model_entry": …,
                 "packs": [ … ], "spine_version": …,            // ProjectMeta, verbatim
-                "built": …, "stale": false, "stale_reason": …,
-                "last_run": { "when": …, "tier": 0, … },
+                "built": …, "stale": true,
+                "stale_reason": "bracket.bed_fit: config.bed_xy 220.0 -> 250.0",
                 "generated": "atompipe site build — an output … not a source …" },
   "readiness": { "verdict": "…one honest sentence…", "counts": {…}, "kinds": {…},
                  "ready": false, "blocking": ["C1", "C7"], "n_claims": 7, "n_critical": 7,
@@ -214,7 +231,9 @@ was the one a reader of the contract would never look for.
                   "unproven": [ { "gate": …, "why": … } ], "partial": false, … } ],
   "verdicts": [ { "gate": …, "passed": …, "ok": false, "status": "fail", "detail": …,
                   "measured": …, "limit": …, "locators": [ … ], "views": [ … ],
-                  "unanchored": true, "evidence": [ … ], "when": …, "age_s": 412, … } ],
+                  "unanchored": true, "evidence": [ … ], "rho": …,
+                  "cached": true, "fresh": true, "stale_reason": "",
+                  "when": "2026-09-27T14:02:11Z", "age_s": 412, … } ],
   "views":    [ { "id": "assembly", "kind": "model3d", "src": "assets/assembly.glb", … },
                 { "id": "sweep", "kind": "table", "data": {}, "data_url": "data/views/sweep.json", … } ],
   "locator_problems": [ { "gate": "cad.clash", "view": "assembly", "target": "back_left",
@@ -232,12 +251,28 @@ was the one a reader of the contract would never look for.
 Everything the page shows is in here, so the page is inspectable with `curl`, and
 an agent can read the site's state without a browser.
 
+- `verdicts` holds one row per gate the resolver has a verdict for — registered
+  gates in registration order, then gates this project does not register, by id — so
+  a verdict for an unregistered gate still reaches the page, as a stale row.
 - A verdict row's `ok` is the only predicate the page may paint green; `status` is
   `pass`, `fail`, `skipped` or `errored`. `unanchored` says out loud that a failure
   carries no locator, instead of leaving an overlay that looks broken.
-- `age_s` is `null`, never 0, when the build had no timestamp or the gate has no
-  recorded run: an age of zero renders as "just now", the exact lie a staleness
-  display exists to prevent.
+- How the resolver reached each row, said on the row: `cached` — it is a cache
+  entry's verdict as recorded (its `tier` and `pack` are the ones it ran under);
+  `fresh` — and it is current and counts (its inputs, code and control are the ones
+  it was measured with); `stale_reason` — why it is not current, in the resolver's
+  words (`config.bed_xy 220.0 -> 250.0`, `control not demonstrated at this version —
+  run atompipe check`, `gate not registered in this project`), `""` when it is. A
+  claim covered by a row with a `stale_reason` is never `pass`.
+- `when` is the time the result dates from: the obs run that last wrote or hit its
+  entry, else the entry's git commit time, else `""`. `age_s` is `when` measured
+  against `meta.built` — `null`, never 0, when either is unknown: an age of zero
+  renders as "just now", the exact lie a staleness display exists to prevent.
+- `meta.stale` is true when any row is not current; `meta.stale_reason` names the
+  stale gates with their reasons (the first three, then `(+n more)`). There is no
+  `meta.last_run`: the run history is gone (the verdict cache and git are the
+  history), and one sweep's time and one model hash could say THAT something moved,
+  never which result it touched.
 - `locator_problems` lists every locator that cannot be drawn — `missing-view` (it
   names a view that does not exist) or `unknown-target` (a node the view does not
   declare). The locator itself stays on its verdict; nothing is dropped.
@@ -255,4 +290,5 @@ an agent can read the site's state without a browser.
 - **Physical claims and assumptions**, never blurred into the proven ones.
 - **Provenance on demand**: a parameter's rationale and rejected alternatives, and
   the ingested evidence that grounds it.
-- **How old the results are.** A stale sweep must look stale.
+- **How old the results are, and which are not current.** A stale result must look
+  stale, on its own row and in the banner.

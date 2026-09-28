@@ -25,14 +25,22 @@ Five rules are mechanical here, not advisory:
    status. If a number on the page is wrong, the ledger is wrong (rule 1 of the
    method: generated files are outputs, not sources).
 
-2. **:func:`build` does not run gates.** It reads the verdicts already recorded
-   and stamps each with an age taken from the run history. A build that
+2. **:func:`build` does not run gates.** It renders what
+   :func:`atompipe.verdicts.resolve` makes of the verdict cache — which never
+   runs a gate either — and stamps each verdict with its own age. A build that
    helpfully re-ran the cheap gates and not the expensive ones would publish a
    mixed-age picture under one timestamp — the tier-0 numbers from ten seconds
    ago beside the tier-2 numbers from last Tuesday, with nothing on the page
-   saying which is which. Age is per gate for the same reason: ``last_run.when``
-   describes the last *sweep*, and a ``--only`` sweep deliberately leaves the
-   gates it skipped at their old results.
+   saying which is which. Age is per gate for the same reason, and so is
+   staleness: each verdict is current or not by its OWN inputs.
+
+   What slipped through (S-28): this module kept its own copy of the staleness
+   rule and of ``_flat_params``, "byte-for-byte" the CLI's, synced by a
+   comment, and judged the whole page by one hash of the projection against
+   the last sweep's. A page handed no resolution now asks the resolver itself;
+   there is no generous default that lists recorded entries as current, which
+   would serve every cached PASS whether or not its control was ever
+   demonstrated (invariant 7 by omission).
 
 3. **A locator that cannot be drawn is REPORTED, never dropped.** A gate that
    thinks it is drawing and is not looks exactly like a gate that found nothing,
@@ -63,9 +71,11 @@ is called out at :meth:`ViewRegistry.register`: a viewgen declares no negative
 control, because it settles nothing and there is no claim to falsify.
 
 Time policy (contract rule 3): nothing here reads the clock. ``now`` arrives
-from the CLI edge as an ISO string, and an *absent* ``now`` produces ``age_s:
-null`` rather than a zero. A zero age renders as "just now", which is precisely
-the lie a staleness display exists to prevent.
+from the CLI edge as an ISO string; a verdict's ``when`` is the resolver's — the
+obs run that last hit or wrote its entry, else the entry's commit time — and an
+*absent* ``now`` or ``when`` produces ``age_s: null`` rather than a zero. A zero
+age renders as "just now", which is precisely the lie a staleness display exists
+to prevent.
 
 No build step, ever. ``site/`` is plain HTML, CSS and ES modules;
 ``atompipe site build`` writes JSON and ``atompipe site serve`` is
@@ -87,11 +97,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Iterable
 
-from . import artifacts as artifact_logic
 from . import claims as claim_logic
 from . import modelio
 from . import report as report_logic
-from . import store
+from . import verdicts as verdict_logic
 from .gates import availability as _gate_availability
 from .models import Ledger, Locator, Verdict, View, ViewKind
 from .util import (
@@ -99,7 +108,6 @@ from .util import (
     atomic_write_json,
     atomic_write_text,
     ensure_dir,
-    read_json,
 )
 
 __all__ = [
@@ -1404,17 +1412,24 @@ def build(
     model: Any | None = None,
     projection: dict | None = None,
     now: str = "",
+    resolution: Any = None,
 ) -> dict:
     """Run the viewgens, write ``site/data/`` and ``site/assets/``, return a summary.
 
-    **This function does not run gates**, and the omission is the point. It reads
-    the verdicts already in the ledger and stamps each with an age from the run
-    history. A build that re-ran the cheap gates on the way past would publish a
-    page whose tier-0 numbers are ten seconds old and whose tier-2 numbers are a
-    week old, under a single "built at" timestamp — and the reader has no way to
-    tell them apart. If the results are stale, the honest fix is to run
-    ``atompipe check``, and the page's job is to make the staleness impossible to
-    miss, not to paper over it.
+    **This function does not run gates**, and the omission is the point. It
+    renders ``resolution`` — the caller's ``verdicts.resolve`` of the verdict
+    cache — and stamps each verdict with its own age. A build that re-ran the
+    cheap gates on the way past would publish a page whose tier-0 numbers are
+    ten seconds old and whose tier-2 numbers are a week old, under a single
+    "built at" timestamp — and the reader has no way to tell them apart. If the
+    results are stale, the honest fix is to run ``atompipe check``, and the
+    page's job is to make the staleness impossible to miss, not to paper over it.
+
+    Handed no ``resolution``, it resolves for itself (:func:`state`), against
+    the projection it builds the views from: ``projection``, or — when the
+    caller passed neither it nor ``model`` — the live model, loaded here. A
+    model that does not load is not an error for the page; the resolver reads
+    every verdict that read it as not current (S-21), and the build warns.
 
     ``registry`` is the *gate* registry (claim coverage and the readiness
     sentence are resolved against it — see :func:`state`); ``view_registry``
@@ -1447,7 +1462,13 @@ def build(
         ensure_dir(directory)
 
     warnings: list[str] = []
-    params, conflicts = _flat_params(projection)
+    model_error = ""
+    if projection is None and model is None:
+        model, projection, model_error = _live_projection(root, ledger)
+    if model_error:
+        warnings.append(f"the model does not load, so no verdict that reads it is "
+                        f"current: {model_error}")
+    params, conflicts = modelio.flat_params(projection)
     for conflict in conflicts:
         warnings.append(f"model and build() disagree on {conflict} — views read the "
                         f"config value")
@@ -1482,9 +1503,14 @@ def build(
     for_state = dataclasses.replace(
         Ledger.from_dict(ledger.to_dict()), views=list(merged)
     )
-    stale, stale_reason = _staleness(root, ledger, projection)
-    payload = state(root, for_state, registry, now=now, stale=stale)
-    payload["meta"]["stale_reason"] = stale_reason
+    if resolution is None:
+        # Resolved against the LEDGER the caller handed in, not `for_state`:
+        # the generated views are page furniture, never a gate input.
+        resolution = _resolve(root, ledger, registry, projection=projection, model=model,
+                              model_error=model_error, now=now)
+    payload = state(root, for_state, registry, now=now, resolution=resolution)
+    stale = bool(payload["meta"]["stale"])
+    stale_reason = str(payload["meta"]["stale_reason"])
 
     written: list[str] = []
     # Split the payloads too big to inline BEFORE writing state.json, so the file
@@ -1689,6 +1715,7 @@ def state(
     *,
     now: str = "",
     stale: bool | None = None,
+    resolution: Any = None,
 ) -> dict:
     """Everything the page shows, in one inspectable JSON-safe dict.
 
@@ -1701,38 +1728,79 @@ def state(
     status of this project?" without a browser, and an agent that has to render
     HTML to read a verdict will not read the verdict.
 
-    The judgements are **borrowed, not recomputed**. Claim statuses come from
-    :mod:`atompipe.claims`, the headline sentence and the coverage/PARTIAL logic
-    from :mod:`atompipe.report`. Those are private helpers in ``report`` and
-    reaching for them is deliberate: a second implementation would give the page
-    and the readiness document two opinions about the same ledger, and the page
-    is the one more people will read. One of the two would eventually be wrong
-    and nothing would be comparing them.
+    The judgements are **borrowed, not recomputed**. Which verdict each gate
+    has, and whether it is current, is ``resolution``'s — the one resolver's
+    (:func:`atompipe.verdicts.resolve`, R-5); claim statuses come from
+    :mod:`atompipe.claims` given the resolver's ``stale_gates``, the headline
+    sentence and the coverage/PARTIAL logic from :mod:`atompipe.report`. Those
+    are private helpers in ``report`` and reaching for them is deliberate: a
+    second implementation would give the page and the readiness document two
+    opinions about the same ledger, and the page is the one more people will
+    read. One of the two would eventually be wrong and nothing would be
+    comparing them.
+
+    ``resolution`` — the caller's, laid over ``ledger`` as its verdicts. With
+    none, this resolves for itself, against the live model (loaded here when
+    the ledger names one). *Rejected:* a default that lists the recorded entries
+    with nothing stale — a caller that forgot the keyword would serve every
+    cached PASS as current and never ask whether its control was demonstrated,
+    and nothing on the page would say so (judges 2 and 3, SF PD-07).
+
+    ``stale=True`` is the all-stale override: every claim that would pass reads
+    STALE, every row not current. ``None`` and ``False`` are no override at all
+    — a caller cannot declare the cache current; only the resolver says what is.
 
     ``now`` is the caller's ISO timestamp (contract rule 3 — nothing here reads
     the clock). Without it, ``age_s`` is ``null`` everywhere rather than zero: an
     age of zero renders as "just now", which is the precise lie a staleness
     display exists to prevent.
-
-    ``stale`` defaults to deriving the answer from the recorded projection on
-    disk. :func:`build` passes the value it computed from the live model instead;
-    the keyword is additive, so the contract's ``state(root, ledger, registry)``
-    call still works.
     """
-    if stale is None:
-        stale, stale_reason = _staleness(root, ledger, None)
-    else:
-        stale_reason = "supplied by the caller"
+    if resolution is None:
+        resolution = _resolve(root, ledger, registry, now=now)
+    everything = stale is True
+    stale_gates = frozenset(resolution.stale_gates)
+    # The page's ledger IS the resolution laid over the records: every judgement
+    # below — statuses, coverage, PARTIAL, the headline, locator problems — reads
+    # these verdicts, so none of them can disagree with the verdict rows.
+    view = dataclasses.replace(ledger, verdicts=list(resolution.verdicts))
 
-    resolved = claim_logic.statuses(ledger, stale=bool(stale), registry=registry)
-    summary = claim_logic.summarise(ledger, registry, stale=bool(stale))
-    cover = report_logic._coverage(ledger, registry)
-    dated = _verdict_dates(root, ledger)
+    resolved = claim_logic.statuses(view, stale=everything, registry=registry,
+                                    stale_gates=stale_gates)
+    summary = claim_logic.summarise(view, registry, stale=everything,
+                                    stale_gates=stale_gates)
+    cover = report_logic._coverage(view, registry)
 
     verdict_rows: list[dict] = []
-    for verdict in ledger.verdicts:
+    for verdict in view.verdicts:
+        how = resolution.rows.get(verdict.gate)
         row = verdict.to_dict()
-        when = dated.get(verdict.gate, "")
+        if how is not None and how.cached and how.entry is not None:
+            # A cached row shows its entry as recorded: the tier and pack the
+            # gate RAN under. The resolver re-stamps a stale verdict with the
+            # gate's current spec so coverage is judged against the claims the
+            # gate covers now, and tier and pack come along with the claims. For
+            # a Fresh entry the two always agree — both are in its code digest
+            # (SPEC_FIELDS_IN_RHO) — so this moves nothing that counts; for a
+            # stale one the page shows what was measured, beside why it is not
+            # current. The claims stay the resolver's: the claim rows are judged
+            # from them, and a verdict row naming other claims would be a second
+            # opinion about coverage.
+            recorded = how.entry.to_verdict()
+            row["tier"], row["pack"] = int(recorded.tier), recorded.pack
+        # How the resolver reached this verdict, said on the row it describes:
+        # `cached` — it is a cache entry's, as recorded; `fresh` — and it is
+        # current and counts; `stale_reason` — why it is not current (the
+        # resolver's words: "config.bed_xy 220.0 -> 250.0", "control not
+        # demonstrated at this version — run atompipe check"). A row the page
+        # showed without them would look exactly as current as one that is.
+        row["cached"] = bool(how is not None and how.cached)
+        row["fresh"] = bool(how is not None and how.fresh) and not everything
+        reason = how.stale_reason if how is not None else ""
+        row["stale_reason"] = reason or (_MARKED_STALE if everything else "")
+        # The age is the resolver's `when` — the obs run that last hit or wrote
+        # the entry, else the entry's commit time, else "" — and "" is a null
+        # age, never 0.
+        when = how.when if how is not None else ""
         row["when"] = when
         row["age_s"] = _age_seconds(now, when)
         # `ok` is the only predicate that means "it ran, it did not crash, and it
@@ -1755,15 +1823,15 @@ def state(
         verdict_rows.append(row)
 
     claim_rows: list[dict] = []
-    for claim in ledger.claims:
+    for claim in view.claims:
         status = resolved.get(claim.id)
-        unproven = report_logic._unproven_for(claim.id, cover, ledger)
+        unproven = report_logic._unproven_for(claim.id, cover, view)
         row = claim.to_dict()
         row["status"] = str(status) if status is not None else ""
         row["acceptance_render"] = claim.acceptance.render()
         row["gates"] = list(cover.get(claim.id) or claim.gates or [])
-        row["verdicts"] = [v.gate for v in report_logic._claim_verdicts(ledger, claim)]
-        row["evidence"] = sorted({e for v in report_logic._claim_verdicts(ledger, claim)
+        row["verdicts"] = [v.gate for v in report_logic._claim_verdicts(view, claim)]
+        row["evidence"] = sorted({e for v in report_logic._claim_verdicts(view, claim)
                                   for e in (v.evidence or [])})
         # PARTIAL is the marker the readiness report prints for a claim that
         # resolved PASS while a gate covering it produced no proof — it skipped,
@@ -1774,27 +1842,28 @@ def state(
         row["partial"] = bool(unproven) and str(status) == "pass"
         claim_rows.append(row)
 
-    views = [view.to_dict() for view in ledger.views]
-    problems = locator_problems(ledger.views, ledger.verdicts)
+    views = [v.to_dict() for v in view.views]
+    problems = locator_problems(view.views, view.verdicts)
 
     return {
         "meta": {
-            **ledger.meta.to_dict(),
+            **view.meta.to_dict(),
             "built": now,
-            "stale": bool(stale),
-            "stale_reason": stale_reason,
-            "last_run": ledger.last_run.to_dict(),
+            "stale": everything or bool(stale_gates),
+            "stale_reason": (_MARKED_STALE if everything
+                             else _stale_reason(resolution, stale_gates)),
             # Stated on the artifact itself, because someone will find this file
             # on its own and wonder whether editing it does anything.
-            "generated": "atompipe site build — an output of .atompipe/ledger.json, "
-                         "not a source. If a number here is wrong, the ledger is wrong.",
+            "generated": "atompipe site build — an output of the ledger and its verdict "
+                         "cache, not a source. If a number here is wrong, the ledger is "
+                         "wrong.",
         },
         "readiness": {
             # markdown=False: the page styles its own emphasis, and `**not
             # ready**` rendered literally into HTML reads as a typo in the one
             # sentence that has to be believed.
             "verdict": report_logic._verdict_sentence(
-                ledger, resolved, registry, stale=bool(stale), markdown=False),
+                view, resolved, registry, stale=everything, markdown=False),
             "counts": summary["by_status"],
             "kinds": summary["by_kind"],
             "ready": summary["ready"],
@@ -1808,11 +1877,11 @@ def state(
         "verdicts": verdict_rows,
         "views": views,
         "locator_problems": problems,
-        "params": [_param_row(param) for param in ledger.params],
+        "params": [_param_row(param) for param in view.params],
         "inputs": [{**artifact.to_dict(), "extracted": artifact.extracted}
-                   for artifact in ledger.inputs],
-        "gaps": [need.to_dict() for need in report_logic._needs(ledger, registry)],
-        "decisions": [decision.to_dict() for decision in ledger.decisions],
+                   for artifact in view.inputs],
+        "gaps": [need.to_dict() for need in report_logic._needs(view, registry)],
+        "decisions": [decision.to_dict() for decision in view.decisions],
     }
 
 
@@ -1831,38 +1900,68 @@ def _param_row(param: Any) -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# ages and staleness
+# the resolution, and ages
 # --------------------------------------------------------------------------- #
-def _verdict_dates(root: str, ledger: Ledger) -> dict[str, str]:
-    """gate id -> the ``when`` of the newest run that produced a verdict for it.
+#: A row's (and ``meta``'s) stale reason under the caller's ``stale=True``.
+#: Said as what it is — the caller's word, not the resolver's finding — so a
+#: reader does not go looking for an input that moved. *Rejected:* the old
+#: "supplied by the caller", which named who and not what; and an empty reason,
+#: which leaves a not-current row looking exactly like a current one.
+_MARKED_STALE = "marked stale by the caller"
 
-    **Per gate, not per sweep.** ``last_run.when`` describes the last sweep, and
-    a ``--only`` run deliberately does not advance it — so stamping every verdict
-    with it would date the tier-2 solver result from last week to ten seconds
-    ago, under a timestamp that is technically true about something else. The run
-    history is append-only and records which gates each sweep actually ran, which
-    makes per-gate age a fact rather than an inference.
 
-    A gate with no run record gets no date, and therefore ``age_s: null``. It is
-    NOT backfilled from ``last_run``: "I do not know how old this is" and "this
-    is as old as the last sweep" are different statements, and only one of them
-    is true of a verdict that was carried forward.
+def _live_projection(root: str, ledger: Ledger) -> tuple[Any, dict | None, str]:
+    """``(model, projection, model_error)`` for the model the ledger names —
+    ``(None, None, "")`` when it names none, which is a normal early state.
+
+    Loaded here only when the caller handed the page neither a resolution nor a
+    projection. *Rejected:* the projection recorded in ``.atompipe/model.json``,
+    which this module used to fall back on — it is the model as the last
+    command saw it, so a model edited since would resolve every entry against
+    the old values and read current. A model that does not load returns its
+    error instead, and the resolver reads every verdict that read it as not
+    current (S-21): never raising here, because a page that cannot be built for
+    a broken model hides the one fact the reader most needs.
     """
-    wanted = {v.gate for v in ledger.verdicts}
-    if not wanted:
-        return {}
-    dates: dict[str, str] = {}
-    for run in store.load_runs(root, limit=0):
-        when = str((run.get("meta") or {}).get("when") or "")
-        if not when:
-            continue
-        for row in run.get("verdicts") or []:
-            gate_id = str(row.get("gate") or "")
-            if gate_id in wanted and gate_id not in dates:
-                dates[gate_id] = when
-        if len(dates) == len(wanted):
-            break              # newest-first, so everything left is older
-    return dates
+    entry = (ledger.meta.model_entry or "").strip()
+    if not entry:
+        return None, None, ""
+    try:
+        model = modelio.load_model(root, entry)
+        return model, modelio.project(model), ""
+    except AtompipeError as exc:
+        return None, None, str(exc)
+
+
+def _resolve(root: str, ledger: Ledger, registry: Any, *, projection: dict | None = None,
+             model: Any = None, model_error: str = "", now: str = "") -> Any:
+    """What the page renders when its caller did not say: the ONE resolver's
+    answer (R-5). ``projection``/``model`` as :func:`build` built them; with
+    neither, the live model is loaded (:func:`_live_projection`)."""
+    if projection is None and model is None and not model_error:
+        model, projection, model_error = _live_projection(root, ledger)
+    return verdict_logic.resolve(root, registry, projection, ledger,
+                                 model_error=model_error, now=now, model=model)
+
+
+def _stale_reason(resolution: Any, stale_gates: frozenset) -> str:
+    """``meta.stale_reason``: the stale gates by name, each with the resolver's
+    reason, in the resolution's order — at most ``verdicts.MAX_STALE_REASONS``,
+    then ``(+n more)``, the cap ``status`` puts on one gate's reasons, so the
+    banner stays a line. ``""`` when nothing is stale.
+
+    What it replaced: ``model 3211… -> 9a0c…; inputs e3b0… -> 5f1d…`` — one pair
+    of hashes for the whole project, which said THAT something moved and never
+    which result it touched, and was the same sentence for a comment edit and a
+    changed load case.
+    """
+    named = [(gid, resolution.rows[gid].stale_reason)
+             for gid in resolution.rows if gid in stale_gates]
+    named += [(gid, "") for gid in sorted(stale_gates - {gid for gid, _ in named})]
+    shown = [f"{gid}: {why}" if why else gid
+             for gid, why in named[:verdict_logic.MAX_STALE_REASONS]]
+    more = len(named) - len(shown)
+    return "; ".join(shown) + (f" (+{more} more)" if more > 0 else "")
 
 
 def _parse_iso(text: str) -> datetime | None:
@@ -1895,67 +1994,6 @@ def _age_seconds(now: str, when: str) -> float | None:
     if start.tzinfo is None or end.tzinfo is None:      # mixed naive/aware
         start, end = start.replace(tzinfo=None), end.replace(tzinfo=None)
     return round(max(0.0, (end - start).total_seconds()), 3)
-
-
-def _staleness(root: str, ledger: Ledger, projection: dict | None) -> tuple[bool, str]:
-    """Have the model or the inputs moved since the last recorded sweep?
-
-    The same comparison ``cli._staleness`` makes at the edge, against the same
-    two authorities (``modelio.model_hash`` and ``artifacts.inputs_hash``), with
-    one addition: when no live projection is supplied it falls back to the
-    recorded one in ``.atompipe/model.json``. That fallback is what lets a site
-    be built — or its state re-read — on a machine that cannot import the model,
-    which is exactly the machine where somebody is deciding whether to trust the
-    build. It is not imported from the CLI because the CLI imports this module,
-    and a cycle for six lines would be a poor trade; if the rule changes, both
-    change.
-
-    A stale sweep has to LOOK stale. That is the whole reason this is computed
-    for a page whose job is otherwise to render what it is given.
-    """
-    run = ledger.last_run
-    if not run.when:
-        return False, "no sweep recorded yet"
-
-    if projection is None:
-        projection = read_json(store.project_paths(root)["projection"], None)
-
-    reasons: list[str] = []
-    if projection is not None and run.model_hash:
-        try:
-            current = modelio.model_hash(projection)
-        except AtompipeError:
-            current = ""
-        if current and current != run.model_hash:
-            reasons.append(f"model {run.model_hash} -> {current}")
-    current_inputs = artifact_logic.inputs_hash(ledger)
-    if run.inputs_hash and current_inputs != run.inputs_hash:
-        reasons.append(f"inputs {run.inputs_hash} -> {current_inputs}")
-    return bool(reasons), "; ".join(reasons) or "unchanged since the last sweep"
-
-
-def _flat_params(projection: dict | None) -> tuple[dict, list]:
-    """Flatten a projection to ``{name: value}`` for ``ViewContext.params``.
-
-    Derived first, then config over the top, so an INPUT always wins a name
-    collision — byte-for-byte the rule ``cli._flat_params`` applies to
-    ``GateContext.params``, because a viewgen and a gate reading the same
-    parameter name must get the same number or the picture is of a different
-    design than the one that was measured. Disagreements are returned rather than
-    resolved silently and land in the build summary's warnings.
-    """
-    if not projection:
-        return {}, []
-    config = dict(projection.get("config") or {})
-    derived = dict(projection.get("derived") or {})
-    conflicts = [
-        f"{name}: config {config[name]!r} vs build() {derived[name]!r}"
-        for name in sorted(set(config) & set(derived))
-        if config[name] != derived[name]
-    ]
-    flat = dict(derived)
-    flat.update(config)
-    return flat, conflicts
 
 
 # --------------------------------------------------------------------------- #

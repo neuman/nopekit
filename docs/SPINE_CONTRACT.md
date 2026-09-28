@@ -1340,17 +1340,19 @@ def why(ledger, name: str) -> str            # one param or claim: value, ration
 `why` is the context-window win: an agent pulls one parameter's full history
 instead of reading a 1,672-line decision log.
 
-### `report.py`  (deps: models, util, store, claims, artifacts)
+### `report.py`  (deps: models, util, store, claims, artifacts, verdicts)
 ```python
 STATUS_TAG: dict[ClaimStatus, str]           # PASS -> "ok   ", FAIL -> "FAIL ", ...
 SECTION_PROVEN = "## What is PROVEN"         # the PROVEN heading, as emitted and as tests find it
 JUNIT_DEFAULT = ".atompipe/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
 def status_tag(status) -> str                # "[FAIL ]": the one fixed-width spelling of a status
 def render_terminal(ledger, registry, *, stale=False, stale_gates=()) -> str
-def render_markdown(ledger, registry, *, stale=False, stale_gates=(), model_error="") -> str
+def render_markdown(ledger, registry, *, stale=False, stale_gates=(), model_error="",
+                    title="", root="") -> str
 def write_report(root, ledger, registry, *, stale=False, stale_gates=()) -> str   # docs/readiness.md
 def render_junit(ledger, verdicts, registry, *, tier, ready, exit_code, when,
-                 not_run=None, cached=frozenset(), stale=False, spine="") -> str
+                 not_run=None, cached=frozenset(), stale=False, spine="",
+                 stale_gates=()) -> str
     # `check --junit`: suites gates / claims.critical / claims.not-critical
 def render_selftest_junit(results, *, exit_code, when, baselines=None) -> str
     # `gate selftest --junit`: suite controls, plus baselines in pack mode
@@ -1368,7 +1370,11 @@ is never under PROVEN; a stale FAIL stays FAIL (`claims.resolve_status`). `stale
 stays the all-gates override. The report reads no sweep time and no rho: its title is
 `(<rev>)`, and `## Reproduce` lists `atompipe check` and each gate's code files, so a
 regenerated `docs/readiness.md` changes only when the claims or the verdict outcomes
-do.
+do. The code files are spelled as the verdict cache spells them (`gates/structural.py`,
+`<pack:NAME>/gates/…`), which needs the project: `render_markdown` lists them only when
+handed `root=` (`write_report` passes it) and otherwise leaves them out, never spelling
+them by this machine's absolute paths (S-89). `render_junit` takes `stale_gates` too, so
+`check`'s claim suites are judged from the same resolution as its exit code.
 
 The PROVEN section's heading line **starts with `SECTION_PROVEN`** (its qualifier,
 "(machine-verified, current)" from Phase 1.2 — a cached verdict is current but not
@@ -1386,8 +1392,10 @@ the same verdict and the same words `atompipe check` prints under BLOCKING. What
 slipped through (S-68): `status` cited the first non-passing verdict, a skip, while
 `check` cited the gate that ran and failed.
 
-`store` is in the deps for one reason: `write_report` takes its destination from
-`store.project_paths(root)["readiness"]`. Layout is `store`'s job alone, and a
+`store` is in the deps for two reasons: `write_report` takes its destination from
+`store.project_paths(root)["readiness"]`, and the Reproduce file list anchors its
+paths with `store.out_dir(root)`. `verdicts` is in them for `anchors_for` and
+`code_digest`, the one spelling of a gate's code files. Layout is `store`'s job alone, and a
 second module that knows where `docs/readiness.md` lives is a second module to
 edit when it moves.
 
@@ -1455,7 +1463,7 @@ phase-1.md 1.1):
   passed by the CLI from Phase 1.2. The CLI edge — unlink the target first, one exit
   code, write atomically at the single exit, the `.xml` suffix rule — is `cli.py`'s.
 
-### `site.py`  (deps: models, util, store, claims, report, artifacts, modelio, gates; verdicts from Phase 1.2)
+### `site.py`  (deps: models, util, claims, report, modelio, gates, verdicts)
 The project site's spine half: viewgens, and the one JSON document the page reads.
 The page's half is plain HTML, CSS and ES modules in `site_template/`, copied by
 `scaffold`; the data contract between the two is `docs/SITE_CONTRACT.md`.

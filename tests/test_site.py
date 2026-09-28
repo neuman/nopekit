@@ -108,11 +108,32 @@ class _SiteCase(unittest.TestCase):
 
     # -- ledger fixtures --------------------------------------------------- #
     def _ledger(self, *, claims=(), verdicts=(), views=()):
+        """Claims and views through `store.save`; each verdict THROUGH THE CACHE.
+
+        Never into `ledger.verdicts`: from 1.2 a page reads what
+        `verdicts.resolve` makes of the verdict cache, and a verdict written
+        into the ledger file would test a store the page no longer reads. A
+        pass or a fail becomes an entry recorded with no gate behind it
+        (`record_verdict(root, None, None, v)`: its code is unrecorded, so it
+        is never Fresh) — these gates are not registered in the CLI's registry
+        (tests:H2), so they reach the page as the stale rows of gates this
+        project does not register, and never as proof. A skip or a crash is
+        not a measurement and is never cached: it is remembered, as the sweep
+        remembers one, with no date (`when=""`), so its age is null.
+        """
+        from atompipe import verdicts as verdicts_mod
+
         ledger = store_mod.load(self.root)
         ledger.claims = list(claims)
-        ledger.verdicts = list(verdicts)
         ledger.views = list(views)
         store_mod.save(self.root, ledger)
+        for verdict in verdicts:
+            if verdict.outcome in ("pass", "fail"):
+                verdicts_mod.record_verdict(self.root, None, None, verdict)
+            else:
+                verdicts_mod.remember(
+                    self.root, verdict.gate, verdict, input_rho="",
+                    kind="error" if verdict.outcome == "error" else "self-skip", when="")
         return ledger
 
     def _claim(self, cid="C1", gates=("g.one",), **kw):
@@ -496,15 +517,88 @@ class HonestyOnThePage(_SiteCase):
     has — and unlike the readiness report, nobody would be diffing it.
     """
 
-    def _built_state(self, claims, verdicts, registry) -> dict:
-        self._ledger(claims=claims, verdicts=verdicts)
-        ledger = store_mod.load(self.root)
-        ledger.last_run = RunMeta(when="2026-01-01T00:00:00Z", tier=0)
-        store_mod.save(self.root, ledger)
+    def _built_state(self, claims, verdicts, registry, *, controls=True) -> dict:
+        """Plant `verdicts` under the registry's OWN gates, then build the page.
+
+        A pass or a fail is recorded with the registered `(spec, fn)`, so the
+        resolver can key it: a Fresh entry. A skip or a crash is remembered —
+        as an availability skip when the gate's tooling is missing here, a
+        self-skip otherwise — dated 2026-01-01T00:00:00Z, ten minutes before
+        the build.
+
+        With `controls`, every registered gate with a verdict also gets a
+        FORGED fired control: `record_control(bad="fail")` with no fixture run
+        behind it. That is a forged admission, legitimate only in a renderer
+        test — it forges the inner loop, and R-9's re-execution at every money
+        boundary (`check --force` in CI, P2's `export`) is what a hand-placed
+        entry cannot get past. It is here because these tests are about the
+        page, and a Fresh PASS from a gate never shown to fail is not a PASS on
+        the page (§3.10); `test_an_undemonstrated_gate_does_not_read_pass_on_the_page`
+        builds without it and shows exactly that.
+
+        `site.build` is handed no resolution: it resolves for itself.
+        """
+        from atompipe import verdicts as verdicts_mod
+
+        self._ledger(claims=claims)
+        for verdict in verdicts:
+            found = registry.get(verdict.gate)
+            spec, fn = found if found is not None else (None, None)
+            if verdict.outcome in ("pass", "fail"):
+                verdicts_mod.record_verdict(self.root, spec, fn, verdict)
+            else:
+                missing = spec is not None and not gates_mod.availability(spec)[0]
+                kind = ("error" if verdict.outcome == "error" else
+                        "availability" if missing else "self-skip")
+                verdicts_mod.remember(self.root, verdict.gate, verdict, input_rho="",
+                                      kind=kind, when="2026-01-01T00:00:00Z")
+            if controls and spec is not None:
+                verdicts_mod.record_control(self.root, spec, fn, bad="fail",
+                                            detail="planted by a renderer test")
         site_mod.scaffold(self.root)
         site_mod.build(self.root, store_mod.load(self.root), registry,
                        site_mod.ViewRegistry(), now="2026-01-01T00:10:00Z")
         return self._state()
+
+    def test_a_passing_gate_reaches_the_page(self):
+        """The positive control for everything in this class: a gate that ran,
+        passed, and was shown to fail its own known-bad input reads PASS on the
+        page. Without it, every "is not PASS" below could be a page that cannot
+        show a pass at all."""
+        state = self._built_state(
+            claims=[self._claim("C1", gates=["g.one"])],
+            verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
+                              measured=0.31, limit=0.5, units="mm")],
+            registry=self._registry(self._spec("g.one")),
+        )
+        self.assertEqual(state["claims"][0]["status"], "pass")
+        verdict = state["verdicts"][0]
+        self.assertTrue(verdict["ok"])
+        self.assertEqual(verdict["status"], "pass")
+        self.assertTrue(verdict["cached"])
+        self.assertTrue(verdict["fresh"])
+        self.assertEqual(verdict["stale_reason"], "")
+        self.assertFalse(state["meta"]["stale"])
+
+    def test_an_undemonstrated_gate_does_not_read_pass_on_the_page(self):
+        """The same build without the forged control. The verdict is Fresh and
+        it passed — and the gate was never shown to fail, so its pass is not
+        proof (invariant 9, the reject half): not PASS on the page, and the row
+        says why."""
+        state = self._built_state(
+            claims=[self._claim("C1", gates=["g.one"])],
+            verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
+                              measured=0.31, limit=0.5, units="mm")],
+            registry=self._registry(self._spec("g.one")),
+            controls=False,
+        )
+        self.assertNotEqual(state["claims"][0]["status"], "pass",
+                            "a PASS from a gate never shown to fail reached the page")
+        verdict = state["verdicts"][0]
+        self.assertFalse(verdict["fresh"])
+        self.assertIn("control not demonstrated", verdict["stale_reason"])
+        self.assertTrue(state["meta"]["stale"])
+        self.assertFalse(state["readiness"]["ready"])
 
     def test_a_claim_covered_only_by_a_skipped_gate_is_not_proven(self):
         state = self._built_state(
