@@ -44,6 +44,39 @@ OUT_NAME = "out"
 PACKS_NAME = "packs"                 # project-local packs, searched first by packs.py
 PROJECTION_NAME = "model.json"       # modelio.write_projection lands here
 
+#: The records layout's project file (Phase 1.3), written LAST by `init` and by
+#: the legacy migration, as the commit marker. Named here ahead of that layout
+#: because `find_root` must recognise a project in either shape from 1.1 on.
+PROJECT_NAME = "project.json"
+
+#: What makes a directory a project: one of these FILES under `.atompipe/`, never
+#: the directory itself. What slipped through (S-64): the marker was any
+#: `.atompipe/` directory, and `~/.atompipe/` is where user packs live
+#: (`packs.search_paths`). On a pack author's machine every directory under `~`
+#: was an empty, unnamed project — `status` in a scratch directory reported
+#: "(unnamed) v0.1" — so pack mode, the Stop hook's fast exit and `/start`'s
+#: `init` never saw "no project". `ledger.json` stays a marker for every project
+#: `init` made before `project.json` existed. Rejected: keeping the directory and
+#: special-casing `~` (a project's `.atompipe/packs/` checked out on its own is
+#: the same bug in another place); `.atompipe/.gitignore` (`init` writes it
+#: before the ledger, so a crashed `init` would count as a project); any
+#: non-empty `.atompipe/` (`packs/` is what makes the user-pack home non-empty).
+_MARKERS: tuple[str, ...] = (PROJECT_NAME, LEDGER_NAME)
+
+#: The repository boundary: the walk up stops at the first directory holding a
+#: `.git` entry — a directory in a clone, a `gitdir:` FILE in a worktree or a
+#: submodule. What slipped through (S-64): with no boundary, a worktree nested
+#: inside a project resolved to the TRUNK's `.atompipe/`, so a command run in the
+#: worktree read and wrote the trunk's ledger. The marker is checked FIRST at
+#: each level (cli:H9): a project that is its own git root — the fresh-clone copy
+#: of the bracket, any standalone project — must still find itself. Rejected:
+#: stopping before the marker check (the case just named); asking git
+#: (`git rev-parse --show-toplevel` is a subprocess on every command, and a
+#: machine without git would have no projects); `.hg`/`.svn` as boundaries too
+#: (Subversion before 1.7 put `.svn/` in EVERY directory, so a project in such a
+#: checkout could not be found from its own `model/`).
+_GIT_ENTRY = ".git"
+
 INPUTS_NAME = "inputs"
 DOCS_NAME = "docs"
 MODEL_NAME = "model"
@@ -146,27 +179,58 @@ directories). `atompipe ingest` recreates whichever one it needs.
 # --------------------------------------------------------------------------- #
 # locating a project
 # --------------------------------------------------------------------------- #
-def find_root(start: str | None = None) -> str | None:
-    """Walk UP from `start` (default: cwd) looking for a `.atompipe/` directory.
+def _marker_in(directory: str) -> str | None:
+    """The marker file that makes `directory` a project, or None.
 
-    Same contract as git's discovery of `.git`: you can run `atompipe check` from
-    `model/` or from a deep `inputs/cad/` subdirectory and hit the same project.
-    Returns the directory CONTAINING `.atompipe/`, or None if there is no project
-    between `start` and the filesystem root.
-
-    A `.atompipe` that is a regular file is ignored rather than accepted, because
-    the alternative is a confusing failure three calls later in `load`.
+    `isfile`, not `exists`: a `.atompipe` that is a regular file, or a
+    `project.json` that is a directory, marks nothing, because the alternative is
+    a confusing failure three calls later in `load`.
     """
+    dot = os.path.join(directory, ATOMPIPE_DIR)
+    for name in _MARKERS:
+        path = os.path.join(dot, name)
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _walk_up(start: str | None) -> tuple[str | None, str | None]:
+    """`(root, boundary)`: the project found walking up from `start`, else None
+    and the git root the walk stopped at (None when it reached the filesystem
+    root). One walk for both callers, so the message `require_root` prints can
+    never describe a different search from the one `find_root` ran."""
     cur = os.path.abspath(start or os.getcwd())
     if os.path.isfile(cur):            # tolerate being handed a file path
         cur = os.path.dirname(cur)
     while True:
-        if os.path.isdir(os.path.join(cur, ATOMPIPE_DIR)):
-            return cur
+        if _marker_in(cur) is not None:                       # the marker FIRST ...
+            return cur, None
+        if os.path.lexists(os.path.join(cur, _GIT_ENTRY)):    # ... then the boundary
+            return None, cur
         parent = os.path.dirname(cur)
         if parent == cur:              # hit "/" (or a drive root)
-            return None
+            return None, None
         cur = parent
+
+
+def find_root(start: str | None = None) -> str | None:
+    """Walk UP from `start` (default: cwd) to the directory holding a project marker.
+
+    Same contract as git's discovery of `.git`: you can run `atompipe check` from
+    `model/` or from a deep `inputs/cad/` subdirectory and hit the same project.
+    A project is a directory holding `.atompipe/project.json`, or a legacy
+    `.atompipe/ledger.json` — never merely a `.atompipe/` directory, which is
+    also what the user-pack home `~/.atompipe/packs/` looks like (S-64).
+
+    At each level the marker is checked first; then a `.git` entry there (a
+    clone's directory, or a worktree's or submodule's `gitdir:` file) ends the
+    search with None. A project is found only at or below the root of the
+    repository it sits in, so a worktree nested inside a project is its own
+    world, not the trunk's. Returns the directory CONTAINING `.atompipe/`, or
+    None if there is no project between `start` and that boundary (or the
+    filesystem root).
+    """
+    return _walk_up(start)[0]
 
 
 def require_root(start: str | None = None) -> str:
@@ -174,14 +238,21 @@ def require_root(start: str | None = None) -> str:
 
     Every CLI command except `init` goes through here, so this is the one place
     that has to explain what is missing. "no such file or directory: ledger.json"
-    is not that explanation.
+    is not that explanation, and neither is "run `atompipe init`" to a user
+    standing in a worktree whose trunk IS a project: the message names both
+    markers and the git root the search stopped at, which is the reason the
+    trunk above did not count.
     """
-    root = find_root(start)
+    root, boundary = _walk_up(start)
     if root is None:
         where = os.path.abspath(start or os.getcwd())
+        stopped = (f"here at {boundary}" if boundary is not None
+                   else "and none was found on the way up")
         raise AtompipeError(
-            f"no atompipe project found in {where} or any parent directory "
-            f"(looking for {ATOMPIPE_DIR}/) — run `atompipe init` first"
+            f"no atompipe project found in {where} or above it (looking for "
+            f"{ATOMPIPE_DIR}/{PROJECT_NAME}, or a legacy {ATOMPIPE_DIR}/{LEDGER_NAME}; "
+            f"the search stops at the first directory holding {_GIT_ENTRY}, "
+            f"{stopped}) — run `atompipe init` first"
         )
     return root
 
@@ -337,13 +408,27 @@ def init(root: str, meta: ProjectMeta) -> Ledger:
 
     `meta` arrives fully formed (including `created`, which the CLI stamps) —
     see contract rule 3 on why this function does not look at the clock.
+
+    It refuses when a MARKER exists, not when `.atompipe/` does: a directory
+    holding only `.atompipe/packs/` is not a project (S-64, cli:H9), and `init`
+    there used to be refused as if it were one. Its packs are left in place.
     """
     dot = atompipe_dir(root)
-    if os.path.exists(dot):
+    for name in _MARKERS:
+        marker = os.path.join(dot, name)
+        # `lexists`, not `find_root`'s `isfile`: a `ledger.json` that is a
+        # directory marks no project, but writing over it would still crash or
+        # clobber, and refusing is never the direction that loses a ledger.
+        if os.path.lexists(marker):
+            raise AtompipeError(
+                f"{marker} already exists — this directory is already an atompipe "
+                f"project. Refusing to overwrite its ledger; the rejected "
+                f"alternatives it records cannot be regenerated."
+            )
+    if os.path.lexists(dot) and not os.path.isdir(dot):
         raise AtompipeError(
-            f"{dot} already exists — this directory is already an atompipe "
-            f"project. Refusing to overwrite its ledger; the rejected "
-            f"alternatives it records cannot be regenerated."
+            f"{dot} exists and is not a directory — move it aside before "
+            f"`atompipe init`; nothing was written"
         )
 
     ensure_dir(root)
@@ -357,6 +442,12 @@ def init(root: str, meta: ProjectMeta) -> Ledger:
     ensure_dir(model_dir(root))
 
     paths = project_paths(root)
+    # Written whole, as before. Now that `.atompipe/` may already exist, a
+    # `.gitignore` in it is either a crashed `init`'s (this same text) or a
+    # hand-made one beside a pack home's `packs/`, and the latter's lines are
+    # replaced: the writer that keeps user lines in a marked block arrives with
+    # the records layout (1.3), and a project whose `out/` is tracked is the
+    # worse failure of the two.
     with open(paths["gitignore"], "w", encoding="utf-8") as fh:
         fh.write(_GITIGNORE)
     with open(paths["inputs_readme"], "w", encoding="utf-8") as fh:

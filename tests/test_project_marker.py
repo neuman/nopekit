@@ -224,6 +224,13 @@ class ProjectMarker(_env.EnvCase):
         store.init(d, _meta("twice"))
         with self.assertRaises(AtompipeError):
             store.init(d, _meta("twice"))
+        # A `.atompipe` that is a FILE marks nothing, but `init` over it must
+        # still refuse before writing anything, not half-build a layout.
+        d = _mkdir(self.base, "dot-is-a-file")
+        _write(os.path.join(d, store.ATOMPIPE_DIR), "not a directory\n")
+        with self.assertRaises(AtompipeError):
+            store.init(d, _meta("dot-is-a-file"))
+        self.assertEqual(os.listdir(d), [store.ATOMPIPE_DIR])
 
 
 if __name__ == "__main__":
