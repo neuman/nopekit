@@ -1105,6 +1105,15 @@ def _static_pass(recording: _Recording) -> None:
     """
     by_file: dict[str, Any] | None = None
     pending = list(recording.sources.items()) + list(recording.foreign.items())
+    # Where a bare name can resolve locally: the roots, every directory the
+    # closure already holds a file in, and any `sys.path` entry under the roots.
+    # What slipped through with the roots alone: beam, thermal and openmodelica
+    # fixtures put `gates/` on `sys.path` and `import _thermal_physics` — the
+    # helper's file was recorded, and its name was listed as third-party too.
+    shared = list(recording.roots)
+    shared += sorted({os.path.dirname(p) for p in recording.files})
+    shared += [entry for entry in sys.path
+               if isinstance(entry, str) and entry and _owning_root(entry, recording.roots)]
     done: set[str] = set()
     while pending:
         path, data = pending.pop()
@@ -1112,7 +1121,7 @@ def _static_pass(recording: _Recording) -> None:
             continue
         done.add(path)
         imports, attributes = _static_imports(path, data)
-        search = list(recording.roots) + [os.path.dirname(path)]
+        search = list(dict.fromkeys(shared + [os.path.dirname(path)]))
         for level, module, names, _line in imports:
             if level:
                 base = os.path.dirname(path)

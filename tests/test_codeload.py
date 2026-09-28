@@ -126,6 +126,10 @@ class _Sandbox(unittest.TestCase):
         for key in list(sys.path_importer_cache):
             if isinstance(key, str) and os.path.abspath(key).startswith(tmp):
                 sys.path_importer_cache.pop(key, None)
+        # A planted module may extend sys.path itself, as the bundled fixtures do.
+        sys.path[:] = [entry for entry in sys.path
+                       if not (isinstance(entry, str) and entry
+                               and os.path.abspath(entry).startswith(tmp))]
 
 
 class RecordingLoader(_Sandbox):
@@ -467,6 +471,25 @@ class RecordingLoader(_Sandbox):
         reversed_order = (self.closure(self.load("two.py", name=self.n("two_b"))).third_party,
                           self.closure(self.load("one.py", name=self.n("one_b"))).third_party)
         self.assertEqual(set(in_order + reversed_order), {expected})
+
+    def test_a_helper_on_a_path_the_module_adds_is_not_third_party(self):
+        # beam, thermal and openmodelica fixtures put `gates/` on sys.path and
+        # import a helper by its bare name; that name resolves under the root.
+        helper_name = self.n("_physics")
+        helper = self.put(f"gates/{helper_name}.py", "K = 1\n")
+        self.put("selftest/bad.py", f"""
+            import os, sys
+            _GATES = os.path.join(os.path.dirname(os.path.dirname(__file__)), "gates")
+            if _GATES not in sys.path:
+                sys.path.insert(0, _GATES)
+            import {helper_name}
+            def make(ctx):
+                import {helper_name} as again
+                return ctx
+            """)
+        closure = self.closure(self.load("selftest/bad.py"))
+        self.assertIn(helper, dict(closure.files))
+        self.assertEqual(closure.third_party, (), "a local helper was listed as third-party")
 
     def test_spine_extras_record_an_atompipe_site_import(self):
         self.put("parts.py", """
