@@ -57,6 +57,35 @@ If you genuinely cannot find a tier-0 bound for the domain, say so in `PACK.md`
 under "what this pack cannot settle" — but look hard first. Almost every physical
 claim has an order-of-magnitude answer sitting in a textbook.
 
+### 3b. Write the gate for the context it actually gets
+
+A gate never sees the sweep's context. It gets a traced view of its own, and every
+read it makes — a parameter, a claim, a file — is recorded, because the verdict cache
+keys each verdict by exactly what it read. Write for that:
+
+- **Name the gate like a directory.** `<scope>.<what>` — `fdm.overhang`. Its cached
+  verdicts live in `.atompipe/verdicts/<gate id>/`, so the registry refuses `/`, `\`,
+  `..` and `:` in an id, and an id that differs from another only in case.
+- **Never write `ctx.params`.** It is read-only: an assignment, `update` or `pop`
+  raises `GateInputWriteError` and the gate reads as an error. It used to be one dict
+  shared by every gate in the sweep, so one gate's write was the next gate's input.
+  Need a variant? `ctx.params.copy()` is a plain dict you own.
+- **`ctx.extra` is yours alone.** Nothing you put there reaches the next gate. To share
+  a file between gates — a mesh several gates measure — use
+  `ctx.load_file(path, loader=trimesh.load_mesh)`: loaded once per sweep, recorded for
+  every gate that asks, hit or miss. Pass a module-level function as the loader, and
+  copy the result before changing it (every caller gets the same object). A cache on
+  `extra` once made the second gate's read of a part invisible.
+- **Load helpers by path with `atompipe.modelio.load_path(path)`**, never with
+  `spec_from_file_location` under a fixed name: it runs the bytes on disk, never a
+  stale `.pyc`, keeps two copies of your pack from sharing one helper, and records the
+  helper as part of the gate's code, so editing it re-runs the gate.
+- **Leave `rho` and `cpu_s` alone.** `run_gate` measures `cpu_s` (child processes
+  included: a solver subprocess is not free) and `duration_s`, and the sweep sets
+  `rho`. Anything a gate puts in them is overwritten.
+- **Read claims through `ctx.ledger.claim(id)`**; the ledger a gate gets has no
+  verdicts in it.
+
 ### 4. Build the negative control, and run it
 
 This is the step that separates a pack from a plausible-looking directory.
@@ -83,7 +112,10 @@ waterplane inertia, and the gate passed its own known-bad input. A control whose
 severity depends on the host project is one that passes in some repositories and
 fails in others.
 
-Use the pack's own `selftest/baseline.json` as the base:
+Use the pack's own `selftest/baseline.json` as the base, and **return a context you
+built** — never edit the one you were handed. It is a traced copy of the host's: your
+writes to it never reach the project's sweep, and every host value you read is
+recorded against the seal.
 
 ```python
 return dataclasses.replace(ctx, params={**_baseline(), "kg_m": 0.62})

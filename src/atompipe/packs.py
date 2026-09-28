@@ -34,7 +34,6 @@ create a cycle at spine import time.
 from __future__ import annotations
 
 import dataclasses
-import importlib.util
 import json
 import os
 import re
@@ -644,14 +643,20 @@ def load_gates(name: str, registry: Any, root: str | None = None, *,
       imports resolve against this pack's directory, which produces a wrong
       answer rather than an error.
     * Each file imports under a pack-namespaced module name (see
-      ``_module_name``), so two packs may both ship ``gates/geometry.py``. A
-      module already in ``sys.modules`` is REUSED, not re-executed — ordinary
-      import semantics, and the reason loading one pack into two registries
-      does not blow up on "gate already registered".
-    * ``PACK = "<name>"`` is set on the module object *before* execution, so a
-      gate module can read it at import time (the contract documents that
-      global) — ``module_from_spec`` hands us the module before the loader runs
-      it, which is the whole reason that ordering is possible.
+      ``_module_name``), so two packs may both ship ``gates/geometry.py``.
+    * Each file loads through ``modelio.load_source_module``: compiled from the
+      bytes on disk (never a ``.pyc``), its code closure recorded, and a module
+      already in ``sys.modules`` REUSED only while every file it ran still hashes
+      the same — otherwise it runs again. A reused module re-adopts the gates it
+      registered into ``registry``, which is what lets one pack load into two
+      registries without "gate already registered", and a fresh registry come
+      back full. What slipped through when reuse was unconditional: an in-process
+      edit to a gate module or its helper ran the old code under the new bytes
+      (S-26).
+    * ``PACK = "<name>"`` and ``PACK_DIR`` are set on the module object *before*
+      execution, so a gate module can read them at import time (the contract
+      documents those globals).
+    * ``registry.pack_dirs[name]`` records the directory the gates came from.
     * Any exception becomes an ``AtompipeError`` naming the pack and the file.
       A pack is somebody else's code; a stranger's ImportError with a spine
       traceback reads as a spine bug and gets reported as one.
@@ -687,6 +692,16 @@ def _load_dir(name: str, pack_dir: str, registry: Any) -> list[GateSpec]:
         # loading is not the place to have that opinion.
         return []
 
+    from . import gates as _gates          # local import: see _fresh_registry
+    from . import modelio as _modelio      # local import: packs stays free to import
+
+    # Where this pack's gates came from, on the registry that now holds them: a
+    # verdict entry spells a path under the pack as `<pack:NAME>/...` so it reads
+    # the same in every checkout, and only the load knows the directory.
+    pack_dirs = getattr(registry, "pack_dirs", None)
+    if isinstance(pack_dirs, dict):
+        pack_dirs[name] = pack_dir
+
     default = _default_registry()
     pools: list[Any] = [registry]
     if default is not registry:
@@ -703,14 +718,12 @@ def _load_dir(name: str, pack_dir: str, registry: Any) -> list[GateSpec]:
             rel_path = os.path.join(GATES_DIR, os.path.basename(path))
             existing = sys.modules.get(mod_name)
             if existing is not None:
-                # Already imported: do NOT run it twice — that is ordinary import
-                # semantics and it is what lets one pack be loaded into two
-                # registries. But module names are keyed on the pack NAME, so a
-                # second directory carrying the same name would silently reuse
-                # the first one's code while every message said otherwise. That
-                # is the shadowing case, and it gets an error rather than a
-                # quietly wrong answer: only one copy can win at check time, so
-                # the user has to be told there are two.
+                # Module names are keyed on the pack NAME, so a second directory
+                # carrying the same name would silently reuse — or now, replace —
+                # the first one's code while every message said otherwise. That is
+                # the shadowing case, and it gets an error rather than a quietly
+                # wrong answer: only one copy can win at check time, so the user has
+                # to be told there are two.
                 seen_dir = getattr(existing, "PACK_DIR", None)
                 if seen_dir and os.path.normcase(seen_dir) != os.path.normcase(pack_dir):
                     raise AtompipeError(
@@ -718,30 +731,32 @@ def _load_dir(name: str, pack_dir: str, registry: Any) -> list[GateSpec]:
                         f"refusing to load a second copy from {pack_dir} under the same name "
                         f"(one of them is shadowed — remove it or rename it)"
                     )
-                continue
-            spec = importlib.util.spec_from_file_location(mod_name, path)
-            if spec is None or spec.loader is None:       # pragma: no cover - defensive
-                raise AtompipeError(
-                    f"pack {name!r}: cannot load {rel_path} (no import machinery accepted it)"
-                )
-            module = importlib.util.module_from_spec(spec)
-            module.PACK = name                            # readable at module import time
-            module.PACK_DIR = pack_dir
-            sys.modules[mod_name] = module                # before exec: self-imports, dataclasses
+            # Fresh bytes, a recorded closure, and a content-keyed cache
+            # (`modelio.load_source_module`). What slipped through with the stock
+            # loader: a module already in `sys.modules` was reused however its file
+            # had changed, and a stale `__pycache__` that validated by mtime and
+            # size ran the old bytecode after a same-size edit inside one second —
+            # the source said 8.0, the verdict came from 7.0 (S-26). A module still
+            # current is served from the cache and re-adopts the gates it
+            # registered into THIS registry; one that moved runs again. `PACK` and
+            # `PACK_DIR` are set before it runs, readable at import time, and are
+            # part of the cache key. `use_registry` makes `registry` the target of
+            # the module's `@gate`s, which is what lets the load record them.
             try:
-                spec.loader.exec_module(module)
+                with _gates.use_registry(registry):
+                    _modelio.load_source_module(
+                        path, name=mod_name, roots=[pack_dir], registry=registry,
+                        attrs={"PACK": name, "PACK_DIR": pack_dir})
             except AtompipeError as exc:
                 # The registry rejecting a gate (no negative control) lands here
                 # already phrased for a human; keep the phrasing, add the location.
-                sys.modules.pop(mod_name, None)
                 raise AtompipeError(f"pack {name!r}: {rel_path}: {exc}") from exc
             except KeyboardInterrupt:
                 # Ctrl-C is the user talking, not the pack failing. Dressing it up
                 # as "pack X failed to import" blames a stranger's file for a
                 # decision the user just made, and makes a slow pack load
                 # un-interruptable in practice because the message reads as a bug
-                # to go and fix. Clean up the half-executed module and get out.
-                sys.modules.pop(mod_name, None)
+                # to go and fix. The loader already dropped the half-run module.
                 raise
             except BaseException as exc:
                 # BaseException on purpose: a gate module calling sys.exit() at
@@ -749,7 +764,6 @@ def _load_dir(name: str, pack_dir: str, registry: Any) -> list[GateSpec]:
                 # able to take `atompipe check` down with its own exit code —
                 # a pack that exits the process is a broken pack, and it is named
                 # as one.
-                sys.modules.pop(mod_name, None)
                 raise AtompipeError(
                     f"pack {name!r}: {rel_path} failed to import: "
                     f"{type(exc).__name__}: {exc}"
@@ -787,9 +801,28 @@ def _load_dir(name: str, pack_dir: str, registry: Any) -> list[GateSpec]:
                 # name on what this function returns, on a new object.
                 live = dataclasses.replace(live, pack=name)
             if pool is not registry:
-                _adopt(registry, live, entry[1] if entry else None, name)
+                fn = entry[1] if entry else None
+                if fn is not None and not _current(fn):
+                    # A function an earlier run of an edited module left in the
+                    # default pool. The module ran again and this is not its gate
+                    # any more; adopting it would sweep the old code.
+                    claimed.discard(spec_obj.id)
+                    continue
+                _adopt(registry, live, fn, name)
             added.append(live)
     return added
+
+
+def _current(fn: Any) -> bool:
+    """Is ``fn`` still what its module says it is?
+
+    The module ``fn`` came from, as ``sys.modules`` holds it now, still binds
+    ``fn`` under its own name. False for a function left behind by an earlier
+    run of a module that has since run again: same name, different object.
+    """
+    module = sys.modules.get(getattr(fn, "__module__", "") or "")
+    name = getattr(fn, "__name__", "")
+    return module is not None and bool(name) and vars(module).get(name) is fn
 
 
 def _adopt(registry: Any, spec: GateSpec, fn: Any, pack: str) -> None:

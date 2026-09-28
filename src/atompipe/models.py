@@ -414,6 +414,19 @@ class Verdict(Record):
     locators: list[Locator] = field(default_factory=list)
     """WHERE this verdict applies, for the site to highlight. Optional and often
     empty: a gate attaches one only when it genuinely knows the position."""
+    rho: str = ""
+    """The content address of what this verdict was computed from — the hash of
+    the gate's code, the spine, and every input the gate read (PLAN D-05). Set by
+    the sweep that recorded it, never by the gate: ``run_gate`` clears whatever a
+    gate returned here, because a verdict that could name its own inputs could
+    name inputs it never read. Empty on a verdict nobody recorded."""
+    cpu_s: float = 0.0
+    """CPU seconds the gate cost, user and system, its child processes INCLUDED —
+    the ``os.times()`` delta ``run_gate`` measures. ``duration_s`` alone called the
+    most expensive gates free: omc does its work in a subprocess, and a gate
+    waiting on a solver spends wall time, not its own CPU. Measured, never
+    declared; 0.0 for a skip, which did no work. Both new fields are last (PLAN
+    R-2), so positional construction still means what it meant."""
 
     @property
     def outcome(self) -> str:

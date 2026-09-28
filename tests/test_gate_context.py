@@ -580,6 +580,33 @@ print(json.dumps([first, measured()]))
 """
 
 
+_EDIT_PACK_AND_RELOAD = """\
+import json, os, py_compile, sys
+from atompipe import gates, packs
+
+pack_dir = sys.argv[1]
+path = os.path.join(pack_dir, "gates", "span.py")
+py_compile.compile(path)
+
+
+def measured():
+    registry = gates.Registry()
+    packs.load_gates("scratchspan", registry, root=None, include_user=False)
+    spec, fn = registry.get("proj.span")
+    return registry.pack_dirs, gates.run_gate(spec, fn, gates.GateContext()).measured
+
+
+first = measured()
+stat = os.stat(path)
+with open(path, encoding="utf-8") as fh:
+    source = fh.read()
+with open(path, "w", encoding="utf-8") as fh:
+    fh.write(source.replace("7.0", "8.0"))
+os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+print(json.dumps([first, measured()]))
+"""
+
+
 class GateCodeIsFresh(_env.EnvCase):
     def test_same_size_same_second_gate_edit_runs_new_code(self):
         """M11.5: a same-size edit with its mtime restored — exactly what a pyc
@@ -593,6 +620,44 @@ class GateCodeIsFresh(_env.EnvCase):
         self.assertEqual(second, 8.0, "the edited gate ran its old bytecode (S-26)")
         self.assertEqual(ids_1, ["proj.span"])
         self.assertEqual(ids_2, ["proj.span"], "the fresh registry came back empty")
+
+    def test_same_size_same_second_pack_gate_edit_runs_new_code(self):
+        """The same, through ``packs.load_gates`` — which also says where the pack
+        was loaded from, on the registry that holds its gates."""
+        packs_root = self.tmp()
+        pack_dir = os.path.join(packs_root, "scratchspan")
+        _write(os.path.join(pack_dir, "pack.json"), '{"name": "scratchspan"}\n')
+        _write(os.path.join(pack_dir, "gates", "span.py"), _SPAN_GATE)
+        proc = _env.run([sys.executable, "-c", _EDIT_PACK_AND_RELOAD, pack_dir], cwd=packs_root,
+                        env={packs_mod.PACK_PATH_ENV: packs_root})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        (dirs_1, first), (dirs_2, second) = json.loads(proc.stdout)
+        self.assertEqual((first, second), (7.0, 8.0), "the edited pack gate ran its old bytecode")
+        for dirs in (dirs_1, dirs_2):
+            self.assertEqual({k: os.path.realpath(v) for k, v in dirs.items()},
+                             {"scratchspan": os.path.realpath(pack_dir)})
+
+    def test_same_size_same_second_fixture_edit_runs_new_code(self):
+        """A fixture was cached by its path forever: an in-process edit — a test that
+        defuses a control to prove admission notices — re-ran the old fixture."""
+        root = self.tmp()
+        fixture = _write(os.path.join(root, "selftest", "bad.py"),
+                         "def make(ctx):\n    return {'span_mm': 42.0}\n")
+        registry = gates_mod.Registry()
+        spec, fn = _register(registry, "g.span",
+                             lambda ctx: ctx.extra.get("span_mm", 0.0) <= 10.0,
+                             negative_control=NegativeControl(fixture="selftest/bad.py"))
+        ctx = GateContext(root=root, ledger=Ledger())
+        before = gates_mod.selftest(spec, fn, ctx)
+        self.assertTrue(before.ok, before.detail or before.error)
+        stat = os.stat(fixture)
+        with open(fixture, "w", encoding="utf-8") as fh:
+            fh.write("def make(ctx):\n    return {'span_mm': 05.0}\n")     # same size
+        os.utime(fixture, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        self.assertEqual(os.stat(fixture).st_size, stat.st_size)
+        after = gates_mod.selftest(spec, fn, ctx)
+        self.assertFalse(after.ok, "the defused fixture's old bytes ran")
+        self.assertIn("PASSED its own known-bad", after.detail)
 
 
 # --------------------------------------------------------------------------- #
@@ -700,6 +765,27 @@ class ReadOnlyBlastRadius(_env.EnvCase):
                                 cwd=os.path.dirname(copy))
                 self.assertEqual(proc.returncode, 0,
                                  f"{name}:\n{proc.stdout[-1500:]}\n{proc.stderr[-1500:]}")
+
+
+class ReadsStillAttributed(_env.EnvCase):
+    """The gate reads a traced COPY of the params now, and a caller that noted
+    which keys each gate read on its own mapping sees nothing of a copy being made.
+    What that would have looked like: every ``Param.gates`` empty after a check,
+    and ``atompipe why thickness`` saying no gate would notice the one number the
+    bracket's failing claim turns on."""
+
+    def test_why_names_the_gate_that_read_the_param(self):
+        project = os.path.join(self.tmp(), "bracket")
+        shutil.copytree(BRACKET, project, ignore=shutil.ignore_patterns("__pycache__", "out"))
+        checked = _env.atompipe(["check"], cwd=project)
+        self.assertIn(checked.returncode, (0, 1), checked.stderr)
+        proc = _env.atompipe(["why", "thickness", "--json"], cwd=project)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        text = json.loads(proc.stdout)["why"]
+        _head, sep, gates_part = text.partition("GATES (")
+        self.assertTrue(sep, text)
+        self.assertFalse(gates_part.startswith("0)"), text)
+        self.assertIn("bracket.min_wall", gates_part.split("\n\n")[0], text)
 
 
 # --------------------------------------------------------------------------- #

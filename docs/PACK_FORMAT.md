@@ -136,6 +136,11 @@ Rules, all enforced:
 
 - **`negative_control` is mandatory.** The registry raises without it. A gate that
   cannot demonstrate failure is a logger — see rule 5 in `METHOD.md`.
+- **A gate id names a directory.** Its cached verdicts live in
+  `.atompipe/verdicts/<gate id>/`, so the registry refuses an id containing `/`, `\`,
+  `..` or `:`, and an id that differs from a registered one only in case (on macOS
+  and Windows those are one directory). Dotted and pack-prefixed — `fdm.overhang` —
+  is the convention, and every bundled id already follows it.
 - **Declare `requires_*` honestly, and ship the install recipe.** A gate whose tool is
   missing reports SKIPPED and its claim goes BLOCKED, visibly — and the skip message
   names the command that fixes it, from the manifest's `install` block. BLOCKED is a
@@ -243,21 +248,26 @@ class Verdict:                         # what a gate returns (or a (bool, detail
     error: str = ""                    # the gate crashed: NOT the same as failing
     pack: str = ""                     # stamped from the spec
     locators: list[Locator]            # WHERE it applies, only when genuinely known
+    rho: str = ""                      # the hash of everything it read: set by the sweep
+                                       #   that records it, never by the gate
+    cpu_s: float = 0.0                 # CPU seconds, child processes included: measured
     outcome -> str                     # property: "error" | "skipped" | "pass" | "fail"
     ok -> bool                         # property: outcome == "pass"; a skip is never ok
     def render(self) -> str            # "[FAIL] fdm.overhang : worst face 63.2deg vs 50deg limit"
 
 @dataclass
-class GateContext:                     # a gate's one argument
+class GateContext:                     # a gate's one argument — a traced view, never the sweep's
     root: str                          # the project root
-    ledger: Ledger                     # a COPY of the project state: read it, never write it
+    ledger: Ledger                     # a COPY of the project state, with NO verdicts in it
     model: Any | None                  # the loaded model, or None
-    params: dict                       # the projection, flattened: read numbers here
+    params: dict                       # the projection, flattened: read numbers here. READ-ONLY
     out_dir: str                       # scratch and evidence
     tier: int                          # the sweep's tier; never a reason to lower the standard
     log: Callable[[str], None]         # one-line progress sink
-    extra: dict                        # where a dict-returning fixture lands
+    extra: dict                        # where a dict-returning fixture lands; THIS gate's own copy
     pack: str; key_scope: str          # stamped by run_gate: whose namespace param() reads
+    memo: dict | None                  # the sweep's file memo behind load_file; None outside a sweep
+    trace: GateTrace | None            # what this view records into; yours to leave alone
     def scopes(self) -> list[str]      # ["fdm", "fdm-print"]: this gate's scopes, best first
     def param(self, name, default=None, *, scope=...) -> Any   # scoped first: see below
     def pack_param(self, name, default=None) -> Any
@@ -266,7 +276,48 @@ class GateContext:                     # a gate's one argument
     def require_param(self, name) -> Any          # raises rather than compare with None
     def out_path(self, *parts) -> str             # an evidence path under out_dir, dir created
     def with_extra(self, extra) -> GateContext    # a copy with `extra` merged over
+    def load_file(self, path, loader=None) -> Any # a file several gates read: loaded once per
+                                                  #   sweep, recorded for EVERY caller
 ```
+
+**The context a gate receives is a traced view of its own.** `run_gate` never hands a
+gate the sweep's context. Every read of `ctx.params`, of a claim through `ctx.ledger`,
+and of a file the gate opens is recorded, because a verdict is only as current as the
+inputs it read — the verdict cache keys each verdict by exactly those reads (`rho`). So:
+
+- **`ctx.params` is read-only.** `ctx.params["load_n"] = 0` — or `update`, `pop`,
+  `setdefault`, a write into a nested dict — raises `GateInputWriteError` ("a gate
+  cannot write another gate's inputs"), and the gate reads as an error. Before, one
+  mutable dict was handed to every gate in a sweep, so one gate's write was the next
+  gate's input and no verdict could show it. A gate that wants a modified projection
+  builds one: `ctx.params.copy()` and `copy.deepcopy(ctx.params)` hand back plain
+  dicts, writable all the way down, and count as reading everything they copy.
+  (`dict(ctx.params)` copies the top level only; a nested dict in it is still the
+  read-only view.)
+- **`ctx.extra` is the gate's own shallow copy.** What one gate stores there is gone
+  for the next. fdm-print once kept a cross-gate mesh cache on it, and the second gate
+  to want the part got a cache hit that opened nothing — so nothing recorded that its
+  verdict depended on the file.
+- **`ctx.load_file(path, loader=None)`** is how several gates share one file. `path`
+  resolves against `ctx.root`; `loader` (a module-level function such as
+  `trimesh.load_mesh`, not a lambda made in the gate body, which never hits) defaults
+  to reading the bytes. The result is memoised once per sweep, and **every call is
+  recorded as a read of the calling gate**, hit or miss. A hit is the same object for
+  every caller: copy it before you change it. Outside a sweep (`ctx.memo is None`, a
+  hand-run script) it simply loads.
+- **`ctx.ledger` holds no verdicts.** A gate that read other gates' verdicts would put
+  verdicts inside its own content address. Claims are readable; `ctx.ledger.claim(id)`
+  makes that claim an input.
+- **`Verdict.rho` and `Verdict.cpu_s` are not yours to set.** `run_gate` measures
+  `duration_s` and `cpu_s` (the `os.times()` delta, child processes included — a gate
+  that shells out to a solver is not free) and clears `rho`, which the sweep computes
+  from the trace.
+- **Load a helper by path with `atompipe.modelio.load_path(path)`**, not with
+  `importlib.util.spec_from_file_location` under a fixed module name. It compiles the
+  bytes on disk (a stale `__pycache__` once ran 7.0 after the source said 8.0), salts
+  the module name with the path (two copies of one pack never run each other's
+  helpers), and records the helper in the code of the gate that loaded it — so editing
+  the helper re-runs that gate.
 
 `outcome` is the one derivation of what a verdict says: `"error"` if `error` is set,
 else `"skipped"` if `skipped`, else `"pass"` if `passed is True`, else `"fail"`.
@@ -399,6 +450,14 @@ handles garbage, not that it measures what it claims.
 Fixtures live in `selftest/` and expose `make(ctx)` returning either a new
 `GateContext` or a dict merged into `ctx.extra`. Reference them as
 `selftest/<file>.py` or `module:function`.
+
+**A fixture builds its own context.** The `ctx` a fixture receives is a writable copy
+of the host's, traced: what it writes there stays there — it never reaches the sweep
+the control ran inside — and every read it makes of the host's params is recorded as a
+host read, which a SEALED fixture (below) never makes. Return
+`dataclasses.replace(ctx, params={...})` with the known-bad projection, as every
+bundled fixture does; the gate then runs on that, read-only like any gate. A fixture
+module is loaded fresh from its bytes, and its code is recorded with the control.
 
 ### Fixtures must be SEALED
 
