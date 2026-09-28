@@ -645,6 +645,7 @@ class GateInputWriteError(AtompipeError): ...  # "a gate cannot write another ga
 
 def traced_context(ctx, trace, *, readonly=True)   # -> the same dataclass type as ctx
 def tracing(trace)                                 # `with tracing(t):` routes audit events to t
+def replay(recorded, trace=None)                   # recorded's files, dirs, opaque -> every open trace and trace
 def canonical_ast_digest(source) -> str            # "" when it does not parse
 def spine_digest() -> str                          # "" when a SPINE_MODULES source is unreadable
 ```
@@ -728,6 +729,14 @@ event; a subprocess's own reads (hence opaque); an `os.open` relative to a `dir_
 What slipped through while writing it: `sys._getframe` raises an audit event of its
 own, so the hook re-entered itself until the recursion limit and aborted the `open` it
 was auditing — it now carries a per-thread re-entrancy guard.
+
+**`replay(recorded, trace=None)`** records again what the hook routed to `recorded` —
+`files_read` (reads first), `files_written`, `dirs`, `opaque` — into every trace open
+now and into `trace`, even with no window open around it; the views' channels (params,
+ledger, model) are not replayed. It is how `GateContext.load_file` makes a memo hit
+record every file the loader opened on the miss (a `.gltf`'s `.bin` buffers): the hit
+once reported the named file only, and bundled `fdm.bridge_span` kept a Fresh PASS after
+its buffers moved.
 
 **`spine_digest`** is the spine's version for rho, taken from what `SPINE_MODULES` say:
 `canonical_ast_digest` of each, read from the files beside `verdicts.py`, memoised per
@@ -1230,7 +1239,7 @@ class GateContext:                                      # the full surface: docs
     def require_param(self, name) -> Any                # raises rather than compare with None
     def out_path(self, *parts) -> str                   # an evidence path under out_dir, dir created
     def with_extra(self, extra) -> GateContext          # a copy with `extra` merged over
-    def load_file(self, path, loader=None) -> Any       # once per sweep; a read of THIS gate, hit or miss
+    def load_file(self, path, loader=None) -> Any       # once per sweep; it and all the loader opened: reads of THIS gate, hit or miss
 def scope_of(gate_id: str) -> str                       # "fdm.bed_fit" -> "fdm"
 SCOPE_SEP = "."
 class Registry:
@@ -1307,8 +1316,13 @@ gets one `memo={}` when the caller brought none, never left on the caller's cont
 the read as the `open` audit event it stands for — to the view's own trace and every
 trace open around it — on EVERY call, hit or miss, and memoises `loader(abspath)` (the
 bytes by default) in `memo` on `(abspath, id(loader))` (a bound method by its object and
-function), revalidated by the file's stat signature. No memo: it just loads (a hand-run
-check script, packs:H15).
+function). The loader runs inside the view's window and, on a miss, under a `GateTrace`
+of its own that the entry keeps; a hit `replay`s it, so every caller records every file,
+directory and opaque channel the loader touched — a `.gltf`'s `.bin` buffers, an `.obj`'s
+`.mtl` — not only the named file. The entry is revalidated by the stat signature of the
+named file (taken before the load) and of every other path the loader read or listed
+(after it; a path probed and missing must still be missing). No memo: it just loads,
+inside the same window (a hand-run check script, packs:H15).
 
 **Controls, traced.** `selftest(spec, fn, ctx, *, trace=None, out_dir=None)`: the
 fixture gets a WRITABLE traced copy of `ctx` (`out_dir` replaced when given) — its

@@ -104,7 +104,7 @@ from typing import Any, Callable, Iterable
 from . import modelio
 from .models import GateSpec, Ledger, NegativeControl, Tier, Verdict
 from .util import AtompipeError, ensure_dir, rel, short_hash
-from .verdicts import GateTrace, ParamTrace, traced_context, tracing
+from .verdicts import GateTrace, ParamTrace, replay, traced_context, tracing
 
 __all__ = [
     "SCOPE_SEP",
@@ -500,18 +500,37 @@ class GateContext:
         before the load, so a file that turns out to be missing is still named
         as an input — its absence is what the gate decided on.
 
+        **Every file the loader opens is a read too, hit or miss.** On a miss the
+        loader runs inside this view's window and under a trace of its own
+        (``verdicts.tracing``), so this gate and every trace open around it record
+        what it opened as they would any open; the entry keeps that trace, and a
+        hit replays it (``verdicts.replay``) — files, listed directories and
+        opaque channels — into every caller. What slipped through before: the hit
+        reported only the file it was handed, so a ``.gltf``'s ``.bin`` buffers
+        (an ``.obj``'s ``.mtl``, any include a loader follows) were inputs of the
+        gate that missed and of no gate that hit. Bundled ``fdm.bridge_span`` kept
+        a Fresh PASS after the buffers moved, while ``fdm.overhang``, which had
+        missed, went stale (review round 1). With no window open the miss used to
+        record the loader's opens nowhere at all; this view's trace is pushed for
+        the load now, so a test calling a view directly sees them too.
+
         **The memo** (``self.memo``, one per :func:`run_all`) is keyed on
         ``(abspath, id(loader))``: two gates asking for the bytes and a third
         asking for a parsed mesh get two entries, never each other's. For a bound
         method the id is its object's and its function's, because ``obj.parse`` is
         a NEW object on every access: keyed on that, a bound-method loader never
         hit (what slipped through while its test was being written); a lambda made
-        inside the gate body never hits either — pass a module-level function. The entry holds the loader itself, so its ``id``
-        cannot be reused by a new function while the entry lives, and the file's
-        stat signature, so bytes rewritten between two gates of one sweep are
-        loaded again — a hit on the old bytes would have put the new bytes' digest
-        on a verdict computed from the old ones. With no memo (``None``: a
-        hand-run check script, a test) it just loads (packs:H15).
+        inside the gate body never hits either — pass a module-level function. The
+        entry holds the loader itself, so its ``id`` cannot be reused by a new
+        function while the entry lives, and the stat signature of every path the
+        loader read or listed (``_signatures``), so bytes rewritten between two
+        gates of one sweep are loaded again — a hit on the old bytes would have
+        put the new bytes' digest on a verdict computed from the old ones. The
+        named file's signature is taken before the load and the rest after it,
+        since only the load says what they are; a path the loader probed and
+        found missing is signed as missing, and a hit needs it still missing.
+        With no memo (``None``: a hand-run check script, a test) it just loads
+        (packs:H15), inside the same window.
 
         A hit hands every caller the SAME object. Do not mutate it: copy first,
         as cad-solid does before welding a mesh.
@@ -522,19 +541,25 @@ class GateContext:
         target = raw if os.path.isabs(raw) else os.path.join(self.root or os.curdir, raw)
         abspath = os.path.abspath(target)
         _report_read(self.trace, abspath)
+        view = tracing(self.trace) if self.trace is not None else contextlib.nullcontext()
         memo = self.memo
         if memo is None:
-            return _load(abspath, loader)
+            with view:
+                return _load(abspath, loader)
         key = (abspath, _loader_id(loader))
         signature = _stat_signature(abspath)
         held = memo.get(key)
         # A key match IS the same loader: the entry holds its loader alive, and a
         # live object's id is never handed to another (see `_loader_id`).
-        if held is not None and signature is not None and held[1] == signature:
+        if (held is not None and signature is not None and held[1] == signature
+                and _unmoved(held[3])):
+            replay(held[4], self.trace)
             return held[2]
-        value = _load(abspath, loader)
+        loaded = GateTrace()
+        with view, tracing(loaded):
+            value = _load(abspath, loader)
         if signature is not None:
-            memo[key] = (loader, signature, value)
+            memo[key] = (loader, signature, value, _signatures(loaded, abspath), loaded)
         return value
 
 
@@ -561,13 +586,39 @@ def _load(abspath: str, loader: Callable[[str], Any] | None) -> Any:
         return handle.read()
 
 
+def _signatures(loaded: GateTrace, named: str) -> tuple:
+    """``((path, stat signature), ...)`` for every path a loader read or listed
+    but the one it was handed (signed before the load, by the caller).
+
+    A read the loader made of a file it had itself written first never reaches
+    ``files_read``, so a scratch file the loader writes and reads back is not
+    signed: its bytes came from the paths that are. A directory is signed by its
+    own stat, whose mtime moves when an entry is added, removed or renamed — a
+    loader that globs for its buffers is re-run when a buffer appears.
+    *Rejected:* the directory's listing (``os.listdir`` raises an audit event,
+    and the check would itself become a read of every trace open at the hit).
+    """
+    paths = [path for path in loaded.files_read if path != named]
+    paths += sorted(loaded.dirs)
+    return tuple((path, _stat_signature(path)) for path in dict.fromkeys(paths))
+
+
+def _unmoved(signed: tuple) -> bool:
+    """Whether every ``(path, signature)`` still stats the same (``None`` for a
+    path that was missing, and still is)."""
+    return all(_stat_signature(path) == signature for path, signature in signed)
+
+
 def _stat_signature(abspath: str) -> tuple | None:
     """What a memo hit is checked against: ``(size, mtime_ns, ctime_ns, inode)``.
 
     ctime and the inode are here because size and mtime alone miss a same-size
     rewrite with its mtime put back — ``os.utime`` cannot restore a ctime, and an
     atomic replace changes the inode. ``None`` when the file cannot be stat'ed:
-    such a load is never memoised, so the loader's own error reaches the gate.
+    for the file ``load_file`` was handed, such a load is never memoised, so the
+    loader's own error reaches the gate; for any other path the loader read (an
+    optional ``.mtl`` it probed), ``None`` is a signature like the rest, and a
+    hit needs the path still missing.
     """
     try:
         st = os.stat(abspath)

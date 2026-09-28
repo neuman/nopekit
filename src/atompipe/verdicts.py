@@ -121,7 +121,7 @@ from .util import AtompipeError, FileDigests, atomic_write_json, atomic_write_te
 
 __all__ = [
     "ABSENT", "PRESENT", "SPINE_MODULES", "SMALL_VALUE_MAX_CHARS",
-    "digest_value", "small_value", "portable", "traced_context", "tracing",
+    "digest_value", "small_value", "portable", "traced_context", "tracing", "replay",
     "spine_digest", "canonical_ast_digest",
     "Anchors", "ParamTrace", "LedgerView", "ModelProxy", "GateTrace",
     "GateInputWriteError",
@@ -1316,6 +1316,43 @@ def tracing(trace: GateTrace) -> _Window:
     nothing at all while no window is open.
     """
     return _Window(trace)
+
+
+def replay(recorded: GateTrace, trace: GateTrace | None = None) -> None:
+    """Record again what the hook routed to ``recorded``: its reads, writes,
+    listed directories and opaque channels — into every trace open now, and into
+    ``trace`` (the calling view's own) even when no window is open around it.
+
+    For work done once and consumed many times: ``GateContext.load_file`` runs a
+    loader under a trace of its own on a miss and replays that trace on every
+    hit, so each caller records every file the loader opened, not only the one
+    it was handed. What slipped through before this existed: the hit reported
+    the named file alone, so a ``.gltf``'s ``.bin`` buffers were inputs of the
+    gate that missed and of no gate that hit — bundled ``fdm.bridge_span`` kept a
+    Fresh PASS after its buffers moved, and failed at 54 mm against a 30 mm limit
+    when forced (review round 1).
+
+    Reads go first and writes after, which rebuilds ``recorded``'s own view of
+    each path: a path it read and then wrote is ``self_modified`` here too, and
+    one it wrote and then read is its output, never a read. The hook's filters
+    (library paths, import machinery) already ran when ``recorded`` was filled.
+    Params, the ledger and the model are the views' channels, not the hook's,
+    and are not replayed. *Rejected:* re-raising the ``open`` events through
+    ``sys.audit`` as ``_report_read`` does for one path (a listing and a child
+    process have no event a replay could raise without running them).
+    """
+    targets: list = []
+    for target in (*_STACK, trace):
+        if target is None or target is recorded or any(t is target for t in targets):
+            continue
+        targets.append(target)
+    for target in targets:
+        for path in recorded.files_read:
+            target._note_read(path)
+        for path in sorted(recorded.files_written):
+            target._note_write(path)
+        target.dirs.update(recorded.dirs)
+        target.opaque.update(recorded.opaque)
 
 
 def _install_hook() -> None:

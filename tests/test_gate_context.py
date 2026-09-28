@@ -92,6 +92,31 @@ def _write(path: str, text: str) -> str:
     return path
 
 
+def _with_include(path: str) -> bytes:
+    """A ``load_file`` loader for a two-file format: the bytes of the file the one
+    it is handed names, found by listing their directory. Module-level, so its id
+    is stable and the memo can hit."""
+    folder = os.path.dirname(path)
+    with open(path, encoding="utf-8") as fh:
+        name = fh.read().split()[-1]
+    if name not in os.listdir(folder):
+        raise FileNotFoundError(os.path.join(folder, name))
+    with open(os.path.join(folder, name), "rb") as fh:
+        return fh.read()
+
+
+def _with_include_and_a_child(path: str) -> bytes:
+    """``_with_include`` after running a child process: an opaque channel too.
+    ``HOME`` is the project root, so ``_env.run`` makes and removes no temp home
+    inside the load (its removal lists directories)."""
+    folder = os.path.dirname(path)
+    proc = _env.run([sys.executable, "-c", "pass"], cwd=folder,
+                    home=os.path.dirname(folder))
+    if proc.returncode != 0:
+        raise RuntimeError(proc.stderr)
+    return _with_include(path)
+
+
 # --------------------------------------------------------------------------- #
 # S-24: a gate cannot forge the next gate's inputs
 # --------------------------------------------------------------------------- #
@@ -255,6 +280,80 @@ class LoadFileMemo(_env.EnvCase):
             "data/part.bin", loader=self._loader) == b"PART v2, longer\n")
         self._sweep(registry)
         self.assertEqual(len(self.calls), 2)
+
+    # -- a loader that opens more than the file it was handed ---------------- #
+    def _plant_include(self) -> str:
+        """``data/scene.txt`` names ``buf.bin`` beside it, as a .gltf names its
+        .bin buffers and an .obj its .mtl. Returns the include's path."""
+        _write(os.path.join(self.root, "data", "scene.txt"), "buffer buf.bin\n")
+        return _write(os.path.join(self.root, "data", "buf.bin"), "BUF v1\n")
+
+    def test_a_hit_records_every_file_the_loader_opened(self):
+        """V: the miss ran the loader inside the first gate's window, so its trace
+        got the scene and the buffer; the hit reported the scene alone, and the
+        second gate's verdict was keyed as if the buffer were no input of it —
+        bundled fdm.bridge_span on a .gltf (review round 1)."""
+        buffer = os.path.abspath(self._plant_include())
+        registry = gates_mod.Registry()
+        for gate_id in ("g.first", "g.second"):
+            _register(registry, gate_id, lambda ctx: ctx.load_file(
+                "data/scene.txt", loader=_with_include) == b"BUF v1\n")
+        loads = []
+        real = gates_mod._load
+        with mock.patch.object(gates_mod, "_load", side_effect=lambda path, loader: (
+                loads.append(path), real(path, loader))[1]):
+            traces = self._sweep(registry)
+        self.assertEqual(len(loads), 1, "the second gate was not served by the memo — "
+                                        "without a hit this tests nothing")
+        for gate_id in ("g.first", "g.second"):
+            with self.subTest(gate=gate_id):
+                self.assertIn(buffer, traces[gate_id].files_read,
+                              f"{gate_id}: a file its loader opened is on no trace")
+                self.assertIn(os.path.abspath(os.path.join(self.root, "data")),
+                              traces[gate_id].dirs, "the loader's listing was dropped")
+
+    def test_a_hit_replays_to_the_view_and_every_trace_open_around_it(self):
+        """A hit is recorded where a miss would have been: on the view's own trace
+        with no window open (a test calling a gate's view directly), and on every
+        window open around it (a control's, around a fixture's nested gate) —
+        files, listings and the opaque channels alike."""
+        buffer = os.path.abspath(self._plant_include())
+        memo: dict = {}
+        first, second, outer = GateTrace(), GateTrace(), GateTrace()
+        GateContext(root=self.root, memo=memo, trace=first).load_file(
+            "data/scene.txt", loader=_with_include_and_a_child)
+        with verdicts.tracing(outer):
+            got = GateContext(root=self.root, memo=memo, trace=second).load_file(
+                "data/scene.txt", loader=_with_include_and_a_child)
+        self.assertEqual(got, b"BUF v1\n")
+        self.assertEqual(len(memo), 1, "one entry: the second call was a hit")
+        for name, trace in (("first (a miss, no window)", first),
+                            ("second (a hit)", second), ("outer (around the hit)", outer)):
+            with self.subTest(trace=name):
+                self.assertIn(buffer, trace.files_read)
+                self.assertIn(os.path.abspath(os.path.join(self.root, "data")), trace.dirs)
+                self.assertTrue(any(c.startswith("subprocess:") for c in trace.opaque),
+                                f"the child the loader ran is not opaque here: "
+                                f"{sorted(trace.opaque)}")
+
+    def test_an_include_rewritten_mid_sweep_is_loaded_again(self):
+        """The memo's stat signature covers every file the loader read, not only the
+        one it was handed: a buffer rewritten between two gates of one sweep, under
+        an unchanged scene, is loaded again."""
+        buffer = self._plant_include()
+        registry = gates_mod.Registry()
+        _register(registry, "g.first", lambda ctx: ctx.load_file(
+            "data/scene.txt", loader=_with_include) == b"BUF v1\n")
+
+        def rewrite(ctx):
+            with open(buffer, "w", encoding="utf-8") as fh:
+                fh.write("BUF v2, longer\n")
+            return True
+
+        _register(registry, "g.rewrite", rewrite)
+        _register(registry, "g.second", lambda ctx: ctx.load_file(
+            "data/scene.txt", loader=_with_include) == b"BUF v2, longer\n")
+        self._sweep(registry)
 
 
 # --------------------------------------------------------------------------- #

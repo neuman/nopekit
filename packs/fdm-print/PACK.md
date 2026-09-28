@@ -345,7 +345,10 @@ parts through both gates is **13 loads, not 26**, and the second gate drops from
 gates of one sweep, so a re-export is a miss and never a stale hit — the whole
 reason anybody re-runs a sweep is that they just rebuilt their meshes. And a hit
 still counts as a read: each gate's verdict names the part among its inputs, so
-it goes stale when the part changes. The cache this pack used to keep on
+it goes stale when the part changes — and so does every file the parse opened, a
+`.gltf`'s `.bin` buffers included. (A hit once named the `.gltf` alone: with only
+its buffers rewritten, `fdm.overhang` went stale and `fdm.bridge_span` stayed
+Fresh on a part whose worst span had tripled to 54 mm.) The cache this pack used to keep on
 `ctx.extra` did not do that — its hits opened nothing, and the second gate's
 verdict named no file at all.
 

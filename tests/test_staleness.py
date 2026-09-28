@@ -25,6 +25,10 @@ positive control, that the claim WAS PASS before.
 * a key the gate asked for and did not find, which then appears.
 * **S-27** — one file shared through the sweep's memo: the second gate's read is
   a memo hit that opens nothing, and it must still be that gate's input.
+* the same memo, with a loader that follows an include (a .gltf's .bin buffers):
+  every file the loader opened is the input of every gate the entry served. The
+  hit once reported the named file only, and bundled ``fdm.bridge_span`` kept a
+  PASS after its buffers moved.
 * a helper module edited; **S-26** — the gate's own file edited inside the same
   second with its mtime restored (both in a fresh process: an in-process module
   cache must never be what makes an edit visible).
@@ -197,6 +201,30 @@ def memo_b(ctx):
     return _shared("t.memo_b", ctx)
 
 
+def _with_buffer(path):
+    # A two-file format, as a .gltf names its .bin buffers: the file handed to
+    # load_file holds only the NAME of the file that holds the number.
+    with open(path, encoding="utf-8") as fh:
+        buffer = fh.read().split()[-1]
+    with open(os.path.join(os.path.dirname(path), buffer), encoding="utf-8") as fh:
+        return float(fh.read())
+
+
+def _buffered(gate_id, ctx):
+    value = ctx.load_file("data/head.txt", loader=_with_buffer)
+    return Verdict(gate=gate_id, passed=value >= 1.0, measured=value, limit=1.0)
+
+
+@gate(id="t.buf_a", title="t", claims=["buf_a"], negative_control=_nc("low_root"))
+def buf_a(ctx):
+    return _buffered("t.buf_a", ctx)
+
+
+@gate(id="t.buf_b", title="t", claims=["buf_b"], negative_control=_nc("low_root"))
+def buf_b(ctx):
+    return _buffered("t.buf_b", ctx)
+
+
 @gate(id="t.crashy", title="t", claims=["crashy"], negative_control=_nc("bad_x"))
 def crashy(ctx):
     x = float(ctx.params["config"]["x"])
@@ -283,7 +311,7 @@ def bad_x(ctx):
 
 TAGS = {"C_ST": "stress", "C_FI": "file", "C_SU": "sub", "C_CL": "claimread",
         "C_OP": "opt", "C_MA": "memo_a", "C_MB": "memo_b", "C_CR": "crashy",
-        "C_SA": "same", "C_HE": "helped"}
+        "C_SA": "same", "C_HE": "helped", "C_BA": "buf_a", "C_BB": "buf_b"}
 TAGS.update({f"C_{gid[len('t.'):]}": gid[len("t."):] for gid in BULK})
 CLAIM_OF = {f"t.{tag}": cid for cid, tag in TAGS.items()}
 CLAIM_OF["t.claim"] = "C_CL"
@@ -317,6 +345,10 @@ def plant(root: str) -> str:
     for name in ("limit", "shared", "hidden"):
         write(root, f"data/{name}.txt", "2.0\n")
         write(root, f"selftest/low/data/{name}.txt", "0.5\n")
+    for data in ("data", "selftest/low/data"):
+        write(root, f"{data}/head.txt", "buffer buf.txt\n")
+    write(root, "data/buf.txt", "2.0\n")
+    write(root, "selftest/low/data/buf.txt", "0.5\n")
     return root
 
 
@@ -802,6 +834,49 @@ class StaleIsNotCurrent(_env.EnvCase):
         for gate_id in ("t.memo_a", "t.memo_b"):
             self.assertIn(gate_id, resolution.stale_gates)
             self.assertNotEqual(after[CLAIM_OF[gate_id]], PASS)
+
+    def test_a_memo_shared_loader_that_follows_an_include_stales_both_gates(self):
+        """V: the loader opens a second file the named one points at — a .gltf's
+        .bin buffers. The first gate's miss ran it inside that gate's window and
+        recorded both files; the second gate's hit reported only the named one,
+        so an edit to the buffer left the second PASS Fresh. Found live on the
+        bundled pack: fdm.overhang went stale, fdm.bridge_span stayed Fresh, and a
+        forced run failed it at 54 mm against a 30 mm limit (review round 1)."""
+        p = Project(self)
+        base = projection()
+        loads = []
+        real = gates._load
+
+        def counting(abspath, loader):
+            loads.append(abspath)
+            return real(abspath, loader)
+
+        with mock.patch.object(gates, "_load", side_effect=counting):
+            p.sweep(base, only=["t.buf_a", "t.buf_b"])
+        head = os.path.abspath(p.path("data/head.txt"))
+        self.assertEqual(loads.count(head), 1, "the second gate was served by the memo — "
+                                               "without a hit this scenario tests nothing")
+        for gate_id in ("t.buf_a", "t.buf_b"):
+            files = p.entry(gate_id).reads["files"]
+            self.assertIn("data/head.txt", files)
+            self.assertIn("data/buf.txt", files,
+                          f"{gate_id}: a file the loader opened is this gate's input, "
+                          f"hit or miss")
+        self.assertEqual(p.statuses(base)["C_BB"], PASS, "the positive control")
+
+        write(p.root, "data/buf.txt", "0.5\n")
+        resolution = p.resolve(base)
+        after = p.statuses(base, resolution)
+        for gate_id in ("t.buf_a", "t.buf_b"):
+            with self.subTest(gate=gate_id):
+                self.assertIn(gate_id, resolution.stale_gates)
+                self.assertIn("data/buf.txt changed", resolution.rows[gate_id].stale_reason)
+                self.assertNotEqual(after[CLAIM_OF[gate_id]], PASS)
+        again = p.sweep(base, only=["t.buf_a", "t.buf_b"])
+        for gate_id in ("t.buf_a", "t.buf_b"):
+            got = row(again, gate_id)
+            self.assertTrue(got.executed, f"{gate_id} was served from the cache")
+            self.assertEqual(got.verdict.outcome, "fail", "the new buffer was loaded")
 
     def test_a_hand_edited_entry(self):
         p = Project(self)

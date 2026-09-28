@@ -73,7 +73,8 @@ keys each verdict by exactly what it read. Write for that:
 - **`ctx.extra` is yours alone.** Nothing you put there reaches the next gate. To share
   a file between gates — a mesh several gates measure — use
   `ctx.load_file(path, loader=trimesh.load_mesh)`: loaded once per sweep, recorded for
-  every gate that asks, hit or miss. Pass a module-level function as the loader, and
+  every gate that asks, hit or miss — with every file the loader opened (a `.gltf`'s
+  `.bin` buffers). Pass a module-level function as the loader, and
   copy the result before changing it (every caller gets the same object). A cache on
   `extra` once made the second gate's read of a part invisible.
 - **Load helpers by path with `atompipe.modelio.load_path(path)`**, never with

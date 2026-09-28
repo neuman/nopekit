@@ -277,7 +277,8 @@ class GateContext:                     # a gate's one argument — a traced view
     def out_path(self, *parts) -> str             # an evidence path under out_dir, dir created
     def with_extra(self, extra) -> GateContext    # a copy with `extra` merged over
     def load_file(self, path, loader=None) -> Any # a file several gates read: loaded once per
-                                                  #   sweep, recorded for EVERY caller
+                                                  #   sweep; it and every file the loader
+                                                  #   opened recorded for EVERY caller
 ```
 
 **The context a gate receives is a traced view of its own.** `run_gate` never hands a
@@ -302,9 +303,13 @@ inputs it read — the verdict cache keys each verdict by exactly those reads (`
   resolves against `ctx.root`; `loader` (a module-level function such as
   `trimesh.load_mesh`, not a lambda made in the gate body, which never hits) defaults
   to reading the bytes. The result is memoised once per sweep, and **every call is
-  recorded as a read of the calling gate**, hit or miss. A hit is the same object for
-  every caller: copy it before you change it. Outside a sweep (`ctx.memo is None`, a
-  hand-run script) it simply loads.
+  recorded as a read of the calling gate**, hit or miss — the named file and every
+  file, directory and subprocess the loader touched on the miss: a `.gltf`'s `.bin`
+  buffers, an `.obj`'s `.mtl`. (A hit once recorded the named file alone, and
+  `fdm.bridge_span` stayed Fresh after the buffers under its `.gltf` moved.) An edit
+  to any of those between two gates of one sweep loads it again. A hit is the same
+  object for every caller: copy it before you change it. Outside a sweep
+  (`ctx.memo is None`, a hand-run script) it simply loads.
 - **`ctx.ledger` holds no verdicts.** A gate that read other gates' verdicts would put
   verdicts inside its own content address. Claims are readable; `ctx.ledger.claim(id)`
   makes that claim an input.
