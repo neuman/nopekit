@@ -84,10 +84,15 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
   the one shared cache that records the file for every caller.
 - **Load helpers by path with `atompipe.modelio.load_path(path)`**, never with
   `spec_from_file_location` under a fixed name: it runs the bytes on disk, never a
-  stale `.pyc`, keeps two copies of your pack from sharing one helper, and records the
-  helper as part of the gate's code, so editing it re-runs the gate. A helper imported
-  by name from a `shared/` beside the pack is the gate's code too; only an installed
-  library (site-packages) is a third-party instrument.
+  stale `.pyc`, keeps two copies of your pack from sharing one helper, and keys the
+  helper, so editing it re-runs the gate. At module level it joins the gate's code;
+  called inside a gate, a fixture or `known_good.context`, its code and what it read
+  at import are reads of that run, served or not. A helper imported by name from a
+  `shared/` beside the pack is the gate's code too; only an installed library
+  (site-packages) is a third-party instrument.
+- **Import a module at run time by a string literal** (`importlib.import_module("rules")`),
+  or with `load_path`. A name held in a variable is keyed only by the first run in a
+  process to load it; `atompipe doctor` names each under `dynamic-imports`.
 - **Leave `rho` and `cpu_s` alone.** `run_gate` measures `cpu_s` (child processes
   included: a solver subprocess is not free) and `duration_s`, and the sweep sets
   `rho`. Anything a gate puts in them is overwritten.

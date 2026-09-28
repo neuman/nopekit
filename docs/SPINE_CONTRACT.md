@@ -542,6 +542,12 @@ def load_source_module(path, *, name, roots, registry=None, attrs=None) -> Modul
                          # gates.use_registry — modelio cannot import gates); attrs: globals set
                          # before it runs (a pack's PACK, PACK_DIR), part of the cache key
 def load_path(path) -> ModuleType                        # a helper by path; module name salted by its abspath
+def on_unrecorded_load(listener) -> None                 # listener(closure) when a module is run or served
+                                                         #   with no load being recorded (at RUN time)
+def bookkeeping() -> bool                                # this thread is inside the loader's own digests
+def recording() -> bool                                  # a module's execution is being recorded now
+def dynamic_imports(tree) -> list[tuple[int, str]]       # (line, call): import_module/__import__ of a
+                                                         #   module a VALUE names; doctor's dynamic-imports
 def is_code(path, roots=()) -> bool                      # code (under roots, or beside them and not
                                                          #   installed), not an instrument; the finder's test
 def code_closure(obj) -> CodeClosure | None              # a module's, or a function's module's
@@ -604,6 +610,35 @@ module inside the window (it runs once per process, so rho would depend on
 module-cache state). Named residuals: what a module only asks about (`os.path.exists`)
 or lists at import, a database opened in C, an environment variable (`env-reads`), and
 a read by a thread it started, once it has finished.
+
+**Code loaded at run time is a read of the run** (admission review, round 2). A
+closure is recorded while a module is being LOADED; a module `load_path` (or any
+`load_source_module` caller, `load_model` included) loads from a function body while a
+gate, a fixture's `make` or `known_good.context` runs has no load to join. So
+`load_source_module` hands the closure of every module it runs or serves with no
+recording open to the `on_unrecorded_load` listeners, and `verdicts` registers the one
+that notes every file of it — code and data — as a read of every trace window open; a
+file the closure holds two versions of makes the windows opaque instead. Served from
+the cache it is reported the same, so the second gate to ask keys it as the first did.
+What slipped through (repros a–c): a `known_good.context` that loaded the live model by
+path made the known-good design the live one with no key — the identity fixture
+"fired" on a shelf failing at 150 mm, and after an edit to 80 mm `check` served that
+control cached, exited 0 and put C1 under PROVEN (S-07 again); a fixture's helper
+`lib/badgen.py` defused 400 -> 40 mm stayed admitted; a gate's
+`load_path(gates/_tables.py).LIMIT` tightened 100 -> 50 mm kept its PASS Fresh, and
+`--force` then filed "two outcomes recorded for identical inputs". *Rejected:*
+folding such a load into the calling gate's code closure (a module's closure is
+recorded once, as it loads; a helper loaded on one branch would make the code a gate
+IS depend on its inputs). The static pass reads a call too:
+`importlib.import_module("x")` — through any binding of `importlib` or of
+`import_module` — and `__import__("x")` with a string literal (relative names against a
+literal `package` or `__package__`, a literal `fromlist`) are resolved and recorded
+like the import statement; a name a VALUE decides cannot be, and `dynamic_imports`
+names it for `doctor`. While the loader digests for its own bookkeeping — `_read`, and
+`_closure_current` or a fallback walk deciding whether a closure holds —
+`bookkeeping()` is true and `verdicts` records nothing: a load at run time purges every
+stale module under its roots first, and those digests had filed an unrelated module's
+DATA as the running gate's read, keyed on whether it was the first to load anything.
 
 **A module-level memo is emptied before every run.** `clear_caches(obj)` empties every
 functools memo — an `lru_cache`, a `cache`, or a function carrying a `cache_clear` of
@@ -699,6 +734,8 @@ class GateTrace:
     fixture_code: Any                  # the fixture's CodeClosure, set by gates.selftest
     anchors: Anchors | None            # makes path-valued param digests portable
     tier: int | None                   # the value read through ctx.tier (a TierRead); None: never
+    sources: list[str]                 # module sources the STOCK import system read while no load
+                                       #   was recorded; keyed under the project or a pack only
     def self_modified(self) -> list[str]   # read, THEN written, in this window
     def stat_existed(self, path) -> bool | None   # what the first question found; None: cannot say
 
@@ -714,7 +751,7 @@ class GateInputWriteError(AtompipeError): ...  # "a gate cannot write another ga
 
 def traced_context(ctx, trace, *, readonly=True)   # -> the same dataclass type as ctx
 def tracing(trace)                                 # `with tracing(t):` routes audit events, stats and env reads to t
-def replay(recorded, trace=None)                   # recorded's files, stats, dirs, opaque, tier -> every open trace and trace
+def replay(recorded, trace=None)                   # recorded's files, sources, stats, dirs, opaque, tier -> every open trace and trace
 def canonical_ast_digest(source) -> str            # "" when it does not parse
 def spine_digest() -> str                          # "" when a SPINE_MODULES source is unreadable
 ```
@@ -813,7 +850,19 @@ whose calling frame is `zipimport` or `importlib.metadata`; everything import ma
 a module's source (`.py`, `.pyw`) — a gate's data read through `linecache.getline`,
 `tokenize.open` or `pkgutil.get_data` is its read. What slipped through (review round 1,
 `probe.linecache`): those modules were excluded whole, and a gate reading its limit with
-`linecache.getline` recorded `files={}`. linecache is also a memo — the admission
+`linecache.getline` recorded `files={}`. And a read by the import system itself
+(`importlib._bootstrap*`, not the formatters) of a module's source — or of its
+`__pycache__` file, mapped back to the source, because a valid pyc is read instead of
+the source and is asked for first either way — while NO load is being recorded
+(`modelio.recording()`) is the stock import system loading code for the running gate
+(`importlib.import_module(name)`, a lazy `import`, `spec_from_file_location` by hand):
+it goes to `GateTrace.sources`, which `Reads.from_trace` keys under the project or a
+pack and drops — never opaque — elsewhere (admission review, round 2, c: a gate's
+`import_module` of a local helper keyed nothing of it). Only the run that first loads
+the module in a process opens it; one served from `sys.modules` keys nothing, which is
+why a literal name is read statically into the code closure and `doctor` names the
+rest. Nothing is recorded while `modelio.bookkeeping()` is true — the loader's own
+digests. linecache is also a memo — the admission
 control warmed it, in the same process, for its gate's real run — so each window's push
 forgets linecache's lines for every file that is not a module's source
 (`_forget_data_lines`; sources and pseudo-named entries stay for the formatter). Also
@@ -873,7 +922,7 @@ imported; `os.DirEntry.stat()`, which is C and calls nothing — a listing's dig
 carries each entry's kind and size instead.
 
 **`replay(recorded, trace=None)`** records again what the hook and the probes routed to
-`recorded` — `files_read` and `stats` (first, each with whether it existed),
+`recorded` — `files_read`, `sources` and `stats` (first, each with whether it existed),
 `files_written`, `dirs`, `opaque` — into every trace open
 now and into `trace`, even with no window open around it; the views' channels (params,
 ledger, model) are not replayed. It is how `GateContext.load_file` makes a memo hit
@@ -2439,9 +2488,10 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 | `imports` | warn | a gate that imports a third-party module (`CodeRef.third_party`) it does not declare in `requires_python` or a `python:` entry of `requires_one_of`: where it is missing, the gate errors instead of reading SKIPPED. In the gate's own file, read by reach — module-level imports plus those inside the gate function and the module-level functions and classes it names, transitively; other closure files whole. A whole-file rule named `cad.bounding`, the one tier-0 gate of a module whose other gates import trimesh lazily |
 | `env-reads` | warn | the static env-read detector (spec §3.17): an AST scan of every registered gate's closure files for `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins), through any alias of `os` or a `from os import`. rho never keys a variable (§8): a read inside a window is named opaque (`env:<NAME>`) and costs a re-run on every check, and a module-level read made at import, before any window, is seen by nothing else |
 | `memos` | warn | the static memo detector: an AST scan of every registered gate's closure files for a module-global memo `modelio.clear_caches` cannot empty — a module-level container (a `{}`, `dict()`, `defaultdict` and the like) written into from a function body that does not bind the name itself, a module global a function rebinds under `global`, a mutable default argument its function writes into. The first gate to fill one opens the file; every later one opens nothing, and no entry keys it (review round 2) |
+| `dynamic-imports` | warn | the static dynamic-import detector (`modelio.dynamic_imports`): an AST scan of every registered gate's closure files and of its owner's `selftest/*.py` (the fixtures and the known-good module its control runs) for `importlib.import_module(...)` or `__import__(...)` whose module a VALUE names. Only the run that first loads such a module in a process keys its source; a later one is served it from `sys.modules` and keys nothing. A literal name is resolved into the code closure and is not named (admission review, round 2, c) |
 | `sealed-fixtures` | FAIL | invariant 5 at runtime: every pack control run against this project's params through `packs.seal_findings`, into a temp `out_dir`; a control that reads its host is named with the paths it read |
 
-The three static detectors measured zero hits on the 54 bundled gates before they landed
+The four static detectors measured zero hits on the 54 bundled gates before they landed
 (R-4; `tests/test_doctor.py`). No staleness row: which gates are current is `status`'s
 `stale:` block. No run-history row: there is none to read (S-31).
 
@@ -2472,6 +2522,16 @@ a reader of the output meets it:
   when it landed). Not reached: a memo held on a module-level INSTANCE (a
   `cached_property`, a dict attribute), and one inside a third-party library the gate
   calls.
+- **Modules loaded at run time.** A helper `load_path` loads while a gate, a fixture or
+  `known_good.context` runs is keyed — its code and what it read at import are reads of
+  that run, whether it ran or was served. A module the STOCK import system loads then
+  (`importlib.import_module(name)`, a lazy `import`) is keyed only by the run that
+  first loads it in a process, and runs from a `__pycache__` that still validates (a
+  same-size, same-second edit runs the old bytecode, S-26 by the stock loader): its
+  literal name is in the code closure by the static pass, and `doctor`'s
+  `dynamic-imports` row names every name a value decides. Load a helper with
+  `modelio.load_path`, which compiles the bytes on disk and keys it on every run. Not
+  keyed: the `atompipe.*` modules outside the spine digest that such a helper imports.
 - **`ctx.model is None` is not recorded.** A gate that branches on whether a model is
   loaded at all is invisible to rho on that branch; `ModelProxy` records a real use of
   the model, never its absence. No bundled gate reads `ctx.model`.

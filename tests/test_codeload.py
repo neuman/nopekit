@@ -291,6 +291,61 @@ class RecordingLoader(_Sandbox):
         self.assertNotIn(lazy_name, sys.modules, "the static supplement imported it")
         self.assertIn(helper, self.files(module))
 
+    def test_a_module_a_literal_names_to_import_module_is_in_the_closure(self):
+        """V: the admission review's round-2 repro (c), at the loader. A gate
+        taking its limit from ``importlib.import_module("probe_rules")`` inside
+        its body has no import statement, so the static walk listed nothing and
+        ``code.files`` omitted the helper: after the limit moved a plain check
+        served the PASS cached. Every spelling of a call whose module is a
+        string literal is resolved as the import statement would be — through
+        an alias of ``importlib``, ``import_module`` imported from it,
+        ``__import__`` (with a literal ``fromlist``), a relative name against a
+        literal ``package`` or ``__package__`` — without importing it. One a
+        value names is in no closure, and ``dynamic_imports`` names it."""
+        self.on_path(self.root)
+        names = {stem: self.n(stem) for stem in ("byattr", "byname", "bybuiltin", "sub")}
+        helpers = {stem: self.put(f"{name}.py", "LIMIT = 1\n") for stem, name in names.items()
+                   if stem != "sub"}
+        package = self.n("pkg")
+        self.put(f"{package}/__init__.py", "")
+        relative = self.put(f"{package}/rel.py", "LIMIT = 2\n")
+        literal_package = self.put(f"{package}/named.py", "LIMIT = 3\n")
+        from_list = self.put(f"{package}/listed.py", "LIMIT = 4\n")
+        computed = self.put(f"{self.n('computed')}.py", "LIMIT = 5\n")
+        self.put(f"{package}/gate.py", f"""
+            import importlib as il
+            from importlib import import_module as im
+
+            NAME = {self.n('computed')!r}
+
+            def limits():
+                return (il.import_module({names['byattr']!r}).LIMIT,
+                        im({names['byname']!r}).LIMIT,
+                        __import__({names['bybuiltin']!r}).LIMIT,
+                        il.import_module(".rel", __package__).LIMIT,
+                        il.import_module(".named", {package!r}).LIMIT,
+                        __import__({package!r}, fromlist=["listed"]).listed.LIMIT)
+
+            def computed():
+                return il.import_module(NAME).LIMIT
+            """)
+        module = self.load(f"{package}/gate.py", name=f"{package}.gate")
+        files = self.files(module)
+        for path in (*helpers.values(), relative, literal_package, from_list):
+            self.assertIn(path, files, f"{os.path.basename(path)} named by a literal is "
+                                       f"not in the closure")
+        self.assertNotIn(computed, files, "a module a value names was resolved")
+        for stem in ("byattr", "byname", "bybuiltin"):
+            self.assertNotIn(names[stem], sys.modules, "the static walk imported it")
+        self.assertEqual(module.limits(), (1, 1, 1, 2, 3, 4), "the planted calls are wrong")
+
+        import ast
+        with open(os.path.join(self.root, package, "gate.py"), "rb") as fh:
+            tree = ast.parse(fh.read())
+        found = modelio.dynamic_imports(tree)
+        self.assertEqual([call for _line, call in found], ["il.import_module(NAME)"],
+                         "a module a value names must be named, and nothing else")
+
     # -- the fallback ------------------------------------------------------ #
     def test_dataclass_does_not_trigger_the_fallback(self):
         self.put("shapes.py", """
@@ -698,6 +753,9 @@ class RecordingLoader(_Sandbox):
         self.assertEqual(modelio._NEVER_DATA_PREFIXES, verdicts._EXCLUDED_PREFIXES)
         self.assertEqual(modelio._NEVER_DATA_CODE, verdicts._EXCLUDED_CODE)
         self.assertEqual(modelio._SOURCE_SUFFIXES, verdicts._SOURCE_SUFFIXES)
+        # And the import system proper, whose source reads outside a recorded
+        # load are a trace's (`verdicts._on_import_read`), is the same set.
+        self.assertEqual(modelio._IMPORT_MODULES, verdicts._IMPORT_SYSTEM)
 
     def test_code_closure_of_a_function_is_its_modules(self):
         self.put("fns.py", "def make(ctx):\n    return ctx\n")

@@ -71,7 +71,14 @@ library and the CLI never asked. On the bracket and on wrapped pack baselines
 * a data file a fixture module or the known-good module reads at import,
   outside `selftest/`, edited so the control no longer fires, is not admitted;
   and a gate module's limit read at import, tightened, does not keep its PASS
-  (admission review, round 1, D).
+  (admission review, round 1, D);
+* code loaded at RUN time — a known-good design that loads the live model by
+  path when ``context`` runs, a fixture's helper loaded when ``make`` runs, a
+  gate's limit from a helper it loads by path or names to ``import_module``
+  — is keyed: an identity fixture on that known-good host is refused once the
+  model passes, a defused helper is refused, a tightened limit fails, and the
+  second gate served the cached helper keys it as the first did (admission
+  review, round 2).
 
 Scenarios that edit code run the sweep in a fresh process (`_DRIVER`, through
 `_env.run`), per spec §0.4: an in-process module cache must never be what makes
@@ -740,6 +747,103 @@ def span(ctx):
     return Verdict(gate="shelf.span", passed=s <= LIMIT, measured=s, limit=LIMIT,
                    units="mm", detail=f"{s} mm (limit {LIMIT})")
 '''
+
+#: The admission review's round-2 repro (a): a known-good design that loads the
+#: LIVE model by path when ``context`` RUNS — no module was being loaded then,
+#: so the model joined no closure; the loader's read of its source was the
+#: import system's, which the trace drops; and ``model/`` is in no static walk.
+#: The known-good design was the live one, keyed nowhere (S-07 again).
+SHELF_KNOWN_GOOD_LOADS_THE_MODEL = '''\
+import dataclasses
+import os
+
+from atompipe.modelio import load_path
+from atompipe.models import Ledger
+
+
+def context(ctx):
+    shelf = load_path(os.path.join(ctx.root, "model", "shelf.py"))
+    return dataclasses.replace(ctx, params={"span": shelf.Config().span},
+                               ledger=Ledger(), extra={})
+'''
+
+#: Repro (b): the known-bad span from a helper outside ``selftest/`` that the
+#: fixture loads when it RUNS, by path, or by a literal name through
+#: ``importlib.import_module`` (``lib/`` put on ``sys.path`` at import, as a
+#: gate module puts its helpers there). ``{how}`` is the load.
+_SHELF_LONG_FROM_HELPER = '''\
+import dataclasses
+import importlib
+import os
+import sys
+
+from atompipe.modelio import load_path
+
+_LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+
+
+def long(ctx):
+    gen = {how}
+    params = dict(ctx.params)
+    params["span"] = gen.SPAN
+    return dataclasses.replace(ctx, params=params)
+'''
+SHELF_LONG_BY_PATH = _SHELF_LONG_FROM_HELPER.format(
+    how='load_path(os.path.join(_LIB, "badgen.py"))')
+SHELF_LONG_BY_NAME = _SHELF_LONG_FROM_HELPER.format(how='importlib.import_module("badgen")')
+
+#: Repro (c): gates that take their limit from a helper loaded when the GATE
+#: runs. Two load ``gates/_tables.py`` by path — so the second is served the
+#: module the first ran, and a cache hit then joined nothing — and that helper
+#: reads its limit from ``inputs/data/limit.json`` at its own import; one names
+#: ``lib/shelf_limits.py`` to ``importlib.import_module`` with a literal. Each
+#: holds its own claim.
+SHELF_TABLES = _READS_AT_IMPORT.format(name="limit.json", value="LIMIT")
+
+SHELF_GATES_LOAD_AT_RUN_TIME = '''\
+import importlib
+import os
+import sys
+
+from atompipe.gates import gate
+from atompipe.modelio import load_path
+from atompipe.models import NegativeControl, Tier, Verdict
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_LIB = os.path.join(os.path.dirname(_HERE), "lib")
+if _LIB not in sys.path:
+    sys.path.insert(0, _LIB)
+
+
+def _held(gate_id, ctx, limit):
+    s = float(ctx.params["span"])
+    return Verdict(gate=gate_id, passed=s <= limit, measured=s, limit=limit, units="mm",
+                   detail=f"{s} mm (limit {limit})")
+
+
+@gate(id="shelf.by_path", claims=["by-path"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def by_path(ctx):
+    return _held("shelf.by_path", ctx, load_path(os.path.join(_HERE, "_tables.py")).LIMIT)
+
+
+@gate(id="shelf.by_path_again", claims=["by-path-again"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def by_path_again(ctx):
+    return _held("shelf.by_path_again", ctx,
+                 load_path(os.path.join(_HERE, "_tables.py")).LIMIT)
+
+
+@gate(id="shelf.by_name", claims=["by-name"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:long"))
+def by_name(ctx):
+    return _held("shelf.by_name", ctx, importlib.import_module("shelf_limits").LIMIT)
+'''
+
+#: The claims of ``SHELF_GATES_LOAD_AT_RUN_TIME``, one per gate, by tag.
+RUN_TIME_CLAIMS = {"C1": "by-path", "C2": "by-path-again", "C3": "by-name"}
 
 #: A cache entry's file name inside its gate's directory (spec §3.7).
 ENTRY_NAME = re.compile(r"^[0-9a-f]{16}-[0-9a-f]{8}\.json$")
@@ -1824,6 +1928,181 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(code, 1, "a tightened limit read at import kept its PASS")
         self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
         self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
+
+    # -- code loaded at RUN time (admission review, round 2) ------------------ #
+    def _shelf_known_good_loads_the_model(self, fixture: str) -> str:
+        """Repro (a)'s project: the live shelf at 150 mm (failing), a known-good
+        design that is the live model loaded by path when ``context`` runs, and
+        ``fixture``. Its first check is the precondition: exit 1 (the live
+        design fails), the control filed on the known-good host and fired, and
+        the model it loaded an input of that control."""
+        project = os.path.join(self.tmp(), "shelf")
+        write(project, "model/shelf.py", SHELF_MODEL.format(span="150.0"))
+        write(project, "gates/g.py", SHELF_GATE)
+        write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
+        write(project, "selftest/known_good.py", SHELF_KNOWN_GOOD_LOADS_THE_MODEL)
+        write(project, "selftest/bad.py", fixture)
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        code, data = check_json(self, project)
+        self.assertEqual(code, 1, data)
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "fail", data)
+        [name] = control_names(project)["shelf.span"]
+        entry = read_control(project, "shelf.span", name)
+        self.assertEqual((entry["host"], entry["bad"]), ("known-good", "fail"), entry)
+        self.assertIn("model/shelf.py", entry["reads"]["files"],
+                      "the model the known-good design loaded when it ran is not an "
+                      "input of its control")
+        return project
+
+    def test_cli_a_known_good_that_loads_the_live_model_at_run_time_is_keyed(self):
+        """V: the admission review's round-2 repro (a). ``known_good.context``
+        loaded ``model/shelf.py`` with ``modelio.load_path`` when it RAN — no
+        module was being loaded, so no closure recorded it; the loader's read
+        of its source was the import system's, which the trace drops; and
+        ``model/`` is in no static walk. The known-good design was the live one
+        with no key (S-07 again): the literal identity fixture "fired" while the
+        shelf failed at 150 mm, and after a model edit to 80 mm ``check`` served
+        that control cached, exited 0, and put C1 under PROVEN, while ``gate
+        selftest`` said PASSED its own known-bad fixture. The positive control:
+        an honest fixture on the same known-good design is re-run by the same
+        edit — its control keyed the model too — and admitted, C1 PROVEN."""
+        ref = "selftest/bad.py:long"
+        project = self._shelf_known_good_loads_the_model(SHELF_IDENTITY)
+        edit(project, "model/shelf.py", "span: float = 150.0", "span: float = 80.0")
+        self._refused(project, ref)
+
+        project = self._shelf_known_good_loads_the_model(SHELF_LONG)
+        before = control_names(project)["shelf.span"]
+        edit(project, "model/shelf.py", "span: float = 150.0", "span: float = 80.0")
+        code, data = check_json(self, project)
+        self.assertEqual(data["counts"]["controls"]["executed"], 1,
+                         f"the model the known-good design loaded moved and its control "
+                         f"was served: {data['counts']}")
+        self.assertEqual(code, 0, data)
+        self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
+        self.assertNotEqual(control_names(project)["shelf.span"], before,
+                            "a control at other inputs wrote no entry of its own")
+        self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
+        self.assertIn("**C1**", proven_section(self, project))
+
+    def test_cli_a_helper_a_fixture_loads_at_run_time_is_keyed(self):
+        """V: the admission review's round-2 repro (b). ``long()`` took its
+        known-bad span from ``lib/badgen.py``, loaded when the FIXTURE ran: by
+        ``load_path``, it joined no closure (none was being recorded) and its
+        source read was the import system's; by a literal
+        ``importlib.import_module``, the static walk saw no import statement.
+        ``lib/`` is outside ``selftest/``, so no byte of it was keyed. Defused
+        400 -> 40 mm, ``check`` served the control cached and C1 stayed PROVEN
+        while ``gate selftest`` said PASSED its own known-bad fixture.
+        On a live and a known-good host; each case ends with its positive
+        control: restored, admitted, C1 PROVEN."""
+        ref = "selftest/bad.py:long"
+        for spelling, fixture in (("load_path", SHELF_LONG_BY_PATH),
+                                  ("import_module", SHELF_LONG_BY_NAME)):
+            for host, known_good in (("live", None), ("known-good", SHELF_KNOWN_GOOD)):
+                with self.subTest(spelling=spelling, host=host):
+                    files = {"selftest/bad.py": fixture, "lib/badgen.py": "SPAN = 400.0\n"}
+                    if known_good is not None:
+                        files["selftest/known_good.py"] = known_good
+                    project = self._shelf_module_fixture(ref, files)
+                    [name] = control_names(project)["shelf.span"]
+                    entry = read_control(project, "shelf.span", name)
+                    self.assertEqual(entry["host"], host, entry)
+                    keyed = {**entry["reads"]["files"], **entry["fixture"]["files"]}
+                    self.assertIn("lib/badgen.py", keyed,
+                                  "the helper the fixture loaded when it ran is keyed "
+                                  "nowhere in its control")
+
+                    # Not same-size: a module the stock import system loads may run
+                    # from a `__pycache__` that still validates (a named residual —
+                    # load_path compiles the bytes on disk), and this test is about
+                    # the key, not the bytecode.
+                    write(project, "lib/badgen.py", "SPAN = 40.0\n")
+                    self._refused(project, ref)
+
+                    write(project, "lib/badgen.py", "SPAN = 400.0\n")
+                    code, data = check_json(self, project)
+                    self.assertEqual(code, 0, data)
+                    self.assertEqual(verdict_row(data, "shelf.span")["outcome"], "pass", data)
+                    self.assertEqual(status_json(self, project)["claims"]["C1"], "pass")
+                    self.assertIn("**C1**", proven_section(self, project))
+
+    def test_cli_a_limit_a_gate_loads_at_run_time_is_keyed(self):
+        """V: the admission review's round-2 repro (c), the verdict side. A gate
+        that took its limit from ``load_path(gates/_tables.py).LIMIT`` inside
+        its body keyed nothing of it: the first gate's load was recorded by no
+        closure and its source read was dropped, and the second gate was served
+        the cached module, which joined nothing at all. One that took it from
+        ``importlib.import_module("shelf_limits")`` had no import statement for
+        the static walk, so ``code.files`` omitted the helper. Each limit 100 ->
+        50 mm under a design at 80: a plain ``check`` served the PASS
+        ``cached=true`` (and ``--force`` then filed "two outcomes recorded for
+        identical inputs"). The helper by path reads its limit from
+        ``inputs/data/limit.json`` at import, so what it read is keyed as well
+        as what it is. The positive control is the first check: every gate
+        passes at 100 mm and each claim is PROVEN."""
+        project = os.path.join(self.tmp(), "shelf")
+        write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
+        write(project, "gates/g.py", SHELF_GATES_LOAD_AT_RUN_TIME)
+        write(project, "gates/_tables.py", SHELF_TABLES)
+        write(project, "inputs/data/limit.json", json.dumps({"span": 100.0}) + "\n")
+        write(project, "lib/shelf_limits.py", "LIMIT = 100.0\n")
+        write(project, "selftest/bad.py", SHELF_LONG)
+        for cid, tag in RUN_TIME_CLAIMS.items():
+            write(project, f"claims/{cid}.json", json.dumps(
+                dict(SHELF_CLAIM, statement=f"Span within 100 mm ({tag})", tags=[tag])) + "\n")
+        proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        code, data = check_json(self, project)
+        self.assertEqual(code, 0, data)
+        proven = proven_section(self, project)
+        for cid, tag in RUN_TIME_CLAIMS.items():
+            self.assertIn(f"**{cid}**", proven, "the positive control")
+        by_path = ("shelf.by_path", "shelf.by_path_again")
+        docs = {}
+        for gate_id in (*by_path, "shelf.by_name"):
+            [name] = entry_names(project, gate_id)
+            with open(os.path.join(project, ".atompipe", "verdicts", gate_id, name),
+                      encoding="utf-8") as fh:
+                docs[gate_id] = json.load(fh)
+        for gate_id in by_path:
+            with self.subTest(gate=gate_id):
+                self.assertIn("gates/_tables.py", docs[gate_id]["reads"]["files"],
+                              "the helper a gate loaded when it ran is not keyed")
+                self.assertIn("inputs/data/limit.json", docs[gate_id]["reads"]["files"],
+                              "what the helper read at its import is not keyed")
+        self.assertIn("lib/shelf_limits.py", docs["shelf.by_name"]["code"]["files"],
+                      "a module named to import_module by a literal is not in the code")
+
+        write(project, "inputs/data/limit.json", json.dumps({"span": 50.0}) + "\n")
+        code, data = check_json(self, project)
+        for gate_id in by_path:
+            with self.subTest(gate=gate_id, moved="inputs/data/limit.json"):
+                row = verdict_row(data, gate_id)
+                self.assertFalse(row["cached"], f"the PASS was served after its limit moved: "
+                                                f"{row}")
+                self.assertEqual((row["outcome"], row["limit"]), ("fail", 50.0), row)
+        self.assertTrue(verdict_row(data, "shelf.by_name")["cached"],
+                        "a gate that loaded nothing that moved re-ran")
+        self.assertEqual(code, 1, "a tightened limit loaded at run time kept its PASS")
+        self.assertEqual({c: blocking_ids(data).get(c) for c in ("C1", "C2")},
+                         {"C1": "fail", "C2": "fail"}, data["blocking"])
+
+        write(project, "lib/shelf_limits.py", "LIMIT = 50.0\n")
+        code, data = check_json(self, project)
+        row = verdict_row(data, "shelf.by_name")
+        self.assertFalse(row["cached"], f"the PASS was served after its limit moved: {row}")
+        self.assertEqual((row["outcome"], row["limit"]), ("fail", 50.0), row)
+        self.assertEqual(blocking_ids(data).get("C3"), "fail", data["blocking"])
+        status = status_json(self, project)["claims"]
+        self.assertEqual({c: status[c] for c in RUN_TIME_CLAIMS},
+                         {"C1": "fail", "C2": "fail", "C3": "fail"})
+        code, data = check_json(self, project, "--force")
+        self.assertEqual(code, 1, data)
+        for gate_id in (*by_path, "shelf.by_name"):
+            self.assertEqual(verdict_row(data, gate_id)["outcome"], "fail",
+                             "a forced run disagrees with the plain one")
 
 
 # --------------------------------------------------------------------------- #

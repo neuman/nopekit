@@ -549,7 +549,11 @@ class GateTrace:
     param digests portable; the sweep sets it. ``tier`` is the value this window
     read through ``ctx.tier`` (a ``TierRead``), ``None`` when it never did; a
     second, different value makes the trace opaque (``tier: read at … and …``),
-    since no single tier then names what it decided on.
+    since no single tier then names what it decided on. ``sources`` is the
+    module sources the STOCK import system read while the window was open and no
+    load was being recorded (``_on_import_read``): an input only under the
+    project or a pack, so they are kept apart from ``files_read`` — whose
+    outside paths are opaque — and classified on their own rule.
     """
 
     kind: str = "gate"
@@ -567,7 +571,9 @@ class GateTrace:
     fixture_code: Any = None
     anchors: Any = None
     tier: Any = None
+    sources: list = field(default_factory=list)
     _read_set: set = field(default_factory=set, init=False, repr=False)
+    _source_set: set = field(default_factory=set, init=False, repr=False)
     _existed: dict = field(default_factory=dict, init=False, repr=False)
     _host_whole: set = field(default_factory=set, init=False, repr=False)
 
@@ -587,6 +593,12 @@ class GateTrace:
             return
         self._read_set.add(path)
         self.files_read.append(path)
+
+    def _note_source(self, path: str) -> None:
+        if path in self.files_written or path in self._source_set:
+            return
+        self._source_set.add(path)
+        self.sources.append(path)
 
     def _note_stat(self, path: str, existed: bool | None) -> None:
         """A path asked about: ``existed`` is what the question found the first
@@ -1513,6 +1525,18 @@ _SOURCE_READERS = frozenset({
     "linecache", "tokenize", "warnings", "traceback",
 })
 
+#: The import system proper among ``_SOURCE_READERS``: the modules that LOAD a
+#: module's source, as against quoting a line of it. A read of a source by
+#: these, while a window is open and no load is being recorded
+#: (``modelio.recording``), is the stock import system loading code for the
+#: gate that is running — ``_on_import_read``. The formatters stay out: a
+#: warning reads its source on the first warning only, which would key a
+#: gate on what warned before it.
+_IMPORT_SYSTEM = frozenset({
+    "importlib._bootstrap", "importlib._bootstrap_external",
+    "_frozen_importlib", "_frozen_importlib_external",
+})
+
 #: What a module's source is spelled as: the suffixes ``SourceFileLoader``
 #: compiles (``.pyw`` is Windows'; listed everywhere so an entry reads the same
 #: on every machine). Bytecode is ``_library_path``'s. Named residual: a data
@@ -1614,7 +1638,8 @@ def tracing(trace: GateTrace) -> _Window:
 
 def replay(recorded: GateTrace, trace: GateTrace | None = None) -> None:
     """Record again what the hook and the stat probes routed to ``recorded``:
-    its reads, stats, writes, listed directories and opaque channels — into
+    its reads, module sources, stats, writes, listed directories and opaque
+    channels — into
     every trace open now, and into ``trace`` (the calling view's own) even when
     no window is open around it.
 
@@ -1648,6 +1673,8 @@ def replay(recorded: GateTrace, trace: GateTrace | None = None) -> None:
     for target in targets:
         for path in recorded.files_read:
             target._note_read(path)
+        for path in recorded.sources:
+            target._note_source(path)
         for path in recorded.stats:
             target._note_stat(path, recorded.stat_existed(path))
         for path in sorted(recorded.files_written):
@@ -1814,6 +1841,51 @@ def _on_source_read(traces: tuple, args: tuple) -> None:
     reads, writes = _open_intent(mode, flags)
     if reads and not writes:
         _on_open(traces, args)
+
+
+def _on_import_read(traces: tuple, args: tuple) -> None:
+    """An ``open`` by the import system (``_IMPORT_SYSTEM``) while no load is
+    being recorded: the STOCK import system loading a module for the code that
+    is running — ``importlib.import_module(name)``, a lazy ``import`` in a gate
+    body, ``spec_from_file_location`` by hand. Its source is noted
+    (``GateTrace.sources``) when the open reads and writes nothing; so is the
+    source of a ``__pycache__`` file it reads, because a valid bytecode file is
+    read INSTEAD of the source, and the stock import asks for it first whether
+    it exists or not — keyed by the pyc it would be missed exactly when a pyc
+    was left behind. ``Reads.from_trace`` keys a source under the project or a
+    pack and drops the rest.
+
+    What slipped through (admission review, round 2, c): a module's source read
+    by the import system was dropped whole, as the closure's business — and
+    outside a recorded load no closure records it, so a gate's
+    ``importlib.import_module(name)`` of a local helper keyed nothing of it.
+    Named residual: the module is loaded once per process, so only the run that
+    loaded it keys it; a later one is served it from ``sys.modules`` and opens
+    nothing. A literal name is in the gate's code closure instead
+    (``modelio``'s static walk), and ``doctor``'s ``dynamic-imports`` row names
+    every name a value decides. *Rejected:* recording it in ``files_read`` —
+    a module from anywhere else on ``sys.path`` (a test helper, a checkout of a
+    library) would be an opaque ``file-outside-project`` channel, and the gate
+    never Fresh, for code that is no input of this project."""
+    path = _path_arg(args[0] if args else None)
+    if path is None:
+        return
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 else 0
+    reads, writes = _open_intent(mode, flags)
+    if not reads or writes:
+        return
+    if os.path.normcase(path).endswith(_BYTECODE):
+        try:
+            path = importlib.util.source_from_cache(path)
+        except (ValueError, NotImplementedError):
+            return                          # sourceless, or no cache tag: not a source
+    elif not _module_source(path):
+        return                              # data through get_data: _on_source_read's
+    if _library_path(path):
+        return
+    for trace in traces:
+        trace._note_source(path)
 
 
 def _sqlite_target(database: str) -> tuple[str | None, bool]:
@@ -1994,13 +2066,21 @@ def _frame_kind(frame: Any) -> str:
     return ""
 
 
+def _import_frame(frame: Any) -> bool:
+    """Is ``frame`` the import system's own (``_IMPORT_SYSTEM``)?"""
+    return frame is not None and (frame.f_globals.get("__name__") in _IMPORT_SYSTEM
+                                  or frame.f_code.co_filename in _SOURCE_READER_CODE)
+
+
 def _audit(event: str, args: tuple) -> None:
     """The one audit hook. Never raises, never opens a file, and returns at once
-    while no window is open or for an event it does not handle."""
+    while no window is open, for an event it does not handle, and while the
+    loader works for itself (``modelio.bookkeeping``: a digest it takes, a
+    check that a closure still holds — nobody's input)."""
     if not _STACK:
         return
     handler = _HANDLERS.get(event)
-    if handler is None or getattr(_BUSY, "on", False):
+    if handler is None or getattr(_BUSY, "on", False) or modelio.bookkeeping():
         return
     _BUSY.on = True
     try:
@@ -2009,16 +2089,53 @@ def _audit(event: str, args: tuple) -> None:
         except ValueError:
             frame = None
         kind = _frame_kind(frame)
+        traces = tuple(_STACK)
+        call = tuple(args) if isinstance(args, tuple) else ()
         if kind == _SOURCE:
+            if event == "open" and traces and not modelio.recording() \
+                    and _import_frame(frame):
+                _on_import_read(traces, call)
             handler = _on_source_read if event == "open" else None
-        if kind != _EXCLUDED and handler is not None:
-            traces = tuple(_STACK)
-            if traces:
-                handler(traces, tuple(args) if isinstance(args, tuple) else ())
+        if kind != _EXCLUDED and handler is not None and traces:
+            handler(traces, call)
     except Exception:
         pass
     finally:
         _BUSY.on = False
+
+
+def _report_closure(closure: Any) -> None:
+    """``modelio``'s ``on_unrecorded_load`` listener: a module was run or served
+    with no load being recorded — at RUN time, by a gate, a fixture's ``make``
+    or ``known_good.context`` — so every file of its closure, its code and what
+    that code read at its import, is a read of every window open now. A file a
+    closure holds two versions of (digest ``""``) names no bytes, and the
+    windows are opaque rather than keyed on whichever is on disk.
+
+    What slipped through without it (admission review, round 2): such a module
+    joined no closure, its source read was dropped as a module's source, and
+    outside ``selftest/`` no static walk covered it. A ``known_good.context``
+    that loaded the live model by path made the known-good design the live one
+    with no key (S-07 again: an identity fixture admitted, C1 PROVEN, while
+    ``gate selftest`` said PASSED its own known-bad); a fixture helper defused
+    400 -> 40 mm stayed admitted; a gate's limit loaded by path kept its PASS
+    Fresh after it moved. Served from the cache, the module is reported the
+    same, so the second gate to ask keys it as the first did — no rho depends
+    on which gate loaded it first. Named residual: the ``atompipe.*`` modules
+    outside the spine digest that such a helper imports (``spine_extras``) —
+    keyed for a module's own closure by ``code_digest``, not here."""
+    if not _STACK or getattr(_BUSY, "on", False):
+        return
+    traces = tuple(_STACK)
+    for path, digest in tuple(closure.files) + tuple(closure.data):
+        for trace in traces:
+            if digest:
+                trace._note_read(path)
+            else:
+                trace.opaque.add(f"code loaded at run time: two versions of {path} ran")
+
+
+modelio.on_unrecorded_load(_report_closure)
 
 
 # --------------------------------------------------------------------------- #
@@ -2087,7 +2204,7 @@ def _stat_probe(original: Callable[..., Any], *, predicate: bool) -> Callable[..
 
     @functools.wraps(original)
     def probe(*args: Any, **kwargs: Any) -> Any:
-        if not _STACK or getattr(_BUSY, "on", False):
+        if not _STACK or getattr(_BUSY, "on", False) or modelio.bookkeeping():
             return original(*args, **kwargs)
         existed: bool | None = None
         try:
@@ -3192,6 +3309,10 @@ class Reads:
         6. under the root — a read ``<rel>``;
         7. anything else — opaque ``file-outside-project:<path>``.
 
+        A module source the stock import system loaded (``trace.sources``) is a
+        read by rules 3 and 6 and dropped by every other: code on ``sys.path``
+        outside the project is not an input of it.
+
         A path the trace only asked about (``trace.stats``) and neither opened
         nor listed follows ``_classify(stat=True)``: a file input under the root
         or a pack (opaque ``self-modified:`` when the window changed the answer
@@ -3244,6 +3365,15 @@ class Reads:
                 files[_clean(what)] = _path_digest(path, digests)
             elif action == "opaque":
                 opaque.add(_clean(what))
+        # A module the stock import system loaded while the window was open
+        # (`_on_import_read`): an input under the project or a pack, like any
+        # read there; anywhere else it is somebody's code on `sys.path`, not an
+        # input of this project, and — unlike a read — not an opaque channel.
+        for path in getattr(trace, "sources", ()):
+            action, what = _classify(path, places, is_dir=False, control=control,
+                                     selfmod=set(), written=written, static=static_set)
+            if action == "read":
+                files.setdefault(_clean(what), _path_digest(path, digests))
         dirs: dict[str, str | None] = {}
         for path in sorted(trace.dirs):
             action, what = _classify(path, places, is_dir=True, control=control,
@@ -3259,7 +3389,8 @@ class Reads:
         # — has lost the state the gate decided on: self-modified, like a read.
         # (An existence answer is compared both ways, followed and not, so a
         # broken symlink asked through os.stat is not a flip.)
-        seen = {_norm(path) for path in trace.files_read} | {_norm(p) for p in trace.dirs}
+        seen = ({_norm(path) for path in trace.files_read} | {_norm(p) for p in trace.dirs}
+                | {_norm(p) for p in getattr(trace, "sources", ())})
         stat_selfmod = set()
         for path in trace.stats:
             before = trace.stat_existed(path)

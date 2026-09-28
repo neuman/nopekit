@@ -4426,6 +4426,49 @@ def _memo_reads(registry: gates.Registry, root: str) -> list[str]:
     return lines
 
 
+def _selftest_sources(owner: str) -> list[str]:
+    """Every `*.py` under `owner/selftest/` — the fixtures and the known-good
+    module a gate's control runs — without `__pycache__` or dot-directories."""
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(os.path.join(owner, "selftest")):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__" and not d.startswith("."))
+        found.extend(os.path.join(dirpath, name) for name in sorted(filenames)
+                     if name.endswith(".py"))
+    return found
+
+
+def _dynamic_imports(registry: gates.Registry, root: str) -> list[str]:
+    """`<file>:<line> <call> (<gates>)` for every import whose module a VALUE
+    names (`modelio.dynamic_imports`: `importlib.import_module(name)`,
+    `__import__(f"...")`) in the code of every registered gate — its module and
+    its closure — and in the `selftest/` of its owner (the fixtures and the
+    known-good module its control runs). Static, like `_env_reads`, and for the
+    same reason: which module such a call loads, only the run knows. The first
+    run of a process that loads it keys its source; a later one is served it
+    from `sys.modules` and keys nothing (admission review, round 2, c: a limit
+    behind `importlib.import_module` moved and the PASS was served cached). A
+    literal name is keyed with the gate's code; `load_path` keys a helper on
+    every run. Zero bundled hits."""
+    cache: dict[str, Any] = {}
+    owners: dict[tuple[str, int, str], list[str]] = {}
+    walked: dict[str, list[str]] = {}
+    for spec, fn in registry.pairs():
+        owner = verdicts._owner_dir(fn, root)
+        if owner not in walked:
+            walked[owner] = _selftest_sources(owner)
+        for path in dict.fromkeys(_source_files(fn) + walked[owner]):
+            tree = _parse(path, cache)
+            for line, call in (modelio.dynamic_imports(tree) if tree is not None else ()):
+                owners.setdefault((path, line, call), []).append(spec.id)
+    base = os.path.abspath(root)
+    lines = []
+    for (path, line, call), gate_ids in sorted(owners.items()):
+        shown = os.path.relpath(path, base).replace(os.sep, "/") \
+            if path.startswith(base + os.sep) else path
+        lines.append(f"{shown}:{line} {call} ({', '.join(sorted(set(gate_ids)))})")
+    return lines
+
+
 def _cache_notes(root: str, resolution: verdicts.Resolution) -> dict[str, list[str]]:
     """The resolver's notes, sorted into the doctor rows that own them — plus a
     strict read of every control entry on disk, because the resolver reads a
@@ -4517,6 +4560,15 @@ def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
                             "no later one, so no cache entry keys it; share a file through "
                             "ctx.load_file, which records it for every caller"
            if found else "no gate's code keeps a module-level memo the spine cannot empty")
+
+    found = _dynamic_imports(registry, root)
+    _check(results, "dynamic-imports", "warn" if found else "ok",
+           _listed(found) + " — a module a value names is keyed only by the run that "
+                            "first loads it in a process; a later one is served it and "
+                            "keys nothing: name it with a string literal, or load it with "
+                            "atompipe.modelio.load_path"
+           if found else "every module a gate or its control imports is named where it "
+                         "is imported")
 
 
 def _doctor_seal_row(results: list[dict], registry: gates.Registry,
@@ -4663,8 +4715,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     on and the resolver will not say in a status line (spec §4 U23): entries
     recorded under other library versions, opaque channels, ignored entries, two
     outcomes for one input, unsealed pack controls, undeclared third-party
-    imports, environment reads, gates keyed by their defining file, controls
-    pending re-verification, and verdicts of gates no longer registered. None of
+    imports, environment reads, module-level memos, imports of a module a value
+    names, gates keyed by their defining file, controls pending
+    re-verification, and verdicts of gates no longer registered. None of
     those changes a claim's status by itself, which is exactly why `check` and
     `status` are the wrong place to hear about them. No staleness row: which
     gates are current is `status`'s `stale:` block, per gate, from the resolver.

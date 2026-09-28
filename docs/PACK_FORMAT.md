@@ -357,12 +357,25 @@ by exactly those reads (`rho`). So:
   `importlib.util.spec_from_file_location` under a fixed module name. It compiles the
   bytes on disk (a stale `__pycache__` once ran 7.0 after the source said 8.0), salts
   the module name with the path (two copies of one pack never run each other's
-  helpers), and records the helper in the code of the gate that loaded it — so editing
-  the helper re-runs that gate. A helper imported by name from outside the pack or
-  project — a monorepo's `shared/` put on `sys.path` — is recorded the same way: any
-  Python file that is not installed (under the interpreter's own trees, or in a
-  `site-packages` / `dist-packages` directory) is the gate's code, never a third-party
-  instrument, and never runs from a stale `__pycache__`.
+  helpers), and keys the helper — so editing it re-runs whatever depended on it. Loaded
+  at module level, the helper is recorded in the code of the gate module that loaded
+  it. Loaded inside a gate function, a fixture's `make` or `known_good.context` — at
+  run time — its code and what it read at its import are reads of that run, whether
+  it ran or was served to a second caller from the cache. (What slipped through: only
+  the module-level load was recorded, so a limit loaded by path inside a gate kept its
+  PASS Fresh after it moved, and a known-good design that loaded the live model by
+  path was the live design with no key.) A helper imported by name from outside the
+  pack or project — a monorepo's `shared/` put on `sys.path` — is recorded the same
+  way: any Python file that is not installed (under the interpreter's own trees, or in
+  a `site-packages` / `dist-packages` directory) is the gate's code, never a
+  third-party instrument, and never runs from a stale `__pycache__`.
+- **Name a module you import at run time with a string literal**, or load it with
+  `load_path`. `importlib.import_module("rules")` — like an `import` inside a function
+  body — is read into the gate's code; `importlib.import_module(name)` is not, and is
+  keyed only by the first run in a process to load it (a later one is served it from
+  `sys.modules` and opens nothing). `atompipe doctor` names every such call under
+  `dynamic-imports`. Either way the stock import system loads it, from a
+  `__pycache__` that still validates; `load_path` never does.
 
 `outcome` is the one derivation of what a verdict says: `"error"` if `error` is set,
 else `"skipped"` if `skipped`, else `"pass"` if `passed is True`, else `"fail"`.

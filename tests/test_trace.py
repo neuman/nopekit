@@ -39,6 +39,7 @@ import copy
 import dataclasses
 import glob
 import importlib
+import importlib.util
 import io
 import json
 import linecache
@@ -783,6 +784,107 @@ class AuditTrace(_env.EnvCase):
                          ([], set(), set(), set(), []),
                          "import machinery's opens, listings, stats and .pyc writes are "
                          "not gate inputs (packs:H1)")
+
+    # -- code loaded at RUN time (admission review, round 2) ------------------ #
+    def _forget_loaded(self) -> None:
+        """Drop every module this test's directory put in ``sys.modules``."""
+        base = os.path.abspath(self.dir) + os.sep
+        for name, module in list(sys.modules.items()):
+            where = getattr(module, "__file__", None)
+            if isinstance(where, str) and os.path.abspath(where).startswith(base):
+                sys.modules.pop(name, None)
+
+    def test_a_stock_import_at_run_time_is_a_source_under_the_project(self):
+        """V: the admission review's round-2 repro (c). A gate taking its limit
+        from ``importlib.import_module(name)`` loads the module through the
+        STOCK import system, while no load is being recorded: the source read
+        was the import system's, dropped as the closure's business, and no
+        closure was being built — so nothing keyed it. Its source is a module
+        source of the window now (``GateTrace.sources``, apart from
+        ``files_read``), keyed under the project and dropped — never opaque —
+        anywhere else; read from a valid ``.pyc`` instead, it is still its
+        source. The named residual: served from ``sys.modules``, it opens
+        nothing and keys nothing."""
+        self.addCleanup(self._forget_loaded)
+        name = f"atompipe_trace_rules_{uuid.uuid4().hex}"
+        path = self.file(f"{name}.py", "LIMIT = 50.0\n")
+        sys.path.insert(0, self.dir)
+        self.addCleanup(sys.path.remove, self.dir)
+        importlib.invalidate_caches()
+        first = GateTrace()
+        with tracing(first):
+            self.assertEqual(importlib.import_module(name).LIMIT, 50.0)
+        self.assertEqual(first.sources, [path])
+        self.assertEqual(first.files_read, [], "a module's source is not a data read")
+
+        import py_compile
+        py_compile.compile(path, cfile=importlib.util.cache_from_source(path), doraise=True)
+        sys.modules.pop(name)
+        from_pyc = GateTrace()
+        with tracing(from_pyc):
+            importlib.import_module(name)
+        self.assertEqual(from_pyc.sources, [path],
+                         "a valid .pyc read in place of the source hid the module")
+        served = GateTrace()
+        with tracing(served):
+            importlib.import_module(name)
+        self.assertEqual(served.sources, [], "served from sys.modules, nothing is opened")
+
+        inside = verdicts.Reads.from_trace(first, anchors=Anchors(root=self.dir))
+        self.assertEqual(list(inside.files), [f"{name}.py"])
+        outside = verdicts.Reads.from_trace(
+            first, anchors=Anchors(root=os.path.join(self.dir, "elsewhere")))
+        self.assertEqual((outside.files, outside.opaque), ({}, []),
+                         "code elsewhere on sys.path is not an input of this project")
+
+    def test_a_recorded_load_at_run_time_is_a_read_whether_it_runs_or_is_served(self):
+        """V: the admission review's round-2 repros (a)-(c). ``modelio.load_path``
+        called while a gate, a fixture or ``known_good.context`` RUNS records
+        no closure (none is being built) — and a cache hit joined one only
+        while one was: the helper's code was keyed by nothing, and neither was
+        what it read at its import once it was served to a second gate. Run or
+        served, every file of its closure is a read of the window now."""
+        from atompipe import modelio
+        self.addCleanup(self._forget_loaded)
+        data = self.file("table.json", '{"limit": 50}\n')
+        helper = self.file(f"tables_{uuid.uuid4().hex}.py",
+                           f"import json\nwith open({data!r}, encoding='utf-8') as fh:\n"
+                           f"    LIMIT = json.load(fh)['limit']\n")
+        ran = GateTrace()
+        with tracing(ran):
+            module = modelio.load_path(helper)
+        self.assertEqual(module.LIMIT, 50)
+        self.assertEqual(sorted(ran.files_read), sorted([helper, data]))
+        self.assertEqual(ran.sources, [], "a recorded load is the loader's, not a stock import")
+        served = GateTrace()
+        with tracing(served):
+            self.assertIs(modelio.load_path(helper), module, "the unchanged helper ran twice")
+        self.assertEqual(sorted(served.files_read), sorted([helper, data]),
+                         "the second gate to ask keyed less than the first")
+        nobody = GateTrace()
+        self.assertIs(modelio.load_path(helper), module)          # no window: nothing, no error
+        self.assertEqual(nobody.files_read, [])
+
+    def test_the_loaders_own_digests_are_nobodys_read(self):
+        """V: the loader digests code and data for its own bookkeeping — a load
+        purges every stale module under its roots first, and serving one
+        re-checks its closure. Under a window those reads were filed as the
+        running gate's: a ``.py`` was dropped as a module's source, a ``.json``
+        was not, so a gate's first ``load_path`` keyed the DATA of an unrelated
+        module it never read, and only when it was the first to load anything."""
+        from atompipe import modelio
+        self.addCleanup(self._forget_loaded)
+        other_data = self.file("other.json", "{}\n")
+        other = self.file(f"other_{uuid.uuid4().hex}.py",
+                          f"with open({other_data!r}, encoding='utf-8') as fh:\n"
+                          f"    X = fh.read()\n")
+        mine = self.file(f"mine_{uuid.uuid4().hex}.py", "Y = 1\n")
+        modelio.load_path(other)                    # before any window
+        trace = GateTrace()
+        with tracing(trace):
+            modelio.load_path(mine)                 # its load checks `other`'s closure
+        self.assertEqual(trace.files_read, [mine])
+        self.assertEqual((trace.stats, trace.dirs, trace.opaque), ([], set(), set()))
 
     def _fresh_function(self, body: str):
         """A function compiled from a file linecache has never seen."""

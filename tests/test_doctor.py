@@ -36,6 +36,12 @@ past a check without it:
   every run (``modelio.clear_caches``); a dict filled from a function body, a
   ``global`` rebound from one, a mutable default written into, it cannot — only
   a static scan sees them.
+* **dynamic-imports** — a module a VALUE names (``importlib.import_module(name)``,
+  ``__import__(f"...")``) is in no recorded closure: only the run that first loads
+  it in a process keys its source, and a later one is served it from
+  ``sys.modules`` and keys nothing (admission review, round 2, c). A literal name
+  is keyed with the gate's code and is not named; the scan covers the gate's code
+  and its owner's ``selftest/``, where its control's fixtures live.
 * **code-digest** — a gate registered from Python, with no recorded closure, is
   keyed by its defining file; a value its function closes over is not seen.
 * **pending-controls** — a control whose fixture code moved still counts until
@@ -47,8 +53,8 @@ past a check without it:
 
 Every row is tested with a planted trigger AND a clean counterpart: a detector
 that has never refused anything is a logger, and one that refuses everything is
-noise. The static detectors (imports, env-reads, memos) are also measured on every
-bundled gate first (R-4): zero hits.
+noise. The static detectors (imports, env-reads, memos, dynamic-imports) are also
+measured on every bundled gate first (R-4): zero hits.
 
 Run:  PYTHONPATH=src python3 -m unittest tests.test_doctor -v
 """
@@ -74,7 +80,8 @@ from atompipe.models import GateSpec, NegativeControl, Tier, Verdict
 
 #: The rows this file holds `doctor` to, by the name each prints.
 ROWS = ("instruments", "opaque-inputs", "cache-entries", "two-outcomes", "sealed-fixtures",
-        "imports", "env-reads", "memos", "code-digest", "pending-controls", "orphan-entries")
+        "imports", "env-reads", "memos", "dynamic-imports", "code-digest", "pending-controls",
+        "orphan-entries")
 
 #: A fixture every planted project gate can borrow: the bracket's own, which
 #: sags the known-good design 30 mm — past any limit the planted gates use.
@@ -222,6 +229,42 @@ def env_limit(ctx):
     value = float(ctx.params["deflection"]) * scale
     return Verdict(gate="bracket.env_limit", passed=value <= limit, measured=value,
                    limit=limit, units="mm")
+'''
+
+_DYNAMIC_GATE = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_doctor.py: modules a value names, and literal look-alikes."""
+import importlib
+from importlib import import_module
+
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+RULES = "json"
+
+
+@gate(id="bracket.dynamic_limit", title="a limit from a module named at run time",
+      claims=["planted"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture={fixture!r}, note="planted"))
+def dynamic_limit(ctx):
+    importlib.import_module(RULES)
+    __import__(f"{{RULES}}")
+    importlib.import_module("json")
+    import_module("json.decoder")
+    value = float(ctx.params["deflection"])
+    return Verdict(gate="bracket.dynamic_limit", passed=value <= 5.0, measured=value,
+                   limit=5.0, units="mm")
+'''
+
+#: A fixture module beside the bracket's, naming its helper by a value: the scan
+#: reaches the owner's `selftest/`, where a control's code lives.
+_DYNAMIC_FIXTURE = '''\
+import importlib
+
+
+def make(ctx, name="json"):
+    importlib.import_module(name)
+    return ctx
 '''
 
 _MEMO_GATE = '''\
@@ -537,6 +580,28 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         registry = _bundled_registry()
         self.assertGreaterEqual(len(registry.ids()), 50, "the bundled corpus did not load")
         self.assertEqual(cli_mod._memo_reads(registry, _env.REPO), [])
+
+    def test_dynamic_imports(self):
+        project = self.copy()
+        _write(project, "gates/planted_dynamic.py", _DYNAMIC_GATE.format(fixture=_FIXTURE))
+        _write(project, "selftest/planted_dynamic.py", _DYNAMIC_FIXTURE)
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "dynamic-imports", "warn",
+                             "gates/planted_dynamic.py:", "importlib.import_module(RULES)",
+                             "__import__(f'{RULES}')", "(bracket.dynamic_limit)",
+                             "selftest/planted_dynamic.py:5 importlib.import_module(name)",
+                             "load_path",
+                             absent=("'json'", "json.decoder", "structural.py",
+                                     "bad_configs.py", "known_good.py"))
+        self.assertEqual(code, 0, row)
+        self.assertClean("dynamic-imports")
+
+    def test_no_bundled_gate_imports_a_module_a_value_names(self):
+        """R-4: zero bundled hits, measured before the row landed (openmodelica's
+        ``__import__("re")`` is a literal, and is not one)."""
+        registry = _bundled_registry()
+        self.assertGreaterEqual(len(registry.ids()), 50, "the bundled corpus did not load")
+        self.assertEqual(cli_mod._dynamic_imports(registry, _env.REPO), [])
 
     def test_code_digest_names_a_gate_keyed_by_its_defining_file(self):
         project = self.copy()
