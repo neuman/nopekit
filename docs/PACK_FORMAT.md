@@ -595,20 +595,48 @@ atompipe pack validate <name>
 checks that the manifest parses and matches its directory, `PACK.md` exists and is
 substantive, every declared gate actually registers, every gate has a negative
 control, `max_tier` matches the gates, the description is one line, and every
-file-based fixture exists.
+file-based fixture exists — and then **demonstrates** the pack at tiers 0–1, gate by
+gate, with the pack loaded alone: its own `selftest/baseline.json` passes, its
+control fires, and the control still fires against an empty host (the seal probe).
+A gate whose declared tooling is absent on this machine is printed as a `note:` and
+not demonstrated — not a problem, and not a pass either. Tiers 0–1 call no external
+solver, so this stays seconds long; the rest waits for
 
-CI runs this plus `atompipe gate selftest` over every pack. **A pack whose gates have
-never demonstrated failure does not get merged.**
+```
+atompipe gate selftest --pack <name> --junit <file>.xml
+```
+
+which runs the same three checks at **every** tier and writes them as JUnit XML:
+suite `controls` (childless only where the control fired) and suite `baselines`.
+`--pack` takes a pack name or a directory; a pack being written inside a project
+(`.atompipe/packs/<name>/`) is found by name there. Outside a project,
+`atompipe gate selftest` with no `--pack` demonstrates every bundled pack. Either
+way nothing is recorded, a run in which no control ran exits 1 (`--allow-empty`
+accepts that), and `--user-packs` is needed before `$ATOMPIPE_PACK_PATH` or
+`~/.atompipe/packs` are searched — the machine does not get to choose which copy is
+tested.
+
+CI runs `pack validate` on every pack and `gate selftest` at the repository root,
+over every bundled pack. **A pack whose gates have never demonstrated failure does
+not get merged.**
 
 ## Contributing back
 
+A pack is an ordinary directory, laid out as above: no command creates or exports
+one. One built inside a user's project, under `.atompipe/packs/<name>/`, is
+already the directory a PR adds under `packs/`, with no edits. The evidence that
+goes with it is the selftest's own report:
+
 ```
-atompipe pack new <name>        # scaffold
-atompipe pack validate <name>   # what CI will run
-atompipe pack export <name>     # PR-ready, with selftest evidence attached
+atompipe pack validate <name>                            # what CI runs on every pack
+atompipe gate selftest --pack <name> --junit <file>.xml  # every tier: the evidence
 ```
 
-A pack built inside a user's project is exportable as a standalone directory with no
-edits. That is the contribution loop: someone builds an RC boat, the agent follows
-the extension protocol to grow a CFD gate, and the pack comes back for the next
-person who needs one.
+What slipped through (S-10): this section, the extension protocol and the
+pack-authoring skill all named a `pack new` and a `pack export` command, the second
+"with selftest evidence attached". Neither ever existed, and neither will (D-24);
+`tests/test_docs_commands.py` now parses every command these documents print.
+
+That is the contribution loop: someone builds an RC boat, the agent follows the
+extension protocol to grow a CFD gate, and the pack comes back for the next person
+who needs one.

@@ -96,7 +96,12 @@ Then, and this is the part that decides whether it gets merged:
 
 ```sh
 PYTHONPATH=src python3 -m atompipe pack validate <name>
-PYTHONPATH=src python3 -m atompipe gate selftest
+PYTHONPATH=src python3 -m atompipe gate selftest --pack <name> --junit <file>.xml
 ```
+
+`pack validate` checks the layout and demonstrates tiers 0–1; `gate selftest --pack`
+runs every tier's control, and its JUnit file is the admission evidence the PR
+carries. There is no `pack new` and no `pack export` (D-24). CI runs `gate selftest`
+at the repo root, where it demonstrates every bundled pack.
 
 A pack whose gates have never demonstrated failure does not get merged.

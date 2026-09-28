@@ -23,11 +23,14 @@ would recognise? If not, split.
 
 ## Procedure
 
-### 1. Scaffold
+### 1. Lay out the directory
 
-```
-atompipe pack new <name>
-```
+No command creates a pack: it is an ordinary directory. Make the layout in
+`docs/PACK_FORMAT.md` — `pack.json`, `PACK.md`, `gates/`, `selftest/`, `references/` —
+under `.atompipe/packs/<name>/` in the project that needs it (or `packs/<name>/` in
+the atompipe repository). `pack validate` and `gate selftest --pack` find it there by
+name before it is published anywhere; `atompipe packs add <name>` opts the project
+into it, so its gates also run in `check` and in a project's `gate selftest`.
 
 Names are lowercase, hyphenated, and say the domain and the tool when the tool
 matters: `cfd-openfoam`, `fea-calculix`, `fdm-print`, `pcb-kicad`, `solar-thermal`.
@@ -207,16 +210,21 @@ contact type, stock volatility, assembly tiers, regional availability. This is w
 makes a design orderable rather than merely correct, and it is almost never in a
 datasheet.
 
-### 9. Validate and export
+### 9. Validate, and produce the evidence
 
 ```
 atompipe pack validate <name>
-atompipe gate selftest
-atompipe pack export <name>
+atompipe gate selftest --pack <name> --junit <file>.xml
 ```
 
-Export produces a PR-ready directory with the selftest evidence attached. A pack
-whose gates have never demonstrated failure does not get merged.
+`pack validate` checks the layout and demonstrates tiers 0–1: each gate passes the
+pack's own baseline, its control fires, and the control still fires against an empty
+host (the seal probe). `gate selftest --pack` runs the same checks at every tier and
+writes them as JUnit XML — that file is the admission evidence, and it goes with the
+PR. A control that could not run for want of a tool is reported as a skip, never as
+fired; say so in the PR rather than letting the file speak for it. The directory
+itself is the contribution: there is no export step. A pack whose gates have never
+demonstrated failure does not get merged.
 
 ## Extracting a pack from an existing project
 
