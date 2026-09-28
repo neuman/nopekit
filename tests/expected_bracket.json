@@ -1,0 +1,13 @@
+{
+  "exit_code": 1,
+  "gates": {
+    "fail": ["bracket.deflection"],
+    "error": [],
+    "not-admitted": [],
+    "skipped": []
+  },
+  "claims.critical": {
+    "fail": {"C1": "fail", "C7": "unclaimed"},
+    "skipped": {"C5": "needs a real part", "C6": "assumed"}
+  }
+}

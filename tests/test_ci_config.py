@@ -49,9 +49,9 @@ SIGNATURE = os.path.join(_env.REPO, "tests", "oracle", "bracket_signature.py")
 EXPECTED = os.path.join(_env.REPO, "tests", "expected_bracket.json")
 
 #: The bracket step as it stood at the start of Phase 1 (`ci.yml:71-81` at
-#: 7ecf953): the planted violator for every structural check below. Kept
-#: verbatim, because a checker that cannot refuse the file that slipped
-#: through has not been shown to refuse anything.
+#: 7ecf953), verbatim inside a minimal job: the planted violator for every
+#: structural check below, because a checker that cannot refuse the file that
+#: slipped through has not been shown to refuse anything.
 OLD_BRACKET_STEP = """\
 jobs:
   test:
@@ -66,7 +66,8 @@ jobs:
           # The default model is deliberately marginal: one gate FAILS, so `check`
           # exits 1 here and that is the expected result, not a broken build.
           PYTHONPATH=../../src python -m atompipe check || true
-          # This one must pass.
+          # This one must pass. A gate that passes its own known-bad fixture is a
+          # logger, and merging one is the failure this whole project exists to stop.
           PYTHONPATH=../../src python -m atompipe gate selftest
 """
 

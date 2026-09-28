@@ -52,7 +52,7 @@ jobs:
       - name: Honesty invariants and pack gates
         run: PYTHONPATH=src python -m unittest discover -s tests -v
 
-      - name: Every pack validates
+      - name: Every pack validates, and demonstrates
         run: |
           PYTHONPATH=src python - <<'PY'
           import os, sys
@@ -62,20 +62,40 @@ jobs:
               d = os.path.join("packs", name)
               if not os.path.isfile(os.path.join(d, "pack.json")):
                   continue
-              problems = packs.validate(d)
+              # What validate could not demonstrate here (no trimesh, no omc on a
+              # runner) comes back as notes. Printed, never dropped: a gate that
+              # was not demonstrated must not pass for one that was (S-12).
+              notes = []
+              problems = packs.validate(d, notes=notes)
               print(f"{name}: {'ok' if not problems else problems}")
+              for note in notes:
+                  print(f"  note: {note}")
               failed |= bool(problems)
           sys.exit(1 if failed else 0)
           PY
 
-      - name: Reference project runs, and its gates prove they can fail
+      # What slipped through (S-11): the docs said CI runs `gate selftest` over
+      # every pack, and CI ran it only inside the bracket, which loads no pack. At
+      # the repo root there is no project, so `gate selftest` runs pack mode: each
+      # bundled pack's baseline must pass and every control must fire.
+      - name: Every bundled pack's gates prove they can fail
+        run: PYTHONPATH=src python -m atompipe gate selftest --junit "$RUNNER_TEMP/selftest-packs.xml"
+
+      # The bracket fails on purpose (thickness 7.0: 0.70 mm of sag against a 0.5 mm
+      # limit), so `check` exits 1 in every correct build. What slipped through
+      # (S-83): this step ran `check || true`, which reads a crash (exit 2), a second
+      # failure and the intended failure going away exactly like the one intended
+      # failure; and it ran `init` and `model --set-entry` in the TRACKED directory,
+      # rewriting committed files on every run. Now it runs in a temp copy, the exit
+      # code is captured rather than swallowed, and code plus JUnit report must equal
+      # tests/expected_bracket.json.
+      - name: Reference project fails exactly as pinned, and its gates prove they can fail
         run: |
-          cd examples/bracket
-          PYTHONPATH=../../src python -m atompipe init --name bracket-ci --summary "CI run" || true
-          PYTHONPATH=../../src python -m atompipe model --set-entry model/bracket.py
-          # The default model is deliberately marginal: one gate FAILS, so `check`
-          # exits 1 here and that is the expected result, not a broken build.
-          PYTHONPATH=../../src python -m atompipe check || true
+          copy="$(mktemp -d)/bracket"
+          cp -R examples/bracket "$copy"
+          rc=0
+          PYTHONPATH=src python -m atompipe -C "$copy" check --junit || rc=$?
+          python tests/oracle/bracket_signature.py "$copy/.atompipe/out/junit.xml" tests/expected_bracket.json --exit-code "$rc"
           # This one must pass. A gate that passes its own known-bad fixture is a
           # logger, and merging one is the failure this whole project exists to stop.
-          PYTHONPATH=../../src python -m atompipe gate selftest
+          PYTHONPATH=src python -m atompipe -C "$copy" gate selftest --junit

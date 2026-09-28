@@ -147,16 +147,18 @@ convergence check as a second gate.
 
 ### 7. Emit a pack
 
-Once the gate works, it should never be rebuilt from scratch by anyone again.
+Once the gate works, it should never be rebuilt from scratch by anyone again. Lay it
+out as [`PACK_FORMAT.md`](PACK_FORMAT.md) describes — an ordinary directory; no
+command creates or exports one — then:
 
 ```
-atompipe pack new <name>      # scaffolds the layout
-atompipe pack validate <name> # the same checks CI runs
-atompipe pack export <name>   # PR-ready, with the selftest evidence attached
+atompipe pack validate <name>                            # the same checks CI runs
+atompipe gate selftest --pack <name> --junit <file>.xml  # every tier's control
 ```
 
-The export includes proof that each gate fails its negative control. A pack whose
-gates have never demonstrated failure does not get merged.
+The JUnit file is the proof that each gate fails its negative control: it goes with
+the pack's PR. A pack whose gates have never demonstrated failure does not get
+merged.
 
 ---
 
