@@ -109,9 +109,10 @@ export function quantity(value, units) {
   return units ? `${text} ${units}` : text;
 }
 
-/** Human age from seconds. `null` is NOT zero — site.state() writes a null age
- *  when it does not know when a gate last ran, and a zero renders as "just now",
- *  which is the exact lie a staleness display exists to prevent. */
+/** Human age from seconds. `null` is NOT zero — site.state() dates a verdict
+ *  from the run that last wrote or hit its entry, else the commit that brought
+ *  it, and writes a null age when it knows neither; a zero renders as "just
+ *  now", which is the exact lie a staleness display exists to prevent. */
 export function age(seconds) {
   if (seconds === null || seconds === undefined) return "age unknown";
   const s = Math.max(0, Number(seconds) || 0);
@@ -129,8 +130,10 @@ export function age(seconds) {
 
 /** Anything older than this reads as aged on the page. It is a DISPLAY
  *  threshold: it marks a row so a reader looks, and it never changes a status.
- *  Whether a result is actually invalidated is the ledger's judgement (meta.stale,
- *  set from the model hash), not a clock's. */
+ *  Whether a result is actually invalidated is the resolver's judgement, per
+ *  gate (each row's stale_reason, and meta.stale), not a clock's: an old result
+ *  whose inputs have not moved is current, and a fresh one whose inputs moved
+ *  a second later is not. */
 export const AGED_SECONDS = 24 * 3600;
 
 export function isAged(seconds) {

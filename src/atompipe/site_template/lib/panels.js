@@ -78,21 +78,23 @@ function countItem(n, one, many, tone = "muted") {
     el("b", { class: "mono", text: String(n) }), " ", (n === 1 ? one : many));
 }
 
-/** The staleness band. Shown ONLY when the ledger says the results describe a
- *  model that has since moved — `meta.stale` is computed against the model hash
- *  in atompipe.site, not guessed here from a clock. The banner is loud on
- *  purpose and the whole page gets `data-stale`, which desaturates the stage and
- *  hatches the header: a stale sweep has to LOOK stale, because the failure mode
- *  is a reader trusting a green page that describes last week's geometry. */
+/** The staleness band. Shown ONLY when the resolver says a verdict is not
+ *  current — `meta.stale` and `meta.stale_reason` are written by atompipe.site
+ *  from `verdicts.resolve`, per gate (an input moved, the code moved, a control
+ *  never shown to fail at this version), never guessed here from a clock. The
+ *  banner is loud on purpose and the whole page gets `data-stale`, which
+ *  desaturates the stage and hatches the header: a stale result has to LOOK
+ *  stale, because the failure mode is a reader trusting a green page that
+ *  describes last week's geometry. */
 export function staleBanner(state) {
   const meta = state.meta || {};
   if (!meta.stale) return null;
   return el("aside", { class: "banner banner-stale", role: "status" },
     el("span", { class: "banner-glyph", "aria-hidden": "true", text: "≈" }),
     el("div", {},
-      el("b", { text: "These results describe an older model." }),
+      el("b", { text: "Some results are not current." }),
       " ",
-      el("span", { text: meta.stale_reason || "the model has changed since the last sweep" }),
+      el("span", { text: meta.stale_reason || "a verdict's inputs have moved since it was measured" }),
       el("p", { class: "banner-fix" }, "Re-run ", code("atompipe check"),
         " and then ", code("atompipe site build"), " to settle them against what the model says now.")));
 }
@@ -304,7 +306,10 @@ function verdictRow(v, app) {
       ...(v.pack ? field("Pack", code(v.pack)) : []),
       ...field("Tier", `${v.tier} — ${["instant", "build", "solve", "external"][v.tier] || "?"}`),
       ...(v.duration_s ? field("Ran in", `${num(v.duration_s)} s`) : []),
-      ...field("Last run", v.when ? `${stamp(v.when)} · ${age(v.age_s)}` : "no run recorded for this gate"),
+      // `when` is the site's, from the resolver: the run that last wrote or hit
+      // this result, else the commit that brought it. Neither known: said so.
+      ...field("Recorded", v.when ? `${stamp(v.when)} · ${age(v.age_s)}` : "no date recorded for this result"),
+      ...(v.stale_reason ? field("Not current", v.stale_reason) : []),
       ...(v.claims || []).length
         ? field("Settles", ...v.claims.map((c) => el("button", {
             class: "linkish mono", type: "button", text: c,
@@ -344,6 +349,9 @@ function verdictRow(v, app) {
         code(v.gate, "verdict-gate"),
         measured,
         el("span", { class: "verdict-line", text: detail }),
+        v.stale_reason
+          ? el("span", { class: "stale-flag", title: v.stale_reason, text: "≈ not current" })
+          : null,
         anchored.length
           ? el("span", { class: "pin-count", title: "highlights the geometry this is about" },
               `⌖ ${anchored.length}`)
@@ -602,16 +610,16 @@ export function decisionsPanel(state, app) {
 /** Project identity and the provenance of the page itself. */
 export function aboutPanel(state) {
   const meta = state.meta || {};
-  const run = meta.last_run || {};
   return el("section", { class: "panel", id: "about" },
     panelHead("This page", "", "An output of the ledger, not a source."),
     el("dl", { class: "kv" },
       ...(meta.model_entry ? field("Model", code(meta.model_entry)) : []),
       ...(meta.created ? field("Project created", stamp(meta.created)) : []),
       ...(meta.built ? field("Site built", `${stamp(meta.built)}`) : field("Site built", "unstamped")),
-      ...(run.when ? field("Last gate sweep", `${stamp(run.when)} · tier ${run.tier} · ${num(run.duration_s)} s`) : []),
-      ...(run.model_hash ? field("Model hash", code(run.model_hash)) : []),
-      ...(run.inputs_hash ? field("Inputs hash", code(run.inputs_hash)) : []),
+      // No "last gate sweep" and no model hash: there is no sweep record any
+      // more, and one hash for the whole project said THAT something moved,
+      // never which result. Each verdict carries its own date and, when it is
+      // not current, its own reason.
       ...((meta.packs || []).length ? field("Packs", ...meta.packs.map((p) => tag(p))) : []),
       ...(meta.spine_version ? field("atompipe", meta.spine_version) : [])),
     el("p", { class: "small muted", text: meta.generated ||

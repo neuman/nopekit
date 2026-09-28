@@ -32,10 +32,13 @@ easy and has been made:
    is a parameter of every function here precisely so the report can notice the
    unrun gate and mark the row.
 
-3. **`stale` is carried all the way through to the table.** When the model moved
-   after the last sweep, `claims.statuses(..., stale=True)` turns every PASS into
-   STALE and the PROVEN table empties out. An empty table with a reason is the
-   honest render; a full table of yesterday's numbers is a lie with a timestamp.
+3. **Staleness is carried all the way through to the table.** `stale_gates` —
+   the gates `verdicts.resolve` found not current — turns each PASS they cover
+   into STALE, and those rows leave the PROVEN table; `stale=True` does it for
+   every gate at once. A missing row with a reason is the honest render; a full
+   table of yesterday's numbers is a lie with a timestamp. What it replaced: one
+   flag for the whole project, from one hash of the projection, so a comment
+   edit in the model emptied the table and nothing said which result had moved.
 
 4. **Absence is reported as loudly as failure.** A parameter with no rationale is
    a number nobody can defend; an ingested artifact with nothing extracted from it
@@ -50,21 +53,26 @@ easy and has been made:
    `claims.blocking` does, and an exit code the rendered verdicts do not explain
    is itself rendered as a failure (`render_junit`, `render_selftest_junit`).
 
-Nothing in this module reads a clock or a module-level registry. The run time
-comes from `ledger.last_run.when` (contract rule 3) and the registry is passed in
-— a report that reached for `gates.REGISTRY` could only be tested against a
-project it had already imported.
+Nothing in this module reads a clock or a module-level registry, and the
+markdown report prints no time at all: a regenerated `docs/readiness.md` changes
+only when the claims or the verdict outcomes do (S-89). It used to be titled
+with the last sweep's time and to end with that sweep's model and inputs hashes,
+so every re-run of an unchanged design rewrote a tracked file — and once
+verdicts are served from the cache, "this run" would be false on every hit. The
+registry is passed in — a report that reached for `gates.REGISTRY` could only be
+tested against a project it had already imported.
 """
 from __future__ import annotations
 
 import math
 import os
 import re
-from typing import Any, Iterable
+from typing import Any, Collection, Iterable
 
 from . import __version__
 from . import claims as claim_logic
 from . import store
+from . import verdicts as verdict_logic
 from .artifacts import unextracted
 from .models import (
     BLOCKING_STATUSES,
@@ -77,7 +85,7 @@ from .models import (
     Tier,
     Verdict,
 )
-from .util import atomic_write_text, ensure_dir, human_duration
+from .util import atomic_write_text, ensure_dir
 
 # --------------------------------------------------------------------------- #
 # vocabulary
@@ -106,8 +114,8 @@ STATUS_TAG: dict[ClaimStatus, str] = {
 }
 
 #: The PROVEN section's heading, as the report emits it and as every test that
-#: inspects that section finds it. The section's qualifier ("(machine-verified
-#: this run)") follows it on the same line and is NOT part of it.
+#: inspects that section finds it. The section's qualifier (`_PROVEN_QUALIFIER`)
+#: follows it on the same line and is NOT part of it.
 #:
 #: What slipped through (S-15): invariant 4's tests located the section by a
 #: literal copy of this text and read "no heading" as "an empty section", so
@@ -124,6 +132,17 @@ STATUS_TAG: dict[ClaimStatus, str] = {
 #: the tests search for. *Rejected:* matching any heading containing "PROVEN" —
 #: a second section that happened to use the word would be tested in its place.
 SECTION_PROVEN = "## What is PROVEN"
+
+#: What follows `SECTION_PROVEN` on its line. What slipped through: it read
+#: "(machine-verified this run)", true only while every verdict came from the
+#: sweep that wrote the report. From 1.2 a verdict is served from the cache when
+#: its inputs have not moved — current, but not "this run" — so the old words
+#: would have been false on every cache hit, in the one heading whose job is to
+#: be believed. *Rejected:* "(machine-verified, cached)" — it describes where a
+#: verdict came from, not why it counts; a verdict counts because it is current
+#: (its inputs, code and control are the ones it was measured with), whether it
+#: ran a second ago or was committed last week.
+_PROVEN_QUALIFIER = "(machine-verified, current)"
 
 #: Order used for the counts line. Good news first *in the counts only*, because
 #: a count is arithmetic; the verdict sentence and the problem list below it are
@@ -148,7 +167,7 @@ _SEVERITY: tuple[ClaimStatus, ...] = (
 _STATUS_PHRASE: dict[ClaimStatus, str] = {
     ClaimStatus.FAIL: "failing",
     ClaimStatus.REFUTED: "refuted in hardware",
-    ClaimStatus.STALE: "stale (passed, but the model moved since)",
+    ClaimStatus.STALE: "stale (passed, but not against the current inputs)",
     ClaimStatus.BLOCKED: "blocked on missing tooling",
     ClaimStatus.PENDING: "never run",
     ClaimStatus.UNCLAIMED: "with no gate at all",
@@ -252,7 +271,8 @@ def _claim_text(claim: Claim) -> str:
 # --------------------------------------------------------------------------- #
 # ledger / registry queries
 # --------------------------------------------------------------------------- #
-def _statuses(ledger: Ledger, registry: Any, stale: bool) -> dict[str, ClaimStatus]:
+def _statuses(ledger: Ledger, registry: Any, stale: bool,
+              stale_gates: Collection[str] = ()) -> dict[str, ClaimStatus]:
     """Every claim's status, judged against the LIVE registry, not the cache.
 
     `claims.statuses` accepts the registry as an additive keyword and the
@@ -262,7 +282,8 @@ def _statuses(ledger: Ledger, registry: Any, stale: bool) -> dict[str, ClaimStat
     instead of PENDING ("the gate is right there, run it"). Those two send an
     agent in opposite directions, and only one of them is true.
     """
-    raw = claim_logic.statuses(ledger, stale=stale, registry=registry)
+    raw = claim_logic.statuses(ledger, stale=stale, registry=registry,
+                               stale_gates=stale_gates)
     # Normalise at the boundary: see _norm_status.
     return {cid: _norm_status(st) for cid, st in raw.items()}
 
@@ -300,7 +321,7 @@ def _specs(registry: Any) -> list[Any]:
 
 
 def _unrun_specs(ledger: Ledger, registry: Any) -> list[Any]:
-    """Gates that are registered but produced no verdict in the recorded run.
+    """Gates that are registered but have no verdict at all: never run here.
 
     These are the quiet ones. They do not fail, they do not skip, they do not
     appear in `atompipe check` output at all — they are simply absent, and a
@@ -468,10 +489,11 @@ def _verdict_sentence(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any,
 
     parts: list[str] = []
     # NB: "never gated" keys off whether any VERDICT exists, not off run metadata.
-    # `last_run.when` is bookkeeping that a caller can legitimately not have written
-    # yet; verdicts are the evidence. Keying the headline off the former let a ledger
-    # holding real results announce "no verdict of any kind is recorded" — a false
-    # statement in the one document whose entire value is that it makes none.
+    # The sweep record this used to consult was bookkeeping a caller could
+    # legitimately not have written; verdicts are the evidence. Keying the headline
+    # off the former let a ledger holding real results announce "no verdict of any
+    # kind is recorded" — a false statement in the one document whose entire value
+    # is that it makes none.
     if not ledger.verdicts:
         parts.append(bold(f"{rev} has never been gated: no verdict of any kind is"
                           f" recorded against its {total} {_plural(total, 'claim')}."))
@@ -497,9 +519,8 @@ def _verdict_sentence(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any,
     elif stale:
         # Reachable when nothing is marked critical: staleness then blocks nothing
         # mechanically, and saying so plainly is better than a silent downgrade.
-        parts.append(bold(f"{rev} has no current proof: the model or its inputs"
-                          f" changed after the last sweep, so every previous pass"
-                          f" is stale."))
+        parts.append(bold(f"{rev} has no current proof: every verdict is marked"
+                          f" stale, so no previous pass counts."))
         parts.append("Re-run `atompipe check` before trusting anything below.")
     else:
         parts.append(bold(f"{rev} clears every critical gate that is installed:"
@@ -514,7 +535,7 @@ def _verdict_sentence(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any,
     unrun = _unrun_specs(ledger, registry)
     if unrun and ledger.verdicts:
         parts.append(f"{len(unrun)} registered {_plural(len(unrun), 'gate')}"
-                     f" did not run in this sweep.")
+                     f" {_plural(len(unrun), 'has', 'have')} never run.")
 
     if unverified:
         parts.append(f"It is unverified in physical hardware:"
@@ -539,7 +560,7 @@ def _section_proven(ledger: Ledger, st: dict[str, ClaimStatus],
     The heading starts with `SECTION_PROVEN`, never a literal: invariant 4's tests
     find the section by that constant, and fail when it is missing.
     """
-    out = [f"{SECTION_PROVEN} (machine-verified this run)", ""]
+    out = [f"{SECTION_PROVEN} {_PROVEN_QUALIFIER}", ""]
     rows: list[str] = []
 
     for claim in ledger.claims:
@@ -606,18 +627,19 @@ def _section_proven(ledger: Ledger, st: dict[str, ClaimStatus],
         out.append("|---|---|---|---|---|")
         out.extend(rows)
         out.append("")
-        out.append("Every row above is backed by at least one gate that actually "
-                   "ran and returned a pass — a skipped, errored or never-run gate "
-                   "can never be the evidence for a row. Where another gate also "
+        out.append("Every row above is backed by at least one gate that ran and "
+                   "returned a pass against the inputs, code and control it has now "
+                   "— a skipped, errored, stale or never-run gate can never be the "
+                   "evidence for a row. Where another gate also "
                    "covers the claim and did **not** produce a pass, the row is "
                    "marked **PARTIAL** and names it with the reason: the claim "
                    "stands on the gates that ran, and you can see which ones did not.")
     elif not ledger.claims:
         out.append("Nothing — there are no claims to prove.")
     elif stale:
-        out.append("**Nothing.** The model or its inputs changed after the last "
-                   "gate sweep, so every claim that previously passed is now STALE. "
-                   "Passing yesterday is not proof today. Re-run `atompipe check`.")
+        out.append("**Nothing.** Every verdict is marked stale, so every claim "
+                   "that previously passed is now STALE. Passing yesterday is not "
+                   "proof today. Re-run `atompipe check`.")
     elif not ledger.verdicts:
         out.append("**Nothing.** No gate has ever been run in this project.")
     else:
@@ -850,8 +872,23 @@ def _section_constraints(ledger: Ledger, st: dict[str, ClaimStatus]) -> list[str
     return out
 
 
+def _stale_suffix(claim: Claim, cover: dict[str, list[str]],
+                  stale_gates: Collection[str]) -> str:
+    """`: `g.one` is stale` — which covering gates made a claim STALE, when the
+    caller said (``stale_gates``); ``""`` under the all-gates alias. The reason
+    each gate is stale is the resolver's and lives in `atompipe status`; the
+    report names the gate so the reader knows which result to re-check."""
+    stale = [gid for gid in (cover.get(claim.id) or list(claim.gates or []))
+             if gid in set(stale_gates)]
+    if not stale:
+        return ""
+    return (": " + ", ".join(_code(g) for g in stale)
+            + f" {_plural(len(stale), 'is', 'are')} stale")
+
+
 def _section_failing(ledger: Ledger, st: dict[str, ClaimStatus],
-                     cover: dict[str, list[str]], registry: Any) -> list[str]:
+                     cover: dict[str, list[str]], registry: Any, *,
+                     stale_gates: Collection[str] = ()) -> list[str]:
     """Everything that is red, with the verdict line that made it red."""
     out = ["## Failing / blocked", ""]
     bad = _claims_with(ledger, st, _FAILING_SECTION)
@@ -886,8 +923,10 @@ def _section_failing(ledger: Ledger, st: dict[str, ClaimStatus],
                 else:
                     out.append("- No verdict and no covering gate recorded.")
             if status is ClaimStatus.STALE:
-                out.append("- Passed previously, but the model or inputs moved "
-                           "afterwards. Nothing here is proven *now*.")
+                out.append("- Passed, but not against the current inputs"
+                           + _stale_suffix(claim, cover, stale_gates)
+                           + ". Nothing here is proven *now* — `atompipe check` "
+                             "re-runs what moved.")
             if claim.physical_result and not claim.physical_result.passed:
                 res = claim.physical_result
                 out.append(f"- Hardware result: FAILED {res.when} {res.who} — "
@@ -923,13 +962,40 @@ def _section_failing(ledger: Ledger, st: dict[str, ClaimStatus],
     return out
 
 
-def _section_reproduce(ledger: Ledger, registry: Any) -> list[str]:
-    """The exact commands. A readiness report nobody can re-derive is a press release."""
+def _code_files(registry: Any, root: str) -> dict[str, list[str]]:
+    """gate id -> the files its code is, spelled as the verdict cache spells
+    them (``gates/structural.py``, ``<pack:cad-solid>/gates/solid.py``) — the
+    files whose bytes key its verdict, so an edit to any of them re-runs that
+    gate and no other.
+
+    Only with a ``root`` to spell them against, and a registry that hands out
+    its gate functions: without the root a project's gate would be spelled by
+    this machine's absolute path, and a tracked report that changes per
+    checkout is the churn S-89 names. A registry that is only a list of specs
+    (a test's, or a machine without the packs) lists no files."""
+    pairs = getattr(registry, "pairs", None) if registry is not None else None
+    if not root or not callable(pairs):
+        return {}
+    anchors = verdict_logic.anchors_for(root, registry, out_dir=store.out_dir(root))
+    files: dict[str, list[str]] = {}
+    for spec, fn in pairs():
+        code = verdict_logic.code_digest(spec, fn, anchors=anchors)
+        files[spec.id] = list(code.files)
+    return files
+
+
+def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list[str]:
+    """The exact commands, and the code behind each row. A readiness report
+    nobody can re-derive is a press release.
+
+    No time, no rho, no hash of the run: those change on every re-run of an
+    unchanged design, and this file is tracked (S-89). What it names instead is
+    what a re-run would re-derive — the command per gate, and the files that
+    gate's verdict is keyed on.
+    """
     out = ["## Reproduce", ""]
-    run = ledger.last_run
-    tier = int(run.tier or 0)
     specs = _specs(registry)
-    max_tier = max((int(s.tier) for s in specs), default=tier)
+    max_tier = max((int(s.tier) for s in specs), default=0)
 
     out.append("This file is generated. Re-derive every row above with:")
     out.append("")
@@ -944,8 +1010,13 @@ def _section_reproduce(ledger: Ledger, registry: Any) -> list[str]:
                "          # regenerates docs/readiness.md")
     out.append("```")
     out.append("")
+    out.append("`check` re-runs only the gates whose inputs, code or control moved; "
+               "every other verdict is served from `.atompipe/verdicts/` as it was "
+               "recorded. `atompipe check --force` re-runs all of them.")
+    out.append("")
 
     ran = {v.gate for v in ledger.verdicts}
+    code = _code_files(registry, root)
     per_gate: list[tuple[str, str]] = []
     for v in ledger.verdicts:
         per_gate.append((v.gate, ", ".join(v.claims) or "no claim linked"))
@@ -955,12 +1026,15 @@ def _section_reproduce(ledger: Ledger, registry: Any) -> list[str]:
                              (", ".join(spec.claims) or "no claim linked")
                              + "  [never run]"))
     if per_gate:
-        out.append("One gate at a time — this is the command behind each row:")
+        out.append("One gate at a time — this is the command behind each row"
+                   + (", and the code it runs:" if code else ":"))
         out.append("")
         out.append("```sh")
         width = max(len(g) for g, _ in per_gate[:_MAX_REPRODUCE_GATES])
         for gate_id, covers in per_gate[:_MAX_REPRODUCE_GATES]:
-            out.append(f"atompipe check --only {gate_id.ljust(width)}   # {covers}")
+            files = code.get(gate_id)
+            where = f" — {', '.join(files)}" if files else ""
+            out.append(f"atompipe check --only {gate_id.ljust(width)}   # {covers}{where}")
         if len(per_gate) > _MAX_REPRODUCE_GATES:
             out.append(f"# ... and {len(per_gate) - _MAX_REPRODUCE_GATES} more;"
                        f" `atompipe gate list` prints them all")
@@ -976,26 +1050,6 @@ def _section_reproduce(ledger: Ledger, registry: Any) -> list[str]:
     out.append("                                 # own known-bad fixture is a logger, not a gate")
     out.append("```")
     out.append("")
-
-    # The provenance of the run itself. Without these, "I ran it and got something
-    # else" is unresolvable: you cannot tell a real regression from a different
-    # model.
-    if run.when:
-        bits = [f"recorded {run.when}", _tier_label(tier)]
-        if run.duration_s:
-            bits.append(human_duration(run.duration_s))
-        if run.model_hash:
-            bits.append(f"model `{run.model_hash}`")
-        if run.inputs_hash:
-            bits.append(f"inputs `{run.inputs_hash}`")
-        if run.spine_version:
-            bits.append(f"atompipe {run.spine_version}")
-        out.append("Run reproduced here: " + ", ".join(bits) + ".")
-        out.append("A different model hash reproduces a different claim, not a "
-                   "different result.")
-    else:
-        out.append("No run is recorded, so there is nothing to reproduce yet.")
-    out.append("")
     return out
 
 
@@ -1003,7 +1057,8 @@ def _section_reproduce(ledger: Ledger, registry: Any) -> list[str]:
 # public surface
 # --------------------------------------------------------------------------- #
 def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
-                    title: str = "") -> str:
+                    stale_gates: Collection[str] = (), model_error: str = "",
+                    title: str = "", root: str = "") -> str:
     """The full readiness report as markdown — the project's public deliverable.
 
     Sections, in the order a sceptical reader needs them: the verdict, what is
@@ -1019,23 +1074,37 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     gate *runtime*, and rendering a ledger must never require the ability to run
     one.
 
-    `stale` is the caller's judgement that the model or inputs moved since the
-    last sweep — usually `modelio.model_hash(...) != ledger.last_run.model_hash`.
-    It is threaded into `claims.statuses`, which turns every PASS into STALE, so
-    a stale report empties its own proof table rather than reprinting yesterday's.
+    `ledger` carries the verdicts to render — the caller's resolution laid over
+    the records (`verdicts.resolve`), never a list this function re-judges.
+    `stale_gates` is that resolution's: the gates whose verdict is not current
+    (stale, unknown, or with a control not demonstrated at this version). Each
+    PASS they cover reads STALE and leaves the proof table, and the failing
+    section names the gate. `stale=True` marks every gate stale at once.
+    `model_error` — the model does not load — is said under the verdict
+    sentence: every verdict that reads the model is then not current, and the
+    reader should know why before reading the tables.
+
+    `root`, when given, spells each gate's code files in `## Reproduce`
+    relative to the project (`write_report` passes it). Without it the files
+    are left out rather than spelled by this machine's absolute paths.
+
+    The title is the project and its revision — no time: a regenerated report
+    of an unchanged design must be byte-identical (S-89).
     """
-    st = _statuses(ledger, registry, stale)
+    st = _statuses(ledger, registry, stale, stale_gates)
     cover = _coverage(ledger, registry)
 
     name = ledger.meta.name or "(unnamed project)"
     rev = ledger.meta.revision or "unversioned"
-    when = ledger.last_run.when or ("run time unrecorded" if ledger.verdicts
-                                    else "never run")
-    heading = title or f"{name} — readiness ({rev}, {when})"
+    heading = title or f"{name} — readiness ({rev})"
 
     out: list[str] = [f"# {heading}", ""]
     out.append(_verdict_sentence(ledger, st, registry, stale=stale, markdown=True))
     out.append("")
+    if model_error:
+        out.append(f"**The model does not load**, so no verdict that reads it is "
+                   f"current: {_trunc(model_error, 300)}")
+        out.append("")
     if ledger.meta.summary:
         out.append(f"> {_trunc(ledger.meta.summary, 400)}")
         out.append("")
@@ -1044,18 +1113,19 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     out += _section_not_verified(ledger, st)
     out += _section_gaps(ledger, st, registry)
     out += _section_constraints(ledger, st)
-    out += _section_failing(ledger, st, cover, registry)
-    out += _section_reproduce(ledger, registry)
+    out += _section_failing(ledger, st, cover, registry, stale_gates=stale_gates)
+    out += _section_reproduce(ledger, registry, root=root)
 
     out.append("---")
     out.append("")
-    out.append("*Generated by `atompipe report` from `.atompipe/ledger.json`. "
+    out.append("*Generated by `atompipe report` from the ledger and its verdict cache. "
                "Do not hand-edit: it is an output, not a source. If a line here is "
                "wrong, the ledger is wrong.*")
     return "\n".join(out).rstrip() + "\n"
 
 
-def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False) -> str:
+def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
+                    stale_gates: Collection[str] = ()) -> str:
     """The same report compressed to something an agent can hold in context.
 
     Under ~40 lines for a healthy project, which is the point: this is what
@@ -1067,23 +1137,23 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False) -> st
     least as often as it goes to a terminal, and an escape sequence in a diff is
     noise in all three. Status is carried by the `[ok   ]` / `[FAIL ]` / `[skip ]`
     / `[gap  ]` tags instead.
+
+    `stale_gates` and `stale` as for `render_markdown`: a claim whose covering
+    gate is stale is listed STALE, naming the gate. The head line carries no
+    sweep time — there is no sweep record to read one from, and `status` prints
+    its own `stale:` and `last check:` lines, each with a source.
     """
-    st = _statuses(ledger, registry, stale)
+    st = _statuses(ledger, registry, stale, stale_gates)
     cover = _coverage(ledger, registry)
     lines: list[str] = []
 
     name = ledger.meta.name or "(unnamed)"
     rev = ledger.meta.revision or "unversioned"
-    run = ledger.last_run
     head = f"atompipe readiness — {name} {rev}"
-    if run.when:
-        head += f" — run {run.when} {_tier_label(run.tier)}"
-        if run.duration_s:
-            head += f" in {human_duration(run.duration_s)}"
-    else:
+    if not ledger.verdicts:
         head += " — never run"
     if stale:
-        head += " — STALE (model moved since)"
+        head += " — STALE (every verdict)"
     lines.append(head)
     lines.append(_verdict_sentence(ledger, st, registry, stale=stale, markdown=False))
 
@@ -1097,8 +1167,9 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False) -> st
     problems.sort(key=lambda c: (_SEVERITY.index(st[c.id]), not c.critical, c.id))
     for claim in problems[:_MAX_TERMINAL_CLAIMS]:
         status = st[claim.id]
+        why = _terminal_reason(ledger, claim, status, cover, stale_gates=stale_gates)
         lines.append(f"{status_tag(status)} {claim.id} {_trunc(claim.statement, 52)}"
-                     f" — {_terminal_reason(ledger, claim, status, cover)}")
+                     f" — {why}")
     if len(problems) > _MAX_TERMINAL_CLAIMS:
         lines.append(f"       ... and {len(problems) - _MAX_TERMINAL_CLAIMS} more "
                      f"unsettled claims — see docs/readiness.md")
@@ -1123,6 +1194,9 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False) -> st
     errored = [v for v in ledger.verdicts if v.error]
     unrun = _unrun_specs(ledger, registry)
     gate_bits = [f"{len(ran)} ran"]
+    not_current = sorted({v.gate for v in ledger.verdicts} & set(stale_gates))
+    if not_current:
+        gate_bits.append(f"{len(not_current)} not current")
     if skipped:
         gate_bits.append(f"{len(skipped)} skipped")
     if errored:
@@ -1152,7 +1226,8 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False) -> st
 
 
 def _terminal_reason(ledger: Ledger, claim: Claim, status: ClaimStatus,
-                     cover: dict[str, list[str]], *, full: bool = False) -> str:
+                     cover: dict[str, list[str]], *, full: bool = False,
+                     stale_gates: Collection[str] = ()) -> str:
     """The shortest true explanation of why this claim is not settled.
 
     The verdict cited is `claims.explaining_verdict`'s, the same one `atompipe
@@ -1188,15 +1263,24 @@ def _terminal_reason(ledger: Ledger, claim: Claim, status: ClaimStatus,
         return f"{v.gate} : {cut(body, 56)}" if body else f"{v.gate} did not pass"
     gates = cover.get(claim.id) or list(claim.gates or [])
     if status is ClaimStatus.STALE:
+        # Name the stale gate when the caller said which (`stale_gates`); under
+        # the all-gates alias every passing gate is. "An older model" was the
+        # only reason one global hash could give, and it is false for a stale
+        # control or a moved data file.
+        stale = [g for g in gates if g in set(stale_gates)]
+        if stale:
+            return (f"passed, but {', '.join(stale[:3])}"
+                    f" {_plural(len(stale), 'is', 'are')} not current")
         passed = [v.gate for v in _ok_verdicts(ledger, claim)]
-        return f"passed on an older model ({', '.join(passed) or 'gate not named'})"
+        return (f"passed, but not against the current inputs"
+                f" ({', '.join(passed) or 'gate not named'})")
     if gates:
         return f"{', '.join(gates[:3])} never ran"
     return "no verdict recorded"
 
 
 def write_report(root: str, ledger: Ledger, registry: Any, *,
-                 stale: bool = False) -> str:
+                 stale: bool = False, stale_gates: Collection[str] = ()) -> str:
     """Render the markdown report to `docs/readiness.md` and return its path.
 
     Written atomically: a half-truncated readiness report left behind by a crash
@@ -1206,10 +1290,15 @@ def write_report(root: str, ledger: Ledger, registry: Any, *,
     The destination comes from `store.project_paths`, not from a join spelled
     here. Layout is `store`'s job alone; a second module that knows where
     `docs/readiness.md` lives is a second module to edit when it moves.
+
+    `stale_gates` as for `render_markdown`; `root` spells the gates' code files.
+    The file holds no time and no rho, so rewriting it for an unchanged design
+    and unchanged outcomes leaves the tracked bytes alone (S-89).
     """
     path = store.project_paths(root)["readiness"]
     ensure_dir(os.path.dirname(path))
-    atomic_write_text(path, render_markdown(ledger, registry, stale=stale))
+    atomic_write_text(path, render_markdown(ledger, registry, stale=stale,
+                                            stale_gates=stale_gates, root=root))
     return path
 
 
@@ -1401,7 +1490,8 @@ def _junit_serialise(root: Any, suites: list[Any]) -> str:
 
 
 def _claim_case(suite: Any, ledger: Ledger, claim: Claim, status: ClaimStatus,
-                cover: dict[str, list[str]], *, red: bool) -> None:
+                cover: dict[str, list[str]], *, red: bool,
+                stale_gates: Collection[str] = ()) -> None:
     """One claim's testcase, asserting "this claim does not block the spend".
 
     `red` is the caller's: blocking (critical) or FAIL/REFUTED (not critical).
@@ -1417,7 +1507,8 @@ def _claim_case(suite: Any, ledger: Ledger, claim: Claim, status: ClaimStatus,
     rendered = claim.acceptance.render() if claim.acceptance else ""
     words = (claim.statement or "") + (f"\nacceptance: {rendered}" if rendered else "")
     if red:
-        reason = _terminal_reason(ledger, claim, status, cover, full=True)
+        reason = _terminal_reason(ledger, claim, status, cover, full=True,
+                                  stale_gates=stale_gates)
         explaining = claim_logic.explaining_verdict(claim, ledger.verdicts)
         # Only a FAIL can come from a crash. A REFUTED claim with a crashed
         # modelled-half gate beside it is refuted by the real object, and saying
@@ -1442,14 +1533,16 @@ def _claim_case(suite: Any, ledger: Ledger, claim: Claim, status: ClaimStatus,
     elif status is ClaimStatus.ASSERTED:
         _xml_sub(case, "skipped", message="assumed")
     else:
-        _xml_sub(case, "skipped", message=f"{status.value}: "
-                 f"{_terminal_reason(ledger, claim, status, cover, full=True)}")
+        why = _terminal_reason(ledger, claim, status, cover, full=True,
+                               stale_gates=stale_gates)
+        _xml_sub(case, "skipped", message=f"{status.value}: {why}")
 
 
 def render_junit(ledger: Ledger, verdicts: Iterable[Verdict], registry: Any, *,
                  tier: Any, ready: bool, exit_code: int, when: str,
                  not_run: Any = None, cached: Iterable[str] = frozenset(),
-                 stale: bool = False, spine: str = "") -> str:
+                 stale: bool = False, spine: str = "",
+                 stale_gates: Collection[str] = ()) -> str:
     """This command's run as JUnit XML — never greener than its exit code.
 
     A CI system renders this file, not the exit code, so the file carries the
@@ -1472,9 +1565,10 @@ def render_junit(ledger: Ledger, verdicts: Iterable[Verdict], registry: Any, *,
     * **`claims.not-critical`** — FAIL and REFUTED red; every other non-pass
       skipped with its reason.
 
-    `ledger` must be the ledger the exit code was judged from, and `stale` the
-    flag it was judged with: the claim suites are recomputed from them, never
-    from `verdicts`. Should a caller hand over an exit code the claims do not
+    `ledger` must be the ledger the exit code was judged from, and `stale` and
+    `stale_gates` what it was judged with (the resolution's stale gates, from
+    1.2): the claim suites are recomputed from them, never from `verdicts`.
+    Should a caller hand over an exit code the claims do not
     explain anyway — a non-zero code with nothing blocking, as a stale project
     rendered without `stale=True` would give — `claims.critical` gains one
     failing `exit code` testcase saying so. A caller's disagreement surfaces as
@@ -1513,17 +1607,19 @@ def render_junit(ledger: Ledger, verdicts: Iterable[Verdict], registry: Any, *,
                          verdict, cached=gate_id in cached,
                          not_run=str(reasons.get(gate_id, "")))
 
-    st = _statuses(ledger, registry, stale)
+    st = _statuses(ledger, registry, stale, stale_gates)
     cover = _coverage(ledger, registry)
-    blocking = {c.id for c, _ in claim_logic.blocking(ledger, registry, stale=stale)}
+    blocking = {c.id for c, _ in claim_logic.blocking(ledger, registry, stale=stale,
+                                                      stale_gates=stale_gates)}
     for claim in ledger.claims:
         status = st[claim.id]
         if claim.critical:
             _claim_case(suites["claims.critical"], ledger, claim, status, cover,
-                        red=claim.id in blocking)
+                        red=claim.id in blocking, stale_gates=stale_gates)
         else:
             _claim_case(suites["claims.not-critical"], ledger, claim, status, cover,
-                        red=status in (ClaimStatus.FAIL, ClaimStatus.REFUTED))
+                        red=status in (ClaimStatus.FAIL, ClaimStatus.REFUTED),
+                        stale_gates=stale_gates)
 
     critical = suites["claims.critical"]
     if not ledger.claims:
