@@ -408,13 +408,16 @@ STEPS: Tuple[Step, ...] = (
 )
 
 
-def due(step: Step, current: Tag = CURRENT) -> bool:
-    """Whether ``step`` is replayed at checkpoint ``current``."""
+def due(step: Step, current: Optional[Tag] = None) -> bool:
+    """Whether ``step`` is replayed at checkpoint ``current`` (default: ``CURRENT``,
+    read at call time — a default bound at definition would not follow it)."""
+    current = CURRENT if current is None else current
     return tuple(step.tag) <= tuple(current)
 
 
-def reached(expect: Expect, step: Step, current: Tag = CURRENT) -> bool:
+def reached(expect: Expect, step: Step, current: Optional[Tag] = None) -> bool:
     """Whether ``expect`` is asserted at ``current`` (the star aside)."""
+    current = CURRENT if current is None else current
     at = expect.at if expect.at is not None else step.tag
     return due(step, current) and tuple(at) <= tuple(current)
 

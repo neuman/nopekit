@@ -167,11 +167,11 @@ class _Replay:
     """Executes `_transcript.STEPS` against one copy, in order, through `_env`."""
 
     def __init__(self, case: _env.EnvCase, project: str, spines: list,
-                 current: _transcript.Tag = _transcript.CURRENT):
+                 current: _transcript.Tag | None = None):
         self.case = case
         self.project = project
         self.spines = spines
-        self.current = current
+        self.current = _transcript.CURRENT if current is None else current
         self.home = case.tmp()             # one HOME for the whole session, as a user has
         self.last: Result | None = None
         self.snapshots: dict[str, set[str]] = {}
