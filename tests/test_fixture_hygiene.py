@@ -86,6 +86,13 @@ EXPECTED_CHANGES = {
 #: A duration rendered into text the way openmodelica did: `in 0.9s`, `in 12s`.
 DURATION_TEXT = re.compile(r"\bin \d+(?:\.\d+)?\s?s\b")
 
+#: How many `detail` sinks the scan must find in modelica.py before its silence
+#: means anything. It builds 17 today (measured when this landed); 10 leaves room
+#: for a refactor that merges a few, and is far above the 2 that carried the
+#: clock — a scan that stopped recognising `Verdict(detail=...)` cannot pass.
+#: Rejected: `> 0`, which one surviving `detail =` assignment would satisfy.
+MODELICA_MIN_SINKS = 10
+
 
 # --------------------------------------------------------------------------- #
 # the bracket, loaded from a copy
@@ -402,7 +409,8 @@ class DetailHasNoWallClock(_env.EnvCase):
             if path == MODELICA:
                 # Non-vacuous: the scan saw modelica.py's details, including the
                 # two that carried the clock.
-                self.assertGreaterEqual(sinks, 10, f"only {sinks} detail sinks in modelica.py")
+                self.assertGreaterEqual(sinks, MODELICA_MIN_SINKS,
+                                        f"only {sinks} detail sinks in modelica.py")
         self.assertEqual(found, [], "a verdict detail is built from a duration or a clock "
                                     "read; duration_s already carries the time")
 

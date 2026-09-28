@@ -1249,8 +1249,11 @@ def compiles(ctx: GateContext) -> Verdict:
         why = f"built {os.path.basename(executable)}"
     return Verdict(
         gate=gid, passed=passed,
-        detail=(f"{why} in {run.duration_s:.1f}s"
-                + (f"; {M.first_errors(errors)}" if dirty else "")),
+        # No `in {run.duration_s:.1f}s` (D-29, S-34): the detail is part of the bytes
+        # a cache entry is written as, and a wall-clock figure made two runs on
+        # identical inputs two different entries — "in 0.9s" and "in 0.8s" — an
+        # add/add conflict on every branch that ran it. `duration_s` carries the time.
+        detail=(why + (f"; {M.first_errors(errors)}" if dirty else "")),
         evidence=evidence)
 
 
@@ -1381,8 +1384,8 @@ def simulates(ctx: GateContext) -> Verdict:
         gate=gid, passed=not failures,
         measured=(None if reached is None else round(float(reached), 9)),
         limit=round(stop_time, 9), units="s",
+        # No run time here either (D-29): see `compiles`.
         detail=(f"simulate({class_name}) reached t="
-                f"{'?' if reached is None else f'{reached:g}'}/{stop_time:g} s in "
-                f"{run.duration_s:.1f}s"
+                f"{'?' if reached is None else f'{reached:g}'}/{stop_time:g} s"
                 + (f"; " + "; ".join(failures[:2]) if failures else "; clean")),
         evidence=evidence)
