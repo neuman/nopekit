@@ -1046,18 +1046,27 @@ class TwoOutcomes(_env.EnvCase):
         return first, verdicts.write_entry(root, other)
 
     def test_detected_as_a_warning_while_staged(self):
-        self.assertIs(verdicts.TWO_OUTCOMES_IS_ERROR, False)
-        root = _project(self)
-        first, second = self._two(root)
-        self.assertEqual(second.status, "written")
-        self.assertEqual(second.rho, first.rho)
-        self.assertNotEqual(second.path, first.path)
-        self.assertTrue(any("two outcomes recorded for identical inputs" in w
-                            for w in second.warnings), second.warnings)
-        problems: list[str] = []
-        both = verdicts.read_entries(root, "t.plain", problems=problems)
-        self.assertEqual(len(both), 2, "both files stay: neither outcome is silently picked")
-        self.assertTrue(any("two outcomes recorded for identical inputs" in p for p in problems))
+        # The detector, under both values of the flag. It was pinned at False
+        # while staged (R-4); U25 flipped it once EntriesAreDeterministic had
+        # measured the corpus, and the flag decides only how `resolve` shows two
+        # outcomes (test_determinism.TwoOutcomes) — never whether the writer and
+        # the reader see them. A refusal must not replace the report under it.
+        for flag in (False, True):
+            with self.subTest(TWO_OUTCOMES_IS_ERROR=flag), \
+                    mock.patch.object(verdicts, "TWO_OUTCOMES_IS_ERROR", flag):
+                root = _project(self)
+                first, second = self._two(root)
+                self.assertEqual(second.status, "written")
+                self.assertEqual(second.rho, first.rho)
+                self.assertNotEqual(second.path, first.path)
+                self.assertTrue(any("two outcomes recorded for identical inputs" in w
+                                    for w in second.warnings), second.warnings)
+                problems: list[str] = []
+                both = verdicts.read_entries(root, "t.plain", problems=problems)
+                self.assertEqual(len(both), 2,
+                                 "both files stay: neither outcome is silently picked")
+                self.assertTrue(any("two outcomes recorded for identical inputs" in p
+                                    for p in problems))
 
     def test_different_instruments_warns_and_prefers_local(self):
         root = _project(self)

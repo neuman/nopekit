@@ -828,7 +828,11 @@ class Resolve(_env.EnvCase):
         [entry] = verdicts.read_entries(p.root, "t.defl")
         verdicts.write_entry(p.root, dataclasses.replace(
             entry, verdict={**entry.verdict, "passed": False}))
-        resolution = p.resolve(_PROJECTION)
+        # The staged half is held by patching since U25 flipped the flag; the
+        # flipped half below is unchanged, and test_determinism.TwoOutcomes
+        # holds the real value through the CLI.
+        with mock.patch.object(verdicts, "TWO_OUTCOMES_IS_ERROR", False):
+            resolution = p.resolve(_PROJECTION)
         self.assertIn("t.defl", resolution.stale_gates)
         self.assertTrue(resolution.rows["t.defl"].stale_reason.startswith(
             "two outcomes recorded for identical inputs"), resolution.rows["t.defl"])

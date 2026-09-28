@@ -1789,15 +1789,24 @@ SPEC_FIELDS_IN_RHO = ("id", "claims", "tier", "pack", "requires_tools",
 #: run reads. *Rejected:* the host ``out_dir`` (today's clobbering).
 CONTROL_OUT_DIR = ".atompipe/out/controls"
 
-#: Two outcomes recorded for one rho under the same instruments: a WARNING (and
-#: the gate reads stale) while this is False, an error once it is True. Staged
-#: on purpose (R-4): the refusal lands only after ``EntriesAreDeterministic``
-#: (U25) has shown that every bundled gate writes the same bytes from two
-#: directories and two cold processes, so the flip cannot turn an honest gate
-#: red. *Rejected:* an error from the start — an omc-style nondeterminism would
-#: have flagged honest gates red mid-phase, before anyone had measured it;
-#: "worse outcome wins", which picks silently.
-TWO_OUTCOMES_IS_ERROR = False
+#: Two outcomes recorded for one rho under the same instruments: an ERROR — the
+#: gate reads "two outcomes recorded for identical inputs", its claims FAIL and
+#: `doctor` fails the row. While False it was a warning and the gate read stale.
+#: Staged on purpose (R-4): the refusal landed only after the detector had been
+#: measured on the bundled corpus. The measurement (2026-09-28,
+#: ``test_determinism.EntriesAreDeterministic``): every bundled pack baseline,
+#: wrapped, plus the bracket, each checked by two cold processes in each of two
+#: temp directories at different depths, trimesh, numpy and omc present — 60
+#: entries and 60 control entries per run, byte-identical across all four runs,
+#: so zero hits on honest bundled code; without those tools 49 and 49, same
+#: bytes, the other 11 gates availability-skipped. The planted hit is
+#: ``test_determinism.TwoOutcomes``. *Rejected:* an error from the start — an
+#: omc-style nondeterminism (S-34: wall-clock time in ``detail``) would have
+#: flagged honest gates red mid-phase, before anyone had measured it; "worse
+#: outcome wins", which picks silently; staying a warning — a stale gate is
+#: re-run, the re-run matches one of the two files, and the claim then reads
+#: whatever that run said while the contradiction sits on disk unanswered.
+TWO_OUTCOMES_IS_ERROR = True
 
 _STATE_DIR = ".atompipe"
 _VERDICTS_DIR = "verdicts"

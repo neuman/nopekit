@@ -53,16 +53,20 @@ Tag = Tuple[int, int]
 CHECKPOINTS: Tuple[Tag, ...] = ((1, 1), (1, 2), (1, 3))
 
 #: The checkpoint this commit has delivered: the replay runs every step whose tag
-#: is at or before it. Why (1, 1): checkpoint 1.1 is what landed — JUnit, the
-#: pack-mode selftest, and the first check's exit code; nothing of 1.2's
-#: per-gate cache exists yet. It moves once per checkpoint, in the unit that
-#: closes it: (1, 2) in U25, (1, 3) in U32 (spec §6.2, G6). *Rejected:* setting
-#: it to (1, 3) now and letting the undelivered steps skip — every skip reads
-#: green, and the transcript would be asserted nowhere until the last wave;
-#: *rejected:* replaying only in the last wave (a judge's defect against the
-#: first design) — a checkpoint that breaks a step already delivered would go
+#: is at or before it. Why (1, 2): checkpoint 1.2 is what landed — the per-gate
+#: cache and admission (the first check's summary shape, `status` naming the one
+#: stale gate and the value that moved, the affected-only re-check, `gate show`'s
+#: control line), closed by U25 together with EntriesAreDeterministic and the
+#: R-8 oracle. The (1, 3) steps need what 1.3 delivers: committed entries (so the
+#: first check is all cache hits and the tree stays clean) and `why` over the
+#: model's PARAMS. It moves once per checkpoint, in the unit that closes it:
+#: (1, 1) in U10, (1, 2) in U25, (1, 3) in U32 (spec §6.2, G6). *Rejected:*
+#: setting it to (1, 3) early and letting the undelivered steps skip — every
+#: skip reads green, and the transcript would be asserted nowhere until the last
+#: wave; *rejected:* replaying only in the last wave (a judge's defect against
+#: the first design) — a checkpoint that breaks a step already delivered would go
 #: unseen for thirteen waves.
-CURRENT: Tag = (1, 1)
+CURRENT: Tag = (1, 2)
 
 #: Where `check --junit` writes when given no path, spelled as the transcript
 #: spells it rather than read from `report.JUNIT_DEFAULT`: an expectation taken
