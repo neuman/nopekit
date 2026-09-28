@@ -709,6 +709,119 @@ and no latency reader filtered them (S-31). A file naming another gate or kind �
 `x`'s control and a gate called `x.control` share one name — reads as no runs and is
 replaced on the next write: never a mixed series.
 
+**Part three: freshness, admission state, the one resolver.** None of it runs a gate
+or a fixture; all of it reads the cache and what is on disk now.
+```python
+MAX_STALE_REASONS = 3         # moves named per stale gate, then "(+n more)": one gate, one line
+
+@dataclass(frozen=True)
+class Fresh:   entry: Entry; notes: tuple; rho: str; current: frozenset       # state = "fresh"
+@dataclass(frozen=True)
+class Stale:   entry: Entry; reasons: tuple; rho: str; current: frozenset;
+               conflict: tuple                                                # state = "stale"
+@dataclass(frozen=True)
+class Unknown: entry: Entry | None; reason: str; rho: str; current: frozenset # state = "unknown"
+@dataclass(frozen=True)
+class Never:   ...                    # state = "never"; entry None, rho "", current frozenset()
+
+def freshness(root, registry, projection, ledger, *, digests=None, anchors=None,
+              model=None) -> dict[str, Fresh | Stale | Unknown | Never]   # every registered gate
+
+@dataclass(frozen=True)
+class Admission:
+    state: str            # "admitted" | "pending" | "not-admitted" | "undemonstrated"
+    entry: ControlEntry | None
+    reason: str           # why not admitted; for pending, the note
+    executed: bool        # a fixture or control ran to decide it: never, from admission_state
+    reverified: bool
+def admission_state(root, spec, fn, *, projection, digests=None, anchors=None) -> Admission
+
+@dataclass(frozen=True)
+class Row:
+    gate: str; state: str           # "fresh" | "stale" | "unknown" | "never" | "legacy" | "orphan"
+    cached: bool; fresh: bool; stale_reason: str; entry: Entry | None
+    admission: Admission | None; when: str; notes: tuple
+@dataclass
+class Resolution:
+    verdicts: list[Verdict]         # registered gates in registration order, then orphans by id
+    stale_gates: frozenset[str]     # Stale, Unknown, undemonstrated, legacy, orphan
+    rows: dict[str, Row]; notes: list[str]
+    read_sets: dict[str, set[tuple]]   # last_read_sets: Param.gates and why (S-30)
+def resolve(root, registry, projection, ledger, *, model_error="", availability=None,
+            digests=None, anchors=None, now="", model=None) -> Resolution
+```
+**`freshness`** groups a gate's entries by read signature — the paths, files, listings,
+claims and opaque channels an entry read, without their values; a presence-only read is
+its own kind of address — and recomputes each group's rho from what is current: the
+spine digest, the code closure of the LOADED module (a newly added import counts), the
+params at each recorded path in `modelio.flat_params(projection)` walked by
+`ParamTrace`'s own leaf/presence/bulk rules (a miss is `ABSENT`), file and listing
+digests through `digests`, the claim records. An entry whose rho is the recomputed one
+is **Fresh** — its `rho` is what the sweep keys a remembered crash under — and an
+instruments difference is a note (`recorded under trimesh 4.0.0; here 5.1.0`), never
+staleness (Q1.3). **Unknown**, never Fresh: the projection is `None` and the entry read
+params (S-21: a model that failed to import used to turn staleness off — status said
+"unchanged" and listed three PROVEN claims for a design that could not be built); any
+opaque channel (`opaque inputs: <channels>`); a spine digest of `""`; code that cannot be
+keyed; a file under a pack this checkout has not loaded; a `ctx.model` read with no
+`model=` given. Otherwise **Stale**, on the latest entry (obs `when`, then the entry's
+commit time, then the name) with its reasons — `config.bed_xy 220.0 -> 250.0` from the
+recorded small value and the current one (`changed` when either is not small, `absent`
+for a missing key), inputs (`config.*` and config fields) first, then derived values
+**only when no input moved** (a derived value that moved with an input is that input's
+consequence: `bracket.bed_fit` also reads `usable_bed`, and the transcript's line names
+the one cause), then the model, claims, files, listings, `gate code changed`, `atompipe
+spine changed`; at most `MAX_STALE_REASONS`, then `(+n more)`. Two outcomes at the
+current rho with equal instruments are Stale with `conflict` set; with different
+instruments the entry recorded under this machine's wins, else a local run decides.
+Nothing global is compared any more: an unread datasheet ingested moves no gate (S-33).
+
+**`admission_state`** — is the gate's control demonstrated at its current version, from
+records alone (only `check` may spend a fixture's time). A candidate is a control entry
+whose `static` equals the current one (`control_static`); it is *current* when it has
+no opaque channel, its file and listing digests are current, and — when its fixture got
+the LIVE host — its host-param reads match `projection`'s flat params. Among current
+candidates, those whose fixture closure (`fixture.files`, the lookup hint) is unchanged
+decide first: all fired → `"admitted"`; one PASSED its known-bad input →
+`"not-admitted"`, `PASSED its own known-bad fixture <ref>`; they disagree →
+`"not-admitted"`, `two control outcomes recorded for identical inputs`. With no
+unchanged-closure candidate, the current ones decide the same way, but a fired control
+is `"pending"` — `control inputs moved (<files>); the next check re-verifies` — and
+counts: the bracket's fixtures load its model, so a `bed_xy` edit moves every closure
+without moving a control value. A remembered control crash, unusable fixture or
+self-skip at this static (`control:<gate>`) → `"not-admitted"`, `control <kind>: <why>`
+(an availability skip is not held against it). No current candidate →
+`"undemonstrated"`. The sweep's `controls.json` re-verification hint is U20's; until
+then a moved closure reads pending.
+
+**`resolve`** — the ONE effective-verdict producer every reader uses (R-5). Per
+registered gate, in registration order, the first that applies:
+1. `availability(spec)` (default `gates.availability`) fails: a skipped verdict with the
+   reason, `cached pass exists; <reason> here` when a Fresh PASS exists (invariant 1: a
+   PASS committed where trimesh is installed never reads PASS where it is not). A Fresh
+   FAIL is still served (R-3).
+2. A remembered crash or self-skip that supersedes the Fresh entry (its `input_rho` is
+   the entry's rho) or, with none Fresh, is displayed (`input_rho` `""`, or a rho
+   recomputable now, or the gate has no entry at all — never "never run", S-68).
+   Invariant 2: a crash proves nothing, and neither does the PASS it followed.
+3. A Fresh entry under admission (PD-08, X14): PASS + admitted or pending counts;
+   PASS + undemonstrated is stale, `control not demonstrated at this version — run
+   atompipe check`; not admitted is an error `not admitted: <why>`; a FAIL stays FAIL
+   (undemonstrated, it is also listed stale) — admission gates what may COUNT as a pass.
+4. The latest entry, stale with its reasons, or Unknown with its reason (`model_error`
+   joins "the model does not load"). Two outcomes: stale, an error once
+   `TWO_OUTCOMES_IS_ERROR` is True.
+5. A `ledger.verdicts` row with no rho: stale, `recorded before per-gate tracing` (Q1.4).
+6. Nothing: no row — the claim reads PENDING.
+
+Then orphans — entries, remembered outcomes or legacy rows of gates not registered —
+sorted by id, stale `gate not registered in this project` (tests:H2). A registered
+gate's verdict carries its spec's claims, tier and pack (the spec is the authority on
+identity). The ledger is read, never written: callers lay the resolution over it as a
+view and never save it. `notes` gathers ignored (hand-edited) entries, instrument
+mismatches, opaque channels, two outcomes, pending admissions and defining-file digests,
+one line each (`<gate> — <note>`).
+
 ### `gates.py`  (deps: models, util, modelio, verdicts)
 ```python
 @dataclass
@@ -887,14 +1000,15 @@ The derivation logic. Nothing here writes.
 ```python
 def covers(spec, claim) -> bool                              # claim id OR any claim tag in spec.claims
 def covering_verdicts(claim, verdicts) -> list[Verdict]      # the same id-or-tag rule, on verdicts
-def resolve_status(claim, verdicts, *, stale: bool = False) -> ClaimStatus
+def resolve_status(claim, verdicts, *, stale: bool = False,
+                   stale_gates: Collection[str] = ()) -> ClaimStatus
 def explaining_verdict(claim, verdicts) -> Verdict | None    # THE reason: failed > errored > skipped
-def statuses(ledger, *, stale=False, registry=None) -> dict[str, ClaimStatus]
+def statuses(ledger, *, stale=False, registry=None, stale_gates=()) -> dict[str, ClaimStatus]
 def coverage(ledger, registry) -> dict[str, list[str]]       # claim id -> LIVE gate ids
 def effective_gates(ledger, registry) -> dict[str, list[str]]  # cached `claim.gates` UNION live
 def find_gaps(ledger, registry) -> list[Need]                # MEASURABLE claims with no gate
-def blocking(ledger, registry, *, stale=False) -> list[tuple[Claim, ClaimStatus]]
-def summarise(ledger, registry, *, stale=False) -> dict      # counts by status, for the CLI
+def blocking(ledger, registry, *, stale=False, stale_gates=()) -> list[tuple[Claim, ClaimStatus]]
+def summarise(ledger, registry, *, stale=False, stale_gates=()) -> dict   # counts by status, for the CLI
 def next_claim_id(ledger, prefix="C") -> str                 # C1, C2, ...
 ```
 `covers` binds by id **or** by tag, and an empty `spec.claims` covers nothing, never
@@ -928,7 +1042,17 @@ Precedence (deliberate):
 ASSUMPTION -> ASSERTED. PHYSICAL -> VERIFIED/REFUTED if a result exists, else UNVERIFIED.
 MEASURABLE -> no covering gate: UNCLAIMED; **every** covering verdict skipped (and none
 errored): BLOCKED; none run: PENDING; any covering verdict errored **or** failed: FAIL;
-all ran and passed and `stale`: STALE; else PASS. **A skip is never a pass.**
+all ran and passed and `stale`, or any covering gate in `stale_gates`: STALE; else PASS.
+**A skip is never a pass.**
+
+**Staleness is per gate.** `stale_gates` is what `verdicts.resolve` found Stale, Unknown
+or undemonstrated; a claim reads STALE when every covering verdict passed and one of its
+covering gates is in it, and a stale FAIL stays FAIL (D-08). `stale=True` is the
+all-gates alias, kept so `StatusPrecedence.test_stale_is_not_pass` stays byte-identical
+(R-6). What it replaced: one flag for the whole project, from one hash of the
+projection and one of every input — a comment edit in the model staled every claim, a
+model that failed to import staled none (S-21), and ingesting one unread file staled
+every measurable claim (S-33). `summarise`'s `stale` is True when any gate is.
 
 An error outranks a skip on purpose: BLOCKED reads "your toolbox is incomplete" and
 FAIL reads "something is wrong here". A gate that crashed is not a gate that was

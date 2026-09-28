@@ -53,10 +53,25 @@ The second half turns a trace into something you can commit:
 * obs — what each run cost, untracked, gate runs and control runs in separate
   files (S-31).
 
-Freshness, admission and the resolver build on these (U19, U20). None of it
-reads the wall clock (``test_meta``) — a ``when`` arrives from the CLI edge —
-takes the build lock, or imports ``gates``: ``gates`` imports this module, so
-anything here that needs a gate type receives the object.
+Its third half judges what is recorded against what is on disk now, without
+running anything:
+
+* ``freshness`` — per gate, Fresh, Stale (with the moves that made it so, in
+  words: ``config.bed_xy 220.0 -> 250.0``), Unknown or never run, by
+  recomputing each entry's rho from current digests. Staleness was one hash of
+  the whole projection: a model that did not import turned it off (S-21), and
+  ingesting one unread file staled every measurable claim (S-33).
+* ``admission_state`` — is the gate's control demonstrated at its current
+  version, from the control entries alone (PD-08, X14).
+* ``resolve`` — the ONE effective-verdict producer every reader uses (R-5):
+  availability, remembered crashes, Fresh entries under admission, the latest
+  entry marked stale, legacy ledger rows, orphans.
+
+Admission's runner and the sweep build on all three (U20). None of it reads the
+wall clock (``test_meta``) — a ``when`` arrives from the CLI edge — takes the
+build lock, or imports ``gates`` at module level: ``gates`` imports this module,
+so anything here that needs a gate type receives the object, and ``resolve``
+reaches ``gates.availability`` from inside the function.
 
 Imports: ``models``, ``util``, ``store``, ``modelio`` and ``vcs``, standard
 library otherwise, including every function-local import (CI's AST walk).
@@ -81,7 +96,7 @@ import sys
 import tempfile
 import threading
 from dataclasses import dataclass, field
-from typing import Any, Callable, Collection, Iterable, Mapping
+from typing import Any, Callable, ClassVar, Collection, Iterable, Mapping
 
 from . import modelio, store, vcs
 from .models import Ledger, Locator, Tier, Verdict
@@ -103,6 +118,9 @@ __all__ = [
     "selftest_walk", "control_static", "write_control", "read_controls",
     "record_control", "remember", "remembered", "forget", "record_obs", "read_obs",
     "last_read_sets",
+    # part three: freshness, admission state, the one resolver (U19)
+    "MAX_STALE_REASONS", "Fresh", "Stale", "Unknown", "Never", "freshness",
+    "Admission", "admission_state", "Row", "Resolution", "resolve",
 ]
 
 
@@ -3081,11 +3099,20 @@ def _owner_dir(fn: Any, root: str) -> str:
 
 
 def _static(spec: Any, fn: Any, root: str, *, digests: FileDigests | None,
-            anchors: Anchors | None) -> tuple[str, dict, CodeRef, str]:
+            anchors: Anchors | None, walks: dict | None = None) -> tuple[str, dict, CodeRef, str]:
+    """``control_static``'s work, plus the code ref and the owner. ``walks`` —
+    ``{owner: selftest_walk}`` — lets one reader judge every gate of a pack with
+    ONE walk of its ``selftest/`` (a ``git ls-files`` each): the resolver asks
+    for 54 bundled statics per ``status``."""
     anchors = anchors if anchors is not None else _default_anchors(root, spec, fn)
     code = code_digest(spec, fn, anchors=anchors)
     owner = _owner_dir(fn, root)
-    files = selftest_walk(owner, digests=digests)
+    if walks is None:
+        files = selftest_walk(owner, digests=digests)
+    else:
+        if owner not in walks:
+            walks[owner] = selftest_walk(owner, digests=digests)
+        files = dict(walks[owner])
     nc = getattr(spec, "negative_control", None)
     parts = _clean({
         "spine": spine_digest(),
@@ -3571,3 +3598,942 @@ def last_read_sets(root: str) -> dict[str, set]:
         out[gate_id] = {tuple(row[0]) for entry in chosen
                         for row in entry.reads.get("params") or []}
     return out
+
+
+# =========================================================================== #
+# part three: freshness, admission state, the one resolver
+# =========================================================================== #
+#: How many moves one stale gate names before the rest are counted as
+#: ``(+n more)``. Why 3: one stale gate stays one ``status`` line (``stale:
+#: bracket.bed_fit — config.bed_xy 220.0 -> 250.0``), and three is enough to
+#: show whether an edit was one input or a sweep of them. *Rejected:* every
+#: reason — a projection-wide edit (a material switch) prints twenty paths for
+#: one gate and buries the next gate's line.
+MAX_STALE_REASONS = 3
+
+#: The words a PASS carries while its gate's control is not demonstrated at the
+#: gate's current version (PD-08, X14). A PASS from a gate nobody has shown can
+#: fail is a logger's output: it reads stale — never PASS — until a check runs
+#: the control. Pinned by ``tests/test_freshness.py``.
+_UNDEMONSTRATED = "control not demonstrated at this version — run atompipe check"
+#: The other fixed reasons a row reads stale for, in the spec's words (§3.10),
+#: which the transcript and the readers' tests match on: a ledger verdict from
+#: before 1.2 names no inputs (Q1.4); an unregistered gate's verdict still
+#: reaches the page but never counts (tests:H2); §3.7's nondeterminism; S-21.
+_LEGACY = "recorded before per-gate tracing"
+_ORPHAN = "gate not registered in this project"
+_TWO_OUTCOMES = "two outcomes recorded for identical inputs"
+_NO_MODEL = "the model does not load"
+_NO_SPINE = ("the spine cannot digest its own sources (atompipe installed without .py "
+             "files), so no entry can say what semantics it was computed under")
+
+
+# --------------------------------------------------------------------------- #
+# the four states of a gate's cache
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Fresh:
+    """An entry whose rho, recomputed from what is on disk now, is its own: the
+    gate would read exactly what it read then, under the same code and spine.
+
+    ``notes`` — what does not make it stale but is worth saying (another
+    library version recorded it, Q1.3: provenance, never rho). ``rho`` — the
+    recomputed address (the entry's). ``current`` — every rho recomputable now
+    across the gate's read signatures, the set a remembered crash is matched
+    against (§3.9).
+    """
+
+    entry: Entry
+    notes: tuple = ()
+    rho: str = ""
+    current: frozenset = frozenset()
+    state: ClassVar[str] = "fresh"
+
+
+@dataclass(frozen=True)
+class Stale:
+    """No entry's rho is current. ``entry`` is the latest one (obs, then commit
+    time, then name) and ``reasons`` what moved since it: param moves as
+    ``config.bed_xy 220.0 -> 250.0``, then files, code, spine — at most
+    ``MAX_STALE_REASONS``, then ``(+n more)``. ``rho`` is the latest entry's
+    read signature recomputed now: the ``input_rho`` a crash here is remembered
+    under. ``conflict`` holds the entries when two outcomes were recorded for
+    the current inputs (§3.7) — stale while ``TWO_OUTCOMES_IS_ERROR`` is False,
+    an error once it is True."""
+
+    entry: Entry
+    reasons: tuple = ()
+    rho: str = ""
+    current: frozenset = frozenset()
+    conflict: tuple = ()
+    state: ClassVar[str] = "stale"
+
+
+@dataclass(frozen=True)
+class Unknown:
+    """Nothing can say whether the entry is current: the model does not load
+    and it read parameters (S-21); it has an opaque channel (a subprocess's own
+    reads, a non-JSON value); the spine cannot digest itself (S-29); or the
+    gate's code cannot be keyed. Resolves like stale, never fresh. ``rho`` is
+    the recomputed address when one exists (an opaque signature still has one:
+    a crash there is matched by it), else ``""``."""
+
+    entry: Any
+    reason: str
+    rho: str = ""
+    current: frozenset = frozenset()
+    state: ClassVar[str] = "unknown"
+
+
+@dataclass(frozen=True)
+class Never:
+    """The gate has no entry: never ran here, or only crashed or skipped
+    (those are remembered, never cached)."""
+
+    state: ClassVar[str] = "never"
+    entry: ClassVar[Any] = None
+    rho: ClassVar[str] = ""
+    current: ClassVar[frozenset] = frozenset()
+
+
+# --------------------------------------------------------------------------- #
+# what is current: gathered once per call
+# --------------------------------------------------------------------------- #
+class _Now:
+    """What is on disk and in memory NOW, for one ``freshness``, ``resolve`` or
+    ``admission_state`` call: the spine digest, the flattened projection (the
+    one ``modelio.flat_params``, so a param is compared in exactly the shape a
+    gate was handed it — S-28), the ledger, file digests, the anchors read
+    backwards, and one ``selftest/`` walk per owner."""
+
+    def __init__(self, root: str, projection: Any, ledger: Any, *, anchors: Anchors,
+                 digests: FileDigests | None, model: Any = None) -> None:
+        self.root = os.path.abspath(root)
+        self.anchors = anchors
+        self.digests = digests if digests is not None else FileDigests()
+        self.projection = projection
+        if projection is None:
+            self.flat: dict | None = None
+            self.config_keys: frozenset = frozenset()
+        else:
+            self.flat, _conflicts = modelio.flat_params(projection)
+            config = projection.get("config") if isinstance(projection, Mapping) else None
+            self.config_keys = frozenset(config) if isinstance(config, Mapping) else frozenset()
+        self.ledger = ledger
+        self.model = model
+        self.spine = spine_digest()
+        self.walks: dict = {}
+        self._model: Any = _MISSING
+        self._places: dict[str, str] = {}
+        for spelling, token in anchors.pairs():
+            self._places.setdefault(token, spelling)
+
+    def locate(self, spelled: Any) -> str | None:
+        """The absolute path an entry's portable spelling names here, or
+        ``None`` when this checkout has no such anchor (a pack not loaded)."""
+        if not isinstance(spelled, str) or not spelled:
+            return None
+        if spelled.startswith("<"):
+            token, sep, rest = spelled.partition(">")
+            base = self._places.get(token + sep)
+            if base is None or (rest and not rest.startswith("/")):
+                return None
+            rest = rest[1:]
+            return os.path.join(base, *rest.split("/")) if rest else base
+        if spelled == "~" or spelled.startswith("~/"):
+            base = self._places.get("~")
+            if base is None:
+                return None
+            return os.path.join(base, *spelled[2:].split("/")) if len(spelled) > 2 else base
+        if os.path.isabs(spelled):
+            return spelled
+        if spelled == ".":
+            return self.root
+        return os.path.join(self.root, *spelled.split("/"))
+
+    def param(self, path: tuple, recorded: str) -> tuple[str, Any]:
+        """``(digest now, value or _MISSING)`` at ``path`` — walked by
+        ``ParamTrace``'s own rules: through dicts only, ``ABSENT`` for a miss,
+        presence alone where only presence was recorded, else the digest of
+        whatever is there now (a leaf, or a whole level read in bulk — the same
+        ``digest_value`` either way)."""
+        node: Any = self.flat
+        for part in path:
+            if isinstance(node, dict):
+                try:
+                    if dict.__contains__(node, part):
+                        node = dict.__getitem__(node, part)
+                        continue
+                except TypeError:                    # an unhashable key: not there
+                    pass
+            node = _MISSING
+            break
+        if recorded == PRESENT:
+            return (ABSENT if node is _MISSING else PRESENT), node
+        if node is _MISSING:
+            return ABSENT, node
+        return _digest(node, self.anchors)[0], node
+
+    def ledger_digest(self, key: str) -> str | None:
+        """The digest a gate reading ledger ``key`` would record now, or
+        ``None`` when it cannot be re-read (no ledger, a key this spine does
+        not know)."""
+        if self.ledger is None or not isinstance(key, str):
+            return None
+        if key.startswith("claim:"):
+            cid = key[len("claim:"):]
+            return _claim_digest(next((c for c in (self.ledger.claims or ()) if c.id == cid),
+                                      None))
+        if key in _LEDGER_WHOLE and key in _LEDGER_FIELD_SET:
+            return _ledger_digest(key, getattr(self.ledger, key))
+        return None
+
+    def model_digest(self) -> str | None:
+        if self._model is _MISSING:
+            found = None
+            if self.model is not None and self.projection is not None:
+                found = model_digest(self.projection, self.model, anchors=self.anchors) or None
+            self._model = found
+        return self._model
+
+    def static(self, spec: Any, fn: Any) -> tuple[str, dict]:
+        static, parts, _code, _owner = _static(spec, fn, self.root, digests=self.digests,
+                                              anchors=self.anchors, walks=self.walks)
+        return static, parts
+
+
+def _now_for(root: str, registry: Any, projection: Any, ledger: Any, *,
+             anchors: Anchors | None, digests: FileDigests | None, model: Any) -> _Now:
+    if anchors is None:
+        anchors = anchors_for(root, registry, out_dir=store.out_dir(root) if root else "")
+    return _Now(root, projection, ledger, anchors=anchors, digests=digests, model=model)
+
+
+# --------------------------------------------------------------------------- #
+# judging one gate's entries
+# --------------------------------------------------------------------------- #
+def _signature(entry: Entry) -> str:
+    """What an entry read, without the values: the addresses its rho is
+    recomputed over. Entries of one gate that read different paths (a branch on
+    a mode switch) are judged each against its own paths. A presence-only read
+    is its own kind of address: ``k in p`` recomputes to PRESENT/ABSENT, a value
+    read to the value's digest."""
+    reads = entry.reads or {}
+    return _canonical_json({
+        "params": [[row[0], row[1] == PRESENT] for row in reads.get("params") or ()],
+        "files": sorted(reads.get("files") or {}),
+        "dirs": sorted(reads.get("dirs") or {}),
+        "ledger": sorted(reads.get("ledger") or {}),
+        "model": reads.get("model") is not None,
+        "opaque": sorted(reads.get("opaque") or ()),
+    })
+
+
+def _reads_now(reads: Mapping[str, Any], now: _Now) -> tuple[Reads | None, str]:
+    """The read set ``reads`` names, digested NOW — or ``(None, why)`` when some
+    part of it cannot be re-read here."""
+    rows = reads.get("params") or []
+    if rows and now.flat is None:
+        return None, _NO_MODEL
+    params = []
+    for row in rows:
+        digest, _value = now.param(tuple(row[0]), row[1])
+        params.append([list(row[0]), digest])
+    files: dict[str, str | None] = {}
+    for spelled in reads.get("files") or {}:
+        where = now.locate(spelled)
+        if where is None:
+            return None, f"cannot find {spelled} here"
+        files[spelled] = now.digests.digest(where)
+    dirs: dict[str, str | None] = {}
+    for spelled in reads.get("dirs") or {}:
+        where = now.locate(spelled)
+        if where is None:
+            return None, f"cannot find {spelled} here"
+        dirs[spelled] = _dir_digest(where)
+    ledger: dict[str, str] = {}
+    for key in reads.get("ledger") or {}:
+        digest = now.ledger_digest(key)
+        if digest is None:
+            return None, f"cannot re-read ledger {key} here"
+        ledger[key] = digest
+    model = None
+    if reads.get("model") is not None:
+        model = now.model_digest()
+        if model is None:
+            return None, "it used ctx.model, and no loaded model was given to digest"
+    return Reads(params=params, files=files, dirs=dirs, ledger=ledger, model=model,
+                 opaque=list(reads.get("opaque") or ())), ""
+
+
+def _display(digest: str, value: Any, small: bool) -> str | None:
+    """A param's display for a stale reason, or ``None`` when it has none.
+    (Not ``_shown``: that name is part two's path-for-a-message helper, and
+    shadowing it here broke every "ignored" problem line ``read_entries``
+    writes — caught by ``test_a_hand_edited_entry_is_ignored_and_named``.)"""
+    if digest == ABSENT:
+        return "absent"
+    if digest == PRESENT:
+        return "present"
+    return repr(value) if small else None
+
+
+def _is_input(path: tuple, now: _Now) -> bool:
+    """A path into the model's INPUTS: ``config.*``, or a config field at the
+    top level (``flat_params`` puts every one there, input over derived)."""
+    return bool(path) and (path[0] == "config" or path[0] in now.config_keys)
+
+
+def _capped(reasons: list[str]) -> tuple:
+    if len(reasons) <= MAX_STALE_REASONS:
+        return tuple(reasons)
+    return tuple(reasons[:MAX_STALE_REASONS]) + (f"(+{len(reasons) - MAX_STALE_REASONS} more)",)
+
+
+def _stale_text(reasons: Iterable[str]) -> str:
+    """``a, b, c (+2 more)`` — the one line a stale gate gets."""
+    shown = [r for r in reasons if not (r.startswith("(+") and r.endswith(" more)"))]
+    more = [r for r in reasons if r not in shown]
+    return ", ".join(shown) + ("".join(f" {m}" for m in more))
+
+
+def _reasons(entry: Entry, reads_now: Reads, code: CodeRef, now: _Now) -> tuple:
+    """What moved between ``entry`` and now, in words, inputs first.
+
+    A derived value that moved while an input it could follow from moved too is
+    that input's consequence, and is named only when no input moved (then
+    ``build()`` itself changed, and the derived value IS the news). What slipped
+    through while writing this: ``bracket.bed_fit`` reads ``usable_bed`` as well
+    as ``config.bed_xy``, so the transcript's one-cause line (``config.bed_xy
+    220.0 -> 250.0``) came out as two, and a three-reason cap filled with echoes
+    of one edit.
+    """
+    inputs: list[str] = []
+    derived: list[str] = []
+    recorded = (entry.reads or {}).get("params") or []
+    for row, now_row in zip(recorded, reads_now.params):
+        if row[1] == now_row[1]:
+            continue
+        path = tuple(row[0])
+        old = _display(row[1], row[2] if len(row) > 2 else None, len(row) > 2)
+        _digest_now, value = now.param(path, row[1])
+        small, display = (False, None) if value is _MISSING else small_value(value, now.anchors)
+        new = _display(now_row[1], display, small)
+        text = (f"{_dotted(path)} {old} -> {new}" if old is not None and new is not None
+                else f"{_dotted(path)} changed")
+        (inputs if _is_input(path, now) else derived).append(text)
+    reasons = inputs or derived
+    reads = entry.reads or {}
+    if reads.get("model") != reads_now.model:
+        reasons.append("model changed")
+    for key, digest in sorted((reads.get("ledger") or {}).items()):
+        if reads_now.ledger.get(key) != digest:
+            reasons.append(f"claim {key[len('claim:'):]} changed" if key.startswith("claim:")
+                           else f"ledger {key} changed")
+    for kind, table, table_now in (("", reads.get("files") or {}, reads_now.files),
+                                   ("listing of ", reads.get("dirs") or {}, reads_now.dirs)):
+        for key, digest in sorted(table.items()):
+            here = table_now.get(key)
+            if here == digest:
+                continue
+            what = "removed" if here is None else "added" if digest is None else "changed"
+            reasons.append(f"{kind}{key} {what}")
+    if (entry.code or {}).get("digest") != code.digest:
+        reasons.append("gate code changed")
+    if entry.spine != now.spine:
+        reasons.append("atompipe spine changed")
+    return _capped(reasons or ["inputs changed"])
+
+
+def _instrument_notes(entry: Entry, local: Mapping[str, str]) -> tuple:
+    """``recorded under trimesh 4.0.0; here 5.1.0`` per module that differs."""
+    notes = []
+    for name, was in sorted((entry.instruments or {}).items()):
+        here = local.get(name) or _version_of(name)
+        if was != here:
+            notes.append(f"recorded under {name} {was}; here {here}")
+    return tuple(notes)
+
+
+def _entry_order(root: str, gate_id: str, times: Mapping[str, str]) -> Callable[[Entry], tuple]:
+    """The key "latest" sorts entries by: the newest obs run that hit or wrote
+    each (``when``, then its position), else the entry file's commit time, else
+    nothing — then the name, so the answer never depends on listing order."""
+    last: dict[str, tuple[str, int]] = {}
+    for index, run in enumerate(read_obs(root, gate_id)):
+        last[run.get("entry", "")] = (str(run.get("when") or ""), index)
+
+    def key(entry: Entry) -> tuple:
+        when, index = last.get(entry.name, ("", -1))
+        return (when or times.get(_entry_rel(root, entry), ""), index, entry.name)
+
+    return key
+
+
+def _entry_rel(root: str, entry: Any) -> str:
+    """An entry file's path relative to the project, posix (``vcs``'s form)."""
+    return _shown(root, entry.path) if getattr(entry, "path", "") else ""
+
+
+def _judge(spec: Any, code: CodeRef, entries: list[Entry], now: _Now,
+           order: Callable[[Entry], tuple]) -> Fresh | Stale | Unknown | Never:
+    """One gate's state, from its entries. Never runs the gate."""
+    if not entries:
+        return Never()
+    gate_id = spec.id
+    blocked = _NO_SPINE if not now.spine else (
+        f"its code cannot be keyed: {code.opaque}" if code.opaque else "")
+    groups: dict[str, list[Entry]] = {}
+    for entry in entries:
+        groups.setdefault(_signature(entry), []).append(entry)
+    judged: dict[str, tuple[str, str, Reads | None]] = {}
+    current: set[str] = set()
+    matches: list[Entry] = []
+    for sig, group in groups.items():
+        reads_now, why = _reads_now(group[0].reads or {}, now)
+        why = blocked or why
+        rho_now = "" if why else rho(gate_id, now.spine, code, reads_now)
+        judged[sig] = (rho_now, why, reads_now)
+        if rho_now:
+            current.add(rho_now)
+            if not (group[0].reads or {}).get("opaque"):
+                matches.extend(e for e in group if e.rho == rho_now)
+    known = frozenset(current)
+    if matches:
+        return _fresh_or_conflict(spec, code, matches, known, order)
+    latest = max(entries, key=order)
+    rho_now, why, reads_now = judged[_signature(latest)]
+    if why:
+        return Unknown(latest, why, "", known)
+    opaque = list((latest.reads or {}).get("opaque") or ())
+    if opaque:
+        return Unknown(latest, "opaque inputs: " + ", ".join(opaque), rho_now, known)
+    return Stale(latest, _reasons(latest, reads_now, code, now), rho_now, known)
+
+
+def _fresh_or_conflict(spec: Any, code: CodeRef, matches: list[Entry], current: frozenset,
+                       order: Callable[[Entry], tuple]) -> Fresh | Stale:
+    """Entries at the current rho: one outcome is Fresh; two are §3.7's case.
+
+    Equal instruments — the same inputs, the same libraries, two answers: a
+    stale "two outcomes" (an error once ``TWO_OUTCOMES_IS_ERROR`` flips, which
+    ``resolve`` reads off ``conflict``). Different instruments — another numpy
+    merged from another machine: the entry recorded under THIS machine's wins,
+    and with none recorded here a local run decides. *Rejected:* "worse outcome
+    wins", which picks silently.
+    """
+    chosen = max(matches, key=order)
+    names = ", ".join(sorted(e.name for e in matches))
+    if len({out8(e.verdict) for e in matches}) == 1:
+        return Fresh(chosen, _instrument_notes(chosen, instruments_for(spec, code)),
+                     chosen.rho, current)
+    if len({_canonical_json(e.instruments) for e in matches}) == 1:
+        return Stale(chosen, (f"{_TWO_OUTCOMES} ({names})",), chosen.rho, current,
+                     conflict=tuple(sorted(matches, key=lambda e: e.name)))
+    local = instruments_for(spec, code)
+    here = [e for e in matches if e.instruments == local]
+    if here and len({out8(e.verdict) for e in here}) == 1:
+        pick = max(here, key=order)
+        return Fresh(pick, (f"outcome differs across instruments ({names}); the entry "
+                            f"recorded under this machine's is used",), pick.rho, current)
+    if here:
+        return Stale(max(here, key=order), (f"{_TWO_OUTCOMES} ({names})",), chosen.rho,
+                     current, conflict=tuple(sorted(here, key=lambda e: e.name)))
+    return Stale(chosen, (f"outcome differs across instruments ({names}), and none was "
+                          f"recorded under this machine's: a run here decides",),
+                 chosen.rho, current)
+
+
+def _gate_entries(root: str, gate_id: str, notes: list) -> list[Entry]:
+    try:
+        return read_entries(root, gate_id, problems=notes)
+    except AtompipeError as exc:
+        notes.append(f"{gate_id}: {exc}")
+        return []
+
+
+def _commit_times(root: str, entries: Iterable[Entry], obs_named: Callable[[Entry], bool]
+                  ) -> dict[str, str]:
+    """One ``git log`` walk for every entry no obs run names — a fresh clone's
+    entries all arrive that way — or nothing, when every entry has a run."""
+    wanted = sorted({_entry_rel(root, e) for e in entries if not obs_named(e)} - {""})
+    return vcs.commit_times(root, wanted) if wanted else {}
+
+
+def _obs_names(root: str, gate_ids: Iterable[str]) -> set[tuple[str, str]]:
+    return {(gate_id, run.get("entry", "")) for gate_id in gate_ids
+            for run in read_obs(root, gate_id)}
+
+
+def freshness(root: str, registry: Any, projection: Any, ledger: Any, *,
+              digests: FileDigests | None = None, anchors: Anchors | None = None,
+              model: Any = None) -> dict[str, Fresh | Stale | Unknown | Never]:
+    """``{gate id: Fresh | Stale | Unknown | Never}`` for every registered gate.
+
+    **It never runs a gate or a fixture** (the verifying-trace shape, M11.11):
+    a gate's entries are grouped by read signature, and each group's rho is
+    recomputed from what is current — the spine digest now, the code closure of
+    the LOADED module (a newly added import counts), the params at each recorded
+    path in ``modelio.flat_params(projection)`` walked by ``ParamTrace``'s own
+    leaf/presence/bulk rules, file and listing digests (``digests``, a
+    ``util.FileDigests``), the claim records. An entry whose rho is the
+    recomputed one is Fresh.
+
+    Unknown — never Fresh — when the projection is ``None`` (the model does not
+    load, S-21) and the entry read params; when it has any opaque channel; when
+    the spine digest is ``""``; when the code cannot be keyed. What slipped
+    through before: ONE hash of the projection decided every gate, and a model
+    that failed to import made it compare equal — status said "unchanged" and
+    listed three PROVEN claims for a design that could not be built (S-21);
+    and one hash of every input made an unread datasheet stale every measurable
+    claim (S-33).
+
+    ``anchors`` defaults to ``anchors_for(root, registry, out_dir=<root's>)`` —
+    the sweep's; entries recorded under other anchors spell paths differently
+    and read stale. ``model`` is the loaded model (``modelio.LoadedModel``): an
+    entry of a gate that used ``ctx.model`` is Unknown without it.
+    """
+    now = _now_for(root, registry, projection, ledger, anchors=anchors, digests=digests,
+                   model=model)
+    pairs = list(registry.pairs()) if registry is not None else []
+    problems: list[str] = []
+    entries = {spec.id: _gate_entries(now.root, spec.id, problems) for spec, _fn in pairs}
+    obs = _obs_names(now.root, entries)
+    times = _commit_times(now.root, (e for es in entries.values() if len(es) > 1 for e in es),
+                          lambda e: (e.gate, e.name) in obs)
+    return {spec.id: _judge(spec, code_digest(spec, fn, anchors=now.anchors),
+                            entries[spec.id], now, _entry_order(now.root, spec.id, times))
+            for spec, fn in pairs}
+
+
+# --------------------------------------------------------------------------- #
+# admission, outside check: read, never run
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Admission:
+    """Whether a gate's control is demonstrated at its current version.
+
+    ``state``: ``"admitted"`` — a control entry at the current static part whose
+    recorded inputs are current and whose fixture closure has not moved;
+    ``"pending"`` — such an entry, but the fixture's code moved (a model it
+    imports was edited) and nothing has re-run it yet: it COUNTS, and
+    ``reason`` says the next check re-verifies; ``"not-admitted"`` — the
+    current control PASSED its own known-bad input, two current controls
+    disagree, or the control crashed at this static part (remembered);
+    ``"undemonstrated"`` — no current control at all. ``entry`` — the control
+    entry it stands on, when one exists. ``executed`` and ``reverified`` —
+    whether a fixture (and the gate) ran to decide it: always ``False`` from
+    ``admission_state``, which never runs anything; the sweep's ``admission``
+    (U20) sets them.
+    """
+
+    state: str
+    entry: Any = None
+    reason: str = ""
+    executed: bool = False
+    reverified: bool = False
+
+
+def _control_failure(record: Mapping[str, Any]) -> str:
+    """``control <kind>: <why>`` for a remembered control that proved nothing."""
+    verdict = record["verdict"]
+    text = (verdict.error or verdict.skip_reason or verdict.detail or "").strip()
+    text = text.splitlines()[0] if text else ""
+    if text.startswith("control "):
+        return text
+    return f"control {record['kind']}: {text}" if text else f"control {record['kind']}"
+
+
+def _control_moved(control: ControlEntry, now: _Now) -> str:
+    """Why ``control``'s recorded inputs are not current, or ``""`` when they
+    are: its files and listings by digest, and — when the fixture got the LIVE
+    host — the host params it read, against the live projection. An opaque
+    control is never current."""
+    reads = control.reads or {}
+    opaque = list(reads.get("opaque") or ())
+    if opaque:
+        return "opaque control inputs: " + ", ".join(opaque)
+    for spelled, digest in (reads.get("files") or {}).items():
+        where = now.locate(spelled)
+        if where is None or now.digests.digest(where) != digest:
+            return f"{spelled} changed"
+    for spelled, digest in (reads.get("dirs") or {}).items():
+        where = now.locate(spelled)
+        if where is None or _dir_digest(where) != digest:
+            return f"listing of {spelled} changed"
+    if control.host == "live":
+        for row in reads.get("host") or ():
+            if now.flat is None:
+                return f"{_NO_MODEL}, and the control read the live host"
+            digest, _value = now.param(tuple(row[0]), row[1])
+            if digest != row[1]:
+                return f"host {_dotted(tuple(row[0]))} changed"
+    return ""
+
+
+def _fixture_moved(control: ControlEntry, now: _Now) -> list[str]:
+    """The files of the fixture's recorded code closure whose bytes moved."""
+    moved = []
+    for spelled, digest in sorted(((control.fixture or {}).get("files") or {}).items()):
+        where = now.locate(spelled)
+        if where is None or now.digests.digest(where) != digest:
+            moved.append(spelled)
+    return moved
+
+
+def _control_order(root: str, gate_id: str) -> Callable[[ControlEntry], tuple]:
+    last: dict[str, tuple[str, int]] = {}
+    for index, run in enumerate(read_obs(root, gate_id, control=True)):
+        last[run.get("entry", "")] = (str(run.get("when") or ""), index)
+    return lambda c: (*last.get(c.name, ("", -1)), c.name)
+
+
+def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
+               notes: list | None = None) -> Admission:
+    """§3.8 steps 1-3 and the remembered control failure, from records alone."""
+    static, _parts = now.static(spec, fn)
+    record = held.get(f"control:{spec.id}")
+    # An availability skip of the control proves nothing either way, and is
+    # re-evaluated where it is shown: while the tool is missing the GATE reads
+    # skipped before admission is asked; once it is here the record is moot.
+    if record is not None and record["kind"] != "availability" \
+            and record["input_rho"] == static:
+        return Admission("not-admitted", None, _control_failure(record))
+    try:
+        controls = read_controls(now.root, spec.id, problems=notes)
+    except AtompipeError as exc:
+        return Admission("undemonstrated", None, str(exc))
+    candidates = [c for c in controls if c.static == static]
+    if not candidates:
+        elsewhere = f" ({len(controls)} recorded at other versions)" if controls else ""
+        return Admission("undemonstrated", None, f"no control entry at this version{elsewhere}")
+    order = _control_order(now.root, spec.id)
+    current: list[ControlEntry] = []
+    moved: list[str] = []
+    for control in candidates:
+        why = _control_moved(control, now)
+        if why:
+            moved.append(why)
+        else:
+            current.append(control)
+    if not current:
+        return Admission("undemonstrated", max(candidates, key=order),
+                         f"control inputs moved: {moved[0]}")
+    # The fixture closure is a HINT (§3.8): an entry whose fixture code is
+    # unchanged was demonstrated on exactly this; one whose fixture code moved
+    # may still be (early cutoff) — only re-running the fixture can say, and
+    # nothing here runs. Among hint matches, disagreement is the control
+    # analogue of two outcomes; without one, every current candidate decides.
+    hinted = [c for c in current if not _fixture_moved(c, now)]
+    pool = hinted or current
+    chosen = max(pool, key=order)
+    if len({c.bad for c in pool}) > 1:
+        names = ", ".join(sorted(c.name for c in pool))
+        return Admission("not-admitted", chosen,
+                         f"two control outcomes recorded for identical inputs ({names})")
+    if chosen.bad == "pass":
+        fixture = getattr(spec.negative_control, "fixture", "") or "its fixture"
+        return Admission("not-admitted", chosen, f"PASSED its own known-bad fixture {fixture}")
+    if hinted:
+        return Admission("admitted", chosen)
+    files = sorted({path for c in pool for path in _fixture_moved(c, now)})
+    return Admission("pending", chosen,
+                     f"control inputs moved ({', '.join(files)}); the next check re-verifies")
+
+
+def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
+                    digests: FileDigests | None = None,
+                    anchors: Anchors | None = None) -> Admission:
+    """Is ``spec``'s control demonstrated at its current version? From the
+    control entries and the remembered control failures alone: it **never runs
+    a fixture** (only ``check`` may spend that time).
+
+    ``"admitted"`` — a control entry whose static part (spine, the gate's code,
+    its owner's ``selftest/`` walk, the NegativeControl fields) is current, whose
+    recorded file, listing and — for a live host — host-param reads are current
+    (against ``projection``'s flat params), and whose fixture closure is
+    unchanged. ``"pending"`` — the same, but the fixture's code closure moved
+    (the bracket's fixtures import its model): it counts, with the note
+    ``control inputs moved (<files>); the next check re-verifies``.
+    ``"not-admitted"`` — the current control PASSED its known-bad input, or two
+    current controls disagree, or the control crashed, was unusable or skipped
+    itself at this static part (remembered under ``control:<gate>``).
+    ``"undemonstrated"`` — no current control.
+
+    ``anchors`` defaults to the root's plus the pack ``fn`` came from (as
+    ``record_control``'s). The ``controls.json`` re-verification hint is the
+    sweep's (U20): until a check re-verifies, a moved fixture closure reads
+    pending, which counts.
+    """
+    if anchors is None:
+        anchors = _default_anchors(root, spec, fn)
+    now = _Now(root, projection, None, anchors=anchors, digests=digests)
+    return _admission(now, spec, fn, remembered(root))
+
+
+# --------------------------------------------------------------------------- #
+# the one resolver
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Row:
+    """How ``resolve`` reached one gate's effective verdict.
+
+    ``state`` — the gate's cache state (``"fresh"``, ``"stale"``,
+    ``"unknown"``, ``"never"``), or ``"legacy"`` for a ledger verdict recorded
+    before 1.2, ``"orphan"`` for a gate this project does not register.
+    ``cached`` — the verdict is a cache entry's, as recorded; ``fresh`` — and it
+    is current and counts (Fresh, admitted or pending, not superseded);
+    ``stale_reason`` — why it is in ``stale_gates`` (``""`` when it is not);
+    ``entry`` — the verdict entry it stands on, if any; ``admission`` — the
+    ``Admission`` a Fresh entry was judged under (``None`` elsewhere); ``when``
+    — the obs run, commit time or remembered time it dates from (``""`` when
+    nothing says; a reader renders that as unknown, never 0); ``notes``.
+    """
+
+    gate: str
+    state: str
+    cached: bool = False
+    fresh: bool = False
+    stale_reason: str = ""
+    entry: Any = None
+    admission: Any = None
+    when: str = ""
+    notes: tuple = ()
+
+
+@dataclass
+class Resolution:
+    """What every reader renders: ``verdicts`` — one effective verdict per gate
+    that has one, registered gates in registration order, then orphans by id;
+    ``stale_gates`` — Stale, Unknown, undemonstrated, legacy and orphan rows
+    (what ``claims.resolve_status`` reads as not current); ``rows`` —
+    ``{gate: Row}``; ``notes`` — instrument mismatches, opaque channels,
+    ignored (hand-edited) entries, two outcomes, pending admissions,
+    defining-file digests, one line each; ``read_sets`` — ``last_read_sets``:
+    which params each gate read when it last executed (``Param.gates``,
+    ``why``)."""
+
+    verdicts: list = field(default_factory=list)
+    stale_gates: frozenset = frozenset()
+    rows: dict = field(default_factory=dict)
+    notes: list = field(default_factory=list)
+    read_sets: dict = field(default_factory=dict)
+
+
+def _as_spec(verdict: Verdict, spec: Any) -> Verdict:
+    """``verdict`` under ``spec``'s identity — the spec is the only authority on
+    a gate's claims, tier and pack (``run_gate``'s rule), so a stale verdict
+    binds to the claims the gate covers NOW."""
+    return dataclasses.replace(verdict, gate=spec.id, claims=list(spec.claims or ()),
+                               tier=Tier(int(spec.tier)), pack=spec.pack or "")
+
+
+def _synthesized(spec: Any, **fields: Any) -> Verdict:
+    return Verdict(gate=spec.id, claims=list(spec.claims or ()), tier=Tier(int(spec.tier)),
+                   pack=spec.pack or "", passed=False, **fields)
+
+
+def _orphan_entries(root: str, registered: set, notes: list) -> dict[str, list[Entry]]:
+    base = os.path.join(root, _STATE_DIR, _VERDICTS_DIR)
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return {}
+    found: dict[str, list[Entry]] = {}
+    for name in names:
+        if name in registered or not os.path.isdir(os.path.join(base, name)):
+            continue
+        entries = _gate_entries(root, name, notes)
+        if entries:
+            found[name] = entries
+    return found
+
+
+def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
+            model_error: str = "", availability: Callable[[Any], tuple] | None = None,
+            digests: FileDigests | None = None, anchors: Anchors | None = None,
+            now: str = "", model: Any = None) -> Resolution:
+    """Every gate's effective verdict — the ONE producer every reader uses (R-5).
+
+    It never runs a gate or a fixture. Per registered gate, in registration
+    order, the first rule that applies:
+
+    1. **Availability** (``availability(spec) -> (ok, reason)``, default
+       ``gates.availability``) fails: a skipped verdict with the reason —
+       ``cached pass exists; <reason> here`` when a Fresh PASS exists, because a
+       PASS committed from a machine with trimesh must never read PASS on one
+       without (invariant 1). A Fresh FAIL is still served (R-3: a refutation
+       keeps its power everywhere).
+    2. A **remembered** crash or self-skip (``last_outcomes.json``) that
+       supersedes — its ``input_rho`` is the Fresh entry's rho — or, with no
+       Fresh entry, is displayed — its ``input_rho`` is ``""`` or a rho
+       recomputable now, or the gate has no entry at all. Invariant 2: a crash
+       proves nothing, and neither does the PASS it followed.
+    3. A **Fresh** entry, then admission (PD-08, X14): a PASS counts when its
+       control is admitted or pending; undemonstrated, it reads stale
+       (``control not demonstrated at this version — run atompipe check``); not
+       admitted, an error ``not admitted: <why>``. A FAIL stays FAIL unless not
+       admitted (then that error; it blocks either way).
+    4. Otherwise the **latest entry**, stale with its reasons (Unknown with its
+       reason; ``model_error`` joins the "model does not load" one). Two
+       outcomes at the current rho: stale, or an error once
+       ``TWO_OUTCOMES_IS_ERROR`` is True.
+    5. A **legacy** ``ledger.verdicts`` row with no rho: stale, ``recorded
+       before per-gate tracing`` (Q1.4; until 1.3 drops them).
+    6. Nothing: no row — the claim reads PENDING.
+
+    Then **orphans** — entries, remembered outcomes or legacy rows of gates this
+    project does not register — sorted by id, stale ``gate not registered in
+    this project`` (tests:H2: an unregistered gate's verdict still reaches the
+    page; it never counts).
+
+    ``ledger`` is read, never written: the resolution is a VIEW a caller lays
+    over it (``dataclasses.replace(ledger, verdicts=resolution.verdicts)``) and
+    never saves. ``now`` is the caller's single clock stamp, accepted so every
+    reader passes the same one; nothing here compares times. ``model`` as for
+    ``freshness``.
+    """
+    if availability is None:
+        from . import gates as _gates                  # gates imports this module
+        availability = _gates.availability
+    here = _now_for(root, registry, projection, ledger, anchors=anchors, digests=digests,
+                    model=model)
+    root_abs = here.root
+    notes: list[str] = []
+    pairs = list(registry.pairs()) if registry is not None else []
+    registered = {spec.id for spec, _fn in pairs}
+    held = remembered(root_abs)
+    entries = {spec.id: _gate_entries(root_abs, spec.id, notes) for spec, _fn in pairs}
+    orphans = _orphan_entries(root_abs, registered, notes)
+    obs = _obs_names(root_abs, list(entries) + list(orphans))
+    times = _commit_times(root_abs, [e for es in (*entries.values(), *orphans.values())
+                                     for e in es], lambda e: (e.gate, e.name) in obs)
+    legacy: dict[str, Verdict] = {}
+    for verdict in getattr(ledger, "verdicts", None) or ():
+        if not verdict.rho:
+            legacy[verdict.gate] = verdict
+
+    verdicts_out: list[Verdict] = []
+    rows: dict[str, Row] = {}
+    stale: set[str] = set()
+
+    def when_of(entry: Any, order: Callable[[Entry], tuple]) -> str:
+        return order(entry)[0] if entry is not None else ""
+
+    def emit(verdict: Verdict, row: Row) -> None:
+        verdicts_out.append(verdict)
+        rows[row.gate] = row
+        if row.stale_reason:
+            stale.add(row.gate)
+
+    for spec, fn in pairs:
+        gid = spec.id
+        code = code_digest(spec, fn, anchors=here.anchors)
+        if code.fallback == "defining-file":
+            notes.append(f"{gid} — code digested as its defining file "
+                         f"({', '.join(code.files)}): a value it closes over is not seen")
+        order = _entry_order(root_abs, gid, times)
+        state = _judge(spec, code, entries[gid], here, order)
+        entry = state.entry
+        row_notes = tuple(getattr(state, "notes", ()) or ())
+        notes.extend(f"{gid} — {note}" for note in row_notes)
+        if isinstance(state, Unknown) and state.reason.startswith("opaque inputs: "):
+            notes.append(f"{gid} — {state.reason}")
+        # (two outcomes need no line of their own: read_entries already wrote one)
+
+        # 1. availability
+        ok, why = availability(spec)
+        if not ok:
+            why = why or "its tooling is not available"
+            if isinstance(state, Fresh) and state.entry.verdict.get("passed") is False:
+                emit(_as_spec(entry.to_verdict(), spec),
+                     Row(gid, state.state, cached=True, fresh=True, entry=entry,
+                         when=when_of(entry, order), notes=row_notes))
+            else:
+                reason = f"cached pass exists; {why} here" if isinstance(state, Fresh) else why
+                emit(_synthesized(spec, skipped=True, skip_reason=reason),
+                     Row(gid, state.state, entry=entry, notes=row_notes))
+            continue
+
+        # 2. a remembered crash or self-skip
+        record = held.get(gid)
+        if record is not None and record["kind"] in ("error", "self-skip"):
+            if isinstance(state, Fresh):
+                applies = record["input_rho"] == state.entry.rho
+            else:
+                # With no entry at all there is nothing better to show, and
+                # "never run" would be false (S-68): the crash is the outcome.
+                applies = isinstance(state, Never) or record["input_rho"] == "" \
+                    or record["input_rho"] in state.current
+            if applies:
+                extra = (f"supersedes the cached {entry.name}",) if isinstance(state, Fresh) \
+                    else ()
+                emit(_as_spec(record["verdict"], spec),
+                     Row(gid, state.state, entry=entry, when=record["when"],
+                         notes=row_notes + (f"remembered {record['kind']}",) + extra))
+                continue
+
+        # 3. a Fresh entry, under admission
+        if isinstance(state, Fresh):
+            verdict = _as_spec(entry.to_verdict(), spec)
+            admission = _admission(here, spec, fn, held, notes)
+            when = when_of(entry, order)
+            if admission.state == "not-admitted":
+                emit(_synthesized(spec, error=f"not admitted: {admission.reason}",
+                                  rho=entry.rho),
+                     Row(gid, state.state, entry=entry, admission=admission, when=when,
+                         notes=row_notes))
+            elif admission.state == "undemonstrated":
+                emit(verdict, Row(gid, state.state, cached=True, stale_reason=_UNDEMONSTRATED,
+                                  entry=entry, admission=admission, when=when, notes=row_notes))
+            else:
+                pending = (admission.reason,) if admission.state == "pending" else ()
+                notes.extend(f"{gid} — {note}" for note in pending)
+                emit(verdict, Row(gid, state.state, cached=True, fresh=True, entry=entry,
+                                  admission=admission, when=when, notes=row_notes + pending))
+            continue
+
+        # 4. the latest entry, stale
+        if isinstance(state, (Stale, Unknown)):
+            when = when_of(entry, order)
+            if isinstance(state, Stale) and state.conflict and TWO_OUTCOMES_IS_ERROR:
+                emit(_synthesized(spec, error=state.reasons[0], rho=entry.rho),
+                     Row(gid, state.state, entry=entry, when=when, notes=row_notes))
+                continue
+            if isinstance(state, Stale):
+                reason = _stale_text(state.reasons)
+            elif state.reason == _NO_MODEL and model_error:
+                reason = f"{_NO_MODEL}: {model_error}"
+            else:
+                reason = state.reason
+            emit(_as_spec(entry.to_verdict(), spec),
+                 Row(gid, state.state, cached=True, stale_reason=reason, entry=entry,
+                     when=when, notes=row_notes))
+            continue
+
+        # 5. a ledger verdict from before per-gate tracing
+        if gid in legacy:
+            emit(_as_spec(legacy[gid], spec), Row(gid, "legacy", stale_reason=_LEGACY))
+        # 6. nothing: no row
+
+    # orphans: what this project's cache and memory hold for gates it does not register
+    orphan_ids = set(orphans) | {key for key, rec in held.items()
+                                 if not key.startswith("control:") and key not in registered
+                                 and rec["kind"] != "availability"}
+    orphan_ids |= {gid for gid in legacy if gid not in registered}
+    for gid in sorted(orphan_ids):
+        if gid in orphans:
+            order = _entry_order(root_abs, gid, times)
+            latest = max(orphans[gid], key=order)
+            emit(latest.to_verdict(), Row(gid, "orphan", cached=True, stale_reason=_ORPHAN,
+                                          entry=latest, when=when_of(latest, order)))
+        elif gid in held:
+            record = held[gid]
+            emit(record["verdict"], Row(gid, "orphan", stale_reason=_ORPHAN,
+                                        when=record["when"],
+                                        notes=(f"remembered {record['kind']}",)))
+        else:
+            emit(legacy[gid], Row(gid, "legacy", stale_reason=_LEGACY))
+
+    return Resolution(verdicts=verdicts_out, stale_gates=frozenset(stale), rows=rows,
+                      notes=list(dict.fromkeys(notes)), read_sets=last_read_sets(root_abs))

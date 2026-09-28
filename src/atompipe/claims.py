@@ -33,8 +33,9 @@ Three structural notes:
   registry — falls back to `claim.gates`, and says so. Pass `registry=` to
   `statuses` when you have one.
 
-* **Purity.** No clock, no randomness, no disk. `stale` comes in as a flag from
-  whoever compared the model hash; these functions must not decide staleness for
+* **Purity.** No clock, no randomness, no disk. Staleness comes in from whoever
+  judged it — `stale_gates`, the gates `verdicts.resolve` found stale, or
+  `stale=True` for all of them; these functions must not decide staleness for
   themselves, or the same ledger would resolve differently on two machines.
 """
 from __future__ import annotations
@@ -42,7 +43,7 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable as _IterableABC
 from dataclasses import replace
-from typing import Any, Iterable
+from typing import Any, Collection, Iterable
 
 from .models import (
     BLOCKING_STATUSES,
@@ -165,18 +166,29 @@ def resolve_status(
     verdicts: Iterable[Verdict],
     *,
     stale: bool = False,
+    stale_gates: Collection[str] = (),
 ) -> ClaimStatus:
     """Resolve one claim to a single honest status.
 
     `verdicts` may be the whole `ledger.verdicts` list — this function filters it
     with `covering_verdicts`, so callers never have to reproduce the tag rule.
 
-    `stale=True` means "the model moved since these verdicts were recorded"
-    (the caller compared `model_hash`). A stale pass is not a pass: it is the
-    exact shape of the failure where a report is green against a model nobody
-    has re-checked. This function will not decide staleness for itself; that
-    needs the model, and a claim resolver that reads the model would resolve the
-    same ledger differently on two machines.
+    `stale_gates` names the gates whose verdict is not current — what
+    `verdicts.resolve` found Stale, Unknown or undemonstrated. A claim whose
+    covering verdicts all ran and passed reads STALE when any covering gate is
+    in it: a stale pass is not a pass, and it is the exact shape of the failure
+    where a report is green against a model nobody has re-checked. A stale FAIL
+    stays FAIL (D-08): the refutation was measured, and staleness never softens
+    a failure into something that looks like progress. `stale=True` is the
+    all-gates alias — every covering gate is stale — kept because
+    `StatusPrecedence.test_stale_is_not_pass` pins it (R-6). What it replaced:
+    one flag for the whole project, from one hash of the projection, so a
+    comment edit in the model staled every claim and ingesting one unread file
+    staled every measurable one (S-33).
+
+    This function will not decide staleness for itself; that needs the model
+    and the cache, and a claim resolver that read either would resolve the same
+    ledger differently on two machines.
 
     Precedence, exactly as specified in the spine contract:
 
@@ -193,7 +205,8 @@ def resolve_status(
     2. every covering verdict was skipped      -> BLOCKED    (tooling missing)
     3. gates exist but none has a verdict      -> PENDING    (never run)
     4. any covering verdict failed or errored  -> FAIL
-    5. all ran and passed, and `stale`         -> STALE
+    5. all ran and passed, and `stale` or a
+       covering gate is in `stale_gates`      -> STALE
     6. otherwise                               -> PASS
 
     **A SKIP IS NEVER A PASS. AN ERROR IS NEVER A PASS.** Rungs 2 and 4 exist
@@ -251,6 +264,12 @@ def resolve_status(
 
     if stale:
         return ClaimStatus.STALE
+    # Rung 5, per gate. The covering gates are the verdicts' and the claim's
+    # known ones: a gate the resolver named stale covers this claim either way.
+    if stale_gates:
+        stale_set = set(stale_gates)
+        if any(v.gate in stale_set for v in mine) or any(g in stale_set for g in known_gates):
+            return ClaimStatus.STALE
     return ClaimStatus.PASS
 
 
@@ -384,6 +403,7 @@ def statuses(
     *,
     stale: bool = False,
     registry: Any = None,
+    stale_gates: Collection[str] = (),
 ) -> dict[str, ClaimStatus]:
     """Resolve every claim in the ledger. Claim id -> status.
 
@@ -392,15 +412,19 @@ def statuses(
     claim was written will read UNCLAIMED instead of PENDING. Pass the registry
     whenever you have one — `blocking()` and `summarise()` always do. (The
     contract spells this function `statuses(ledger, *, stale=False)`; `registry`
-    is an additive keyword, so every contract call site still works.)
+    and `stale_gates` are additive keywords, so every contract call site still
+    works.) `stale_gates` is `resolve_status`'s: the gates whose verdict is not
+    current, per gate rather than per project.
     """
     gates_for = effective_gates(ledger, registry) if registry is not None else None
+    stale_set = frozenset(stale_gates or ())
     out: dict[str, ClaimStatus] = {}
     for claim in ledger.claims:
         if gates_for is not None:
             # `replace` copies; the ledger is never mutated by a derivation.
             claim = replace(claim, gates=gates_for.get(claim.id, []))
-        out[claim.id] = resolve_status(claim, ledger.verdicts, stale=stale)
+        out[claim.id] = resolve_status(claim, ledger.verdicts, stale=stale,
+                                       stale_gates=stale_set)
     return out
 
 
@@ -513,6 +537,7 @@ def blocking(
     registry: Any,
     *,
     stale: bool = False,
+    stale_gates: Collection[str] = (),
 ) -> list[tuple[Claim, ClaimStatus]]:
     """Critical claims whose status must stop an irreversible spend, with the reason.
 
@@ -532,11 +557,12 @@ def blocking(
     instead — that is the readiness ledger separating PROVEN from ASSUMED, not
     the spend gate.
 
-    With `stale=True` every passing critical claim becomes STALE and therefore
-    blocks. That is the point: a green run against a model that has since moved
-    is precisely the evidence that is not evidence.
+    A passing critical claim covered by a gate in `stale_gates` becomes STALE and
+    therefore blocks — with `stale=True`, every one does. That is the point: a
+    green run against inputs that have since moved is precisely the evidence
+    that is not evidence.
     """
-    resolved = statuses(ledger, stale=stale, registry=registry)
+    resolved = statuses(ledger, stale=stale, registry=registry, stale_gates=stale_gates)
     return [
         (claim, resolved[claim.id])
         for claim in ledger.claims
@@ -549,6 +575,7 @@ def summarise(
     registry: Any,
     *,
     stale: bool = False,
+    stale_gates: Collection[str] = (),
 ) -> dict[str, Any]:
     """Counts for `atompipe status` — claims and gates, nothing else.
 
@@ -566,12 +593,15 @@ def summarise(
     Input-artifact counts are deliberately absent; `artifacts.unextracted()`
     owns those, and a summary assembled from two modules' views of the same
     ledger is how two numbers that must agree stop agreeing.
+
+    `stale` in the result is True when any gate is stale — the alias, or a
+    non-empty `stale_gates`.
     """
-    resolved = statuses(ledger, stale=stale, registry=registry)
+    resolved = statuses(ledger, stale=stale, registry=registry, stale_gates=stale_gates)
     specs = _specs(registry)
     live = coverage(ledger, registry)
     gaps = find_gaps(ledger, registry)
-    blockers = blocking(ledger, registry, stale=stale)
+    blockers = blocking(ledger, registry, stale=stale, stale_gates=stale_gates)
 
     by_status = {s.value: 0 for s in ClaimStatus}
     for status in resolved.values():
@@ -595,7 +625,7 @@ def summarise(
         "n_gaps": len(gaps),
         "n_blocking": len(blockers),
         "blocking_ids": [c.id for c, _ in blockers],
-        "stale": bool(stale),
+        "stale": bool(stale) or bool(stale_gates),
         "ready": not blockers,
     }
 

@@ -223,7 +223,10 @@ def flaky_bad(ctx):
 
 def file_bad(ctx):
     _guard()
-    return ctx          # the gate reads data/limit.txt, which the test sets low
+    # the same gate, pointed at a project whose data/limit.txt is too low: a
+    # read under selftest/, which the control's static part already keys
+    low = os.path.join(os.path.dirname(os.path.abspath(__file__)), "low")
+    return dataclasses.replace(ctx, root=low)
 
 
 def opaque_bad(ctx):
@@ -295,6 +298,7 @@ class _Project:
         _write(root, "selftest/bad.py", _FIXTURES)
         _write(root, "model/helper.py", _HELPER)
         _write(root, "data/limit.txt", "2.0\n")
+        _write(root, "selftest/low/data/limit.txt", "0.5\n")
         self.registry = gates.Registry()
         gates.load_project_gates(root, self.registry)
         self.anchors = verdicts.anchors_for(root, self.registry, out_dir=store.out_dir(root))
@@ -813,6 +817,52 @@ class Resolve(_env.EnvCase):
         self.assertEqual(_row_verdict(resolution, "t.defl").outcome, "skipped")
         self.assertEqual(resolution.read_sets["t.defl"],
                          {("deflection",), ("config", "load_n")})
+
+    def test_two_outcomes_at_the_current_rho_never_count(self):
+        # §3.7: the same inputs, the same libraries, two answers. Stale while
+        # TWO_OUTCOMES_IS_ERROR is staged (R-4), an error once it flips —
+        # never a silent pick of either.
+        p = _Project(self)
+        p.record("t.defl", _PROJECTION)
+        p.demonstrate("t.defl")
+        [entry] = verdicts.read_entries(p.root, "t.defl")
+        verdicts.write_entry(p.root, dataclasses.replace(
+            entry, verdict={**entry.verdict, "passed": False}))
+        resolution = p.resolve(_PROJECTION)
+        self.assertIn("t.defl", resolution.stale_gates)
+        self.assertTrue(resolution.rows["t.defl"].stale_reason.startswith(
+            "two outcomes recorded for identical inputs"), resolution.rows["t.defl"])
+        self.assertNotEqual(p.statuses(resolution)["C1"], ClaimStatus.PASS)
+        self.assertTrue(any("two outcomes recorded for identical inputs" in note
+                            for note in resolution.notes), resolution.notes)
+        with mock.patch.object(verdicts, "TWO_OUTCOMES_IS_ERROR", True):
+            flipped = p.resolve(_PROJECTION)
+        verdict = _row_verdict(flipped, "t.defl")
+        self.assertEqual(verdict.outcome, "error")
+        self.assertTrue(verdict.error.startswith("two outcomes recorded for identical inputs"))
+        self.assertEqual(p.statuses(flipped)["C1"], ClaimStatus.FAIL)
+
+    def test_a_hand_edited_entry_is_ignored_and_named(self):
+        p = _Project(self)
+        _v, wrote = p.record("t.defl", _PROJECTION)
+        with open(wrote.path, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(wrote.path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace('"measured": 0.3', '"measured": 0.1'))
+        resolution = p.resolve(_PROJECTION)
+        self.assertNotIn("t.defl", resolution.rows, "a hand-edited entry is not evidence")
+        self.assertTrue(any("hand-edited entry" in note for note in resolution.notes),
+                        resolution.notes)
+
+    def test_when_comes_from_the_run_that_wrote_or_hit_it(self):
+        p = _Project(self)
+        _v, wrote = p.record("t.defl", _PROJECTION)
+        p.demonstrate("t.defl")
+        self.assertEqual(p.resolve(_PROJECTION).rows["t.defl"].when, "",
+                         "no run and no commit: unknown, never a made-up time")
+        verdicts.record_obs(p.root, "t.defl", entry=wrote.name, when="2026-09-27T12:00:00Z",
+                            duration_s=0.001, cpu_s=0.001)
+        self.assertEqual(p.resolve(_PROJECTION).rows["t.defl"].when, "2026-09-27T12:00:00Z")
 
     def test_verdicts_come_in_registration_order(self):
         p = _Project(self)
