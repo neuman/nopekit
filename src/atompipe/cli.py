@@ -232,77 +232,6 @@ def _lock(root: str) -> FileLock:
     return FileLock(os.path.join(store.atompipe_dir(root), LOCK_NAME))
 
 
-def _load_project_gates(root: str, registry: gates.Registry) -> list[Any]:
-    """Import `<root>/gates/*.py` into `registry`; return the specs they added.
-
-    The project's own gates, loaded the same way a pack's are and for the same
-    reasons — the pack directory equivalent is the project root, so a gate can
-    `import selftest.bad_configs` or share a `_geom.py` helper with the model.
-
-    Three details are copied deliberately from `packs.load_gates`, because the
-    two must behave identically or a gate would work in a project and break the
-    moment it was extracted into a pack:
-
-    * the root goes on `sys.path[0]` and comes off in a `finally`; a leaked entry
-      makes the *next* import resolve against this project
-    * module names are salted with a hash of the file's absolute path, so two
-      projects in one process cannot silently share a `gates/structural.py`
-    * `PACK_DIR` is NOT set, so `gates._fixture_root` falls through to `ctx.root`
-      and `selftest/bad_configs.py` resolves beside the model, where it lives
-
-    Files starting with `_` are skipped (helpers, not gates). Any failure becomes
-    an AtompipeError naming the file: a gate module that will not import is a
-    user's Python problem, and a spine traceback would read as a spine bug.
-    """
-    directory = os.path.join(root, PROJECT_GATES_DIR)
-    if not os.path.isdir(directory):
-        return []
-
-    try:
-        names = sorted(os.listdir(directory))
-    except OSError as exc:
-        raise AtompipeError(f"cannot read {rel(directory, root)}: {exc}") from exc
-    files = [os.path.join(directory, n) for n in names
-             if n.endswith(".py") and not n.startswith("_")]
-    if not files:
-        return []
-
-    before = {spec.id for spec in registry.specs()}
-    sys.path.insert(0, root)
-    try:
-        with gates.use_registry(registry):
-            for path in files:
-                stem = os.path.splitext(os.path.basename(path))[0]
-                module_name = f"atompipe_project_{stem}_{short_hash(os.path.abspath(path), 8)}"
-                if module_name in sys.modules:
-                    continue          # ordinary import semantics: already executed
-                spec = importlib.util.spec_from_file_location(module_name, path)
-                if spec is None or spec.loader is None:     # pragma: no cover
-                    raise AtompipeError(
-                        f"{rel(path, root)}: no import machinery accepted this file")
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                try:
-                    spec.loader.exec_module(module)
-                except AtompipeError as exc:
-                    # A registry refusal (no negative control) is already phrased
-                    # for a human. Keep the phrasing, add the location.
-                    sys.modules.pop(module_name, None)
-                    raise AtompipeError(f"{rel(path, root)}: {exc}") from exc
-                except BaseException as exc:
-                    sys.modules.pop(module_name, None)
-                    raise AtompipeError(
-                        f"{rel(path, root)} failed to import: "
-                        f"{type(exc).__name__}: {exc}"
-                    ) from exc
-    finally:
-        try:
-            sys.path.remove(root)
-        except ValueError:            # pragma: no cover - a gate mangled sys.path
-            pass
-    return [spec for spec in registry.specs() if spec.id not in before]
-
-
 def _registry(root: str, ledger: Ledger, *,
               strict: bool = True) -> tuple[gates.Registry, list[str]]:
     """Load every gate this project can see. Returns `(registry, problems)`.
@@ -324,7 +253,7 @@ def _registry(root: str, ledger: Ledger, *,
     for label, load in (
         ("packs", lambda: packs.load_all_gates(packs.installed(root, ledger=ledger),
                                                registry, root)),
-        ("project gates", lambda: _load_project_gates(root, registry)),
+        ("project gates", lambda: gates.load_project_gates(root, registry)),
     ):
         try:
             load()
@@ -2809,7 +2738,7 @@ def _load_viewgens(directory: str, registry: Any, *,
                    pack: str, root: str) -> list[Any]:
     """Import `<directory>/*.py` into a ViewRegistry; return the specs it added.
 
-    Deliberately the same shape as `_load_project_gates`, because a viewgen is a
+    Deliberately the same shape as `gates.load_project_gates`, because a viewgen is a
     gate's twin: same directory convention, same `sys.path` handling, same
     `PACK`/`PACK_DIR` globals, same "an exception here is the pack author's
     problem and must not print as a spine traceback". A pack author who has

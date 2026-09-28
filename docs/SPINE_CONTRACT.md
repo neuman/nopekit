@@ -135,7 +135,9 @@ one copy that goes stale. `Verdict.outcome` is the single derivation of what a
 verdict says — `"error"` if `error`, else `"skipped"` if `skipped`, else `"pass"` if
 `passed is True`, else `"fail"` — and `ok`, `render()` and `claims.resolve_status`
 all read it; every new consumer (JUnit, the index, the page) calls it and never
-re-derives one (PLAN R-5). `GateSpec.requires_one_of` is the last field.
+re-derives one (PLAN R-5). `GateSpec.requires_one_of` is the last field;
+`Verdict.rho` and `Verdict.cpu_s` are Verdict's last two (R-2): the content address the
+sweep keys it by (a gate never sets it) and the CPU seconds it cost, children included.
 
 ### `util.py`  (no deps)
 ```python
@@ -475,13 +477,15 @@ wheel without `.py` files) gives `""`: every entry is then Unknown, never Fresh.
 `!r`, `{x=}`, `match`, walrus, decorators, async — and CI asserts it on 3.10, 3.12 and
 3.13.
 
-### `gates.py`  (deps: models, util, store)
+### `gates.py`  (deps: models, util, modelio, verdicts)
 ```python
 @dataclass
 class GateContext:                                      # the full surface: docs/PACK_FORMAT.md
     root: str; ledger: Ledger; model: Any | None; params: dict
     out_dir: str; tier: int; log: Callable[[str], None]; extra: dict
     pack: str; key_scope: str                           # stamped by run_gate from the spec
+    memo: dict | None                                   # the sweep's file memo (run_all); None outside one
+    trace: GateTrace | None                             # the trace this view records into (run_gate)
     def scopes(self) -> list[str]                       # ["fdm", "fdm-print"]: key namespaces, best first
     def param(self, name, default=None, *, scope=...) -> Any   # PACK-SCOPED first: see below
     def pack_param(self, name, default=None) -> Any
@@ -490,9 +494,11 @@ class GateContext:                                      # the full surface: docs
     def require_param(self, name) -> Any                # raises rather than compare with None
     def out_path(self, *parts) -> str                   # an evidence path under out_dir, dir created
     def with_extra(self, extra) -> GateContext          # a copy with `extra` merged over
+    def load_file(self, path, loader=None) -> Any       # once per sweep; a read of THIS gate, hit or miss
 def scope_of(gate_id: str) -> str                       # "fdm.bed_fit" -> "fdm"
 SCOPE_SEP = "."
 class Registry:
+    pack_dirs: dict[str, str]                           # {pack name: dir its gates loaded from}
     def register(self, spec: GateSpec, fn, *, replace=False) -> None   # raises if no negative_control
     def unregister(self, gate_id) -> bool
     def clear(self) -> None
@@ -510,23 +516,87 @@ def gate(*, id, claims=(), tier=Tier.INSTANT, settles="", requires_tools=(),
          requires_python=(), requires_one_of=(), negative_control=None, title="",
          description="", pack="", entry="", registry=None)   # decorator -> registers, returns fn
 def availability(spec) -> tuple[bool, str]              # (ok, "requires openfoam (not on PATH)")
-def run_gate(spec, fn, ctx) -> Verdict                  # times it; catches exceptions -> error verdict
-def run_all(registry, ctx, *, max_tier=0, only=None, on_verdict=None) -> list[Verdict]
-def selftest(spec, fn, ctx) -> Verdict                  # runs the NEGATIVE CONTROL
+def run_gate(spec, fn, ctx, *, trace=None) -> Verdict   # a traced, read-only view; times it (wall, CPU);
+                                                        #   catches exceptions -> error verdict
+def run_all(registry, ctx, *, max_tier=0, only=None, on_verdict=None,
+            before=None, after=None) -> list[Verdict]   # before(spec, fn) -> Verdict | None;
+                                                        #   after(spec, fn, verdict, trace)
+def selftest(spec, fn, ctx, *, trace=None, out_dir=None) -> Verdict   # runs the NEGATIVE CONTROL, traced
+def run_fixture(spec, fn, ctx, *, trace, out_dir) -> GateContext      # the fixture ONLY; never calls fn
 def load_fixture(ref: str, root: str) -> Any            # "mod:fn" or "path/to/file.py"
+def load_project_gates(root, registry) -> list[str]     # <root>/gates/*.py; the ids they register
 def describe(spec) -> str                               # one dense line for `atompipe gate list`
 def registry_summary(registry) -> dict                  # JSON-safe: what can run here, and what cannot
 ```
 `gate(registry=None)` decorates into `active_registry()`, which is `REGISTRY` unless a
-`use_registry(...)` block says otherwise. That block is the seam a loader needs (the
-CLI's project-gate loader holds it across each import): a gate module cannot name the
-registry it should land in, and a loader that handed a private registry to an import
-without it would get its gates in the global one and an empty diff back — a project
-that looks like it ships no gates, with no error.
+`use_registry(...)` block says otherwise. That block is the seam a loader needs (both
+`load_project_gates` and `packs.load_gates` hold it across each module they load): a
+gate module cannot name the registry it should land in, and a loader that handed a
+private registry to an import without it would get its gates in the global one and an
+empty diff back — a project that looks like it ships no gates, with no error.
 A gate function receives `GateContext` and returns `Verdict` **or** a plain
 `(bool, detail)` / dict, which `run_gate` normalises. `run_gate` always fills in
-`gate`, `tier`, `pack`, `claims`, `duration_s` from the spec — a gate cannot lie
-about its own identity.
+`gate`, `tier`, `pack`, `claims`, `duration_s` and `cpu_s` from the spec and its own
+clocks, and clears `rho` — a gate cannot lie about its own identity, its cost, or what
+its verdict was computed from.
+
+**The gate sees a traced, read-only world.** `run_gate(spec, fn, ctx, *, trace=None)`
+never hands `fn` the caller's context. In order: availability (a skip never calls `fn`
+and records nothing); `pack` and `key_scope` stamped; then `verdicts.traced_context` —
+`params` a read-only `ParamTrace`, `ledger` a `LedgerView` with no verdicts, `extra` the
+gate's own shallow copy, `model` a `ModelProxy` (`None` stays `None`), `memo` shared,
+`trace` set — and `fn` runs inside `verdicts.tracing(trace)`. `trace=None` makes a
+throwaway trace, so the view is read-only on every path, not only in a sweep. It writes
+no file, consults no cache and enforces no admission. The window closes before a
+crash's traceback is formatted (linecache's reads are the formatter's). What slipped
+through: `ctx.params` was one mutable dict shared by every gate, so gate A's
+`ctx.params["load_n"] = 0` was gate B's input (S-24); fdm-print's mesh cache on the
+shared `extra` made its second gate's read of the part invisible (S-27). `cpu_s` is the
+`os.times()` delta with children included — omc works in a subprocess. Measured on the
+corpus before it landed (R-4): every bundled baseline and control, and cad-solid's
+hand-run `selftest/check_*.py`, raise zero `GateInputWriteError`
+(`tests/test_gate_context.py::ReadOnlyBlastRadius`). A caller that hands `run_gate` a
+dict subclass of its own as `params` has the gate's read paths replayed through its
+`get` afterwards (the first two levels): the CLI's `Param.gates` recorder sees nothing
+of a copy being made, and `why` would otherwise have said no gate reads a parameter
+three gates read.
+
+**`run_all`'s hooks.** `before(spec, fn)` is asked after the lost-control re-check; a
+`Verdict` it returns is that gate's verdict and `fn` never runs. `after(spec, fn,
+verdict, trace)` gets every gate that ran here with a fresh `GateTrace` of its own; a
+`Verdict` it returns replaces the one it got; it runs before `on_verdict`. The sweep
+gets one `memo={}` when the caller brought none, never left on the caller's context.
+
+**`GateContext.load_file(path, loader=None)`** resolves `path` against `root`, reports
+the read as the `open` audit event it stands for — to the view's own trace and every
+trace open around it — on EVERY call, hit or miss, and memoises `loader(abspath)` (the
+bytes by default) in `memo` on `(abspath, id(loader))` (a bound method by its object and
+function), revalidated by the file's stat signature. No memo: it just loads (a hand-run
+check script, packs:H15).
+
+**Controls, traced.** `selftest(spec, fn, ctx, *, trace=None, out_dir=None)`: the
+fixture gets a WRITABLE traced copy of `ctx` (`out_dir` replaced when given) — its
+writes never reach the sweep, its reads of the host land in `trace.host_reads` — and
+`make` runs inside `tracing(trace)`; `trace.fixture_code` is
+`modelio.code_closure(make)`; the gate then runs through `run_gate` with the same trace.
+`duration_s` and `cpu_s` cover both. `run_fixture(spec, fn, ctx, *, trace, out_dir)`
+is the fixture half alone — for re-verifying a control whose fixture code moved without
+re-running the gate — and raises `AtompipeError` when the control is unusable.
+
+**Code is loaded fresh.** `load_project_gates`, the path form of `load_fixture` and
+`packs.load_gates` all go through `modelio.load_source_module`: the bytes that run are
+the bytes on disk, the code closure is recorded, and a cached module is served only
+while its closure still hashes the same — re-adopting its gates into the caller's
+registry. What slipped through: after a same-size, same-second edit, gate modules and
+fixtures ran their old bytecode, and an in-process re-load skipped any module already
+in `sys.modules` (S-26). `load_project_gates` moved here from the CLI so there is one
+copy; it returns the ids each module registered, cached or not.
+
+**A gate id names a directory.** `register` refuses an id containing `/`, `\`, `..`
+or `:` — `.atompipe/verdicts/<gate id>/` holds its cached verdicts — and an id that
+differs from a registered one only in case, which a case-insensitive filesystem makes
+one directory. Zero hits over the 54 bundled pack ids and the bracket's 6 before the
+refusal landed (R-4).
 
 **Parameter lookup is PACK-SCOPED.** `ctx.param("bbox_mm")` inside `fdm.bed_fit`
 resolves `fdm.bbox_mm` (flat or nested), then `fdm-print.bbox_mm`, then the bare
@@ -662,7 +732,7 @@ spec, measurement, standard, data — each with 2-4 concrete, domain-neutral pro
 phrased as things to ask a human ("a photo of the closest existing product you'd
 buy instead, even a bad one").
 
-### `packs.py`  (deps: models, util, store)
+### `packs.py`  (deps: models, util, store; gates and modelio only inside functions)
 ```python
 MANIFEST_NAME = "pack.json"; DOC_NAME = "PACK.md"; REFERENCES_DIR = "references"
 GATES_DIR = "gates"; GENERATORS_DIR = "generators"; SELFTEST_DIR = "selftest"
@@ -710,7 +780,12 @@ packs/<name>/pack.json  PACK.md  references/*.md  gates/*.py  generators/*.py
              lenses.md  sourcing.md  scaffold/  selftest/
 ```
 `load_gates` imports each `gates/*.py` with the pack directory on `sys.path` and a
-module-level `PACK = "<name>"`; gate modules use the `@gate` decorator. A gate
+module-level `PACK = "<name>"` and `PACK_DIR`, through `modelio.load_source_module`
+(`roots=[pack_dir]`) inside `gates.use_registry(registry)`: fresh bytes, a recorded
+closure, and a module reused only while it still hashes the same — re-adopting its gates
+into the registry being filled (S-26). It records `registry.pack_dirs[name] = pack_dir`,
+which a verdict entry's `<pack:NAME>` anchor reads. A second directory under a pack name
+already loaded is still refused. Gate modules use the `@gate` decorator. A gate
 registered with a blank `pack` is stamped through `Registry.set_pack`, never by
 mutating the spec the registry stores.
 

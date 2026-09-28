@@ -57,6 +57,21 @@ colliding rather than about a single gate lying:
    :meth:`GateContext.param`, because the previous order (``bbox_mm`` before
    ``bbox``) was something a user had to discover by experiment.
 
+And a fifth, because a verdict is only as current as what it read:
+
+5. **A gate sees a traced, read-only world of its own.** :func:`run_gate` never
+   hands ``fn`` the caller's context. It hands it a view (``verdicts.traced_context``)
+   whose ``params`` refuse every write, whose ``ledger`` is a copy with no
+   verdicts in it, whose ``extra`` is the gate's own, and whose every read — of a
+   parameter, a claim, a file — is recorded on a trace. What slipped through
+   before it: ``ctx.params`` was one mutable dict handed to every gate in a sweep,
+   so ``ctx.params["load_n"] = 0`` in gate A was gate B's input, and no verdict
+   could show it (S-24); and fdm-print rode a mesh cache on the shared ``extra``,
+   so its second gate's read of the part opened nothing and was recorded nowhere
+   (S-27). With no trace passed, a throwaway one is made: the view is read-only on
+   EVERY path — a test, a pack's own ``__main__``, a fixture's nested call — not
+   only inside ``check``.
+
 The gate function itself stays an ordinary function: :func:`gate` registers it
 and returns it **unchanged**, so it is directly callable and directly testable
 without the registry in the way.
@@ -64,7 +79,7 @@ without the registry in the way.
 Time policy (contract rule 3): nothing here stamps a timestamp. Durations are
 *measured*, which is not the same thing — a wall-clock duration cannot be passed
 in by a caller who is waiting on the result, and ``RunMeta.when`` still arrives
-from the CLI edge.
+from the CLI edge. The same goes for ``cpu_s`` (``os.times``).
 """
 from __future__ import annotations
 
@@ -85,8 +100,10 @@ import traceback
 from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
+from . import modelio
 from .models import GateSpec, Ledger, NegativeControl, Tier, Verdict
-from .util import AtompipeError, ensure_dir, short_hash
+from .util import AtompipeError, ensure_dir, rel, short_hash
+from .verdicts import GateTrace, ParamTrace, traced_context, tracing
 
 __all__ = [
     "SCOPE_SEP",
@@ -101,7 +118,9 @@ __all__ = [
     "run_gate",
     "run_all",
     "selftest",
+    "run_fixture",
     "load_fixture",
+    "load_project_gates",
     "describe",
     "registry_summary",
 ]
@@ -112,6 +131,22 @@ __all__ = [
 #: the scope of ``fdm.bed_fit`` is ``fdm``, so a reader who can name the gate can
 #: name the key without looking anything up.
 SCOPE_SEP = "."
+
+#: What a gate id may not contain, because it names a directory:
+#: ``.atompipe/verdicts/<gate id>/`` holds the gate's cached verdicts. ``/`` and
+#: ``\`` would nest it; ``..`` would climb out of the cache; ``:`` is a drive
+#: letter or an NTFS alternate data stream on Windows. Measured before the refusal
+#: landed: zero hits over the 54 bundled pack ids and the bracket's 6 (R-4,
+#: ``tests/test_gate_context.py``). *Rejected:* an allow-list charset — project ids
+#: were never constrained beyond "no whitespace", and an allow-list would refuse
+#: spellings nobody measured. Named residual: Windows also refuses ``<>"|?*`` in a
+#: file name; none is refused here, and none is in the corpus.
+_ID_FORBIDDEN = ("/", "\\", "..", ":")
+
+#: Where a project's own gates live: ``<root>/gates/*.py``, imported exactly like
+#: a pack's, but with no manifest and no pack name. ``cli.PROJECT_GATES_DIR`` is
+#: the same directory under the name it had when the loader lived there.
+_PROJECT_GATES_DIR = "gates"
 
 #: Internal "nothing was found" marker. Distinct from ``None`` because a
 #: projection is allowed to carry ``None`` (a model that computed nothing says so
@@ -198,13 +233,19 @@ class GateContext:
     Fields:
 
     ``root``     project root (the directory containing ``.atompipe/``).
-    ``ledger``   the whole project state: claims, params, prior verdicts.
+    ``ledger``   the project state: claims, params, inputs. What a gate
+                 receives is a traced copy with NO verdicts in it: a gate that
+                 read other gates' verdicts would put verdicts inside its own
+                 content address, a staleness that feeds itself.
     ``model``    the loaded model module/instance, or None when the gate is
                  checking something else (a file, a netlist, an input artifact).
     ``params``   the projection flattened to ``{name: value}`` — config AND
                  derived together. Gates read numbers from here, never by
                  re-deriving them, because a gate that recomputes a derived
                  value is checking its own arithmetic instead of the model's.
+                 READ-ONLY in the gate's view: a write raises
+                 ``verdicts.GateInputWriteError`` (S-24). A fixture builds a
+                 context of its own; it never edits the one it was handed.
     ``out_dir``  scratch and evidence. Anything cited in ``Verdict.evidence``
                  goes here; see :meth:`out_path`.
     ``tier``     the tier of the sweep in progress. A gate may use it to pick a
@@ -213,16 +254,27 @@ class GateContext:
     ``extra``    free-form. The negative-control machinery merges a fixture's
                  dict in here, and a caller may put ``pack_dirs`` /``pack_dir``
                  here to say where a pack's fixtures live (see
-                 :func:`_fixture_root`).
+                 :func:`_fixture_root`). Each gate gets its OWN shallow copy:
+                 a value one gate stores here is gone for the next (S-27).
+                 Anything shared across a sweep goes through :meth:`load_file`.
     ``pack``     the pack the running gate came from (``"fdm-print"``), stamped
                  by :func:`run_gate`. Empty for a project's own gates.
     ``key_scope`` that gate's key namespace (``"fdm"``), stamped by
                  :func:`run_gate` from the gate id. See :meth:`param`.
+    ``memo``     the sweep's file memo, behind :meth:`load_file`. One dict per
+                 :func:`run_all`, shared by reference with every gate's view.
+                 ``None`` outside a sweep — a hand-run script, a test — and
+                 :meth:`load_file` then simply loads.
+    ``trace``    the ``verdicts.GateTrace`` this view records into, set by
+                 :func:`run_gate` (and :func:`selftest` for a fixture). ``None``
+                 on a context nobody is tracing.
 
     Every field has a default so a test can build a context with the one thing
     it cares about. That is additive to the contract's declaration, not a change
     to it: field order is unchanged and positional construction still works.
-    New fields go on the END for that reason.
+    New fields go on the END for that reason — ``memo`` and ``trace`` are there
+    now, and are neither shown nor compared: two contexts that differ only in who
+    is watching are the same context.
     """
 
     root: str = ""
@@ -235,6 +287,8 @@ class GateContext:
     extra: dict[str, Any] = field(default_factory=dict)
     pack: str = ""
     key_scope: str = ""
+    memo: dict | None = field(default=None, repr=False, compare=False)
+    trace: Any = field(default=None, repr=False, compare=False)
 
     # -- parameter access -------------------------------------------------- #
     def scopes(self) -> list[str]:
@@ -424,6 +478,123 @@ class GateContext:
         merged.update(extra or {})
         return dataclasses.replace(self, extra=merged)
 
+    # -- files --------------------------------------------------------------- #
+    def load_file(self, path: Any, loader: Callable[[str], Any] | None = None) -> Any:
+        """``loader(abspath)`` — or the file's bytes — loaded once per sweep, and
+        recorded as a read of THIS gate on every call.
+
+        For a file several gates read: a mesh, a table, a result file. ``path``
+        resolves against ``root`` when relative. ``loader`` defaults to reading
+        the bytes; pass the parser (``trimesh.load_mesh``) to share the parsed
+        object instead. Its exceptions are the gate's, and are not memoised.
+
+        **Every call is a read, hit or miss.** What slipped through without it:
+        fdm-print kept a mesh cache on the shared ``ctx.extra``, so the second gate
+        to want the part got a cache hit that opened nothing — no audit event, no
+        record — and its verdict would have been keyed as if it never depended on
+        the file (S-27). So the call is reported as the ``open`` it stands for,
+        through the same audit channel a real open uses: this view's trace sees
+        it, and so does every trace open around it (a control's, around a
+        fixture's nested gate), exactly as for an open. The read is recorded
+        before the load, so a file that turns out to be missing is still named
+        as an input — its absence is what the gate decided on.
+
+        **The memo** (``self.memo``, one per :func:`run_all`) is keyed on
+        ``(abspath, id(loader))``: two gates asking for the bytes and a third
+        asking for a parsed mesh get two entries, never each other's. For a bound
+        method the id is its object's and its function's, because ``obj.parse`` is
+        a NEW object on every access: keyed on that, a bound-method loader never
+        hit (what slipped through while its test was being written); a lambda made
+        inside the gate body never hits either — pass a module-level function. The entry holds the loader itself, so its ``id``
+        cannot be reused by a new function while the entry lives, and the file's
+        stat signature, so bytes rewritten between two gates of one sweep are
+        loaded again — a hit on the old bytes would have put the new bytes' digest
+        on a verdict computed from the old ones. With no memo (``None``: a
+        hand-run check script, a test) it just loads (packs:H15).
+
+        A hit hands every caller the SAME object. Do not mutate it: copy first,
+        as cad-solid does before welding a mesh.
+        """
+        raw = os.fspath(path)
+        if isinstance(raw, bytes):
+            raw = os.fsdecode(raw)
+        target = raw if os.path.isabs(raw) else os.path.join(self.root or os.curdir, raw)
+        abspath = os.path.abspath(target)
+        _report_read(self.trace, abspath)
+        memo = self.memo
+        if memo is None:
+            return _load(abspath, loader)
+        key = (abspath, _loader_id(loader))
+        signature = _stat_signature(abspath)
+        held = memo.get(key)
+        # A key match IS the same loader: the entry holds its loader alive, and a
+        # live object's id is never handed to another (see `_loader_id`).
+        if held is not None and signature is not None and held[1] == signature:
+            return held[2]
+        value = _load(abspath, loader)
+        if signature is not None:
+            memo[key] = (loader, signature, value)
+        return value
+
+
+def _loader_id(loader: Any) -> Any:
+    """``id(loader)`` — or, for a bound method, the ids of its object and function.
+
+    Two accesses of ``obj.parse`` are two method objects with two ids and one
+    meaning; keyed on the method object, the memo never hit for one. The entry
+    keeps the loader alive, and a live object's id is never reused, so neither
+    form can collide with another loader while the entry exists.
+    """
+    owner = getattr(loader, "__self__", None)
+    func = getattr(loader, "__func__", None)
+    if owner is not None and func is not None:
+        return ("method", id(owner), id(func))
+    return id(loader)
+
+
+def _load(abspath: str, loader: Callable[[str], Any] | None) -> Any:
+    """``loader(abspath)``, or the file's bytes."""
+    if loader is not None:
+        return loader(abspath)
+    with open(abspath, "rb") as handle:
+        return handle.read()
+
+
+def _stat_signature(abspath: str) -> tuple | None:
+    """What a memo hit is checked against: ``(size, mtime_ns, ctime_ns, inode)``.
+
+    ctime and the inode are here because size and mtime alone miss a same-size
+    rewrite with its mtime put back — ``os.utime`` cannot restore a ctime, and an
+    atomic replace changes the inode. ``None`` when the file cannot be stat'ed:
+    such a load is never memoised, so the loader's own error reaches the gate.
+    """
+    try:
+        st = os.stat(abspath)
+    except OSError:
+        return None
+    return (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino)
+
+
+#: ``os.open``'s read-only flag, for the ``open`` event :func:`_report_read`
+#: raises. The audit hook reads the MODE first and the flags only when the mode
+#: is None, so "r" alone decides; the flag keeps the arguments shaped like the
+#: real event's.
+_READ_FLAGS = getattr(os, "O_RDONLY", 0)
+
+
+def _report_read(trace: Any, abspath: str) -> None:
+    """Raise the ``open`` audit event a real read of ``abspath`` would raise.
+
+    Routed like every other audit event (``verdicts.tracing``): to every trace
+    open right now, and — pushed for the length of this one event — to
+    ``trace``, the calling view's own, even when no window is open around it (a
+    test calling a gate's view directly). A trace pushed twice records once: a
+    trace dedupes its own reads. With no trace and no window it is inert.
+    """
+    window = tracing(trace) if trace is not None else contextlib.nullcontext()
+    with window:
+        sys.audit("open", abspath, "r", _READ_FLAGS)
+
 
 # --------------------------------------------------------------------------- #
 # the registry
@@ -507,6 +678,14 @@ class Registry:
 
     def __init__(self) -> None:
         self._gates: dict[str, tuple[GateSpec, Callable[[GateContext], Any]]] = {}
+        #: ``{pack name: the directory its gates were loaded from}``, filled by
+        #: ``packs.load_gates``. Public because it is a fact about THIS registry's
+        #: gates that nothing else can answer: a gate's pack name is on its spec,
+        #: but where that pack lives — a checkout, a project's ``.atompipe/packs``,
+        #: site-packages — is known only to the load. A verdict entry spells an
+        #: absolute path under a pack directory as ``<pack:NAME>/...`` so it reads
+        #: the same in every checkout, and this is where the directory comes from.
+        self.pack_dirs: dict[str, str] = {}
 
     # -- registration ------------------------------------------------------ #
     def register(
@@ -532,6 +711,10 @@ class Registry:
         trusted to say which gate proved what:
 
         * empty ``spec.id`` — verdicts key on it, the ledger keys on it
+        * an id holding ``/``, ``\\``, ``..`` or ``:`` — a gate id names a
+          directory in the verdict cache, ``.atompipe/verdicts/<gate id>/``
+        * an id that differs from a registered one only in case — on a
+          case-insensitive filesystem the two cache directories are one
         * a fixture-less ``NegativeControl`` — the declaration without the proof
         * a duplicate id from a different function — two packs claiming one name;
           the second silently winning is how a gate stops being the gate you read
@@ -558,6 +741,24 @@ class Registry:
                 f"gate id {spec.id!r} is empty or contains whitespace — ids are keys "
                 f"in the ledger and on the command line. Use a dotted, pack-prefixed "
                 f"id like 'fdm.overhang'."
+            )
+        unsafe = [part for part in _ID_FORBIDDEN if part in gate_id]
+        if unsafe:
+            raise AtompipeError(
+                f"gate id {gate_id!r} contains {', '.join(repr(p) for p in unsafe)} — a "
+                f"gate id names a directory in the verdict cache "
+                f"(.atompipe/verdicts/<gate id>/), so it cannot hold a path separator, "
+                f"'..' or ':'. Use a dotted, pack-prefixed id like 'fdm.overhang'."
+            )
+        folded = gate_id.casefold()
+        twin = next((known for known in self._gates
+                     if known != gate_id and known.casefold() == folded), None)
+        if twin is not None:
+            raise AtompipeError(
+                f"gate id {gate_id!r} differs from the registered {twin!r} only in case — "
+                f"on a case-insensitive filesystem (macOS and Windows by default) their "
+                f"verdict-cache directories are one directory, and each gate would be "
+                f"served the other's verdicts. Rename one."
             )
 
         nc = spec.negative_control
@@ -636,6 +837,7 @@ class Registry:
     def clear(self) -> None:
         """Empty the registry. Tests and `packs.validate` use a scratch registry."""
         self._gates.clear()
+        self.pack_dirs.clear()
 
     # -- lookup ------------------------------------------------------------ #
     # Every exit below hands out `_own_copy` of the stored spec, never the spec
@@ -1066,7 +1268,7 @@ def _plain_number(value: Any) -> Any:
     return float(value)
 
 
-def _stamp(verdict: Verdict, spec: GateSpec, duration: float) -> Verdict:
+def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) -> Verdict:
     """Overwrite the identity fields of a verdict from its spec.
 
     A gate cannot be trusted to report its own name, tier, pack, claims or
@@ -1075,6 +1277,12 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float) -> Verdict:
     verdict filed under the wrong gate is worse than a missing one: it overwrites
     a real result in ``Ledger.upsert_verdict`` and marks someone else's claim.
     The spec is the only authority on identity, so the spec wins, always.
+
+    The same goes for what a gate costs and what it was computed from:
+    ``duration_s`` and ``cpu_s`` are the measured ones, and ``rho`` is cleared.
+    rho is the content address of the inputs the gate READ, computed by the sweep
+    from the trace; a gate that could set it could key its verdict to inputs it
+    never read, and the cache would serve that verdict as current.
 
     ``passed`` is forced False whenever the gate skipped or errored. ``Verdict.ok``
     already encodes that, but ``passed`` is what lands in the JSON a human reads,
@@ -1107,6 +1315,8 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float) -> Verdict:
         pack=spec.pack,
         claims=list(spec.claims or []),
         duration_s=round(max(0.0, float(duration)), 6),
+        cpu_s=round(max(0.0, float(cpu)), 6),
+        rho="",
         passed=passed,
         skipped=bool(verdict.skipped),
         measured=_plain_number(verdict.measured),
@@ -1294,7 +1504,34 @@ def _finite(value: numbers.Real) -> bool:
         return False
 
 
-def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext) -> Verdict:
+class _Clock:
+    """Wall and CPU time since construction: ``(elapsed_s, cpu_s)``.
+
+    CPU is the ``os.times()`` delta of user + system time, the process's
+    children INCLUDED. The children are the point: omc, a mesher, a solver — the
+    expensive gates do their work in a subprocess, and the process's own CPU
+    time would call them free. (Children are counted once reaped, which every
+    ``subprocess.run`` does before it returns. Windows reports no children
+    times; there ``cpu_s`` is the process's own.)
+    """
+
+    __slots__ = ("wall", "cpu")
+
+    def __init__(self) -> None:
+        self.wall = time.perf_counter()
+        self.cpu = _cpu_now()
+
+    def spent(self) -> tuple[float, float]:
+        return time.perf_counter() - self.wall, _cpu_now() - self.cpu
+
+
+def _cpu_now() -> float:
+    t = os.times()
+    return t.user + t.system + t.children_user + t.children_system
+
+
+def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
+             trace: GateTrace | None = None) -> Verdict:
     """Run one gate and return a verdict that is honest about what happened.
 
     Four outcomes, and keeping them four instead of two is the whole job:
@@ -1311,8 +1548,26 @@ def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
     that a skip can resolve its claim to BLOCKED, a crash to FAIL, and neither
     can ever be mistaken for the gate having measured something.
 
+    **The gate never sees ``ctx`` itself** (rule 5 in the module docstring). In
+    order: availability, with no trace — a skip never calls ``fn`` and reads
+    nothing; then ``pack`` and ``key_scope`` stamped from the spec; then the
+    traced view — ``params`` a read-only ``ParamTrace``, ``ledger`` a
+    ``LedgerView`` without verdicts, ``extra`` the gate's own shallow copy,
+    ``model`` a ``ModelProxy`` (``None`` stays ``None``), ``memo`` shared and
+    ``trace`` set — and ``fn`` runs inside ``verdicts.tracing(trace)``, so the
+    files it opens are recorded too. ``trace=None`` makes a throwaway trace: the
+    view is read-only on every path, not only when someone is recording. This
+    function writes no file, consults no cache and enforces no admission; the
+    caller that keys a verdict by its trace (the sweep) does all of that.
+
+    The trace window closes BEFORE a crash's traceback is formatted: formatting
+    opens every frame's source through ``linecache``, and those reads are the
+    formatter's, not the gate's (packs:H2).
+
     Availability is checked BEFORE the clock starts, so a skipped gate reports
-    ~0s rather than the cost of discovering the tool is missing.
+    ~0s and 0 CPU rather than the cost of discovering the tool is missing.
+    ``duration_s`` is wall time; ``cpu_s`` is CPU time with the gate's child
+    processes included (see ``_Clock``).
 
     ``Exception`` is caught; ``KeyboardInterrupt`` is not — a Ctrl-C during a
     twenty-minute solver gate must stop the sweep, not be filed as a verdict and
@@ -1344,17 +1599,22 @@ def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
     # caller's own value is overwritten for the same reason — the running gate
     # defines its own namespace, and nobody else can.
     ctx = dataclasses.replace(ctx, pack=spec.pack, key_scope=scope_of(spec.id))
+    if trace is None:
+        trace = GateTrace()
+    view = traced_context(ctx, trace, readonly=True)
 
-    started = time.perf_counter()
+    clock = _Clock()
     try:
-        result = fn(ctx)
+        with tracing(trace):
+            result = fn(view)
     except (SystemExit, GeneratorExit) as exc:       # BaseException: see docstring.
         # Ordered BEFORE the Exception clause on purpose — neither of these is an
         # Exception subclass, so the clause below would never see them and they
         # would leave the sweep silently. KeyboardInterrupt is deliberately NOT
         # in this tuple: Ctrl-C must still stop a long run.
-        elapsed = time.perf_counter() - started
-        trace = traceback.format_exc()
+        elapsed, cpu = clock.spent()
+        stack = traceback.format_exc()               # the window is already closed
+        _replay_reads(ctx.params, trace)
         if isinstance(exc, SystemExit):
             what = (
                 f"gate called sys.exit({exc.code!r}); a gate must return a verdict, "
@@ -1366,25 +1626,62 @@ def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
                 "the process"
             )
         return _stamp(
-            Verdict(gate=spec.id, passed=False, error=what, detail=_trace_tail(trace)),
+            Verdict(gate=spec.id, passed=False, error=what, detail=_trace_tail(stack)),
             spec,
             elapsed,
+            cpu,
         )
     except Exception as exc:                         # noqa: BLE001 - deliberate: see docstring
-        elapsed = time.perf_counter() - started
-        trace = traceback.format_exc()
+        elapsed, cpu = clock.spent()
+        stack = traceback.format_exc()               # the window is already closed
+        _replay_reads(ctx.params, trace)
         return _stamp(
             Verdict(
                 gate=spec.id,
                 passed=False,
                 error=f"{type(exc).__name__}: {exc}",
-                detail=_trace_tail(trace),
+                detail=_trace_tail(stack),
             ),
             spec,
             elapsed,
+            cpu,
         )
-    elapsed = time.perf_counter() - started
-    return _stamp(_reject_non_finite(_normalise(result, spec), spec), spec, elapsed)
+    elapsed, cpu = clock.spent()
+    _replay_reads(ctx.params, trace)
+    return _stamp(_reject_non_finite(_normalise(result, spec), spec), spec, elapsed, cpu)
+
+
+def _replay_reads(source: Any, trace: GateTrace) -> None:
+    """Tell a caller's own recording mapping which keys the gate read.
+
+    ``atompipe check`` hands ``run_all`` its params wrapped in a dict subclass
+    that notes every key a gate asks for — that is where ``Param.gates``, "which
+    gates read this number", comes from, and ``atompipe why`` prints it. The gate
+    now reads a traced COPY, and a subclass never sees a copy being made: CPython
+    copies a dict subclass's storage without calling one of its methods. What
+    would have slipped through: every ``Param.gates`` empty after the first sweep,
+    and ``why`` telling the reader no gate would notice a parameter three gates
+    read. So the paths the trace recorded are replayed through the caller's own
+    ``get`` once the gate is done — the first two levels, which is all that
+    recorder ever followed. Nothing is replayed into a plain dict or a trace's own
+    view (a fixture's host copy records through its own link). Harmless once
+    ``Param.gates`` is fed from the recorded read sets instead (S-30), because
+    then nothing hands ``run_all`` a recorder at all.
+
+    A path is replayed whatever the gate went on to do: a gate that read a key and
+    then crashed or skipped still read it.
+    """
+    if type(source) is dict or not isinstance(source, dict) or isinstance(source, ParamTrace):
+        return
+    for path in list(trace.params):
+        if not path:
+            continue
+        try:
+            value = source.get(path[0])
+            if len(path) > 1 and isinstance(value, dict):
+                value.get(path[1])
+        except Exception:                            # noqa: BLE001 - a caller's mapping
+            continue
 
 
 # --------------------------------------------------------------------------- #
@@ -1451,6 +1748,9 @@ def run_all(
     max_tier: int = 0,
     only: str | Iterable[str] | None = None,
     on_verdict: Callable[[Verdict], None] | None = None,
+    before: Callable[[GateSpec, Callable[[GateContext], Any]], Verdict | None] | None = None,
+    after: Callable[[GateSpec, Callable[[GateContext], Any], Verdict, GateTrace], Any]
+    | None = None,
 ) -> list[Verdict]:
     """Run every selected gate in declaration order and return their verdicts.
 
@@ -1484,14 +1784,37 @@ def run_all(
     registry's private dict. The re-check stays as defence in depth: it costs one
     attribute read per gate, and a registry is not the only thing that can hold a
     spec.
+
+    **The hooks** are how a sweep that keys verdicts by what they read (the verdict
+    cache) sits on this loop without a second copy of its order, tier and
+    ``--only`` logic:
+
+    * ``before(spec, fn)`` is asked after the control re-check, for every gate
+      that passed it. A ``Verdict`` it returns IS that gate's verdict — a cached
+      one, or a skip or refusal the caller decided — and ``fn`` is never called;
+      ``None`` runs the gate. Anything else is the hook's bug and raises.
+    * ``after(spec, fn, verdict, trace)`` is called for every gate that ran here,
+      with the ``GateTrace`` of that run — a fresh one per gate, so no gate's
+      reads are filed under another's. A ``Verdict`` it returns replaces the one
+      it was handed (the same verdict with its ``rho`` set, say). It is not
+      called for a verdict ``before`` supplied or the control re-check refused:
+      nothing ran, so there is no trace. It runs before ``on_verdict``, which
+      streams the final verdict.
+
+    ``ctx.memo`` — the file memo behind :meth:`GateContext.load_file` — is one
+    fresh dict for the whole sweep when the caller brought none, shared by every
+    gate's view, and never left on the caller's context: a memo that outlived
+    its sweep would serve one sweep's bytes to the next.
     """
     selected = _selected(registry, max_tier, only)
     if int(ctx.tier) != int(max_tier):
         ctx = dataclasses.replace(ctx, tier=int(max_tier))
+    if ctx.memo is None:
+        ctx = dataclasses.replace(ctx, memo={})
     if ctx.out_dir:
         ensure_dir(ctx.out_dir)      # once, up front: gates cite files in it
 
-    verdicts: list[Verdict] = []
+    out: list[Verdict] = []
     for spec in selected:
         entry = registry.get(spec.id)
         if entry is None:            # concurrent unregister; nothing else can do this
@@ -1512,11 +1835,21 @@ def run_all(
                 0.0,
             )
         else:
-            verdict = run_gate(live, fn, ctx)
-        verdicts.append(verdict)
+            verdict = before(live, fn) if before is not None else None
+            if verdict is not None and not isinstance(verdict, Verdict):
+                raise TypeError(f"run_all's before() returned a {type(verdict).__name__} "
+                                f"for {live.id!r}; it returns a Verdict or None")
+            if verdict is None:
+                trace = GateTrace()
+                verdict = run_gate(live, fn, ctx, trace=trace)
+                if after is not None:
+                    replaced = after(live, fn, verdict, trace)
+                    if isinstance(replaced, Verdict):
+                        verdict = replaced
+        out.append(verdict)
         if on_verdict is not None:
             on_verdict(verdict)
-    return verdicts
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -1532,46 +1865,47 @@ def _looks_like_path(ref: str) -> bool:
     return ref.endswith(".py") or "/" in ref or os.sep in ref
 
 
-def _load_py_file(path: str) -> Any:
+def _load_py_file(path: str, root: str = "") -> Any:
     """Import a standalone .py file as a private module and return it.
 
     The module name is salted with a hash of the absolute path so two packs can
     each ship ``selftest/known_bad.py`` without the second one silently getting
     the first one's already-cached module — a collision that would make a gate
     selftest itself against somebody else's fixture and still look green.
+
+    Through ``modelio.load_source_module``, like every other piece of code a
+    verdict depends on: the bytes on disk are the bytes that run, and the module
+    is served from ``sys.modules`` only while every file it ran still hashes the
+    same. What slipped through before: this cached by path alone, forever, so a
+    fixture edited in-process — a test that turns a control into a no-op to prove
+    admission notices — re-ran the OLD fixture under the new one's name (S-26).
+    ``root`` (the project or pack directory the fixture resolved against) is the
+    closure's root when the file lies under it, so the fixture's own imports from
+    the project — the bracket's fixtures ``import bracket`` from ``model/`` — are
+    recorded with it.
     """
     absolute = os.path.abspath(path)
     module_name = f"_atompipe_fixture_{short_hash(absolute, 10)}"
-    cached = sys.modules.get(module_name)
-    if cached is not None:
-        return cached
-
-    spec = importlib.util.spec_from_file_location(module_name, absolute)
-    if spec is None or spec.loader is None:
-        raise AtompipeError(f"cannot load fixture {path}: not an importable Python file")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module            # before exec: dataclasses need it
+    base = os.path.abspath(root) if root else ""
+    roots = [base] if base and (absolute == base or absolute.startswith(base + os.sep)) else []
     try:
-        spec.loader.exec_module(module)
+        return modelio.load_source_module(absolute, name=module_name, roots=roots)
     except SystemExit as exc:
         # Not an Exception, so the clause below cannot see it. A fixture module
         # that exits at import — a dependency's "tool not installed" guard, say —
         # would otherwise take the whole `gate selftest` run down with whatever
         # exit code it chose, including 0. "Every control passed" and "the process
         # died during the first control" must never render the same.
-        sys.modules.pop(module_name, None)
         raise AtompipeError(
             f"fixture {path} called sys.exit({exc.code!r}) while importing — a fixture "
             f"builds known-bad input, it does not exit the process; the gate it guards "
             f"is unproven until it stops"
         ) from exc
     except Exception as exc:                     # noqa: BLE001 - user's fixture code
-        sys.modules.pop(module_name, None)
         raise AtompipeError(
             f"fixture {path} failed to import ({type(exc).__name__}: {exc}) — the "
             f"known-bad input is broken, so the gate it guards is unproven"
         ) from exc
-    return module
 
 
 def load_fixture(ref: str, root: str) -> Any:
@@ -1614,7 +1948,7 @@ def load_fixture(ref: str, root: str) -> Any:
                 f"(looked in {os.path.abspath(path)}). The gate cannot be proven able "
                 f"to fail until it does."
             )
-        module = _load_py_file(path)
+        module = _load_py_file(path, root or os.curdir)
         wanted = func_name or "make"
         source = target
     else:
@@ -1685,7 +2019,104 @@ def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | Non
     return ctx.root or os.curdir
 
 
-def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext) -> Verdict:
+def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
+                   trace: GateTrace, out_dir: str | None
+                   ) -> tuple[GateContext | None, dict[str, str] | None]:
+    """Run ``spec``'s fixture: ``(the known-bad context, None)``, or ``(None,
+    {"error", "detail"})`` saying why the control is unusable.
+
+    The fixture receives a WRITABLE traced copy of ``ctx`` — its ``out_dir``
+    replaced when one is given — never ``ctx`` itself. What would slip through
+    otherwise: once a sweep runs controls (admission), the context a fixture is
+    handed is the one every later gate reads, and a fixture that assigned
+    ``ctx.params["span_mm"] = 99`` on it would have handed the next gate the
+    known-bad span (core:§5.10). Every read through that copy — the fixture's,
+    or the gate's on a context the fixture returned unchanged — is recorded in
+    ``trace.host_reads`` (what a SEALED fixture never makes), and ``make`` runs
+    inside ``tracing(trace)`` so the files it opens are on the trace too. Loading
+    the fixture module is not in the window: code is the closure's business, and
+    ``trace.fixture_code`` records the closure of the module ``make`` came from
+    (``None`` for a ``module:function`` fixture the stock import system loaded).
+
+    A fixture that builds its own context keeps it as built: cad-solid's fixtures
+    assign params on contexts they made from the pack baseline (packs:H15), and
+    those are theirs to edit. A dict is merged into the copy's ``extra``.
+    """
+    nc = spec.negative_control
+    host = traced_context(dataclasses.replace(ctx, out_dir=out_dir) if out_dir else ctx,
+                          trace, readonly=False)
+    try:
+        make = load_fixture(nc.fixture, _fixture_root(spec, ctx, fn))
+        trace.fixture_code = modelio.code_closure(make)
+        with tracing(trace):
+            built = make(host)
+    except AtompipeError as exc:
+        return None, {"error": "negative control unusable", "detail": str(exc)}
+    except (SystemExit, GeneratorExit) as exc:
+        # Same hole as run_gate's: neither is an Exception, so the clause below
+        # would miss them and a fixture that exits would abort `gate selftest`
+        # mid-run with nothing printed and nothing recorded. The honest reading of
+        # a control that exits the process is that the control is unusable.
+        code = exc.code if isinstance(exc, SystemExit) else None
+        return None, {
+            "error": f"fixture called sys.exit({code!r})" if isinstance(exc, SystemExit)
+                     else "fixture raised GeneratorExit",
+            "detail": f"{nc.fixture} must build known-bad input and return it, not exit "
+                      f"the process — the control is unusable, so {spec.id} is unproven",
+        }
+    except Exception as exc:                     # noqa: BLE001 - user's fixture code
+        # Formatted after the window closed: the traceback's source reads are
+        # the formatter's, not the fixture's.
+        return None, {"error": f"fixture raised {type(exc).__name__}: {exc}",
+                      "detail": _trace_tail(traceback.format_exc())}
+
+    if isinstance(built, GateContext):
+        return built, None
+    if isinstance(built, dict):
+        return host.with_extra(built), None
+    if built is None:
+        return None, {
+            "error": "fixture returned None",
+            "detail": f"{nc.fixture} must return a GateContext or a dict to merge into "
+                      f"ctx.extra; returning nothing means the gate ran against the GOOD "
+                      f"input and any result is meaningless",
+        }
+    return None, {"error": f"fixture returned {type(built).__name__}",
+                  "detail": f"{nc.fixture} must return a GateContext or a dict for ctx.extra"}
+
+
+def run_fixture(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
+                trace: GateTrace | None, out_dir: str | None) -> GateContext:
+    """Build ``spec``'s known-bad context, traced — and do NOT run the gate on it.
+
+    The fixture half of :func:`selftest`, on the same terms: a writable traced
+    copy of ``ctx`` (``out_dir`` replaced), ``make`` inside ``tracing(trace)``,
+    ``trace.fixture_code`` set. It exists for re-verifying a control whose
+    fixture's code moved but whose output may not have: compare what the fixture
+    built with what the recorded control read, and when they match, the gate —
+    possibly a twenty-minute solver — need not run again to know it would fire
+    again. So it must never call ``fn``, and a test holds it to that.
+
+    Raises ``AtompipeError`` when the control is unusable (no negative control, a
+    missing or broken fixture, a fixture that exited, raised, or returned
+    something other than a context or a dict), naming why — the caller then runs
+    the whole control and learns the rest. Availability is the caller's: a
+    fixture may itself need the tooling its gate declares.
+    """
+    nc = spec.negative_control
+    if nc is None or not (nc.fixture or "").strip():
+        raise AtompipeError(
+            f"{spec.id} declares no negative control, so there is no fixture to run")
+    if trace is None:
+        trace = GateTrace(kind="control")
+    bad_ctx, problem = _build_control(spec, fn, ctx, trace=trace, out_dir=out_dir)
+    if problem is not None:
+        raise AtompipeError(f"{spec.id}: {problem['error']} — {problem['detail']}")
+    return bad_ctx
+
+
+def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
+             trace: GateTrace | None = None, out_dir: str | None = None) -> Verdict:
     """Run the gate against its own known-bad input. The verdict is on the GATE.
 
     ``passed=True`` here means *the gate correctly failed on input that is known
@@ -1724,6 +2155,15 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
     gate's ``skip_reason`` text to tell a tooling skip from any other — it lets
     the gate decide its own skip is about tooling. A gate that genuinely needs one
     of several back-ends declares ``requires_one_of`` and lets availability say.
+
+    **Traced, on a copy** (see ``_build_control``): the fixture gets a writable
+    traced copy of ``ctx`` with ``out_dir`` replaced when one is given — a
+    control must not write over the evidence a real verdict cited (packs:H5) —
+    and the gate then runs on what the fixture built, through :func:`run_gate`
+    with the SAME ``trace``: one record of everything the control read, the
+    fixture's files and host reads and the gate's params alike. ``trace=None``
+    makes a throwaway one (``kind="control"``). ``duration_s`` and ``cpu_s``
+    cover the fixture and the gate together.
     """
     selftest_id = f"{spec.id}#selftest"
     tier = Tier(int(spec.tier))
@@ -1760,60 +2200,21 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
             skip_reason=f"{reason} — the gate could not be exercised, so its control is unproven",
         )
 
-    started = time.perf_counter()
-    try:
-        make = load_fixture(nc.fixture, _fixture_root(spec, ctx, fn))
-        built = make(ctx)
-    except AtompipeError as exc:
-        return verdict(
-            passed=False, error="negative control unusable",
-            detail=str(exc), duration_s=round(time.perf_counter() - started, 6),
-        )
-    except (SystemExit, GeneratorExit) as exc:
-        # Same hole as run_gate's: neither is an Exception, so the clause below
-        # would miss them and a fixture that exits would abort `gate selftest`
-        # mid-run with nothing printed and nothing recorded. The honest reading of
-        # a control that exits the process is that the control is unusable.
-        code = exc.code if isinstance(exc, SystemExit) else None
-        return verdict(
-            passed=False,
-            error=f"fixture called sys.exit({code!r})" if isinstance(exc, SystemExit)
-                  else "fixture raised GeneratorExit",
-            detail=f"{nc.fixture} must build known-bad input and return it, not exit the "
-                   f"process — the control is unusable, so {spec.id} is unproven",
-            duration_s=round(time.perf_counter() - started, 6),
-        )
-    except Exception as exc:                     # noqa: BLE001 - user's fixture code
-        return verdict(
-            passed=False, error=f"fixture raised {type(exc).__name__}: {exc}",
-            detail=_trace_tail(traceback.format_exc()),
-            duration_s=round(time.perf_counter() - started, 6),
-        )
+    if trace is None:
+        trace = GateTrace(kind="control")
+    clock = _Clock()
+    bad_ctx, problem = _build_control(spec, fn, ctx, trace=trace, out_dir=out_dir)
+    if problem is not None:
+        elapsed, cpu = clock.spent()
+        return verdict(passed=False, duration_s=round(elapsed, 6), cpu_s=round(cpu, 6),
+                       **problem)
 
-    if isinstance(built, GateContext):
-        bad_ctx = built
-    elif isinstance(built, dict):
-        bad_ctx = ctx.with_extra(built)
-    elif built is None:
-        return verdict(
-            passed=False, error="fixture returned None",
-            detail=f"{nc.fixture} must return a GateContext or a dict to merge into "
-                   f"ctx.extra; returning nothing means the gate ran against the GOOD "
-                   f"input and any result is meaningless",
-            duration_s=round(time.perf_counter() - started, 6),
-        )
-    else:
-        return verdict(
-            passed=False, error=f"fixture returned {type(built).__name__}",
-            detail=f"{nc.fixture} must return a GateContext or a dict for ctx.extra",
-            duration_s=round(time.perf_counter() - started, 6),
-        )
-
-    inner = run_gate(spec, fn, bad_ctx)
-    elapsed = round(time.perf_counter() - started, 6)
+    inner = run_gate(spec, fn, bad_ctx, trace=trace)
+    elapsed, cpu = clock.spent()
     shared = {
         "measured": inner.measured, "limit": inner.limit, "units": inner.units,
-        "evidence": list(inner.evidence or []), "duration_s": elapsed,
+        "evidence": list(inner.evidence or []), "duration_s": round(elapsed, 6),
+        "cpu_s": round(cpu, 6),
     }
     where = f"{nc.fixture}" + (f" ({nc.note})" if nc.note else "")
     outcome = inner.outcome
@@ -1881,6 +2282,89 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext)
                + (f": {inner.detail}" if inner.detail else ""),
         **shared,
     )
+
+
+# --------------------------------------------------------------------------- #
+# a project's own gates
+# --------------------------------------------------------------------------- #
+def load_project_gates(root: str, registry: Registry) -> list[str]:
+    """Import ``<root>/gates/*.py`` into ``registry``; return the ids they register.
+
+    The project's own gates, loaded the way a pack's are and for the same
+    reasons — the pack directory's equivalent is the project root, so a gate can
+    ``import selftest.bad_configs`` or share a ``_geom.py`` helper with the model.
+    It lived in the CLI until the verdict cache needed the code a verdict came
+    from; it lives here now, beside the registry it fills, so there is one copy.
+
+    What it shares with ``packs.load_gates``, deliberately, because a gate must
+    behave identically in a project and after it is extracted into a pack:
+
+    * ``root`` goes on ``sys.path[0]`` and comes off in a ``finally``; a leaked
+      entry makes the *next* import resolve against this project.
+    * Module names are salted with a hash of the file's absolute path, so two
+      projects in one process cannot share a ``gates/structural.py``.
+    * Every module goes through ``modelio.load_source_module`` with
+      ``roots=[root]``: the bytes on disk are the bytes that run, and the module's
+      code closure is recorded. What slipped through before: a module already in
+      ``sys.modules`` was skipped outright, and a stale ``__pycache__`` validated
+      by mtime and size served the old bytecode — edit ``7.0`` to ``8.0`` inside
+      the same second and the verdict came from 7.0 (S-26). A module served from
+      the cache re-adopts the gates it registered into THIS registry, so a fresh
+      ``Registry`` per command is never handed back empty.
+    * ``PACK_DIR`` is NOT set, so ``_fixture_root`` falls through to ``ctx.root``
+      and ``selftest/bad_configs.py`` resolves beside the model, where it lives.
+    * ``KeyboardInterrupt`` passes through untouched, as it does for a pack: the
+      CLI copy caught it with everything else and reported a Ctrl-C as the
+      user's gate module failing to import.
+
+    Files starting with ``_`` are skipped (helpers, not gates). Any other failure
+    becomes an ``AtompipeError`` naming the file: a gate module that will not
+    import is a user's Python problem, and a spine traceback reads as a spine bug.
+
+    Returns the ids each module registered, in load order — including gates
+    re-adopted from a cached module, which a before/after diff of the registry
+    would miss when the registry already held them.
+    """
+    directory = os.path.join(root, _PROJECT_GATES_DIR)
+    if not os.path.isdir(directory):
+        return []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        raise AtompipeError(f"cannot read {rel(directory, root)}: {exc}") from exc
+    files = [os.path.join(directory, n) for n in names
+             if n.endswith(".py") and not n.startswith("_")]
+    if not files:
+        return []
+
+    ids: list[str] = []
+    sys.path.insert(0, root)
+    try:
+        with use_registry(registry):
+            for path in files:
+                stem = os.path.splitext(os.path.basename(path))[0]
+                module_name = f"atompipe_project_{stem}_{short_hash(os.path.abspath(path), 8)}"
+                try:
+                    module = modelio.load_source_module(path, name=module_name, roots=[root],
+                                                        registry=registry)
+                except AtompipeError as exc:
+                    # A registry refusal (no negative control) is already phrased
+                    # for a human. Keep the phrasing, add the location.
+                    raise AtompipeError(f"{rel(path, root)}: {exc}") from exc
+                except KeyboardInterrupt:
+                    raise
+                except BaseException as exc:
+                    raise AtompipeError(
+                        f"{rel(path, root)} failed to import: {type(exc).__name__}: {exc}"
+                    ) from exc
+                recorded = vars(module).get("__atompipe_gates__") or ()
+                ids.extend(spec.id for spec, _fn in recorded)
+    finally:
+        try:
+            sys.path.remove(root)
+        except ValueError:            # pragma: no cover - a gate mangled sys.path
+            pass
+    return ids
 
 
 # --------------------------------------------------------------------------- #
