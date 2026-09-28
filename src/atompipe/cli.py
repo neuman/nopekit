@@ -1324,7 +1324,10 @@ def cmd_check(args: argparse.Namespace) -> int:
 
     * `--force` re-runs every selected gate AND its control, cache or no cache
       (R-9): the inner loop may trust the committed cache, a money boundary
-      re-proves it, and CI runs the bracket this way.
+      re-proves it, and CI runs the bracket this way. A forced run's row is what
+      the records resolve to with its entry filed: at tier 0 it re-proves the
+      cheap path, and never lays that PASS over a costlier tier's FAIL at the
+      same inputs (`verdicts._outranked`).
     * `--no-record` is a dry sweep: nothing under `.atompipe/` but gate scratch in
       `out/` — no cache or control entry, no obs, no remembered outcome, no
       `last_check.json`, no index, and a legacy ledger migrates in memory only

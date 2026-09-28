@@ -6801,6 +6801,77 @@ def _filtered(only: Any) -> bool:
     return any(p.strip() for p in patterns)
 
 
+def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, entry: Entry,
+               verdict: Verdict, judged: Admission) -> SweepRow | None:
+    """The row a measured run leaves when the records, with its ``entry`` filed,
+    resolve to another answer — or ``None`` when the run's own is the answer.
+
+    The gate is re-judged at the sweep's tier over its entries on disk plus
+    ``entry`` (in memory under ``--no-record``, where nothing reaches the disk):
+    ``_judge``'s rule, so ``_most_thorough`` decides between tiers exactly as it
+    does when this sweep serves the cache and when ``resolve`` answers every
+    reader. Asked only after a run over a current answer (a Fresh entry, or two
+    outcomes) — ``--force``, or a crash that superseded it; any other run makes
+    the only current entry, and a clash at its own rho is ``_contradicted``'s.
+
+    Then: a Fresh entry at other inputs with another outcome is served as step 3
+    serves one, under its own tier's admission (records alone above this
+    sweep's tier, as step 2 judges a costlier entry — Q1.6), costed with this
+    run's time; two outcomes are ``resolve``'s error. A note says why the run's
+    own answer is not the row.
+
+    What slipped through (review, ``check --force``): the forced run re-ran a
+    gate that reads ``ctx.tier`` on its tier-0 path, got a PASS at the tier-0
+    rho, and ``_swept`` laid that row over the tier-2 FAIL every reader served —
+    ``check --force --junit``, CI's invocation, exited 0 with a green report and
+    ``last_check.json`` saying pass, while ``status``, ``report`` and the site
+    showed the claim FAIL. *Rejected:* keeping the resolver's verdict in
+    ``_swept`` whenever it serves a higher-tier entry — the JUnit testcases and
+    the ``--json`` rows are the sweep's rows, not the resolution, and would still
+    have shown the PASS; and skipping the cheap-path run under ``--force`` — R-9
+    re-proves every selected gate, and its entry is what the gate said.
+    """
+    gid = spec.id
+    found = [e for e in _gate_entries(s.root, gid, []) if e.name != entry.name] + [entry]
+    obs = _obs_names(s.root, [gid])
+    times = _commit_times(s.root, found if len(found) > 1 else [],
+                          lambda e: (e.gate, e.name) in obs)
+    after = _judge(spec, code, found, s.now, _entry_order(s.root, gid, times))
+    cost = {"duration_s": verdict.duration_s, "cpu_s": verdict.cpu_s}
+    ran = f"{gid}: ran at tier {s.now.tier} ({verdict.outcome.upper()})"
+    if isinstance(after, Stale) and after.conflict and TWO_OUTCOMES_IS_ERROR:
+        s.notes.append(f"{ran}; the entries at these inputs are {after.reasons[0]}")
+        refused = dataclasses.replace(_synthesized(spec, error=after.reasons[0],
+                                                   rho=after.rho), **cost)
+        return SweepRow(refused, executed=True, rho=after.rho, admission=judged)
+    if not isinstance(after, Fresh) or after.entry.rho == entry.rho \
+            or out8(after.entry.verdict) == out8(entry.verdict):
+        return None
+    served = after.entry
+    tier = _read_tier(served.reads)
+    # The served tier's admission, carrying what this sweep's own control run
+    # did: the counts say a forced control executed, whichever tier it decided.
+    admitted = judged if tier is None or tier == s.now.tier else dataclasses.replace(
+        _admit(s, spec, fn, run_ctx, may_run=False, force=False, at=tier),
+        executed=judged.executed, reverified=judged.reverified)
+    shown = _as_spec(served.to_verdict(), spec)
+    s.notes.append(f"{ran}; the tier-{tier} entry {served.name} at these inputs is the "
+                   f"more thorough answer, and it stands ({shown.outcome.upper()})"
+                   if tier is not None and tier != s.now.tier else
+                   f"{ran}; the entry {served.name} at these inputs is the answer the "
+                   f"records resolve to, and it stands ({shown.outcome.upper()})")
+    if admitted.state == "undemonstrated":
+        return SweepRow(dataclasses.replace(
+            _synthesized(spec, skipped=True, skip_reason=admitted.reason), **cost),
+            executed=True, admission=admitted)
+    if admitted.state == "not-admitted":
+        refused = _synthesized(spec, error=f"not admitted: {admitted.reason}", rho=served.rho)
+        return SweepRow(dataclasses.replace(refused, **cost), executed=True, rho=served.rho,
+                        admission=admitted)
+    return SweepRow(dataclasses.replace(shown, **cost), executed=True, fresh=True,
+                    rho=served.rho, admission=admitted)
+
+
 def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
                force: bool) -> SweepRow:
     """§3.11 for one selected gate: availability, admission, the cache, the run."""
@@ -6886,6 +6957,14 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         refused = dataclasses.replace(_synthesized(spec, error=clash, rho=keyed.rho),
                                       duration_s=verdict.duration_s, cpu_s=verdict.cpu_s)
         return SweepRow(refused, executed=True, rho=keyed.rho, admission=judged)
+    # 5. a run over a current answer — `--force`, or a crash that superseded it —
+    # is one entry beside that answer, not the answer: the row is what the
+    # records resolve to with it filed (`_outranked`).
+    if measured and (isinstance(state, Fresh)
+                     or (isinstance(state, Stale) and state.conflict)):
+        outranked = _outranked(s, spec, fn, run_ctx, keyed.code, entry, verdict, judged)
+        if outranked is not None:
+            return outranked
     return SweepRow(verdict, executed=True, fresh=measured, rho=keyed.rho, admission=judged)
 
 
@@ -6922,6 +7001,10 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
        forced re-run of a conflict, or a run that just made one — is filed and
        its row is that same error (``_contradicted``), recorded or not; an
        entry with an opaque channel never is, as ``_judge`` never matches one.
+    5. A run over a **current answer** — ``force``, or a crash that superseded
+       it — is re-judged with its entry filed (``_outranked``): where the
+       records resolve to another outcome (a costlier tier's Fresh entry, two
+       outcomes), that is the row, and a note says so.
 
     The gate runs INSIDE ``before`` rather than in ``run_all``'s own loop: that
     loop's trace carries no anchors, and a path-valued param digested without

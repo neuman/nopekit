@@ -98,6 +98,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from typing import Any
 from unittest import mock
 
@@ -2160,6 +2161,109 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertEqual((again["outcome"], again["cached"]), ("fail", True),
                          "a tier-0 check served its cheap PASS over the costlier path's "
                          f"FAIL at the same inputs: {again}")
+
+    def test_cli_a_forced_cheap_run_never_lays_its_pass_over_the_costlier_fail(self):
+        """V: the review's repro (``check --force``, CI's invocation — tier 0,
+        ``--junit``). The costlier path FAILs the design at tier 2 and every
+        reader serves that FAIL, a plain tier-0 ``check`` included
+        (``_most_thorough``). ``--force`` re-ran the gate on its cheap path, got a
+        PASS at the tier-0 rho, and ``_swept`` laid that row over the resolver's
+        FAIL: exit 0, a green JUnit and ``last_check.json`` saying pass, while
+        ``status``, ``report`` and the site showed C8 FAIL. A forced run re-proves
+        its own path; it does not outrank a more thorough answer at the same
+        inputs. The row is what the records resolve to once the run is filed,
+        with ``--no-record`` too, where nothing reaches the records at all.
+
+        The exit code is the signal CI reads, so the copy is otherwise ready: the
+        bracket at 8 mm (C1 passes) without C7 (no gate covers it), and the
+        costlier path's allowable at 0.3 mm, below the 8 mm bracket's ~0.47."""
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True,
+                                         thickness=8.0)
+        os.remove(os.path.join(project, "claims", "C7.json"))
+        tighter = "ALLOWABLE_MM = (5.0, 5.0, 0.3, 0.3)"
+        self.assertEqual(_TIERED_GATE.count("ALLOWABLE_MM = (5.0, 5.0, 0.5, 0.5)"), 1)
+        _put(project, "selftest/planted.py", _PLANTED_FIXTURES)
+        _put(project, "gates/tiered.py",
+             _TIERED_GATE.replace("ALLOWABLE_MM = (5.0, 5.0, 0.5, 0.5)", tighter))
+        _put(project, "claims/C8.json", json.dumps(
+            {"statement": "Tip sags within the allowable of the path that judged it",
+             "kind": "measurable",
+             "acceptance": {"quantity": "tip deflection", "comparator": "<=",
+                            "limit": 5.0, "units": "mm"},
+             "tags": ["tiered"]}) + "\n")
+        gate_id = "tiered.path"
+        junit = os.path.join(project, ".atompipe", "out", "junit.xml")
+
+        # dry, so no tier-0 entry is on disk when the dry forced run below asks
+        cheap = _cli(project, "check", "--no-record", "--json")
+        self.assertEqual(cheap.returncode, 0,
+                         f"the positive control: the cheap path passes the ready copy "
+                         f"{cheap.stdout}")
+        self.assertEqual(_rows(_doc(cheap))[gate_id]["outcome"], "pass")
+        costly = _cli(project, "check", "--tier", "2", "--json")
+        self.assertEqual(costly.returncode, 1, "the positive control: tier 2 refutes it")
+        self.assertEqual(_rows(_doc(costly))[gate_id]["outcome"], "fail")
+        plain = _cli(project, "check", "--json")
+        self.assertEqual(plain.returncode, 1,
+                         "the positive control: a plain tier-0 check serves the costlier FAIL")
+        self.assertEqual((_rows(_doc(plain))[gate_id]["outcome"],
+                          _rows(_doc(plain))[gate_id]["cached"]), ("fail", True))
+        seen, proven = _seen(project)
+        self.assertEqual(seen["C8"], "fail", "the positive control")
+        self.assertNotIn("C8", proven)
+
+        def tiers() -> dict:
+            """``{tier read: passed}`` of the gate's entries on disk."""
+            found = {}
+            for rel in _split(_cache(project))[0]:
+                if rel.split("/")[0] == gate_id:
+                    with open(os.path.join(project, ".atompipe", "verdicts", *rel.split("/")),
+                              encoding="utf-8") as fh:
+                        doc = json.load(fh)
+                    found[doc["reads"].get("tier")] = doc["verdict"]["passed"]
+            return found
+
+        # First dry: the run's entry is in memory only, and still decides nothing.
+        dry = _cli(project, "check", "--force", "--no-record", "--json")
+        self.assertEqual(dry.returncode, 1, f"--force --no-record: {dry.stdout}")
+        self.assertEqual((_rows(_doc(dry))[gate_id]["outcome"],
+                          _rows(_doc(dry))[gate_id]["cached"]), ("fail", False))
+        self.assertEqual(tiers(), {2: False}, "a dry sweep filed an entry")
+
+        forced = _cli(project, "check", "--force", "--junit")
+        self.assertEqual(forced.returncode, 1,
+                         "check --force at tier 0 exited 0 over the costlier path's FAIL "
+                         f"that status shows:\n{forced.stdout}\n{forced.stderr}")
+        root = ET.parse(junit).getroot()
+        red = [case.get("name") for case in root.iter("testcase")
+               if case.find("failure") is not None or case.find("error") is not None]
+        self.assertIn(gate_id, red, "the JUnit report shows the cheap PASS as green")
+        exit_codes = [p.get("value") for p in root.iter("property")
+                      if p.get("name") == "exit_code"]
+        self.assertEqual(exit_codes, ["1"], exit_codes)
+        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+                  encoding="utf-8") as fh:
+            last = json.load(fh)
+        self.assertEqual(last["statuses"]["C8"], "fail",
+                         "last_check.json says pass for a claim status FAILs")
+        seen, proven = _seen(project)
+        self.assertEqual(seen["C8"], "fail")
+        self.assertNotIn("C8", proven)
+
+        # The forced run did run, on the cheap path, and filed what it said: the
+        # fix is not "stop running". Both tiers' entries are on disk.
+        self.assertEqual(tiers(), {0: True, 2: False})
+
+        again = _doc(_cli(project, "check", "--force", "--json"))
+        row_ = _rows(again)[gate_id]
+        self.assertFalse(row_["cached"], f"--force served the cache instead of running: {row_}")
+        self.assertEqual((row_["outcome"], row_["limit"]), ("fail", 0.3),
+                         f"the forced row is not what the records resolve to: {row_}")
+        self.assertFalse(again["ready"])
+        self.assertTrue(any(note.startswith(f"{gate_id}: ran at tier 0 (PASS)")
+                            and "tier-2 entry" in note and note.endswith("(FAIL)")
+                            for note in again["notes"]),
+                        f"nothing says why the run's own PASS is not the row: {again['notes']}")
 
     def test_cli_a_pass_at_other_inputs_never_clears_a_crash_here(self):
         """V: the review's repro (remembered outcomes, round 1), through the CLI a

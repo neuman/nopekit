@@ -1537,7 +1537,15 @@ rho computed before the run; every run appends obs. A pass or
 fail landing where the other outcome is recorded at its rho under the same instruments
 (`--force` over a conflict, or a run that just made one) is filed, and its row is that
 same error (`_contradicted`, asked of the writer's `_siblings`), recorded or not — an
-entry with an opaque channel excepted, which `_judge` never matches either. The
+entry with an opaque channel excepted, which `_judge` never matches either. 5. A run
+over a current answer — `--force`, or a crash that superseded it — is one entry beside
+that answer: the gate is re-judged at the sweep's tier with the run's entry filed (in
+memory under `record=False`), and where the records resolve to another outcome — a
+Fresh entry of a costlier tier (`_most_thorough`), or two outcomes — that is the row,
+under its own tier's admission and with a `note:` saying so (`_outranked`). What
+slipped through: `check --force --junit`, CI's invocation at tier 0, re-ran a gate that
+reads `ctx.tier` on its cheap path and laid that PASS over the tier-2 FAIL every reader
+served — exit 0, a green JUnit, `last_check.json` saying pass. The
 gate runs INSIDE `before`, not in `run_all`'s own loop: that loop's trace carries no
 anchors, and a path-valued param digested without them (fdm's absolute mesh paths,
 packs:H6) differs per checkout — never Fresh anywhere, rewritten per clone. A row is
@@ -2443,7 +2451,9 @@ S-05: nothing here ever ran a control, so a logger with a declared one produced 
 rows), then the cache, then the run. The clock is stamped once per command (`now`):
 obs, remembered outcomes, `last_check.json` and the JUnit report carry one instant.
 - `--force` re-runs every selected gate AND its control (R-9); CI runs the bracket
-  with it.
+  with it. A forced run re-proves its own path and files what it said; it does not
+  outrank a more thorough answer at the same inputs — the row is what the records
+  resolve to (`sweep`'s step 5).
 - `--no-record` is a dry sweep: nothing under `.atompipe/` but gate scratch in
   `out/` — no cache or control entry, obs, remembered outcome, `controls.json`,
   `digests.json`, `last_check.json` or index, and a legacy ledger migrates in memory
