@@ -267,7 +267,7 @@ class GateContext:                     # a gate's one argument — a traced view
     log: Callable[[str], None]         # one-line progress sink
     extra: dict                        # where a dict-returning fixture lands; THIS gate's own copy
     pack: str; key_scope: str          # stamped by run_gate: whose namespace param() reads
-    memo: dict | None                  # the sweep's file memo behind load_file; None outside a sweep
+    memo: SweepMemo | None             # the sweep's file memo: load_file's alone; None outside a sweep
     trace: GateTrace | None            # what this view records into; yours to leave alone
     def scopes(self) -> list[str]      # ["fdm", "fdm-print"]: this gate's scopes, best first
     def param(self, name, default=None, *, scope=...) -> Any   # scoped first: see below
@@ -301,6 +301,16 @@ by exactly those reads (`rho`). So:
   for the next. fdm-print once kept a cross-gate mesh cache on it, and the second gate
   to want the part got a cache hit that opened nothing — so nothing recorded that its
   verdict depended on the file.
+- **`ctx.memo` is `load_file`'s, and nobody else's.** It is one per sweep and every
+  gate holds it, so it is a `SweepMemo`: a handle `load_file` opens and nothing else
+  can. `ctx.memo.get(k)`, `ctx.memo[k]`, `ctx.memo[k] = v`, `k in ctx.memo`,
+  iterating it, `dict(ctx.memo)` — each raises `GateMemoError`, and the gate reads
+  as an error. `ctx.memo is None` is the one question to ask of it (outside a sweep
+  there is none). What slipped through while it was the plain dict: two gates shared
+  a parsed table through `ctx.memo["materials"]`; the second opened nothing, its
+  verdict keyed no file, and an edit to the table re-ran the first gate alone while
+  the second kept its PASS — the `ctx.extra` hole, one field over. A fixture's
+  context holds the same handle, so a fixture that fills it is an unusable control.
 - **`ctx.load_file(path, loader=None)`** is how several gates share one file. `path`
   resolves against `ctx.root`; `loader` (a module-level function such as
   `trimesh.load_mesh`, not a lambda made in the gate body, which never hits) defaults
@@ -311,7 +321,9 @@ by exactly those reads (`rho`). So:
   `fdm.bridge_span` stayed Fresh after the buffers under its `.gltf` moved.) An edit
   to any of those between two gates of one sweep loads it again. A hit is the same
   object for every caller: copy it before you change it. Outside a sweep
-  (`ctx.memo is None`, a hand-run script) it simply loads.
+  (`ctx.memo is None`, a hand-run script) it simply loads. It is the only way to
+  cache anything across gates: a parsed table is a `loader` (a module-level
+  function), never a value left in `ctx.memo`.
 - **A module-level memo is emptied before every run.** A `functools.lru_cache` or
   `functools.cache` in your gate module or a helper it loads — a global, or a cached
   method of a class the module defines — is cleared before each gate, fixture and

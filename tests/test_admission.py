@@ -65,7 +65,10 @@ library and the CLI never asked. On the bracket and on wrapped pack baselines
   it builds equal to its sealed entry's — is not vouched for by the fixture
   alone: the control runs and keys what it read, so a later live edit that
   defuses it is not admitted; nor is a fixture that swaps `ctx.model` or
-  `ctx.memo`, or fills the memo it was handed (admission review, round 2, `r3`);
+  `ctx.memo` (admission review, round 2, `r3`); a memo of the fixture's own
+  still sends the control to a full run, though a gate can no longer see what
+  it holds, and a fixture that fills the memo it was handed is refused as an
+  unusable control (review, `ffr3/p2`: only `load_file` opens a memo now);
 * a Config default edit re-verifies all six controls by their fixtures alone
   (nothing executed, nothing new on disk), while a `build()` edit that moves a
   value a control fed its gate writes a new control entry for exactly the gates
@@ -740,11 +743,13 @@ def long(ctx):
 '''
 
 #: The same repro's other door: two context fields no control entry keys. A
-#: gate that branches on whether a model came with its context (``is None``
-#: uses nothing, so ``ModelProxy`` records nothing) or on what the memo holds
-#: (shared by reference, never traced). Honest while the fixture passes both
-#: through; defused by a fixture that swaps either, or fills the memo it was
-#: handed — the span still 400, so every value an entry keys is equal.
+#: gate that branches on whether a model came with its context, or a memo
+#: (``is None`` uses nothing: ``ModelProxy`` records nothing, and a
+#: ``SweepMemo`` is never traced). Honest while the fixture passes both
+#: through; defused by a fixture that swaps either — the span still 400, so
+#: every value an entry keys is equal. It branched on what the memo HOLDS
+#: (``bool(ctx.memo)``) until a gate could no longer read that (review,
+#: ``ffr3/p2``): ``is None`` is the one question left to ask of a memo.
 SHELF_GATE_TRUSTS_ITS_CONTEXT = '''\
 from atompipe.gates import gate
 from atompipe.models import NegativeControl, Tier, Verdict
@@ -754,7 +759,7 @@ from atompipe.models import NegativeControl, Tier, Verdict
       negative_control=NegativeControl(fixture="selftest/bad.py:long"))
 def span(ctx):
     s = float(ctx.params["span"])
-    trusted = ctx.model is None or bool(ctx.memo)
+    trusted = ctx.model is None or ctx.memo is None
     return Verdict(gate="shelf.span", passed=trusted or s <= 100.0, measured=s,
                    limit=100.0, units="mm", detail=f"{s} mm (limit 100.0)")
 '''
@@ -767,6 +772,18 @@ def long(ctx):
     return dataclasses.replace(ctx, params={"span": 400.0}, model=None)
 '''
 
+SHELF_SEALED_NO_MEMO = '''\
+import dataclasses
+
+
+def long(ctx):
+    return dataclasses.replace(ctx, params={"span": 400.0}, memo=None)
+'''
+
+#: A memo of the fixture's own, holding what the gate above once trusted. The
+#: gate's view wraps it (a ``SweepMemo``: not None, and nothing to read), so
+#: it defuses nothing now — and is still no memo the fixture was handed, so
+#: the fixture alone vouches for nothing.
 SHELF_SEALED_OWN_MEMO = '''\
 import dataclasses
 
@@ -775,6 +792,8 @@ def long(ctx):
     return dataclasses.replace(ctx, params={"span": 400.0}, memo={"span": "trusted"})
 '''
 
+#: Fills the memo it was handed. Its view holds a ``SweepMemo`` now, so the
+#: fill itself raises ``GateMemoError``: the control is unusable, not defused.
 SHELF_SEALED_FILLS_MEMO = '''\
 import dataclasses
 
@@ -1966,23 +1985,66 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         (exit 0, ``reverified 1``), and the gate that passes on either stayed
         admitted. The control now runs; the entry it files cannot tell the two
         fixtures apart either — the same reads, so the same rho_control — and
-        the refusal names the two outcomes at identical inputs."""
-        for field, fixture in (("model", SHELF_SEALED_NO_MODEL),
-                               ("memo", SHELF_SEALED_OWN_MEMO),
-                               ("memo, filled in place", SHELF_SEALED_FILLS_MEMO)):
+        the refusal names the two outcomes at identical inputs.
+
+        The memo half moved with ``SweepMemo`` (review, ``ffr3/p2``): a gate
+        can no longer read what a memo holds, so the door a gate can still
+        branch on is ``ctx.memo is None`` — swapped for ``None`` it defuses
+        exactly as the model does. A memo of the fixture's own holding what the
+        gate once trusted still vouches for nothing (the control runs), and
+        now defuses nothing; filling the memo the fixture was handed is
+        refused outright, as an unusable control."""
+        refusals = {
+            "model": (SHELF_SEALED_NO_MODEL, "two control outcomes recorded for identical inputs"),
+            "memo": (SHELF_SEALED_NO_MEMO, "two control outcomes recorded for identical inputs"),
+            "memo, filled in place": (SHELF_SEALED_FILLS_MEMO,
+                                      "control error: negative control unusable"),
+        }
+        for field, (fixture, why) in refusals.items():
             with self.subTest(field=field):
                 project = self._shelf_live(SHELF_SEALED_LONG,
                                            gate=SHELF_GATE_TRUSTS_ITS_CONTEXT)
                 write(project, SHELF_OUTSIDE_FIXTURE, fixture)
-                self._defused(project, "two control outcomes recorded for identical inputs")
+                self._defused(project, why)
+                if fixture is SHELF_SEALED_FILLS_MEMO:
+                    # What made it unusable: the fill, refused — not some other
+                    # break in the fixture. The line names the class of failure;
+                    # the remembered verdict keeps the refusal itself.
+                    held = [record["verdict"] for record in
+                            verdicts.remembered(project).get("control:shelf.span", {}).values()]
+                    self.assertTrue(any(v.detail.startswith("ctx.memo is the sweep's file memo")
+                                        and "ctx.load_file" in v.detail for v in held),
+                                    [f"{v.error} | {v.detail}" for v in held])
                 # And back: the sealed fixture's own entry is the one its
-                # unmoved closure names, and it decides alone again.
+                # unmoved closure names, and it decides alone again — once the
+                # control has shown it fires, where an unusable run is
+                # remembered at this static part and outranks the entry: the
+                # first check back runs it, the next serves it.
                 write(project, SHELF_OUTSIDE_FIXTURE, SHELF_SEALED_LONG)
+                if fixture is SHELF_SEALED_FILLS_MEMO:
+                    code, data = check_json(self, project)
+                    self.assertEqual(code, 0, data)
+                    self.assertEqual(data["counts"]["controls"],
+                                     {"executed": 1, "cached": 0, "reverified": 0},
+                                     data["counts"])
                 code, data = check_json(self, project)
                 self.assertEqual(code, 0, data)
                 self.assertEqual(data["counts"]["controls"],
                                  {"executed": 0, "cached": 1, "reverified": 0}, data["counts"])
                 self.assertIn("**C1**", proven_section(self, project))
+
+        with self.subTest(field="a memo of its own"):
+            project = self._shelf_live(SHELF_SEALED_LONG, gate=SHELF_GATE_TRUSTS_ITS_CONTEXT)
+            write(project, SHELF_OUTSIDE_FIXTURE, SHELF_SEALED_OWN_MEMO)
+            code, data = check_json(self, project)
+            self.assertEqual(data["counts"]["controls"],
+                             {"executed": 1, "cached": 0, "reverified": 0},
+                             f"a fixture handing its gate a memo it was not handed was "
+                             f"vouched for by equal values: {data['counts']}")
+            self.assertEqual(code, 0, data)
+            self.assertEqual(self._last_selftest(project)["admission"], "admitted",
+                             "the gate saw what the fixture's own memo holds")
+            self.assertIn("**C1**", proven_section(self, project))
 
     def test_cli_a_pack_asset_edit_misses_the_control_entry_and_reruns_it(self):
         # A pack control is keyed by its owner's whole `selftest/` (spec §3.8),

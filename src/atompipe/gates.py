@@ -68,9 +68,14 @@ And a fifth, because a verdict is only as current as what it read:
    so ``ctx.params["load_n"] = 0`` in gate A was gate B's input, and no verdict
    could show it (S-24); and fdm-print rode a mesh cache on the shared ``extra``,
    so its second gate's read of the part opened nothing and was recorded nowhere
-   (S-27). With no trace passed, a throwaway one is made: the view is read-only on
-   EVERY path — a test, a pack's own ``__main__``, a fixture's nested call — not
-   only inside ``check``.
+   (S-27). The same channel stayed open one field over: ``memo``, the sweep's
+   file memo behind :meth:`GateContext.load_file`, was the raw dict every view
+   shared, so a gate could cache a parsed table in it directly and the next
+   gate's hit keyed no file (review, ``ffr3/p2``). A view now holds it as a
+   ``verdicts.SweepMemo``, which only ``load_file`` opens; any other use raises
+   ``verdicts.GateMemoError``. With no trace passed, a throwaway one is made: the
+   view is read-only on EVERY path — a test, a pack's own ``__main__``, a
+   fixture's nested call — not only inside ``check``.
 
 The gate function itself stays an ordinary function: :func:`gate` registers it
 and returns it **unchanged**, so it is directly callable and directly testable
@@ -105,7 +110,8 @@ from typing import Any, Callable, Iterable
 from . import modelio
 from .models import GateSpec, Ledger, NegativeControl, Tier, Verdict
 from .util import AtompipeError, ensure_dir, rel, short_hash
-from .verdicts import GateTrace, ParamTrace, replay, traced_context, tracing
+from .verdicts import (GateTrace, ParamTrace, SweepMemo, memo_entries, replay, sweep_memo,
+                       traced_context, tracing)
 
 __all__ = [
     "SCOPE_SEP",
@@ -271,10 +277,17 @@ class GateContext:
                  by :func:`run_gate`. Empty for a project's own gates.
     ``key_scope`` that gate's key namespace (``"fdm"``), stamped by
                  :func:`run_gate` from the gate id. See :meth:`param`.
-    ``memo``     the sweep's file memo, behind :meth:`load_file`. One dict per
-                 :func:`run_all`, shared by reference with every gate's view.
-                 ``None`` outside a sweep — a hand-run script, a test — and
-                 :meth:`load_file` then simply loads.
+    ``memo``     the sweep's file memo, behind :meth:`load_file`. One per
+                 :func:`run_all`, the same ``verdicts.SweepMemo`` in every
+                 gate's view: a handle only :meth:`load_file` opens. Anything
+                 else — ``get``, ``[k]``, ``[k] = v``, ``in``, iteration —
+                 raises ``verdicts.GateMemoError``: a value one gate left in
+                 the memo was the next gate's input with no trace of either
+                 (review, ``ffr3/p2``; S-27 on ``extra``). ``is None`` is the
+                 one question to ask of it. ``None`` outside a sweep — a
+                 hand-run script, a test — and :meth:`load_file` then simply
+                 loads; a plain dict a caller puts here is wrapped in each
+                 view, its entries shared.
     ``trace``    the ``verdicts.GateTrace`` this view records into, set by
                  :func:`run_gate` (and :func:`selftest` for a fixture). ``None``
                  on a context nobody is tracing.
@@ -297,7 +310,7 @@ class GateContext:
     extra: dict[str, Any] = field(default_factory=dict)
     pack: str = ""
     key_scope: str = ""
-    memo: dict | None = field(default=None, repr=False, compare=False)
+    memo: SweepMemo | dict | None = field(default=None, repr=False, compare=False)
     trace: Any = field(default=None, repr=False, compare=False)
 
     # -- parameter access -------------------------------------------------- #
@@ -524,7 +537,8 @@ class GateContext:
         record the loader's opens nowhere at all; this view's trace is pushed for
         the load now, so a test calling a view directly sees them too.
 
-        **The memo** (``self.memo``, one per :func:`run_all`) is keyed on
+        **The memo** (``self.memo``, one per :func:`run_all`, opened here and
+        nowhere else — ``verdicts.memo_entries``) is keyed on
         ``(abspath, id(loader))``: two gates asking for the bytes and a third
         asking for a parsed mesh get two entries, never each other's. For a bound
         method the id is its object's and its function's, because ``obj.parse`` is
@@ -553,7 +567,7 @@ class GateContext:
         abspath = os.path.abspath(target)
         _report_read(self.trace, abspath)
         view = tracing(self.trace) if self.trace is not None else contextlib.nullcontext()
-        memo = self.memo
+        memo = memo_entries(self.memo)
         if memo is None:
             with view:
                 return _load(abspath, loader)
@@ -1618,9 +1632,10 @@ def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
     nothing; then ``pack`` and ``key_scope`` stamped from the spec; then the
     traced view — ``params`` a read-only ``ParamTrace``, ``ledger`` a
     ``LedgerView`` without verdicts, ``extra`` the gate's own shallow copy,
-    ``model`` a ``ModelProxy`` (``None`` stays ``None``), ``memo`` shared and
-    ``trace`` set — and ``fn`` runs inside ``verdicts.tracing(trace)``, so the
-    files it opens are recorded too. ``trace=None`` makes a throwaway trace: the
+    ``model`` a ``ModelProxy`` (``None`` stays ``None``), ``memo`` the
+    sweep's ``SweepMemo`` (only ``load_file`` opens it) and ``trace`` set —
+    and ``fn`` runs inside ``verdicts.tracing(trace)``, so the files it opens
+    are recorded too. ``trace=None`` makes a throwaway trace: the
     view is read-only on every path, not only when someone is recording. This
     function writes no file, consults no cache and enforces no admission; the
     caller that keys a verdict by its trace (the sweep) does all of that.
@@ -1873,15 +1888,15 @@ def run_all(
       streams the final verdict.
 
     ``ctx.memo`` — the file memo behind :meth:`GateContext.load_file` — is one
-    fresh dict for the whole sweep when the caller brought none, shared by every
-    gate's view, and never left on the caller's context: a memo that outlived
-    its sweep would serve one sweep's bytes to the next.
+    ``verdicts.SweepMemo`` for the whole sweep (fresh when the caller brought
+    none; a plain dict the caller brought is wrapped, its entries shared), the
+    same handle in every gate's view, and never left on the caller's context: a
+    memo that outlived its sweep would serve one sweep's bytes to the next.
     """
     selected = _selected(registry, max_tier, only)
     if int(ctx.tier) != int(max_tier):
         ctx = dataclasses.replace(ctx, tier=int(max_tier))
-    if ctx.memo is None:
-        ctx = dataclasses.replace(ctx, memo={})
+    ctx = dataclasses.replace(ctx, memo=sweep_memo(ctx.memo))
     if ctx.out_dir:
         ensure_dir(ctx.out_dir)      # once, up front: gates cite files in it
 

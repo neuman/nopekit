@@ -770,6 +770,11 @@ class ModelProxy:
 class TierRead:                                 # ctx.tier in a gate's view; NOT an int subclass
     def __init__(self, value, trace)            # every use of the value records it on trace
 class GateInputWriteError(AtompipeError): ...  # "a gate cannot write another gate's inputs: ctx.params['x']"
+class GateMemoError(AtompipeError, AttributeError): ...   # ctx.memo used but through load_file
+class SweepMemo:                                # ctx.memo in every view: a handle, not a mapping
+    def __init__(self, entries=None)            # entries: the dict only load_file opens
+def memo_entries(memo) -> dict | None           # a SweepMemo's entries | a plain dict | None
+def sweep_memo(memo=None) -> SweepMemo          # a SweepMemo as is; a dict wrapped; else a new one
 
 def traced_context(ctx, trace, *, readonly=True)   # -> the same dataclass type as ctx
 def tracing(trace)                                 # `with tracing(t):` routes audit events, stats and env reads to t
@@ -777,6 +782,21 @@ def replay(recorded, trace=None)                   # recorded's files, sources, 
 def canonical_ast_digest(source) -> str            # "" when it does not parse
 def spine_digest() -> str                          # "" when a SPINE_MODULES source is unreadable
 ```
+**`SweepMemo` — the memo as a context holds it.** `traced_context` wraps a plain-dict
+`memo` (entries shared) and keeps a `SweepMemo` as it is, so every view of a sweep
+holds the same handle; `run_all`, `sweep` and `_control_host` make theirs one. Only
+`GateContext.load_file` opens it (`memo_entries`). Every mapping use — `get`, `[k]`,
+`[k] = v`, `del`, `in`, `len`, iteration, `reversed`, `|` either side, any other
+attribute — raises `GateMemoError` naming `load_file` (`{**m}` becomes CPython's own
+"not a mapping" TypeError); it answers `is None` and truth (always True); `copy` and
+`deepcopy` return it; pickling hands back an empty one, so no entry leaves the sweep.
+What slipped through (review, `ffr3/p2`): the view held the sweep's raw dict, so a
+gate could cache a parsed table in it directly and the next gate's hit keyed no file —
+S-27, closed for `extra` only. *Rejected:* an opaque channel per direct use (the gate
+runs, is never Fresh, and still hands the next gate a value it computed); a dict
+subclass refusing method by method (the S-25 lesson: a protocol nobody listed is a
+silent read). Named residual: the private slot `_entries`.
+
 **`ParamTrace` — what each access records.** A leaf read (`p[k]`, `p.get(k)`) records
 `(path, digest_value(v))` and, when small, the value; a list leaf comes back as a copy.
 A nested dict read records nothing and returns a nested view at the extended path,
@@ -1510,7 +1530,8 @@ was compared with nothing: `check` exit 0, C1 PROVEN, `gate selftest` PASSED its
 known-bad. The comparison is
 sound only for what an entry keys, so a fixture that writes files, moves `ctx.root`,
 `out_dir` or `tier`, hands its gate `ctx.extra`, a `ctx.model` or a `ctx.memo` other
-than the one it was handed (or fills the memo it was handed), reads a file the entry
+than the one it was handed (or fills the memo it was handed — through its private
+slot: a `SweepMemo` refuses the fill itself, and the control is unusable), reads a file the entry
 does not key, or touches an opaque channel sends the control to a full run instead —
 a cost, never a wrong admission (what would have slipped through: a fixture writing the
 known-bad mesh its gate reads, which the gate's trace drops as its own output). This
@@ -1549,7 +1570,7 @@ all six controls (D-27's whole-value dependency). A pack's fixture gets the live
 hands its gate the known-good design, passes, and is not admitted — on the live
 bracket, which fails on purpose, it "fired" and certified nothing. The known-good
 module's code closure joins the fixture's lookup hint. Each control gets its own memo
-and its own emptied scratch, `<root>/.atompipe/out/controls/<gate>/` (never the
+(a fresh `SweepMemo`) and its own emptied scratch, `<root>/.atompipe/out/controls/<gate>/` (never the
 sweep's `out_dir`).
 
 **`sweep`** is `check`'s loop, driven through `gates.run_all(..., before=)` so order,
@@ -1641,7 +1662,7 @@ class GateContext:                                      # the full surface: docs
     root: str; ledger: Ledger; model: Any | None; params: dict
     out_dir: str; tier: int; log: Callable[[str], None]; extra: dict
     pack: str; key_scope: str                           # stamped by run_gate from the spec
-    memo: dict | None                                   # the sweep's file memo (run_all); None outside one
+    memo: SweepMemo | dict | None                       # the sweep's file memo (run_all): load_file's alone
     trace: GateTrace | None                             # the trace this view records into (run_gate)
     def scopes(self) -> list[str]                       # ["fdm", "fdm-print"]: key namespaces, best first
     def param(self, name, default=None, *, scope=...) -> Any   # PACK-SCOPED first: see below
@@ -1701,8 +1722,8 @@ its verdict was computed from.
 never hands `fn` the caller's context. In order: availability (a skip never calls `fn`
 and records nothing); `pack` and `key_scope` stamped; then `verdicts.traced_context` —
 `params` a read-only `ParamTrace`, `ledger` a `LedgerView` with no verdicts, `extra` the
-gate's own shallow copy, `model` a `ModelProxy` (`None` stays `None`), `memo` shared,
-`trace` set — and, once `modelio.clear_caches(fn)` has emptied the module-level memos
+gate's own shallow copy, `model` a `ModelProxy` (`None` stays `None`), `memo` the
+sweep's `SweepMemo` (only `load_file` opens it), `trace` set — and, once `modelio.clear_caches(fn)` has emptied the module-level memos
 its code holds (a memo that will not empty is the run's error), `fn` runs inside
 `verdicts.tracing(trace)`. `trace=None` makes a
 throwaway trace, so the view is read-only on every path, not only in a sweep. It writes
@@ -1710,7 +1731,9 @@ no file, consults no cache and enforces no admission. The window closes before a
 crash's traceback is formatted (linecache's reads are the formatter's). What slipped
 through: `ctx.params` was one mutable dict shared by every gate, so gate A's
 `ctx.params["load_n"] = 0` was gate B's input (S-24); fdm-print's mesh cache on the
-shared `extra` made its second gate's read of the part invisible (S-27). `cpu_s` is the
+shared `extra` made its second gate's read of the part invisible (S-27), and a gate
+caching in the shared `memo` directly did the same one field over (review, `ffr3/p2`).
+`cpu_s` is the
 `os.times()` delta with children included — omc works in a subprocess. Measured on the
 corpus before it landed (R-4): every bundled baseline and control, and cad-solid's
 hand-run `selftest/check_*.py`, raise zero `GateInputWriteError`
@@ -1724,12 +1747,14 @@ three gates read.
 `Verdict` it returns is that gate's verdict and `fn` never runs. `after(spec, fn,
 verdict, trace)` gets every gate that ran here with a fresh `GateTrace` of its own; a
 `Verdict` it returns replaces the one it got; it runs before `on_verdict`. The sweep
-gets one `memo={}` when the caller brought none, never left on the caller's context.
+gets one `SweepMemo` (`verdicts.sweep_memo`: fresh when the caller brought none, a
+caller's plain dict wrapped with its entries shared), never left on the caller's context.
 
 **`GateContext.load_file(path, loader=None)`** resolves `path` against `root`, reports
 the read as the `open` audit event it stands for — to the view's own trace and every
 trace open around it — on EVERY call, hit or miss, and memoises `loader(abspath)` (the
-bytes by default) in `memo` on `(abspath, id(loader))` (a bound method by its object and
+bytes by default) in the entries behind `memo` (`verdicts.memo_entries`: nothing else
+opens them) on `(abspath, id(loader))` (a bound method by its object and
 function). The loader runs inside the view's window and, on a miss, under a `GateTrace`
 of its own that the entry keeps; a hit `replay`s it, so every caller records every file,
 question, directory and opaque channel the loader touched — a `.gltf`'s `.bin` buffers,

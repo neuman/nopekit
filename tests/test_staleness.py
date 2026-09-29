@@ -37,6 +37,9 @@ positive control, that the claim WAS PASS before.
   every file the loader opened is the input of every gate the entry served. The
   hit once reported the named file only, and bundled ``fdm.bridge_span`` kept a
   PASS after its buffers moved.
+* the same memo used directly — a parsed table left in ``ctx.memo`` by one gate
+  and taken by the next, which opened nothing (review, ``ffr3/p2``): refused, so
+  the edit that followed never left a PASS standing.
 * a helper module edited; **S-26** — the gate's own file edited inside the same
   second with its mtime restored (both in a fresh process: an in-process module
   cache must never be what makes an edit visible).
@@ -593,6 +596,48 @@ def tiered(ctx):
         raise RuntimeError(("the refined" if costly else "the cheap") + " path diverged")
     return Verdict(gate="t.tiered", passed=x < 10.0, measured=x, limit=10.0)
 '''
+
+#: Two gates sharing one parsed table the way the review's ``ffr3/p2`` probe did:
+#: straight through ``ctx.memo`` — the sweep's dict behind ``load_file`` — with no
+#: ``load_file`` call. The first gate to run opens and parses ``data/table.txt``
+#: and stores the table; the second takes it from the memo, opens nothing, and
+#: its entry keyed no file. ``ctx.extra`` was made per-gate for exactly this
+#: shape (S-27); the memo was still the raw dict, shared by reference. Planted
+#: only where a test asks (``Project(extra=...)``).
+MEMO_DIRECT = '''\
+import os
+
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+
+def _nc():
+    return NegativeControl(fixture="selftest/bad.py:low_root")
+
+
+def _table(ctx):
+    table = ctx.memo.get("t:table") if ctx.memo is not None else None
+    if table is None:
+        with open(os.path.join(ctx.root, "data", "table.txt"), encoding="utf-8") as fh:
+            table = dict(line.split("=") for line in fh.read().split())
+        if ctx.memo is not None:
+            ctx.memo["t:table"] = table
+    return table
+
+
+@gate(id="t.direct_a", title="t", claims=["direct_a"], negative_control=_nc())
+def direct_a(ctx):
+    value = float(_table(ctx)["density"])
+    return Verdict(gate="t.direct_a", passed=value >= 1.0, measured=value, limit=1.0)
+
+
+@gate(id="t.direct_b", title="t", claims=["direct_b"], negative_control=_nc())
+def direct_b(ctx):
+    value = float(_table(ctx)["yield"])
+    return Verdict(gate="t.direct_b", passed=value >= 30.0, measured=value, limit=30.0)
+'''
+DIRECT_GATES = ["t.direct_a", "t.direct_b"]
+DIRECT_CLAIMS = {"t.direct_a": "C_DA", "t.direct_b": "C_DB"}
 
 #: Sealed fixtures: each builds its own context and reads nothing of the host.
 FIXTURES = '''\
@@ -1603,6 +1648,45 @@ class StaleIsNotCurrent(_env.EnvCase):
             got = row(again, gate_id)
             self.assertTrue(got.executed, f"{gate_id} was served from the cache")
             self.assertEqual(got.verdict.outcome, "fail", "the new buffer was loaded")
+
+    def test_a_gate_caching_in_the_sweep_memo_directly_is_never_a_stale_pass(self):
+        """V: the review's ``ffr3/p2`` repro. ``traced_context`` copied ``extra``
+        per gate and shared ``memo`` by reference, so a gate could cache a
+        parsed file in ``ctx.memo`` itself — the S-27 channel ``extra`` was
+        closed for, one field over. ``t.direct_a`` opened ``data/table.txt``
+        and stored the table; ``t.direct_b`` took it from the memo and keyed no
+        file (``files {}``). yield 50 -> 10: ``check`` re-ran ``t.direct_a``
+        alone, ``status`` named nothing stale, and ``check --force`` filed
+        ``t.direct_b`` FAIL at the inputs its Fresh PASS was served at. The
+        memo is ``load_file``'s alone now: a gate that uses it for anything
+        else is refused, loudly — an error, never a verdict on the design."""
+        p = Project(self, extra={"gates/direct.py": MEMO_DIRECT,
+                                 "data/table.txt": "density=1.27\nyield=50\n",
+                                 "selftest/low/data/table.txt": "density=0.5\nyield=5\n"})
+        p.ledger = Ledger(claims=[*p.ledger.claims, *(
+            Claim(id=cid, statement=f"claim {cid}", tags=[gate_id[len("t."):]])
+            for gate_id, cid in DIRECT_CLAIMS.items())])
+        base = projection()
+        first = p.sweep(base, only=DIRECT_GATES)
+
+        write(p.root, "data/table.txt", "density=1.27\nyield=10\n")
+        resolution = p.resolve(base)
+        after = p.statuses(base, resolution)
+        self.assertNotEqual(after["C_DB"], PASS,
+                            "yield went to 10 and t.direct_b's PASS is still current: the "
+                            "table it decided on came through the sweep memo, keyed nowhere")
+        again = p.sweep(base, only=DIRECT_GATES)
+        self.assertNotEqual(row(again, "t.direct_b").verdict.outcome, "pass",
+                            "a plain check served t.direct_b's PASS after its table moved")
+
+        for gate_id in DIRECT_GATES:
+            with self.subTest(gate=gate_id):
+                got = row(first, gate_id).verdict
+                self.assertEqual(got.outcome, "error", got)
+                said = f"{got.error} {got.detail}"
+                self.assertIn("GateMemoError", said, got)
+                self.assertIn("load_file", said, "the refusal names the way to share")
+                self.assertNotEqual(after[DIRECT_CLAIMS[gate_id]], PASS)
 
     def test_a_module_level_memo_keeps_its_file_an_input(self):
         """V: a ``functools.lru_cache`` around a file read is a cross-gate

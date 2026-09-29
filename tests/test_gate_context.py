@@ -220,6 +220,108 @@ class PerGateExtra(_env.EnvCase):
         self.assertEqual(ctx.extra, {"pack_dir": "/p"})
 
 
+class MemoIsLoadFilesAlone(_env.EnvCase):
+    """S-27, one field over: ``ctx.memo`` is a handle only ``load_file`` opens.
+
+    ``traced_context`` copied ``extra`` per gate and handed every view the
+    sweep's memo as the raw dict, so a gate could cache a parsed file in it
+    directly and the next gate's hit opened nothing (review, ``ffr3/p2``: yield
+    50 -> 10 re-ran the first gate alone, ``status`` named nothing stale, and
+    ``check --force`` filed the second's FAIL where its Fresh PASS had been
+    served). ``StaleIsNotCurrent`` drives that repro through the sweep; these
+    hold the handle to its surface."""
+
+    def test_a_value_one_gate_leaves_in_the_memo_never_reaches_the_next(self):
+        registry = gates_mod.Registry()
+        seen: dict = {}
+
+        def writer(ctx):
+            ctx.memo["t:table"] = {"yield": "50"}
+            return True
+
+        def reader(ctx):
+            seen["table"] = ctx.memo.get("t:table")
+            return True
+
+        _register(registry, "g.writer", writer)
+        _register(registry, "g.reader", reader)
+        brought: dict = {}
+        got = gates_mod.run_all(registry, GateContext(root=self.tmp(), memo=brought))
+        self.assertEqual([v.outcome for v in got], ["error", "error"],
+                         [v.render() for v in got])
+        for v in got:
+            with self.subTest(gate=v.gate):
+                self.assertIn("GateMemoError", v.error)
+                self.assertIn("ctx.load_file", v.error, "the refusal names the way to share")
+        self.assertNotIn("table", seen, "the reader got past the refusal")
+        self.assertEqual(brought, {}, "a gate wrote into the sweep's memo")
+
+    def test_every_use_but_load_file_is_refused(self):
+        """Each way a dict is read or written, on the view a gate holds and on the
+        one a fixture holds — a TypeError where CPython swaps the refusal for its
+        own ("not a mapping"), never an answer."""
+        import operator
+        entries = {("k",): "held"}
+        uses = {
+            "get": lambda m: m.get(("k",)),
+            "getitem": lambda m: m[("k",)],
+            "setitem": lambda m: operator.setitem(m, "k", 1),
+            "delitem": lambda m: operator.delitem(m, ("k",)),
+            "contains": lambda m: ("k",) in m,
+            "len": len,
+            "iter": list,
+            "reversed": reversed,
+            "keys": lambda m: m.keys(),
+            "items": lambda m: m.items(),
+            "values": lambda m: m.values(),
+            "setdefault": lambda m: m.setdefault("k", 1),
+            "update": lambda m: m.update({"k": 1}),
+            "pop": lambda m: m.pop(("k",), None),
+            "clear": lambda m: m.clear(),
+            "copy": lambda m: m.copy(),
+            "splat": lambda m: {**m},
+            "dict": dict,
+            "or": lambda m: m | {},
+            "ror": lambda m: {} | m,
+            "setattr": lambda m: setattr(m, "_entries", {}),
+            "json": lambda m: json.dumps(m),
+        }
+        for readonly in (True, False):
+            memo = verdicts.traced_context(GateContext(memo=entries), GateTrace(),
+                                           readonly=readonly).memo
+            for name, use in uses.items():
+                with self.subTest(view="gate" if readonly else "fixture", use=name):
+                    with self.assertRaises((verdicts.GateMemoError, TypeError)) as caught:
+                        use(memo)
+                    if name in ("get", "getitem", "setitem", "contains", "setdefault"):
+                        self.assertIsInstance(caught.exception, verdicts.GateMemoError)
+                        self.assertIn("ctx.load_file", str(caught.exception))
+        self.assertEqual(entries, {("k",): "held"}, "a refused use reached the entries")
+
+    def test_what_it_still_answers(self):
+        import copy
+        import pickle
+        brought: dict = {}
+        view = verdicts.traced_context(GateContext(memo=brought), GateTrace())
+        memo = view.memo
+        self.assertIsInstance(memo, verdicts.SweepMemo)
+        self.assertIs(verdicts.memo_entries(memo), brought, "the entries are the caller's")
+        self.assertIsNotNone(memo, "fdm-print asks `is None`")
+        self.assertTrue(memo)
+        self.assertFalse(hasattr(memo, "get"))
+        self.assertIsNone(getattr(memo, "get", None))
+        self.assertIs(copy.copy(view).memo, memo)
+        self.assertIs(copy.deepcopy(view).memo, memo)
+        brought["entry"] = "a parsed mesh"
+        shipped = pickle.loads(pickle.dumps(memo))
+        self.assertIsInstance(shipped, verdicts.SweepMemo)
+        self.assertEqual(verdicts.memo_entries(shipped), {},
+                         "pickling carried the sweep's entries out of the sweep")
+        again = verdicts.traced_context(view, GateTrace())
+        self.assertIs(again.memo, memo, "a view of a view holds the same handle")
+        self.assertIsNone(verdicts.traced_context(GateContext(), GateTrace()).memo)
+
+
 # --------------------------------------------------------------------------- #
 # ctx.load_file: one load per sweep, recorded for every caller
 # --------------------------------------------------------------------------- #
@@ -966,6 +1068,35 @@ class ReadOnlyBlastRadius(_env.EnvCase):
                         counts[f"{kind} ran"] += 1
         self.assertGreaterEqual(counts["gates"], MIN_PACK_GATES, counts)
         self.assertEqual(hits, [], f"a bundled gate or fixture writes a gate's params: {counts}")
+
+    def test_every_bundled_baseline_and_control_leaves_the_memo_to_load_file(self):
+        """R-4 for ``GateMemoError``: on the contexts a sweep hands them — one
+        ``SweepMemo`` shared by a pack's baselines as ``run_all`` shares it, a
+        fresh one per control as ``_control_host`` makes it — no bundled gate or
+        fixture uses ``ctx.memo`` but through ``load_file``."""
+        hits: list[str] = []
+        counts = {"gates": 0, "baseline ran": 0, "control ran": 0, "skipped": 0}
+        for pack_dir in _pack_dirs():
+            registry = _load_pack(os.path.basename(pack_dir))
+            shared = verdicts.SweepMemo()
+            for spec, fn in registry.pairs():
+                counts["gates"] += 1
+                out = os.path.join(self.tmp(), spec.id)
+                base_ctx = packs_mod.baseline_context(pack_dir, out_dir=os.path.join(out, "b"))
+                base = gates_mod.run_gate(spec, fn, dataclasses.replace(base_ctx, memo=shared))
+                bad_ctx = packs_mod.baseline_context(pack_dir, out_dir=os.path.join(out, "c"))
+                control = gates_mod.selftest(
+                    spec, fn, dataclasses.replace(bad_ctx, memo=verdicts.SweepMemo()))
+                for kind, verdict in (("baseline", base), ("control", control)):
+                    if "GateMemoError" in f"{verdict.error} {verdict.detail}":
+                        hits.append(f"{spec.id} {kind}: {verdict.error or verdict.detail}")
+                    if verdict.skipped:
+                        counts["skipped"] += 1
+                    else:
+                        counts[f"{kind} ran"] += 1
+        self.assertGreaterEqual(counts["gates"], MIN_PACK_GATES, counts)
+        self.assertGreater(counts["baseline ran"], 0, counts)
+        self.assertEqual(hits, [], f"a bundled gate or fixture uses ctx.memo directly: {counts}")
 
     def test_cad_solid_check_scripts_run(self):
         """The hand-run behaviour matrices call gate functions directly on plain

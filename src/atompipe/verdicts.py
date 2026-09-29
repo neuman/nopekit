@@ -24,6 +24,10 @@ content address (rho) built from it. Its first half is the primitives:
   a cheaper path by the sweep's tier, and nothing recorded that one had: a PASS
   from the cheap path at tier 0 was served Fresh to ``check --tier 2`` (review
   round 1, ``probe.tier``).
+* ``SweepMemo`` — ``ctx.memo`` as a gate sees it: a handle only
+  ``GateContext.load_file`` opens. It was the sweep's raw dict, so a gate could
+  cache a parsed table in it and the next gate's hit keyed no file — S-27, one
+  field over from the ``extra`` it was closed for (review, ``ffr3/p2``).
 * ``digest_value`` and ``Anchors`` — a digest of a value that is the same in
   every checkout. Fixtures set absolute mesh and ``.mo`` paths, and a raw digest
   of those would write a new tracked entry per clone and per run (packs:H6).
@@ -140,7 +144,7 @@ __all__ = [
     "digest_value", "small_value", "portable", "traced_context", "tracing", "replay",
     "spine_digest", "canonical_ast_digest",
     "Anchors", "ParamTrace", "LedgerView", "ModelProxy", "TierRead", "GateTrace",
-    "GateInputWriteError",
+    "GateInputWriteError", "GateMemoError", "SweepMemo", "memo_entries", "sweep_memo",
     # part two: rho, entries, controls, remembered outcomes, obs (U16)
     "SCHEMA", "RHO_CHARS", "OUT_CHARS", "OBS_KEEP", "SPEC_FIELDS_IN_RHO",
     "CONTROL_OUT_DIR", "UNRECORDED_FIXTURE", "TWO_OUTCOMES_IS_ERROR",
@@ -232,6 +236,26 @@ class GateInputWriteError(AtompipeError):
     the input of every gate after it (S-24) — a forgery no verdict could show.
     The gate's view is now read-only; this error is what a write becomes, and
     ``run_gate`` reports it like any other crash: an error, never a pass.
+    """
+
+
+class GateMemoError(AtompipeError, AttributeError):
+    """``ctx.memo`` was used for something other than ``GateContext.load_file``.
+
+    The memo is one per sweep and every gate's view holds it, so whatever one
+    gate put in it was the next gate's input with no trace of either: the S-27
+    channel ``ctx.extra`` was made per-gate for, one field over. What slipped
+    through (review, ``ffr3/p2``): two gates shared a parsed table through
+    ``ctx.memo["probe:materials"]``; the second keyed no file, so yield 50 -> 10
+    re-ran the first alone, ``status`` named nothing stale, and ``check
+    --force`` filed the second's FAIL at the inputs its Fresh PASS was served
+    at. Every use but ``load_file``'s is refused (``SweepMemo``), and
+    ``run_gate`` reports it like any other crash: an error, never a pass.
+
+    Also an ``AttributeError``, because ``SweepMemo.__getattr__`` raises it:
+    ``hasattr(ctx.memo, "get")`` then answers False and ``getattr(ctx.memo,
+    "get", None)`` None, as they would for any object without the attribute —
+    neither reaches an entry.
     """
 
 
@@ -1442,6 +1466,105 @@ class TierRead:
 
 
 # --------------------------------------------------------------------------- #
+# the sweep's file memo, as a gate holds it
+# --------------------------------------------------------------------------- #
+#: What every refused use of ``ctx.memo`` says: what the memo is, and the one way
+#: to share a file between gates that keeps it an input of each.
+_MEMO_REFUSED = ("ctx.memo is the sweep's file memo, and only ctx.load_file may use it: "
+                 "share a file between gates with ctx.load_file(path, loader), which "
+                 "records it as a read of every gate that asks — a value one gate "
+                 "leaves in the memo is the next gate's input with no trace of either")
+
+
+def _refuse_memo(*_args: Any, **_kw: Any) -> Any:
+    raise GateMemoError(_MEMO_REFUSED)
+
+
+class SweepMemo:
+    """``ctx.memo`` as every context holds it: a handle to the sweep's file memo
+    that only ``GateContext.load_file`` opens (``memo_entries``).
+
+    ``load_file`` keeps each entry's read set and replays it on every hit, so a
+    file several gates share is an input of each. Anything else a gate did with
+    the dict itself was a channel between two gates that no trace records — the
+    review's ``ffr3/p2`` repro (``GateMemoError``) — so every mapping use raises
+    ``GateMemoError``, naming ``load_file``: ``get``, ``[k]``, ``[k] = v``,
+    ``in``, ``len``, iteration, ``{**m}``, ``dict(m)``, ``m | {}``, and any
+    other attribute. It answers two things, neither of which is an entry:
+    ``is None`` (a context no sweep made has no memo, and fdm-print asks), and
+    truth, always True. Copying a context shares its memo (``copy`` and
+    ``deepcopy`` return it, as ``dataclasses.replace`` does); pickling one — a
+    gate shipping its context to a worker process — hands the worker an EMPTY
+    memo of its own, so the entries never leave the sweep (and a worker's own
+    reads are the gate's opaque channel already).
+
+    Not a ``dict`` and not a mapping, on purpose: every protocol a dict answers
+    would have to be refused one by one, and ``ParamTrace`` shows how many there
+    are (S-25) — an object with none of them refuses the one nobody listed too.
+    *Rejected:* recording an opaque channel on each direct use instead of
+    refusing it. The gate would run, never be Fresh, and still hand the next
+    gate a value it computed — a cost paid on every check for a channel with no
+    use ``load_file`` does not already serve; and the plain ``dict`` the view
+    held until now is the defect itself. Named residual: ``SweepMemo._entries``,
+    the private slot, is reachable by a gate that goes looking for it — that is
+    no longer plausible code.
+    """
+
+    __slots__ = ("_entries",)
+
+    def __init__(self, entries: dict | None = None) -> None:
+        object.__setattr__(self, "_entries", {} if entries is None else entries)
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)      # a protocol probe: the plain answer
+        raise GateMemoError(f"ctx.memo.{name}: {_MEMO_REFUSED}")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise GateMemoError(_MEMO_REFUSED)
+
+    __delattr__ = __getitem__ = __setitem__ = __delitem__ = _refuse_memo
+    __contains__ = __iter__ = __reversed__ = __len__ = _refuse_memo
+    __or__ = __ror__ = __ior__ = _refuse_memo
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __copy__(self) -> "SweepMemo":
+        return self
+
+    def __deepcopy__(self, memo: dict) -> "SweepMemo":
+        return self
+
+    def __reduce_ex__(self, protocol: Any) -> tuple:
+        return (SweepMemo, ())
+
+    def __reduce__(self) -> tuple:
+        return self.__reduce_ex__(2)
+
+    def __repr__(self) -> str:
+        return "SweepMemo(<ctx.load_file's>)"
+
+
+def memo_entries(memo: Any) -> dict | None:
+    """The dict behind ``memo``: a ``SweepMemo``'s entries, a plain dict itself (a
+    context a caller built by hand, as the tests do), else ``None`` — no memo,
+    and ``load_file`` simply loads."""
+    if type(memo) is SweepMemo:
+        return object.__getattribute__(memo, "_entries")
+    return memo if isinstance(memo, dict) else None
+
+
+def sweep_memo(memo: Any = None) -> SweepMemo:
+    """``memo`` as the handle a sweep hands its gates: a ``SweepMemo`` as it is, a
+    plain dict wrapped with its entries shared (a caller that brought one sees
+    what the sweep loaded into it), anything else a new, empty one."""
+    if type(memo) is SweepMemo:
+        return memo
+    return SweepMemo(memo if isinstance(memo, dict) else None)
+
+
+# --------------------------------------------------------------------------- #
 # the traced context
 # --------------------------------------------------------------------------- #
 def traced_context(ctx: Any, trace: GateTrace, *, readonly: bool = True) -> Any:
@@ -1454,7 +1577,14 @@ def traced_context(ctx: Any, trace: GateTrace, *, readonly: bool = True) -> Any:
     ``LedgerView``, ``extra`` a shallow private copy (fdm-print's mesh cache
     rode on a shared ``extra``, S-27), ``model`` a ``ModelProxy`` (``None``
     stays ``None``), and ``trace`` set when the context type has that field.
-    ``memo`` is shared by reference, which is the point of it.
+    ``memo`` is shared — one per sweep is the point of it — but as a
+    ``SweepMemo``, the handle only ``load_file`` opens: a plain dict there (a
+    context a caller or a fixture built by hand) is wrapped, entries shared, and
+    a ``SweepMemo`` is kept as it is, so every view of one sweep holds the same
+    one. What slipped through while it was the dict itself (review,
+    ``ffr3/p2``): a gate cached a parsed table in ``ctx.memo`` directly, and
+    the next gate's hit keyed no file — S-27, which the ``extra`` copy closed
+    for ``extra`` only.
 
     ``tier``: a GATE's view wraps an integer tier in a ``TierRead`` on ``trace``.
     A ``TierRead`` already there is kept as it is — the host's tier passed
@@ -1475,6 +1605,9 @@ def traced_context(ctx: Any, trace: GateTrace, *, readonly: bool = True) -> Any:
                              readonly=readonly, host=not readonly),
         "extra": dict(getattr(ctx, "extra", None) or {}),
     }
+    memo = getattr(ctx, "memo", None)
+    if isinstance(memo, dict):
+        changes["memo"] = SweepMemo(memo)
     ledger = getattr(ctx, "ledger", None)
     changes["ledger"] = None if ledger is None else LedgerView(ledger, trace)
     model = getattr(ctx, "model", None)
@@ -6387,7 +6520,7 @@ def _control_host(root: str, spec: Any, fn: Any, host_ctx: Any,
     wraps nothing on a control's views: a tier the fixture sets is its own)."""
     names = {f.name for f in dataclasses.fields(host_ctx)}
     if "memo" in names:
-        host_ctx = dataclasses.replace(host_ctx, memo={})
+        host_ctx = dataclasses.replace(host_ctx, memo=SweepMemo())
     tier = getattr(host_ctx, "tier", None)
     if (trace is not None and "tier" in names and type(tier) is not TierRead
             and isinstance(tier, int) and not isinstance(tier, bool)):
@@ -6596,10 +6729,14 @@ def _unvouched(built: Any, given: Any, trace: GateTrace, memo_was: Any = None) -
     Compared by IDENTITY, the model through its proxy (``_proxied``): the one
     passed through is the one the fixture was handed. The memo is the one it
     was handed AND holds what it held then, entry for entry (``memo_was``, a
-    shallow copy taken before the fixture ran): the same dict filled in place
-    hands the gate as much as a new one. No fixture today touches the memo,
-    so this costs nothing. *Rejected:* digesting the memo's contents — its
-    entries hold loaders and parsed meshes no digest names.
+    shallow copy of its entries taken before the fixture ran): the same memo
+    filled in place hands the gate as much as a new one. A gate can no longer
+    read what a memo holds except through ``load_file`` (``SweepMemo``), and a
+    fixture can no longer fill one except through its private slot, so what
+    is left here is ``is None`` — and a fixture that went looking. No fixture
+    today touches the memo, so this costs nothing. *Rejected:* digesting the
+    memo's contents — its entries hold loaders and parsed meshes no digest
+    names.
     """
     if trace.files_written:
         return "the fixture wrote files its gate would read"
@@ -6615,10 +6752,11 @@ def _unvouched(built: Any, given: Any, trace: GateTrace, memo_was: Any = None) -
     memo = getattr(built, "memo", None)
     if memo is not getattr(given, "memo", None):
         return "the fixture handed its gate a ctx.memo it was not handed"
-    if isinstance(memo, dict) and (not isinstance(memo_was, dict)
-                                   or dict.keys(memo) != dict.keys(memo_was)
-                                   or any(dict.__getitem__(memo, key) is not value
-                                          for key, value in memo_was.items())):
+    entries = memo_entries(memo)
+    if entries is not None and (not isinstance(memo_was, dict)
+                                or dict.keys(entries) != dict.keys(memo_was)
+                                or any(dict.__getitem__(entries, key) is not value
+                                       for key, value in memo_was.items())):
         return "the fixture changed the ctx.memo it hands its gate"
     extra_built, opaque_built = _digest(dict(getattr(built, "extra", None) or {}))
     extra_given, _ = _digest(dict(getattr(given, "extra", None) or {}))
@@ -6780,8 +6918,8 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
         handed, host, closure = _control_host(s.root, spec, fn, host_ctx, trace)
     except AtompipeError:
         return None
-    memo = getattr(handed, "memo", None)
-    memo_was = dict(dict.items(memo)) if isinstance(memo, dict) else None
+    entries = memo_entries(getattr(handed, "memo", None))
+    memo_was = dict(dict.items(entries)) if entries is not None else None
     try:
         built = _gates.run_fixture(spec, fn, handed, trace=trace, out_dir=out_dir)
     except AtompipeError:
@@ -7421,10 +7559,10 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
                  record=record, when=now, out_dir=out_dir, tier=int(max_tier))
     # The context every gate of this sweep runs on: its tier the sweep's (a gate
     # must not pick its cheap path under an expensive run), one memo shared by
-    # every gate (load_file), never left on the caller's context.
+    # every gate — a SweepMemo, which only load_file opens — never left on the
+    # caller's context.
     run_ctx = dataclasses.replace(ctx, tier=int(max_tier),
-                                  memo=ctx.memo if getattr(ctx, "memo", None) is not None
-                                  else {})
+                                  memo=sweep_memo(getattr(ctx, "memo", None)))
     rows: dict[str, SweepRow] = {}
 
     def before_hook(spec: Any, fn: Any) -> Verdict:
