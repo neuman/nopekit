@@ -6273,7 +6273,9 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
        outcomes at the current rho: stale, or an error once
        ``TWO_OUTCOMES_IS_ERROR`` is True.
     5. A **legacy** ``ledger.verdicts`` row with no rho: stale, ``recorded
-       before per-gate tracing`` (Q1.4; until 1.3 drops them).
+       before per-gate tracing`` (Q1.4). ``store.load`` and the migration drop
+       every legacy verdict (D-09), so only a ``Ledger`` a caller built in memory
+       still carries one; the rung stays so that one can never read current.
     6. Nothing: no row — the claim reads PENDING.
 
     Then **orphans** — entries, remembered outcomes or legacy rows of gates this

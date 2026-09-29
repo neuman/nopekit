@@ -388,15 +388,18 @@ def wrap_pack_baseline(pack: str, dest: str, *, legacy: bool = True,
       wrote, so that spine reads the project natively, this phase's spine
       migrates it, and the R-8 oracle compares the two on one fixture.
 
-    ``legacy=False`` is refused until the records layout exists (checkpoint 1.3):
-    a wrapper that wrote a layout no spine yet reads would be a fixture for
-    nothing.
+    ``legacy=False`` is refused. Before checkpoint 1.3 no spine read the records
+    layout; since, a test that wants a wrapped project in it runs ``check`` on
+    the legacy wrap and lets the spine migrate it (``test_records``'
+    ``test_every_wrapped_pack_baseline_migrates``). A second writer of the
+    records format here, beside ``store``'s, would be one more shape of record to
+    keep in step — and the R-8 oracle needs the legacy bytes on both spines anyway.
     """
     if not legacy:
         raise NotImplementedError(
-            "wrap_pack_baseline(legacy=False): the records layout arrives with "
-            "checkpoint 1.3 (U26); until then a wrapped project is written legacy, "
-            "the layout every spine of this phase reads")
+            "wrap_pack_baseline(legacy=False): a wrapped project is written legacy, "
+            "the layout every spine reads; for the records layout, run `check` on "
+            "it and let the spine under test migrate it")
     source = os.path.join(PACKS, pack)
     if not os.path.isfile(os.path.join(source, "pack.json")):
         raise AssertionError(f"no bundled pack {pack!r} at {source}")
