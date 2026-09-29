@@ -381,7 +381,10 @@ def _resolve_entry(root: str, entry: str | None) -> str:
     and then silently analyses the wrong one.
     """
     if not entry:
-        meta = store.load(root).meta
+        # With the reader `check` migrates with, or a legacy project whose model
+        # states `D` and `d` refuses here as a case collision `check` never
+        # makes (store.load's docstring).
+        meta = store.load(root, model_prose=static_param_prose).meta
         entry = (meta.model_entry or "").strip()
     if not entry:
         candidates = _model_candidates(root)

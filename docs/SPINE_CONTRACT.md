@@ -311,7 +311,7 @@ def read_project(root) -> ProjectMeta                   # .atompipe/project.json
 def write_project(root, meta) -> str | None             # the path, or None when unchanged
 def read_record(path, kind, *, model_entry="") -> Record | list[PhysicalResult]   # STRICT
 def write_record(root, kind, record, *, record_id=None) -> str | None             # None: unchanged
-def load(root) -> Ledger                # the records; a legacy ledger migrated IN MEMORY; verdicts []
+def load(root, *, model_prose=None) -> Ledger   # the records; a legacy ledger migrated IN MEMORY; verdicts []
 def save(root, ledger: Ledger) -> None  # tests and the migration only (see below)
 def is_legacy(root) -> bool             # ledger.json present, project.json absent
 def build_index(root, *, digests: FileDigests | None = None) -> dict   # pure
@@ -395,9 +395,22 @@ a typo'd real record would vanish (S-40's shape). `Record.from_dict` stays lenie
 decisions newest first by `when`), sets each claim's in-memory `physical_result` to the
 LAST of `results/<id>.json`, each input's `bytes` from its file's size, and `verdicts`
 to `[]` (they live in the verdict cache). On a legacy project it is
-`migrate_legacy(root, apply=False, when="").ledger`: the same Ledger the migration will
-write, so a command answers the same before and after it. Neither marker: an empty
-`Ledger`. **No spine code reads `.atompipe/ledger.json` for truth** on a records project.
+`migrate_legacy(root, apply=False, when="", model_prose=model_prose).ledger`: the same
+Ledger the migration will write — **when it is given the reader the migration runs
+with**, so a command answers the same before and after it and refuses exactly what the
+migration refuses. Every spine caller (`cli._load`, `modelio`'s entry resolver,
+`packs.installed`) passes `modelio.static_param_prose`, `check`'s reader; a call that
+does not is a test failure (`tests/test_records.EveryReaderMigratesAsCheckDoes` walks
+every spine module's AST, as `NoWholeLedgerWriterInCli` does for `save`). What slipped
+through: `load` planned with none — lossless, every param keeping its rationale — while
+`check` planned with the static reader, so on a model stating `D` and `d` every read
+command refused "params/D.json and params/d.json would name ids that differ only in case
+… rename one" about two files `check` never writes, and after a migration killed half
+way every read command blamed a `params/thickness.json` that was byte for byte `check`'s
+("Move those files aside"). *Rejected:* a default reader `modelio` registers into the
+store at import (the plan would turn on which module a process imported first). Neither
+marker: an empty `Ledger`. **No spine code reads `.atompipe/ledger.json` for truth** on
+a records project.
 
 **`save(root, ledger)`** stays for tests and the migration (an AST test,
 `tests/test_shims.py`, forbids it in `cli.py`: a command writes exactly the record it
@@ -445,7 +458,7 @@ plan (both named). Legacy `verdicts` and the old sweep record are dropped unread
 **last** (the commit marker: a crash before it leaves a legacy project whose next run
 re-derives the same bytes and completes), then renames `ledger.json` to
 `ledger.legacy.json` — never deleted. `apply=False` writes nothing; `load` and `doctor`
-use it. `MigrationPlan.ledger` is the plan read back through the strict reader;
+use it, with the same `model_prose` as `check` (see `load`). `MigrationPlan.ledger` is the plan read back through the strict reader;
 `files` maps each root-relative path (including `.atompipe/project.json`) to its bytes;
 `notice` is one stderr paragraph for the CLI — with `apply`, it ends with
 `git rm --cached .atompipe/ledger.json` (the spine runs no git); without, it says the
@@ -690,7 +703,7 @@ def static_param_prose(root, entry) -> dict[str, dict[str, str]]
     # entry file: every class's AST attribute docstrings (field_docstrings' normalisation)
     # plus rationale/units constants of PARAMS items that are dict literals or Param(...)
     # calls with constant keywords. Parses, never imports or runs; {} when it cannot parse.
-    # The CLI passes it to store.migrate_legacy as model_prose.
+    # Every spine reader passes it to store.load and store.migrate_legacy as model_prose.
 class ParamView:                 # one parameter as a reader shows it
     # value, units, rationale, derived_from — from the model (value None when it does not load);
     # rejected — the union of the model's PARAMS and the record's, each tagged with its
@@ -2018,6 +2031,7 @@ def match(need: Need, manifests) -> list[PackManifest]      # gap -> candidate p
 def score(need: Need, manifest) -> float                   # 0 = no signal; what `match` ranks by
 def installed(root, *, ledger=None) -> list[str]           # the project's opted-in packs, in order:
                                                              # project.json's `packs`, via store.load
+                                                             # with check's model_prose (a legacy project)
 def available(root=None) -> list[str]                      # every pack name discovery can see
 def key_scope(manifest) -> str                             # "fdm-print" -> "fdm" (from its gate ids)
 def key_vocabulary(name, root=None) -> dict[str, dict]     # every projection key the pack reads
@@ -2343,6 +2357,9 @@ another name.
 def _migrate(root, *, apply, now) -> Ledger
     # store.migrate_legacy(root, apply=apply, when=now,
     #                      model_prose=modelio.static_param_prose); its notice to stderr
+def _load(root) -> Ledger
+    # store.load(root, model_prose=modelio.static_param_prose): every command that only
+    # reads, so a legacy project reads as the plan _migrate will write
 def _touch_index(root, *, quiet=False) -> None
     # store.write_index on a MIGRATED project, best-effort; re-run while records_digest moves
 ```
@@ -2351,8 +2368,9 @@ def _touch_index(root, *, quiet=False) -> None
   `apply` — once, with ONE stderr notice ending `git rm --cached
   .atompipe/ledger.json` (the spine runs no git). `check --no-record` runs it in
   memory only and says the project "will migrate … on the next check". Every other
-  command reads a legacy project through `store.load`, in memory, and writes nothing
-  of it.
+  command reads a legacy project through `_load` — `store.load` with `_migrate`'s own
+  reader, so it refuses what the migration refuses and nothing else — in memory, and
+  writes nothing of it.
 - **The shims**, each under the lock with `now` stamped at the edge, each migrating
   first, each writing **exactly one record file** (plus the ignored index):
   `ingest` — the bytes into `inputs/<bucket>/` (the payload, not a record) and

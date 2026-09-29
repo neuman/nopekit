@@ -42,6 +42,7 @@ Run:  PYTHONPATH=src python3 -m unittest tests.test_records -v
 """
 from __future__ import annotations
 
+import ast
 import contextlib
 import copy
 import fnmatch
@@ -50,6 +51,7 @@ import io
 import json
 import os
 import sys
+import textwrap
 import time
 import unittest
 from typing import Any, NamedTuple
@@ -1326,6 +1328,8 @@ _CALIPER_ID = "caliper-txt"
 #: The migration's rename: the legacy ledger goes, kept under its new name.
 _LEGACY_REL = f"{store.ATOMPIPE_DIR}/{store.LEDGER_NAME}"
 _KEPT_REL = f"{store.ATOMPIPE_DIR}/{store.LEGACY_LEDGER_NAME}"
+#: The migration's commit marker, written last.
+_PROJECT_REL = f"{store.ATOMPIPE_DIR}/{store.PROJECT_NAME}"
 
 #: A claim the migrated fixture carries formatted as a person formats it (indent
 #: 4, keys in their own order, no trailing newline) rather than as `write_record`
@@ -1973,6 +1977,296 @@ class NoCommandWritesARecord(_env.EnvCase):
         self.assertEqual(_read_bytes(path), before[_HAND_FORMATTED][0])
         self.assertEqual(_touched_records(before, _records(project)), [_HAND_FORMATTED],
                          "a record saved back with equal bytes was not seen")
+
+
+# --------------------------------------------------------------------------- #
+# every reader of a legacy project plans the migration `check` will carry out
+# --------------------------------------------------------------------------- #
+#: The commands a person runs on a legacy project before its first `check`. Each
+#: reads the legacy ledger migrated in memory and writes nothing; `check
+#: --no-record` is the same plan through `check`'s own path, `doctor` through its
+#: own row. `why` is added per test with the parameter the test is about.
+_LEGACY_READERS: tuple[tuple[str, ...], ...] = (
+    ("status",), ("report",), ("doctor",), ("model",), ("claim", "list"),
+    ("inputs",), ("ask",), ("gate", "list"), ("packs", "list"), ("site", "status"),
+    ("check", "--no-record"),
+)
+
+#: The two model fields a case-only pair is made of, each with the docstring the
+#: model states it with — the words the legacy parameter sync copied into the
+#: legacy record's `rationale` — and the value.
+_CASE_PAIR = (("D", 12.0, "mm, boss outer diameter: a washer seats on it."),
+              ("d", 5.0, "mm, boss bore: an M4 clearance hole."))
+
+#: A child that runs `atompipe <argv>` and dies the instant the command renames
+#: its temp file onto `sys.argv[2]` (a root-relative path) — `os._exit`: no
+#: `finally`, no lock release, no cleanup, as a SIGKILL or a power cut leaves it.
+#: That file is never written; every write before it is.
+_KILL_DRIVER = r"""
+import os, sys
+
+root, target, argv = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3:]
+want = os.path.join(root, *target.split("/"))
+
+
+def hook(event, args):
+    if event == "os.rename":
+        try:
+            dst = os.path.realpath(os.path.abspath(os.fsdecode(args[1])))
+        except (TypeError, ValueError):
+            return
+        if dst == want:
+            os._exit(137)
+
+
+sys.addaudithook(hook)
+from atompipe import cli
+sys.exit(cli.main(argv))
+"""
+
+
+def _case_pair_bracket(dest: str, *, stated: bool) -> str:
+    """The legacy bracket with two model fields whose names differ only in case,
+    `D` and `d`, and the legacy records the old parameter sync wrote for them.
+
+    ``stated``: the model states each one's rationale (a docstring), and the
+    legacy record holds that same text — what the sync copied — so the params
+    rule leaves neither with anything to hold: no file, nothing to collide.
+    Without it the model is silent and the legacy record's rationale is a
+    person's, which the rule keeps: `params/D.json` beside `params/d.json`, one
+    file on a case-insensitive filesystem, and every command must refuse it."""
+    project = _projects.bracket_copy(dest)
+    model = os.path.join(project, "model", "bracket.py")
+    with open(model, encoding="utf-8") as fh:
+        text = fh.read()
+    anchor = "    thickness: float = 7.0\n"
+    if anchor not in text:
+        raise AssertionError(f"model/bracket.py no longer holds {anchor!r}: move the anchor")
+    fields = "".join(f"    {name}: float = {value}\n"
+                     + (f'    """{why}"""\n' if stated else "") + "\n"
+                     for name, value, why in _CASE_PAIR)
+    _write(model, text.replace(anchor, fields + anchor, 1))
+    ledger = os.path.join(project, ".atompipe", "ledger.json")
+    with open(ledger, encoding="utf-8") as fh:
+        data = json.load(fh)
+    data["params"] += [{"changed_in": "", "derived_from": [], "gates": [], "grounded_by": [],
+                        "name": name, "rationale": why, "rejected": [], "source": "",
+                        "tags": [], "units": "", "value": value}
+                       for name, value, why in _CASE_PAIR]
+    _write(ledger, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    return project
+
+
+def unmatched_migration_readers(source: str) -> list[str]:
+    """``<function>:<line>`` for every way ``source`` reaches `store.load` or
+    `store.migrate_legacy` other than a call passing `model_prose=` the reader
+    `check` migrates with (`static_param_prose`, by any module path): a call
+    without it, a bare reference (`f = store.load`), `getattr(store, "load")`,
+    and either name imported from the store module under any name."""
+    tree = ast.parse(source)
+    owner: dict[int, str] = {}
+    for fn in ast.walk(tree):
+        if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for node in ast.walk(fn):
+                owner.setdefault(id(node), fn.name)
+    store_names = {"store"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module in (None, "atompipe"):
+            store_names |= {a.asname or a.name for a in node.names if a.name == "store"}
+        elif isinstance(node, ast.Import):
+            store_names |= {a.asname for a in node.names
+                            if a.name == "atompipe.store" and a.asname}
+    readers = ("load", "migrate_legacy")
+
+    def the_reader(value: ast.AST) -> bool:
+        return ((isinstance(value, ast.Attribute) and value.attr == "static_param_prose")
+                or (isinstance(value, ast.Name) and value.id == "static_param_prose"))
+
+    judged: set[int] = set()
+    found: list[str] = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr in readers and isinstance(node.func.value, ast.Name)
+                and node.func.value.id in store_names):
+            judged.add(id(node.func))
+            if not any(k.arg == "model_prose" and the_reader(k.value) for k in node.keywords):
+                found.append(f"{owner.get(id(node), '<module>')}:{node.lineno}")
+    for node in ast.walk(tree):
+        where = f"{owner.get(id(node), '<module>')}:{getattr(node, 'lineno', 0)}"
+        if (isinstance(node, ast.Attribute) and node.attr in readers
+                and isinstance(node.value, ast.Name) and node.value.id in store_names
+                and id(node) not in judged):
+            found.append(where)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+              and node.func.id == "getattr" and len(node.args) >= 2
+              and isinstance(node.args[0], ast.Name) and node.args[0].id in store_names
+              and isinstance(node.args[1], ast.Constant) and node.args[1].value in readers):
+            found.append(where)
+        elif (isinstance(node, ast.ImportFrom)
+              and (node.module or "").split(".")[-1] == "store"
+              and any(a.name in readers for a in node.names)):
+            found.append(where)
+    return sorted(set(found), key=lambda s: (int(s.rsplit(":", 1)[1]), s))
+
+
+class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
+    """A legacy project is read through its migration planned in memory, and
+    that plan depends on what the model states (the params rule). Every reader
+    must plan it with the reader `check` migrates with, or a read command and
+    `check` disagree about the same bytes.
+
+    What slipped through: `store.load` planned the migration with no
+    `model_prose` — lossless, every param keeping its rationale — while `check`
+    and `doctor`'s records row planned it with `modelio.static_param_prose`. So
+    on a legacy project whose model states `D` and `d`, every read command
+    refused ("params/D.json and params/d.json would name ids that differ only in
+    case … rename one") while `check` migrated it cleanly and wrote neither
+    file; and after a migration killed half way, every read command blamed a
+    `params/thickness.json` that was byte for byte what `check` would write
+    ("differs from what .atompipe/ledger.json migrates to … Move those files
+    aside"), while `check` completed it. Both remedies were false, and a person
+    who followed the first renamed a model field for nothing."""
+
+    def _reads(self, project: str, why: str, *, false_remedy: str) -> None:
+        """Every reader works on the legacy ``project``, says nothing of
+        ``false_remedy``, and leaves it legacy."""
+        for argv in _LEGACY_READERS + (("why", why),):
+            with self.subTest(argv=argv):
+                proc = _env.atompipe(list(argv), cwd=project)
+                said = proc.stdout + proc.stderr
+                self.assertIn(proc.returncode, (0, 1),
+                              f"`atompipe {' '.join(argv)}` refused a project `check` "
+                              f"migrates:\n{said}")
+                self.assertNotIn("Traceback", proc.stderr)
+                self.assertNotIn(false_remedy, said,
+                                 f"`atompipe {' '.join(argv)}` named a refusal `check` "
+                                 f"does not make")
+                self.assertNotIn("[FAIL] records", proc.stdout)
+                self.assertTrue(store.is_legacy(project),
+                                f"`atompipe {' '.join(argv)}` migrated a project it was reading")
+
+    def _check_completes(self, project: str, plan: store.MigrationPlan) -> None:
+        proc = _env.atompipe(["check"], cwd=project)
+        self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertFalse(store.is_legacy(project), "check did not migrate")
+        for rel, data in plan.files.items():
+            self.assertEqual(_read_bytes(os.path.join(project, *rel.split("/"))), data, rel)
+
+    def test_a_case_pair_the_model_states_reads_as_check_migrates_it(self):
+        """V: the review's repro (``ir2/case.py``). The model states `D` and `d`,
+        so the migration writes neither: every read command must read the project
+        — never refuse it with "rename one" — and `check` then migrates it."""
+        project = _case_pair_bracket(os.path.join(self.tmp(), "case"), stated=True)
+        plan = store.migrate_legacy(project, apply=False, when="",
+                                    model_prose=modelio.static_param_prose)
+        self.assertFalse([rel for rel in plan.files if rel.startswith("params/")],
+                         "the fixture no longer exercises the params rule: a case pair the "
+                         "model states must write no param file")
+        self._reads(project, "D", false_remedy="differ only in case")
+        why = _env.atompipe(["why", "D"], cwd=project)
+        self.assertIn(_CASE_PAIR[0][2], why.stdout, "why D lost the rationale the model states")
+        self._check_completes(project, plan)
+
+    def test_a_case_pair_only_the_ledger_holds_is_refused_by_every_command(self):
+        """V: the other direction, so the one above cannot pass by never refusing.
+        The model is silent on `D` and `d`, so both records keep their rationale
+        and would be one file on a case-insensitive filesystem: `check` refuses,
+        and every reader refuses with the same words, and nothing is written."""
+        project = _case_pair_bracket(os.path.join(self.tmp(), "case"), stated=False)
+        before = _tree(project)
+        for argv in _LEGACY_READERS + (("why", "D"), ("check",)):
+            with self.subTest(argv=argv):
+                proc = _env.atompipe(list(argv), cwd=project)
+                said = proc.stdout + proc.stderr
+                self.assertIn(proc.returncode, (1,) if argv == ("doctor",) else (2,), said)
+                self.assertIn("params/D.json and params/d.json", said)
+                self.assertIn("differ only in case", said)
+                self.assertNotIn("Traceback", proc.stderr)
+        self.assertTrue(store.is_legacy(project))
+        self.assertEqual(
+            {rel: data for rel, data in _tree(project).items()
+             if not rel.startswith((".atompipe/cache/", ".atompipe/obs/", ".atompipe/out/"))},
+            {rel: data for rel, data in before.items()
+             if not rel.startswith((".atompipe/cache/", ".atompipe/obs/", ".atompipe/out/"))},
+            "a refused migration wrote something")
+
+    def test_a_check_killed_mid_migration_reads_as_its_plan_and_completes(self):
+        """V: the review's repro (``ir2/crash.py 12``), through the CLI a person
+        runs. `check` on the enriched legacy bracket — which has a
+        `params/thickness.json` to write — is killed at the rename of one file:
+        the first result (every claim, decision, input, need and param record on
+        disk) and the commit marker (every record on disk, no `project.json`).
+        Every read command must read the half-migrated project as its plan —
+        never blame a record `check` itself wrote — and the next `check` must
+        complete it, byte for byte."""
+        for target in ("results/C5.json", _PROJECT_REL):
+            with self.subTest(killed_at=target):
+                project = _legacy_bracket(os.path.join(self.tmp(), "legacy"))
+                plan = store.migrate_legacy(project, apply=False, when="",
+                                            model_prose=modelio.static_param_prose)
+                self.assertIn("params/thickness.json", plan.files,
+                              "the fixture no longer writes a param record, so the plan "
+                              "difference this repro turns on cannot be seen")
+                self.assertIn(target, plan.files)
+                killed = _env.run([sys.executable, "-c", _KILL_DRIVER, project, target,
+                                   "check"], cwd=project)
+                self.assertEqual(killed.returncode, 137, killed.stdout + killed.stderr)
+                self.assertTrue(store.is_legacy(project), "the killed check committed")
+                self.assertFalse(os.path.exists(os.path.join(project, *target.split("/"))))
+                self.assertTrue(os.path.isfile(os.path.join(project, "params",
+                                                            "thickness.json")),
+                                "the kill came before the param record: nothing to blame")
+                self._reads(project, "thickness", false_remedy="has not finished migrating")
+                self._check_completes(project, plan)
+
+    def test_every_spine_reader_passes_the_reader_check_migrates_with(self):
+        """Every `store.load` and `store.migrate_legacy` in a spine module passes
+        `model_prose=` `static_param_prose`: a reader added without it plans a
+        different migration from `check`'s, which is this class's repro."""
+        spine = os.path.join(_env.SRC, "atompipe")
+        found: dict[str, list[str]] = {}
+        calls = 0
+        for name in sorted(os.listdir(spine)):
+            if not name.endswith(".py") or name == "store.py":
+                continue
+            with open(os.path.join(spine, name), encoding="utf-8") as fh:
+                source = fh.read()
+            calls += source.count("store.load(") + source.count("store.migrate_legacy(")
+            bad = unmatched_migration_readers(source)
+            if bad:
+                found[name] = bad
+        self.assertTrue(calls, "no spine module reads a project: the rule held vacuously")
+        self.assertEqual(found, {}, "a reader plans a different migration from check's")
+
+    def test_the_rule_catches_a_planted_reader(self):
+        """V: each spelling of a reader without `check`'s `model_prose` is found; a
+        call passing it, by any module path, is not."""
+        planted = {
+            "no model_prose": ("def cmd(root):\n    return store.load(root)\n", ["cmd:2"]),
+            "model_prose=None": ("def cmd(root):\n    return store.migrate_legacy(\n"
+                                 "        root, apply=False, when='', model_prose=None)\n",
+                                 ["cmd:2"]),
+            "another reader": ("def cmd(root):\n    return store.load(root, model_prose=f)\n",
+                               ["cmd:2"]),
+            "a reference": ("def cmd(root):\n    read = store.load\n    return read(root)\n",
+                            ["cmd:2"]),
+            "getattr": ("def cmd(root):\n    return getattr(store, 'load')(root)\n", ["cmd:2"]),
+            "imported": ("from .store import migrate_legacy as plan\n"
+                         "def cmd(root):\n    return plan(root)\n", ["<module>:1"]),
+            "an alias of the module": ("from . import store as st\n"
+                                       "def cmd(root):\n    return st.load(root)\n", ["cmd:3"]),
+        }
+        for label, (source, want) in planted.items():
+            with self.subTest(label):
+                self.assertEqual(unmatched_migration_readers(textwrap.dedent(source)), want)
+        clean = ("def cmd(root):\n"
+                 "    a = store.load(root, model_prose=modelio.static_param_prose)\n"
+                 "    b = store.migrate_legacy(root, apply=False, when='',\n"
+                 "                             model_prose=static_param_prose)\n"
+                 "    return json.load(root), self.load()\n")
+        self.assertEqual(unmatched_migration_readers(clean), [])
+
 
 
 if __name__ == "__main__":

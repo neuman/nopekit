@@ -1103,7 +1103,8 @@ def _load_records(root: str) -> Ledger:
     return _assemble(root, meta, parsed)
 
 
-def load(root: str) -> Ledger:
+def load(root: str, *,
+         model_prose: Callable[[str, str], Any] | None = None) -> Ledger:
     """The project, in memory: its record files, or its legacy ledger migrated IN
     MEMORY (nothing is written). `verdicts` is always empty: they live in the
     verdict cache, and `verdicts.resolve` is what reads them.
@@ -1115,11 +1116,29 @@ def load(root: str) -> Ledger:
     worked, and the next save would write that emptiness over the project.
     `.atompipe/ledger.json` on a records project is the generated index and is
     never read here.
+
+    `model_prose` is `migrate_legacy`'s, and matters only on a legacy project:
+    the in-memory plan is the migration's, and the migration's plan depends on
+    what the model states (the params rule). A caller that will migrate, or
+    whose project `check` will, passes the reader `check` migrates with — the
+    spine passes `modelio.static_param_prose` at every call, and
+    `tests/test_records.EveryReaderMigratesAsCheckDoes` walks the spine's AST
+    for a call that does not. What slipped through: this called
+    `migrate_legacy` with none (lossless: every param keeps its rationale)
+    while `check` passed the static reader, so the two planned different
+    files from the same bytes — on a model stating `D` and `d`, every read
+    command refused "params/D.json and params/d.json … rename one" while
+    `check` wrote neither file; after a killed migration, every read command
+    blamed a `params/thickness.json` byte for byte what `check` would write.
+    *Rejected:* a default reader registered by `modelio` at import (the plan
+    would depend on which module a process happened to import first); a
+    meta-only fast path (the refusals are the point: a reader must refuse
+    exactly where `check` refuses, and nowhere else).
     """
     if os.path.isfile(_project_path(root)):
         return _load_records(root)
     if os.path.isfile(ledger_path(root)):
-        return migrate_legacy(root, apply=False, when="").ledger
+        return migrate_legacy(root, apply=False, when="", model_prose=model_prose).ledger
     return Ledger()
 
 
@@ -1924,7 +1943,10 @@ def migrate_legacy(root: str, *, apply: bool, when: str,
     output (`{param: {"rationale", "units"}}`, what the model STATES, read
     statically — the CLI passes `modelio.static_param_prose`; the store never
     imports or runs a model). With `model_prose=None`, no entry, or an entry
-    that does not parse, nothing is dropped.
+    that does not parse, nothing is dropped. Every plan of one project — `load`'s
+    in memory, `doctor`'s, `check --no-record`'s and `check`'s own — must be made
+    with the same reader, or the refusals below fire on one path and not the
+    other (see `load`).
 
     Before a byte is written it refuses: an unknown key at any level (`rejectd`,
     with a suggestion — S-40: today's spine drops it and the next save erases

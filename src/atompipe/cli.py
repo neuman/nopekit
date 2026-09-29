@@ -566,6 +566,25 @@ def _migrate(root: str, *, apply: bool, now: str) -> Ledger:
     return plan.ledger
 
 
+def _load(root: str) -> Ledger:
+    """The project's records for every command that does not migrate them:
+    `store.load`, with the reader `_migrate` migrates with, so a legacy project
+    reads as the very plan its next `check` will write — the same refusals, and
+    no others.
+
+    What slipped through: every reader called `store.load(root)`, which planned
+    the migration with no `model_prose`, while `check` planned it with the
+    static reader. On a model stating `D` and `d`, `status`, `why`, `report`
+    and the rest refused with "rename one" — a case collision between two
+    files `check` never writes — and `check` migrated cleanly; after a
+    migration killed half way, they blamed a `params/thickness.json` that was
+    byte for byte what `check` would write, and told the user to move it aside.
+    *Rejected:* `_migrate(apply=False)` here (it prints the "will migrate"
+    notice on every read); keeping the calls and fixing the store's default (the
+    store must not import `modelio`, spec §3.1)."""
+    return store.load(root, model_prose=modelio.static_param_prose)
+
+
 #: Commands after which the index is NOT rebuilt. `doctor` reports on the
 #: project and never writes a byte of it (it compares the index with the records
 #: instead). `init` never writes a `ledger.json` (spec §3.15): a new project's
@@ -1082,7 +1101,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     lines. `status` is what you run when something is wrong.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, problems = _registry(root, ledger, strict=False)
     model, projection, model_error = _projection_safe(root, ledger)
     now = utcnow_iso()
@@ -1635,7 +1654,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     for the agent, not for the person being asked.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     if args.kind:
         pairs = [(args.kind, prompt) for prompt in artifacts.prompts_for(args.kind)]
     else:
@@ -1755,7 +1774,7 @@ def cmd_inputs(args: argparse.Namespace) -> int:
     record, and the digest cache is consulted, never saved.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     model, _projection_unused, model_error = _projection_safe(root, ledger)
     grounds = _grounding(ledger, _param_views(root, ledger, model, model_error))
     grounded: dict[str, list[str]] = {}
@@ -1883,7 +1902,7 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
     as things pass is unreadable as a diff.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, _ = _registry(root, ledger, strict=False)
     model, projection, model_error = _projection_safe(root, ledger)
     view, resolution = _resolved(root, ledger, registry, projection, model_error,
@@ -1927,7 +1946,7 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
     rejected alternatives.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     if ledger.claim(args.id) is None:
         raise AtompipeError(f"no claim {args.id!r} — `atompipe claim list` shows what exists")
     registry, _ = _registry(root, ledger, strict=False)
@@ -2041,7 +2060,7 @@ def cmd_gap(args: argparse.Namespace) -> int:
     a judgement this command is not entitled to make.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, _ = _registry(root, ledger, strict=False)
     gaps = claims.find_gaps(ledger, registry)
 
@@ -2136,7 +2155,7 @@ def cmd_gate_list(args: argparse.Namespace) -> int:
     has always been the way to read one gate's prose.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, problems = _registry(root, ledger, strict=False)
     specs = registry.by_tier(args.tier if args.tier is not None else ALL_TIERS)
 
@@ -2226,7 +2245,7 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     selftest` are the commands that spend that time.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, _ = _registry(root, ledger, strict=False)
     entry = registry.get(args.id)
     if entry is None:
@@ -2374,7 +2393,7 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
     project and exited 2 at the root, so the merge check `CLAUDE.md` and
     `CONTRIBUTING.md` prescribe could not run where they prescribe it, and CI ran
     it only inside the bracket, which loads no pack at all. The branch comes
-    before `_root`, `_lock`, `store.load` and `_projection` (cli:H8): each of them
+    before `_root`, `_lock`, `_load` and `_projection` (cli:H8): each of them
     assumes a project, and a broken model must not stop a pack's controls.
 
     **Project mode files what it demonstrates** (D-07, S-08). Every selected
@@ -2404,7 +2423,7 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
     now = utcnow_iso()
 
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _load(root)
         registry, _ = _registry(root, ledger, strict=True)
         model, projection = _projection(root, ledger)
         ctx = _context(root, ledger, model, projection, max_tier, quiet=args.json)
@@ -2876,7 +2895,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     both failures are now named in a banner directly under the headline.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, problems = _registry(root, ledger, strict=False)
     model, projection, model_error = _projection_safe(root, ledger)
     view, resolution = _resolved(root, ledger, registry, projection, model_error,
@@ -2982,7 +3001,7 @@ def cmd_why(args: argparse.Namespace) -> int:
     S-36). All of it through `_why_text`, which `claim show` shares.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, _problems = _registry(root, ledger, strict=False)
     model, projection, model_error = _projection_safe(root, ledger)
     view, resolution = _resolved(root, ledger, registry, projection, model_error,
@@ -3064,7 +3083,7 @@ def cmd_packs_list(args: argparse.Namespace) -> int:
     gate come from" (installed, and shadowed by a copy earlier on the path).
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     installed = packs.installed(root, ledger=ledger)
     found = packs.discover_dirs(root)
 
@@ -3247,7 +3266,7 @@ def cmd_model(args: argparse.Namespace) -> int:
     entirely has no record, and is no orphan.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
 
     model, projection = _projection(root, ledger, entry=args.entry)
     if projection is None:
@@ -3616,7 +3635,7 @@ def _site_judgement(root: str, resolved: tuple | None) -> dict:
     shows: stale, correctly. No viewgen runs: the views are not judged
     (`site._UNJUDGED_KEYS`)."""
     if resolved is None:
-        ledger = store.load(root)
+        ledger = _load(root)
         registry, _problems = _registry(root, ledger, strict=False)
         model, projection, model_error = _projection_safe(root, ledger)
         view, resolution = _resolved(root, ledger, registry, projection, model_error,
@@ -3725,7 +3744,7 @@ def cmd_site_build(args: argparse.Namespace) -> int:
     # moment of the build rather than the ones from before a `check` that landed
     # while the viewgens were still importing.
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _load(root)
         registry, _ = _registry(root, ledger)
         view_registry, _ = _view_registry(root, ledger)
         model, projection = _projection(root, ledger)
@@ -4014,7 +4033,7 @@ def cmd_site_status(args: argparse.Namespace) -> int:
     the registration and missing on this machine.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     info = _site_state(root)
     view_registry, problems = _view_registry(root, ledger, strict=False)
 
@@ -4838,7 +4857,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check(results, "project", "ok", root)
 
     try:
-        ledger = store.load(root)
+        ledger = _load(root)
     except AtompipeError as exc:
         # One FAIL row per record the strict reader refuses, never an exit 2:
         # `doctor` is where a human finds out WHICH files, and the load stops at

@@ -1889,8 +1889,13 @@ def installed(root: str, *, ledger: Ledger | None = None) -> list[str]:
     question is a wasted walk on every command.
     """
     from . import store                      # local: keeps module import cost flat
+    from . import modelio as _modelio        # local: the same edge, the same reason
 
-    led = ledger if ledger is not None else store.load(root)
+    # With the reader `check` migrates with: on a legacy project `load` is the
+    # migration's plan, and a plan made without it refuses what `check` does
+    # not (store.load's docstring has the D/d case).
+    led = ledger if ledger is not None else store.load(
+        root, model_prose=_modelio.static_param_prose)
     out: list[str] = []
     seen: set[str] = set()
     for name in led.meta.packs or []:
