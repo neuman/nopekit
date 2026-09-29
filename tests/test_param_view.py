@@ -36,7 +36,9 @@ Run:  PYTHONPATH=src python3 -m unittest tests.test_param_view -v
 """
 from __future__ import annotations
 
+import json
 import os
+import re
 import sys
 import textwrap
 import unittest
@@ -45,6 +47,7 @@ import _env
 import _projects
 import _transcript
 from atompipe import decisions, modelio, store
+from atompipe import site as site_mod
 from atompipe.models import Claim, Decision, Ledger, Param, Rejected, Verdict
 from atompipe.util import AtompipeError
 
@@ -455,6 +458,230 @@ class StaticProse(_Bracket):
         self.assertEqual(modelio.static_param_prose(root, "model/broken.py"), {})
         self.assertEqual(modelio.static_param_prose(root, "model/pkg"),
                          {"x": {"rationale": "x, from the package.", "units": ""}})
+
+
+# --------------------------------------------------------------------------- #
+# every reader shows the view, and they agree on what is undefended
+# --------------------------------------------------------------------------- #
+#: `doctor`'s `model-provenance` detail when it names parameters.
+_DOCTOR_UNDEFENDED = re.compile(r"\d+ param\(s\) with no rationale: (?P<names>.+)")
+
+#: `status`'s line naming them.
+_STATUS_UNDEFENDED = re.compile(r"undefended params: (?P<names>.+?)(?:, \+\d+)? — "
+                                r"no rationale recorded")
+
+#: The report's section heading, and the first cell of each of its rows.
+_REPORT_HEAD = "### Parameters with no recorded rationale"
+_REPORT_ROW = re.compile(r"^\| `(?P<name>[^`]+)` \| (?P<value>[^|]*) \|")
+
+#: A model field that states nothing about itself: no docstring, no PARAMS entry,
+#: so no home says why it is 1.5.
+_SILENT_FIELD = "    fillet_r: float = 1.5\n"
+
+#: Where it goes: after the last field's docstring (exactly once in the model).
+_LAST_DOCSTRING = 'which is the kind of thing you discover at 11pm."""\n'
+
+
+def _names(text: str) -> list[str]:
+    return [name.strip() for name in text.split(",") if name.strip()]
+
+
+class RenderersReadTheParamView(_Bracket):
+    """`status`, `report` and the page take a parameter's value and rationale from
+    `modelio.param_view` — the model's, with the record's provenance — exactly as
+    `why` and `doctor` do, and all of them name the same undefended parameters.
+
+    What slipped through (review, checkpoint 1.3): from 1.3 the model owns a
+    parameter and a param record is SPARSE — `params/<name>.json` holds only what
+    the model cannot (source, grounding, tags) — but `site.state`, `report`'s
+    standing constraints and terminal block, and `status` still read
+    `ledger.params`, the records alone. So the migrated bracket's page showed no
+    parameters at all (it has no record); a record holding only `"source"` made
+    `status` call `thickness` undefended and the report print it with value
+    `None`, while `doctor` — reading the model — said every parameter carried a
+    rationale; and a model field nobody explained was flagged by `doctor` and by
+    nothing a reader of the page, the report or `status` would see.
+
+    Every command runs in a subprocess on a temp copy of the migrated bracket.
+    """
+
+    def project(self, *, silent_field: bool = False, records: dict | None = None) -> str:
+        root = self.bracket(migrated=True)
+        if silent_field:
+            _replace_once(root, _LAST_DOCSTRING, _LAST_DOCSTRING + "\n" + _SILENT_FIELD)
+        for name, body in (records or {}).items():
+            os.makedirs(os.path.join(root, "params"), exist_ok=True)
+            with open(os.path.join(root, "params", f"{name}.json"), "w",
+                      encoding="utf-8") as fh:
+                json.dump(body, fh, indent=2)
+                fh.write("\n")
+        return root
+
+    def run_ok(self, root: str, *argv: str):
+        proc = _env.atompipe(list(argv), cwd=root)
+        self.assertEqual(proc.returncode, 0,
+                         f"atompipe {' '.join(argv)}\n{proc.stdout}\n{proc.stderr}")
+        return proc
+
+    def page(self, root: str) -> dict:
+        if not os.path.isdir(os.path.join(root, "site")):
+            self.run_ok(root, "site", "init")
+        self.run_ok(root, "site", "build")
+        with open(os.path.join(root, "site", "data", "state.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def readers(self, root: str, *, loads: bool = True) -> dict[str, list[str]]:
+        """``{reader: [undefended parameter names]}`` as each one says it. With
+        ``loads=False`` (the model is broken) `model` and `site build` are left
+        out: both refuse a model that does not load, with exit 2."""
+        said: dict[str, list[str]] = {}
+        doctor = json.loads(_env.atompipe(["doctor", "--json"], cwd=root).stdout)
+        rows = [row for row in doctor["checks"] if row["check"] == "model-provenance"]
+        said["doctor"] = ([] if not rows or rows[0]["status"] == "ok" else
+                          _names(_DOCTOR_UNDEFENDED.fullmatch(rows[0]["detail"])["names"]))
+        status = json.loads(self.run_ok(root, "status", "--json").stdout)
+        said["status --json"] = list(status["model"]["undocumented_params"])
+        lines = self.run_ok(root, "status").stdout.splitlines()
+        found = [_STATUS_UNDEFENDED.fullmatch(line) for line in lines]
+        said["status"] = next((_names(m["names"]) for m in found if m), [])
+        said["report"] = [row["name"] for row in self.report_rows(root)]
+        if loads:
+            model = json.loads(self.run_ok(root, "model", "--json").stdout)
+            said["model --json"] = list(model["undocumented"])
+            said["page"] = [row["name"] for row in self.page(root)["params"]
+                            if row["defended"] is False]
+        return said
+
+    def report_rows(self, root: str) -> list[dict]:
+        lines = self.run_ok(root, "report").stdout.splitlines()
+        if _REPORT_HEAD not in lines:
+            return []
+        rows = []
+        for line in lines[lines.index(_REPORT_HEAD) + 1:]:
+            if line.startswith("#"):
+                break
+            match = _REPORT_ROW.match(line)
+            if match and match["name"] != "Param":
+                rows.append(match.groupdict())
+        return rows
+
+    def assertAgree(self, said: dict[str, list[str]], expected: list[str]) -> None:
+        self.assertEqual(said, {reader: expected for reader in said},
+                         "every reader names the same undefended parameters")
+
+    def test_the_bracket_page_shows_the_models_parameters(self):
+        """V: the migrated bracket holds no param record; its page shows every
+        parameter the model holds, with the model's value, rationale and losers."""
+        root = self.project()
+        model = modelio.load_model(root, ENTRY)
+        rows = {row["name"]: row for row in self.page(root)["params"]}
+        self.assertEqual(list(rows), [p.name for p in model.params],
+                         "the page shows the model's parameters, in its order")
+        thickness = rows["thickness"]
+        self.assertEqual((thickness["value"], thickness["units"], thickness["home"]),
+                         (7.0, "mm", "model/bracket.py Config.thickness"))
+        self.assertIn("DELIBERATELY", thickness["rationale"])
+        self.assertIs(thickness["defended"], True)
+        self.assertEqual([(r["value"], r["origin"]) for r in thickness["rejected"]],
+                         [("4.0 mm", "model/bracket.py PARAMS")])
+        self.assertEqual(thickness["model_error"], "")
+        self.assertAgree(self.readers(root), [])
+
+    def test_a_record_holding_only_provenance_is_defended_by_the_model(self):
+        """V: the review's repro. `params/thickness.json` says only where the number
+        came from; the model's docstring defends it. Nobody calls it undefended,
+        and nobody shows it without its value."""
+        root = self.project(records={"thickness": {"source": "hand calc"}})
+        said = self.readers(root)
+        self.assertAgree(said, [])
+        self.assertNotIn("undefended params:", self.run_ok(root, "status").stdout)
+        rows = {row["name"]: row for row in self.page(root)["params"]}
+        self.assertEqual((rows["thickness"]["value"], rows["thickness"]["source"],
+                          rows["thickness"]["record"]),
+                         (7.0, "hand calc", "params/thickness.json"))
+        self.assertIn("DELIBERATELY", rows["thickness"]["rationale"])
+
+    def test_an_unexplained_model_field_is_flagged_by_every_reader(self):
+        """V: a field the model adds with no word about it — no record, so the
+        records alone never saw it."""
+        root = self.project(silent_field=True)
+        self.assertAgree(self.readers(root), ["fillet_r"])
+        self.assertEqual(self.report_rows(root), [{"name": "fillet_r", "value": "1.5"}])
+        row = next(r for r in self.page(root)["params"] if r["name"] == "fillet_r")
+        self.assertEqual((row["value"], row["home"]),
+                         (1.5, "model/bracket.py Config.fillet_r"))
+
+    def test_a_record_rationale_defends_a_field_the_model_leaves_silent(self):
+        """V: the other direction. A record may carry a rationale where the model
+        states none (phase-1.md, Ownership); then no reader — `doctor` included,
+        which read the model alone — calls it undefended."""
+        why = "the smallest fillet a 0.4 mm nozzle lays down without a seam"
+        root = self.project(silent_field=True, records={"fillet_r": {"rationale": why}})
+        self.assertAgree(self.readers(root), [])
+        row = next(r for r in self.page(root)["params"] if r["name"] == "fillet_r")
+        self.assertEqual((row["value"], row["rationale"], row["defended"]), (1.5, why, True))
+
+    def test_the_page_reads_current_until_what_it_shows_moves(self):
+        """V: the page's parameters are part of what it judged. Built now, it reads
+        current; a docstring edit moves no record and no verdict, and a page that
+        still shows the old rationale reads stale, naming the parameter."""
+        root = self.project()
+        self.page(root)
+        info = json.loads(self.run_ok(root, "site", "status", "--json").stdout)
+        self.assertEqual((info["stale"], info["stale_reason"]),
+                         (False, "current with the records and the verdicts"))
+        _replace_once(root, "it comes out at ~0.70mm against a 0.5mm limit.",
+                      "it comes out at ~0.70 mm against a 0.5 mm limit.")
+        info = json.loads(self.run_ok(root, "site", "status", "--json").stdout)
+        self.assertTrue(info["stale"], info)
+        self.assertIn("(thickness rationale)", info["stale_reason"])
+        self.page(root)
+        info = json.loads(self.run_ok(root, "site", "status", "--json").stdout)
+        self.assertFalse(info["stale"], info)
+
+    def test_what_moved_names_a_parameter_after_claims_and_verdicts(self):
+        """`judgement_moved`'s parameter tier: a value, then the first other field
+        in the row's order; claims and verdict rows still come first."""
+        row = {"name": "thickness", "value": 7.0, "units": "mm", "rationale": "why 7",
+               "defended": True}
+        shown = {"claims": [{"id": "C1", "status": "fail"}], "verdicts": [],
+                 "params": [dict(row), {"name": "width", "value": 30.0, "units": "mm"}]}
+        now = json.loads(json.dumps(shown))
+        self.assertEqual(site_mod.judgement_moved(shown, now), [])
+        now["params"][0].update(rationale="", defended=False)
+        self.assertEqual(site_mod.judgement_moved(shown, now), ["thickness rationale"])
+        now["params"][0].update(value=8.0)
+        del now["params"][1]
+        now["params"].append({"name": "fillet_r", "value": None, "model_error": "boom"})
+        self.assertEqual(site_mod.judgement_moved(shown, now),
+                         ["thickness 7 mm -> 8 mm", "fillet_r (none) -> (no value)",
+                          "width 30 mm -> (none)"])
+        now["claims"][0].update(status="pass")
+        self.assertEqual(site_mod.judgement_moved(shown, now), ["C1 fail -> pass"])
+
+    def test_a_model_that_does_not_load_is_called_neither(self):
+        """V: with the model broken there is no number and no rationale to judge:
+        no reader names an undefended parameter from the records alone, the
+        report says it does not know rather than listing a record at `None`, and
+        the page's rows carry the load error with `defended` null."""
+        root = self.project(records={"thickness": {"source": "hand calc"}})
+        _append(root, 'raise RuntimeError("the model is broken on purpose")\n')
+        said = self.readers(root, loads=False)
+        self.assertEqual(said["doctor"], [], "doctor judges no provenance it cannot read")
+        self.assertAgree(said, [])
+        report_text = self.run_ok(root, "report").stdout
+        self.assertNotIn(_REPORT_HEAD, report_text)
+        self.assertIn("Parameter rationales are not known: the model does not load",
+                      report_text)
+        self.assertNotIn("every parameter carries a rationale", report_text)
+        payload = site_mod.state(root, store.load(root), None)
+        rows = {row["name"]: row for row in payload["params"]}
+        self.assertIn("thickness", rows)
+        for name, row in rows.items():
+            with self.subTest(param=name):
+                self.assertIsNone(row["value"])
+                self.assertIsNone(row["defended"])
+                self.assertIn("the model is broken on purpose", row["model_error"])
 
 
 if __name__ == "__main__":

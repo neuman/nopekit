@@ -926,6 +926,9 @@ REMOVED_NAMES: tuple[tuple[str, str], ...] = (
     ("_ParamReads", "the CLI's flat read recorder went at 1.2: verdicts.ParamTrace"),
     ("_staleness", "the global staleness rule went at 1.2: verdicts.freshness and resolve"),
     ("sync_params", "the parameter sync went at 1.3: modelio.param_view reads the model"),
+    ("undocumented_params", "went in the review of 1.3: it judged the model alone while "
+                            "status, the report and the page judged the records alone; "
+                            "modelio.undefended_params over param_view is the one nag list"),
     ("claim add", "went at 1.3 (A-8): a claim is the file claims/<id>.json"),
     ("claim edit", "went at 1.3 (A-8): edit claims/<id>.json"),
     ("packs remove", "went at 1.3 (A-8): delete the name from packs in .atompipe/project.json"),

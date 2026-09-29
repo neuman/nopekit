@@ -378,17 +378,22 @@ def _param_gates(ledger: Ledger, read_sets: Mapping[str, Iterable[tuple]],
     would notice if it changed" (which gates go stale when it moves is what
     `status` says, from rho).
     """
-    registered = set(registry.ids()) if registry is not None else set(read_sets)
-    known = {param.name for param in ledger.params}
+    reads = _registered_reads(read_sets, registry)
     found: dict[str, list[str]] = {}
-    for gate_id in sorted(read_sets):
-        if gate_id not in registered:
-            continue
-        names = {part for path in read_sets[gate_id] for part in tuple(path)[:2]
-                 if isinstance(part, str)}
-        for name in sorted(names & known):
-            found.setdefault(name, []).append(gate_id)
+    for name in sorted({param.name for param in ledger.params}):
+        gates_of = modelio.param_readers(name, reads)
+        if gates_of:
+            found[name] = gates_of
     return found
+
+
+def _registered_reads(read_sets: Mapping[str, Iterable[tuple]],
+                      registry: gates.Registry | None) -> dict[str, Iterable[tuple]]:
+    """`read_sets` for the gates `registry` registers (all of them with no
+    registry): a gate this project cannot load protects nothing here. The
+    attribution itself is `modelio.param_readers`, the one copy of the rule."""
+    registered = set(registry.ids()) if registry is not None else set(read_sets)
+    return {gate: paths for gate, paths in read_sets.items() if gate in registered}
 
 
 def _swept(resolution: verdicts.Resolution, result: verdicts.SweepResult,
@@ -807,10 +812,12 @@ def _resolved_row(verdict: Verdict, resolution: verdicts.Resolution) -> dict[str
 # --------------------------------------------------------------------------- #
 # parameters and grounding, read where they are shown
 # --------------------------------------------------------------------------- #
-def _param_views(root: str, ledger: Ledger, model: Any,
-                 model_error: str) -> list[modelio.ParamView]:
+def _param_views(root: str, ledger: Ledger, model: Any, model_error: str, *,
+                 read_sets: Mapping[str, Iterable[tuple]] | None = None
+                 ) -> list[modelio.ParamView]:
     """`modelio.param_view`, plus — when the model does not load — one bare view
-    per parameter the model's TEXT states and no record holds.
+    per parameter the model's TEXT states and no record holds. `read_sets`
+    (registered gates only) fills each view's `gates`; without it they are `()`.
 
     Why the second half: from checkpoint 1.3 a parameter the model states
     entirely has no record (`check` stopped copying the model into the records,
@@ -821,14 +828,36 @@ def _param_views(root: str, ledger: Ledger, model: Any,
     `modelio.static_param_prose` — the entry parsed, never imported or run —
     and each view says why it has no number (`model_error`), never a cached one
     (S-39)."""
-    views = modelio.param_view(ledger, model, model_error=model_error)
+    views = modelio.param_view(ledger, model, model_error=model_error, read_sets=read_sets)
     if model is None and model_error:
         held = {view.name for view in views}
         error = " ".join(model_error.split())
         stated = modelio.static_param_prose(root, ledger.meta.model_entry)
-        views += [modelio.ParamView(name=name, model_error=error)
+        views += [modelio.ParamView(
+                      name=name, model_error=error,
+                      gates=tuple(modelio.param_readers(name, read_sets or {})))
                   for name in stated if name not in held]
     return views
+
+
+def _shown_params(root: str, ledger: Ledger, model: Any, model_error: str,
+                  resolution: verdicts.Resolution,
+                  registry: gates.Registry | None) -> list[modelio.ParamView]:
+    """The parameters as `status`, `report`, the page and `doctor` show them:
+    `_param_views` with each view's gates read off the resolution's read sets.
+
+    What slipped through (review, checkpoint 1.3): those four took a parameter's
+    value and rationale from `ledger.params` — the records, which from 1.3 the
+    model owns and which hold only what it cannot. The migrated bracket's page
+    showed no parameter; a record holding only `"source"` made `status` and the
+    report call `thickness` undefended (the report at value `None`) while
+    `doctor`, reading the model alone, said every parameter carried a rationale;
+    and a field nobody explained was flagged by `doctor` and nothing else. One
+    view, one rule (`modelio.undefended_params`), every reader. `site build`
+    and the page-staleness judgement (`_site_judgement`) both take theirs from
+    here, so a page built from it reads current against it."""
+    return _param_views(root, ledger, model, model_error,
+                        read_sets=_registered_reads(resolution.read_sets, registry))
 
 
 def _grounding(ledger: Ledger, views: Iterable[modelio.ParamView]) -> dict[str, list[str]]:
@@ -1112,10 +1141,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     installed = packs.installed(root, ledger=ledger)
     available = packs.available(root)
     unread = artifacts.unextracted(view)
-    undefended = [p.name for p in view.params if not (p.rationale or "").strip()]
+    params = _shown_params(root, ledger, model, model_error, resolution, registry)
+    undefended = modelio.undefended_params(params)
     summary = claims.summarise(view, registry, stale_gates=stale_gates)
     resolved = claims.statuses(view, registry=registry, stale_gates=stale_gates)
-    site_info = _site_state(root, resolved=(view, registry, resolution))
+    site_info = _site_state(root, resolved=(view, registry, resolution, params))
     last = _last_check(root)
     last_when = str(last.get("when") or "")
     last_age = _seconds_between(last_when, now) if last_when else None
@@ -1149,7 +1179,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         })
         return 0
 
-    sys.stdout.write(report.render_terminal(view, registry, stale_gates=stale_gates))
+    sys.stdout.write(report.render_terminal(view, registry, stale_gates=stale_gates,
+                                            params=params))
     for line in _stale_lines(resolution, registry, model_error=model_error):
         _say(line)
     if last_when:
@@ -1438,7 +1469,8 @@ def cmd_check(args: argparse.Namespace) -> int:
             # lives, and what lost in both homes — beside the statuses, so the
             # agent's second read has the numbers `why` would print. It was `{}`
             # from 1.2 until the view existed.
-            views = modelio.param_view(ledger, model)
+            views = modelio.param_view(
+                ledger, model, read_sets=_registered_reads(resolution.read_sets, registry))
             verdicts.write_last_check(root, result, resolution, now=now,
                                       params={view.name: view.to_dict() for view in views})
             # The index, still under the lock, so the sweep that just migrated a
@@ -2902,6 +2934,7 @@ def cmd_report(args: argparse.Namespace) -> int:
                                  now=utcnow_iso(), model=model)
     stale_gates = resolution.stale_gates
     banner = _load_failure_banner(problems, model_error)
+    params = _shown_params(root, ledger, model, model_error, resolution, registry)
 
     if args.json:
         resolved = claims.statuses(view, registry=registry, stale_gates=stale_gates)
@@ -2922,7 +2955,8 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     if args.write:
         with _lock(root):
-            path = report.write_report(root, view, registry, stale_gates=stale_gates)
+            path = report.write_report(root, view, registry, stale_gates=stale_gates,
+                                       model_error=model_error, params=params)
             if view.decisions:
                 decisions.write_log(root, view)
         _say(rel(path, root))
@@ -2934,7 +2968,7 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 0
     sys.stdout.write(_with_banner(
         report.render_markdown(view, registry, stale_gates=stale_gates,
-                               model_error=model_error, root=root), banner))
+                               model_error=model_error, root=root, params=params), banner))
     return 0
 
 
@@ -3275,7 +3309,9 @@ def cmd_model(args: argparse.Namespace) -> int:
             f"dict); `atompipe model --entry <file>` projects one without recording it")
 
     digest = modelio.model_hash(projection)
-    undocumented = modelio.undocumented_params(model)
+    # The nag list every reader prints: over the view, so a record's rationale
+    # for a field the model leaves silent counts (modelio.undefended_params).
+    undocumented = modelio.undefended_params(_param_views(root, ledger, model, ""))
 
     written = ""
     if args.write:
@@ -3498,9 +3534,10 @@ def _site_state(root: str, *, resolved: tuple | None = None) -> dict:
     missing was built by an older spine and cannot say what it was built from:
     stale.
 
-    `resolved` — the caller's `(view, registry, resolution)`, from `_resolved`
-    with the registry it loaded, so `status` and `doctor` judge the page by the
-    resolution they print. Without it this resolves for itself exactly as they
+    `resolved` — the caller's `(view, registry, resolution, params)`, from
+    `_resolved` with the registry it loaded and `_shown_params` over the model
+    it loaded, so `status` and `doctor` judge the page by the resolution and the
+    parameters they print. Without it this resolves for itself exactly as they
     do (strict=False, `_projection_safe`): it loads the model and the gates, as
     `status` does, because only the resolver can say what a rebuild would show.
     """
@@ -3617,7 +3654,7 @@ def _site_state(root: str, *, resolved: tuple | None = None) -> dict:
         named = (f" ({'; '.join(shown)}{f' (+{more} more)' if more > 0 else ''})"
                  if shown else "")
         info["stale"] = True
-        info["stale_reason"] = (f"the verdicts have changed since the site was built"
+        info["stale_reason"] = (f"what the page shows has changed since the site was built"
                                 f"{named} — `atompipe site build`")
         return info
     info["stale_reason"] = "current with the records and the verdicts"
@@ -3640,9 +3677,10 @@ def _site_judgement(root: str, resolved: tuple | None) -> dict:
         model, projection, model_error = _projection_safe(root, ledger)
         view, resolution = _resolved(root, ledger, registry, projection, model_error,
                                      now="", model=model)
+        params = _shown_params(root, ledger, model, model_error, resolution, registry)
     else:
-        view, registry, resolution = resolved
-    return site.state(root, view, registry, resolution=resolution)
+        view, registry, resolution, params = resolved
+    return site.state(root, view, registry, resolution=resolution, params=params)
 
 
 def _site_brief(info: dict) -> dict:
@@ -3755,7 +3793,9 @@ def cmd_site_build(args: argparse.Namespace) -> int:
         view, resolution = _resolved(root, ledger, registry, projection, "", now=now,
                                      model=model)
         summary = site.build(root, view, registry, view_registry, model=model,
-                             projection=projection, now=now, resolution=resolution)
+                             projection=projection, now=now, resolution=resolution,
+                             params=_shown_params(root, ledger, model, "", resolution,
+                                                  registry))
 
     problems = summary.get("locator_problems") or []
     counts = summary.get("counts") or {}
@@ -4944,7 +4984,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             _check(results, "model-determinism", "FAIL", str(exc).replace("\n", " "))
         else:
             _check(results, "model-determinism", "ok" if deterministic else "FAIL", detail)
-        undocumented = modelio.undocumented_params(model)
+        # Over the view `status`, the report and the page judge too — never the
+        # model alone, which called a field a record defends undefended while
+        # `status` read the records alone and disagreed both ways (review, 1.3).
+        undocumented = modelio.undefended_params(
+            _param_views(root, ledger, model, model_error))
         _check(results, "model-provenance", "warn" if undocumented else "ok",
                f"{len(undocumented)} param(s) with no rationale: "
                f"{', '.join(undocumented[:6])}" if undocumented
@@ -4996,7 +5040,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _doctor_seal_row(results, registry,
                      _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
 
-    site_info = _site_state(root, resolved=(view, registry, resolution))
+    site_info = _site_state(root, resolved=(
+        view, registry, resolution,
+        _shown_params(root, ledger, model, model_error, resolution, registry)))
     if site_info["present"]:
         # Only when there is a site. A doctor row about a surface the project
         # never opted into is a row that is always there and never actionable,

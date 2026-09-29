@@ -242,8 +242,13 @@ was the one a reader of the contract would never look for.
   "locator_problems": [ { "gate": "cad.clash", "view": "assembly", "target": "back_left",
                           "severity": "unknown-target",
                           "problem": "view 'assembly' declares no node 'back_left'" } ],
-  "params":   [ { "name": "thickness", "value": 8.0, "units": "mm",
-                  "rationale": …, "rejected": [ … ], "defended": true, "derived": false, … } ],
+  "params":   [ { "name": "thickness", "value": 7.0, "units": "mm",
+                  "rationale": …, "derived_from": [ ], "source": "", "grounded_by": [ ],
+                  "tags": [ ], "home": "model/bracket.py Config.thickness", "record": "",
+                  "model_error": "", "gates": ["bracket.min_wall"],
+                  "rejected": [ { "value": "4.0 mm", "why": …, "evidence": "",
+                                  "origin": "model/bracket.py PARAMS" } ],
+                  "changed_in": "", "defended": true, "derived": false } ],
   "inputs":   [ { "id": "sk", "kind": "sketch", "path": …, "extractions": [ … ],
                   "extracted": true, … } ],
   "gaps":     [ … ],
@@ -277,6 +282,24 @@ an agent can read the site's state without a browser.
   declare). The locator itself stays on its verdict; nothing is dropped.
 - A view whose inline `data` is too big to sit in the summary is split into
   `data/views/<id>.json`: its row keeps `"data": {}` and gains `data_url`.
+- `params` is the parameter view (`modelio.param_view`, `ParamView.to_dict`), never
+  the param records: every parameter the model holds, in its field order, then any
+  record the model no longer defines. `value`, `units`, `rationale` and
+  `derived_from` are the model's (a record's `units` or `rationale` only where the
+  model states none); `home` is where the value lives; `source`, `grounded_by` and
+  `tags` are the record's (`record` its path, `""` when there is none); `rejected`
+  is both homes' losers, each with its `origin`; `gates` are the registered gates
+  whose last executed reads name it; `changed_in` is the newest decision that moved
+  it. `defended` is the one undefended rule `doctor`, `status` and the report print
+  (`modelio.undefended_params`): `false` for a number the model holds that no home
+  defends, `true` otherwise, and `null` where the model holds no number — `value`
+  is then `null` too, and `model_error` says why (the model does not load), or it
+  is `""` and `home` is `""` (a record the model no longer defines). A cached number
+  never stands in. What slipped through (review, checkpoint 1.3): the page read the
+  param records — sparse from 1.3, holding only what the model cannot — so the
+  bracket's page showed no parameter at all, and a record holding only `"source"`
+  was shown at `null` and flagged undefended while `doctor` said every parameter
+  carried a rationale.
 
 ### `meta`
 
@@ -321,9 +344,10 @@ where the page's staleness lives.
   `repro_site`). So, once the records match, the three build the document a rebuild
   would write now — `site.state` over the same resolution `status` prints, never
   running a gate, fixture or viewgen — and compare its digest. A page whose judgement
-  moved reads "the verdicts have changed since the site was built", naming up to three
-  claims whose status moved (`C1 pass -> fail`), else the verdict rows that did, with
-  the fix, `atompipe site build`; a page with no `judgement_digest` (an older build)
+  moved reads "what the page shows has changed since the site was built", naming up to
+  three claims whose status moved (`C1 pass -> fail`), else the verdict rows that did,
+  else the parameters (`thickness 7 mm -> 8 mm`, or `thickness rationale` when only a
+  docstring moved), with the fix, `atompipe site build`; a page with no `judgement_digest` (an older build)
   reads stale too. A model edited and not yet checked moves it as well: a rebuild would
   show those rows stale. The clock is left out because a `check` that changed nothing
   moves every `when` (a cache hit is an obs run); the views because they are drawn by

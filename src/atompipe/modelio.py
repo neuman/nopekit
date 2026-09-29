@@ -96,7 +96,7 @@ __all__ = [
     "model_hash",
     "write_projection",
     "params_from_model",
-    "undocumented_params",
+    "undefended_params",
     "check_determinism",
     "CodeClosure",
     "NO_BYTES",
@@ -113,6 +113,7 @@ __all__ = [
     "static_param_prose",
     "ParamView",
     "param_view",
+    "param_readers",
 ]
 
 #: Loaded model modules are registered in `sys.modules` under this prefix rather
@@ -2740,8 +2741,9 @@ def params_from_model(model: LoadedModel) -> list[Param]:
     that live outside the config (a material property, a fastener standard).
 
     Fields with no `PARAMS` entry still become `Param`s, with empty units and an
-    empty rationale, and `undocumented_params` is how the report nags about
-    them. A number with no rationale is a number nobody can defend.
+    empty rationale, and `undefended_params` (over `param_view`, which lets a
+    record state the rationale the model does not) is how every reader nags
+    about them. A number with no rationale is a number nobody can defend.
     """
     declared = {p.name: p for p in _explicit_params(model.module, model.entry)}
     # Resolve from the CLASS, not from `model.entry`. `entry` is the relative path
@@ -3039,8 +3041,13 @@ class ParamView:
     the ledger's 7 after the model said 8.0. `record` is the record's path, or
     `""` when no record exists.
 
+    `gates` is derived, never stored: the gates whose last executed reads name
+    this parameter (`param_readers`), filled only when the caller handed
+    `param_view` the read sets — `()` otherwise, which is "not asked", and a
+    reader that prints a "protected by" column passes them.
+
     Not persisted; `to_dict` is the JSON shape for readers that write one
-    (`last_check.json`'s `params`).
+    (`last_check.json`'s `params`, `state.json`'s `params` rows).
     """
 
     name: str
@@ -3055,6 +3062,7 @@ class ParamView:
     home: str = ""
     record: str = ""
     model_error: str = ""
+    gates: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -3065,12 +3073,12 @@ class ParamView:
                          for item, origin in self.rejected],
             "source": self.source, "grounded_by": list(self.grounded_by),
             "tags": list(self.tags), "home": self.home, "record": self.record,
-            "model_error": self.model_error,
+            "model_error": self.model_error, "gates": list(self.gates),
         }
 
 
-def param_view(ledger, model: LoadedModel | None, *,
-               model_error: str = "") -> list[ParamView]:
+def param_view(ledger, model: LoadedModel | None, *, model_error: str = "",
+               read_sets: Mapping[str, Iterable[Any]] | None = None) -> list[ParamView]:
     """Every parameter, value from the model, provenance from the record.
 
     `ledger` supplies the records (`ledger.params`); nothing but its names,
@@ -3088,6 +3096,10 @@ def param_view(ledger, model: LoadedModel | None, *,
     record, `value=None`, `model_error` set — to `model_error`, else
     `"no model was loaded"`. No number is shown where the model should answer.
 
+    `read_sets` — `{gate id: {param path}}`, the caller's (registered gates
+    only: a gate this project cannot load protects nothing here) — fills each
+    view's `gates` through `param_readers`. Without it `gates` is `()`.
+
     Replaces the mutating parameter sync (`sync_params`, deleted at checkpoint
     1.3 with its last caller), which copied the model into the ledger on every
     check and kept the record's `rejected` whole: a loser added to PARAMS after
@@ -3095,6 +3107,14 @@ def param_view(ledger, model: LoadedModel | None, *,
     quoted the copy's value after the model moved (S-39). Nothing is copied
     here, so there is nothing to fall behind.
     """
+    views = _views(ledger, model, model_error)
+    if read_sets is None:
+        return views
+    return [dataclasses.replace(view, gates=tuple(param_readers(view.name, read_sets)))
+            for view in views]
+
+
+def _views(ledger, model: LoadedModel | None, model_error: str) -> list[ParamView]:
     records: dict[str, Param] = {}
     for record in list(getattr(ledger, "params", None) or ()):
         records.setdefault(record.name, record)         # first wins, as Ledger.param
@@ -3129,6 +3149,33 @@ def param_view(ledger, model: LoadedModel | None, *,
     live = {param.name for param in declared}
     views += [_record_view(record) for name, record in records.items() if name not in live]
     return views
+
+
+def param_readers(name: str, read_sets: Mapping[str, Iterable[Any]]) -> list[str]:
+    """The gates whose recorded reads name parameter `name`, sorted by id.
+
+    A read counts when `name` is one of the first two keys of its path —
+    `ctx.params["thickness"]` and `ctx.params["config"]["thickness"]`, the two
+    spellings gates use — and deeper keys do not: a gate walking a BOM would
+    otherwise protect every line item that shares a parameter's name.
+
+    The one copy of the rule. `decisions.why` (its GATES block), `cli`'s
+    `Param.gates` and every `ParamView.gates` read it from here. What slipped
+    through: it lived in `decisions` and again in `cli`, and when the page and
+    the report moved to the view (review, checkpoint 1.3: they read the sparse
+    records, so the bracket's page showed no parameter at all) a third copy was
+    one keystroke away. The honest limit is the same everywhere: this is a
+    DIRECT read — `bracket.deflection` reads the derived `deflection`, which
+    protects `arm_length` in physical fact, and names no gate for it.
+    """
+    found: list[str] = []
+    for gate_id in sorted(read_sets):
+        for path in read_sets[gate_id] or ():
+            parts = (path,) if isinstance(path, str) else tuple(path)
+            if name in [part for part in parts[:2] if isinstance(part, str)]:
+                found.append(gate_id)
+                break
+    return found
 
 
 def _record_path(name: str) -> str:
@@ -3211,20 +3258,40 @@ def orphan_params(ledger, model: LoadedModel) -> list[str]:
     live = {p.name for p in (model.params or params_from_model(model))}
     return [p.name for p in ledger.params if p.name not in live]
 
-def undocumented_params(model: LoadedModel) -> list[str]:
-    """Names of parameters carrying no rationale. The report's nag list.
+def undefended_params(views: Iterable[ParamView]) -> list[str]:
+    """Names of the parameters the model holds that no home defends. The nag list
+    `doctor`, `model`, `status`, the report and the page all print — each from
+    this, over `param_view`'s views, so no two can disagree.
 
     The test is the rationale, not the paperwork: a `Param` that exists in
     `PARAMS` with `rationale=""` is exactly as undefended as a field nobody
     mentioned. "It was 7 when it worked" is not a rationale, but at least it is
     a sentence someone can argue with; an empty string is a number that will be
     re-litigated by every fresh reader forever, which is the cost `Rejected`
-    exists to eliminate.
+    exists to eliminate. A view's rationale is the model's, else its record's
+    (a record may state one only where the model states none).
 
-    Returned in model field order, so the list reads like the config file.
+    Only a view with a `home` is judged. An orphan record holds no number to
+    defend (`orphan_params` names it); and when the model does not load, what
+    it says about its numbers cannot be read — calling a parameter undefended
+    then would be a claim about text nobody read, so the caller says the model
+    does not load instead.
+
+    What slipped through (review, checkpoint 1.3). This read the MODEL alone
+    (`undocumented_params(model)`) for `doctor` and `model`, while `status`, the
+    report and the page read the RECORDS alone (`ledger.params`), which from
+    1.3 are sparse: a record holding only `"source"` made `status` call
+    `thickness` undefended while `doctor` said every parameter carried a
+    rationale; a field nobody explained was flagged by `doctor` and by nothing
+    else; a record's rationale for a field the model leaves silent was flagged
+    by `doctor` alone. *Rejected:* keeping both functions, one per home — two
+    rules for one nag list is how the two answers came apart.
+
+    Returned in view order (the model's field order), so the list reads like
+    the config file.
     """
-    return [p.name for p in (model.params or params_from_model(model))
-            if not (p.rationale or "").strip()]
+    return [view.name for view in views
+            if view.home and not (view.rationale or "").strip()]
 
 
 # --------------------------------------------------------------------------- #

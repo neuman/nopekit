@@ -99,6 +99,7 @@ from datetime import datetime
 from typing import Any, Callable, Iterable
 
 from . import claims as claim_logic
+from . import decisions as decision_logic
 from . import modelio
 from . import report as report_logic
 from . import store
@@ -1418,6 +1419,7 @@ def build(
     projection: dict | None = None,
     now: str = "",
     resolution: Any = None,
+    params: Any = None,
 ) -> dict:
     """Run the viewgens, write ``site/data/`` and ``site/assets/``, return a summary.
 
@@ -1435,6 +1437,8 @@ def build(
     caller passed neither it nor ``model`` — the live model, loaded here. A
     model that does not load is not an error for the page; the resolver reads
     every verdict that read it as not current (S-21), and the build warns.
+    ``params`` as for :func:`state`; handed none, they are the view of the model
+    the build already holds.
 
     ``registry`` is the *gate* registry (claim coverage and the readiness
     sentence are resolved against it — see :func:`state`); ``view_registry``
@@ -1473,7 +1477,7 @@ def build(
     if model_error:
         warnings.append(f"the model does not load, so no verdict that reads it is "
                         f"current: {model_error}")
-    params, conflicts = modelio.flat_params(projection)
+    flat, conflicts = modelio.flat_params(projection)
     for conflict in conflicts:
         warnings.append(f"model and build() disagree on {conflict} — views read the "
                         f"config value")
@@ -1489,7 +1493,7 @@ def build(
         # it stays available, just not as a writable handle.
         ledger=Ledger.from_dict(ledger.to_dict()),
         model=model,
-        params=params,
+        params=flat,
         assets_dir=assets_dir,
         log=_noop_log,
         extra={},
@@ -1513,7 +1517,10 @@ def build(
         # the generated views are page furniture, never a gate input.
         resolution = _resolve(root, ledger, registry, projection=projection, model=model,
                               model_error=model_error, now=now)
-    payload = state(root, for_state, registry, now=now, resolution=resolution)
+    if params is None:
+        params = _param_views(ledger, model, model_error, resolution, registry)
+    payload = state(root, for_state, registry, now=now, resolution=resolution,
+                    params=params)
     stale = bool(payload["meta"]["stale"])
     stale_reason = str(payload["meta"]["stale_reason"])
 
@@ -1721,6 +1728,7 @@ def state(
     now: str = "",
     stale: bool | None = None,
     resolution: Any = None,
+    params: Any = None,
 ) -> dict:
     """Everything the page shows, in one inspectable JSON-safe dict.
 
@@ -1759,9 +1767,23 @@ def state(
     the clock). Without it, ``age_s`` is ``null`` everywhere rather than zero: an
     age of zero renders as "just now", which is the precise lie a staleness
     display exists to prevent.
+
+    ``params`` — the caller's :func:`atompipe.modelio.param_view` (the CLI's,
+    which also names what a broken model's text states). With none, the view of
+    the live model, loaded here as for ``resolution``. Never ``ledger.params``:
+    what slipped through (review, checkpoint 1.3) — this read the records, which
+    from 1.3 hold only what the model cannot (a source, a grounding), so the
+    migrated bracket's page showed no parameter at all, and a record holding
+    only ``"source"`` was shown at value ``null`` and flagged undefended while
+    ``doctor`` said every parameter carried a rationale.
     """
-    if resolution is None:
-        resolution = _resolve(root, ledger, registry, now=now)
+    if resolution is None or params is None:
+        model, projection, model_error = _live_projection(root, ledger)
+        if resolution is None:
+            resolution = _resolve(root, ledger, registry, projection=projection,
+                                  model=model, model_error=model_error, now=now)
+        if params is None:
+            params = _param_views(ledger, model, model_error, resolution, registry)
     everything = stale is True
     stale_gates = frozenset(resolution.stale_gates)
     # The page's ledger IS the resolution laid over the records: every judgement
@@ -1891,7 +1913,7 @@ def state(
         "verdicts": verdict_rows,
         "views": views,
         "locator_problems": problems,
-        "params": [_param_row(param) for param in view.params],
+        "params": [_param_row(param, view) for param in params],
         "inputs": [{**artifact.to_dict(), "extracted": artifact.extracted}
                    for artifact in view.inputs],
         "gaps": [need.to_dict() for need in report_logic._needs(view, registry)],
@@ -1966,10 +1988,17 @@ def judgement_moved(shown: Any, now: Any) -> list[str]:
     whose status moved (``C1 pass -> fail``, ``C9 (none) -> pending`` for one
     the page lacks), else each verdict row whose outcome or measurement moved
     (``g.one pass 0.41 mm -> pass 0.29 mm``; ``… (stale)`` on a row that does
-    not count), in the documents' order. ``[]`` when neither moved — the
-    readiness, a parameter's gates, a stale reason's words: the caller then says
-    only THAT it moved. ``shown`` is the page's ``state.json``, ``now`` a
-    ``state`` document built now; both are read, never judged again."""
+    not count), else each parameter whose value moved (``thickness 7 mm -> 8
+    mm``) or, its value standing, the first other field that did (``thickness
+    rationale``), in the documents' order. ``[]`` when none moved — the
+    readiness, a stale reason's words: the caller then says only THAT it moved.
+    ``shown`` is the page's ``state.json``, ``now`` a ``state`` document built
+    now; both are read, never judged again.
+
+    The parameter tier arrived with the parameter view (review, checkpoint
+    1.3): the page's ``params`` are the model's values and rationales now, so a
+    docstring edit moves what the page shows and no verdict, and a reason that
+    named nothing sent the reader looking for a verdict that had not moved."""
     def claims_of(doc: Any) -> dict[str, str]:
         return {str(row.get("id")): str(row.get("status") or "")
                 for row in (doc.get("claims") or ())}
@@ -1994,19 +2023,69 @@ def judgement_moved(shown: Any, now: Any) -> list[str]:
                              f"{after.get(key) or '(none)'}")
         if moved:
             return moved
+
+    def params_of(doc: Any) -> dict[str, dict]:
+        return {str(row.get("name")): dict(row) for row in (doc.get("params") or ())}
+
+    def value_of(row: dict | None) -> str:
+        if row is None:
+            return "(none)"
+        value = row.get("value")
+        said = "(no value)" if value is None else f"{value:g}" if (
+            isinstance(value, (int, float)) and not isinstance(value, bool)) else str(value)
+        return said + (f" {row['units']}" if row.get("units") and value is not None else "")
+
+    before, after = params_of(shown), params_of(now)
+    for key in [*after, *(k for k in before if k not in after)]:
+        old, new = before.get(key), after.get(key)
+        if old == new:
+            continue
+        if old is None or new is None or old.get("value") != new.get("value"):
+            moved.append(f"{key} {value_of(old)} -> {value_of(new)}")
+        else:
+            # In the row's own key order (``ParamView.to_dict``'s, then the
+            # flags), so an emptied rationale reads as ``rationale``, not as the
+            # ``defended`` flag it also moved.
+            field = next(name for name in [*new, *(k for k in old if k not in new)]
+                         if old.get(name) != new.get(name))
+            moved.append(f"{key} {field}")
     return moved
 
 
-def _param_row(param: Any) -> dict:
-    """One parameter with its provenance, and a flag for the provenance it lacks.
+def _param_views(ledger: Ledger, model: Any, model_error: str, resolution: Any,
+                 registry: Any) -> list:
+    """``modelio.param_view`` of ``model``, each view's ``gates`` read off the
+    resolution's read sets for the gates ``registry`` registers (all of them
+    with no registry) — what the page shows when its caller handed none."""
+    registered = ({spec.id for spec in report_logic._specs(registry)}
+                  if registry is not None else None)
+    reads = {gate: paths for gate, paths in (getattr(resolution, "read_sets", None)
+                                              or {}).items()
+             if registered is None or gate in registered}
+    return modelio.param_view(ledger, model, model_error=model_error, read_sets=reads)
 
-    ``defended`` is false for a parameter with no rationale — a number nobody can
-    defend, which the next agent will change. The report has a section for these;
-    the page needs the same flag so it can show the gap next to the number rather
-    than in a list somewhere else.
+
+def _param_row(param: Any, ledger: Ledger) -> dict:
+    """One parameter as ``modelio.ParamView.to_dict`` spells it — the model's
+    value where it lives, its rationale and losers from both homes, the gates
+    that read it — and a flag for the provenance it lacks.
+
+    ``defended`` is ``modelio.undefended_params``'s answer, the one ``doctor``,
+    ``status`` and the report print: false for a number the model holds that no
+    home defends, which the next agent will change; ``None`` where the model
+    holds no number (``model_error`` says why, or the record outlived its field)
+    — there is nothing to defend, and "undefended" would be a claim about text
+    nobody read. The page shows the flag next to the number rather than in a
+    list somewhere else.
+
+    ``changed_in`` is derived from the decisions (``decisions.changed_in``, as
+    ``why`` derives it) — the page's "last moved in". The record row it
+    replaced carried the key, and the strict reader keeps it out of records.
     """
     row = param.to_dict()
-    row["defended"] = bool((param.rationale or "").strip())
+    row["changed_in"] = decision_logic.changed_in(ledger, param.name)
+    row["defended"] = (None if not param.home
+                       else not modelio.undefended_params([param]))
     row["derived"] = bool(param.derived_from)
     return row
 

@@ -46,7 +46,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import store
+from . import modelio, store
 from .models import Claim, Decision, Ledger, Param, Rejected, Verdict, slugify
 from .util import AtompipeError, atomic_write_text, ensure_dir, iter_suffix_unique
 
@@ -496,23 +496,11 @@ class _Evidence:
 
 
 def _readers(name: str, read_sets: Mapping[str, Iterable[Any]]) -> list[str]:
-    """The gates whose recorded reads name parameter `name`, sorted by id.
-
-    A read counts when `name` is one of the first two keys of its path —
-    `ctx.params["thickness"]` and `ctx.params["config"]["thickness"]`, the two
-    spellings gates use — and deeper keys do not: a gate walking a BOM would
-    otherwise protect every line item that shares a parameter's name. The same
-    rule as `cli._param_gates`, which fills `Param.gates` for the not-yet-switched
-    readers; one of the two goes when `why` is the only consumer (U29).
-    """
-    found: list[str] = []
-    for gate_id in sorted(read_sets):
-        for path in read_sets[gate_id] or ():
-            parts = (path,) if isinstance(path, str) else tuple(path)
-            if name in [part for part in parts[:2] if isinstance(part, str)]:
-                found.append(gate_id)
-                break
-    return found
+    """The gates whose recorded reads name parameter `name`, sorted by id —
+    `modelio.param_readers`, the one copy of the rule. It was spelled here and
+    again in `cli._param_gates` until the page and the report moved to the
+    parameter view and would have needed a third (review, checkpoint 1.3)."""
+    return modelio.param_readers(name, read_sets)
 
 
 def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],

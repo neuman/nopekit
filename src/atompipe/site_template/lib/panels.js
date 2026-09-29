@@ -409,12 +409,17 @@ function miniVerdict(v, app) {
  *  tried and rejected, and why it lost.
  *
  *  A number with no rationale is flagged `undefended` rather than left looking
- *  the same as a defended one. That flag comes from the ledger (`row.defended`),
- *  and it matters because an undefended constant is the one the next agent
- *  changes — then the one after that changes it back. */
+ *  the same as a defended one. That flag comes from the spine (`row.defended`,
+ *  the list `doctor` and `status` print), and it matters because an undefended
+ *  constant is the one the next agent changes — then the one after that
+ *  changes it back. `defended` is `null` where the model holds no number (it
+ *  does not load, or the record outlived its field): nothing to defend, so the
+ *  row says why there is no value instead. Only `=== false` is undefended —
+ *  what slipped through (review, checkpoint 1.3): `!p.defended` would paint a
+ *  broken model's every parameter "undefended", a claim about text nobody read. */
 export function paramsPanel(state, app) {
   const params = state.params || [];
-  const undefended = params.filter((p) => !p.defended).length;
+  const undefended = params.filter((p) => p.defended === false).length;
 
   return el("section", { class: "panel", id: "params" },
     panelHead("Parameters", plural(params.length, "parameter"),
@@ -435,14 +440,22 @@ function paramRow(p, app) {
         el("span", { class: "param-value mono", text: formatValue(p.value) }),
         p.units ? el("span", { class: "param-units", text: p.units }) : null,
         p.derived ? tag("derived", { tone: "ok", title: `from ${(p.derived_from || []).join(", ")}` }) : null,
-        !p.defended ? tag("undefended", { tone: "warn", title: "no rationale recorded" }) : null,
+        p.defended === false ? tag("undefended", { tone: "warn", title: "no rationale recorded" }) : null,
+        p.model_error ? tag("no value", { tone: "warn", title: `model does not load: ${p.model_error}` })
+          : !p.home ? tag("not in the model", { tone: "muted", title: `only ${p.record || "a record"} holds it` })
+          : null,
         rejected.length ? tag(`${rejected.length} rejected`, { tone: "muted" }) : null),
       el("div", { class: "param-detail" },
         el("dl", { class: "kv" },
+          ...(p.model_error ? field("Value", el("span", { class: "tone-warn",
+                text: `model does not load: ${p.model_error}` })) : []),
+          ...(p.home ? field("Lives in", code(p.home)) : []),
           ...(p.rationale
             ? field("Why this value", p.rationale)
-            : field("Why this value", el("span", { class: "tone-warn",
-                text: "Not recorded. A number nobody can defend is a number the next agent changes." }))),
+            : p.defended === false
+              ? field("Why this value", el("span", { class: "tone-warn",
+                  text: "Not recorded. A number nobody can defend is a number the next agent changes." }))
+              : []),
           ...(p.source ? field("Source", p.source) : []),
           ...(p.derived_from || []).length
             ? field("Derived from", ...p.derived_from.map((d) => el("button", {

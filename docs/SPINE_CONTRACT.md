@@ -551,7 +551,8 @@ def project(model: LoadedModel) -> dict      # {"config": {...}, "derived": {...
 def model_hash(projection: dict) -> str      # stable; a display id (staleness is per gate)
 def write_projection(root, projection) -> str   # .atompipe/model.json  (the diffable view)
 def params_from_model(model) -> list[Param]  # merge PARAMS with dataclass fields+defaults
-def undocumented_params(model) -> list[str]  # no rationale: the report's nag list
+def undefended_params(views) -> list[str]    # param_view's views the model holds that no home
+                                             # defends: THE nag list (doctor, model, status, report, page)
 def check_determinism(model, runs=2) -> tuple[bool, str]   # build twice; the projection must not move
 ```
 Rule enforced here: a projection value that is a dataclass/enum is encoded via
@@ -729,8 +730,13 @@ class ParamView:                 # one parameter as a reader shows it
     # value, units, rationale, derived_from — from the model (value None when it does not load);
     # rejected — the union of the model's PARAMS and the record's, each tagged with its
     #   origin ("model/bracket.py PARAMS" or "params/<name>.json");
-    # source, grounded_by, tags — from the record; model_error — why there is no value
-def param_view(ledger, model, *, model_error="") -> list[ParamView]
+    # source, grounded_by, tags — from the record; model_error — why there is no value;
+    # home — where the value lives ("" when the model holds none); record — its file or "";
+    # gates — derived from read sets when param_view was handed them, () otherwise
+def param_view(ledger, model, *, model_error="", read_sets=None) -> list[ParamView]
+def param_readers(name, read_sets) -> list[str]  # gates whose last executed reads name it
+    # (first two keys of a path; deeper keys do not count) — the one copy of the rule:
+    # decisions.why, cli's Param.gates and ParamView.gates all read it
 ```
 ```python
 def orphan_params(ledger, model) -> list[str]   # param RECORDS whose field the model no longer defines
@@ -739,7 +745,16 @@ def orphan_params(ledger, model) -> list[str]   # param RECORDS whose field the 
 checkpoint 1.3 (it copied the model into the records on every check): the value on
 screen is the model's current one (S-39), a `PARAMS` rejection added after the params
 exist appears (S-38), and a model that does not load shows "model does not load: …"
-and no number — never a cached one. `orphan_params` works off the records (a parameter
+and no number — never a cached one. Every reader that shows a parameter reads it
+here — `why`, `doctor`, `model`, `status`, the report and the page — and judges
+"undefended" with `undefended_params` over it: only a view with a `home` is judged
+(an orphan holds no number; a model that does not load says nothing either way).
+What slipped through (review, checkpoint 1.3): the page, the report and `status`
+read `ledger.params`, the sparse records, while `doctor` and `model` read the model
+alone (a model-only nag list, gone) — the bracket's page showed no parameter,
+a record holding only `"source"` was undefended to `status` and the report (at value
+`None`) and defended to `doctor`, and a field nobody explained was flagged by
+`doctor` alone. `orphan_params` works off the records (a parameter
 the model owns entirely has no record, and is no orphan); `model` and `doctor` list
 them from it. `_explicit_params` refuses an unknown key in a `PARAMS` dict item with a
 `difflib` suggestion (the model-side cousin of S-40).
@@ -2135,7 +2150,7 @@ one you are editing looks exactly like one that is: a tester pulled a fix, watch
 the gate fail to appear, and lost ten minutes before finding the live copy was the
 one inside the installed wheel.
 
-### `decisions.py`  (deps: models, util, store)
+### `decisions.py`  (deps: models, util, store, modelio)
 ```python
 def add(ledger, *, title, summary, when, rejected=(), params_changed=(),
         claims_changed=(), body="", evidence=()) -> Decision
@@ -2157,16 +2172,18 @@ does not load prints `model does not load: …` and no number.
 `why` is the context-window win: an agent pulls one parameter's full history
 instead of reading a 1,672-line decision log.
 
-### `report.py`  (deps: models, util, store, claims, artifacts, verdicts)
+### `report.py`  (deps: models, util, store, claims, artifacts, verdicts, modelio)
 ```python
 STATUS_TAG: dict[ClaimStatus, str]           # PASS -> "ok   ", FAIL -> "FAIL ", ...
 SECTION_PROVEN = "## What is PROVEN"         # the PROVEN heading, as emitted and as tests find it
 JUNIT_DEFAULT = ".atompipe/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
 def status_tag(status) -> str                # "[FAIL ]": the one fixed-width spelling of a status
-def render_terminal(ledger, registry, *, stale=False, stale_gates=()) -> str
+RATIONALE_UNKNOWN = "Parameter rationales are not known"  # + ": <why>" — no view, or no model
+def render_terminal(ledger, registry, *, stale=False, stale_gates=(), params=None) -> str
 def render_markdown(ledger, registry, *, stale=False, stale_gates=(), model_error="",
-                    title="", root="") -> str
-def write_report(root, ledger, registry, *, stale=False, stale_gates=()) -> str   # docs/readiness.md
+                    title="", root="", params=None) -> str
+def write_report(root, ledger, registry, *, stale=False, stale_gates=(), model_error="",
+                 params=None) -> str   # docs/readiness.md
 def render_junit(ledger, verdicts, registry, *, tier, ready, exit_code, when,
                  not_run=None, cached=frozenset(), stale=False, spine="",
                  stale_gates=()) -> str
@@ -2208,6 +2225,13 @@ and a reason. Where a verdict explains the status, the reason is
 the same verdict and the same words `atompipe check` prints under BLOCKING. What
 slipped through (S-68): `status` cited the first non-passing verdict, a skip, while
 `check` cited the gate that ran and failed.
+
+`params` is the caller's `modelio.param_view`: the standing constraints list
+`modelio.undefended_params` over it (value from the model, source from the record,
+the gates that read it) and `render_terminal`'s `standing:` line counts the same
+list — never `ledger.params`, the sparse records (review, checkpoint 1.3). With no
+`params`, or with `model_error` or a view carrying one, the section says
+`RATIONALE_UNKNOWN: <why>` and never "every parameter carries a rationale".
 
 `store` is in the deps for two reasons: `write_report` takes its destination from
 `store.project_paths(root)["readiness"]`, and the Reproduce file list anchors its
@@ -2280,7 +2304,7 @@ phase-1.md 1.1):
   passed by the CLI from Phase 1.2. The CLI edge — unlink the target first, one exit
   code, write atomically at the single exit, the `.xml` suffix rule — is `cli.py`'s.
 
-### `site.py`  (deps: models, util, store, claims, report, modelio, gates, verdicts)
+### `site.py`  (deps: models, util, store, claims, decisions, report, modelio, gates, verdicts)
 The project site's spine half: viewgens, and the one JSON document the page reads.
 The page's half is plain HTML, CSS and ES modules in `site_template/`, copied by
 `scaffold`; the data contract between the two is `docs/SITE_CONTRACT.md`.
@@ -2310,8 +2334,9 @@ def derive_explode(bounds, *, overrides=None) -> dict      # a FIRST DRAFT explo
 def locator_problems(views, verdicts) -> list[dict]         # every locator that cannot be drawn
 def scaffold(root, *, force=False) -> list                  # copy the template; index.html only with force
 def build(root, ledger, registry, view_registry, *, model=None, projection=None, now="",
-          resolution=None) -> dict
-def state(root, ledger, registry, *, now="", stale=None, resolution=None) -> dict   # state.json
+          resolution=None, params=None) -> dict
+def state(root, ledger, registry, *, now="", stale=None, resolution=None,
+          params=None) -> dict   # state.json
 def judgement_digest(payload) -> str                        # sha256 of what a state document judged
 def judgement_moved(shown, now) -> list[str]                # "C1 pass -> fail": what a rebuild would change
 def clean_assets(root, keep) -> list                        # delete unreferenced site/assets/ files
@@ -2340,8 +2365,14 @@ default. It is the other half of what the page was built from: the resolver's ju
 of the verdict cache against the live model, which no record holds (review,
 `repro_site`: a `check` that FAILed C1 moved no record, and the page's C1 PASS read
 current). `judgement_moved(shown, now)` names what a rebuild would change — claims whose
-status moved, else verdict rows whose outcome or measurement did — for the reason line;
-it reads both documents and judges neither.
+status moved, else verdict rows whose outcome or measurement did, else parameters whose
+value (`thickness 7 mm -> 8 mm`) or, the value standing, another field (`thickness
+rationale`) did — for the reason line; it reads both documents and judges neither.
+`params` is the caller's `modelio.param_view` (the CLI's `_shown_params`); with none,
+`state` views the live model it loads for the resolution, and `build` the model it
+holds. Each row is `modelio.ParamView`'s `to_dict` plus `changed_in` (`decisions.changed_in`),
+`derived`, and `defended` — `modelio.undefended_params`'s answer, `null` where the
+model holds no number (SITE_CONTRACT). Never `ledger.params` (review, checkpoint 1.3).
 
 A locator is never dropped for being undrawable: it stays on its verdict, and
 `locator_problems` publishes the problem beside it in `state.json`, because a gate
@@ -2444,9 +2475,13 @@ lives, and none writes a record:
 ```python
 def _entry_edit(root) -> str        # '"model_entry" in .atompipe/project.json' (legacy: under
                                     # "meta" in .atompipe/ledger.json, until a check migrates it)
-def _param_views(root, ledger, model, model_error) -> list[modelio.ParamView]
+def _param_views(root, ledger, model, model_error, *, read_sets=None) -> list[modelio.ParamView]
     # param_view, plus — when the model does not load — a bare view (no value, model_error
     # set) for each name modelio.static_param_prose finds in the model's TEXT and no record holds
+def _shown_params(root, ledger, model, model_error, resolution, registry) -> list[modelio.ParamView]
+    # _param_views with gates from the resolution's read sets (registered gates only): what
+    # status, report, site build, the page-staleness judgement and doctor show and judge
+def _registered_reads(read_sets, registry) -> dict   # read sets of the registered gates only
 def _grounding(ledger, views) -> dict[str, list[str]]
     # {param or claim: [artifact ids]}: extractions, then records' grounded_by
     # (artifacts.grounding), then PARAMS' grounded_by — derived on every read
@@ -2493,19 +2528,21 @@ def _input_bytes(root, artifact, digests) -> dict
   meaningless: a page of unchanged records read stale after any `status`, and a record
   edited by hand before the index caught up read current. Then its
   `meta.judgement_digest` with the digest of the document a rebuild would write now
-  (`_site_judgement`: `site.state` over `_resolved`'s view — the caller's
-  `resolved=(view, registry, resolution)` from `status` and `doctor`, or resolved there
+  (`_site_judgement`: `site.state` over `_resolved`'s view and `_shown_params` — the
+  caller's `resolved=(view, registry, resolution, params)` from `status` and `doctor`,
+  or resolved there
   as `status` resolves, strict=False and `_projection_safe`; no gate, fixture or
   viewgen runs). What slipped through with the records alone (review, `repro_site`): a
   check that FAILed C1 moved no record, and all three called a page still showing C1
-  PASS "current with the records". A moved judgement reads "the verdicts have changed
+  PASS "current with the records". A moved judgement reads "what the page shows has changed
   since the site was built (C1 pass -> fail) — `atompipe site build`"
   (`site.judgement_moved`, at most `verdicts.MAX_STALE_REASONS` named); `status`'s
   `site:` line carries that reason, never a fixed sentence. A page with either digest
   missing (an older build) reads stale.
 - **`last_check.json`'s `params`** is `{name: modelio.ParamView.to_dict()}` from
   `modelio.param_view` at the end of a recorded full `check`: the model's values and
-  what lost, beside the statuses — the agent's second read.
+  what lost, and the registered gates that read each (`read_sets`), beside the
+  statuses — the agent's second read.
 
 **`--junit [PATH]` at the edge** (`check`, `gate selftest`; the XML itself is
 `report.render_junit` / `render_selftest_junit`). Three rules, each because of what

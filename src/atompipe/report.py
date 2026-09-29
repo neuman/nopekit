@@ -67,10 +67,11 @@ from __future__ import annotations
 import math
 import os
 import re
-from typing import Any, Collection, Iterable
+from typing import Any, Collection, Iterable, Sequence
 
 from . import __version__
 from . import claims as claim_logic
+from . import modelio
 from . import store
 from . import verdicts as verdict_logic
 from .artifacts import unextracted
@@ -801,22 +802,67 @@ def _section_gaps(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any) -> 
     return out
 
 
-def _section_constraints(ledger: Ledger, st: dict[str, ClaimStatus]) -> list[str]:
+#: What the standing constraints say when the parameters' rationales cannot be
+#: judged, completed by the reason (`_rationale_unknown`). *Rejected:* saying
+#: nothing — the section's all-clear sentence then reads "every parameter carries
+#: a rationale" about a model nobody read; and listing the records' own lack of a
+#: rationale, which is what it did (review, checkpoint 1.3: a record holding only
+#: `"source"` was printed as undefended at value `None`).
+RATIONALE_UNKNOWN = "Parameter rationales are not known"
+
+
+def _rationale_unknown(params: Sequence[Any] | None, model_error: str) -> str:
+    """Why no parameter can be called defended or undefended here, or `""`.
+
+    `params` is the caller's `modelio.param_view` (None: the caller gave none);
+    a view with a `model_error` is one the model did not answer for, and its
+    error's first line is the reason ("no model was loaded" for a project that
+    names none) — said as it is, so a project with no model is not told that
+    its model does not load."""
+    if model_error:
+        return "the model does not load"
+    errors = [str(getattr(view, "model_error", "") or "") for view in params or ()]
+    first = next((error for error in errors if error.strip()), "")
+    if first:
+        return _trunc(first.strip().splitlines()[0], 160)
+    if params is None:
+        return "no parameter view was given to this report"
+    return ""
+
+
+def _section_constraints(ledger: Ledger, st: dict[str, ClaimStatus],
+                         params: Sequence[Any] | None = None,
+                         model_error: str = "") -> list[str]:
     """Assumptions, undefended numbers, and evidence nobody read.
 
     None of these is a failing gate, and that is exactly why they get their own
     section: they are the things that sink a build without ever turning a check
     red. An assumption nobody wrote down, a constant nobody can defend, and a
     datasheet nobody opened all behave identically at the moment they bite.
+
+    The numbers are `params`, `modelio.param_view`'s views — the model's value,
+    its rationale or the record's — judged by `modelio.undefended_params`, the
+    rule `doctor` and `status` print. What slipped through (review, checkpoint
+    1.3): this read `ledger.params`, the records, which from 1.3 hold only what
+    the model cannot (a source, a grounding), so a field nobody explained never
+    reached this section, and a record holding only `"source"` was listed as
+    undefended at value `None` while `doctor` said every parameter carried a
+    rationale.
     """
     out = ["## Standing constraints", ""]
     asserted = [c for c in ledger.claims if st.get(c.id) is ClaimStatus.ASSERTED]
-    undefended = [p for p in ledger.params if not (p.rationale or "").strip()]
+    unknown = _rationale_unknown(params, model_error)
+    names = set(modelio.undefended_params(params or ()))
+    undefended = [view for view in params or () if view.name in names]
     unread = unextracted(ledger)
 
     if not (asserted or undefended or unread):
-        out.append("None recorded: no standing assumptions, every parameter carries "
-                   "a rationale, and every ingested artifact has been read.")
+        if unknown:
+            out.append(f"None recorded: no standing assumptions, and every ingested "
+                       f"artifact has been read. {RATIONALE_UNKNOWN}: {unknown}.")
+        else:
+            out.append("None recorded: no standing assumptions, every parameter carries "
+                       "a rationale, and every ingested artifact has been read.")
         out.append("")
         return out
 
@@ -832,6 +878,11 @@ def _section_constraints(ledger: Ledger, st: dict[str, ClaimStatus]) -> list[str
             out.append(f"- **{claim.id}** {_claim_text(claim)}{src}")
             if claim.rationale:
                 out.append(f"  - {_trunc(claim.rationale, 220)}")
+        out.append("")
+
+    if unknown:
+        out.append(f"{RATIONALE_UNKNOWN}: {unknown}, so no number here is called "
+                   f"defended or undefended.")
         out.append("")
 
     if undefended:
@@ -1058,7 +1109,8 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
 # --------------------------------------------------------------------------- #
 def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
                     stale_gates: Collection[str] = (), model_error: str = "",
-                    title: str = "", root: str = "") -> str:
+                    title: str = "", root: str = "",
+                    params: Sequence[Any] | None = None) -> str:
     """The full readiness report as markdown — the project's public deliverable.
 
     Sections, in the order a sceptical reader needs them: the verdict, what is
@@ -1088,6 +1140,14 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     relative to the project (`write_report` passes it). Without it the files
     are left out rather than spelled by this machine's absolute paths.
 
+    `params` is the caller's `modelio.param_view` — every parameter the model
+    holds, its value from the model and its rationale from the model or its
+    record — and the standing constraints judge it with
+    `modelio.undefended_params`, the list `doctor` prints. Never `ledger.params`:
+    from 1.3 those are sparse records (review). Without it, or with a model that
+    does not load, the section says the rationales are not known
+    (`RATIONALE_UNKNOWN`) instead of calling any number defended or not.
+
     The title is the project and its revision — no time: a regenerated report
     of an unchanged design must be byte-identical (S-89).
     """
@@ -1112,7 +1172,7 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     out += _section_proven(ledger, st, cover, stale=stale)
     out += _section_not_verified(ledger, st)
     out += _section_gaps(ledger, st, registry)
-    out += _section_constraints(ledger, st)
+    out += _section_constraints(ledger, st, params, model_error)
     out += _section_failing(ledger, st, cover, registry, stale_gates=stale_gates)
     out += _section_reproduce(ledger, registry, root=root)
 
@@ -1125,7 +1185,8 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
 
 
 def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
-                    stale_gates: Collection[str] = ()) -> str:
+                    stale_gates: Collection[str] = (),
+                    params: Sequence[Any] | None = None) -> str:
     """The same report compressed to something an agent can hold in context.
 
     Under ~40 lines for a healthy project, which is the point: this is what
@@ -1142,6 +1203,10 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
     gate is stale is listed STALE, naming the gate. The head line carries no
     sweep time — there is no sweep record to read one from, and `status` prints
     its own `stale:` and `last check:` lines, each with a source.
+
+    `params` as for `render_markdown`: the `standing:` line counts
+    `modelio.undefended_params` over it, and says nothing about parameters
+    without it (a model that does not load is `status`'s `model:` line).
     """
     st = _statuses(ledger, registry, stale, stale_gates)
     cover = _coverage(ledger, registry)
@@ -1209,7 +1274,7 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
         lines.append("gates: " + ", ".join(gate_bits))
 
     constraints: list[str] = []
-    undefended = [p for p in ledger.params if not (p.rationale or "").strip()]
+    undefended = modelio.undefended_params(params or ())
     if undefended:
         constraints.append(f"{len(undefended)} "
                            f"{_plural(len(undefended), 'param')} with no rationale")
@@ -1280,7 +1345,8 @@ def _terminal_reason(ledger: Ledger, claim: Claim, status: ClaimStatus,
 
 
 def write_report(root: str, ledger: Ledger, registry: Any, *,
-                 stale: bool = False, stale_gates: Collection[str] = ()) -> str:
+                 stale: bool = False, stale_gates: Collection[str] = (),
+                 model_error: str = "", params: Sequence[Any] | None = None) -> str:
     """Render the markdown report to `docs/readiness.md` and return its path.
 
     Written atomically: a half-truncated readiness report left behind by a crash
@@ -1291,14 +1357,18 @@ def write_report(root: str, ledger: Ledger, registry: Any, *,
     here. Layout is `store`'s job alone; a second module that knows where
     `docs/readiness.md` lives is a second module to edit when it moves.
 
-    `stale_gates` as for `render_markdown`; `root` spells the gates' code files.
-    The file holds no time and no rho, so rewriting it for an unchanged design
-    and unchanged outcomes leaves the tracked bytes alone (S-89).
+    `stale_gates`, `model_error` and `params` as for `render_markdown`; `root`
+    spells the gates' code files. The file holds no time and no rho, so
+    rewriting it for an unchanged design and unchanged outcomes leaves the
+    tracked bytes alone (S-89). `model_error` reaches the file as it reaches
+    `report`'s stdout: without it, a broken model's parameters would be judged
+    from whatever records exist.
     """
     path = store.project_paths(root)["readiness"]
     ensure_dir(os.path.dirname(path))
     atomic_write_text(path, render_markdown(ledger, registry, stale=stale,
-                                            stale_gates=stale_gates, root=root))
+                                            stale_gates=stale_gates, root=root,
+                                            model_error=model_error, params=params))
     return path
 
 
@@ -1714,6 +1784,7 @@ __all__ = [
     "STATUS_TAG",
     "SECTION_PROVEN",
     "JUNIT_DEFAULT",
+    "RATIONALE_UNKNOWN",
     "status_tag",
     "render_terminal",
     "render_markdown",
