@@ -2268,6 +2268,236 @@ class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
         self.assertEqual(unmatched_migration_readers(clean), [])
 
 
+# --------------------------------------------------------------------------- #
+# evidence never sits where a record goes
+# --------------------------------------------------------------------------- #
+#: A bench log as a person drops it into `inputs/`: JSON, and not an input record.
+_LOADS = b'{"load_n": [3.0, 3.1, 2.9]}\n'
+
+#: Scratch the CLI writes under `.atompipe/` on any command; a refusal may leave it.
+_SCRATCH = (".atompipe/cache/", ".atompipe/obs/", ".atompipe/out/")
+
+
+def _kept(tree: dict[str, bytes]) -> dict[str, bytes]:
+    return {rel: data for rel, data in tree.items() if not rel.startswith(_SCRATCH)}
+
+
+def _input_records(project: str) -> list[str]:
+    return sorted(name for name in os.listdir(os.path.join(project, "inputs"))
+                  if name.endswith(".json"))
+
+
+def _legacy_with_loose_evidence(dest: str, name: str, aid: str) -> str:
+    """The legacy bracket plus one input the 1e09113 spine ingested IN PLACE at
+    `inputs/<name>` — its `ingest` never copied a file already inside the
+    project — so the legacy ledger names input ``aid`` with that path, and the
+    bytes sit at the top of `inputs/`, where the records layout reads records.
+    Written in the legacy file's own shape, by hand (`_enrich`'s reason)."""
+    project = _projects.bracket_copy(dest)
+    _write(os.path.join(project, "inputs", name), _LOADS)
+    path = os.path.join(project, ".atompipe", "ledger.json")
+    with open(path, encoding="utf-8") as fh:
+        data = json.load(fh)
+    data["inputs"].append({
+        "id": aid, "path": f"inputs/{name}", "url": "", "kind": "data",
+        "description": "bench loads", "sha256": hashlib.sha256(_LOADS).hexdigest(),
+        "bytes": len(_LOADS), "added": "2026-09-20T00:00:00Z", "licence": "", "note": "",
+        "extractions": []})
+    _write(path, json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
+    return project
+
+
+class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
+    """Every top-level `<record dir>/*.json` is read as a record, so bytes filed
+    there are never evidence — not in a legacy ledger's plan, not in a record's
+    `path`, not in what `ingest` records.
+
+    What slipped through: the 1e09113 `ingest` recorded a file already inside the
+    project in place, so a bench log dropped at `inputs/loads.json` became input
+    `loads` with path `inputs/loads.json` — the file its record goes in now. The
+    migration refused every command with "inputs/loads.json differs from what
+    .atompipe/ledger.json migrates to … Move those files aside", about a file it
+    had planned itself, and its remedy made it worse: with the bytes moved aside,
+    `check` wrote a record naming ITSELF as its evidence, read DRIFT forever, and
+    re-ingesting it would pin the record's own bytes. The `Bench Loads.json`
+    variant was refused as "not in .atompipe/ledger.json" — it is, as input
+    `bench-loads`'s bytes — and its hint (into a bucket, then `atompipe ingest`)
+    left a record naming bytes that are not there: `ingest` found them by digest
+    and handed the record back untouched."""
+
+    def _refused(self, project: str, *needles: str) -> None:
+        """Every command refuses ``project`` naming ``needles``, never with a
+        remedy that does not work, and nothing is written."""
+        before = _kept(_tree(project))
+        for argv in (("status",), ("inputs",), ("check",)):
+            with self.subTest(argv=argv):
+                proc = _env.atompipe(list(argv), cwd=project)
+                said = proc.stdout + proc.stderr
+                self.assertEqual(proc.returncode, 2, said)
+                self.assertNotIn("Traceback", proc.stderr)
+                for needle in needles + ("nothing was written",):
+                    self.assertIn(needle, said)
+                for false_remedy in ("differs from what", "is not in .atompipe/ledger.json",
+                                     "Move those files aside"):
+                    self.assertNotIn(false_remedy, said)
+        self.assertTrue(store.is_legacy(project), "a refused migration committed")
+        self.assertEqual(_kept(_tree(project)), before, "a refused migration wrote something")
+
+    def test_legacy_evidence_where_a_record_goes_is_refused_with_a_remedy_that_works(self):
+        """V: the review's repro (``ir2/inputs_collide.sh``) and its `Bench Loads`
+        variant. Each is refused, naming the input, where its bytes sit and where
+        they go; the old remedy (move the bytes aside) is refused again rather
+        than migrated into a record that names itself; the named remedy migrates
+        to a record whose bytes are there and match their pin."""
+        cases = (("loads.json", "loads", "its own record"),
+                 ("Bench Loads.json", "bench-loads", "a record"))
+        for name, aid, whose in cases:
+            with self.subTest(name=name):
+                project = _legacy_with_loose_evidence(
+                    os.path.join(self.tmp(), "legacy"), name, aid)
+                loose = os.path.join(project, "inputs", name)
+                home = f"inputs/data/{name}"
+                needles = (f"input '{aid}'", f"inputs/{name}", home, whose, '"path"')
+                self._refused(project, *needles)
+
+                aside = os.path.join(self.tmp(), name)
+                os.replace(loose, aside)
+                self._refused(project, *needles)
+                self.assertFalse(os.path.exists(loose),
+                                 "a record was written where the evidence was")
+
+                os.makedirs(os.path.join(project, "inputs", "data"), exist_ok=True)
+                os.replace(aside, os.path.join(project, *home.split("/")))
+                path = os.path.join(project, ".atompipe", "ledger.json")
+                _write(path, _read_bytes(path).decode("utf-8").replace(
+                    f'"inputs/{name}"', json.dumps(home)))
+                proc = _env.atompipe(["check"], cwd=project)
+                self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
+                self.assertFalse(store.is_legacy(project), "the named remedy did not migrate")
+                record = json.loads(_read_bytes(os.path.join(project, "inputs",
+                                                             f"{aid}.json")))
+                self.assertEqual(record["path"], home)
+                shown = _env.atompipe(["inputs", "--json"], cwd=project)
+                row = {r["id"]: r for r in json.loads(shown.stdout)["inputs"]}[aid]
+                self.assertEqual((row["exists"], row["drift"], row["sha256"]),
+                                 (True, False, hashlib.sha256(_LOADS).hexdigest()))
+
+    def test_a_foreign_file_where_a_record_goes_is_named_as_one(self):
+        """A file where the plan puts a record, or in a record directory, that does
+        not read as a record is no half-finished migration: it is named as a
+        foreign file — and, where the plan writes there, as what it would
+        collide with — not "differs from what the ledger migrates to". A
+        record-shaped file keeps the half-migration words."""
+        project = _legacy_bracket(os.path.join(self.tmp(), "legacy"))
+        _write(os.path.join(project, "inputs", f"{_CALIPER_ID}.json"), _LOADS)
+        _write(os.path.join(project, "inputs", "loads.json"), _LOADS)
+        _write(os.path.join(project, "decisions", "extra.json"),
+               '{"title": "Extra", "when": "2026-09-20T10:00:00Z"}\n')
+        before = _tree(project)
+        for apply in (False, True):
+            with self.subTest(apply=apply), self.assertRaises(AtompipeError) as caught:
+                store.migrate_legacy(project, apply=apply, when=_WHEN,
+                                     model_prose=modelio.static_param_prose)
+            said = str(caught.exception)
+            self.assertIn(f"inputs/{_CALIPER_ID}.json does not read as an input record", said)
+            self.assertIn(f"input '{_CALIPER_ID}''s record goes there", said)
+            self.assertIn("inputs/loads.json does not read as an input record", said)
+            self.assertIn("atompipe ingest", said)
+            self.assertIn("decisions/extra.json is not in .atompipe/ledger.json", said)
+            for wrong in (f"inputs/{_CALIPER_ID}.json differs",
+                          "inputs/loads.json is not in"):
+                self.assertNotIn(wrong, said)
+        self.assertEqual(_tree(project), before, "a refused migration wrote something")
+
+    def test_the_reader_refuses_an_input_whose_path_is_a_record(self):
+        """A record whose `path` names a record file — its own, or another's — is
+        refused: its "evidence" is a file `load` reads as a record, and its pin
+        can only ever read as drift."""
+        root = self.tmp()
+        body = {"kind": "data", "sha256": hashlib.sha256(_LOADS).hexdigest()}
+        for path in ("inputs/loads.json", "claims/C1.json", "./inputs/other.json",
+                     "inputs\\other.json", "inputs/./other.json", "views/curve.json"):
+            with self.subTest(path=path):
+                target = _write(os.path.join(root, "inputs", "loads.json"),
+                                json.dumps(dict(body, path=path)))
+                with self.assertRaises(AtompipeError) as caught:
+                    store.read_record(target, "inputs")
+                said = str(caught.exception)
+                self.assertIn("inputs/loads.json", said)
+                self.assertIn('"path"', said)
+                self.assertIn("where a record goes", said)
+        for path in ("inputs/data/loads.json", "inputs/loads.csv", "docs/loads.json",
+                     "inputs/data/claims/C1.json", "/abs/elsewhere/loads.json"):
+            with self.subTest(path=path):
+                target = _write(os.path.join(root, "inputs", "loads.json"),
+                                json.dumps(dict(body, path=path)))
+                self.assertEqual(store.read_record(target, "inputs").path, path)
+
+    def test_ingest_repoints_a_record_whose_bytes_moved(self):
+        """V: the `Bench Loads` hint followed on a records project. The bytes a
+        record pinned are gone from its `path` and ingested again from where
+        they are now: the same record comes back pointing THERE — id and
+        extractions kept, filed in the bucket of the record's kind when they come
+        from outside — never the stale path, and never a second record."""
+        outside = self.tmp()
+        for where in ("inputs/measurements/caliper.txt", "outside"):
+            with self.subTest(moved_to=where):
+                project = _migrated_bracket(os.path.join(self.tmp(), "migrated"))
+                old = os.path.join(project, "inputs", "data", "caliper.txt")
+                src = (os.path.join(outside, "caliper.txt") if where == "outside"
+                       else os.path.join(project, *where.split("/")))
+                os.makedirs(os.path.dirname(src), exist_ok=True)
+                os.replace(old, src)
+                before = _input_records(project)
+                proc = _env.atompipe(["ingest", src, "--json"], cwd=project)
+                self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+                (artifact,) = json.loads(proc.stdout)["ingested"]
+                self.assertEqual(artifact["id"], _CALIPER_ID)
+                self.assertEqual(artifact["path"], "inputs/measurements/caliper.txt")
+                self.assertEqual(_input_records(project), before,
+                                 "ingest wrote a second record")
+                record = json.loads(_read_bytes(os.path.join(project, "inputs",
+                                                             f"{_CALIPER_ID}.json")))
+                self.assertEqual(record["path"], "inputs/measurements/caliper.txt")
+                self.assertEqual(len(record["extractions"]), 1)
+                shown = _env.atompipe(["inputs", "--json"], cwd=project)
+                row = {r["id"]: r for r in json.loads(shown.stdout)["inputs"]}[_CALIPER_ID]
+                self.assertEqual((row["exists"], row["drift"]), (True, False))
+
+    def test_ingest_keeps_a_record_whose_bytes_are_there(self):
+        """The other side, so the one above cannot pass by re-pointing always: a
+        copy of evidence whose recorded bytes are still in place is the same
+        evidence, and the record keeps its path."""
+        project = _migrated_bracket(os.path.join(self.tmp(), "migrated"))
+        record = os.path.join(project, "inputs", f"{_CALIPER_ID}.json")
+        before = _read_bytes(record)
+        copy_at = _write(os.path.join(project, "inputs", "measurements", "again.txt"),
+                         _CALIPER)
+        proc = _env.atompipe(["ingest", copy_at, "--json"], cwd=project)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        (artifact,) = json.loads(proc.stdout)["ingested"]
+        self.assertEqual((artifact["id"], artifact["path"]),
+                         (_CALIPER_ID, "inputs/data/caliper.txt"))
+        self.assertEqual(_read_bytes(record), before)
+
+    def test_ingest_refuses_bytes_where_a_record_goes(self):
+        """`ingest` records a file inside the project in place, so a file sitting
+        where a record goes would be recorded as evidence there: refused, naming
+        where evidence goes, before any record is returned."""
+        from atompipe import artifacts
+        project = _migrated_bracket(os.path.join(self.tmp(), "migrated"))
+        ledger = store.load(project, model_prose=modelio.static_param_prose)
+        count = len(ledger.inputs)
+        for rel in ("inputs/loads.json", "claims/notes.json"):
+            with self.subTest(rel=rel):
+                src = _write(os.path.join(project, *rel.split("/")), _LOADS)
+                with self.assertRaises(AtompipeError) as caught:
+                    artifacts.ingest(project, ledger, src, when=_WHEN)
+                self.assertIn(rel, str(caught.exception))
+                self.assertIn("where a record goes", str(caught.exception))
+                self.assertEqual(len(ledger.inputs), count)
+                os.remove(src)
+
 
 if __name__ == "__main__":
     unittest.main()

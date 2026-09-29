@@ -384,7 +384,12 @@ the key and the `difflib` suggestion: an unknown key at any depth
 (`claims/C1.json: unknown key "limt" at acceptance.limt (did you mean "limit"?)`); a
 key written twice; NaN or ±Infinity (and a literal like `1e999`); an empty file; a
 non-object; an `id` that disagrees with the stem; a `FORBIDDEN_KEYS` key, naming its
-owner (`model_entry` names the model file); `independence` anywhere. A failing
+owner (`model_entry` names the model file); `independence` anywhere; an input whose
+`path` names a record file — a top-level `<record dir>/*.json`, its own or another's,
+in any spelling (`./inputs/x.json`, `inputs\x.json`) — because `load` reads those bytes
+as a record and the pin can only ever read as drift (what slipped through: a legacy
+input ingested in place at `inputs/loads.json` migrated to a record at that path naming
+itself as its evidence). A failing
 top-level `inputs/*.json` is most likely stray evidence, and the message names
 `atompipe ingest` and the buckets. A results file must be `{"results": [...]}` whose
 items say `passed` as a bool. `load` also refuses two record files whose stems differ
@@ -452,8 +457,24 @@ function of the legacy JSON and of `model_prose(root, meta.model_entry)` —
 level (`rejectd` → `.atompipe/ledger.json: param "thickness": unknown key "rejectd" (did
 you mean "rejected"?)`, S-40), `independence`, a NaN inside a record, an id that cannot
 be a file name or collides (exactly or by case), a `ledger.json` with a `generated` key
-and no `project.json`, and record files a crashed migration left that differ from the
-plan (both named). Legacy `verdicts` and the old sweep record are dropped unread (D-09).
+and no `project.json`, a legacy input whose `path` is where a record goes, and files
+where records go that disagree with the plan. The input is the old spine's `ingest`
+recording a file inside the project in place: `inputs/loads.json` became input `loads`
+with that path, the file its own record goes in now. It is refused on the path, not on
+the file being there, naming the move and the edit that migrate it (`move them to
+inputs/data/loads.json and set its "path" to …` — the bucket of its kind). What slipped
+through: the plan wrote the record there and called the bench log a half-written record
+("differs from what .atompipe/ledger.json migrates to … Move those files aside"), and
+following that let the migration write a record naming itself — DRIFT forever;
+`inputs/Bench Loads.json` (input `bench-loads`) was called "not in
+.atompipe/ledger.json". *Rejected:* moving the bytes during the migration (it stays a
+function of the ledger and the model, and a model opening `inputs/loads.json` by path
+would break without a word); rewriting only the path (a record naming bytes that are not
+there). Of the files where records go, one that reads as a record is a crashed
+migration's and must equal the plan (both named, "has not finished migrating"); one that
+does not read as a record is named as a foreign file — and, where the plan writes there,
+as what it would collide with — never offered "make the ledger say the same".
+Legacy `verdicts` and the old sweep record are dropped unread (D-09).
 `apply=True` writes the record files, then `ensure_ignore_blocks`, then `project.json`
 **last** (the commit marker: a crash before it leaves a legacy project whose next run
 re-derives the same bytes and completes), then renames `ledger.json` to
@@ -1979,7 +2000,14 @@ def suggest_requests(ledger, *, project_kind="") -> list[str]
 `ingest`, `ingest_link` and `add_extraction` write nothing: each returns the
 `InputArtifact` the CLI's shim writes as `inputs/<id>.json`, the one record it
 touches, and updates the in-memory `ledger` so a command handling several files
-dedupes against its own earlier ones. `grounding` inverts the extractions every time
+dedupes against its own earlier ones. `ingest` refuses a file where a record goes (a
+top-level `<record dir>/*.json`, which it would record in place). Bytes already ingested
+come back as their record untouched — unless the record's `path` no longer holds a
+file: then they moved, and the same record (id and extractions kept) comes back pointing
+where they are, copied into the bucket of the record's kind when they come from outside
+the project, unless another record already names that file. What slipped through: the
+record came back untouched, so moving evidence into a bucket and ingesting it — a
+refusal's own hint — left it MISSING under "1 artifact(s) registered". `grounding` inverts the extractions every time
 it is read and adds the `grounded_by` a human declared on a param or claim record; the
 edge an extraction implies is never copied into the record it grounds. What slipped
 through (S-36): `extract` used to copy it (`cli._link_grounding`), so a deleted

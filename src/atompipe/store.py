@@ -71,6 +71,7 @@ import hashlib
 import json
 import math
 import os
+import posixpath
 import re
 import sys
 import types
@@ -910,9 +911,23 @@ def _parse_record(label: str, kind: str, stem: str, raw: bytes, *, model_entry: 
                 and f.default_factory is dataclasses.MISSING):          # type: ignore[misc]
             body[f.name] = None
     try:
-        return cls.from_dict(body)
+        record = cls.from_dict(body)
     except (TypeError, ValueError, KeyError, AttributeError) as exc:
         raise AtompipeError(f"{label}: not a valid {kind} record ({exc})") from None
+    # An input whose `path` is a record file pins bytes `load` reads as a record.
+    # What slipped through: a legacy input ingested in place at inputs/loads.json
+    # migrated to a record AT inputs/loads.json naming itself as its evidence —
+    # DRIFT on every read, and a re-ingest re-pinned the record's own bytes,
+    # which the write then moved again. Rejected: skipping such a row in the
+    # index (the record would still claim evidence it does not have).
+    slot = _record_slot(record.path) if kind == INPUTS_NAME else ""
+    if slot:
+        raise AtompipeError(
+            f'{label}: "path" names {slot}, which is where a record goes, not evidence — '
+            f"every top-level {slot.split('/', 1)[0]}/*.json is read as a record; move the "
+            f"bytes into a bucket (inputs/data/, inputs/measurements/, …) and set "
+            f'"path" to where they are')
+    return record
 
 
 def _label(path: str) -> str:
@@ -930,8 +945,9 @@ def read_record(path: str, kind: str, *, model_entry: str = "") -> Any:
     twice; NaN or ±Infinity; an empty file; anything but an object; an `id`
     (`name` for a param) that disagrees with the file's stem; a `FORBIDDEN_KEYS`
     key, naming the home that owns the fact (`model_entry` fills the model's
-    name); `independence` anywhere. A top-level `inputs/*.json` that fails is
-    most likely stray evidence, and the message says where evidence goes.
+    name); `independence` anywhere; an input whose `path` names a record file
+    (`_record_slot`). A top-level `inputs/*.json` that fails is most likely
+    stray evidence, and the message says where evidence goes.
 
     `Record.from_dict` stays lenient; this is the reader for FILES a human edits,
     where a dropped key is a lost fact (S-40).
@@ -975,6 +991,30 @@ def _record_files(root: str, kind: str) -> list[tuple[str, str]]:
         seen[key] = stem
     return [(stem, os.path.join(directory, stem + ".json"))
             for stem in sorted(stems, key=_natural)]
+
+
+def _record_slot(path: str) -> str:
+    """The record file a root-relative `path` lands on (`inputs/loads.json`), or
+    "" when it lands on none: a top-level `<kind>/<stem>.json`, not a dot-file,
+    in a record directory — `_record_files`' rule, so `load` reads whatever
+    sits there as a record, whatever it was meant to be.
+
+    The one question behind three refusals: a legacy input whose bytes sit
+    there (`_plan_files`), an input record whose `path` names one
+    (`_parse_record`), and `artifacts.ingest` recording a file in place there.
+    Spellings a `path` arrives in are normalised first (`inputs\\x.json`,
+    `./inputs/x.json`, `inputs/./x.json`); an absolute path names no slot —
+    `ingest` records a file inside the project relative, and one outside it
+    (`--no-copy`) is outside every record directory."""
+    rel = (path or "").replace("\\", "/")
+    if not rel or rel.startswith("/") or re.match(r"[A-Za-z]:", rel):
+        return ""
+    rel = posixpath.normpath(rel)
+    kind, sep, name = rel.partition("/")
+    if (sep and kind in RECORD_DIRS and "/" not in name and name.endswith(".json")
+            and not name.startswith(".")):
+        return rel
+    return ""
 
 
 def _input_size(root: str, path: str) -> int:
@@ -1868,8 +1908,65 @@ def _plan_files(root: str, data: dict[str, Any],
         for record in records:
             files[f"{kind}/{record.id}.json"] = _record_bytes(kind, record, label)
     files[_PROJECT_REL] = _project_bytes(ledger.meta)
+    _evidence_on_record_slots(ledger, files)
     _case_collisions(files)
     return files
+
+
+#: The noun for one record of each kind, in the words a refusal uses.
+_RECORD_NOUN: dict[str, str] = {
+    **{section: singular for section, singular, _cls in _LEGACY_SECTIONS},
+    "results": "results",
+}
+
+
+def _whose(rel: str) -> str:
+    """`input 'loads''s record`: what the plan writes at `rel`, in words."""
+    kind, name = rel.split("/", 1)
+    if kind == "results":
+        return f"claim {name[:-5]!r}'s results record"
+    return f"{_RECORD_NOUN[kind]} {name[:-5]!r}'s record"
+
+
+def _evidence_on_record_slots(ledger: Ledger, files: dict[str, bytes]) -> None:
+    """Refuse a legacy input whose bytes sit where a record goes, before a byte
+    is written, naming the one move and the one edit that migrate it.
+
+    What slipped through: the 1e09113 `ingest` recorded a file already inside
+    the project in place, so a bench log dropped at `inputs/loads.json` became
+    input `loads` with that path — the file its own record goes in now. The
+    plan wrote the record there, `_refuse_disagreeing_records` then called the
+    bench log a half-written record ("differs from what .atompipe/ledger.json
+    migrates to … Move those files aside"), and moving it aside let the
+    migration write a record naming itself as its evidence (`_parse_record`
+    refuses that now). A slot the plan does not fill (`inputs/Bench Loads.json`,
+    input `bench-loads`) was refused as "not in .atompipe/ledger.json", and its
+    hint — into a bucket, then `atompipe ingest` — migrated a record naming
+    bytes that were no longer there.
+
+    Refused on the path, not on the file being there: with the bytes moved, the
+    record would still name a record slot. Rejected: moving the bytes into
+    their bucket during the migration — it stays a function of the ledger and
+    the model, never of the evidence, and a model that opens
+    `inputs/loads.json` by path would break without a word; rewriting only the
+    path — a record naming bytes that are not at its `path` reads MISSING."""
+    problems: list[str] = []
+    for artifact in ledger.inputs:
+        slot = _record_slot(artifact.path)
+        if not slot:
+            continue
+        name = slot.split("/", 1)[1]
+        home = f"{INPUTS_NAME}/{BUCKET_FOR_KIND.get(artifact.kind) or 'data'}/{name}"
+        whose = ("its own record" if slot == f"{INPUTS_NAME}/{artifact.id}.json"
+                 else _whose(slot) if slot in files else "a record")
+        problems.append(f"input {artifact.id!r} keeps its bytes at {slot}, where {whose} "
+                        f'goes — move them to {home} and set its "path" to "{home}"')
+    if problems:
+        raise AtompipeError(
+            f"{_LEDGER_REL} cannot migrate: {'; '.join(problems)}. Every top-level "
+            f"<record dir>/*.json is read as a record now, so evidence lives in a bucket "
+            f"under {INPUTS_NAME}/; edit the path in {_LEDGER_REL} (and wherever model/ "
+            f"opens the file), then run the command again — nothing was written.")
 
 
 def _ledger_from_files(root: str, files: dict[str, bytes]) -> Ledger:
@@ -1890,23 +1987,53 @@ def _refuse_disagreeing_records(root: str, files: dict[str, bytes]) -> None:
     """A migration that crashed left record files and no `project.json`. Each is
     re-derived; identical ones are completed, and anything else — a record
     edited since, a record the ledger does not hold — is refused, naming both
-    sides, because completing the migration would silently pick one."""
+    sides, because completing the migration would silently pick one. A file
+    there that does not read as a record is no crash's: it is named as what it
+    is, and as what the plan would write over it."""
     problems: list[str] = []
+    records = False                # a record-shaped file disagrees: what a crash leaves
     for kind in RECORD_DIRS:
         for stem, path in _record_files(root, kind):
             rel = f"{kind}/{stem}.json"
             want = files.get(rel)
+            try:
+                raw = _read_bytes(path)
+            except OSError as exc:
+                problems.append(f"{rel} cannot be read ({exc.strerror or exc})")
+                continue
+            if raw == want:
+                continue
+            hint = _INPUTS_HINT if kind == INPUTS_NAME else ""
+            try:
+                _parse_record(rel, kind, stem, raw)
+            except AtompipeError:
+                # Not a record at all, so no migration left it: a bench log
+                # dropped at inputs/loads.json was called a half-written record
+                # ("differs from what … migrates to"), and "make the ledger say
+                # the same" is a remedy only a record can take.
+                noun = _RECORD_NOUN[kind]
+                article = "an" if noun[0] in "aeiou" else "a"
+                problems.append(f"{rel} does not read as {article} {noun} record, so no "
+                                f"migration left it"
+                                + (f", and {_whose(rel)} goes there" if want is not None
+                                   else "") + hint)
+                continue
+            records = True
             if want is None:
-                problems.append(f"{rel} is not in {_LEDGER_REL}"
-                                + (_INPUTS_HINT if kind == "inputs" else ""))
-            elif _read_bytes(path) != want:
+                problems.append(f"{rel} is not in {_LEDGER_REL}" + hint)
+            else:
                 problems.append(f"{rel} differs from what {_LEDGER_REL} migrates to")
-    if problems:
+    if problems and records:
         raise AtompipeError(
             f"{_LEDGER_REL} has not finished migrating (there is no {_PROJECT_REL} yet), "
             f"and record files already here disagree with it: {'; '.join(problems)}. "
             f"Move those files aside, or make {_LEDGER_REL} say the same, then run the "
             f"command again — nothing was written.")
+    if problems:
+        raise AtompipeError(
+            f"{_LEDGER_REL} cannot migrate: files that are not records sit where records "
+            f"go: {'; '.join(problems)}. Move those files aside, then run the command "
+            f"again — nothing was written.")
 
 
 def _finish_rename(root: str) -> None:
@@ -1951,8 +2078,10 @@ def migrate_legacy(root: str, *, apply: bool, when: str,
     Before a byte is written it refuses: an unknown key at any level (`rejectd`,
     with a suggestion — S-40: today's spine drops it and the next save erases
     it), `independence` anywhere, a NaN in a record, an id that cannot be a file
-    name or collides, a generated index with no `project.json`, and record files
-    left by a crashed migration that disagree with this plan. Then, with
+    name or collides, a generated index with no `project.json`, an input whose
+    bytes sit where a record goes (`inputs/loads.json`, ingested in place by the
+    old spine — `_evidence_on_record_slots`), and files where records go that
+    disagree with this plan: a crashed migration's, or not records at all. Then, with
     `apply`: the record files, then `ensure_ignore_blocks`, then `project.json`
     LAST (the commit marker: a crash before it leaves a legacy project that the
     next run completes), then `ledger.json` renamed to `ledger.legacy.json`,

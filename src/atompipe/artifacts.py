@@ -369,10 +369,16 @@ def ingest(
       and the directory they chose has already spoken (see `kind_for`) — we do
       not move it to "correct" the bucket. The one exception is `.atompipe/`:
       that tree is gate scratch and rebuildable output, so evidence found there
-      is copied out before something deletes it.
+      is copied out before something deletes it. A file where a RECORD goes (a
+      top-level `inputs/*.json`, `claims/*.json`, …) is refused: `load` reads
+      it as a record, and recorded in place it would be both.
     * **Same sha256 already ingested** -> the existing record comes back
       untouched, nothing is copied, nothing is appended. See `find_by_hash` for
-      why that is not signalled in the return value.
+      why that is not signalled in the return value. Unless its bytes are gone
+      from its `path`: then they moved, and the same record — id, extractions
+      and all — comes back pointing where they are now (copied into the bucket
+      of the record's kind when that is outside the project), never a second
+      record and never the stale path.
     * **Same path, new bytes** (an in-place file the user edited) -> the existing
       record's digest is refreshed and its id is KEPT. Minting a fresh id would
       orphan every `grounded_by` and every `Extraction` pointing at the old one,
@@ -425,8 +431,16 @@ def ingest(
         )
 
     existing = find_by_hash(ledger, sha)
-    if existing is not None:
+    if existing is not None and not _bytes_gone(root, existing):
         return existing
+    if existing is not None:
+        # The bytes a record pinned are gone from its `path` and arrive from
+        # somewhere else: they MOVED, and they are filed as what the record says
+        # they are. What slipped through: this returned the record untouched, so
+        # a person who moved `inputs/Bench Loads.json` into a bucket and
+        # ingested it — the refusal's own hint — kept a record naming bytes that
+        # were not there, MISSING, under "1 artifact(s) registered".
+        resolved = existing.kind
 
     # `.atompipe/` is excluded deliberately: it is declared rebuildable and
     # git-ignored by `store.init`, so a record pointing into it is a record
@@ -464,6 +478,22 @@ def ingest(
                 ) from exc
 
     recorded = rel(dest, root)
+    slot = store._record_slot(recorded)
+    if slot:
+        # Recorded in place, a file there would be evidence where `load` reads a
+        # record, and the record written beside it would pin a record's bytes.
+        # A copy always lands in a bucket, never here, so nothing was copied.
+        raise AtompipeError(
+            f"cannot ingest {slot}: it is where a record goes, not evidence — every "
+            f"top-level {slot.split('/', 1)[0]}/*.json is read as a record; move it into "
+            f"a bucket ({store.INPUTS_NAME}/{bucket_for(resolved)}/) and ingest it there")
+
+    if existing is not None:
+        if any(a is not existing and a.path == recorded for a in ledger.inputs):
+            return existing         # another record names that file: never two
+        existing.path = recorded
+        existing.bytes = size
+        return existing
 
     prior = next((a for a in ledger.inputs if a.path and a.path == recorded), None)
     if prior is not None:
@@ -804,6 +834,16 @@ def _within(path: str, directory: str) -> bool:
     except ValueError:
         # Different drives on Windows: no common path exists, so it is not inside.
         return False
+
+
+def _bytes_gone(root: str, artifact: InputArtifact) -> bool:
+    """True when the record names a file and no file is there — the index's
+    MISSING. A link names none, and drifted bytes are still there: neither moved."""
+    if not artifact.path:
+        return False
+    path = artifact.path.replace("\\", "/")
+    full = path if os.path.isabs(path) else os.path.join(root, *path.split("/"))
+    return not os.path.isfile(full)
 
 
 def _dest_for(directory: str, filename: str, sha: str) -> tuple[str, bool]:
