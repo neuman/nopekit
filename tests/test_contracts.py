@@ -22,6 +22,8 @@ a string instead of editing the tree:
     PackSurfaceIsDocumented     GateSpec / NegativeControl / Verdict fields and
                                 properties, GateContext fields and methods, each
                                 in its own `class` block in PACK_FORMAT
+    SkillNamesTheNewSurface     ... and every one of those added since 1e09113,
+                                in code form in the pack-authoring skill too
     SiteStateKeysAreDocumented  a real `site init` + `site build` on a copy of
                                 the bracket; every top-level state.json key and
                                 every file under site/data/ is in SITE_CONTRACT
@@ -113,6 +115,34 @@ PACK_SURFACE = (
     ("models.py", "Verdict", ("fields", "properties")),
     ("gates.py", "GateContext", ("fields", "methods")),
 )
+
+PACK_AUTHORING_SKILL = os.path.join(REPO, "skills", "pack-authoring", "SKILL.md")
+
+#: The pack-facing surface as it stood at 1e09113, the commit this plan was drawn
+#: against, by `class_members` over PACK_SURFACE's groups. R-14 puts every field
+#: of GateSpec, NegativeControl and Verdict and every GateContext method in
+#: PACK_FORMAT *and* the pack-authoring skill; the skill is the procedure and
+#: points at PACK_FORMAT for the rest, so what it owes is what moved under the
+#: pack author since the plan: every member NOT in this set. What slipped through
+#: without it: Phase 1 added `requires_one_of`, `Verdict.outcome`, `ctx.memo` and
+#: `ctx.trace`, PACK_FORMAT's checker made each land there, and the skill an
+#: agent writing a pack actually loads named none of the four. *Rejected:* every
+#: member in the skill — a second copy of PACK_FORMAT's blocks, which drifts from
+#: the first (METHOD rule 2); *rejected:* a list of the Phase 1 additions — the
+#: next phase's field would owe the skill nothing.
+PACK_SURFACE_AT_1E09113: dict[str, frozenset[str]] = {
+    "GateSpec": frozenset({"id", "title", "claims", "tier", "pack", "requires_tools",
+                           "requires_python", "negative_control", "description",
+                           "settles", "entry"}),
+    "NegativeControl": frozenset({"fixture", "expect", "note"}),
+    "Verdict": frozenset({"gate", "passed", "claims", "measured", "limit", "units",
+                          "detail", "evidence", "duration_s", "tier", "skipped",
+                          "skip_reason", "error", "pack", "locators", "ok"}),
+    "GateContext": frozenset({"root", "ledger", "model", "params", "out_dir", "tier",
+                              "log", "extra", "pack", "key_scope", "scopes", "param",
+                              "pack_param", "first_pack_param", "first_pack_param_named",
+                              "require_param", "out_path", "with_extra"}),
+}
 
 #: The gap map at 7ecf953 holds 74 rows. The floor sits below that so a later
 #: phase may merge or retire rows without touching this file, and far enough above
@@ -371,6 +401,25 @@ def pack_surface_problems(sources: dict[str, str], pack_format: str,
     for where, name, groups in surface:
         problems += _surface_problems(sources[where], where, pack_format,
                                       "PACK_FORMAT", name, groups)
+    return problems
+
+
+def skill_surface_problems(sources: dict[str, str], skill: str, surface=PACK_SURFACE,
+                           baseline=PACK_SURFACE_AT_1E09113) -> list[str]:
+    """Pack-surface members added since 1e09113 that the pack-authoring skill never
+    writes in code form (a fenced block or an inline span, anywhere in it)."""
+    code = code_text(skill)
+    problems: list[str] = []
+    for where, name, groups in surface:
+        members = class_members(sources[where], name)
+        if members is None:
+            problems.append(f"{where} defines no class {name}")
+            continue
+        for group in groups:
+            for member in members[group]:
+                if member not in baseline.get(name, frozenset()) and not mentions(code, member):
+                    problems.append(f"{name}.{member} is new since 1e09113 and the "
+                                    f"pack-authoring skill never names it in code form")
     return problems
 
 
@@ -1180,6 +1229,45 @@ class PackSurfaceIsDocumented(unittest.TestCase):
         self.assertEqual(pack_surface_problems(
             {"gates.py": source}, "```\nclass GateContext:\n```\n",
             surface=(("gates.py", "GateContext", ("fields", "methods")),)), [])
+
+
+class SkillNamesTheNewSurface(unittest.TestCase):
+    """What moved under the pack author since the plan, in the skill they load."""
+
+    def _sources(self) -> dict[str, str]:
+        return {"models.py": _read(os.path.join(SPINE_SRC, "models.py")),
+                "gates.py": _read(os.path.join(SPINE_SRC, "gates.py"))}
+
+    def test_every_member_added_since_the_plan_is_in_the_skill(self):
+        problems = skill_surface_problems(self._sources(), _read(PACK_AUTHORING_SKILL))
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_the_baseline_is_not_the_whole_surface(self):
+        """Not vacuous: Phase 1 did add members, so the check has something to find."""
+        added = [(name, member) for where, name, groups in PACK_SURFACE
+                 for group in groups
+                 for member in class_members(self._sources()[where], name)[group]
+                 if member not in PACK_SURFACE_AT_1E09113[name]]
+        self.assertGreaterEqual(len(added), 7, added)
+
+    def test_a_planted_field_is_caught(self):
+        sources = self._sources()
+        sources["models.py"] = _plant_field(sources["models.py"], "GateSpec",
+                                            "planted_field_skill: str = ''")
+        problems = skill_surface_problems(sources, _read(PACK_AUTHORING_SKILL))
+        self.assertEqual(problems, ["GateSpec.planted_field_skill is new since 1e09113 and "
+                                    "the pack-authoring skill never names it in code form"])
+
+    def test_prose_is_not_naming(self):
+        """`memo` in "keep no memo of your own" is English, not `ctx.memo`."""
+        source = "class GateContext:\n    memo: int = 0\n"
+        surface = (("gates.py", "GateContext", ("fields",)),)
+        self.assertEqual(len(skill_surface_problems({"gates.py": source},
+                                                    "Keep no memo of your own.\n",
+                                                    surface=surface)), 1)
+        self.assertEqual(skill_surface_problems({"gates.py": source},
+                                                "Leave `ctx.memo` alone.\n",
+                                                surface=surface), [])
 
 
 class SiteStateKeysAreDocumented(unittest.TestCase):
