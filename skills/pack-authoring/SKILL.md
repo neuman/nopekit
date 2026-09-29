@@ -77,6 +77,12 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
   `.bin` buffers). Pass a module-level function as the loader, and
   copy the result before changing it (every caller gets the same object). A cache on
   `extra` once made the second gate's read of a part invisible.
+- **`ctx.memo` and `ctx.trace` are the sweep's, not yours.** `ctx.memo` is
+  `load_file`'s handle on the sweep's file memo: `ctx.memo[k]`, `.get`, a write, `in`
+  or `dict(ctx.memo)` raises `GateMemoError` and the gate reads as an error, because a
+  value one gate left there was the next gate's read of a file it never opened.
+  `ctx.memo is None` (a hand-run script, outside a sweep) is the one question to ask
+  of it. `ctx.trace` is what your reads are recorded into; never touch it.
 - **Keep no memo of your own.** An `lru_cache` at module level is emptied before every
   run, so it saves nothing across gates; a module-level dict you fill from a function
   is never emptied, and the second gate to ask gets a value whose file it never opened
@@ -96,6 +102,17 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
 - **Leave `rho` and `cpu_s` alone.** `run_gate` measures `cpu_s` (child processes
   included: a solver subprocess is not free) and `duration_s`, and the sweep sets
   `rho`. Anything a gate puts in them is overwritten.
+- **Return `passed=True` or `passed=False`, and read a verdict by its `outcome`.**
+  Any other pass value (`"false"`, `1`, `None`) is an error naming its type: `"false"`
+  once read `[ok]`. `Verdict.outcome` — `"error"`, `"skipped"`, `"pass"` or `"fail"`,
+  in that precedence — is the one derivation every renderer calls; a helper or a check
+  script that re-derives it from the three flags is the fourth copy that drifts.
+- **When any one of several back-ends will do, declare `requires_one_of`**
+  (`["python:manifold3d", "tool:openscad"]`) next to `requires_python` and
+  `requires_tools`, and never probe for the engine inside the gate and skip there.
+  `availability` cannot see a skip decided in the body: `cad.clash` once skipped its own
+  baseline and its own control on a machine with trimesh and no boolean engine, while
+  availability said it could run.
 - **Read claims through `ctx.ledger.claim(id)`**; the ledger a gate gets has no
   verdicts in it.
 - **`os.path.isfile` is a read.** A path under the project or your pack that the gate
