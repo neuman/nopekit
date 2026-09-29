@@ -360,7 +360,10 @@ by exactly those reads (`rho`). So:
   the tier-2 PASS — a plain `check` shows the crash and says `run atompipe check --tier
   2` — and a PASS on the cheap path never clears it; only a run on that path that
   measures does. (What slipped through: a tier-0 PASS forgot the tier-2 crash, and
-  `check --tier 2` served the PASS the crash had superseded.)
+  `check --tier 2` served the PASS the crash had superseded.) Your control's crash is
+  remembered on its own path the same way: a control that fires on the cheap path
+  never clears its crash on the costlier one, and a crash of the cheap path's control
+  never refuses the costlier PASS whose own path's control fired.
   In your view `ctx.tier` is a `verdicts.TierRead`: it compares, indexes, hashes and
   formats as the int it is and `isinstance(ctx.tier, int)` holds, but it is not an
   `int` subclass (CPython reads an int subclass's index without asking it), so

@@ -4668,8 +4668,9 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
     are cached. A crash, an unusable fixture, a self-skip with the tools
     present, or an availability skip proves nothing about the gate: it is
     ``remember``-ed under ``control:<gate id>``, keyed by the current static part
-    (``when`` from the caller: this module reads no clock), and ``None`` is
-    returned.
+    and the path it failed on — the tier its run read, if it read one
+    (``_control_key``; ``when`` from the caller: this module reads no clock) —
+    and ``None`` is returned.
 
     **The forged form** passes ``bad="fail"`` (and a ``detail``) with no result
     and no trace: an entry with empty reads, which a renderer test uses to plant
@@ -4679,8 +4680,9 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
     ``host``: ``"known-good"`` (the spine handed a project fixture
     ``selftest/known_good.py``'s context, D-27) or ``"live"``; host-param reads
     are keyed in rho_control only when live. Writing a control entry clears the
-    remembered control failure of this gate at the entry's static part, and at
-    no other (``forget``).
+    remembered control failures of this gate at the entry's static part on the
+    path every tier shares and on the path its run read — never at another
+    static, nor on another tier's path (``_answered_controls``, ``forget``).
     """
     if host not in _HOSTS:
         raise AtompipeError(f"host must be one of {list(_HOSTS)}, not {host!r}")
@@ -4688,10 +4690,11 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
                            detail=detail, digests=digests, anchors=anchors)
     key = f"control:{spec.id}"
     if built.entry is None:
-        remember(root, key, built.held, input_rho=built.static, kind=built.kind, when=when)
+        remember(root, key, built.held, input_rho=built.failure_key, kind=built.kind,
+                 when=when)
         return None
     written = write_control(root, built.entry)
-    forget(root, key, (built.entry.static,))
+    forget(root, key, _answered_controls(built.entry.static, built.tier))
     return written
 
 
@@ -4699,12 +4702,19 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
 class _BuiltControl:
     """A control run as ``record_control`` would file it, before anything is
     written: ``entry`` for a measurement, else ``held`` — the verdict to
-    remember — and its ``kind``; ``static`` the part it is keyed by."""
+    remember — and its ``kind``; ``static`` the part it is keyed by, ``tier``
+    the one its run read through ``ctx.tier`` (``None``: never looked)."""
 
     static: str
     entry: ControlEntry | None = None
     kind: str = ""
     held: Verdict | None = None
+    tier: int | None = None
+
+    @property
+    def failure_key(self) -> str:
+        """What a failure of this run is remembered under (``_control_key``)."""
+        return _control_key(self.static, self.tier)
 
 
 def _held_control(result: Verdict, kind: str) -> Verdict:
@@ -4730,6 +4740,7 @@ def _control_entry(root: str, spec: Any, fn: Any, *, result: Verdict | None,
     anchors = anchors if anchors is not None else _default_anchors(root, spec, fn)
     digests = digests if digests is not None else FileDigests()
     static, parts, code, owner = _static(spec, fn, root, digests=digests, anchors=anchors)
+    tier = _trace_tier(trace)
     measured = limit = None
     units = ""
     if bad is None:
@@ -4738,7 +4749,8 @@ def _control_entry(root: str, spec: Any, fn: Any, *, result: Verdict | None,
                                 f"or an explicit bad=")
         bad, kind = _control_outcome(spec, result)
         if bad is None:
-            return _BuiltControl(static, kind=kind, held=_held_control(result, kind))
+            return _BuiltControl(static, kind=kind, held=_held_control(result, kind),
+                                 tier=tier)
     elif bad not in ("fail", "pass"):
         raise AtompipeError(f"bad must be 'fail' or 'pass', not {bad!r}")
     if result is not None:
@@ -4767,7 +4779,7 @@ def _control_entry(root: str, spec: Any, fn: Any, *, result: Verdict | None,
                          admitted="reject-only" if bad == "fail" else "no",
                          detail=portable(detail, anchors), measured=measured, limit=limit,
                          units=units)
-    return _BuiltControl(static, entry=entry)
+    return _BuiltControl(static, entry=entry, tier=tier)
 
 
 # --------------------------------------------------------------------------- #
@@ -4815,11 +4827,13 @@ def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str
     (the state's ``input_rho``: a Fresh entry's, the recomputed rho of the
     latest entry's read signature — of the latest one read at that tier, when
     the state's own was read at another — or ``""`` when none was); for a
-    control, the current static part. *Rejected:* the failing run's own rho — a
-    crash at partial reads has a different rho than the PASS it followed, so
-    "supersede at the same rho" would never match and the next plain check
-    would serve the old PASS. Nothing remembered is evidence, so
-    remembering a pass or a fail is refused: those are cached.
+    control, the current static part and the path it failed on
+    (``_control_key``: ``<static>@<tier>`` when the run read ``ctx.tier``).
+    *Rejected:* the failing run's own rho — a crash at partial reads has a
+    different rho than the PASS it followed, so "supersede at the same rho"
+    would never match and the next plain check would serve the old PASS.
+    Nothing remembered is evidence, so remembering a pass or a fail is
+    refused: those are cached.
 
     One record per ``(key, input_rho)``, the newest — except that an
     ``"availability"`` record never replaces an ``"error"`` or ``"self-skip"``
@@ -4895,6 +4909,69 @@ def forget(root: str, key: str, input_rhos: Iterable[str]) -> bool:
         del data[key]
     atomic_write_json(path, data)
     return True
+
+
+def _control_key(static: str, tier: int | None) -> str:
+    """What a failed control run is remembered under in ``control:<gate>``:
+    the static part, and — when the run read ``ctx.tier`` — ``@<tier>``, the
+    path it failed on. A failure that never read the tier (an unusable fixture,
+    a crash before the gate looked) is on the path every tier shares, and keeps
+    the bare static.
+
+    What slipped through (review, remembered control failures by tier): the
+    key was the static part alone, though rho_control keys the tier the
+    control's gate read. ``check --tier 2 --force`` crashed the costlier path's
+    control; an edit sent the next plain check down the cheap path, whose
+    control fired and forgot that crash; the edit reverted, ``check --tier 2``
+    served the tier-2 control entry the crash had superseded, admitted, and the
+    PASS cached — while ``--force`` crashed again. *Rejected:* a tier field on
+    the record — the file keeps one shape, one record per key, as the gate's
+    records did (a signature's rho already names its tier); and a digest of
+    ``(static, tier)`` — at ``at=None`` a reader must find every path's failure
+    at one static (``_control_failures``), which a digest hides.
+    """
+    return static if tier is None else f"{static}@{int(tier)}"
+
+
+def _trace_tier(trace: Any) -> int | None:
+    """The tier a control run read through ``ctx.tier`` (``GateTrace.tier``),
+    or ``None`` when it never looked — or there is no trace (the forged form)."""
+    tier = getattr(trace, "tier", None) if trace is not None else None
+    return None if isinstance(tier, bool) or not isinstance(tier, int) else int(tier)
+
+
+def _answered_controls(static: str, *tiers: int | None) -> set[str]:
+    """The failure keys a control entry at ``static`` answers: the shared
+    path's, and the path of each tier in ``tiers`` it was run on or read —
+    never another path's. A control firing on the tier-0 path says nothing
+    about a crash of the control on the tier-2 one (``_control_key``)."""
+    return {static} | {_control_key(static, tier) for tier in tiers if tier is not None}
+
+
+def _control_failures(held: Mapping[str, Any], gate_id: str, static: str,
+                      at: int | None) -> list[tuple[int | None, Mapping[str, Any]]]:
+    """``gate_id``'s remembered control failures (a crash, an unusable fixture,
+    a self-skip) standing against an admission asked at ``at``, as ``(the tier
+    the failed run read, or None; the record)``, the shared path's first: at
+    this static, on the path every tier shares or the one ``at`` picks — at
+    ``at=None`` (a verdict that never read the tier, whose admission counts a
+    control of any tier) on every path. An availability record is never one
+    (it is re-evaluated where it is shown), nor a record at another static
+    (that version's: remembered outcomes, round 1)."""
+    found: list[tuple[int | None, Mapping[str, Any]]] = []
+    for key, record in (held.get(f"control:{gate_id}") or {}).items():
+        if record["kind"] not in _SUPERSEDING_KINDS:
+            continue
+        suffix = key[len(static) + 1:] if key.startswith(static + "@") else ""
+        if key == static:
+            tier = None
+        elif suffix.isascii() and suffix.isdigit():
+            tier = int(suffix)
+        else:
+            continue
+        if tier is None or at is None or tier == at:
+            found.append((tier, record))
+    return sorted(found, key=lambda pair: (pair[0] is not None, pair[0] or 0))
 
 
 # --------------------------------------------------------------------------- #
@@ -5881,17 +5958,23 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
     whatever tier it ran at (``_disagree``). What slipped through (review round
     1, ``probe.tier``): rho_control never keyed the tier, so a control shown on
     the tier-0 path was served to ``check --tier 2`` and admitted a costlier
-    path that passed its own known-bad input."""
+    path that passed its own known-bad input. A remembered control failure is
+    held against ``at`` only on that path or the one every tier shares
+    (``_control_failures``) — a crash proves nothing, least of all about a path
+    it did not take."""
     static, _parts = now.static(spec, fn)
     mine = (verified or {}).get(spec.id) or {}
-    record = (held.get(f"control:{spec.id}") or {}).get(static)
     # An availability skip of the control proves nothing either way, and is
     # re-evaluated where it is shown: while the tool is missing the GATE reads
     # skipped before admission is asked; once it is here the record is moot.
-    # Only the record at THIS static: one at another version is that
-    # version's (remembered outcomes, round 1).
-    if record is not None and record["kind"] in _SUPERSEDING_KINDS:
-        return Admission("not-admitted", None, _control_failure(record))
+    # Only a record at THIS static: one at another version is that version's
+    # (remembered outcomes, round 1). And only one on the path `at` picks, or
+    # the one every tier shares: a control crash on the tier-2 path says
+    # nothing about the tier-0 path's control, which fired (review, remembered
+    # control failures by tier).
+    failures = _control_failures(held, spec.id, static, at)
+    if failures:
+        return Admission("not-admitted", None, _control_failure(failures[0][1]))
     try:
         controls = read_controls(now.root, spec.id, problems=notes)
     except AtompipeError as exc:
@@ -5957,7 +6040,8 @@ def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
     next check re-verifies``.
     ``"not-admitted"`` — the current control PASSED its known-bad input, or two
     current controls disagree, or the control crashed, was unusable or skipped
-    itself at this static part (remembered under ``control:<gate>``).
+    itself at this static part — on any tier's path: this asks at no tier
+    (``_control_failures`` at ``at=None``) — remembered under ``control:<gate>``.
     ``"undemonstrated"`` — no current control.
 
     ``anchors`` defaults to the root's plus the pack ``fn`` came from (as
@@ -6946,15 +7030,42 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
     return _decide(matches, spec, order, reverified=True)
 
 
+def _hold_control_failure(s: _Session, gate_id: str, key: str, verdict: Verdict,
+                          kind: str) -> None:
+    """Remember a failed control run at ``key`` (``_control_key``) — on disk
+    unless ``record=False`` — and in the session's ``held``, so what the rest
+    of the sweep reads (``_outranked``, a note) is what the next reader will."""
+    if s.record:
+        remember(s.root, f"control:{gate_id}", verdict, input_rho=key, kind=kind, when=s.when)
+    s.held.setdefault(f"control:{gate_id}", {})[key] = {
+        "input_rho": key, "kind": kind, "verdict": verdict, "when": str(s.when or "")}
+
+
+def _release_control_failures(s: _Session, gate_id: str, keys: Iterable[str]) -> None:
+    """Forget the control failures at ``keys`` (``_answered_controls``): on
+    disk unless ``record=False``, and in the session's ``held``."""
+    keys = set(keys)
+    if s.record:
+        forget(s.root, f"control:{gate_id}", keys)
+    records = s.held.get(f"control:{gate_id}")
+    if records:
+        for key in keys:
+            records.pop(key, None)
+        if not records:
+            del s.held[f"control:{gate_id}"]
+
+
 def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool) -> Admission:
     """§3.8 steps 5-6: run the control — fixture and gate, traced, in its own
     emptied ``out_dir`` — and file it: a measurement as a control entry, a
     crash, an unusable fixture or a self-skip remembered under
-    ``control:<gate>``. Under ``record=False`` it is judged exactly as it would
-    be filed, and nothing is written."""
+    ``control:<gate>``, on the path it failed on (``_control_key``). Under
+    ``record=False`` it is judged exactly as it would be filed, and nothing is
+    written. A control entry answers the failures on the path it ran — this
+    sweep's tier, whether or not it read it — and on the shared one, and no
+    other (``_answered_controls``)."""
     from . import gates as _gates
     gid = spec.id
-    key = f"control:{gid}"
     out_dir = _fresh_control_dir(s.root, gid, s.out_dir)
     # Opened before the known-good design is built: `context` runs inside it.
     trace = GateTrace(kind="control", anchors=s.anchors)
@@ -6964,9 +7075,8 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
         held = Verdict(gate=f"{gid}#selftest", passed=False, tier=Tier(int(spec.tier)),
                        pack=spec.pack or "", error=str(exc).splitlines()[0] if str(exc) else
                        "negative control unusable")
-        if s.record:
-            remember(s.root, key, held, input_rho=s.now.static(spec, fn)[0], kind="error",
-                     when=s.when)
+        _hold_control_failure(s, gid, _control_key(s.now.static(spec, fn)[0],
+                                                   _trace_tier(trace)), held, "error")
         return Admission("not-admitted", None, _control_failure({"verdict": held,
                                                                  "kind": "error"}),
                          executed=True)
@@ -6985,9 +7095,7 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
             return Admission("undemonstrated", None,
                              result.skip_reason or "its tooling is not available",
                              executed=True)
-        if s.record:
-            remember(s.root, key, built.held, input_rho=built.static, kind=built.kind,
-                     when=s.when)
+        _hold_control_failure(s, gid, built.failure_key, built.held, built.kind)
         return Admission("not-admitted", None,
                          _control_failure({"verdict": built.held, "kind": built.kind}),
                          executed=True)
@@ -6999,7 +7107,9 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
     if s.record:
         wrote = write_control(s.root, entry)
         s.notes.extend(wrote.warnings)
-        forget(s.root, key, (entry.static,))
+    # Written first: a write that raises must leave the failure it would answer.
+    _release_control_failures(s, gid, _answered_controls(entry.static, built.tier, s.now.tier))
+    if s.record:
         # The entry on disk keeps the fixture hint it was FIRST written with
         # (same inputs, same outcome: "exists"); the closure it was just
         # demonstrated under is remembered beside it.
@@ -7019,7 +7129,10 @@ def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
     """§3.8 steps 1-6 for one gate (see ``admission``). ``at`` is the tier
     whose path the counted verdict takes (``_admission``): with no current
     control shown on that path the control runs — at the session's tier, which
-    is the one a caller that may run passes as ``at``."""
+    is the one a caller that may run passes as ``at``. A remembered control
+    failure on that path or the shared one (``_control_failures``) runs it
+    again; one on a path the session does not run is the answer, and nothing
+    runs."""
     from . import gates as _gates
     if not may_run:
         return _admission(s.now, spec, fn, s.held, s.notes, s.verified, at=at)
@@ -7040,12 +7153,27 @@ def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
             s.notes.append(f"{gid}: {exc}")
         controls = []
     current = [c for c in controls if c.static == static and not _control_moved(c, s.now)]
+    failures = _control_failures(s.held, gid, static, at)
+    # A failure on a path this sweep does not run — only at `at=None`, a served
+    # verdict that never read the tier, against which every path's failure
+    # stands — is answered by no run here: nothing runs, as sweep step 1b reads
+    # a gate's crash on a costlier path, and a note names the check that runs
+    # it. *Rejected:* running the control at this sweep's tier anyway — it
+    # would re-run on every check to reach the same refusal.
+    beyond = [(tier, record) for tier, record in failures
+              if tier is not None and tier != s.now.tier]
+    if beyond:
+        tier, record = beyond[0]
+        s.notes.append(f"{gid}: the control {record['kind']} remembered on the tier-{tier} "
+                       f"path stands, and a check at tier {s.now.tier} does not run that "
+                       f"path — run atompipe check --tier {tier}")
+        if not force:
+            return Admission("not-admitted", None, _control_failure(failures[0][1]))
     if not force:
-        record = (s.held.get(f"control:{gid}") or {}).get(static)
-        failed_here = record is not None and record["kind"] in _SUPERSEDING_KINDS
-        # A control that crashed at this static supersedes whatever entry it
-        # followed, like a gate's crash (§3.9): run it again, never serve it.
-        if not failed_here and current and _at_tier(current, at):
+        # A control that failed at this static, on this path or the shared one,
+        # supersedes whatever entry it followed, like a gate's crash (§3.9): run
+        # it again, never serve it.
+        if not failures and current and _at_tier(current, at):
             mine = s.verified.get(gid) or {}
             # A live ledger that differs from what a control recorded is
             # not a miss yet: only its fixture can say whether it builds
@@ -7060,7 +7188,12 @@ def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
             found = _reverify(s, spec, fn, host_ctx, current, order)
             if found is not None:
                 return _other_tiers(found, current, s, spec)
-    return _other_tiers(_run_control(s, spec, fn, host_ctx, force=force), current, s, spec)
+    found = _other_tiers(_run_control(s, spec, fn, host_ctx, force=force), current, s, spec)
+    if beyond and found.state != "not-admitted":
+        # `--force` ran it on this sweep's path, which answers only that path.
+        return Admission("not-admitted", found.entry, _control_failure(beyond[0][1]),
+                         executed=found.executed, reverified=found.reverified)
+    return found
 
 
 def _other_tiers(found: Admission, current: list, s: _Session, spec: Any) -> Admission:
@@ -7117,9 +7250,10 @@ def admission(root: str, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool = T
        ``record=False``): ``bad: "fail"`` admitted reject-only; ``bad: "pass"``
        not admitted (``PASSED its own known-bad fixture <ref>``). A crash, an
        unusable fixture or a self-skip with the tools present is remembered
-       under ``control:<gate>`` at the current static and not admitted
-       (``control <kind>: <why>``); a remembered one at this static is re-run,
-       never served.
+       under ``control:<gate>`` at the current static and the path it failed on
+       (``_control_key``) and not admitted (``control <kind>: <why>``); a
+       remembered one at this static, on this path or the shared one, is
+       re-run, never served.
     6. **``force``** skips 1-4: the control always runs, and an outcome that
        differs from a cached control entry at the same ``rho_control`` is not
        admitted (``control outcome differs from its cached entry``, R-9).
@@ -7398,6 +7532,22 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     if judged.state == "not-admitted":
         refused = _synthesized(spec, error=f"not admitted: {judged.reason}",
                                rho=state.rho if isinstance(state, Fresh) else "")
+        above = _read_tier(state.entry.reads) if isinstance(state, Fresh) else None
+        if (force and judged.executed and above is not None and above != s.now.tier
+                and _standing(s.held.get(gid), state) is None):
+            # The refusal is this run's, on this path (invariant 2: never laid
+            # under a PASS it did not reach); a costlier entry whose own path's
+            # control stands is what `status` and a plain check serve — say so,
+            # rather than leave `check --force` and `status` disagreeing
+            # unexplained (review, remembered control failures by tier).
+            there = _admit(s, spec, fn, run_ctx, may_run=False, force=False, at=above)
+            if there.state in ("admitted", "pending"):
+                shown = _as_spec(state.entry.to_verdict(), spec).outcome.upper()
+                s.notes.append(f"{gid}: its control ran at tier {s.now.tier} "
+                               f"({judged.reason}), on that path only; the tier-{above} "
+                               f"entry {state.entry.name} at these inputs, whose own "
+                               f"path's control stands, is the more thorough answer, and "
+                               f"what status and a plain check serve ({shown})")
         return SweepRow(refused, admission=judged)
 
     # 3. the cache — unless a remembered crash at these inputs superseded it.

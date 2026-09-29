@@ -1253,11 +1253,20 @@ bytecode. Where git lists nothing and the walk finds files, the walk wins.
 trace: fired → `bad: "fail"`, admitted reject-only; the gate PASSED its known-bad
 input → `bad: "pass"`, admitted `"no"` (both measurements, cached). A crash on the
 fixture, an unusable fixture, a self-skip with the tools present or an availability
-skip is `remember`-ed under `control:<gate id>`, keyed by the current `static`, and
-returns `None`. The forged form, `record_control(root, spec, fn, bad="fail",
-detail=...)` with no result and no trace, writes an entry with empty reads — how a
-renderer test plants an admission; it forges only the inner loop (R-9). Writing one
-`forget`s the gate's remembered control failure at the entry's `static`, and at no other.
+skip is `remember`-ed under `control:<gate id>`, keyed by the current `static` and the
+path it failed on — `<static>@<tier>` when its run read `ctx.tier`, the bare `static`
+(the path every tier shares) when it never looked (`_control_key`) — and returns `None`.
+The forged form, `record_control(root, spec, fn, bad="fail", detail=...)` with no result
+and no trace, writes an entry with empty reads — how a renderer test plants an
+admission; it forges only the inner loop (R-9). Writing one `forget`s the gate's
+remembered control failures at the entry's `static` on the shared path and on the path
+its run read — the sweep's also on the tier it ran the control at — and at no other
+static or path (`_answered_controls`). What slipped through (review, remembered control
+failures by tier): keyed and forgotten by `static` alone, though rho_control keys the
+tier — `check --tier 2 --force` crashed the costlier path's control, an edit sent the
+next plain check down the cheap path, whose control fired and forgot that crash, and
+with the edit reverted `check --tier 2` served the tier-2 control entry the crash had
+superseded, admitted, and its PASS cached, while `--force` crashed again.
 
 **Remembered outcomes** — `.atompipe/cache/last_outcomes.json` (untracked): `{key:
 {input_rho: {"kind", "verdict", "when"}}}`, key a gate id or `control:<gate id>`,
@@ -1265,8 +1274,8 @@ renderer test plants an admission; it forges only the inner loop (R-9). Writing 
 `input_rho` the rho computed from current digests just before the run, at the tier
 the run took (the state's `input_rho`: a Fresh entry's, the recomputed rho of the latest
 entry's read signature — of the latest one read at that tier when the state's own is
-another's — or `""`), or a control's current `static` — never the failing run's own
-rho, which a crash at partial reads makes different from the PASS it followed, and
+another's — or `""`), or a control's current `static` and the path it failed on
+(`_control_key`) — never the failing run's own rho, which a crash at partial reads makes different from the PASS it followed, and
 never another tier's entry's, which a crash on this path is not at the inputs of. One record per `(key, input_rho)`,
 the newest, except that an `availability` record never replaces an `error` or
 `self-skip` one: a check that could not run the gate answered nothing — and a key
@@ -1274,7 +1283,8 @@ keeps one `availability` record, the newest, since it supersedes nothing. A pass
 clears only the records at the inputs it was measured at (`forget(root, key,
 input_rhos)`): the sweep's `_superseded` — the new entry's rho, `""`, and every rho
 current before the run at the tier it took (`here`) — `record_verdict`'s the entry's
-rho and `""`, a control entry's its `static`. What slipped through (remembered outcomes, round 1): one record
+rho and `""`, a control entry's its `static` on the shared path and on its own
+(`_answered_controls`). What slipped through (remembered outcomes, round 1): one record
 per gate, forgotten by a pass or fail at ANY rho and overwritten by an availability
 skip — a crash at A, then a PASS at B (or a check without the tool), and back at A
 `check` read `0 executed, 6 cached` and served the PASS the crash had superseded; the
@@ -1422,8 +1432,12 @@ disagree the reason is `control outcomes differ by ctx.tier (<names>)` — a gat
 passes its known-bad input on one tier's path is a logger on every path (review round
 1, `probe.tier`: rho_control never keyed the tier, and a control shown on the tier-0
 path admitted a tier-2 path that passed a 400 mm span). A remembered control crash, unusable fixture or
-self-skip at this static (`control:<gate>`) → `"not-admitted"`, `control <kind>: <why>`
-(an availability skip is not held against it). No current candidate →
+self-skip at this static (`control:<gate>`), on the path every tier shares or on the
+path `at` picks — on every path when `at` is `None`, a verdict that never read the tier
+(`_control_failures`) → `"not-admitted"`, `control <kind>: <why>` (an availability skip
+is not held against it). A control crash on the tier-2 path says nothing about the
+tier-0 path's control, which fired: a tier-0 crash never refuses the tier-2 PASS whose
+own path's control stands, nor a tier-2 crash the tier-0 one. No current candidate →
 `"undemonstrated"`. A candidate whose closure moved but that a sweep re-verified by
 its values under the closure as it is now (`CONTROLS_CACHE`, part four) counts as an
 unchanged one: after a `check` the note goes, until the next edit.
@@ -1542,10 +1556,13 @@ and re-runs it, and one that defuses it is not admitted (S-19's model-code half)
 5. *Miss*: the control runs, fixture and gate, and is filed unless `record=False`:
 `bad: "fail"` admitted reject-only; `bad: "pass"` not admitted. A crash, an unusable
 fixture (a `known_good.py` that will not load included) or a self-skip with the tools
-present is remembered under `control:<gate>` at the current static — `not-admitted`,
-`control <kind>: <why>` — and a remembered one at this static is re-run, never served
-(the control analogue of §3.9's supersede); a control entry written at another static
-leaves it standing. A new outcome at the `rho_control` of a
+present is remembered under `control:<gate>` at the current static and the path it
+failed on — `not-admitted`, `control <kind>: <why>` — and a remembered one at this
+static, on this path or the shared one, is re-run, never served (the control analogue
+of §3.9's supersede); a control entry written at another static, or on another path,
+leaves it standing. One on a path this run does not take — only at `at=None` — is the
+answer, and nothing runs (a `note:` names `run atompipe check --tier <t>`); under
+`force` the control still runs, and the answer is still that failure. A new outcome at the `rho_control` of a
 cached entry with the other `bad` is `not-admitted`. 6. *`force`* skips 1-4, and an
 outcome that differs from a cached entry at the same `rho_control` is `not-admitted`,
 `control outcome differs from its cached entry` (R-9). With the gate's tools missing
@@ -1587,7 +1604,10 @@ that path's inputs or answers it. What slipped through (review, remembered outco
 tier): the cheap path ran instead, and its PASS was the row — `check` ready while every
 reader showed the crash — and forgot the tier-2 crash, so `check --tier 2` then served
 the PASS that crash had superseded.
-2. *admission* — not admitted: `error="not admitted: <why>"`, `fn` never called. A
+2. *admission* — not admitted: `error="not admitted: <why>"`, `fn` never called; under
+`force`, over a Fresh entry of a costlier tier whose own path's control stands, a
+`note:` names that entry as what `status` and a plain check serve (`… its control ran
+at tier 0 (…), on that path only; …`). A
 Fresh entry of a costlier tier is judged at its own tier by the records alone;
 undemonstrated there, the row is what `resolve` serves — the entry's verdict, cached,
 `stale_reason` `control not demonstrated at this version — run atompipe check --tier

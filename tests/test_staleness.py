@@ -53,7 +53,11 @@ positive control, that the claim WAS PASS before.
   remembered outcomes by tier): for a gate that reads ``ctx.tier``, a PASS on one
   tier's path never clears a crash on another's, and a cheap-path crash is filed
   at the cheap path's inputs — never under the tier-2 entry a plain check serves,
-  where an edit to an input only the costlier path reads dropped it.
+  where an edit to an input only the costlier path reads dropped it. Its control
+  the same (review, remembered control failures by tier): a control that fires on
+  one path never clears the control's crash on another, a crash on one path
+  never refuses the verdict of another whose own control fired, and a check that
+  does not run the crashed path refuses without running anything.
 
 The same class then drives four of those defects through the CLI a person runs,
 on a copy of the bracket, and reads the verdict where a person reads it: the
@@ -573,15 +577,17 @@ MEMO_GATES = list(MEMO_FILES)
 #: tier-2 entry and leaves the tier-0 one current. ``FLAGS`` names the path that
 #: crashes on the REAL design (x below 10), never on the control's known-bad
 #: input (x = 50): one path broken, the other still measuring, the control
-#: firing on both. Planted only where a test asks (``Project(extra=...)``), so
-#: no other test's sweep grows a gate.
+#: firing on both. ``"<path> control"`` is the other half: that path crashes on
+#: the known-bad input only — a crash of one path's control, the gate still
+#: measuring the design on both. Planted only where a test asks
+#: (``Project(extra=...)``), so no other test's sweep grows a gate.
 TIERED = '''\
 import os
 
 from atompipe.gates import gate
 from atompipe.models import NegativeControl, Verdict
 
-FLAGS = {"cheap": False, "costly": False}
+FLAGS = {"cheap": False, "costly": False, "cheap control": False, "costly control": False}
 
 
 @gate(id="t.tiered", title="t", claims=["tiered"],
@@ -592,9 +598,34 @@ def tiered(ctx):
     if costly:
         with open(os.path.join(ctx.root, "data", "solver.txt"), encoding="utf-8") as fh:
             float(fh.read())
-    if FLAGS["costly" if costly else "cheap"] and x < 10.0:
+    path = "costly" if costly else "cheap"
+    if FLAGS[path] and x < 10.0:
         raise RuntimeError(("the refined" if costly else "the cheap") + " path diverged")
+    if FLAGS[path + " control"] and x >= 10.0:
+        raise RuntimeError(("the refined" if costly else "the cheap")
+                           + " path diverged on its known-bad input")
     return Verdict(gate="t.tiered", passed=x < 10.0, measured=x, limit=10.0)
+'''
+
+#: A gate that reads ``ctx.tier`` only on its known-bad input (x of 10 and up):
+#: its entries on the real design never read the tier — every tier's path is the
+#: one path, and a check at any tier serves them — while its control runs the path
+#: the tier picks. ``FLAGS["costly control"]`` crashes that control at tier 2.
+#: Planted only where a test asks (``Project(extra=...)``).
+TIER_ON_BAD = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+FLAGS = {"costly control": False}
+
+
+@gate(id="t.tier_on_bad", title="t", claims=["tier_on_bad"],
+      negative_control=NegativeControl(fixture="selftest/bad.py:bad_x"))
+def tier_on_bad(ctx):
+    x = float(ctx.params["config"]["x"])
+    if x >= 10.0 and int(ctx.tier) >= 2 and FLAGS["costly control"]:
+        raise RuntimeError("the refined path diverged on its known-bad input")
+    return Verdict(gate="t.tier_on_bad", passed=x < 10.0, measured=x, limit=10.0)
 '''
 
 #: Two gates sharing one parsed table the way the review's ``ffr3/p2`` probe did:
@@ -1915,7 +1946,7 @@ class StaleIsNotCurrent(_env.EnvCase):
         p = Project(self, extra={"gates/tiered.py": TIERED, "data/solver.txt": "2.0\n"})
         _spec, fn = p.registry.get("t.tiered")
         flags = sys.modules[fn.__module__].FLAGS
-        self.addCleanup(flags.update, {"cheap": False, "costly": False})
+        self.addCleanup(flags.update, dict.fromkeys(flags, False))
         return p, projection(), flags
 
     @staticmethod
@@ -2053,6 +2084,185 @@ class StaleIsNotCurrent(_env.EnvCase):
         cached = row(p.sweep(base, only=[gid]), gid)
         self.assertEqual((cached.cached, cached.verdict.outcome), (True, "pass"),
                          f"cleared, it is a cache hit again: {cached.verdict}")
+
+    @staticmethod
+    def _control_held(p: Project) -> list[str]:
+        """The keys ``t.tiered``'s remembered control failures are filed under."""
+        return sorted(verdicts.remembered(p.root).get("control:t.tiered", {}))
+
+    def test_a_control_firing_on_the_cheap_path_never_clears_its_crash_on_the_costlier_one(self):
+        """V: the review's repro (remembered control failures by tier). A control
+        failure was remembered and forgotten by the static part alone, though
+        rho_control keys the tier the control's gate read. ``check --tier 2``
+        showed the costlier path's control firing; forced, it crashed there. An
+        edit that sent the next plain check down the cheap path ran that path's
+        control — which fired, and whose ``forget`` took the tier-2 crash with
+        it. The edit reverted, ``check --tier 2`` served the tier-2 control entry
+        recorded BEFORE the crash, admitted, and the PASS cached, while
+        ``--force`` said the control still crashed. A control that fires on one
+        path says nothing about a crash of the control on another."""
+        p, base, flags = self._tiered()
+        gid = "t.tiered"
+        first = row(p.sweep(base, only=[gid], max_tier=2), gid)
+        self.assertEqual((first.verdict.outcome, first.admission.state), ("pass", "admitted"),
+                         "the positive control: the costlier path's control fires")
+        self.assertEqual(self._status(p, base), "pass")
+
+        flags["costly control"] = True
+        forced = row(p.sweep(base, only=[gid], max_tier=2, force=True), gid)
+        self.assertEqual(forced.admission.state, "not-admitted", forced.admission)
+        self.assertEqual(self._status(p, base), "error",
+                         "the positive control: status refuses the PASS the crash superseded")
+        [held] = self._control_held(p)
+
+        moved = projection(x=2.0)          # both paths' entries stale: the cheap path runs
+        cheap = p.sweep(moved, only=[gid])
+        got = row(cheap, gid)
+        self.assertEqual((got.verdict.outcome, got.admission.state, cheap.controls["executed"]),
+                         ("pass", "admitted", 1),
+                         "the positive control: the cheap path's control fires at tier 0")
+        self.assertEqual(self._status(p, moved), "pass")
+        self.assertEqual(self._control_held(p), [held],
+                         "a control firing on the cheap path forgot its crash on the costlier one")
+
+        back = p.sweep(base, only=[gid], max_tier=2)
+        got = row(back, gid)
+        self.assertEqual(back.controls["executed"], 1,
+                         "the tier-2 control entry the crash superseded was served from the cache")
+        self.assertEqual((got.admission.state, got.verdict.outcome), ("not-admitted", "error"),
+                         f"the costlier path's control still crashes: {got.verdict}")
+        self.assertEqual(self._status(p, base), "error")
+        plain = row(p.sweep(base, only=[gid]), gid)
+        self.assertEqual((plain.verdict.outcome, plain.executed), ("error", False),
+                         f"a tier-0 check and status disagree on the gate: {plain.verdict}")
+
+        flags["costly control"] = False
+        healed = p.sweep(base, only=[gid], max_tier=2)
+        self.assertEqual((row(healed, gid).admission.state, healed.controls["executed"]),
+                         ("admitted", 1))
+        self.assertEqual(self._status(p, base), "pass",
+                         "a control that fires on that path clears its crash there")
+        self.assertEqual(self._control_held(p), [])
+        again = p.sweep(base, only=[gid], max_tier=2)
+        self.assertEqual((row(again, gid).verdict.outcome, again.controls["executed"]),
+                         ("pass", 0), "cleared, the control is a cache hit")
+
+    def test_a_control_firing_on_the_costlier_path_never_clears_its_crash_on_the_cheap_one(self):
+        """V: the same repro, the other way round. Both paths' controls fired, and
+        then the cheap path's crashed under ``check --force``. Filed by the static
+        part alone, that crash refused the tier-2 PASS a plain check serves — a
+        verdict whose own path's control fired — and the costlier path's control,
+        firing, forgot it. An edit to an input only the costlier path reads then
+        handed the next plain check the tier-0 entry, served admitted on the
+        tier-0 control entry the crash had superseded."""
+        p, base, flags = self._tiered()
+        gid = "t.tiered"
+        for tier in (0, 2):
+            ran = p.sweep(base, only=[gid], max_tier=tier)
+            self.assertEqual((row(ran, gid).admission.state, ran.controls["executed"]),
+                             ("admitted", 1),
+                             f"the positive control: the tier-{tier} path's control fires")
+        costlier = self._entry_at(p, 2)
+
+        flags["cheap control"] = True
+        swept = p.sweep(base, only=[gid], force=True)
+        forced = row(swept, gid)
+        self.assertEqual(forced.admission.state, "not-admitted", forced.admission)
+        [held] = self._control_held(p)
+        self.assertEqual(self._status(p, base), "pass",
+                         "a control crash on the cheap path refused the tier-2 PASS, whose "
+                         "own path's control fired")
+        self.assertTrue(any(note.startswith(f"{gid}: its control ran at tier 0")
+                            and costlier.name in note for note in swept.notes),
+                        f"nothing says what status serves beside the crash: {swept.notes}")
+        plain = row(p.sweep(base, only=[gid]), gid)
+        self.assertEqual((plain.verdict.outcome, plain.cached), ("pass", True),
+                         f"a tier-0 check and status disagree on the gate: {plain.verdict}")
+
+        write(p.root, "data/solver.txt", "2.50\n")         # the costlier path's input only
+        cheap = p.sweep(base, only=[gid])
+        got = row(cheap, gid)
+        self.assertEqual(cheap.controls["executed"], 1,
+                         "the tier-0 control entry the crash superseded was served from the cache")
+        self.assertEqual((got.admission.state, got.verdict.outcome), ("not-admitted", "error"),
+                         f"the cheap path's control still crashes: {got.verdict}")
+        self.assertEqual(self._status(p, base), "error")
+
+        refined = p.sweep(base, only=[gid], max_tier=2, force=True)
+        self.assertEqual((row(refined, gid).admission.state, refined.controls["executed"]),
+                         ("admitted", 1),
+                         "the positive control: the costlier path's control fires")
+        self.assertEqual(self._control_held(p), [held],
+                         "a control firing on the costlier path forgot its crash on the cheap one")
+        write(p.root, "data/solver.txt", "2.750\n")        # that entry not current again
+        again = p.sweep(base, only=[gid])
+        got = row(again, gid)
+        self.assertEqual((again.controls["executed"], got.admission.state), (1, "not-admitted"),
+                         "the tier-0 control entry the crash superseded was served from the cache")
+        self.assertEqual(self._status(p, base), "error")
+
+        flags["cheap control"] = False
+        healed = p.sweep(base, only=[gid])
+        self.assertEqual((row(healed, gid).admission.state, healed.controls["executed"]),
+                         ("admitted", 1))
+        self.assertEqual(self._status(p, base), "pass",
+                         "a control that fires on that path clears its crash there")
+        self.assertEqual(self._control_held(p), [])
+
+    def test_a_control_crash_on_a_path_this_check_does_not_run_is_its_answer(self):
+        """V: the same repro where the verdict never read the tier. Its entry is
+        served at every tier, so its admission counts a control of any tier —
+        and every path's control crash stands against it. Filed by the static
+        part alone, a plain check re-ran the control on the cheap path, which
+        fired and forgot the tier-2 crash: the PASS read admitted, and ``check
+        --tier 2`` served it. A check that does not run that path cannot answer
+        the crash, so it runs nothing, refuses, and names the check that can."""
+        p = Project(self, extra={"gates/tier_on_bad.py": TIER_ON_BAD})
+        base = projection()
+        gid = "t.tier_on_bad"
+        _spec, fn = p.registry.get(gid)
+        flags = sys.modules[fn.__module__].FLAGS
+        self.addCleanup(flags.update, dict.fromkeys(flags, False))
+        first = p.sweep(base, only=[gid], max_tier=2)
+        self.assertEqual((row(first, gid).verdict.outcome, row(first, gid).admission.state),
+                         ("pass", "admitted"), "the positive control")
+        [entry] = verdicts.read_entries(p.root, gid)
+        self.assertNotIn("tier", entry.reads, "the precondition: the verdict never read it")
+        [control] = verdicts.read_controls(p.root, gid)
+        self.assertEqual(control.reads.get("tier"), 2, "the precondition: its control did")
+
+        flags["costly control"] = True
+        forced = row(p.sweep(base, only=[gid], max_tier=2, force=True), gid)
+        self.assertEqual(forced.admission.state, "not-admitted", forced.admission)
+        resolved = {v.gate: v for v in p.resolve(base).verdicts}[gid]
+        self.assertEqual(resolved.outcome, "error", "the positive control: status refuses it")
+        held = sorted(verdicts.remembered(p.root).get(f"control:{gid}", {}))
+
+        plain = p.sweep(base, only=[gid])
+        got = row(plain, gid)
+        self.assertEqual(plain.controls["executed"], 0,
+                         "a tier-0 check re-ran the control on a path the crash was not on")
+        self.assertEqual((got.admission.state, got.verdict.outcome), ("not-admitted", "error"),
+                         f"a tier-0 check answered a crash on the tier-2 path: {got.verdict}")
+        self.assertEqual(sorted(verdicts.remembered(p.root).get(f"control:{gid}", {})), held)
+        self.assertTrue(any(note.startswith(f"{gid}: ")
+                            and note.endswith("run atompipe check --tier 2")
+                            for note in plain.notes),
+                        f"nothing says which check settles the crash: {plain.notes}")
+        resolved = {v.gate: v for v in p.resolve(base).verdicts}[gid]
+        self.assertEqual(resolved.outcome, "error", "a tier-0 check and status disagree")
+        costly = p.sweep(base, only=[gid], max_tier=2)
+        self.assertEqual((row(costly, gid).admission.state, costly.controls["executed"]),
+                         ("not-admitted", 1), "the control still crashes on that path")
+
+        flags["costly control"] = False
+        healed = p.sweep(base, only=[gid], max_tier=2)
+        self.assertEqual((row(healed, gid).admission.state, row(healed, gid).verdict.outcome,
+                          healed.controls["executed"]), ("admitted", "pass", 1))
+        self.assertNotIn(f"control:{gid}", verdicts.remembered(p.root))
+        again = p.sweep(base, only=[gid])
+        self.assertEqual((row(again, gid).verdict.outcome, again.controls["executed"]),
+                         ("pass", 0), "cleared, a plain check serves it again")
 
     # -- code edits: a fresh process per step ------------------------------- #
     def _driven(self) -> Driven:
