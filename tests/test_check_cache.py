@@ -574,7 +574,13 @@ class SweepsThatKeepNothingOrEverything(_env.EnvCase):
         last = _state(self.project, "cache", "last_check.json")
         only = _run(self.project, "check", "--only", "bracket.deflection", "--json")
         self.assertEqual(only.returncode, 1, only.stdout + only.stderr)
-        self.assertEqual(list(_rows(_json(only))), ["bracket.deflection"])
+        # P2.2-D15: `--only` runs the named gate's prerequisite closure too —
+        # bracket.deflection needs bracket.model_validity — in registration
+        # order (D4). Moved under R-6: the property (a filtered sweep's rows
+        # are its selection, and it keeps no project-wide bookkeeping) is the
+        # same; the selection now includes the guard.
+        self.assertEqual(list(_rows(_json(only))), ["bracket.deflection",
+                                                    "bracket.model_validity"])
         self.assertFalse(os.path.exists(last), "--only wrote last_check.json")
         full = _run(self.project, "check")
         self.assertEqual(full.returncode, 1, full.stdout + full.stderr)
@@ -584,7 +590,9 @@ class SweepsThatKeepNothingOrEverything(_env.EnvCase):
         # as rows that say whether each is current (spec §3.13, `carried_over`).
         again = _json(_run(self.project, "check", "--only", "bracket.deflection", "--json"))
         carried = {row["gate"]: row for row in again["carried_over"]}
-        self.assertEqual(sorted(carried), sorted(BRACKET_GATES[1:]))
+        self.assertEqual(sorted(carried), sorted(set(BRACKET_GATES)
+                                                 - {"bracket.deflection",
+                                                    "bracket.model_validity"}))
         for gate, row in carried.items():
             with self.subTest(gate=gate):
                 self.assertTrue(row["fresh"] and row["cached"], row)

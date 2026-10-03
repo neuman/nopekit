@@ -556,9 +556,18 @@ def sentinel_human() -> Any:
     leads = {cause: (f"zz{text}" if text and text != "—" else text)
              for cause, text in human["lead"].items()}
     headings = {key: f"## Zz{key}" for key in human["heading"]}
+    extra = {}
+    if "prerequisite" in human:
+        # P2.2: a prerequisite skip's phrase and its kind words are HUMAN's too
+        # (critique of its design: spelled in the spine, they were a second
+        # outcome-word table no sentinel reached).
+        extra["prerequisite"] = MappingProxyType({key: f"zz{text}" for key, text
+                                                  in human["prerequisite"].items()})
+        extra["outcome"] = MappingProxyType({key: f"zz{text}" for key, text
+                                             in human["outcome"].items()})
     return MappingProxyType(dict(human, status=MappingProxyType(rows), errored=errored,
                                  lead=MappingProxyType(leads),
-                                 heading=MappingProxyType(headings)))
+                                 heading=MappingProxyType(headings), **extra))
 
 
 #: The original status words that must not survive in a status-bearing line
@@ -686,6 +695,32 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
         with mock.patch.object(report_mod, "HUMAN", sentinel_human()):
             said = decisions_mod.why(ledger, "C1")
         self.assertRegex(said, r"\[ -- \] g\.never : zzunrun")
+
+    def test_a_prerequisite_reason_routes_through_human(self):
+        """A claim Skipped behind a prerequisite reads its lead, its phrase and
+        the root's kind from `HUMAN`, never from the spine's `skip_reason`
+        (critique of the P2.2 design: "(errored)", "(skipped)" and "not
+        registered" were spelled in `gates`, where a sentinel never reached)."""
+        from atompipe.models import Claim, Ledger, Verdict
+        claim = Claim(id="C1", statement="s", tags=["d"])
+        for kind, root, lead in (("failed", "t.p", "zzskipped"),
+                                 ("errored", "t.p", "zzerrored"),
+                                 ("skipped", "t.p", "zzskipped"),
+                                 ("unqualified", "t.p", "zzskipped"),
+                                 ("not-registered", "t.ghost", "zzskipped")):
+            with self.subTest(kind):
+                verdict = Verdict(gate="t.d", claims=["d"], skipped=True,
+                                  skip_reason="SPINE TEXT", blocked_by=[root],
+                                  blocked_kind=kind)
+                ledger = Ledger(claims=[claim], verdicts=[verdict])
+                with mock.patch.object(report_mod, "HUMAN", sentinel_human()):
+                    composed = claims_mod.compose(claim, ledger.verdicts)
+                    said = report_mod.reason(composed, ledger, claim)
+                self.assertTrue(said.startswith(f"{lead}: t.d : zzprerequisite"), said)
+                self.assertIn(root, said)
+                self.assertNotIn("SPINE TEXT", said)
+                if kind != "failed":
+                    self.assertRegex(said, r"\(zz[^)]*\)$")
 
     def test_a_renderer_with_its_own_literal_is_caught(self):
         """Planted: a `status_tag` that appends a literal `checked`."""

@@ -457,6 +457,12 @@ def _on_bed(mesh, axis):
     tier=Tier.BUILD,
     settles="overhang angle",
     requires_python=["trimesh", "numpy"],
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:steep_cone",
         note="a cone stood on its apex with a 70-degree half angle: every side "
@@ -784,6 +790,12 @@ def _overhang_over_set(ctx: GateContext, parts, axis, limit: float, allow: float
     tier=Tier.BUILD,
     settles="bridge span",   # and the cantilever case, which is the same measurement
     requires_python=["trimesh", "numpy"],
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:long_bridge",
         note="a PLATE of three parts whose middle one is an arch: its flat "

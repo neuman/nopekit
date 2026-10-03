@@ -156,7 +156,7 @@ __all__ = [
     "last_read_sets",
     # part three: freshness, admission state, the one resolver (U19)
     "MAX_STALE_REASONS", "Fresh", "Stale", "Unknown", "Never", "freshness",
-    "Admission", "admission_state", "Row", "Resolution", "resolve",
+    "Admission", "admission_state", "Row", "Resolution", "resolve", "apply_prerequisites",
     # part four: admission at its current version, the sweep, last_check (U20)
     "CONTROLS_CACHE", "WATCHED", "known_good_context", "admission", "SweepRow",
     "SweepResult", "sweep", "write_last_check", "watched_paths", "fingerprint",
@@ -2839,7 +2839,12 @@ OBS_KEEP = 20
 #: (it belongs to ``rho_control``'s static part, where a fixture rename re-runs
 #: the control, not the gate); ``entry`` (discovery only); hashing ``pack.json``
 #: (no manifest field reaches a GateSpec at runtime — and it would miss the
-#: decorator, which is where the spec is actually written).
+#: decorator, which is where the spec is actually written); ``needs`` (P2.2-D1,
+#: D-04: the prerequisite edge is for scheduling and resolution — a dependent's
+#: measurement is a function of its own inputs, so a guard that recovered must
+#: not re-run every dependent whose inputs never moved. Declaring an edge still
+#: re-keys the declaring file's gates once, through the code digest, as any edit
+#: to that file does).
 SPEC_FIELDS_IN_RHO = ("id", "claims", "tier", "pack", "requires_tools",
                       "requires_python", "requires_one_of", "settles")
 
@@ -4889,8 +4894,13 @@ def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str
 #: reader at once. What slipped through the first design (P2.1 review): the drop
 #: sat in ``_as_spec``, which the orphan rung never calls, so a hand-edited
 #: record for an unregistered gate read Gap instead of errored — a crash made
-#: quieter than a skip.
-_NEVER_REMEMBERED = frozenset({"unqualified"})
+#: quieter than a skip. ``blocked_by`` and ``blocked_kind`` (P2.2-D9) on the same
+#: terms: the prerequisite mark is set fresh by every resolution and sweep, and a
+#: record carrying it — by hand, or from a spine that stored it — would make a
+#: gate's own skip read as a prerequisite's, or (``"errored"``) louder than it
+#: is, or name a root nobody has. Dropped on write too (``remember``), so the
+#: file never holds what no reader may read.
+_NEVER_REMEMBERED = frozenset({"unqualified", "blocked_by", "blocked_kind"})
 
 
 def remembered(root: str) -> dict:
@@ -6276,6 +6286,107 @@ def _orphan_entries(root: str, registered: set, notes: list) -> dict[str, list[E
     return found
 
 
+def _resolve_gate(here: _Now, spec: Any, fn: Any, state: Any, *, held: Mapping[str, Any],
+                  verified: Mapping[str, Any], notes: list,
+                  order: Callable[[Entry], tuple], legacy: Mapping[str, Verdict],
+                  availability: Callable[[Any], tuple], model_error: str = "",
+                  row_notes: tuple = ()) -> tuple[Verdict | None, Row | None]:
+    """``resolve``'s rungs 1-6 for ONE registered gate: ``(verdict, row)``, or
+    ``(None, None)`` when nothing applies and the claim reads Open. Extracted
+    from ``resolve``'s loop unchanged (P2.2-D8), so the sweep can ask what
+    ``resolve`` reads of a gate it does not run — a dependent pruned under its
+    prerequisite (``_pruned_row``) — through the same code, rather than a copy
+    that drifts (the sweep and the resolver drifted at every place they were
+    copied in P1 and P2.0: ``_crash_applies``, ``_outranked``, S-68). The
+    caller supplies the gate's state (``_judge``) and the records it was read
+    with; this writes nothing (``notes`` is the caller's list)."""
+    gid = spec.id
+    entry = state.entry
+
+    def when_of(found: Any) -> str:
+        return order(found)[0] if found is not None else ""
+
+    # 1. availability
+    ok, why = availability(spec)
+    if not ok:
+        why = why or "its tooling is not available"
+        if isinstance(state, Fresh) and state.entry.verdict.get("passed") is False:
+            return (_as_spec(entry.to_verdict(), spec),
+                    Row(gid, state.state, cached=True, fresh=True, entry=entry,
+                        when=when_of(entry), notes=row_notes))
+        reason = f"cached pass exists; {why} here" if isinstance(state, Fresh) else why
+        return (_synthesized(spec, skipped=True, skip_reason=reason),
+                Row(gid, state.state, entry=entry, notes=row_notes))
+
+    # 2. a remembered crash or self-skip
+    record = _standing(held.get(gid), state)
+    if record is not None:
+        extra = (f"supersedes the cached {entry.name}",) if isinstance(state, Fresh) else ()
+        return (_as_spec(record["verdict"], spec),
+                Row(gid, state.state, entry=entry, when=record["when"],
+                    notes=row_notes + (f"remembered {record['kind']}",) + extra))
+
+    # 3. a Fresh entry, under admission
+    if isinstance(state, Fresh):
+        verdict = _as_spec(entry.to_verdict(), spec)
+        at = _read_tier(entry.reads)
+        admission = _admission(here, spec, fn, held, notes, verified, at=at)
+        when = when_of(entry)
+        if admission.state == "not-admitted":
+            return (_unqualified(spec, admission.reason, rho=entry.rho),
+                    Row(gid, state.state, entry=entry, admission=admission, when=when,
+                        notes=row_notes))
+        if admission.state == "undemonstrated":
+            return (verdict, Row(gid, state.state, cached=True,
+                                 stale_reason=_undemonstrated(at), entry=entry,
+                                 admission=admission, when=when, notes=row_notes))
+        pending = (admission.reason,) if admission.state == "pending" else ()
+        notes.extend(f"{gid} — {note}" for note in pending)
+        return (verdict, Row(gid, state.state, cached=True, fresh=True, entry=entry,
+                             admission=admission, when=when, notes=row_notes + pending))
+
+    # 4. the latest entry, stale — unless the evaluator is refused at its
+    # version, which no rerun of the gate answers: its claim reads Gap, not
+    # "run check" (P2.1-D5). Asked at the entry's own tier, as step 3 asks.
+    if isinstance(state, (Stale, Unknown)):
+        when = when_of(entry)
+        if isinstance(state, Stale) and state.conflict and TWO_OUTCOMES_IS_ERROR:
+            return (_synthesized(spec, error=state.reasons[0], rho=entry.rho),
+                    Row(gid, state.state, entry=entry, when=when, notes=row_notes))
+        admission = _admission(here, spec, fn, held, notes, verified,
+                               at=_read_tier(entry.reads))
+        if admission.state == "not-admitted":
+            return (_unqualified(spec, admission.reason, rho=entry.rho),
+                    Row(gid, state.state, entry=entry, admission=admission, when=when,
+                        notes=row_notes))
+        if isinstance(state, Stale):
+            reason = _stale_text(state.reasons)
+        elif state.reason == _NO_MODEL and model_error:
+            reason = f"{_NO_MODEL}: {model_error}"
+        else:
+            reason = state.reason
+        return (_as_spec(entry.to_verdict(), spec),
+                Row(gid, state.state, cached=True, stale_reason=reason, entry=entry,
+                    when=when, notes=row_notes))
+
+    # 5. a ledger verdict from before per-gate tracing
+    if gid in legacy:
+        return _as_spec(legacy[gid], spec), Row(gid, "legacy", stale_reason=_LEGACY)
+    # 6. nothing — unless the evaluator is refused at its version, which is
+    # on disk (its control entry PASSED its known-bad input, or its control
+    # crashed, remembered under control:<gate>). What slipped through (P2.0
+    # review): admission was asked only over a Fresh entry, a refused gate is
+    # never cached, so every reader after the `check` that refused it read
+    # "never run" — and "pass beside an unrun gate" read pass: `status --json`
+    # ready, the claim under PROVEN. Asked at no tier, as `admission_state`.
+    admission = _admission(here, spec, fn, held, notes, verified, at=None)
+    if admission.state == "not-admitted":
+        return (_unqualified(spec, admission.reason),
+                Row(gid, state.state, admission=admission, notes=row_notes))
+    # undemonstrated, pending or admitted with no entry: no row, the claim reads Open
+    return None, None
+
+
 def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
             model_error: str = "", availability: Callable[[Any], tuple] | None = None,
             digests: FileDigests | None = None, anchors: Anchors | None = None,
@@ -6326,6 +6437,12 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
     this project`` (tests:H2: an unregistered gate's verdict still reaches the
     page; it never counts).
 
+    7. Last, **prerequisites** (``apply_prerequisites``, P2.2): a gate whose
+       prerequisite is not established reads the prerequisite skip (or its own
+       crash, refusal or missing tool, which stand); one whose prerequisite is
+       invalidated or unrun keeps its verdict, marked stale. Rungs 1-6 are
+       ``_resolve_gate``, one gate at a time, which the sweep asks too.
+
     ``ledger`` is read, never written: the resolution is a VIEW a caller lays
     over it (``dataclasses.replace(ledger, verdicts=resolution.verdicts)``) and
     never saves. ``now`` is the caller's single clock stamp, accepted so every
@@ -6374,101 +6491,17 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
                          f"({', '.join(code.files)}): a value it closes over is not seen")
         order = _entry_order(root_abs, gid, times)
         state = _judge(spec, code, entries[gid], here, order)
-        entry = state.entry
         row_notes = tuple(getattr(state, "notes", ()) or ())
         notes.extend(f"{gid} — {note}" for note in row_notes)
         if isinstance(state, Unknown) and state.reason.startswith("opaque inputs: "):
             notes.append(f"{gid} — {state.reason}")
         # (two outcomes need no line of their own: read_entries already wrote one)
-
-        # 1. availability
-        ok, why = availability(spec)
-        if not ok:
-            why = why or "its tooling is not available"
-            if isinstance(state, Fresh) and state.entry.verdict.get("passed") is False:
-                emit(_as_spec(entry.to_verdict(), spec),
-                     Row(gid, state.state, cached=True, fresh=True, entry=entry,
-                         when=when_of(entry, order), notes=row_notes))
-            else:
-                reason = f"cached pass exists; {why} here" if isinstance(state, Fresh) else why
-                emit(_synthesized(spec, skipped=True, skip_reason=reason),
-                     Row(gid, state.state, entry=entry, notes=row_notes))
-            continue
-
-        # 2. a remembered crash or self-skip
-        record = _standing(held.get(gid), state)
-        if record is not None:
-            extra = (f"supersedes the cached {entry.name}",) if isinstance(state, Fresh) \
-                else ()
-            emit(_as_spec(record["verdict"], spec),
-                 Row(gid, state.state, entry=entry, when=record["when"],
-                     notes=row_notes + (f"remembered {record['kind']}",) + extra))
-            continue
-
-        # 3. a Fresh entry, under admission
-        if isinstance(state, Fresh):
-            verdict = _as_spec(entry.to_verdict(), spec)
-            at = _read_tier(entry.reads)
-            admission = _admission(here, spec, fn, held, notes, verified, at=at)
-            when = when_of(entry, order)
-            if admission.state == "not-admitted":
-                emit(_unqualified(spec, admission.reason, rho=entry.rho),
-                     Row(gid, state.state, entry=entry, admission=admission, when=when,
-                         notes=row_notes))
-            elif admission.state == "undemonstrated":
-                emit(verdict, Row(gid, state.state, cached=True,
-                                  stale_reason=_undemonstrated(at), entry=entry,
-                                  admission=admission, when=when, notes=row_notes))
-            else:
-                pending = (admission.reason,) if admission.state == "pending" else ()
-                notes.extend(f"{gid} — {note}" for note in pending)
-                emit(verdict, Row(gid, state.state, cached=True, fresh=True, entry=entry,
-                                  admission=admission, when=when, notes=row_notes + pending))
-            continue
-
-        # 4. the latest entry, stale — unless the evaluator is refused at its
-        # version, which no rerun of the gate answers: its claim reads Gap, not
-        # "run check" (P2.1-D5). Asked at the entry's own tier, as step 3 asks.
-        if isinstance(state, (Stale, Unknown)):
-            when = when_of(entry, order)
-            if isinstance(state, Stale) and state.conflict and TWO_OUTCOMES_IS_ERROR:
-                emit(_synthesized(spec, error=state.reasons[0], rho=entry.rho),
-                     Row(gid, state.state, entry=entry, when=when, notes=row_notes))
-                continue
-            admission = _admission(here, spec, fn, held, notes, verified,
-                                   at=_read_tier(entry.reads))
-            if admission.state == "not-admitted":
-                emit(_unqualified(spec, admission.reason, rho=entry.rho),
-                     Row(gid, state.state, entry=entry, admission=admission, when=when,
-                         notes=row_notes))
-                continue
-            if isinstance(state, Stale):
-                reason = _stale_text(state.reasons)
-            elif state.reason == _NO_MODEL and model_error:
-                reason = f"{_NO_MODEL}: {model_error}"
-            else:
-                reason = state.reason
-            emit(_as_spec(entry.to_verdict(), spec),
-                 Row(gid, state.state, cached=True, stale_reason=reason, entry=entry,
-                     when=when, notes=row_notes))
-            continue
-
-        # 5. a ledger verdict from before per-gate tracing
-        if gid in legacy:
-            emit(_as_spec(legacy[gid], spec), Row(gid, "legacy", stale_reason=_LEGACY))
-            continue
-        # 6. nothing — unless the evaluator is refused at its version, which is
-        # on disk (its control entry PASSED its known-bad input, or its control
-        # crashed, remembered under control:<gate>). What slipped through (P2.0
-        # review): admission was asked only over a Fresh entry, a refused gate is
-        # never cached, so every reader after the `check` that refused it read
-        # "never run" — and "pass beside an unrun gate" read pass: `status --json`
-        # ready, the claim under PROVEN. Asked at no tier, as `admission_state`.
-        admission = _admission(here, spec, fn, held, notes, verified, at=None)
-        if admission.state == "not-admitted":
-            emit(_unqualified(spec, admission.reason),
-                 Row(gid, state.state, admission=admission, notes=row_notes))
-        # undemonstrated, pending or admitted with no entry: no row, the claim reads Open
+        verdict, row = _resolve_gate(here, spec, fn, state, held=held, verified=verified,
+                                     notes=notes, order=order, legacy=legacy,
+                                     availability=availability, model_error=model_error,
+                                     row_notes=row_notes)
+        if verdict is not None:
+            emit(verdict, row)
 
     # orphans: what this project's cache and memory hold for gates it does not register
     shown = {key: _latest_shown(records) for key, records in held.items()
@@ -6489,9 +6522,137 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
         else:
             emit(legacy[gid], Row(gid, "legacy", stale_reason=_LEGACY))
 
-    return Resolution(verdicts=verdicts_out, stale_gates=frozenset(stale), rows=rows,
-                      notes=list(dict.fromkeys(notes)), read_sets=last_read_sets(root_abs),
-                      anchors=here.anchors)
+    # 7. prerequisites, over the whole resolution, in plan order (P2.2-D8)
+    return apply_prerequisites(
+        Resolution(verdicts=verdicts_out, stale_gates=frozenset(stale), rows=rows,
+                   notes=list(dict.fromkeys(notes)), read_sets=last_read_sets(root_abs),
+                   anchors=here.anchors),
+        registry, availability=availability)
+
+
+def _under_rule(spec: Any, own: Verdict | None, unmet: Any,
+                availability: Callable[[Any], tuple]) -> Verdict | None:
+    """``own`` — a gate's reading of its own — under a NEGATIVE prerequisite
+    root (P2.2-D6): the prerequisite skip (``gates.blocked``), or ``own`` itself
+    where it stands. **The rule replaces what the dependent measured, and
+    nothing else**: a pass or a fail, current or not, or no verdict at all.
+    Three readings stand, because no run of the prerequisite changes them: the
+    gate's tool missing here (``availability``, the same call in both
+    producers); a crash or a self-skip of its own (or two outcomes) standing at
+    its inputs — invariant 2: the crash keeps its loudness, never the quieter
+    prerequisite skip; and its own refusal (unqualified, which reads Gap).
+    A prerequisite skip is replaced by the one the rule now finds (its root may
+    have moved; it is never restored to a pass here). *Rejected:* replacing
+    every reading (a standing crash would read as the prerequisite skip for as
+    long as the root is down); letting the dependent's FAIL stand (a number a
+    model the guard says does not apply computed settles nothing: D-03, D-04)."""
+    from . import gates as _gates
+    if not availability(spec)[0]:
+        return own
+    if own is not None and not own.blocked_by and own.outcome in ("error", "skipped"):
+        return own
+    return _gates.blocked(spec, unmet)
+
+
+def _marked(row: Row, reason: str) -> Row:
+    """A row marked not current under a prerequisite that is not (P2.2-D7):
+    ``fresh`` False — no longer "current and counts" — and ``reason`` as its
+    stale reason unless it is already stale for one of its own. What slipped
+    through the design (critique): it set only the reason, and every JSON
+    channel then served ``fresh: true`` beside ``stale_reason: prerequisite …
+    invalidated``, and ``status`` counted the gate in "N verdicts current" on
+    the line that listed it invalidated."""
+    return dataclasses.replace(row, fresh=False, stale_reason=row.stale_reason or reason)
+
+
+def apply_prerequisites(resolution: Resolution, registry: Any, *,
+                        availability: Callable[[Any], tuple] | None = None) -> Resolution:
+    """``resolution`` under the prerequisite rule — ``resolve``'s rung 7, and
+    ``check``'s again over the view it merges with its sweep (``cli._swept``).
+
+    Walks :func:`gates.plan`'s order over every registered gate, reading each
+    prerequisite as the resolution has it (``gates.Reading``: its verdict, and
+    current unless in ``stale_gates``), and asks ``gates.prerequisite_root``,
+    the one decision the sweep asks too:
+
+    * a **negative** root (failed, errored, skipped, unqualified, not
+      registered): the gate's own reading becomes the prerequisite skip unless it
+      stands (``_under_rule``) — its row ``cached`` and ``fresh`` False, its
+      ``entry`` kept (D-04: the entry stays Fresh on disk, and is served again
+      the moment the root recovers), a note naming the root, and out of
+      ``stale_gates`` (its verdict is the skip, not an invalidated pass);
+    * a **not-current** root (invalidated, unrun): a pass or a fail is kept and
+      marked (``_marked``: ``prerequisite <root> invalidated: <what moved>`` /
+      ``prerequisite <root> unrun``, ``fresh`` False) and joins ``stale_gates``,
+      so its claim reads Stale, or what ranks above it. **This amends D-03's
+      "neither run nor fresh -> unknown"** (P2.2-D7): every model edit between
+      check runs invalidates a guard and its dependents together, and D-03 read
+      literally turns every guarded claim Skipped — "no usable verdict" — when
+      the true and actionable fact is "inputs moved; run check". In a sweep the
+      closure expansion leaves no not-current root but a costlier tier's entry
+      served stale. *Rejected:* dropping the dependent's verdict so the claim
+      reads Open (a second mechanism, and the reason would lose the root's
+      name); leaving the dependent alone (Checked downstream of a prerequisite
+      not established on the current inputs: invariant 10).
+
+    **Monotone**: it only ever moves a reading toward not-pass, so applying it
+    to a view another producer already ruled on (``_swept``) can only
+    downgrade. **Idempotent**: a second application finds every replaced gate's
+    skip and every mark in place. With no ``needs`` registered the resolution
+    is returned as it came, byte for byte (C3). A cycle or an inversion planted
+    past the registry raises (``gates.plan``).
+    """
+    from . import gates as _gates
+    if registry is None:
+        return resolution
+    if availability is None:
+        availability = _gates.availability
+    order = _gates.plan(registry, registry.specs())
+    if not any(spec.needs for spec in order):
+        return resolution
+    by_gate = {v.gate: v for v in resolution.verdicts}
+    rows = dict(resolution.rows)
+    stale = set(resolution.stale_gates)
+    readings: dict[str, Any] = {}
+    changed = False
+    for spec in order:
+        gid = spec.id
+        own = by_gate.get(gid)
+        row = rows.get(gid)
+        unmet = _gates.prerequisite_root(spec, readings, registry) if spec.needs else None
+        if unmet is not None and unmet.negative:
+            ruled = _under_rule(spec, own, unmet, availability)
+            if ruled is not own:
+                base = row if row is not None else Row(gid, "never")
+                by_gate[gid] = ruled
+                rows[gid] = dataclasses.replace(
+                    base, cached=False, fresh=False, stale_reason="",
+                    notes=tuple(base.notes) + (f"not run: {ruled.skip_reason}",))
+                stale.discard(gid)
+                own = ruled
+                changed = True
+            readings[gid] = _gates.Reading(own, False)
+            continue
+        if unmet is not None:
+            why = unmet.why
+            if not why and str(unmet.kind) == "invalidated" and unmet.root in rows:
+                why = rows[unmet.root].stale_reason
+            if own is not None and own.outcome in ("pass", "fail"):
+                rows[gid] = _marked(row if row is not None else Row(gid, "fresh"),
+                                    _gates.mark_reason(unmet._replace(why=why)))
+                stale.add(gid)
+                changed = True
+            readings[gid] = _gates.Reading(own, False, unmet.root, str(unmet.kind), why)
+            continue
+        readings[gid] = _gates.Reading(own, own is not None and gid not in stale,
+                                       why=row.stale_reason if row is not None else "")
+    if not changed:
+        return resolution
+    registered = set(registry.ids())
+    verdicts_out = [by_gate[gid] for gid in registry.ids() if gid in by_gate]
+    verdicts_out += [v for v in resolution.verdicts if v.gate not in registered]
+    return dataclasses.replace(resolution, verdicts=verdicts_out, rows=rows,
+                               stale_gates=frozenset(stale))
 
 
 # =========================================================================== #
@@ -6798,6 +6959,9 @@ class _Session:
     out_dir: str = ""
     verified_out: dict = field(default_factory=dict)
     notes: list = field(default_factory=list)
+    #: A reader's ``_Now`` (no tier), made by ``_reader_state`` on the first gate
+    #: a sweep prunes under a prerequisite, and only then.
+    reader: Any = None
 
 
 def _session(root: str, host_ctx: Any, *, projection: Any, anchors: Anchors,
@@ -7381,7 +7545,11 @@ class SweepResult:
     ``stale_before`` — ``{gate: reason}`` for the selected gates it called Stale
     or Unknown; ``notes`` — writer warnings and ignored entries, which ``check``
     prints (they were collected and never shown: the writer's "two outcomes
-    recorded for identical inputs" reached nobody). The rest is how
+    recorded for identical inputs" reached nobody). ``order`` — the gate ids in
+    the order they RAN (``gates.plan``: each gate after its prerequisites),
+    which ``rows`` does not keep: rows stay in registration order, so ``check
+    --json``, JUnit and every tie-break that reads them are unmoved by an edge
+    (P2.2-D4); P4's sequencing reads this one. The rest is how
     it ran — ``only``, ``max_tier``, ``force``, ``record``, ``when`` — and what
     ``write_last_check`` needs: ``ledger``, ``registry``, ``anchors``.
     """
@@ -7402,6 +7570,7 @@ class SweepResult:
     ledger: Any = None
     registry: Any = None
     anchors: Any = None
+    order: list = field(default_factory=list)
 
 
 def _filtered(only: Any) -> bool:
@@ -7693,6 +7862,62 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     return SweepRow(verdict, executed=True, fresh=measured, rho=keyed.rho, admission=judged)
 
 
+def _reader_state(s: _Session, spec: Any, fn: Any) -> tuple:
+    """``(here, state, order, legacy, row_notes)`` for one gate as ``resolve``
+    judges it — a reader's ``_Now`` (no tier: the most thorough tier recorded),
+    the gate's entries, obs and commit times — built from the session's own
+    projection, ledger, anchors and digests. The ``_Now`` is made once per
+    sweep, on the first pruned gate, so a sweep that prunes nothing pays
+    nothing."""
+    here = s.reader
+    if here is None:
+        here = _Now(s.root, s.now.projection, s.now.ledger, anchors=s.anchors,
+                    digests=s.digests, model=s.now.model, tier=None)
+        if s.now.projection is None:
+            here.flat = s.now.flat
+        s.reader = here
+    notes: list[str] = []
+    entries = _gate_entries(s.root, spec.id, notes)
+    named = _obs_names(s.root, [spec.id])
+    times = _commit_times(s.root, entries, lambda e: (e.gate, e.name) in named)
+    order = _entry_order(s.root, spec.id, times)
+    state = _judge(spec, code_digest(spec, fn, anchors=here.anchors), entries, here, order)
+    legacy = {v.gate: v for v in getattr(s.now.ledger, "verdicts", None) or ()
+              if not v.rho and v.gate == spec.id}
+    return here, state, order, legacy, tuple(getattr(state, "notes", ()) or ())
+
+
+def _pruned_row(s: _Session, spec: Any, fn: Any, state: Any, unmet: Any) -> SweepRow:
+    """The row of a selected gate the sweep does not run because a prerequisite
+    is not established (P2.2-D6, D8): **what ``resolve`` reads of the gate,
+    under the rule** — ``_resolve_gate`` on the gate's records as a reader
+    judges them, then ``_under_rule``. Nothing of the gate moved during the
+    sweep (it did not run), so what ``status`` reads afterwards is this row: the
+    prerequisite skip, or the gate's own crash, refusal or missing tool where
+    one stands. ``state`` is the sweep's tier-aware state, kept for the
+    caller's interface; the reading is the reader's, so the row and ``status``
+    cannot part over a costlier tier's entry (the design's risk 1).
+
+    It writes NOTHING — no entry, no remembered outcome, no obs, no control —
+    and calls neither the gate nor its control: a pruned verdict is never
+    cached, never remembered and never logged (it measured nothing, and a
+    prerequisite skip remembered would outlive the root's recovery). Its row
+    is neither executed nor cached, so the sweep's counts are untouched; a
+    standing reading served from an entry (a refutation where the tool is
+    missing, R-3) says ``cached`` as the sweep's own step 1 would."""
+    from . import gates as _gates
+    here, judged, order, legacy, row_notes = _reader_state(s, spec, fn)
+    notes: list[str] = []
+    own, row = _resolve_gate(here, spec, fn, judged, held=s.held, verified=s.verified,
+                             notes=notes, order=order, legacy=legacy,
+                             availability=_gates.availability, row_notes=row_notes)
+    ruled = _under_rule(spec, own, unmet, _gates.availability)
+    if ruled is own and own is not None and row is not None:
+        return SweepRow(own, cached=row.cached, fresh=row.fresh, stale_reason=row.stale_reason,
+                        rho=own.rho)
+    return SweepRow(ruled)
+
+
 def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
           max_tier: int, only: Any = None, force: bool = False, record: bool = True,
           now: str = "", on_verdict: Callable[[Verdict], Any] | None = None,
@@ -7703,7 +7928,18 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
     Driven through ``gates.run_all(..., before=)``, so order, the tier ceiling,
     ``--only`` (a named gate above the ceiling runs, control included) and the
     lost-control refusal stay in one place. ``freshness`` is computed BEFORE
-    anything runs (cli:H19). Per selected gate, in order (``_sweep_one``):
+    anything runs (cli:H19).
+
+    0. **Plan** (``gates.plan``): the selection and its prerequisite closure,
+       each gate after its prerequisites; ``SweepResult.order`` records the run
+       order, and ``rows`` keep registration order (P2.2-D4). A gate whose
+       prerequisite is not established (``gates.prerequisite_root``, the
+       resolver's rule) is **pruned**: ``_pruned_row`` — what ``resolve`` reads
+       of it under the rule — and nothing below runs for it, its control
+       neither. A gate whose prerequisite is not current (a costlier tier's
+       entry served stale) runs as below, and its row is then marked stale.
+
+    Per selected gate that is not pruned, in order (``_sweep_one``):
 
     1. **Availability** fails: a Fresh FAIL is served (R-3); otherwise skipped —
        ``cached pass exists; <why> here`` over a Fresh PASS (invariant 1) —
@@ -7785,6 +8021,31 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
         rows[spec.id] = found
         return found.verdict
 
+    def pruned_hook(spec: Any, fn: Any, unmet: Any) -> Verdict:
+        found = _pruned_row(s, spec, fn, before.get(spec.id) or Never(), unmet)
+        rows[spec.id] = found
+        return found.verdict
+
+    def current_hook(gate_id: str) -> bool:
+        # A row the sweep served stale (a costlier tier's entry this ceiling
+        # cannot demonstrate) is the one not-current prerequisite a sweep can
+        # meet: the closure is selected with every dependent (D3, D7).
+        found = rows.get(gate_id)
+        return bool(found is not None and found.fresh)
+
+    def marked_hook(spec: Any, verdict: Verdict, unmet: Any) -> None:
+        # D7 in the sweep: the dependent ran as usual; its row says it is not
+        # current, as `resolve` says it (the same `mark_reason`, the root's own
+        # stale reason as its "what moved").
+        found = rows.get(spec.id)
+        if found is None or verdict.outcome not in ("pass", "fail"):
+            return
+        root = rows.get(unmet.root)
+        why = unmet.why or (root.stale_reason if root is not None else "")
+        rows[spec.id] = dataclasses.replace(
+            found, fresh=False,
+            stale_reason=found.stale_reason or _gates.mark_reason(unmet._replace(why=why)))
+
     def landed(verdict: Verdict) -> None:
         if on_verdict is not None:
             on_verdict(verdict)
@@ -7792,11 +8053,16 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
             on_row(rows.get(verdict.gate) or SweepRow(verdict))
 
     swept = _gates.run_all(registry, run_ctx, max_tier=max_tier, only=only,
-                           on_verdict=landed, before=before_hook)
+                           on_verdict=landed, before=before_hook, pruned=pruned_hook,
+                           current=current_hook, marked=marked_hook)
 
     result = SweepResult(only=only, max_tier=int(max_tier), force=force, record=record,
                          when=now, ledger=ledger, registry=registry, anchors=anchors,
-                         before=before, notes=s.notes)
+                         before=before, notes=s.notes, order=[v.gate for v in swept])
+    # Registration order, not run order (D4): the gate ids `run_all` swept,
+    # listed as the registry lists them.
+    by_gate = {verdict.gate: verdict for verdict in swept}
+    swept = [by_gate[gid] for gid in registry.ids() if gid in by_gate]
     for verdict in swept:
         # a lost control is refused by run_all before `before` is asked: no row yet
         found = rows.get(verdict.gate) or SweepRow(verdict)

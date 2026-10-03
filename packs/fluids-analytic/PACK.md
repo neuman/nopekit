@@ -97,6 +97,16 @@ friction factor cannot physically leave. Because it binds broadly, its *ability
 to reach a verdict* matters as much as its verdict: an external-only project (a
 strut, a float, a hull with no piping) must get a **valid** from it, not a skip.
 
+### Prerequisites
+
+`fluid.flow_regime` is the prerequisite (`needs`) of `fluid.drag` and
+`fluid.pipe_pressure_drop`: it checks the Reynolds and roughness bands their
+correlations were fitted in, and outside them the arithmetic still returns a confident
+number. Below it failing they are not run; their claims read Skipped, `prerequisite
+failed: fluid.flow_regime`. The hydrostatics gates (buoyancy, freeboard, metacentric,
+righting arm) need nothing: the flow regime does not guard them, and one analysis
+failing is not a reason another's number is meaningless.
+
 ## Views
 
 | View | Kind | Payload | Addressed by |

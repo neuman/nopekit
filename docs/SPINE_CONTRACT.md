@@ -79,6 +79,8 @@ class ClaimStatus(StrEnum): PASS | FAIL | STALE | UNCLAIMED | BLOCKED | PENDING
                             | UNVERIFIED | VERIFIED | REFUTED | ASSERTED   # derived, never stored
 BLOCKING_STATUSES: frozenset[ClaimStatus]     # FAIL STALE UNCLAIMED BLOCKED PENDING REFUTED (P2.1: unchanged)
 class Tier(enum.IntEnum): INSTANT = 0 | BUILD = 1 | SOLVE = 2 | EXTERNAL = 3
+class PrerequisiteKind(StrEnum): ERRORED | FAILED | SKIPPED | UNQUALIFIED | NOT_REGISTERED
+                                 | INVALIDATED | UNRUN   # why a prerequisite is not established, rank order
 class ViewKind(StrEnum): MODEL3D | IMAGE | CHART | TABLE | FIELD | DIAGRAM
 class ArtifactKind(StrEnum): SKETCH | REFERENCE | CAD | SCREENSHOT | DATASHEET | SPEC
                              | MEASUREMENT | STANDARD | DATA | LINK | OTHER
@@ -201,8 +203,9 @@ one copy that goes stale. `Verdict.outcome` is the single derivation of what a
 verdict says — `"error"` if `error`, else `"skipped"` if `skipped`, else `"pass"` if
 `passed is True`, else `"fail"` — and `ok`, `render()` and `claims.resolve_status`
 all read it; every new consumer (JUnit, the index, the page) calls it and never
-re-derives one (PLAN R-5). `GateSpec.requires_one_of` is the last field;
-`Verdict.rho`, `Verdict.cpu_s` and `Verdict.unqualified` are Verdict's last three
+re-derives one (PLAN R-5). `GateSpec.needs` is the last field (P2.2, after
+`requires_one_of`); `Verdict.blocked_by` and `Verdict.blocked_kind` are Verdict's last
+two (P2.2, below), after `Verdict.rho`, `Verdict.cpu_s` and `Verdict.unqualified`
 (R-2): the content address the sweep keys it by (a gate never sets it), the CPU
 seconds it cost, children included, and — from P2.1 — the refusal's reason when the
 evaluator is not admitted at its version. `unqualified` is the spine's mark alone:
@@ -214,6 +217,21 @@ is never ok. `claims.compose` reads a claim with a marked evaluator as Gap; the 
 alone reads as a crash (degrade-closed). `Verdict.render()`'s body follows the
 outcome: an error's first line, a skip's reason, a pass's or a fail's detail — never a
 crash's traceback (P2.0 F-1), never a crash in its skip reason's words (F-10).
+
+**The prerequisite mark (P2.2-D9).** `Verdict.blocked_by` — the roots, found
+transitively, of the prerequisites that were not established when a gate was not run
+— and `Verdict.blocked_kind`, the first root's `PrerequisiteKind` (`errored`,
+`failed`, `skipped`, `unqualified`, `not-registered`). The spine's alone, on
+`unqualified`'s terms: `gates.blocked` is the one producer, `run_gate` clears both on
+whatever a gate returns (`_stamp`), no entry stores them (the whitelist), no remembered
+outcome carries them (`verdicts._NEVER_REMEMBERED`, on read and on write). Non-empty,
+`blocked_by` makes `__post_init__` write `skipped=True, passed=False` (R-2: an older
+spine that drops both keys still reads a skip). `blocked_kind == "errored"` is what
+makes a claim behind a crashed prerequisite read errored (`claims.compose`): a guard is
+bound to its own claims, so nothing else carries its crash to a claim bound only to
+the dependent. `GateSpec.needs` names the prerequisites — exact gate ids, refused at
+registration when malformed, cyclic or tier-inverted — and is not part of rho
+(`verdicts.SPEC_FIELDS_IN_RHO`, D-04).
 
 **`ClaimStatus` from P2.1 is a reading of GLOSSARY §3** (Table 1's seven words plus
 Open). The ten members and their values stay — JSON values move only in the rename
@@ -228,7 +246,7 @@ pass (GLOSSARY §7) — and each now holds the fact in this table; the word is
 | `asserted` | Assumed (`assumed`) | an assumption with a reason and an owner the signing channel attributed (none in P2.1) |
 | `unverified` | Pending build (`pending_build`) | a physical claim with no result, every automated evaluator passing and current |
 | `unclaimed` | Gap (`gap`) | no evaluator; an unqualified one, beside a pass or not; an assumption with no attributed owner or no reason |
-| `blocked` | Skipped (`skipped`) | an evaluator skipped **or errored**, none failed, beside a pass or not |
+| `blocked` | Skipped (`skipped`) | an evaluator skipped **or errored**, or was not run because a prerequisite is not established (P2.2), none failed, beside a pass or not |
 | `pending` | Open (`open`) | an evaluator unrun on the current inputs, nothing above applying |
 
 ### `util.py`  (no deps)
@@ -1424,7 +1442,24 @@ class Resolution:
     anchors: Anchors | None            # what the entries were judged against (watched_paths)
 def resolve(root, registry, projection, ledger, *, model_error="", availability=None,
             digests=None, anchors=None, now="", model=None) -> Resolution
+def apply_prerequisites(resolution, registry, *,
+                        availability=None) -> Resolution   # rung 7: the rule over a resolution
 ```
+**`apply_prerequisites`** (P2.2-D7, D8) is `resolve`'s last rung and `check`'s again over
+the view it merges with its sweep (`cli._swept`). It walks `gates.plan`'s order over
+every registered gate, building a `gates.Reading` per gate from the resolution (current
+unless in `stale_gates`), and asks `gates.prerequisite_root`, the decision the sweep
+asks too. Under a NEGATIVE root the gate's own reading becomes `gates.blocked`'s skip,
+unless it stands — its tool missing here, its own crash, self-skip or two outcomes, its
+own refusal (`_under_rule`; invariant 2: a crash keeps its loudness) — with its row
+`cached`/`fresh` False, its `entry` kept (D-04: still Fresh on disk, served the moment
+the root recovers) and out of `stale_gates`. Under a NOT-CURRENT root a pass or a fail
+is kept, marked (`_marked`: `fresh` False, `stale_reason` `prerequisite <root>
+invalidated: <what moved>` / `prerequisite <root> unrun`) and added to `stale_gates`,
+so its claim reads Stale or what ranks above it — **D-03 amended**: read literally,
+every model edit between check runs would turn every guarded claim Skipped, when the
+fact is "inputs moved; run check". Monotone (only toward not-pass) and idempotent; with
+no `needs` registered the resolution comes back as it went in.
 **`freshness`** groups a gate's entries by read signature — the paths, files, listings,
 claims and opaque channels an entry read, without their values; a presence-only read is
 its own kind of address — and recomputes each group's rho from what is current: the
@@ -1583,6 +1618,7 @@ class SweepResult:
     notes: list[str]                # writer warnings, ignored entries; `check` prints them
     only; max_tier: int; force: bool; record: bool; when: str   # how it ran
     ledger; registry; anchors       # what write_last_check needs
+    order: list[str]                # the ids in RUN order (gates.plan); rows keep registration order
 def sweep(root, registry, ctx, *, projection, ledger, max_tier, only=None, force=False,
           record=True, now="", on_verdict=None, anchors=None, digests=None,
           on_row=None) -> SweepResult
@@ -1670,8 +1706,17 @@ sweep's `out_dir`).
 
 **`sweep`** is `check`'s loop, driven through `gates.run_all(..., before=)` so order,
 the tier ceiling, `--only` and the lost-control refusal stay in one place; a gate
-named above the ceiling runs, control included. `freshness` is computed first. Per
-selected gate: 1. *availability* fails — a Fresh FAIL is served (R-3); otherwise
+named above the ceiling runs, control included. `freshness` is computed first.
+0. *Plan* (P2.2): the selection and its prerequisite closure run in `gates.plan`'s order
+(`SweepResult.order`); `rows` keep registration order (D4: `check --json`, JUnit and
+every tie-break unmoved). A gate whose prerequisite is not established is **pruned**
+(`_pruned_row`): its row is what `resolve` reads of it under the rule —
+`_resolve_gate`, `resolve`'s rungs 1-6 extracted, on the gate's records as a reader
+(no tier) judges them, then `_under_rule` — and nothing below runs for it, its control
+neither; it writes nothing (no entry, remembered outcome, obs or control), and its row
+is neither executed nor cached. A gate whose prerequisite is not current (a costlier
+tier's entry served stale) runs as below and its row is then marked stale (`fresh`
+False). Per selected gate that is not pruned: 1. *availability* fails — a Fresh FAIL is served (R-3); otherwise
 skipped, `cached pass exists; <why> here` over a Fresh PASS (invariant 1), remembered
 as `availability` (never over a crash or self-skip at the same rho); no control runs (CI has no trimesh: a skip, never "not admitted").
 1b. unless `force`, a remembered crash or self-skip standing over a Fresh entry of a
@@ -1785,18 +1830,32 @@ class Registry:
     def for_claim(self, claim_id, tags=()) -> list[GateSpec]           # copies
     def by_tier(self, max_tier: int) -> list[GateSpec]                 # copies
     def set_pack(self, gate_id, pack) -> None                          # the one way to stamp a stored pack
+    def needed_by(self, gate_id) -> list[str]                          # reverse `needs` edges, registration order
 REGISTRY: Registry                                      # module-level default
 def active_registry() -> Registry                       # the registry `@gate` decorates into right now
 def use_registry(registry)                              # context manager: `@gate` inside registers there
 def gate(*, id, claims=(), tier=Tier.INSTANT, settles="", requires_tools=(),
          requires_python=(), requires_one_of=(), negative_control=None, title="",
-         description="", pack="", entry="", registry=None)   # decorator -> registers, returns fn
+         description="", pack="", entry="", registry=None,
+         needs=())                                      # decorator -> registers, returns fn
 def availability(spec) -> tuple[bool, str]              # (ok, "requires openfoam (not on PATH)")
 def run_gate(spec, fn, ctx, *, trace=None) -> Verdict   # a traced, read-only view; times it (wall, CPU);
                                                         #   catches exceptions -> error verdict
 def run_all(registry, ctx, *, max_tier=0, only=None, on_verdict=None,
-            before=None, after=None) -> list[Verdict]   # before(spec, fn) -> Verdict | None;
-                                                        #   after(spec, fn, verdict, trace)
+            before=None, after=None, current=None, pruned=None,
+            marked=None) -> list[Verdict]               # before(spec, fn) -> Verdict | None;
+                                                        #   after(spec, fn, verdict, trace);
+                                                        #   plan order (run order)
+def plan(registry, selected) -> list[GateSpec]          # selection + prerequisite closure, DFS postorder
+class Reading(NamedTuple): verdict; current=True; root=""; root_kind=""; why=""
+class Unmet(NamedTuple): root; kind; roots=(); why=""   # .negative: not run (Skipped) vs marked (Stale)
+def prerequisite_root(spec, readings, registry) -> Unmet | None   # THE rule: sweep and resolver both
+def blocked(spec, unmet) -> Verdict                     # the one producer of a prerequisite skip
+def mark_reason(unmet) -> str                           # "prerequisite <root> invalidated: …" / "… unrun"
+PREREQUISITE_FAILED = "prerequisite failed"             # skip_reason leads (spine text: rewording re-keys)
+PREREQUISITE_NOT_ESTABLISHED = "prerequisite not established"
+NEGATIVE_KINDS: tuple[str, ...]                         # errored failed skipped unqualified not-registered
+NOT_CURRENT_KINDS: tuple[str, ...]                      # invalidated unrun
 def selftest(spec, fn, ctx, *, trace=None, out_dir=None) -> Verdict   # runs the NEGATIVE CONTROL, traced
 def run_fixture(spec, fn, ctx, *, trace, out_dir) -> GateContext      # the fixture ONLY; never calls fn
 def load_fixture(ref: str, root: str) -> Any            # "mod:fn" or "path/to/file.py"
@@ -1874,6 +1933,38 @@ fixture file that re-exports a helper's `make` is keyed by the file an edit move
 `duration_s` and `cpu_s` cover both. `run_fixture(spec, fn, ctx, *, trace, out_dir)`
 is the fixture half alone — for re-verifying a control whose fixture code moved without
 re-running the gate — and raises `AtompipeError` when the control is unusable.
+
+**Prerequisites (`needs`, P2.2).** A gate may name the gates that must be
+established before its verdict counts: a validity guard before the analyses it
+guards. `Registry.register` refuses, on the new field only (R-10): a need that is not
+exactly one gate id (empty, whitespace, `/ \ .. :`, a glob character), names the gate
+itself, or repeats; a need that closes a **cycle** — an incremental DFS from the new
+node over the registered gates' needs, with the new spec substituted (`replace=True`,
+a re-import), complete under any load order, the message naming `a -> b -> a` and each
+member's pack; and a **tier inversion** from either side of the edge. A need not
+registered yet is allowed (a missing pack must not become a load crash) and reads "not
+registered" at the sweep. `plan(registry, selected)` expands the selection by its
+prerequisite closure (`check --only X` runs X's prerequisites; `gate selftest --only X`
+stays pure selection, `_selected`) and orders it DFS-postorder — registration order
+when nothing needs anything — re-asserting acyclicity and tier order (a spec reached
+the private dict some other way: `AtompipeError`). `run_all` runs in that order and
+returns its verdicts in it; `prerequisite_root(spec, readings, registry)` is the one
+decision, asked before each gate with `needs`. A prerequisite is established when its
+effective verdict is a pass and current; otherwise its kind is, in rank order,
+errored, failed (an invalidated fail too, D-08), skipped, unqualified, not registered
+(**negative**), then invalidated, unrun (**not current**); a root is found
+transitively (through `blocked_by`, or a reading's `root`). Under a negative root
+`before`, `fn`, `after` and the control are never called: the verdict is
+`pruned(spec, fn, unmet)`'s, by default the gate's own missing-tool skip, else
+`blocked(spec, unmet)` — `skip_reason` `prerequisite failed: <root>` only when the root
+failed, else `prerequisite not established: <root> (<why>)`, `blocked_by` the roots,
+`blocked_kind` the first's kind, no cost, no rho. Under a not-current root the gate
+runs as usual and `marked(spec, verdict, unmet)` is told. `current(gate_id)` says
+whether a verdict this loop produced is current (default: all are). What slipped
+through before the edge (S-51): a claim tagged only `deflection` read Checked on a beam
+whose guard reported Euler-Bernoulli omitting 32% of the deflection; and run order was
+registration order, alphabetical by module, so four of seven packs ran their guard
+after the numbers it vouched for (S-52).
 
 **Code is loaded fresh.** `load_project_gates`, `load_fixture` and
 `packs.load_gates` all go through `modelio.load_source_module`: the bytes that run are
@@ -1953,13 +2044,14 @@ deleted a key its gate needed passed invariants 3 and 6 as "honestly blocked" (S
 ### `claims.py`  (deps: models, util)
 The derivation logic. Nothing here writes.
 ```python
-class ClaimCause(StrEnum): FAILED | PHYSICAL_FAIL | ERRORED | SKIPPED | UNQUALIFIED
+class ClaimCause(StrEnum): FAILED | PHYSICAL_FAIL | ERRORED | PREREQUISITE_ERRORED
+                         | SKIPPED | PREREQUISITE | UNQUALIFIED
                          | NO_EVALUATOR | NO_OWNER | OWNER_UNATTRIBUTED | NO_REASON
                          | UNRUN | INVALIDATED | NO_ARTICLE | OWNED | PHYSICAL_PASS | CHECKED
 class Attribution(NamedTuple): owner: str; reason: str     # the signing channel's record of an owner
 @dataclass(frozen=True)
 class Composed: status: ClaimStatus; cause: ClaimCause; cites: tuple; verdict: Verdict | None
-    errored -> bool                                          # property: cause is ERRORED
+    errored -> bool                                          # property: ERRORED or PREREQUISITE_ERRORED
 STATUS_KEY: Mapping[ClaimStatus, str]                        # pass -> "checked", unverified -> "pending_build", ...
 SEVERITY_ORDER: tuple[str, ...]                              # tokens + "errored", most urgent first
 KEY_ORDER: tuple[str, ...]                                   # the eight tokens, count order
@@ -1994,7 +2086,7 @@ without it:
 | # | status | when | cause |
 |---|---|---|---|
 | 1 | Failing | a physical result failed (`refuted`), whatever the claim's kind and whatever was recorded after it; any covering verdict failed (`fail`), any kind, stale or not (D-08, R-3) | `physical-fail`, `failed` |
-| 2 | Skipped (`blocked`) | any errored, else any skipped — beside a pass or not | `errored`, `skipped` |
+| 2 | Skipped (`blocked`) | any errored, else any not run behind a prerequisite that crashed (`blocked_kind` `errored`: as loud), else any skipped — `prerequisite` when the first was not run behind a prerequisite (`blocked_by`) — beside a pass or not | `errored`, `prerequisite-errored`, `skipped`, `prerequisite` |
 | 3 | Gap (`unclaimed`) | any unqualified, beside a pass or not; a measurable claim with no evaluator; an assumption with no owner named, no reason, or an owner `owners` does not attribute | `unqualified`, `no-evaluator`, `no-owner`, `no-reason`, `owner-unattributed` |
 | 4 | Open (`pending`) | any covering gate unrun | `unrun` |
 | 5 | Stale | `stale`, or a covering gate in `stale_gates` | `invalidated` |
@@ -2293,7 +2385,8 @@ HUMAN: Mapping[str, Any]   # THE table (PLAN D-16): "status" {ClaimStatus: Statu
                            # "errored" (Skipped's loud row, tag "SKIP "), "lead" {ClaimCause: str},
                            # "recorded" {named, unattributed}, "need" {NeedStatus: word},
                            # "outcome" {outcome: word}, "outcome_hint" {outcome: line},
-                           # "outcome_tag" (models._RENDER_TAG itself), "heading", "refusal"
+                           # "outcome_tag" (models._RENDER_TAG itself), "heading", "refusal",
+                           # "prerequisite" {failed, not-established, not-registered} (P2.2)
 STATUS_TAG: Mapping[ClaimStatus, str]        # HUMAN's tags, a view: PASS -> "ok   ", ...
 SECTION_PROVEN = "## What is PROVEN"         # the checked section's heading (text: A-11)
 JUNIT_DEFAULT = ".atompipe/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
@@ -2307,6 +2400,8 @@ def status_view(composed, ledger, claim, *, stale_reasons=None) -> dict  # {key,
 def words_table() -> dict;  def outcome_words() -> dict;  def need_word(status) -> str
 def page_phrases() -> dict                   # state.json `phrases`: {invalidated, need, outcome_hint}
 def recorded_by(who) -> str                  # "recorded by sam" | "recorded, unattributed" — one line
+def prerequisite_phrase(verdict) -> str      # "prerequisite failed: <root>" | "… not established:
+                                             #   <root> (<kind>)", from HUMAN and the spine's mark
 def readiness(ledger, composed) -> dict      # {required, unresolved, unbound, ready}
 def not_ready_line(ledger, composed) -> str  # `check`'s line when nothing blocks it
 RATIONALE_UNKNOWN = "Parameter rationales are not known"  # + ": <why>" — no view, or no model
@@ -2876,8 +2971,14 @@ obs, remembered outcomes, `last_check.json` and the JUnit report carry one insta
 for **every selected gate** — executed, cached or refused — in registration order, so
 a fresh clone whose first check is all cache hits still lists `bracket.deflection`
 (cli:H1). Row keys `gate, passed, skipped, ok` (stable); `outcome, cached, fresh`
-(always); `rho`, `stale_reason` (when non-empty); `duration_s, cpu_s` (executed rows
-only). `carried_over[]` holds the rows (with `cached`, `fresh`, `stale_reason`) of
+(always); `rho`, `stale_reason`, and from P2.2 `blocked_by` and `blocked_kind` (when
+non-empty — a gate not run behind a prerequisite: its roots, and the first's kind);
+`duration_s, cpu_s` (executed rows only). Rows stay in registration order whatever
+order the gates RAN in (P2.2-D4); `--only X` selects X's prerequisites too, so their
+rows are present (D15). No `pruned` key: the rows carrying `blocked_by` are that list
+(D16). `gate list --json` rows gain `needs` and `needed_by` (always lists; `--full`
+adds `needed_by` beside the spec), and `gate show --json` gains `needed_by`.
+`last_check.json` carries no verdict rows, so nothing there moved. `carried_over[]` holds the rows (with `cached`, `fresh`, `stale_reason`) of
 registered gates this sweep did not select that have an effective verdict. `counts` =
 `{ran (#ok over executed plus cached), failed, skipped, errored, executed, cached,
 controls: {executed, cached, reverified}}`. `stale` means some selected gate was stale

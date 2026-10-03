@@ -179,6 +179,12 @@ def complete(ctx: GateContext) -> Verdict:
     claims=["cost", "build-cost", "budget", "unit-cost"],
     tier=Tier.INSTANT,
     settles="build cost per unit",
+    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
+    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
+    #    this gate's arithmetic over the BOM a work of fiction.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:price_shock",
         note="one line repriced so that part alone costs ten times the whole per-unit "
@@ -266,6 +272,12 @@ def cost(ctx: GateContext) -> Verdict:
     claims=["availability", "lead-time", "ship-date", "stock"],
     tier=Tier.INSTANT,
     settles="longest lead time",
+    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
+    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
+    #    this gate's arithmetic over the BOM a work of fiction.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:end_of_life",
         note="one line's lifecycle moved to 'eol' — the notice that arrives by email "
@@ -420,6 +432,12 @@ def availability(ctx: GateContext) -> Verdict:
     claims=["moq", "minimum-order", "overbuy", "inventory"],
     tier=Tier.INSTANT,
     settles="minimum order quantity overbuy",
+    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
+    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
+    #    this gate's arithmetic over the BOM a work of fiction.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:brutal_moq",
         note="one line's MOQ raised far past what the build needs, on the line whose "
@@ -550,6 +568,12 @@ def moq(ctx: GateContext) -> Verdict:
     claims=["process-rules", "vendor-capability", "manufacturability", "dfm"],
     tier=Tier.INSTANT,
     settles="vendor process capability",
+    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
+    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
+    #    this gate's arithmetic over the BOM a work of fiction.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:outside_capability",
         note="one declared process attribute moved outside the vendor's stated set — "
@@ -607,6 +631,12 @@ def process_rules(ctx: GateContext) -> Verdict:
     claims=["single-source", "supply-risk", "second-source", "supply-chain-risk"],
     tier=Tier.INSTANT,
     settles="single source count",
+    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
+    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
+    #    this gate's arithmetic over the BOM a work of fiction.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:lost_second_source",
         note="the second source goes away, with nothing written down — expressed on "
@@ -718,6 +748,8 @@ def single_source(ctx: GateContext) -> Verdict:
     claims=["currency", "fx", "price-currency", "cost"],
     tier=Tier.INSTANT,
     settles="price currency coherence",
+    # No edge to bom.complete: this gate's own control fails it (1 of 10 lines
+    # not orderable), so the guard would pre-empt the control.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:foreign_quote",
         note="one line re-quoted in a currency the document holds no fx rate for — "

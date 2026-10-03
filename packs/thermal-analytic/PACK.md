@@ -136,6 +136,16 @@ temperature, so the single-node result from `thermal.steady_state_temp` and the
 time constant are both describing a fiction. When it trips, stop trusting those
 numbers rather than tuning them.
 
+### Prerequisites
+
+None yet, on purpose. `thermal.time_constant` holds the Biot check that guards lumped
+capacitance, but it also fails on a time constant over `time_constant_limit_s` — a
+measurement, which says nothing about the steady-state node — so making it
+`thermal.steady_state_temp`'s prerequisite would hide that gate's number behind an
+unrelated fail. The edge lands once the Biot half is its own evaluator.
+`thermal.h_agreement` compares two representations rather than guarding one, and
+`thermal.convection`'s own control (`fan_stopped`) fails it.
+
 ## 3b. Views
 
 | View | Kind | Payload | Addressed by |

@@ -111,6 +111,17 @@ For the same reason they pass on an omc with no Modelica Standard Library, and
 that is what most installs produce: the `-minimal` docker image ships none.
 `references/installing.md` gives the one-time install and a check for it.
 
+### Prerequisites
+
+`modelica.solution_valid` is the prerequisite (`needs`) of `modelica.result_claim` and
+`modelica.mirror_agrees` (all tier 0): a value read off a run that stopped early,
+diverged or never initialised means nothing. `modelica.compiles` is the prerequisite of
+`modelica.simulates` (both tier 2): nothing simulates without compiling. Below a failed
+guard the dependent is not run, and its claims read Skipped naming the guard. There is
+no edge from `result_claim` to `simulates`: that would make a tier-0 gate wait on a
+tier-2 one, and the registry refuses the inversion. None from `compiles` to `checks`:
+`compiles`' own control fails `checkModel` too.
+
 ## Claim tags
 
 Gates list everything they bear on; **claims carry the narrowest vocabulary that

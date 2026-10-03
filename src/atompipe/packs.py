@@ -1239,6 +1239,19 @@ def validate(pack_dir: str, *, tier: int = Tier.BUILD,
                 f"gate {spec.id!r} has an empty `settles` — that string is what turns "
                 f"'no gate covers C2' into 'this gate might'"
             )
+        # P2.2-D14: a pack's prerequisites are its own gates. Its controls and
+        # baseline are sealed to the pack (invariant 5); a prerequisite in
+        # another pack would make the isolation `demonstrate` checks depend on
+        # that pack's version, and a missing pack would Skip this one's gates
+        # in every project that installs it alone. A project's `gates/` may
+        # name any id: there it is the project's choice, and `doctor` names one
+        # nothing registers.
+        for need in spec.needs or ():
+            if need not in registered:
+                problems.append(
+                    f"{spec.id}: prerequisite {need} is not in this pack — a pack's "
+                    f"prerequisites are its own gates (its controls and baseline are "
+                    f"sealed to it); declare the edge in the project instead, or drop it")
 
         nc = spec.negative_control
         if nc is None:
@@ -1447,6 +1460,13 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
        of its host's ``ctx.params`` (:func:`seal_findings`, one line per gate).
        Step 3 sees only what an EMPTY host changes; a fixture that layers the
        whole baseline over the host fires the same both ways and passed it.
+    5. **isolation** (P2.2-D13): every prerequisite in the gate's ``needs``
+       closure must pass the gate's own known-bad control. One that fails it
+       pre-empts the control wherever both run, and the dependent's admission
+       then shows nothing about the inputs it judges (:func:`_isolation_problems`;
+       ``tests/test_packs.ControlsAreIsolated`` holds its own copy, D-25). A
+       prerequisite whose tools are absent here is not checked, and not a
+       problem: the same rule as a skipped control.
 
     A skip is honest only when :func:`gates.availability` says the gate's tools
     are absent; it goes to ``skipped``. A skip with the tools present is a
@@ -1583,10 +1603,53 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
             # 4. the seal, read off step 2's trace: what the probe cannot see
             if unsealed:
                 shown.problems.append(unsealed)
+
+            # 5. isolation (P2.2-D13): every prerequisite in this gate's closure
+            #    must PASS the known-bad control this gate just failed. If one
+            #    fails it too, the guard pre-empts the control wherever both
+            #    run: the dependent is pruned before its own judgement, and
+            #    the control shows nothing about the inputs it actually judges.
+            shown.problems.extend(_isolation_problems(pack_dir, registry, spec, fn,
+                                                      _run_dir(base, spec.id, "isolation")))
     finally:
         if out_dir is None:
             shutil.rmtree(base, ignore_errors=True)
     return shown
+
+
+def _isolation_problems(pack_dir: str, registry: Any, spec: GateSpec, fn: Any,
+                        out_dir: str) -> list[str]:
+    """``"<gate>: control not isolated — …"`` for each prerequisite in
+    ``spec``'s closure that does not PASS ``spec``'s known-bad control, built
+    over the pack's baseline as step 2 built it. Worded in GLOSSARY §2's words
+    (critique of the P2.2 design: the first draft said "known-bad input", a §2
+    Never-say on a `pack validate` line)."""
+    from . import gates as _gates          # local import: see _fresh_registry
+
+    closure = [s for s in _gates.plan(registry, [spec]) if s.id != spec.id]
+    if not closure:
+        return []
+    out: list[str] = []
+    for need in closure:
+        entry = registry.get(need.id)
+        if entry is None or not _gates.availability(need)[0]:
+            continue
+        need_spec, need_fn = entry
+        try:
+            bad = _gates.run_fixture(spec, fn, baseline_context(pack_dir, out_dir=out_dir),
+                                     trace=None, out_dir=out_dir)
+        except AtompipeError as exc:
+            out.append(f"{spec.id}: control not isolated — its known-bad control could not be "
+                       f"rebuilt to run {need.id} on: {exc}")
+            return out
+        verdict = _gates.run_gate(need_spec, need_fn, bad)
+        if verdict.outcome != "pass":
+            out.append(f"{spec.id}: control not isolated — its prerequisite {need.id} does not "
+                       f"pass {spec.id}'s known-bad control ({verdict.outcome}: "
+                       f"{_why(verdict)}); the guard pre-empts the control wherever both "
+                       f"run. Make the control move only what {spec.id} judges, or drop "
+                       f"the edge")
+    return out
 
 
 # --------------------------------------------------------------------------- #

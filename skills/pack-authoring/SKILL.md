@@ -99,13 +99,14 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
 - **Import a module at run time by a string literal** (`importlib.import_module("rules")`),
   or with `load_path`. A name held in a variable is keyed only by the first run in a
   process to load it; `atompipe doctor` names each under `dynamic-imports`.
-- **Leave `rho`, `cpu_s` and `unqualified` alone.** `run_gate` measures `cpu_s`
+- **Leave `rho`, `cpu_s`, `unqualified`, `blocked_by` and `blocked_kind` alone.** `run_gate` measures `cpu_s`
   (child processes included: a solver subprocess is not free) and `duration_s`, and
   the sweep sets `rho`. Anything a gate puts in them is overwritten. `unqualified` is
   the spine's mark for an evaluator refused at its version — its known-bad control
   passed — and a claim with one reads Gap; `run_gate` clears it on whatever you
   return, so a gate that sets it, or wraps its own exception as `error="not admitted:
-  …"`, reads as the crash it is (Skipped, `errored:`), never as a refusal.
+  …"`, reads as the crash it is (Skipped, `errored:`), never as a refusal. The
+  prerequisite mark is the spine's on the same terms (step 4's validity guard).
 - **Return `passed=True` or `passed=False`, and read a verdict by its `outcome`.**
   Any other pass value (`"false"`, `1`, `None`) is an error naming its type: `"false"`
   once read `[ok]`. `Verdict.outcome` — `"error"`, `"skipped"`, `"pass"` or `"fail"`,
@@ -240,6 +241,25 @@ decides whether the domain's other numbers mean anything at all (slenderness for
 beam theory, Biot for lumped capacitance, Reynolds for a correlation). When it
 trips, dragging every claim in the domain down with it is correct behaviour, and it
 is usually the most valuable gate you will write.
+
+Then make it the **prerequisite** of the gates it guards: `needs=["beam.model_validity"]`
+on each (`GateSpec.needs`, exact ids of your own pack's gates). A broad binding reaches
+only the claims that share its tags; a claim tagged only `deflection` once read Checked
+on a beam whose guard reported Euler-Bernoulli omitting 32% of the deflection. With the
+edge, a dependent whose guard fails is not run and reads Skipped, `prerequisite failed:
+<guard>`. Declare an edge only when all four hold, and say why at the decorator:
+
+1. the prerequisite is a validity guard — every way it fails means the dependent's
+   number does not apply (an analysis that fails is not one: its fail would hide the
+   dependent's measurement);
+2. it is **isolated** — it passes the dependent's own known-bad control, or it would
+   pre-empt the control (`pack validate` checks this);
+3. its tier is no costlier than the dependent's (the registry refuses the inversion);
+4. both gates are in your pack.
+
+The registry refuses a cycle, a glob, a duplicate and a gate needing itself.
+`Verdict.blocked_by` and `Verdict.blocked_kind` are the spine's mark for a gate not run
+behind a prerequisite — leave them alone, as `unqualified`: `run_gate` clears both.
 
 ### 5. Write `PACK.md`
 

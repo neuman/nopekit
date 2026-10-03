@@ -165,6 +165,12 @@ def _pipe_velocity(ctx: GateContext, diameter: float) -> tuple[float, str] | Non
     claims=["drag", "resistance"],
     tier=Tier.INSTANT,
     settles="drag force",
+    # Prerequisite fluid.flow_regime (P2.2-D12): it checks the Reynolds and roughness
+    #    bands this gate's correlation was fitted in; outside them the arithmetic
+    #    still returns a confident number, and it is wrong.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fluid.flow_regime"],
     negative_control=NegativeControl(
         fixture="selftest/bad_flow.py:oversped",
         note="the same body at 3x the speed: drag goes as v^2 so this is ~9x the force, "
@@ -257,6 +263,12 @@ def drag(ctx: GateContext) -> Verdict:
     claims=["pressure-drop", "head-loss", "pipe-flow"],
     tier=Tier.INSTANT,
     settles="pipe pressure drop",
+    # Prerequisite fluid.flow_regime (P2.2-D12): it checks the Reynolds and roughness
+    #    bands this gate's correlation was fitted in; outside them the arithmetic
+    #    still returns a confident number, and it is wrong.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fluid.flow_regime"],
     negative_control=NegativeControl(
         fixture="selftest/bad_flow.py:pinched_bore",
         note="the same flow rate through a bore reduced to 60%: at fixed Q the drop goes "

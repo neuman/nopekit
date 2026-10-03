@@ -61,7 +61,10 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     # "louder" is carried only by these tests. And a gate cannot make its crash
     # read the quieter Gap: the unqualified mark is the spine's (P2.1).
     2: ["test_invariants.ErrorIsNotPass", "test_louder.ErrorIsLouder",
-        "test_invariants.UnqualifiedIsTheSpinesWord"],
+        "test_invariants.UnqualifiedIsTheSpinesWord",
+        # P2.2: a crash behind a prerequisite reaches a claim bound only to the
+        # dependent, and must read as loud there as anywhere (its critique).
+        "test_prerequisites.AnErroredPrerequisiteStaysLouder"],
     3: "test_invariants.RegistryRefusesLoggers",
     # 4 over a pass beside an evaluator that is not admitted (P2.0): an
     # invariant-9 change that drops the refused verdict would leave the pass
@@ -78,6 +81,12 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     8: ["test_records.IndexNeverDisagreesWithRecords",
         "test_records.NoCommandWritesARecord"],
     9: "test_admission.AdmissionIsDemonstrated",
+    # 10 (P2.2): the rule in the run loop, the resolver and the composition; a
+    # cached pass behind a failed guard, end to end in process; and the graph
+    # the rule walks — a cycle or an inversion refused at registration.
+    10: ["test_prerequisites.PrerequisiteFailureIsNeverAPass",
+         "test_prerequisites.ACachedPassNeverSurvivesAFailedPrerequisite",
+         "test_prerequisites.NeedsCycleRefused", "test_prerequisites.TierInversionRefused"],
 }
 
 #: Classes a later checkpoint will make invariants, guarded against skips from
@@ -89,7 +98,7 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
 #:
 #: 15 is PLAN §4.0.1's mutation half (PLAN-v0.14 §4.1: "the mutation half lands
 #: in P2 as MutationIsSealed, in P2.0"). It is planned, not mapped, because
-#: CLAUDE.md states 1-9 and `EveryInvariantHasItsTest` refuses a mapped number
+#: CLAUDE.md states 1-10 and `EveryInvariantHasItsTest` refuses a mapped number
 #: CLAUDE.md does not state; it moves to INVARIANT_CLASSES, with CLAUDE.md's new
 #: item, in the checkpoint that makes mutation mechanical (P2.3) — PLAN §4.0.1:
 #: "each is added to CLAUDE.md in the phase that makes it mechanical".

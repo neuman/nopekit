@@ -198,9 +198,53 @@ Rules, all enforced:
   lumped capacitance, a Reynolds check protecting a correlation. When one of those
   trips, every other number in the domain really is untrustworthy, so dragging the
   whole domain down is the correct behaviour. Ship one; it is usually the most
-  valuable gate in the pack.
+  valuable gate in the pack — and make it the **prerequisite** of the gates it
+  guards (next section): a broad binding reaches only the claims that share its
+  tags, and a claim bound narrowly to the analysis it guards read Checked while the
+  guard failed (S-51).
 - **Ship at least one tier-0 gate.** A pack of only expensive gates has not finished
   its job.
+
+### Prerequisites (`needs`)
+
+```python
+@gate(id="beam.deflection", ..., needs=["beam.model_validity"])   # exact ids, this pack's
+```
+
+A gate names, in `needs`, the gates that must be **established** — a pass, current —
+before its own verdict counts. Under a prerequisite that failed, errored, skipped, is
+unqualified or is not registered, the gate is **not run** (neither it nor its control)
+and reads Skipped: `prerequisite failed: <root>` when the root failed, `prerequisite
+not established: <root> (<why>)` otherwise, naming the root through a chain. Its own
+missing tool, crash or refusal still stands — a crash is never made quieter. Under a
+prerequisite invalidated or unrun it runs, and its verdict reads Stale. The verdict
+cache is not touched: the edge is not part of rho, so a guard that recovers re-runs
+nothing. `gates.plan` runs every gate after its prerequisites, and `check --only X`
+runs X's.
+
+Declare an edge only when all four hold (P2.2-D12), and say why at the decorator:
+
+1. **The prerequisite is a validity guard**: every way it can fail means the
+   dependent's number does not apply. An analysis is not a guard — a buoyancy fail
+   says the design is wrong, not that freeboard is meaningless — and turning the
+   second fail into a skip would hide a measurement. A guard that also measures
+   (fails for a reason that leaves the dependent's number valid) is not one either.
+2. **The edge is isolated**: the prerequisite PASSES the dependent's own known-bad
+   control. Otherwise the guard pre-empts the control wherever both run, and the
+   dependent's admission shows nothing about the inputs it judges. `pack validate`
+   checks it (below) and `tests/test_packs.ControlsAreIsolated` checks every
+   bundled edge.
+3. **tier(prerequisite) <= tier(dependent)**: the registry refuses the inversion,
+   which would drag a solver into a cheaper loop.
+4. **Both gates are in this pack**: a pack's controls and baseline are sealed to it,
+   and a prerequisite in another pack would make isolation depend on that pack's
+   version. A project's `gates/` may name any id; one nothing registers reads "not
+   registered", and `atompipe doctor` names it.
+
+The registry also refuses a `needs` cycle (named `a -> b -> a`, each with its pack), a
+need that names the gate itself, a glob or a duplicate. `Verdict.blocked_by` and
+`blocked_kind` are the spine's mark for a gate not run behind a prerequisite;
+`run_gate` clears both on whatever a gate returns.
 
 ## The surface a gate sees
 
@@ -224,6 +268,8 @@ class GateSpec:                        # what @gate(...) builds and registers fo
     settles: str = ""                  # the quantity it measures, for gap matching
     entry: str = ""                    # "module:function", for out-of-process discovery
     requires_one_of: list[str]         # AT LEAST ONE "python:<module>" / "tool:<exe>"
+    needs: list[str]                   # PREREQUISITES: exact ids of this pack's gates that
+                                       #   must be established first (see "Prerequisites")
 
 @dataclass
 class NegativeControl:
@@ -253,6 +299,10 @@ class Verdict:                         # what a gate returns (or a (bool, detail
     cpu_s: float = 0.0                 # CPU seconds, child processes included: measured
     unqualified: str = ""              # the SPINE's mark for an evaluator refused at its
                                        #   version; run_gate clears whatever a gate sets
+    blocked_by: list[str]              # the SPINE's mark: not run, these prerequisites not
+                                       #   established; run_gate clears whatever a gate sets
+    blocked_kind: str = ""             # the spine's too: the first root's kind ("failed",
+                                       #   "errored", "skipped", "unqualified", "not-registered")
     outcome -> str                     # property: "error" | "skipped" | "pass" | "fail"
     ok -> bool                         # property: outcome == "pass"; a skip is never ok
     def render(self) -> str            # "[FAIL] fdm.overhang : worst face 63.2deg vs 50deg limit"
@@ -831,8 +881,12 @@ substantive, every declared gate actually registers, every gate has a negative
 control, `max_tier` matches the gates, the description is one line, and every
 file-based fixture exists — and then **demonstrates** the pack at tiers 0–1, gate by
 gate, with the pack loaded alone: its own `selftest/baseline.json` passes, its
-control fires, the control still fires against an empty host (the seal probe), and it
-read nothing of its host's `ctx.params` on the way (the seal, read off the trace).
+control fires, the control still fires against an empty host (the seal probe), it
+read nothing of its host's `ctx.params` on the way (the seal, read off the trace), and
+every prerequisite in its `needs` closure passes that same known-bad control
+(isolation: `<gate>: control not isolated — its prerequisite <id> does not pass
+<gate>'s known-bad control (…)`). A `needs` entry that is not one of the pack's own
+gates is a problem too.
 A gate whose declared tooling is absent on this machine is printed as a `note:` and
 not demonstrated — not a problem, and not a pass either. Tiers 0–1 call no external
 solver, so this stays seconds long; the rest waits for

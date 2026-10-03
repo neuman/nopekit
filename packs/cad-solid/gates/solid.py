@@ -724,6 +724,9 @@ def _weld_and_drop(mesh: Any, digits: int, area_eps: float, max_passes: int = 8)
     tier=Tier.BUILD,
     settles="degenerate faces",
     requires_python=["trimesh", "numpy"],
+    # No edge to cad.watertight: this gate's own control, split_corner_box, is
+    # open and inconsistently wound too, so it fails both guards — they would
+    # pre-empt it wherever both run.
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:sliver_pair",
         note="one corner of a closed box emitted twice 1e-6 mm apart with a subset "
@@ -910,6 +913,11 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
     tier=Tier.BUILD,
     settles="minimum wall thickness",
     requires_python=["trimesh", "numpy"],
+    # Prerequisite cad.watertight (P2.2-D12): ray casting through an open mesh
+    #    leaks out of the hole and reports a thickness that is not there.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["cad.watertight"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:thin_plate",
         note="a plate at a quarter of the project's own minimum wall; the same "
@@ -1292,6 +1300,11 @@ def _read_bonded(ctx: GateContext, sliding: set[tuple[str, str]],
     # tooling. Declared, the answer is availability's alone. The in-body probe
     # stays as defence in depth for an engine that is found but will not load.
     requires_one_of=["python:manifold3d", "tool:blender", "tool:openscad"],
+    # Prerequisite cad.is_volume (P2.2-D12): a boolean against a mesh that is not
+    #    a volume returns garbage or nothing, and nothing reads as no clash.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["cad.is_volume"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:overlapping_pair",
         note="two valid 20 mm boxes placed 18 mm apart: 800 mm^3 of shared material, "
@@ -2926,6 +2939,11 @@ def _gap_text(gap: Any) -> str:
     tier=Tier.BUILD,
     settles="assembly connectivity",
     requires_python=["trimesh", "numpy"],
+    # Prerequisite cad.is_volume (P2.2-D12): contact between parts is a boolean
+    #    question, and booleans need volumes.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["cad.is_volume"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:broken_chain",
         note="the baseline assembly with the cover lifted 3 mm off the housing rim "

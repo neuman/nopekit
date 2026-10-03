@@ -2,12 +2,12 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.min_wall",
-  "rho": "bea7706347e73268451afba93e6a314e63a3c79d7fe5d48385660590a47e06bc",
-  "static": "7fb7da33b18297d766536e8b659dcdc62d95f6b69e14656f3c3ffb482bebc1ca",
+  "rho": "20b15c93a0bd09570a4e9bd6f1787f3fc7add3b7f798a6f913da5fb9d0e7667b",
+  "static": "23d73b27f9e62284c45a67fedfa6bee0cf5450a9af8b0e2fb8d6f043ece87eb4",
   "static_parts": {
-    "spine": "23d6e7d1a9fc55da80e5d75e564b899ab362e95065aa3de7f84af75e77f2dcaf",
+    "spine": "70502ab6510517c25da9f698587128e4cc83d5820fe1f7003bdb940f995e8d62",
     "code": {
-      "digest": "8a38ef02571f2e879d2dbbbbd52e2383ef7c6d996751151d180016515e40e3b6",
+      "digest": "a52d9c706a230f68c0529638f1b33d8d67fd2c9614c42a410e8dcb25b60a2419",
       "files": [
         "gates/structural.py"
       ]
@@ -73,5 +73,5 @@
   "measured": 3.0,
   "limit": 3.6,
   "units": "mm",
-  "digest": "77b2f5cc1f2ab4e0e4442194fdf8774d261d2308cc7a888755c38987710e47f9"
+  "digest": "73794ee6d3c67ff2cecaa7289ae2d037fd0f8c9248a3324dc251b2b7c180f97b"
 }

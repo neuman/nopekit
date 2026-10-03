@@ -13,7 +13,11 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine: 87 s measured
+The budget is 90 s as ONE process on an otherwise idle machine: 87.5 s measured
+2026-10-03 (load average 1.4-1.8; 64 s user) after P2.2 added invariant 10's
+classes and its fast neighbours (~3 s, in process), with the matrix, the
+transcript and the wrapped-beam cases left to the full suite (below) — at the
+budget, so the next class that joins moves one out; 87 s measured
 2026-10-03 (load average 1.9-2.3, the quietest this machine got that day; 59 s
 user) after P2.1 added four `test_vocabulary` classes, `test_json_keys` and
 `test_owner` (the sentence-branch scan 4.3 s, `claim physical` end to end 3.3 s
@@ -62,6 +66,10 @@ out below are the channels that code carries:
   `test_records` (every command on a legacy project, and the shims);
 * a pack's fixtures or baseline, the fixture context in `gates.py`, or
   `NegativeControl` -> `test_packs` (with `test_pack_mode`);
+* the prerequisite rule — `gates.plan`/`prerequisite_root`/`run_all`,
+  `verdicts.apply_prerequisites`/`_pruned_row`, `cli._swept`, `claims.compose`'s
+  rung 2 — -> `test_prerequisites` whole (its matrix and transcript are left out
+  below) and `test_packs.ControlsAreIsolated`;
 * a renderer's code — `report.py`, `Verdict.render`, `cmd_check`,
   `cmd_status`, `cmd_doctor`, `claim list`/`show`, `decisions.why`,
   `site.state` or the site template — -> `test_louder` is in this tier; also
@@ -229,6 +237,26 @@ FAST: list[str] = [
     "test_staleness.StaleIsNotCurrent.test_s21_cli_a_model_that_does_not_load_proves_nothing",
     "test_staleness.StaleIsNotCurrent.test_s32_cli_a_dry_check_leaves_a_moved_gate_stale",
 
+    # -- invariant 10: a prerequisite not established is never a pass ----- #
+    # The rule in the run loop, the resolver and the composition, with the
+    # spine's mark and R-2; a cached pass behind a failed guard (V5) and a crash
+    # behind one read as loud as a crash (invariant 2's class too), each through
+    # a sweep in process; the graph refused at registration — every 3-node graph
+    # in every load order and 1,000 seeded 6-node ones; the edge outside rho; the
+    # declaration's exactness; the merged view `check` judges from (the critique's
+    # unselected dependent); the run order. ~3 s together.
+    "test_prerequisites.PrerequisiteFailureIsNeverAPass",
+    "test_prerequisites.ACachedPassNeverSurvivesAFailedPrerequisite",
+    "test_prerequisites.AnErroredPrerequisiteStaysLouder",
+    "test_prerequisites.NeedsCycleRefused",
+    "test_prerequisites.TierInversionRefused",
+    "test_prerequisites.NeedsIsNotARhoEdge",
+    "test_prerequisites.NeedsDeclarationsAreExact",
+    "test_prerequisites.UnselectedDependentFollowsTheSweep",
+    "test_prerequisites.PlanIsStable.test_without_needs_run_order_is_registration_order",
+    "test_prerequisites.PlanIsStable.test_needs_order_is_dfs_postorder",
+    "test_prerequisites.PlanIsStable.test_a_plan_that_does_not_expand_is_caught",
+
     # -- invariant 8: records are the source, the index an output --------- #
     # The whole class, the index-agrees test among it: a hand-edited index
     # loses, every record change reaches it, and every command run after a
@@ -361,6 +389,17 @@ LEFT_FOR_THE_GATE: list[str] = [
 #   iteration that touches it runs these with test_admission and test_staleness
 #   (module docstring); the lie they guard against is StaleIsNotCurrent's, whose
 #   in-process scenarios are above.
+#   test_prerequisites' project-per-case classes 25 (P2.2): the §3 matrix,
+#   48 projects (PrunedRowIsWhatStatusReads); the bracket at arm 30 through
+#   `check` and JUnit (BracketGuardTranscript); the wrapped beam at two designs
+#   (GuardsReachNarrowClaims); `check --only` expanding (PlanIsStable's CLI
+#   test); the words, `doctor` included (PrerequisiteWords); the corpus resolved
+#   with and without the rule (ResolveIsUnchangedWithoutNeeds); the cad mesh
+#   guards (trimesh), the bracket header, JUnit's skip and `selftest --only`.
+#   The rule they hold is the one FAST runs in process; a change to the sweep,
+#   the resolver or `cli._swept` runs test_prerequisites whole. And
+#   test_packs.ControlsAreIsolated 6: every bundled edge's isolation and the
+#   planted pairs, which `pack validate` also checks.
 #   test_vocabulary.ReadyMeansEveryRequiredClaimChecked ~25: V15 through the
 #   commands — what `check`, `status`, their JSON, JUnit and the page say about
 #   *ready* on seven bracket copies; `ReadyIsThePredicate` holds the predicate

@@ -11,7 +11,7 @@ two gates cannot share an id — verdicts, claim coverage and `--only` all key o
 Packs own the domain namespace; a project owns its own.
 
 **A gate lists every vocabulary it bears on; a CLAIM carries the narrowest
-vocabulary that describes what it asserts.** `beam.deflection` below lists
+vocabulary that describes what it asserts.** `bracket.deflection` below lists
 `structural` as well as `stiffness` because a sagging bracket genuinely bears on a
 claim about structural adequacy. The mistake to avoid is on the claim side: tag
 "root stress stays under half of yield" with `structural` and this deflection gate
@@ -19,7 +19,11 @@ covers it, so a deflection failure makes a stress claim read FAIL and the reader
 goes hunting in the wrong place. The claims in this project's ledger are tagged
 narrowly (`stiffness`, `strength`, `bearing`, `bed-fit`) for exactly that reason.
 
-`beam.model_validity` is the deliberate exception — see its docstring.
+`bracket.model_validity` is the deliberate exception — see its docstring. It is
+also the PREREQUISITE of the two gates whose numbers are Euler-Bernoulli's
+(`needs=`): below its slenderness floor they are not run, and a claim bound only
+to them reads Skipped naming it, where it used to read their confident pass. The
+broad binding is kept beside the edge, so no claim it covers today moves.
 
 Every gate declares a negative control, because the registry will not accept one
 without it (rule 5). The fixtures live in `../selftest/bad_configs.py` and each one
@@ -46,6 +50,10 @@ MIN_SLENDERNESS = 5.0         # L/h below which Euler-Bernoulli under-predicts,
     claims=["structural", "stiffness", "deflection"],
     tier=Tier.INSTANT,
     settles="tip deflection",
+    # Prerequisite bracket.model_validity: F*L^3/(3*E*I) is Euler-Bernoulli's, which the guard says
+    # stops applying below L/h 5. Isolated: its control, quarter_thickness,
+    # quadruples L/h (the guard passes it).
+    needs=["bracket.model_validity"],
     negative_control=NegativeControl(
         fixture="selftest/bad_configs.py:quarter_thickness",
         note="same bracket at 1/4 thickness; deflection goes as 1/t^3 so this is ~64x "
@@ -76,6 +84,9 @@ def deflection(ctx: GateContext) -> Verdict:
     claims=["structural", "strength", "bending-stress"],
     tier=Tier.INSTANT,
     settles="bending stress",
+    # Prerequisite bracket.model_validity: the root-stress arithmetic is the same beam theory.
+    # Isolated: its control, overloaded, leaves the geometry untouched.
+    needs=["bracket.model_validity"],
     negative_control=NegativeControl(
         fixture="selftest/bad_configs.py:overloaded",
         note="same bracket at 20x load; stress is linear in load so this lands far "
@@ -108,6 +119,8 @@ def bending_stress(ctx: GateContext) -> Verdict:
     claims=["structural", "fastener", "bearing"],
     tier=Tier.INSTANT,
     settles="bearing stress",
+    # No prerequisite: bearing stress is F/(d*t*n), which does not depend on the
+    # beam model. C3 (tagged `bearing`) is covered by this gate alone.
     negative_control=NegativeControl(
         fixture="selftest/bad_configs.py:thin_bearing",
         note="one bolt in a thin plate: bearing area collapses while the beam itself "

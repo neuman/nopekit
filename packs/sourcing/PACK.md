@@ -154,6 +154,16 @@ fires in one repository and passes in another. No fixture hardcodes a magnitude
 either; each reads the limit it has to beat out of the baseline the gate reads it
 from. Run them: `atompipe gate selftest sourcing`.
 
+### Prerequisites
+
+`bom.complete` is the prerequisite (`needs`) of `bom.cost`, `bom.availability`,
+`bom.moq`, `bom.process_rules` and `bom.single_source`: an unpriced or unorderable
+line, or a spares fraction outside [0, 1], makes their arithmetic over the BOM a work of
+fiction. Below it failing they are not run, and a claim tagged only `moq`,
+`single-source`, `process-rules` or `lead-time` reads Skipped, `prerequisite failed:
+bom.complete`. `bom.currency` needs nothing: its own control fails `bom.complete` (one
+line not orderable), which would pre-empt it.
+
 ## 4b. The view, and the rows locators land on
 
 | View | Kind | Payload | Addressed by |

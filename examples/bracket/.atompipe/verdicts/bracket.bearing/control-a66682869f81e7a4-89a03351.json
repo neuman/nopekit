@@ -2,12 +2,12 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.bearing",
-  "rho": "d880bb4cdf549f15e506b07c322c1a6589416346951a7ccd51bdd30136e18739",
-  "static": "d263c800f7a00e17b6f7607f7f58200d418c01ce9c9cfbb2411e81cf879b219a",
+  "rho": "a66682869f81e7a4af65df1641cda9481bb6a5654cfa6bc659cf0266537be355",
+  "static": "2e57a49343ee64aa9dcdfc525bfb970273979dd8c5d854f083c4e2c42905ecbb",
   "static_parts": {
-    "spine": "23d6e7d1a9fc55da80e5d75e564b899ab362e95065aa3de7f84af75e77f2dcaf",
+    "spine": "70502ab6510517c25da9f698587128e4cc83d5820fe1f7003bdb940f995e8d62",
     "code": {
-      "digest": "89dbe7ad367bba659945b1733eeaee11c7f6baf1e42098bc9b962b9050e461d0",
+      "digest": "9d3567074829302f66938b15753722f3eca685ba93dc721b1b5a9abeb912010a",
       "files": [
         "gates/structural.py"
       ]
@@ -79,5 +79,5 @@
   "measured": 26.667,
   "limit": 15.0,
   "units": "MPa",
-  "digest": "4e9d35816cdf656011b0dd3cbcc4d9e6a8ffa574f378f189280ab6ba4e60478c"
+  "digest": "9c326c00a5561bc93780a90f5e6305d3462d0063a20f31f9763abbaa5467461c"
 }

@@ -27,9 +27,11 @@ Three rules are mechanical here, not advisory:
    measure the design, it exploded. :func:`run_gate` catches ``Exception`` and
    returns a verdict with ``error`` set and a trimmed traceback in ``detail``,
    kept separate from ``passed=False`` all the way into the ledger. The two read
-   differently downstream — a missing tool resolves its claim to BLOCKED, a crash
-   to FAIL, because a crash is the louder problem — and the report must be able
-   to say "this gate could not run" instead of "your design is wrong".
+   differently downstream — both leave the claim Skipped, and the crash louder:
+   its reason leads ``errored:``, it takes Failing's tone and is counted apart
+   (invariant 2) — and the report must be able to say "this gate could not run"
+   instead of "your design is wrong". (Until P2.1 a crash read FAIL: loud only by
+   the accident of the status it borrowed, and it blamed the design.)
 
    ``SystemExit`` is caught alongside it even though it is not an ``Exception``.
    A gate body that reached ``sys.exit()`` used to unwind past the handler and
@@ -77,6 +79,32 @@ And a fifth, because a verdict is only as current as what it read:
    view is read-only on EVERY path — a test, a pack's own ``__main__``, a
    fixture's nested call — not only inside ``check``.
 
+And a sixth, because a validity guard that guards nothing is a logger one level up:
+
+6. **A prerequisite that is not established is never a pass downstream.** A gate
+   may name the gates it ``needs`` (exact ids): a validity guard before the
+   analyses it guards. :meth:`Registry.register` refuses a malformed need, a
+   ``needs`` cycle (named ``a -> b -> a``, with each member's pack) and a
+   prerequisite in a costlier tier than its dependent, the way a build system
+   refuses them; :func:`plan` runs a gate's prerequisites before it (DFS
+   postorder, registration order when nothing needs anything) and expands
+   ``--only`` to them. Under a prerequisite that failed, errored, skipped, is
+   unqualified or is not registered, :func:`run_all` never calls the
+   dependent's function or its control: it reads Skipped — :func:`blocked`, the
+   one producer of ``prerequisite failed: <root>`` / ``prerequisite not
+   established: <root> (<why>)`` — unless a reading of the dependent's own
+   stands that no run of the prerequisite changes (its tool missing here, its
+   own crash, its own refusal). Under one invalidated or unrun it runs, and its
+   verdict is marked not current. The decision is :func:`prerequisite_root`'s
+   alone, and the resolver applies the same function
+   (``verdicts.apply_prerequisites``). What slipped through before it (S-51): a
+   claim tagged only ``deflection`` read Checked on a beam whose guard reported
+   Euler-Bernoulli omitting 32% of the deflection — the guard was bound to the
+   broad tags, the claim to a narrow one, and nothing joined the two. And the
+   registry's "cheapest and most fundamental first" order was prose that four
+   of seven packs broke (S-52): ``_gate_files`` loads alphabetically, so beam's
+   guard ran last.
+
 The gate function itself stays an ordinary function: :func:`gate` registers it
 and returns it **unchanged**, so it is directly callable and directly testable
 without the registry in the way.
@@ -105,10 +133,10 @@ import sys
 import time
 import traceback
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, NamedTuple
 
 from . import modelio
-from .models import GateSpec, Ledger, NegativeControl, Tier, Verdict
+from .models import GateSpec, Ledger, NegativeControl, PrerequisiteKind, Tier, Verdict
 from .util import AtompipeError, ensure_dir, rel, short_hash
 from .verdicts import (GateTrace, ParamTrace, SweepMemo, memo_entries, replay, sweep_memo,
                        traced_context, tracing)
@@ -131,6 +159,16 @@ __all__ = [
     "load_project_gates",
     "describe",
     "registry_summary",
+    "plan",
+    "Reading",
+    "Unmet",
+    "prerequisite_root",
+    "blocked",
+    "mark_reason",
+    "PREREQUISITE_FAILED",
+    "PREREQUISITE_NOT_ESTABLISHED",
+    "NEGATIVE_KINDS",
+    "NOT_CURRENT_KINDS",
 ]
 
 
@@ -150,6 +188,60 @@ SCOPE_SEP = "."
 #: spellings nobody measured. Named residual: Windows also refuses ``<>"|?*`` in a
 #: file name; none is refused here, and none is in the corpus.
 _ID_FORBIDDEN = ("/", "\\", "..", ":")
+
+#: What a ``needs`` entry may not contain beyond a gate id's own refusals: the
+#: fnmatch metacharacters. A prerequisite names exactly one gate (P2.2-D1). A
+#: glob, like a tag, binds a SET that changes when a pack is installed — the
+#: graph, and whether it has a cycle, would move under a project nobody edited.
+#: Measured before the refusal landed: zero hits over the bundled packs and the
+#: bracket, which declared no ``needs`` at all (R-10: only the new field can
+#: produce it). *Rejected:* accepting globs and expanding them at registration
+#: (frozen at load order — a later pack is never reached); at every sweep (the
+#: cycle check would have to run there, after the import that wrote it).
+_NEED_FORBIDDEN = ("*", "?", "[")
+
+#: The two leads of a prerequisite skip's ``skip_reason`` (P2.2-D6, D11): the
+#: brief's ``prerequisite failed: <root>`` ONLY when the root failed — it tells a
+#: reader to fix the design the root judged — and ``prerequisite not
+#: established: <root> (<why>)`` for every other kind, which a reader fixes
+#: elsewhere (install the root's tool, fix the root's crash, qualify the root).
+#: Spine text, so rewording either re-keys every verdict cache entry in every
+#: project (``verdicts.SPINE_MODULES``): that is the cost, and the reason these
+#: are constants. The claim channel does not read them: ``report.reason`` words
+#: a prerequisite skip from ``report.HUMAN`` and the verdict's
+#: ``blocked_by``/``blocked_kind``; this text is the gate channel's — the
+#: streamed line, ``check``'s skip digest (which groups by it, so everything one
+#: root blocks lands on one line), JUnit's gate case, ``gate show``.
+#: *Rejected:* ``unknown: prerequisite …`` (phase-2.md's draft; GLOSSARY lists
+#: *unknown* as a Never-say for Skipped); "blocked by" (a Never-say too).
+PREREQUISITE_FAILED = "prerequisite failed"
+PREREQUISITE_NOT_ESTABLISHED = "prerequisite not established"
+
+#: The two not-current marks' stale reasons (P2.2-D7), for the same channels.
+#: "invalidated" and "unrun" are GLOSSARY's words for the ROOT; the dependent's
+#: own read set did not move, and the reason says whose did.
+PREREQUISITE_INVALIDATED = "prerequisite {root} invalidated"
+PREREQUISITE_UNRUN = "prerequisite {root} unrun"
+
+#: The kind word in ``prerequisite not established: <root> (<word>)``, the gate
+#: channel's — the outcome words of GLOSSARY §1 for a crash and a skip, §2's
+#: *unqualified*, and "not registered" (no glossary term: a fact about this
+#: project's registry, not an outcome). The claim channel's are ``report.HUMAN``'s.
+_KIND_WORDS = {
+    PrerequisiteKind.ERRORED: "errored",
+    PrerequisiteKind.SKIPPED: "skipped",
+    PrerequisiteKind.UNQUALIFIED: "unqualified",
+    PrerequisiteKind.NOT_REGISTERED: "not registered",
+}
+
+#: ``PrerequisiteKind``'s two classes, each in rank order (its docstring has why
+#: a crash ranks first). A negative root wins over a not-current one: what can
+#: be judged now is judged.
+NEGATIVE_KINDS: tuple[str, ...] = (PrerequisiteKind.ERRORED, PrerequisiteKind.FAILED,
+                                   PrerequisiteKind.SKIPPED, PrerequisiteKind.UNQUALIFIED,
+                                   PrerequisiteKind.NOT_REGISTERED)
+NOT_CURRENT_KINDS: tuple[str, ...] = (PrerequisiteKind.INVALIDATED, PrerequisiteKind.UNRUN)
+_KIND_RANK = {str(kind): rank for rank, kind in enumerate(NEGATIVE_KINDS + NOT_CURRENT_KINDS)}
 
 #: Where a project's own gates live: ``<root>/gates/*.py``, imported exactly like
 #: a pack's, but with no manifest and no pack name. ``cli.PROJECT_GATES_DIR`` is
@@ -696,7 +788,8 @@ def _own_copy(spec: GateSpec) -> GateSpec:
     that registered with one. The mutable list fields are copied for the same
     reason: ``spec.claims.append("stiffness")`` after the fact silently widens
     what a verdict is allowed to settle, which is the ledger claiming coverage
-    nobody registered.
+    nobody registered. ``needs`` likewise: ``spec.needs.append(…)`` after the
+    audit would add an edge no cycle or tier check ever saw.
 
     It runs on the way OUT as well as on the way in. Copying at registration
     closed the caller's handle and left the registry's own: ``get()`` and
@@ -720,6 +813,7 @@ def _own_copy(spec: GateSpec) -> GateSpec:
         requires_tools=list(spec.requires_tools or []),
         requires_python=list(spec.requires_python or []),
         requires_one_of=list(spec.requires_one_of or []),
+        needs=list(spec.needs or []),
         negative_control=dataclasses.replace(nc) if isinstance(nc, NegativeControl) else nc,
     )
 
@@ -741,14 +835,31 @@ def _control_gap(spec: GateSpec) -> str:
     return ""
 
 
+def _inversion(dependent: str, dependent_spec: GateSpec, need: str,
+               need_spec: GateSpec) -> str:
+    """The refusal of a prerequisite costlier than its dependent."""
+    def at(spec: GateSpec) -> str:
+        return f"tier {int(spec.tier)}, {spec.pack or '(project)'}"
+    return (f"gate {dependent!r} ({at(dependent_spec)}) names {need!r} ({at(need_spec)}) as "
+            f"a prerequisite — a prerequisite costlier than its dependent drags tier "
+            f"{int(need_spec.tier)}'s cost into every tier-{int(dependent_spec.tier)} loop "
+            f"that runs the dependent (rule 10; D-28). Drop the edge, or declare "
+            f"{dependent!r} at tier {int(need_spec.tier)} or above.")
+
+
 class Registry:
     """The gates known to this process, in declaration order.
 
-    Order is part of the contract: a sweep runs gates in the order they
-    registered, which is the order a pack's author wrote them, which is usually
-    cheapest-and-most-fundamental first. Sorting alphabetically would put
-    ``cad.wall_thickness`` before ``cad.watertight`` and report thin walls on a
-    mesh that is not even closed.
+    Order is part of the contract, and it is LISTING order: ``specs()``,
+    ``check --json``'s rows and JUnit's gate cases keep it. RUN order is
+    :func:`plan`'s — each gate's prerequisites (``GateSpec.needs``) before it,
+    and registration order where nothing needs anything. What slipped through
+    while this order was also the run order (S-52): it was prose — "the order a
+    pack's author wrote them, usually cheapest-and-most-fundamental first" — and
+    a pack's modules load alphabetically, so beam's validity guard registered
+    last and ran after every number it was meant to vouch for; four of seven
+    bundled packs broke the promise. The guard-before-analysis order is now an
+    edge, which the registry checks and the sweep obeys.
 
     The registry holds ``(spec, fn)`` pairs. The spec is serialisable and the
     function is not, which is why ``GateSpec.entry`` exists — out-of-process
@@ -808,6 +919,29 @@ class Registry:
         What is stored is a **copy** (:func:`_own_copy`), never the caller's
         object. A check run against a record the caller can rewrite afterwards is
         not a check — see that function for the three-line withdrawal it closes.
+
+        **Prerequisites** (``spec.needs``, P2.2-D2), refused on the new field
+        only, so no spec written before it can trip them (R-10):
+
+        * a need that is not exactly one gate id — empty, holding whitespace,
+          ``/ \\ .. :`` or a glob character — or names the gate itself, or
+          repeats;
+        * a need that **closes a cycle**, found by a DFS from this gate over the
+          registered gates' needs, with this spec in place of any it replaces
+          (``replace=True``, or a re-import that changed its needs). Complete under
+          any load order: every cycle is closed by its last registration, and every
+          registration before that left the graph acyclic. The message names the
+          cycle ``a -> b -> a`` and each member's pack;
+        * a **tier inversion** from either side of the edge: a need costlier than
+          this gate, or this gate costlier than one that already needs it.
+
+        A need on an id not registered yet is allowed: a missing pack must not
+        become a load crash, and load order must not become semantic (Q2.3). It
+        reads "not registered" at the sweep, and ``doctor`` names it.
+        *Rejected:* checking only at sweep time (a cycle would surface at the
+        first ``check``, not at the import that wrote it, and ``pack validate``
+        would pass a cyclic pack); falling back to registration order on a cycle
+        (a dependent would run before its prerequisite).
         """
         if not isinstance(spec, GateSpec):          # a bug in the caller, not the user
             raise TypeError(f"register() needs a GateSpec, got {type(spec).__name__}")
@@ -870,14 +1004,8 @@ class Registry:
             )
 
         existing = self._gates.get(gate_id)
-        if existing is not None and not replace:
+        if existing is not None and not replace and existing[1] is not fn:
             old_spec, old_fn = existing
-            if old_fn is fn:                                   # idempotent re-import
-                fresh = _own_copy(spec)
-                if not (fresh.pack or "").strip() and old_spec.pack:
-                    fresh = dataclasses.replace(fresh, pack=old_spec.pack)
-                self._gates[gate_id] = (fresh, fn)
-                return
             where_old = old_spec.entry or old_spec.pack or getattr(old_fn, "__module__", "?")
             where_new = spec.entry or spec.pack or getattr(fn, "__module__", "?")
             raise AtompipeError(
@@ -887,7 +1015,91 @@ class Registry:
                 f"(ids are pack-prefixed for exactly this reason)."
             )
 
-        self._gates[gate_id] = (_own_copy(spec), fn)
+        fresh = _own_copy(spec)
+        if existing is not None and not replace:              # idempotent re-import
+            old_spec, _old_fn = existing
+            if not (fresh.pack or "").strip() and old_spec.pack:
+                fresh = dataclasses.replace(fresh, pack=old_spec.pack)
+        self._check_needs(gate_id, fresh)
+        self._gates[gate_id] = (fresh, fn)
+
+    # -- prerequisites ----------------------------------------------------- #
+    def _check_needs(self, gate_id: str, spec: GateSpec) -> None:
+        """Refuse ``spec``'s ``needs`` as :meth:`register` says, or return."""
+        seen: set[str] = set()
+        for need in spec.needs or ():
+            if not isinstance(need, str):
+                raise AtompipeError(
+                    f"gate {gate_id!r}: prerequisite {need!r} is a {type(need).__name__}, "
+                    f"not a gate id — write needs=['<pack>.<gate>']")
+            why = ""
+            if not need or any(ch.isspace() for ch in need):
+                why = "is empty or holds whitespace"
+            elif any(part in need for part in _ID_FORBIDDEN):
+                why = "holds '/', '\\', '..' or ':', which no gate id can"
+            elif any(ch in need for ch in _NEED_FORBIDDEN):
+                why = ("is a pattern — a prerequisite names exactly one gate, because a "
+                       "set bound by a glob or a tag changes when a pack is installed, "
+                       "and the graph with it")
+            elif need == gate_id:
+                why = "names the gate itself — a gate cannot be established before itself"
+            elif need in seen:
+                why = "is named twice"
+            if why:
+                raise AtompipeError(
+                    f"gate {gate_id!r}: prerequisite {need!r} {why}. Write each "
+                    f"prerequisite's exact id once: needs=['beam.model_validity']")
+            seen.add(need)
+
+        cycle = self._cycle_through(gate_id, list(spec.needs or ()))
+        if cycle is not None:
+            packs_of = {gid: (spec.pack if gid == gate_id else
+                              (self._gates[gid][0].pack if gid in self._gates else ""))
+                        for gid in cycle}
+            who = ", ".join(f"{gid}: {packs_of[gid] or '(project)'}"
+                            for gid in dict.fromkeys(cycle))
+            raise AtompipeError(
+                f"gate {gate_id!r}: its prerequisites close a cycle, "
+                f"{' -> '.join(cycle)} ({who}) — no gate in it could ever be "
+                f"established before the others. Remove one of these edges.")
+
+        mine = int(spec.tier)
+        for need in spec.needs or ():
+            found = self._gates.get(need)
+            if found is not None and int(found[0].tier) > mine:
+                raise AtompipeError(_inversion(gate_id, spec, need, found[0]))
+        for other, (other_spec, _fn) in self._gates.items():
+            if other != gate_id and gate_id in (other_spec.needs or ()) \
+                    and mine > int(other_spec.tier):
+                raise AtompipeError(_inversion(other, other_spec, gate_id, spec))
+
+    def _cycle_through(self, gate_id: str, needs: list[str]) -> list[str] | None:
+        """The cycle ``needs`` would close through ``gate_id`` — ``[gate_id, …,
+        gate_id]`` — or ``None``: a DFS over the registered gates' needs with
+        ``gate_id``'s own replaced by ``needs`` (``replace=True`` and a re-import
+        substitute the spec; a stale copy of it in the graph would find a cycle
+        that no longer exists, or miss one that does)."""
+        graph = {gid: list(stored.needs or ()) for gid, (stored, _fn) in self._gates.items()}
+        graph[gate_id] = list(needs)
+        stack: list[tuple[str, list[str]]] = [(need, [gate_id, need])
+                                              for need in reversed(needs)]
+        seen: set[str] = set()
+        while stack:
+            node, path = stack.pop()
+            if node == gate_id:
+                return path
+            if node in seen or node not in graph:
+                continue
+            seen.add(node)
+            stack.extend((nxt, path + [nxt]) for nxt in reversed(graph[node]))
+        return None
+
+    def needed_by(self, gate_id: str) -> list[str]:
+        """The gates whose ``needs`` name ``gate_id``, in registration order —
+        the reverse edges, for ``gate show``'s "prerequisite of" and ``gate list
+        --json``'s ``needed_by``."""
+        return [gid for gid, (spec, _fn) in self._gates.items()
+                if gate_id in (spec.needs or ())]
 
     def unregister(self, gate_id: str) -> bool:
         """Drop a gate. Returns whether it was there. Mostly for tests."""
@@ -1068,6 +1280,7 @@ def gate(
     entry: str = "",
     registry: Registry | None = None,
     requires_one_of: Iterable[str] = (),
+    needs: Iterable[str] = (),
 ) -> Callable[[Callable[[GateContext], Any]], Callable[[GateContext], Any]]:
     """Declare a gate: build its :class:`~atompipe.models.GateSpec` and register it.
 
@@ -1110,6 +1323,10 @@ def gate(
     availability did not decide is a gate skipping its own input (see
     ``GateSpec.requires_one_of``).
 
+    ``needs`` names this gate's **prerequisites** — exact ids of gates that must
+    be established before its verdict counts (``GateSpec.needs``): a validity
+    guard before the analyses it guards. The last keyword, like the field.
+
     ``fn.gate_spec`` is this declaration, not the record the registry holds —
     the registry keeps its own copy.
 
@@ -1124,6 +1341,12 @@ def gate(
             f"gate {id!r}: negative_control must be a NegativeControl instance, "
             f"got {type(negative_control).__name__}"
         )
+    if isinstance(needs, str):
+        # list("beam.model_validity") is seventeen one-letter "prerequisites",
+        # each a legal forward reference: refused here, where the author looks.
+        raise AtompipeError(
+            f"gate {id!r}: needs={needs!r} is a string — it takes a list of gate ids: "
+            f"needs=[{needs!r}]")
 
     def decorate(fn: Callable[[GateContext], Any]) -> Callable[[GateContext], Any]:
         doc = (fn.__doc__ or "").strip()
@@ -1145,6 +1368,7 @@ def gate(
             settles=settles,
             entry=entry or f"{getattr(fn, '__module__', '?')}:{getattr(fn, '__qualname__', getattr(fn, '__name__', '?'))}",
             requires_one_of=[str(r) for r in (requires_one_of or ())],
+            needs=list(needs or ()),
         )
         # Resolved at DECORATION time, not when `gate()` was called: the
         # ambient registry is whatever loader is importing this module right now.
@@ -1371,6 +1595,14 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
     ``error="not admitted: …"`` (or the error ``Verdict.__post_init__`` writes
     for a mark it set) is a crash like any other.
 
+    ``blocked_by`` and ``blocked_kind`` are cleared on the same terms (P2.2-D9):
+    the prerequisite mark is the spine's, set only by :func:`blocked`. A gate
+    that could set it could make its own skip read as a prerequisite's (the
+    claim would read the root's fault), or — with ``blocked_kind="errored"`` —
+    make itself loud or name a root it never had. A gate that returned the
+    mark still reads a skip: ``Verdict.__post_init__`` wrote the flags when it
+    built the verdict, and the flags are what is kept.
+
     ``passed`` is forced False whenever the gate skipped or errored. ``Verdict.ok``
     already encodes that, but ``passed`` is what lands in the JSON a human reads,
     and "passed: true, error: ..." is a sentence nobody should have to interpret.
@@ -1405,6 +1637,8 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
         cpu_s=round(max(0.0, float(cpu)), 6),
         rho="",
         unqualified="",
+        blocked_by=[],
+        blocked_kind="",
         passed=passed,
         skipped=bool(verdict.skipped),
         measured=_plain_number(verdict.measured),
@@ -1780,6 +2014,218 @@ def _replay_reads(source: Any, trace: GateTrace) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# prerequisites: the plan, and the one rule
+# --------------------------------------------------------------------------- #
+def plan(registry: Registry, selected: Iterable[GateSpec | str]) -> list[GateSpec]:
+    """``selected`` and every registered prerequisite it reaches, in run order.
+
+    **DFS postorder** (P2.2-D3): gates are visited in registration order, each
+    gate's needs in their declared order, and a gate is placed after all of
+    its prerequisites. With no ``needs`` anywhere this is exactly registration
+    order. On the beam pack it is input_sanity, model_validity, deflection, …
+    (S-52). A need that is not registered is skipped here — the rule reads it
+    as "not registered" (:func:`prerequisite_root`).
+
+    **The selection expands** to its prerequisite closure (D15): ``check --only
+    beam.deflection`` runs the guard and the guard's guard too. Naming a gate
+    opts into its cost, and its prerequisites cost no more (the registry
+    refuses an inversion). *Rejected:* no expansion — the sweep would need
+    ``resolve``'s reading of an unselected prerequisite (a second path), and
+    ``check --only D`` just after an edit would read D stale until a full check.
+
+    Acyclicity and tier order are checked again here, and a violation raises
+    ``AtompipeError``: a spec can reach the registry's private dict past
+    :meth:`Registry.register` (defence in depth, the reasoning of
+    :func:`_control_gap`), and a sweep must never run a dependent before a
+    prerequisite or loop. *Rejected:* Kahn's sort with ties to the lowest index
+    (unrelated gates jump ahead of a guard: the bracket's ``bearing`` would run
+    first); alphabetical order (S-52's own cause).
+    """
+    specs = {spec.id: spec for spec in registry.specs()}
+    wanted: set[str] = set()
+    stack = [item.id if isinstance(item, GateSpec) else str(item) for item in selected]
+    while stack:
+        gid = stack.pop()
+        if gid in wanted or gid not in specs:
+            continue
+        wanted.add(gid)
+        stack.extend(specs[gid].needs or ())
+
+    out: list[GateSpec] = []
+    state: dict[str, str] = {}
+
+    def visit(gid: str, path: list[str]) -> None:
+        if state.get(gid) == "done":
+            return
+        if state.get(gid) == "open":
+            loop = path[path.index(gid):]
+            raise AtompipeError(
+                f"the prerequisites form a cycle, {' -> '.join(loop)} — the registry "
+                f"refuses one at registration, so a spec reached it some other way; "
+                f"no gate in it can run before the others")
+        state[gid] = "open"
+        spec = specs[gid]
+        for need in spec.needs or ():
+            found = specs.get(need)
+            if found is None:
+                continue
+            if int(found.tier) > int(spec.tier):
+                raise AtompipeError(_inversion(gid, spec, need, found))
+            visit(need, path + [need])
+        state[gid] = "done"
+        out.append(spec)
+
+    for gid in registry.ids():
+        if gid in wanted:
+            visit(gid, [gid])
+    return out
+
+
+class Reading(NamedTuple):
+    """What the rule knows of one gate: its effective ``verdict`` (``None`` —
+    unrun), whether it is ``current`` (a pass whose inputs have not moved), and,
+    for a reading marked not current through ITS prerequisite, that ``root``,
+    its ``root_kind`` and ``why`` — so a dependent of a dependent names the root,
+    not the gate in between. ``why`` is a not-current reading's own stale reason."""
+
+    verdict: Verdict | None
+    current: bool = True
+    root: str = ""
+    root_kind: str = ""
+    why: str = ""
+
+
+class Unmet(NamedTuple):
+    """A gate's prerequisites are not established: ``root`` — the one its
+    message names, found transitively — and its ``kind`` (a
+    ``PrerequisiteKind``), ``roots`` — every root of the winning class, in rank
+    order, which a pruned verdict carries as ``blocked_by`` — and ``why``, a
+    not-current root's own stale reason."""
+
+    root: str
+    kind: str
+    roots: tuple = ()
+    why: str = ""
+
+    @property
+    def negative(self) -> bool:
+        """Not run, Skipped (D6) — as against kept and marked Stale (D7)."""
+        return str(self.kind) in NEGATIVE_KINDS
+
+
+def prerequisite_root(spec: GateSpec, readings: dict[str, Reading],
+                      registry: Registry) -> Unmet | None:
+    """Whether ``spec``'s prerequisites are established — the ONE decision, which
+    the sweep (:func:`run_all`) and the resolver (``verdicts.apply_prerequisites``)
+    both call. Pure: it reads ``readings`` (``{gate id: Reading}``) and which ids
+    ``registry`` holds, and nothing else. ``None`` when every need is established.
+
+    A prerequisite is **established** when its effective verdict is a pass and
+    current (P2.2-D5). Otherwise, per need, in ``needs`` order:
+
+    * not registered -> ``not-registered``;
+    * a verdict the rule itself made (``blocked_by`` set) -> its first root and
+      its kind, transitively: a chain P -> Q -> R names P on R;
+    * refused at its version (``unqualified``) -> ``unqualified``; a crash ->
+      ``errored``; a skip (its tool missing, or it skipped itself) ->
+      ``skipped``; a fail, current or not (D-08: an invalidated fail is still a
+      fail) -> ``failed``;
+    * a pass marked through its own prerequisite -> that root and kind; a pass
+      not current -> ``invalidated``; no verdict -> ``unrun``.
+
+    The negative class wins over the not-current one; within a class
+    ``PrerequisiteKind``'s rank order, then ``needs`` order. *Rejected:* passes
+    only, ignoring currency (a dependent's pass would count downstream of a
+    guard whose own inputs moved, against invariant 10); treating every unmet
+    need alike (a guard invalidated by an edit would turn every claim it guards
+    Skipped until the next check — see ``verdicts.apply_prerequisites``, D7).
+    """
+    negative: list[tuple[int, int, str, tuple]] = []
+    stale: list[tuple[int, int, str, str, str]] = []
+    for index, need in enumerate(spec.needs or ()):
+        if need not in registry:
+            kind = PrerequisiteKind.NOT_REGISTERED
+            negative.append((_KIND_RANK[kind], index, kind, (need,)))
+            continue
+        reading = readings.get(need)
+        verdict = reading.verdict if reading is not None else None
+        if verdict is None:
+            stale.append((_KIND_RANK[PrerequisiteKind.UNRUN], index, PrerequisiteKind.UNRUN,
+                          need, ""))
+            continue
+        if verdict.blocked_by:
+            kind = (verdict.blocked_kind if str(verdict.blocked_kind) in NEGATIVE_KINDS
+                    else PrerequisiteKind.SKIPPED)       # an unknown kind: the quiet one
+            negative.append((_KIND_RANK[str(kind)], index, kind, tuple(verdict.blocked_by)))
+            continue
+        if getattr(verdict, "unqualified", ""):
+            kind = PrerequisiteKind.UNQUALIFIED
+        else:
+            kind = {"error": PrerequisiteKind.ERRORED, "skipped": PrerequisiteKind.SKIPPED,
+                    "fail": PrerequisiteKind.FAILED}.get(verdict.outcome)
+        if kind is not None:
+            negative.append((_KIND_RANK[kind], index, kind, (need,)))
+        elif reading.root:
+            stale.append((_KIND_RANK[str(reading.root_kind)], index, reading.root_kind,
+                          reading.root, reading.why))
+        elif not reading.current:
+            stale.append((_KIND_RANK[PrerequisiteKind.INVALIDATED], index,
+                          PrerequisiteKind.INVALIDATED, need, reading.why))
+    if negative:
+        negative.sort(key=lambda item: (item[0], item[1]))
+        roots = tuple(dict.fromkeys(root for item in negative for root in item[3]))
+        first = negative[0]
+        return Unmet(first[3][0], str(first[2]), roots)
+    if stale:
+        stale.sort(key=lambda item: (item[0], item[1]))
+        first = stale[0]
+        return Unmet(first[3], str(first[2]), tuple(dict.fromkeys(i[3] for i in stale)),
+                     first[4])
+    return None
+
+
+def blocked(spec: GateSpec, unmet: Unmet) -> Verdict:
+    """The verdict of a gate not run because a prerequisite is not established —
+    the ONE producer of a prerequisite skip (P2.2-D6, D9): ``skipped``, not
+    passed, ``blocked_by`` its roots and ``blocked_kind`` the first's kind, a
+    ``skip_reason`` of ``prerequisite failed: <root>`` when that root failed and
+    ``prerequisite not established: <root> (<why>)`` otherwise. No cost and no
+    rho: nothing ran, and it is never cached, remembered or logged (the sweep's
+    ``_pruned_row`` writes nothing)."""
+    if not unmet.negative:
+        raise ValueError(f"{spec.id}: a not-current prerequisite ({unmet.kind}) keeps its "
+                         f"dependent's verdict; it is marked, never replaced")
+    if str(unmet.kind) == PrerequisiteKind.FAILED:
+        reason = f"{PREREQUISITE_FAILED}: {unmet.root}"
+    else:
+        reason = (f"{PREREQUISITE_NOT_ESTABLISHED}: {unmet.root} "
+                  f"({_KIND_WORDS[PrerequisiteKind(str(unmet.kind))]})")
+    return Verdict(gate=spec.id, claims=list(spec.claims or ()), tier=Tier(int(spec.tier)),
+                   pack=spec.pack or "", passed=False, skipped=True, skip_reason=reason,
+                   blocked_by=list(unmet.roots), blocked_kind=str(unmet.kind))
+
+
+def mark_reason(unmet: Unmet) -> str:
+    """The stale reason a dependent carries under a not-current prerequisite
+    (P2.2-D7): ``prerequisite <root> invalidated: <what moved>`` or
+    ``prerequisite <root> unrun``."""
+    if str(unmet.kind) == PrerequisiteKind.UNRUN:
+        return PREREQUISITE_UNRUN.format(root=unmet.root)
+    text = PREREQUISITE_INVALIDATED.format(root=unmet.root)
+    return f"{text}: {unmet.why}" if unmet.why else text
+
+
+def _pruned_default(spec: GateSpec, unmet: Unmet) -> Verdict:
+    """:func:`run_all`'s pruned verdict with no hook: the dependent's own missing
+    tool stands (no run of the prerequisite changes it), else :func:`blocked`."""
+    ok, reason = availability(spec)
+    if not ok:
+        return _stamp(Verdict(gate=spec.id, passed=False, skipped=True, skip_reason=reason),
+                      spec, 0.0)
+    return blocked(spec, unmet)
+
+
+# --------------------------------------------------------------------------- #
 # running a sweep
 # --------------------------------------------------------------------------- #
 def _selected(registry: Registry, max_tier: int, only: str | Iterable[str] | None) -> list[GateSpec]:
@@ -1846,8 +2292,13 @@ def run_all(
     before: Callable[[GateSpec, Callable[[GateContext], Any]], Verdict | None] | None = None,
     after: Callable[[GateSpec, Callable[[GateContext], Any], Verdict, GateTrace], Any]
     | None = None,
+    current: Callable[[str], bool] | None = None,
+    pruned: Callable[[GateSpec, Callable[[GateContext], Any], Unmet], Verdict] | None = None,
+    marked: Callable[[GateSpec, Verdict, Unmet], Any] | None = None,
 ) -> list[Verdict]:
-    """Run every selected gate in declaration order and return their verdicts.
+    """Run every selected gate and its prerequisites, in :func:`plan`'s order, and
+    return their verdicts in that order — the run order, which is registration
+    order when nothing ``needs`` anything.
 
     ``max_tier`` defaults to 0 because the default sweep is the inner loop, and
     the inner loop must stay in seconds (rule 10). A caller who wants the
@@ -1896,13 +2347,25 @@ def run_all(
       nothing ran, so there is no trace. It runs before ``on_verdict``, which
       streams the final verdict.
 
+    **Prerequisites** (rule 6): before a gate with ``needs`` runs,
+    :func:`prerequisite_root` reads the verdicts this loop has produced so far
+    (each prerequisite ran first: :func:`plan`). Under a NEGATIVE root —
+    failed, errored, skipped, unqualified, not registered — neither ``before``,
+    ``fn`` nor ``after`` is called, nor the gate's control: the verdict is
+    ``pruned(spec, fn, unmet)``'s, by default the gate's own availability skip
+    if its tool is missing, else :func:`blocked`. Under a NOT-CURRENT root
+    (invalidated, unrun) the gate runs as usual, and ``marked(spec, verdict,
+    unmet)`` is told, so the caller can say the verdict is not current.
+    ``current(gate_id)`` says whether a prerequisite's verdict is current; with
+    no hook, every verdict this loop produced is.
+
     ``ctx.memo`` — the file memo behind :meth:`GateContext.load_file` — is one
     ``verdicts.SweepMemo`` for the whole sweep (fresh when the caller brought
     none; a plain dict the caller brought is wrapped, its entries shared), the
     same handle in every gate's view, and never left on the caller's context: a
     memo that outlived its sweep would serve one sweep's bytes to the next.
     """
-    selected = _selected(registry, max_tier, only)
+    selected = plan(registry, _selected(registry, max_tier, only))
     if int(ctx.tier) != int(max_tier):
         ctx = dataclasses.replace(ctx, tier=int(max_tier))
     ctx = dataclasses.replace(ctx, memo=sweep_memo(ctx.memo))
@@ -1910,13 +2373,22 @@ def run_all(
         ensure_dir(ctx.out_dir)      # once, up front: gates cite files in it
 
     out: list[Verdict] = []
+    readings: dict[str, Reading] = {}
     for spec in selected:
         entry = registry.get(spec.id)
         if entry is None:            # concurrent unregister; nothing else can do this
             raise AtompipeError(f"gate {spec.id!r} disappeared from the registry mid-sweep")
         live, fn = entry
         gap = _control_gap(live)
-        if gap:
+        unmet = prerequisite_root(live, readings, registry) if live.needs else None
+        if not gap and unmet is not None and unmet.negative:
+            # Not run: no before, no fn, no after, no control (D6).
+            verdict = (pruned(live, fn, unmet) if pruned is not None
+                       else _pruned_default(live, unmet))
+            if not isinstance(verdict, Verdict):
+                raise TypeError(f"run_all's pruned() returned a {type(verdict).__name__} "
+                                f"for {live.id!r}; it returns a Verdict")
+        elif gap:
             verdict = _stamp(
                 Verdict(
                     gate=live.id,
@@ -1941,6 +2413,13 @@ def run_all(
                     replaced = after(live, fn, verdict, trace)
                     if isinstance(replaced, Verdict):
                         verdict = replaced
+        if unmet is not None and not unmet.negative:
+            readings[live.id] = Reading(verdict, False, unmet.root, str(unmet.kind),
+                                        unmet.why)
+            if marked is not None:
+                marked(live, verdict, unmet)
+        else:
+            readings[live.id] = Reading(verdict, bool(current(live.id)) if current else True)
         out.append(verdict)
         if on_verdict is not None:
             on_verdict(verdict)
@@ -2569,12 +3048,17 @@ def describe(spec: GateSpec) -> str:
         bits.append(f"settles {spec.settles}")
     if spec.claims:
         bits.append("claims " + ",".join(spec.claims))
-    needs = list(spec.requires_tools or []) + list(spec.requires_python or [])
+    if spec.needs:
+        # The edge's word (P2.2-D11). Tools say "requires", availability's own
+        # lead: until P2.2 they said "needs", which was then about to mean two
+        # things on one line — and *need* (noun) is the Gap's Never-say.
+        bits.append("prerequisites " + ",".join(spec.needs))
+    tools = list(spec.requires_tools or []) + list(spec.requires_python or [])
     if spec.requires_one_of:
-        needs.append("one of " + "|".join(spec.requires_one_of))
-    if needs:
+        tools.append("one of " + "|".join(spec.requires_one_of))
+    if tools:
         ok, reason = availability(spec)
-        bits.append(("needs " + ",".join(needs)) if ok else f"BLOCKED: {reason}")
+        bits.append(("requires " + ",".join(tools)) if ok else f"BLOCKED: {reason}")
     nc = spec.negative_control
     bits.append(f"control {nc.fixture}" if nc and nc.fixture else "NO CONTROL")
     return _one_line("  ".join(bits), 240)
@@ -2613,6 +3097,11 @@ def registry_summary(registry: Registry) -> dict[str, Any]:
     return {
         "gates": len(specs),
         "ids": [s.id for s in specs],
+        # A prerequisite that is not registered reads "not registered" at every
+        # sweep and Skips its dependent (P2.2-D14): `doctor` names each one.
+        "unregistered_prerequisites": [{"gate": s.id, "need": need}
+                                       for s in specs for need in (s.needs or ())
+                                       if need not in registry],
         "by_tier": by_tier,
         "by_pack": by_pack,
         "max_tier": max((int(s.tier) for s in specs), default=0),

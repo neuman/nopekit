@@ -167,6 +167,25 @@ says it is in the wrong unit. The other gates SKIP on a signed load, resolving
 their claims BLOCKED; this one puts a red line in the report so six quiet blanks
 are not the only signal.
 
+### Prerequisites
+
+`beam.model_validity` is the prerequisite (`needs`) of `beam.deflection`,
+`beam.deflection_ratio`, `beam.bending_stress` and `beam.buckling`: each of those numbers
+is Euler-Bernoulli's, and every way the guard fails — L/h under its floor, or the shear
+share the theory omits past its limit — is a beam where they do not apply.
+`beam.input_sanity` is the prerequisite of `beam.model_validity`, `beam.shear_stress` and
+`beam.bearing`: a load with the wrong sign or a length in metres makes their arithmetic
+meaningless. Below a failed guard the dependents are not run, and a claim bound only to
+one reads Skipped, `prerequisite failed: beam.model_validity` — a claim tagged only
+`deflection` used to read Checked on a beam whose guard reported 32% of the deflection
+omitted. The guard keeps its broad tags too, so a claim tagged `stiffness` still reads
+Failing through it.
+
+No edge from `beam.shear_stress` to the slenderness guard: its own control,
+`shear_governed` (L/h 6.0), fails the guard, which would pre-empt the control; and
+transverse shear does not rest on the no-shear assumption. None from `beam.bearing`:
+bearing stress is F/(d·t·n), whatever the beam model.
+
 ## 3b. Views
 
 | View | Kind | Payload | Addressed by |

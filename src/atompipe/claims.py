@@ -66,6 +66,7 @@ from .models import (
     Ledger,
     Need,
     NeedStatus,
+    PrerequisiteKind,
     StrEnum,
     Verdict,
     slugify,
@@ -199,14 +200,29 @@ class ClaimCause(StrEnum):
     it was "UNCLAIMED: no gate can settle it".
 
     Here, not in `models`: `models` is a spine module (`verdicts.SPINE_MODULES`),
-    so a cause added later (P2.2's prerequisite) would re-key every verdict
-    cache entry in every project. The words for each are `report.HUMAN`'s.
+    so a cause added here would re-key every verdict cache entry in every
+    project, as P2.2's two did not. The words for each are `report.HUMAN`'s.
+
+    `prerequisite` (P2.2-D10): Skipped because a prerequisite of the claim's
+    evaluator is not established — the evaluator was not run. Its own cause,
+    because "skipped" had come to mean "install a tool" everywhere (S-54), and
+    installing changes nothing when a guard FAILED. `prerequisite-errored`:
+    the same, where the root CRASHED — invariant 2's louder Skipped, reached
+    through a prerequisite (`Composed.errored`). What slipped through the
+    design: a guard is bound to its own claims, so its crash reached a claim
+    bound only to the dependent as the dependent's skip — the missing tool's
+    tone, its count and a JUnit `<failure>`. *Rejected:* a lead word of its own
+    for a prerequisite skip ("blocked" and "unknown" are both GLOSSARY
+    Never-says for Skipped); splitting the count by cause (`N skipped (k
+    prerequisite)`: a number no decision reads; the crash is already split out).
     """
 
     FAILED = "failed"
     PHYSICAL_FAIL = "physical-fail"
     ERRORED = "errored"
+    PREREQUISITE_ERRORED = "prerequisite-errored"
     SKIPPED = "skipped"
+    PREREQUISITE = "prerequisite"
     UNQUALIFIED = "unqualified"
     NO_EVALUATOR = "no-evaluator"
     NO_OWNER = "no-owner"
@@ -251,9 +267,10 @@ class Composed:
 
     @property
     def errored(self) -> bool:
-        """Skipped by a crash — invariant 2's louder Skipped. Never true for an
-        unqualified evaluator, which reads Gap (P2.0 D-8)."""
-        return self.cause is ClaimCause.ERRORED
+        """Skipped by a crash — invariant 2's louder Skipped: the evaluator's
+        own, or its prerequisite's (P2.2). Never true for an unqualified
+        evaluator, which reads Gap (P2.0 D-8)."""
+        return self.cause in (ClaimCause.ERRORED, ClaimCause.PREREQUISITE_ERRORED)
 
 
 #: Each status's machine token: GLOSSARY §8's proposed rename-pass values, so the
@@ -380,7 +397,11 @@ def compose(
        (`fail`), whatever the kind and whether or not it is stale (D-08; R-3: a
        result never loses its power to fail).
     2. **Skipped** — any covering evaluator ERRORED (cause `errored`, louder:
-       invariant 2), else any SKIPPED (`skipped`), even beside a pass.
+       invariant 2); else any not run behind a prerequisite that crashed
+       (`prerequisite-errored`, as loud: `Verdict.blocked_kind`); else any
+       SKIPPED, even beside a pass — `prerequisite` when the first skipped
+       verdict was not run behind a prerequisite (`Verdict.blocked_by`, the
+       spine's mark), `skipped` otherwise (P2.2-D10).
     3. **Gap** — any covering evaluator unqualified (`unqualified`), even
        beside a pass; a measurable claim with no evaluator (`no-evaluator`); an
        assumption with no owner named, no reason, or an owner the channel did
@@ -444,12 +465,19 @@ def compose(
         return Composed(ClaimStatus.REFUTED, ClaimCause.PHYSICAL_FAIL)
     if failed:
         return Composed(ClaimStatus.FAIL, ClaimCause.FAILED, gates_of(failed), failed[0])
-    # 2. Skipped: errored first, in the status and in what it cites
+    # 2. Skipped: errored first, in the status and in what it cites — a crash
+    # behind a prerequisite as loud as one in the evaluator (P2.2)
     if errored:
         return Composed(ClaimStatus.BLOCKED, ClaimCause.ERRORED, gates_of(errored, skipped),
                         errored[0])
+    crashed_root = [v for v in skipped
+                    if v.blocked_by and str(v.blocked_kind) == PrerequisiteKind.ERRORED]
+    if crashed_root:
+        return Composed(ClaimStatus.BLOCKED, ClaimCause.PREREQUISITE_ERRORED,
+                        gates_of(crashed_root, skipped), crashed_root[0])
     if skipped:
-        return Composed(ClaimStatus.BLOCKED, ClaimCause.SKIPPED, gates_of(skipped), skipped[0])
+        cause = ClaimCause.PREREQUISITE if skipped[0].blocked_by else ClaimCause.SKIPPED
+        return Composed(ClaimStatus.BLOCKED, cause, gates_of(skipped), skipped[0])
     # 3. Gap
     if refused:
         return Composed(ClaimStatus.UNCLAIMED, ClaimCause.UNQUALIFIED, gates_of(refused),

@@ -295,6 +295,17 @@ without raising — so a corrupt part reads as colliding with nothing, which is 
 most dangerous available false negative because it is the answer everyone wanted.
 If `cad.watertight` fails, treat every later verdict on that part as void.
 
+### Prerequisites
+
+The order above is also an edge (`needs`): `cad.wall_thickness` needs `cad.watertight`
+(ray casting through an open mesh leaks out of the hole), and `cad.clash` and
+`cad.assembly_connected` need `cad.is_volume` (booleans need volumes). Below a failed
+guard they are not run, and their claims read Skipped, `prerequisite failed:
+cad.watertight` — where `wall_thickness` used to skip in its body (read as a missing
+tool) and `clash` to fail on a non-volume. `cad.degenerate_faces` needs nothing: its
+own control, `split_corner_box`, is open and inconsistently wound too, so either guard
+would pre-empt it.
+
 ## Presence, absence, and the gap between them
 
 Read this even if you are not using `cad.assembly_connected`, because the hole it

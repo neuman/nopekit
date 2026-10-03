@@ -105,6 +105,10 @@ DESCRIBE = re.compile(r"^(?P<gate>\S+) +\[t(?P<tier>\d)(?: \S+)?\] +.+$")
 SHOW_TIER = re.compile(r"^  tier (?P<tier>\d)  pack (?P<pack>\S+)  entry \S*$")
 SHOW_CLAIMS = re.compile(r"^  claims: .+$")
 SHOW_RUNNABLE = re.compile(r"^  runnable here: (?:yes|NO — .+)$")
+#: P2.2: the prerequisite edge, both ways — each line only when it has an id, so
+#: a gate with no edge prints neither and keeps the shape it had.
+SHOW_PREREQUISITES = re.compile(r"^  prerequisites: \S+(?:, \S+)*(?: \(.+ not registered\))?$")
+SHOW_PREREQUISITE_OF = re.compile(r"^  prerequisite of: \S+(?:, \S+)*$")
 SHOW_CONTROL = re.compile(r"^  control: (?:\S+ \(must \w+\)|NONE — .+)$")
 SHOW_NOTE = re.compile(r"^           \S.*$")
 SHOW_VERDICT = re.compile(r"^  last verdict: (?:\[.{4}\] \S+.*|\(never run\))$")
@@ -266,7 +270,10 @@ def gate_show_problems(stdout: str) -> list[str]:
             problems.append(f"gate show: line {at + 1} is not description text: {lines[at]!r}")
         at += 1
     body = (("tier", SHOW_TIER, 1, 1), ("claims", SHOW_CLAIMS, 1, 1),
-            ("runnable", SHOW_RUNNABLE, 1, 1), ("control", SHOW_CONTROL, 1, 1),
+            ("runnable", SHOW_RUNNABLE, 1, 1),
+            ("prerequisites", SHOW_PREREQUISITES, 0, 1),
+            ("prerequisite of", SHOW_PREREQUISITE_OF, 0, 1),
+            ("control", SHOW_CONTROL, 1, 1),
             ("control note", SHOW_NOTE, 0, 1), ("last verdict", SHOW_VERDICT, 1, 1))
     at = _grammar(lines, at, body, problems, "gate show")
     if at < len(lines) and (T.LAST_SELFTEST.fullmatch(lines[at])
@@ -663,6 +670,17 @@ class GateShowShape(_ShapeCase):
             with self.subTest(where=where):
                 self.refuses(add_line(text, after), f"prose {where}")
         self.refuses(text + PROSE + "\n", "prose after the last selftest")
+
+    def test_the_prerequisite_lines_are_where_they_belong(self):
+        """P2.2: `bracket.deflection` shows its prerequisite, after `runnable`
+        and before the control; out of place it is refused."""
+        text = self.out("gate-show", 0)
+        lines = text.splitlines()
+        self.assertIn("  prerequisites: bracket.model_validity", lines)
+        moved = [ln for ln in lines if not SHOW_PREREQUISITES.fullmatch(ln)]
+        at = next(i for i, ln in enumerate(moved) if SHOW_VERDICT.fullmatch(ln))
+        moved.insert(at, "  prerequisites: bracket.model_validity")
+        self.refuses("\n".join(moved) + "\n", "a prerequisites line after the control")
 
     def test_the_control_removed_is_refused(self):
         text = self.out("gate-show", 0)

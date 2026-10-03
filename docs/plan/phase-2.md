@@ -118,6 +118,52 @@ Rows the review moved say so.
 | D23 | CLAUDE.md invariants 1, 2, 4, 7 and the preamble in GLOSSARY's words | — |
 | D24 | D2–D21 land as one change | semantics first (a crash read "blocked on missing tooling"); words first (Checked minted over S-03) |
 
+#### P2.2's decision rows (`P2.2-Dn`)
+
+Checkpoint 2.2 as it landed (PLAN-v0.14 §1.4 BLOCKED row, §1.5 groundspace row, §3 row
+P2; GLOSSARY §3, §4). Where it disagrees with the checkpoint text below, these rows win:
+*unknown* is gone (a Never-say for Skipped), BLOCKED is Skipped, and the measured
+descriptor (S-56) moved to P4. Rows the design's critique moved say so.
+
+| Id | Decision | Rejected |
+|---|---|---|
+| D1 | `GateSpec.needs: list[str]`, the LAST field, `@gate(needs=[...])` the last keyword; exact gate ids; `_own_copy` copies it; NOT in `SPEC_FIELDS_IN_RHO` (D-04) — declaring an edge re-keys the declaring file once, through its code digest | globs or tags (a tag-bound set moves when a pack is installed, and the graph and its cycles with it); an edges file (two homes); `after=` (sequencing's word); the prerequisite's outcome inside rho (a recovered guard would re-run every dependent) |
+| D2 | registration refuses a need that is empty, holds whitespace, `/ \ .. :` or `* ? [`, repeats, or names the gate itself; a **cycle** (incremental DFS from the new node, the new spec substituted — complete under any load order); a **tier inversion** from either side of the edge. Forward references allowed (Q2.3) | refusing an unregistered need (a missing pack would become a load crash); checking only at sweep time (`pack validate` would pass a cyclic pack); falling back to registration order on a cycle |
+| D3 | `gates.plan(registry, selected)`: the selection's prerequisite closure in DFS postorder (registration order outer, `needs` order inner) — exactly registration order with no edges; re-asserts acyclicity and tier order (defence in depth) | Kahn's sort, ties by index (unrelated gates jump a guard); alphabetical (S-52's cause); no expansion under `--only` |
+| D4 | gates RUN in plan order and are LISTED in registration order: `SweepResult.rows`, `check --json`, JUnit, `resolve`, `_swept`; only the stream shows run order, and `SweepResult.order` records it | listing in run order (every project with an edge would move its JSON and JUnit order) |
+| D5 | established = a pass, current. Negative kinds errored, failed, skipped, unqualified, not registered; not current invalidated, unrun; negative wins; within a class rank order, then `needs` order; roots transitive (`blocked_by`, a reading's `root`). **Moved by the critique:** errored ranks ABOVE failed — the dependent reads Skipped either way, and within Skipped a crash leads (invariant 2); with failed first, adding a failed guard to a crashed one made the dependent's claim quieter | passes only, ignoring currency (invariant 10); every unmet need alike (D7) |
+| D6 | under a negative root the dependent is not run (nor its control) and reads `gates.blocked`'s skip — never cached, remembered or logged; the rule replaces a pass, a fail (current or not) or nothing; the dependent's own missing tool, crash, self-skip or refusal stands (`verdicts._under_rule`) | replacing every reading (a crash read quieter for as long as the root is down); letting the dependent's FAIL stand (D-03, D-04); `ClaimStatus.UNKNOWN` (D-02); the `unknown:` lead |
+| D7 | under a not-current root the dependent keeps its verdict, marked: `prerequisite <root> invalidated: <what moved>` / `prerequisite <root> unrun`, `fresh` False (**moved by the critique**: the mark set only the reason, and every JSON channel served `fresh: true` beside it), in `stale_gates` — its claim reads Stale. **Amends D-03** ("neither run nor fresh -> unknown"): every model edit between check runs invalidates a guard and its dependents together, and D-03 read literally turns every guarded claim Skipped when the fact is "inputs moved; run check"; Skipped also outranks Stale and Open, so the count would report skips after every edit; and D-03's argument (do not spend on a dependent whose root cannot be judged) is the sweep's, where closure expansion leaves no not-current root but a costlier tier's entry served stale | D-03 read literally; dropping the verdict so the claim reads Open (a second mechanism; the reason loses the root); leaving the dependent alone (invariant 10) |
+| D8 | one rule, three callers: `gates.prerequisite_root` decides; `run_all` prunes (hooks `pruned`, `current`, `marked`); `verdicts.apply_prerequisites` applies it to a resolution — `resolve`'s rung 7 and `cli._swept` again over the merged view (monotone, idempotent). The sweep's pruned row IS `resolve`'s reading under the rule (`_resolve_gate`, rungs 1-6 extracted, on a reader's `_Now`) | each producer keeping a copy (they drifted at every copy in P1 and P2.0); the rule in `resolve` only (`check`'s stream and JUnit would disagree with its claim view) |
+| D9 | `Verdict.blocked_by` (the roots) and **`Verdict.blocked_kind`** (the first root's kind), the LAST two fields; `__post_init__` writes `skipped=True, passed=False` when `blocked_by` is set (R-2); spine-only (`gates.blocked`), cleared by `_stamp`, never stored or remembered (`_NEVER_REMEMBERED`, read and write). **Moved by the critique:** the design rejected `blocked_kind` as derivable from the root's reading — but a claim's composition sees the verdicts that cover it, and a guard bound to its own tags does not cover a narrowly tagged claim, so a crashed guard reached that claim in a missing tool's tone | the `skip_reason` text as the predicate (a gate could word its own skip into it); deriving the kind at `compose` from the root's verdict (a not-registered root may still have an orphan crash on disk) |
+| D10 | `ClaimCause.PREREQUISITE` ("skipped" lead, Skipped's rank) and **`PREREQUISITE_ERRORED`** ("errored" lead; `Composed.errored` true: `[SKIP ]`, `(k errored)`, JUnit `<error>`, `last_check.json` `errored`) — added by the critique, invariant 2 through a prerequisite; in `claims`, not the spine | a lead word of its own ("blocked", "unknown": Never-says); splitting the count by cause; ranking prerequisite skips above tool skips |
+| D11 | the edge is a **prerequisite** wherever a person reads it (`describe` "prerequisites", `gate show` "prerequisites:"/"prerequisite of:", `--only`'s help, `doctor`, `pack validate`); tools now say "requires" in `describe`. The claim channel words a prerequisite skip from `report.HUMAN["prerequisite"]` and the mark (`report.prerequisite_phrase`) — **moved by the critique**: the kind words lived only in `gates`, a second outcome-word table no sentinel reached; the spine keeps `PREREQUISITE_FAILED`/`_NOT_ESTABLISHED` for the gate channel (skip reasons, the digest) | "needs" (*need*, the noun, is Gap's Never-say, and `describe` said "needs <tools>"); "dependency"; "after" |
+| D12 | a bundled edge needs all four: the prerequisite is a validity guard (every fail means the number does not apply); the edge is isolated (it passes the dependent's own known-bad control); tier(P) <= tier(D); same pack. 26 edges over six packs plus the bracket's two; each edge and each rejected one has its reason at the decorator | analysis-to-analysis edges (a fail would hide a measurement); a guard that also measures (`thermal.time_constant`) |
+| D13 | isolation in R-4's two steps: `test_packs.ControlsAreIsolated` (zero hits on the declared edges, one on `beam.shear_stress -> beam.model_validity`), then `packs.demonstrate` step 5 behind `pack validate` and `gate selftest --pack`: `<D>: control not isolated — its prerequisite <P> does not pass <D>'s known-bad control (…)` (**moved by the critique**: "known-bad input" is a GLOSSARY §2 Never-say). Project gates: P2.3, as a diagnostic BESIDE the qualification line, never inside it (**moved by the critique**: the line and *qualified* stay GLOSSARY §2's) | refusing at admission now (a third control run per dependent); not checking (a later fixture edit trips its guard unseen) |
+| D14 | a pack needs only its own gates (`pack validate`: `<gate>: prerequisite <id> is not in this pack`); a project may need any id; an unregistered need reads "not registered" at the sweep and is a `doctor` problem with its fix | cross-pack needs (isolation would depend on another pack's version) |
+| D15 | `check --only X` runs X's closure; `gate selftest --only X` stays pure selection | — |
+| D16 | no `pruned` key in `check --json` (rows carry `blocked_by`); no measured L/C descriptor (S-56 to P4) | a second copy of what the rows say |
+| D17 | CLAUDE.md invariant 10; `test_meta.INVARIANT_CLASSES[10]`: `PrerequisiteFailureIsNeverAPass`, `ACachedPassNeverSurvivesAFailedPrerequisite`, `NeedsCycleRefused`, `TierInversionRefused`, all in `tests.fast`; invariant 2 gains `AnErroredPrerequisiteStaysLouder` | folding cycle refusal into invariant 3 |
+| D18 | G4 does not move: at 7.0 mm the guard passes; the bracket's cache is regenerated (spine and `gates/structural.py` moved) and `docs/readiness.md` does not change | — |
+
+**Check-in batch (P2.2):** GLOSSARY §4's new *prerequisite* row; *Skipped*'s Means
+gaining "or a prerequisite is not established" and *Stale*'s gaining "or whose
+prerequisite is invalidated or unrun" (the critique: D7 stretches *invalidated*, which
+is defined over a verdict's own read set — the reason line names the prerequisite, so
+no reader is misled, and an Open reading for an unrun root was weighed and rejected in
+D7); D-03's amendment (D7) and D-02's "no new code path" (D9-D10 added two fields and
+two causes, each with its evidence).
+
+**Hand-offs:** P2.3 — project-gate control isolation as a diagnostic beside the
+qualification line (the line stays `known-good pass · known-bad fail · mutation n/n
+fail → qualified`), the bracket's two edges first. P2.5 — a required claim Skipped by
+a prerequisite is unresolved; `export` refuses it with no new code. P3 — the `next:`
+line: "fix <root>" for a failed root, "install <tool> for <root>" for one skipped on a
+missing tool; `ask --next` ranks a failed root above its dependents. P4 — sequencing
+over `plan()`, `SweepResult.order`, measured latency and cost (S-56). P5 — evaluator
+lanes from `needs`/`needed_by`. thermal-analytic — the Biot half of `time_constant` as
+its own guard, then `steady_state_temp -> <guard>`.
+
 #### Checkpoint 2.2: the refusal graph
 
 ```python

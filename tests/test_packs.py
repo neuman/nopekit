@@ -10,6 +10,7 @@ Run:  PYTHONPATH=src python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import atexit
+import dataclasses
 import hashlib
 import json
 import os
@@ -280,6 +281,33 @@ def _scratch_pack(case: unittest.TestCase, *, baseline: dict, fixture: str = "to
     return pack_dir, registry, gate_id
 
 
+#: Packs that declare no prerequisite yet, each with why (P2.2-D12, §4 of its
+#: design). thermal-analytic's candidate guards each fail a criterion: its
+#: ``time_constant`` also fails on tau over ``time_constant_limit_s``, which says
+#: nothing about the steady-state node, so turning that fail into a skip would
+#: hide a measurement; ``h_agreement`` checks agreement between representations,
+#: and ``convection``'s own control (``fan_stopped``) fails it. The edge
+#: ``steady_state_temp -> <guard>`` lands once the Biot half of ``time_constant``
+#: is its own evaluator (a pack follow-up).
+NO_EDGE_YET = {"thermal-analytic": "no gate is a pure validity guard yet: time_constant "
+                                   "also measures, h_agreement compares representations"}
+
+
+def _keyword_guards(registry: gates_mod.Registry) -> list[str]:
+    """The keyword test S-55 retired, kept for the exempt pack only."""
+    return [s.id for s in registry.specs()
+            if any(w in f"{s.id} {s.settles} {s.title} {s.description}".lower()
+                   for w in ("valid", "applicab", "regime", "guard", "polic",
+                             "assumption", "hygiene", "is_volume"))]
+
+
+def _prerequisites_of(registry: gates_mod.Registry) -> list[str]:
+    """Every gate in ``registry`` that another gate there needs."""
+    needed = {need for spec in registry.specs() for need in (getattr(spec, "needs", None)
+                                                             or ())}
+    return sorted(need for need in needed if need in registry)
+
+
 class PacksValidate(unittest.TestCase):
     def test_at_least_one_pack_ships(self):
         self.assertTrue(_pack_dirs(), "no packs found — packs/ is empty")
@@ -305,36 +333,46 @@ class PacksValidate(unittest.TestCase):
                     f"{name} ships no tier-0 gate: "
                     f"{[(s.id, int(s.tier)) for s in specs]}")
 
-    def test_every_pack_ships_a_validity_guard(self):
+    def test_every_analysis_pack_declares_a_prerequisite(self):
         """A pack of closed-form or correlation-based gates needs one gate that
-        decides whether its other numbers mean anything.
+        decides whether its other numbers mean anything — and that gate must
+        GUARD them: some gate in the pack is another's prerequisite (``needs``).
 
-        Slenderness guards beam theory; Biot guards lumped capacitance; Reynolds
-        guards a drag correlation. Without one, the cheap gate silently becomes the
-        wrong gate as the design moves out of the range it was valid for — and it
-        keeps returning a confident pass the whole way.
+        Slenderness guards beam theory; Reynolds guards a drag correlation;
+        completeness guards a BOM's arithmetic. Without the edge the cheap gate
+        silently becomes the wrong gate as the design moves out of the range it
+        was valid for — and a claim bound narrowly to it keeps reading Checked
+        the whole way (S-51).
 
-        Packs that do not analyse anything (a sourcing or BOM pack has no model to
-        outgrow) are exempt.
+        What it replaced (R-6, S-55): a keyword test — "valid", "guard",
+        "is_volume" in a gate's id or title — that passed a pack whose guard
+        guarded nothing. Structural now, and stronger: sourcing, exempt from the
+        keyword test as "not an analysis", has a guard (``bom.complete``) and is
+        held to it. The one exemption keeps the keyword test it had.
         """
-        exempt = {"sourcing"}
         for path in _pack_dirs():
             name = os.path.basename(path)
-            if name in exempt:
-                continue
             with self.subTest(pack=name):
                 registry = gates_mod.Registry()
                 packs_mod.load_gates(name, registry, root=REPO)
-                guards = [
-                    s.id for s in registry.specs()
-                    if any(w in f"{s.id} {s.settles} {s.title} {s.description}".lower()
-                           for w in ("valid", "applicab", "regime", "guard", "polic",
-                                     "assumption", "hygiene", "is_volume"))
-                ]
+                if name in NO_EDGE_YET:
+                    self.assertTrue(_keyword_guards(registry), name)
+                    continue
                 self.assertTrue(
-                    guards,
-                    f"{name} ships no validity guard — nothing tells a caller when the "
-                    f"pack's own model has stopped applying (see docs/PACK_FORMAT.md)")
+                    _prerequisites_of(registry),
+                    f"{name} declares no prerequisite — no gate is another's `needs`, so "
+                    f"nothing stops its analyses counting once its model has stopped "
+                    f"applying (docs/PACK_FORMAT.md, Prerequisites)")
+
+    def test_a_guard_that_guards_nothing_is_caught(self):
+        """The planted violator: a gate titled as a validity guard, with no edge —
+        green under the keyword test this replaced, red under this one."""
+        _pack_dir, registry, _gate_id = _scratch_pack(self, baseline={"span_mm": 50.0})
+        spec, fn = registry.get(_gate_id)
+        registry.register(dataclasses.replace(spec, title="model validity guard"), fn,
+                          replace=True)
+        self.assertTrue(_keyword_guards(registry), "the keyword test passed it")
+        self.assertEqual(_prerequisites_of(registry), [])
 
     def test_packs_publish_their_tag_vocabulary(self):
         """A claim can only bind correctly to a pack whose tag names are written
@@ -711,6 +749,235 @@ class ControlsAreSealed(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # the spine's copy of the gate on the gates, held to this file's (D-25)
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# prerequisites: every bundled edge leaves its dependent's control a control
+# --------------------------------------------------------------------------- #
+#: The bundled prerequisite edges, ``(dependent, prerequisite)`` per pack, as
+#: P2.2's design lists them (§4), each with its reason at the dependent's
+#: decorator. Literal data, so this file is its own oracle (D-25): a gate file
+#: that gains or loses an edge turns ``test_the_edges_are_these`` red instead of
+#: quietly re-defining what the isolation test checks.
+EDGES: dict[str, list[tuple[str, str]]] = {
+    "beam-analytic": [
+        ("beam.deflection", "beam.model_validity"),
+        ("beam.deflection_ratio", "beam.model_validity"),
+        ("beam.bending_stress", "beam.model_validity"),
+        ("beam.shear_stress", "beam.input_sanity"),
+        ("beam.buckling", "beam.model_validity"),
+        ("beam.bearing", "beam.input_sanity"),
+        ("beam.model_validity", "beam.input_sanity"),
+    ],
+    "fdm-print": [(d, "fdm.process_model_valid") for d in (
+        "fdm.overhang", "fdm.bridge_span", "fdm.bed_fit", "fdm.min_wall",
+        "fdm.layer_alignment", "fdm.print_time_est")],
+    "fluids-analytic": [("fluid.drag", "fluid.flow_regime"),
+                        ("fluid.pipe_pressure_drop", "fluid.flow_regime")],
+    "cad-solid": [("cad.wall_thickness", "cad.watertight"),
+                  ("cad.clash", "cad.is_volume"),
+                  ("cad.assembly_connected", "cad.is_volume")],
+    "sourcing": [(d, "bom.complete") for d in (
+        "bom.cost", "bom.availability", "bom.moq", "bom.process_rules",
+        "bom.single_source")],
+    "openmodelica": [("modelica.result_claim", "modelica.solution_valid"),
+                     ("modelica.mirror_agrees", "modelica.solution_valid"),
+                     ("modelica.simulates", "modelica.compiles")],
+}
+BRACKET_EDGES = [("bracket.deflection", "bracket.model_validity"),
+                 ("bracket.bending_stress", "bracket.model_validity")]
+
+#: Edges whose pair needs no third-party tool: the floor the isolation test
+#: checks on any machine, CI without trimesh or omc included.
+_EDGE_FLOOR = 20
+
+#: A pair that is NOT isolated, measured (P2.2's isolation probe): beam's
+#: ``shear_governed`` control is L/h 6.0, where Euler-Bernoulli omits about 32%
+#: of the deflection, so the slenderness guard fails it too. Declared, the guard
+#: would pre-empt the control and admission would show nothing about the inputs
+#: shear_stress actually judges. The detector's planted hit.
+_NOT_ISOLATED = ("beam.shear_stress", "beam.model_validity")
+
+
+def _isolation_hits(pack_dir: str, registry: gates_mod.Registry,
+                    edges: list[tuple[str, str]], *,
+                    skipped: list[str] | None = None) -> list[str]:
+    """Each edge whose prerequisite does not PASS its dependent's sealed
+    known-bad context, built over the pack's own baseline. This file's own
+    copy of the rule (D-25); ``packs.demonstrate`` holds the other."""
+    baseline = _read_baseline(pack_dir) or {}
+    hits: list[str] = []
+    for dependent, prerequisite in edges:
+        d_spec, d_fn = registry.get(dependent)
+        p_spec, p_fn = registry.get(prerequisite)
+        missing = _tooling_absent(d_spec) or _tooling_absent(p_spec)
+        if missing:
+            if skipped is not None:
+                skipped.append(f"{dependent} -> {prerequisite} ({missing})")
+            continue
+        bad = gates_mod.run_fixture(d_spec, d_fn, _pack_ctx(pack_dir, dict(baseline)),
+                                    trace=None, out_dir=_scratch_out())
+        verdict = gates_mod.run_gate(p_spec, p_fn, bad)
+        if verdict.outcome != "pass":
+            hits.append(f"{dependent} -> {prerequisite}: {verdict.outcome} on "
+                        f"{dependent}'s known-bad control "
+                        f"({verdict.detail or verdict.skip_reason or verdict.error})")
+    return hits
+
+
+def _declared_edges(registry: gates_mod.Registry) -> list[tuple[str, str]]:
+    return [(spec.id, need) for spec in registry.specs() for need in spec.needs]
+
+
+_ISOLATION_GATE = """\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id={guard!r}, claims=["scratch"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:way_too_long"))
+def guard(ctx):
+    \"\"\"The model applies up to 200 mm.\"\"\"
+    v = float(ctx.params["span_mm"])
+    return Verdict(gate={guard!r}, passed=v <= 200.0, measured=v, limit=200.0)
+
+
+@gate(id={dependent!r}, claims=["scratch"], tier=Tier.INSTANT, needs=[{need!r}],
+      negative_control=NegativeControl(fixture="selftest/bad.py:{fixture}"))
+def span(ctx):
+    \"\"\"The span limit, under the guard.\"\"\"
+    v = float(ctx.params["span_mm"])
+    return Verdict(gate={dependent!r}, passed=v <= 100.0, measured=v, limit=100.0)
+"""
+
+_ISOLATION_FIXTURES = """\
+import dataclasses
+
+
+def _span(ctx, value):
+    return dataclasses.replace(ctx, params={"span_mm": value}, extra={})
+
+
+def way_too_long(ctx):
+    return _span(ctx, 900.0)
+
+
+def too_long(ctx):
+    \"\"\"Past the span limit, inside the guard's range: isolated.\"\"\"
+    return _span(ctx, 150.0)
+
+
+def trips_the_guard(ctx):
+    \"\"\"Past the guard's range too: the guard pre-empts the control.\"\"\"
+    return _span(ctx, 500.0)
+"""
+
+
+def _two_gate_pack(case: unittest.TestCase, *, fixture: str = "too_long",
+                   need: str | None = None) -> tuple[str, str, str]:
+    """A guard and a dependent under the temp dir: ``(pack_dir, guard, dependent)``.
+    ``need`` defaults to the pack's own guard."""
+    root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-isolation-pack-"))
+    case.addCleanup(shutil.rmtree, root, True)
+    name = f"scratch-{uuid.uuid4().hex[:12]}"
+    guard, dependent = f"{name}.guard", f"{name}.span"
+    pack_dir = os.path.join(root, ".atompipe", "packs", name)
+    os.makedirs(os.path.join(pack_dir, "gates"))
+    os.makedirs(os.path.join(pack_dir, "selftest"))
+    files = {
+        "pack.json": json.dumps({"name": name}),
+        os.path.join("gates", "span.py"): _ISOLATION_GATE.format(
+            guard=guard, dependent=dependent, need=need or guard, fixture=fixture),
+        os.path.join("selftest", "bad.py"): _ISOLATION_FIXTURES,
+        os.path.join("selftest", "baseline.json"): json.dumps({"span_mm": 50.0}),
+    }
+    for rel, text in files.items():
+        with open(os.path.join(pack_dir, rel), "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def forget_modules() -> None:
+        for mod_name, module in list(sys.modules.items()):
+            origin = getattr(module, "__file__", None) or ""
+            if origin and os.path.realpath(origin).startswith(root + os.sep):
+                sys.modules.pop(mod_name, None)
+
+    case.addCleanup(forget_modules)
+    return pack_dir, guard, dependent
+
+
+class ControlsAreIsolated(unittest.TestCase):
+    """Invariant 5's neighbour (P2.2-D12b, D13): a dependent's known-bad control
+    must leave its prerequisites passing, or the guard pre-empts the control and
+    admission shows nothing about the inputs the dependent actually judges. R-4's
+    two steps: this detector over the bundled corpus (zero hits on the declared
+    edges, one on a planted pair), then ``packs.demonstrate``'s step 5, behind
+    ``pack validate`` and ``gate selftest --pack``."""
+
+    def _registry(self, name: str) -> gates_mod.Registry:
+        registry = gates_mod.Registry()
+        packs_mod.load_gates(name, registry, root=REPO)
+        return registry
+
+    def test_detector_over_the_planned_edges(self):
+        """C2: the §4 list as literal data — no spine field read — so it ran
+        before the edges existed."""
+        checked = 0
+        for name, edges in sorted(EDGES.items()):
+            with self.subTest(pack=name):
+                skipped: list[str] = []
+                hits = _isolation_hits(os.path.join(PACKS_DIR, name), self._registry(name),
+                                       edges, skipped=skipped)
+                self.assertEqual(hits, [])
+                checked += len(edges) - len(skipped)
+        self.assertGreaterEqual(checked, _EDGE_FLOOR)
+        beam = os.path.join(PACKS_DIR, "beam-analytic")
+        hits = _isolation_hits(beam, self._registry("beam-analytic"), [_NOT_ISOLATED])
+        self.assertEqual(len(hits), 1, hits)
+        self.assertIn("beam.shear_stress -> beam.model_validity: fail", hits[0])
+
+    def test_every_declared_edge_is_isolated(self):
+        checked = 0
+        for path in _pack_dirs():
+            name = os.path.basename(path)
+            with self.subTest(pack=name):
+                registry = self._registry(name)
+                skipped: list[str] = []
+                self.assertEqual(_isolation_hits(path, registry, _declared_edges(registry),
+                                                 skipped=skipped), [])
+                checked += len(_declared_edges(registry)) - len(skipped)
+        self.assertGreaterEqual(checked, _EDGE_FLOOR)
+
+    def test_the_edges_are_these(self):
+        declared = {}
+        for path in _pack_dirs():
+            name = os.path.basename(path)
+            edges = _declared_edges(self._registry(name))
+            if edges:
+                declared[name] = sorted(edges)
+        self.assertEqual(declared, {name: sorted(e) for name, e in EDGES.items()})
+        self.assertEqual(sum(len(e) for e in declared.values()), 26)
+        registry = gates_mod.Registry()
+        gates_mod.load_project_gates(os.path.join(REPO, "examples", "bracket"), registry)
+        self.assertEqual(sorted(_declared_edges(registry)), sorted(BRACKET_EDGES))
+
+    def test_demonstrate_names_a_planted_unisolated_edge(self):
+        pack_dir, guard, dependent = _two_gate_pack(self, fixture="trips_the_guard")
+        problems = packs_mod.demonstrate(pack_dir).problems
+        wanted = (f"{dependent}: control not isolated — its prerequisite {guard} does not "
+                  f"pass {dependent}'s known-bad control")
+        self.assertTrue(any(p.startswith(wanted) for p in problems), problems)
+        self.assertTrue(any(wanted in p for p in packs_mod.validate(pack_dir)))
+        clean, _guard, _dep = _two_gate_pack(self, fixture="too_long")
+        self.assertEqual(packs_mod.demonstrate(clean).problems, [])
+
+    def test_a_pack_may_not_need_another_packs_gate(self):
+        """D14: a pack's controls and baseline are sealed to the pack (invariant
+        5); a prerequisite in another pack would make isolation depend on that
+        pack's version."""
+        pack_dir, _guard, dependent = _two_gate_pack(self, need="beam.model_validity")
+        problems = packs_mod.validate(pack_dir)
+        wanted = f"{dependent}: prerequisite beam.model_validity is not in this pack"
+        self.assertTrue(any(p.startswith(wanted) for p in problems), problems)
+
+
 def _oracle(pack_dir: str, registry: gates_mod.Registry) -> dict[str, list[str]]:
     """This file's own verdict on one pack, as the classes above compute it.
 

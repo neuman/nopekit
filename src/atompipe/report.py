@@ -166,7 +166,8 @@ _FAILING = _status_row(
     "an evaluator failed the current candidate, or a physical result failed")
 _STALE = _status_row(
     ClaimStatus.STALE, "stale", "Stale", "stale", "STALE",
-    "a pass whose read set has changed since: nothing is checked now")
+    "a pass whose read set has changed since, or whose prerequisite is invalidated or "
+    "unrun: nothing is checked now")
 _ASSUMED = _status_row(
     ClaimStatus.ASSERTED, "assumed", "Assumed", "assumed", "assum",
     "accepted provisionally, with a reason and an owner — unresolved")
@@ -177,9 +178,15 @@ _PENDING_BUILD = _status_row(
 _GAP = _status_row(
     ClaimStatus.UNCLAIMED, "gap", "Gap", "gaps", "gap  ",
     "no evaluator, none qualified, or one unqualified; or an assumption nobody owns")
+# Skipped's hint and the skipped chip name all three causes of a skip (S-54):
+# "skipped" had come to mean "install a tool" everywhere — the hints, and the
+# skill's "install the tool, and re-run" — while packs skip themselves for a
+# missing PARAMETER and, from P2.2, an evaluator is skipped behind a
+# prerequisite that failed, where installing changes nothing.
 _SKIPPED = _status_row(
     ClaimStatus.BLOCKED, "skipped", "Skipped", "skipped", "skip ",
-    "an evaluator skipped, its tool missing here, and none failed: no usable verdict")
+    "an evaluator skipped — its tool is missing here, it skipped itself on its input, or "
+    "a prerequisite is not established — and none failed: no usable verdict")
 _OPEN = _status_row(
     ClaimStatus.PENDING, "open", "Open", "open", "open ",
     "an evaluator of the claim is unrun on the current inputs")
@@ -208,7 +215,9 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         ClaimCause.FAILED: "",
         ClaimCause.PHYSICAL_FAIL: "failed on an article",
         ClaimCause.ERRORED: "errored",
+        ClaimCause.PREREQUISITE_ERRORED: "errored",
         ClaimCause.SKIPPED: "skipped",
+        ClaimCause.PREREQUISITE: "skipped",
         ClaimCause.UNQUALIFIED: "unqualified",
         ClaimCause.NO_EVALUATOR: "no evaluator",
         ClaimCause.NO_OWNER: "no owner recorded",
@@ -246,11 +255,26 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
     "outcome_hint": MappingProxyType({
         "pass": "the evaluator ran and passed",
         "fail": "the evaluator ran and failed",
-        "skipped": "its tool is missing here, so nothing was evaluated",
+        "skipped": "nothing was evaluated: its tool is missing here, it skipped itself on "
+                   "its input, or a prerequisite is not established",
         "error": "the evaluator crashed — nothing was evaluated, and the evaluator itself "
                  "is broken",
     }),
     "outcome_tag": MappingProxyType(_RENDER_TAG),
+    # A claim Skipped behind a prerequisite (P2.2-D10, D11): the phrase after
+    # `skipped: <evaluator> : ` — `prerequisite failed: <root>` only when the
+    # root failed (D-03), `prerequisite not established: <root> (<kind>)`
+    # otherwise — and the kind word with no glossary term. The other kind words
+    # are the outcome words above (errored, skipped) and the lead `unqualified`.
+    # What slipped through the design (critique): the words lived in `gates`,
+    # a second outcome-word table no sentinel reached; the spine keeps its own
+    # spelling for the gate channel (`gates.PREREQUISITE_FAILED`, a skip reason)
+    # and this table words the claim channel.
+    "prerequisite": MappingProxyType({
+        "failed": "prerequisite failed: {root}",
+        "not-established": "prerequisite not established: {root} ({kind})",
+        "not-registered": "not registered",
+    }),
     # The report's section headings (GLOSSARY §9), SECTION_PROVEN's text excepted:
     # it changes only with METHOD's (A-11, PLAN D-14).
     "heading": MappingProxyType({
@@ -473,8 +497,10 @@ def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
     Led by the fact (`HUMAN["lead"]`), then the evaluator, then its words: a
     fail cites `<gate> : <detail>` (+ ` (invalidated: <why>)` when the fail's
     inputs moved, D-08); a crash `errored: <gate> : <exception>`, never the
-    traceback; a skip `skipped: <gate> : <reason>`; a refused evaluator
-    `unqualified: <gate> : <why>`; an unrun one `unrun: <gates>`; an invalidated
+    traceback; a skip `skipped: <gate> : <reason>`; an evaluator not run
+    behind a prerequisite `skipped: <gate> : prerequisite failed: <root>` (or
+    `errored: …` when the root crashed: `prerequisite_phrase`); a refused
+    evaluator `unqualified: <gate> : <why>`; an unrun one `unrun: <gates>`; an invalidated
     pass `invalidated: <gate> : <what moved>`. `full=True` is the long form —
     the report, JUnit and JSON — which also says what an unowned assumption
     waits for; `cut` (default: not `full`) cuts the evaluator's words to share a
@@ -508,6 +534,11 @@ def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
         result = claim.physical_result
         detail = (result.detail if result and result.detail else "no detail recorded")
         return f"{lead}: {cut_(detail, 60)} ({recorded_by(result.who if result else '')})"
+    if cause in (ClaimCause.PREREQUISITE, ClaimCause.PREREQUISITE_ERRORED) \
+            and verdict is not None:
+        # Cut at 96, not the 56 a gate's own words get: the root's id is the
+        # actionable half, and the phrase around it is bounded.
+        return f"{lead}: {verdict.gate} : {cut_(prerequisite_phrase(verdict), 96)}"
     if cause in (ClaimCause.ERRORED, ClaimCause.SKIPPED, ClaimCause.UNQUALIFIED) \
             and verdict is not None:
         if cause is ClaimCause.UNQUALIFIED:
@@ -543,6 +574,22 @@ def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
         result = claim.physical_result
         return lead.format(recorded=recorded_by(result.who if result else ""))
     return lead
+
+
+def prerequisite_phrase(verdict: Verdict) -> str:
+    """`prerequisite failed: <root>` / `prerequisite not established: <root>
+    (<kind>)` for a verdict not run behind a prerequisite — from `HUMAN` and the
+    spine's mark (`blocked_by`, `blocked_kind`), never from its `skip_reason`
+    text (a gate cannot write the mark; it can write a reason)."""
+    said = HUMAN["prerequisite"]
+    root = (list(verdict.blocked_by) or [""])[0]
+    kind = str(getattr(verdict, "blocked_kind", "") or "")
+    if kind == "failed":
+        return said["failed"].format(root=root)
+    word = {"errored": HUMAN["outcome"]["error"], "skipped": HUMAN["outcome"]["skipped"],
+            "unqualified": HUMAN["lead"][ClaimCause.UNQUALIFIED],
+            "not-registered": said["not-registered"]}.get(kind, HUMAN["outcome"]["skipped"])
+    return said["not-established"].format(root=root, kind=word)
 
 
 def _one(text: Any) -> str:
@@ -2336,6 +2383,7 @@ __all__ = [
     "count_bits",
     "count_line",
     "reason",
+    "prerequisite_phrase",
     "status_view",
     "words_table",
     "outcome_words",

@@ -70,9 +70,11 @@ class ClaimStatus(StrEnum):
 
     PASS = "pass"                 # Checked: every evaluator ran and passed, current
     FAIL = "fail"                 # Failing: an evaluator not unqualified failed
-    STALE = "stale"               # Stale: a pass whose read set moved, or undemonstrated
+    STALE = "stale"               # Stale: a pass whose read set moved, or undemonstrated,
+                                  # or whose prerequisite is invalidated or unrun (P2.2)
     UNCLAIMED = "unclaimed"       # Gap: no evaluator, one unqualified, or an unowned assumption
-    BLOCKED = "blocked"           # Skipped: an evaluator skipped OR ERRORED, none failed
+    BLOCKED = "blocked"           # Skipped: an evaluator skipped OR ERRORED, or a
+                                  # prerequisite is not established; none failed
     PENDING = "pending"           # Open: an evaluator unrun on the current inputs
     UNVERIFIED = "unverified"     # Pending build: physical, no result
     VERIFIED = "verified"         # Checked: a physical pass recorded (not article-bound yet)
@@ -104,6 +106,43 @@ class Tier(enum.IntEnum):
     BUILD = 1       # seconds to minutes. Geometry builds, mesh gates, netlists.
     SOLVE = 2       # minutes to hours. External solvers: CFD, FEA, autorouters.
     EXTERNAL = 3    # CI, a fab house, a lab, a human with calipers.
+
+
+class PrerequisiteKind(StrEnum):
+    """Why a prerequisite is not established (P2.2-D5) — an identifier, never a
+    word; the words are ``report.HUMAN``'s.
+
+    Two classes. **Negative** — the prerequisite has a reading that is not a
+    pass: ``errored``, ``failed``, ``skipped`` (its tool is missing, or it
+    skipped itself), ``unqualified``, ``not-registered``. Its dependent is not
+    run and reads Skipped, and the kind travels on that verdict
+    (``Verdict.blocked_kind``). **Not current** — a pass that is not current
+    now: ``invalidated``, ``unrun``. Its dependent keeps its verdict and reads
+    Stale; nothing is stored, only a stale reason.
+
+    The members are in rank order: when several needs are unmet, the first
+    negative kind here names the root (``gates.prerequisite_root``). A crash
+    before a fail: the dependent reads Skipped either way (D10), and within
+    Skipped a crash leads (invariant 2, GLOSSARY §3: "errored first"). What
+    slipped through the design's first order (failed first): a dependent of one
+    failed and one crashed guard read the quiet missing-tool tone, while the
+    same dependent of the crashed guard alone read errored — adding a failure
+    made the crash quieter. *Rejected:* a kind per root on the verdict (a list
+    of pairs; nothing reads more than the first, and ``blocked_by`` names them
+    all); deriving the kind from the root's own verdict at ``compose`` (a root
+    that is not registered can still have an orphan crash on disk, which would
+    then read errored for a root the rule called not registered).
+
+    Here, in the type contract, because ``Verdict.blocked_kind`` holds one, and
+    ``claims`` (pure) and ``gates`` (the rule) must read the same identifiers."""
+
+    ERRORED = "errored"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    UNQUALIFIED = "unqualified"
+    NOT_REGISTERED = "not-registered"
+    INVALIDATED = "invalidated"
+    UNRUN = "unrun"
 
 
 class ArtifactKind(StrEnum):
@@ -487,12 +526,45 @@ class Verdict(Record):
     degrade-closed — and only this field reads Gap. The LAST field (R-2); and
     ``__post_init__`` writes ``error`` when it is set without one, so an
     unqualified verdict is never ``ok``, whoever builds it."""
+    blocked_by: list[str] = field(default_factory=list)
+    """The prerequisites that are not established — the ROOTS, found
+    transitively — when this gate was not run because of them (P2.2-D9), or
+    ``[]``. Set by the spine only, through ``gates.blocked``, the one producer
+    of a prerequisite skip; ``gates.run_gate`` clears it on whatever a gate
+    returns (``_stamp``), no entry stores it (``verdicts._VERDICT_FIELDS`` is a
+    whitelist) and no remembered outcome carries it (``_NEVER_REMEMBERED``) — so
+    a gate can neither make its own skip read as a prerequisite's, nor name a
+    root. Non-empty, ``__post_init__`` writes the legacy flags in the not-pass
+    direction (R-2): an older spine that drops the key still reads a skip.
+    *Rejected:* the ``skip_reason`` text as the predicate (a gate could word
+    its own skip into it, the reason P2.1-D4 rejected the same for
+    ``unqualified``). One of the LAST two fields."""
+    blocked_kind: str = ""
+    """The first root's ``PrerequisiteKind`` — ``"errored"``, ``"failed"``,
+    ``"skipped"``, ``"unqualified"`` or ``"not-registered"`` — beside
+    ``blocked_by``, or ``""``. Spine-only on the same terms. What it carries
+    that nothing else does: whether the root CRASHED. A guard is bound to its
+    own claims, so its crash reached a claim bound only to the dependent as the
+    dependent's skip — the missing tool's tone, its count, a JUnit
+    ``<failure>`` — and invariant 2 says a crash reads louder than that
+    (critique of the P2.2 design). ``claims.compose`` reads a prerequisite skip
+    whose root errored as errored. The P2.2 design had rejected this field,
+    reasoning that the kind can be derived from the root's reading — but a
+    claim's composition sees the verdicts that cover it, and the root's does
+    not cover a narrowly tagged claim. An older spine that drops it reads a
+    plain skip: quieter, never a pass. The LAST field."""
 
     def __post_init__(self) -> None:
         # Degrade-closed (R-2): a verdict marked unqualified with no error would
         # read `outcome` from its pass flag, and a refusal must never be a pass.
         if self.unqualified and not self.error:
             self.error = f"not admitted: {self.unqualified}"
+        # The same for a prerequisite skip: the flags say "skipped, not passed"
+        # wherever the mark is set, so a reader that knows nothing of it still
+        # reads the not-pass it means.
+        if self.blocked_by:
+            self.skipped = True
+            self.passed = False
 
     @property
     def outcome(self) -> str:
@@ -607,6 +679,29 @@ class GateSpec(Record):
     forget. The LAST field, so every positional ``GateSpec(...)`` still works and
     an older spine that drops it reads a spec that requires less, never one that
     passes more."""
+    needs: list[str] = field(default_factory=list)
+    """The gates that must be established before this one's verdict counts —
+    its **prerequisites** (P2.2-D1), declared ``@gate(needs=[...])``: a
+    validity guard before the analyses it guards. Exact gate ids (no glob, no
+    tag: a tag-bound set moves when a pack is installed, and the graph and its
+    cycles with it); for a pack, the pack's own gates only (``packs.validate``,
+    D14); refused at registration when it is malformed, closes a cycle, or names
+    a costlier tier than this gate's (``gates.Registry.register``). A need not
+    registered yet is allowed (a missing pack must not become a load crash) and
+    reads "not registered" at the sweep.
+
+    What it does (``gates.prerequisite_root``, D5-D7): under a prerequisite that
+    failed, errored, skipped, is unqualified or is not registered, this gate is
+    not run and reads Skipped; under one invalidated or unrun, its verdict is
+    kept and reads Stale. What slipped through before it (S-51): a claim tagged
+    only ``deflection`` read Checked on a beam whose guard reported
+    Euler-Bernoulli omitting 32% of the deflection.
+
+    NOT part of rho (``verdicts.SPEC_FIELDS_IN_RHO``, D-04): the measurement is
+    a function of its own inputs, so a guard that recovers re-runs nothing.
+    *Rejected:* a separate edges file (two homes for one fact); ``after=``
+    (sequencing's word — P4 reorders; a prerequisite is semantic). The LAST
+    field."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GateSpec":
@@ -1080,7 +1175,7 @@ __all__ = [
     "ArtifactKind", "EXT_KIND_HINTS", "NeedStatus", "Comparator",
     "Record", "slugify", "sha256_file",
     "Rejected", "Param", "Acceptance", "PhysicalResult", "Claim",
-    "Verdict", "NegativeControl", "GateSpec",
+    "Verdict", "NegativeControl", "GateSpec", "PrerequisiteKind",
     "ToolCandidate", "Need", "Extraction", "InputArtifact", "Decision",
     "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta", "Ledger",
     "RECORD_KINDS", "FORBIDDEN_KEYS", "ALWAYS_WRITTEN",

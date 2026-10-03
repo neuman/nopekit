@@ -333,8 +333,16 @@ an agent can read the site's state without a browser.
   it was measured with); `stale_reason` — why it is not current, in the resolver's
   words (`config.bed_xy 220.0 -> 250.0`, `control not demonstrated at this version —
   run atompipe check`, or `… check --tier 2` for a costlier path's entry, `gate not
-  registered in this project`), `""` when it is. A
+  registered in this project`, or — from P2.2 — `prerequisite <root> invalidated: …`
+  / `prerequisite <root> unrun` for a verdict kept under a prerequisite that is not
+  current), `""` when it is. A
   claim covered by a row with a `stale_reason` is never `pass`.
+- A row carries `blocked_by` and `blocked_kind` (P2.2) — `[]` and `""`, or the roots
+  of the prerequisites that were not established when its gate was not run, and the
+  first one's kind. Such a row is `skipped`, never `ok`; its `skip_reason` says
+  `prerequisite failed: <root>` or `prerequisite not established: <root> (<why>)`, and
+  its claim's `reason` says the same in the table's words. The page reads neither key:
+  `status`, `ok` and the claim's own `reason` already say it.
 - `when` is the time the result dates from: the obs run that last wrote or hit its
   entry, else the entry's git commit time, else `""`. `age_s` is `when` measured
   against `meta.built` — `null`, never 0, when either is unknown: an age of zero

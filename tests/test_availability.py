@@ -115,8 +115,13 @@ class ToolingDisjunction(unittest.TestCase):
         self.assertIn("python:<module> or tool:<executable>", reason)
 
     def test_it_is_the_last_field_and_round_trips(self):
-        """Last, so positional construction of every existing GateSpec still works."""
-        self.assertEqual(dataclasses.fields(GateSpec)[-1].name, "requires_one_of")
+        """After every field it was added beside, so positional construction of
+        every existing GateSpec still works. It was the last field until P2.2
+        appended ``needs`` after it (moved under R-6: the property is "nothing
+        new is inserted before an old field", and ``needs`` is held to the
+        same — the last field now)."""
+        names = [f.name for f in dataclasses.fields(GateSpec)]
+        self.assertEqual(names[-2:], ["requires_one_of", "needs"])
         spec = GateSpec.from_dict({"id": "g.x", "requires_one_of": list(ENGINES)})
         self.assertEqual(spec.requires_one_of, ENGINES)
         self.assertEqual(GateSpec.from_dict(spec.to_dict()).requires_one_of, ENGINES)

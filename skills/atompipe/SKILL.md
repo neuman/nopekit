@@ -250,13 +250,26 @@ re-litigates every settled number.
 negative control — a known-bad input it must fail on. The registry will not accept
 one without it. Run `atompipe gate selftest` and believe the result.
 
-**Never call a skipped or errored gate a pass.** A missing solver means the claim is
-Skipped, not fine — even beside a gate that passed. Say so — and then **clear it**:
-Skipped is a call to action, not a resting state. Run `atompipe packs show <pack>` for
-the install recipe, install the tool, and re-run. If it is heavy or needs root, say
-what it costs and ask. What you must not do is leave the claim Skipped and move on as
-though the design were checked. A claim Skipped by a crash (its reason starts
-`errored:`, its tag is `[SKIP ]`) is louder still: the evaluator itself is broken.
+**Never call a skipped or errored gate a pass.** A Skipped claim is not fine — even
+beside a gate that passed. Say so — and then **clear it**: Skipped is a call to
+action, not a resting state, and its reason says which action:
+
+- `skipped: <gate> : requires <tool> (…)` — the tool is missing here. Run
+  `atompipe packs show <pack>` for the install recipe, install the tool, and re-run.
+  If it is heavy or needs root, say what it costs and ask.
+- `skipped: <gate> : <its own words>` with the tool present — the gate skipped itself
+  on its input, usually a parameter the model does not publish. Add it to the model;
+  installing changes nothing.
+- `skipped: <gate> : prerequisite failed: <evaluator>` — the gate was not run because
+  a validity guard it depends on failed: its number would not mean anything here. It
+  is not a missing tool: installing changes nothing. Fix what that evaluator failed
+  (its own row says what), and the gate runs again.
+- `skipped: <gate> : prerequisite not established: <evaluator> (<why>)` — clear that
+  evaluator by its own reason: install its tool if it skipped, fix it if it errored.
+
+What you must not do is leave the claim Skipped and move on as though the design were
+checked. A claim Skipped by a crash (its reason starts `errored:`, its tag is
+`[SKIP ]`) is louder still — the evaluator, or a prerequisite of it, is broken.
 
 **Never simulate a physical claim.** No CFD run makes a printed seam watertight.
 

@@ -113,6 +113,23 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    returned `True` with a declared control produced PROVEN rows, because nothing ever
    ran the control.)
 
+One more came with checkpoint P2.2, when gates gained prerequisites — a dependent
+verdict is a new place to show a pass nothing earned. Enforced in
+`tests/test_prerequisites.py`:
+
+10. **A prerequisite that is not established is never a pass downstream.** A gate may
+    name the gates it needs (`needs`): a validity guard before the analyses it guards.
+    One whose prerequisite failed, skipped, errored, is unqualified or is not
+    registered is not run and reads **Skipped** — `prerequisite failed: <root>` or
+    `prerequisite not established: <root> (<why>)`, and as loud as a crash when the
+    root crashed — and that verdict is never cached or remembered; the gate's own
+    crash, refusal or missing tool still stands. One whose prerequisite is invalidated
+    or unrun keeps its verdict and reads Stale. The registry refuses a `needs` cycle,
+    and a prerequisite in a costlier tier than its dependent, like a build system.
+    (What slipped through: a validity guard protected nothing — a claim tagged only
+    `deflection` read Checked on a beam whose guard reported Euler-Bernoulli omitting
+    32% of the deflection.)
+
 ## House rules
 
 - **`src/atompipe/` is standard library only.** No third-party imports, ever — the

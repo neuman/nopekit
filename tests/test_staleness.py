@@ -3256,6 +3256,19 @@ class GateVersionRows(_env.EnvCase):
                 self.assertTrue(rows[gate_id]["skipped"], rows[gate_id])
                 self.assertEqual(rows[gate_id]["skip_reason"], why)
 
+    def _dependents_of(self, moved: frozenset) -> set[str]:
+        """The gates that ran, outside ``moved``, with a prerequisite in it,
+        transitively — what D7 marks."""
+        out: set[str] = set()
+        grown = True
+        while grown:
+            grown = False
+            for gid in self.ran - moved - out:
+                if set(self.specs[gid].needs) & (moved | out):
+                    out.add(gid)
+                    grown = True
+        return out
+
     def test_the_first_check(self):
         self.assertEqual(set(self.specs), FDM_MESH | FDM_PRINTABILITY,
                          "fdm-print's gates moved: GATE_VERSION_TABLE is typed against them")
@@ -3286,10 +3299,20 @@ class GateVersionRows(_env.EnvCase):
                     fh.write(GATE_EDIT)
 
                 status = _doc(_cli(project, "status", "--json"), 0)
-                self.assertEqual(set(status["stale_gates"]), expected)
+                # P2.2 (D7): a gate whose PREREQUISITE's code moved is marked not
+                # current too — its own entry still Fresh (D-04), its reason the
+                # prerequisite's — and is not re-run: the guard re-runs, passes,
+                # and the dependent is served. Moved under R-6, stronger: both
+                # sets exact, and the mark told apart from a moved read set.
+                marked = self._dependents_of(expected)
+                self.assertEqual(set(status["stale_gates"]), expected | marked)
                 self.assertEqual(_fresh(status), self.ran - expected)
                 for gid in expected:
                     self.assertIn("code", status["freshness"][gid]["reasons"][0])
+                for gid in marked:
+                    self.assertTrue(status["freshness"][gid]["reasons"][0].startswith(
+                        "prerequisite fdm.process_model_valid invalidated: "),
+                        status["freshness"][gid])
                 for gid in self.specs.keys() - self.ran:
                     self.assertEqual(status["freshness"][gid]["state"], "never",
                                      "a gate that never ran has nothing to go stale")

@@ -181,6 +181,9 @@ def conduction(ctx: GateContext) -> Verdict:
     claims=["convection", "heat-transfer-coefficient", "airflow"],
     tier=Tier.INSTANT,
     settles="convective heat transfer coefficient",
+    # No edge to thermal.h_agreement: it compares representations rather than
+    # guarding validity, and this gate's own control, fan_stopped, fails it
+    # (17.7 vs 5.6 W/m^2K).
     negative_control=NegativeControl(
         fixture="selftest/bad_thermal.py:fan_stopped",
         note="the agency driving the convection collapses — forced: the velocity falls "
@@ -435,6 +438,10 @@ def fin_efficiency(ctx: GateContext) -> Verdict:
     claims=["steady-state-temperature", "component-temperature", "cooling"],
     tier=Tier.INSTANT,
     settles="steady-state temperature",
+    # No edge to thermal.time_constant (P2.2-D12a): it also fails on tau over
+    # time_constant_limit_s, which says nothing about the steady-state node, so a
+    # fail there would hide this measurement. It can land once the Biot half of
+    # time_constant is its own evaluator.
     negative_control=NegativeControl(
         fixture="selftest/bad_thermal.py:dry_joint",
         note="the thermal interface material is omitted and the part is bolted dry: the "

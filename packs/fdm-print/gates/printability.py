@@ -364,6 +364,12 @@ def _direction_problem(name: str, value: Any) -> str:
     claims=["manufacturability", "fdm", "additive", "printability"],
     tier=Tier.INSTANT,
     settles="bed fit",
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_params.py:brim_overflow",
         note="a footprint sized halfway between the bed minus its brim and the "
@@ -580,6 +586,12 @@ def _bed_fit_over_set(ctx: GateContext, parts) -> Verdict:
     claims=["manufacturability", "fdm", "additive", "printability"],
     tier=Tier.INSTANT,
     settles="wall thickness",
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_params.py:two_perimeter_wall",
         note="the same part with its thinnest section cut to two beads of the "
@@ -652,6 +664,12 @@ def min_wall(ctx: GateContext) -> Verdict:
     claims=["manufacturability", "fdm", "additive", "structural", "printability"],
     tier=Tier.INSTANT,
     settles="layer-normal load alignment",
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_params.py:load_across_layers",
         note="the same part rotated so the load runs along the build axis, with "
@@ -808,6 +826,12 @@ def layer_alignment(ctx: GateContext) -> Verdict:
     claims=["manufacturability", "fdm", "additive", "cost", "printability"],
     tier=Tier.INSTANT,
     settles="print time",
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_params.py:crawling_speed",
         note="the same part at the speed that puts it 15% past the project's own "

@@ -719,6 +719,13 @@ def solution_valid(ctx: GateContext) -> Verdict:
     claims=["result-extraction", "simulation-result", "modelica"],
     tier=Tier.INSTANT,
     settles="simulated value against acceptance",
+    # Prerequisite modelica.solution_valid (P2.2-D12): a value read off a run that stopped
+    #    early, diverged or never initialised is a real float from a real file, and
+    #    means nothing. No edge to modelica.simulates: that is tier 2, this tier 0
+    #    (D-28; the registry refuses the inversion).
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["modelica.solution_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_modelica.py:claim_exceeded",
         note="the pack's own result file with the first bound variable shifted so "
@@ -854,6 +861,11 @@ def result_claim(ctx: GateContext) -> Verdict:
     claims=["cross-representation", "model-agreement", "mirror-agreement"],
     tier=Tier.INSTANT,
     settles="agreement between the model and its mirror",
+    # Prerequisite modelica.solution_valid (P2.2-D12): agreement with a result the run did
+    #    not finish producing settles nothing.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["modelica.solution_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_modelica.py:mirror_drifted",
         note="the mirror's first variable is offset by just past the tolerance it "
@@ -1212,6 +1224,8 @@ def checks(ctx: GateContext) -> Verdict:
     tier=Tier.SOLVE,
     settles="model compiles to an executable",
     requires_tools=["omc"],
+    # No edge to modelica.checks: this gate's own control, WillNotCompile, fails
+    # checkModel too, so the guard would pre-empt the control.
     negative_control=NegativeControl(
         fixture="selftest/bad_modelica.py:will_not_compile",
         note="selftest/assets/bad/WillNotCompile.mo — the pack's own tank routing its "
@@ -1309,6 +1323,11 @@ def compiles(ctx: GateContext) -> Verdict:
     tier=Tier.SOLVE,
     settles="simulation runs to completion",
     requires_tools=["omc"],
+    # Prerequisite modelica.compiles (P2.2-D12): nothing simulates without compiling;
+    #    both tier 2.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["modelica.compiles"],
     negative_control=NegativeControl(
         fixture="selftest/bad_modelica.py:assert_fires",
         note="selftest/assets/bad/AssertFires.mo — the pack's own tank with a ceiling "

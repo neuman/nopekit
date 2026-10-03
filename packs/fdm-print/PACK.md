@@ -140,6 +140,24 @@ gates report SKIPPED with the module named and their claims resolve BLOCKED. The
 never fall back to a cheaper approximation. A pack that quietly downgrades turns
 "we did not check this" into "this is fine".
 
+### Prerequisites
+
+`fdm.process_model_valid` is the prerequisite (`needs`) of every other gate here:
+`fdm.overhang`, `fdm.bridge_span`, `fdm.bed_fit`, `fdm.min_wall`, `fdm.layer_alignment`
+and `fdm.print_time_est`. It checks the units and the process envelope the rest of
+the pack's arithmetic assumes, so below it failing they are not run, and their
+claims read Skipped, `prerequisite failed: fdm.process_model_valid`.
+
+**A mesh-only project reads Skipped throughout.** A project that publishes meshes and
+no `bbox_mm` gives `fdm.process_model_valid` nothing to check its units against: it
+skips itself, so every fdm gate — the mesh gates `overhang` and `bridge_span`
+included, which used to measure — reads `prerequisite not established:
+fdm.process_model_valid (skipped)`. That is the honest reading: nothing has verified
+the units the overhang and bridge numbers are in. Publish `fdm.bbox_mm` (one part, in
+print orientation) and the pack runs. There is no mesh-validity guard here, and a
+prerequisite cannot be another pack's gate, so a mesh the mesh gates cannot read still
+fails in their bodies, not as a prerequisite skip.
+
 ## Views, and the node name that is an interface
 
 | View | Kind | Asset | Built from | Addressed by |

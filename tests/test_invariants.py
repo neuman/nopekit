@@ -495,6 +495,8 @@ def _every_status_ledger() -> tuple[Ledger, _Reg, dict, frozenset]:
         c("K10", assume, owner="Sam"), c("K11", gates=["g.k11"]), c("K12", gates=["g.k12"]),
         c("K13", phys), c("K14", phys, physical_result=PhysicalResult(passed=True)),
         c("K15", assume, owner="Ana", rationale="carried on purpose"),
+        # P2.2: not run behind a prerequisite that failed, and one that crashed
+        c("K16", gates=["g.k16"]), c("K17", gates=["g.k17"]),
     ]
     verdicts = [
         Verdict(gate="g.k1", claims=["K1"], passed=True),
@@ -503,8 +505,14 @@ def _every_status_ledger() -> tuple[Ledger, _Reg, dict, frozenset]:
         Verdict(gate="g.k5", claims=["K5"], skipped=True, skip_reason="no tool"),
         Verdict(gate="g.k7", claims=["K7"], error="not admitted: x", unqualified="x"),
         Verdict(gate="g.k12", claims=["K12"], passed=True),
+        Verdict(gate="g.k16", claims=["K16"], skipped=True, blocked_by=["g.k2"],
+                blocked_kind="failed", skip_reason="prerequisite failed: g.k2"),
+        Verdict(gate="g.k17", claims=["K17"], skipped=True, blocked_by=["g.k4"],
+                blocked_kind="errored",
+                skip_reason="prerequisite not established: g.k4 (errored)"),
     ]
-    reg = _Reg([gate(g) for g in ("g.k1", "g.k2", "g.k4", "g.k5", "g.k7", "g.k11", "g.k12")])
+    reg = _Reg([gate(g) for g in ("g.k1", "g.k2", "g.k4", "g.k5", "g.k7", "g.k11", "g.k12",
+                                  "g.k16", "g.k17")])
     owners = {"K15": claims_mod.Attribution("Ana", "carried on purpose")}
     return _ledger(*claims, verdicts=verdicts), reg, owners, frozenset({"g.k12"})
 

@@ -411,11 +411,27 @@ def _swept(resolution: verdicts.Resolution, result: verdicts.SweepResult,
 
     The one exception is a row the sweep itself served stale
     (`SweepRow.stale_reason`: a costlier tier's entry whose path no current
-    control shows, which this sweep's ceiling cannot demonstrate). It stays in
-    `stale_gates` with the sweep's reason on its resolution row. What slipped through (review,
+    control shows, which this sweep's ceiling cannot demonstrate, or a
+    dependent marked under such a prerequisite). It stays in `stale_gates` with
+    the sweep's reason on its resolution row, `fresh` False. What slipped through (review,
     `repro_undemonstrated`): the sweep served that gate as a skip and this
     dropped it from the stale set, so `check --junit` exited 0 ready while
     `status` read the claim STALE.
+
+    Then the prerequisite rule again, over the merged view
+    (`verdicts.apply_prerequisites`, P2.2-D8). `resolve` applied it to what it
+    read from disk; the sweep may have learned more — a guard it just refused
+    or saw fail, under `--no-record` (nothing reached disk), or an entry with an
+    opaque channel that reads Unknown the moment it is written. Without this an
+    unselected dependent — above the ceiling, outside `--only` — reads Checked
+    beside a guard this same command found not established: exit 0, JUnit
+    green, and `status` stricter than `check` (critique of the P2.2 design;
+    `UnselectedDependentFollowsTheSweep`). The rule is monotone, so it only
+    ever downgrades here. Its two under-generous corners, each stricter than
+    `status` and never more generous: a dependent `resolve` already pruned
+    stays pruned in this view when the sweep's reading of its root passes (a
+    `--no-record --only <root>` after a fix); and an opaque root reads Unknown
+    once written, so its dependents read Stale here — as `status` shows them.
     """
     rows = {row.verdict.gate: row for row in result.rows}
     resolved = {verdict.gate: verdict for verdict in resolution.verdicts}
@@ -434,10 +450,11 @@ def _swept(resolution: verdicts.Resolution, result: verdicts.SweepResult,
         held = by_gate.get(gate_id) or verdicts.Row(gate_id, "fresh", cached=row.cached)
         by_gate[gate_id] = dataclasses.replace(held, fresh=False,
                                                stale_reason=row.stale_reason)
-    return dataclasses.replace(
+    merged_view = dataclasses.replace(
         resolution, verdicts=merged, rows=by_gate,
         stale_gates=frozenset([*(g for g in resolution.stale_gates if g not in rows),
                                *served_stale]))
+    return verdicts.apply_prerequisites(merged_view, registry)
 
 
 def _resolved(root: str, ledger: Ledger, registry: gates.Registry | None,
@@ -769,7 +786,8 @@ def _verdict_row(verdict: Verdict, *, cached: bool | None = None, fresh: bool | 
     (cli:H12, `CostIsKept`) — the cost lives in obs.
     """
     row = verdict.to_dict()
-    for key in ("detail", "error", "evidence", "skip_reason", "units", "rho", "unqualified"):
+    for key in ("detail", "error", "evidence", "skip_reason", "units", "rho", "unqualified",
+                "blocked_by", "blocked_kind"):
         if not row.get(key):
             row.pop(key, None)
     for key in ("measured", "limit"):
@@ -1410,7 +1428,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     """Run what moved, serve what did not, and exit non-zero while anything critical blocks.
 
     **Affected-only** (D-05). `verdicts.sweep` is the loop: per selected gate,
-    in registration order, availability, then admission (the gate's negative
+    in plan order (each gate after its prerequisites, `gates.plan`; `--only`
+    runs the named gates' prerequisites too), first the prerequisite rule — a
+    gate whose prerequisite is not established is not run and reads the
+    prerequisite skip, or its own crash, refusal or missing tool — then
+    availability, then admission (the gate's negative
     control, run on a control-entry miss — S-05: a logger with a declared
     control produced PROVEN rows because nothing here ever ran a control), then
     the verdict cache (a Fresh entry is served, unless a crash at its inputs
@@ -2261,7 +2283,7 @@ def cmd_gap(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # gates
 # --------------------------------------------------------------------------- #
-def _gate_row(spec: Any) -> dict[str, Any]:
+def _gate_row(spec: Any, registry: gates.Registry | None = None) -> dict[str, Any]:
     """One gate as JSON, without its prose. The default shape of `gate list --json`.
 
     Everything here answers a question a caller can act on: what it is, what it
@@ -2289,6 +2311,11 @@ def _gate_row(spec: Any) -> dict[str, Any]:
         row["requires_tools"] = list(spec.requires_tools)
     if spec.requires_python:
         row["requires_python"] = list(spec.requires_python)
+    # The prerequisite edge, both ways (P2.2): what this gate needs established
+    # first, and which gates need it. Always present, as lists: P5's canvas
+    # lays evaluators in lanes by them, and an absent key would read "unknown".
+    row["needs"] = list(spec.needs or [])
+    row["needed_by"] = registry.needed_by(spec.id) if registry is not None else []
     return row
 
 
@@ -2315,7 +2342,8 @@ def cmd_gate_list(args: argparse.Namespace) -> int:
     specs = registry.by_tier(args.tier if args.tier is not None else ALL_TIERS)
 
     if args.json:
-        _dump({"gates": [spec.to_dict() if args.full else _gate_row(spec)
+        _dump({"gates": [dict(spec.to_dict(), needed_by=registry.needed_by(spec.id))
+                         if args.full else _gate_row(spec, registry)
                          for spec in specs],
                "full": bool(args.full),
                "summary": gates.registry_summary(registry),
@@ -2416,8 +2444,10 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     admission = verdicts.admission_state(root, spec, fn, projection=projection,
                                          ledger=ledger, anchors=resolution.anchors)
 
+    needed_by = registry.needed_by(spec.id)
     if args.json:
-        _dump({"gate": spec.to_dict(), "available": ok, "availability": reason,
+        _dump({"gate": spec.to_dict(), "needed_by": needed_by, "available": ok,
+               "availability": reason,
                "last_verdict": _resolved_row(verdict, resolution) if verdict else None,
                "last_selftest": _last_selftest(admission)})
         return 0
@@ -2428,6 +2458,12 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     _say(f"  tier {int(spec.tier)}  pack {spec.pack or '(project)'}  entry {spec.entry}")
     _say(f"  claims: {', '.join(spec.claims) or '(none — this gate settles nothing)'}")
     _say(f"  runnable here: {'yes' if ok else 'NO — ' + reason}")
+    if spec.needs:
+        missing = [need for need in spec.needs if need not in registry]
+        _say(f"  prerequisites: {', '.join(spec.needs)}"
+             + (f" ({', '.join(missing)} not registered)" if missing else ""))
+    if needed_by:
+        _say(f"  prerequisite of: {', '.join(needed_by)}")
     if spec.negative_control:
         _say(f"  control: {spec.negative_control.fixture} "
              f"(must {spec.negative_control.expect})")
@@ -5095,6 +5131,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
            f"{summary['available']} runnable here"
            + (f" — NO NEGATIVE CONTROL: {', '.join(uncontrolled)}" if uncontrolled
               else "" if summary["gates"] else " — nothing can be checked yet"))
+    # A prerequisite nothing registers reads "not registered" at every check and
+    # Skips its dependent (P2.2-D14): name each, with the fix. A problem, not a
+    # warning — every claim the dependent covers is unresolved until it is.
+    for row in summary["unregistered_prerequisites"]:
+        _check(results, "prerequisite", "FAIL",
+               f"{row['gate']}: prerequisite {row['need']} is not registered — install "
+               f"the pack that provides it, or remove the edge")
     # Where the crash rows go once the resolution is known (below): above every
     # row about a missing tool (invariant 2).
     crash_at = len(results)
@@ -5326,7 +5369,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tier", type=int, default=0,
                    help="cost ceiling: 0 instant (default), 1 build, 2 solve, 3 external")
     p.add_argument("--only", action="append", metavar="GATE",
-                   help="gate id, pack name or glob (repeatable); runs it above its tier too")
+                   help="gate id, pack name or glob (repeatable); runs it above its tier "
+                        "too, with its prerequisites")
     p.add_argument("--force", action="store_true",
                    help="re-run every selected gate and its control, ignoring the "
                         "verdict cache (what CI runs: a cache is re-proven, not trusted)")
