@@ -61,7 +61,9 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     3: "test_invariants.RegistryRefusesLoggers",
     # 4 over a pass beside an evaluator that is not admitted (P2.0): an
     # invariant-9 change that drops the refused verdict would leave the pass
-    # alone and the claim under PROVEN.
+    # alone and the claim under PROVEN. In process on a planted verdict, and
+    # end to end on a gate refused at its first check — where today's readers
+    # already drop the refusal (its ratchet, KNOWN_OVERCLAIMS, names each one).
     4: ["test_invariants.ReportNeverOverclaims",
         "test_status_table.UnqualifiedBesideAPassIsNeverChecked"],
     5: "test_packs.ControlsAreSealed",

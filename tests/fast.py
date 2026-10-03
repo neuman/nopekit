@@ -13,10 +13,13 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine: 66-72 s
-measured 2026-10-03 (load average 0.1-2.5) after ``test_louder``,
-``test_status_table`` and ``test_mutation`` joined (5.0 s, 0.1 s and 1.0 s
-alone); 68-71 s before them (load average 1.3), after the bundled-pack seal
+The budget is 90 s as ONE process on an otherwise idle machine: 70-74 s
+measured 2026-10-03 (load average 0.8-1.4) after the P2.0 review grew
+``test_louder``, ``test_status_table`` (an end-to-end project) and
+``test_mutation`` to 4.8 s, 2.7 s and 2.3 s alone, and 85 s for the same list
+with other agents loading the machine (load average 1.6-4.3); 66-72 s (load
+average 0.1-2.5) when those three joined at 5.0 s, 0.1 s and 1.0 s; 68-71 s
+before them (load average 1.3), after the bundled-pack seal
 tests and the migrated-project write sweep joined; 54-59 s before those, and
 94 s for that shorter list with other agents loading the machine. Re-time it
 whenever ``FAST`` changes; a run under load is not a measurement.
@@ -66,6 +69,7 @@ from __future__ import annotations
 import os
 import sys
 import unittest
+from unittest import mock
 
 TESTS = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(os.path.dirname(TESTS), "src")
@@ -110,11 +114,13 @@ FAST: list[str] = [
     # today is quieter (ErrorNotYetLouder), and the command tripwire.
     "test_louder",
     # Today's resolve_status table, the report's section order, and invariant 4
-    # over a pass beside an evaluator that is not admitted. <0.1 s.
+    # over a pass beside an evaluator that is not admitted — in process, and
+    # end to end on a gate refused at its first check (eight commands, the
+    # time: ~2.5 s), with the ratchet of what today's readers overclaim there.
     "test_status_table",
     # Planned invariant 15: the mutation harness, its planted runners, the
-    # tripwire, and the reference runner over the bracket's six gates and a
-    # bundled pack's eight. ~1 s.
+    # tripwire, and the reference and planted runners over the bracket's six
+    # gates and a bundled pack's eight. ~2.3 s.
     "test_mutation",
     # Freshness, admission state and the one resolver: what any reader may call
     # current. Invariants 7 and 9 are read through it. 2.1 s.
@@ -380,17 +386,34 @@ def coverage_problems(fast: list[str], left: list[str],
     return problems
 
 
+def _planned_but_unwritten(ref: str) -> bool:
+    """A planned class whose file or class does not exist yet — the state
+    `test_meta.test_planned_classes_never_skip_once_they_exist` allows. One
+    whose class is written but does not import is NOT this: it resolves to
+    None below and is a problem."""
+    found = test_meta._class_source(ref)
+    if found is None:
+        return True
+    source, class_name, path = found
+    return test_meta._skip_findings(source, class_name, os.path.relpath(path)) is None
+
+
 def _invariant_classes() -> dict[str, list[str] | None]:
     """Every class of a numbered invariant AND of a planned one: a test added to
     a planned class (MutationIsSealed, P2.0) must be placed too, or it would run
     in neither tier until someone noticed — the class is planned so that the
-    rules bite from its first line, and this is one of them (D-13). *Rejected:*
+    rules bite from its first line, and this is one of them. A planned class not
+    written yet is left out until it is, as test_meta allows (what slipped
+    through the first version: a planned ref named a checkpoint ahead turned
+    this tier red while test_meta, by design, stayed green). *Rejected:*
     listing a planned class in FAST by name only, which a fourth test added to
-    it later slips past."""
+    it later slips past; requiring planned classes to exist, which makes
+    planning a class a checkpoint ahead impossible."""
     loader = unittest.TestLoader()
     out: dict[str, list[str] | None] = {}
-    for ref in (test_meta._refs(test_meta.INVARIANT_CLASSES)
-                + test_meta._refs(test_meta.PLANNED_INVARIANT_CLASSES)):
+    planned = [ref for ref in test_meta._refs(test_meta.PLANNED_INVARIANT_CLASSES)
+               if not _planned_but_unwritten(ref)]
+    for ref in test_meta._refs(test_meta.INVARIANT_CLASSES) + planned:
         cls = test_meta._resolve(ref)
         out[ref] = list(loader.getTestCaseNames(cls)) if cls is not None else None
     return out
@@ -436,6 +459,22 @@ class FastTierHoldsEveryInvariant(unittest.TestCase):
     def test_an_unresolvable_class_is_caught(self):
         problems = coverage_problems(["test_a"], [], {"test_a.Gone": None})
         self.assertEqual(problems, ["test_a.Gone: does not resolve to a TestCase holding a test"])
+
+    def test_a_planned_class_not_yet_written_waits_until_it_is(self):
+        """test_meta allows a planned class that does not exist yet, so this tier
+        does too; a NUMBERED one that does not resolve stays a problem."""
+        before = _invariant_classes()
+        with mock.patch.dict(test_meta.PLANNED_INVARIANT_CLASSES,
+                             {99: "test_no_such_module.NotWrittenYet",
+                              98: "test_invariants.NotWrittenYet"}):
+            self.assertEqual(_invariant_classes(), before)
+            self.assertEqual(coverage_problems(FAST, LEFT_FOR_THE_GATE, _invariant_classes()),
+                             [])
+        with mock.patch.dict(test_meta.INVARIANT_CLASSES,
+                             {99: "test_no_such_module.NotWrittenYet"}):
+            self.assertIn("test_no_such_module.NotWrittenYet: does not resolve to a TestCase "
+                          "holding a test",
+                          coverage_problems(FAST, LEFT_FOR_THE_GATE, _invariant_classes()))
 
 
 def load_tests(loader: unittest.TestLoader, standard_tests: unittest.TestSuite,

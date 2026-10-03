@@ -12,15 +12,18 @@ reason, the order and tone of the row, the counts, and the JUnit ``<error>``.
 These tests land first (R-1), green on the code before rung 4 moves, so the
 change that moves it cannot quietly drop one of the four.
 
-What slipped through, read on the code before this module (the P2.0 probe):
+What slipped through, read on the code before this module (the P2.0 probe).
+The ``F-n`` are this module's own findings, named here and in ``KNOWN_QUIETER``
+— not PLAN-v0.14 §4.3's paper feedback F1–F5:
 
 * **F-1** A crash's reason is its traceback: every reason prefers ``detail``,
   which ``run_gate`` fills with the traceback tail, and ``status`` cuts the
-  body at 56 characters, so the row never says what crashed.
+  body at 56 characters, so the row never says what crashed; and no reason
+  leads ``errored:`` (GLOSSARY §3).
 * **F-2** ``check``'s BLOCKING list is in record order: ``[skip ] P1`` above the
   crashed ``[FAIL ] P2``.
 * **F-3** ``why`` and ``claim show`` list a claim's evaluators in gate-id order:
-  ``[skip]`` above ``[ERR ]``.
+  ``[skip]`` above ``[ERR ]``; the report's bullets under each claim the same.
 * **F-4** ``doctor`` has two rows for a missing tool and none for a gate that
   crashes at its current inputs.
 * **F-5** ``state.json`` lists claims in record order, and the page keeps it.
@@ -33,9 +36,10 @@ What slipped through, read on the code before this module (the P2.0 probe):
   streams it under the skip digest's quiet ``[skip]`` tag with its skip reason,
   ``status`` counts it as skipped and errored at once, and ``why``, the report
   and ``gate show`` print ``[ERR ] … : requires … (not installed)`` —
-  ``Verdict.render`` prefers ``skip_reason`` to ``error``. The first draft of
-  this module planted only a raising gate, which never sets ``skipped``, and
-  was green over all of it.
+  ``Verdict.render`` prefers ``skip_reason`` to ``error``; the page's unproven
+  reason for it is the skip reason too. The first draft of this module planted
+  only a raising gate, which never sets ``skipped``, and was green over all of
+  it.
 
 **The shape of the tests.** One planted project (``_louder_project``): the
 bracket, migrated, plus three evaluators — ``probe.a_skip`` (its tool is
@@ -50,27 +54,36 @@ output into ``Problem`` rows; each ``ErrorIsLouder`` test asserts a channel has
 none. In process, ``render_terminal``, ``render_markdown`` and ``render_junit``
 run on a ledger built from real ``run_gate`` verdicts, under the same checkers.
 
-**Monotone.** Every assertion holds today AND must hold after Phase 2 moves
-rung 4 (P2.1): never a pass; never the skip's quiet tag or its words; above
-every row that is neither Failing nor errored; counted once, never inside a
-missing-tool count; a JUnit ``<error>`` critical or not; and a fail beside an
-error still reads Failing. Where today does not hold one — F-2 to F-5, F-10 —
-the problem is named in ``KNOWN_QUIETER``, a ratchet that may only shrink:
-``ErrorNotYetLouder`` goes red when an entry no longer shows, so the change that
-fixes a channel deletes its entry in the same edit and ``ErrorIsLouder`` holds
-that channel from then on. Adding an entry is weakening an invariant test (R-6).
-*Rejected* (P2.0 design, D-4, and its review): pinning today's violations as
+**Monotone, and ratcheted.** Every assertion holds today AND must hold after
+Phase 2 moves rung 4 (P2.1): never a pass; never the skip's quiet tag or its
+words, nor its lead ``skipped:``; above every row that is neither Failing nor
+errored; counted once, never inside a missing-tool or ``skipped`` count unless
+split out (``N skipped (k errored)``); a JUnit ``<error>`` critical or not; and a
+fail beside an error still reads Failing. Where today does not hold one — the
+reason's lead ``errored:`` and its traceback (F-1), F-2 to F-5, F-10 — the exact
+problem is named in ``KNOWN_QUIETER``, a ratchet that may only shrink:
+``ErrorNotYetLouder`` goes red when a named problem no longer shows, so the
+change that fixes a channel deletes it in the same edit and ``ErrorIsLouder``
+holds that channel from then on; any other problem on the channel is red at
+once. Adding to an entry is weakening an invariant test (R-6). So PLAN-v0.14
+§3's P2.0 row — across every renderer an errored claim's reason starts
+``errored:`` — binds here from P2.0: today's shortfall is listed, channel by
+channel, and P2.1 is done with this module when the ratchet is empty.
+*Rejected* (in the P2.0 design and its review): pinning today's violations as
 green tests (a contributor who honours invariant 2 early turned the suite red
 for it); leaving them out with a comment (invisible to the one suite run every
 iteration, which is how F-4 survived Phase 1); asserting P2.1's exact words now
-(red on today's code, against R-1, and R-7 forbids an expected failure).
+(red on today's code, against R-1, and R-7 forbids an expected failure); a
+ratchet keyed by channel and property (the first version: it excused a WORSE
+problem on a listed channel — both crashes counted as missing tools, the word
+errored gone from the gates line — as the listed one still showing).
 
-**What P2.1 adds here** (the hand-off): ``test_reason_leads_with_errored`` (every
-channel: ``errored:`` / ``skipped:`` lead, the exception's first line, never the
-traceback tail — F-1) and ``test_counts_say_skipped_with_errored_apart``
-(``N skipped (k errored)`` in every count, sentence and heading). Expected words
-are literals typed here from GLOSSARY §3, never read from ``report.HUMAN`` (a
-test that reads the table under test agrees with it by construction).
+**What P2.1 adds here** (the hand-off): ``test_counts_say_skipped_with_errored_apart``
+(``N skipped (k errored)`` in every claim count and heading, which no channel
+prints today), and the deletion of every ``KNOWN_QUIETER`` entry. Expected words
+are literals typed here from GLOSSARY §3 (``ERRORED_LEAD``), never read from
+``report.HUMAN``: a test that reads the table under test agrees with it by
+construction.
 
 Run:  PYTHONPATH=src python3 -m unittest discover -s tests -p test_louder.py -v
 """
@@ -143,7 +156,10 @@ PROBE_CLAIMS: dict[str, tuple[str, list[str], bool]] = {
 #: The evaluators the CLI fixture plants. `probe.z_crash` is honest on every
 #: input but the live design's: it passes the known-good 8.0 (`t >= 7.6`),
 #: fails its own known-bad, and raises only at 7.0. So it is admitted today and
-#: stays a gate whose error is a CRASH, not a refusal of qualification (D-8).
+#: stays a gate whose error is a CRASH, not a refusal of qualification: GLOSSARY
+#: §2 and PLAN-v0.14 §1.4 keep "it crashed" (Skipped, errored) apart from "it
+#: has not shown it can fail" (Gap, unqualified), and a fixture that blurred them
+#: would test the wrong word.
 #: Why its own fixture and 7.6 (review of the P2.0 design): reusing the
 #: bracket's `quarter_thickness` tied this fixture to a control P2 recalibrates
 #: (old 2.3, S-17: about 1.15x past the deflection limit, thickness ~7.5),
@@ -152,8 +168,8 @@ PROBE_CLAIMS: dict[str, tuple[str, list[str], bool]] = {
 #: a margin no small mutation crosses. *Rejected:* a gate that always raises —
 #: never qualified once the known-good half runs (P2.3), so P2.3 would turn
 #: this fixture's errored claims into Gaps silently. Which mutation operators
-#: P2.3 runs is not designed yet: `_check_the_fixture` (D-8's precondition)
-#: is the guard, and names the gate if the crash stops being one.
+#: P2.3 runs is not designed yet: `_check_the_fixture`'s precondition is the
+#: guard, and names the gate if the crash stops being one.
 PROBE_GATES = f'''\
 """Planted by tests/test_louder.py: a missing tool, a crash, and both at once."""
 from atompipe.gates import gate
@@ -211,13 +227,23 @@ _BED_XY = re.compile(r"^(    bed_xy: float = )220\.0$", re.MULTILINE)
 # problems
 # --------------------------------------------------------------------------- #
 class Problem(NamedTuple):
+    """One shortfall. `(channel, prop, subject, text)` is its identity — what
+    `KNOWN_QUIETER` names, so `text` never carries what varies by machine or
+    by run (a path, a traceback, a whole printed line); that goes in `seen`,
+    shown to a reader and never compared."""
     channel: str
     prop: str
     subject: str
     text: str
+    seen: str = ""
+
+    @property
+    def key(self) -> tuple[str, str, str, str]:
+        return (self.channel, self.prop, self.subject, self.text)
 
     def __str__(self) -> str:
-        return f"{self.channel}: {self.prop}: {self.subject}: {self.text}"
+        head = f"{self.channel}: {self.prop}: {self.subject}: {self.text}"
+        return f"{head} [{self.seen}]" if self.seen else head
 
 
 class Row(NamedTuple):
@@ -238,9 +264,12 @@ def classify(subject: str) -> str:
 
 
 def tone_of(tag: str) -> str:
-    """D-6: on a channel with no colour, Failing's tone is a LOUD tag — letters,
-    all upper case (`FAIL`, `ERR `, `STALE`); `skip`, `gap`, `phys`, `ok` are
-    quiet. *Rejected:* punctuation (`[skip!]`), which is not a tone anyone learns."""
+    """On a channel with no colour, Failing's tone is a LOUD tag — letters, all
+    upper case (`FAIL`, `ERR `, `STALE`); `skip`, `gap`, `phys`, `ok` are quiet,
+    as today's tags already split (the P2.0 design; its default for P2.1 is an
+    errored claim tagged `[SKIP ]`, the status's one word in Failing's tone).
+    *Rejected:* punctuation (`[skip!]`), which is not a tone anyone learns;
+    `[ERR  ]` on a claim row, an outcome's tag on a status row."""
     core = tag.strip()
     return "loud" if any(c.isalpha() for c in core) and core == core.upper() else "quiet"
 
@@ -264,7 +293,10 @@ def never_pass_problems(channel: str, rows: list[Row]) -> list[Problem]:
 
 
 def words_problems(channel: str, rows: list[Row]) -> list[Problem]:
-    """An errored row's body says nothing a missing tool says (F-8, F-10)."""
+    """An errored row's body says nothing a missing tool says (F-8, F-10), and
+    never leads with the skip's GLOSSARY lead `skipped:` — a reason that names
+    both says `errored:` first (GLOSSARY §3: "errored first"). Green today,
+    where no reason says either; it binds the day P2.1 writes the leads."""
     out = []
     for row in rows:
         if classify(row.subject) != "errored":
@@ -272,7 +304,43 @@ def words_problems(channel: str, rows: list[Row]) -> list[Problem]:
         hit = [w for w in MISSING_TOOL_WORDS if w in row.body.lower()]
         if hit:
             out.append(Problem(channel, "skip-words", row.subject,
-                               f"reads like a missing tool ({hit[0].strip()!r}): {row.body[:80]}"))
+                               f"reads like a missing tool ({hit[0].strip()!r})", row.body[:80]))
+        if row.body.lower().lstrip().startswith("skipped"):
+            out.append(Problem(channel, "skip-words", row.subject,
+                               "leads with the skip's 'skipped:'", row.body[:80]))
+    return out
+
+
+#: GLOSSARY §3's lead for an errored claim's reason, typed here (never read
+#: from the table under test).
+ERRORED_LEAD = "errored:"
+
+#: What a traceback leaves in a reason: its head line, or a frame line.
+#: `run_gate` keeps the last ~400 characters of the stack cut at a line boundary
+#: (`gates._trace_tail`), so a long checkout path pushes the head out and only
+#: frames remain. What slipped through a head-only marker: run from a tree under
+#: a long temp path, every "carries the traceback" problem vanished, and the
+#: ratchet went red for the path, not the code.
+TRACEBACK = re.compile(r'Traceback \(most recent call last\)|\bFile "')
+
+
+def lead_problems(channel: str, rows: list[Row], *, lead: bool = True) -> list[Problem]:
+    """F-1. An errored claim's reason leads `errored:` (`lead`) and never
+    carries the traceback: the exception's first line says what crashed, the
+    tail of the stack says where the spine called the gate. `lead=False` for an
+    evaluator's own row (`[ERR ] gate : …`), whose tag already leads. Today
+    every reason leads with the gate id and a crash's is its traceback, so each
+    channel's shortfall is in `KNOWN_QUIETER` until P2.1 writes the lead."""
+    out = []
+    for row in rows:
+        if classify(row.subject) != "errored":
+            continue
+        if lead and not row.body.startswith(ERRORED_LEAD):
+            out.append(Problem(channel, "lead", row.subject,
+                               f"does not lead with {ERRORED_LEAD!r}", row.body[:60]))
+        if TRACEBACK.search(row.body):
+            out.append(Problem(channel, "lead", row.subject, "carries the traceback",
+                               row.body[:60]))
     return out
 
 
@@ -315,8 +383,9 @@ def floor_problems(channel: str, rows: list[Row], *kinds: str) -> list[Problem]:
 
 
 def row_problems(channel: str, rows: list[Row], *, full: bool = False, order: bool = True,
-                 cites: bool = True, floor: tuple[str, ...] = ("errored", "skipped")
-                 ) -> list[Problem]:
+                 cites: bool = True, floor: tuple[str, ...] = ("errored", "skipped"),
+                 lead: bool = False) -> list[Problem]:
+    """Every row property; `lead` for rows whose body is a claim's reason."""
     out = floor_problems(channel, rows, *floor)
     out += never_pass_problems(channel, rows)
     out += tone_problems(channel, rows)
@@ -325,6 +394,8 @@ def row_problems(channel: str, rows: list[Row], *, full: bool = False, order: bo
         out += cites_problems(channel, rows, full=full)
     if order:
         out += order_problems(channel, rows)
+    if lead:
+        out += lead_problems(channel, rows)
     return out
 
 
@@ -340,11 +411,11 @@ def gate_count_problems(channel: str, line: str) -> list[Problem]:
     out = []
     if plain != len(SKIPPED_GATES):
         out.append(Problem(channel, "counts", "*",
-                           f"{plain} counted as skipped, {len(SKIPPED_GATES)} skipped: {line}"))
+                           f"{plain} counted as skipped, {len(SKIPPED_GATES)} skipped", line))
     if alone + inside != len(ERRORED_GATES) or (alone and inside):
         out.append(Problem(channel, "counts", "*",
-                           f"errored counted {alone} + {inside} times for "
-                           f"{len(ERRORED_GATES)}: {line}"))
+                           f"errored counted {alone} + {inside} times for {len(ERRORED_GATES)}",
+                           line))
     return out
 
 
@@ -372,31 +443,50 @@ def claim_count_problems(channel: str, line: str, n_claims: int) -> list[Problem
             plain_skip = n - int(m.group("sub") or 0)
     out = []
     if not parsed:
-        out.append(Problem(channel, "floor", "*", f"no count parsed in {line!r}"))
+        out.append(Problem(channel, "floor", "*", "no count parsed", line))
     elif total != n_claims:
         out.append(Problem(channel, "counts", "*",
-                           f"the counts add to {total} for {n_claims} claims: {line}"))
+                           f"the counts add to {total} for {n_claims} claims", line))
     if plain_skip != len(SKIPPED_CLAIMS):
         out.append(Problem(channel, "counts", "*",
-                           f"skip counts {plain_skip} for {len(SKIPPED_CLAIMS)} skipped: {line}"))
+                           f"skip counts {plain_skip} for {len(SKIPPED_CLAIMS)} skipped", line))
     return out
 
 
-_ID_GROUP = re.compile(r"(\d+) ([^;:()]*?) \(([A-Z]\d+(?:, (?:[A-Z]\d+|\+\d+ more))*)\)")
+_ID_GROUP = re.compile(r"(\d+) ([^;:()]*?)(?: \((\d+) errored\))?"
+                       r" \(([A-Z]\d+(?:, (?:[A-Z]\d+|\+\d+ more))*)\)")
+
+#: A sentence group whose phrase holds one of these counts claims with no
+#: usable verdict: today's "blocked on missing tooling", and GLOSSARY §3's word
+#: for the status, "skipped".
+_SKIP_PHRASES = ("missing tool", "tooling", "not installed", "skipped")
 
 
 def sentence_problems(channel: str, sentence: str) -> list[Problem]:
-    """The readiness sentence never lists an errored claim under a missing tool."""
+    """The readiness sentence never counts an errored claim inside a skip: a
+    group that names a missing tool or says `skipped` lists no errored claim
+    unless it splits them out, `N skipped (k errored) (…)`, and then N − k is
+    the critical skipped claims alone. What slipped through the first version:
+    it knew only today's phrase, so GLOSSARY's `6 skipped (P1, P2, …)` — every
+    crash counted as a missing tool — passed, and a group carrying the split
+    was not parsed at all."""
     groups = list(_ID_GROUP.finditer(sentence))
-    out = [] if groups else [Problem(channel, "floor", "*", f"no id group in {sentence!r}")]
+    out = [] if groups else [Problem(channel, "floor", "*", "no id group", sentence)]
+    critical_skipped = [cid for cid in SKIPPED_CLAIMS if cid not in NOT_REQUIRED]
     for m in groups:
         phrase = m.group(2).lower()
-        if not any(w in phrase for w in ("missing tool", "tooling", "not installed")):
+        if not any(w in phrase for w in _SKIP_PHRASES):
             continue
-        for cid in (x.strip() for x in m.group(3).split(",")):
-            if cid in ERRORED_CLAIMS:
-                out.append(Problem(channel, "skip-words", cid,
-                                   f"listed under {m.group(2)!r}"))
+        if m.group(3) is None:
+            for cid in (x.strip() for x in m.group(4).split(",")):
+                if cid in ERRORED_CLAIMS:
+                    out.append(Problem(channel, "skip-words", cid,
+                                       f"listed under {m.group(2)!r}", sentence))
+        elif int(m.group(1)) - int(m.group(3)) != len(critical_skipped):
+            out.append(Problem(channel, "counts", "*",
+                               f"{m.group(1)} {m.group(2)} ({m.group(3)} errored) leaves "
+                               f"{int(m.group(1)) - int(m.group(3))} skipped for "
+                               f"{len(critical_skipped)}", sentence))
     return out
 
 
@@ -434,6 +524,7 @@ def junit_problems(channel: str, text: str) -> list[Problem]:
         message = el.get("message") or ""
         out += cites_problems(channel, [Row(cid, "ERROR", message)], full=True)
         out += words_problems(channel, [Row(cid, "ERROR", message)])
+        out += lead_problems(channel, [Row(cid, "ERROR", message)])
     for cid in SKIPPED_CLAIMS:
         tag, _el = child("claims.critical", cid)
         if tag in (None, "error", "absent"):
@@ -503,7 +594,7 @@ def terminal_problems(channel: str, text: str, n_claims: int) -> list[Problem]:
     counts = [line for line in lines if line.startswith("claims ")]
     out += (claim_count_problems(f"{channel}.counts", counts[0], n_claims) if counts
             else [Problem(f"{channel}.counts", "floor", "*", "no counts line")])
-    out += row_problems(channel, claim_rows(lines))
+    out += row_problems(channel, claim_rows(lines), lead=True)
     gates_line = [line for line in lines if line.startswith("gates: ")]
     out += (gate_count_problems(f"{channel}.gates", gates_line[0]) if gates_line
             else [Problem(f"{channel}.gates", "floor", "*", "no gates line")])
@@ -513,7 +604,12 @@ def terminal_problems(channel: str, text: str, n_claims: int) -> list[Problem]:
 def markdown_problems(channel: str, md: str) -> list[Problem]:
     """The report: nothing errored under PROVEN; the Failing section's claim
     heads loud and ranked; each errored claim's block carries a loud bullet for
-    its errored evaluator with the exception (the report never cuts)."""
+    its errored evaluator with the exception (the report never cuts) and not the
+    traceback (F-1), and lists it above every bullet that is neither a fail nor
+    errored (channel `<channel>.<claim>`). What slipped through the first
+    version: it held the bullets' presence, tone and words, never their order,
+    so the report's skip-above-crash bullets (F-3's gate-id order, as in `why`)
+    could outlive the fix to `why`."""
     lines = md.splitlines()
     out = sentence_problems(f"{channel}.sentence",
                             next((ln for ln in lines if ln.startswith("**")), ""))
@@ -547,8 +643,10 @@ def markdown_problems(channel: str, md: str) -> list[Problem]:
         bullet = Row(cid, mine[0].tag, mine[0].body)
         out += tone_problems(channel, [bullet])
         out += words_problems(channel, [bullet])
+        out += lead_problems(channel, [bullet], lead=False)
         if EXCEPTION[gate] not in bullet.body:
             out.append(Problem(channel, "cites", cid, f"bullet lacks {EXCEPTION[gate]!r}"))
+        out += order_problems(f"{channel}.{cid}", bullets[cid])
     return out
 
 
@@ -570,14 +668,17 @@ def check_problems(text: str) -> list[Problem]:
     out += row_problems("check.stream", stream, cites=False)
     out += gate_count_problems("check.summary", lines[summary_at])
     blocking = claim_rows(lines[blocking_at + 1:])
-    out += row_problems("check.blocking", blocking, full=True)
+    out += row_problems("check.blocking", blocking, full=True, lead=True)
     return out
 
 
 def why_problems(channel: str, text: str, *, floor: tuple[str, ...]) -> list[Problem]:
+    """`why`'s GATES rows: the evaluator's row is the claim's reason there, so
+    the crash's carries no traceback (F-1)."""
     lines = text.splitlines()
     rows = gate_rows(section(lines, "GATES (", lambda ln: not ln.strip()))
-    return row_problems(channel, rows, cites=False, floor=floor)
+    return (row_problems(channel, rows, cites=False, floor=floor)
+            + lead_problems(channel, rows, lead=False))
 
 
 def doctor_problems(text: str) -> list[Problem]:
@@ -645,8 +746,13 @@ def json_map_problems(channel: str, doc: dict) -> list[Problem]:
             if _tell(claims[errored_id], errored_id in marked) == _tell(claims[cid], cid in marked):
                 out.append(Problem(channel, "tell-apart", errored_id,
                                    f"reads exactly as {cid}: {claims[cid]}"))
-    by_status = (doc.get("summary") or {}).get("by_status") or {}
-    if by_status and by_status.get("blocked", 0) - by_status.get("errored", 0) != len(SKIPPED_CLAIMS):
+    summary = doc.get("summary")
+    by_status = summary.get("by_status") if isinstance(summary, dict) else None
+    if not isinstance(by_status, dict) or not by_status:
+        # What slipped through the first version: `if by_status and …` dropped
+        # the count check, silently, for a summary that moved or was renamed.
+        out.append(Problem(channel, "floor", "*", "no summary.by_status to count"))
+    elif by_status.get("blocked", 0) - by_status.get("errored", 0) != len(SKIPPED_CLAIMS):
         out.append(Problem(channel, "counts", "*",
                            f"by_status counts {by_status.get('blocked')} blocked "
                            f"for {len(SKIPPED_CLAIMS)} skipped"))
@@ -729,11 +835,26 @@ def state_problems(state: dict, format_js: str, panels_js: str) -> list[Problem]
             out.append(Problem("site.claims", "tone", cid,
                                f"tone {claim_row_tone(row, claim_table)} "
                                f"(Failing: {failing_tone})"))
+        if cid in ERRORED_CLAIMS:
+            # The page's "PARTIAL — a gate … produced no proof" list gives each
+            # evaluator's reason (`unproven`): the crash's says errored, never
+            # a missing tool (F-10 reached the page here unchecked).
+            gate = ERRORED_CLAIMS[cid]
+            why = [u.get("why", "") for u in row.get("unproven") or () if u.get("gate") == gate]
+            if not why:
+                out.append(Problem("site.claims", "cites", cid, f"no unproven reason for {gate}"))
+            for text in why:
+                out += words_problems("site.claims", [Row(cid, "", str(text))])
+                if not str(text).startswith("errored"):
+                    out.append(Problem("site.claims", "lead", cid,
+                                       f"{gate}'s reason does not lead with 'errored'",
+                                       str(text)[:60]))
     out += order_problems("site.claims", [Row(str(r.get("id")), "") for r in claims])
     readiness = state.get("readiness") or {}
     counts = readiness.get("counts") or {}
     if counts.get("blocked", 0) - counts.get("errored", 0) != len(SKIPPED_CLAIMS):
-        out.append(Problem("site.readiness", "counts", "*", f"counts {counts}"))
+        out.append(Problem("site.readiness", "counts", "*",
+                           "blocked less errored is not the skipped count", str(counts)))
     out += sentence_problems("site.readiness.sentence", str(readiness.get("verdict") or ""))
     return out
 
@@ -741,62 +862,106 @@ def state_problems(state: dict, format_js: str, panels_js: str) -> list[Problem]
 # --------------------------------------------------------------------------- #
 # the ratchet: where today is quieter than invariant 2 says
 # --------------------------------------------------------------------------- #
-#: (channel, property, subject or "*") -> the finding, and the ErrorIsLouder
-#: test that holds the channel once the entry goes. Each is a place where an
-#: errored row reads QUIETER than invariant 2 allows, today. It may only
-#: shrink: `ErrorNotYetLouder` turns red when an entry stops showing, so the
-#: change that fixes it deletes the entry and the property binds from then on.
-#: Adding one is an R-6 weakening of an invariant test, named in its commit.
-KNOWN_QUIETER: dict[tuple[str, str, str], str] = {
-    ("check.blocking", "order", "*"):
-        "F-2: BLOCKING is in record order, the skip's P1 above the crash; "
-        "test_check_output holds it once gone",
-    ("why.P3", "order", "*"):
-        "F-3: `why` lists evaluators in gate-id order, [skip] above [ERR ]; "
-        "test_why_and_claim_show",
-    ("claim.show.P3", "order", "*"):
-        "F-3: `claim show` shares `why`'s rendering; test_why_and_claim_show",
-    ("doctor", "names", "*"):
-        "F-4: doctor warns twice about the missing tool and never names a gate "
-        "that crashes at its current inputs; test_doctor",
-    ("site.claims", "order", "*"):
-        "F-5: state.json lists claims in record order and the page keeps it; "
-        "test_site_state",
-    ("check.stream", "tone", BOTH_GATE):
-        "F-10: a skipped-and-errored verdict streams under the skip digest's "
-        "quiet [skip] tag; test_check_output",
-    ("check.stream", "skip-words", BOTH_GATE):
-        "F-10: …with its skip reason as its body; test_check_output",
-    ("check.stream", "order", BOTH_GATE):
-        "F-10: …after the summary, below the plain skip; test_check_output",
-    ("status.gates", "counts", "*"):
-        "F-10: `status` counts it skipped AND errored; test_status",
-    ("render_terminal.gates", "counts", "*"):
-        "F-10: render_terminal's tallies read the flags, not the outcome; "
-        "test_render_terminal",
-    ("report", "skip-words", "P7"):
-        "F-10: Verdict.render prefers skip_reason to error, so the report's "
-        "bullet reads like a missing tool; test_report",
-    ("report", "cites", "P7"):
-        "F-10: …and does not carry the exception; test_report",
-    ("report.file", "skip-words", "P7"):
-        "F-10: docs/readiness.md, the same bullet; test_report",
-    ("report.file", "cites", "P7"):
-        "F-10: docs/readiness.md, the same bullet; test_report",
-    ("render_markdown", "skip-words", "P7"):
-        "F-10: render_markdown, the same bullet; test_render_markdown",
-    ("render_markdown", "cites", "P7"):
-        "F-10: render_markdown, the same bullet; test_render_markdown",
-    ("why.P7", "skip-words", BOTH_GATE):
-        "F-10: `why` prints [ERR ] with the skip reason; test_why_and_claim_show",
-    ("gate.show", "skip-words", BOTH_GATE):
-        "F-10: `gate show`'s last verdict, the same render; test_gate_show",
+#: The texts of today's lead shortfalls (F-1), and the claims each covers.
+_NO_LEAD = f"does not lead with {ERRORED_LEAD!r}"
+_TRACED = "carries the traceback"
+_ALL = tuple(ERRORED_CLAIMS)                                     # P2-P7
+_RAISED = tuple(c for c, g in ERRORED_CLAIMS.items() if g == CRASH_GATE)   # P2-P6
+_BLOCKING = tuple(c for c in ERRORED_CLAIMS if c not in NOT_REQUIRED)     # P2 P3 P5 P7
+
+
+def _each(channel: str, prop: str, text: str, *subjects: str
+          ) -> tuple[tuple[str, str, str, str], ...]:
+    return tuple((channel, prop, subject, text) for subject in subjects)
+
+
+#: The finding, and the ErrorIsLouder test that holds the channel once it goes
+#: -> the exact problems (`Problem.key`) it names today. Each is a place where
+#: an errored row reads QUIETER than invariant 2 allows, today. The ratchet may
+#: only shrink: `ErrorNotYetLouder` turns red when a named problem stops
+#: showing, so the change that fixes it deletes it and the property binds from
+#: then on. Adding a problem to an existing check's entry is an R-6 weakening of
+#: an invariant test, named in its commit; a new check lands with the entries
+#: for what it finds today (F-1's lead, F-3 in the report's bullets, F-10 on the
+#: page's unproven reasons, with the review of P2.0).
+#: *Rejected:* keys `(channel, prop, "*")` (the first version) — a key excused
+#: every problem of that property on that channel, so a change that made a
+#: channel WORSE stayed green: counting both crashes as missing tools and
+#: dropping the word errored from `status`'s gates line read as F-10 still
+#: showing (`test_the_ratchet_excuses_only_the_problems_it_names`).
+KNOWN_QUIETER: dict[str, tuple[tuple[str, str, str, str], ...]] = {
+    "F-1: `status`'s reasons lead with the gate id, a crash's with its traceback; "
+    "test_status":
+        _each("status", "lead", _NO_LEAD, *_ALL) + _each("status", "lead", _TRACED, *_RAISED),
+    "F-1: render_terminal, the same reasons; test_render_terminal":
+        _each("render_terminal", "lead", _NO_LEAD, *_ALL)
+        + _each("render_terminal", "lead", _TRACED, *_RAISED),
+    "F-1: `check`'s BLOCKING reasons; test_check_output":
+        _each("check.blocking", "lead", _NO_LEAD, *_BLOCKING)
+        + _each("check.blocking", "lead", _TRACED, *(c for c in _BLOCKING if c in _RAISED)),
+    "F-1: the JUnit claim messages, critical or not; test_check_junit":
+        _each("check.junit", "lead", _NO_LEAD, *_ALL)
+        + _each("check.junit", "lead", _TRACED, *_RAISED),
+    "F-1: render_junit, the same messages; test_render_junit_required_or_not":
+        _each("render_junit", "lead", _NO_LEAD, *_ALL)
+        + _each("render_junit", "lead", _TRACED, *_RAISED),
+    "F-1: the report's bullet for the crash is its traceback, stdout and file; test_report":
+        _each("report", "lead", _TRACED, *_RAISED) + _each("report.file", "lead", _TRACED, *_RAISED),
+    "F-1: render_markdown, the same bullets; test_render_markdown":
+        _each("render_markdown", "lead", _TRACED, *_RAISED),
+    "F-1: `why` and `claim show` print the crash's traceback; test_why_and_claim_show":
+        (("why.P3", "lead", CRASH_GATE, _TRACED), ("claim.show.P3", "lead", CRASH_GATE, _TRACED)),
+    "F-2: BLOCKING is in record order, the skip's P1 above the crash; test_check_output":
+        _each("check.blocking", "order", "sorts below C7, P1", *_BLOCKING),
+    "F-3: `why` and `claim show` list evaluators in gate-id order, [skip] above [ERR ]; "
+    "test_why_and_claim_show":
+        (("why.P3", "order", CRASH_GATE, "sorts below probe.a_skip"),
+         ("claim.show.P3", "order", CRASH_GATE, "sorts below probe.a_skip")),
+    "F-3: the report's bullets in gate-id order, the skip and a pass above the crash; "
+    "test_report":
+        tuple((f"{where}.{cid}", "order", CRASH_GATE, text)
+              for where in ("report", "report.file")
+              for cid, text in (("P3", "sorts below probe.a_skip"),
+                                ("P5", "sorts below bracket.min_wall"),
+                                ("P6", "sorts below bracket.min_wall"))),
+    "F-3: render_markdown's bullets, the skip above the crash; test_render_markdown":
+        (("render_markdown.P3", "order", CRASH_GATE, "sorts below probe.a_skip"),),
+    "F-4: doctor warns twice about the missing tool and never names a gate that "
+    "crashes at its current inputs; test_doctor":
+        _each("doctor", "names", "no loud row names the crash", BOTH_GATE, CRASH_GATE),
+    "F-5: state.json lists claims in record order and the page keeps it; test_site_state":
+        _each("site.claims", "order", "sorts below C2, C3, C4", *_ALL),
+    "F-10: a skipped-and-errored verdict streams under the skip digest's quiet [skip] "
+    "tag, with its skip reason, below the plain skip; test_check_output":
+        (("check.stream", "tone", BOTH_GATE, "[skip] is quiet"),
+         ("check.stream", "skip-words", BOTH_GATE, "reads like a missing tool ('not installed')"),
+         ("check.stream", "order", BOTH_GATE, "sorts below probe.a_skip")),
+    "F-10: `status` counts it skipped AND errored; test_status":
+        (("status.gates", "counts", "*", "2 counted as skipped, 1 skipped"),),
+    "F-10: render_terminal's tallies read the flags, not the outcome; test_render_terminal":
+        (("render_terminal.gates", "counts", "*", "2 counted as skipped, 1 skipped"),),
+    "F-10: Verdict.render prefers skip_reason to error, so the report's bullet reads "
+    "like a missing tool and lacks the exception, stdout and file; test_report":
+        tuple((where, prop, "P7", text) for where in ("report", "report.file")
+              for prop, text in (("skip-words", "reads like a missing tool ('not installed')"),
+                                 ("cites", "bullet lacks 'RuntimeError: planted both'"))),
+    "F-10: render_markdown, the same bullet; test_render_markdown":
+        (("render_markdown", "skip-words", "P7", "reads like a missing tool ('not installed')"),
+         ("render_markdown", "cites", "P7", "bullet lacks 'RuntimeError: planted both'")),
+    "F-10: `why` prints [ERR ] with the skip reason; test_why_and_claim_show":
+        (("why.P7", "skip-words", BOTH_GATE, "reads like a missing tool ('not installed')"),),
+    "F-10: `gate show`'s last verdict, the same render; test_gate_show":
+        (("gate.show", "skip-words", BOTH_GATE, "reads like a missing tool ('not installed')"),),
+    "F-10: the page's unproven reason for it is the skip reason; test_site_state":
+        (("site.claims", "skip-words", "P7", "reads like a missing tool ('not installed')"),
+         ("site.claims", "lead", "P7", f"{BOTH_GATE}'s reason does not lead with 'errored'")),
 }
+
+_KNOWN = frozenset(key for keys in KNOWN_QUIETER.values() for key in keys)
 
 
 def known(problem: Problem) -> bool:
-    return ((problem.channel, problem.prop, problem.subject) in KNOWN_QUIETER
-            or (problem.channel, problem.prop, "*") in KNOWN_QUIETER)
+    return problem.key in _KNOWN
 
 
 def unexplained(problems: list[Problem]) -> list[str]:
@@ -879,8 +1044,9 @@ def _probe_ledger(registry: gates_mod.Registry, root: str) -> Ledger:
 
 
 #: `report._SEVERITY` with the skip ranked above Failing: the planted renderer
-#: the order checker must catch on the real render path (D-5b). P2.1 moves the
-#: patch to whatever replaces `_SEVERITY` (strengthening-neutral, R-6).
+#: the order checker must catch on the real render path, so a checker that
+#: reads nothing cannot pass. P2.1 moves the patch to whatever replaces
+#: `_SEVERITY` (strengthening-neutral, R-6).
 _SKIP_FIRST = (ClaimStatus.BLOCKED, ClaimStatus.FAIL, ClaimStatus.REFUTED, ClaimStatus.STALE,
                ClaimStatus.PENDING, ClaimStatus.UNCLAIMED, ClaimStatus.UNVERIFIED,
                ClaimStatus.ASSERTED, ClaimStatus.VERIFIED, ClaimStatus.PASS)
@@ -972,9 +1138,10 @@ _SHARED: list[_Run] = []
 
 
 def _check_the_fixture(run: _Run) -> None:
-    """D-8's precondition: the skip is a skip, each crash is a crash (not a
-    refusal of qualification), C4 is Stale. A rotted fixture fails HERE, naming
-    the evaluator, instead of passing every property on nothing."""
+    """The fixture's precondition: the skip is a skip, each crash is a crash (not
+    a refusal of qualification, whose error starts `not admitted:`), C4 is
+    Stale. A rotted fixture fails HERE, naming the evaluator, instead of passing
+    every property on nothing."""
     for key, proc in run.out.items():
         want = 1 if key.startswith("check") else 0
         if proc.returncode != want:
@@ -1049,7 +1216,8 @@ def cli_problems(run: _Run) -> list[Problem]:
     out += json_row_problems("check.json", check_doc["blocking"], id_key="claim")
     for row in check_doc["verdicts"]:
         if row["gate"] in ERRORED_GATES and (row.get("ok") or row.get("outcome") != "error"):
-            out.append(Problem("check.json", "outcome", row["gate"], str(row)))
+            out.append(Problem("check.json", "outcome", row["gate"],
+                               f"ok {row.get('ok')}, outcome {row.get('outcome')}", str(row)))
     out += terminal_problems("status", run.out["status"].stdout, n_claims)
     out += json_map_problems("status.json", json.loads(run.out["status.json"].stdout))
     out += markdown_problems("report", run.out["report"].stdout)
@@ -1158,6 +1326,81 @@ class ErrorIsLouder(_env.EnvCase):
         self.assertTrue(sentence_problems(
             "t", "2 blocked on missing tooling (P1, P2); 1 failing (C1)."))
         self.assertTrue(sentence_problems("t", "nothing to see"))
+        # GLOSSARY's word for the status, with and without the errored split.
+        self.assertEqual(sentence_problems(
+            "t", "8 of 12 — 1 failing (C1); 5 skipped (4 errored) (P2, P3, P5, P7, +1 more); "
+                 "1 gap (C7)."), [])
+        for sentence, prop in (
+                ("8 of 12 — 1 failing (C1); 5 skipped (P1, P2, P3, P5, +1 more); 1 gap (C7).",
+                 "skip-words"),
+                ("8 of 12 — 1 failing (C1); 5 skipped (3 errored) (P2, P3, P5, +2 more).",
+                 "counts")):
+            with self.subTest(sentence):
+                self.assertTrue(any(p.prop == prop for p in sentence_problems("t", sentence)),
+                                sentence_problems("t", sentence))
+
+        # The skip's GLOSSARY lead on an errored row, under a loud tag (P2.1's
+        # default `[SKIP ]`): never, from today.
+        led = [clean[0], clean[1]._replace(tag="SKIP ", body=f"skipped: {clean[1].body}"),
+               *clean[2:]]
+        self.assertTrue(any(p.prop == "skip-words" and p.subject == "P2"
+                            for p in row_problems("t", led, full=True)))
+        # The reason's lead (F-1): `errored:` and the exception, never the traceback.
+        self.assertEqual(lead_problems("t", [Row("P2", "SKIP ", f"errored: {CRASH_GATE} : "
+                                                              f"{EXCEPTION[CRASH_GATE]}")]), [])
+        for body in (f"{CRASH_GATE} : {EXCEPTION[CRASH_GATE]}",
+                     f"skipped: {CRASH_GATE} : {EXCEPTION[CRASH_GATE]}",
+                     f"errored: {CRASH_GATE} : Traceback (most recent call last): | File",
+                     f'errored: {CRASH_GATE} : File "/a/long/path/gates.py", line 1695, in '
+                     f'run_gate | {EXCEPTION[CRASH_GATE]}'):
+            with self.subTest(body):
+                self.assertTrue(lead_problems("t", [Row("P2", "SKIP ", body)]))
+        # A JSON map with no summary to count is a floor, never a pass.
+        self.assertTrue(any(p.prop == "floor" for p in json_map_problems(
+            "t", {"claims": {"P1": "blocked", **{c: "fail" for c in ERRORED_CLAIMS}},
+                  "errored": list(ERRORED_CLAIMS)})))
+        # The report's evaluator bullets: the crash above the skip in its block.
+        def block(*bullets: str) -> str:
+            return "\n".join([f"**x — 1 failing (P3).**", f"{report_mod.SECTION_PROVEN} (x)",
+                              "| **C2** x |", "## Failing / blocked",
+                              "### [FAIL ] P3 — both probes hold", *bullets])
+        skip_bullet = f"- `[skip] {SKIP_GATE} : requires {TOOL} (not on PATH)`"
+        err_bullet = f"- `[ERR ] {CRASH_GATE} : {EXCEPTION[CRASH_GATE]}`"
+        self.assertTrue([p for p in markdown_problems("t", block(skip_bullet, err_bullet))
+                         if p.channel == "t.P3" and p.prop == "order"])
+        self.assertFalse([p for p in markdown_problems("t", block(err_bullet, skip_bullet))
+                          if p.channel == "t.P3" and p.prop == "order"])
+
+    def test_the_ratchet_excuses_only_the_problems_it_names(self):
+        """An entry in `KNOWN_QUIETER` names exact problems, never a channel, so a
+        worse problem on a channel that has one is unexplained. What slipped
+        through the first version: entries keyed `(channel, prop, "*")` excused
+        every count problem on `status`'s and render_terminal's gates lines — a
+        render that counted both crashes as missing tools and dropped the word
+        errored (`gates: 3 ran, 1 not current, 4 skipped`) stayed green, as did
+        any worse order in `check`'s BLOCKING list."""
+        registry = _probe_registry()
+        ledger = _probe_ledger(registry, self.tmp())
+        real = report_mod.render_terminal(ledger, registry, stale_gates={"probe.moved"})
+
+        def fold(match: re.Match) -> str:
+            line = match.group(0)
+            n = sum(int(x) for x in re.findall(r"(\d+) (?:skipped|errored)", line))
+            return re.sub(r"\d+ skipped", f"{n} skipped", re.sub(r", \d+ errored", "", line))
+
+        planted = re.sub(r"^gates: .*$", fold, real, flags=re.M)
+        self.assertIn("4 skipped", planted)
+        self.assertNotIn("errored", next(ln for ln in planted.splitlines()
+                                         if ln.startswith("gates: ")))
+        found = unexplained(terminal_problems("render_terminal", planted, len(ledger.claims)))
+        self.assertTrue([p for p in found if p.startswith("render_terminal.gates: counts")],
+                        found)
+        self.assertTrue(unexplained(gate_count_problems(
+            "status.gates", "gates: 6 ran, 1 not current, 4 skipped")))
+        worse = [Row("C4", "STALE", "passed, but not current"), Row("C7", "gap  ", "no gate"),
+                 Row("P1", "skip ", f"{SKIP_GATE} : requires {TOOL}"),
+                 Row("P2", "FAIL ", f"{CRASH_GATE} : {EXCEPTION[CRASH_GATE]}")]
+        self.assertTrue(unexplained(order_problems("check.blocking", worse)))
 
     # -- in process ------------------------------------------------------- #
     def _render(self, both: str = "verdict") -> tuple[Ledger, gates_mod.Registry]:
@@ -1188,8 +1431,10 @@ class ErrorIsLouder(_env.EnvCase):
                 with mock.patch.object(report_mod, "_SEVERITY", _SKIP_FIRST):
                     planted = report_mod.render_markdown(ledger, registry,
                                                          stale_gates={"probe.moved"})
+                # The claim heads' channel: each block's bullets are judged
+                # under `render_markdown.<claim>`, and `_SEVERITY` orders heads.
                 order = [p for p in markdown_problems("render_markdown", planted)
-                         if p.prop == "order"]
+                         if p.prop == "order" and p.channel == "render_markdown"]
                 self.assertEqual({p.subject for p in order}, set(ERRORED_CLAIMS))
 
     def _junit(self, ledger: Ledger, registry: gates_mod.Registry) -> str:
@@ -1202,7 +1447,7 @@ class ErrorIsLouder(_env.EnvCase):
         verdict errored, and a not-required claim is red only for FAIL or
         REFUTED — so rung 4 moved alone would make a required errored claim
         `<failure type="blocked">` and a not-required one `<skipped>`. Pinned on
-        both suites now, with a planted `_claim_case` as the violator (D-5c)."""
+        both suites now, with a planted `_claim_case` as the violator."""
         for both in ("verdict", "dict"):
             with self.subTest(both=both):
                 ledger, registry = self._render(both)
@@ -1270,9 +1515,10 @@ class ErrorIsLouder(_env.EnvCase):
 
     # -- through the commands --------------------------------------------- #
     def test_the_fixture_is_what_it_says(self):
-        """Discriminating by construction (D-4's second job, on the fixture
-        rather than on the output): every alphabetical or record order puts the
-        skip first, so no order check passes on a renderer that does not rank."""
+        """Discriminating by construction: every alphabetical or record order
+        puts the skip first, so no order check passes on a renderer that does
+        not rank, and the ratchet's order entries show because the fixture can
+        show them, not by accident."""
         run = _louder_project()
         self.assertLess("P1", min(ERRORED_CLAIMS))
         self.assertLess(SKIP_GATE, min(ERRORED_GATES))
@@ -1341,13 +1587,13 @@ class ErrorIsLouder(_env.EnvCase):
 
 
 class ErrorNotYetLouder(_env.EnvCase):
-    """(C) The ratchet: each `KNOWN_QUIETER` entry is a place where an errored
-    row reads quieter than invariant 2 allows TODAY. Red when an entry no longer
-    shows — not to demand the violation back, but so the change that fixed it
-    deletes the entry, and `ErrorIsLouder` binds that channel from then on.
+    """(C) The ratchet: each problem `KNOWN_QUIETER` names is a place where an
+    errored row reads quieter than invariant 2 allows TODAY. Red when one no
+    longer shows — not to demand the violation back, but so the change that
+    fixed it deletes it, and `ErrorIsLouder` binds that channel from then on.
     P2.1 empties it."""
 
-    def test_each_known_shortfall_still_shows(self):
+    def _today(self) -> set[tuple[str, str, str, str]]:
         registry = _probe_registry()
         ledger = _probe_ledger(registry, self.tmp())
         problems = list(_cli())
@@ -1355,21 +1601,33 @@ class ErrorNotYetLouder(_env.EnvCase):
             ledger, registry, stale_gates={"probe.moved"}), len(ledger.claims))
         problems += markdown_problems("render_markdown", report_mod.render_markdown(
             ledger, registry, stale_gates={"probe.moved"}))
-        for key, why in KNOWN_QUIETER.items():
-            with self.subTest(key=key):
-                channel, prop, subject = key
-                shows = [p for p in problems if (p.channel, p.prop) == (channel, prop)
-                         and subject in ("*", p.subject)]
-                self.assertTrue(shows, f"{key} no longer shows ({why}) — delete the entry, "
-                                       f"so ErrorIsLouder holds it from now on")
+        problems += junit_problems("render_junit", report_mod.render_junit(
+            ledger, ledger.verdicts, registry, tier=0, ready=False, exit_code=1,
+            when="2026-10-03T00:00:00Z", stale_gates={"probe.moved"}))
+        return {p.key for p in problems}
+
+    def test_each_known_shortfall_still_shows(self):
+        today = self._today()
+        for why, keys in KNOWN_QUIETER.items():
+            for key in keys:
+                with self.subTest(key=key):
+                    self.assertIn(key, today, f"no longer shows ({why}) — delete it, so "
+                                              f"ErrorIsLouder holds it from now on")
 
     def test_each_shortfall_names_its_finding_and_its_test(self):
         tests = set(unittest.TestLoader().getTestCaseNames(ErrorIsLouder))
-        for key, why in KNOWN_QUIETER.items():
-            with self.subTest(key=key):
+        for why, keys in KNOWN_QUIETER.items():
+            with self.subTest(why=why):
                 self.assertRegex(why, r"^F-\d+: ")
                 named = re.findall(r"\btest_\w+", why)
                 self.assertTrue(named and all(n in tests for n in named), why)
+                self.assertTrue(keys, why)
+
+    def test_no_shortfall_is_named_twice(self):
+        keys = [key for keys in KNOWN_QUIETER.values() for key in keys]
+        self.assertEqual(len(keys), len(set(keys)),
+                         sorted(k for k in set(keys) if keys.count(k) > 1))
+        self.assertTrue(all(len(key) == 4 and "*" != key[3] for key in keys))
 
 
 if __name__ == "__main__":
