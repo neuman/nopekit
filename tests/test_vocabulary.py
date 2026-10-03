@@ -204,6 +204,20 @@ class StatusWordsAreTheGlossarys(unittest.TestCase):
             self.assertEqual(report_mod.HUMAN["outcome_tag"]["pass"], "ZZ  ")
         self.assertEqual(dict(report_mod.HUMAN["outcome_tag"]), dict(models_mod._RENDER_TAG))
 
+    def test_the_tag_view_is_a_mapping(self):
+        """`report.STATUS_TAG` (exported) answers like the dict it replaced: a
+        status it does not know is a missing key — `.get` gives None and `in`
+        False — never a ValueError out of both. What slipped through (review of
+        P2.1): the view raised `ValueError: 'bogus' is not a valid ClaimStatus`,
+        which `Mapping.get` and `__contains__` do not catch."""
+        tags = report_mod.STATUS_TAG
+        self.assertIsNone(tags.get("bogus"))
+        self.assertNotIn("bogus", tags)
+        self.assertIn(ClaimStatus.PASS, tags)
+        self.assertEqual((tags["pass"], tags.get(ClaimStatus.UNVERIFIED)), ("ok   ", "build"))
+        with self.assertRaises(KeyError):
+            tags["bogus"]
+
     def test_the_comparison_refuses_what_it_forbids(self):
         glossary = _glossary()
         ninth = glossary.replace("| **Open** |", "| **Ajar** | x | x | x | x |\n| **Open** |", 1)
@@ -342,6 +356,15 @@ def scan(channel: str, lines: list[str], banned: set[str], masks: list[str],
     return out
 
 
+def readme_status_lines() -> list[str]:
+    """README's "Why you should believe the output", line by line: where it
+    defines the statuses for a reader."""
+    with open(os.path.join(_env.REPO, "README.md"), encoding="utf-8") as fh:
+        text = fh.read()
+    section = text.split("## Why you should believe the output", 1)[1].split("\n## ", 1)[0]
+    return [ln for ln in section.splitlines() if ln.strip()]
+
+
 def _markdown_lines(md: str) -> list[str]:
     """The report minus `## Reproduce` (commands and file names, not prose)."""
     head, _, _ = md.partition("## Reproduce")
@@ -474,6 +497,22 @@ class StatusLinesSpeakTheTable(unittest.TestCase):
         self.assertIn("has never been evaluated", sentences["unevaluated"])
         self.assertIn("has no claims recorded", sentences["empty"])
         self.assertIn("is NOT ready", sentences["invalidated"])
+
+    def test_the_readme_says_the_statuses_in_their_words(self):
+        """README's account of the statuses — what a sandboxed agent quotes — in
+        GLOSSARY §3's words (a §7 channel). What slipped through (review of P2.1,
+        lines that commit wrote): Skipped was "a gate did not run" and Open "has
+        not run", Open's Never-say twice, and the checked rows were "the PROVEN
+        table"."""
+        banned, masks, _reasons = self._lists()
+        self.assertEqual(scan("README", readme_status_lines(), banned, masks), [])
+        planted = [*readme_status_lines(),
+                   "- **Open** — a gate exists and has not run on the current inputs.",
+                   "Every row in the PROVEN table cites the gate that passed it."]
+        found = scan("README", planted, banned, masks)
+        for word in ("'not run'", "'proven'"):
+            with self.subTest(word):
+                self.assertTrue(any(word in p for p in found), found)
 
     def test_the_scan_refuses_what_it_forbids(self):
         banned, masks, reasons = self._lists()
@@ -609,6 +648,45 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
         self.assertIn("## Zzgaps", outputs["report"])
         self.assertTrue(status)
 
+    def test_claim_list_status_takes_a_word_and_refuses_anything_else(self):
+        """`claim list --status` takes a status's enum value, token or word, and
+        refuses a spelling that is none of them, naming the words. What slipped
+        through (review of P2.1, which traded argparse's `choices` for a free
+        filter): `--status failed` printed "no claims match that filter", exit 0
+        — an agent told that nothing is failing."""
+        root = bracket_world().root
+
+        def run(*argv):
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                code = cli_mod.main(["claim", "list", *argv, "-C", root])
+            return code, out.getvalue(), err.getvalue()
+
+        for spelling, ids in (("failing", ["C1"]), ("fail", ["C1"]),
+                              ("pending build", ["C5"]), ("pending_build", ["C5"]),
+                              ("unclaimed", ["C6", "C7"]), ("Gap", ["C6", "C7"])):
+            with self.subTest(spelling):
+                code, out, _err = run("--status", spelling)
+                self.assertEqual(code, 0)
+                self.assertEqual(re.findall(r"^\[.{5}\] (C\d+)", out, re.M), ids, out)
+        for spelling in ("failed", "chekced", "errored"):
+            with self.subTest(spelling):
+                code, out, err = run("--status", spelling)
+                self.assertEqual(code, 2, out)
+                self.assertIn("is no status", err)
+                self.assertIn('"pending build"', err)
+                self.assertNotIn("no claims match", out)
+
+    def test_why_says_unrun_in_the_tables_word(self):
+        """`why`'s line for an unrun evaluator takes its word from `HUMAN` (review
+        of P2.1: it was a literal in `decisions`, outside the one table)."""
+        from atompipe import decisions as decisions_mod
+        from atompipe.models import Claim, Ledger
+        ledger = Ledger(claims=[Claim(id="C1", statement="s", gates=["g.never"])])
+        with mock.patch.object(report_mod, "HUMAN", sentinel_human()):
+            said = decisions_mod.why(ledger, "C1")
+        self.assertRegex(said, r"\[ -- \] g\.never : zzunrun")
+
     def test_a_renderer_with_its_own_literal_is_caught(self):
         """Planted: a `status_tag` that appends a literal `checked`."""
         ledger, registry = self._ledger()
@@ -625,8 +703,13 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
                          if "'checked'" in p])
 
     def test_the_page_holds_no_status_word(self):
-        """`format.js` and `panels.js` take every status word from `state.json`'s
-        `words` (D-16: the site never owns one)."""
+        """`app.js`, `format.js` and `panels.js` take every status word — and
+        `invalidated`, and a gap record's state — from `state.json` (D-16: the
+        site never owns one), in EVERY string literal: a ternary's arm and a
+        group's blurb as much as a `label:`. What slipped through (review of
+        P2.1): the scan read `label:`/`hint:`/`text:` values only, so "No gate
+        covers this claim" (a ternary arm), "An assumption nobody owns is a
+        gap." (a blurb) and `≈ STALE` (app.js, unscanned) passed it."""
         self.assertEqual(page_word_problems(_page_sources()), [])
         planted = dict(_page_sources())
         planted["format.js"] = planted["format.js"].replace(
@@ -634,29 +717,121 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
             'pass:       { label: "PROVEN", glyph: "✓", tone: "ok" },')
         self.assertTrue(page_word_problems(planted))
 
+    def test_a_ternary_and_a_blurb_are_scanned(self):
+        """Planted: the two literals the review found, back in place."""
+        sources = _page_sources()
+        for name, old, new in (
+                ("panels.js", "claim.reason && claim.cause !== \"checked\"",
+                 "claim.reason || \"No gate covers this claim.\""),
+                ("format.js", "Each row says whether its owner has recorded it.",
+                 "An assumption nobody owns is a gap."),
+                ("app.js", 'text: `≈ ${phrase("invalidated")}`', 'text: "≈ STALE"'),
+                ("panels.js", "tag(needWord(g.status),", 'tag(g.status === "open" ? '
+                                                          '"identified" : g.status,')):
+            with self.subTest(name=name, new=new):
+                self.assertIn(old, sources[name])
+                planted = dict(sources, **{name: sources[name].replace(old, new)})
+                self.assertTrue(page_word_problems(planted), new)
+
+    def test_a_checked_claim_shows_no_reason_on_the_page(self):
+        """A Checked claim's reason is `—` (the terminal's "no reason" cell), and
+        the page prints a claim's reason only when its cause is not `checked`.
+        What slipped through (review of P2.1): every Checked row got a lone `—`
+        paragraph, because the dash is truthy."""
+        from atompipe.models import Claim, Ledger, Verdict
+        claim = Claim(id="C1", statement="s", gates=["g.1"])
+        found = claims_mod.compose(claim, [Verdict(gate="g.1", claims=["C1"], passed=True)])
+        view = report_mod.status_view(found, Ledger(claims=[claim]), claim)
+        self.assertEqual((view["cause"], view["reason"]), ("checked", "—"))
+        panels = _page_sources()["panels.js"]
+        self.assertRegex(panels, r'claim\.reason && claim\.cause !== "checked"\s*\n\s*\? el\("p", '
+                                 r'\{ class: "claim-reason"')
+
+    def test_the_page_takes_its_other_words_from_state(self):
+        """`state.json`'s `phrases` is `HUMAN`'s: `invalidated`, every gap
+        record state's word (`identified` for `open`, GLOSSARY §6), and a title
+        for each verdict chip's outcome — none of them the page's own."""
+        phrases = report_mod.page_phrases()
+        self.assertEqual(phrases["invalidated"], "invalidated")
+        self.assertEqual(phrases["need"]["open"], "identified")
+        self.assertEqual(sorted(phrases["outcome_hint"]), ["errored", "fail", "pass", "skipped"])
+        self.assertNotIn("hint:", _page_sources()["format.js"].split("const VERDICT_STATUS", 1)[1]
+                         .split("};", 1)[0])
+        with mock.patch.object(report_mod, "HUMAN", sentinel_human()):
+            self.assertEqual(report_mod.page_phrases()["invalidated"], "zzinvalidated")
+
 
 def _page_sources() -> dict[str, str]:
     out = {}
-    for name in ("format.js", "panels.js"):
-        with open(os.path.join(site_mod.TEMPLATE_DIR, "lib", name), encoding="utf-8") as fh:
-            out[name] = fh.read()
+    for name in ("app.js", "lib/format.js", "lib/panels.js"):
+        with open(os.path.join(site_mod.TEMPLATE_DIR, *name.split("/")),
+                  encoding="utf-8") as fh:
+            out[os.path.basename(name)] = fh.read()
     return out
 
 
-#: Status words in the page's own human strings: `label:`, `hint:` and
-#: `text:` values, `tag(...)` and the count strip's nouns. (A class name like
-#: `banner-stale` is not a word anyone reads.)
-_PAGE_TEXT = re.compile(r'(?:label|hint|text):\s*"([^"]*)"|tag\("([^"]*)"')
+def js_literals(source: str) -> list[tuple[str, str]]:
+    """Every string literal of a page script, with the code just before it —
+    double- and single-quoted, and template literals with each `${…}` blanked —
+    comments skipped."""
+    out: list[tuple[str, str]] = []
+    i, n = 0, len(source)
+    while i < n:
+        if source.startswith("//", i):
+            end = source.find("\n", i)
+            i = n if end < 0 else end
+        elif source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            i = n if end < 0 else end + 2
+        elif source[i] in "\"'`":
+            quote, j, buf = source[i], i + 1, []
+            while j < n and source[j] != quote:
+                if source[j] == "\\":
+                    buf.append(source[j:j + 2])
+                    j += 2
+                elif quote == "`" and source.startswith("${", j):
+                    depth, j = 1, j + 2
+                    while j < n and depth:
+                        depth += {"{": 1, "}": -1}.get(source[j], 0)
+                        j += 1
+                    buf.append(" ")
+                elif quote != "`" and source[j] == "\n":
+                    break
+                else:
+                    buf.append(source[j])
+                    j += 1
+            out.append(("".join(buf), source[max(0, i - 12):i]))
+            i = j + 1
+        else:
+            i += 1
+    return out
+
+
+#: Status words, and the ledger's other words the page takes from `state.json`
+#: (`invalidated`'s Never-say twins, a gap record's state), in any string a
+#: page script holds. A lone lower-case token compared with `===`/`!==` or given
+#: as a `class:` is an identifier (a status value, a class name) and is exempt;
+#: anything else is read — a ternary's arm too; a backticked span is a command
+#: (`atompipe gap --propose`).
+_IDENTIFIER = re.compile(r"[a-z][a-z0-9_-]*")
+_IDENTIFIER_SLOT = re.compile(r"(?:[!=]==?|class:)\s*$")
 _PAGE_WORDS = ("proven", "checked", "failing", "stale", "assumed", "pending build", "gap",
                "skipped", "open", "blocked", "unverified", "verified", "refuted",
-               "not run", "no gate")
+               "not run", "never run", "no gate", "not current", "identified")
+#: Phrases that hold a word above as the name of something else: the record kind
+#: the gap panel lists ("Gap records", the terminal's `gap records` line).
+_PAGE_MASKED = ("gap record",)
 
 
 def page_word_problems(sources: dict[str, str]) -> list[str]:
     out = []
     for name, text in sources.items():
-        for match in _PAGE_TEXT.finditer(text):
-            said = re.sub(r"`[^`]*`", " ", match.group(1) or match.group(2) or "")
+        for literal, before in js_literals(text):
+            if _IDENTIFIER.fullmatch(literal) and _IDENTIFIER_SLOT.search(before):
+                continue
+            said = re.sub(r"`[^`]*`", " ", literal)
+            for phrase in _PAGE_MASKED:
+                said = re.sub(rf"(?i){re.escape(phrase)}", " ", said)
             for word in _PAGE_WORDS:
                 if re.search(rf"(?i)(?<![\w-]){re.escape(word)}(?![\w-])", said):
                     out.append(f"{name}: {said!r} says {word!r}")
@@ -745,8 +920,15 @@ class ReadyIsThePredicate(unittest.TestCase):
     """(V15, in process) `report.readiness` — the one predicate the readiness
     sentence, `check`'s line, the JSON and JUnit keys and the page's headline
     read — over a ledger for each case: one claim waiting for an article, every
-    required claim checked, a typed physical pass, no required claim. The fast
-    tier's half of V15; the commands are `ReadyMeansEveryRequiredClaimChecked`'s."""
+    required claim checked, a typed physical pass, no required claim, a project
+    never evaluated whose one claim has a typed pass. The fast tier's half of
+    V15; the commands are `ReadyMeansEveryRequiredClaimChecked`'s.
+
+    Every sentence that is not ready says `NOT ready` (review of P2.1: the
+    never-evaluated branch never did, and beside a typed pass it said "Nothing
+    below is checked … 1 claim is checked on an article"), and a typed pass is
+    Pending build in every line, never "checked on an article" (R-6: the case
+    asked for that phrase, which said *checked* of a claim that is not)."""
 
     def _composed(self, *claims_and_verdicts):
         from atompipe.models import Claim, ClaimKind, Ledger, PhysicalResult, Verdict
@@ -776,7 +958,9 @@ class ReadyIsThePredicate(unittest.TestCase):
                                          "ready: every required claim is checked"),
         "a typed physical pass": ([("C1", "measurable", True, None),
                                    ("C5", "physical", True, True)], False,
-                                  "not bound to the current inputs"),
+                                  "1 pending build (C5)"),
+        "never evaluated, a typed physical pass": ([("C5", "physical", True, True)], False,
+                                                   "1 pending build (C5)"),
         "no required claim": ([("C1", "measurable", False, None)], False,
                               "no claim is required"),
         "ready, a claim not required waiting for an article": (
@@ -795,9 +979,21 @@ class ReadyIsThePredicate(unittest.TestCase):
                 out.append(f"{name}: the sentence: {sentence[:80]}")
             if line not in check_line:
                 out.append(f"{name}: check says {check_line[:80]}")
+            if not ready and "NOT ready" not in sentence:
+                out.append(f"{name}: the sentence never says NOT ready: {sentence[:80]}")
             if any(kind == "physical" and result is None for _c, kind, _r, result in rows) \
                     and "Pending build: 1 claim needs an article (C5)." not in sentence:
                 out.append(f"{name}: no hardware sentence")
+            if any(kind == "physical" and result is True for _c, kind, _r, result in rows):
+                if "Pending build: 1 claim needs an article (C5); C5 has a pass recorded " \
+                        "that no article binds to the current inputs." not in sentence:
+                    out.append(f"{name}: the hardware sentence does not name the typed pass")
+                if re.search(r"(?i)\bchecked on an article\b", sentence + check_line):
+                    out.append(f"{name}: says the typed pass is checked")
+                if report_mod.count_line(composed) != f"{len(rows)} claim" + (
+                        "s" if len(rows) != 1 else "") + (
+                        " · 1 checked" if len(rows) > 1 else "") + " · 1 pending build":
+                    out.append(f"{name}: counts {report_mod.count_line(composed)}")
         return out
 
     def test_each_case(self):
@@ -850,12 +1046,19 @@ class ReadyMeansEveryRequiredClaimChecked(unittest.TestCase):
         self.assertIn("ready: every required claim is checked", world.out["check"].stdout)
 
     def test_a_typed_physical_pass_never_makes_a_project_ready(self):
-        """An unattributed pass typed with `claim physical` reads Checked, on an
-        article nothing binds to the current inputs: never ready — before a
-        model edit or after it (review of the P2.1 design)."""
+        """An unattributed pass typed with `claim physical` reads Pending build —
+        a pass no article binds to the current inputs — never Checked and never
+        ready, before a model edit or after it (review of the P2.1 design; and of
+        P2.1, R-6 toward unresolved: it read Checked everywhere but *ready*)."""
         world = _variant("typed", drop=("C6", "C7"), physical_pass=True)
         self.assertEqual(ready_problems(world, ready=False), [])
-        self.assertIn("not bound to the current inputs", world.out["status"].stdout)
+        status = world.out["status"].stdout
+        self.assertIn("C5 has a pass recorded that no article binds to the current inputs",
+                      status)
+        self.assertTrue(any(ln.startswith("[build] C5 ") and ln.endswith(
+            "a pass recorded, unattributed, not bound to an article")
+            for ln in status.splitlines()), status)
+        self.assertRegex(status, r"(?m)^\d+ claims · \d+ checked · 1 pending build$")
         world = _variant("typed-edited", drop=("C6", "C7"), physical_pass=True,
                          edit_model=True)
         self.assertEqual(ready_problems(world, ready=False), [])

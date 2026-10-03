@@ -150,13 +150,20 @@ Say the physical ones out loud early: *"No evaluator here can settle C5 — it n
 real hull in real water. It is pending build until you test it."* This builds trust
 and sets expectations correctly. When the test happens, record what was observed:
 `atompipe claim physical C5 pass --who <name> --detail "<what was seen>"`. Until
-article binding lands, a recorded pass reads Checked but never makes the project
-*ready*: nothing yet ties it to the article that is built from the current design.
+article binding lands, a recorded pass still reads **Pending build** (its reason: "a
+pass recorded by <name>, not bound to an article") and never makes the project
+*ready*: nothing yet ties it to an article built from the current design. A recorded
+**fail** keeps counting: no later pass, and no edit of the claim's kind, takes it
+back.
 
-**An assumption needs an owner who records it.** Writing `"owner": "<name>"` into
-`claims/<id>.json` does not make it Assumed — an owner counts only through the signing
-channel, and a hand or agent edit reads unattributed. Say it as it is: *"C6 is a gap
-until its owner records it."* Never edit the owner in to clear a gap.
+**An assumption needs an owner who records it — and no command can record one yet.**
+Writing `"owner": "<name>"` into `claims/<id>.json` does not make it Assumed: an owner
+counts only through the signing channel, which has not landed, and a hand or agent
+edit reads unattributed. So until it lands every assumption reads Gap, and `check`
+exits 1 for each one that is required. Say it as it is: *"C6 is a gap, and nothing
+here can record its owner yet: `check` exits 1 on it until the signing channel
+lands."* Never edit the owner in to clear a gap, and never make a claim not required
+to get `check` to pass — whether it is required is the user's call.
 
 ### 3. Reach first light fast
 

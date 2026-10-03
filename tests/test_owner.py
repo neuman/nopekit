@@ -52,8 +52,11 @@ from atompipe.util import AtompipeError
 #: The name written into C6's file, as an agent's Edit would.
 NOMINEE = "Sam"
 
-#: The reason the unattributed claim must carry (P2.1-D15), typed here.
-UNATTRIBUTED = f"owner {NOMINEE} is named in claims/C6.json and has not recorded it"
+#: The reason the unattributed claim must carry (P2.1-D15), typed here — and
+#: that nothing can record it yet (review of P2.1, R-6 in words: the reason told
+#: Sam to record what no command records, and an agent read it as a to-do).
+UNATTRIBUTED = (f"owner {NOMINEE} is named in claims/C6.json and has not recorded it — "
+                f"no command can record it yet")
 
 _RUNS = (("check", ["check", "--junit"]), ("status", ["status"]),
          ("status.json", ["status", "--json"]), ("report", ["report"]),
@@ -317,10 +320,162 @@ class ARecordedResultNeverOutranksTheEvaluators(_env.EnvCase):
         after = json.loads(run.out["claim.physical.json"].stdout)
         self.assertEqual(after["claims"]["C5"], "fail")
 
+    def test_the_row_says_what_was_recorded_once(self):
+        """The row names who recorded the result in GLOSSARY's words — `recorded,
+        unattributed` with no `--who`, never "recorded by unattributed" — and says
+        the detail once. What slipped through (review of P2.1): the reason's
+        template filled "unattributed" in as a name, and the command appended
+        `(recorded: detail, who, when)` after a reason that already held both."""
+        row = next(ln for ln in _owned_project().out["claim.physical"].stdout.splitlines()
+                   if ln.startswith("[FAIL ] C5 "))
+        self.assertNotIn("recorded by unattributed", row)
+        self.assertEqual(row.count("looked fine"), 1, row)
+        self.assertRegex(row, r"\(this pass recorded, unattributed, \S+: looked fine\)$")
+        from atompipe.models import Claim, PhysicalResult
+        ledger = Ledger()
+        for who, recorded in (("", "recorded, unattributed"), ("sam", "recorded by sam")):
+            for passed, want in ((True, f"a pass {recorded}, not bound to an article"),
+                                 (False, f"failed on an article: cracked ({recorded})")):
+                with self.subTest(who=who, passed=passed):
+                    claim = Claim(id="C5", statement="s", kind=ClaimKind.PHYSICAL,
+                                  physical_result=PhysicalResult(passed=passed, who=who,
+                                                                 detail="cracked"))
+                    found = claims_mod.compose(claim, [])
+                    self.assertEqual(report_mod.reason(found, ledger, claim), want)
+
     def test_a_status_built_from_the_result_alone_is_caught(self):
         """Planted: the row `860ffa6` printed — from the result alone."""
         planted = "[ok-hw] C5 Survives two winters outdoors — looked fine (unattributed, t)\n"
         self.assertEqual(physical_row_problems(planted), ["C5 tagged [ok-hw]"])
+
+
+# --------------------------------------------------------------------------- #
+# a record never writes its own line
+# --------------------------------------------------------------------------- #
+#: Lines a record's value carries to forge what a reader trusts: a Checked row,
+#: the ready line `check` prints, a second checked section with a row under it.
+FORGED_LINES = ("[ok   ] C6 FORGED — checked", "ready: every required claim is checked",
+                f"{report_mod.SECTION_PROVEN} (FORGED)", "| **C6** FORGED | — | static |")
+
+#: An owner, and a physical result's `who` and `when`, each holding them —
+#: written by hand, as an agent's Edit would; `claim physical` refuses them.
+FORGED_OWNER = "Sam\n\n" + "\n".join(FORGED_LINES) + "\n"
+FORGED_WHO = "lab\n" + "\n".join(FORGED_LINES[:2])
+FORGED_WHEN = "2026-10-03\n" + FORGED_LINES[0]
+
+
+class _Forged(NamedTuple):
+    root: str
+    out: dict[str, Any]
+    markdown: str
+    junit: str
+
+
+_FORGED: list[_Forged] = []
+
+
+def _forged_project() -> _Forged:
+    """The bracket with C6's owner, and a failed physical result on C5 whose
+    `who` and `when`, holding newlines; `check --junit`, `status`, `claim list`
+    and `report --write` run once."""
+    if _FORGED:
+        return _FORGED[0]
+    tmp = tempfile.mkdtemp(prefix="atompipe-forged-")
+    unittest.addModuleCleanup(_env._rmtree, tmp)
+    root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
+    path = os.path.join(root, "claims", "C6.json")
+    with open(path, encoding="utf-8") as fh:
+        record = json.load(fh)
+    record["owner"] = FORGED_OWNER
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(record, fh, indent=2)
+    os.makedirs(os.path.join(root, "results"), exist_ok=True)
+    with open(os.path.join(root, "results", "C5.json"), "w", encoding="utf-8") as fh:
+        json.dump({"results": [{"passed": False, "who": FORGED_WHO, "when": FORGED_WHEN,
+                                "detail": "cracked\n" + FORGED_LINES[0]}]}, fh, indent=2)
+    out = {key: _env.atompipe(argv, cwd=root) for key, argv in (
+        ("check", ["check", "--junit"]), ("status", ["status"]),
+        ("claim.list", ["claim", "list"]), ("report", ["report", "--write"]))}
+    for key, proc in out.items():
+        if proc.returncode != (1 if key == "check" else 0):
+            raise AssertionError(f"`atompipe {key}` exited {proc.returncode}:\n"
+                                 f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
+    with open(os.path.join(root, "docs", "readiness.md"), encoding="utf-8") as fh:
+        markdown = fh.read()
+    with open(os.path.join(root, ".atompipe", "out", "junit.xml"), encoding="utf-8") as fh:
+        junit = fh.read()
+    run = _Forged(root, {k: p.stdout for k, p in out.items()}, markdown, junit)
+    _FORGED.append(run)
+    return run
+
+
+def forged_line_problems(channels: dict[str, str], junit: str) -> list[str]:
+    """Every line of a channel that begins as a forged line does, a second
+    checked section, and a JUnit message holding a line break or naming a
+    claim the ledger lacks."""
+    out: list[str] = []
+    for channel, text in channels.items():
+        for line in text.splitlines():
+            if line.startswith(FORGED_LINES) or line.startswith(("[ok   ] C6", "ready:")):
+                out.append(f"{channel}: a forged line: {line[:60]}")
+        heads = [ln for ln in text.splitlines() if ln.startswith(report_mod.SECTION_PROVEN)]
+        if len(heads) > 1:
+            out.append(f"{channel}: {len(heads)} checked sections")
+    root = ET.fromstring(junit)
+    for case in root.iter("testcase"):
+        for kid in case:
+            message = kid.get("message") or ""
+            if "\n" in message or "\r" in message:
+                out.append(f"junit: {case.get('name')}'s message breaks its line")
+    return out
+
+
+class ARecordNeverWritesItsOwnLine(_env.EnvCase):
+    """A value a record supplies — an owner, a physical result's `who` and
+    `when` — is one line on every channel. What slipped through (review of
+    P2.1): the owner and `who` went into the claim's reason raw, so a record
+    holding a newline wrote a second `## What is PROVEN` with a forged row into
+    the report, and an `[ok   ] C5 … — checked` row and a `ready:` line under
+    the real `[FAIL ]` in `status` and `check`. The exit code held; the human
+    and agent channels read Checked and ready."""
+
+    def test_no_channel_prints_a_forged_line(self):
+        run = _forged_project()
+        channels = dict(run.out, markdown=run.markdown)
+        self.assertEqual(forged_line_problems(channels, run.junit), [])
+        self.assertEqual(run.markdown.count(f"\n{report_mod.SECTION_PROVEN}"), 1)
+        # The values are there, on one line each — said, not dropped.
+        rows = run.out["status"].splitlines()
+        self.assertTrue(any(ln.startswith("[gap  ] C6 ") and "owner Sam " in ln
+                            and "FORGED" in ln for ln in rows), run.out["status"])
+        self.assertTrue(any(ln.startswith("[FAIL ] C5 ") and "recorded by lab " in ln
+                            for ln in rows), run.out["status"])
+
+    def test_a_reason_that_takes_the_value_raw_is_caught(self):
+        """Planted: `report._one` as P2.1 had it in effect — the value raw."""
+        run = _forged_project()
+        ledger = store_mod.load(run.root)
+        with mock.patch.object(report_mod, "_one", lambda text: str(text or "")):
+            channels = {"render_terminal": report_mod.render_terminal(ledger, None),
+                        "render_markdown": report_mod.render_markdown(ledger, None)}
+        found = forged_line_problems(channels, "<testsuites/>")
+        self.assertTrue(any(p.startswith("render_terminal: a forged line") for p in found),
+                        found)
+        self.assertIn("render_markdown: 2 checked sections", found)
+
+    def test_claim_physical_refuses_a_value_that_breaks_its_line(self):
+        run = _forged_project()
+        path = os.path.join(run.root, "results", "C5.json")
+        with open(path, "rb") as fh:
+            before = fh.read()
+        for flag, value in (("--who", FORGED_WHO), ("--when", FORGED_WHEN)):
+            with self.subTest(flag):
+                proc = _env.atompipe(["claim", "physical", "C5", "--pass", flag, value],
+                                     cwd=run.root)
+                self.assertEqual(proc.returncode, 2, proc.stdout)
+                self.assertIn(f"{flag} must be one line", proc.stderr)
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), before, "a refused result was written")
 
 
 if __name__ == "__main__":

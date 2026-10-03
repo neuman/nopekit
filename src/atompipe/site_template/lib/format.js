@@ -49,9 +49,30 @@ const CLAIM_STATUS = {
  *  value rather than a word the page invented. */
 let WORDS = {};
 
-export function useWords(words, outcomes) {
+/** The ledger's other words the page prints — `invalidated`, each gap
+ *  record's state, each verdict chip's title — from state.json's `phrases`
+ *  (atompipe.report.page_phrases). What slipped through P2.1: the page held
+ *  them itself, `≈ STALE` on the top bar over a project where no claim read
+ *  Stale, its own "identified", and its own outcome hints. */
+let PHRASES = {};
+
+export function useWords(words, outcomes, phrases) {
   WORDS = words || {};
   OUTCOME_WORDS = outcomes || {};
+  PHRASES = phrases || {};
+}
+
+/** `invalidated`, from state.json; the raw key until a state that has it. */
+export function phrase(key) {
+  const said = PHRASES[key];
+  return typeof said === "string" && said ? said : String(key);
+}
+
+/** A gap record's state in its word (`identified` for `open`, and for a record
+ *  that names none), from state.json; the raw state until a state that has it. */
+export function needWord(status) {
+  const need = PHRASES.need || {};
+  return need[status] || (status ? String(status) : need.open || "");
 }
 
 /** Verdict statuses, as written by site.state(): pass | fail | skipped | errored.
@@ -59,10 +80,10 @@ export function useWords(words, outcomes) {
  *  solver is missing proved nothing, and an errored gate reads louder still,
  *  because a crash is a defect in the check itself. */
 const VERDICT_STATUS = {
-  pass:    { glyph: "✓", tone: "ok",   hint: "the evaluator ran and passed" },
-  fail:    { glyph: "✕", tone: "bad",  hint: "the evaluator ran and failed" },
-  skipped: { glyph: "⊘", tone: "warn", hint: "its tool is missing here, so nothing was evaluated" },
-  errored: { glyph: "!", tone: "bad",  hint: "the evaluator crashed — nothing was evaluated, and the evaluator itself is broken" },
+  pass:    { glyph: "✓", tone: "ok" },
+  fail:    { glyph: "✕", tone: "bad" },
+  skipped: { glyph: "⊘", tone: "warn" },
+  errored: { glyph: "!", tone: "bad" },
 };
 
 /** Each verdict row's outcome word, from state.json's `outcome_words`
@@ -83,10 +104,13 @@ const CLAIM_KIND = {
     blurb: "Only an article settles these. No evaluator here settles them; they are " +
            "carried, visibly, until a physical result is recorded.",
   },
+  // No status word in a blurb: each row's chip and reason say what it reads
+  // (review of P2.1: "An assumption nobody owns is a gap." — a status word the
+  // page owned, and a scan of `label:`/`text:` values could not see a blurb).
   assumption: {
     title: "Assumptions",
     blurb: "Accepted provisionally, with a reason and an owner, and written down so they " +
-           "stay visible. An assumption nobody owns is a gap.",
+           "stay visible. Each row says whether its owner has recorded it.",
   },
 };
 
@@ -106,10 +130,14 @@ export function claimStatus(key, { errored = false } = {}) {
   };
 }
 
+/** A verdict row's chip: the glyph and tone for its outcome; the word from
+ *  state.json's `outcome_words` and the hint from its `phrases.outcome_hint`
+ *  (review of P2.1: the hints were the page's own words). */
 export function verdictStatus(key) {
   const look = VERDICT_STATUS[key];
   if (!look) return { label: String(key || "unknown").toUpperCase(), glyph: "·", tone: "muted", hint: "" };
-  return { ...look, label: String(OUTCOME_WORDS[key] || key).toUpperCase() };
+  return { ...look, label: String(OUTCOME_WORDS[key] || key).toUpperCase(),
+           hint: String((PHRASES.outcome_hint || {})[key] || "") };
 }
 
 export function claimKind(key) {

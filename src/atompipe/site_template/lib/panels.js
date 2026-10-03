@@ -21,8 +21,14 @@
 import { el, mount, field } from "./dom.js";
 import {
   chip, tag, claimStatus, verdictStatus, claimKind,
-  num, quantity, age, isAged, stamp, plural, code,
+  num, quantity, age, isAged, stamp, plural, code, phrase, needWord,
 } from "./format.js";
+
+/** `invalidated` -> `Invalidated`, for a field label. */
+function capital(text) {
+  const s = String(text || "");
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
 
 // --------------------------------------------------------------------------- //
 // headline
@@ -199,10 +205,15 @@ function claimRow(claim, state, app) {
           el("h4", { text: "Gates" }),
           el("ul", { class: "mini-verdicts" },
             ...verdicts.map((v) => miniVerdict(v, app))))
-      : el("p", { class: "muted", text: (claim.gates || []).length
-          ? `Covered by ${claim.gates.join(", ")}, which has produced no verdict yet.`
-          : "No gate covers this claim. Nothing about it has been evaluated." }),
-    claim.reason ? el("p", { class: "claim-reason", text: claim.reason }) : null,
+      : null,
+    // Why the claim reads what it reads: state.json's `reason`, the ledger's
+    // words (no evaluator, unrun, no owner recorded, needs an article…) — none
+    // here. What slipped through (review of P2.1): with no verdict this panel
+    // said "No gate covers this claim" itself, the old NO GATE meaning, for an
+    // unowned assumption and a claim waiting on an article alike; and a
+    // Checked claim's reason, `—`, rendered as a lone dash.
+    claim.reason && claim.cause !== "checked"
+      ? el("p", { class: "claim-reason", text: claim.reason }) : null,
     (claim.unproven || []).length
       ? el("div", { class: claim.disagree ? "partial-note tone-bad" : "partial-note" },
           claim.disagree ? el("b", { text: "Status and evidence disagree — " }) : null,
@@ -318,7 +329,7 @@ function verdictRow(v, app) {
       // `when` is the site's, from the resolver: the run that last wrote or hit
       // this result, else the commit that brought it. Neither known: said so.
       ...field("Recorded", v.when ? `${stamp(v.when)} · ${age(v.age_s)}` : "no date recorded for this result"),
-      ...(v.stale_reason ? field("Not current", v.stale_reason) : []),
+      ...(v.stale_reason ? field(capital(phrase("invalidated")), v.stale_reason) : []),
       ...(v.claims || []).length
         ? field("Settles", ...v.claims.map((c) => el("button", {
             class: "linkish mono", type: "button", text: c,
@@ -359,7 +370,8 @@ function verdictRow(v, app) {
         measured,
         el("span", { class: "verdict-line", text: detail }),
         v.stale_reason
-          ? el("span", { class: "stale-flag", title: v.stale_reason, text: "≈ invalidated" })
+          ? el("span", { class: "stale-flag", title: v.stale_reason,
+              text: `≈ ${phrase("invalidated")}` })
           : null,
         anchored.length
           ? el("span", { class: "pin-count", title: "highlights the geometry this is about" },
@@ -573,9 +585,10 @@ export function gapsPanel(state, app) {
       el("details", { class: "disclosure" },
         el("summary", {},
           // A record's state, never a claim status word: `open` is Open's alone
-          // (GLOSSARY §6), so a record nobody acted on is "identified".
-          tag(g.status === "open" || !g.status ? "identified" : g.status,
-              { tone: g.status === "satisfied" ? "ok" : "warn" }),
+          // (GLOSSARY §6), so a record nobody acted on is *identified* — the
+          // ledger's word, from state.json's `phrases` (review of P2.1: this
+          // held its own copy of `HUMAN["need"]`).
+          tag(needWord(g.status), { tone: g.status === "satisfied" ? "ok" : "warn" }),
           code(g.id),
           el("span", { text: g.quantity || "" }),
           (g.claim_ids || []).length ? el("span", { class: "muted mono", text: g.claim_ids.join(" ") }) : null),

@@ -34,6 +34,7 @@ from atompipe import claims as claims_mod
 from atompipe import gates as gates_mod
 from atompipe import packs as packs_mod
 from atompipe import report as report_mod
+from atompipe import store as store_mod
 from atompipe.models import (
     Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, GateSpec, Ledger,
     NegativeControl, PhysicalResult, ProjectMeta, Tier, Verdict,
@@ -561,8 +562,12 @@ class EveryUnresolvedClaimIsListed(unittest.TestCase):
         return md, composed
 
     def test_every_status_and_cause_is_reached(self):
+        """Every status `compose` can give — `verified` is not one until article
+        binding (a typed pass reads Pending build, review of P2.1) — and every
+        cause."""
         _md, composed = self._md()
-        self.assertEqual({c.status.value for c in composed.values()}, set(_SECTION_OF))
+        self.assertEqual({c.status.value for c in composed.values()},
+                         set(_SECTION_OF) - {"verified"})
         self.assertEqual({c.cause.value for c in composed.values()},
                          {cause.value for cause in claims_mod.ClaimCause})
 
@@ -580,6 +585,44 @@ class EveryUnresolvedClaimIsListed(unittest.TestCase):
         md, composed = self._md(gaps=needs_only)
         missing = {p.split(" ", 1)[0] for p in listing_problems(md, composed)}
         self.assertEqual(missing, {"K7", "K8", "K9", "K10"})
+
+
+class RequiredIsSaidAsABool(unittest.TestCase):
+    """A claim file's `critical` is true, false or absent (required): anything
+    else is refused by the strict reader, naming the file, as a result's
+    `passed` is. What slipped through (review of P2.1): `"critical": null` was
+    copied as-is and read by truthiness, so a FAILING claim left every required
+    list — `check` printed `ready: every required claim is checked`, exit 0,
+    and `status --json` said `all_required_checked: true`. A null is a value
+    nobody set; it never means "not required"."""
+
+    def _read(self, body: dict) -> Claim:
+        root = tempfile.mkdtemp(prefix="atompipe-critical-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        path = os.path.join(root, "C1.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"statement": "the tip sags no more than 0.5 mm", **body}, fh)
+        return store_mod.read_record(path, "claims")
+
+    def test_only_a_bool_says_whether_a_claim_is_required(self):
+        self.assertIs(self._read({}).critical, True)
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.assertIs(self._read({"critical": value}).critical, value)
+        for value in (None, 0, 1, "", "false", []):
+            with self.subTest(value=value):
+                with self.assertRaises(AtompipeError) as caught:
+                    self._read({"critical": value})
+                self.assertIn('C1.json: "critical" must be true or false',
+                              str(caught.exception))
+
+    def test_what_a_null_would_have_bought(self):
+        """The reason it is refused: read leniently, `critical: None` takes a
+        failing claim off the required list, and *ready* holds over it."""
+        claim = _claim(gates=["g.one"], critical=None)
+        ledger = _ledger(claim, verdicts=[Verdict(gate="g.one", claims=["C1"], passed=False)])
+        found = claims_mod.summarise(ledger, _Reg([SPEC]))
+        self.assertEqual(found["blocking_ids"], [], "the lenient read degrades open")
 
 
 class StatusPrecedence(unittest.TestCase):
@@ -600,11 +643,67 @@ class StatusPrecedence(unittest.TestCase):
                          "an owner in the file alone counts for nothing")
 
     def test_physical_with_result(self):
+        """A typed pass reads Pending build, cause `physical-pass`, until article
+        binding (R-6, toward unresolved: this read VERIFIED, Checked on every
+        channel but *ready* — review of P2.1); a fail reads Failing."""
         c = _claim("C3", kind=ClaimKind.PHYSICAL, gates=[])
         c.physical_result = PhysicalResult(passed=True, when="2026-01-01")
-        self.assertEqual(claims_mod.resolve_status(c, []), ClaimStatus.VERIFIED)
+        found = claims_mod.compose(c, [])
+        self.assertEqual((found.status, found.cause),
+                         (ClaimStatus.UNVERIFIED, claims_mod.ClaimCause.PHYSICAL_PASS))
         c.physical_result = PhysicalResult(passed=False, when="2026-01-01")
         self.assertEqual(claims_mod.resolve_status(c, []), ClaimStatus.REFUTED)
+
+    # -- R-3: a recorded fail never loses its power to fail ------------------ #
+    def _loaded(self, kind: str, results: list[dict]) -> Claim:
+        """C5 of a records project with `results` in `results/C5.json`, oldest
+        first, read back through `store.load` — the assembler every command uses."""
+        root = tempfile.mkdtemp(prefix="atompipe-r3-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        store_mod.init(root, ProjectMeta(name="r3", revision="v0.1"))
+        for sub, name, body in (
+                ("claims", "C5.json", {"statement": "survives two winters", "kind": kind}),
+                ("results", "C5.json", {"results": results})):
+            os.makedirs(os.path.join(root, sub), exist_ok=True)
+            with open(os.path.join(root, sub, name), "w", encoding="utf-8") as fh:
+                json.dump(body, fh)
+        return store_mod.load(root).claim("C5")
+
+    def test_a_pass_after_a_fail_never_outranks_it(self):
+        """A pass typed one second after a fail: the fail still counts. What
+        slipped through (review of P2.1): the LAST result counted, so the
+        project read ready with the fail still in `results/C5.json`."""
+        claim = self._loaded("physical", [
+            {"passed": False, "who": "tester", "detail": "cracked after 1 winter"},
+            {"passed": True, "who": "agent", "detail": "looks fine"}])
+        found = claims_mod.compose(claim, [])
+        self.assertEqual((found.status, found.cause),
+                         (ClaimStatus.REFUTED, claims_mod.ClaimCause.PHYSICAL_FAIL))
+        self.assertEqual(claim.physical_result.detail, "cracked after 1 winter")
+
+    def test_a_fail_counts_whatever_the_claims_kind(self):
+        """The claim's kind edited away from physical — the edit `claim
+        physical`'s own refusal names — keeps its recorded fail: Failing, and
+        blocking. What slipped through: the result rung read only a PHYSICAL
+        claim's result, so the edit read the project ready."""
+        for kind in ("measurable", "assumption"):
+            with self.subTest(kind=kind):
+                claim = self._loaded(kind, [{"passed": False, "detail": "embrittled"}])
+                ledger = _ledger(claim)
+                self.assertEqual(claims_mod.resolve_status(claim, []), ClaimStatus.REFUTED)
+                self.assertEqual([c.id for c, _ in claims_mod.blocking(ledger, None)], ["C5"])
+        claim = self._loaded("measurable", [{"passed": True, "detail": "looks fine"}])
+        self.assertEqual(claims_mod.resolve_status(claim, []), ClaimStatus.UNCLAIMED,
+                         "a recorded pass settles nothing an evaluator is meant to")
+
+    def test_the_latest_result_wins_is_caught(self):
+        """Planted: the assembler as P2.1 had it — the last result counts."""
+        real = store_mod._counting_result
+        with mock.patch.object(store_mod, "_counting_result",
+                               lambda items: items[-1] if items else None):
+            claim = self._loaded("physical", [{"passed": False}, {"passed": True}])
+        self.assertNotEqual(claims_mod.resolve_status(claim, []), ClaimStatus.REFUTED)
+        self.assertIs(store_mod._counting_result, real)
 
     def test_no_covering_gate_is_unclaimed(self):
         self.assertEqual(
@@ -657,9 +756,13 @@ def _covering(kind: str, index: int) -> Verdict:
     }[kind]
 
 
-#: The claim kinds V3 composes over: (kind, physical result, attributed).
+#: The claim kinds V3 composes over: (kind, physical result, attributed). A
+#: result on an automated claim is a physical result left behind by an edit of
+#: its kind (review of P2.1): a fail still counts, a pass never does.
 _KINDS = (
     ("automated", None, False),
+    ("automated, a fail recorded", False, False),
+    ("automated, a pass recorded", True, False),
     ("physical, no result", None, False),
     ("physical, a pass", True, False),
     ("physical, a fail", False, False),
@@ -707,7 +810,7 @@ def checked_problems(resolve=None, compose=None) -> list[str]:
               "skipped": "blocked", "unqualified": "unclaimed", "no-evaluator": "unclaimed",
               "no-owner": "unclaimed", "owner-unattributed": "unclaimed",
               "no-reason": "unclaimed", "unrun": "pending", "invalidated": "stale",
-              "no-article": "unverified", "owned": "asserted", "physical-pass": "verified",
+              "no-article": "unverified", "owned": "asserted", "physical-pass": "unverified",
               "checked": "pass"}
     out: list[str] = []
     for size in range(4):
@@ -717,7 +820,7 @@ def checked_problems(resolve=None, compose=None) -> list[str]:
                 verdicts = [_covering(k, i) for i, k in enumerate(combo)]
                 gates = [v.gate for v in verdicts] + (["g.unrun"] if unrun else [])
                 moved = {v.gate for v in verdicts if v.outcome == "pass"} if stale else set()
-                claim_kind = (ClaimKind.MEASURABLE if kind == "automated" else
+                claim_kind = (ClaimKind.MEASURABLE if kind.startswith("automated") else
                               ClaimKind.PHYSICAL if kind.startswith("physical")
                               else ClaimKind.ASSUMPTION)
                 claim = _claim(gates=gates, kind=claim_kind, rationale="why",
@@ -729,11 +832,14 @@ def checked_problems(resolve=None, compose=None) -> list[str]:
                 if claim_kind is ClaimKind.ASSUMPTION:
                     should = False
                 elif claim_kind is ClaimKind.PHYSICAL:
-                    should = (result is True and not unrun and not moved
-                              and all(v.outcome == "pass" and not v.unqualified
-                                      for v in verdicts))
+                    # Checked only on a pass bound to an article built from the
+                    # current inputs (GLOSSARY §3), and nothing binds one until
+                    # article binding: a typed pass is Pending build (review of
+                    # P2.1; R-6, toward unresolved — this read `result is True`).
+                    should = False
                 else:
-                    should = (bool(verdicts) and not unrun and not moved
+                    should = (result is not False and bool(verdicts) and not unrun
+                              and not moved
                               and all(v.outcome == "pass" and not v.unqualified
                                       for v in verdicts))
                 name = f"{kind}: {'+'.join(combo) or '-'}{' unrun' if unrun else ''}" \

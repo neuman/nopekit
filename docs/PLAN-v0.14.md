@@ -122,8 +122,9 @@ on the site as a score. What stays from the old stance: no universal metric. Lan
 R-8's P2 oracle stands as PLAN.md words it: statuses move only in the blocking
 direction, and the phase commit lists every changed claim with its reason. "Blocking"
 here is GLOSSARY's *unresolved*, so ASSERTED → Assumed or Gap, and VERIFIED → Stale, both
-move toward it. The bracket's C6 gains an owner, so G4's pinned signature moves only in
-words — unless the mutation pass leaves a bracket gate unqualified (§1.5), in which case
+move toward it. The bracket's C6 gains an owner (A-15, §4.2: until its owner records it
+through the signing channel, C6 reads Gap and G4 holds it so), so G4's pinned signature
+moves only in words — unless the mutation pass leaves a bracket gate unqualified (§1.5), in which case
 `tests/expected_bracket.json` changes in the P2 commit with its reason.
 
 ### 1.5 New mechanisms the plan had no row for
@@ -323,6 +324,7 @@ untracked draft stays untracked. The walkthrough's own command lines answer two 
 | A-12 layout epoch | unchanged | P5, conditional |
 | A-13 METHOD's incident anecdotes (rules 3 and 4) | **new**, check-in batch | shipped doctrine that recounts a past incident is a prior every sandboxed agent shares; proposed as a neutral rewording beside the vocabulary diff. Until answered, B1 scores the affected scenarios as contaminated (top of this file) |
 | A-14 `claim physical --who` (D-12) | **new**, P2 | the skill tells agents to pass `--who`; it changes in the same change that removes the flag |
+| A-15 who owns the bracket's C6 (P2.1) | **new**, check-in batch | from P2.1 an assumption reads Gap until its owner records it through the signing channel, which lands later in P2, so the bracket's C6 blocks `check` and G4's pinned signature moves (C6 joins `claims.critical` as `unclaimed`, exit 1 at 7.0 and at 8.0). The ask: who owns C6, and will they record it once the channel exists — then C6 reads Assumed and G4 moves back in words only, as §1.4 expects — or does C6 stay a Gap as the example's demonstration of the rule, and G4 keeps it? Until answered, G4 holds C6 as a Gap |
 
 ### 4.3 Paper feedback (the user's call; the repo matches whatever the paper says)
 

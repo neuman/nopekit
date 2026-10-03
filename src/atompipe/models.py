@@ -396,8 +396,16 @@ class Claim(Record):
     in P2.1 produces one. *Rejected:* a forbidden key (the strict reader would
     refuse every command on a file an agent plausibly writes, and refusing the
     edit is P3's permission rule); trusting the file until the channel exists
-    (the exact edit §1.4 says must not count). The LAST field (R-2): an older
-    spine drops it and reads the assumption as it always did."""
+    (the exact edit §1.4 says must not count). The LAST field (R-2), so a
+    positional reader is unmoved. What an older spine does with it — corrected
+    in review, where this said "an older spine drops it": a spine before P2.1
+    REFUSES every command on a claim file that names an owner (`store.read_record`
+    refuses an unknown key, S-40; only the lenient `Record.from_dict`, which no
+    record file goes through, drops one). That is the forbidden key's cost,
+    rejected above, paid in the other direction — and it holds only while
+    nothing but a hand edit writes this field: no command writes it (V7), so a
+    project an older atompipe still reads never holds it unless someone typed
+    it."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Claim":

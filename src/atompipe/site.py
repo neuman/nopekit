@@ -1981,6 +1981,10 @@ def state(
         "words": report_logic.words_table(),
         # Each verdict row's outcome word, the same way: `HUMAN`'s.
         "outcome_words": report_logic.outcome_words(),
+        # The rest of what the page says that is the ledger's word, not the
+        # page's: `invalidated`, each gap record's state and each verdict chip's
+        # title (`report.page_phrases`).
+        "phrases": report_logic.page_phrases(),
         "claims": claim_rows,
         "verdicts": verdict_rows,
         "views": views,

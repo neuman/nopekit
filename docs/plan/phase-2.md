@@ -83,6 +83,41 @@ the current report section order, and that `SECTION_PROVEN` (P1.0) exists.
 PASS; the JUnit `claims.critical` suite has a `<failure>` for it; a physical claim with a
 failing gate is FAIL and blocking.
 
+#### P2.1's decision rows (`P2.1-Dn`)
+
+Checkpoint 2.1 as it landed (PLAN-v0.14 §1.4, §1.5; GLOSSARY §3). The code and tests
+cite these ids; each row is the decision and what was tried and rejected, so no fresh
+context window re-litigates it. Committed with P2.1's review, where a refuter found the
+ids cited in ~30 places and defined in none (they lived in a session's scratch spec).
+Rows the review moved say so.
+
+| Id | Decision | Rejected |
+|---|---|---|
+| D1 | `ClaimStatus` keeps its ten members and values; Table 1 is a reading of them (`claims.STATUS_KEY`, GLOSSARY §8's tokens) | renaming the enum now (R-8 could not tell a word move from a status move; ~80 test lines); `ERRORED`/`UNQUALIFIED` members (one fact, one status: the reason says which); aliasing members |
+| D2 | one ladder for every kind, first match wins: Failing · Skipped (errored first) · Gap · Open · Stale · Pending build · Assumed · Checked (`claims.compose`) | today's ladder (S-03); Skipped above Failing; Open above Skipped; Pending build above Open or Stale on a physical claim; assumptions ignoring their covering verdicts; one ladder per kind |
+| D3 | the cause travels with the status from one producer (`Composed`, `ClaimCause`, in `claims`, not the spine) | each renderer re-deriving the cause (S-68, P2.0 F-8); the cause in the enum |
+| D4 | "unqualified" is `Verdict.unqualified`, set only by the spine (`verdicts._unqualified`), cleared by `run_gate`, never remembered; the `not admitted:` text unchanged until P2.3 | the text prefix as the predicate (a gate could make its crash read the quieter Gap); rewording the text now; a fifth outcome |
+| D5 | `verdicts.resolve` states a refusal on rung 4 (stale entry) and rung 6 (no entry), not only on a Fresh one | filing the refusal as a verdict entry; rung 6 only; neither |
+| D6 | an undemonstrated control still reads Stale, not Gap | Gap (every claim Gap after any spine edit, until `check`) |
+| D7 | known-bad shown (reject-only) still counts until P2.3; pinned by `RejectOnlyStillCounts` | flipping it now (every bracket claim Gap until P2.3, then moved twice) |
+| D8 | `Claim.owner` names a nominee; an owner counts only through `owners` (`Attribution`, bound by value to the owner and the rationale), which nothing produces until the signing channel — every assumption reads Gap | a forbidden key (an older or a strict reader refuses the file; see `Claim.owner`'s note); trusting the file; git authorship; an interim TTY command; deferring the rule |
+| D9 | `BLOCKING_STATUSES` unchanged; more facts read into it (an errored claim, an unowned assumption, pass beside unrun or skip) | cause-dependent blocking; demoting C6 to not required |
+| D10 | **moved by the review:** a recorded physical pass reads Pending build, cause `physical-pass`, reason `a pass recorded by <who>, not bound to an article`, until article binding; as landed it read Checked, and only *ready* left it out, so *checked* meant two things | Checked until binding (as landed); keeping Checked and dropping *ready*'s carve-out (a typed pass would make a project ready) |
+| D11 | *ready* only when every required claim reads Checked (`readiness`, `all_required_checked`); zero required is not ready; `summary.ready` keeps "nothing stops `check`" | flipping `summary.ready` in place; `check`'s old `ready:` line |
+| D12 | JSON keeps every key and value domain; the words arrive under new keys (`statuses`, `key`, `word`, `cause`, `reason`, `errored`, `counts`, …) | changing `status` values in place; `by_status["errored"]`; `state.json` re-keyed to tokens; words without a token; a top-level `status` map |
+| D13 | `report.HUMAN`, one read-only table in `report.py`; `STATUS_TAG` a view of it; outcome tags `models._RENDER_TAG` re-exported | words in `models` (a word is not a type; a spine edit re-keys every cache); a `vocab.py`; `format.js`; a JSON data file |
+| D14 | five-wide tags: `ok   ` `FAIL ` `STALE` `assum` `build` `gap  ` `skip ` `SKIP ` (errored) `open `; upper case = loud | full-term tags (P2.0's `\[.{5}\]` parsers); `REFUT`, `phys `, `unrun`, `ok-hw` (Never-says); `[ERR  ]` on a claim row; `skip!`; `chkd `, `check` |
+| D15 | one reason producer, `report.reason`, led by the fact then the evaluator (`errored: <gate> : <first line>`) | no lead; the status word as the lead; the traceback |
+| D16 | one severity order, Failing · Skipped errored · Skipped · Gap · Open · Stale · Pending build · Assumed · Checked; ties critical first, then record order; `claim list`, `check --json` and JUnit keep record order. **Moved by the review:** the order lives in `claims.SEVERITY_ORDER` (a rank is not a word), and `last_check.json`'s `worst` reads it | today's `_SEVERITY` (STALE above BLOCKED); the rank in `HUMAN`'s rows (the spine's `write_last_check` then picked by record order) |
+| D17 | counts `N claims · a checked · …` (Checked first, zeros dropped, `N skipped (k errored)`); the readiness sentence lists every unresolved required claim by word; headings Pending build · Gaps · Assumed · Failing, stale, skipped or open; collision lines reworded (`invalidated:`, `verdicts current`, `unrun`, `last check run:`, `(identified)`) | `Unresolved — N required claims` now (P2.5 moves it again); "unsettled" over blocking claims only; a separate Pending build sentence |
+| D18 | no PARTIAL anywhere; a Checked claim its evidence contradicts is "status and evidence disagree", loud, outside the checked section | PARTIAL as the word for a contradiction |
+| D19 | every unresolved claim in exactly one report section; Gaps by cause (no evaluator, unqualified, unowned) | the gaps section reading `find_gaps` only |
+| D20 | R-8's P2 oracle is a rank plus a cause, written twice (`StatusesMoveOnlyTowardUnresolved`, `tests/oracle/r8_statuses.py --toward-unresolved`) | one shared helper (an oracle that imports the module under test relaxes with it) |
+| D21 | the page keeps glyph and tone per enum value and takes every word from `state.json` (`words`, `outcome_words`, and from the review `phrases`) | a page re-keyed on words or tokens |
+| D22 | P2.1's vocabulary tests are GLOSSARY §7's status subset plus one-table routing (sentinels) | the full prose scanner and ratchet now; an AST scan of source strings (the review widened the PAGE scan to every string literal: the page has no rendered form a test can read) |
+| D23 | CLAUDE.md invariants 1, 2, 4, 7 and the preamble in GLOSSARY's words | — |
+| D24 | D2–D21 land as one change | semantics first (a crash read "blocked on missing tooling"); words first (Checked minted over S-03) |
+
 #### Checkpoint 2.2: the refusal graph
 
 ```python

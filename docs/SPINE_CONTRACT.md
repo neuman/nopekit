@@ -418,13 +418,16 @@ input ingested in place at `inputs/loads.json` migrated to a record at that path
 itself as its evidence). A failing
 top-level `inputs/*.json` is most likely stray evidence, and the message names
 `atompipe ingest` and the buckets. A results file must be `{"results": [...]}` whose
-items say `passed` as a bool. `load` also refuses two record files whose stems differ
+items say `passed` as a bool, and a claim's `critical`, when present, is a bool too
+(review of P2.1: `"critical": null` read as not required by truthiness, so a failing
+claim left every required list and `check` said ready). `load` also refuses two record files whose stems differ
 only in case. *Rejected:* quarantining a file that does not read as an index `problem` —
 a typo'd real record would vanish (S-40's shape). `Record.from_dict` stays lenient.
 
 **`load`** reads the records (each kind in natural id order — C2 before C10 —,
 decisions newest first by `when`), sets each claim's in-memory `physical_result` to the
-LAST of `results/<id>.json`, each input's `bytes` from its file's size, and `verdicts`
+result that counts in `results/<id>.json` — the latest fail when any failed, otherwise
+the latest (R-3: no later pass outranks an earlier fail) — each input's `bytes` from its file's size, and `verdicts`
 to `[]` (they live in the verdict cache). On a legacy project it is
 `migrate_legacy(root, apply=False, when="", model_prose=model_prose).ledger`: the same
 Ledger the migration will write — **when it is given the reader the migration runs
@@ -1958,7 +1961,11 @@ class Attribution(NamedTuple): owner: str; reason: str     # the signing channel
 class Composed: status: ClaimStatus; cause: ClaimCause; cites: tuple; verdict: Verdict | None
     errored -> bool                                          # property: cause is ERRORED
 STATUS_KEY: Mapping[ClaimStatus, str]                        # pass -> "checked", unverified -> "pending_build", ...
+SEVERITY_ORDER: tuple[str, ...]                              # tokens + "errored", most urgent first
 KEY_ORDER: tuple[str, ...]                                   # the eight tokens, count order
+OUTCOME_ORDER: tuple[str, ...]                               # fail, error, skipped, unqualified, unrun, pass
+def severity(composed) -> int                                # its place in SEVERITY_ORDER
+def outcome_rank(verdict) -> int                             # its place in OUTCOME_ORDER; None = unrun
 def covers(spec, claim) -> bool                              # claim id OR any claim tag in spec.claims
 def covering_verdicts(claim, verdicts) -> list[Verdict]      # the same id-or-tag rule, on verdicts
 def compose(claim, verdicts, *, stale=False, stale_gates=(), owners=None) -> Composed
@@ -1986,14 +1993,22 @@ without it:
 
 | # | status | when | cause |
 |---|---|---|---|
-| 1 | Failing | a physical result failed (`refuted`); any covering verdict failed (`fail`), any kind, stale or not (D-08, R-3) | `physical-fail`, `failed` |
+| 1 | Failing | a physical result failed (`refuted`), whatever the claim's kind and whatever was recorded after it; any covering verdict failed (`fail`), any kind, stale or not (D-08, R-3) | `physical-fail`, `failed` |
 | 2 | Skipped (`blocked`) | any errored, else any skipped — beside a pass or not | `errored`, `skipped` |
 | 3 | Gap (`unclaimed`) | any unqualified, beside a pass or not; a measurable claim with no evaluator; an assumption with no owner named, no reason, or an owner `owners` does not attribute | `unqualified`, `no-evaluator`, `no-owner`, `no-reason`, `owner-unattributed` |
 | 4 | Open (`pending`) | any covering gate unrun | `unrun` |
 | 5 | Stale | `stale`, or a covering gate in `stale_gates` | `invalidated` |
-| 6 | Pending build (`unverified`) | a physical claim with no result | `no-article` |
+| 6 | Pending build (`unverified`) | a physical claim with no result; or a pass recorded that no article binds to the current inputs (every pass, until article binding) | `no-article`, `physical-pass` |
 | 7 | Assumed (`asserted`) | an attributed, reasoned assumption | `owned` |
-| 8 | Checked | a physical pass recorded (`verified`); else `pass` | `physical-pass`, `checked` |
+| 8 | Checked | every covering evaluator ran, passed and is current (`pass`); a physical claim only on a pass bound to an article (`verified`), which nothing records yet | `checked` |
+
+**The result that counts** is `Claim.physical_result`, as `store` assembles it from
+`results/<id>.json`: the latest **fail** when any result failed, otherwise the latest
+(R-3). Rung 1 reads a fail whatever the claim's kind; a recorded pass counts only for a
+physical claim, at rung 6. What slipped through (review of P2.1): the latest result
+counted, and only for a physical claim — a pass typed after a fail, or the claim's kind
+edited away from physical, read the project ready with the fail still on disk; and a
+typed pass read Checked everywhere but *ready*, so *checked* meant two things.
 
 **A skip is never a pass; an error is never a pass; an unqualified or unrun evaluator
 is never a pass, beside a pass or not.** A pass never makes an assumption Checked (its
@@ -2029,7 +2044,13 @@ other way "reads unattributed and the claim stays Gap".
 
 `explaining_verdict` is the single ranked choice of which verdict explains a claim's
 status, in `compose`'s order: one that ran and failed, else one that errored, else one
-that skipped, else one unqualified, stable within a rank. What slipped through: `status`
+that skipped, else one unqualified, stable within a rank — `OUTCOME_ORDER`, the one
+table the report's bullets and `why`'s groups read too (`outcome_rank`). **One severity
+order**, `SEVERITY_ORDER` (`severity`): Failing · Skipped, errored · Skipped · Gap ·
+Open · Stale · Pending build · Assumed · Checked — the order `status`, `check`'s
+BLOCKING list, the report and `last_check.json`'s `worst` rank claims in. It lives here,
+not in `report.HUMAN`, because a rank is not a word and `verdicts.write_last_check`
+reads it. What slipped through: `status`
 cited a skipped pack gate as the reason a claim failed while `check` cited the real
 failure, because a fix to one caller's private ranking never reached the other's (S-68).
 
@@ -2049,9 +2070,10 @@ sum = `n_claims`), `errored` and `errored_ids` (claims Skipped by a crash),
 RECORDS — `find_gaps`' Needs, an automated claim no registered evaluator covers — not
 claims reading Gap: `counts["gap"]` is those), `n_blocking`, `blocking_ids`,
 `unresolved_ids` (required claims not Checked, Pending build and Assumed included),
-`unbound_ids` (required claims Checked only on a physical pass no article binds),
+`unbound_ids` (required claims with a physical pass recorded that no article binds:
+each reads Pending build, so each is in `unresolved_ids` too),
 `all_required_checked` (*ready*, GLOSSARY §4: at least one required claim, every one
-Checked on the current inputs — `unresolved_ids` and `unbound_ids` both empty), `stale`,
+Checked — `unresolved_ids` empty), `stale`,
 and `ready`. **`ready` keeps its meaning** — `n_blocking == 0`, nothing stops `check` —
 for every reader that has it, until P2.5's `Readiness` replaces it; a reader that wants
 *ready* reads `all_required_checked`. *Rejected:* flipping `ready` in place, a key
@@ -2269,19 +2291,22 @@ instead of reading a 1,672-line decision log.
 class StatusWords(NamedTuple): key; word; term; plural; tag; hint; rank   # one GLOSSARY §3 row
 HUMAN: Mapping[str, Any]   # THE table (PLAN D-16): "status" {ClaimStatus: StatusWords},
                            # "errored" (Skipped's loud row, tag "SKIP "), "lead" {ClaimCause: str},
-                           # "need" {NeedStatus: word}, "outcome" {outcome: word},
+                           # "recorded" {named, unattributed}, "need" {NeedStatus: word},
+                           # "outcome" {outcome: word}, "outcome_hint" {outcome: line},
                            # "outcome_tag" (models._RENDER_TAG itself), "heading", "refusal"
 STATUS_TAG: Mapping[ClaimStatus, str]        # HUMAN's tags, a view: PASS -> "ok   ", ...
 SECTION_PROVEN = "## What is PROVEN"         # the checked section's heading (text: A-11)
 JUNIT_DEFAULT = ".atompipe/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
 def words(status, *, errored=False) -> StatusWords;  def word(status, *, errored=False, n=1) -> str
 def status_tag(status, *, errored=False) -> str      # "[FAIL ]", "[SKIP ]" for a crash
-def severity(composed) -> int                # P2.1-D16's rank; in_severity(ledger, composed, claims=None)
+def severity(composed) -> int                # claims.severity; in_severity(ledger, composed, claims=None)
 def count_line(composed) -> str              # "7 claims · 3 checked · 1 failing · 2 gaps · ..."
 def count_bits(composed) -> list[dict]       # its items: {key, status, n, errored, label}
 def reason(composed, ledger, claim, *, full=False, cut=None, stale_reasons=None) -> str
 def status_view(composed, ledger, claim, *, stale_reasons=None) -> dict  # {key, word, cause, reason, errored}
 def words_table() -> dict;  def outcome_words() -> dict;  def need_word(status) -> str
+def page_phrases() -> dict                   # state.json `phrases`: {invalidated, need, outcome_hint}
+def recorded_by(who) -> str                  # "recorded by sam" | "recorded, unattributed" — one line
 def readiness(ledger, composed) -> dict      # {required, unresolved, unbound, ready}
 def not_ready_line(ledger, composed) -> str  # `check`'s line when nothing blocks it
 RATIONALE_UNKNOWN = "Parameter rationales are not known"  # + ": <why>" — no view, or no model
@@ -2316,27 +2341,35 @@ the fact (`HUMAN["lead"]`): a fail cites `<gate> : <detail>` (` (invalidated: <w
 when its inputs moved, D-08); a crash `errored: <gate> : <exception's first line>`,
 never the traceback; a skip `skipped: <gate> : <reason>`; a refusal `unqualified:
 <gate> : <why>` (its words in GLOSSARY §2's, `HUMAN["refusal"]`); `no evaluator`;
-`no owner recorded`; `owner X is named in claims/<id>.json and has not recorded it`;
-`no reason recorded`; `unrun: <gates>`; `invalidated: <gate> : <what moved>`;
-`needs an article` (`; no test written down` with neither acceptance nor note);
-`assumed by <owner>: <rationale>`; `recorded by <who|unattributed>, not bound to an
-article`. `cli._blocking_reason` and `report._terminal_reason` wrap it (S-68: two
-copies once told two stories).
+`no owner recorded`; `owner X is named in claims/<id>.json and has not recorded it —
+no command can record it yet`; `no reason recorded`; `unrun: <gates>`; `invalidated:
+<gate> : <what moved>`; `needs an article` (`; no test written down` with neither
+acceptance nor note); `assumed by <owner>: <rationale>`; `a pass recorded by <who>, not
+bound to an article` (`recorded, unattributed` with no one named, `recorded_by`).
+`cli._blocking_reason` and `report._terminal_reason` wrap it (S-68: two copies once
+told two stories). **Every value a record supplies — an owner, a result's `who` and
+`when` — is one line** before it reaches a line-oriented channel (whitespace runs,
+newlines included, collapsed). What slipped through (review of P2.1): an owner or a
+`who` holding a newline went in raw and wrote its own lines — a second `## What is
+PROVEN` heading with a forged row in the report, an `[ok   ]` row and a `ready:` line
+under the real `[FAIL ]` in `check` and `status`.
 
 **The readiness sentence** says *ready* only when every required claim reads Checked
 on the current inputs (GLOSSARY §4: `readiness`), else `NOT ready: u of n required
 claims are unresolved — <groups>` with every unresolved required claim in severity
 order (`1 failing (C1); 2 gaps (C6, C7); 1 pending build (C5)`, Skipped as `N skipped
 (k errored)`), then `C of T claims are checked against the current inputs.`; claims
-not required that are unresolved; unrun gates; and **in every branch** the hardware
-sentence — `Pending build: N claims need an article (ids).` and any physical pass
-checked on an article not bound to the current inputs (W13). A required claim whose
-only evidence is such a pass keeps the project NOT ready: nothing binds a typed pass
-to what is being built (until article binding).
+not required that are unresolved, grouped by word the same way (a crash counted apart);
+unrun gates; and **in every branch** the hardware sentence — `Pending build: N claims
+need an article (ids)`, naming apart those with a pass recorded that no article binds
+(W13). Every branch that is not ready says `NOT ready`, the never-evaluated one too
+(`v0.1 is NOT ready and has never been evaluated: …`). A required claim whose only
+evidence is a typed physical pass reads Pending build and keeps the project NOT ready:
+nothing binds a typed pass to what is being built (until article binding).
 
 The markdown report has this shape, generated: the readiness sentence / `SECTION_PROVEN`
 (the checked claims, each row citing the evaluators that passed) / **Pending build**
-(what waits on an article, and passes recorded on one) / **Gaps** (every claim reading
+(what waits on an article, and passes recorded that no article binds) / **Gaps** (every claim reading
 Gap, by cause: gap records and tool options, unqualified evaluators, assumptions nobody
 owns — P2.1-D19) / **Assumed** (Assumed claims, undefended numbers, unread evidence) /
 **Failing, stale, skipped or open** (each claim's head in its word, its reason, its
@@ -2855,8 +2888,10 @@ ignored entries).
 
 `check` text: executed rows stream as they land; a cached row prints only when it did
 not pass, as `f"{line:<77} cached"`; then
-`6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0` (`, S skipped` and
-`, R errored` when non-zero; the time and the model hash left this line), then
+`6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0` (`, S skipped`, `, R errored`
+and `, U unqualified` when non-zero — an evaluator refused at its version is
+`unqualified`, never errored, here and in `--json`'s `counts`; the time and the model
+hash left this line), then
 `controls: E executed, C cached, R re-verified` when a control executed or was
 re-verified, a `note: <note>` line per `SweepResult.notes` entry (the writer's
 `two outcomes recorded for identical inputs` among them — collected and printed nowhere
@@ -2942,6 +2977,25 @@ Each with its remedy:
 A physical claim with no result still reads Pending build and does not stop `check`
 (nor does Assumed); both keep a project from *ready* (`all_required_checked`).
 
+**What P2.1's review moved** (each a slip a refuter reproduced):
+
+- a physical pass typed with `claim physical` reads **Pending build** (`a pass recorded
+  by <who>, not bound to an article`), no longer Checked: GLOSSARY §3 checks a physical
+  claim only on an article built from the current inputs, and nothing binds one yet.
+  It never stopped `check` and never made a project *ready*; now the count line, the
+  tag, JUnit and the page say the same;
+- a recorded physical **fail** counts whatever was recorded after it and whatever the
+  claim's kind becomes (R-3): `check` stops on it until the claim changes;
+- `"critical"` that is not a bool is refused by the strict reader, naming the file;
+- `check`'s summary line and `check --json`'s `counts` count an evaluator refused at its
+  version as `unqualified`, never `errored`; `status`'s `invalidated:` line no longer
+  counts it unrun;
+- `claim list --status` refuses a spelling that is no status, naming the words;
+- `last_check.json`'s `worst` is the most urgent blocker (`claims.severity`), not the
+  first in record order;
+- the readiness sentence says `NOT ready` in its never-evaluated branch too, and groups
+  the claims not required by word, a crash counted apart.
+
 **JSON: every existing key keeps its spelling and value domain; the words arrive under
 new keys** (P2.1-D12):
 
@@ -2949,7 +3003,7 @@ new keys** (P2.1-D12):
 |---|---|---|
 | `status --json`, `report --json` | `claims` {id: enum}; `summary.by_status` (ten values, sum = `n_claims`); `summary.ready` (nothing stops `check`); `summary.n_gaps` (gap records) | `statuses` {id: {`key`, `word`, `cause`, `reason`, `errored`}}; `errored` [ids]; `summary.counts` {token: n}, sum = `n_claims`; `summary.errored`, `errored_ids`, `unresolved_ids`, `unbound_ids`, `all_required_checked` |
 | `claim list --json` rows, `claim show --json`, `check --json` `blocking[]`, `claim physical --json` | `status` (enum) | `key`, `word`, `cause`, `reason`, `errored` |
-| `check --json` | `ready` (nothing stops `check`) | `all_required_checked` |
+| `check --json` | `ready` (nothing stops `check`); `counts.errored` (from review: crashes only) | `all_required_checked`; `counts.unqualified` (evaluators refused at their version) |
 | JUnit root properties | `ready` | `all_required_checked` |
 | `last_check.json` | `statuses` (enum) | `errored` [ids]; `worst.cause`; `worst.detail` by outcome |
 | `state.json` | see `docs/SITE_CONTRACT.md` | |

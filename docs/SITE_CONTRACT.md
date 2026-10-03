@@ -274,7 +274,10 @@ was the one a reader of the contract would never look for.
                           inputs — checked does not mean true" }, …,
                 "errored": { "key": "skipped", "word": "skipped", "term": "Skipped", … } },
   "outcome_words": { "pass": "pass", "fail": "fail", "skipped": "skipped",
-                     "errored": "errored" }
+                     "errored": "errored" },
+  "phrases":  { "invalidated": "invalidated",
+                "need": { "open": "identified", "proposed": "proposed", … },
+                "outcome_hint": { "pass": "the evaluator ran and passed", … } }
 }
 ```
 
@@ -289,7 +292,18 @@ an agent can read the site's state without a browser.
   `errored`, to `{key, word, term, plural, hint}` from `report.HUMAN`, and
   `outcome_words` each verdict row's status to its outcome word: `format.js` takes
   every label and hint from these two — the site owns no status or outcome word
-  (PLAN D-16). The claims are in severity order (Failing · Skipped, errored ·
+  (PLAN D-16). `phrases` carries the rest of what the page says in the ledger's
+  words (`report.page_phrases`): `invalidated`, the flag on a verdict whose read set
+  moved and on the top bar when `meta.stale` (a verdict invalidated, which is not a
+  claim reading Stale: an invalidated fail stays Failing), and `need`, each gap
+  record's state (`identified` for `open`, GLOSSARY §6), and `outcome_hint`, each
+  verdict chip's title. A claim row's `reason` is why
+  it reads what it reads — no evaluator, unrun, no owner recorded, needs an article —
+  and the page prints it, never a sentence of its own; a Checked row (`cause:
+  "checked"`) prints none. What slipped through (review of P2.1): the page said "No
+  gate covers this claim" itself for an unowned assumption and a claim waiting on an
+  article alike, `≈ STALE` on its top bar over a project where no claim read Stale,
+  and a lone `—` under every Checked claim. The claims are in severity order (Failing · Skipped, errored ·
   Skipped · Gap · Open · Stale · Pending build · Assumed · Checked; ties critical
   first, then record order), and the page keeps it: what slipped through (P2.0 F-5),
   record order put a skip above the crash it should sit under.

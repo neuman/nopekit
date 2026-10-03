@@ -7880,8 +7880,9 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
     touched; each claim's status under ``resolution`` (``claims.compositions``,
     the enum value as before, P2.1-D12) and ``errored``, the claims Skipped by
     a crash (a crash and a missing tool share ``blocked``; this tells them
-    apart); the sweep's counts with its controls; the first blocking claim with
-    the gate that explains it, its ``cause`` (``claims.ClaimCause``) and its
+    apart); the sweep's counts with its controls; the most urgent blocking
+    claim (``claims.severity``, record order on a tie) with the gate that
+    explains it, its ``cause`` (``claims.ClaimCause``) and its
     ``detail`` by outcome — an error's first line, a skip's reason, a fail's
     detail, never a crash's traceback (P2.0 F-1) — nulls when nothing blocks;
     ``params`` (the parameter view, from 1.3) and ``influence`` (P3), empty
@@ -7900,7 +7901,12 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
     blocking = (_claims.blocking(view, result.registry, stale_gates=stale)
                 if result.registry is not None else [])
     if blocking:
-        claim, status = blocking[0]
+        # The most urgent blocker by `claims.severity` — the order `check`
+        # prints its BLOCKING list in — the first in record order on a tie.
+        # What slipped through (review of P2.1, P2.0 F-2 on the JSON channel):
+        # `blocking[0]`, record order, so a claim Skipped by a missing tool
+        # named before it hid a crash or a fail from the file P3's hook reads.
+        claim, status = min(blocking, key=lambda pair: _claims.severity(composed[pair[0].id]))
         why = _claims.explaining_verdict(claim, view.verdicts)
         worst = {"claim": claim.id, "gate": why.gate if why is not None else None,
                  "detail": _detail_by_outcome(why) if why is not None else str(status.value),

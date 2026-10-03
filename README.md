@@ -106,18 +106,18 @@ whole thing as a pack so nobody has to do it again.
 
 ## Why you should believe the output
 
-Because of what it refuses to claim. Every row in the PROVEN table cites the gate that
-passed it and the evidence file it wrote, and a claim is listed there only when every
-gate covering it ran and passed — *checked*, which does not mean true. Everything else
-is listed under its own status, with the reason: failing, skipped, a gap, open, stale,
-pending build or assumed.
+Because of what it refuses to claim. Every row in the report's checked section cites
+the gate that passed it and the evidence file it wrote, and a claim is listed there
+only when every gate covering it ran and passed — *checked*, which does not mean true.
+Everything else is listed under its own status, with the reason: failing, skipped, a
+gap, open, stale, pending build or assumed.
 
 None of these ever blurs into a pass, even beside a gate that passed:
 
-- **Skipped** — a gate did not run: its tool is missing. Nothing was evaluated.
+- **Skipped** — a gate skipped: its tool is missing here. Nothing was evaluated.
 - **Skipped, errored** — a gate crashed. Nothing was evaluated, and it reads louder
   than a missing tool: the gate itself is broken.
-- **Open** — a gate exists and has not run on the current inputs.
+- **Open** — a gate exists and is unrun on the current inputs.
 - **Gap** — no gate covers the claim, or one has not shown it can fail; or an
   assumption nobody owns.
 - **Stale** — it passed, but inputs have changed since. Nothing is checked *now*.

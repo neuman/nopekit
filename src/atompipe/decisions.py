@@ -503,12 +503,6 @@ def _readers(name: str, read_sets: Mapping[str, Iterable[Any]]) -> list[str]:
     return modelio.param_readers(name, read_sets)
 
 
-#: The order `why` lists a claim's evaluators in, by outcome (P2.1-D16): what
-#: failed the candidate, what crashed, what skipped, then an unqualified one (3,
-#: set apart from `error`), an unrun one (4), and what passed.
-_OUTCOME_RANK = {"fail": 0, "error": 1, "skipped": 2, "pass": 5}
-
-
 def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],
                 evidence: _Evidence | None = None) -> list[str]:
     """Gates that protect this item, each with how it LAST ran, deduped by reason.
@@ -534,6 +528,8 @@ def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],
     text. What slipped through (P2.0 F-3): they were in gate-id order, so
     `[skip]` sat above `[ERR ]` and a reader read the dull line first.
     """
+    from . import claims as claim_logic, report    # readers' modules: not at import
+    from .claims import ClaimCause
     groups: dict[tuple[str, str], list[str]] = {}
     ranks: dict[tuple[str, str], int] = {}
     for gid in gate_ids:
@@ -541,12 +537,16 @@ def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],
         if verdict is None:
             # An unrun gate is shown like any outcome (GLOSSARY §6: an evaluator
             # is *unrun*, never "never run", which is Open's Never-say), and gates
-            # that are unrun group together the same way.
-            key, rank = ("[ -- ]", "unrun"), 4
+            # that are unrun group together the same way. The word is HUMAN's
+            # (review of P2.1: it was a literal here, outside the one table).
+            key = ("[ -- ]", report.HUMAN["lead"][ClaimCause.UNRUN])
         else:
             key = _split_verdict(verdict)
-            rank = 3 if getattr(verdict, "unqualified", "") else _OUTCOME_RANK.get(
-                verdict.outcome, 5)
+        # `claims.OUTCOME_ORDER` — fail, errored, skipped, unqualified (by the
+        # spine's mark, never as a crash), unrun, pass — the one table the
+        # report's bullets and `explaining_verdict` read too (review of P2.1:
+        # this kept its own copy, and two inline ranks beside it).
+        rank = claim_logic.outcome_rank(verdict)
         groups.setdefault(key, []).append(gid)
         ranks.setdefault(key, rank)
 

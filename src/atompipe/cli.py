@@ -1006,12 +1006,21 @@ _PENDING_REASON = re.compile(r"^control inputs moved \((?P<files>.*)\); the next
 
 
 def _never_run(resolution: verdicts.Resolution, registry: gates.Registry | None) -> list[str]:
-    """Registered gates with nothing to show: no row, or only an availability
-    skip over no entry. A remembered crash is not "never run" (S-68)."""
+    """Registered gates with nothing to show — *unrun*: no row, or only an
+    availability skip over no entry. A remembered crash is not unrun (S-68),
+    and neither is an evaluator refused at its version: `resolve` says that
+    refusal (`unqualified`, its claim a Gap), so it has something to show.
+    What slipped through (review of P2.1, whose D5 said it closed this): a gate
+    refused at its first check has a `never` row, and this asked only `state`,
+    so `status` printed `gates: 6 ran, 1 unqualified` and two lines below
+    `(6 verdicts current, 1 unrun)` — one evaluator, two words."""
     ids = registry.ids() if registry is not None else []
     out = []
     for gate_id in ids:
         row = resolution.rows.get(gate_id)
+        if row is not None and row.admission is not None \
+                and row.admission.state == "not-admitted":
+            continue
         if row is None or (row.state == "never" and not any(
                 str(note).startswith("remembered ") for note in row.notes)):
             out.append(gate_id)
@@ -1368,18 +1377,30 @@ def _check_row_line(row: verdicts.SweepRow) -> str | None:
     return verdict.render()
 
 
+def _row_outcome(verdict: Verdict) -> str:
+    """A sweep row's outcome for `check`'s tallies: `Verdict.outcome`, with an
+    evaluator refused at its version counted as `unqualified` — never errored.
+    GLOSSARY §2: a qualification is not an outcome; the refusal's verdict says
+    `error` only so that it is never ok (R-2)."""
+    return "unqualified" if getattr(verdict, "unqualified", "") else verdict.outcome
+
+
 def _check_summary(rows: list[verdicts.SweepRow], counts: Mapping[str, int], tier: int) -> str:
     """`6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0` (spec §3.13).
 
     What left the line, and why: the elapsed time (a mostly-cached sweep takes
     no time worth reading, and `--json` keeps `duration_s`), and the model hash
     (one hash of the projection said THAT something moved; which check it
-    touched is `status`'s `stale:` line now). FAIL, skipped and errored appear
-    only when non-zero, as they always did."""
-    outcomes = [row.verdict.outcome for row in rows]
+    touched is `status`'s `stale:` line now). FAIL, skipped, errored and
+    unqualified appear only when non-zero. What slipped through (review of
+    P2.1): an evaluator refused at its version was counted `errored` here and
+    in `--json` while `status` said `1 unqualified` — invariant 2's loud count
+    inflated by something that crashed nothing."""
+    outcomes = [_row_outcome(row.verdict) for row in rows]
     line = (f"{len(rows)} gates: {counts.get('executed', 0)} executed, "
             f"{counts.get('cached', 0)} cached — {outcomes.count('pass')} ok")
-    for outcome, word in (("fail", "FAIL"), ("skipped", "skipped"), ("error", "errored")):
+    for outcome, word in (("fail", "FAIL"), ("skipped", "skipped"), ("error", "errored"),
+                          ("unqualified", report.HUMAN["lead"][claims.ClaimCause.UNQUALIFIED])):
         if outcomes.count(outcome):
             line += f", {outcomes.count(outcome)} {word}"
     return f"{line} — tier {tier}"
@@ -1519,7 +1540,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         "ran": sum(1 for row in rows if row.verdict.ok),
         "failed": sum(1 for row in rows if row.verdict.outcome == "fail"),
         "skipped": sum(1 for row in rows if row.verdict.outcome == "skipped"),
-        "errored": sum(1 for row in rows if row.verdict.outcome == "error"),
+        "errored": sum(1 for row in rows if _row_outcome(row.verdict) == "error"),
+        "unqualified": sum(1 for row in rows if _row_outcome(row.verdict) == "unqualified"),
         "executed": int(result.counts.get("executed", 0)),
         "cached": int(result.counts.get("cached", 0)),
         "controls": {key: int(result.controls.get(key, 0))
@@ -1656,8 +1678,8 @@ def _blocking_line(claim: Claim, status: ClaimStatus, reason: str, *,
     `errored` is the claim's crash mark: its tag is `[SKIP ]`, Failing's tone
     (invariant 2, P2.1).
     """
-    return (f"{report.status_tag(status, errored=errored)} {claim.id} {claim.statement}"
-            f" — {reason}")
+    return (f"{report.status_tag(status, errored=errored)} {claim.id} "
+            f"{report._one(claim.statement)} — {reason}")
 
 
 def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus, *,
@@ -1985,12 +2007,24 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
     if args.status:
         # The enum value, its token or its word, in any case: `--status gap`,
         # `--status unclaimed` and `--status "pending build"` are one filter.
+        # A spelling none of those holds is refused, naming them: what slipped
+        # through (review of P2.1, which traded argparse's `choices` for this
+        # free filter), `--status failed` for *failing* printed "no claims
+        # match", exit 0 — an agent told that nothing is failing.
         wanted = args.status.strip().lower().replace("_", " ")
 
         def spelled(found: Any) -> set[str]:
             row = report.words(found.status, errored=found.errored)
             return {str(found.status.value), row.key.replace("_", " "), row.word}
 
+        accepted = {spelling for status in ClaimStatus
+                    for spelling in spelled(claims.Composed(status, claims.ClaimCause.CHECKED))}
+        if wanted not in accepted:
+            words = sorted({report.word(status) for status in ClaimStatus})
+            raise AtompipeError(
+                f"--status {args.status!r} is no status — say one of: "
+                + ", ".join(f'"{w}"' if " " in w else w for w in words)
+                + " (or the enum value `claim list --json` prints)")
         rows = [c for c in rows if wanted in spelled(composed[c.id])]
     if args.kind:
         rows = [c for c in rows if str(c.kind) == args.kind]
@@ -2015,7 +2049,7 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
         accepts = claim.acceptance.render() or "NO THRESHOLD"
         flag = "" if claim.critical else " (not required)"
         _say(f"{report.status_tag(found.status, errored=found.errored)} {claim.id:<6} "
-             f"{claim.statement}{flag}  [{claim.kind}] {accepts}")
+             f"{report._one(claim.statement)}{flag}  [{claim.kind}] {report._one(accepts)}")
     return 0
 
 
@@ -2076,9 +2110,18 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
     legacy ledger first, then APPENDS one `PhysicalResult` to
     `results/<claim-id>.json` and writes nothing else. Append-only (D-11): a
     second result never replaces the first — a refutation recorded last week is
-    evidence, and the claim reads its latest. `--who`/`--when` stay until the
-    signed result of P2.5 (D-12).
+    evidence, and it keeps counting: no later pass outranks an earlier fail
+    (R-3, `store._counting_result`). `--who`/`--when` stay until the signed
+    result of P2.5 (D-12), and each is one line: a value that breaks the line
+    is refused before anything is written (review of P2.1: a `--who` holding a
+    newline printed a forged `[ok   ]` row and a `ready:` line under the real
+    `[FAIL ]`, on every later `status` and `check`).
     """
+    for flag, value in (("--who", args.who), ("--when", args.when)):
+        if value and value.splitlines() != [value]:
+            raise AtompipeError(
+                f"{flag} must be one line — {value!r} breaks it, and every channel that "
+                f"prints it is line by line; nothing was written")
     root = _root(args)
     now = utcnow_iso()
     with _lock(root):
@@ -2132,10 +2175,23 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
     if args.json:
         _dump(dict(claim.to_dict(), status=str(found.status), **shown))
         return 0
+    # The composed row, then what was just recorded — once. When the row's
+    # reason IS this result (its cause is the physical result, and the result
+    # that counts is the one just written) only the time is added; otherwise
+    # the row says something else — an earlier fail that still counts, a
+    # covering evaluator — and the suffix says what this command wrote. What
+    # slipped through (review of P2.1): it always appended `(recorded: detail,
+    # who, when)` after a reason that already held both.
+    about_this = (found.cause in (claims.ClaimCause.PHYSICAL_PASS,
+                                  claims.ClaimCause.PHYSICAL_FAIL)
+                  and claim.physical_result == result)
+    said = report.HUMAN["outcome"]["pass" if passed else "fail"]
+    detail = report._one(result.detail)
+    suffix = (f"({report._one(result.when)})" if about_this
+              else f"(this {said} {report.recorded_by(result.who)}, "
+                   f"{report._one(result.when)}" + (f": {detail}" if detail else "") + ")")
     _say(f"{report.status_tag(found.status, errored=found.errored)} {claim.id} "
-         f"{claim.statement} — {shown['reason']} "
-         f"(recorded: {result.detail or ('pass' if passed else 'fail')}, "
-         f"{result.who or 'unattributed'}, {result.when})")
+         f"{report._one(claim.statement)} — {shown['reason']} {suffix}")
     return 0
 
 

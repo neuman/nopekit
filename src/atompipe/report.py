@@ -116,8 +116,9 @@ class StatusWords(NamedTuple):
     value); ``word`` — prose, counts and JSON ``word`` ("pending build");
     ``term`` — headings and page chips ("Pending build"); ``plural`` — a count
     above one ("gaps"); ``tag`` — the five-wide terminal tag; ``hint`` — what it
-    means, one line (the page's chip title); ``rank`` — P2.1-D16's severity
-    order, most urgent first."""
+    means, one line (the page's chip title); ``rank`` — its place in
+    `claims.SEVERITY_ORDER`, most urgent first, read from there (a rank is not
+    a word; the one order and its rejected alternatives live beside it)."""
 
     key: str
     word: str
@@ -129,46 +130,63 @@ class StatusWords(NamedTuple):
 
 
 def _status_row(status: ClaimStatus, word: str, term: str, plural: str, tag: str,
-                hint: str, rank: int) -> StatusWords:
-    return StatusWords(claim_logic.STATUS_KEY[status], word, term, plural, tag, hint, rank)
+                hint: str) -> StatusWords:
+    key = claim_logic.STATUS_KEY[status]
+    return StatusWords(key, word, term, plural, tag, hint,
+                       claim_logic.SEVERITY_ORDER.index(key))
 
 
 # Each row is GLOSSARY §3's, typed here — the glossary is a development document
 # the release bundle strips, so the words reach a user only through this table.
-# Tags are five wide (P2.1-D14): every grep and P2.0's parsers know the width,
-# and the loud ones — upper case — are exactly Failing, errored and Stale, the
-# tone `test_louder.tone_of` reads. Hints never say "qualified" or "built from
-# them" for Checked while a known-bad-shown evaluator still counts (P2.3) and no
-# article binds a physical pass: saying so would be the overclaim in words the
-# P2.1 design rejected (critique: the hint reaches the page's chip title).
+# (`P2.1-Dn`, here and below: the decision rows of `docs/plan/phase-2.md`, "P2.1's
+# decision rows", each with what was rejected.)
+#
+# Tags are five wide, one per status (P2.1-D14): `ok   ` Checked, `FAIL `
+# Failing, `STALE`, `assum` Assumed, `build` Pending build, `gap  ` Gap, `skip `
+# Skipped and `SKIP ` a crash's Skipped, `open ` Open. Five, because every grep
+# and P2.0's invariant parsers key on `\[.{5}\]`; the loud ones — upper case —
+# are exactly Failing, errored and Stale, the tone `test_louder.tone_of` reads.
+# *Rejected:* full-term tags (`[pending build]`: P2.0's parsers would need an
+# R-6 edit to pass, so they wait for the taste batch, where the change is this
+# table plus the parsers); `REFUT`, `phys `, `unrun` and `ok-hw` (each a GLOSSARY
+# §3 Never-say, or the evaluator's word put on a claim); `[ERR  ]` on a claim
+# row (an outcome's tag on a status row); `skip!` (loudness by punctuation, which
+# no tone reader sees); `chkd ` and `check` for Checked (an abbreviation nobody
+# says, and the verb `atompipe check`).
+#
+# Hints never say "qualified" or "built from them" for Checked while a
+# known-bad-shown evaluator still counts (P2.3) and no article binds a physical
+# pass: saying so would be the overclaim in words the P2.1 design rejected
+# (critique: the hint reaches the page's chip title).
 _CHECKED = _status_row(
     ClaimStatus.PASS, "checked", "Checked", "checked", "ok   ",
-    "every evaluator passed on the current inputs — checked does not mean true", 8)
+    "every evaluator passed on the current inputs — checked does not mean true")
 _FAILING = _status_row(
     ClaimStatus.FAIL, "failing", "Failing", "failing", "FAIL ",
-    "an evaluator failed the current candidate, or a physical result failed", 0)
+    "an evaluator failed the current candidate, or a physical result failed")
 _STALE = _status_row(
     ClaimStatus.STALE, "stale", "Stale", "stale", "STALE",
-    "a pass whose read set has changed since: nothing is checked now", 5)
+    "a pass whose read set has changed since: nothing is checked now")
 _ASSUMED = _status_row(
     ClaimStatus.ASSERTED, "assumed", "Assumed", "assumed", "assum",
-    "accepted provisionally, with a reason and an owner — unresolved", 7)
+    "accepted provisionally, with a reason and an owner — unresolved")
 _PENDING_BUILD = _status_row(
     ClaimStatus.UNVERIFIED, "pending build", "Pending build", "pending build", "build",
-    "waits on an article: a physical evaluator with no result yet", 6)
+    "waits on an article: no physical result yet, or a pass no article binds to the "
+    "current inputs")
 _GAP = _status_row(
     ClaimStatus.UNCLAIMED, "gap", "Gap", "gaps", "gap  ",
-    "no evaluator, none qualified, or one unqualified; or an assumption nobody owns", 3)
+    "no evaluator, none qualified, or one unqualified; or an assumption nobody owns")
 _SKIPPED = _status_row(
     ClaimStatus.BLOCKED, "skipped", "Skipped", "skipped", "skip ",
-    "an evaluator skipped, its tool missing here, and none failed: no usable verdict", 2)
+    "an evaluator skipped, its tool missing here, and none failed: no usable verdict")
 _OPEN = _status_row(
     ClaimStatus.PENDING, "open", "Open", "open", "open ",
-    "an evaluator of the claim is unrun on the current inputs", 4)
+    "an evaluator of the claim is unrun on the current inputs")
 #: Skipped by a crash: the same status, louder (PLAN-v0.14 §1.5) — Failing's
 #: tone in its tag, above every skipped row in its rank.
 _SKIPPED_ERRORED = _SKIPPED._replace(
-    tag="SKIP ", rank=1,
+    tag="SKIP ", rank=claim_logic.SEVERITY_ORDER.index("errored"),
     hint="an evaluator errored: it crashed, so nothing was evaluated, and the evaluator "
          "itself is broken")
 
@@ -195,15 +213,20 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         ClaimCause.NO_EVALUATOR: "no evaluator",
         ClaimCause.NO_OWNER: "no owner recorded",
         ClaimCause.OWNER_UNATTRIBUTED: "owner {owner} is named in claims/{id}.json and "
-                                       "has not recorded it",
+                                       "has not recorded it — no command can record it yet",
         ClaimCause.NO_REASON: "no reason recorded",
         ClaimCause.UNRUN: "unrun",
         ClaimCause.INVALIDATED: "invalidated",
         ClaimCause.NO_ARTICLE: "needs an article",
         ClaimCause.OWNED: "assumed by {owner}",
-        ClaimCause.PHYSICAL_PASS: "recorded by {who}, not bound to an article",
+        ClaimCause.PHYSICAL_PASS: "a pass {recorded}, not bound to an article",
         ClaimCause.CHECKED: "—",
     }),
+    # Who entered a physical result (GLOSSARY §1, *recorded by*): named, or the
+    # unattributed form. What slipped through (review of P2.1): one template for
+    # both, filled with the word "unattributed" — "recorded by unattributed".
+    "recorded": MappingProxyType({"named": "recorded by {who}",
+                                  "unattributed": "recorded, unattributed"}),
     # NeedStatus -> its word. `open` is a claim status only (GLOSSARY §6): a gap
     # record nobody has acted on is *identified*.
     "need": MappingProxyType({
@@ -217,6 +240,16 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
     # held equal by a test only says so by failing).
     "outcome": MappingProxyType({"pass": "pass", "fail": "fail", "skipped": "skipped",
                                  "error": "errored"}),
+    # Each outcome in a line, for the page's verdict chips (their title). The
+    # page held these itself until P2.1's review (D-16: the site never owns a
+    # word, and an outcome word is one).
+    "outcome_hint": MappingProxyType({
+        "pass": "the evaluator ran and passed",
+        "fail": "the evaluator ran and failed",
+        "skipped": "its tool is missing here, so nothing was evaluated",
+        "error": "the evaluator crashed — nothing was evaluated, and the evaluator itself "
+                 "is broken",
+    }),
     "outcome_tag": MappingProxyType(_RENDER_TAG),
     # The report's section headings (GLOSSARY §9), SECTION_PROVEN's text excepted:
     # it changes only with METHOD's (A-11, PLAN D-14).
@@ -246,7 +279,14 @@ class _StatusTagView(Mapping):
     the one table, never a second one, so patching `HUMAN` moves it too."""
 
     def __getitem__(self, status: Any) -> str:
-        return HUMAN["status"][_norm_status(status)].tag
+        # A status the enum does not know is a missing key, never a ValueError:
+        # `Mapping.get` and `in` catch only KeyError. What slipped through
+        # (review of P2.1): the dict this replaced answered `.get("bogus")` with
+        # None, and the view raised out of both.
+        try:
+            return HUMAN["status"][_norm_status(status)].tag
+        except ValueError:
+            raise KeyError(status) from None
 
     def __iter__(self):
         return iter(HUMAN["status"])
@@ -349,12 +389,13 @@ def status_tag(status: ClaimStatus | str, *, errored: bool = False) -> str:
 
 
 def severity(composed: Any) -> int:
-    """P2.1-D16's rank for one `claims.Composed`, most urgent first: Failing ·
-    Skipped, errored · Skipped · Gap · Open · Stale · Pending build · Assumed ·
-    Checked. What it replaced (`_SEVERITY`) ranked STALE above BLOCKED and a
+    """`claims.severity`: one `claims.Composed`'s rank, most urgent first —
+    Failing · Skipped, errored · Skipped · Gap · Open · Stale · Pending build ·
+    Assumed · Checked (`claims.SEVERITY_ORDER`, with why and what was
+    rejected). What it replaced (`_SEVERITY`) ranked STALE above BLOCKED and a
     crash, an order no rule produced, and left `check`'s BLOCKING list in record
     order: a skip above the crash (P2.0 F-2)."""
-    return words(composed.status, errored=composed.errored).rank
+    return claim_logic.severity(composed)
 
 
 def in_severity(ledger: Ledger, composed: Mapping[str, Any],
@@ -466,8 +507,7 @@ def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
     if cause is ClaimCause.PHYSICAL_FAIL:
         result = claim.physical_result
         detail = (result.detail if result and result.detail else "no detail recorded")
-        who = (result.who if result and result.who else "unattributed")
-        return f"{lead}: {cut_(detail, 60)} (recorded by {who})"
+        return f"{lead}: {cut_(detail, 60)} ({recorded_by(result.who if result else '')})"
     if cause in (ClaimCause.ERRORED, ClaimCause.SKIPPED, ClaimCause.UNQUALIFIED) \
             and verdict is not None:
         if cause is ClaimCause.UNQUALIFIED:
@@ -480,7 +520,7 @@ def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
         return lead + (" — an assumption reads Assumed only once its owner records it; "
                        "nothing can record one yet" if full else "")
     if cause is ClaimCause.OWNER_UNATTRIBUTED:
-        return lead.format(owner=claim.owner, id=claim.id)
+        return lead.format(owner=_one(claim.owner), id=claim.id)
     if cause is ClaimCause.UNRUN:
         shown = ", ".join(composed.cites[:3])
         more = f", +{len(composed.cites) - 3} more" if len(composed.cites) > 3 else ""
@@ -498,11 +538,32 @@ def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
             and not (claim.acceptance.quantity or "").strip()
         return lead + ("; no test written down" if untested else "")
     if cause is ClaimCause.OWNED:
-        return f"{lead.format(owner=claim.owner)}: {cut_(claim.rationale, 52)}"
+        return f"{lead.format(owner=_one(claim.owner))}: {cut_(claim.rationale, 52)}"
     if cause is ClaimCause.PHYSICAL_PASS:
         result = claim.physical_result
-        return lead.format(who=(result.who if result and result.who else "unattributed"))
+        return lead.format(recorded=recorded_by(result.who if result else ""))
     return lead
+
+
+def _one(text: Any) -> str:
+    """A value a record supplied, as ONE line: whitespace runs, newlines
+    included, collapsed to a space (`_trunc` that never cuts). Every value from
+    a record file that reaches a line-oriented channel goes through it. What
+    slipped through (review of P2.1): an owner, or a physical result's `who`,
+    went into the reason raw, so a record holding a newline wrote its own lines
+    — a second `## What is PROVEN` heading with a forged row in the report, a
+    `[ok   ] C5 … — checked` row and a `ready:` line under the real `[FAIL ]`
+    in `check` and `status`."""
+    return _trunc(str(text or ""), None)
+
+
+def recorded_by(who: Any) -> str:
+    """`recorded by sam`, or `recorded, unattributed` with no one named
+    (`HUMAN["recorded"]`; GLOSSARY §1, *recorded by*) — the one place a
+    physical result's recorder is worded, on one line."""
+    name = _one(who)
+    said = HUMAN["recorded"]
+    return said["named"].format(who=name) if name else said["unattributed"]
 
 
 def status_view(composed: Any, ledger: Ledger, claim: Claim, *,
@@ -537,6 +598,22 @@ def words_table() -> dict[str, dict[str, str]]:
     out["errored"] = {"key": row.key, "word": row.word, "term": row.term,
                       "plural": row.plural, "hint": row.hint}
     return out
+
+
+def page_phrases() -> dict[str, Any]:
+    """`state.json`'s `phrases`: the rest of what the page says in the ledger's
+    words — `invalidated` (GLOSSARY §4, a verdict whose read set moved), `need`,
+    each gap record's state (`HUMAN["need"]`: `identified` for `open`, GLOSSARY
+    §6), and `outcome_hint`, each verdict chip's title (`HUMAN["outcome_hint"]`). What slipped through (review of P2.1): the page
+    held both itself — `≈ STALE` on its top bar when a verdict was invalidated
+    and no claim read Stale, and its own copy of "identified" — beside a claim
+    row that said "No gate covers this claim" for an unowned assumption. The
+    site never owns a word (D-16)."""
+    hints = HUMAN["outcome_hint"]
+    return {"invalidated": HUMAN["lead"][ClaimCause.INVALIDATED],
+            "need": {str(status.value): said for status, said in HUMAN["need"].items()},
+            "outcome_hint": {"pass": hints["pass"], "fail": hints["fail"],
+                             "skipped": hints["skipped"], "errored": hints["error"]}}
 
 
 def need_word(status: Any) -> str:
@@ -824,18 +901,21 @@ def _groups(ledger: Ledger, composed: Mapping[str, Any], chosen: Iterable[Claim]
 def readiness(ledger: Ledger, composed: Mapping[str, Any]) -> dict[str, Any]:
     """What *ready* turns on, as lists of claims (GLOSSARY §4, W3): `required`;
     `unresolved` — required and not Checked, Pending build and Assumed included;
-    `unbound` — required and Checked on a physical pass no article binds to the
-    current inputs (every one until article binding: P2.1 review, so an agent's
-    typed pass never makes a project ready); `ready` — at least one required
-    claim, and neither list holds any. `claims.summarise`'s
+    `unbound` — the unresolved ones with a physical pass recorded that no article
+    binds to the current inputs (each reads Pending build until article binding,
+    so an agent's typed pass never makes a project ready); `ready` — at least
+    one required claim, and none unresolved. `claims.summarise`'s
     `all_required_checked` is this predicate; `ready` in a JSON summary is not
-    (it keeps "nothing stops check")."""
+    (it keeps "nothing stops check"). What slipped through (review of P2.1): an
+    unbound pass read Checked everywhere but here, so *checked* meant two
+    things — `5 checked` on the count line beside "is NOT ready: every required
+    claim is checked, but…"."""
     required = [c for c in ledger.claims if c.critical]
     unresolved = [c for c in required if composed[c.id].status
                   not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
-    unbound = [c for c in required if composed[c.id].status is ClaimStatus.VERIFIED]
+    unbound = [c for c in required if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
     return {"required": required, "unresolved": unresolved, "unbound": unbound,
-            "ready": bool(required) and not unresolved and not unbound}
+            "ready": bool(required) and not unresolved}
 
 
 def not_ready_line(ledger: Ledger, composed: Mapping[str, Any]) -> str:
@@ -850,16 +930,11 @@ def not_ready_line(ledger: Ledger, composed: Mapping[str, Any]) -> str:
     if not found["required"]:
         return (f"nothing stops this check run — no claim is required, so nothing is "
                 f"ready (listed in `atompipe report`)")
-    if found["unresolved"]:
-        n = len(found["unresolved"])
-        return (f"nothing stops this check run — {n} required "
-                f"{_plural(n, 'claim')} {_plural(n, 'is', 'are')} unresolved: "
-                f"{_groups(ledger, composed, found['unresolved'])} "
-                f"(listed in `atompipe report`)")
-    n = len(found["unbound"])
-    return (f"nothing stops this check run — {n} required {_plural(n, 'claim')} "
-            f"{_plural(n, 'is', 'are')} {checked} on an article not bound to the current "
-            f"inputs ({_ids(found['unbound'])})")
+    n = len(found["unresolved"])
+    return (f"nothing stops this check run — {n} required "
+            f"{_plural(n, 'claim')} {_plural(n, 'is', 'are')} unresolved: "
+            f"{_groups(ledger, composed, found['unresolved'])} "
+            f"(listed in `atompipe report`)")
 
 
 def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any,
@@ -883,11 +958,20 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
     "unsettled", so a reader counted what was left wrong.
 
     The hardware sentence follows in EVERY branch, ready included — `Pending
-    build: N claims need an article`, and a physical pass named as not bound to
-    an article — because that clause is what separates a design that clears its
-    evaluators from a working thing (W13, GLOSSARY §9). What slipped through the
-    P2.1 design (review): it folded the clause into the not-ready groups, so a
-    ready project with a not-required physical claim said nothing about hardware.
+    build: N claims need an article`, naming apart those with a pass recorded
+    that no article binds — because that clause is what separates a design that
+    clears its evaluators from a working thing (W13, GLOSSARY §9). What slipped
+    through the P2.1 design (review): it folded the clause into the not-ready
+    groups, so a ready project with a not-required physical claim said nothing
+    about hardware.
+
+    Every branch that is not ready SAYS so, the never-evaluated one included,
+    and the claims not required are grouped by word as the required ones are,
+    a crash counted apart. What slipped through (review of P2.1): a project
+    with one typed physical pass and no verdict read "has never been evaluated
+    … Nothing below is checked … 1 claim is checked on an article" — no NOT
+    ready, and a contradiction in one sentence; and a crash on a claim not
+    required was "unresolved", its errored said only on the count line.
     """
     rev = ledger.meta.revision or "this revision"
     bold = (lambda s: f"**{s}**") if markdown else (lambda s: s)
@@ -910,7 +994,9 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
     # metadata. The sweep record this used to consult was bookkeeping a caller
     # could legitimately not have written; verdicts are the evidence.
     if not ledger.verdicts:
-        parts.append(bold(f"{rev} has never been evaluated: no verdict of any kind is"
+        verdict = (f"{rev} has never been evaluated" if found["ready"]
+                   else f"{rev} is NOT ready and has never been evaluated")
+        parts.append(bold(f"{verdict}: no verdict of any kind is"
                           f" recorded against its {total} {_plural(total, 'claim')}."))
         parts.append(f"Nothing below is {checked}, because no evaluator has run —"
                      f" `atompipe check --tier 0` is the first step.")
@@ -925,10 +1011,6 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
             f" {_plural(n, 'is', 'are')} unresolved —"
             f" {_groups(ledger, composed, found['unresolved'])}."))
         parts.append(tally)
-    elif found["unbound"]:
-        parts.append(bold(f"{rev} is NOT ready: every required claim is {checked}, but"
-                          f" not every one against the current inputs."))
-        parts.append(tally)
     else:
         parts.append(bold(f"{rev} is ready: every required claim is {checked} against"
                           f" the current inputs."))
@@ -937,7 +1019,8 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
              and status_of.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
     if other:
         parts.append(f"{len(other)} {_plural(len(other), 'claim')} not required"
-                     f" {_plural(len(other), 'is', 'are')} unresolved ({_ids(other)}).")
+                     f" {_plural(len(other), 'is', 'are')} unresolved —"
+                     f" {_groups(ledger, composed, other)}.")
 
     unrun = _unrun_specs(ledger, registry)
     if unrun and ledger.verdicts:
@@ -946,15 +1029,15 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
                      f" {HUMAN['lead'][ClaimCause.UNRUN]}.")
 
     pending = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.UNVERIFIED]
-    verified = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.VERIFIED]
     if pending:
-        parts.append(f"{words(ClaimStatus.UNVERIFIED).term}: {len(pending)}"
-                     f" {_plural(len(pending), 'claim')}"
-                     f" {_plural(len(pending), 'needs', 'need')} an article ({_ids(pending)}).")
-    if verified:
-        parts.append(f"{len(verified)} {_plural(len(verified), 'claim')}"
-                     f" {_plural(len(verified), 'is', 'are')} {checked} on an article not"
-                     f" bound to the current inputs ({_ids(verified)}).")
+        recorded = [c for c in pending if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
+        text = (f"{words(ClaimStatus.UNVERIFIED).term}: {len(pending)}"
+                f" {_plural(len(pending), 'claim')}"
+                f" {_plural(len(pending), 'needs', 'need')} an article ({_ids(pending)})")
+        if recorded:
+            text += (f"; {_ids(recorded)} {_plural(len(recorded), 'has', 'have')} a pass"
+                     f" recorded that no article binds to the current inputs")
+        parts.append(text + ".")
     return " ".join(parts)
 
 
@@ -1037,12 +1120,15 @@ def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
 
 
 def _section_pending_build(ledger: Ledger, composed: Mapping[str, Any]) -> list[str]:
-    """Physical claims that wait on an article, how to settle each, and those a
-    physical pass was recorded for (Checked, not yet bound to an article)."""
+    """Physical claims that wait on an article: how to settle each, and those a
+    physical pass was recorded for that no article binds to the current inputs
+    (Pending build too, until article binding — the pass is listed, never
+    counted as Checked)."""
     out = [HUMAN["heading"]["pending_build"], ""]
     status_of = {cid: c.status for cid, c in composed.items()}
-    pending = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.UNVERIFIED]
-    verified = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.VERIFIED]
+    waiting = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.UNVERIFIED]
+    verified = [c for c in waiting if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
+    pending = [c for c in waiting if composed[c.id].cause is not ClaimCause.PHYSICAL_PASS]
     # `==` rather than `is` — see the note in `_needs`. A PHYSICAL claim whose
     # kind is still a plain string would otherwise vanish from the
     # "physical claims with no written test" nag, which is the one line that
@@ -1065,18 +1151,21 @@ def _section_pending_build(ledger: Ledger, composed: Mapping[str, Any]) -> list[
         out.append("")
 
     if verified:
+        out.append("These have a pass recorded that no article binds to the current "
+                   "inputs, so they are not checked: nothing shows the article was built "
+                   "from what the model says now.")
+        out.append("")
         for claim in verified:
             res = claim.physical_result
-            when = (res.when if res and res.when else "date not recorded")
-            who = f" by {res.who}" if res and res.who else " (unattributed)"
+            when = _one(res.when if res and res.when else "date not recorded")
             detail = f" — {_trunc(res.detail, 160)}" if res and res.detail else ""
             ev = ""
             if res and res.evidence:
                 ev = " [" + ", ".join(_code(p) for p in res.evidence[:3]) + "]"
-            out.append(f"- **{words(ClaimStatus.VERIFIED).term} on an article:** "
-                       f"**{claim.id}** {_claim_text(claim)} — passed {when}{who}{detail}"
-                       f"{ev}; not bound to an article, so a change to what it was built "
-                       f"from does not yet invalidate it")
+            crit = "" if claim.critical else " *(not required)*"
+            out.append(f"- **{claim.id}** {_claim_text(claim)}{crit} — a pass "
+                       f"{recorded_by(res.who if res else '')}, {when}{detail}{ev}; not "
+                       f"bound to an article")
         out.append("")
 
     if not physical:
@@ -1088,7 +1177,7 @@ def _section_pending_build(ledger: Ledger, composed: Mapping[str, Any]) -> list[
                    "nobody has asked which properties those are. The second is far "
                    "more common.")
         out.append("")
-    elif not pending and not verified:
+    elif not waiting:
         out.append("No physical claim waits on an article: each reads under its own "
                    "status in another section.")
         out.append("")
@@ -1382,15 +1471,13 @@ _FAILING_SECTION: tuple[ClaimStatus, ...] = (
     ClaimStatus.BLOCKED, ClaimStatus.PENDING,
 )
 
-#: A claim's evaluator bullets in outcome order (P2.1-D16): what failed, what
-#: crashed, what skipped, what is refused, then what passed. What slipped
-#: through (P2.0 F-3): the bullets were in gate-id order, a skip above the crash.
-_BULLET_ORDER = {"fail": 0, "error": 1, "skipped": 2, "unqualified": 3, "pass": 4}
-
-
 def _bullet_rank(verdict: Verdict) -> int:
-    key = "unqualified" if getattr(verdict, "unqualified", "") else verdict.outcome
-    return _BULLET_ORDER.get(key, 5)
+    """A claim's evaluator bullets in `claims.OUTCOME_ORDER` (P2.1-D16): what
+    failed, what crashed, what skipped, what is refused, then what passed. What
+    slipped through (P2.0 F-3): the bullets were in gate-id order, a skip above
+    the crash; then (review of P2.1) the order was a third copy of the table
+    `explaining_verdict` and `why` each kept."""
+    return claim_logic.outcome_rank(verdict)
 
 
 def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
@@ -1447,10 +1534,10 @@ def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
                            + _stale_suffix(claim, cover, stale_gates)
                            + f". Nothing here is {word(ClaimStatus.PASS)} *now* — "
                              f"`atompipe check` re-runs what moved.")
-            if claim.physical_result and not claim.physical_result.passed:
+            if claim.physical_result and claim.physical_result.passed is not True:
                 res = claim.physical_result
-                out.append(f"- Physical result: failed {res.when} "
-                           f"{res.who or '(unattributed)'} — {_trunc(res.detail, 200)}")
+                out.append(f"- Physical result: failed {_one(res.when)}, "
+                           f"{recorded_by(res.who)} — {_trunc(res.detail, 200)}")
             out.append("")
     else:
         out.append("No claim is failing, stale, skipped or open.")
@@ -2253,6 +2340,8 @@ __all__ = [
     "words_table",
     "outcome_words",
     "need_word",
+    "page_phrases",
+    "recorded_by",
     "readiness",
     "not_ready_line",
     "render_terminal",

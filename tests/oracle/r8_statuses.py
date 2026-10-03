@@ -349,7 +349,9 @@ def _held(claim: str, binds: set, kind: str, side: Side, *, stale: bool) -> set[
     if kind == "assumption":
         held.update(OWNER_CAUSES)
     if kind == "physical":
-        held.update(("physical-fail", "no-article"))
+        # P2.1's review: a typed pass no article binds reads Pending build,
+        # `physical-pass` (a move from verified, toward unresolved).
+        held.update(("physical-fail", "no-article", "physical-pass"))
     return held
 
 

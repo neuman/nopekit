@@ -1293,7 +1293,13 @@ class SaveWritesTheLayoutItFinds(_env.EnvCase):
         store.save(root, ledger)
         path = os.path.join(root, "results", "C1.json")
         self.assertEqual(store.read_record(path, "results"), [first, second])
-        self.assertEqual(store.load(root).claim("C1").physical_result, second)
+        # The result that COUNTS is the earlier fail, not the later pass (R-3;
+        # R-6, toward unresolved — this read `second`, the latest, until P2.1's
+        # review found a pass typed after a fail reading the project ready).
+        self.assertEqual(store.load(root).claim("C1").physical_result, first)
+        store.save(root, store.load(root))
+        self.assertEqual(store.read_record(path, "results"), [first, second],
+                         "saving what load assembled appends the counting fail again")
         ledger.claims[0].physical_result = None
         store.save(root, ledger)
         self.assertEqual(store.read_record(path, "results"), [first, second],

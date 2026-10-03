@@ -897,6 +897,19 @@ def _parse_record(label: str, kind: str, stem: str, raw: bytes, *, model_entry: 
         return out
 
     _check_keys(data, cls, label, model_entry=model_entry, hint=hint)
+    # A claim's `critical` is a statement — required, or not — so it is a bool
+    # or absent (required), as a result's `passed` is. What slipped through
+    # (review of P2.1): `"critical": null` (or 0, or "") was copied as-is and
+    # read by truthiness, so a FAILING claim left every required list, and
+    # `check` printed `ready: every required claim is checked`, exit 0. A JSON
+    # null is a value nobody set, never "not required". *Rejected:* coercing
+    # null to true (degrade-closed, but it silently rewrites what the file says;
+    # the strict reader refuses and names the key, as for every other mistake).
+    if kind == "claims" and "critical" in data and not isinstance(data["critical"], bool):
+        raise AtompipeError(
+            f'{label}: "critical" must be true or false, not {json.dumps(data["critical"])} '
+            f"— a claim is required (true, the default when the key is absent) or not "
+            f"(false); a value nobody wrote as a bool never makes a claim not required")
     idf = _id_field(cls)
     if idf in data and data[idf] != stem:
         raise AtompipeError(
@@ -1028,21 +1041,39 @@ def _input_size(root: str, path: str) -> int:
         return 0
 
 
+def _counting_result(items: list[PhysicalResult]) -> PhysicalResult | None:
+    """The one of a claim's results (oldest first) that counts: the LATEST FAIL
+    when any result failed, otherwise the latest — R-3, a result never loses its
+    power to fail. What slipped through (review of P2.1): the latest result
+    counted, so a pass typed one second after a fail — `claim physical C5
+    --pass` — read Checked and `check` exited 0 with the fail still in
+    `results/C5.json`. No later pass outranks an earlier fail, and neither does
+    any edit: the fail counts whatever the claim's kind (`claims.compose`, rung
+    1). *Rejected:* the latest result (that slip); a fail only until a later
+    pass names it (nothing records who may overrule a physical fail — that is
+    the signing channel's, and article binding's, to decide); the first fail (a
+    second fail is newer evidence of the same thing, and its detail is the one
+    a reader wants)."""
+    for item in reversed(items):
+        if item.passed is not True:
+            return item
+    return items[-1] if items else None
+
+
 def _assemble(root: str, meta: ProjectMeta, parsed: dict[str, list[tuple[str, Any]]]
               ) -> Ledger:
     """The in-memory Ledger from parsed records: each kind in natural id order,
-    decisions newest first, each claim's `physical_result` the LAST of its
-    results, each input's `bytes` measured, `verdicts` empty (they live in the
-    verdict cache). One assembler for files on disk and for a migration's plan,
-    so the two cannot disagree about what a record means."""
+    decisions newest first, each claim's `physical_result` the result that
+    counts (`_counting_result`), each input's `bytes` measured, `verdicts` empty
+    (they live in the verdict cache). One assembler for files on disk and for a
+    migration's plan, so the two cannot disagree about what a record means."""
     ordered = {kind: [rec for _stem, rec in sorted(parsed.get(kind, []),
                                                     key=lambda pair: _natural(pair[0]))]
                for kind in RECORD_DIRS}
     results = dict(parsed.get("results", []))
     claims = ordered["claims"]
     for claim in claims:
-        items = results.get(claim.id) or []
-        claim.physical_result = items[-1] if items else None
+        claim.physical_result = _counting_result(results.get(claim.id) or [])
     for artifact in ordered["inputs"]:
         artifact.bytes = _input_size(root, artifact.path)
     # Newest first, as `decisions.render_log` prints storage order and `add` used
@@ -1195,8 +1226,9 @@ def save(root: str, ledger: Ledger) -> None:
       file per record — a record no longer in `ledger` has its file removed, a
       param with nothing to hold writes none — then the index, so it never
       disagrees with what was just written. A claim's `physical_result` is
-      APPENDED to `results/<id>.json` when it is not already the last result
-      there, and a result is never removed: results are append-only (D-11), and a
+      APPENDED to `results/<id>.json` when it is not already there (it is the
+      result that counts, which may be an earlier fail), and a result is never
+      removed: results are append-only (D-11), and a
       whole-ledger save that truncated them would lose a refutation.
     * **A legacy project**: the legacy `ledger.json`, with `verdicts` empty (they
       live in the verdict cache, PD-31) and no `last_run`. It does not migrate:
@@ -1234,7 +1266,10 @@ def save(root: str, ledger: Ledger) -> None:
             continue
         path = os.path.join(root, "results", claim.id + ".json")
         existing = read_record(path, "results") if os.path.isfile(path) else []
-        if not existing or existing[-1] != claim.physical_result:
+        # `physical_result` is the result that COUNTS (`_counting_result`) — an
+        # earlier fail, when one exists, not the last line: appended only when
+        # it is not already there, or a save would write that fail a second time.
+        if claim.physical_result not in existing:
             write_record(root, "results", [*existing, claim.physical_result],
                          record_id=claim.id)
     write_index(root)

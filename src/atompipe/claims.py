@@ -78,7 +78,11 @@ __all__ = [
     "Attribution",
     "Composed",
     "STATUS_KEY",
+    "SEVERITY_ORDER",
     "KEY_ORDER",
+    "OUTCOME_ORDER",
+    "severity",
+    "outcome_rank",
     "covers",
     "covering_verdicts",
     "compose",
@@ -179,7 +183,8 @@ def covering_verdicts(claim: Claim, verdicts: Iterable[Verdict]) -> list[Verdict
 
 
 # --------------------------------------------------------------------------- #
-# the composition: one ladder, every kind (GLOSSARY §3)
+# the composition: one ladder, every kind (GLOSSARY §3). `P2.1-Dn` below are the
+# decision rows of `docs/plan/phase-2.md` ("P2.1's decision rows").
 # --------------------------------------------------------------------------- #
 class ClaimCause(StrEnum):
     """Which fact set a claim's status — an identifier, never a word.
@@ -263,11 +268,69 @@ STATUS_KEY: Mapping[ClaimStatus, str] = MappingProxyType({
     ClaimStatus.BLOCKED: "skipped", ClaimStatus.PENDING: "open",
 })
 
-#: The eight tokens in count order: Checked first, then GLOSSARY §9's example's
-#: order of what is unresolved (P2.1-D16). `summarise`'s `counts` is keyed by
-#: exactly these, zero-filled, and sums to `n_claims`.
-KEY_ORDER: tuple[str, ...] = ("checked", "failing", "skipped", "gap", "open", "stale",
-                              "pending_build", "assumed")
+#: The order a claim is listed in, most urgent first — one table for every
+#: reader that ranks claims (`severity`): Failing · Skipped by a crash ·
+#: Skipped · Gap · Open · Stale · Pending build · Assumed · Checked. Tokens,
+#: with `errored` for a crash's Skipped (one status, louder: invariant 2).
+#: Why this order: what an evaluator failed is the actionable fact, and a crash
+#: is a broken evaluator, louder than a missing tool (GLOSSARY §3, *Skipped*);
+#: then what no evaluator can settle (Gap) before what one could if it ran
+#: (Open); a moved pass (Stale) before what waits on an article or an owner,
+#: which no rerun answers; Checked last. *Rejected:* STALE above Skipped
+#: (`report._SEVERITY` before P2.1 — an order no rule produced, which put a
+#: missing tool under a moved pass); Open above Skipped (a missing tool hidden
+#: behind "run check"); Pending build above Open or Stale (the cheap evaluator
+#: first, §6.1, and Open and Stale stop `check` while Pending build does not);
+#: the rank living in `report.HUMAN`'s rows (the P2.1 design: a rank is not a
+#: word, and `verdicts.write_last_check` — a spine module, which must not reach
+#: for the words — then picked its `worst` in record order, a skip above the
+#: crash `check` printed first).
+SEVERITY_ORDER: tuple[str, ...] = ("failing", "errored", "skipped", "gap", "open", "stale",
+                                   "pending_build", "assumed", "checked")
+
+#: The eight tokens in count order: Checked first, then `SEVERITY_ORDER` with
+#: the crash folded into Skipped (a count splits it out in words: `N skipped (k
+#: errored)`). `summarise`'s `counts` is keyed by exactly these, zero-filled,
+#: and sums to `n_claims`. *Rejected:* severity order with Checked last (GLOSSARY
+#: §9's count line leads with what is settled, so a reader sees the size of the
+#: project before its problems); a separate key for errored (a key that is not a
+#: status, in a map readers sum to `n_claims`).
+KEY_ORDER: tuple[str, ...] = ("checked", *(key for key in SEVERITY_ORDER
+                                           if key not in ("errored", "checked")))
+
+#: The order one claim's evaluators are listed and explained in, by what each
+#: did — one table for `explaining_verdict`, the report's bullets and `why`'s
+#: groups (each kept its own copy until review: `_EXPLAINS`, `_BULLET_ORDER`,
+#: `_OUTCOME_RANK` plus two inline ranks, three tables that had to agree): what
+#: failed the candidate, what crashed, what skipped, an unqualified evaluator
+#: (its verdict says `error` too, and it is never ranked as a crash: P2.0 D-8),
+#: an unrun one, and what passed. Outcome words are `Verdict.outcome`'s values;
+#: `unqualified` and `unrun` name what is not an outcome. *Rejected:* gate-id
+#: order (P2.0 F-3: `[skip]` above `[ERR ]`, the dull line read first); errored
+#: first (a fail carries the measured value and the limit, what the reader goes
+#: to change, and Failing outranks Skipped on the claim).
+OUTCOME_ORDER: tuple[str, ...] = ("fail", "error", "skipped", "unqualified", "unrun", "pass")
+
+
+def severity(composed: "Composed") -> int:
+    """`composed`'s place in `SEVERITY_ORDER`, most urgent 0 — the one rank
+    `report.in_severity`, `check`'s BLOCKING list and `last_check.json`'s
+    `worst` all sort by."""
+    key = "errored" if composed.errored else STATUS_KEY[composed.status]
+    return SEVERITY_ORDER.index(key)
+
+
+def outcome_rank(verdict: Verdict | None) -> int:
+    """`verdict`'s place in `OUTCOME_ORDER`; None is an unrun evaluator. A
+    refused evaluator ranks by the spine's mark, never as the crash its
+    `error` text reads as."""
+    if verdict is None:
+        key = "unrun"
+    elif getattr(verdict, "unqualified", ""):
+        key = "unqualified"
+    else:
+        key = verdict.outcome
+    return OUTCOME_ORDER.index(key) if key in OUTCOME_ORDER else len(OUTCOME_ORDER)
 
 
 def _distinct(ids: Iterable[str]) -> list[str]:
@@ -310,10 +373,12 @@ def compose(
     `stale_gates`/`stale` are the resolver's, as before; `owners` maps a claim
     id to the `Attribution` the signing channel recorded (none in P2.1).
 
-    1. **Failing** — a physical result failed (`refuted`); any covering verdict
-       FAILED, from an evaluator that is not unqualified (`fail`), whatever the
-       kind and whether or not it is stale (D-08; R-3: a result never loses its
-       power to fail).
+    1. **Failing** — a physical result failed (`refuted`), whatever the claim's
+       kind now and whatever was recorded after it (`claim.physical_result` is
+       the result that counts, `store`'s: the latest fail when any failed); any
+       covering verdict FAILED, from an evaluator that is not unqualified
+       (`fail`), whatever the kind and whether or not it is stale (D-08; R-3: a
+       result never loses its power to fail).
     2. **Skipped** — any covering evaluator ERRORED (cause `errored`, louder:
        invariant 2), else any SKIPPED (`skipped`), even beside a pass.
     3. **Gap** — any covering evaluator unqualified (`unqualified`), even
@@ -322,10 +387,23 @@ def compose(
        not attribute (`no-owner`, `no-reason`, `owner-unattributed`).
     4. **Open** — a covering gate unrun (`unrun`), even beside a pass.
     5. **Stale** — `stale`, or a covering gate in `stale_gates` (`invalidated`).
-    6. **Pending build** — a physical claim with no result (`no-article`).
+    6. **Pending build** — a physical claim no article settles: no result
+       (`no-article`), or a pass recorded that no article binds to the current
+       inputs (`physical-pass`) — every recorded pass, until article binding.
     7. **Assumed** — an attributed, reasoned assumption (`owned`).
-    8. **Checked** — a physical pass recorded (`verified`, `physical-pass`);
-       otherwise every covering evaluator ran, passed and is current (`pass`).
+    8. **Checked** — every covering evaluator ran, passed and is current
+       (`pass`). A physical claim reaches it only on a pass bound to an article
+       built from the current inputs (`verified`), which nothing records yet.
+
+    What slipped through rungs 1 and 6 (review of P2.1): the result rung read
+    only the LAST result and only for a physical claim, so a pass typed after a
+    fail, or the claim's kind edited away from physical — the edit `claim
+    physical`'s own refusal names — read the project ready while the fail sat
+    in `results/`; and a typed pass read Checked on every channel but *ready*,
+    so *checked* meant two things (GLOSSARY §3: a physical claim is Checked "on
+    an article built from" the current inputs). *Rejected:* keeping the pass
+    Checked and dropping *ready*'s carve-out for it — *ready* would then hold on
+    a typed, unbound pass.
 
     **A SKIP IS NEVER A PASS. AN ERROR IS NEVER A PASS. AN UNQUALIFIED OR UNRUN
     EVALUATOR IS NEVER A PASS, beside a pass or not.** What slipped through the
@@ -354,13 +432,15 @@ def compose(
     failed = [v for v in counted if v.outcome == "fail"]
     errored = [v for v in counted if v.outcome == "error"]
     skipped = [v for v in counted if v.outcome == "skipped"]
-    result = claim.physical_result if kind is ClaimKind.PHYSICAL else None
+    result = claim.physical_result
 
     def gates_of(*groups: list[Verdict]) -> tuple:
         return tuple(_distinct(v.gate for group in groups for v in group))
 
-    # 1. Failing
-    if result is not None and not result.passed:
+    # 1. Failing — a recorded fail whatever the kind (R-3); a recorded PASS
+    # counts only for a physical claim (rung 6), never for one an evaluator is
+    # meant to settle.
+    if result is not None and result.passed is not True:
         return Composed(ClaimStatus.REFUTED, ClaimCause.PHYSICAL_FAIL)
     if failed:
         return Composed(ClaimStatus.FAIL, ClaimCause.FAILED, gates_of(failed), failed[0])
@@ -391,15 +471,16 @@ def compose(
     if moved:
         first = next((v for v in mine if v.gate == moved[0]), None)
         return Composed(ClaimStatus.STALE, ClaimCause.INVALIDATED, tuple(moved), first)
-    # 6. Pending build
-    if kind is ClaimKind.PHYSICAL and result is None:
-        return Composed(ClaimStatus.UNVERIFIED, ClaimCause.NO_ARTICLE)
+    # 6. Pending build — no result, or a pass no article binds (all of them,
+    # until article binding: then a bound pass reads `verified`, Checked).
+    if kind is ClaimKind.PHYSICAL:
+        if result is None:
+            return Composed(ClaimStatus.UNVERIFIED, ClaimCause.NO_ARTICLE)
+        return Composed(ClaimStatus.UNVERIFIED, ClaimCause.PHYSICAL_PASS, gates_of(mine))
     # 7. Assumed
     if kind is ClaimKind.ASSUMPTION:
         return Composed(ClaimStatus.ASSERTED, ClaimCause.OWNED)
     # 8. Checked
-    if kind is ClaimKind.PHYSICAL:
-        return Composed(ClaimStatus.VERIFIED, ClaimCause.PHYSICAL_PASS, gates_of(mine))
     return Composed(ClaimStatus.PASS, ClaimCause.CHECKED, gates_of(mine))
 
 
@@ -419,16 +500,16 @@ def resolve_status(
                    owners=owners).status
 
 
-#: The order `explaining_verdict` ranks verdicts in, most explanatory first —
-#: `compose`'s rungs 1-3: a gate that RAN and failed carries the measured value
-#: and the limit, which is what the reader is about to go and change; a crash is
-#: louder than a missing tool; a skip explains before a refusal (Skipped ranks
-#: above Gap); a pass explains nothing.
-_EXPLAINS = ("fail", "error", "skipped", "unqualified")
+#: The verdicts `explaining_verdict` may cite, most explanatory first —
+#: `OUTCOME_ORDER` up to the refusal, `compose`'s rungs 1-3: a gate that RAN and
+#: failed carries the measured value and the limit, which is what the reader is
+#: about to go and change; a crash is louder than a missing tool; a skip
+#: explains before a refusal (Skipped ranks above Gap); a pass explains nothing.
+_EXPLAINS = OUTCOME_ORDER[:OUTCOME_ORDER.index("unqualified") + 1]
 
 
 def _explains_as(verdict: Verdict) -> str:
-    return "unqualified" if getattr(verdict, "unqualified", "") else verdict.outcome
+    return OUTCOME_ORDER[min(outcome_rank(verdict), len(OUTCOME_ORDER) - 1)]
 
 
 def explaining_verdict(claim: Claim, verdicts: Iterable[Verdict]) -> Verdict | None:
@@ -775,12 +856,13 @@ def summarise(
       (invariant 2: `N skipped (k errored)`);
     * `unresolved_ids` — the required (`critical`) claims that do not read
       Checked, Pending build and Assumed included (GLOSSARY §3);
-    * `unbound_ids` — the required claims that read Checked on a physical pass
-      no article binds to the current inputs (every one, until article binding
-      lands): checked, but not shown to be against the current inputs;
+    * `unbound_ids` — the required claims with a physical pass recorded that no
+      article binds to the current inputs (every one, until article binding
+      lands). Each reads Pending build, so each is in `unresolved_ids` too: the
+      key says which of those already hold a result;
     * `all_required_checked` — *ready* (GLOSSARY §4, W3): at least one required
-      claim, and every one reads Checked on the current inputs — `unresolved_ids`
-      and `unbound_ids` both empty. Zero required claims is not ready.
+      claim, and every one reads Checked — `unresolved_ids` empty. Zero required
+      claims is not ready.
 
     `ready` keeps its meaning — `n_blocking == 0`, nothing stops `check` — for
     every reader that has it (`status --json`, the private bench, a page
@@ -821,7 +903,7 @@ def summarise(
     required = [c for c in ledger.claims if c.critical]
     unresolved = [c.id for c in required
                   if resolved.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
-    unbound = [c.id for c in required if resolved.get(c.id) is ClaimStatus.VERIFIED]
+    unbound = [c.id for c in required if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
     errored = [cid for cid, c in composed.items() if c.errored]
 
     return {
@@ -841,7 +923,7 @@ def summarise(
         "blocking_ids": [c.id for c, _ in blockers],
         "unresolved_ids": unresolved,
         "unbound_ids": unbound,
-        "all_required_checked": bool(required) and not unresolved and not unbound,
+        "all_required_checked": bool(required) and not unresolved,
         "stale": bool(stale) or bool(stale_gates),
         "ready": not blockers,
     }

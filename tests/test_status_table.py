@@ -279,6 +279,10 @@ AT_860FFA6_OTHER_KINDS: dict[str, str] = {
     "physical, a pass recorded, a covering gate errored": "verified",
     "physical, a pass recorded, a covering pass invalidated": "verified",
     "physical, a fail recorded, a covering gate errored": "refuted",
+    "physical, a pass recorded, its covering gate passed": "verified",
+    "automated, a fail recorded, its covering gate passed": "pass",
+    "automated, a pass recorded, its covering gate passed": "pass",
+    "assumption, a fail recorded": "asserted",
     "assumption": "asserted",
     "assumption, a covering gate failed": "asserted",
     "assumption, a covering gate skipped": "asserted",
@@ -304,7 +308,15 @@ AT_860FFA6_OTHER_KINDS: dict[str, str] = {
 #: Checked.
 EXPECTED_OTHER_KINDS: dict[str, str] = {
     "physical, no result": "unverified",
-    "physical, a pass recorded": "verified",
+    # A typed pass is Pending build until article binding (review of P2.1: it
+    # read Checked on every channel but *ready*); a recorded fail is Failing
+    # whatever the claim's kind (R-3), and a recorded pass counts for nothing
+    # on a claim an evaluator settles.
+    "physical, a pass recorded": "unverified",
+    "physical, a pass recorded, its covering gate passed": "unverified",
+    "automated, a fail recorded, its covering gate passed": "refuted",
+    "automated, a pass recorded, its covering gate passed": "pass",
+    "assumption, a fail recorded": "refuted",
     "physical, a fail recorded": "refuted",
     "physical, no result, a covering gate failed": "fail",
     "physical, no result, a covering gate errored": "blocked",
@@ -381,6 +393,14 @@ def other_kinds_cases() -> dict[str, tuple[Claim, list[Verdict], set[str], dict]
             {}),
         "physical, a fail recorded, a covering gate errored": (
             _claim(["g.0error"], physical, physical_result=failed), one("error"), set(), {}),
+        "physical, a pass recorded, its covering gate passed": (
+            _claim(["g.0pass"], physical, physical_result=passed), one("pass"), set(), {}),
+        "automated, a fail recorded, its covering gate passed": (
+            _claim(["g.0pass"], physical_result=failed), one("pass"), set(), {}),
+        "automated, a pass recorded, its covering gate passed": (
+            _claim(["g.0pass"], physical_result=passed), one("pass"), set(), {}),
+        "assumption, a fail recorded": (_claim([], assumption, physical_result=failed), [],
+                                        set(), {}),
         "assumption": (_claim([], assumption), [], set(), {}),
         "assumption, a covering gate failed": (_claim(["g.0fail"], assumption), one("fail"),
                                                set(), {}),
@@ -509,7 +529,7 @@ CAUSE_STATUS: dict[str, set[str]] = {
     "unqualified": {"unclaimed"}, "no-evaluator": {"unclaimed"}, "no-owner": {"unclaimed"},
     "owner-unattributed": {"unclaimed"}, "no-reason": {"unclaimed"},
     "unrun": {"pending"}, "invalidated": {"stale"}, "no-article": {"unverified"},
-    "owned": {"asserted"}, "physical-pass": {"verified"}, "checked": {"pass"},
+    "owned": {"asserted"}, "physical-pass": {"unverified"}, "checked": {"pass"},
 }
 
 #: The causes a moved row may name, by what the row holds (P2.1-D20): an error
@@ -524,11 +544,23 @@ COMPONENT_CAUSES: dict[str, set[str]] = {
 }
 
 
+#: The causes a row holding a recorded physical result may move to — by the
+#: phrase, since "pass" and "fail" alone are covering verdicts' words: a pass no
+#: article binds reads Pending build (`physical-pass`), a fail Failing whatever
+#: the kind (`physical-fail`, R-3). Added in P2.1's review.
+PHRASE_CAUSES: dict[str, set[str]] = {
+    "a pass recorded": {"physical-pass"}, "a fail recorded": {"physical-fail"},
+}
+
+
 def allowed_causes(row: str) -> set[str]:
     """The causes `row`'s move may name, read off its key's words."""
     found: set[str] = set()
     for word in re.split(r"[+ ,]+", row):
         found |= COMPONENT_CAUSES.get(word, set())
+    for phrase, causes in PHRASE_CAUSES.items():
+        if phrase in row:
+            found |= causes
     return found
 
 
@@ -1039,6 +1071,22 @@ def never_errored_problems(run: _Refused) -> list[str]:
     kids = [k.tag for k in case] if case is not None else []
     if kids != ["failure"]:
         out.append(f"check.junit: C2 is {kids}, not one <failure>")
+    # The evaluator's own tallies (review of P2.1): `check` counted the refusal
+    # `errored` — invariant 2's loud count, for something that crashed nothing —
+    # and `status`'s `invalidated:` line counted it `unrun` two lines below its
+    # `gates: 6 ran, 1 unqualified`. One evaluator, three words.
+    summary = next((ln for ln in run.out["check"].stdout.splitlines()
+                    if re.match(r"^\d+ gates: ", ln)), "")
+    if "errored" in summary or "1 unqualified" not in summary:
+        out.append(f"check: the summary counts the refusal as {summary!r}")
+    counts = json.loads(run.out["check.json"].stdout).get("counts") or {}
+    if (counts.get("errored"), counts.get("unqualified")) != (0, 1):
+        out.append(f"check.json: counts errored={counts.get('errored')} "
+                   f"unqualified={counts.get('unqualified')}")
+    invalidated = next((ln for ln in run.out["status"].stdout.splitlines()
+                        if ln.startswith("invalidated:")), "")
+    if "unrun" in invalidated:
+        out.append(f"status: the refused evaluator is counted unrun: {invalidated!r}")
     return out
 
 
@@ -1071,6 +1119,24 @@ class UnqualifiedReadsGap(_env.EnvCase):
 
     def test_an_unqualified_claim_never_reads_errored(self):
         self.assertEqual(never_errored_problems(_refused_project()), [])
+
+    def test_the_tallies_that_called_it_errored_or_unrun_are_caught(self):
+        """Planted: `check`'s and `status`'s lines as P2.1 printed them — the
+        refusal one `errored`, and `1 unrun` beside `6 verdicts current`."""
+        run = _refused_project()
+        check = run.out["check"].stdout.replace("1 unqualified", "1 errored")
+        doc = json.loads(run.out["check.json"].stdout)
+        doc["counts"].update(errored=1, unqualified=0)
+        status = run.out["status"].stdout.replace("6 verdicts current)",
+                                                   "6 verdicts current, 1 unrun)")
+        self.assertNotEqual(status, run.out["status"].stdout)
+        planted = run._replace(out=dict(run.out, check=_Stdout(check), status=_Stdout(status),
+                                        **{"check.json": _Stdout(json.dumps(doc))}))
+        found = never_errored_problems(planted)
+        for want in ("check: the summary", "check.json: counts errored=1",
+                     "status: the refused evaluator is counted unrun"):
+            with self.subTest(want):
+                self.assertTrue(any(p.startswith(want) for p in found), found)
 
     def test_a_compose_that_reads_the_mark_as_a_crash_is_caught(self):
         """Planted in process: a compose that ignores `Verdict.unqualified` — the

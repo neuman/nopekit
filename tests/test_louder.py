@@ -462,7 +462,12 @@ def claim_count_problems(channel: str, line: str, n_claims: int) -> list[Problem
     return out
 
 
-_ID_GROUP = re.compile(r"(\d+) ([^;:()]*?)(?: \((\d+) errored\))?"
+#: One `N <word> [(k errored)] (ids)` group of the readiness sentence. Its
+#: phrase never crosses a dash or a full stop: from P2.1's review the claims not
+#: required are grouped by word too (`3 claims not required are unresolved — 3
+#: skipped (3 errored) (P4, P6, P8)`), and a phrase that ran from the sentence
+#: before ("2 of 15 claims are checked … — 3 skipped") misread both counts.
+_ID_GROUP = re.compile(r"(\d+) ([^;:()—.]*?)(?: \((\d+) errored\))?"
                        r" \(([A-Z]\d+(?:, (?:[A-Z]\d+|\+\d+ more))*)\)")
 
 #: A sentence group whose phrase holds one of these counts claims with no
@@ -482,20 +487,38 @@ def sentence_problems(channel: str, sentence: str) -> list[Problem]:
     groups = list(_ID_GROUP.finditer(sentence))
     out = [] if groups else [Problem(channel, "floor", "*", "no id group", sentence)]
     critical_skipped = [cid for cid in SKIPPED_CLAIMS if cid not in NOT_REQUIRED]
+    other_skipped = [cid for cid in SKIPPED_CLAIMS if cid in NOT_REQUIRED]
     for m in groups:
         phrase = m.group(2).lower()
         if not any(w in phrase for w in _SKIP_PHRASES):
             continue
+        ids = [x.strip() for x in m.group(4).split(",") if not x.strip().startswith("+")]
         if m.group(3) is None:
-            for cid in (x.strip() for x in m.group(4).split(",")):
+            for cid in ids:
                 if cid in ERRORED_CLAIMS:
                     out.append(Problem(channel, "skip-words", cid,
                                        f"listed under {m.group(2)!r}", sentence))
-        elif int(m.group(1)) - int(m.group(3)) != len(critical_skipped):
+            continue
+        # The group the claims not required are listed in, split the same way
+        # (review of P2.1: they were one "unresolved" count, a crash among them
+        # said nowhere) — its N − k is theirs; the required group's, theirs.
+        mine = other_skipped if ids and set(ids) <= NOT_REQUIRED else critical_skipped
+        if int(m.group(1)) - int(m.group(3)) != len(mine):
             out.append(Problem(channel, "counts", "*",
                                f"{m.group(1)} {m.group(2)} ({m.group(3)} errored) leaves "
                                f"{int(m.group(1)) - int(m.group(3))} skipped for "
-                               f"{len(critical_skipped)}", sentence))
+                               f"{len(mine)}", sentence))
+    # Invariant 2 in the most-read line: a crash on a claim not required is
+    # said too, counted apart — never folded into a bare "N claims not required
+    # are unresolved (…)", the count line the only place it showed.
+    other_errored = [cid for cid in ERRORED_CLAIMS if cid in NOT_REQUIRED]
+    said = [int(m.group(3)) for m in groups if m.group(3) is not None
+            and {x.strip() for x in m.group(4).split(",")
+                 if not x.strip().startswith("+")} <= NOT_REQUIRED]
+    if groups and other_errored and said != [len(other_errored)]:
+        out.append(Problem(channel, "counts", "*",
+                           f"the {len(other_errored)} errored claims not required are "
+                           f"counted errored {said or 'nowhere'}", sentence))
     return out
 
 
@@ -1285,16 +1308,25 @@ class ErrorIsLouder(_env.EnvCase):
                      "claims 14 — nothing"):
             with self.subTest(line):
                 self.assertTrue(claim_count_problems("t", line, 14))
+        # The claims not required — all three crashed — in the clause P2.1's
+        # review split by word (a crash counted apart there too).
+        others = " 3 claims not required are unresolved — 3 skipped (3 errored) (P4, P6, P8)."
         self.assertEqual(sentence_problems(
             "t", "8 of 12 — 5 failing (C1, P2, P3, P5, +1 more); 1 blocked on missing "
-                 "tooling (P1); 1 with no gate at all (C7)."), [])
+                 "tooling (P1); 1 with no gate at all (C7)." + others), [])
+        # Planted: the clause as P2.1 wrote it — the three crashes one bare count.
+        self.assertTrue(any(p.prop == "counts" and "not required" in p.text
+                            for p in sentence_problems(
+                                "t", "8 of 12 — 1 failing (C1); 5 skipped (4 errored) (P2, P3, "
+                                     "P5, P7, +1 more). 3 claims not required are unresolved "
+                                     "(P4, P6, P8).")))
         self.assertTrue(sentence_problems(
             "t", "2 blocked on missing tooling (P1, P2); 1 failing (C1)."))
         self.assertTrue(sentence_problems("t", "nothing to see"))
         # GLOSSARY's word for the status, with and without the errored split.
         self.assertEqual(sentence_problems(
             "t", "8 of 12 — 1 failing (C1); 5 skipped (4 errored) (P2, P3, P5, P7, +1 more); "
-                 "1 gap (C7)."), [])
+                 "1 gap (C7)." + others), [])
         for sentence, prop in (
                 ("8 of 12 — 1 failing (C1); 5 skipped (P1, P2, P3, P5, +1 more); 1 gap (C7).",
                  "skip-words"),
@@ -1615,6 +1647,61 @@ class ErrorIsLouder(_env.EnvCase):
         sub.add_parser("export")
         self.assertEqual(sorted(command_paths(planted) - RENDERED - set(NOT_A_STATUS_RENDERER)),
                          [("export",)])
+
+
+# --------------------------------------------------------------------------- #
+# last_check.json's `worst`: the most urgent blocker, never the first by record
+# --------------------------------------------------------------------------- #
+def _worst(root: str, order: tuple[str, ...]) -> dict:
+    """`write_last_check`'s `worst` over three critical claims written in
+    `order` — S skipped (a tool missing), E errored (a crash), F failing."""
+    from atompipe import store as store_mod
+    from atompipe import verdicts as verdicts_mod
+    from atompipe.models import GateSpec, Tier
+    made = {
+        "S": Verdict(gate="g.s", claims=["S"], skipped=True,
+                     skip_reason="requires atompipe-no-such-tool (not on PATH)"),
+        "E": Verdict(gate="g.e", claims=["E"], error="RuntimeError: planted crash"),
+        "F": Verdict(gate="g.f", claims=["F"], passed=False, detail="0.7 mm vs 0.5 mm"),
+    }
+    specs = [GateSpec(id=f"g.{cid.lower()}", claims=[cid], tier=Tier.INSTANT,
+                      negative_control=NegativeControl(fixture="x:y")) for cid in order]
+    ledger = Ledger(meta=ProjectMeta(name="w", revision="v0.1"),
+                    claims=[Claim(id=cid, statement=cid, gates=[f"g.{cid.lower()}"])
+                            for cid in order])
+    if not os.path.isdir(os.path.join(root, ".atompipe")):
+        store_mod.init(root, ProjectMeta(name="w", revision="v0.1"))
+    path = verdicts_mod.write_last_check(
+        root, verdicts_mod.SweepResult(record=True, ledger=ledger, registry=specs),
+        verdicts_mod.Resolution(verdicts=[made[cid] for cid in order]), now="t")
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)["worst"]
+
+
+class WorstIsTheMostUrgent(unittest.TestCase):
+    """(2) `last_check.json`'s `worst` — what P3's hook will say first — is the
+    most urgent blocking claim in `claims.severity`'s order, the order `check`
+    prints its BLOCKING list in: a fail, then a crash, then a missing tool.
+    What slipped through (review of P2.1, P2.0 F-2 again on the JSON channel):
+    `blocking[0]`, record order, so a skip written first named the missing tool
+    and hid the crash `check` printed above it."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="atompipe-worst-")
+        self.addCleanup(_env._rmtree, self.root)
+
+    def test_a_crash_outranks_a_skip_and_a_fail_outranks_both(self):
+        for order, want in ((("S", "E"), ("E", "errored")), (("S", "E", "F"), ("F", "failed")),
+                            (("E", "S"), ("E", "errored"))):
+            with self.subTest(order=order):
+                worst = _worst(self.root, order)
+                self.assertEqual((worst["claim"], worst["cause"]), want, worst)
+
+    def test_record_order_is_caught(self):
+        """Planted: a severity that ranks nothing — record order again."""
+        with mock.patch.object(claims_mod, "severity", lambda composed: 0):
+            worst = _worst(self.root, ("S", "E"))
+        self.assertEqual((worst["claim"], worst["cause"]), ("S", "skipped"))
 
 
 if __name__ == "__main__":
