@@ -497,6 +497,43 @@ def spares_fraction(line: dict[str, Any]) -> tuple[float, str]:
     return value, ""
 
 
+def quantity_problems(line: dict[str, Any]) -> list[str]:
+    """Why ``line``'s quantity cannot be read as written — ``[]`` when it can.
+
+    ``qty_per_unit`` missing or not positive, a spares fraction
+    :func:`spares_fraction` refuses, and an ``moq`` or ``order_multiple`` that
+    is present and not a quantity. Each is read downstream as something
+    smaller — no need, no spares, "no minimum", "no rounding" — which quietly
+    makes the order SMALLER and the run CHEAPER than the vendor will actually
+    sell it, and a stock figure look like it covers the build: the permissive
+    direction every BOM error fails in, and just as invisible.
+
+    One copy for the two readers that refuse it: ``bom.complete`` (as part of
+    "not orderable") and ``bom.availability`` (a line whose quantity cannot be
+    read is never covered by stock). What slipped through (review of P2.2):
+    ``bom.availability`` had relied on ``bom.complete`` as its prerequisite for
+    this, and that guard also fails on an unpriced line, which says nothing
+    about a ship date.
+    """
+    out: list[str] = []
+    per = num(line.get("qty_per_unit"))
+    if per is None or isinstance(per, bool):
+        out.append("no qty_per_unit")
+    elif float(per) <= 0:
+        out.append(f"qty_per_unit {float(per):g}")
+    _spares, spares_problem = spares_fraction(line)
+    if spares_problem:
+        out.append(spares_problem)
+    for field in ("moq", "order_multiple"):
+        raw = line.get(field)
+        if raw is None or raw == "":
+            continue
+        value = num(raw)
+        if value is None or isinstance(value, bool) or float(value) < 0:
+            out.append(f"{field} {raw!r} is not a quantity")
+    return out
+
+
 def needed_qty(line: dict[str, Any], qty: int) -> float:
     """Pieces the build consumes, spares included. Not yet rounded to a purchase."""
     per = num(line.get("qty_per_unit"))

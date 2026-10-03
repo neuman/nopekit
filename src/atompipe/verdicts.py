@@ -6438,10 +6438,12 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
     page; it never counts).
 
     7. Last, **prerequisites** (``apply_prerequisites``, P2.2): a gate whose
-       prerequisite is not established reads the prerequisite skip (or its own
-       crash, refusal or missing tool, which stand); one whose prerequisite is
-       invalidated or unrun keeps its verdict, marked stale. Rungs 1-6 are
-       ``_resolve_gate``, one gate at a time, which the sweep asks too.
+       prerequisite is not established reads the prerequisite skip — or its own
+       crash, which stands, and its own refusal or skip (a missing tool, a
+       self-skip), which stand unless the root crashed (``_under_rule``); one
+       whose prerequisite is invalidated or unrun keeps its verdict, marked
+       stale. Rungs 1-6 are ``_resolve_gate``, one gate at a time, which the
+       sweep asks too.
 
     ``ledger`` is read, never written: the resolution is a VIEW a caller lays
     over it (``dataclasses.replace(ledger, verdicts=resolution.verdicts)``) and
@@ -6527,31 +6529,71 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
         Resolution(verdicts=verdicts_out, stale_gates=frozenset(stale), rows=rows,
                    notes=list(dict.fromkeys(notes)), read_sets=last_read_sets(root_abs),
                    anchors=here.anchors),
-        registry, availability=availability)
+        registry)
 
 
-def _under_rule(spec: Any, own: Verdict | None, unmet: Any,
-                availability: Callable[[Any], tuple]) -> Verdict | None:
+def _under_rule(spec: Any, own: Verdict | None, unmet: Any) -> Verdict:
     """``own`` — a gate's reading of its own — under a NEGATIVE prerequisite
     root (P2.2-D6): the prerequisite skip (``gates.blocked``), or ``own`` itself
-    where it stands. **The rule replaces what the dependent measured, and
-    nothing else**: a pass or a fail, current or not, or no verdict at all.
-    Three readings stand, because no run of the prerequisite changes them: the
-    gate's tool missing here (``availability``, the same call in both
-    producers); a crash or a self-skip of its own (or two outcomes) standing at
-    its inputs — invariant 2: the crash keeps its loudness, never the quieter
-    prerequisite skip; and its own refusal (unqualified, which reads Gap).
-    A prerequisite skip is replaced by the one the rule now finds (its root may
-    have moved; it is never restored to a pass here). *Rejected:* replacing
-    every reading (a standing crash would read as the prerequisite skip for as
-    long as the root is down); letting the dependent's FAIL stand (a number a
-    model the guard says does not apply computed settles nothing: D-03, D-04)."""
+    where it stands. The one copy of the rule: ``apply_prerequisites``, the
+    sweep's ``_pruned_row`` and ``gates.run_all``'s default all ask it.
+
+    **A reading of the dependent's own stands only where it is at least as loud
+    as the prerequisite skip, and no run of the prerequisite changes it:**
+
+    * its own crash (or two outcomes) — always: invariant 2, a crash is never
+      made quieter;
+    * its own skip — its tool missing here, or a self-skip at its inputs — and
+      its own refusal (unqualified, which reads Gap): only while the root did
+      NOT crash. Under a crashed root they give way to the errored
+      prerequisite skip, because invariant 10's claim is "as loud as a crash
+      when the root crashed";
+    * a prerequisite skip this rule already made, saying what the rule says
+      now — kept as it is, so a second application moves nothing (``cli
+      ._swept`` applies the rule over a view ``resolve`` already ruled on).
+
+    Everything else is replaced: a pass or a fail, current or not — a Fresh
+    FAIL served where the tool is missing (R-3, ``_resolve_gate``'s rung 1)
+    included — or no verdict at all.
+
+    What slipped through the first rule (review of P2.2): (1) it let any skip
+    or refusal of the dependent's own stand, so a crashed guard went quiet
+    behind it — the claim read `skipped: <dep> : requires <tool>`, a JUnit
+    ``<failure>``, absent from ``last_check.json``'s ``errored``, and after
+    the tool was installed the same records read errored; (2) it returned
+    ``own`` whenever the gate's tool was missing, whatever ``own`` was, so a
+    Fresh FAIL behind a failed guard read Failing on a machine without the tool
+    and Skipped on one with it — the number D6 says settles nothing; (3) it
+    rebuilt a prerequisite skip it had already made, so every second
+    application appended its ``not run:`` note again.
+
+    *Rejected:* replacing every reading (a standing crash would read as the
+    prerequisite skip for as long as the root is down); letting the dependent's
+    FAIL stand (a number a model the guard says does not apply computed
+    settles nothing: D-03, D-04); letting a skip of its own give way under every
+    negative root (it is as loud as the prerequisite skip it would become, and
+    a missing tool on this machine is as true a reason as a failed guard — the
+    claim's composition ranks the prerequisite skip first among Skipped
+    readings instead, ``claims.compose``); carrying the root's mark on the
+    standing skip (a verdict marked ``blocked_by`` that the rule did not
+    produce, against D9's "spine-only, ``gates.blocked``")."""
     from . import gates as _gates
-    if not availability(spec)[0]:
+    from .models import PrerequisiteKind
+    ruled = _gates.blocked(spec, unmet)
+    if own is None:
+        return ruled
+    if own.blocked_by:
+        same = ((own.skip_reason, list(own.blocked_by), str(own.blocked_kind))
+                == (ruled.skip_reason, list(ruled.blocked_by), str(ruled.blocked_kind)))
+        return own if same else ruled
+    refused = bool(getattr(own, "unqualified", ""))
+    if own.outcome == "error" and not refused:
         return own
-    if own is not None and not own.blocked_by and own.outcome in ("error", "skipped"):
+    if str(unmet.kind) == PrerequisiteKind.ERRORED:
+        return ruled
+    if own.outcome == "skipped" or refused:
         return own
-    return _gates.blocked(spec, unmet)
+    return ruled
 
 
 def _marked(row: Row, reason: str) -> Row:
@@ -6565,8 +6607,12 @@ def _marked(row: Row, reason: str) -> Row:
     return dataclasses.replace(row, fresh=False, stale_reason=row.stale_reason or reason)
 
 
-def apply_prerequisites(resolution: Resolution, registry: Any, *,
-                        availability: Callable[[Any], tuple] | None = None) -> Resolution:
+#: The note a row pruned under the rule carries — ``not run: <its skip
+#: reason>`` — one per row, the current one (``apply_prerequisites``).
+_PRUNED_NOTE = "not run: "
+
+
+def apply_prerequisites(resolution: Resolution, registry: Any) -> Resolution:
     """``resolution`` under the prerequisite rule — ``resolve``'s rung 7, and
     ``check``'s again over the view it merges with its sweep (``cli._swept``).
 
@@ -6598,15 +6644,21 @@ def apply_prerequisites(resolution: Resolution, registry: Any, *,
     **Monotone**: it only ever moves a reading toward not-pass, so applying it
     to a view another producer already ruled on (``_swept``) can only
     downgrade. **Idempotent**: a second application finds every replaced gate's
-    skip and every mark in place. With no ``needs`` registered the resolution
-    is returned as it came, byte for byte (C3). A cycle or an inversion planted
-    past the registry raises (``gates.plan``).
+    skip (``_under_rule`` keeps a prerequisite skip that says what the rule
+    says now) and every mark in place, and a row carries one ``not run:`` note,
+    the current one. What slipped through the first version (review of P2.2):
+    the second application rebuilt every pruned gate's skip and appended its
+    note again — ``check``'s view row read ``not run: prerequisite failed:
+    t.guard`` twice — while this docstring promised it moved nothing. With no
+    ``needs`` registered the resolution is returned as it came, byte for byte
+    (C3). A cycle or an inversion planted past the registry raises
+    (``gates.plan``). It reads no availability: whether a gate's tool is
+    missing here is in its reading already (``_resolve_gate``'s rung 1, the
+    sweep's step 1), and the rule decides by the reading (``_under_rule``).
     """
     from . import gates as _gates
     if registry is None:
         return resolution
-    if availability is None:
-        availability = _gates.availability
     order = _gates.plan(registry, registry.specs())
     if not any(spec.needs for spec in order):
         return resolution
@@ -6621,13 +6673,14 @@ def apply_prerequisites(resolution: Resolution, registry: Any, *,
         row = rows.get(gid)
         unmet = _gates.prerequisite_root(spec, readings, registry) if spec.needs else None
         if unmet is not None and unmet.negative:
-            ruled = _under_rule(spec, own, unmet, availability)
+            ruled = _under_rule(spec, own, unmet)
             if ruled is not own:
                 base = row if row is not None else Row(gid, "never")
                 by_gate[gid] = ruled
+                kept = tuple(n for n in base.notes if not str(n).startswith(_PRUNED_NOTE))
                 rows[gid] = dataclasses.replace(
                     base, cached=False, fresh=False, stale_reason="",
-                    notes=tuple(base.notes) + (f"not run: {ruled.skip_reason}",))
+                    notes=kept + (f"{_PRUNED_NOTE}{ruled.skip_reason}",))
                 stale.discard(gid)
                 own = ruled
                 changed = True
@@ -6638,10 +6691,12 @@ def apply_prerequisites(resolution: Resolution, registry: Any, *,
             if not why and str(unmet.kind) == "invalidated" and unmet.root in rows:
                 why = rows[unmet.root].stale_reason
             if own is not None and own.outcome in ("pass", "fail"):
-                rows[gid] = _marked(row if row is not None else Row(gid, "fresh"),
-                                    _gates.mark_reason(unmet._replace(why=why)))
-                stale.add(gid)
-                changed = True
+                marked = _marked(row if row is not None else Row(gid, "fresh"),
+                                 _gates.mark_reason(unmet._replace(why=why)))
+                if marked != row or gid not in stale:      # a second application: in place
+                    rows[gid] = marked
+                    stale.add(gid)
+                    changed = True
             readings[gid] = _gates.Reading(own, False, unmet.root, str(unmet.kind), why)
             continue
         readings[gid] = _gates.Reading(own, own is not None and gid not in stale,
@@ -7893,8 +7948,9 @@ def _pruned_row(s: _Session, spec: Any, fn: Any, state: Any, unmet: Any) -> Swee
     under the rule** — ``_resolve_gate`` on the gate's records as a reader
     judges them, then ``_under_rule``. Nothing of the gate moved during the
     sweep (it did not run), so what ``status`` reads afterwards is this row: the
-    prerequisite skip, or the gate's own crash, refusal or missing tool where
-    one stands. ``state`` is the sweep's tier-aware state, kept for the
+    prerequisite skip, or the gate's own crash — or, unless the root crashed,
+    its own refusal, missing tool or self-skip — where one stands. ``state`` is
+    the sweep's tier-aware state, kept for the
     caller's interface; the reading is the reader's, so the row and ``status``
     cannot part over a costlier tier's entry (the design's risk 1).
 
@@ -7903,15 +7959,16 @@ def _pruned_row(s: _Session, spec: Any, fn: Any, state: Any, unmet: Any) -> Swee
     cached, never remembered and never logged (it measured nothing, and a
     prerequisite skip remembered would outlive the root's recovery). Its row
     is neither executed nor cached, so the sweep's counts are untouched; a
-    standing reading served from an entry (a refutation where the tool is
-    missing, R-3) says ``cached`` as the sweep's own step 1 would."""
+    standing reading keeps what its row says of it (``cached``, ``fresh``, its
+    stale reason), as ``resolve``'s does. (A Fresh FAIL served where the tool is
+    missing, R-3, no longer stands: review of P2.2, ``_under_rule``.)"""
     from . import gates as _gates
     here, judged, order, legacy, row_notes = _reader_state(s, spec, fn)
     notes: list[str] = []
     own, row = _resolve_gate(here, spec, fn, judged, held=s.held, verified=s.verified,
                              notes=notes, order=order, legacy=legacy,
                              availability=_gates.availability, row_notes=row_notes)
-    ruled = _under_rule(spec, own, unmet, _gates.availability)
+    ruled = _under_rule(spec, own, unmet)
     if ruled is own and own is not None and row is not None:
         return SweepRow(own, cached=row.cached, fresh=row.fresh, stale_reason=row.stale_reason,
                         rho=own.rho)

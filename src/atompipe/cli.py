@@ -2874,6 +2874,10 @@ def _selftest_packs(args: argparse.Namespace, root: str | None, junit: str | Non
                     plan["dir"], tier=tier,
                     out_dir=os.path.join(scratch, f"{index:03d}-{plan['name']}"))
                 _read_back(plan, shown, tier)
+                # An isolation check its prerequisite's tools left unrun: said,
+                # never dropped (review of P2.2; `Demonstration.unchecked`).
+                notes.extend(entry for entry in shown.unchecked
+                             if entry.partition(": ")[0] in plan["chosen"])
             for problem in plan["problems"]:
                 baselines.append(Verdict(gate=plan["name"], pack=plan["name"],
                                          passed=False, detail=problem))

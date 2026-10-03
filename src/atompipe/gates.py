@@ -93,8 +93,9 @@ And a sixth, because a validity guard that guards nothing is a logger one level 
    dependent's function or its control: it reads Skipped — :func:`blocked`, the
    one producer of ``prerequisite failed: <root>`` / ``prerequisite not
    established: <root> (<why>)`` — unless a reading of the dependent's own
-   stands that no run of the prerequisite changes (its tool missing here, its
-   own crash, its own refusal). Under one invalidated or unrun it runs, and its
+   stands that no run of the prerequisite changes and is at least as loud (its
+   own crash; its tool missing here, a self-skip or its own refusal while the
+   root did not crash). Under one invalidated or unrun it runs, and its
    verdict is marked not current. The decision is :func:`prerequisite_root`'s
    alone, and the resolver applies the same function
    (``verdicts.apply_prerequisites``). What slipped through before it (S-51): a
@@ -836,15 +837,25 @@ def _control_gap(spec: GateSpec) -> str:
 
 
 def _inversion(dependent: str, dependent_spec: GateSpec, need: str,
-               need_spec: GateSpec) -> str:
-    """The refusal of a prerequisite costlier than its dependent."""
+               need_spec: GateSpec, dependent_fn: Any = None) -> str:
+    """The refusal of a prerequisite costlier than its dependent, naming the
+    file that declares the edge — the dependent's (``dependent_fn``'s source,
+    its last two path parts: ``gates/dep.py``). What slipped through (review of
+    P2.2): the loader prefixes the file it was loading, which is the
+    prerequisite's when the dependent registered first, so the error pointed
+    at the file with no edge in it; and it cited ``D-28``, a plan row the
+    release bundle strips (METHOD's rule 10 is the shipped reference)."""
     def at(spec: GateSpec) -> str:
         return f"tier {int(spec.tier)}, {spec.pack or '(project)'}"
-    return (f"gate {dependent!r} ({at(dependent_spec)}) names {need!r} ({at(need_spec)}) as "
-            f"a prerequisite — a prerequisite costlier than its dependent drags tier "
-            f"{int(need_spec.tier)}'s cost into every tier-{int(dependent_spec.tier)} loop "
-            f"that runs the dependent (rule 10; D-28). Drop the edge, or declare "
-            f"{dependent!r} at tier {int(need_spec.tier)} or above.")
+    source = getattr(getattr(dependent_fn, "__code__", None), "co_filename", "") or ""
+    where = (f", declared in {os.path.basename(os.path.dirname(source))}/"
+             f"{os.path.basename(source)}" if source else "")
+    return (f"gate {dependent!r} ({at(dependent_spec)}{where}) names {need!r} "
+            f"({at(need_spec)}) as a prerequisite — a prerequisite costlier than its "
+            f"dependent drags tier {int(need_spec.tier)}'s cost into every "
+            f"tier-{int(dependent_spec.tier)} loop that runs the dependent (METHOD rule "
+            f"10). Drop the edge from {dependent!r}, or declare it at tier "
+            f"{int(need_spec.tier)} or above.")
 
 
 class Registry:
@@ -1020,12 +1031,13 @@ class Registry:
             old_spec, _old_fn = existing
             if not (fresh.pack or "").strip() and old_spec.pack:
                 fresh = dataclasses.replace(fresh, pack=old_spec.pack)
-        self._check_needs(gate_id, fresh)
+        self._check_needs(gate_id, fresh, fn)
         self._gates[gate_id] = (fresh, fn)
 
     # -- prerequisites ----------------------------------------------------- #
-    def _check_needs(self, gate_id: str, spec: GateSpec) -> None:
-        """Refuse ``spec``'s ``needs`` as :meth:`register` says, or return."""
+    def _check_needs(self, gate_id: str, spec: GateSpec, fn: Any = None) -> None:
+        """Refuse ``spec``'s ``needs`` as :meth:`register` says, or return.
+        ``fn`` is the gate's function, so a refusal can name its file."""
         seen: set[str] = set()
         for need in spec.needs or ():
             if not isinstance(need, str):
@@ -1067,11 +1079,11 @@ class Registry:
         for need in spec.needs or ():
             found = self._gates.get(need)
             if found is not None and int(found[0].tier) > mine:
-                raise AtompipeError(_inversion(gate_id, spec, need, found[0]))
-        for other, (other_spec, _fn) in self._gates.items():
+                raise AtompipeError(_inversion(gate_id, spec, need, found[0], fn))
+        for other, (other_spec, other_fn) in self._gates.items():
             if other != gate_id and gate_id in (other_spec.needs or ()) \
                     and mine > int(other_spec.tier):
-                raise AtompipeError(_inversion(other, other_spec, gate_id, spec))
+                raise AtompipeError(_inversion(other, other_spec, gate_id, spec, other_fn))
 
     def _cycle_through(self, gate_id: str, needs: list[str]) -> list[str] | None:
         """The cycle ``needs`` would close through ``gate_id`` — ``[gate_id, …,
@@ -2070,7 +2082,9 @@ def plan(registry: Registry, selected: Iterable[GateSpec | str]) -> list[GateSpe
             if found is None:
                 continue
             if int(found.tier) > int(spec.tier):
-                raise AtompipeError(_inversion(gid, spec, need, found))
+                held = registry.get(gid)
+                raise AtompipeError(_inversion(gid, spec, need, found,
+                                               held[1] if held is not None else None))
             visit(need, path + [need])
         state[gid] = "done"
         out.append(spec)
@@ -2217,12 +2231,16 @@ def mark_reason(unmet: Unmet) -> str:
 
 def _pruned_default(spec: GateSpec, unmet: Unmet) -> Verdict:
     """:func:`run_all`'s pruned verdict with no hook: the dependent's own missing
-    tool stands (no run of the prerequisite changes it), else :func:`blocked`."""
+    tool — the one reading of its own a loop that does not run it can have —
+    under the resolver's rule (``verdicts._under_rule``): it stands unless the
+    root crashed, else :func:`blocked`. What slipped through (review of P2.2):
+    this kept its own copy, "the missing tool stands", so a crashed root went
+    quiet here too behind the dependent's missing tool."""
+    from . import verdicts as _verdicts      # the module, so the rule is one object
     ok, reason = availability(spec)
-    if not ok:
-        return _stamp(Verdict(gate=spec.id, passed=False, skipped=True, skip_reason=reason),
-                      spec, 0.0)
-    return blocked(spec, unmet)
+    own = None if ok else _stamp(
+        Verdict(gate=spec.id, passed=False, skipped=True, skip_reason=reason), spec, 0.0)
+    return _verdicts._under_rule(spec, own, unmet)
 
 
 # --------------------------------------------------------------------------- #
@@ -2353,9 +2371,10 @@ def run_all(
     failed, errored, skipped, unqualified, not registered — neither ``before``,
     ``fn`` nor ``after`` is called, nor the gate's control: the verdict is
     ``pruned(spec, fn, unmet)``'s, by default the gate's own availability skip
-    if its tool is missing, else :func:`blocked`. Under a NOT-CURRENT root
-    (invalidated, unrun) the gate runs as usual, and ``marked(spec, verdict,
-    unmet)`` is told, so the caller can say the verdict is not current.
+    if its tool is missing and the root did not crash, else :func:`blocked`.
+    Under a NOT-CURRENT root (invalidated, unrun) the gate runs as usual, and
+    ``marked(spec, verdict, unmet)`` is told, so the caller can say the verdict
+    is not current.
     ``current(gate_id)`` says whether a prerequisite's verdict is current; with
     no hook, every verdict this loop produced is.
 
@@ -3042,6 +3061,20 @@ def describe(spec: GateSpec) -> str:
     if spec.pack:
         bits[0] += f" {spec.pack}"
     bits[0] += "]"
+    tools = list(spec.requires_tools or []) + list(spec.requires_python or [])
+    if spec.requires_one_of:
+        tools.append("one of " + "|".join(spec.requires_one_of))
+    ok, reason = availability(spec) if tools else (True, "")
+    if not ok:
+        # Right after the id, never at the tail: the line is cut at 240
+        # characters, and what cannot run here is what a reader scans this
+        # list for. In `gate show`'s words ("runnable here: NO — …"). What
+        # slipped through (review of P2.2): it was the tail's "BLOCKED: …" — a
+        # GLOSSARY §3 Never-say, beside the new prerequisite list, where a
+        # reader could take it for the prerequisite blocking the gate — and the
+        # new segment pushed it past the cap (cad.assembly_connected's line
+        # ended "prerequisites cad.is_volume BLO...").
+        bits.append(f"not runnable here: {reason}")
     if spec.title:
         bits.append(spec.title)
     if spec.settles:
@@ -3053,12 +3086,8 @@ def describe(spec: GateSpec) -> str:
         # lead: until P2.2 they said "needs", which was then about to mean two
         # things on one line — and *need* (noun) is the Gap's Never-say.
         bits.append("prerequisites " + ",".join(spec.needs))
-    tools = list(spec.requires_tools or []) + list(spec.requires_python or [])
-    if spec.requires_one_of:
-        tools.append("one of " + "|".join(spec.requires_one_of))
-    if tools:
-        ok, reason = availability(spec)
-        bits.append(("requires " + ",".join(tools)) if ok else f"BLOCKED: {reason}")
+    if tools and ok:
+        bits.append("requires " + ",".join(tools))
     nc = spec.negative_control
     bits.append(f"control {nc.fixture}" if nc and nc.fixture else "NO CONTROL")
     return _one_line("  ".join(bits), 240)

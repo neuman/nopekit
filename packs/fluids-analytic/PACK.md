@@ -104,8 +104,8 @@ strut, a float, a hull with no piping) must get a **valid** from it, not a skip.
 correlations were fitted in, and outside them the arithmetic still returns a confident
 number. Below it failing they are not run; their claims read Skipped, `prerequisite
 failed: fluid.flow_regime`. The hydrostatics gates (buoyancy, freeboard, metacentric,
-righting arm) need nothing: the flow regime does not guard them, and one analysis
-failing is not a reason another's number is meaningless.
+righting arm) have no prerequisite: the flow regime does not guard them, and one
+analysis failing is not a reason another's number is meaningless.
 
 ## Views
 

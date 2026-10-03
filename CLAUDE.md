@@ -123,7 +123,8 @@ verdict is a new place to show a pass nothing earned. Enforced in
     registered is not run and reads **Skipped** — `prerequisite failed: <root>` or
     `prerequisite not established: <root> (<why>)`, and as loud as a crash when the
     root crashed — and that verdict is never cached or remembered; the gate's own
-    crash, refusal or missing tool still stands. One whose prerequisite is invalidated
+    crash still stands, and its own refusal, self-skip or missing tool too unless the
+    root crashed. One whose prerequisite is invalidated
     or unrun keeps its verdict and reads Stale. The registry refuses a `needs` cycle,
     and a prerequisite in a costlier tier than its dependent, like a build system.
     (What slipped through: a validity guard protected nothing — a claim tagged only

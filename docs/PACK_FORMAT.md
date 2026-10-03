@@ -216,7 +216,9 @@ before its own verdict counts. Under a prerequisite that failed, errored, skippe
 unqualified or is not registered, the gate is **not run** (neither it nor its control)
 and reads Skipped: `prerequisite failed: <root>` when the root failed, `prerequisite
 not established: <root> (<why>)` otherwise, naming the root through a chain. Its own
-missing tool, crash or refusal still stands — a crash is never made quieter. Under a
+crash still stands — a crash is never made quieter — and its own missing tool,
+self-skip or refusal too, unless the root crashed: then the claim reads as loud as a
+crash. Under a
 prerequisite invalidated or unrun it runs, and its verdict reads Stale. The verdict
 cache is not touched: the edge is not part of rho, so a guard that recovers re-runs
 nothing. `gates.plan` runs every gate after its prerequisites, and `check --only X`
@@ -888,7 +890,9 @@ every prerequisite in its `needs` closure passes that same known-bad control
 <gate>'s known-bad control (…)`). A `needs` entry that is not one of the pack's own
 gates is a problem too.
 A gate whose declared tooling is absent on this machine is printed as a `note:` and
-not demonstrated — not a problem, and not a pass either. Tiers 0–1 call no external
+not demonstrated — not a problem, and not a pass either; so is an isolation check whose
+prerequisite's tooling is absent (`<gate>: isolation not checked — its prerequisite
+<id> is skipped here (<why>)`). Tiers 0–1 call no external
 solver, so this stays seconds long; the rest waits for
 
 ```

@@ -152,8 +152,8 @@ claims read Skipped, `prerequisite failed: fdm.process_model_valid`.
 no `bbox_mm` gives `fdm.process_model_valid` nothing to check its units against: it
 skips itself, so every fdm gate — the mesh gates `overhang` and `bridge_span`
 included, which used to measure — reads `prerequisite not established:
-fdm.process_model_valid (skipped)`. That is the honest reading: nothing has verified
-the units the overhang and bridge numbers are in. Publish `fdm.bbox_mm` (one part, in
+fdm.process_model_valid (skipped)`. That is the honest reading: the units the overhang
+and bridge numbers are in are unestablished. Publish `fdm.bbox_mm` (one part, in
 print orientation) and the pack runs. There is no mesh-validity guard here, and a
 prerequisite cannot be another pack's gate, so a mesh the mesh gates cannot read still
 fails in their bodies, not as a prerequisite skip.

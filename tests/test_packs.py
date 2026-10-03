@@ -10,8 +10,10 @@ Run:  PYTHONPATH=src python3 -m unittest discover -s tests -v
 from __future__ import annotations
 
 import atexit
+import contextlib
 import dataclasses
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -775,9 +777,10 @@ EDGES: dict[str, list[tuple[str, str]]] = {
     "cad-solid": [("cad.wall_thickness", "cad.watertight"),
                   ("cad.clash", "cad.is_volume"),
                   ("cad.assembly_connected", "cad.is_volume")],
-    "sourcing": [(d, "bom.complete") for d in (
-        "bom.cost", "bom.availability", "bom.moq", "bom.process_rules",
-        "bom.single_source")],
+    # Two, not five (review of P2.2): bom.complete also fails on any unpriced
+    # line, which says nothing about a ship date, a capability rule or a source
+    # count — with those three edges one blank price cell hid a real fail.
+    "sourcing": [(d, "bom.complete") for d in ("bom.cost", "bom.moq")],
     "openmodelica": [("modelica.result_claim", "modelica.solution_valid"),
                      ("modelica.mirror_agrees", "modelica.solution_valid"),
                      ("modelica.simulates", "modelica.compiles")],
@@ -786,8 +789,10 @@ BRACKET_EDGES = [("bracket.deflection", "bracket.model_validity"),
                  ("bracket.bending_stress", "bracket.model_validity")]
 
 #: Edges whose pair needs no third-party tool: the floor the isolation test
-#: checks on any machine, CI without trimesh or omc included.
-_EDGE_FLOOR = 20
+#: checks on any machine, CI without trimesh or omc included — beam 7, fdm 6,
+#: fluids 2, sourcing 2 (20 until the review of P2.2 dropped three of
+#: sourcing's: ``AGuardFailureNeverHidesAnIndependentFail``).
+_EDGE_FLOOR = 17
 
 #: A pair that is NOT isolated, measured (P2.2's isolation probe): beam's
 #: ``shear_governed`` control is L/h 6.0, where Euler-Bernoulli omits about 32%
@@ -904,9 +909,10 @@ def _two_gate_pack(case: unittest.TestCase, *, fixture: str = "too_long",
 
 
 class ControlsAreIsolated(unittest.TestCase):
-    """Invariant 5's neighbour (P2.2-D12b, D13): a dependent's known-bad control
-    must leave its prerequisites passing, or the guard pre-empts the control and
-    admission shows nothing about the inputs the dependent actually judges. R-4's
+    """Invariant 5's neighbour (P2.2-D12's second test, D13): a dependent's
+    known-bad control must leave its prerequisites passing, or the guard
+    pre-empts the control and admission shows nothing about the inputs the
+    dependent actually judges. R-4's
     two steps: this detector over the bundled corpus (zero hits on the declared
     edges, one on a planted pair), then ``packs.demonstrate``'s step 5, behind
     ``pack validate`` and ``gate selftest --pack``."""
@@ -953,7 +959,7 @@ class ControlsAreIsolated(unittest.TestCase):
             if edges:
                 declared[name] = sorted(edges)
         self.assertEqual(declared, {name: sorted(e) for name, e in EDGES.items()})
-        self.assertEqual(sum(len(e) for e in declared.values()), 26)
+        self.assertEqual(sum(len(e) for e in declared.values()), 23)
         registry = gates_mod.Registry()
         gates_mod.load_project_gates(os.path.join(REPO, "examples", "bracket"), registry)
         self.assertEqual(sorted(_declared_edges(registry)), sorted(BRACKET_EDGES))
@@ -968,6 +974,94 @@ class ControlsAreIsolated(unittest.TestCase):
         clean, _guard, _dep = _two_gate_pack(self, fixture="too_long")
         self.assertEqual(packs_mod.demonstrate(clean).problems, [])
 
+    def _unchecked_problems(self) -> list[str]:
+        """The guard's tools absent here (patched), its dependent's present: the
+        isolation check cannot run, and must say so — in ``demonstrate``, in
+        ``pack validate``'s notes and in ``gate selftest --pack``'s."""
+        from atompipe import cli as cli_mod
+        pack_dir, guard, dependent = _two_gate_pack(self, fixture="trips_the_guard")
+        real = gates_mod.availability
+
+        def no_guard(spec):
+            if spec.id == guard:
+                return False, "requires planted-tool (not installed)"
+            return real(spec)
+
+        wanted = (f"{dependent}: isolation not checked — its prerequisite {guard} is "
+                  f"skipped here (requires planted-tool (not installed))")
+        out: list[str] = []
+        with mock.patch.object(gates_mod, "availability", no_guard):
+            shown = packs_mod.demonstrate(pack_dir)
+            notes: list[str] = []
+            problems = packs_mod.validate(pack_dir, notes=notes)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+                cli_mod.main(["gate", "selftest", "--pack", pack_dir, "--json"])
+        said = json.loads(buf.getvalue())
+        if wanted not in shown.unchecked:
+            out.append(f"demonstrate: unchecked is {shown.unchecked}")
+        if any("not isolated" in p for p in shown.problems + problems):
+            out.append("an unrun check reported as a problem")
+        if wanted not in notes:
+            out.append(f"pack validate: notes are {notes}")
+        if wanted not in said["notes"]:
+            out.append(f"gate selftest --pack: notes are {said['notes']}")
+        if said["counts"]["controls"] != 2:
+            out.append(f"gate selftest --pack counts {said['counts']}")
+        return out
+
+    def test_an_isolation_check_left_unrun_is_said(self):
+        """Review of P2.2: step 5 skipped a prerequisite whose tools are absent
+        and recorded nothing, so ``pack validate`` passed a non-isolated edge
+        on a machine without the guard's tool (cad.clash -> cad.is_volume is
+        the bundled edge whose two tool sets differ)."""
+        self.assertEqual(self._unchecked_problems(), [])
+
+    def test_a_step_that_drops_the_unrun_check_is_caught(self):
+        real = packs_mod._isolation_problems
+        with mock.patch.object(packs_mod, "_isolation_problems",
+                               lambda *a, **k: (real(*a, **k)[0], [])):
+            found = self._unchecked_problems()
+        self.assertTrue(any(p.startswith("demonstrate: unchecked") for p in found), found)
+
+    def _crashing_guard_line(self) -> str:
+        pack_dir, guard, dependent = _two_gate_pack(self, fixture="trips_the_guard")
+        path = os.path.join(pack_dir, "gates", "span.py")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        head = f"    return Verdict(gate={guard!r}, passed=v <= 200.0"
+        self.assertIn(head, text)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(head, "    if v > 200.0:\n"
+                                        "        raise RuntimeError('planted crash on a long "
+                                        "span')\n" + head))
+        lines = [p for p in packs_mod.demonstrate(pack_dir).problems
+                 if p.startswith(f"{dependent}: control not isolated")]
+        self.assertEqual(len(lines), 1, lines)
+        return lines[0]
+
+    def test_an_isolation_line_says_the_guards_verdict_in_one_line(self):
+        """Review of P2.2: the line printed the raw outcome token ``error`` and
+        the whole flattened traceback (GLOSSARY §1: a crash is *errored*;
+        P2.1-D15: never the traceback)."""
+        line = self._crashing_guard_line()
+        self.assertIn("(errored: RuntimeError: planted crash on a long span)", line)
+        for leak in ("Traceback", 'File "', "run_gate", "(error:"):
+            self.assertNotIn(leak, line)
+
+    def test_the_isolation_lines_word_is_the_tables(self):
+        from atompipe import report as report_mod
+        from types import MappingProxyType
+        human = report_mod.HUMAN
+        planted = MappingProxyType(dict(human, outcome=MappingProxyType(
+            {key: f"zz{word}" for key, word in human["outcome"].items()})))
+        with mock.patch.object(report_mod, "HUMAN", planted):
+            line = self._crashing_guard_line()
+        self.assertIn("(zzerrored: RuntimeError", line)
+        with mock.patch.object(packs_mod, "_one_line_of", packs_mod._why):
+            line = self._crashing_guard_line()
+        self.assertIn('File "', line, "the planted traceback-printing body was not seen")
+
     def test_a_pack_may_not_need_another_packs_gate(self):
         """D14: a pack's controls and baseline are sealed to the pack (invariant
         5); a prerequisite in another pack would make isolation depend on that
@@ -976,6 +1070,104 @@ class ControlsAreIsolated(unittest.TestCase):
         problems = packs_mod.validate(pack_dir)
         wanted = f"{dependent}: prerequisite beam.model_validity is not in this pack"
         self.assertTrue(any(p.startswith(wanted) for p in problems), problems)
+
+
+#: The sourcing gates whose numbers do not rest on a price: each one's own
+#: known-bad control, with an unrelated line's price blanked on top — a fail of
+#: ``bom.complete`` that says nothing about them — and the tag a narrowly bound
+#: claim on it carries.
+INDEPENDENT_OF_PRICE = (("bom.availability", "lead-time"),
+                        ("bom.process_rules", "process-rules"),
+                        ("bom.single_source", "single-source"))
+
+
+def _independent_fail_problems(case: unittest.TestCase,
+                               registry: gates_mod.Registry | None = None) -> list[str]:
+    """Each of ``INDEPENDENT_OF_PRICE`` on its own known-bad BOM with one more
+    line's price blanked: ``bom.complete`` fails (the price), and the gate must
+    still FAIL on its own defect — through the sweep, and on a claim tagged
+    only with its vocabulary."""
+    from atompipe import claims as claims_mod
+    from atompipe.models import Claim
+    pack_dir = os.path.join(PACKS_DIR, "sourcing")
+    if registry is None:
+        registry = gates_mod.Registry()
+        packs_mod.load_gates("sourcing", registry, root=REPO)
+    sys.path.insert(0, pack_dir)
+    try:
+        import bomlib  # noqa: E402  (the pack's own reader)
+    finally:
+        sys.path.remove(pack_dir)
+    out: list[str] = []
+    for gate_id, tag in INDEPENDENT_OF_PRICE:
+        spec, fn = registry.get(gate_id)
+        bad = gates_mod.run_fixture(spec, fn, packs_mod.baseline_context(
+            pack_dir, out_dir=_scratch_out()), trace=None, out_dir=_scratch_out())
+        doc = json.loads(json.dumps(bad.extra["bom"]))
+        lines = bomlib.lines(doc)
+        priced = [i for i, line in enumerate(lines) if line.get("unit_price") not in (None, "")]
+        lines[priced[-1]]["unit_price"] = None          # the unrelated defect
+        ctx = dataclasses.replace(bad, extra={**bad.extra, "bom": doc})
+        got = {v.gate: v for v in gates_mod.run_all(registry, ctx)}
+        if got["bom.complete"].outcome != "fail":
+            out.append(f"{gate_id}: setup — bom.complete reads "
+                       f"{got['bom.complete'].outcome} on a blanked price")
+            continue
+        mine = got[gate_id]
+        if mine.outcome != "fail":
+            out.append(f"{gate_id}: reads {mine.outcome} "
+                       f"({mine.skip_reason or mine.detail}) beside an unrelated unpriced "
+                       f"line, not its own fail")
+        claim = Claim(id="CX", statement="narrow", tags=[tag])
+        found = claims_mod.compose(claim, list(got.values()))
+        if found.cause is not claims_mod.ClaimCause.FAILED or \
+                (found.verdict is not None and found.verdict.gate != gate_id):
+            out.append(f"{gate_id}: a claim tagged only {tag!r} reads "
+                       f"{found.status.value}/{found.cause.value}")
+    return out
+
+
+class AGuardFailureNeverHidesAnIndependentFail(unittest.TestCase):
+    """P2.2-D12's first test, as the review of P2.2 found it broken: a
+    prerequisite must be a validity guard — EVERY way it fails means its
+    dependent's number does not apply. ``bom.complete`` also fails on any
+    unpriced line; wired as the prerequisite of ``bom.availability``,
+    ``bom.process_rules`` and ``bom.single_source``, one blank price cell turned
+    a real end-of-life fail into a skip naming the wrong root, in every
+    channel, until the unrelated price was filled in. The isolation check
+    (D13) cannot see it: the guard passes each dependent's own control."""
+
+    def test_an_unrelated_guard_fail_leaves_each_fail_standing(self):
+        self.assertEqual(_independent_fail_problems(self), [])
+
+    def test_the_edges_the_review_dropped_are_caught(self):
+        registry = gates_mod.Registry()
+        packs_mod.load_gates("sourcing", registry, root=REPO)
+        for gate_id, _tag in INDEPENDENT_OF_PRICE:
+            spec, fn = registry.get(gate_id)
+            registry.register(dataclasses.replace(spec, needs=["bom.complete"]), fn,
+                              replace=True)
+        found = _independent_fail_problems(self, registry)
+        for gate_id, _tag in INDEPENDENT_OF_PRICE:
+            with self.subTest(gate_id):
+                self.assertTrue(any(p.startswith(f"{gate_id}: reads skipped") for p in found),
+                                found)
+
+    def test_availability_never_counts_stock_against_an_unknown_quantity(self):
+        """What the dropped edge used to refuse for ``bom.availability``, in
+        its body: a line with no readable quantity is never covered by stock."""
+        pack_dir = os.path.join(PACKS_DIR, "sourcing")
+        registry = gates_mod.Registry()
+        packs_mod.load_gates("sourcing", registry, root=REPO)
+        spec, fn = registry.get("bom.availability")
+        base = packs_mod.baseline_context(pack_dir, out_dir=_scratch_out())
+        self.assertEqual(gates_mod.run_gate(spec, fn, base).outcome, "pass")
+        params = json.loads(json.dumps(dict(base.params)))
+        line = params["bom"]["lines"][0]
+        line.update(qty_per_unit=None, stock=10 ** 9, lead_time_weeks=None)
+        got = gates_mod.run_gate(spec, fn, dataclasses.replace(base, params=params))
+        self.assertEqual(got.outcome, "fail", got.detail)
+        self.assertIn("against an unknown quantity", got.detail)
 
 
 def _oracle(pack_dir: str, registry: gates_mod.Registry) -> dict[str, list[str]]:

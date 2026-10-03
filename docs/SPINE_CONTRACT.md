@@ -1442,24 +1442,28 @@ class Resolution:
     anchors: Anchors | None            # what the entries were judged against (watched_paths)
 def resolve(root, registry, projection, ledger, *, model_error="", availability=None,
             digests=None, anchors=None, now="", model=None) -> Resolution
-def apply_prerequisites(resolution, registry, *,
-                        availability=None) -> Resolution   # rung 7: the rule over a resolution
+def apply_prerequisites(resolution, registry) -> Resolution   # rung 7: the rule over a resolution
 ```
 **`apply_prerequisites`** (P2.2-D7, D8) is `resolve`'s last rung and `check`'s again over
 the view it merges with its sweep (`cli._swept`). It walks `gates.plan`'s order over
 every registered gate, building a `gates.Reading` per gate from the resolution (current
 unless in `stale_gates`), and asks `gates.prerequisite_root`, the decision the sweep
 asks too. Under a NEGATIVE root the gate's own reading becomes `gates.blocked`'s skip,
-unless it stands — its tool missing here, its own crash, self-skip or two outcomes, its
-own refusal (`_under_rule`; invariant 2: a crash keeps its loudness) — with its row
+unless it stands — its own crash or two outcomes, always (invariant 2: a crash keeps its
+loudness); its tool missing here, a self-skip or its own refusal, unless the root crashed
+(invariant 10: as loud as a crash); a prerequisite skip the rule already made, saying
+what it says now (`_under_rule`, the one copy: `_pruned_row` and `run_all`'s default ask
+it too) — with its row
 `cached`/`fresh` False, its `entry` kept (D-04: still Fresh on disk, served the moment
 the root recovers) and out of `stale_gates`. Under a NOT-CURRENT root a pass or a fail
 is kept, marked (`_marked`: `fresh` False, `stale_reason` `prerequisite <root>
 invalidated: <what moved>` / `prerequisite <root> unrun`) and added to `stale_gates`,
 so its claim reads Stale or what ranks above it — **D-03 amended**: read literally,
 every model edit between check runs would turn every guarded claim Skipped, when the
-fact is "inputs moved; run check". Monotone (only toward not-pass) and idempotent; with
-no `needs` registered the resolution comes back as it went in.
+fact is "inputs moved; run check". Monotone (only toward not-pass) and idempotent (a
+second application moves nothing; a row carries one `not run:` note, the current one);
+with no `needs` registered the resolution comes back as it went in. It reads no
+availability: a missing tool is in the gate's reading already.
 **`freshness`** groups a gate's entries by read signature — the paths, files, listings,
 claims and opaque channels an entry read, without their values; a presence-only read is
 its own kind of address — and recomputes each group's rho from what is current: the
@@ -2055,7 +2059,7 @@ class Composed: status: ClaimStatus; cause: ClaimCause; cites: tuple; verdict: V
 STATUS_KEY: Mapping[ClaimStatus, str]                        # pass -> "checked", unverified -> "pending_build", ...
 SEVERITY_ORDER: tuple[str, ...]                              # tokens + "errored", most urgent first
 KEY_ORDER: tuple[str, ...]                                   # the eight tokens, count order
-OUTCOME_ORDER: tuple[str, ...]                               # fail, error, skipped, unqualified, unrun, pass
+OUTCOME_ORDER: tuple[str, ...]                               # fail, error, prerequisite-errored, prerequisite, skipped, unqualified, unrun, pass
 def severity(composed) -> int                                # its place in SEVERITY_ORDER
 def outcome_rank(verdict) -> int                             # its place in OUTCOME_ORDER; None = unrun
 def covers(spec, claim) -> bool                              # claim id OR any claim tag in spec.claims
@@ -2086,7 +2090,7 @@ without it:
 | # | status | when | cause |
 |---|---|---|---|
 | 1 | Failing | a physical result failed (`refuted`), whatever the claim's kind and whatever was recorded after it; any covering verdict failed (`fail`), any kind, stale or not (D-08, R-3) | `physical-fail`, `failed` |
-| 2 | Skipped (`blocked`) | any errored, else any not run behind a prerequisite that crashed (`blocked_kind` `errored`: as loud), else any skipped — `prerequisite` when the first was not run behind a prerequisite (`blocked_by`) — beside a pass or not | `errored`, `prerequisite-errored`, `skipped`, `prerequisite` |
+| 2 | Skipped (`blocked`) | any errored, else any not run behind a prerequisite that crashed (`blocked_kind` `errored`: as loud), else any not run behind any other prerequisite (`blocked_by`; ahead of a plain skip), else any skipped — beside a pass or not | `errored`, `prerequisite-errored`, `prerequisite`, `skipped` |
 | 3 | Gap (`unclaimed`) | any unqualified, beside a pass or not; a measurable claim with no evaluator; an assumption with no owner named, no reason, or an owner `owners` does not attribute | `unqualified`, `no-evaluator`, `no-owner`, `no-reason`, `owner-unattributed` |
 | 4 | Open (`pending`) | any covering gate unrun | `unrun` |
 | 5 | Stale | `stale`, or a covering gate in `stale_gates` | `invalidated` |
@@ -2136,7 +2140,8 @@ other way "reads unattributed and the claim stays Gap".
 
 `explaining_verdict` is the single ranked choice of which verdict explains a claim's
 status, in `compose`'s order: one that ran and failed, else one that errored, else one
-that skipped, else one unqualified, stable within a rank — `OUTCOME_ORDER`, the one
+not run behind a crashed prerequisite, else one behind any other, else one that
+skipped, else one unqualified, stable within a rank — `OUTCOME_ORDER`, the one
 table the report's bullets and `why`'s groups read too (`outcome_rank`). **One severity
 order**, `SEVERITY_ORDER` (`severity`): Failing · Skipped, errored · Skipped · Gap ·
 Open · Stale · Pending build · Assumed · Checked — the order `status`, `check`'s
@@ -2269,6 +2274,7 @@ class Demonstration:                         # what `demonstrate` saw, gate by g
     problems: list[str]                      # baseline failed, control did not fire, unsealed
     skipped: list[str]                       # availability skips: reported, never a problem
     ran: int                                 # controls actually exercised
+    unchecked: list[str]                     # isolation checks a prerequisite's absent tools left unrun
 def seal_findings(registry, host_ctx, *, tier=Tier.EXTERNAL,
                   out_dir=None) -> list[SealFinding]        # controls whose fixture read the HOST's params
 @dataclass(frozen=True)

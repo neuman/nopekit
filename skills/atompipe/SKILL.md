@@ -261,11 +261,19 @@ action, not a resting state, and its reason says which action:
   on its input, usually a parameter the model does not publish. Add it to the model;
   installing changes nothing.
 - `skipped: <gate> : prerequisite failed: <evaluator>` — the gate was not run because
-  a validity guard it depends on failed: its number would not mean anything here. It
-  is not a missing tool: installing changes nothing. Fix what that evaluator failed
-  (its own row says what), and the gate runs again.
-- `skipped: <gate> : prerequisite not established: <evaluator> (<why>)` — clear that
-  evaluator by its own reason: install its tool if it skipped, fix it if it errored.
+  a validity guard that is its prerequisite failed: its number would not mean anything
+  here. It is not a missing tool: installing changes nothing. Fix what that evaluator
+  failed (its own row says what), and the gate runs again.
+- `skipped: <gate> : prerequisite not established: <evaluator> (<why>)` — the gate was
+  not run, and nothing about the gate itself is wrong: clear that evaluator, by `<why>`.
+  `(skipped)` — read the evaluator's own row: if it says `requires <tool>`, install
+  what it names; otherwise it skipped itself on its input, and the fix is to publish the
+  parameter it names — installing changes nothing. `(unqualified)` — the evaluator is
+  not qualified at its version (its known-bad control did not fail): fix the evaluator
+  or its control — `atompipe gate selftest` says which — never the gate behind it.
+  `(not registered)` — no evaluator has that id here: install the pack that provides
+  it, or drop the edge, as `atompipe doctor` says. A prerequisite that crashed reads
+  `errored:`, below.
 
 What you must not do is leave the claim Skipped and move on as though the design were
 checked. A claim Skipped by a crash (its reason starts `errored:`, its tag is

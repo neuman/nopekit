@@ -251,7 +251,10 @@ edge, a dependent whose guard fails is not run and reads Skipped, `prerequisite 
 
 1. the prerequisite is a validity guard — every way it fails means the dependent's
    number does not apply (an analysis that fails is not one: its fail would hide the
-   dependent's measurement);
+   dependent's measurement; nor is a guard that also fails on an input the dependent
+   never reads — `bom.complete` fails on any unpriced line, which says nothing about
+   a ship date, and as `bom.availability`'s prerequisite it hid a real end-of-life
+   fail behind one blank price cell);
 2. it is **isolated** — it passes the dependent's own known-bad control, or it would
    pre-empt the control (`pack validate` checks this);
 3. its tier is no costlier than the dependent's (the registry refuses the inversion);

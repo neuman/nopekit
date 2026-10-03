@@ -13,7 +13,12 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine: 87.5 s measured
+The budget is 90 s as ONE process on an otherwise idle machine: 89 s measured
+2026-10-03 (load average 0.8-1.5; 64 s user) after the review of P2.2 grew
+AnErroredPrerequisiteStaysLouder (+1.2 s: the dependent's own skip and refusal
+behind a crashed guard, and the ranking within Skipped) and added
+ApplyingTheRuleTwiceMovesNothing (0.2 s) — one second under, so the next test
+that joins moves one out; 87.5 s measured
 2026-10-03 (load average 1.4-1.8; 64 s user) after P2.2 added invariant 10's
 classes and its fast neighbours (~3 s, in process), with the matrix, the
 transcript and the wrapped-beam cases left to the full suite (below) — at the
@@ -253,6 +258,9 @@ FAST: list[str] = [
     "test_prerequisites.NeedsIsNotARhoEdge",
     "test_prerequisites.NeedsDeclarationsAreExact",
     "test_prerequisites.UnselectedDependentFollowsTheSweep",
+    # The review of P2.2: applying the rule twice moves nothing (`cli._swept`
+    # applies it over a view `resolve` already ruled on). In process, 0.2 s.
+    "test_prerequisites.ApplyingTheRuleTwiceMovesNothing",
     "test_prerequisites.PlanIsStable.test_without_needs_run_order_is_registration_order",
     "test_prerequisites.PlanIsStable.test_needs_order_is_dfs_postorder",
     "test_prerequisites.PlanIsStable.test_a_plan_that_does_not_expand_is_caught",
@@ -390,7 +398,7 @@ LEFT_FOR_THE_GATE: list[str] = [
 #   (module docstring); the lie they guard against is StaleIsNotCurrent's, whose
 #   in-process scenarios are above.
 #   test_prerequisites' project-per-case classes 25 (P2.2): the §3 matrix,
-#   48 projects (PrunedRowIsWhatStatusReads); the bracket at arm 30 through
+#   54 projects (PrunedRowIsWhatStatusReads); the bracket at arm 30 through
 #   `check` and JUnit (BracketGuardTranscript); the wrapped beam at two designs
 #   (GuardsReachNarrowClaims); `check --only` expanding (PlanIsStable's CLI
 #   test); the words, `doctor` included (PrerequisiteWords); the corpus resolved
@@ -399,7 +407,9 @@ LEFT_FOR_THE_GATE: list[str] = [
 #   The rule they hold is the one FAST runs in process; a change to the sweep,
 #   the resolver or `cli._swept` runs test_prerequisites whole. And
 #   test_packs.ControlsAreIsolated 6: every bundled edge's isolation and the
-#   planted pairs, which `pack validate` also checks.
+#   planted pairs, which `pack validate` also checks; and
+#   test_packs.AGuardFailureNeverHidesAnIndependentFail 1: an over-broad guard
+#   (the review of P2.2's three sourcing edges), which isolation cannot see.
 #   test_vocabulary.ReadyMeansEveryRequiredClaimChecked ~25: V15 through the
 #   commands — what `check`, `status`, their JSON, JUnit and the page say about
 #   *ready* on seven bracket copies; `ReadyIsThePredicate` holds the predicate

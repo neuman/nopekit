@@ -132,25 +132,7 @@ def complete(ctx: GateContext) -> Verdict:
         # an order minimum, and bom.single_source reports its supplier as "(none)".
         if not bomlib.sources_of(line):
             missing.append("no vendor and no sources")
-        qty = bomlib.num(line.get("qty_per_unit"))
-        if qty is None or isinstance(qty, bool):
-            missing.append("no qty_per_unit")
-        elif float(qty) <= 0:
-            missing.append(f"qty_per_unit {float(qty):g}")
-        _spares, spares_problem = bomlib.spares_fraction(line)
-        if spares_problem:
-            missing.append(spares_problem)
-        # An uncoercible moq or order_multiple is read downstream as "no minimum"
-        # and "no rounding", which quietly makes the order SMALLER and the run
-        # CHEAPER than the vendor will actually sell it — the same permissive
-        # direction as the spares typo above, and just as invisible.
-        for field in ("moq", "order_multiple"):
-            raw = line.get(field)
-            if raw is None or raw == "":
-                continue
-            value = bomlib.num(raw)
-            if value is None or isinstance(value, bool) or float(value) < 0:
-                missing.append(f"{field} {raw!r} is not a quantity")
+        missing.extend(bomlib.quantity_problems(line))
         price, why = bomlib.unit_price(line, doc)
         if price is None:
             missing.append(why)
@@ -272,12 +254,16 @@ def cost(ctx: GateContext) -> Verdict:
     claims=["availability", "lead-time", "ship-date", "stock"],
     tier=Tier.INSTANT,
     settles="longest lead time",
-    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
-    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
-    #    this gate's arithmetic over the BOM a work of fiction.
-    #    Isolated: the guard passes this gate's own known-bad control
-    #    (test_packs.ControlsAreIsolated).
-    needs=["bom.complete"],
+    # No edge to bom.complete (review of P2.2: P2.2-D12's first test, "every
+    #    fail of the prerequisite means the number does not apply", does not
+    #    hold): a lead time, a lifecycle and a stock figure do not depend on
+    #    another line's price, and bom.complete fails on any unpriced line — so
+    #    with the edge one blank price cell turned a real end-of-life FAIL into
+    #    a skip naming the wrong root, in every channel, until the unrelated
+    #    price was filled in. The one input this gate shares with the guard is
+    #    a line's quantity (stock covers a need), and the body refuses that
+    #    itself: a line whose quantity cannot be read is never covered by stock.
+    #    The edge can land once bom.complete's quantity half is its own guard.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:end_of_life",
         note="one line's lifecycle moved to 'eol' — the notice that arrives by email "
@@ -335,7 +321,16 @@ def availability(ctx: GateContext) -> Verdict:
         stock, stock_problem = bomlib.stock_qty(line)
         lead, lead_problem = bomlib.lead_weeks(line)
         lifecycle = str(line.get("lifecycle") or "unknown").strip().lower()
-        covered = stock is not None and stock >= buy
+        # A line whose quantity cannot be read is never covered by stock: with
+        # no usable need, purchase_qty reads 0 and any shelf "covers" it. This
+        # was bom.complete's to refuse while it was this gate's prerequisite;
+        # the edge is gone (see the decorator), so the gate refuses it itself,
+        # in the direction that leaves a ship date unknown, never known.
+        qty_problems = bomlib.quantity_problems(line)
+        covered = not qty_problems and stock is not None and stock >= buy
+        if qty_problems and stock is not None and not stock_problem:
+            stock_problem = (f"stock {stock:g} against an unknown quantity "
+                             f"({'; '.join(qty_problems)})")
 
         if lifecycle in bomlib.DEAD:
             dead.append(ref)
@@ -568,12 +563,11 @@ def moq(ctx: GateContext) -> Verdict:
     claims=["process-rules", "vendor-capability", "manufacturability", "dfm"],
     tier=Tier.INSTANT,
     settles="vendor process capability",
-    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
-    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
-    #    this gate's arithmetic over the BOM a work of fiction.
-    #    Isolated: the guard passes this gate's own known-bad control
-    #    (test_packs.ControlsAreIsolated).
-    needs=["bom.complete"],
+    # No edge to bom.complete (review of P2.2: P2.2-D12's first test does not
+    #    hold): a vendor's capability set is checked against the design's
+    #    declared attributes, none of which a price, a quantity or a part
+    #    number moves — with the edge, one blank price cell hid a real
+    #    capability violation behind a skip naming the wrong root.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:outside_capability",
         note="one declared process attribute moved outside the vendor's stated set — "
@@ -631,12 +625,12 @@ def process_rules(ctx: GateContext) -> Verdict:
     claims=["single-source", "supply-risk", "second-source", "supply-chain-risk"],
     tier=Tier.INSTANT,
     settles="single source count",
-    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
-    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
-    #    this gate's arithmetic over the BOM a work of fiction.
-    #    Isolated: the guard passes this gate's own known-bad control
-    #    (test_packs.ControlsAreIsolated).
-    needs=["bom.complete"],
+    # No edge to bom.complete (review of P2.2: P2.2-D12's first test does not
+    #    hold): the count reads who makes and who sells each line, and an
+    #    unpriced line, a missing quantity or a spares typo moves none of it —
+    #    with the edge, one blank price cell hid an unrecorded single source
+    #    behind a skip naming the wrong root. A line with no source at all is
+    #    counted here as no second source (the conservative direction).
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:lost_second_source",
         note="the second source goes away, with nothing written down — expressed on "

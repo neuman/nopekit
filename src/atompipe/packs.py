@@ -1333,6 +1333,7 @@ def validate(pack_dir: str, *, tier: int = Tier.BUILD,
         if notes is not None:
             notes.extend(f"not demonstrated here, its tools are absent: {entry}"
                          for entry in shown.skipped)
+            notes.extend(shown.unchecked)
             above = sorted(spec.id for spec in specs if int(spec.tier) > int(tier))
             if above:
                 notes.append(
@@ -1365,11 +1366,21 @@ class Demonstration:
     ``ran``       how many gates in scope ran their control. Zero problems with
                   zero controls run is "nothing was tried", not "nothing failed",
                   and this is the field that tells the two apart.
+    ``unchecked`` ``"<gate id>: isolation not checked — its prerequisite <id> is
+                  skipped here (<why>)"`` for each prerequisite step 5 could not
+                  run here, its tools absent. Not a problem, and never silent: a
+                  skipped isolation check is as unrun as a skipped control.
+                  What slipped through (review of P2.2): it was dropped without
+                  a trace, so ``pack validate`` passed a non-isolated edge on a
+                  machine without the guard's tool. Its own list, not
+                  ``skipped``: that one is the gates whose own control did not
+                  run, and ``gate selftest --pack`` counts it.
     """
 
     problems: list[str] = dataclasses.field(default_factory=list)
     skipped: list[str] = dataclasses.field(default_factory=list)
     ran: int = 0
+    unchecked: list[str] = dataclasses.field(default_factory=list)
 
 
 def baseline_context(pack_dir: str, *, out_dir: str) -> "GateContext":
@@ -1466,7 +1477,7 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
        then shows nothing about the inputs it judges (:func:`_isolation_problems`;
        ``tests/test_packs.ControlsAreIsolated`` holds its own copy, D-25). A
        prerequisite whose tools are absent here is not checked, and not a
-       problem: the same rule as a skipped control.
+       problem — but it goes to ``unchecked``, so the unrun check is seen.
 
     A skip is honest only when :func:`gates.availability` says the gate's tools
     are absent; it goes to ``skipped``. A skip with the tools present is a
@@ -1609,8 +1620,10 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
             #    fails it too, the guard pre-empts the control wherever both
             #    run: the dependent is pruned before its own judgement, and
             #    the control shows nothing about the inputs it actually judges.
-            shown.problems.extend(_isolation_problems(pack_dir, registry, spec, fn,
-                                                      _run_dir(base, spec.id, "isolation")))
+            found, unchecked = _isolation_problems(pack_dir, registry, spec, fn,
+                                                   _run_dir(base, spec.id, "isolation"))
+            shown.problems.extend(found)
+            shown.unchecked.extend(unchecked)
     finally:
         if out_dir is None:
             shutil.rmtree(base, ignore_errors=True)
@@ -1618,21 +1631,33 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
 
 
 def _isolation_problems(pack_dir: str, registry: Any, spec: GateSpec, fn: Any,
-                        out_dir: str) -> list[str]:
-    """``"<gate>: control not isolated — …"`` for each prerequisite in
-    ``spec``'s closure that does not PASS ``spec``'s known-bad control, built
-    over the pack's baseline as step 2 built it. Worded in GLOSSARY §2's words
-    (critique of the P2.2 design: the first draft said "known-bad input", a §2
-    Never-say on a `pack validate` line)."""
+                        out_dir: str) -> tuple[list[str], list[str]]:
+    """``(problems, unchecked)``: ``"<gate>: control not isolated — …"`` for
+    each prerequisite in ``spec``'s closure that does not PASS ``spec``'s
+    known-bad control, built over the pack's baseline as step 2 built it, and
+    ``"<gate>: isolation not checked — …"`` for each one whose tools are absent
+    here (``Demonstration.unchecked``). Worded in GLOSSARY §2's words (critique
+    of the P2.2 design: the first draft said "known-bad input", a §2 Never-say
+    on a `pack validate` line), and the guard's verdict in §1's: its outcome
+    word from ``report.HUMAN`` and one line — a crash's first, never its
+    traceback (review of P2.2: the line printed the raw token ``error`` and a
+    whole flattened stack, P2.1-D15)."""
     from . import gates as _gates          # local import: see _fresh_registry
+    from . import report as _report        # the one word table (D-16); not at import
 
     closure = [s for s in _gates.plan(registry, [spec]) if s.id != spec.id]
     if not closure:
-        return []
+        return [], []
     out: list[str] = []
+    unchecked: list[str] = []
     for need in closure:
         entry = registry.get(need.id)
-        if entry is None or not _gates.availability(need)[0]:
+        if entry is None:
+            continue
+        available, why = _gates.availability(need)
+        if not available:
+            unchecked.append(f"{spec.id}: isolation not checked — its prerequisite "
+                             f"{need.id} is skipped here ({why or 'not available here'})")
             continue
         need_spec, need_fn = entry
         try:
@@ -1641,15 +1666,27 @@ def _isolation_problems(pack_dir: str, registry: Any, spec: GateSpec, fn: Any,
         except AtompipeError as exc:
             out.append(f"{spec.id}: control not isolated — its known-bad control could not be "
                        f"rebuilt to run {need.id} on: {exc}")
-            return out
+            return out, unchecked
         verdict = _gates.run_gate(need_spec, need_fn, bad)
         if verdict.outcome != "pass":
+            word = _report.HUMAN["outcome"].get(verdict.outcome, verdict.outcome)
             out.append(f"{spec.id}: control not isolated — its prerequisite {need.id} does not "
-                       f"pass {spec.id}'s known-bad control ({verdict.outcome}: "
-                       f"{_why(verdict)}); the guard pre-empts the control wherever both "
-                       f"run. Make the control move only what {spec.id} judges, or drop "
-                       f"the edge")
-    return out
+                       f"pass {spec.id}'s known-bad control ({word}: "
+                       f"{_one_line_of(verdict)}); the guard pre-empts the control wherever "
+                       f"both run. Make the control move only what {spec.id} judges, or "
+                       f"drop the edge")
+    return out, unchecked
+
+
+def _one_line_of(verdict: Any) -> str:
+    """What explains ``verdict`` in one line, by its outcome — a crash's first
+    line, a skip's reason, a fail's detail — as ``Verdict.render`` reads it;
+    never the traceback ``run_gate`` keeps in a crash's ``detail``."""
+    if verdict.outcome == "error":
+        return (str(verdict.error).splitlines() or [""])[0] or "no reason given"
+    if verdict.outcome == "skipped":
+        return verdict.skip_reason or verdict.detail or "no reason given"
+    return verdict.detail or "no reason given"
 
 
 # --------------------------------------------------------------------------- #

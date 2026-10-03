@@ -163,9 +163,10 @@ needed most, and the price of that is disclosing every assumption it made to do 
 skips: its inputs are wrong, not missing. It catches a load carrying a sign (the
 ordinary downward-negative convention used to produce a full sweep of PASSes
 reading `util -0.65` and `L/inf`) and a modulus, stress or span whose magnitude
-says it is in the wrong unit. The other gates SKIP on a signed load, resolving
-their claims BLOCKED; this one puts a red line in the report so six quiet blanks
-are not the only signal.
+says it is in the wrong unit. It is the root of this pack's prerequisites (below),
+so on a signed load it is the one red line, and every other gate is not run and
+reads Skipped, `prerequisite failed: beam.input_sanity` — each blank names the
+cause.
 
 ### Prerequisites
 

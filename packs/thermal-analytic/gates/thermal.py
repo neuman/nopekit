@@ -438,10 +438,11 @@ def fin_efficiency(ctx: GateContext) -> Verdict:
     claims=["steady-state-temperature", "component-temperature", "cooling"],
     tier=Tier.INSTANT,
     settles="steady-state temperature",
-    # No edge to thermal.time_constant (P2.2-D12a): it also fails on tau over
-    # time_constant_limit_s, which says nothing about the steady-state node, so a
-    # fail there would hide this measurement. It can land once the Biot half of
-    # time_constant is its own evaluator.
+    # No edge to thermal.time_constant (P2.2-D12, "a guard that also
+    # measures"): it also fails on tau over time_constant_limit_s, which says
+    # nothing about the steady-state node, so a fail there would hide this
+    # measurement. It can land once the Biot half of time_constant is its own
+    # evaluator.
     negative_control=NegativeControl(
         fixture="selftest/bad_thermal.py:dry_joint",
         note="the thermal interface material is omitted and the part is bolted dry: the "

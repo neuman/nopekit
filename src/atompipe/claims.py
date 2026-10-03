@@ -319,14 +319,25 @@ KEY_ORDER: tuple[str, ...] = ("checked", *(key for key in SEVERITY_ORDER
 #: did — one table for `explaining_verdict`, the report's bullets and `why`'s
 #: groups (each kept its own copy until review: `_EXPLAINS`, `_BULLET_ORDER`,
 #: `_OUTCOME_RANK` plus two inline ranks, three tables that had to agree): what
-#: failed the candidate, what crashed, what skipped, an unqualified evaluator
-#: (its verdict says `error` too, and it is never ranked as a crash: P2.0 D-8),
-#: an unrun one, and what passed. Outcome words are `Verdict.outcome`'s values;
-#: `unqualified` and `unrun` name what is not an outcome. *Rejected:* gate-id
-#: order (P2.0 F-3: `[skip]` above `[ERR ]`, the dull line read first); errored
-#: first (a fail carries the measured value and the limit, what the reader goes
-#: to change, and Failing outranks Skipped on the claim).
-OUTCOME_ORDER: tuple[str, ...] = ("fail", "error", "skipped", "unqualified", "unrun", "pass")
+#: failed the candidate, what crashed, what was not run behind a crashed
+#: prerequisite, what was not run behind any other, what skipped, an
+#: unqualified evaluator (its verdict says `error` too, and it is never ranked
+#: as a crash: P2.0 D-8), an unrun one, and what passed — `compose`'s rungs 1-3
+#: in its own order. Outcome words are `Verdict.outcome`'s values;
+#: `prerequisite-errored` and `prerequisite` name a skip the rule made
+#: (`Verdict.blocked_by`, by its `blocked_kind`), `unqualified` and `unrun`
+#: what is not an outcome. What slipped through (review of P2.2): `compose`
+#: ranked a skip behind a crashed prerequisite above a plain skip and this did
+#: not, so `last_check.json`'s `worst` cited a missing tool's gate and words
+#: beside the cause `prerequisite-errored`, and the report's bullets listed the
+#: tool skip first. *Rejected:* gate-id order (P2.0 F-3: `[skip]` above
+#: `[ERR ]`, the dull line read first); errored first (a fail carries the
+#: measured value and the limit, what the reader goes to change, and Failing
+#: outranks Skipped on the claim); a prerequisite-errored skip ranked with a
+#: crash (a tie, broken by record order, would cite it before the crash
+#: `compose` cites).
+OUTCOME_ORDER: tuple[str, ...] = ("fail", "error", "prerequisite-errored", "prerequisite",
+                                  "skipped", "unqualified", "unrun", "pass")
 
 
 def severity(composed: "Composed") -> int:
@@ -340,11 +351,16 @@ def severity(composed: "Composed") -> int:
 def outcome_rank(verdict: Verdict | None) -> int:
     """`verdict`'s place in `OUTCOME_ORDER`; None is an unrun evaluator. A
     refused evaluator ranks by the spine's mark, never as the crash its
-    `error` text reads as."""
+    `error` text reads as; a skip the prerequisite rule made ranks by its
+    root's kind (`Verdict.blocked_by`, `blocked_kind`, the spine's marks)."""
     if verdict is None:
         key = "unrun"
     elif getattr(verdict, "unqualified", ""):
         key = "unqualified"
+    elif getattr(verdict, "blocked_by", None):
+        key = ("prerequisite-errored"
+               if str(getattr(verdict, "blocked_kind", "")) == PrerequisiteKind.ERRORED
+               else "prerequisite")
     else:
         key = verdict.outcome
     return OUTCOME_ORDER.index(key) if key in OUTCOME_ORDER else len(OUTCOME_ORDER)
@@ -399,9 +415,10 @@ def compose(
     2. **Skipped** — any covering evaluator ERRORED (cause `errored`, louder:
        invariant 2); else any not run behind a prerequisite that crashed
        (`prerequisite-errored`, as loud: `Verdict.blocked_kind`); else any
-       SKIPPED, even beside a pass — `prerequisite` when the first skipped
-       verdict was not run behind a prerequisite (`Verdict.blocked_by`, the
-       spine's mark), `skipped` otherwise (P2.2-D10).
+       not run behind any other prerequisite (`prerequisite`:
+       `Verdict.blocked_by`, the spine's mark — ahead of a plain skip, review
+       of P2.2); else any SKIPPED, even beside a pass (`skipped`). P2.2-D10;
+       `OUTCOME_ORDER` holds the same order for `explaining_verdict`.
     3. **Gap** — any covering evaluator unqualified (`unqualified`), even
        beside a pass; a measurable claim with no evaluator (`no-evaluator`); an
        assumption with no owner named, no reason, or an owner the channel did
@@ -472,12 +489,20 @@ def compose(
                         errored[0])
     crashed_root = [v for v in skipped
                     if v.blocked_by and str(v.blocked_kind) == PrerequisiteKind.ERRORED]
+    behind = [v for v in skipped if v.blocked_by]
     if crashed_root:
         return Composed(ClaimStatus.BLOCKED, ClaimCause.PREREQUISITE_ERRORED,
-                        gates_of(crashed_root, skipped), crashed_root[0])
+                        gates_of(crashed_root, behind, skipped), crashed_root[0])
+    # Within Skipped a prerequisite skip leads a plain one (review of P2.2,
+    # amending D10): the claim cited `skipped[0]`, record order, so a dependent
+    # whose own tool is missing, registered first, hid the failed guard beside
+    # it — `skipped: <gate> : requires <tool>`, the one advice that changes
+    # nothing while the guard fails (S-54).
+    if behind:
+        return Composed(ClaimStatus.BLOCKED, ClaimCause.PREREQUISITE,
+                        gates_of(behind, skipped), behind[0])
     if skipped:
-        cause = ClaimCause.PREREQUISITE if skipped[0].blocked_by else ClaimCause.SKIPPED
-        return Composed(ClaimStatus.BLOCKED, cause, gates_of(skipped), skipped[0])
+        return Composed(ClaimStatus.BLOCKED, ClaimCause.SKIPPED, gates_of(skipped), skipped[0])
     # 3. Gap
     if refused:
         return Composed(ClaimStatus.UNCLAIMED, ClaimCause.UNQUALIFIED, gates_of(refused),
@@ -531,8 +556,10 @@ def resolve_status(
 #: The verdicts `explaining_verdict` may cite, most explanatory first —
 #: `OUTCOME_ORDER` up to the refusal, `compose`'s rungs 1-3: a gate that RAN and
 #: failed carries the measured value and the limit, which is what the reader is
-#: about to go and change; a crash is louder than a missing tool; a skip
-#: explains before a refusal (Skipped ranks above Gap); a pass explains nothing.
+#: about to go and change; a crash is louder than a missing tool, and a skip
+#: behind a crashed prerequisite as loud; a skip behind a prerequisite names
+#: the root to fix before a plain skip; a skip explains before a refusal
+#: (Skipped ranks above Gap); a pass explains nothing.
 _EXPLAINS = OUTCOME_ORDER[:OUTCOME_ORDER.index("unqualified") + 1]
 
 
@@ -550,7 +577,8 @@ def explaining_verdict(claim: Claim, verdicts: Iterable[Verdict]) -> Verdict | N
     cited the gate that ran and measured 0.7 mm against a 0.5 mm limit. Two
     commands, two stories, one ledger; the reader went looking for a missing
     parameter. So the choice lives here, once, in `compose`'s order: ran and
-    failed, then errored, then skipped, then unqualified — and within a rank
+    failed, then errored, then not run behind a crashed prerequisite, then
+    behind any other, then skipped, then unqualified — and within a rank
     the first in the order given (stable, so the same ledger always cites the
     same gate). An unqualified evaluator's verdict says `error` too; it is
     ranked by its mark, never as a crash (P2.0 D-8).

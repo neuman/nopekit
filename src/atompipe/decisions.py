@@ -542,8 +542,9 @@ def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],
             key = ("[ -- ]", report.HUMAN["lead"][ClaimCause.UNRUN])
         else:
             key = _split_verdict(verdict)
-        # `claims.OUTCOME_ORDER` — fail, errored, skipped, unqualified (by the
-        # spine's mark, never as a crash), unrun, pass — the one table the
+        # `claims.OUTCOME_ORDER` — fail, errored, not run behind a crashed
+        # prerequisite, behind any other, skipped, unqualified (by the spine's
+        # mark, never as a crash), unrun, pass — the one table the
         # report's bullets and `explaining_verdict` read too (review of P2.1:
         # this kept its own copy, and two inline ranks beside it).
         rank = claim_logic.outcome_rank(verdict)

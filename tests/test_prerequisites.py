@@ -590,6 +590,29 @@ class TierInversionRefused(unittest.TestCase):
                 self.assertIn("t.p", text)
                 self.assertIn("t.d", text)
 
+    def test_the_refusal_names_the_file_with_the_edge(self):
+        """Review of P2.2: the loader prefixes the file it was loading — the
+        prerequisite's, when the dependent registered first — so the error
+        pointed at a file with no edge in it; and it cited ``D-28``, a plan row
+        the release bundle strips."""
+        gate_file = (
+            "from atompipe.gates import gate\n"
+            "from atompipe.models import NegativeControl, Tier, Verdict\n\n\n"
+            "@gate(id={gid!r}, claims=[{gid!r}], tier=Tier({tier}){needs},\n"
+            "      negative_control=NegativeControl(fixture='selftest/bad.py:bad'))\n"
+            "def g(ctx):\n"
+            "    return Verdict(gate={gid!r}, passed=True)\n")
+        root = _tmp(self)
+        _write(root, "gates/dep.py", gate_file.format(gid="mini.dep", tier=0,
+                                                       needs=", needs=['mini.guard']"))
+        _write(root, "gates/guard.py", gate_file.format(gid="mini.guard", tier=2, needs=""))
+        with self.assertRaises(AtompipeError) as caught:
+            gates.load_project_gates(root, gates.Registry())
+        text = str(caught.exception)
+        self.assertIn("'mini.dep' (tier 0, (project), declared in gates/dep.py)", text)
+        self.assertIn("Drop the edge from 'mini.dep'", text)
+        self.assertIsNone(re.search(r"\bD-\d+\b", text), text)
+
     def test_equal_and_cheaper_prerequisites_are_allowed(self):
         registry = gates.Registry()
         registry.register(_spec("t.d1", needs=["t.p"], tier=1), _passes("t.d1"))
@@ -756,6 +779,82 @@ def _captured(argv: list[str]) -> str:
         cli.main(argv)
     return out.getvalue()
 
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.2: applying the rule twice moves nothing
+# --------------------------------------------------------------------------- #
+def twice_problems() -> list[str]:
+    """``apply_prerequisites`` over its own output, in process: a dependent
+    pruned behind a failed guard, one behind a crashed guard, a chain, and one
+    marked under an invalidated guard. ``cli._swept`` applies the rule over a
+    view ``resolve`` already ruled on, so the second application is every
+    ``check``'s."""
+    out: list[str] = []
+    registry = gates.Registry()
+    registry.register(_spec("t.r", needs=["t.d"]), _passes("t.r"))
+    registry.register(_spec("t.d", needs=["t.p"]), _passes("t.d"))
+    registry.register(_spec("t.p"), _passes("t.p"))
+    d = Verdict(gate="t.d", passed=True, claims=["d"])
+    r = Verdict(gate="t.r", passed=True, claims=["r"])
+    for name, guard, stale in (
+            ("failed", Verdict(gate="t.p", passed=False, claims=["p"]), {}),
+            ("errored", Verdict(gate="t.p", error="RuntimeError: x", claims=["p"]), {}),
+            ("invalidated", Verdict(gate="t.p", passed=True, claims=["p"]),
+             {"t.p": "config.p 1 -> 2"})):
+        once = verdicts.apply_prerequisites(_resolution([guard, d, r], stale=stale), registry)
+        twice = verdicts.apply_prerequisites(once, registry)
+        if twice is not once:
+            moved = [g for g in once.rows if once.rows[g] != twice.rows.get(g)]
+            out.append(f"{name}: a second application made a new resolution (rows moved: "
+                       f"{moved})")
+        for gid in ("t.d", "t.r"):
+            notes = [n for n in twice.rows[gid].notes if str(n).startswith("not run: ")]
+            if len(notes) > 1:
+                out.append(f"{name}: {gid}'s row carries {notes}")
+    return out
+
+
+def swept_twice_problems(case: unittest.TestCase) -> list[str]:
+    """The review's world: a tier-1 dependent of a failing tier-0 guard, after
+    ``check --tier 0`` — ``resolve`` prunes it, and ``_swept`` applies the rule
+    again over the merged view."""
+    p = Planted(case, dep_tier=1, needs=["t.guard"])
+    p.sweep(max_tier=1)
+    p.config["p_guard"] = 5.0
+    result = p.sweep(max_tier=0)
+    out: list[str] = []
+    for name, (_view, resolution) in (("check", p.viewed(result)), ("status", p.viewed())):
+        notes = [n for n in resolution.rows["t.dep"].notes if str(n).startswith("not run: ")]
+        if notes != ["not run: prerequisite failed: t.guard"]:
+            out.append(f"{name}: the dependent's row carries {notes}")
+    return out
+
+
+class ApplyingTheRuleTwiceMovesNothing(unittest.TestCase):
+    """``apply_prerequisites`` is idempotent, as its docstring says (review of
+    P2.2): what slipped through was a second application rebuilding every
+    pruned gate's skip and appending its ``not run:`` note again — ``check``'s
+    view row read it twice — and handing back a new resolution, changed."""
+
+    def test_a_second_application_moves_nothing(self):
+        self.assertEqual(twice_problems(), [])
+
+    def test_checks_view_carries_one_note(self):
+        self.assertEqual(swept_twice_problems(self), [])
+
+    def test_a_rule_that_rebuilds_its_own_skip_is_caught(self):
+        real = verdicts._under_rule
+
+        def rebuilds(spec, own, unmet):
+            if own is not None and own.blocked_by:
+                return gates.blocked(spec, unmet)
+            return real(spec, own, unmet)
+
+        with mock.patch.object(verdicts, "_under_rule", rebuilds):
+            found = twice_problems()
+        self.assertTrue(any(p.startswith("failed: a second application") for p in found),
+                        found)
 
 
 # --------------------------------------------------------------------------- #
@@ -1032,8 +1131,11 @@ class ACachedPassNeverSurvivesAFailedPrerequisite(unittest.TestCase):
 # V6: check's row for a pruned dependent is what status reads
 # --------------------------------------------------------------------------- #
 #: D's own reading, made with the guard passing, before the guard goes down.
+#: "fresh fail, tool missing" is the review's cell (P2.2): rung 1 serves a Fresh
+#: FAIL where the tool is missing (R-3), and the first rule let it stand there —
+#: Failing on a machine without the tool, Skipped on one with it.
 OWN_READINGS = ("fresh pass", "fresh fail", "stale entry", "never run", "standing crash",
-                "standing self-skip", "refused", "tool missing")
+                "standing self-skip", "refused", "tool missing", "fresh fail, tool missing")
 #: How the guard is then made not established.
 ROOT_KINDS = ("failed", "errored", "self-skipped", "tool missing", "unqualified",
               "not registered")
@@ -1059,7 +1161,7 @@ def pruned_cell(case: unittest.TestCase, own: str, root_kind: str) -> dict[str, 
     p = Planted(case, needs=["t.guard"])
     flags = p.module.FLAGS
     missing: set[str] = set()
-    if own == "fresh fail":
+    if own in ("fresh fail", "fresh fail, tool missing"):
         p.config["p_dep"] = 5.0
     if own == "standing crash":
         flags["dep:crash"] = True
@@ -1070,7 +1172,7 @@ def pruned_cell(case: unittest.TestCase, own: str, root_kind: str) -> dict[str, 
     p.sweep(only=["t.guard"]) if own == "never run" else p.sweep()
     if own == "stale entry":
         p.config["p_dep"] = 1.5
-    if own == "tool missing":
+    if own in ("tool missing", "fresh fail, tool missing"):
         missing.add("t.dep")
     # the guard goes down
     if root_kind == "failed":
@@ -1129,7 +1231,12 @@ def pruned_problems(case: unittest.TestCase, cells: list[tuple[str, str]]) -> li
                        f"{got['status_claim'].cause.value} in status")
         if got["check_claim"].status is ClaimStatus.PASS:
             out.append(f"{name}: the dependent's claim reads Checked")
-        stands = own in ("standing crash", "standing self-skip", "refused", "tool missing")
+        # What stands (``verdicts._under_rule``): its own crash, always; its own
+        # skip or refusal unless the root crashed (as loud as a crash, invariant
+        # 10); never a measurement, a served FAIL included.
+        stands = own == "standing crash" or (
+            own in ("standing self-skip", "refused", "tool missing")
+            and root_kind != "errored")
         blocked = bool(got["row"] and got["row"].blocked_by)
         if stands == blocked:
             out.append(f"{name}: the rule {'replaced' if blocked else 'kept'} the "
@@ -1137,18 +1244,26 @@ def pruned_problems(case: unittest.TestCase, cells: list[tuple[str, str]]) -> li
         if own == "standing crash" and got["check_claim"].cause is not claims.ClaimCause.ERRORED:
             out.append(f"{name}: the dependent's own crash reads "
                        f"{got['check_claim'].cause.value}, quieter than errored")
+        if root_kind == "errored" and not got["check_claim"].errored:
+            out.append(f"{name}: behind a crashed guard the claim reads "
+                       f"{got['check_claim'].cause.value}, quieter than errored")
+        if got["check_claim"].status is ClaimStatus.FAIL:
+            out.append(f"{name}: the dependent's fail counts behind a guard that is not "
+                       f"established (D6: the number does not apply)")
     return out
 
 
 class PrunedRowIsWhatStatusReads(unittest.TestCase):
     """V6 (invariant 12): over the §3 table — every root kind against every
     reading the dependent can have of its own — ``check``'s row for it, the
-    claim view ``check`` judges from, and ``status`` agree, and only a pass, a
-    fail, a stale entry or nothing is replaced (P2.2-D6)."""
+    claim view ``check`` judges from, and ``status`` agree; a pass, a fail
+    (served where the tool is missing too), a stale entry or nothing is
+    replaced, and the dependent's own skip or refusal only under a crashed
+    root (P2.2-D6, as the review moved it)."""
 
     def test_every_cell(self):
         cells = list(itertools.product(OWN_READINGS, ROOT_KINDS))
-        self.assertEqual(len(cells), 48)
+        self.assertEqual(len(cells), 54)
         self.assertEqual(pruned_problems(self, cells), [])
 
     def test_a_pruned_row_that_always_blocks_is_caught(self):
@@ -1157,9 +1272,30 @@ class PrunedRowIsWhatStatusReads(unittest.TestCase):
 
         with mock.patch.object(verdicts, "_pruned_row", always):
             found = pruned_problems(self, [("standing crash", "failed"),
-                                           ("refused", "errored")])
+                                           ("refused", "failed")])
         self.assertTrue(any("standing crash / failed: check's row" in p for p in found), found)
+        self.assertTrue(any("refused / failed: check's row" in p for p in found), found)
         self.assertTrue(any("quieter than errored" in p for p in found), found)
+
+    def test_the_first_rule_is_caught(self):
+        """The review's violator (P2.2): the rule as it first landed — the
+        dependent's tool missing kept whatever it read, and any skip or refusal
+        of its own stood under every root. A served FAIL then counted behind a
+        failed guard, and a missing tool hid a crashed one."""
+        def first(spec, own, unmet):
+            if not gates.availability(spec)[0]:        # the cell's, patched in pruned_cell
+                return own
+            if own is not None and not own.blocked_by and own.outcome in ("error", "skipped"):
+                return own
+            return gates.blocked(spec, unmet)
+
+        with mock.patch.object(verdicts, "_under_rule", first):
+            found = pruned_problems(self, [("fresh fail, tool missing", "failed"),
+                                           ("tool missing", "errored")])
+        self.assertTrue(any("fresh fail, tool missing / failed: the dependent's fail counts"
+                            in p for p in found), found)
+        self.assertTrue(any("tool missing / errored: behind a crashed guard" in p
+                            for p in found), found)
 
 
 # --------------------------------------------------------------------------- #
@@ -1235,25 +1371,39 @@ class UnselectedDependentFollowsTheSweep(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # critique 1: a crash in a prerequisite stays louder than a missing tool
 # --------------------------------------------------------------------------- #
-def errored_root_problems(case: unittest.TestCase) -> list[str]:
+#: The dependent's own reading before its guard crashes: none, or one of the
+#: three the first rule let stand under any root (review of P2.2) — each quieter
+#: than a crash, so each gives way to the errored prerequisite skip.
+DEP_OWN = ("none", "tool missing", "self-skip", "refused")
+
+
+def errored_root_problems(case: unittest.TestCase, own: str = "none") -> list[str]:
     """The guard crashes on the live design; the claim tagged only with the
     dependent's vocabulary must read as loud as a crash — through every count,
     tone, lead and JUnit channel ``compose`` feeds — and louder than the same
-    world with the guard's tool missing."""
+    world with the guard's tool missing. ``own`` is the dependent's own
+    reading first (``DEP_OWN``): a missing tool, a self-skip, a refusal."""
     out: list[str] = []
     readings: dict[str, Any] = {}
     for name in ("crash", "tool"):
         p = Planted(case, needs=["t.guard"])
-        p.sweep()
+        dep_missing = {"t.dep"} if own == "tool missing" else set()
+        if own == "self-skip":
+            p.module.FLAGS["dep:self-skip"] = True
+        elif own == "refused":
+            p.module.FLAGS["dep:lenient"] = True
+        with mock.patch.object(gates, "availability", _availability(dep_missing)):
+            p.sweep()
         if name == "crash":
             p.config["p_guard"] = 1.5                # moved, so the guard re-runs
             p.module.FLAGS["guard:crash"] = True
-            missing: set[str] = set()
+            missing: set[str] = set(dep_missing)
         else:
-            missing = {"t.guard"}
+            missing = {"t.guard"} | dep_missing
         with mock.patch.object(gates, "availability", _availability(missing)):
             result = p.sweep()
             view, resolution = p.viewed(result)
+            status = p.composed()["CD"]
         composed = claims.compositions(view, registry=p.registry,
                                        stale_gates=resolution.stale_gates)
         claim = view.claim("CD")
@@ -1264,27 +1414,95 @@ def errored_root_problems(case: unittest.TestCase) -> list[str]:
                                                   exit_code=1, when=NOW,
                                                   stale_gates=resolution.stale_gates))
         if name == "crash":
+            if (status.status, status.cause) != (composed["CD"].status, composed["CD"].cause):
+                out.append(f"{own}: status reads {status.cause.value}, check "
+                           f"{composed['CD'].cause.value}")
             last = verdicts.write_last_check(p.root, result, resolution, now=NOW)
             with open(last, encoding="utf-8") as fh:
                 readings["last_check"] = json.load(fh)
     found, why, counts, junit = readings["crash"]
     if not found.errored:
-        out.append(f"the claim behind a crashed guard is not errored: {found.cause.value}")
+        out.append(f"{own}: the claim behind a crashed guard is not errored: "
+                   f"{found.cause.value} ({why})")
     if not why.startswith("errored:"):
-        out.append(f"its reason leads {why.split(':')[0]!r}, not 'errored': {why}")
+        out.append(f"{own}: its reason leads {why.split(':')[0]!r}, not 'errored': {why}")
     if report_mod.status_tag(found.status, errored=found.errored) != "[SKIP ]":
-        out.append("its tag is not Failing's tone")
+        out.append(f"{own}: its tag is not Failing's tone")
     if "(" not in counts or "errored)" not in counts:
-        out.append(f"the count line does not split it out: {counts}")
+        out.append(f"{own}: the count line does not split it out: {counts}")
     case_cd = ET.fromstring(junit.split("\n", 1)[1]).find(
         ".//testsuite[@name='claims.critical']/testcase[@name='CD']")
     if case_cd is None or case_cd.find("error") is None:
-        out.append("JUnit does not make it an <error>")
+        out.append(f"{own}: JUnit does not make it an <error>")
     if "CD" not in readings["last_check"]["errored"]:
-        out.append(f"last_check.json's errored is {readings['last_check']['errored']}")
+        out.append(f"{own}: last_check.json's errored is {readings['last_check']['errored']}")
     quiet = readings["tool"][0]
     if claims.severity(found) >= claims.severity(quiet):
-        out.append("a crashed guard reads no louder than a guard whose tool is missing")
+        out.append(f"{own}: a crashed guard reads no louder than a guard whose tool is "
+                   f"missing")
+    return out
+
+
+def _tool_gate_first(p: Planted) -> None:
+    """``p``'s registry with ``a.tool`` registered FIRST — a second evaluator of
+    the dependent's claim whose tool is missing everywhere — so record order
+    puts its skip before the dependent's (the review's world, P2.2)."""
+    registry = gates.Registry()
+    registry.register(_spec("a.tool", claims_=["dep"],
+                            requires_python=["atompipe_no_such_module_p22"]),
+                      _passes("a.tool"))
+    for spec, fn in p.registry.pairs():
+        registry.register(spec, fn)
+    p.registry = registry
+
+
+def ranked_skip_problems(case: unittest.TestCase) -> list[str]:
+    """A claim covered by a gate whose tool is missing (registered first) and by
+    a dependent not run behind its guard, failed and then crashed: the claim,
+    ``explaining_verdict``, the report's bullet order and ``last_check.json``'s
+    ``worst`` all cite the dependent, never the missing tool — installing it
+    changes nothing while the guard is down (S-54), and a crash is never filed
+    under a missing tool's words (invariant 2)."""
+    out: list[str] = []
+    for root_kind, cause, said in (
+            ("failed", claims.ClaimCause.PREREQUISITE, "prerequisite failed: t.guard"),
+            ("errored", claims.ClaimCause.PREREQUISITE_ERRORED,
+             "prerequisite not established: t.guard (errored)")):
+        p = Planted(case, needs=["t.guard"])
+        _tool_gate_first(p)
+        p.ledger = Ledger(claims=[_claim("CD", ["dep"])])
+        p.sweep()
+        if root_kind == "failed":
+            p.config["p_guard"] = 5.0
+        else:
+            p.config["p_guard"] = 1.5
+            p.module.FLAGS["guard:crash"] = True
+        result = p.sweep()
+        view, resolution = p.viewed(result)
+        found = claims.compositions(view, registry=p.registry,
+                                    stale_gates=resolution.stale_gates)["CD"]
+        claim = view.claim("CD")
+        cited = found.verdict.gate if found.verdict is not None else None
+        if (found.cause, cited) != (cause, "t.dep"):
+            out.append(f"{root_kind}: the claim reads {found.cause.value} citing {cited}, "
+                       f"not {cause.value} citing t.dep")
+        why = report_mod.reason(found, view, claim)
+        if said not in why:
+            out.append(f"{root_kind}: the reason does not name the guard: {why}")
+        explains = claims.explaining_verdict(claim, view.verdicts)
+        if explains is None or explains.gate != cited:
+            out.append(f"{root_kind}: explaining_verdict cites "
+                       f"{explains and explains.gate}, compose {cited}")
+        ranked = sorted((v for v in view.verdicts if v.gate in ("a.tool", "t.dep")),
+                        key=claims.outcome_rank)
+        if [v.gate for v in ranked] != ["t.dep", "a.tool"]:
+            out.append(f"{root_kind}: the bullets rank {[v.gate for v in ranked]}")
+        last = verdicts.write_last_check(p.root, result, resolution, now=NOW)
+        with open(last, encoding="utf-8") as fh:
+            worst = json.load(fh)["worst"]
+        if (worst["claim"], worst["gate"], worst["cause"]) != ("CD", "t.dep", cause.value) \
+                or worst["detail"] != said:
+            out.append(f"{root_kind}: last_check.json's worst is {worst}")
     return out
 
 
@@ -1294,10 +1512,27 @@ class AnErroredPrerequisiteStaysLouder(unittest.TestCase):
     claim solely as the dependent's skip — the missing tool's tone, its count,
     a JUnit ``<failure>``. The root's kind travels on the verdict
     (``Verdict.blocked_kind``, the spine's alone), and ``compose`` reads a skip
-    behind a crashed root as errored."""
+    behind a crashed root as errored.
+
+    And through what the dependent read of its own (review of P2.2): its own
+    missing tool, self-skip or refusal stood under every root, so behind a
+    crashed guard the claim read `skipped: <dep> : requires <tool>` — a
+    JUnit ``<failure>``, absent from ``last_check.json``'s ``errored``, and
+    errored again the day the tool was installed. And within Skipped the claim
+    cited its first skip in record order, so a missing tool beside the
+    dependent named the tool, and ``last_check.json``'s ``worst`` named it
+    beside the cause ``prerequisite-errored``."""
 
     def test_a_crashed_guard_reads_errored_downstream(self):
         self.assertEqual(errored_root_problems(self), [])
+
+    def test_the_dependents_own_skip_or_refusal_gives_way(self):
+        for own in DEP_OWN[1:]:
+            with self.subTest(own=own):
+                self.assertEqual(errored_root_problems(self, own), [])
+
+    def test_a_prerequisite_skip_leads_a_plain_one(self):
+        self.assertEqual(ranked_skip_problems(self), [])
 
     def test_a_cause_blind_to_the_roots_kind_is_caught(self):
         real = claims.compose
@@ -1311,6 +1546,50 @@ class AnErroredPrerequisiteStaysLouder(unittest.TestCase):
             found = errored_root_problems(self)
         self.assertTrue(any("not errored" in p for p in found), found)
 
+    def test_a_rule_where_the_dependents_own_reading_stands_is_caught(self):
+        """The first rule: any skip or refusal of the dependent's own stood,
+        whatever its root."""
+        def stands(spec, own, unmet):
+            if own is not None and not own.blocked_by and own.outcome in ("error", "skipped"):
+                return own
+            return gates.blocked(spec, unmet)
+
+        for own in DEP_OWN[1:]:
+            with self.subTest(own=own), mock.patch.object(verdicts, "_under_rule", stands):
+                found = errored_root_problems(self, own)
+            self.assertTrue(any("not errored" in p for p in found), found)
+
+    def test_a_composition_that_cites_the_first_skip_is_caught(self):
+        real = claims.compose
+
+        def first_skip(claim, verdicts_, **kw):
+            found = real(claim, verdicts_, **kw)
+            if found.cause is claims.ClaimCause.PREREQUISITE:
+                skipped = [v for v in claims.covering_verdicts(claim, verdicts_)
+                           if v.outcome == "skipped"]
+                if not skipped[0].blocked_by:
+                    return claims.Composed(found.status, claims.ClaimCause.SKIPPED,
+                                           found.cites, skipped[0])
+            return found
+
+        with mock.patch.object(claims, "compose", first_skip):
+            found = ranked_skip_problems(self)
+        self.assertTrue(any(p.startswith("failed: the claim reads skipped citing a.tool")
+                            for p in found), found)
+
+    def test_an_explaining_rank_blind_to_the_prerequisite_is_caught(self):
+        real = claims.outcome_rank
+
+        def blind(verdict):
+            if verdict is not None and verdict.blocked_by:
+                verdict = dataclasses.replace(verdict, blocked_by=[], blocked_kind="")
+            return real(verdict)
+
+        with mock.patch.object(claims, "outcome_rank", blind):
+            found = ranked_skip_problems(self)
+        self.assertTrue(any("explaining_verdict cites a.tool" in p for p in found), found)
+        self.assertTrue(any(p.startswith("errored: last_check.json's worst") and "a.tool" in p
+                            for p in found), found)
 
 
 # --------------------------------------------------------------------------- #
@@ -1486,6 +1765,77 @@ def words_problems(human: Any = None) -> list[str]:
     return out
 
 
+_UNAVAILABLE = "requires planted-tool (not installed)"
+
+
+def describe_problems(describe: Callable[[GateSpec], str] | None = None) -> list[str]:
+    """``gate list``'s line (``gates.describe``) for every bundled gate and the
+    bracket's, each gate with tools made unavailable here: what cannot run
+    survives the 240-character cap, and the spine's own words on the line —
+    the title, settles and claims blanked — say no GLOSSARY §2 or §3
+    Never-say. What slipped through (review of P2.2): the tail said
+    ``BLOCKED: <why>`` (a §3 Never-say, beside the new prerequisite list),
+    and the new segment pushed it past the cap."""
+    import test_vocabulary as vocab
+    describe = describe or gates.describe
+    text = vocab._glossary()
+    banned, masks = vocab.never_says(text, 2, 3), vocab.masked_terms(text)
+    registry = gates.Registry()
+    for path in sorted(os.listdir(os.path.join(_env.REPO, "packs"))):
+        if os.path.isfile(os.path.join(_env.REPO, "packs", path, "pack.json")):
+            packs.load_gates(path, registry, root=_env.REPO)
+    gates.load_project_gates(os.path.join(_env.REPO, "examples", "bracket"), registry)
+
+    def tooled(spec: GateSpec) -> bool:
+        return bool(spec.requires_tools or spec.requires_python or spec.requires_one_of)
+
+    out: list[str] = []
+    with mock.patch.object(gates, "availability",
+                           lambda spec: (False, _UNAVAILABLE) if tooled(spec) else (True, "")):
+        for spec in registry.specs():
+            line = describe(spec)
+            if len(line) > 240:
+                out.append(f"{spec.id}: {len(line)} characters")
+            if tooled(spec) and _UNAVAILABLE not in line:
+                out.append(f"{spec.id}: the cap cut what cannot run here: ...{line[-60:]}")
+            own = describe(dataclasses.replace(spec, title="", settles="", claims=["x"]))
+            hits = vocab.never_say_hits(own, banned, masks)
+            if hits:
+                out.append(f"{spec.id}: says {hits}: {own}")
+    return out
+
+
+def skill_problems(text: str) -> list[str]:
+    """What is wrong with the atompipe skill's account of a Skipped claim
+    (S-54): each cause with its own action, "install the tool" said once and
+    under the missing tool only, and each kind a prerequisite skip names
+    mapped to what clears it — the edge in D11's word."""
+    out: list[str] = []
+    for said in ("prerequisite failed: <evaluator>", "installing changes nothing",
+                 "prerequisite not established: <evaluator> (<why>)",
+                 "the gate skipped itself on its input"):
+        if said not in text:
+            out.append(f"SKILL.md does not say {said!r}")
+    at = text.index("Never call a skipped or errored gate a pass")
+    rule = text[at:text.index("Never simulate a physical claim")]
+    # "install the tool" is said once, under the missing-tool reason only.
+    if rule.count("install the tool") != 1:
+        out.append("SKILL.md tells every skip to install a tool (S-54)")
+    elif not (rule.index("requires <tool>") < rule.index("install the tool")
+              < rule.index("<its own words>")):
+        out.append("'install the tool' is not under the missing-tool reason (S-54)")
+    start = rule.find("prerequisite not established: <evaluator> (<why>)")
+    bullet = rule[start:rule.find("What you must not do", start)] if start >= 0 else ""
+    for kind, action in (("(skipped)", "requires <tool>"), ("(unqualified)", "gate selftest"),
+                         ("(not registered)", "drop the edge")):
+        if kind not in bullet or action not in bullet:
+            out.append(f"the prerequisite bullet gives no action for {kind}")
+    for wrong in ("install its tool if it skipped", "depends on"):
+        if wrong in rule:
+            out.append(f"SKILL.md says {wrong!r}")
+    return out
+
+
 class PrerequisiteWords(unittest.TestCase):
     """V16 (S-54, D11): *skipped* stops meaning only "missing tool", and the edge
     is called a *prerequisite* wherever a person reads about it."""
@@ -1516,18 +1866,23 @@ class PrerequisiteWords(unittest.TestCase):
     def test_the_skill_says_what_to_do_for_each_cause(self):
         with open(SKILL, encoding="utf-8") as fh:
             text = " ".join(fh.read().split())
-        for said in ("prerequisite failed: <evaluator>", "installing changes nothing",
-                     "prerequisite not established: <evaluator> (<why>)",
-                     "the gate skipped itself on its input"):
-            self.assertTrue(said in text, f"SKILL.md does not say {said!r}")
-        at = text.index("Never call a skipped or errored gate a pass")
-        rule = text[at:text.index("Never simulate a physical claim")]
-        # "install the tool" is said once, under the missing-tool reason only.
-        self.assertEqual(rule.count("install the tool"), 1, "SKILL.md tells every skip to "
-                                                            "install a tool (S-54)")
-        self.assertTrue(rule.index("requires <tool>") < rule.index("install the tool")
-                        < rule.index("<its own words>"),
-                        "'install the tool' is not under the missing-tool reason (S-54)")
+        self.assertEqual(skill_problems(text), [])
+
+    def test_a_skill_that_installs_for_every_prerequisite_skip_is_caught(self):
+        """Review of P2.2: the `(<why>)` bullet said "install its tool if it
+        skipped" — S-54 again for an fdm project whose guard skipped itself on
+        a missing bbox, where no tool is missing — and gave no action for
+        `(unqualified)` or `(not registered)`."""
+        with open(SKILL, encoding="utf-8") as fh:
+            text = " ".join(fh.read().split())
+        at = text.index("- `skipped: <gate> : prerequisite not established")
+        end = text.index("What you must not do", at)
+        planted = (text[:at] + "- `skipped: <gate> : prerequisite not established: "
+                   "<evaluator> (<why>)` — clear that evaluator by its own reason: install "
+                   "its tool if it skipped, fix it if it errored. " + text[end:])
+        found = skill_problems(planted)
+        self.assertTrue(any("(unqualified)" in p for p in found), found)
+        self.assertTrue(any("install its tool if it skipped" in p for p in found), found)
 
     def test_describe_and_help_say_prerequisite(self):
         registry = gates.Registry()
@@ -1541,6 +1896,33 @@ class PrerequisiteWords(unittest.TestCase):
         only = next(a for a in check._actions if "--only" in a.option_strings)
         self.assertIn("prerequisites", only.help)
         self.assertNotIn("needs", only.help)
+
+    def test_gate_list_lines_say_what_cannot_run_in_the_tables_words(self):
+        self.assertEqual(describe_problems(), [])
+
+    def test_the_first_describe_is_caught(self):
+        """The line as P2.2 first shipped it: ``BLOCKED: <why>`` at the tail,
+        after the new prerequisite segment."""
+        def first(spec):
+            bits = [f"{spec.id}  [t{int(spec.tier)}" + (f" {spec.pack}" if spec.pack else "")
+                    + "]"]
+            bits += [spec.title] if spec.title else []
+            bits += [f"settles {spec.settles}"] if spec.settles else []
+            bits += ["claims " + ",".join(spec.claims)] if spec.claims else []
+            bits += ["prerequisites " + ",".join(spec.needs)] if spec.needs else []
+            tools = list(spec.requires_tools or []) + list(spec.requires_python or [])
+            if spec.requires_one_of:
+                tools.append("one of " + "|".join(spec.requires_one_of))
+            if tools:
+                ok, reason = gates.availability(spec)
+                bits.append(("requires " + ",".join(tools)) if ok else f"BLOCKED: {reason}")
+            bits.append(f"control {spec.negative_control.fixture}")
+            return gates._one_line("  ".join(bits), 240)
+
+        found = describe_problems(first)
+        self.assertTrue(any("says ['blocked']" in p for p in found), found)
+        self.assertTrue(any(p.startswith("cad.assembly_connected: the cap cut") for p in found),
+                        found)
 
     def test_doctor_names_an_unregistered_prerequisite(self):
         root = _projects.bracket_copy(os.path.join(_tmp(self), "bracket"), migrated=True)
