@@ -54,9 +54,16 @@ CLAUDE_MD = os.path.join(_env.REPO, "CLAUDE.md")
 #: same commit, moved out of PLANNED_INVARIANT_CLASSES.
 INVARIANT_CLASSES: dict[int, str | list[str]] = {
     1: "test_invariants.SkipIsNotPass",
-    2: "test_invariants.ErrorIsNotPass",
+    # 2's second sentence, "reads louder than a missing tool", in what every
+    # command prints (P2.0, R-1): carried by FAIL until Phase 2 moves an errored
+    # claim to Skipped, and from then on only by these tests.
+    2: ["test_invariants.ErrorIsNotPass", "test_louder.ErrorIsLouder"],
     3: "test_invariants.RegistryRefusesLoggers",
-    4: "test_invariants.ReportNeverOverclaims",
+    # 4 over a pass beside an evaluator that is not admitted (P2.0): an
+    # invariant-9 change that drops the refused verdict would leave the pass
+    # alone and the claim under PROVEN.
+    4: ["test_invariants.ReportNeverOverclaims",
+        "test_status_table.UnqualifiedBesideAPassIsNeverChecked"],
     5: "test_packs.ControlsAreSealed",
     6: "test_packs.NegativeControlsFire",
     7: "test_staleness.StaleIsNotCurrent",
@@ -70,9 +77,19 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
 #: not from the later commit that writes its number into CLAUDE.md — by then a
 #: skip could already be load-bearing. Phase 1 planned 7-9 here; 7 and 9 moved to
 #: INVARIANT_CLASSES when CLAUDE.md numbered them (checkpoint 1.2), and 8 with the
-#: records layout (1.3), each the day its number landed. Empty until the phase
-#: that adds invariant 10 creates its class — and that commit adds it here.
-PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {}
+#: records layout (1.3), each the day its number landed.
+#:
+#: 15 is PLAN §4.0.1's mutation half (PLAN-v0.14 §4.1: "the mutation half lands
+#: in P2 as MutationIsSealed, in P2.0"). It is planned, not mapped, because
+#: CLAUDE.md states 1-9 and `EveryInvariantHasItsTest` refuses a mapped number
+#: CLAUDE.md does not state; it moves to INVARIANT_CLASSES, with CLAUDE.md's new
+#: item, in the checkpoint that makes mutation mechanical (P2.3) — PLAN §4.0.1:
+#: "each is added to CLAUDE.md in the phase that makes it mechanical".
+#: *Rejected:* keeping it planned past P2 — mutation would ship inside
+#: qualification with its seal stated nowhere a reader of CLAUDE.md looks.
+PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {
+    15: "test_mutation.MutationIsSealed",
+}
 
 
 def _refs(mapping: dict[int, str | list[str]]) -> list[str]:

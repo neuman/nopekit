@@ -13,11 +13,13 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine: 68-71 s
-measured 2026-10-03 (load average 1.3), after the bundled-pack seal tests and
-the migrated-project write sweep joined; 54-59 s before they did, and 94 s for
-that shorter list with other agents loading the machine. Re-time it whenever
-``FAST`` changes; a run under load is not a measurement.
+The budget is 90 s as ONE process on an otherwise idle machine: 66-72 s
+measured 2026-10-03 (load average 0.1-2.5) after ``test_louder``,
+``test_status_table`` and ``test_mutation`` joined (5.0 s, 0.1 s and 1.0 s
+alone); 68-71 s before them (load average 1.3), after the bundled-pack seal
+tests and the migrated-project write sweep joined; 54-59 s before those, and
+94 s for that shorter list with other agents loading the machine. Re-time it
+whenever ``FAST`` changes; a run under load is not a measurement.
 
 **The selection is an explicit list of test names.** Rejected:
 
@@ -51,7 +53,11 @@ out below are the channels that code carries:
 * a command's code in `cli.py`, `store.py`, a record writer or a migration ->
   `test_records` (every command on a legacy project, and the shims);
 * a pack's fixtures or baseline, the fixture context in `gates.py`, or
-  `NegativeControl` -> `test_packs` (with `test_pack_mode`).
+  `NegativeControl` -> `test_packs` (with `test_pack_mode`);
+* a renderer's code — `report.py`, `Verdict.render`, `cmd_check`,
+  `cmd_status`, `cmd_doctor`, `claim list`/`show`, `decisions.why`,
+  `site.state` or the site template — -> `test_louder` is in this tier; also
+  run `test_renderers`, `test_junit`, `test_shapes` and `test_site` whole.
 
 Run:  PYTHONPATH=src python3 -m tests.fast        (or: python3 -m unittest tests.fast)
 """
@@ -97,6 +103,19 @@ FAST: list[str] = [
     # JUnit is never greener than the exit code: a skip or an error is never a
     # passing testcase to CI. 0.1 s.
     "test_junit",
+    # Invariant 2's second sentence: a crash reads louder than a missing tool in
+    # every renderer — in process on the report's own renderers, and through
+    # one planted project that runs every command once (the commands cost the
+    # time: ~5 s, the in-process half <1 s). With the ratchet that names where
+    # today is quieter (ErrorNotYetLouder), and the command tripwire.
+    "test_louder",
+    # Today's resolve_status table, the report's section order, and invariant 4
+    # over a pass beside an evaluator that is not admitted. <0.1 s.
+    "test_status_table",
+    # Planned invariant 15: the mutation harness, its planted runners, the
+    # tripwire, and the reference runner over the bracket's six gates and a
+    # bundled pack's eight. ~1 s.
+    "test_mutation",
     # Freshness, admission state and the one resolver: what any reader may call
     # current. Invariants 7 and 9 are read through it. 2.1 s.
     "test_freshness",
@@ -362,9 +381,16 @@ def coverage_problems(fast: list[str], left: list[str],
 
 
 def _invariant_classes() -> dict[str, list[str] | None]:
+    """Every class of a numbered invariant AND of a planned one: a test added to
+    a planned class (MutationIsSealed, P2.0) must be placed too, or it would run
+    in neither tier until someone noticed — the class is planned so that the
+    rules bite from its first line, and this is one of them (D-13). *Rejected:*
+    listing a planned class in FAST by name only, which a fourth test added to
+    it later slips past."""
     loader = unittest.TestLoader()
     out: dict[str, list[str] | None] = {}
-    for ref in test_meta._refs(test_meta.INVARIANT_CLASSES):
+    for ref in (test_meta._refs(test_meta.INVARIANT_CLASSES)
+                + test_meta._refs(test_meta.PLANNED_INVARIANT_CLASSES)):
         cls = test_meta._resolve(ref)
         out[ref] = list(loader.getTestCaseNames(cls)) if cls is not None else None
     return out
