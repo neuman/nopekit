@@ -529,7 +529,7 @@ class CopyListsWhatACloneHolds(_env.EnvCase):
 #: it or push its tag later (R-6, R-7).
 SPEC_STEP_IDS = (
     "first-check-exit", "first-check-shape", "first-check-cached", "clean-after-check",
-    "edit-bed-xy", "status-stale", "check-after-edit", "porcelain-after-edit",
+    "status-words", "edit-bed-xy", "status-stale", "check-after-edit", "porcelain-after-edit",
     "why-thickness", "gate-show-last-selftest", "pack-mode-selftest", "check-junit",
     "revert", "no-bytecode-shown",
 )
@@ -537,7 +537,7 @@ SPEC_STEP_IDS = (
 #: Each step's tag in the spec's table. A tag moves later only here, visibly.
 SPEC_TAGS = {
     "first-check-exit": (1, 1), "first-check-shape": (1, 2), "first-check-cached": (1, 3),
-    "clean-after-check": (1, 3), "edit-bed-xy": (1, 2), "status-stale": (1, 2),
+    "clean-after-check": (1, 3), "status-words": (2, 1), "edit-bed-xy": (1, 2), "status-stale": (1, 2),
     "check-after-edit": (1, 2), "porcelain-after-edit": (1, 3), "why-thickness": (1, 3),
     "gate-show-last-selftest": (1, 2), "pack-mode-selftest": (1, 1), "check-junit": (1, 1),
     "revert": (1, 2), "no-bytecode-shown": (1, 3),
@@ -617,22 +617,38 @@ class TranscriptIsWellFormed(unittest.TestCase):
 
 #: The plan's transcript (docs/plan/phase-1.md), as each command prints it once
 #: Phase 1 has landed — the positive control for every expectation. Built here,
-#: never read from the plan file: the plan is a document people edit.
+#: never read from the plan file: the plan is a document people edit. From P2.1
+#: in GLOSSARY's words (R-6, words and one claim): C6, an assumption nobody owns,
+#: is a Gap and blocks; C7 says "no evaluator"; `status` says `invalidated:`,
+#: `verdicts current` and `last check run:`; and `status-words` is P2.1's step.
 _CACHED_FAIL = f"{'[FAIL] bracket.deflection : 0.700 mm at 15 N (limit 0.5 mm)':<77} cached"
 _BLOCKING = (
-    "BLOCKING — 2 critical claim(s) must not be spent against:\n"
+    "BLOCKING — 3 critical claim(s) must not be spent against:\n"
     "[FAIL ] C1 Tip sags no more than 0.5 mm at rated load — bracket.deflection : "
     "0.700 mm at 15 N (limit 0.5 mm)\n"
-    "[gap  ] C7 First mode is clear of the pump that sits on the shelf — no gate covers it\n")
+    "[gap  ] C6 The load is static and centred on the arm — no owner recorded\n"
+    "[gap  ] C7 First mode is clear of the pump that sits on the shelf — no evaluator\n")
 _PLAN_OUTPUT = {
     "first-check-exit": (1, f"{_CACHED_FAIL}\n"
                             "6 gates: 0 executed, 6 cached — 5 ok, 1 FAIL — tier 0\n"
                             + _BLOCKING),
     "clean-after-check": (0, ""),
+    "status-words": (0, "atompipe readiness — wall-bracket v0.1\n"
+                        "v0.1 is NOT ready: 4 of 7 required claims are unresolved — "
+                        "1 failing (C1); 2 gaps (C6, C7); 1 pending build (C5). 3 of 7 "
+                        "claims are checked against the current inputs. Pending build: "
+                        "1 claim needs an article (C5).\n"
+                        "7 claims · 3 checked · 1 failing · 2 gaps · 1 pending build\n"
+                        "[gap  ] C6 The load is static and centred on the arm — "
+                        "no owner recorded\n"
+                        "[build] C5 Survives two winters outdoors without UV "
+                        "embrittlem… — needs an article; no test written down\n"
+                        "invalidated: none   (6 verdicts current)\n"
+                        "last check run: 2026-09-27T14:02:11Z (3m ago)\n"),
     "status-stale": (0, "bracket — 7 claims, 6 gates\n"
-                        "stale: bracket.bed_fit — config.bed_xy 220.0 -> 250.0   "
-                        "(5 checks current)\n"
-                        "last check: 2026-09-27T14:02:11Z (3m ago)\n"),
+                        "invalidated: bracket.bed_fit — config.bed_xy 220.0 -> 250.0   "
+                        "(5 verdicts current)\n"
+                        "last check run: 2026-09-27T14:02:11Z (3m ago)\n"),
     "check-after-edit": (1, "[ok  ] bracket.bed_fit : 74 x 30 x 7 mm vs 234 mm usable "
                             "(250 bed - 2x8 brim)\n"
                             f"{_CACHED_FAIL}\n"

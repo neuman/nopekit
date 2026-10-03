@@ -98,6 +98,12 @@ Scenarios that edit code run the sweep in a fresh process (`_DRIVER`, through
 an edit visible or invisible. Everything else runs in-process on a fresh
 `Registry` — never `gates.REGISTRY`.
 
+
+From P2.1 a claim whose evaluator is refused at its version reads Gap
+(`unclaimed`, cause `unqualified`), never FAIL — PLAN-v0.14 §1.4, "a claim with no
+qualified evaluator remains a gap" — and still blocks. The CLI tests below assert
+`unclaimed` where they asserted `fail` (R-6: each a row of
+`test_status_table.EXPECTED`, `unadmitted` -> `unclaimed`; nothing else moved).
 Run:  PYTHONPATH=src python3 -m unittest tests.test_admission -v
 """
 from __future__ import annotations
@@ -1422,9 +1428,9 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                          "refused gate is never called")
         self.assertEqual(data["counts"]["controls"]["executed"], len(BRACKET_GATES),
                          "bad_configs.py is every bracket control's static input")
-        self.assertEqual(blocking_ids(data).get("C2"), "fail", data["blocking"])
+        self.assertEqual(blocking_ids(data).get("C2"), "unclaimed", data["blocking"])
         after = status_json(self, project)
-        self.assertEqual(after["claims"]["C2"], "fail")
+        self.assertEqual(after["claims"]["C2"], "unclaimed")
         self.assertEqual(after["freshness"]["bracket.bending_stress"]["admission"],
                          "not-admitted")
         self.assertNotIn("**C2**", proven_section(self, project))
@@ -1451,7 +1457,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                 self.assertEqual(got["outcome"], "error", got)
                 self.assertIn("not admitted: PASSED its own known-bad fixture "
                               "selftest/bad_configs.py:quarter_thickness", got["error"])
-                self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+                self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
                 if attempt == "first":
                     # structural.py is every bracket gate's code: all six re-key,
                     # five re-run, and the refused one is never called.
@@ -1463,7 +1469,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                     self.assertEqual(data["counts"]["controls"]["executed"], 0,
                                      "the refusal is a recorded control entry, reused")
                 status = status_json(self, project)
-                self.assertEqual(status["claims"]["C1"], "fail")
+                self.assertEqual(status["claims"]["C1"], "unclaimed")
                 self.assertNotEqual(status["freshness"]["bracket.deflection"]["state"],
                                     "fresh", "a PASS from the logger was never recorded")
                 self.assertNotIn("**C1**", proven_section(self, project))
@@ -1485,14 +1491,14 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(got["outcome"], "error", got)
         self.assertIn("not admitted: PASSED its own known-bad fixture "
                       "selftest/bad_configs.py:overloaded", got["error"])
-        self.assertEqual(blocking_ids(data).get("C2"), "fail", data["blocking"])
+        self.assertEqual(blocking_ids(data).get("C2"), "unclaimed", data["blocking"])
         self.assertEqual(data["counts"]["executed"], len(BRACKET_GATES) - 1,
                          "every gate ran but the refused one")
         self.assertEqual(entry_names(project, "bracket.bending_stress"), set(),
                          "a refused gate records no verdict")
         with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
                   encoding="utf-8") as fh:
-            self.assertEqual(json.load(fh)["statuses"]["C2"], "fail")
+            self.assertEqual(json.load(fh)["statuses"]["C2"], "unclaimed")
 
     def test_cli_identity_fixtures_for_deflection_are_not_admitted(self):
         # S-07, D-27, in both spellings the plan names. The live bracket fails
@@ -1527,7 +1533,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                 self.assertEqual((refusals[0]["host"], refusals[0]["admitted"]),
                                  ("known-good", "no"), refusals[0])
                 status = status_json(self, project)
-                self.assertEqual(status["claims"]["C1"], "fail", "a refused gate still blocks")
+                self.assertEqual(status["claims"]["C1"], "unclaimed", "a refused gate still blocks")
                 self.assertEqual(status["freshness"]["bracket.deflection"]["admission"],
                                  "not-admitted")
 
@@ -1558,7 +1564,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(got["outcome"], "error", got)
         self.assertTrue(got["error"].startswith("not admitted: "), got)
         self.assertEqual(code, 1, "an identity fixture admitted the live design")
-        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
         self.assertNotIn("C1", proven_section(self, project))
 
@@ -1607,7 +1613,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(data["counts"]["controls"]["executed"], 1,
                          "the tier-2 path's control never ran: the tier-0 one was served")
         self.assertEqual(code, 1, "a tier-2 sweep admitted a path that passes 400 mm")
-        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass",
                             "a reader admitted the costlier path on the cheap path's control")
         self.assertNotIn("**C1**", proven_section(self, project))
@@ -1793,7 +1799,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertTrue(got["error"].startswith("not admitted: "), got)
         self.assertIn("PASSED its own known-bad fixture selftest/bad.py:long", got["error"])
         self.assertEqual(code, 1, "a control defused by a claim edit admitted its gate")
-        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertEqual(self._last_selftest(project)["admission"], "not-admitted")
         self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
         self.assertNotIn("C1", proven_section(self, project))
@@ -1916,7 +1922,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(got["outcome"], "error", got)
         self.assertIn(f"not admitted: {why}", got["error"])
         self.assertEqual(code, 1, "a control the live design defused admitted its gate")
-        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertEqual(self._last_selftest(project)["admission"], "not-admitted")
         self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
         self.assertNotIn("C1", proven_section(self, project))
@@ -2220,7 +2226,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(got["outcome"], "error", got)
         self.assertIn(f"not admitted: PASSED its own known-bad fixture {ref}", got["error"])
         self.assertEqual(code, 1, "a fixture edited into a no-op admitted its gate")
-        self.assertEqual(blocking_ids(data).get("C1"), "fail", data["blocking"])
+        self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
         self.assertNotIn("**C1**", proven_section(self, project))
         proc = cli(project, "gate", "selftest", "--no-record")

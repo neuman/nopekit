@@ -747,7 +747,8 @@ class Resolve(_env.EnvCase):
         served = _row_verdict(after, "t.flaky")
         self.assertEqual(served.outcome, "error")
         self.assertEqual(served.rho, partial, "the crash carries its own partial-read rho")
-        self.assertEqual(p.statuses(after)["C5"], ClaimStatus.FAIL)
+        # P2.1 (R-6, a V1 row): a crash reads Skipped, errored — never FAIL.
+        self.assertEqual(p.statuses(after)["C5"], ClaimStatus.BLOCKED)
         self.assertFalse(after.rows["t.flaky"].cached)
         self.assertEqual(after.rows["t.flaky"].when, "2026-09-27T11:00:00Z")
 
@@ -791,7 +792,8 @@ class Resolve(_env.EnvCase):
         self.assertEqual(_row_verdict(resolution, "t.bed").outcome, "error")
         status = p.statuses(resolution)
         self.assertEqual(status["C1"], ClaimStatus.BLOCKED)
-        self.assertEqual(status["C2"], ClaimStatus.FAIL)
+        # P2.1 (R-6, a V1 row): a remembered crash reads Skipped, errored.
+        self.assertEqual(status["C2"], ClaimStatus.BLOCKED)
         self.assertEqual(status["C3"], ClaimStatus.PENDING, "a gate with nothing is PENDING")
         self.assertNotIn("t.many", resolution.rows)
 
@@ -844,7 +846,8 @@ class Resolve(_env.EnvCase):
         verdict = _row_verdict(flipped, "t.defl")
         self.assertEqual(verdict.outcome, "error")
         self.assertTrue(verdict.error.startswith("two outcomes recorded for identical inputs"))
-        self.assertEqual(p.statuses(flipped)["C1"], ClaimStatus.FAIL)
+        # P2.1 (R-6, a V1 row): the conflict is an error, so Skipped, errored.
+        self.assertEqual(p.statuses(flipped)["C1"], ClaimStatus.BLOCKED)
 
     def test_a_hand_edited_entry_is_ignored_and_named(self):
         p = _Project(self)
@@ -927,7 +930,10 @@ class AdmissionInResolution(_env.EnvCase):
         self.assertTrue(verdict.error.startswith("not admitted: "), verdict.error)
         self.assertIn("PASSED its own known-bad", verdict.error)
         self.assertEqual(resolution.rows["t.defl"].admission.state, "not-admitted")
-        self.assertEqual(p.statuses(resolution)["C1"], ClaimStatus.FAIL)
+        # P2.1 (R-6, a V1 row): a refused evaluator reads Gap, `unqualified`,
+        # never FAIL — and the spine marks the verdict so.
+        self.assertEqual(verdict.unqualified, resolution.rows["t.defl"].admission.reason)
+        self.assertEqual(p.statuses(resolution)["C1"], ClaimStatus.UNCLAIMED)
 
     def test_an_undemonstrated_fail_stays_fail(self):
         # It blocks either way; admission gates what may COUNT as a pass.

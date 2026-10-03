@@ -596,7 +596,9 @@ def _oracle():
 
 
 def _report(*, exit_code: str = "1", deflection: str = '<failure type="fail" message="m"/>',
-            extra_gate: str = "", c5: str = '<skipped message="needs a real part"/>') -> str:
+            extra_gate: str = "",
+            c5: str = '<skipped message="pending build: needs an article; no test written down"/>'
+            ) -> str:
     return textwrap.dedent(f"""\
         <?xml version="1.0" encoding="UTF-8"?>
         <testsuites name="atompipe check">
@@ -610,7 +612,7 @@ def _report(*, exit_code: str = "1", deflection: str = '<failure type="fail" mes
             <testcase classname="claims.critical" name="C1"><failure type="fail" message="m"/></testcase>
             <testcase classname="claims.critical" name="C2"/>
             <testcase classname="claims.critical" name="C5">{c5}</testcase>
-            <testcase classname="claims.critical" name="C6"><skipped message="assumed"/></testcase>
+            <testcase classname="claims.critical" name="C6"><failure type="unclaimed" message="m"/></testcase>
             <testcase classname="claims.critical" name="C7"><failure type="unclaimed" message="m"/></testcase>
           </testsuite>
           <testsuite name="claims.not-critical"/>
@@ -683,14 +685,20 @@ class SignatureIsExact(_env.EnvCase):
 
     def test_the_pinned_file_is_the_spec_json(self):
         """The signature is a fixture: a phase that changes it on purpose changes
-        this file in the same commit and says why (PLAN G4)."""
+        this file in the same commit and says why (PLAN G4). P2.1 changed it: C6,
+        an assumption nobody owns, reads Gap and blocks until its owner records
+        it through the signing channel (later in Phase 2, when it moves back);
+        C5's message is GLOSSARY's words (R-6, the synthetic report above with
+        it)."""
         with open(EXPECTED, encoding="utf-8") as fh:
             self.assertEqual(json.load(fh), {
                 "exit_code": 1,
                 "gates": {"fail": ["bracket.deflection"], "error": [],
                           "not-admitted": [], "skipped": []},
-                "claims.critical": {"fail": {"C1": "fail", "C7": "unclaimed"},
-                                    "skipped": {"C5": "needs a real part", "C6": "assumed"}},
+                "claims.critical": {"fail": {"C1": "fail", "C6": "unclaimed",
+                                             "C7": "unclaimed"},
+                                    "skipped": {"C5": "pending build: needs an article; "
+                                                      "no test written down"}},
             })
 
 

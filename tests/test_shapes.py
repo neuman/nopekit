@@ -62,11 +62,15 @@ WRAPPED = re.compile(r"^       \S.*$")
 #: `check`'s note on registered gates the sweep did not select.
 CARRIED_NOTE = re.compile(
     r"^note: \d+ gate\(s\) outside this sweep keep their last verdict \(.+\)"
-    r"(?: — \d+ of them stale)?$")
+    r"(?: — \d+ of them invalidated)?$")
 
-#: `check`'s last line when nothing critical blocks, or when there are no claims.
-READY = re.compile(r"^ready: no critical claim is blocking .+$")
-NO_CLAIMS = re.compile(r"^no claims recorded, so nothing was checked — .+$")
+#: `check`'s last line when nothing critical blocks: `ready:` only when every
+#: required claim reads Checked (GLOSSARY §4, P2.1), else what stands between
+#: the project and ready; or the line for no claims at all. (R-6, P2.1: `ready:
+#: no critical claim is blocking` said ready while a claim waited for an article.)
+READY = re.compile(r"^(?:ready: every required claim is checked"
+                   r"|nothing stops this check run — .+)$")
+NO_CLAIMS = re.compile(r"^no claims recorded, so nothing was evaluated — .+$")
 
 #: The readiness block `report.render_terminal` prints at the top of `status`, in
 #: its order: the head, one sentence, the counts, the unsettled claims (and how
@@ -74,10 +78,12 @@ NO_CLAIMS = re.compile(r"^no claims recorded, so nothing was checked — .+$")
 STATUS_HEAD = (
     ("head", re.compile(r"^atompipe readiness — .+$"), 1, 1),
     ("sentence", re.compile(r"^\S.*$"), 1, 1),
-    ("counts", re.compile(r"^claims \d+(?: — .+)?$"), 1, 1),
+    # GLOSSARY §9's count line (P2.1, R-6): `7 claims · 3 checked · 1 failing`,
+    # Skipped with its crashes apart, `N skipped (k errored)`.
+    ("counts", re.compile(r"^\d+ claims?(?: · \d+ [a-z ]+(?: \(\d+ errored\))?)*$"), 1, 1),
     ("claim", re.compile(r"^\[.{5}\] \S+ .+ — .+$"), 0, None),
-    ("more claims", re.compile(r"^       \.\.\. and \d+ more unsettled claims — .+$"), 0, 1),
-    ("gaps", re.compile(r"^gaps \d+:$"), 0, 1),
+    ("more claims", re.compile(r"^       \.\.\. and \d+ more unresolved claims — .+$"), 0, 1),
+    ("gaps", re.compile(r"^gap records \d+:$"), 0, 1),
     ("gap", re.compile(r"^  \S+ .+ \(\S+\) — .+$"), 0, None),
     ("more gaps", re.compile(r"^  \.\.\. and \d+ more$"), 0, 1),
     ("gates", re.compile(r"^gates: .+$"), 0, 1),
@@ -627,7 +633,7 @@ class StatusShape(_ShapeCase):
 
     def test_a_line_added_is_refused(self):
         text = self.out("status-stale", 0)
-        for where, after in (("in the head", lambda line: line.startswith("claims ")),
+        for where, after in (("in the head", lambda line: bool(re.match(r"^\d+ claims ", line))),
                              ("after the stale block", T.STALE_LINE.fullmatch),
                              ("after last check", T.LAST_CHECK.fullmatch),
                              ("after the note", T.NOTE_PENDING.fullmatch)):
@@ -639,7 +645,7 @@ class StatusShape(_ShapeCase):
             with self.subTest(step=step):
                 text = self.out(step, 0)
                 self.refuses(sub_line(text, T.LAST_CHECK, r" \([^()]+ ago\)$", ""),
-                             "`last check:` without its age")
+                             "`last check run:` without its age")
 
 
 class GateShowShape(_ShapeCase):
@@ -736,8 +742,9 @@ class SelftestShape(_ShapeCase):
 _CACHED_DEFLECTION = (r"^\[FAIL\] bracket\.deflection : 0\.700 mm at 15 N "
                       r"\(limit 0\.5 mm\)\s+cached$")
 _BLOCKING_LINES = (
-    ("the BLOCKING head", r"^BLOCKING — 2 critical claim\(s\) must not be spent against:$"),
+    ("the BLOCKING head", r"^BLOCKING — 3 critical claim\(s\) must not be spent against:$"),
     ("C1", T._C1),
+    ("C6", T._C6),
     ("C7", T._C7),
 )
 

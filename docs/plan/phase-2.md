@@ -71,7 +71,9 @@ the current report section order, and that `SECTION_PROVEN` (P1.0) exists.
   `site.py`'s `row["partial"]` becomes `bool(unproven)` regardless of status.
 - **Strengthened test (R-6):**
   `test_site.test_a_partially_covered_claim_carries_the_partial_marker` asserts
-  `status != "pass"` *and* that the unproven gate is named.
+  `status != "pass"` *and* that the unproven gate is named. (Landed in P2.1 as
+  `test_a_partially_covered_claim_reads_skipped_and_names_the_gate`: D18 dropped
+  `partial` itself, so the row reads Skipped and the old name would be false.)
 - **Visible change**, stated in the phase summary and recorded in `claims.py` with the
   probe that exposed it: a project with a skipping tag-bound pack gate beside a passing one
   now blocks. That is the honest direction; the fix is to publish the key or drop the tag.

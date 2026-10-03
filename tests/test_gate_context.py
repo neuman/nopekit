@@ -576,7 +576,11 @@ class CostIsMeasured(_env.EnvCase):
         self.assertTrue(v.skipped)
         self.assertEqual((v.duration_s, v.cpu_s, v.rho), (0.0, 0.0, ""))
         names = [f.name for f in dataclasses.fields(Verdict)]
-        self.assertEqual(names[-2:], ["rho", "cpu_s"], "R-2: new fields go on the end")
+        # P2.1 put `unqualified` after them, on the end too (R-6: the window
+        # widened by one, the order it pins unchanged).
+        self.assertEqual(names[-3:], ["rho", "cpu_s", "unqualified"],
+                         "R-2: new fields go on the end")
+        self.assertEqual(v.unqualified, "", "a skip carries no refusal mark")
         self.assertEqual([f.name for f in dataclasses.fields(GateContext)][-2:],
                          ["memo", "trace"])
 

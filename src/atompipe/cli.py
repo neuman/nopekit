@@ -769,7 +769,7 @@ def _verdict_row(verdict: Verdict, *, cached: bool | None = None, fresh: bool | 
     (cli:H12, `CostIsKept`) — the cost lives in obs.
     """
     row = verdict.to_dict()
-    for key in ("detail", "error", "evidence", "skip_reason", "units", "rho"):
+    for key in ("detail", "error", "evidence", "skip_reason", "units", "rho", "unqualified"):
         if not row.get(key):
             row.pop(key, None)
     for key in ("measured", "limit"):
@@ -1020,11 +1020,17 @@ def _never_run(resolution: verdicts.Resolution, registry: gates.Registry | None)
 
 def _stale_lines(resolution: verdicts.Resolution, registry: gates.Registry | None, *,
                  model_error: str = "") -> list[str]:
-    """`status`'s `stale:` block (spec §3.13): one line per stale gate with its
-    reasons, continuation lines indented under `stale: `, and the counts on the
-    last — `(N checks current[, n never run])`, a check being current when its
-    verdict is a Fresh entry whose control is admitted or pending. `stale: none`
-    with the counts when nothing is stale.
+    """`status`'s `invalidated:` block (spec §3.13): one line per gate whose
+    verdict is not current, with its reasons, continuation lines indented under
+    the head, and the counts on the last — `(N verdicts current[, n unrun])`, a
+    verdict being current when it is a Fresh entry whose control is admitted or
+    pending. `invalidated: none` with the counts when nothing moved.
+
+    In GLOSSARY §6's words from P2.1: a verdict whose read set moved is
+    *invalidated* (§6.2's operation) and only its claim reads *Stale*; a gate
+    with no verdict is *unrun* and its claim *Open*. What slipped through: the
+    block was headed `stale:`, counted `checks current` and `never run`, three
+    status words one screen below the claim rows they were not about.
 
     One line per gate, always. What slipped through while wiring it: with the
     model broken, the resolver's reason for every gate that reads it carries the
@@ -1033,18 +1039,19 @@ def _stale_lines(resolution: verdicts.Resolution, registry: gates.Registry | Non
     reader and the counts. The error is `model:`'s line, printed once below."""
     current = sum(1 for row in resolution.rows.values() if row.fresh)
     never = _never_run(resolution, registry)
-    counts = f"   ({current} checks current" + (f", {len(never)} never run" if never else "") + ")"
+    counts = (f"   ({current} verdicts current"
+              + (f", {len(never)} unrun" if never else "") + ")")
     stale = _stale_gate_list(resolution)
     if not stale:
-        return [f"stale: none{counts}"]
+        return [f"invalidated: none{counts}"]
     lines = []
     for index, gate_id in enumerate(stale):
         row = resolution.rows.get(gate_id)
-        why = (row.stale_reason if row is not None else "") or "not current"
+        why = (row.stale_reason if row is not None else "") or "invalidated"
         if model_error:
             why = why.replace(f": {model_error}", "")
-        why = (why.splitlines() or ["not current"])[0]
-        lines.append(f"{'stale: ' if index == 0 else '       '}{gate_id} — {why}")
+        why = (why.splitlines() or ["invalidated"])[0]
+        lines.append(f"{'invalidated: ' if index == 0 else '             '}{gate_id} — {why}")
     lines[-1] += counts
     return lines
 
@@ -1065,8 +1072,12 @@ def _pending(resolution: verdicts.Resolution) -> tuple[list[str], str]:
 
 
 def _pending_sentence(count: int, moved: str) -> str:
-    return (f"{count} control(s) pending — inputs moved ({moved}); "
-            f"the next check re-verifies")
+    """GLOSSARY §9's words for controls whose fixture code moved: they count, and
+    the next check run re-qualifies their evaluators. What slipped through: it
+    said "N control(s) pending" on `status`'s screen, the Open status's
+    Never-say beside the claim rows (review of the P2.1 design)."""
+    return (f"{count} evaluator(s) to re-qualify — control inputs moved ({moved}); "
+            f"the next check run re-qualifies them")
 
 
 def _note_lines(resolution: verdicts.Resolution) -> list[str]:
@@ -1108,17 +1119,17 @@ def cmd_status(args: argparse.Namespace) -> int:
     view. Then, in a fixed order (spec §3.13), the facts that live outside the
     readiness report, each with its source:
 
-    * `stale:` — each gate whose verdict is not current, with what moved
-      (`config.bed_xy 220.0 -> 250.0`), and on the last line how many checks are
-      current and how many never ran; `stale: none` when nothing is stale. What
-      it replaced said "model <hash> -> <hash>": that SOMETHING moved, never
-      which check it touched (M11.7).
-    * `last check:` — when `check` last swept the whole project
+    * `invalidated:` — each gate whose verdict is not current, with what moved
+      (`config.bed_xy 220.0 -> 250.0`), and on the last line how many verdicts
+      are current and how many gates are unrun; `invalidated: none` when nothing
+      moved. What it replaced said "model <hash> -> <hash>": that SOMETHING
+      moved, never which check it touched (M11.7). (Headed `stale:` until P2.1.)
+    * `last check run:` — when `check` last swept the whole project
       (`last_check.json`), with its age; `never` before the first.
     * `note:` — an entry recorded under another library version (provenance,
       never staleness, Q1.3), and at most one line for controls whose fixture
-      code moved since they were demonstrated (they count; the next check
-      re-verifies them).
+      code moved since they were demonstrated (they count; the next check run
+      re-qualifies their evaluators).
     * `model:` — only when the model does not load, because then no verdict
       that reads it is current and the reader must know why first.
 
@@ -1144,7 +1155,9 @@ def cmd_status(args: argparse.Namespace) -> int:
     params = _shown_params(root, ledger, model, model_error, resolution, registry)
     undefended = modelio.undefended_params(params)
     summary = claims.summarise(view, registry, stale_gates=stale_gates)
-    resolved = claims.statuses(view, registry=registry, stale_gates=stale_gates)
+    composed = claims.compositions(view, registry=registry, stale_gates=stale_gates)
+    resolved = {cid: c.status for cid, c in composed.items()}
+    stale_reasons = _stale_reasons(resolution)
     site_info = _site_state(root, resolved=(view, registry, resolution, params))
     last = _last_check(root)
     last_when = str(last.get("when") or "")
@@ -1155,7 +1168,11 @@ def cmd_status(args: argparse.Namespace) -> int:
             "root": root,
             "meta": view.meta.to_dict(),
             "summary": summary,
+            # `claims` keeps the enum values (P2.1-D12: JSON values move only in
+            # the rename pass, GLOSSARY §7); the words are under `statuses`.
             "claims": {cid: str(status) for cid, status in resolved.items()},
+            "statuses": _status_views(view, composed, stale_reasons),
+            "errored": [cid for cid, c in composed.items() if c.errored],
             "gaps": [need.to_dict() for need in claims.find_gaps(view, registry)],
             "stale": bool(stale_gates),
             "stale_reason": _stale_summary(resolution),
@@ -1180,15 +1197,17 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 0
 
     sys.stdout.write(report.render_terminal(view, registry, stale_gates=stale_gates,
-                                            params=params))
+                                            params=params, stale_reasons=stale_reasons))
     for line in _stale_lines(resolution, registry, model_error=model_error):
         _say(line)
+    # "last check run" (GLOSSARY §6: one invocation of `check` is a check run):
+    # `last check:` read as a noun for an evaluator one line under the claims.
     if last_when:
         age = (f" ({human_duration(last_age)} ago)" if last_age is not None and last_age >= 0
                else " (in the future)" if last_age is not None else "")
-        _say(f"last check: {last_when}{age}")
+        _say(f"last check run: {last_when}{age}")
     else:
-        _say("last check: never")
+        _say("last check run: never")
     for line in _note_lines(resolution):
         _say(line)
     if model_error:
@@ -1334,10 +1353,13 @@ def _check_row_line(row: verdicts.SweepRow) -> str | None:
     pass each print; a cached pass does not — the inner loop is for what moved
     or what is wrong, and five unchanged `[ok  ]` lines between you and the FAIL
     you came for is the wall `_skip_digest` exists to collapse. Skips are that
-    digest's, after the summary.
+    digest's, after the summary — keyed on `Verdict.outcome`, never the flag:
+    what slipped through (P2.0 F-10), a verdict that said skipped AND errored
+    went to the digest under the quiet `[skip]` tag, with its skip reason, below
+    the plain skip; it is a crash, and streams as one.
     """
     verdict = row.verdict
-    if verdict.skipped:
+    if verdict.outcome == "skipped":
         return None
     if row.cached:
         if verdict.ok:
@@ -1482,6 +1504,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         stale_gates = resolution.stale_gates
         blockers = claims.blocking(view, registry, stale_gates=stale_gates)
         summary = claims.summarise(view, registry, stale_gates=stale_gates)
+        composed = claims.compositions(view, registry=registry, stale_gates=stale_gates)
 
     rows = list(result.rows)
     selected = {row.verdict.gate for row in rows}
@@ -1491,8 +1514,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     # and `doctor` names it.
     registered = set(registry.ids())
     carried = [v for v in view.verdicts if v.gate not in selected and v.gate in registered]
-    stale_reasons = {gid: row.stale_reason for gid, row in resolution.rows.items()
-                     if gid in stale_gates}
+    stale_reasons = _stale_reasons(resolution)
     counts = {
         "ran": sum(1 for row in rows if row.verdict.ok),
         "failed": sum(1 for row in rows if row.verdict.outcome == "fail"),
@@ -1525,7 +1547,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         view, [row.verdict for row in rows], registry, tier=tier, ready=ready,
         exit_code=code, when=now, not_run=result.not_run,
         cached={row.verdict.gate for row in rows if row.cached}, spine=spine,
-        stale_gates=stale_gates))
+        stale_gates=stale_gates, stale_reasons=stale_reasons))
 
     if args.json:
         _dump({
@@ -1537,9 +1559,19 @@ def cmd_check(args: argparse.Namespace) -> int:
             "counts": counts,
             "carried_over": [_resolved_row(v, resolution) for v in carried],
             "summary": summary,
+            # Record order, as before (machine, diff-stable); each row gains the
+            # words beside its kept enum `status` (P2.1-D12).
             "blocking": [{"claim": claim.id, "status": str(status),
-                          "statement": claim.statement} for claim, status in blockers],
+                          "statement": claim.statement,
+                          **report.status_view(composed[claim.id], view, claim,
+                                               stale_reasons=stale_reasons)}
+                         for claim, status in blockers],
+            # `ready` keeps its meaning — nothing stops this check run — and
+            # `all_required_checked` is *ready* in GLOSSARY §4's sense, beside
+            # it (critique of the P2.1 design: a reader of `ready` alone read a
+            # project waiting for an article as ready).
             "ready": ready,
+            "all_required_checked": bool(summary["all_required_checked"]),
             "claims_recorded": len(view.claims),
             # Stale BEFORE the sweep (cli:H19): after a recorded full sweep
             # everything it touched is current by construction, so "stale" read
@@ -1570,7 +1602,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     # after the summary and before the blockers on purpose: the summary already
     # carries the count, and the thing you must act on has to stay at the bottom
     # of the screen where the eye lands.
-    for line in _skip_digest([row.verdict for row in rows if row.verdict.skipped]):
+    for line in _skip_digest([row.verdict for row in rows
+                              if row.verdict.outcome == "skipped"]):
         _say(line)
 
     if carried:
@@ -1578,28 +1611,37 @@ def cmd_check(args: argparse.Namespace) -> int:
         more = f", +{len(carried) - 4}" if len(carried) > 4 else ""
         stale_n = sum(1 for v in carried if v.gate in stale_gates)
         _say(f"note: {len(carried)} gate(s) outside this sweep keep their last verdict "
-             f"({shown}{more})" + (f" — {stale_n} of them stale" if stale_n else ""))
+             f"({shown}{more})" + (f" — {stale_n} of them invalidated" if stale_n else ""))
 
     if not view.claims:
         # "ready" on a project that has never stated what must be true is the
         # laundering this whole tool exists to refuse: zero blocking claims
         # out of zero claims is not evidence of anything. Non-zero, so that the
         # exit code says the same thing this line says.
-        _say("no claims recorded, so nothing was checked — a project with no claims "
-             "is not a clean bill of health. Write the first as claims/C1.json: a "
-             "statement and an acceptance")
+        _say("no claims recorded, so nothing was evaluated — a project with no claims "
+             "is not ready. Write the first as claims/C1.json: a statement and an "
+             "acceptance")
     elif not blockers:
-        _say("ready: no critical claim is blocking "
-             "(physical and assumed claims are still listed in `atompipe report`)")
+        # `ready:` only when every required claim reads Checked (GLOSSARY §4);
+        # otherwise what stands between the project and it. What slipped through:
+        # `ready: no critical claim is blocking` printed while a claim waited
+        # for an article and an assumption had no owner.
+        _say(report.not_ready_line(view, composed))
     else:
+        # In severity order (P2.1-D16): what slipped through (P2.0 F-2), record
+        # order put a missing tool's `[skip ]` above a crash's row.
         _say(f"BLOCKING — {len(blockers)} critical claim(s) must not be spent against:")
-        for claim, status in blockers:
-            _say(_blocking_line(claim, status,
-                                _blocking_reason(view, claim, status, stale=stale_reasons)))
+        for claim in report.in_severity(view, composed, [c for c, _ in blockers]):
+            found = composed[claim.id]
+            _say(_blocking_line(claim, found.status,
+                                _blocking_reason(view, claim, found.status,
+                                                 stale=stale_reasons),
+                                errored=found.errored))
     return code
 
 
-def _blocking_line(claim: Claim, status: ClaimStatus, reason: str) -> str:
+def _blocking_line(claim: Claim, status: ClaimStatus, reason: str, *,
+                   errored: bool = False) -> str:
     """`[FAIL ] C1 <statement> — <reason>`: one blocking claim, as `check` prints it.
 
     The tag is `report.status_tag`, the one spelling `status`, `claim list` and the
@@ -1611,62 +1653,56 @@ def _blocking_line(claim: Claim, status: ClaimStatus, reason: str) -> str:
     four-wide field so `check`'s lines align with its verdict lines above them:
     those are GATE outcomes (four states, `Verdict.render`), these are CLAIM
     statuses (ten), and squeezing ten into four is how `uncl` got invented.
+    `errored` is the claim's crash mark: its tag is `[SKIP ]`, Failing's tone
+    (invariant 2, P2.1).
     """
-    return f"{report.status_tag(status)} {claim.id} {claim.statement} — {reason}"
+    return (f"{report.status_tag(status, errored=errored)} {claim.id} {claim.statement}"
+            f" — {reason}")
 
 
 def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus, *,
                      stale: Mapping[str, str] | None = None) -> str:
-    """The shortest true sentence about why one claim blocks.
+    """The shortest true sentence about why one claim blocks: `report.reason`,
+    in full, for the claim composed over `ledger` — the one producer every
+    channel's reason comes from (P2.1-D15; `ReasonsAgree` holds this and
+    `report._terminal_reason` equal).
 
     A failing gate's own detail beats any phrasing invented here: it carries the
     measured value and the limit, which is what the reader is about to go and
-    change. Only when no verdict speaks does this fall back to naming the status.
-
-    THE REASON MUST MATCH THE STATUS. Several gates can cover one claim, and the
-    first non-passing one is not necessarily the one that set the status: a claim
-    covered by a project gate that FAILED and a pack gate that SKIPPED for a
-    missing parameter was reporting `[fail] C1 ... — pack.gate: the projection
-    does not provide ...`, which sends the reader to look for a missing parameter
-    when the real answer is that their part sags 0.7 mm. So a FAIL cites a gate
-    that actually ran and failed, in preference to one that skipped or errored.
-
-    That ranking used to live here, privately, and the fix above never reached
-    `report._terminal_reason`, which kept citing the skip in `status` (S-68). It
-    is `claims.explaining_verdict` now — ran-and-failed, then errored, then
-    skipped — and both callers format it the same way, `gate : body`, the
-    separator `Verdict.render` and `status` already use.
+    change. THE REASON MUST MATCH THE STATUS: several gates can cover one claim,
+    and the first non-passing one is not necessarily the one that set it — a
+    claim covered by a gate that FAILED and a pack gate that SKIPPED for a
+    missing parameter cites the measured fail (`claims.explaining_verdict`'s
+    ranking, which `compose` shares). That ranking used to live here, privately,
+    and the fix never reached `status` (S-68); and the fallback words were the
+    STATUS's, so a crash moved to Skipped alone would have read "its gates could
+    not run here (missing tooling)" (P2.0 F-8). `status` must be what `compose`
+    says for the claim; the words are `reason`'s.
 
     `stale` is `{gate: why}` for the gates whose verdict is not current (the
-    resolution's). A FAIL that is stale stays FAIL (D-08) and says so —
-    `gate : body (stale: why)` — because the refutation was measured against
-    inputs that have since moved, and the reader should know which before
-    arguing with it. A STALE claim names its stale gates: what it replaced,
-    "it passed against a model that has since moved", was the one sentence one
-    project-wide hash could say, and false for a moved data file or an
-    undemonstrated control. The UNCLAIMED reason is "no gate covers it" and stops
-    there: the `gap --propose` suffix was advice in a column that states facts.
+    resolution's). A FAIL whose inputs moved stays FAIL (D-08) and says so —
+    `gate : body (invalidated: why)` — and a Stale claim names its moved gate
+    with what moved.
     """
     stale = dict(stale or {})
-    verdict = claims.explaining_verdict(claim, ledger.verdicts)
-    if verdict is not None:
-        body = verdict.detail or verdict.error or verdict.skip_reason
-        text = f"{verdict.gate} : {body}" if body else f"{verdict.gate} did not pass"
-        if verdict.outcome == "fail" and stale.get(verdict.gate):
-            text += f" (stale: {stale[verdict.gate]})"
-        return text
-    if status is ClaimStatus.UNCLAIMED:
-        return "no gate covers it"
-    if status is ClaimStatus.PENDING:
-        return "its gates have never run"
-    if status is ClaimStatus.BLOCKED:
-        return "its gates could not run here (missing tooling)"
-    if status is ClaimStatus.STALE:
-        named = [f"{gate}: {stale[gate]}" for gate in (claim.gates or ()) if stale.get(gate)]
-        if named:
-            return "passed, but not current — " + "; ".join(named)
-        return "passed, but not against the current inputs"
-    return str(status)
+    found = claims.compose(claim, ledger.verdicts, stale_gates=set(stale))
+    return report.reason(found, ledger, claim, cut=False, stale_reasons=stale)
+
+
+def _status_views(view: Ledger, composed: Mapping[str, Any],
+                  stale_reasons: Mapping[str, str]) -> dict[str, dict[str, Any]]:
+    """`{claim id: {key, word, cause, reason, errored}}` — the words beside the
+    kept enum map (P2.1-D12), one `report.status_view` per claim."""
+    by_id = {claim.id: claim for claim in view.claims}
+    return {cid: report.status_view(found, view, by_id[cid], stale_reasons=stale_reasons)
+            for cid, found in composed.items()}
+
+
+def _stale_reasons(resolution: verdicts.Resolution) -> dict[str, str]:
+    """`{gate: why}` for every gate the resolution calls not current — the words
+    `report.reason` puts after `invalidated:` (`config.bed_xy 220.0 -> 250.0`)."""
+    return {gid: (resolution.rows[gid].stale_reason if gid in resolution.rows else "")
+            for gid in resolution.stale_gates}
 
 
 # --------------------------------------------------------------------------- #
@@ -1939,12 +1975,23 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
     model, projection, model_error = _projection_safe(root, ledger)
     view, resolution = _resolved(root, ledger, registry, projection, model_error,
                                  now=utcnow_iso(), model=model)
-    resolved = claims.statuses(view, registry=registry, stale_gates=resolution.stale_gates)
+    composed = claims.compositions(view, registry=registry,
+                                   stale_gates=resolution.stale_gates)
+    resolved = {cid: c.status for cid, c in composed.items()}
     cover = claims.coverage(view, registry)
+    stale_reasons = _stale_reasons(resolution)
 
     rows = list(view.claims)
     if args.status:
-        rows = [c for c in rows if str(resolved.get(c.id)) == args.status]
+        # The enum value, its token or its word, in any case: `--status gap`,
+        # `--status unclaimed` and `--status "pending build"` are one filter.
+        wanted = args.status.strip().lower().replace("_", " ")
+
+        def spelled(found: Any) -> set[str]:
+            row = report.words(found.status, errored=found.errored)
+            return {str(found.status.value), row.key.replace("_", " "), row.word}
+
+        rows = [c for c in rows if wanted in spelled(composed[c.id])]
     if args.kind:
         rows = [c for c in rows if str(c.kind) == args.kind]
     if args.tag:
@@ -1952,7 +1999,10 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
 
     if args.json:
         _dump({"claims": [dict(c.to_dict(), status=str(resolved.get(c.id)),
-                               covered_by=cover.get(c.id, [])) for c in rows],
+                               covered_by=cover.get(c.id, []),
+                               **report.status_view(composed[c.id], view, c,
+                                                    stale_reasons=stale_reasons))
+                          for c in rows],
                "stale": bool(resolution.stale_gates),
                "stale_gates": _stale_gate_list(resolution)})
         return 0
@@ -1961,11 +2011,11 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
         _say("no claims recorded" if not view.claims else "no claims match that filter")
         return 0
     for claim in rows:
-        status = resolved.get(claim.id, ClaimStatus.UNCLAIMED)
+        found = composed[claim.id]
         accepts = claim.acceptance.render() or "NO THRESHOLD"
-        flag = "" if claim.critical else " (nice-to-have)"
-        _say(f"{report.status_tag(status)} {claim.id:<6} {claim.statement}{flag}"
-             f"  [{claim.kind}] {accepts}")
+        flag = "" if claim.critical else " (not required)"
+        _say(f"{report.status_tag(found.status, errored=found.errored)} {claim.id:<6} "
+             f"{claim.statement}{flag}  [{claim.kind}] {accepts}")
     return 0
 
 
@@ -1990,7 +2040,8 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
     # no registry at all — `claim list` said PENDING while `claim show` said
     # UNCLAIMED for the same claim, one command apart.
     claim = view.claim(args.id)
-    status = claims.resolve_status(claim, view.verdicts, stale_gates=resolution.stale_gates)
+    found = claims.compose(claim, view.verdicts, stale_gates=resolution.stale_gates)
+    status = found.status
 
     why = _why_text(root, ledger, registry, model, model_error, view, resolution, claim.id)
     if args.json:
@@ -1998,9 +2049,11 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
                    covered_by=claims.coverage(view, registry).get(claim.id, []),
                    verdicts=[_resolved_row(v, resolution)
                              for v in claims.covering_verdicts(claim, view.verdicts)],
-                   why=why))
+                   why=why,
+                   **report.status_view(found, view, claim,
+                                        stale_reasons=_stale_reasons(resolution))))
         return 0
-    _say(f"{report.status_tag(status)} {claim.id}")
+    _say(f"{report.status_tag(status, errored=found.errored)} {claim.id}")
     sys.stdout.write(why)
     return 0
 
@@ -2060,15 +2113,29 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
         path = os.path.join(root, "results", f"{claim.id}.json")
         earlier = store.read_record(path, "results") if os.path.isfile(path) else []
         store.write_record(root, "results", [*earlier, result], record_id=claim.id)
-        claim = dataclasses.replace(claim, physical_result=result)
 
-    status = ClaimStatus.VERIFIED if result.passed else ClaimStatus.REFUTED
+    # The status the claim reads NOW, composed as every reader composes it —
+    # never computed here from the result alone. What slipped through (review
+    # of the P2.1 design; P2.0's hand-off): this printed VERIFIED for any pass
+    # and REFUTED for any fail, a second status producer (R-5), so beside a
+    # covering evaluator that fails, crashes or never ran it printed `[ok   ]`
+    # where `status` printed Failing, Skipped or Open — and an agent quotes the
+    # command's own line. Read after the write, outside the lock: a reader.
+    ledger = _load(root)
+    registry, _problems = _registry(root, ledger, strict=False)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=now, model=model)
+    claim = view.claim(args.id)
+    found = claims.compose(claim, view.verdicts, stale_gates=resolution.stale_gates)
+    shown = report.status_view(found, view, claim, stale_reasons=_stale_reasons(resolution))
     if args.json:
-        _dump(dict(claim.to_dict(), status=str(status)))
+        _dump(dict(claim.to_dict(), status=str(found.status), **shown))
         return 0
-    _say(f"{report.status_tag(status)} {claim.id} {claim.statement} — "
-         f"{result.detail or ('pass' if passed else 'fail')} "
-         f"({result.who or 'unattributed'}, {result.when})")
+    _say(f"{report.status_tag(found.status, errored=found.errored)} {claim.id} "
+         f"{claim.statement} — {shown['reason']} "
+         f"(recorded: {result.detail or ('pass' if passed else 'fail')}, "
+         f"{result.who or 'unattributed'}, {result.when})")
     return 0
 
 
@@ -2116,7 +2183,7 @@ def cmd_gap(args: argparse.Namespace) -> int:
     for need in gaps:
         cids = ", ".join(need.claim_ids)
         _say(f"{_tag('gap')} {need.id:<10} {need.quantity or '(unnamed quantity)'} "
-             f"— claims {cids} ({need.status})")
+             f"— claims {cids} ({report.need_word(need.status)})")
         if need.claim_class:
             _say(f"            class: {need.claim_class}")
         for candidate in need.candidates:
@@ -2933,14 +3000,17 @@ def cmd_report(args: argparse.Namespace) -> int:
     view, resolution = _resolved(root, ledger, registry, projection, model_error,
                                  now=utcnow_iso(), model=model)
     stale_gates = resolution.stale_gates
+    stale_reasons = _stale_reasons(resolution)
     banner = _load_failure_banner(problems, model_error)
     params = _shown_params(root, ledger, model, model_error, resolution, registry)
 
     if args.json:
-        resolved = claims.statuses(view, registry=registry, stale_gates=stale_gates)
+        composed = claims.compositions(view, registry=registry, stale_gates=stale_gates)
         _dump({
             "summary": claims.summarise(view, registry, stale_gates=stale_gates),
-            "claims": {cid: str(status) for cid, status in resolved.items()},
+            "claims": {cid: str(c.status) for cid, c in composed.items()},
+            "statuses": _status_views(view, composed, stale_reasons),
+            "errored": [cid for cid, c in composed.items() if c.errored],
             "coverage": claims.coverage(view, registry),
             "gaps": [need.to_dict() for need in claims.find_gaps(view, registry)],
             "verdicts": [_resolved_row(v, resolution) for v in view.verdicts],
@@ -2956,7 +3026,8 @@ def cmd_report(args: argparse.Namespace) -> int:
     if args.write:
         with _lock(root):
             path = report.write_report(root, view, registry, stale_gates=stale_gates,
-                                       model_error=model_error, params=params)
+                                       model_error=model_error, params=params,
+                                       stale_reasons=stale_reasons)
             if view.decisions:
                 decisions.write_log(root, view)
         _say(rel(path, root))
@@ -2968,7 +3039,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         return 0
     sys.stdout.write(_with_banner(
         report.render_markdown(view, registry, stale_gates=stale_gates,
-                               model_error=model_error, root=root, params=params), banner))
+                               model_error=model_error, root=root, params=params,
+                               stale_reasons=stale_reasons), banner))
     return 0
 
 
@@ -2985,8 +3057,9 @@ def _load_failure_banner(problems: list[str], model_error: str) -> list[str]:
     lines = ["> **This report is incomplete.** "
              f"{len(problems)} gate source(s) failed to load"
              + (" and the model did not load" if model_error else "")
-             + ", so coverage below is UNDERSTATED: a claim may read UNCLAIMED "
-               "because its gate never registered, not because no gate exists."]
+             + ", so coverage below is UNDERSTATED: a claim may read "
+             + report.words(ClaimStatus.UNCLAIMED).term
+             + " because its gate never registered, not because no gate exists."]
     lines += [f"> - {problem}" for problem in problems]
     if model_error:
         lines.append(f"> - model: {model_error.splitlines()[0]}")
@@ -3767,6 +3840,10 @@ def cmd_site_build(args: argparse.Namespace) -> int:
     the one artifact whose entire job is to be trusted when a gate says
     something is wrong.
 
+    It also refreshes the renderer — every template file but `index.html` —
+    when this atompipe's differs (`site.refresh_renderer`), so a page scaffolded
+    by an older spine never reads new data with old words.
+
     Dangling locators never fail the build and are never silent. A verdict
     addressing a view that does not exist is a gate that believes it is drawing
     and is not, which from the outside looks exactly like a gate that found
@@ -3831,6 +3908,9 @@ def cmd_site_build(args: argparse.Namespace) -> int:
     _say(f"{counts.get('claims', 0)} claim(s), {counts.get('verdicts', 0)} verdict(s), "
          f"{counts.get('views', 0)} view(s), {counts.get('assets', 0)} asset(s) from "
          f"viewgens")
+    if summary.get("refreshed"):
+        _say(f"refreshed the renderer to this atompipe's template: "
+             f"{', '.join(summary['refreshed'])}")
     _say(f"wrote {len(summary['wrote'])} file(s), removed {len(summary['removed'])} "
          f"stale file(s) -> {summary['state']}")
     if problems:
@@ -4152,6 +4232,11 @@ def _first_sentence(text: str | None, limit: int = 100) -> str:
         return "(the pack wrote no note for this key)"
     head = flat.split(". ", 1)[0].rstrip(".")
     return head if len(head) <= limit else head[:limit - 3].rstrip() + "..."
+
+
+def _tagged_row(name: str, status: str, detail: str) -> dict:
+    """One doctor row, not yet placed (`_check` appends it)."""
+    return {"check": name, "status": status, "detail": detail}
 
 
 def _check(results: list[dict], name: str, status: str, detail: str) -> None:
@@ -4954,6 +5039,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
            f"{summary['available']} runnable here"
            + (f" — NO NEGATIVE CONTROL: {', '.join(uncontrolled)}" if uncontrolled
               else "" if summary["gates"] else " — nothing can be checked yet"))
+    # Where the crash rows go once the resolution is known (below): above every
+    # row about a missing tool (invariant 2).
+    crash_at = len(results)
     for row in summary["unavailable"]:
         _check(results, "gate-tool", "warn", f"{row['gate']}: {row['reason']}")
     for tool in summary["requires_tools"]:
@@ -5036,6 +5124,22 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check(results, "orphan-entries", "warn" if orphans else "ok",
            _listed(orphans) if orphans
            else "every cached verdict belongs to a gate registered here")
+    # Each gate whose effective verdict at its current inputs is a crash, in a
+    # loud row ABOVE the missing-tool rows, from the resolution alone — no gate
+    # runs here. What slipped through (P2.0 F-4): doctor had two rows for a
+    # missing tool and none for a gate that crashes, so the command people run
+    # when confused ranked the dull case above the broken evaluator. `ERR` is
+    # not a FAIL: a crash is a fact about an evaluator, not this environment,
+    # and `doctor` exits 1 only for the environment.
+    registered = set(registry.ids())
+    crashes = [_tagged_row("gate-error", "ERR",
+                           f"{v.gate}: errored at its current inputs — "
+                           f"{(str(v.error).splitlines() or [''])[0]} "
+                           f"(`atompipe gate show {v.gate}`)")
+               for v in resolution.verdicts
+               if v.gate in registered and v.outcome == "error"
+               and not getattr(v, "unqualified", "")]
+    results[crash_at:crash_at] = crashes
     _doctor_cache_rows(results, root, registry, resolution)
     _doctor_seal_row(results, registry,
                      _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
@@ -5089,7 +5193,7 @@ def _doctor_finish(args: argparse.Namespace, results: list[dict]) -> int:
         return 1 if failures else 0
     for row in results:
         _say(f"{_tag(row['status'])} {row['check']:<18} {row['detail']}")
-    warnings = [row for row in results if row["status"] == "warn"]
+    warnings = [row for row in results if row["status"] in ("warn", "ERR")]
     _say(f"{len(results)} checks — {len(failures)} failing, {len(warnings)} warning(s)")
     return 1 if failures else 0
 
@@ -5227,7 +5331,9 @@ def build_parser() -> argparse.ArgumentParser:
     claim.set_defaults(func=lambda args: _needs_subcommand(claim))
 
     p = claim_sub.add_parser("list", parents=[common], help="one line per claim")
-    p.add_argument("--status", choices=[s.value for s in ClaimStatus])
+    p.add_argument("--status", metavar="STATUS",
+                   help="a status by its word, token or value: checked, failing, stale, "
+                        "assumed, \"pending build\", gap, skipped, open")
     p.add_argument("--kind", choices=[k.value for k in ClaimKind])
     p.add_argument("--tag", default="")
     p.set_defaults(func=cmd_claim_list)

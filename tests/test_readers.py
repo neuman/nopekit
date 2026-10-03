@@ -204,10 +204,12 @@ class ReadersTakeStaleGates(unittest.TestCase):
 
     def test_the_proven_heading_says_current(self):
         """A cached verdict is current without having run this time: "this run"
-        would be false on every cache hit."""
+        would be false on every cache hit. The qualifier in GLOSSARY §3's words
+        from P2.1 (R-6, words only: *machine-verified* is a Never-say), saying
+        what it is not: checked does not mean true."""
         md = report_mod.render_markdown(self.ledger, self.registry)
-        self.assertIn(report_mod.SECTION_PROVEN + " (machine-verified, current)",
-                      md.splitlines())
+        self.assertIn(report_mod.SECTION_PROVEN + " (checked: every evaluator passed on the "
+                      "current inputs — checked does not mean true)", md.splitlines())
 
     def test_the_title_names_the_revision_and_nothing_that_moves(self):
         md = report_mod.render_markdown(self.ledger, self.registry)

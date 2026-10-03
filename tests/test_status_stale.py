@@ -205,7 +205,7 @@ class StatusNamesTheCheck(_env.EnvCase):
         _edit(project, "model/bracket.py", BED_XY_OLD, BED_XY_NEW)
         proc = _run(project, "status")
         _ok(self, proc)
-        stale = [line for line in _lines(proc) if line.startswith("stale:")]
+        stale = [line for line in _lines(proc) if line.startswith("invalidated:")]
         self.assertEqual(len(stale), 1, proc.stdout)
         match = _transcript.STALE_LINE.fullmatch(stale[0])
         self.assertIsNotNone(match, stale[0])
@@ -299,7 +299,7 @@ class StatusNamesTheCheck(_env.EnvCase):
         never = [m for m in _matching(_transcript.LAST_CHECK, before)]
         self.assertEqual(len(never), 1, before.stdout)
         self.assertIsNone(never[0].group("when"), "a copy that never ran check has no age")
-        self.assertIn("last check: never", before.stdout.splitlines())
+        self.assertIn("last check run: never", before.stdout.splitlines())
         self.assertIsNone(_json(_run(fresh, "status", "--json"))["last_check"]["when"])
 
         project = self.checked.copy(self)

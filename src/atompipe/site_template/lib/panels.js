@@ -38,8 +38,12 @@ import {
 export function headline(state, app) {
   const r = state.readiness || {};
   const meta = state.meta || {};
-  const ready = !!r.ready;
-  const counts = r.counts || {};
+  // READY only when every required claim reads Checked (GLOSSARY §4) —
+  // `all_required_checked`, never `ready`, which keeps "nothing stops check"
+  // for older readers. What slipped through: READY over a project whose
+  // claim waited for an article.
+  const ready = !!r.all_required_checked;
+  const tally = r.tally || [];
   const blocking = r.blocking || [];
 
   return el("section", { class: `headline ${ready ? "is-ready" : "is-not-ready"}`, id: "verdict" },
@@ -57,25 +61,26 @@ export function headline(state, app) {
               onclick: () => app.reveal(`claim-${id}`),
             })))
         : null,
+      // The strip is `readiness.tally`: report.count_bits' items, each label
+      // already in HUMAN's words with a crash counted apart ("7 skipped (6
+      // errored)"), toned by its status (a crash's in Failing's).
       el("ul", { class: "counts" },
-        countItem(r.n_claims, "claim", "claims"),
-        counts.pass ? countItem(counts.pass, "proven", "proven", "ok") : null,
-        counts.fail ? countItem(counts.fail, "failing", "failing", "bad") : null,
-        counts.stale ? countItem(counts.stale, "stale", "stale", "warn") : null,
-        counts.blocked ? countItem(counts.blocked, "blocked", "blocked", "warn") : null,
-        counts.pending ? countItem(counts.pending, "not run", "not run", "warn") : null,
-        counts.unclaimed ? countItem(counts.unclaimed, "with no gate", "with no gate", "warn") : null,
-        counts.unverified ? countItem(counts.unverified, "unverified", "unverified", "phys") : null,
-        counts.refuted ? countItem(counts.refuted, "refuted", "refuted", "bad") : null,
-        counts.asserted ? countItem(counts.asserted, "assumed", "assumed", "assum") : null,
-        countItem(r.n_gates, "gate", "gates"),
-        r.n_gaps ? countItem(r.n_gaps, "capability gap", "capability gaps", "warn") : null)));
+        countItem(r.n_claims, r.n_claims === 1 ? "claim" : "claims"),
+        ...tally.map((t) => labelItem(t.label,
+          claimStatus(t.status, { errored: t.errored > 0 }).tone)),
+        countItem(r.n_gates, r.n_gates === 1 ? "gate" : "gates"))));
 }
 
-function countItem(n, one, many, tone = "muted") {
+function countItem(n, noun, tone = "muted") {
   if (n === null || n === undefined) return null;
   return el("li", { class: `count tone-${tone}` },
-    el("b", { class: "mono", text: String(n) }), " ", (n === 1 ? one : many));
+    el("b", { class: "mono", text: String(n) }), " ", noun);
+}
+
+function labelItem(label, tone) {
+  const [n, ...rest] = String(label).split(" ");
+  return el("li", { class: `count tone-${tone}` },
+    el("b", { class: "mono", text: n }), " ", rest.join(" "));
 }
 
 /** The staleness band. Shown ONLY when the resolver says a verdict is not
@@ -92,7 +97,7 @@ export function staleBanner(state) {
   return el("aside", { class: "banner banner-stale", role: "status" },
     el("span", { class: "banner-glyph", "aria-hidden": "true", text: "≈" }),
     el("div", {},
-      el("b", { text: "Some results are not current." }),
+      el("b", { text: "Some verdicts are invalidated." }),
       " ",
       el("span", { text: meta.stale_reason || "a verdict's inputs have moved since it was measured" }),
       el("p", { class: "banner-fix" }, "Re-run ", code("atompipe check"),
@@ -127,12 +132,13 @@ export function locatorProblems(state) {
 /** Every claim, grouped by kind, each with the gate and measured value that
  *  settled it — or the reason nothing did.
  *
- *  The PARTIAL marker is the load-bearing detail. A claim covered by a cheap
- *  analytic gate AND an uninstalled solver resolves PASS, and printing it as
- *  simply proven deletes the check that mattered from the page. `row.partial`
- *  and `row.unproven` come straight from the readiness report's own coverage
- *  logic, so the marker here and the marker in the document are the same
- *  judgement rendered twice, not two judgements. */
+ *  `row.unproven` is the load-bearing detail: each covering gate that produced
+ *  no pass that counts, with its reason led by the fact (errored, skipped,
+ *  unqualified, unrun), straight from the readiness report's own coverage
+ *  logic. Under GLOSSARY §3's composition a Checked claim has none, so PARTIAL
+ *  went (P2.1); a claim the resolver calls Checked while one exists is a
+ *  contradiction, `row.disagree`, painted loud. The claims arrive in severity
+ *  order (`state.json`), and the page keeps it. */
 export function claimsPanel(state, app) {
   const claims = state.claims || [];
   const groups = ["measurable", "physical", "assumption"];
@@ -169,7 +175,7 @@ export function claimsPanel(state, app) {
 }
 
 function claimRow(claim, state, app) {
-  const status = claimStatus(claim.status);
+  const status = claimStatus(claim.status, { errored: !!claim.errored });
   const verdicts = (claim.verdicts || []).map((g) => app.index.verdictByGate.get(g)).filter(Boolean);
   const proving = verdicts.filter((v) => v.ok);
   const headline = proving.length ? proving[0] : verdicts[0];
@@ -195,11 +201,12 @@ function claimRow(claim, state, app) {
             ...verdicts.map((v) => miniVerdict(v, app))))
       : el("p", { class: "muted", text: (claim.gates || []).length
           ? `Covered by ${claim.gates.join(", ")}, which has produced no verdict yet.`
-          : "No gate covers this claim. Nothing about it has been checked." }),
+          : "No gate covers this claim. Nothing about it has been evaluated." }),
+    claim.reason ? el("p", { class: "claim-reason", text: claim.reason }) : null,
     (claim.unproven || []).length
-      ? el("div", { class: "partial-note" },
-          el("b", { text: "PARTIAL — " }),
-          "a gate covering this claim produced no proof:",
+      ? el("div", { class: claim.disagree ? "partial-note tone-bad" : "partial-note" },
+          claim.disagree ? el("b", { text: "Status and evidence disagree — " }) : null,
+          "a gate covering this claim produced no verdict that counts:",
           el("ul", {}, ...claim.unproven.map((u) =>
             el("li", {}, code(u.gate), " — ", u.why))))
       : null,
@@ -213,8 +220,9 @@ function claimRow(claim, state, app) {
     chip(status),
     el("span", { class: "claim-id mono", text: claim.id }),
     el("span", { class: "claim-statement", text: claim.statement || "(no statement)" }),
-    claim.partial ? tag("PARTIAL", { tone: "warn", title: "a covering gate produced no proof" }) : null,
-    claim.critical === false ? tag("non-blocking", { tone: "muted" }) : null,
+    claim.disagree ? tag("status and evidence disagree", { tone: "bad",
+      title: "the resolver and the verdicts contradict each other — a defect to report" }) : null,
+    claim.critical === false ? tag("not required", { tone: "muted" }) : null,
     headline && headline.measured !== null && headline.measured !== undefined
       ? el("span", { class: "claim-measure mono", title: `measured by ${headline.gate}` },
           quantity(headline.measured, headline.units || claim.acceptance?.units || ""),
@@ -223,14 +231,14 @@ function claimRow(claim, state, app) {
             : null)
       : null);
 
-  return el("li", { class: `claim tone-${status.tone}`, id: `claim-${claim.id}` },
+  return el("li", { class: `claim tone-${claim.disagree ? "bad" : status.tone}`, id: `claim-${claim.id}` },
     el("details", { class: "disclosure" }, summary, body));
 }
 
 function physicalResult(result) {
   const ok = !!result.passed;
   return el("div", { class: `physical-result ${ok ? "tone-ok" : "tone-bad"}` },
-    el("b", { text: ok ? "A human recorded a pass. " : "A human recorded a failure. " }),
+    el("b", { text: ok ? "A physical result was recorded: pass. " : "A physical result was recorded: fail. " }),
     el("span", { text: result.detail || "" }),
     el("p", { class: "muted small" },
       [result.who, stamp(result.when)].filter(Boolean).join(" · ")),
@@ -351,7 +359,7 @@ function verdictRow(v, app) {
         measured,
         el("span", { class: "verdict-line", text: detail }),
         v.stale_reason
-          ? el("span", { class: "stale-flag", title: v.stale_reason, text: "≈ not current" })
+          ? el("span", { class: "stale-flag", title: v.stale_reason, text: "≈ invalidated" })
           : null,
         anchored.length
           ? el("span", { class: "pin-count", title: "highlights the geometry this is about" },
@@ -558,13 +566,16 @@ export function gapsPanel(state, app) {
   const gaps = state.gaps || [];
   if (!gaps.length) return null;
   return el("section", { class: "panel", id: "gaps" },
-    panelHead("Capability gaps", plural(gaps.length, "gap"),
-      "Claims nothing can currently settle. Each one names the unvalidated physical " +
-      "quantity, which is where the extension protocol starts."),
+    panelHead("Gap records", plural(gaps.length, "record"),
+      "Claims no evaluator here can settle yet. Each record names the physical " +
+      "quantity nothing measures, which is where the extension protocol starts."),
     el("ul", { class: "gap-list" }, ...gaps.map((g) => el("li", { class: "gap", id: `gap-${cssId(g.id)}` },
       el("details", { class: "disclosure" },
         el("summary", {},
-          tag(g.status || "open", { tone: g.status === "satisfied" ? "ok" : "warn" }),
+          // A record's state, never a claim status word: `open` is Open's alone
+          // (GLOSSARY §6), so a record nobody acted on is "identified".
+          tag(g.status === "open" || !g.status ? "identified" : g.status,
+              { tone: g.status === "satisfied" ? "ok" : "warn" }),
           code(g.id),
           el("span", { text: g.quantity || "" }),
           (g.claim_ids || []).length ? el("span", { class: "muted mono", text: g.claim_ids.join(" ") }) : null),
@@ -584,7 +595,7 @@ export function gapsPanel(state, app) {
                 c.why ? el("p", { text: c.why }) : null,
                 c.cost ? el("p", { class: "small muted", text: `cost: ${c.cost}` }) : null,
                 c.install ? el("pre", { class: "install" }, code(c.install)) : null)))
-            : el("p", { class: "muted small", text: "No candidate tooling proposed yet — `atompipe gap --propose`." })))))));
+            : el("p", { class: "muted small", text: "No tool options proposed yet — `atompipe gap --propose`." })))))));
 }
 
 /** The decision log, newest first, each entry naming what lost. */

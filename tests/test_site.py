@@ -28,6 +28,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 
 from atompipe import cli as cli_mod
 from atompipe import gates as gates_mod
@@ -242,6 +243,32 @@ class Scaffold(_SiteCase):
         with self.assertRaises(AtompipeError) as caught:
             site_mod.scaffold(self.root)
         self.assertIn("--force", str(caught.exception))
+
+    def test_build_refreshes_a_renderer_an_older_atompipe_scaffolded(self):
+        """A page scaffolded before P2.1 keeps its own `format.js`, which read
+        `blocked` as "its tooling is missing" in a missing tool's tone — so a
+        crash, filed under `blocked` from P2.1, would read on it exactly like a
+        missing tool (invariant 2), and its READY headline read `ready`. `site
+        build` refreshes every renderer file but the shell, which stays the
+        project's (review of the P2.1 design)."""
+        _capture(["site", "init", "-C", self.root])
+        site_dir = os.path.join(self.root, site_mod.SITE_DIR)
+        old_format = os.path.join(site_dir, "lib", "format.js")
+        with open(old_format, "w", encoding="utf-8") as fh:
+            fh.write('const CLAIM_STATUS = { blocked: { label: "BLOCKED", tone: "warn", '
+                     'hint: "a gate covers it but its tooling is missing" } };\n')
+        index = os.path.join(site_dir, "index.html")
+        with open(index, "w", encoding="utf-8") as fh:
+            fh.write("<!-- the project's own shell -->")
+        code, out = _capture(["site", "build", "-C", self.root])
+        self.assertEqual(code, 0, out)
+        with open(old_format, encoding="utf-8") as fh, \
+                open(os.path.join(site_mod.TEMPLATE_DIR, "lib", "format.js"),
+                     encoding="utf-8") as want:
+            self.assertEqual(fh.read(), want.read())
+        with open(index, encoding="utf-8") as fh:
+            self.assertIn("the project's own shell", fh.read())
+        self.assertIn("refreshed the renderer", out)
 
 
 # --------------------------------------------------------------------------- #
@@ -692,12 +719,13 @@ class HonestyOnThePage(_SiteCase):
         self.assertEqual(state["verdicts"][0]["status"], "errored")
         self.assertFalse(state["verdicts"][0]["ok"])
 
-    def test_a_partially_covered_claim_carries_the_partial_marker(self):
-        """The PARTIAL row, on the page as in the report.
-
-        Without it a claim covered by a cheap analytic gate and an uninstalled
-        solver reads as fully proven, and the check that mattered has vanished
-        from the document.
+    def test_a_partially_covered_claim_reads_skipped_and_names_the_gate(self):
+        """A claim covered by a cheap analytic gate and an uninstalled solver,
+        on the page as in the report. Until P2.1 it resolved PASS and the page
+        marked it PARTIAL; under GLOSSARY §3's composition it reads Skipped —
+        never `pass` — the unproven gate named with its lead, and PARTIAL is
+        gone (R-6, old 2.1's strengthening: `status != "pass"` and the gate
+        named; P2.1-D18: no `partial` key at all, its contradiction flag false).
         """
         state = self._built_state(
             claims=[self._claim("C1", gates=["g.cheap", "g.solve"])],
@@ -710,11 +738,49 @@ class HonestyOnThePage(_SiteCase):
             registry=self._registry(self._spec("g.cheap"), self._spec("g.solve")),
         )
         row = state["claims"][0]
-        self.assertTrue(row["partial"],
-                        "a claim whose covering solver never ran is PARTIAL, not proven")
-        unproven = {entry["gate"] for entry in row["unproven"]}
-        self.assertIn("g.solve", unproven,
-                      "the page must NAME the gate that did not produce proof")
+        self.assertNotIn("partial", row)
+        self.assertNotEqual(row["status"], "pass",
+                            "a claim whose covering solver never ran is not checked")
+        self.assertEqual((row["status"], row["key"], row["word"], row["cause"]),
+                         ("blocked", "skipped", "skipped", "skipped"))
+        self.assertFalse(row["disagree"])
+        unproven = {entry["gate"]: entry["why"] for entry in row["unproven"]}
+        self.assertEqual(unproven.get("g.solve"), "skipped: requires openfoam (not on PATH)",
+                         "the page must NAME the gate that did not pass, led by the fact")
+
+    def test_an_errored_row_paints_in_failings_tone_and_sorts_first(self):
+        """Invariant 2 on the page (P2.0 F-5): an errored claim's row is marked
+        `errored`, the page paints it in Failing's tone (`format.js`), and the
+        claims arrive in severity order — the crash above the skip whatever the
+        record order says."""
+        state = self._built_state(
+            claims=[self._claim("C1", gates=["g.skip"]), self._claim("C2", gates=["g.boom"])],
+            verdicts=[Verdict(gate="g.skip", claims=["C1"], skipped=True,
+                              skip_reason="requires openfoam (not on PATH)"),
+                      Verdict(gate="g.boom", claims=["C2"], error="RuntimeError: boom")],
+            registry=self._registry(self._spec("g.skip"), self._spec("g.boom", claims=["C2"])),
+        )
+        self.assertEqual([r["id"] for r in state["claims"]], ["C2", "C1"])
+        crash = state["claims"][0]
+        self.assertEqual((crash["status"], crash["errored"]), ("blocked", True))
+        self.assertTrue(crash["reason"].startswith("errored: g.boom : RuntimeError: boom"))
+        with open(os.path.join(site_mod.TEMPLATE_DIR, "lib", "format.js"),
+                  encoding="utf-8") as fh:
+            self.assertIn('tone: errored ? "bad" : look.tone,', fh.read())
+
+    def test_a_junk_pass_flag_is_a_fail_on_the_page(self):
+        """A verdict row's status comes from `Verdict.outcome`, never the flags:
+        `passed: "yes"` is not a pass (P2.1 design: the page read `passed` and
+        printed `pass` beside `ok: false`)."""
+        from atompipe import site as site_
+        junk = Verdict(gate="g.one", claims=["C1"], passed="yes")
+        resolution = unittest.mock.Mock(verdicts=[junk], stale_gates=frozenset(), rows={})
+        ledger = store_mod.load(self.root)
+        ledger.claims = [self._claim("C1")]
+        state = site_.state(self.root, ledger, self._registry(self._spec("g.one")),
+                            resolution=resolution, params=[])
+        row = state["verdicts"][0]
+        self.assertEqual((row["status"], row["ok"]), ("fail", False))
 
     def test_an_unanchored_failure_says_so_rather_than_looking_broken(self):
         """A gate attaches a locator only when it genuinely knows the position;

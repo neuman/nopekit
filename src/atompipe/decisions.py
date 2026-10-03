@@ -503,6 +503,12 @@ def _readers(name: str, read_sets: Mapping[str, Iterable[Any]]) -> list[str]:
     return modelio.param_readers(name, read_sets)
 
 
+#: The order `why` lists a claim's evaluators in, by outcome (P2.1-D16): what
+#: failed the candidate, what crashed, what skipped, then an unqualified one (3,
+#: set apart from `error`), an unrun one (4), and what passed.
+_OUTCOME_RANK = {"fail": 0, "error": 1, "skipped": 2, "pass": 5}
+
+
 def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],
                 evidence: _Evidence | None = None) -> list[str]:
     """Gates that protect this item, each with how it LAST ran, deduped by reason.
@@ -522,22 +528,30 @@ def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],
     the same failure as a log nobody opens.
 
     Grouping never shortens a reason — the reason is wrapped, not truncated, and
-    every gate id still appears. First-appearance order is kept so two runs over
-    an unchanged ledger print identical text.
+    every gate id still appears. The groups are in outcome order — fail,
+    errored, skipped, unqualified, unrun, pass (P2.1-D16) — and within one, in
+    first-appearance order, so two runs over an unchanged ledger print identical
+    text. What slipped through (P2.0 F-3): they were in gate-id order, so
+    `[skip]` sat above `[ERR ]` and a reader read the dull line first.
     """
     groups: dict[tuple[str, str], list[str]] = {}
+    ranks: dict[tuple[str, str], int] = {}
     for gid in gate_ids:
         verdict = evidence.verdict(ledger, gid) if evidence else ledger.verdict(gid)
         if verdict is None:
-            # Never run is an outcome like any other, and gates that never ran
-            # group together the same way.
-            key = ("[ -- ]", "never run")
+            # An unrun gate is shown like any outcome (GLOSSARY §6: an evaluator
+            # is *unrun*, never "never run", which is Open's Never-say), and gates
+            # that are unrun group together the same way.
+            key, rank = ("[ -- ]", "unrun"), 4
         else:
             key = _split_verdict(verdict)
+            rank = 3 if getattr(verdict, "unqualified", "") else _OUTCOME_RANK.get(
+                verdict.outcome, 5)
         groups.setdefault(key, []).append(gid)
+        ranks.setdefault(key, rank)
 
     lines: list[str] = []
-    for (head, body), ids in groups.items():
+    for (head, body), ids in sorted(groups.items(), key=lambda item: ranks[item[0]]):
         if len(ids) == 1:
             # One gate, one line: the dense `[skip] gate.id : reason` form, which
             # is strictly better than a two-line form when there is nothing to
@@ -825,7 +839,7 @@ def _why_view(ledger: Ledger, view: Any, views: Sequence[Any], evidence: _Eviden
 def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
     names = {claim.id}
     flags = [str(claim.kind)]
-    flags.append("critical" if claim.critical else "nice-to-have")
+    flags.append("critical" if claim.critical else "not required")
     out: list[str] = [f"claim  {claim.id}  [{', '.join(flags)}]"]
     out += _wrap(claim.statement)
 
@@ -841,10 +855,10 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
         out += _wrap("tags: " + ", ".join(claim.tags), indent="  ")
     if claim.physical_result is not None:
         result = claim.physical_result
-        verdict = "PASSED" if result.passed else "FAILED"
-        stamp = " ".join(x for x in (result.when, result.who) if x)
+        verdict = "pass" if result.passed else "fail"
+        stamp = " ".join(x for x in (result.when, result.who or "unattributed") if x)
         out += _wrap(
-            f"real-world result: {verdict}" + (f" ({stamp})" if stamp else "")
+            f"physical result: {verdict}" + (f" (recorded {stamp})" if stamp else "")
             + (f" — {result.detail}" if result.detail else ""),
             indent="  ",
             hanging="    ",
@@ -864,7 +878,7 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
     covering = evidence.claim_gates(claim)
     _section(out, f"GATES ({len(covering)})")
     out += _gate_lines(ledger, covering, evidence) if covering else _wrap(
-        "(none — this claim is UNCLAIMED: no gate can settle it)"
+        f"(none — {_no_evaluator(ledger, claim, evidence)})"
     )
 
     _section(out, f"GROUNDED BY ({len(claim.grounded_by)})")
@@ -879,6 +893,26 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
     )
 
     return "\n".join(out).rstrip() + "\n"
+
+
+def _no_evaluator(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
+    """Why nothing evaluates `claim`, by its kind and in its status's word —
+    `report`'s, through `claims.compose`, never a status spelled here. What
+    slipped through (P2.1): this said "this claim is UNCLAIMED: no gate can
+    settle it" for every claim with no evaluator, an assumption included, so
+    `why C6` told its owner to go find a gate."""
+    from . import claims as claim_logic, report     # readers' modules: not at import
+    from .models import ClaimKind
+    verdicts = list((evidence.verdicts or {}).values()) if evidence.verdicts is not None \
+        else list(ledger.verdicts)
+    found = claim_logic.compose(claim, verdicts)
+    status = report.word(found.status, errored=found.errored)
+    if claim.kind == ClaimKind.ASSUMPTION:
+        return (f"an assumption is carried by its owner, not settled by an evaluator: "
+                f"{status}, {report.reason(found, ledger, claim)}")
+    if claim.kind == ClaimKind.PHYSICAL:
+        return f"settled on an article: {status}"
+    return f"no evaluator covers this claim: {status}"
 
 
 def _why_decision_only(ledger: Ledger, name: str, close: Sequence[str]) -> str:

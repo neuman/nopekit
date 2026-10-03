@@ -142,14 +142,21 @@ Classify each one honestly:
 
 | Kind | Meaning |
 |---|---|
-| `measurable` | A gate can settle it from the model. Only these are ever "proven". |
-| `physical` | Only a real object settles it. Watertightness, feel, RF range, taste. |
-| `assumption` | Taken on faith. Recorded so it stays visible. |
+| `measurable` | An automated evaluator settles it from the model — the only kind one settles. |
+| `physical` | Only an article settles it. Watertightness, feel, RF range, taste. |
+| `assumption` | Accepted provisionally, with a reason and an owner. Recorded so it stays visible. |
 
-Say the physical ones out loud early: *"C5 can't be validated by any tool — it needs
-a real hull in real water. It stays UNVERIFIED until you test it."* This builds trust
+Say the physical ones out loud early: *"No evaluator here can settle C5 — it needs a
+real hull in real water. It is pending build until you test it."* This builds trust
 and sets expectations correctly. When the test happens, record what was observed:
-`atompipe claim physical C5 pass --who <name> --detail "<what was seen>"`.
+`atompipe claim physical C5 pass --who <name> --detail "<what was seen>"`. Until
+article binding lands, a recorded pass reads Checked but never makes the project
+*ready*: nothing yet ties it to the article that is built from the current design.
+
+**An assumption needs an owner who records it.** Writing `"owner": "<name>"` into
+`claims/<id>.json` does not make it Assumed — an owner counts only through the signing
+channel, and a hand or agent edit reads unattributed. Say it as it is: *"C6 is a gap
+until its owner records it."* Never edit the owner in to clear a gap.
 
 ### 3. Reach first light fast
 
@@ -237,10 +244,12 @@ negative control — a known-bad input it must fail on. The registry will not ac
 one without it. Run `atompipe gate selftest` and believe the result.
 
 **Never call a skipped or errored gate a pass.** A missing solver means the claim is
-BLOCKED, not fine. Say so — and then **clear it**: BLOCKED is a call to action, not a
-resting state. Run `atompipe packs show <pack>` for the install recipe, install the tool,
-and re-run. If it is heavy or needs root, say what it costs and ask. What you must not
-do is leave the claim BLOCKED and move on as though the design were validated.
+Skipped, not fine — even beside a gate that passed. Say so — and then **clear it**:
+Skipped is a call to action, not a resting state. Run `atompipe packs show <pack>` for
+the install recipe, install the tool, and re-run. If it is heavy or needs root, say
+what it costs and ask. What you must not do is leave the claim Skipped and move on as
+though the design were checked. A claim Skipped by a crash (its reason starts
+`errored:`, its tag is `[SKIP ]`) is louder still: the evaluator itself is broken.
 
 **Never simulate a physical claim.** No CFD run makes a printed seam watertight.
 
@@ -261,14 +270,17 @@ productive.
 
 Ordering boards, buying stock, booking machine time, committing to a mould: run the
 full sweep and read `atompipe report`. `atompipe check` exits non-zero while any
-critical claim is FAIL, STALE, UNCLAIMED, BLOCKED or PENDING.
+required claim is Failing, Skipped, a Gap, Open or Stale. Pending build and Assumed do
+not stop it, and they are still unresolved: say *ready* only when the report's first
+sentence does — every required claim checked against the current inputs.
 
 Then say the honest sentence out loud, in the shape the report uses:
 
-> *Fab-ready: routed, DRC-clean, fab package exported, mechanicals fit-checked. It is
-> unverified in physical hardware.*
+> *Fab-ready: routed, DRC-clean, fab package exported, mechanicals fit-checked.
+> Pending build: 2 claims need an article.*
 
-The second sentence is why anyone believes the first.
+The second sentence is why anyone believes the first. And "checked" does not mean
+true: it means every evaluator passed on the current inputs.
 
 ## Adversarial review before building
 

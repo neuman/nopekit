@@ -1076,10 +1076,18 @@ _LEDGER_HIDDEN = frozenset({"verdicts"}) & _LEDGER_FIELD_SET
 _IN_MEMORY_FIELDS = {"claims": ("gates", "physical_result"), "params": ("gates",)}
 
 
+#: Fields a gate's read of a record leaves out of the digest while they hold
+#: their default: ``Claim.owner`` (P2.1), so a claim no file names an owner for
+#: digests exactly as it did before the field existed, and only an edit that
+#: names one moves the gates that read the claim.
+_ABSENT_WHEN_EMPTY = frozenset({"owner"})
+
+
 def _record_form(item: Any, strip: tuple = ()) -> Any:
     form = item.to_dict() if hasattr(item, "to_dict") else item
-    if strip and isinstance(form, dict):
-        form = {k: v for k, v in form.items() if k not in strip}
+    if isinstance(form, dict):
+        form = {k: v for k, v in form.items()
+                if k not in strip and not (k in _ABSENT_WHEN_EMPTY and v == "")}
     return form
 
 
@@ -4867,19 +4875,34 @@ def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str
         # crash — a machine without omc would grow the file by a record per
         # model edit per omc gate, for no reader.
         records = {r: rec for r, rec in records.items() if rec["kind"] in _SUPERSEDING_KINDS}
-    records[input_rho] = {"kind": kind, "verdict": _clean(verdict.to_dict()),
-                          "when": str(when or "")}
+    stored = {k: v for k, v in verdict.to_dict().items() if k not in _NEVER_REMEMBERED}
+    records[input_rho] = {"kind": kind, "verdict": _clean(stored), "when": str(when or "")}
     data[key] = dict(sorted(records.items()))
     atomic_write_json(_outcomes_path(root), data)
+
+
+#: Verdict fields a remembered outcome never carries, written or read:
+#: ``unqualified`` is the spine's mark for an evaluator refused at its version,
+#: set fresh by every resolution from the control records. The file is untracked
+#: and hand-editable, and this is its ONE reader (``remembered``), so a mark left
+#: in it — by hand, or by a spine that stored it — is dropped here, for every
+#: reader at once. What slipped through the first design (P2.1 review): the drop
+#: sat in ``_as_spec``, which the orphan rung never calls, so a hand-edited
+#: record for an unregistered gate read Gap instead of errored — a crash made
+#: quieter than a skip.
+_NEVER_REMEMBERED = frozenset({"unqualified"})
 
 
 def remembered(root: str) -> dict:
     """``{key: {input_rho: {"input_rho", "kind", "verdict": Verdict, "when"}}}``
     — every remembered outcome, per key one record per ``input_rho``. Raises
     ``AtompipeError`` naming the file when it does not parse (see
-    ``_read_outcomes``)."""
+    ``_read_outcomes``). A record's ``unqualified`` is dropped
+    (``_NEVER_REMEMBERED``): a remembered crash reads as a crash."""
     return {key: {input_rho: {"input_rho": input_rho, "kind": rec["kind"],
-                              "verdict": Verdict.from_dict(rec["verdict"]),
+                              "verdict": Verdict.from_dict(
+                                  {k: v for k, v in rec["verdict"].items()
+                                   if k not in _NEVER_REMEMBERED}),
                               "when": rec["when"]}
                   for input_rho, rec in sorted(records.items())}
             for key, records in sorted(_read_outcomes(root).items())}
@@ -6123,6 +6146,19 @@ def _synthesized(spec: Any, **fields: Any) -> Verdict:
                    pack=spec.pack or "", passed=False, **fields)
 
 
+def _unqualified(spec: Any, reason: str, *, rho: str = "") -> Verdict:
+    """The verdict of an evaluator refused at its version: ``unqualified`` set to
+    the refusal's reason, beside ``error="not admitted: <reason>"``. Every
+    refusal is minted here — ``resolve`` (a Fresh entry, a stale one, none) and
+    the sweep (``_sweep_one``, ``_outranked``) — so ``Verdict.unqualified``, the
+    one mark ``claims.compose`` reads as Gap, has one producer. The text is
+    unchanged in P2.1: P2.0's fixtures and planted violators key on it, and
+    P2.3 rewords it with the qualification words. *Rejected:* the text as the
+    mark (a second predicate; a gate could word its own crash into it)."""
+    return _synthesized(spec, error=f"not admitted: {reason}", unqualified=str(reason or ""),
+                        rho=rho)
+
+
 def _crash_applies(record: Mapping[str, Any] | None, state: Any) -> bool:
     """Does a remembered crash or self-skip stand at ``state``'s inputs (§3.9)?
     Over a Fresh entry, at a rho current now on the served entry's path
@@ -6265,18 +6301,25 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
        control is admitted or pending; undemonstrated, it reads stale
        (``control not demonstrated at this version — run atompipe check``, with
        ``--tier <t>`` for an entry that took a costlier tier's path:
-       ``_undemonstrated``); not admitted, an error ``not admitted: <why>``. A
-       FAIL stays FAIL unless not admitted (then that error; it blocks either
-       way).
+       ``_undemonstrated``); not admitted, the refusal (``_unqualified``:
+       ``Verdict.unqualified`` set, ``error`` ``not admitted: <why>``). A FAIL
+       stays FAIL unless not admitted (then that refusal; it blocks either way).
     4. Otherwise the **latest entry**, stale with its reasons (Unknown with its
-       reason; ``model_error`` joins the "model does not load" one). Two
-       outcomes at the current rho: stale, or an error once
-       ``TWO_OUTCOMES_IS_ERROR`` is True.
+       reason; ``model_error`` joins the "model does not load" one) — unless its
+       evaluator is not admitted at the entry's tier, then the refusal (P2.1-D5:
+       a refusal that read Gap must not read "run check" after a model edit).
+       Two outcomes at the current rho: stale, or an error once
+       ``TWO_OUTCOMES_IS_ERROR`` is True, before the refusal is asked.
     5. A **legacy** ``ledger.verdicts`` row with no rho: stale, ``recorded
        before per-gate tracing`` (Q1.4). ``store.load`` and the migration drop
        every legacy verdict (D-09), so only a ``Ledger`` a caller built in memory
        still carries one; the rung stays so that one can never read current.
-    6. Nothing: no row — the claim reads PENDING.
+    6. Nothing: the refusal, a ``never`` row, when the evaluator is not admitted
+       (admission at no tier — a control entry that PASSED its known-bad input,
+       or a remembered control crash); otherwise no row, and the claim reads
+       Open. What slipped through (P2.0 review): only rung 3 asked, a gate
+       refused at its first check has no entry, and every reader after that
+       check read it never run and the pass beside it as pass.
 
     Then **orphans** — entries, remembered outcomes or legacy rows of gates this
     project does not register — sorted by id, stale ``gate not registered in
@@ -6369,8 +6412,7 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
             admission = _admission(here, spec, fn, held, notes, verified, at=at)
             when = when_of(entry, order)
             if admission.state == "not-admitted":
-                emit(_synthesized(spec, error=f"not admitted: {admission.reason}",
-                                  rho=entry.rho),
+                emit(_unqualified(spec, admission.reason, rho=entry.rho),
                      Row(gid, state.state, entry=entry, admission=admission, when=when,
                          notes=row_notes))
             elif admission.state == "undemonstrated":
@@ -6384,12 +6426,21 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
                                   admission=admission, when=when, notes=row_notes + pending))
             continue
 
-        # 4. the latest entry, stale
+        # 4. the latest entry, stale — unless the evaluator is refused at its
+        # version, which no rerun of the gate answers: its claim reads Gap, not
+        # "run check" (P2.1-D5). Asked at the entry's own tier, as step 3 asks.
         if isinstance(state, (Stale, Unknown)):
             when = when_of(entry, order)
             if isinstance(state, Stale) and state.conflict and TWO_OUTCOMES_IS_ERROR:
                 emit(_synthesized(spec, error=state.reasons[0], rho=entry.rho),
                      Row(gid, state.state, entry=entry, when=when, notes=row_notes))
+                continue
+            admission = _admission(here, spec, fn, held, notes, verified,
+                                   at=_read_tier(entry.reads))
+            if admission.state == "not-admitted":
+                emit(_unqualified(spec, admission.reason, rho=entry.rho),
+                     Row(gid, state.state, entry=entry, admission=admission, when=when,
+                         notes=row_notes))
                 continue
             if isinstance(state, Stale):
                 reason = _stale_text(state.reasons)
@@ -6405,7 +6456,19 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
         # 5. a ledger verdict from before per-gate tracing
         if gid in legacy:
             emit(_as_spec(legacy[gid], spec), Row(gid, "legacy", stale_reason=_LEGACY))
-        # 6. nothing: no row
+            continue
+        # 6. nothing — unless the evaluator is refused at its version, which is
+        # on disk (its control entry PASSED its known-bad input, or its control
+        # crashed, remembered under control:<gate>). What slipped through (P2.0
+        # review): admission was asked only over a Fresh entry, a refused gate is
+        # never cached, so every reader after the `check` that refused it read
+        # "never run" — and "pass beside an unrun gate" read pass: `status --json`
+        # ready, the claim under PROVEN. Asked at no tier, as `admission_state`.
+        admission = _admission(here, spec, fn, held, notes, verified, at=None)
+        if admission.state == "not-admitted":
+            emit(_unqualified(spec, admission.reason),
+                 Row(gid, state.state, admission=admission, notes=row_notes))
+        # undemonstrated, pending or admitted with no entry: no row, the claim reads Open
 
     # orphans: what this project's cache and memory hold for gates it does not register
     shown = {key: _latest_shown(records) for key, records in held.items()
@@ -7451,7 +7514,7 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
             _synthesized(spec, skipped=True, skip_reason=admitted.reason), **cost),
             executed=True, admission=admitted)
     if admitted.state == "not-admitted":
-        refused = _synthesized(spec, error=f"not admitted: {admitted.reason}", rho=served.rho)
+        refused = _unqualified(spec, admitted.reason, rho=served.rho)
         return SweepRow(dataclasses.replace(refused, **cost), executed=True, rho=served.rho,
                         admission=admitted)
     return SweepRow(dataclasses.replace(shown, **cost), executed=True, fresh=True,
@@ -7532,7 +7595,7 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         return SweepRow(_synthesized(spec, skipped=True, skip_reason=judged.reason),
                         admission=judged)
     if judged.state == "not-admitted":
-        refused = _synthesized(spec, error=f"not admitted: {judged.reason}",
+        refused = _unqualified(spec, judged.reason,
                                rho=state.rho if isinstance(state, Fresh) else "")
         above = _read_tier(state.entry.reads) if isinstance(state, Fresh) else None
         if (force and judged.executed and above is not None and above != s.now.tier
@@ -7788,6 +7851,19 @@ def _flat_reads(reads: Mapping[str, Any]) -> dict[str, str | None]:
     return dict(sorted(out.items()))
 
 
+def _detail_by_outcome(verdict: Verdict) -> str:
+    """What explains ``verdict`` in one line, by its outcome: an error's first
+    line, a skip's reason, a pass's or a fail's detail — the body
+    ``Verdict.render`` prints. What slipped through (P2.0 F-1): this preferred
+    ``detail``, which ``run_gate`` fills with a crash's traceback tail."""
+    outcome = verdict.outcome
+    if outcome == "error":
+        return (str(verdict.error).splitlines() or [""])[0]
+    if outcome == "skipped":
+        return verdict.skip_reason or verdict.detail or ""
+    return verdict.detail or ""
+
+
 def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, now: str,
                      params: Mapping[str, Any] | None = None,
                      digests: FileDigests | None = None) -> str | None:
@@ -7796,16 +7872,21 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
     filtered (``--only``) or dry (``record=False``): a partial sweep's summary
     would stand for the whole project's.
 
-    ``{"when", "spine", "fingerprint", "reads", "statuses", "counts", "worst",
-    "params", "influence"}``: the CLI's stamp; the spine digest; the
+    ``{"when", "spine", "fingerprint", "reads", "statuses", "errored", "counts",
+    "worst", "params", "influence"}``: the CLI's stamp; the spine digest; the
     ``fingerprint`` of ``watched_paths``; per gate the reads of the entry the
     resolution used (``param:<json path>``, ``file:``, ``dir:``, ``ledger:``,
     ``model``, ``opaque:``) — what lets P3's hook say which checks a change
-    touched; each claim's status under ``resolution``; the sweep's counts with
-    its controls; the first blocking claim with the gate and words that explain
-    it (nulls when nothing blocks); ``params`` (the parameter view, from 1.3) and
-    ``influence`` (P3), empty until then. Untracked, and read by nothing in the
-    sweep: ``check`` never trusts its own summary of a previous run.
+    touched; each claim's status under ``resolution`` (``claims.compositions``,
+    the enum value as before, P2.1-D12) and ``errored``, the claims Skipped by
+    a crash (a crash and a missing tool share ``blocked``; this tells them
+    apart); the sweep's counts with its controls; the first blocking claim with
+    the gate that explains it, its ``cause`` (``claims.ClaimCause``) and its
+    ``detail`` by outcome — an error's first line, a skip's reason, a fail's
+    detail, never a crash's traceback (P2.0 F-1) — nulls when nothing blocks;
+    ``params`` (the parameter view, from 1.3) and ``influence`` (P3), empty
+    until then. Untracked, and read by nothing in the sweep: ``check`` never
+    trusts its own summary of a previous run.
     """
     if not result.record or _filtered(result.only):
         return None
@@ -7814,16 +7895,16 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
     base = result.ledger if result.ledger is not None else Ledger()
     view = dataclasses.replace(base, verdicts=list(resolution.verdicts))
     stale = resolution.stale_gates
-    statuses = _claims.statuses(view, registry=result.registry, stale_gates=stale)
-    worst: dict[str, Any] = {"claim": None, "gate": None, "detail": None}
+    composed = _claims.compositions(view, registry=result.registry, stale_gates=stale)
+    worst: dict[str, Any] = {"claim": None, "gate": None, "detail": None, "cause": None}
     blocking = (_claims.blocking(view, result.registry, stale_gates=stale)
                 if result.registry is not None else [])
     if blocking:
         claim, status = blocking[0]
         why = _claims.explaining_verdict(claim, view.verdicts)
         worst = {"claim": claim.id, "gate": why.gate if why is not None else None,
-                 "detail": ((why.detail or why.error or why.skip_reason) if why is not None
-                            else str(status.value))}
+                 "detail": _detail_by_outcome(why) if why is not None else str(status.value),
+                 "cause": str(composed[claim.id].cause.value)}
     reads = {gid: _flat_reads(row.entry.reads or {})
              for gid, row in sorted(resolution.rows.items()) if row.entry is not None}
     data = {
@@ -7831,7 +7912,8 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
         "spine": spine_digest(),
         "fingerprint": fingerprint(root, watched_paths(root, resolution), digests=digests),
         "reads": reads,
-        "statuses": {cid: str(status.value) for cid, status in statuses.items()},
+        "statuses": {cid: str(c.status.value) for cid, c in composed.items()},
+        "errored": [cid for cid, c in composed.items() if c.errored],
         "counts": {**result.counts, "controls": dict(result.controls)},
         "worst": worst,
         "params": dict(params or {}),

@@ -283,7 +283,7 @@ class ParamValueHasOneHome(_Bracket):
         for head in ("WHY", "REJECTED (0)", "GATES (1)", "GROUNDED BY (0)",
                      "DECISIONS (0, newest first)"):
             self.assertIn(head, lines)
-        self.assertIn("  [ -- ] bracket.min_wall : never run", lines)
+        self.assertIn("  [ -- ] bracket.min_wall : unrun", lines)
 
     def test_coverage_read_sets_and_verdicts_stand_in_for_the_stored_copies(self):
         """The CLI hands `why` registry coverage, the recorded read sets and the

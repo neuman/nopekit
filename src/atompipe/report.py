@@ -25,12 +25,16 @@ easy and has been made:
    report-side half of "a logger is not a gate": the gate registry refuses gates
    that cannot fail, and the report refuses to print gates that did not run.
 
-2. **A claim can resolve PASS while a gate that covers it never ran.**
-   `claims.resolve_status` sees only the verdicts that exist, and a
-   registered-but-unrun gate produces none, so it cannot lower the status. That
-   is exactly how a partial sweep comes to look like a complete one. The registry
-   is a parameter of every function here precisely so the report can notice the
-   unrun gate and mark the row.
+2. **A claim never reads Checked while a gate that covers it never ran.**
+   Until P2.1 it could: the resolver saw only the verdicts that existed, a
+   registered-but-unrun gate produced none, and the report marked the row
+   PARTIAL and printed it under PROVEN anyway (S-03). GLOSSARY §3's composition
+   (`claims.compose`) reads that claim Open, a pass beside a skip or a crash
+   Skipped, and one beside a refused evaluator Gap — so there is nothing left to
+   mark partial, and a Checked status its evidence contradicts is printed as a
+   contradiction, loudly, outside the checked section (D18). The registry is
+   still a parameter of every function here, so the report can see the unrun
+   gate and name it.
 
 3. **Staleness is carried all the way through to the table.** `stale_gates` —
    the gates `verdicts.resolve` found not current — turns each PASS they cover
@@ -53,6 +57,16 @@ easy and has been made:
    `claims.blocking` does, and an exit code the rendered verdicts do not explain
    is itself rendered as a failure (`render_junit`, `render_selftest_junit`).
 
+6. **Every human word for a status comes from one table, `HUMAN`** (PLAN
+   D-16), which equals GLOSSARY §3: Table 1's seven words plus Open. Every
+   channel — `status`, `check`, `claim`, `why`, the report, JUnit messages,
+   `state.json` and the page's labels — reads it through the helpers here
+   (`word`, `status_tag`, `reason`, `count_line`, `severity`, `status_view`,
+   `words_table`). What slipped through before it (S-69): three vocabularies at
+   once — `[uncl]` in `check`, `[gap  ]` in `status`, NO GATE on the page —
+   and words the paper's readers would misread ("machine-verified", "blocked on
+   missing tooling" for a crash, "PARTIAL" for a lesser success).
+
 Nothing in this module reads a clock or a module-level registry, and the
 markdown report prints no time at all: a regenerated `docs/readiness.md` changes
 only when the claims or the verdict outcomes do (S-89). It used to be titled
@@ -67,7 +81,9 @@ from __future__ import annotations
 import math
 import os
 import re
-from typing import Any, Collection, Iterable, Sequence
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any, Collection, Iterable, NamedTuple, Sequence
 
 from . import __version__
 from . import claims as claim_logic
@@ -75,7 +91,9 @@ from . import modelio
 from . import store
 from . import verdicts as verdict_logic
 from .artifacts import unextracted
+from .claims import ClaimCause
 from .models import (
+    _RENDER_TAG,
     BLOCKING_STATUSES,
     Claim,
     ClaimKind,
@@ -89,33 +107,163 @@ from .models import (
 from .util import atomic_write_text, ensure_dir
 
 # --------------------------------------------------------------------------- #
-# vocabulary
+# vocabulary: `HUMAN`, the one table every human word for a status comes from
 # --------------------------------------------------------------------------- #
-#: Fixed-width tag per claim status, for the terminal render and for `atompipe
-#: status`. Deliberately NOT coloured: this output is read by agents at least as
-#: often as by humans, and an ANSI escape is noise in a transcript, a log file and
-#: a pipe to grep alike.
-#:
-#: Five characters wide, where `Verdict.render()` uses four — a gate verdict has
-#: four states and a claim has ten, and squeezing "unverified in hardware" and
-#: "no gate exists" into the same four-column slot as "skip" is how two very
-#: different situations start reading as the same one. The four tags the method
-#: names — ok / FAIL / skip / gap — keep their spelling.
-STATUS_TAG: dict[ClaimStatus, str] = {
-    ClaimStatus.PASS: "ok   ",
-    ClaimStatus.FAIL: "FAIL ",
-    ClaimStatus.REFUTED: "REFUT",      # a human tested it and it did not work
-    ClaimStatus.STALE: "STALE",        # passed, but not against the current model
-    ClaimStatus.BLOCKED: "skip ",      # the gate exists; its tooling does not
-    ClaimStatus.PENDING: "unrun",      # the gate exists; nobody ran it
-    ClaimStatus.UNCLAIMED: "gap  ",    # no gate exists at all -> capability gap
-    ClaimStatus.UNVERIFIED: "phys ",   # only a real object can settle it
-    ClaimStatus.VERIFIED: "ok-hw",     # a human recorded a real-world pass
-    ClaimStatus.ASSERTED: "assum",     # standing assumption, unevidenced
-}
+class StatusWords(NamedTuple):
+    """One GLOSSARY §3 row, as every channel speaks it.
+
+    ``key`` — the JSON token (``claims.STATUS_KEY``, GLOSSARY §8's rename-pass
+    value); ``word`` — prose, counts and JSON ``word`` ("pending build");
+    ``term`` — headings and page chips ("Pending build"); ``plural`` — a count
+    above one ("gaps"); ``tag`` — the five-wide terminal tag; ``hint`` — what it
+    means, one line (the page's chip title); ``rank`` — P2.1-D16's severity
+    order, most urgent first."""
+
+    key: str
+    word: str
+    term: str
+    plural: str
+    tag: str
+    hint: str
+    rank: int
+
+
+def _status_row(status: ClaimStatus, word: str, term: str, plural: str, tag: str,
+                hint: str, rank: int) -> StatusWords:
+    return StatusWords(claim_logic.STATUS_KEY[status], word, term, plural, tag, hint, rank)
+
+
+# Each row is GLOSSARY §3's, typed here — the glossary is a development document
+# the release bundle strips, so the words reach a user only through this table.
+# Tags are five wide (P2.1-D14): every grep and P2.0's parsers know the width,
+# and the loud ones — upper case — are exactly Failing, errored and Stale, the
+# tone `test_louder.tone_of` reads. Hints never say "qualified" or "built from
+# them" for Checked while a known-bad-shown evaluator still counts (P2.3) and no
+# article binds a physical pass: saying so would be the overclaim in words the
+# P2.1 design rejected (critique: the hint reaches the page's chip title).
+_CHECKED = _status_row(
+    ClaimStatus.PASS, "checked", "Checked", "checked", "ok   ",
+    "every evaluator passed on the current inputs — checked does not mean true", 8)
+_FAILING = _status_row(
+    ClaimStatus.FAIL, "failing", "Failing", "failing", "FAIL ",
+    "an evaluator failed the current candidate, or a physical result failed", 0)
+_STALE = _status_row(
+    ClaimStatus.STALE, "stale", "Stale", "stale", "STALE",
+    "a pass whose read set has changed since: nothing is checked now", 5)
+_ASSUMED = _status_row(
+    ClaimStatus.ASSERTED, "assumed", "Assumed", "assumed", "assum",
+    "accepted provisionally, with a reason and an owner — unresolved", 7)
+_PENDING_BUILD = _status_row(
+    ClaimStatus.UNVERIFIED, "pending build", "Pending build", "pending build", "build",
+    "waits on an article: a physical evaluator with no result yet", 6)
+_GAP = _status_row(
+    ClaimStatus.UNCLAIMED, "gap", "Gap", "gaps", "gap  ",
+    "no evaluator, none qualified, or one unqualified; or an assumption nobody owns", 3)
+_SKIPPED = _status_row(
+    ClaimStatus.BLOCKED, "skipped", "Skipped", "skipped", "skip ",
+    "an evaluator skipped, its tool missing here, and none failed: no usable verdict", 2)
+_OPEN = _status_row(
+    ClaimStatus.PENDING, "open", "Open", "open", "open ",
+    "an evaluator of the claim is unrun on the current inputs", 4)
+#: Skipped by a crash: the same status, louder (PLAN-v0.14 §1.5) — Failing's
+#: tone in its tag, above every skipped row in its rank.
+_SKIPPED_ERRORED = _SKIPPED._replace(
+    tag="SKIP ", rank=1,
+    hint="an evaluator errored: it crashed, so nothing was evaluated, and the evaluator "
+         "itself is broken")
+
+HUMAN: Mapping[str, Any] = MappingProxyType({
+    # ClaimStatus -> its row. Ten members, eight rows: a physical pass is
+    # Checked and a physical fail Failing — the terminal is the claim's, not
+    # the status's (GLOSSARY §8).
+    "status": MappingProxyType({
+        ClaimStatus.PASS: _CHECKED, ClaimStatus.VERIFIED: _CHECKED,
+        ClaimStatus.FAIL: _FAILING, ClaimStatus.REFUTED: _FAILING,
+        ClaimStatus.STALE: _STALE, ClaimStatus.ASSERTED: _ASSUMED,
+        ClaimStatus.UNVERIFIED: _PENDING_BUILD, ClaimStatus.UNCLAIMED: _GAP,
+        ClaimStatus.BLOCKED: _SKIPPED, ClaimStatus.PENDING: _OPEN,
+    }),
+    "errored": _SKIPPED_ERRORED,
+    # ClaimCause -> how its reason leads (P2.1-D15). "The reason line says
+    # which" (GLOSSARY §3): the lead names the fact, then the evaluator.
+    "lead": MappingProxyType({
+        ClaimCause.FAILED: "",
+        ClaimCause.PHYSICAL_FAIL: "failed on an article",
+        ClaimCause.ERRORED: "errored",
+        ClaimCause.SKIPPED: "skipped",
+        ClaimCause.UNQUALIFIED: "unqualified",
+        ClaimCause.NO_EVALUATOR: "no evaluator",
+        ClaimCause.NO_OWNER: "no owner recorded",
+        ClaimCause.OWNER_UNATTRIBUTED: "owner {owner} is named in claims/{id}.json and "
+                                       "has not recorded it",
+        ClaimCause.NO_REASON: "no reason recorded",
+        ClaimCause.UNRUN: "unrun",
+        ClaimCause.INVALIDATED: "invalidated",
+        ClaimCause.NO_ARTICLE: "needs an article",
+        ClaimCause.OWNED: "assumed by {owner}",
+        ClaimCause.PHYSICAL_PASS: "recorded by {who}, not bound to an article",
+        ClaimCause.CHECKED: "—",
+    }),
+    # NeedStatus -> its word. `open` is a claim status only (GLOSSARY §6): a gap
+    # record nobody has acted on is *identified*.
+    "need": MappingProxyType({
+        NeedStatus.OPEN: "identified", NeedStatus.PROPOSED: "proposed",
+        NeedStatus.DEFERRED: "deferred", NeedStatus.INSTALLING: "installing",
+        NeedStatus.SATISFIED: "satisfied", NeedStatus.ABANDONED: "abandoned",
+    }),
+    # Verdict.outcome -> its word (GLOSSARY §1: pass, fail, skipped, errored),
+    # and its tag: `models._RENDER_TAG` itself, re-exported — one table, so a
+    # tag changed there is changed here (critique of the P2.1 design: a copy
+    # held equal by a test only says so by failing).
+    "outcome": MappingProxyType({"pass": "pass", "fail": "fail", "skipped": "skipped",
+                                 "error": "errored"}),
+    "outcome_tag": MappingProxyType(_RENDER_TAG),
+    # The report's section headings (GLOSSARY §9), SECTION_PROVEN's text excepted:
+    # it changes only with METHOD's (A-11, PLAN D-14).
+    "heading": MappingProxyType({
+        "pending_build": "## Pending build",
+        "gaps": "## Gaps",
+        "assumed": "## Assumed",
+        "failing": "## Failing, stale, skipped or open",
+        "reproduce": "## Reproduce",
+    }),
+    # An unqualified evaluator's refusal, as admission words it, in GLOSSARY §2's
+    # words until P2.3 rewords the source: (admission's phrase, the glossary's).
+    # Ordered: the first match per phrase wins. What slipped through the design
+    # (review): the reason line carried "not admitted" and "known-bad fixture",
+    # two §2 Never-says, on a claim's status row.
+    "refusal": (
+        ("PASSED its own known-bad fixture", "passed its own known-bad control"),
+        ("its own known-bad input", "its own known-bad control"),
+        ("control error:", "its known-bad control errored:"),
+        ("control self-skip:", "its known-bad control skipped itself:"),
+    ),
+})
+
+
+class _StatusTagView(Mapping):
+    """`STATUS_TAG`: HUMAN's tags by status, read through at call time — a view of
+    the one table, never a second one, so patching `HUMAN` moves it too."""
+
+    def __getitem__(self, status: Any) -> str:
+        return HUMAN["status"][_norm_status(status)].tag
+
+    def __iter__(self):
+        return iter(HUMAN["status"])
+
+    def __len__(self) -> int:
+        return len(HUMAN["status"])
+
+
+#: The five-wide tag per claim status, for every channel that prints one —
+#: `HUMAN`'s, as a view (tests import the name). Deliberately NOT coloured: this
+#: output is read by agents at least as often as by humans, and an ANSI escape
+#: is noise in a transcript, a log file and a pipe to grep alike. An errored
+#: claim's tag is `status_tag(status, errored=True)`, `[SKIP ]`.
+STATUS_TAG: Mapping[ClaimStatus, str] = _StatusTagView()
 
 #: The PROVEN section's heading, as the report emits it and as every test that
-#: inspects that section finds it. The section's qualifier (`_PROVEN_QUALIFIER`)
+#: inspects that section finds it. The section's qualifier (`_proven_qualifier`)
 #: follows it on the same line and is NOT part of it.
 #:
 #: What slipped through (S-15): invariant 4's tests located the section by a
@@ -129,59 +277,24 @@ STATUS_TAG: dict[ClaimStatus, str] = {
 #: rule 9 and invariant 4 both say PROVEN, and changing the word is a METHOD edit
 #: (A-11), so a rename changes this constant's TEXT, never its name. *Rejected:*
 #: the qualifier inside the constant — it is prose that changes on its own (P1.2
-#: makes it "machine-verified, current"), and every such edit would move the key
-#: the tests search for. *Rejected:* matching any heading containing "PROVEN" —
-#: a second section that happened to use the word would be tested in its place.
+#: made it "machine-verified, current", P2.1 says checked), and every such edit
+#: would move the key the tests search for. *Rejected:* matching any heading
+#: containing "PROVEN" — a second section that happened to use the word would be
+#: tested in its place. It is the ONE place a human channel still prints a word
+#: GLOSSARY §3 retires, allowlisted by name in `test_vocabulary` until A-11.
 SECTION_PROVEN = "## What is PROVEN"
 
-#: What follows `SECTION_PROVEN` on its line. What slipped through: it read
-#: "(machine-verified this run)", true only while every verdict came from the
-#: sweep that wrote the report. From 1.2 a verdict is served from the cache when
-#: its inputs have not moved — current, but not "this run" — so the old words
-#: would have been false on every cache hit, in the one heading whose job is to
-#: be believed. *Rejected:* "(machine-verified, cached)" — it describes where a
-#: verdict came from, not why it counts; a verdict counts because it is current
-#: (its inputs, code and control are the ones it was measured with), whether it
-#: ran a second ago or was committed last week.
-_PROVEN_QUALIFIER = "(machine-verified, current)"
 
-#: Order used for the counts line. Good news first *in the counts only*, because
-#: a count is arithmetic; the verdict sentence and the problem list below it are
-#: ordered by severity, because those are judgements.
-_COUNT_ORDER: tuple[ClaimStatus, ...] = (
-    ClaimStatus.PASS, ClaimStatus.VERIFIED,
-    ClaimStatus.FAIL, ClaimStatus.REFUTED, ClaimStatus.STALE,
-    ClaimStatus.BLOCKED, ClaimStatus.PENDING, ClaimStatus.UNCLAIMED,
-    ClaimStatus.UNVERIFIED, ClaimStatus.ASSERTED,
-)
+def _proven_qualifier() -> str:
+    """What follows `SECTION_PROVEN` on its line: what the rows under it are, in
+    Checked's words. What slipped through: it read "(machine-verified this run)",
+    then "(machine-verified, current)" — *machine-verified* is a GLOSSARY §3
+    Never-say, and *verified* is the paper's word for something nothing here
+    earns. *Rejected:* "a qualified evaluator passed" while a known-bad-shown
+    evaluator still counts (P2.3) — an overclaim in words."""
+    return (f"({word(ClaimStatus.PASS)}: every evaluator passed on the current inputs — "
+            f"{word(ClaimStatus.PASS)} does not mean true)")
 
-#: Severity order: what a reader must deal with first.
-_SEVERITY: tuple[ClaimStatus, ...] = (
-    ClaimStatus.FAIL, ClaimStatus.REFUTED, ClaimStatus.STALE,
-    ClaimStatus.BLOCKED, ClaimStatus.PENDING, ClaimStatus.UNCLAIMED,
-    ClaimStatus.UNVERIFIED, ClaimStatus.ASSERTED,
-    ClaimStatus.VERIFIED, ClaimStatus.PASS,
-)
-
-#: How each blocking status reads inside the verdict sentence. Written as a
-#: fragment that follows a count: "2 failing", "1 with no gate at all".
-_STATUS_PHRASE: dict[ClaimStatus, str] = {
-    ClaimStatus.FAIL: "failing",
-    ClaimStatus.REFUTED: "refuted in hardware",
-    ClaimStatus.STALE: "stale (passed, but not against the current inputs)",
-    ClaimStatus.BLOCKED: "blocked on missing tooling",
-    ClaimStatus.PENDING: "never run",
-    ClaimStatus.UNCLAIMED: "with no gate at all",
-}
-
-#: Statuses that get a per-claim entry under "Failing / blocked". UNCLAIMED is
-#: absent on purpose: a claim with no gate is a capability gap, not a defect, and
-#: it is answered by installing a tool rather than by fixing the design. It gets
-#: its own section.
-_FAILING_SECTION: tuple[ClaimStatus, ...] = (
-    ClaimStatus.FAIL, ClaimStatus.REFUTED, ClaimStatus.STALE,
-    ClaimStatus.BLOCKED, ClaimStatus.PENDING,
-)
 
 #: Caps for the terminal render. The contract is "under ~40 lines for a healthy
 #: project"; a *sick* project must still not scroll a terminal off its history,
@@ -193,20 +306,8 @@ _MAX_REPRODUCE_GATES = 16
 
 
 # --------------------------------------------------------------------------- #
-# small render helpers
+# the helpers: the only readers of HUMAN
 # --------------------------------------------------------------------------- #
-def status_tag(status: ClaimStatus | str) -> str:
-    """`[FAIL ]` — the bracketed, fixed-width tag for one claim status.
-
-    Public because `atompipe status`, `atompipe claim list` and this module must
-    all spell a status the same way. Two renderings of the same status is exactly
-    the duplication rule 2 exists to kill: the day they drift, a reader has to
-    learn which command is telling the truth.
-    """
-    st = _norm_status(status)
-    return f"[{STATUS_TAG.get(st, str(st)[:5].ljust(5))}]"
-
-
 def _norm_status(status: ClaimStatus | str) -> ClaimStatus:
     """Coerce whatever `claims.statuses` handed back into a ClaimStatus member.
 
@@ -220,6 +321,235 @@ def _norm_status(status: ClaimStatus | str) -> ClaimStatus:
     return ClaimStatus(status)
 
 
+def words(status: ClaimStatus | str, *, errored: bool = False) -> StatusWords:
+    """`HUMAN`'s row for `status`, the errored row for a crash's Skipped."""
+    st = _norm_status(status)
+    if errored and st is ClaimStatus.BLOCKED:
+        return HUMAN["errored"]
+    return HUMAN["status"][st]
+
+
+def word(status: ClaimStatus | str, *, errored: bool = False, n: int = 1) -> str:
+    """The status's word ("pending build"), plural when `n` is not 1 ("gaps")."""
+    row = words(status, errored=errored)
+    return row.word if n == 1 else row.plural
+
+
+def status_tag(status: ClaimStatus | str, *, errored: bool = False) -> str:
+    """`[FAIL ]` — the bracketed, five-wide tag for one claim status; `[SKIP ]`
+    for a claim Skipped by a crash (invariant 2: Failing's tone).
+
+    Public because `status`, `check`, `claim list`, `claim show`, `claim
+    physical` and this module must all spell a status the same way. Two
+    renderings of the same status is exactly the duplication rule 2 exists to
+    kill: the day they drift, a reader has to learn which command is telling
+    the truth.
+    """
+    return f"[{words(status, errored=errored).tag}]"
+
+
+def severity(composed: Any) -> int:
+    """P2.1-D16's rank for one `claims.Composed`, most urgent first: Failing ·
+    Skipped, errored · Skipped · Gap · Open · Stale · Pending build · Assumed ·
+    Checked. What it replaced (`_SEVERITY`) ranked STALE above BLOCKED and a
+    crash, an order no rule produced, and left `check`'s BLOCKING list in record
+    order: a skip above the crash (P2.0 F-2)."""
+    return words(composed.status, errored=composed.errored).rank
+
+
+def in_severity(ledger: Ledger, composed: Mapping[str, Any],
+                claims_: Iterable[Claim] | None = None) -> list[Claim]:
+    """`claims_` (default: every claim) in severity order; ties critical first,
+    then record order — stable, so an unchanged ledger prints the same list."""
+    index = {c.id: i for i, c in enumerate(ledger.claims)}
+    chosen = list(ledger.claims if claims_ is None else claims_)
+    return sorted(chosen, key=lambda c: (severity(composed[c.id]), not c.critical,
+                                         index.get(c.id, len(index))))
+
+
+def count_bits(composed: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The count line's items, one per status word present: Checked first, then
+    the severity order — each `{key, status, n, errored, label}`, `label` the
+    bit as printed (`2 gaps`, `7 skipped (6 errored)`). One producer for the
+    terminal's count line and the page's strip (`site.state`'s `tally`)."""
+    n_errored = sum(1 for c in composed.values() if c.errored)
+    found: dict[str, list[Any]] = {}
+    for c in composed.values():
+        row = words(c.status)
+        found.setdefault(row.key, [row, c.status, 0])[2] += 1
+    checked = HUMAN["status"][ClaimStatus.PASS].rank
+    skipped = HUMAN["status"][ClaimStatus.BLOCKED].key
+    out: list[dict[str, Any]] = []
+    for row, status, n in sorted(found.values(),
+                                 key=lambda item: (item[0].rank != checked, item[0].rank)):
+        errored = n_errored if row.key == skipped else 0
+        label = f"{n} {row.word if n == 1 else row.plural}"
+        if errored:
+            label += f" ({errored} {HUMAN['lead'][ClaimCause.ERRORED]})"
+        out.append({"key": row.key, "status": str(_norm_status(status).value), "n": n,
+                    "errored": errored, "label": label})
+    return out
+
+
+def count_line(composed: Mapping[str, Any]) -> str:
+    """`7 claims · 3 checked · 1 failing · 2 gaps · 1 pending build` — GLOSSARY
+    §9's count line: Checked first, then the severity order, zeros dropped, and
+    Skipped written `N skipped (k errored)` (PLAN-v0.14 §1.5: every count splits
+    a crash out). What it replaced, `claims 7 — ok 3 | FAIL 1 | phys 1 | assum
+    1`, spoke the tags, two of them GLOSSARY Never-says."""
+    total = len(composed)
+    return " · ".join([f"{total} {_plural(total, 'claim')}",
+                       *(bit["label"] for bit in count_bits(composed))])
+
+
+def _refusal_words(text: str) -> str:
+    """An unqualified evaluator's refusal in GLOSSARY §2's words (`HUMAN["refusal"]`)."""
+    for old, new in HUMAN["refusal"]:
+        if old in text:
+            text = text.replace(old, new)
+    return text
+
+
+def _verdict_body(verdict: Verdict) -> str:
+    """What explains a verdict, by its outcome — never the first non-empty flag:
+    an error's first line (a crash's `detail` is its traceback, P2.0 F-1), a
+    skip's reason, a pass's or a fail's detail."""
+    outcome = verdict.outcome
+    if outcome == "error":
+        return (str(verdict.error).splitlines() or [""])[0]
+    if outcome == "skipped":
+        return verdict.skip_reason or verdict.detail or ""
+    return verdict.detail or ""
+
+
+def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
+           cut: bool | None = None,
+           stale_reasons: Mapping[str, str] | None = None) -> str:
+    """The shortest true sentence about why `claim` reads `composed.status` — ONE
+    producer for every channel: `status` and the terminal report, `check`'s
+    BLOCKING list, JUnit messages, `state.json`, the JSON views.
+
+    Led by the fact (`HUMAN["lead"]`), then the evaluator, then its words: a
+    fail cites `<gate> : <detail>` (+ ` (invalidated: <why>)` when the fail's
+    inputs moved, D-08); a crash `errored: <gate> : <exception>`, never the
+    traceback; a skip `skipped: <gate> : <reason>`; a refused evaluator
+    `unqualified: <gate> : <why>`; an unrun one `unrun: <gates>`; an invalidated
+    pass `invalidated: <gate> : <what moved>`. `full=True` is the long form —
+    the report, JUnit and JSON — which also says what an unowned assumption
+    waits for; `cut` (default: not `full`) cuts the evaluator's words to share a
+    terminal row with the claim (`check`'s BLOCKING rows: short, never cut).
+    `stale_reasons` is `{gate: why}` from the resolution, when the caller has it.
+
+    What slipped through (S-68, P2.0 F-1/F-8): `status` and `check` each kept a
+    copy of this, one fixed and one not, and every copy preferred `detail` — a
+    crash's traceback — and fell back to the STATUS for words: a crash rode on
+    FAIL's "failing", and moved alone to Skipped it would have read "blocked on
+    missing tooling" in three places. The cause is `compose`'s now, and the
+    words are here, once.
+    """
+    cutting = (not full) if cut is None else cut
+
+    def cut_(text: str, limit: int) -> str:
+        return _trunc(text, limit if cutting else None)
+
+    cause = composed.cause
+    lead = HUMAN["lead"][cause]
+    verdict = composed.verdict
+    stale_reasons = stale_reasons or {}
+    if cause is ClaimCause.FAILED and verdict is not None:
+        body = _verdict_body(verdict)
+        text = f"{verdict.gate} : {cut_(body, 56)}" if body else f"{verdict.gate} did not pass"
+        moved = stale_reasons.get(verdict.gate)
+        if moved:
+            text += f" ({HUMAN['lead'][ClaimCause.INVALIDATED]}: {cut_(moved, 80)})"
+        return text
+    if cause is ClaimCause.PHYSICAL_FAIL:
+        result = claim.physical_result
+        detail = (result.detail if result and result.detail else "no detail recorded")
+        who = (result.who if result and result.who else "unattributed")
+        return f"{lead}: {cut_(detail, 60)} (recorded by {who})"
+    if cause in (ClaimCause.ERRORED, ClaimCause.SKIPPED, ClaimCause.UNQUALIFIED) \
+            and verdict is not None:
+        if cause is ClaimCause.UNQUALIFIED:
+            body = _refusal_words(str(verdict.unqualified or _verdict_body(verdict)))
+        else:
+            body = _verdict_body(verdict)
+        return f"{lead}: {verdict.gate} : {cut_(body, 56)}" if body \
+            else f"{lead}: {verdict.gate}"
+    if cause is ClaimCause.NO_OWNER:
+        return lead + (" — an assumption reads Assumed only once its owner records it; "
+                       "nothing can record one yet" if full else "")
+    if cause is ClaimCause.OWNER_UNATTRIBUTED:
+        return lead.format(owner=claim.owner, id=claim.id)
+    if cause is ClaimCause.UNRUN:
+        shown = ", ".join(composed.cites[:3])
+        more = f", +{len(composed.cites) - 3} more" if len(composed.cites) > 3 else ""
+        return f"{lead}: {shown}{more}"
+    if cause is ClaimCause.INVALIDATED:
+        named = [g for g in composed.cites if stale_reasons.get(g)]
+        if named:
+            gate = named[0]
+            text = f"{lead}: {gate} : {cut_(stale_reasons[gate], 56)}"
+            return text + (f" (+{len(composed.cites) - 1} more)"
+                           if len(composed.cites) > 1 else "")
+        return f"{lead}: {', '.join(composed.cites[:3]) or 'every verdict'}"
+    if cause is ClaimCause.NO_ARTICLE:
+        untested = not claim.note and claim.acceptance.limit is None \
+            and not (claim.acceptance.quantity or "").strip()
+        return lead + ("; no test written down" if untested else "")
+    if cause is ClaimCause.OWNED:
+        return f"{lead.format(owner=claim.owner)}: {cut_(claim.rationale, 52)}"
+    if cause is ClaimCause.PHYSICAL_PASS:
+        result = claim.physical_result
+        return lead.format(who=(result.who if result and result.who else "unattributed"))
+    return lead
+
+
+def status_view(composed: Any, ledger: Ledger, claim: Claim, *,
+                stale_reasons: Mapping[str, str] | None = None) -> dict[str, Any]:
+    """`{key, word, cause, reason, errored}` — a claim's status as every JSON
+    channel adds it beside the kept enum `status` (P2.1-D12): the token, the
+    word, the cause's identifier, the reason in full, and the crash mark."""
+    row = words(composed.status, errored=composed.errored)
+    return {"key": row.key, "word": row.word, "cause": str(composed.cause.value),
+            "reason": reason(composed, ledger, claim, full=True, stale_reasons=stale_reasons),
+            "errored": bool(composed.errored)}
+
+
+def outcome_words() -> dict[str, str]:
+    """`state.json`'s `outcome_words`: a verdict row's status (`pass`, `fail`,
+    `skipped`, `errored`) -> its word, from `HUMAN` — the page's verdict chips
+    own no word either (GLOSSARY §7: every status and outcome word comes from
+    one table)."""
+    said = HUMAN["outcome"]
+    return {"pass": said["pass"], "fail": said["fail"], "skipped": said["skipped"],
+            "errored": said["error"]}
+
+
+def words_table() -> dict[str, dict[str, str]]:
+    """`state.json`'s `words`: `{enum value: {key, word, term, plural, hint}}`,
+    the page's labels — read from `HUMAN`, so the site never owns a word (D-16),
+    and an `errored` entry for the louder Skipped."""
+    out = {str(status.value): {"key": row.key, "word": row.word, "term": row.term,
+                               "plural": row.plural, "hint": row.hint}
+           for status, row in HUMAN["status"].items()}
+    row = HUMAN["errored"]
+    out["errored"] = {"key": row.key, "word": row.word, "term": row.term,
+                      "plural": row.plural, "hint": row.hint}
+    return out
+
+
+def need_word(status: Any) -> str:
+    """A gap record's state, in its word: `identified` for `open` (GLOSSARY §6)."""
+    try:
+        return HUMAN["need"][NeedStatus(status)]
+    except ValueError:
+        return str(status)
+
+
+# --------------------------------------------------------------------------- #
+# small render helpers
+# --------------------------------------------------------------------------- #
 def _num(value: Any) -> str:
     """Render a measured number without trailing-zero noise: 220.0 -> `220`."""
     if isinstance(value, bool):          # bool is an int; check it first
@@ -272,21 +602,29 @@ def _claim_text(claim: Claim) -> str:
 # --------------------------------------------------------------------------- #
 # ledger / registry queries
 # --------------------------------------------------------------------------- #
+def _compositions(ledger: Ledger, registry: Any, stale: bool,
+                  stale_gates: Collection[str] = ()) -> dict[str, Any]:
+    """Every claim's `claims.Composed` — status AND cause — judged against the
+    LIVE registry, not the cache.
+
+    `claims.compositions` accepts the registry as a keyword and the difference
+    is not cosmetic: without it, coverage is read from `claim.gates` alone, and
+    a claim whose gate arrived with a pack installed after the claim was
+    written reads Gap ("nobody can check this — go find a solver") instead of
+    Open ("the evaluator is right there, run it"). Those two send an agent in
+    opposite directions, and only one of them is true. No `owners`: nothing in
+    P2.1 attributes an owner (the signing channel is later in Phase 2), so every
+    assumption reads Gap here, as everywhere.
+    """
+    return claim_logic.compositions(ledger, registry=registry, stale=stale,
+                                    stale_gates=stale_gates)
+
+
 def _statuses(ledger: Ledger, registry: Any, stale: bool,
               stale_gates: Collection[str] = ()) -> dict[str, ClaimStatus]:
-    """Every claim's status, judged against the LIVE registry, not the cache.
-
-    `claims.statuses` accepts the registry as an additive keyword and the
-    difference is not cosmetic: without it, coverage is read from `claim.gates`
-    alone, and a claim whose gate arrived with a pack installed after the claim
-    was written reads UNCLAIMED ("nobody can check this — go find a solver")
-    instead of PENDING ("the gate is right there, run it"). Those two send an
-    agent in opposite directions, and only one of them is true.
-    """
-    raw = claim_logic.statuses(ledger, stale=stale, registry=registry,
-                               stale_gates=stale_gates)
-    # Normalise at the boundary: see _norm_status.
-    return {cid: _norm_status(st) for cid, st in raw.items()}
+    """`_compositions`' statuses alone, for a reader that needs no cause."""
+    return {cid: _norm_status(c.status)
+            for cid, c in _compositions(ledger, registry, stale, stale_gates).items()}
 
 
 def _coverage(ledger: Ledger, registry: Any) -> dict[str, list[str]]:
@@ -403,45 +741,54 @@ def _ok_verdicts(ledger: Ledger, claim: Claim) -> list[Verdict]:
 
 def _unproven_for(claim_id: str, cover: dict[str, list[str]],
                   ledger: Ledger) -> list[tuple[str, str]]:
-    """Covering gates that produced NO PROOF, each with the reason.
+    """Covering gates that produced no pass that counts, each with its reason,
+    led by the fact (`HUMAN["lead"]`): `unrun`, `errored: <exception>`,
+    `skipped: <reason>`, `unqualified: <refusal>`, `fail: <detail>`.
 
-    The test is `Verdict.ok` — ran, passed, did not skip, did not error — and not
-    merely "a verdict exists". Keying off existence was a live laundering hole: a
-    claim covered by a cheap analytic gate and an expensive solver resolves PASS on
-    the analytic one alone, and if the solver skipped for a missing binary it left
-    a verdict behind, so the row printed no caveat and the gate that would actually
-    have settled the claim vanished from the document entirely.
+    The test is `Verdict.ok` and the spine's mark — ran, passed, did not skip,
+    did not error, is not refused — never merely "a verdict exists". Keying off
+    existence was a live laundering hole: a claim covered by a cheap analytic
+    gate and an expensive solver resolved PASS on the analytic one alone, and
+    the gate that would have settled it vanished from the document. Under
+    GLOSSARY §3's composition (P2.1) a Checked claim has none of these; a list
+    beside a Checked status is a contradiction, never a PARTIAL row (D18).
 
-    That is the precise shape of the failure this whole project exists to prevent:
-    the reader sees PROVEN, and the check that mattered never ran.
+    What slipped through (P2.0 F-10): a skipped-and-errored verdict's reason
+    was its skip reason — a crash in a missing tool's words, on the page.
     """
     by_gate = {v.gate: v for v in ledger.verdicts}
+    lead = HUMAN["lead"]
     out: list[tuple[str, str]] = []
     for gid in cover.get(claim_id, []):
         verdict = by_gate.get(gid)
         if verdict is None:
-            out.append((gid, "never run"))
+            out.append((gid, lead[ClaimCause.UNRUN]))
+        elif getattr(verdict, "unqualified", ""):
+            out.append((gid, f"{lead[ClaimCause.UNQUALIFIED]}: "
+                             f"{_refusal_words(verdict.unqualified)}"))
         elif not verdict.ok:
-            if verdict.skipped:
-                out.append((gid, verdict.skip_reason or "skipped"))
-            elif verdict.error:
-                out.append((gid, "errored"))
-            else:
-                out.append((gid, "failed"))
+            body = _verdict_body(verdict)
+            head = {"error": lead[ClaimCause.ERRORED], "skipped": lead[ClaimCause.SKIPPED]
+                    }.get(verdict.outcome, HUMAN["outcome"]["fail"])
+            out.append((gid, f"{head}: {body}" if body else head))
     return out
 
 
-def _counts(st: dict[str, ClaimStatus]) -> dict[ClaimStatus, int]:
-    counts: dict[ClaimStatus, int] = {}
-    for value in st.values():
-        counts[value] = counts.get(value, 0) + 1
-    return counts
-
-
-def _claims_with(ledger: Ledger, st: dict[str, ClaimStatus],
-                 wanted: Iterable[ClaimStatus]) -> list[Claim]:
-    wanted = tuple(wanted)
-    return [c for c in ledger.claims if st.get(c.id) in wanted]
+def _disagreement(ledger: Ledger, claim: Claim, composed: Any,
+                  cover: dict[str, list[str]]) -> str:
+    """Why a claim the resolver calls `pass` is contradicted by its evidence —
+    `<gate> <why>; …` — or `""`. Under GLOSSARY §3's composition this never
+    happens; when it does, the resolver and the verdicts disagree, and the
+    report says so loudly, outside the checked section (P2.1-D18, review): a
+    contradiction kept under PROVEN, even marked, is PARTIAL under a new name."""
+    if composed.status is not ClaimStatus.PASS:
+        return ""
+    unproven = _unproven_for(claim.id, cover, ledger)
+    if unproven:
+        return "; ".join(f"{gid} {why}" for gid, why in unproven)
+    if not _ok_verdicts(ledger, claim):
+        return "no verdict recorded"
+    return ""
 
 
 def _ids(claims: Iterable[Claim], limit: int = 4) -> str:
@@ -454,158 +801,199 @@ def _ids(claims: Iterable[Claim], limit: int = 4) -> str:
 # --------------------------------------------------------------------------- #
 # the verdict sentence
 # --------------------------------------------------------------------------- #
-def _verdict_sentence(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any,
+def _groups(ledger: Ledger, composed: Mapping[str, Any], chosen: Iterable[Claim]) -> str:
+    """`1 failing (C1); 2 gaps (C6, C7); 1 pending build (C5)` — `chosen` grouped
+    by status word in severity order, Skipped written `N skipped (k errored)`
+    with the errored claims first. One producer for the readiness sentence and
+    `check`'s line, so the two cannot disagree about what is unresolved."""
+    buckets: dict[str, list[Claim]] = {}
+    for claim in in_severity(ledger, composed, chosen):
+        buckets.setdefault(words(composed[claim.id].status).key, []).append(claim)
+    parts: list[str] = []
+    for members in buckets.values():
+        status = composed[members[0].id].status
+        n = len(members)
+        text = f"{n} {word(status, n=n)}"
+        errored = sum(1 for c in members if composed[c.id].errored)
+        if errored:
+            text += f" ({errored} {HUMAN['lead'][ClaimCause.ERRORED]})"
+        parts.append(f"{text} ({_ids(members)})")
+    return "; ".join(parts)
+
+
+def readiness(ledger: Ledger, composed: Mapping[str, Any]) -> dict[str, Any]:
+    """What *ready* turns on, as lists of claims (GLOSSARY §4, W3): `required`;
+    `unresolved` — required and not Checked, Pending build and Assumed included;
+    `unbound` — required and Checked on a physical pass no article binds to the
+    current inputs (every one until article binding: P2.1 review, so an agent's
+    typed pass never makes a project ready); `ready` — at least one required
+    claim, and neither list holds any. `claims.summarise`'s
+    `all_required_checked` is this predicate; `ready` in a JSON summary is not
+    (it keeps "nothing stops check")."""
+    required = [c for c in ledger.claims if c.critical]
+    unresolved = [c for c in required if composed[c.id].status
+                  not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
+    unbound = [c for c in required if composed[c.id].status is ClaimStatus.VERIFIED]
+    return {"required": required, "unresolved": unresolved, "unbound": unbound,
+            "ready": bool(required) and not unresolved and not unbound}
+
+
+def not_ready_line(ledger: Ledger, composed: Mapping[str, Any]) -> str:
+    """`check`'s line when nothing blocks it: `ready: …` only when *ready* holds
+    (GLOSSARY §4), otherwise what stands between the project and it. What it
+    replaced said `ready: no critical claim is blocking` while a claim waited
+    for an article — GLOSSARY's *clean bill of health*."""
+    found = readiness(ledger, composed)
+    checked = word(ClaimStatus.PASS)
+    if found["ready"]:
+        return f"ready: every required claim is {checked}"
+    if not found["required"]:
+        return (f"nothing stops this check run — no claim is required, so nothing is "
+                f"ready (listed in `atompipe report`)")
+    if found["unresolved"]:
+        n = len(found["unresolved"])
+        return (f"nothing stops this check run — {n} required "
+                f"{_plural(n, 'claim')} {_plural(n, 'is', 'are')} unresolved: "
+                f"{_groups(ledger, composed, found['unresolved'])} "
+                f"(listed in `atompipe report`)")
+    n = len(found["unbound"])
+    return (f"nothing stops this check run — {n} required {_plural(n, 'claim')} "
+            f"{_plural(n, 'is', 'are')} {checked} on an article not bound to the current "
+            f"inputs ({_ids(found['unbound'])})")
+
+
+def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any,
                       *, stale: bool, markdown: bool) -> str:
-    """One honest sentence, plus the hardware caveat. Bad news first, always.
+    """The readiness sentence, then what stays true whatever it says. Bad news
+    first, always.
 
     This function is the whole point of the report, so it is worth being explicit
-    about the ordering rule it encodes: a blocking gap outranks any amount of
-    good news. The moment a verdict is allowed to open with "8 of 9 claims pass"
-    while one critical claim has no gate at all, the reader has been told the
-    project is nearly done, and the one sentence that mattered is now a footnote.
+    about the ordering rule it encodes: an unresolved required claim outranks any
+    amount of good news. The moment a verdict is allowed to open with "8 of 9
+    claims pass" while one required claim has no evaluator at all, the reader
+    has been told the project is nearly done, and the one sentence that mattered
+    is now a footnote.
 
-    The second sentence — "it is unverified in physical hardware" — is emitted
-    unconditionally whenever an UNVERIFIED physical claim exists, however good the
-    first sentence is. That clause is what separates a manufacturable design from
-    a working product, and no amount of green gates removes it. Only a human
-    recording a real result does.
+    *Ready* only when every required claim reads Checked on the current inputs
+    (GLOSSARY §4; `readiness`); otherwise `NOT ready`, with every unresolved
+    required claim listed by its word — Pending build and Assumed included,
+    because both are unresolved (GLOSSARY §3). What slipped through: the
+    sentence said "clears every critical gate that is installed" while a claim
+    waited for an article, and grouped only the blocking statuses under
+    "unsettled", so a reader counted what was left wrong.
+
+    The hardware sentence follows in EVERY branch, ready included — `Pending
+    build: N claims need an article`, and a physical pass named as not bound to
+    an article — because that clause is what separates a design that clears its
+    evaluators from a working thing (W13, GLOSSARY §9). What slipped through the
+    P2.1 design (review): it folded the clause into the not-ready groups, so a
+    ready project with a not-required physical claim said nothing about hardware.
     """
     rev = ledger.meta.revision or "this revision"
     bold = (lambda s: f"**{s}**") if markdown else (lambda s: s)
     total = len(ledger.claims)
+    checked = word(ClaimStatus.PASS)
 
     if total == 0:
-        return bold(f"{rev} has no claims recorded, so nothing has been proven.") + \
-            " A project with no claims is not a clean bill of health — start with" \
-            " one: write `claims/C1.json`, a statement and an acceptance."
+        return bold(f"{rev} has no claims recorded, so nothing has been evaluated.") + \
+            " A project with no claims is not ready — start with one: write" \
+            " `claims/C1.json`, a statement and an acceptance."
 
-    critical_bad = [c for c in ledger.claims
-                    if c.critical and st.get(c.id) in BLOCKING_STATUSES]
-    other_bad = [c for c in ledger.claims
-                 if not c.critical and st.get(c.id) in BLOCKING_STATUSES]
-    n_critical = sum(1 for c in ledger.claims if c.critical)
-    proven = [c for c in ledger.claims if st.get(c.id) is ClaimStatus.PASS]
-    unverified = [c for c in ledger.claims if st.get(c.id) is ClaimStatus.UNVERIFIED]
-    verified = [c for c in ledger.claims if st.get(c.id) is ClaimStatus.VERIFIED]
+    found = readiness(ledger, composed)
+    status_of = {cid: c.status for cid, c in composed.items()}
+    n_checked = sum(1 for s in status_of.values() if s is ClaimStatus.PASS)
+    tally = (f"{n_checked} of {total} {_plural(total, 'claim')} "
+             f"{_plural(n_checked, 'is', 'are')} {checked} against the current inputs.")
 
     parts: list[str] = []
-    # NB: "never gated" keys off whether any VERDICT exists, not off run metadata.
-    # The sweep record this used to consult was bookkeeping a caller could
-    # legitimately not have written; verdicts are the evidence. Keying the headline
-    # off the former let a ledger holding real results announce "no verdict of any
-    # kind is recorded" — a false statement in the one document whose entire value
-    # is that it makes none.
+    # NB: "never evaluated" keys off whether any VERDICT exists, not off run
+    # metadata. The sweep record this used to consult was bookkeeping a caller
+    # could legitimately not have written; verdicts are the evidence.
     if not ledger.verdicts:
-        parts.append(bold(f"{rev} has never been gated: no verdict of any kind is"
+        parts.append(bold(f"{rev} has never been evaluated: no verdict of any kind is"
                           f" recorded against its {total} {_plural(total, 'claim')}."))
-        parts.append("Nothing below is proven because nothing has been run —"
-                     " `atompipe check --tier 0` is the first step.")
-    elif critical_bad:
-        # Group the blocking statuses so the sentence says *how* it is blocked,
-        # not merely that it is. "2 unsettled" sends a reader hunting; "1 failing
-        # (C3), 1 with no gate at all (C2)" tells them which tool to reach for.
-        fragments: list[str] = []
-        for status in _SEVERITY:
-            group = [c for c in critical_bad if st.get(c.id) is status]
-            if group:
-                phrase = _STATUS_PHRASE.get(status, str(status))
-                fragments.append(f"{len(group)} {phrase} ({_ids(group)})")
+        parts.append(f"Nothing below is {checked}, because no evaluator has run —"
+                     f" `atompipe check --tier 0` is the first step.")
+    elif not found["required"]:
+        parts.append(bold(f"{rev} is NOT ready: none of its {total}"
+                          f" {_plural(total, 'claim')} is required."))
+        parts.append(tally)
+    elif found["unresolved"]:
+        n, req = len(found["unresolved"]), len(found["required"])
         parts.append(bold(
-            f"{rev} is NOT ready: {len(critical_bad)} of {n_critical} critical"
-            f" {_plural(n_critical, 'claim')} {_plural(len(critical_bad), 'is', 'are')}"
-            f" unsettled — {'; '.join(fragments)}."))
-        parts.append(f"{len(proven)} of {total} {_plural(total, 'claim')}"
-                     f" {_plural(len(proven), 'is', 'are')} machine-verified against"
-                     f" the current model.")
-    elif stale:
-        # Reachable when nothing is marked critical: staleness then blocks nothing
-        # mechanically, and saying so plainly is better than a silent downgrade.
-        parts.append(bold(f"{rev} has no current proof: every verdict is marked"
-                          f" stale, so no previous pass counts."))
-        parts.append("Re-run `atompipe check` before trusting anything below.")
+            f"{rev} is NOT ready: {n} of {req} required {_plural(req, 'claim')}"
+            f" {_plural(n, 'is', 'are')} unresolved —"
+            f" {_groups(ledger, composed, found['unresolved'])}."))
+        parts.append(tally)
+    elif found["unbound"]:
+        parts.append(bold(f"{rev} is NOT ready: every required claim is {checked}, but"
+                          f" not every one against the current inputs."))
+        parts.append(tally)
     else:
-        parts.append(bold(f"{rev} clears every critical gate that is installed:"
-                          f" {len(proven)} of {total} {_plural(total, 'claim')}"
-                          f" machine-verified."))
-        if other_bad:
-            parts.append(f"{len(other_bad)} non-critical"
-                         f" {_plural(len(other_bad), 'claim')} still"
-                         f" {_plural(len(other_bad), 'has', 'have')} no result"
-                         f" ({_ids(other_bad)}).")
+        parts.append(bold(f"{rev} is ready: every required claim is {checked} against"
+                          f" the current inputs."))
+
+    other = [c for c in ledger.claims if not c.critical
+             and status_of.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
+    if other:
+        parts.append(f"{len(other)} {_plural(len(other), 'claim')} not required"
+                     f" {_plural(len(other), 'is', 'are')} unresolved ({_ids(other)}).")
 
     unrun = _unrun_specs(ledger, registry)
     if unrun and ledger.verdicts:
         parts.append(f"{len(unrun)} registered {_plural(len(unrun), 'gate')}"
-                     f" {_plural(len(unrun), 'has', 'have')} never run.")
+                     f" {_plural(len(unrun), 'is', 'are')}"
+                     f" {HUMAN['lead'][ClaimCause.UNRUN]}.")
 
-    if unverified:
-        parts.append(f"It is unverified in physical hardware:"
-                     f" {len(unverified)} {_plural(len(unverified), 'claim')}"
-                     f" {_plural(len(unverified), 'needs', 'need')} a real object"
-                     f" ({_ids(unverified)}).")
-    elif verified:
-        parts.append(f"{len(verified)} physical {_plural(len(verified), 'claim')}"
-                     f" {_plural(len(verified), 'has', 'have')} been confirmed on a"
-                     f" built object.")
-
+    pending = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.UNVERIFIED]
+    verified = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.VERIFIED]
+    if pending:
+        parts.append(f"{words(ClaimStatus.UNVERIFIED).term}: {len(pending)}"
+                     f" {_plural(len(pending), 'claim')}"
+                     f" {_plural(len(pending), 'needs', 'need')} an article ({_ids(pending)}).")
+    if verified:
+        parts.append(f"{len(verified)} {_plural(len(verified), 'claim')}"
+                     f" {_plural(len(verified), 'is', 'are')} {checked} on an article not"
+                     f" bound to the current inputs ({_ids(verified)}).")
     return " ".join(parts)
 
 
 # --------------------------------------------------------------------------- #
 # markdown sections
 # --------------------------------------------------------------------------- #
-def _section_proven(ledger: Ledger, st: dict[str, ClaimStatus],
+def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
                     cover: dict[str, list[str]], *, stale: bool) -> list[str]:
-    """The PROVEN table. Every row cites a gate that ran and the file it wrote.
+    """The checked table. Every row cites a gate that ran and the file it wrote.
 
     The heading starts with `SECTION_PROVEN`, never a literal: invariant 4's tests
-    find the section by that constant, and fail when it is missing.
+    find the section by that constant, and fail when it is missing. Only a claim
+    that reads Checked (`pass`) on its evidence is here: one whose evaluators
+    contradict the status is listed loudly in the failing section instead
+    (`_disagreement`, D18).
     """
-    out = [f"{SECTION_PROVEN} {_PROVEN_QUALIFIER}", ""]
+    out = [f"{SECTION_PROVEN} {_proven_qualifier()}", ""]
     rows: list[str] = []
+    checked = word(ClaimStatus.PASS)
 
     for claim in ledger.claims:
-        if st.get(claim.id) is not ClaimStatus.PASS:
+        if composed[claim.id].status is not ClaimStatus.PASS:
+            continue
+        if _disagreement(ledger, claim, composed[claim.id], cover):
             continue
         verdicts = _ok_verdicts(ledger, claim)
-
-        if verdicts:
-            gates = ", ".join(_code(v.gate) for v in verdicts)
-            measured_bits = []
-            evidence: list[str] = []
-            for v in verdicts:
-                if v.measured is not None:
-                    measured_bits.append(f"{_num(v.measured)} {v.units}".strip())
-                elif v.detail:
-                    # A boolean gate ("watertight: yes") has no number, and an
-                    # empty Measured cell reads as missing evidence rather than as
-                    # a pass with no scalar. Show the gate's one-line detail.
-                    measured_bits.append(_trunc(v.detail, 56))
-                evidence.extend(v.evidence or [])
-            measured = "; ".join(measured_bits) or "(no value reported)"
-        else:
-            # Defensive: PASS with nothing behind it means claims.resolve_status
-            # and the verdict list disagree. Print the contradiction rather than
-            # a clean-looking row - a silently empty Gate column is how an
-            # unproven claim gets read as proven.
-            gates = "**no verdict recorded — status and evidence disagree**"
-            measured = "—"
-            evidence = []
-
-        unproven = _unproven_for(claim.id, cover, ledger)
-        if unproven:
-            # Rule 2 in the module docstring, made visible on the row it affects.
-            # Carry the REASON: "did not run" tells a reader nothing actionable,
-            # while "requires simpleFoam (not on PATH)" tells them what to install
-            # and what the row is currently missing.
-            detail = "; ".join(f"{_code(gid)} {why}" for gid, why in unproven)
-            # Count GATES on both sides of the fraction, not verdicts on one and
-            # gates on the other: a gate that recorded two passing verdicts would
-            # otherwise read "4 of 5 covering gates" for four gates, which
-            # overstates the coverage in the one number meant to understate it.
-            proved = len({v.gate for v in verdicts})
-            gates += (f" — **PARTIAL**: {detail}. This row rests on "
-                      f"{proved} of {proved + len(unproven)} covering gates.")
+        gates = ", ".join(_code(v.gate) for v in verdicts)
+        measured_bits = []
+        evidence: list[str] = []
+        for v in verdicts:
+            if v.measured is not None:
+                measured_bits.append(f"{_num(v.measured)} {v.units}".strip())
+            elif v.detail:
+                # A boolean gate ("watertight: yes") has no number, and an
+                # empty Measured cell reads as missing evidence rather than as
+                # a pass with no scalar. Show the gate's one-line detail.
+                measured_bits.append(_trunc(v.detail, 56))
+            evidence.extend(v.evidence or [])
+        measured = "; ".join(measured_bits) or "(no value reported)"
 
         if evidence:
             shown = evidence[:3]
@@ -628,46 +1016,45 @@ def _section_proven(ledger: Ledger, st: dict[str, ClaimStatus],
         out.append("|---|---|---|---|---|")
         out.extend(rows)
         out.append("")
-        out.append("Every row above is backed by at least one gate that ran and "
-                   "returned a pass against the inputs, code and control it has now "
-                   "— a skipped, errored, stale or never-run gate can never be the "
-                   "evidence for a row. Where another gate also "
-                   "covers the claim and did **not** produce a pass, the row is "
-                   "marked **PARTIAL** and names it with the reason: the claim "
-                   "stands on the gates that ran, and you can see which ones did not.")
+        out.append(f"Every row above is {checked}: each of its evaluators ran and passed "
+                   f"against the inputs, code and control it has now. A skipped, errored, "
+                   f"unqualified, invalidated or unrun evaluator puts its claim in another "
+                   f"section with the reason, never here — and {checked} does not mean "
+                   f"true.")
     elif not ledger.claims:
-        out.append("Nothing — there are no claims to prove.")
+        out.append("Nothing — there are no claims.")
     elif stale:
-        out.append("**Nothing.** Every verdict is marked stale, so every claim "
-                   "that previously passed is now STALE. Passing yesterday is not "
-                   "proof today. Re-run `atompipe check`.")
+        out.append(f"**Nothing.** Every verdict is marked invalidated, so no claim reads "
+                   f"{words(ClaimStatus.PASS).term} now. Passing yesterday is not "
+                   f"{checked} today. Re-run `atompipe check`.")
     elif not ledger.verdicts:
-        out.append("**Nothing.** No gate has ever been run in this project.")
+        out.append("**Nothing.** No evaluator has ever run in this project.")
     else:
-        out.append("**Nothing.** No claim currently resolves to PASS. The sections "
-                   "below say why for each one.")
+        out.append(f"**Nothing.** No claim reads {words(ClaimStatus.PASS).term} now. "
+                   f"The sections below say why for each one.")
     out.append("")
     return out
 
 
-def _section_not_verified(ledger: Ledger, st: dict[str, ClaimStatus]) -> list[str]:
-    """Physical claims: what only a real object can settle, and how to settle it."""
-    out = ["## What is NOT verified", ""]
-
-    unverified = [c for c in ledger.claims if st.get(c.id) is ClaimStatus.UNVERIFIED]
-    verified = [c for c in ledger.claims if st.get(c.id) is ClaimStatus.VERIFIED]
+def _section_pending_build(ledger: Ledger, composed: Mapping[str, Any]) -> list[str]:
+    """Physical claims that wait on an article, how to settle each, and those a
+    physical pass was recorded for (Checked, not yet bound to an article)."""
+    out = [HUMAN["heading"]["pending_build"], ""]
+    status_of = {cid: c.status for cid, c in composed.items()}
+    pending = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.UNVERIFIED]
+    verified = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.VERIFIED]
     # `==` rather than `is` — see the note in `_needs`. A PHYSICAL claim whose
     # kind is still a plain string would otherwise vanish from the
     # "physical claims with no written test" nag, which is the one line that
     # says a claim can never be settled by anything in this pipeline.
     physical = [c for c in ledger.claims if c.kind == ClaimKind.PHYSICAL]
 
-    if unverified:
-        out.append("These need the real object. No gate in any pack can settle them, "
-                   "and no number of passing gates above changes that.")
+    if pending:
+        out.append("These need an article. No evaluator in any pack can settle them, and "
+                   "no number of passing evaluators above changes that.")
         out.append("")
-        for claim in unverified:
-            crit = "" if claim.critical else " *(non-critical)*"
+        for claim in pending:
+            crit = "" if claim.critical else " *(not required)*"
             out.append(f"- **{claim.id}** {_claim_text(claim)}{crit}")
             out.append(f"  - **Test that would settle it:** {_physical_test(claim)}")
             if claim.rationale:
@@ -681,13 +1068,15 @@ def _section_not_verified(ledger: Ledger, st: dict[str, ClaimStatus]) -> list[st
         for claim in verified:
             res = claim.physical_result
             when = (res.when if res and res.when else "date not recorded")
-            who = f" by {res.who}" if res and res.who else ""
+            who = f" by {res.who}" if res and res.who else " (unattributed)"
             detail = f" — {_trunc(res.detail, 160)}" if res and res.detail else ""
             ev = ""
             if res and res.evidence:
                 ev = " [" + ", ".join(_code(p) for p in res.evidence[:3]) + "]"
-            out.append(f"- **Confirmed in hardware:** **{claim.id}** "
-                       f"{_claim_text(claim)} — passed {when}{who}{detail}{ev}")
+            out.append(f"- **{words(ClaimStatus.VERIFIED).term} on an article:** "
+                       f"**{claim.id}** {_claim_text(claim)} — passed {when}{who}{detail}"
+                       f"{ev}; not bound to an article, so a change to what it was built "
+                       f"from does not yet invalidate it")
         out.append("")
 
     if not physical:
@@ -695,12 +1084,13 @@ def _section_not_verified(ledger: Ledger, st: dict[str, ClaimStatus]) -> list[st
         # a tool cannot settle; a ledger with none usually means nobody asked the
         # question, not that the question has no answer.
         out.append("No claim in this project is marked `physical`. Either nothing "
-                   "here depends on a property only a built object can show — or "
+                   "here depends on a property only an article can show — or "
                    "nobody has asked which properties those are. The second is far "
                    "more common.")
         out.append("")
-    elif not unverified and not verified:
-        out.append("Every physical claim has a recorded real-world result.")
+    elif not pending and not verified:
+        out.append("No physical claim waits on an article: each reads under its own "
+                   "status in another section.")
         out.append("")
     return out
 
@@ -708,7 +1098,7 @@ def _section_not_verified(ledger: Ledger, st: dict[str, ClaimStatus]) -> list[st
 def _physical_test(claim: Claim) -> str:
     """What experiment settles this claim — the claim's own note, or a derived one.
 
-    A physical claim with no written procedure does not get verified; it gets
+    A physical claim with no written procedure does not get settled; it gets
     remembered as "we should check that" until the build is finished and nobody
     can be bothered. When the note is empty the acceptance at least names the
     quantity and threshold, which is enough for somebody to design the test. When
@@ -718,54 +1108,67 @@ def _physical_test(claim: Claim) -> str:
         return _trunc(claim.note, 240)
     rendered = claim.acceptance.render()
     if rendered:
-        return (f"measure {rendered} on the built object and compare against the "
+        return (f"measure {rendered} on the article and compare against the "
                 f"acceptance")
     return ("**no test has been written down.** As stated, this claim cannot be "
             "settled by any observation — give it an acceptance or a procedure in "
             "its note, or it will stay on this list forever")
 
 
-def _section_gaps(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any) -> list[str]:
-    """Capability gaps: the claims no installed gate can settle, with candidates."""
-    out = ["## Open gaps", ""]
-    needs = _needs(ledger, registry)
-    unclaimed = [c for c in ledger.claims if st.get(c.id) is ClaimStatus.UNCLAIMED]
+def _section_gaps(ledger: Ledger, composed: Mapping[str, Any], registry: Any, *,
+                  stale_reasons: Mapping[str, str] | None = None) -> list[str]:
+    """Every claim that reads Gap, by the fact that made it one (P2.1-D19), each
+    wanting a different person to act: no evaluator — its gap records and tool
+    options; an unqualified evaluator — which one, and why; an assumption with
+    no attributed owner or no reason.
 
-    if not needs:
-        if unclaimed:
-            out.append(f"{len(unclaimed)} {_plural(len(unclaimed), 'claim')} "
-                       f"{_plural(len(unclaimed), 'resolves', 'resolve')} to "
-                       f"UNCLAIMED but no capability gap has been recorded for "
-                       f"{_plural(len(unclaimed), 'it', 'them')}: "
-                       f"{_ids(unclaimed, limit=12)}. Run `atompipe gap --propose`.")
-        elif not ledger.claims:
+    What slipped through the design (P2.1): this section read only
+    `find_gaps`, the automated claims no evaluator covers, so a Gap from an
+    unqualified evaluator or an unowned assumption appeared in no section at
+    all, and the C6 it did catch was told to run `gap --propose`.
+    """
+    out = [HUMAN["heading"]["gaps"], ""]
+    needs = _needs(ledger, registry)
+    gap = ClaimStatus.UNCLAIMED
+    gaps = [c for c in ledger.claims if composed[c.id].status is gap]
+    by_cause = {cause: [c for c in gaps if composed[c.id].cause is cause]
+                for cause in ClaimCause}
+    unqualified = by_cause[ClaimCause.UNQUALIFIED]
+    unowned = (by_cause[ClaimCause.NO_OWNER] + by_cause[ClaimCause.OWNER_UNATTRIBUTED]
+               + by_cause[ClaimCause.NO_REASON])
+    no_evaluator = by_cause[ClaimCause.NO_EVALUATOR]
+
+    if not gaps and not needs:
+        if not ledger.claims:
             out.append("No claims, so nothing to gap. This is not good news.")
         else:
-            out.append("None. Every measurable claim has at least one gate "
-                       "registered against it.")
+            out.append(f"None. Every automated claim has at least one evaluator, and no "
+                       f"claim reads {words(gap).term}.")
         out.append("")
         return out
 
-    out.append("A claim with no gate is a capability gap, not a defect. It is "
-               "closed by installing or writing a tool — with the cost said out "
-               "loud before anyone agrees to it.")
-    out.append("")
-
+    if needs or no_evaluator:
+        out.append(f"A claim with no evaluator is a {word(gap)}, not a defect. It is closed "
+                   f"by installing or writing a tool — with the cost said out loud before "
+                   f"anyone agrees to it.")
+        out.append("")
+    recorded = {cid for need in needs for cid in (need.claim_ids or ())}
     for need in needs:
         quantity = need.quantity or "(quantity not named)"
-        out.append(f"### {need.id} — {quantity}  *({need.status})*")
+        out.append(f"### {need.id} — {quantity}  *({need_word(need.status)})*")
         for cid in need.claim_ids or []:
             claim = ledger.claim(cid)
             text = _claim_text(claim) if claim else "*(claim not in ledger)*"
-            tag = str(st.get(cid, "?"))
+            found = composed.get(cid)
+            tag = word(found.status, errored=found.errored) if found is not None else "?"
             out.append(f"- **Claim:** {cid} — {text}  `{tag}`")
-            if claim and claim.gates and st.get(cid) in (ClaimStatus.PENDING,
-                                                         ClaimStatus.BLOCKED):
+            if claim and claim.gates and found is not None and found.status in (
+                    ClaimStatus.PENDING, ClaimStatus.BLOCKED):
                 # Not a contradiction, and worth one line so nobody reads it as
                 # one: the claim remembers a gate id from a pack that is not
-                # installed *here*. "Never run" and "no gate covers it" are both
+                # installed *here*. "Unrun" and "no evaluator covers it" are both
                 # true, and they want different fixes - install the pack, or run
-                # the sweep.
+                # the check.
                 out.append(f"  - The claim names {', '.join(_code(g) for g in claim.gates)}"
                            f", which is not registered in this environment —"
                            f" install the pack that provides it, or write one.")
@@ -778,7 +1181,7 @@ def _section_gaps(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any) -> 
             out.append(f"- **Note:** {_trunc(need.note, 220)}")
 
         if need.candidates:
-            out.append("- **Candidate tooling:**")
+            out.append("- **Tool options:**")
             for cand in need.candidates:
                 bits = [f"**{cand.name}**"]
                 if cand.kind:
@@ -796,8 +1199,40 @@ def _section_gaps(ledger: Ledger, st: dict[str, ClaimStatus], registry: Any) -> 
             if need.chosen:
                 out.append(f"  - **Chosen:** {need.chosen}")
         else:
-            out.append("- **Candidate tooling:** none proposed yet — "
+            out.append("- **Tool options:** none proposed yet — "
                        "`atompipe gap --propose`")
+        out.append("")
+    loose = [c for c in no_evaluator if c.id not in recorded]
+    if loose:
+        out.append(f"{len(loose)} {_plural(len(loose), 'claim')} "
+                   f"{_plural(len(loose), 'reads', 'read')} {words(gap).term} with no "
+                   f"evaluator and no gap record names "
+                   f"{_plural(len(loose), 'it', 'them')}: "
+                   f"{_ids(loose, limit=12)}. Run `atompipe gap --propose`.")
+        out.append("")
+
+    if unqualified:
+        out.append("### Unqualified evaluators")
+        out.append("")
+        out.append("An evaluator that has not shown it can fail settles nothing: its claim "
+                   f"is a {word(gap)} until it qualifies, whatever passed beside it.")
+        out.append("")
+        for claim in unqualified:
+            why = reason(composed[claim.id], ledger, claim, full=True,
+                         stale_reasons=stale_reasons)
+            out.append(f"- **{claim.id}** {_claim_text(claim)} — {why}")
+        out.append("")
+
+    if unowned:
+        out.append("### Assumptions nobody owns")
+        out.append("")
+        out.append(f"An assumption reads {words(ClaimStatus.ASSERTED).term} only with a "
+                   f"reason and an owner who recorded it; until then it is a {word(gap)}.")
+        out.append("")
+        for claim in unowned:
+            why = reason(composed[claim.id], ledger, claim, full=True,
+                         stale_reasons=stale_reasons)
+            out.append(f"- **{claim.id}** {_claim_text(claim)} — {why}")
         out.append("")
     return out
 
@@ -830,15 +1265,16 @@ def _rationale_unknown(params: Sequence[Any] | None, model_error: str) -> str:
     return ""
 
 
-def _section_constraints(ledger: Ledger, st: dict[str, ClaimStatus],
-                         params: Sequence[Any] | None = None,
-                         model_error: str = "") -> list[str]:
-    """Assumptions, undefended numbers, and evidence nobody read.
+def _section_assumed(ledger: Ledger, composed: Mapping[str, Any],
+                     params: Sequence[Any] | None = None,
+                     model_error: str = "") -> list[str]:
+    """Assumed claims, undefended numbers, and evidence nobody read.
 
     None of these is a failing gate, and that is exactly why they get their own
     section: they are the things that sink a build without ever turning a check
-    red. An assumption nobody wrote down, a constant nobody can defend, and a
-    datasheet nobody opened all behave identically at the moment they bite.
+    red. An assumption nobody owns (that one is a Gap, above), a constant nobody
+    can defend, and a datasheet nobody opened all behave identically at the
+    moment they bite.
 
     The numbers are `params`, `modelio.param_view`'s views — the model's value,
     its rationale or the record's — judged by `modelio.undefended_params`, the
@@ -849,35 +1285,35 @@ def _section_constraints(ledger: Ledger, st: dict[str, ClaimStatus],
     undefended at value `None` while `doctor` said every parameter carried a
     rationale.
     """
-    out = ["## Standing constraints", ""]
-    asserted = [c for c in ledger.claims if st.get(c.id) is ClaimStatus.ASSERTED]
+    out = [HUMAN["heading"]["assumed"], ""]
+    assumed = [c for c in ledger.claims if composed[c.id].status is ClaimStatus.ASSERTED]
     unknown = _rationale_unknown(params, model_error)
     names = set(modelio.undefended_params(params or ()))
     undefended = [view for view in params or () if view.name in names]
     unread = unextracted(ledger)
+    term = words(ClaimStatus.ASSERTED).term
 
-    if not (asserted or undefended or unread):
+    if not (assumed or undefended or unread):
         if unknown:
-            out.append(f"None recorded: no standing assumptions, and every ingested "
+            out.append(f"None recorded: no claim reads {term}, and every ingested "
                        f"artifact has been read. {RATIONALE_UNKNOWN}: {unknown}.")
         else:
-            out.append("None recorded: no standing assumptions, every parameter carries "
-                       "a rationale, and every ingested artifact has been read.")
+            out.append(f"None recorded: no claim reads {term}, every parameter carries "
+                       f"a rationale, and every ingested artifact has been read.")
         out.append("")
         return out
 
-    out.append("Carried on faith. None of this is proven; all of it is visible, "
-               "which is the whole trade.")
+    out.append(f"Carried on the record and not {word(ClaimStatus.PASS)}: all of it is "
+               f"visible, which is the whole trade.")
     out.append("")
 
-    if asserted:
-        out.append("### Assumptions")
+    if assumed:
+        out.append(f"### {term} claims")
         out.append("")
-        for claim in asserted:
+        for claim in assumed:
             src = f" *(source: {_trunc(claim.source, 80)})*" if claim.source else ""
-            out.append(f"- **{claim.id}** {_claim_text(claim)}{src}")
-            if claim.rationale:
-                out.append(f"  - {_trunc(claim.rationale, 220)}")
+            why = reason(composed[claim.id], ledger, claim, full=True)
+            out.append(f"- **{claim.id}** {_claim_text(claim)}{src} — {why}")
         out.append("")
 
     if unknown:
@@ -925,90 +1361,124 @@ def _section_constraints(ledger: Ledger, st: dict[str, ClaimStatus],
 
 def _stale_suffix(claim: Claim, cover: dict[str, list[str]],
                   stale_gates: Collection[str]) -> str:
-    """`: `g.one` is stale` — which covering gates made a claim STALE, when the
-    caller said (``stale_gates``); ``""`` under the all-gates alias. The reason
-    each gate is stale is the resolver's and lives in `atompipe status`; the
+    """`: `g.one` is invalidated` — which covering gates made a claim Stale, when
+    the caller said (``stale_gates``); ``""`` under the all-gates alias. The
+    reason each gate moved is the resolver's and lives in `atompipe status`; the
     report names the gate so the reader knows which result to re-check."""
     stale = [gid for gid in (cover.get(claim.id) or list(claim.gates or []))
              if gid in set(stale_gates)]
     if not stale:
         return ""
     return (": " + ", ".join(_code(g) for g in stale)
-            + f" {_plural(len(stale), 'is', 'are')} stale")
+            + f" {_plural(len(stale), 'is', 'are')} "
+            + HUMAN["lead"][ClaimCause.INVALIDATED])
 
 
-def _section_failing(ledger: Ledger, st: dict[str, ClaimStatus],
+#: The statuses listed one by one under the failing section: GLOSSARY §9's
+#: "Failing, stale, skipped or open". A Gap is a missing evaluator, not a defect,
+#: and has its own section; Pending build and Assumed theirs.
+_FAILING_SECTION: tuple[ClaimStatus, ...] = (
+    ClaimStatus.FAIL, ClaimStatus.REFUTED, ClaimStatus.STALE,
+    ClaimStatus.BLOCKED, ClaimStatus.PENDING,
+)
+
+#: A claim's evaluator bullets in outcome order (P2.1-D16): what failed, what
+#: crashed, what skipped, what is refused, then what passed. What slipped
+#: through (P2.0 F-3): the bullets were in gate-id order, a skip above the crash.
+_BULLET_ORDER = {"fail": 0, "error": 1, "skipped": 2, "unqualified": 3, "pass": 4}
+
+
+def _bullet_rank(verdict: Verdict) -> int:
+    key = "unqualified" if getattr(verdict, "unqualified", "") else verdict.outcome
+    return _BULLET_ORDER.get(key, 5)
+
+
+def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
                      cover: dict[str, list[str]], registry: Any, *,
-                     stale_gates: Collection[str] = ()) -> list[str]:
-    """Everything that is red, with the verdict line that made it red."""
-    out = ["## Failing / blocked", ""]
-    bad = _claims_with(ledger, st, _FAILING_SECTION)
-    bad.sort(key=lambda c: (_SEVERITY.index(st[c.id]), not c.critical, c.id))
+                     stale_gates: Collection[str] = (),
+                     stale_reasons: Mapping[str, str] | None = None) -> list[str]:
+    """Everything that is red, with the verdict line that made it red — and any
+    claim the resolver calls Checked that its evidence contradicts, first and
+    loudly (D18)."""
+    out = [HUMAN["heading"]["failing"], ""]
+    contradicted = {c.id: why for c in ledger.claims
+                    if (why := _disagreement(ledger, c, composed[c.id], cover))}
+    bad = in_severity(ledger, composed,
+                      [c for c in ledger.claims
+                       if composed[c.id].status in _FAILING_SECTION])
+    bad = [c for c in ledger.claims if c.id in contradicted] + bad
 
     cited: set[str] = set()
 
     if bad:
         for claim in bad:
-            status = st[claim.id]
-            flag = "critical" if claim.critical else "non-critical"
-            out.append(f"### {status_tag(status)} {claim.id} — {_claim_text(claim)}  "
-                       f"*({status}, {flag})*")
+            found = composed[claim.id]
+            flag = "critical" if claim.critical else "not required"
+            if claim.id in contradicted:
+                out.append(f"### {status_tag(found.status)} {claim.id} — "
+                           f"{_claim_text(claim)}  *(status and evidence disagree, {flag})*")
+                out.append(f"- **status and evidence disagree — "
+                           f"{contradicted[claim.id]}**")
+            else:
+                label = word(found.status) + (", errored" if found.errored else "")
+                out.append(f"### {status_tag(found.status, errored=found.errored)} "
+                           f"{claim.id} — {_claim_text(claim)}  *({label}, {flag})*")
+                out.append(f"- **Why:** {reason(found, ledger, claim, full=True, stale_reasons=stale_reasons)}")
             rendered = claim.acceptance.render()
             if rendered:
                 out.append(f"- **Acceptance:** {rendered}")
-            verdicts = _claim_verdicts(ledger, claim)
+            verdicts = sorted(_claim_verdicts(ledger, claim), key=_bullet_rank)
             for v in verdicts:
                 cited.add(v.gate)
                 out.append(f"- `{v.render()}`")
                 if v.evidence:
                     out.append("  - evidence: "
                                + ", ".join(_code(p) for p in v.evidence[:3]))
-            if not verdicts:
-                gates = cover.get(claim.id) or list(claim.gates or [])
-                if gates:
-                    out.append("- No verdict recorded. "
-                               + _plural(len(gates), "The covering gate",
-                                         "The covering gates")
-                               + " never ran: "
-                               + ", ".join(_code(g) for g in gates) + ".")
-                else:
-                    out.append("- No verdict and no covering gate recorded.")
-            if status is ClaimStatus.STALE:
+            ran = {v.gate for v in verdicts}
+            unrun = [g for g in (cover.get(claim.id) or list(claim.gates or []))
+                     if g not in ran]
+            if unrun:
+                out.append(f"- {HUMAN['lead'][ClaimCause.UNRUN]}: "
+                           + ", ".join(_code(g) for g in unrun))
+            if not verdicts and not unrun:
+                out.append("- No verdict and no covering gate recorded.")
+            if found.status is ClaimStatus.STALE:
                 out.append("- Passed, but not against the current inputs"
                            + _stale_suffix(claim, cover, stale_gates)
-                           + ". Nothing here is proven *now* — `atompipe check` "
-                             "re-runs what moved.")
+                           + f". Nothing here is {word(ClaimStatus.PASS)} *now* — "
+                             f"`atompipe check` re-runs what moved.")
             if claim.physical_result and not claim.physical_result.passed:
                 res = claim.physical_result
-                out.append(f"- Hardware result: FAILED {res.when} {res.who} — "
-                           f"{_trunc(res.detail, 200)}")
+                out.append(f"- Physical result: failed {res.when} "
+                           f"{res.who or '(unattributed)'} — {_trunc(res.detail, 200)}")
             out.append("")
     else:
-        out.append("No claim is failing, blocked, stale or pending.")
+        out.append("No claim is failing, stale, skipped or open.")
         out.append("")
 
     # Gate-level problems that no claim surfaced. A gate that skipped while
-    # covering nothing, or one that crashed, still proved nothing — and a crash
+    # covering nothing, or one that crashed, still showed nothing — and a crash
     # is not a failure, it is an absence of information wearing a failure's
     # clothes.
     loose = [v for v in ledger.verdicts if not v.ok and v.gate not in cited]
-    unrun = _unrun_specs(ledger, registry)
-    if loose or unrun:
-        out.append("### Gates that produced no proof")
+    unrun_specs = _unrun_specs(ledger, registry)
+    if loose or unrun_specs:
+        out.append("### Gates with no verdict that counts")
         out.append("")
-        for v in loose:
-            why = "crashed" if v.error else ("skipped" if v.skipped else "failed")
+        for v in sorted(loose, key=_bullet_rank):
+            why = ("unqualified" if getattr(v, "unqualified", "")
+                   else HUMAN["outcome"].get(v.outcome, v.outcome))
             out.append(f"- `{v.render()}`  *({why}; claims: "
                        f"{', '.join(v.claims) or 'none linked'})*")
-        for spec in unrun:
+        for spec in unrun_specs:
             covers = ", ".join(spec.claims) if spec.claims else "nothing recorded"
             out.append(f"- `{spec.id}` — registered ({_tier_label(spec.tier)}"
-                       f"{', pack ' + spec.pack if spec.pack else ''}) but never "
-                       f"run. Would cover: {covers}.")
+                       f"{', pack ' + spec.pack if spec.pack else ''}) but "
+                       f"{HUMAN['lead'][ClaimCause.UNRUN]}. Would cover: {covers}.")
         out.append("")
-        out.append("A gate that did not run is not a gate that passed. Until each "
-                   "of these produces a verdict, the claims they cover rest on "
-                   "whatever else happened to run.")
+        out.append("A gate with no verdict that counts is not a gate that passed: each "
+                   "claim it covers reads under its own status in this report, never "
+                   f"{words(ClaimStatus.PASS).term}.")
         out.append("")
     return out
 
@@ -1044,7 +1514,7 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
     what a re-run would re-derive — the command per gate, and the files that
     gate's verdict is keyed on.
     """
-    out = ["## Reproduce", ""]
+    out = [HUMAN["heading"]["reproduce"], ""]
     specs = _specs(registry)
     max_tier = max((int(s.tier) for s in specs), default=0)
 
@@ -1075,7 +1545,7 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
         if spec.id not in ran:
             per_gate.append((spec.id,
                              (", ".join(spec.claims) or "no claim linked")
-                             + "  [never run]"))
+                             + f"  [{HUMAN['lead'][ClaimCause.UNRUN]}]"))
     if per_gate:
         out.append("One gate at a time — this is the command behind each row"
                    + (", and the code it runs:" if code else ":"))
@@ -1092,7 +1562,7 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
         out.append("```")
         out.append("")
 
-    out.append("And prove the gates above can actually fail, which is the only "
+    out.append("And show the gates above can actually fail, which is the only "
                "reason their passes mean anything:")
     out.append("")
     out.append("```sh")
@@ -1110,13 +1580,15 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
 def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
                     stale_gates: Collection[str] = (), model_error: str = "",
                     title: str = "", root: str = "",
-                    params: Sequence[Any] | None = None) -> str:
+                    params: Sequence[Any] | None = None,
+                    stale_reasons: Mapping[str, str] | None = None) -> str:
     """The full readiness report as markdown — the project's public deliverable.
 
-    Sections, in the order a sceptical reader needs them: the verdict, what is
-    proven, what is not verified, the capability gaps, the standing constraints,
-    what is failing, and the commands to check all of it. The verdict leads with
-    the worst thing that is true.
+    Sections, in the order a sceptical reader needs them: the readiness
+    sentence, what is checked, what is pending build, the gaps, what is
+    assumed, what is failing, stale, skipped or open, and the commands to check
+    all of it. The sentence leads with the worst thing that is true. Every
+    unresolved claim is in exactly one section, under its own word (P2.1-D19).
 
     `registry` is a `gates.Registry` (or None). It is a parameter rather than the
     module global so this function can be tested against a registry built in the
@@ -1129,12 +1601,13 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     `ledger` carries the verdicts to render — the caller's resolution laid over
     the records (`verdicts.resolve`), never a list this function re-judges.
     `stale_gates` is that resolution's: the gates whose verdict is not current
-    (stale, unknown, or with a control not demonstrated at this version). Each
-    PASS they cover reads STALE and leaves the proof table, and the failing
-    section names the gate. `stale=True` marks every gate stale at once.
-    `model_error` — the model does not load — is said under the verdict
-    sentence: every verdict that reads the model is then not current, and the
-    reader should know why before reading the tables.
+    (invalidated, unknown, or with a control not demonstrated at this version).
+    Each pass they cover reads Stale and leaves the checked table, and the
+    failing section names the gate; `stale_reasons` (`{gate: why}`) says what
+    moved, when the caller has it. `stale=True` marks every gate stale at once.
+    `model_error` — the model does not load — is said under the readiness
+    sentence: every verdict that reads it is then not current, and the reader
+    should know why before reading the tables.
 
     `root`, when given, spells each gate's code files in `## Reproduce`
     relative to the project (`write_report` passes it). Without it the files
@@ -1142,7 +1615,7 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
 
     `params` is the caller's `modelio.param_view` — every parameter the model
     holds, its value from the model and its rationale from the model or its
-    record — and the standing constraints judge it with
+    record — and the assumed section judges it with
     `modelio.undefended_params`, the list `doctor` prints. Never `ledger.params`:
     from 1.3 those are sparse records (review). Without it, or with a model that
     does not load, the section says the rationales are not known
@@ -1151,7 +1624,7 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     The title is the project and its revision — no time: a regenerated report
     of an unchanged design must be byte-identical (S-89).
     """
-    st = _statuses(ledger, registry, stale, stale_gates)
+    composed = _compositions(ledger, registry, stale, stale_gates)
     cover = _coverage(ledger, registry)
 
     name = ledger.meta.name or "(unnamed project)"
@@ -1159,7 +1632,7 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     heading = title or f"{name} — readiness ({rev})"
 
     out: list[str] = [f"# {heading}", ""]
-    out.append(_verdict_sentence(ledger, st, registry, stale=stale, markdown=True))
+    out.append(_verdict_sentence(ledger, composed, registry, stale=stale, markdown=True))
     out.append("")
     if model_error:
         out.append(f"**The model does not load**, so no verdict that reads it is "
@@ -1169,11 +1642,12 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
         out.append(f"> {_trunc(ledger.meta.summary, 400)}")
         out.append("")
 
-    out += _section_proven(ledger, st, cover, stale=stale)
-    out += _section_not_verified(ledger, st)
-    out += _section_gaps(ledger, st, registry)
-    out += _section_constraints(ledger, st, params, model_error)
-    out += _section_failing(ledger, st, cover, registry, stale_gates=stale_gates)
+    out += _section_proven(ledger, composed, cover, stale=stale)
+    out += _section_pending_build(ledger, composed)
+    out += _section_gaps(ledger, composed, registry, stale_reasons=stale_reasons)
+    out += _section_assumed(ledger, composed, params, model_error)
+    out += _section_failing(ledger, composed, cover, registry, stale_gates=stale_gates,
+                            stale_reasons=stale_reasons)
     out += _section_reproduce(ledger, registry, root=root)
 
     out.append("---")
@@ -1186,90 +1660,107 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
 
 def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
                     stale_gates: Collection[str] = (),
-                    params: Sequence[Any] | None = None) -> str:
+                    params: Sequence[Any] | None = None,
+                    stale_reasons: Mapping[str, str] | None = None) -> str:
     """The same report compressed to something an agent can hold in context.
 
     Under ~40 lines for a healthy project, which is the point: this is what
     `atompipe status` prints on every loop, and a status command that costs a
-    screenful stops being read. Passing claims are counted, never listed — the
-    only thing worth a line each is what is *not* settled.
+    screenful stops being read. Checked claims are counted, never listed — the
+    only thing worth a line each is what is *not* resolved, in severity order
+    (P2.1-D16), each with its reason (`reason`).
 
     No ANSI colour anywhere. This output goes into transcripts, logs and pipes at
     least as often as it goes to a terminal, and an escape sequence in a diff is
-    noise in all three. Status is carried by the `[ok   ]` / `[FAIL ]` / `[skip ]`
-    / `[gap  ]` tags instead.
+    noise in all three. Status is carried by `HUMAN`'s five-wide tags instead,
+    upper case for the loud ones (Failing, a crash's Skipped, Stale).
 
-    `stale_gates` and `stale` as for `render_markdown`: a claim whose covering
-    gate is stale is listed STALE, naming the gate. The head line carries no
-    sweep time — there is no sweep record to read one from, and `status` prints
-    its own `stale:` and `last check:` lines, each with a source.
+    `stale_gates`, `stale` and `stale_reasons` as for `render_markdown`. The
+    head line carries no sweep time — `status` prints its own `invalidated:` and
+    `last check run:` lines, each with a source.
 
     `params` as for `render_markdown`: the `standing:` line counts
     `modelio.undefended_params` over it, and says nothing about parameters
     without it (a model that does not load is `status`'s `model:` line).
     """
-    st = _statuses(ledger, registry, stale, stale_gates)
-    cover = _coverage(ledger, registry)
+    composed = _compositions(ledger, registry, stale, stale_gates)
     lines: list[str] = []
 
     name = ledger.meta.name or "(unnamed)"
     rev = ledger.meta.revision or "unversioned"
     head = f"atompipe readiness — {name} {rev}"
     if not ledger.verdicts:
-        head += " — never run"
+        head += " — never evaluated"
     if stale:
-        head += " — STALE (every verdict)"
+        head += f" — every verdict {HUMAN['lead'][ClaimCause.INVALIDATED]}"
     lines.append(head)
-    lines.append(_verdict_sentence(ledger, st, registry, stale=stale, markdown=False))
+    lines.append(_verdict_sentence(ledger, composed, registry, stale=stale, markdown=False))
+    lines.append(count_line(composed))
 
-    counts = _counts(st)
-    total = len(ledger.claims)
-    bits = [f"{STATUS_TAG[s].strip()} {counts[s]}" for s in _COUNT_ORDER if counts.get(s)]
-    lines.append(f"claims {total} — {' | '.join(bits)}" if bits else f"claims {total}")
-
-    problems = [c for c in ledger.claims
-                if st.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
-    problems.sort(key=lambda c: (_SEVERITY.index(st[c.id]), not c.critical, c.id))
+    # A claim the resolver calls Checked while its evidence says otherwise is
+    # listed first, as the contradiction it is (D18) — never counted silently
+    # among the Checked ones the terminal does not list.
+    cover = _coverage(ledger, registry)
+    contradicted = {c.id: why for c in ledger.claims
+                    if (why := _disagreement(ledger, c, composed[c.id], cover))}
+    problems = [c for c in ledger.claims if c.id in contradicted] + [
+        c for c in in_severity(ledger, composed)
+        if composed[c.id].status not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
     for claim in problems[:_MAX_TERMINAL_CLAIMS]:
-        status = st[claim.id]
-        why = _terminal_reason(ledger, claim, status, cover, stale_gates=stale_gates)
-        lines.append(f"{status_tag(status)} {claim.id} {_trunc(claim.statement, 52)}"
-                     f" — {why}")
+        found = composed[claim.id]
+        why = (f"status and evidence disagree — {_trunc(contradicted[claim.id], 60)}"
+               if claim.id in contradicted
+               else reason(found, ledger, claim, stale_reasons=stale_reasons))
+        lines.append(f"{status_tag(found.status, errored=found.errored)} {claim.id} "
+                     f"{_trunc(claim.statement, 52)} — {why}")
     if len(problems) > _MAX_TERMINAL_CLAIMS:
         lines.append(f"       ... and {len(problems) - _MAX_TERMINAL_CLAIMS} more "
-                     f"unsettled claims — see docs/readiness.md")
+                     f"unresolved claims — see docs/readiness.md")
 
+    # The gap RECORDS (`find_gaps`' Needs), with their tool options. Headed
+    # "gap records", never "gaps": the count line above counts the claims that
+    # read Gap — an unowned assumption and an unqualified evaluator included —
+    # and two numbers under one word one screen apart is the reader guessing
+    # which (review of the P2.1 design: `2 gaps` over `gaps 1:`).
     needs = _needs(ledger, registry)
     if needs:
-        lines.append(f"gaps {len(needs)}:")
+        lines.append(f"gap records {len(needs)}:")
         for need in needs[:_MAX_TERMINAL_GAPS]:
-            cands = ", ".join(
+            options = ", ".join(
                 f"{c.name}" + (f" ({_trunc(c.cost, 40)})" if c.cost else " (cost unstated)")
                 for c in need.candidates[:2]
-            ) or "no candidate proposed"
+            ) or "no tool option proposed"
             lines.append(f"  {need.id} {_trunc(need.quantity, 44)} "
-                         f"({need.status}) — {cands}")
+                         f"({need_word(need.status)}) — {options}")
         if len(needs) > _MAX_TERMINAL_GAPS:
             lines.append(f"  ... and {len(needs) - _MAX_TERMINAL_GAPS} more")
 
-    # One line of gate bookkeeping. `unrun` is the number that matters and the one
+    # One line of gate bookkeeping, keyed on `Verdict.outcome` and the spine's
+    # mark — never the flags. What slipped through (P2.0 F-10): it read
+    # `skipped` and `error` separately, so a verdict that said both was counted
+    # as a skip AND a crash. `unrun` is the number that matters and the one
     # nothing else prints: gates that exist, cost nothing to run, and did not.
-    ran = [v for v in ledger.verdicts if not v.skipped and not v.error]
-    skipped = [v for v in ledger.verdicts if v.skipped]
-    errored = [v for v in ledger.verdicts if v.error]
+    refused = [v for v in ledger.verdicts if getattr(v, "unqualified", "")]
+    counted = [v for v in ledger.verdicts if not getattr(v, "unqualified", "")]
+    ran = [v for v in counted if v.outcome in ("pass", "fail")]
+    skipped = [v for v in counted if v.outcome == "skipped"]
+    errored = [v for v in counted if v.outcome == "error"]
     unrun = _unrun_specs(ledger, registry)
     gate_bits = [f"{len(ran)} ran"]
-    not_current = sorted({v.gate for v in ledger.verdicts} & set(stale_gates))
-    if not_current:
-        gate_bits.append(f"{len(not_current)} not current")
+    moved = sorted({v.gate for v in ledger.verdicts} & set(stale_gates))
+    if moved:
+        gate_bits.append(f"{len(moved)} {HUMAN['lead'][ClaimCause.INVALIDATED]}")
     if skipped:
-        gate_bits.append(f"{len(skipped)} skipped")
+        gate_bits.append(f"{len(skipped)} {HUMAN['outcome']['skipped']}")
     if errored:
-        gate_bits.append(f"{len(errored)} errored")
+        gate_bits.append(f"{len(errored)} {HUMAN['outcome']['error']}")
+    if refused:
+        gate_bits.append(f"{len(refused)} {HUMAN['lead'][ClaimCause.UNQUALIFIED]}")
     if unrun:
         shown = ", ".join(s.id for s in unrun[:3])
         extra = f", +{len(unrun) - 3}" if len(unrun) > 3 else ""
-        gate_bits.append(f"{len(unrun)} registered but never run ({shown}{extra})")
+        gate_bits.append(f"{len(unrun)} registered but {HUMAN['lead'][ClaimCause.UNRUN]} "
+                         f"({shown}{extra})")
     if ledger.verdicts or unrun:
         lines.append("gates: " + ", ".join(gate_bits))
 
@@ -1292,61 +1783,27 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
 
 def _terminal_reason(ledger: Ledger, claim: Claim, status: ClaimStatus,
                      cover: dict[str, list[str]], *, full: bool = False,
-                     stale_gates: Collection[str] = ()) -> str:
-    """The shortest true explanation of why this claim is not settled.
+                     stale_gates: Collection[str] = (),
+                     stale_reasons: Mapping[str, str] | None = None) -> str:
+    """`reason` for one claim, composed here over `cover`'s gates — the wrapper
+    the terminal rows and `ReasonsAgree` call (`cli._blocking_reason` is the
+    other). `status` is the caller's, and must be what `compose` says: a
+    reason built for another status would be the second story S-68 named."""
+    known = list(cover.get(claim.id) or claim.gates or [])
+    found = claim_logic.compose(_with_gates(claim, known), ledger.verdicts,
+                                stale_gates=stale_gates)
+    return reason(found, ledger, claim, full=full, stale_reasons=stale_reasons)
 
-    The verdict cited is `claims.explaining_verdict`'s, the same one `atompipe
-    check` cites under BLOCKING, in the same `gate : body` words. What slipped
-    through (S-68): this function cited the FIRST covering verdict that did not
-    pass, so a claim covered by a gate that ran and measured 0.7 mm against 0.5
-    and a pack gate that skipped for a missing parameter read, in `status`, as
-    failing for the missing parameter — while `check`, whose private copy of the
-    ranking had been fixed, cited the 0.7 mm. The fix reached one caller of two;
-    the ranking now lives in `claims`, where neither can keep its own copy.
 
-    The body prefers `detail`, then `error`, then `skip_reason`: the same order as
-    `cli._blocking_reason`, so the words agree as well as the gate. It is only
-    truncated here, because this line shares a terminal row with the claim;
-    `full=True` keeps the words and drops the cut, for the JUnit `message` — a
-    third caller that reuses this reason rather than writing a third copy of it.
-    """
-    def cut(text: str, limit: int) -> str:
-        return _trunc(text, None if full else limit)
-
-    if status is ClaimStatus.UNCLAIMED:
-        return "no gate covers it"
-    if status is ClaimStatus.UNVERIFIED:
-        return "needs the real object"
-    if status is ClaimStatus.ASSERTED:
-        return cut(claim.rationale or claim.source or "standing assumption", 52)
-    if status is ClaimStatus.REFUTED:
-        res = claim.physical_result
-        return cut(res.detail if res and res.detail else "refuted in hardware", 60)
-    v = claim_logic.explaining_verdict(claim, ledger.verdicts)
-    if v is not None:
-        body = v.detail or v.error or v.skip_reason
-        return f"{v.gate} : {cut(body, 56)}" if body else f"{v.gate} did not pass"
-    gates = cover.get(claim.id) or list(claim.gates or [])
-    if status is ClaimStatus.STALE:
-        # Name the stale gate when the caller said which (`stale_gates`); under
-        # the all-gates alias every passing gate is. "An older model" was the
-        # only reason one global hash could give, and it is false for a stale
-        # control or a moved data file.
-        stale = [g for g in gates if g in set(stale_gates)]
-        if stale:
-            return (f"passed, but {', '.join(stale[:3])}"
-                    f" {_plural(len(stale), 'is', 'are')} not current")
-        passed = [v.gate for v in _ok_verdicts(ledger, claim)]
-        return (f"passed, but not against the current inputs"
-                f" ({', '.join(passed) or 'gate not named'})")
-    if gates:
-        return f"{', '.join(gates[:3])} never ran"
-    return "no verdict recorded"
+def _with_gates(claim: Claim, gates: list[str]) -> Claim:
+    import dataclasses
+    return dataclasses.replace(claim, gates=list(gates))
 
 
 def write_report(root: str, ledger: Ledger, registry: Any, *,
                  stale: bool = False, stale_gates: Collection[str] = (),
-                 model_error: str = "", params: Sequence[Any] | None = None) -> str:
+                 model_error: str = "", params: Sequence[Any] | None = None,
+                 stale_reasons: Mapping[str, str] | None = None) -> str:
     """Render the markdown report to `docs/readiness.md` and return its path.
 
     Written atomically: a half-truncated readiness report left behind by a crash
@@ -1357,18 +1814,19 @@ def write_report(root: str, ledger: Ledger, registry: Any, *,
     here. Layout is `store`'s job alone; a second module that knows where
     `docs/readiness.md` lives is a second module to edit when it moves.
 
-    `stale_gates`, `model_error` and `params` as for `render_markdown`; `root`
-    spells the gates' code files. The file holds no time and no rho, so
-    rewriting it for an unchanged design and unchanged outcomes leaves the
-    tracked bytes alone (S-89). `model_error` reaches the file as it reaches
-    `report`'s stdout: without it, a broken model's parameters would be judged
-    from whatever records exist.
+    `stale_gates`, `stale_reasons`, `model_error` and `params` as for
+    `render_markdown`; `root` spells the gates' code files. The file holds no
+    time and no rho, so rewriting it for an unchanged design and unchanged
+    outcomes leaves the tracked bytes alone (S-89). `model_error` reaches the
+    file as it reaches `report`'s stdout: without it, a broken model's
+    parameters would be judged from whatever records exist.
     """
     path = store.project_paths(root)["readiness"]
     ensure_dir(os.path.dirname(path))
     atomic_write_text(path, render_markdown(ledger, registry, stale=stale,
                                             stale_gates=stale_gates, root=root,
-                                            model_error=model_error, params=params))
+                                            model_error=model_error, params=params,
+                                            stale_reasons=stale_reasons))
     return path
 
 
@@ -1393,14 +1851,6 @@ JUNIT_DEFAULT = ".atompipe/out/junit.xml"
 #: exactly like one that had nothing to say; one suite for every claim — a failing
 #: nice-to-have would then sit in the count the exit code is held to.
 _JUNIT_SUITES = ("gates", "claims.critical", "claims.not-critical")
-
-#: The prefix a verdict's `error` carries when the gate was refused because its
-#: negative control is not demonstrated at this version (Phase 1.2's admission).
-#: It renders `<error type="not-admitted">` rather than `type="error"`, because
-#: "the instrument is not trusted" and "the instrument crashed" send a reader to
-#: different places. *Rejected:* a substring match — an exception whose text
-#: merely quotes the phrase is still a crash, so only the start counts.
-_NOT_ADMITTED = "not admitted:"
 
 #: The code points XML 1.0 forbids (its `Char` production): C0 controls other
 #: than tab, LF and CR; the surrogates, which a Python `str` can hold alone (bytes
@@ -1489,6 +1939,10 @@ def _junit_outcome(case: Any, verdict: Verdict) -> None:
     writer reading the flag renders a skip that also said `passed=True` as a
     green testcase — the generous direction phase-1.md names as this format's
     failure (R-5; `RenderersAgree.test_junit` holds all 8 flag combinations).
+    A refused evaluator's error is `type="not-admitted"`, keyed on the spine's
+    mark (`Verdict.unqualified`) and never on its text: "the instrument is not
+    trusted" and "the instrument crashed" send a reader to different places,
+    and a gate whose own crash reads "not admitted: …" is still a crash.
     """
     outcome = verdict.outcome
     if outcome == "pass":
@@ -1498,10 +1952,10 @@ def _junit_outcome(case: Any, verdict: Verdict) -> None:
                          message=verdict.detail or "the gate reported a failure")
         _xml_text(child, _junit_measured(verdict))
     elif outcome == "error":
-        error = str(verdict.error)
         child = _xml_sub(case, "error",
-                         type="not-admitted" if error.startswith(_NOT_ADMITTED) else "error",
-                         message=error)
+                         type="not-admitted" if getattr(verdict, "unqualified", "")
+                         else "error",
+                         message=str(verdict.error))
         _xml_text(child, verdict.detail)
     else:
         _xml_sub(case, "skipped", message=verdict.skip_reason or "skipped")
@@ -1559,60 +2013,53 @@ def _junit_serialise(root: Any, suites: list[Any]) -> str:
             + ET.tostring(root, encoding="unicode") + "\n")
 
 
-def _claim_case(suite: Any, ledger: Ledger, claim: Claim, status: ClaimStatus,
+def _claim_case(suite: Any, ledger: Ledger, claim: Claim, composed: Any,
                 cover: dict[str, list[str]], *, red: bool,
-                stale_gates: Collection[str] = ()) -> None:
+                stale_reasons: Mapping[str, str] | None = None) -> None:
     """One claim's testcase, asserting "this claim does not block the spend".
 
-    `red` is the caller's: blocking (critical) or FAIL/REFUTED (not critical).
-    A red claim whose status came from a gate that crashed is an `error` — a crash
-    reads louder than a failure (invariant 2) — else a `failure` typed with the
-    status. Everything short of settled is skipped with its words: `partial: …`
-    for a PASS that rests on fewer gates than cover it, `needs a real part`,
-    `assumed`. Childless only for PASS with every covering gate passed, and for
-    VERIFIED.
+    `red` is the caller's: blocking (critical) or Failing (not critical). A claim
+    Skipped by a crash is an `<error>`, critical or not — a crash reads louder
+    than a missing tool (invariant 2; PLAN-v0.14 §1.5: "the claim stays a JUnit
+    `<error>`"). What slipped through (P2.0 F-7): `<error>` was chosen only for
+    a FAIL whose explaining verdict errored, so rung 4 moved alone would have
+    made a required crash `<failure type="blocked">` and a not-required one
+    `<skipped>`. A Checked status its evidence contradicts is a red
+    `status-and-evidence-disagree` failure (D18). Everything else short of
+    Checked is skipped with its word and reason (`pending build: needs an
+    article`); childless only for a Checked claim its evidence backs.
     """
     case = _xml_sub(suite, "testcase", classname=suite.get("name"), name=claim.id,
                     time="0")
     rendered = claim.acceptance.render() if claim.acceptance else ""
-    words = (claim.statement or "") + (f"\nacceptance: {rendered}" if rendered else "")
+    text = (claim.statement or "") + (f"\nacceptance: {rendered}" if rendered else "")
+    status = composed.status
+    contradicted = _disagreement(ledger, claim, composed, cover)
+    if contradicted:
+        child = _xml_sub(case, "failure", type="status-and-evidence-disagree",
+                         message=f"status and evidence disagree — {contradicted}")
+        _xml_text(child, text)
+        return
+    why = reason(composed, ledger, claim, full=True, stale_reasons=stale_reasons)
+    if composed.errored:
+        child = _xml_sub(case, "error", type="error", message=why)
+        _xml_text(child, text)
+        return
     if red:
-        reason = _terminal_reason(ledger, claim, status, cover, full=True,
-                                  stale_gates=stale_gates)
-        explaining = claim_logic.explaining_verdict(claim, ledger.verdicts)
-        # Only a FAIL can come from a crash. A REFUTED claim with a crashed
-        # modelled-half gate beside it is refuted by the real object, and saying
-        # "error" there would send the reader to the gate instead of the part.
-        if (status is ClaimStatus.FAIL and explaining is not None
-                and explaining.outcome == "error"):
-            child = _xml_sub(case, "error", type="error", message=reason)
-        else:
-            child = _xml_sub(case, "failure", type=status.value, message=reason)
-        _xml_text(child, words)
+        child = _xml_sub(case, "failure", type=status.value, message=why)
+        _xml_text(child, text)
         return
-    if status is ClaimStatus.PASS:
-        unproven = _unproven_for(claim.id, cover, ledger)
-        if unproven:
-            _xml_sub(case, "skipped", message="partial: " + "; ".join(
-                f"{gid} {why}" for gid, why in unproven))
+    if status in (ClaimStatus.PASS, ClaimStatus.VERIFIED):
         return
-    if status is ClaimStatus.VERIFIED:
-        return
-    if status is ClaimStatus.UNVERIFIED:
-        _xml_sub(case, "skipped", message="needs a real part")
-    elif status is ClaimStatus.ASSERTED:
-        _xml_sub(case, "skipped", message="assumed")
-    else:
-        why = _terminal_reason(ledger, claim, status, cover, full=True,
-                               stale_gates=stale_gates)
-        _xml_sub(case, "skipped", message=f"{status.value}: {why}")
+    _xml_sub(case, "skipped", message=f"{word(status)}: {why}")
 
 
 def render_junit(ledger: Ledger, verdicts: Iterable[Verdict], registry: Any, *,
                  tier: Any, ready: bool, exit_code: int, when: str,
                  not_run: Any = None, cached: Iterable[str] = frozenset(),
                  stale: bool = False, spine: str = "",
-                 stale_gates: Collection[str] = ()) -> str:
+                 stale_gates: Collection[str] = (),
+                 stale_reasons: Mapping[str, str] | None = None) -> str:
     """This command's run as JUnit XML — never greener than its exit code.
 
     A CI system renders this file, not the exit code, so the file carries the
@@ -1622,18 +2069,19 @@ def render_junit(ledger: Ledger, verdicts: Iterable[Verdict], registry: Any, *,
       count is stable between runs. Its outcome is the gate's verdict in
       `verdicts` (this command's rows): childless iff `outcome == "pass"`; fail
       -> `<failure type="fail">`; error -> `<error type="error">`, or
-      `type="not-admitted"` for an error that starts `not admitted:`; skipped ->
-      `<skipped>`. A gate with no row is `<skipped message="not run: <why>">`,
-      the why from `not_run` (`(gate, reason)` pairs or a mapping, e.g. "above
-      the tier ceiling", "excluded by --only"). Gates in `cached` get `time="0"`
-      and a `cached` property.
+      `type="not-admitted"` for a refused evaluator (`Verdict.unqualified`);
+      skipped -> `<skipped>`. A gate with no row is `<skipped message="not run:
+      <why>">`, the why from `not_run` (`(gate, reason)` pairs or a mapping,
+      e.g. "above the tier ceiling", "excluded by --only"). Gates in `cached`
+      get `time="0"` and a `cached` property.
     * **`claims.critical`** — one testcase per critical claim, each asserting
       "does not block the spend". Its red testcases are exactly
       `claims.blocking(ledger, registry, stale=stale)`, so failures plus errors
-      equal `len(blocking())`; zero claims adds one failing `no claims recorded`
-      (zero blocking claims out of zero is not readiness, and `check` exits 1).
-    * **`claims.not-critical`** — FAIL and REFUTED red; every other non-pass
-      skipped with its reason.
+      equal `len(blocking())`, a claim Skipped by a crash an `<error>`; zero
+      claims adds one failing `no claims recorded` (zero blocking claims out of
+      zero is not readiness, and `check` exits 1).
+    * **`claims.not-critical`** — Failing red, a crash an `<error>`; every other
+      claim short of Checked skipped with its word and reason.
 
     `ledger` must be the ledger the exit code was judged from, and `stale` and
     `stale_gates` what it was judged with (the resolution's stale gates, from
@@ -1644,17 +2092,24 @@ def render_junit(ledger: Ledger, verdicts: Iterable[Verdict], registry: Any, *,
     failing `exit code` testcase saying so. A caller's disagreement surfaces as
     red, never as a green file beside a red job.
 
-    Root `<properties>`: `spine_version`, `exit_code`, `tier`, `ready`, `when`,
-    and `spine` when given (the spine digest, from Phase 1.2). `when` is the
-    caller's timestamp; this function reads no clock. Every attribute and text
-    value goes through `junit_safe`, so the file parses whatever a gate wrote.
+    Root `<properties>`: `spine_version`, `exit_code`, `tier`, `ready` (the
+    caller's: nothing stops `check`), `all_required_checked` (*ready* in
+    GLOSSARY §4's sense, `claims.summarise`'s — critique of the P2.1 design: a
+    `ready=true` property beside a claim waiting for an article was READY on
+    one more channel), `when`, and `spine` when given (the spine digest, from
+    Phase 1.2). `when` is the caller's timestamp; this function reads no clock.
+    Every attribute and text value goes through `junit_safe`, so the file
+    parses whatever a gate wrote.
     """
     import xml.etree.ElementTree as ET        # ~6 ms; only `--junit` pays it
 
     code = int(exit_code)
+    composed = _compositions(ledger, registry, stale, stale_gates)
     root = ET.Element("testsuites", {"name": "atompipe check"})
     props = [("spine_version", __version__), ("exit_code", str(code)),
              ("tier", str(_int_or(tier))), ("ready", "true" if ready else "false"),
+             ("all_required_checked",
+              "true" if readiness(ledger, composed)["ready"] else "false"),
              ("when", when)]
     if spine:
         props.append(("spine", spine))
@@ -1677,27 +2132,26 @@ def render_junit(ledger: Ledger, verdicts: Iterable[Verdict], registry: Any, *,
                          verdict, cached=gate_id in cached,
                          not_run=str(reasons.get(gate_id, "")))
 
-    st = _statuses(ledger, registry, stale, stale_gates)
     cover = _coverage(ledger, registry)
     blocking = {c.id for c, _ in claim_logic.blocking(ledger, registry, stale=stale,
                                                       stale_gates=stale_gates)}
     for claim in ledger.claims:
-        status = st[claim.id]
+        found = composed[claim.id]
         if claim.critical:
-            _claim_case(suites["claims.critical"], ledger, claim, status, cover,
-                        red=claim.id in blocking, stale_gates=stale_gates)
+            _claim_case(suites["claims.critical"], ledger, claim, found, cover,
+                        red=claim.id in blocking, stale_reasons=stale_reasons)
         else:
-            _claim_case(suites["claims.not-critical"], ledger, claim, status, cover,
-                        red=status in (ClaimStatus.FAIL, ClaimStatus.REFUTED),
-                        stale_gates=stale_gates)
+            _claim_case(suites["claims.not-critical"], ledger, claim, found, cover,
+                        red=found.status in (ClaimStatus.FAIL, ClaimStatus.REFUTED),
+                        stale_reasons=stale_reasons)
 
     critical = suites["claims.critical"]
     if not ledger.claims:
         case = _xml_sub(critical, "testcase", classname="claims.critical",
                         name="no claims recorded", time="0")
         _xml_sub(case, "failure", type="no-claims",
-                 message="no claims recorded, so nothing was checked — an empty "
-                         "ledger is not a clean bill of health")
+                 message="no claims recorded, so nothing was evaluated — an empty "
+                         "ledger is not ready")
     if code != 0 and _junit_red(critical) == 0:
         case = _xml_sub(critical, "testcase", classname="claims.critical",
                         name="exit code", time="0")
@@ -1781,11 +2235,26 @@ def _int_or(value: Any) -> Any:
 
 
 __all__ = [
+    "HUMAN",
+    "StatusWords",
     "STATUS_TAG",
     "SECTION_PROVEN",
     "JUNIT_DEFAULT",
     "RATIONALE_UNKNOWN",
+    "words",
+    "word",
     "status_tag",
+    "severity",
+    "in_severity",
+    "count_bits",
+    "count_line",
+    "reason",
+    "status_view",
+    "words_table",
+    "outcome_words",
+    "need_word",
+    "readiness",
+    "not_ready_line",
     "render_terminal",
     "render_markdown",
     "write_report",

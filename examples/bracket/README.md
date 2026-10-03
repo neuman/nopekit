@@ -17,9 +17,10 @@ On a fresh clone, before you change anything:
 ```
 [FAIL] bracket.deflection : 0.700 mm at 15 N (limit 0.5 mm)                   cached
 6 gates: 0 executed, 6 cached — 5 ok, 1 FAIL — tier 0
-BLOCKING — 2 critical claim(s) must not be spent against:
+BLOCKING — 3 critical claim(s) must not be spent against:
 [FAIL ] C1 Tip sags no more than 0.5 mm at rated load — bracket.deflection : 0.700 mm at 15 N (limit 0.5 mm)
-[gap  ] C7 First mode is clear of the pump that sits on the shelf — no gate covers it
+[gap  ] C6 The load is static and centred on the arm — no owner recorded
+[gap  ] C7 First mode is clear of the pump that sits on the shelf — no evaluator
 ```
 
 Nothing ran. Every verdict came out of `.atompipe/verdicts/`, where it was recorded
@@ -30,7 +31,10 @@ The exit code is 1.
 **The failure is deliberate.** The default thickness is 7 mm and the arm sags 0.70 mm
 against a 0.5 mm limit. Open `model/bracket.py`, change `thickness` to `8.0`, and run
 `atompipe check` again — `bracket.deflection` goes green at 0.47 mm (C7 still blocks:
-no gate covers it yet). Before you run anything, `atompipe status` names each gate the
+no evaluator covers it yet; and C6 is an assumption nobody owns, a gap until its owner
+records it — writing a name into `claims/C6.json` does not count). C5 waits on an
+article: `atompipe status` says *pending build*, and the project is not *ready* until
+every required claim reads checked. Before you run anything, `atompipe status` names each gate the
 edit reached and what moved for it; `check` re-runs exactly those and serves the rest
 from the cache.
 

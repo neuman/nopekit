@@ -14,8 +14,10 @@ that matters — the XML may be redder than the command, never greener:
 * the ``claims.critical`` suite's failures plus errors equal ``len(claims.blocking())``
   (plus one when there are no claims at all), and ``check`` exits 1 iff that count
   is positive — the two are the same judgement, printed twice;
-* a PASS that rests on fewer gates than cover it is ``<skipped message="partial:
-  …">``, never childless (invariant 4's PARTIAL, in CI's vocabulary);
+* a pass beside a gate that skipped or never ran is red from P2.1 — the claim
+  reads Skipped or Open (GLOSSARY §3), blocks, and its case is a ``<failure>``
+  naming the gate; until P2.1 it was ``<skipped message="partial: …">``,
+  invariant 4's PARTIAL, which GLOSSARY §3 retires;
 * the renderer escapes the code points XML 1.0 forbids, because ElementTree alone
   writes them raw and the file then fails to parse — a CI step that cannot read
   the report shows no failures at all (the slice probe behind phase-1.md 1.1).
@@ -391,34 +393,42 @@ class JUnitNeverGreenerThanTheExitCode(unittest.TestCase):
                     ET.fromstring(f"<a b='{report_mod.junit_safe(ch)}'/>".encode("utf-8"))
 
     def test_partial_pass_is_skipped_never_childless(self):
-        """PASS on one covering gate while another skipped or never ran: invariant
-        4's PARTIAL, which CI must show as skipped with the gate and the reason —
-        never as a green testcase, and never counted as blocking."""
+        """A pass on one covering gate while another skipped or never ran. Until
+        P2.1 the claim read PASS and CI showed it skipped, `partial: …`; under
+        GLOSSARY §3's composition it reads Skipped or Open, blocks, and its case
+        is red, naming the gate with its lead (R-6, stronger: red, not skipped;
+        old 2.1's V, "the JUnit claims.critical suite has a <failure> for it")."""
         sc = next(s for s in _scenarios() if s.name == "partial-pass-and-pending")
         root, blockers, _code, _ = _render(sc)
         self.assertEqual(claims_mod.statuses(sc.ledger, registry=sc.registry)["C1"],
-                         ClaimStatus.PASS)
+                         ClaimStatus.BLOCKED)
         res = _result(_cases(_suite(root, "claims.critical"))["C1"])
-        self.assertIsNotNone(res, "a PARTIAL pass rendered childless")
-        self.assertEqual(res.tag, "skipped")
-        self.assertEqual(res.get("message"), "partial: g.b requires openfoam (not on PATH)")
-        self.assertNotIn("C1", {c.id for c, _s in blockers})
+        self.assertIsNotNone(res, "a pass beside a skip rendered childless")
+        self.assertEqual((res.tag, res.get("type")), ("failure", "blocked"))
+        self.assertEqual(res.get("message"), "skipped: g.b : requires openfoam (not on PATH)")
+        self.assertIn("C1", {c.id for c, _s in blockers})
 
         reg = _registry({"g.a": ["C1"], "g.never": ["C1"]})
         vs = [_v("g.a", "pass", ["C1"])]
         never = Scenario("never", _ledger([_measurable("C1")], vs), vs, reg)
         root, *_ = _render(never)
         res = _result(_cases(_suite(root, "claims.critical"))["C1"])
-        self.assertEqual((res.tag, res.get("message")), ("skipped", "partial: g.never never run"))
+        self.assertEqual((res.tag, res.get("type"), res.get("message")),
+                         ("failure", "pending", "unrun: g.never"))
 
     def test_physical_and_assumed_are_skipped_with_their_words(self):
         sc = next(s for s in _scenarios() if s.name == "bracket-shaped")
         root, *_ = _render(sc)
         cases = _cases(_suite(root, "claims.critical"))
+        # P2.1 (R-6): GLOSSARY §3's words. C5 waits on an article and says
+        # what it lacks; C6, an assumption nobody owns, reads Gap and blocks.
         self.assertEqual((_kind(cases["C5"]), _result(cases["C5"]).get("message")),
-                         ("skipped", "needs a real part"))
-        self.assertEqual((_kind(cases["C6"]), _result(cases["C6"]).get("message")),
-                         ("skipped", "assumed"))
+                         ("skipped", "pending build: needs an article; no test written down"))
+        self.assertEqual((_kind(cases["C6"]), _result(cases["C6"]).get("type"),
+                          _result(cases["C6"]).get("message")),
+                         ("failure", "unclaimed",
+                          "no owner recorded — an assumption reads Assumed only once its owner "
+                          "records it; nothing can record one yet"))
         self.assertEqual(_result(cases["C1"]).get("message"),
                          "g.defl : 0.700 mm at 15 N (limit 0.5 mm)")
         self.assertEqual(_result(cases["C7"]).get("type"), "unclaimed")
@@ -438,15 +448,22 @@ class JUnitNeverGreenerThanTheExitCode(unittest.TestCase):
         self.assertEqual(_red(_suite(root, "claims.critical")), 0)
 
     def test_not_admitted_is_error_type(self):
-        reg = _registry({"g.na": ["C1"], "g.crash": ["C1"], "g.quoted": ["C1"]})
-        vs = [_v("g.na", "error", ["C1"], error="not admitted: PASSED its own known-bad"),
+        """`type="not-admitted"` is keyed on the spine's mark, `Verdict.unqualified`
+        (P2.1, R-6): a verdict carrying only the text — a gate that worded its
+        own crash so (`g.text`) — is a crash."""
+        reg = _registry({"g.na": ["C1"], "g.crash": ["C1"], "g.quoted": ["C1"],
+                         "g.text": ["C1"]})
+        vs = [_v("g.na", "error", ["C1"], error="not admitted: PASSED its own known-bad",
+                 unqualified="PASSED its own known-bad"),
               _v("g.crash", "error", ["C1"]),
-              _v("g.quoted", "error", ["C1"], error="ValueError: not admitted: x")]
+              _v("g.quoted", "error", ["C1"], error="ValueError: not admitted: x"),
+              _v("g.text", "error", ["C1"], error="not admitted: worded by the gate")]
         sc = Scenario("admission", _ledger([_measurable("C1")], vs), vs, reg)
         root, *_ = _render(sc)
         cases = _cases(_suite(root, "gates"))
-        self.assertEqual([_result(cases[g]).get("type") for g in ("g.na", "g.crash", "g.quoted")],
-                         ["not-admitted", "error", "error"])
+        self.assertEqual([_result(cases[g]).get("type")
+                          for g in ("g.na", "g.crash", "g.quoted", "g.text")],
+                         ["not-admitted", "error", "error", "error"])
         self.assertEqual(_result(cases["g.na"]).get("message"),
                          "not admitted: PASSED its own known-bad")
 

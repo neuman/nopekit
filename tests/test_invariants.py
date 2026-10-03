@@ -18,13 +18,17 @@ from __future__ import annotations
 
 import dataclasses
 import fractions
+import itertools
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
 import unittest
 import uuid
+import xml.etree.ElementTree as ET
+from unittest import mock
 
 from atompipe import claims as claims_mod
 from atompipe import gates as gates_mod
@@ -106,6 +110,56 @@ class SkipIsNotPass(unittest.TestCase):
         v = Verdict(gate="g.one", passed=True, skipped=True, skip_reason="no tool")
         self.assertIn("skip", v.render())
         self.assertNotIn("[ok", v.render())
+
+    # -- P2.1 (old 2.1's V, D-01): a pass never hides what did not run ------ #
+    def _two(self, second):
+        ok = Verdict(gate="g.one", claims=["C1"], passed=True)
+        claim = _claim(gates=["g.one", "g.two"])
+        reg = _Reg([SPEC, dataclasses.replace(SPEC, id="g.two")])
+        return claim, [ok] + ([second] if second is not None else []), reg
+
+    def _blocks_and_is_red(self, claim, verdicts, reg, want):
+        ledger = _ledger(claim, verdicts=verdicts)
+        for order in (verdicts, verdicts[::-1]):
+            self.assertEqual(claims_mod.resolve_status(claim, order), want)
+        self.assertEqual([(c.id, s) for c, s in claims_mod.blocking(ledger, reg)],
+                         [("C1", want)])
+        junit = ET.fromstring(report_mod.render_junit(
+            ledger, verdicts, reg, tier=0, ready=False, exit_code=1, when="t"))
+        case = junit.find("testsuite[@name='claims.critical']/testcase[@name='C1']")
+        self.assertTrue([k for k in case if k.tag in ("failure", "error")],
+                        "the JUnit claim case is not red")
+
+    def test_a_pass_beside_a_skip_is_skipped_and_blocks(self):
+        no_tool = Verdict(gate="g.two", claims=["C1"], skipped=True,
+                          skip_reason="requires openfoam (not on PATH)")
+        self._blocks_and_is_red(*self._two(no_tool), ClaimStatus.BLOCKED)
+
+    def test_a_pass_beside_an_unrun_gate_is_open_and_blocks(self):
+        self._blocks_and_is_red(*self._two(None), ClaimStatus.PENDING)
+
+    def test_a_physical_claim_with_a_failing_modelled_half_fails_and_blocks(self):
+        """S-49: a physical claim read no evaluator, so its failing modelled half
+        left it Pending build — not blocking, and the sentence said it cleared
+        every gate. Now the covering fail is Failing before any result counts."""
+        claim = _claim("C1", kind=ClaimKind.PHYSICAL, gates=["g.one"],
+                       physical_result=PhysicalResult(passed=True))
+        fail = Verdict(gate="g.one", claims=["C1"], passed=False, detail="0.7 mm")
+        self._blocks_and_is_red(claim, [fail], _Reg([SPEC]), ClaimStatus.FAIL)
+
+    def test_a_blocking_that_drops_skipped_is_caught(self):
+        """Planted: a `blocking()` that lets Skipped through a money boundary."""
+        claim, verdicts, reg = self._two(Verdict(gate="g.two", claims=["C1"], skipped=True,
+                                                 skip_reason="no tool"))
+        real = claims_mod.blocking
+
+        def drops(ledger, registry, **kw):
+            return [(c, st) for c, st in real(ledger, registry, **kw)
+                    if st is not ClaimStatus.BLOCKED]
+
+        with mock.patch.object(claims_mod, "blocking", drops):
+            with self.assertRaises(AssertionError):
+                self._blocks_and_is_red(claim, verdicts, reg, ClaimStatus.BLOCKED)
 
 
 class ErrorIsNotPass(unittest.TestCase):
@@ -348,6 +402,49 @@ class ReportNeverOverclaims(unittest.TestCase):
         self.assertIn("C1", section)
         self.assertIn("0.312", section)
 
+    def test_a_pass_the_evidence_does_not_back_is_a_disagreement(self):
+        """P2.1-D18: under GLOSSARY §3's composition a Checked claim has no
+        evaluator that did not pass. If the resolver says `pass` anyway — here a
+        planted compose that lets a pass beside a skip through — the report
+        never lists it under the checked section, prints the contradiction
+        loudly in the failing section, makes its JUnit case red, and the page
+        marks the row (`disagree`). What slipped through the P2.1 design: the
+        contradiction row stayed INSIDE the checked section, marked — PARTIAL
+        under a new name — and `state.json` had nothing in `partial`'s place."""
+        from atompipe import site as site_mod
+        no_tool = Verdict(gate="g.two", claims=["C1"], skipped=True, skip_reason="no tool")
+        ok = Verdict(gate="g.one", claims=["C1"], passed=True, measured=0.3, units="mm")
+        reg = _Reg([SPEC, dataclasses.replace(SPEC, id="g.two")])
+        ledger = _ledger(_claim(gates=["g.one", "g.two"]), verdicts=[ok, no_tool])
+        real = claims_mod.compose
+
+        def lets_it_through(claim, verdicts, **kw):
+            found = real(claim, verdicts, **kw)
+            if found.cause is claims_mod.ClaimCause.SKIPPED:
+                return claims_mod.Composed(ClaimStatus.PASS, claims_mod.ClaimCause.CHECKED)
+            return found
+
+        with mock.patch.object(claims_mod, "compose", lets_it_through):
+            self.assertEqual(claims_mod.resolve_status(ledger.claims[0], ledger.verdicts),
+                             ClaimStatus.PASS)
+            md = self._render(ledger, reg)
+            terminal = report_mod.render_terminal(ledger, reg)
+            junit = ET.fromstring(report_mod.render_junit(
+                ledger, ledger.verdicts, reg, tier=0, ready=True, exit_code=0, when="t"))
+            resolution = mock.Mock(verdicts=ledger.verdicts, stale_gates=frozenset(), rows={})
+            state = site_mod.state(tempfile.gettempdir(), ledger, reg, resolution=resolution,
+                                   params=[])
+        self.assertNotIn("C1", self._proven_section(md))
+        failing = md.split("## Failing, stale, skipped or open", 1)[1]
+        self.assertIn("**status and evidence disagree — g.two skipped: no tool**", failing)
+        case = junit.find("testsuite[@name='claims.critical']/testcase[@name='C1']")
+        self.assertEqual([(k.tag, k.get("type")) for k in case],
+                         [("failure", "status-and-evidence-disagree")])
+        row = next(r for r in state["claims"] if r["id"] == "C1")
+        self.assertEqual((row["status"], row["disagree"]), ("pass", True))
+        self.assertTrue(any(re.match(r"^\[.{5}\] C1 .* — status and evidence disagree — ", ln)
+                            for ln in terminal.splitlines()), terminal)
+
     def test_verdict_says_so_when_something_blocks(self):
         """The one-sentence verdict must lead with the problem, not bury it."""
         v = Verdict(gate="g.one", claims=["C1"], passed=False, detail="0.70 vs 0.50")
@@ -359,12 +456,148 @@ class ReportNeverOverclaims(unittest.TestCase):
             f"the headline verdict hid a failing critical claim: {head!r}")
 
 
+#: Where each status's claims are listed in the report (P2.1-D19), typed here:
+#: a claim is in exactly its section, once.
+_SECTION_OF = {
+    "pass": "## What is PROVEN", "verified": "## Pending build",
+    "unverified": "## Pending build", "unclaimed": "## Gaps", "asserted": "## Assumed",
+    "fail": "## Failing, stale, skipped or open", "refuted": "## Failing, stale, skipped or open",
+    "stale": "## Failing, stale, skipped or open", "blocked": "## Failing, stale, skipped or open",
+    "pending": "## Failing, stale, skipped or open",
+}
+
+#: A claim's entry in each section: the row, bullet or head that lists it.
+_ENTRY = re.compile(r"^(?:\| \*\*(?P<row>K\d+)\*\*|- \*\*Claim:\*\* (?P<need>K\d+)"
+                    r"|- \*\*Checked on an article:\*\* \*\*(?P<art>K\d+)\*\*"
+                    r"|- \*\*(?P<bullet>K\d+)\*\*|### \[.{5}\] (?P<head>K\d+) — .*\*\((?P<word>[^,]+(?:, errored)?),)")
+
+#: The word a failing-section head names for each status (GLOSSARY §3, typed).
+_HEAD_WORD = {"fail": "failing", "refuted": "failing", "stale": "stale", "blocked": "skipped",
+              "pending": "open"}
+
+
+def _every_status_ledger() -> tuple[Ledger, _Reg, dict, frozenset]:
+    """A ledger reaching every (status, cause) `compose` can give, one claim
+    each, with the registry, the attributions and the stale gates it needs."""
+    def gate(gid):
+        return dataclasses.replace(SPEC, id=gid, claims=[gid.replace("g.", "").upper()])
+
+    def c(cid, kind=ClaimKind.MEASURABLE, gates=(), **kw):
+        return _claim(cid, kind=kind, gates=list(gates), **kw)
+
+    phys, assume = ClaimKind.PHYSICAL, ClaimKind.ASSUMPTION
+    claims = [
+        c("K1", gates=["g.k1"]), c("K2", gates=["g.k2"]),
+        c("K3", phys, physical_result=PhysicalResult(passed=False, detail="cracked")),
+        c("K4", gates=["g.k4"]), c("K5", gates=["g.k5"]), c("K6"), c("K7", gates=["g.k7"]),
+        c("K8", assume), c("K9", assume, owner="Sam", rationale="r"),
+        c("K10", assume, owner="Sam"), c("K11", gates=["g.k11"]), c("K12", gates=["g.k12"]),
+        c("K13", phys), c("K14", phys, physical_result=PhysicalResult(passed=True)),
+        c("K15", assume, owner="Ana", rationale="carried on purpose"),
+    ]
+    verdicts = [
+        Verdict(gate="g.k1", claims=["K1"], passed=True),
+        Verdict(gate="g.k2", claims=["K2"], passed=False, detail="0.7 mm"),
+        Verdict(gate="g.k4", claims=["K4"], error="RuntimeError: boom"),
+        Verdict(gate="g.k5", claims=["K5"], skipped=True, skip_reason="no tool"),
+        Verdict(gate="g.k7", claims=["K7"], error="not admitted: x", unqualified="x"),
+        Verdict(gate="g.k12", claims=["K12"], passed=True),
+    ]
+    reg = _Reg([gate(g) for g in ("g.k1", "g.k2", "g.k4", "g.k5", "g.k7", "g.k11", "g.k12")])
+    owners = {"K15": claims_mod.Attribution("Ana", "carried on purpose")}
+    return _ledger(*claims, verdicts=verdicts), reg, owners, frozenset({"g.k12"})
+
+
+def listing_problems(md: str, composed: dict) -> list[str]:
+    """Every claim of `composed` not in exactly its section once, with its word."""
+    sections: dict[str, list[tuple[str, str]]] = {}
+    current = ""
+    for line in md.splitlines():
+        if line.startswith("## "):
+            current = next((h for h in set(_SECTION_OF.values()) if line.startswith(h)), "")
+            continue
+        m = _ENTRY.match(line)
+        if m and current:
+            cid = next(v for k, v in m.groupdict().items() if v and k != "word")
+            sections.setdefault(cid, []).append((current, m.group("word") or ""))
+    out = []
+    for cid, found in composed.items():
+        want = _SECTION_OF[found.status.value]
+        seen = sections.get(cid, [])
+        if [where for where, _w in seen] != [want]:
+            out.append(f"{cid} ({found.status.value}, {found.cause.value}): listed "
+                       f"{[w for w, _ in seen] or 'nowhere'}, not once under {want!r}")
+            continue
+        head = _HEAD_WORD.get(found.status.value)
+        if head:
+            word = head + (", errored" if found.errored else "")
+            if seen[0][1] != word:
+                out.append(f"{cid}: its head says {seen[0][1]!r}, not {word!r}")
+    return out
+
+
+class EveryUnresolvedClaimIsListed(unittest.TestCase):
+    """(V, P2.1-D19) Every claim is listed in exactly one report section — its
+    status's — with its word. What slipped through the P2.1 design: the gaps
+    section read only `find_gaps` (an automated claim no evaluator covers), so a
+    Gap from an unqualified evaluator or an unowned assumption was in no section
+    at all, and the one it did list was told to run `gap --propose`."""
+
+    def _md(self, gaps=None):
+        ledger, reg, owners, stale = _every_status_ledger()
+        real = claims_mod.compositions
+
+        def owned(ledger_, **kw):
+            kw.setdefault("owners", owners)
+            return real(ledger_, **kw)
+
+        patches = [mock.patch.object(claims_mod, "compositions", owned)]
+        if gaps is not None:
+            patches.append(mock.patch.object(report_mod, "_section_gaps", gaps))
+        with patches[0], (patches[1] if len(patches) > 1 else mock.patch.object(
+                report_mod, "_section_gaps", report_mod._section_gaps)):
+            md = report_mod.render_markdown(ledger, reg, stale_gates=stale)
+            composed = owned(ledger, registry=reg, stale_gates=stale)
+        return md, composed
+
+    def test_every_status_and_cause_is_reached(self):
+        _md, composed = self._md()
+        self.assertEqual({c.status.value for c in composed.values()}, set(_SECTION_OF))
+        self.assertEqual({c.cause.value for c in composed.values()},
+                         {cause.value for cause in claims_mod.ClaimCause})
+
+    def test_each_claim_once_in_its_section(self):
+        md, composed = self._md()
+        self.assertEqual(listing_problems(md, composed), [])
+
+    def test_a_gaps_section_that_reads_find_gaps_only_is_caught(self):
+        def needs_only(ledger, composed, registry, **_kw):
+            out = ["## Gaps", ""]
+            for need in report_mod._needs(ledger, registry):
+                out += [f"### {need.id}"] + [f"- **Claim:** {cid} — x" for cid in need.claim_ids]
+            return out + [""]
+
+        md, composed = self._md(gaps=needs_only)
+        missing = {p.split(" ", 1)[0] for p in listing_problems(md, composed)}
+        self.assertEqual(missing, {"K7", "K8", "K9", "K10"})
+
+
 class StatusPrecedence(unittest.TestCase):
     """The derivation table from SPINE_CONTRACT.md, exactly."""
 
-    def test_assumption_is_asserted(self):
-        c = _claim("C2", kind=ClaimKind.ASSUMPTION, gates=[])
-        self.assertEqual(claims_mod.resolve_status(c, []), ClaimStatus.ASSERTED)
+    def test_an_assumption_nobody_owns_is_a_gap(self):
+        """GLOSSARY §3: Assumed needs a reason and an owner; with no owner the
+        claim reads Gap (PLAN-v0.14 §1.4). Was `test_assumption_is_asserted`
+        (R-6: a reversal §1.4 forces, beside the case that keeps Assumed held)."""
+        c = _claim("C2", kind=ClaimKind.ASSUMPTION, gates=[], rationale="why")
+        self.assertEqual(claims_mod.resolve_status(c, []), ClaimStatus.UNCLAIMED)
+
+    def test_an_attributed_assumption_is_assumed(self):
+        c = _claim("C2", kind=ClaimKind.ASSUMPTION, gates=[], rationale="why", owner="Sam")
+        owners = {"C2": claims_mod.Attribution("Sam", "why")}
+        self.assertEqual(claims_mod.resolve_status(c, [], owners=owners), ClaimStatus.ASSERTED)
+        self.assertEqual(claims_mod.resolve_status(c, []), ClaimStatus.UNCLAIMED,
+                         "an owner in the file alone counts for nothing")
 
     def test_physical_with_result(self):
         c = _claim("C3", kind=ClaimKind.PHYSICAL, gates=[])
@@ -402,6 +635,227 @@ class StatusPrecedence(unittest.TestCase):
         self.assertIn(ClaimStatus.UNCLAIMED, BLOCKING_STATUSES)
         self.assertIn(ClaimStatus.BLOCKED, BLOCKING_STATUSES)
         self.assertIn(ClaimStatus.STALE, BLOCKING_STATUSES)
+
+
+# --------------------------------------------------------------------------- #
+# P2.1: Checked means every evaluator passed (invariants 1 and 4)
+# --------------------------------------------------------------------------- #
+#: The covering outcomes V3 composes: GLOSSARY §1's four, plus a refusal of
+#: qualification (the spine's mark, `Verdict.unqualified`).
+_OUTCOMES = ("pass", "fail", "skipped", "error", "unqualified")
+
+
+def _covering(kind: str, index: int) -> Verdict:
+    gate = f"g.{index}{kind}"
+    return {
+        "pass": Verdict(gate=gate, claims=["C1"], passed=True),
+        "fail": Verdict(gate=gate, claims=["C1"], passed=False),
+        "skipped": Verdict(gate=gate, claims=["C1"], skipped=True, skip_reason="no tool"),
+        "error": Verdict(gate=gate, claims=["C1"], error="RuntimeError: x"),
+        "unqualified": Verdict(gate=gate, claims=["C1"], error="not admitted: x",
+                               unqualified="x"),
+    }[kind]
+
+
+#: The claim kinds V3 composes over: (kind, physical result, attributed).
+_KINDS = (
+    ("automated", None, False),
+    ("physical, no result", None, False),
+    ("physical, a pass", True, False),
+    ("physical, a fail", False, False),
+    ("assumption", None, False),
+    ("assumption, attributed", None, True),
+)
+
+
+def _ladder_860ffa6(claim, verdicts, *, stale=False, stale_gates=(), owners=None):
+    """`claims.resolve_status` as `860ffa6` had it, copied here as a literal: the
+    planted violator V3 must catch — pass beside a skip, an unrun gate, an error
+    or a refusal of qualification."""
+    if claim.kind == ClaimKind.ASSUMPTION:
+        return ClaimStatus.ASSERTED
+    if claim.kind == ClaimKind.PHYSICAL:
+        result = claim.physical_result
+        if result is None:
+            return ClaimStatus.UNVERIFIED
+        return ClaimStatus.VERIFIED if result.passed else ClaimStatus.REFUTED
+    mine = claims_mod.covering_verdicts(claim, verdicts)
+    known = [g for g in (claim.gates or ()) if g]
+    if not mine and not known:
+        return ClaimStatus.UNCLAIMED
+    outcomes = [v.outcome for v in mine]
+    if mine and all(o == "skipped" for o in outcomes):
+        return ClaimStatus.BLOCKED
+    if not mine:
+        return ClaimStatus.PENDING
+    if any(o in ("error", "fail") for o in outcomes):
+        return ClaimStatus.FAIL
+    if stale or (set(stale_gates) & ({v.gate for v in mine} | set(known))):
+        return ClaimStatus.STALE
+    return ClaimStatus.PASS
+
+
+def checked_problems(resolve=None, compose=None) -> list[str]:
+    """Every case where a claim reads Checked and should not, or should and does
+    not, over every multiset of up to three covering outcomes × an unrun gate ×
+    an invalidated pass × every kind; and where `compose`'s status and
+    `resolve_status`'s disagree, or its cause does not fit its status."""
+    resolve = resolve or claims_mod.resolve_status
+    compose = compose or claims_mod.compose
+    checked = (ClaimStatus.PASS, ClaimStatus.VERIFIED)
+    causes = {"failed": "fail", "physical-fail": "refuted", "errored": "blocked",
+              "skipped": "blocked", "unqualified": "unclaimed", "no-evaluator": "unclaimed",
+              "no-owner": "unclaimed", "owner-unattributed": "unclaimed",
+              "no-reason": "unclaimed", "unrun": "pending", "invalidated": "stale",
+              "no-article": "unverified", "owned": "asserted", "physical-pass": "verified",
+              "checked": "pass"}
+    out: list[str] = []
+    for size in range(4):
+        for combo in itertools.combinations_with_replacement(_OUTCOMES, size):
+            for unrun, stale, (kind, result, attributed) in itertools.product(
+                    (False, True), (False, True), _KINDS):
+                verdicts = [_covering(k, i) for i, k in enumerate(combo)]
+                gates = [v.gate for v in verdicts] + (["g.unrun"] if unrun else [])
+                moved = {v.gate for v in verdicts if v.outcome == "pass"} if stale else set()
+                claim_kind = (ClaimKind.MEASURABLE if kind == "automated" else
+                              ClaimKind.PHYSICAL if kind.startswith("physical")
+                              else ClaimKind.ASSUMPTION)
+                claim = _claim(gates=gates, kind=claim_kind, rationale="why",
+                               owner="Sam" if claim_kind is ClaimKind.ASSUMPTION else "",
+                               physical_result=(None if result is None
+                                                else PhysicalResult(passed=result)))
+                owners = {"C1": claims_mod.Attribution("Sam", "why")} if attributed else None
+                status = ClaimStatus(resolve(claim, verdicts, stale_gates=moved, owners=owners))
+                if claim_kind is ClaimKind.ASSUMPTION:
+                    should = False
+                elif claim_kind is ClaimKind.PHYSICAL:
+                    should = (result is True and not unrun and not moved
+                              and all(v.outcome == "pass" and not v.unqualified
+                                      for v in verdicts))
+                else:
+                    should = (bool(verdicts) and not unrun and not moved
+                              and all(v.outcome == "pass" and not v.unqualified
+                                      for v in verdicts))
+                name = f"{kind}: {'+'.join(combo) or '-'}{' unrun' if unrun else ''}" \
+                       f"{' stale' if stale else ''}"
+                if (status in checked) != should:
+                    out.append(f"{name}: {status.value}")
+                found = compose(claim, verdicts, stale_gates=moved, owners=owners)
+                if found.status != status:
+                    out.append(f"{name}: compose {found.status.value}, resolve {status.value}")
+                if causes.get(str(found.cause.value)) != found.status.value:
+                    out.append(f"{name}: cause {found.cause.value} with {found.status.value}")
+    return out
+
+
+class CheckedMeansEveryEvaluatorPassed(unittest.TestCase):
+    """(1, 4) GLOSSARY §3's composition, exhaustively: a claim reads Checked iff
+    its kind allows it, every known evaluator has a verdict, every verdict
+    passed, none is unqualified, none is invalidated — and, for a physical
+    claim, its recorded result passed. An assumption is never Checked. What
+    slipped through the ladder this replaced (S-03): a pass beside a skip, an
+    unrun gate or a refused evaluator read PASS, and the report marked it
+    PARTIAL under PROVEN."""
+
+    def test_checked_iff_every_evaluator_passed(self):
+        self.assertEqual(checked_problems(), [])
+
+    def test_the_860ffa6_ladder_is_caught(self):
+        """Planted: today's ladder before P2.1, as a literal. Pass beside a skip
+        or an unrun gate reads pass — Checked, caught by the oracle; pass beside
+        a crash or a refusal reads fail — not Checked, but not what `compose`
+        says, caught by the agreement half."""
+        found = checked_problems(resolve=_ladder_860ffa6)
+        for row, problem in (("pass+skipped", "pass"), ("pass unrun", "pass"),
+                             ("pass+error", "compose blocked, resolve fail"),
+                             ("pass+unqualified", "compose unclaimed, resolve fail")):
+            with self.subTest(row=row):
+                self.assertIn(f"automated: {row}: {problem}", found)
+
+    def test_a_compose_that_drops_refusals_is_caught(self):
+        real = claims_mod.compose
+
+        def drops(claim, verdicts, **kw):
+            kept = [v for v in verdicts if not v.unqualified]
+            gone = {v.gate for v in verdicts} - {v.gate for v in kept}
+            return real(dataclasses.replace(claim, gates=[g for g in claim.gates
+                                                          if g not in gone]), kept, **kw)
+
+        found = checked_problems(resolve=lambda *a, **kw: drops(*a, **kw).status, compose=drops)
+        self.assertIn("automated: pass+unqualified: pass", found)
+
+
+class UnqualifiedIsTheSpinesWord(unittest.TestCase):
+    """(2) `Verdict.unqualified` — the mark a claim reads Gap by — is set by the
+    spine only. A gate cannot set it: `run_gate` clears it on whatever a gate
+    returns, so a gate's own `unqualified` or its `error="not admitted: …"`
+    reads as the crash it is (Skipped, errored), never the quieter Gap. And no
+    stored verdict carries it: the remembered-outcome reader drops it."""
+
+    def _ran(self, returned):
+        reg, (spec, fn) = _one_gate(returned)
+        return gates_mod.run_gate(spec, fn, _gate_ctx())
+
+    def _reads_errored(self, verdict):
+        found = claims_mod.compose(_claim(gates=[verdict.gate]), [verdict])
+        return (found.status, found.cause, verdict.unqualified)
+
+    def test_a_gate_that_marks_itself_reads_as_a_crash(self):
+        errored = (ClaimStatus.BLOCKED, claims_mod.ClaimCause.ERRORED, "")
+        for returned in (Verdict(gate="g.strict", unqualified="x"),
+                         {"pass": True, "unqualified": "x"},
+                         Verdict(gate="g.strict", error="not admitted: x")):
+            with self.subTest(returned=repr(returned)[:60]):
+                verdict = self._ran(returned)
+                self.assertEqual(verdict.outcome, "error")
+                self.assertEqual(self._reads_errored(verdict), errored)
+
+    def test_a_marked_verdict_is_never_ok(self):
+        """Degrade-closed (R-2): set without an error, the mark writes one."""
+        v = Verdict(gate="g", passed=True, unqualified="x")
+        self.assertFalse(v.ok)
+        self.assertTrue(v.error)
+
+    def test_a_remembered_outcome_never_carries_the_mark(self):
+        from atompipe import verdicts as verdicts_mod
+        root = tempfile.mkdtemp(prefix="atompipe-remembered-")
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        os.makedirs(os.path.join(root, ".atompipe", "cache"))
+        crash = Verdict(gate="g.x", claims=["C1"], error="RuntimeError: boom")
+        verdicts_mod.remember(root, "g.x", crash, input_rho="", kind="error", when="t")
+        path = os.path.join(root, ".atompipe", "cache", "last_outcomes.json")
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertNotIn("unqualified", data["g.x"][""]["verdict"])
+        # A hand-edited record — for a registered gate and for one no longer
+        # registered (the orphan rung reads `remembered()` directly) — reads
+        # without it.
+        data["g.x"][""]["verdict"]["unqualified"] = "x"
+        data["g.gone"] = {"": {"kind": "error", "verdict": dict(data["g.x"][""]["verdict"],
+                                                              gate="g.gone"), "when": "t"}}
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(data, fh)
+        held = verdicts_mod.remembered(root)
+        for key in ("g.x", "g.gone"):
+            with self.subTest(key=key):
+                self.assertEqual(held[key][""]["verdict"].unqualified, "")
+                self.assertEqual(self._reads_errored(dataclasses.replace(
+                    held[key][""]["verdict"], gate="g.x"))[:2],
+                                 (ClaimStatus.BLOCKED, claims_mod.ClaimCause.ERRORED))
+
+    def test_a_run_gate_that_keeps_the_mark_is_caught(self):
+        """Planted: `run_gate` not clearing it — the gate's own mark then reads
+        Gap, quieter than a crash."""
+        real = gates_mod._stamp
+
+        def keeps(verdict, spec, duration, cpu=0.0):
+            stamped = real(verdict, spec, duration, cpu)
+            return dataclasses.replace(stamped, unqualified=verdict.unqualified)
+
+        with mock.patch.object(gates_mod, "_stamp", keeps):
+            verdict = self._ran(Verdict(gate="g.strict", unqualified="x"))
+        self.assertEqual(self._reads_errored(verdict)[:2],
+                         (ClaimStatus.UNCLAIMED, claims_mod.ClaimCause.UNQUALIFIED))
 
 
 # --------------------------------------------------------------------------- #

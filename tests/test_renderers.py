@@ -50,9 +50,11 @@ def _claim(cid="C1", gates=("g.one", "g.two")):
 
 #: outcome -> (ok, render tag, the status a claim covered only by it resolves to).
 #: Written out rather than computed: a table derived from the code under test
-#: agrees with that code by construction.
+#: agrees with that code by construction. A crash reads Skipped from P2.1
+#: (`blocked`, cause errored — GLOSSARY §3; R-6, PLAN-v0.14 §3's P2 row names
+#: this move), never FAIL: it failed nothing.
 EXPECTED = {
-    "error":   (False, "[ERR ]", ClaimStatus.FAIL),
+    "error":   (False, "[ERR ]", ClaimStatus.BLOCKED),
     "skipped": (False, "[skip]", ClaimStatus.BLOCKED),
     "pass":    (True,  "[ok  ]", ClaimStatus.PASS),
     "fail":    (False, "[FAIL]", ClaimStatus.FAIL),
@@ -133,6 +135,8 @@ class RenderersAgree(unittest.TestCase):
                 self.assertTrue(v.render().startswith("[FAIL]"), v.render())
                 self.assertEqual(claims_mod.resolve_status(_claim(gates=["g.one"]), [v]),
                                  ClaimStatus.FAIL)
+                self.assertEqual(claims_mod.compose(_claim(gates=["g.one"]), [v]).cause,
+                                 claims_mod.ClaimCause.FAILED)
 
 
 class ExplainingVerdict(unittest.TestCase):
@@ -237,23 +241,27 @@ class ReasonsAgree(unittest.TestCase):
 
     def test_status_check_and_report_cite_the_failing_gate(self):
         cases = {
-            "a fail beats a skip": ([self.SKIP, self.FAIL],
+            "a fail beats a skip": ([self.SKIP, self.FAIL], ClaimStatus.FAIL,
                                     "g.one : 0.700 mm at 15 N (limit 0.5 mm)"),
-            "an error beats a skip": ([self.SKIP, self.ERROR],
-                                      "g.three : ZeroDivisionError: division by zero"),
+            # P2.1 (R-6): a crash beside a skip reads Skipped, its reason led
+            # `errored:` — still the crash cited, never the skip (S-68).
+            "an error beats a skip": ([self.SKIP, self.ERROR], ClaimStatus.BLOCKED,
+                                      "errored: g.three : ZeroDivisionError: division by zero"),
             "a fail with nothing to say": ([self.SKIP, Verdict(gate="g.one", claims=["C1"],
                                                                passed=False)],
-                                           "g.one did not pass"),
+                                           ClaimStatus.FAIL, "g.one did not pass"),
         }
-        for name, (verdicts, want) in cases.items():
+        for name, (verdicts, want_status, want) in cases.items():
             for order in (verdicts, verdicts[::-1]):
                 with self.subTest(name, order=[v.gate for v in order]):
                     status, check, status_reason, row = self._reasons(order)
-                    self.assertEqual(status, ClaimStatus.FAIL)
+                    self.assertEqual(status, want_status)
                     self.assertEqual(check, want, "check cites another reason")
                     self.assertEqual(status_reason, want, "status cites another reason")
-                    self.assertTrue(row.startswith(report_mod.status_tag(status) + " C1 "),
-                                    row)
+                    errored = claims_mod.compose(
+                        _claim(gates=[s.id for s in _SPECS]), order).errored
+                    self.assertTrue(row.startswith(
+                        report_mod.status_tag(status, errored=errored) + " C1 "), row)
                     self.assertTrue(row.endswith(" — " + want), row)
                     self.assertNotIn("g.two", row, "the skip was cited over the failure")
 
@@ -293,6 +301,9 @@ class BlockingTagIsStatusTag(_env.EnvCase):
                 self.assertEqual(cli_mod._blocking_line(claim, status, "the reason"),
                                  f"{report_mod.status_tag(status)} C1 the thing holds"
                                  f" — the reason")
+        # A crash's Skipped carries the loud tag (P2.1, invariant 2).
+        self.assertTrue(cli_mod._blocking_line(claim, ClaimStatus.BLOCKED, "r", errored=True)
+                        .startswith("[SKIP ] C1 "))
 
     def test_check_prints_its_blockers_with_it(self):
         """The helper is what `check` prints: every line under BLOCKING in a real
@@ -312,11 +323,17 @@ class BlockingTagIsStatusTag(_env.EnvCase):
         self.assertEqual(len(heads), 1, text.stdout)
         printed = lines[heads[0] + 1:heads[0] + 1 + len(blocking)]
         self.assertEqual(len(printed), len(blocking), text.stdout)
-        for row, line in zip(blocking, printed):
+        # Matched by claim, not position: from P2.1 the text is in severity
+        # order and `--json` in record order (R-6, stronger: every row matched,
+        # and its crash mark read beside its status).
+        by_claim = {_CLAIM_LINE.match(line).group("id"): line for line in printed}
+        self.assertEqual(sorted(by_claim), sorted(row["claim"] for row in blocking))
+        for row in blocking:
             with self.subTest(claim=row["claim"]):
-                self.assertTrue(line.startswith(
-                    f"{report_mod.status_tag(ClaimStatus(row['status']))} {row['claim']} "),
-                    line)
+                tag = report_mod.status_tag(ClaimStatus(row["status"]),
+                                            errored=bool(row["errored"]))
+                self.assertTrue(by_claim[row["claim"]].startswith(f"{tag} {row['claim']} "),
+                                by_claim[row["claim"]])
 
 
 if __name__ == "__main__":

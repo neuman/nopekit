@@ -52,26 +52,40 @@ class ClaimKind(StrEnum):
     records a result."""
 
     ASSUMPTION = "assumption"
-    """Taken on faith and recorded so it stays visible. An assumption that nobody
-    wrote down is the thing that sinks the build."""
+    """Accepted provisionally, with a reason and an owner, and recorded so it
+    stays visible (Assumed, GLOSSARY §3; with no attributed owner it reads Gap).
+    An assumption that nobody wrote down is the thing that sinks the build."""
 
 
 class ClaimStatus(StrEnum):
-    """Resolved state of one claim. Derived, never stored by hand."""
+    """Resolved state of one claim. Derived, never stored by hand.
 
-    PASS = "pass"                 # every covering gate ran and passed
-    FAIL = "fail"                 # at least one covering gate failed
-    STALE = "stale"               # gates passed, but inputs changed since
-    UNCLAIMED = "unclaimed"       # no gate covers it  -> a capability gap
-    BLOCKED = "blocked"           # a gate covers it but its tooling is missing
-    PENDING = "pending"           # gates exist, never run
-    UNVERIFIED = "unverified"     # physical: awaiting a real-world result
-    VERIFIED = "verified"         # physical: a human recorded a real-world pass
-    REFUTED = "refuted"           # physical: a human recorded a real-world fail
-    ASSERTED = "asserted"         # assumption: standing, unevidenced
+    Ten members, read as Table 1's seven words plus Open (GLOSSARY §3; the
+    words themselves live in ``report.HUMAN``, never here). The values are JSON
+    and stay until the rename pass; from P2.1 each is the reading in its
+    comment, composed by ``claims.compose``, whose ``cause`` says which fact
+    set it. What slipped through before P2.1: ``fail`` also held a crash and an
+    evaluator refused at its version, and ``pass`` held a pass beside a skip or
+    an unrun evaluator (S-03)."""
+
+    PASS = "pass"                 # Checked: every evaluator ran and passed, current
+    FAIL = "fail"                 # Failing: an evaluator not unqualified failed
+    STALE = "stale"               # Stale: a pass whose read set moved, or undemonstrated
+    UNCLAIMED = "unclaimed"       # Gap: no evaluator, one unqualified, or an unowned assumption
+    BLOCKED = "blocked"           # Skipped: an evaluator skipped OR ERRORED, none failed
+    PENDING = "pending"           # Open: an evaluator unrun on the current inputs
+    UNVERIFIED = "unverified"     # Pending build: physical, no result
+    VERIFIED = "verified"         # Checked: a physical pass recorded (not article-bound yet)
+    REFUTED = "refuted"           # Failing: a physical fail recorded
+    ASSERTED = "asserted"         # Assumed: a reason and an attributed owner
 
 
-#: statuses that must block an irreversible spend (ordering a board, buying stock)
+#: statuses that must block an irreversible spend (ordering a board, buying stock).
+#: Unchanged by P2.1 (its D9): what moved is which status a fact reads, so an
+#: errored claim blocks because Skipped (``blocked``) is here, and an assumption
+#: nobody owns because Gap (``unclaimed``) is. Pending build and Assumed are
+#: unresolved (GLOSSARY §3) but do not stop ``check``: *ready* is the stricter
+#: predicate, ``claims.summarise``'s ``all_required_checked``.
 BLOCKING_STATUSES = frozenset(
     {ClaimStatus.FAIL, ClaimStatus.STALE, ClaimStatus.UNCLAIMED,
      ClaimStatus.BLOCKED, ClaimStatus.PENDING, ClaimStatus.REFUTED}
@@ -369,9 +383,21 @@ class Claim(Record):
     grounded_by: list[str] = field(default_factory=list)   # InputArtifact ids
     gates: list[str] = field(default_factory=list)         # gate ids that cover it
     tags: list[str] = field(default_factory=list)
-    critical: bool = True            # false = nice-to-have, never blocks a spend
+    critical: bool = True            # false = not required, never blocks a spend
     physical_result: PhysicalResult | None = None
     note: str = ""
+    owner: str = ""
+    """Who an ASSUMPTION's owner is NAMED to be — a nominee, never an
+    attribution. GLOSSARY §3: Assumed needs a reason and an owner; PLAN-v0.14
+    §1.4: an owner counts only when recorded through the signing channel, and
+    one written any other way — a hand or agent edit of this file — reads
+    unattributed, so the claim stays Gap. ``claims.compose`` reads this field
+    only against ``owners``, the attributions the channel produced, and nothing
+    in P2.1 produces one. *Rejected:* a forbidden key (the strict reader would
+    refuse every command on a file an agent plausibly writes, and refusing the
+    edit is P3's permission rule); trusting the file until the channel exists
+    (the exact edit §1.4 says must not count). The LAST field (R-2): an older
+    spine drops it and reads the assumption as it always did."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Claim":
@@ -390,7 +416,10 @@ class Claim(Record):
 #: ``Verdict.outcome`` -> the four-character tag ``Verdict.render`` prints. Four
 #: characters so a sweep's lines align; the strings are the ones every grep and
 #: every reader already knows (``[FAIL]``), so they do not change with the rule
-#: that picks them.
+#: that picks them. The ONE table of outcome tags: ``report.HUMAN["outcome_tag"]``
+#: is this object, re-exported, not a copy held equal by a test (D-16: a second
+#: table drifts, and an equality test only says so by failing). It lives here
+#: because ``models`` imports nothing from ``report``.
 _RENDER_TAG = {"error": "ERR ", "skipped": "skip", "pass": "ok  ", "fail": "FAIL"}
 
 
@@ -433,6 +462,29 @@ class Verdict(Record):
     waiting on a solver spends wall time, not its own CPU. Measured, never
     declared; 0.0 for a skip, which did no work. Both new fields are last (PLAN
     R-2), so positional construction still means what it meant."""
+    unqualified: str = ""
+    """Why the evaluator is not qualified at its version — its refusal's reason
+    (``admission.reason``) — or ``""``. **Set by the spine only**: the resolver
+    and the sweep set it, through ``verdicts._unqualified``, beside
+    ``error="not admitted: <reason>"``; ``gates.run_gate`` clears it on whatever a
+    gate returns, as it clears ``rho``; no stored verdict carries it (an entry is
+    built from an explicit field list, and the remembered-outcome reader drops
+    it). ``claims.compose`` reads a claim with an unqualified evaluator as Gap,
+    ``unqualified:`` (PLAN-v0.14 §1.4), and never as errored (P2.0 D-8).
+
+    What it replaced: the ``not admitted:`` prefix of ``error`` as the predicate.
+    *Rejected,* because a gate could then make its own crash read the quieter
+    Gap by wording it so, and because P2.3's rewording of the text would
+    silently turn every Gap into errored. So the text alone reads errored —
+    degrade-closed — and only this field reads Gap. The LAST field (R-2); and
+    ``__post_init__`` writes ``error`` when it is set without one, so an
+    unqualified verdict is never ``ok``, whoever builds it."""
+
+    def __post_init__(self) -> None:
+        # Degrade-closed (R-2): a verdict marked unqualified with no error would
+        # read `outcome` from its pass flag, and a refusal must never be a pass.
+        if self.unqualified and not self.error:
+            self.error = f"not admitted: {self.unqualified}"
 
     @property
     def outcome(self) -> str:
@@ -469,8 +521,21 @@ class Verdict(Record):
         return self.outcome == "pass"
 
     def render(self) -> str:
-        tag = _RENDER_TAG[self.outcome]
-        body = self.detail or self.skip_reason or self.error or ""
+        """``[tag] gate : body`` — the body follows the outcome, never the first
+        non-empty flag: an error's first line, a skip's reason, a pass's or a
+        fail's detail. What slipped through (P2.0 F-1, F-10): the body was
+        ``detail or skip_reason or error``, so a crash rendered its traceback
+        (``run_gate`` keeps the stack's tail in ``detail``) and a verdict that
+        said skipped AND errored rendered ``[ERR ] … : requires … (not
+        installed)``, a crash in a missing tool's words."""
+        outcome = self.outcome
+        tag = _RENDER_TAG[outcome]
+        if outcome == "error":
+            body = (str(self.error).splitlines() or [""])[0]
+        elif outcome == "skipped":
+            body = self.skip_reason or self.detail or ""
+        else:
+            body = self.detail or ""
         return f"[{tag}] {self.gate}{(' : ' + body) if body else ''}"
 
     @classmethod

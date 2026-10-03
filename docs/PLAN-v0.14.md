@@ -152,7 +152,7 @@ words — unless the mutation pass leaves a bracket gate unqualified (§1.5), in
 | C5 | sequencing "under development" | declined | this amendment, then P4 |
 | C6 | cross-project confidence "under development" | not planned | per-evaluator record in P2; beyond that deferred, said so in §3 |
 | C7 | the ledger "records where judgment must remain with a named human or institution" (§1, present tense) | false | P2 records it (`terminal` + `authority`, set through the signing channel); P3 enforces it (W9's permission rule) |
-| C8 | a claim with no qualified evaluator remains a gap (§7) | false (→ FAIL) | P2 |
+| C8 | a claim with no qualified evaluator remains a gap (§7) | false (→ FAIL) | P2 — the not-admitted half true from P2.1 (an evaluator refused at its version reads Gap, beside a pass too); the known-bad-shown half (reject-only still counts, `test_status_table.RejectOnlyStillCounts`) in P2.3 |
 | C9 | a model may propose "reviews" (§8) | no review record exists | paper feedback F5, or a review record later |
 | C10 | a ledger row shows its ρ (Fig. 9) | ρ per verdict; not printed on every row | P3 |
 

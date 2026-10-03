@@ -49,8 +49,9 @@ from typing import Any, NamedTuple, Optional, Sequence, Tuple, Union
 
 Tag = Tuple[int, int]
 
-#: The checkpoints Phase 1 delivers, in order. A step's tag is one of these.
-CHECKPOINTS: Tuple[Tag, ...] = ((1, 1), (1, 2), (1, 3))
+#: The checkpoints delivered so far, in order. A step's tag is one of these. P2.1
+#: joins with the steps its statuses and words change (GLOSSARY §3, §9).
+CHECKPOINTS: Tuple[Tag, ...] = ((1, 1), (1, 2), (1, 3), (2, 1))
 
 #: The checkpoint this commit has delivered: the replay runs every step whose tag
 #: is at or before it. Why (1, 3): checkpoint 1.3 is what landed — records as
@@ -67,7 +68,12 @@ CHECKPOINTS: Tuple[Tag, ...] = ((1, 1), (1, 2), (1, 3))
 #: wave; *rejected:* replaying only in the last wave (a judge's defect against
 #: the first design) — a checkpoint that breaks a step already delivered would go
 #: unseen for thirteen waves.
-CURRENT: Tag = (1, 3)
+#: (2, 1): P2.1 moved C6 — an assumption nobody owns — to Gap, and every word a
+#: status line says to GLOSSARY's; the steps it adds are tagged with it, and the
+#: Phase 1 steps it changed in words were edited in place (R-6, named in its
+#: commit: the BLOCKING count 2 -> 3, C6's row, C7's reason, `invalidated:`,
+#: `verdicts current`, `last check run:`).
+CURRENT: Tag = (2, 1)
 
 #: Where `check --junit` writes when given no path, spelled as the transcript
 #: spells it rather than read from `report.JUNIT_DEFAULT`: an expectation taken
@@ -121,21 +127,24 @@ BLOCKING_HEAD = re.compile(
 BLOCKING_ROW = re.compile(
     r"^\[(?P<tag>.{5})\] (?P<claim>\S+) (?P<statement>.+?) — (?P<reason>.+)$")
 
-#: The `(N checks current[, n never run])` suffix `status` puts on its last stale line.
-_COUNTS = r"   \((?P<current>\d+) checks current(?:, (?P<never>\d+) never run)?\)"
+#: The `(N verdicts current[, n unrun])` suffix `status` puts on the last line of
+#: its invalidated block (GLOSSARY §6: a moved verdict is *invalidated*, a gate
+#: with none *unrun*; P2.1, R-6 words only — `checks current`, `never run` before).
+_COUNTS = r"   \((?P<current>\d+) verdicts current(?:, (?P<never>\d+) unrun)?\)"
 
-#: `status`: the first stale gate, with the counts when it is the only one.
-STALE_LINE = re.compile(rf"^stale: (?P<gate>\S+) — (?P<reasons>.+?)(?:{_COUNTS})?$")
+#: `status`: the first invalidated gate, with the counts when it is the only one.
+STALE_LINE = re.compile(rf"^invalidated: (?P<gate>\S+) — (?P<reasons>.+?)(?:{_COUNTS})?$")
 
-#: `status`: each further stale gate, indented under `stale: ` (seven spaces).
-STALE_MORE = re.compile(rf"^       (?P<gate>\S+) — (?P<reasons>.+?)(?:{_COUNTS})?$")
+#: `status`: each further invalidated gate, indented under the head (13 spaces).
+STALE_MORE = re.compile(rf"^             (?P<gate>\S+) — (?P<reasons>.+?)(?:{_COUNTS})?$")
 
-#: `status` when nothing is stale.
-STALE_NONE = re.compile(rf"^stale: none{_COUNTS}$")
+#: `status` when nothing is invalidated.
+STALE_NONE = re.compile(rf"^invalidated: none{_COUNTS}$")
 
-#: `status`: when the last check ran, from `last_check.json`, with its age — or never.
+#: `status`: when the last check run was, from `last_check.json`, with its age —
+#: or never (GLOSSARY §6: one invocation of `check` is a *check run*).
 LAST_CHECK = re.compile(
-    r"^last check: (?:never|(?P<when>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"
+    r"^last check run: (?:never|(?P<when>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)"
     r" \((?P<age>[^()]+) ago\))$")
 
 #: `status`: an instrument recorded under another library version (Q1.3).
@@ -143,10 +152,12 @@ NOTE_INSTRUMENT = re.compile(
     r"^note: (?P<gate>\S+) — recorded under (?P<module>\S+) (?P<recorded>\S+); "
     r"here (?P<here>\S+)$")
 
-#: `status`: controls whose fixture closure moved since they were demonstrated.
+#: `status`: controls whose fixture closure moved since they were demonstrated —
+#: in GLOSSARY §9's words from P2.1 ("pending" was Open's Never-say on the screen
+#: that lists the claims).
 NOTE_PENDING = re.compile(
-    r"^note: (?P<count>\d+) control\(s\) pending — inputs moved \((?P<files>.+)\); "
-    r"the next check re-verifies$")
+    r"^note: (?P<count>\d+) evaluator\(s\) to re-qualify — control inputs moved "
+    r"\((?P<files>.+)\); the next check run re-qualifies them$")
 
 #: `status` when the model entry does not load.
 MODEL_BROKEN = re.compile(r"^model: (?P<entry>\S+) DOES NOT LOAD — (?P<error>.+)$")
@@ -351,8 +362,9 @@ class Step(NamedTuple):
 # a step and a shape test can name the same line.
 _C1 = (r"^\[FAIL \] C1 Tip sags no more than 0\.5 mm at rated load — "
        r"bracket\.deflection : 0\.700 mm at 15 N \(limit 0\.5 mm\)$")
+_C6 = (r"^\[gap  \] C6 The load is static and centred on the arm — no owner recorded$")
 _C7 = (r"^\[gap  \] C7 First mode is clear of the pump that sits on the shelf — "
-       r"no gate covers it$")
+       r"no evaluator$")
 
 #: The phase-1 target transcript (docs/plan/phase-1.md), in order. The table in
 #: spec §4 (U10) is binding: a step leaves it only by an edit a reviewer sees,
@@ -362,8 +374,9 @@ STEPS: Tuple[Step, ...] = (
     Step("first-check-shape", (1, 2), SAME_RUN, (
         exit_code(1),
         line(r"^6 gates: \d+ executed, \d+ cached — 5 ok, 1 FAIL — tier 0$"),
-        line(r"^BLOCKING — 2 critical claim\(s\) must not be spent against:$"),
+        line(r"^BLOCKING — 3 critical claim\(s\) must not be spent against:$"),
         line(_C1),
+        line(_C6),
         line(_C7),
     )),
     Step("first-check-cached", (1, 3), SAME_RUN, starred(
@@ -371,11 +384,23 @@ STEPS: Tuple[Step, ...] = (
         line(r"^\[FAIL\] bracket\.deflection : 0\.700 mm at 15 N \(limit 0\.5 mm\)\s+cached$"),
     )),
     Step("clean-after-check", (1, 3), PORCELAIN, starred(exactly())),
+    # P2.1: what a person reads after the first check, in GLOSSARY §3's words —
+    # the readiness sentence naming every unresolved required claim, the count
+    # line, C6 a Gap with its reason, C5 waiting on an article.
+    Step("status-words", (2, 1), Atompipe(("status",)), (
+        line(r"^v0\.1 is NOT ready: 4 of 7 required claims are unresolved — 1 failing \(C1\); "
+             r"2 gaps \(C6, C7\); 1 pending build \(C5\)\. 3 of 7 claims are checked against "
+             r"the current inputs\. Pending build: 1 claim needs an article \(C5\)\.$"),
+        line(r"^7 claims · 3 checked · 1 failing · 2 gaps · 1 pending build$"),
+        line(r"^\[gap  \] C6 The load is static and centred on the arm — no owner recorded$"),
+        line(r"^\[build\] C5 .+ — needs an article; no test written down$"),
+        line(r"^invalidated: none   \(6 verdicts current\)$"),
+    )),
     Step("edit-bed-xy", (1, 2),
          Edit("model/bracket.py", "bed_xy: float = 220.0", "bed_xy: float = 250.0"), ()),
     Step("status-stale", (1, 2), Atompipe(("status",)), (
-        line(r"^stale: bracket\.bed_fit — config\.bed_xy 220\.0 -> 250\.0   "
-             r"\(5 checks current\)$"),
+        line(r"^invalidated: bracket\.bed_fit — config\.bed_xy 220\.0 -> 250\.0   "
+             r"\(5 verdicts current\)$"),
     )),
     Step("check-after-edit", (1, 2), CHECK, (
         exit_code(1),

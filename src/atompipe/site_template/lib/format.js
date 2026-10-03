@@ -17,56 +17,99 @@
 
 import { el } from "./dom.js";
 
-/** Claim statuses, as ClaimStatus in atompipe.models. Unknown values fall back
- *  to a neutral chip that prints the raw string — a newer spine inventing a
- *  status must not blank out a claim row on an older page. */
+/** Claim statuses, as ClaimStatus in atompipe.models: the glyph and the tone
+ *  of each enum value, and NOTHING it says. The word and its hint arrive in
+ *  state.json's `words` (atompipe.report.HUMAN, GLOSSARY §3) through
+ *  `useWords`, because a status word is truth and the site never owns one
+ *  (PLAN D-16). What slipped through before P2.1: this table held its own
+ *  labels — PROVEN, NO GATE, BLOCKED, NOT RUN, UNVERIFIED — a third
+ *  vocabulary beside the terminal's tags and the report's headings, and the
+ *  words a reader quoted from the page were none of the paper's.
+ *
+ *  A claim Skipped by a crash takes Failing's tone (`errored`, invariant 2): a
+ *  crash reads louder than a missing tool on the page as on the terminal.
+ *  Unknown values fall back to a neutral chip that prints the raw string — a
+ *  newer spine inventing a status must not blank out a claim row on an older
+ *  page. */
 const CLAIM_STATUS = {
-  pass:       { label: "PROVEN",     glyph: "✓", tone: "ok",    hint: "every covering gate ran and passed" },
-  fail:       { label: "FAILING",    glyph: "✕", tone: "bad",   hint: "a covering gate failed" },
-  stale:      { label: "STALE",      glyph: "≈", tone: "warn",  hint: "it passed, but the inputs have moved since — nothing is proven now" },
-  unclaimed:  { label: "NO GATE",    glyph: "?", tone: "warn",  hint: "nothing covers this claim — a capability gap" },
-  blocked:    { label: "BLOCKED",    glyph: "⊘", tone: "warn",  hint: "a gate covers it but its tooling is missing, so nothing was proven" },
-  pending:    { label: "NOT RUN",    glyph: "◌", tone: "warn",  hint: "gates exist and have never run" },
-  unverified: { label: "UNVERIFIED", glyph: "◻", tone: "phys",  hint: "physical: awaiting a result from a real object" },
-  verified:   { label: "VERIFIED",   glyph: "✓", tone: "ok",    hint: "physical: a human recorded a real-world pass" },
-  refuted:    { label: "REFUTED",    glyph: "✕", tone: "bad",   hint: "physical: a human recorded a real-world failure" },
-  asserted:   { label: "ASSUMED",    glyph: "≡", tone: "assum", hint: "standing assumption, carried in the open and unevidenced" },
+  pass:       { glyph: "✓", tone: "ok" },
+  fail:       { glyph: "✕", tone: "bad" },
+  stale:      { glyph: "≈", tone: "warn" },
+  unclaimed:  { glyph: "?", tone: "warn" },
+  blocked:    { glyph: "⊘", tone: "warn" },
+  pending:    { glyph: "◌", tone: "warn" },
+  unverified: { glyph: "◻", tone: "phys" },
+  verified:   { glyph: "✓", tone: "ok" },
+  refuted:    { glyph: "✕", tone: "bad" },
+  asserted:   { glyph: "≡", tone: "assum" },
 };
+
+/** The words state.json carries, keyed by enum value (and `errored`). Set once
+ *  by app.js from `state.words`; empty until then, when a chip prints the raw
+ *  value rather than a word the page invented. */
+let WORDS = {};
+
+export function useWords(words, outcomes) {
+  WORDS = words || {};
+  OUTCOME_WORDS = outcomes || {};
+}
 
 /** Verdict statuses, as written by site.state(): pass | fail | skipped | errored.
  *  `skipped` and `errored` are deliberately NOT neutral greys — a gate whose
  *  solver is missing proved nothing, and an errored gate reads louder still,
  *  because a crash is a defect in the check itself. */
 const VERDICT_STATUS = {
-  pass:    { label: "PASS",    glyph: "✓", tone: "ok",   hint: "the gate ran and the measurement holds" },
-  fail:    { label: "FAIL",    glyph: "✕", tone: "bad",  hint: "the gate ran and refused" },
-  skipped: { label: "SKIPPED", glyph: "⊘", tone: "warn", hint: "the gate did not run — nothing was proven" },
-  errored: { label: "ERRORED", glyph: "!", tone: "bad",  hint: "the gate crashed — nothing was proven, and the check itself is broken" },
+  pass:    { glyph: "✓", tone: "ok",   hint: "the evaluator ran and passed" },
+  fail:    { glyph: "✕", tone: "bad",  hint: "the evaluator ran and failed" },
+  skipped: { glyph: "⊘", tone: "warn", hint: "its tool is missing here, so nothing was evaluated" },
+  errored: { glyph: "!", tone: "bad",  hint: "the evaluator crashed — nothing was evaluated, and the evaluator itself is broken" },
 };
 
+/** Each verdict row's outcome word, from state.json's `outcome_words`
+ *  (atompipe.report.HUMAN, GLOSSARY §1) — set with the status words. */
+let OUTCOME_WORDS = {};
+
+// GLOSSARY §9's group words. What slipped through: "the only kind a machine
+// proves" and "taken on faith", a Never-say each, on the page alone after every
+// other channel had moved.
 const CLAIM_KIND = {
   measurable: {
-    title: "Measurable",
-    blurb: "A gate settles these from the model. This is the only kind a machine proves.",
+    title: "Automated",
+    blurb: "An automated evaluator settles these from the model — the only kind an " +
+           "automated evaluator settles.",
   },
   physical: {
     title: "Physical",
-    blurb: "Only a real object settles these. The pipeline never proves them; it carries them, " +
-           "visibly, until a human records a result.",
+    blurb: "Only an article settles these. No evaluator here settles them; they are " +
+           "carried, visibly, until a physical result is recorded.",
   },
   assumption: {
     title: "Assumptions",
-    blurb: "Taken on faith and written down so they stay visible. An assumption nobody recorded " +
-           "is the one that sinks the build.",
+    blurb: "Accepted provisionally, with a reason and an owner, and written down so they " +
+           "stay visible. An assumption nobody owns is a gap.",
   },
 };
 
-export function claimStatus(key) {
-  return CLAIM_STATUS[key] || { label: String(key || "unknown").toUpperCase(), glyph: "·", tone: "muted", hint: "" };
+/** A claim row's chip: the glyph and tone for its enum value (Failing's tone
+ *  when `errored`), the word and hint from state.json's `words`. */
+export function claimStatus(key, { errored = false } = {}) {
+  const look = CLAIM_STATUS[key];
+  const said = (errored && WORDS.errored) || WORDS[key] || {};
+  if (!look) {
+    return { label: String(key || "unknown").toUpperCase(), glyph: "·", tone: "muted", hint: "" };
+  }
+  return {
+    label: String(said.term || key).toUpperCase(),
+    glyph: look.glyph,
+    tone: errored ? "bad" : look.tone,
+    hint: said.hint || "",
+  };
 }
 
 export function verdictStatus(key) {
-  return VERDICT_STATUS[key] || { label: String(key || "unknown").toUpperCase(), glyph: "·", tone: "muted", hint: "" };
+  const look = VERDICT_STATUS[key];
+  if (!look) return { label: String(key || "unknown").toUpperCase(), glyph: "·", tone: "muted", hint: "" };
+  return { ...look, label: String(OUTCOME_WORDS[key] || key).toUpperCase() };
 }
 
 export function claimKind(key) {

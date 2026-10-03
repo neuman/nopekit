@@ -38,18 +38,33 @@ clean and nobody read it.)
 ## Invariants — do not break these
 
 The entire value of this project is that its report refuses to claim anything it has
-not proven. Four properties carry that, each with a test that actively tries to
+not checked. Four properties carry that, each with a test that actively tries to
 violate it (`tests/test_invariants.py`):
 
-1. **A skipped gate is never a pass.** A missing solver means the claim is BLOCKED.
-2. **An errored gate is never a pass.** A crash proves nothing, and reads louder than
-   a missing tool.
+1. **A skipped gate is never a pass.** A missing solver leaves the claim **Skipped**
+   — beside a gate that passed, too.
+2. **An errored gate is never a pass.** A crash settles nothing, and reads louder than
+   a missing tool: the claim reads **Skipped**, its reason starts `errored:`, its row
+   sorts above every skipped row in Failing's tone (`[SKIP ]`), every count splits it
+   out (`N skipped (k errored)`), and it is a JUnit `<error>`, critical or not
+   (`tests/test_louder.py`). And a gate cannot make its crash read quieter: the mark
+   for an evaluator refused at its version (`Verdict.unqualified`, read as Gap) is
+   the spine's, cleared on whatever a gate returns. (What slipped through the plan:
+   a crash read FAIL until P2.1, loud only by the accident of the status it borrowed;
+   moved to Skipped alone, it would have read "blocked on missing tooling" — a crash
+   filed under the missing tool's word.)
 3. **The registry refuses a gate with no negative control.** A validator that cannot
    be shown to fail is a logger. This is not negotiable — an agent that writes
    plausible code writes plausible validators, and those launder assumption into
    proof.
-4. **The report never puts an unrun or skipped gate under PROVEN.** Where a covering
-   gate did not produce a pass, the row is marked PARTIAL and names it with the reason.
+4. **The report never lists a claim as Checked — in its checked section
+   (`report.SECTION_PROVEN`), a status row or a JUnit pass — while any of its gates
+   is unrun, skipped, errored or unqualified;** that claim reads under its own status
+   (Open, Skipped, Gap), naming the gate and the reason. (What slipped through: a
+   pass beside a skipped or unrun gate read PASS and was printed under PROVEN marked
+   PARTIAL (S-03); and a gate `check` refused at its first run had no cached verdict,
+   so every reader after it read the gate "never run" and the claim beside it
+   PROVEN, `ready: true`. GLOSSARY §3's composition, `claims.compose`, closes both.)
 
 Two more, learned the hard way and enforced in `tests/test_packs.py`:
 
@@ -68,9 +83,9 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
 
 7. **A stale verdict is never served as current.** A verdict is keyed by the hash of
    what its gate actually read — parameters, files, claim records, its own code, the
-   spine. When any of those moves, its PASS reads STALE until the gate runs again.
+   spine. When any of those moves, its pass reads Stale until the gate runs again.
    (Observed before this: one hash of the whole model decided every gate, and a model
-   that failed to import compared equal, so three claims read PROVEN for a design that
+   that failed to import compared equal, so three claims read Checked for a design that
    could not be built.)
 
 8. **The index never disagrees with the records, and no command writes a record

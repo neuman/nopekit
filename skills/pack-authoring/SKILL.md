@@ -99,9 +99,13 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
 - **Import a module at run time by a string literal** (`importlib.import_module("rules")`),
   or with `load_path`. A name held in a variable is keyed only by the first run in a
   process to load it; `atompipe doctor` names each under `dynamic-imports`.
-- **Leave `rho` and `cpu_s` alone.** `run_gate` measures `cpu_s` (child processes
-  included: a solver subprocess is not free) and `duration_s`, and the sweep sets
-  `rho`. Anything a gate puts in them is overwritten.
+- **Leave `rho`, `cpu_s` and `unqualified` alone.** `run_gate` measures `cpu_s`
+  (child processes included: a solver subprocess is not free) and `duration_s`, and
+  the sweep sets `rho`. Anything a gate puts in them is overwritten. `unqualified` is
+  the spine's mark for an evaluator refused at its version — its known-bad control
+  passed — and a claim with one reads Gap; `run_gate` clears it on whatever you
+  return, so a gate that sets it, or wraps its own exception as `error="not admitted:
+  …"`, reads as the crash it is (Skipped, `errored:`), never as a refusal.
 - **Return `passed=True` or `passed=False`, and read a verdict by its `outcome`.**
   Any other pass value (`"false"`, `1`, `None`) is an error naming its type: `"false"`
   once read `[ok]`. `Verdict.outcome` — `"error"`, `"skipped"`, `"pass"` or `"fail"`,

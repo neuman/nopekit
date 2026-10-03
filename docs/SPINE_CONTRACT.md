@@ -77,7 +77,7 @@ class StrEnum(str, enum.Enum)                 # serialises as its value on json.
 class ClaimKind(StrEnum): MEASURABLE | PHYSICAL | ASSUMPTION
 class ClaimStatus(StrEnum): PASS | FAIL | STALE | UNCLAIMED | BLOCKED | PENDING
                             | UNVERIFIED | VERIFIED | REFUTED | ASSERTED   # derived, never stored
-BLOCKING_STATUSES: frozenset[ClaimStatus]     # FAIL STALE UNCLAIMED BLOCKED PENDING REFUTED
+BLOCKING_STATUSES: frozenset[ClaimStatus]     # FAIL STALE UNCLAIMED BLOCKED PENDING REFUTED (P2.1: unchanged)
 class Tier(enum.IntEnum): INSTANT = 0 | BUILD = 1 | SOLVE = 2 | EXTERNAL = 3
 class ViewKind(StrEnum): MODEL3D | IMAGE | CHART | TABLE | FIELD | DIAGRAM
 class ArtifactKind(StrEnum): SKETCH | REFERENCE | CAD | SCREENSHOT | DATASHEET | SPEC
@@ -115,7 +115,7 @@ class Claim(Record):            # something that must be true for the design to 
     id: str; statement: str; kind: ClaimKind = MEASURABLE; acceptance: Acceptance
     rationale: str = ""; source: str = ""; grounded_by: list[str]; gates: list[str]
     tags: list[str]; critical: bool = True; physical_result: PhysicalResult | None = None
-    note: str = ""
+    note: str = ""; owner: str = ""   # P2.1: a NOMINEE for an assumption, never an attribution
 class Need(Record):             # a claim with no gate: the extension protocol's trigger
     id: str; claim_ids: list[str]; quantity: str = ""; claim_class: str = ""
     status: NeedStatus = OPEN; candidates: list[ToolCandidate]; chosen: str = ""
@@ -202,8 +202,34 @@ verdict says — `"error"` if `error`, else `"skipped"` if `skipped`, else `"pas
 `passed is True`, else `"fail"` — and `ok`, `render()` and `claims.resolve_status`
 all read it; every new consumer (JUnit, the index, the page) calls it and never
 re-derives one (PLAN R-5). `GateSpec.requires_one_of` is the last field;
-`Verdict.rho` and `Verdict.cpu_s` are Verdict's last two (R-2): the content address the
-sweep keys it by (a gate never sets it) and the CPU seconds it cost, children included.
+`Verdict.rho`, `Verdict.cpu_s` and `Verdict.unqualified` are Verdict's last three
+(R-2): the content address the sweep keys it by (a gate never sets it), the CPU
+seconds it cost, children included, and — from P2.1 — the refusal's reason when the
+evaluator is not admitted at its version. `unqualified` is the spine's mark alone:
+`verdicts._unqualified` sets it (with `error="not admitted: <reason>"`), `run_gate`
+clears it on whatever a gate returns, no stored verdict carries it (an entry is built
+from an explicit field list, and `verdicts.remembered` drops it), and
+`Verdict.__post_init__` writes `error` when it is set without one, so a marked verdict
+is never ok. `claims.compose` reads a claim with a marked evaluator as Gap; the text
+alone reads as a crash (degrade-closed). `Verdict.render()`'s body follows the
+outcome: an error's first line, a skip's reason, a pass's or a fail's detail — never a
+crash's traceback (P2.0 F-1), never a crash in its skip reason's words (F-10).
+
+**`ClaimStatus` from P2.1 is a reading of GLOSSARY §3** (Table 1's seven words plus
+Open). The ten members and their values stay — JSON values move only in the rename
+pass (GLOSSARY §7) — and each now holds the fact in this table; the word is
+`report.HUMAN`'s, the token `claims.STATUS_KEY`'s:
+
+| enum | word (token) | holds, from P2.1 |
+|---|---|---|
+| `pass`, `verified` | Checked (`checked`) | every evaluator ran, passed, current; `verified`: a physical pass recorded, bound to no article yet |
+| `fail`, `refuted` | Failing (`failing`) | an evaluator not unqualified failed; `refuted`: a physical fail recorded |
+| `stale` | Stale (`stale`) | a pass whose read set moved, or whose control is undemonstrated |
+| `asserted` | Assumed (`assumed`) | an assumption with a reason and an owner the signing channel attributed (none in P2.1) |
+| `unverified` | Pending build (`pending_build`) | a physical claim with no result, every automated evaluator passing and current |
+| `unclaimed` | Gap (`gap`) | no evaluator; an unqualified one, beside a pass or not; an assumption with no attributed owner or no reason |
+| `blocked` | Skipped (`skipped`) | an evaluator skipped **or errored**, none failed, beside a pass or not |
+| `pending` | Open (`open`) | an evaluator unrun on the current inputs, nothing above applying |
 
 ### `util.py`  (no deps)
 ```python
@@ -1924,67 +1950,133 @@ deleted a key its gate needed passed invariants 3 and 6 as "honestly blocked" (S
 ### `claims.py`  (deps: models, util)
 The derivation logic. Nothing here writes.
 ```python
+class ClaimCause(StrEnum): FAILED | PHYSICAL_FAIL | ERRORED | SKIPPED | UNQUALIFIED
+                         | NO_EVALUATOR | NO_OWNER | OWNER_UNATTRIBUTED | NO_REASON
+                         | UNRUN | INVALIDATED | NO_ARTICLE | OWNED | PHYSICAL_PASS | CHECKED
+class Attribution(NamedTuple): owner: str; reason: str     # the signing channel's record of an owner
+@dataclass(frozen=True)
+class Composed: status: ClaimStatus; cause: ClaimCause; cites: tuple; verdict: Verdict | None
+    errored -> bool                                          # property: cause is ERRORED
+STATUS_KEY: Mapping[ClaimStatus, str]                        # pass -> "checked", unverified -> "pending_build", ...
+KEY_ORDER: tuple[str, ...]                                   # the eight tokens, count order
 def covers(spec, claim) -> bool                              # claim id OR any claim tag in spec.claims
 def covering_verdicts(claim, verdicts) -> list[Verdict]      # the same id-or-tag rule, on verdicts
+def compose(claim, verdicts, *, stale=False, stale_gates=(), owners=None) -> Composed
+def compositions(ledger, *, registry=None, stale=False, stale_gates=(), owners=None) -> dict[str, Composed]
 def resolve_status(claim, verdicts, *, stale: bool = False,
-                   stale_gates: Collection[str] = ()) -> ClaimStatus
-def explaining_verdict(claim, verdicts) -> Verdict | None    # THE reason: failed > errored > skipped
-def statuses(ledger, *, stale=False, registry=None, stale_gates=()) -> dict[str, ClaimStatus]
+                   stale_gates: Collection[str] = (), owners=None) -> ClaimStatus  # compose(...).status
+def explaining_verdict(claim, verdicts) -> Verdict | None    # failed > errored > skipped > unqualified
+def statuses(ledger, *, stale=False, registry=None, stale_gates=(), owners=None) -> dict[str, ClaimStatus]
 def coverage(ledger, registry) -> dict[str, list[str]]       # claim id -> LIVE gate ids
 def effective_gates(ledger, registry) -> dict[str, list[str]]  # cached `claim.gates` UNION live
 def find_gaps(ledger, registry) -> list[Need]                # MEASURABLE claims with no gate
-def blocking(ledger, registry, *, stale=False, stale_gates=()) -> list[tuple[Claim, ClaimStatus]]
-def summarise(ledger, registry, *, stale=False, stale_gates=()) -> dict   # counts by status, for the CLI
+def blocking(ledger, registry, *, stale=False, stale_gates=(), owners=None) -> list[tuple[Claim, ClaimStatus]]
+def summarise(ledger, registry, *, stale=False, stale_gates=(), owners=None) -> dict   # counts, for the CLI
 def next_claim_id(ledger, prefix="C") -> str                 # C1, C2, ...
 ```
 `covers` binds by id **or** by tag, and an empty `spec.claims` covers nothing, never
 everything: a wildcard would let one misregistered gate mark a project proven.
 
-`explaining_verdict` is the single ranked choice of which verdict explains a claim's
-status: one that ran and failed, else one that errored, else one that skipped,
-stable within a rank. It is the one place that ranking lives — a caller that names
-why a claim has its status asks it, and never ranks verdicts itself. What slipped
-through: `status` cited a skipped pack gate as the reason a claim failed while
-`check` cited the real failure, because a fix to one caller's private ranking never
-reached the other's (S-68).
+**The composition (P2.1, GLOSSARY §3).** `compose` resolves one claim to its status
+AND the fact that set it, one ladder for every kind, first match wins. Over the
+covering verdicts (`covering_verdicts`) and the known covering gates (`claim.gates`;
+a known gate with no verdict is *unrun*), an evaluator is *unqualified* when its
+verdict carries `Verdict.unqualified`, and *errored* when its outcome is `error`
+without it:
 
-`blocking` returns **(claim, status) pairs**, not bare claims. The caller is about
-to approve an irreversible spend and needs the reason — "C7 blocks" sends them
-hunting, "C7 is BLOCKED: no gate ran, the solver is not installed" tells them what
-to do. Returning bare claims would also force every caller to re-derive the status
-it just discarded, and a second copy of the precedence ladder is a second answer to
-the only question this module exists to answer.
+| # | status | when | cause |
+|---|---|---|---|
+| 1 | Failing | a physical result failed (`refuted`); any covering verdict failed (`fail`), any kind, stale or not (D-08, R-3) | `physical-fail`, `failed` |
+| 2 | Skipped (`blocked`) | any errored, else any skipped — beside a pass or not | `errored`, `skipped` |
+| 3 | Gap (`unclaimed`) | any unqualified, beside a pass or not; a measurable claim with no evaluator; an assumption with no owner named, no reason, or an owner `owners` does not attribute | `unqualified`, `no-evaluator`, `no-owner`, `no-reason`, `owner-unattributed` |
+| 4 | Open (`pending`) | any covering gate unrun | `unrun` |
+| 5 | Stale | `stale`, or a covering gate in `stale_gates` | `invalidated` |
+| 6 | Pending build (`unverified`) | a physical claim with no result | `no-article` |
+| 7 | Assumed (`asserted`) | an attributed, reasoned assumption | `owned` |
+| 8 | Checked | a physical pass recorded (`verified`); else `pass` | `physical-pass`, `checked` |
+
+**A skip is never a pass; an error is never a pass; an unqualified or unrun evaluator
+is never a pass, beside a pass or not.** A pass never makes an assumption Checked (its
+kind says no evaluator settles it); a covering fail, skip, refusal or unrun gate still
+counts against one (R-3). A physical claim composes its automated evaluators before it
+reads its result (S-49), so a failing modelled half reads Failing, and an unrun or
+invalidated one Open or Stale, above Pending build — the cheap evaluator first, and
+Open and Stale stop `check` while Pending build does not. `cites` is the gate ids the
+cause names, errored first; `verdict` is the one that explains it.
+
+What it replaced, and what slipped through it: rung 2 read only *all*-skipped as
+BLOCKED and rung 4 read a crash as FAIL ("something is wrong here" for a broken
+evaluator, so the design took the blame); a pass beside a skip or an unrun gate read
+PASS and the report marked it PARTIAL under PROVEN (S-03); a gate refused at its first
+check had no verdict entry, so it read unrun and the pass beside it PASS; a physical
+claim ignored a failing modelled half (S-49); every assumption read ASSERTED, owned or
+not. **Folding a crash into Skipped files it under the missing tool's word** — so the
+crash is carried louder on purpose, in four places (PLAN-v0.14 §1.5): its reason leads
+`errored:`, its row sorts above every skipped row in Failing's tone (`[SKIP ]`), every
+count splits it out (`N skipped (k errored)`), and its JUnit case is an `<error>`,
+critical or not. `Composed.errored` is the one place a renderer learns which; an
+unqualified evaluator's claim is never errored (P2.0 D-8).
+
+**Owners** (P2.1-D8). `Claim.owner` names a nominee; it never counts by itself. An
+assumption reads Assumed only when `owners[claim.id]` exists, its `owner` equals the
+file's and its `reason` equals the file's non-empty `rationale` — bound by value, so an
+edit to either after the attribution un-attributes it. `owners` reaches `compose`
+only as a mapping of `Attribution`s, the way staleness arrives; the signing channel
+(later in Phase 2) is its only producer, and every P2.1 caller passes none — so every
+assumption reads Gap: `no owner recorded`, `owner X is named in claims/<id>.json and
+has not recorded it`, or `no reason recorded`. PLAN-v0.14 §1.4: an owner written any
+other way "reads unattributed and the claim stays Gap".
+
+`explaining_verdict` is the single ranked choice of which verdict explains a claim's
+status, in `compose`'s order: one that ran and failed, else one that errored, else one
+that skipped, else one unqualified, stable within a rank. What slipped through: `status`
+cited a skipped pack gate as the reason a claim failed while `check` cited the real
+failure, because a fix to one caller's private ranking never reached the other's (S-68).
+
+`blocking` returns **(claim, status) pairs** over `BLOCKING_STATUSES`, which P2.1 does
+not change: what moved is which status a fact reads. So from P2.1 these stop `check`
+too — **the visible changes**: an errored critical claim (Skipped), an assumption
+nobody owns (Gap), a pass beside an unrun evaluator (Open), a pass beside a skipping
+tag-bound evaluator (Skipped), a refused evaluator beside a pass (Gap), and `check
+--tier 0` on a claim whose tier-2 evaluator never ran (Open). Pending build and Assumed
+are unresolved and do not stop `check`; *ready* is the stricter predicate.
+
+`summarise`'s keys: `n_claims`, `n_critical`, `by_status` (every enum value, sum =
+`n_claims`; from P2.1 `blocked` holds errored claims, `unclaimed` unqualified and
+unowned ones), `by_kind`, `counts` (P2.1: the eight tokens of `KEY_ORDER`, zero-filled,
+sum = `n_claims`), `errored` and `errored_ids` (claims Skipped by a crash),
+`n_gates`, `n_gates_binding`, `n_covered_claims`, `n_verdicts`, `n_gaps` (gap
+RECORDS — `find_gaps`' Needs, an automated claim no registered evaluator covers — not
+claims reading Gap: `counts["gap"]` is those), `n_blocking`, `blocking_ids`,
+`unresolved_ids` (required claims not Checked, Pending build and Assumed included),
+`unbound_ids` (required claims Checked only on a physical pass no article binds),
+`all_required_checked` (*ready*, GLOSSARY §4: at least one required claim, every one
+Checked on the current inputs — `unresolved_ids` and `unbound_ids` both empty), `stale`,
+and `ready`. **`ready` keeps its meaning** — `n_blocking == 0`, nothing stops `check` —
+for every reader that has it, until P2.5's `Readiness` replaces it; a reader that wants
+*ready* reads `all_required_checked`. *Rejected:* flipping `ready` in place, a key
+changing meaning under every reader at once.
 
 `effective_gates` is the **single** definition of which gates cover a claim, and
 anything rendering coverage calls it rather than re-deriving one. `coverage` alone
 is the live half; the union with the ledger's cached `claim.gates` is what keeps a
 gate visible when the pack supplying it is not loaded in this process. A second,
-live-only copy of the rule in `report.py` dropped exactly those gates, so the PROVEN
-table's **PARTIAL** caveat vanished whenever a pack went missing — the report read
-*more* certain the less it could see.
-
-`resolve_status` reads each covering verdict's `outcome` (one derivation, PLAN R-5).
-Precedence (deliberate):
-ASSUMPTION -> ASSERTED. PHYSICAL -> VERIFIED/REFUTED if a result exists, else UNVERIFIED.
-MEASURABLE -> no covering gate: UNCLAIMED; **every** covering verdict skipped (and none
-errored): BLOCKED; none run: PENDING; any covering verdict errored **or** failed: FAIL;
-all ran and passed and `stale`, or any covering gate in `stale_gates`: STALE; else PASS.
-**A skip is never a pass.**
+live-only copy of the rule in `report.py` dropped exactly those gates, so the report's
+caveat naming the unproven gate vanished whenever a pack went missing — the report
+read *more* certain the less it could see.
 
 **Staleness is per gate.** `stale_gates` is what `verdicts.resolve` found Stale, Unknown
-or undemonstrated; a claim reads STALE when every covering verdict passed and one of its
-covering gates is in it, and a stale FAIL stays FAIL (D-08). `stale=True` is the
+or undemonstrated; a claim reads Stale (rung 5) when one of its covering gates is in it
+and nothing above applies, and a stale fail stays Failing (D-08). `stale=True` is the
 all-gates alias, kept so `StatusPrecedence.test_stale_is_not_pass` stays byte-identical
 (R-6). What it replaced: one flag for the whole project, from one hash of the
 projection and one of every input — a comment edit in the model staled every claim, a
 model that failed to import staled none (S-21), and ingesting one unread file staled
-every measurable claim (S-33). `summarise`'s `stale` is True when any gate is.
+every measurable one (S-33). `summarise`'s `stale` is True when any gate is.
 
-An error outranks a skip on purpose: BLOCKED reads "your toolbox is incomplete" and
-FAIL reads "something is wrong here". A gate that crashed is not a gate that was
-absent — it ran, it was given this project's data, and it came apart on it, which is
-the louder signal and may itself be the defect. Folding a crash into BLOCKED would
-file it under "install something", which is the one instruction that will not help.
+**`ClaimCause` lives here, not in `models`**: `models` is a spine module
+(`verdicts.SPINE_MODULES`), so a cause added later (P2.2's prerequisite) would re-key
+every verdict cache entry in every project.
 
 ### `artifacts.py`  (deps: models, util, store)
 Intake of real evidence — sketches, teardown photos, CAD, datasheets, measurements.
@@ -2174,29 +2266,87 @@ instead of reading a 1,672-line decision log.
 
 ### `report.py`  (deps: models, util, store, claims, artifacts, verdicts, modelio)
 ```python
-STATUS_TAG: dict[ClaimStatus, str]           # PASS -> "ok   ", FAIL -> "FAIL ", ...
-SECTION_PROVEN = "## What is PROVEN"         # the PROVEN heading, as emitted and as tests find it
+class StatusWords(NamedTuple): key; word; term; plural; tag; hint; rank   # one GLOSSARY §3 row
+HUMAN: Mapping[str, Any]   # THE table (PLAN D-16): "status" {ClaimStatus: StatusWords},
+                           # "errored" (Skipped's loud row, tag "SKIP "), "lead" {ClaimCause: str},
+                           # "need" {NeedStatus: word}, "outcome" {outcome: word},
+                           # "outcome_tag" (models._RENDER_TAG itself), "heading", "refusal"
+STATUS_TAG: Mapping[ClaimStatus, str]        # HUMAN's tags, a view: PASS -> "ok   ", ...
+SECTION_PROVEN = "## What is PROVEN"         # the checked section's heading (text: A-11)
 JUNIT_DEFAULT = ".atompipe/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
-def status_tag(status) -> str                # "[FAIL ]": the one fixed-width spelling of a status
+def words(status, *, errored=False) -> StatusWords;  def word(status, *, errored=False, n=1) -> str
+def status_tag(status, *, errored=False) -> str      # "[FAIL ]", "[SKIP ]" for a crash
+def severity(composed) -> int                # P2.1-D16's rank; in_severity(ledger, composed, claims=None)
+def count_line(composed) -> str              # "7 claims · 3 checked · 1 failing · 2 gaps · ..."
+def count_bits(composed) -> list[dict]       # its items: {key, status, n, errored, label}
+def reason(composed, ledger, claim, *, full=False, cut=None, stale_reasons=None) -> str
+def status_view(composed, ledger, claim, *, stale_reasons=None) -> dict  # {key, word, cause, reason, errored}
+def words_table() -> dict;  def outcome_words() -> dict;  def need_word(status) -> str
+def readiness(ledger, composed) -> dict      # {required, unresolved, unbound, ready}
+def not_ready_line(ledger, composed) -> str  # `check`'s line when nothing blocks it
 RATIONALE_UNKNOWN = "Parameter rationales are not known"  # + ": <why>" — no view, or no model
-def render_terminal(ledger, registry, *, stale=False, stale_gates=(), params=None) -> str
+def render_terminal(ledger, registry, *, stale=False, stale_gates=(), params=None,
+                    stale_reasons=None) -> str
 def render_markdown(ledger, registry, *, stale=False, stale_gates=(), model_error="",
-                    title="", root="", params=None) -> str
+                    title="", root="", params=None, stale_reasons=None) -> str
 def write_report(root, ledger, registry, *, stale=False, stale_gates=(), model_error="",
-                 params=None) -> str   # docs/readiness.md
+                 params=None, stale_reasons=None) -> str   # docs/readiness.md
 def render_junit(ledger, verdicts, registry, *, tier, ready, exit_code, when,
                  not_run=None, cached=frozenset(), stale=False, spine="",
-                 stale_gates=()) -> str
+                 stale_gates=(), stale_reasons=None) -> str
     # `check --junit`: suites gates / claims.critical / claims.not-critical
 def render_selftest_junit(results, *, exit_code, when, baselines=None) -> str
     # `gate selftest --junit`: suite controls, plus baselines in pack mode
 def junit_safe(text) -> str                  # XML-1.0-illegal code points -> visible "\xNN" / "\uNNNN"
 ```
-The markdown report has this shape, generated:
-**Verdict** (one honest sentence) / **PROVEN** table with evidence per row /
-**NOT VERIFIED** list with why / **OPEN GAPS** (Needs) / **STANDING CONSTRAINTS**
-(assumptions) / **Reproduce** (the exact commands). It must never call a skipped
-or unrun gate "proven".
+**`HUMAN` is the one table** every human word for a status, a cause's lead and an
+outcome comes from (PLAN D-16; GLOSSARY §7), equal to GLOSSARY §3 (Table 1's seven
+words plus Open: Checked, Failing, Stale, Assumed, Pending build, Gap, Skipped, Open)
+and held there by `tests/test_vocabulary.py`, which also patches it to sentinels and
+requires every channel to move with it. Its readers are the helpers above, and every
+channel — `status`, `check`, `claim`, `why`, the report, JUnit, `state.json` and the
+page's labels — goes through them. Tags are five wide; the loud ones (upper case) are
+exactly Failing, a crash's Skipped and Stale. It lives here, not in `models` (a word is
+not a type, and a spine module's edit re-keys every cache entry), and not in the page
+(a status word is truth, and the site never owns one). What slipped through before it
+(S-69): `[uncl]` in `check`, `[gap  ]` in `status`, NO GATE on the page.
+
+**`reason`** is the one producer of the sentence that explains a claim's status, led by
+the fact (`HUMAN["lead"]`): a fail cites `<gate> : <detail>` (` (invalidated: <why>)`
+when its inputs moved, D-08); a crash `errored: <gate> : <exception's first line>`,
+never the traceback; a skip `skipped: <gate> : <reason>`; a refusal `unqualified:
+<gate> : <why>` (its words in GLOSSARY §2's, `HUMAN["refusal"]`); `no evaluator`;
+`no owner recorded`; `owner X is named in claims/<id>.json and has not recorded it`;
+`no reason recorded`; `unrun: <gates>`; `invalidated: <gate> : <what moved>`;
+`needs an article` (`; no test written down` with neither acceptance nor note);
+`assumed by <owner>: <rationale>`; `recorded by <who|unattributed>, not bound to an
+article`. `cli._blocking_reason` and `report._terminal_reason` wrap it (S-68: two
+copies once told two stories).
+
+**The readiness sentence** says *ready* only when every required claim reads Checked
+on the current inputs (GLOSSARY §4: `readiness`), else `NOT ready: u of n required
+claims are unresolved — <groups>` with every unresolved required claim in severity
+order (`1 failing (C1); 2 gaps (C6, C7); 1 pending build (C5)`, Skipped as `N skipped
+(k errored)`), then `C of T claims are checked against the current inputs.`; claims
+not required that are unresolved; unrun gates; and **in every branch** the hardware
+sentence — `Pending build: N claims need an article (ids).` and any physical pass
+checked on an article not bound to the current inputs (W13). A required claim whose
+only evidence is such a pass keeps the project NOT ready: nothing binds a typed pass
+to what is being built (until article binding).
+
+The markdown report has this shape, generated: the readiness sentence / `SECTION_PROVEN`
+(the checked claims, each row citing the evaluators that passed) / **Pending build**
+(what waits on an article, and passes recorded on one) / **Gaps** (every claim reading
+Gap, by cause: gap records and tool options, unqualified evaluators, assumptions nobody
+owns — P2.1-D19) / **Assumed** (Assumed claims, undefended numbers, unread evidence) /
+**Failing, stale, skipped or open** (each claim's head in its word, its reason, its
+evaluators in outcome order) / **Reproduce**. Every claim is listed in exactly one
+section, its status's (`test_invariants.EveryUnresolvedClaimIsListed`). It must never
+list a claim as Checked while an evaluator of it is unrun, skipped, errored or
+unqualified; a `pass` its evidence contradicts is printed, loudly, in the failing
+section as `status and evidence disagree — <gate> <why>`, never in the checked one, and
+its JUnit case is a red `status-and-evidence-disagree` failure (P2.1-D18). PARTIAL is
+gone: under the composition there is nothing left to mark.
 
 **Staleness is per gate** (Phase 1.2). The renderers take the resolution's
 `stale_gates` (`verdicts.resolve`): a PASS whose covering gate is in it reads STALE and
@@ -2210,21 +2360,24 @@ handed `root=` (`write_report` passes it) and otherwise leaves them out, never s
 them by this machine's absolute paths (S-89). `render_junit` takes `stale_gates` too, so
 `check`'s claim suites are judged from the same resolution as its exit code.
 
-The PROVEN section's heading line **starts with `SECTION_PROVEN`** (its qualifier,
-"(machine-verified, current)" from Phase 1.2 — a cached verdict is current but not
-"this run" — follows on the same line and is not part of the constant). Invariant 4's tests find the section by that constant and fail when it is
+The checked section's heading line **starts with `SECTION_PROVEN`** (its qualifier
+follows on the same line and is not part of the constant: "(checked: every evaluator
+passed on the current inputs — checked does not mean true)" from P2.1;
+"(machine-verified, current)" before, a GLOSSARY Never-say). Invariant 4's tests find the section by that constant and fail when it is
 absent, duplicated or empty. What slipped through (S-15): they searched for a literal
 copy of the heading and read "no heading" as an empty section, so `assertNotIn` passed
 on nothing, and a rename would have kept the invariant green while it tested no
 report. A rename changes the constant's text, never its name (PLAN D-14, A-11).
 
-`render_terminal`'s one line per unsettled claim is `status_tag(status)`, the claim,
-and a reason. Where a verdict explains the status, the reason is
-`claims.explaining_verdict`'s gate, formatted `gate : body` (body = the verdict's
-`detail`, else `error`, else `skip_reason`; `gate did not pass` when all are empty) —
-the same verdict and the same words `atompipe check` prints under BLOCKING. What
-slipped through (S-68): `status` cited the first non-passing verdict, a skip, while
-`check` cited the gate that ran and failed.
+`render_terminal` prints the head, the readiness sentence, `count_line`, one line per
+unresolved claim in severity order — `status_tag(status, errored=)`, the claim, and
+`reason` — then the gap records with their tool options (`gap records N:`, never
+"gaps": the count line counts the claims that read Gap), the gate tally keyed on
+`Verdict.outcome` (`N ran, k invalidated, s skipped, e errored, q unqualified, u
+registered but unrun`: a skipped-and-errored verdict is one crash, P2.0 F-10), and
+`next:`. A claim whose status its evidence contradicts is listed first. What slipped
+through (S-68): `status` cited the first non-passing verdict, a skip, while `check`
+cited the gate that ran and failed.
 
 `params` is the caller's `modelio.param_view`: the standing constraints list
 `modelio.undefended_params` over it (value from the model, source from the record,
@@ -2240,11 +2393,11 @@ paths with `store.out_dir(root)`. `verdicts` is in them for `anchors_for` and
 second module that knows where `docs/readiness.md` lives is a second module to
 edit when it moves.
 
-A PROVEN row whose claim is *also* covered by a gate that produced no proof is
-marked **PARTIAL**, names that gate and the reason (`never run`, the skip reason,
-`errored`, `failed`), and says how many of the covering gates the row rests on.
-Coverage for that check comes from `claims.effective_gates` — the union — so the
-caveat survives the pack going missing, which is when it matters most.
+A covering gate that produced no pass that counts (`_unproven_for`) is named with its
+reason led by the fact — `unrun`, `errored: <exception>`, `skipped: <reason>`,
+`unqualified: <why>`, `fail: <detail>`. Coverage for it comes from
+`claims.effective_gates` — the union — so it survives the pack going missing, which is
+when it matters most. Beside a Checked status it is a contradiction (above).
 
 **JUnit is never greener than the exit code.** CI renders the XML, not the exit
 code, so `render_junit` carries the judgement the exit code was made from and may
@@ -2253,7 +2406,7 @@ renderers: about 6 ms that only `--junit` should pay). The shape (PLAN §3 row M
 phase-1.md 1.1):
 ```
 <testsuites name="atompipe check" tests= failures= errors= skipped= time=>
-  <properties> spine_version exit_code tier ready when [spine] </properties>
+  <properties> spine_version exit_code tier ready all_required_checked when [spine] </properties>
   <testsuite name="gates">            one testcase per REGISTERED gate, registry order
     <testcase classname="project"|"pack.<pack>" name="<gate id>" time="<duration_s>"/>
   <testsuite name="claims.critical">  one per critical claim: "does not block the spend"
@@ -2262,8 +2415,9 @@ phase-1.md 1.1):
 - **`gates`.** A testcase is childless **iff** its verdict's `outcome == "pass"` —
   `Verdict.outcome`, never `passed`, so a skip that also says `passed=True` is a
   `<skipped>` (R-5). fail → `<failure type="fail" message=detail>measured … vs limit
-  …</failure>`; error → `<error type="error">`, or `type="not-admitted"` when the error
-  **starts with** `not admitted:`; skipped → `<skipped message=skip_reason>`. A
+  …</failure>`; error → `<error type="error">`, or `type="not-admitted"` for a refused
+  evaluator — keyed on `Verdict.unqualified`, never the text (P2.1: a gate whose own
+  crash says "not admitted: …" is a crash); skipped → `<skipped message=skip_reason>`. A
   registered gate with no row in `verdicts` → `<skipped message="not run: <why>">`,
   the why from `not_run` (`(gate, reason)` pairs or a mapping: `above the tier
   ceiling`, `excluded by --only`), else `no verdict in this run`. A gate in `cached`
@@ -2272,15 +2426,17 @@ phase-1.md 1.1):
 - **`claims.critical`** is recomputed from `ledger` with `stale`, never from
   `verdicts`: its red testcases are exactly `claims.blocking(ledger, registry,
   stale=stale)`, so **failures + errors == `len(blocking())`**, and `check` exits 1
-  iff that count is positive. A blocking claim whose FAIL came from a crashed gate
-  (its explaining verdict errored) is `<error type="error">`; any other is
-  `<failure type="<status>" message="<gate> : <body>">` — the reason `status` and
-  `check` print. A PASS that rests on fewer gates than cover it → `<skipped
-  message="partial: <gate> <why>; …">`, never childless (invariant 4's PARTIAL);
-  UNVERIFIED → `<skipped message="needs a real part">`; ASSERTED → `<skipped
-  message="assumed">`. Zero claims → one failing testcase `no claims recorded`.
-- **`claims.not-critical`**: FAIL and REFUTED red (the same error-vs-failure rule);
-  every other non-pass `<skipped message="<status>: <reason>">`.
+  iff that count is positive. A claim Skipped by a crash is `<error type="error">`,
+  critical or not (PLAN-v0.14 §1.5); any other red claim is `<failure type="<enum
+  value>" message="<reason>">` — `report.reason`, the words `status` and `check` print.
+  A `pass` its evidence contradicts is `<failure type="status-and-evidence-disagree">`
+  (P2.1-D18; PARTIAL went). Pending build → `<skipped message="pending build: needs an
+  article…">`; Assumed → `<skipped message="assumed: assumed by <owner>: …">`. `type`
+  keeps the enum value (machine, GLOSSARY §7); messages are words. Zero claims → one
+  failing testcase `no claims recorded`. The root property `ready` is the caller's
+  (nothing stops `check`); `all_required_checked` is *ready* (GLOSSARY §4).
+- **`claims.not-critical`**: Failing red, a crash an `<error>`; every other claim short
+  of Checked `<skipped message="<word>: <reason>">`.
 - **An exit code nothing explains is itself red.** If `exit_code != 0` and
   `claims.critical` has nothing red — a caller that judged a stale project stale and
   rendered it with `stale=False` — a failing testcase `exit code` is added. The
@@ -2613,9 +2769,10 @@ def _verdict_row(verdict, *, cached=None, fresh=None, stale_reason="", executed=
   same claims (S-69).
 - The reason is `claims.explaining_verdict`'s, formatted exactly as
   `render_terminal` formats it (S-68): ran-and-failed, then errored, then skipped.
-  An UNCLAIMED claim reads `no gate covers it` and stops there (the `gap --propose`
-  suffix was advice in a column that states facts); a STALE one names its stale
-  gates and why.
+  A Gap with no covering gate reads `no evaluator` (`no gate covers it` until P2.1)
+  and stops there (the `gap --propose` suffix was advice in a column that states
+  facts); an unowned assumption `no owner recorded`; a refused evaluator
+  `unqualified: <gate> …`; a Stale one names its invalidated gates and why.
 - A verdict row in `--json` carries `outcome` (`"pass" | "fail" | "error" |
   "skipped"`, `Verdict.outcome`) next to `ok`. Both are set explicitly: `to_dict`
   serialises dataclass fields only, and both are properties. From 1.2 it also
@@ -2706,12 +2863,14 @@ re-verified, a `note: <note>` line per `SweepResult.notes` entry (the writer's
 until the review), the skip digest, a note for gates outside the sweep, and the BLOCKING
 list.
 
-**`status`** text: `render_terminal`'s block, then in this order — `stale: <gate> —
-<reasons>` per stale gate (continuations indented under `stale: `) with `   (N checks
-current[, n never run])` on the last, or `stale: none   (N checks current)`; `last
-check: <when> (<age> ago)` from `last_check.json`, or `last check: never`; `note:` per
-instrument mismatch and at most one `note: <k> control(s) pending — inputs moved
-(<files>); the next check re-verifies`; `model: <entry> DOES NOT LOAD — <error>` only
+**`status`** text: `render_terminal`'s block, then in this order — `invalidated: <gate> —
+<reasons>` per invalidated gate (continuations indented under `invalidated: `) with
+`   (N verdicts current[, n unrun])` on the last, or `invalidated: none   (N verdicts
+current)`; `last check run: <when> (<age> ago)` from `last_check.json`, or `last check
+run: never`; `note:` per instrument mismatch and at most one `note: <k> evaluator(s) to
+re-qualify — control inputs moved (<files>); the next check run re-qualifies them`
+(GLOSSARY §9's words from P2.1: "pending", "stale" and "never run" are other statuses'
+words beside the claim rows); `model: <entry> DOES NOT LOAD — <error>` only
 when it does not load. A check is current when its row is Fresh with its control
 admitted or pending. `status --json` drops the sweep record and its age, keeps
 `stale`/`stale_reason`, and adds `stale_gates`, `freshness` (`{gate: {"state",
@@ -2751,7 +2910,7 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 | `cache-entries` | warn | every verdict or control entry the strict readers ignored, a `hand-edited entry` (digest mismatch) by name; any resolver note no other row claims lands here |
 | `two-outcomes` | FAIL while `verdicts.TWO_OUTCOMES_IS_ERROR` (True since U25), else warn | two outcomes recorded for identical inputs, read at call time; **two control outcomes** at one rho_control FAIL always (the gate is not admitted). Controls are read for every gate on disk, not only for the gates whose verdict is Fresh |
 | `code-digest` | warn | a gate keyed by its defining file (registered from Python, no recorded closure): a value its function closes over is not seen. The CLI never makes one |
-| `pending-controls` | warn | controls whose fixture code moved (`<k> control(s) pending — inputs moved (<files>); the next check re-verifies`, the sentence `status`'s note prints) |
+| `pending-controls` | warn | controls whose fixture code moved (`<k> evaluator(s) to re-qualify — control inputs moved (<files>); the next check run re-qualifies them`, the sentence `status`'s note prints) |
 | `imports` | warn | a gate that imports a third-party module (`CodeRef.third_party`) it does not declare in `requires_python` or a `python:` entry of `requires_one_of`: where it is missing, the gate errors instead of reading SKIPPED. In the gate's own file, read by reach — module-level imports plus those inside the gate function and the module-level functions and classes it names, transitively; other closure files whole. A whole-file rule named `cad.bounding`, the one tier-0 gate of a module whose other gates import trimesh lazily |
 | `env-reads` | warn | the static env-read detector (spec §3.17): an AST scan of every registered gate's closure files for `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins), through any alias of `os` or a `from os import`. rho never keys a variable (§8): a read inside a window is named opaque (`env:<NAME>`) and costs a re-run on every check, and a module-level read made at import, before any window, is seen by nothing else |
 | `memos` | warn | the static memo detector: an AST scan of every registered gate's closure files for a module-global memo `modelio.clear_caches` cannot empty — a module-level container (a `{}`, `dict()`, `defaultdict` and the like) written into from a function body that does not bind the name itself, a module global a function rebinds under `global`, a mutable default argument its function writes into. The first gate to fill one opens the file; every later one opens nothing, and no entry keys it (review round 2) |
@@ -2761,6 +2920,50 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 The four static detectors measured zero hits on the 54 bundled gates before they landed
 (R-4; `tests/test_doctor.py`). No staleness row: which gates are current is `status`'s
 `stale:` block. No run-history row: there is none to read (S-31).
+
+## What P2.1 moved
+
+Claim statuses compose per GLOSSARY §3 (`claims.compose`), and every human word for one
+comes from `report.HUMAN`. No record changes; the spine digest moved (models, gates,
+verdicts), so every cached entry re-runs once.
+
+**What now stops `check`** — `BLOCKING_STATUSES` is unchanged; more facts read into it.
+Each with its remedy:
+
+| a critical claim that | reads | stops `check` until |
+|---|---|---|
+| has an evaluator that crashed | Skipped, `errored:` | the evaluator is fixed (`atompipe gate show <id>`) |
+| has a passing evaluator beside one whose tool is missing | Skipped, `skipped:` | the tool is installed, or the tag that binds the evaluator is dropped |
+| has a passing evaluator beside one never run (e.g. a costlier tier under `check --tier 0`) | Open, `unrun:` | `atompipe check --tier <its tier>` runs it |
+| has an evaluator refused at its version (it passed its own known-bad input) | Gap, `unqualified:` | the evaluator is fixed so its control fails |
+| is an assumption | Gap, `no owner recorded` | its owner records it through the signing channel (later in Phase 2) — or the claim stops being required |
+| is physical, with a covering evaluator that fails | Failing | the design passes it |
+
+A physical claim with no result still reads Pending build and does not stop `check`
+(nor does Assumed); both keep a project from *ready* (`all_required_checked`).
+
+**JSON: every existing key keeps its spelling and value domain; the words arrive under
+new keys** (P2.1-D12):
+
+| where | kept (now read per Table 1) | added |
+|---|---|---|
+| `status --json`, `report --json` | `claims` {id: enum}; `summary.by_status` (ten values, sum = `n_claims`); `summary.ready` (nothing stops `check`); `summary.n_gaps` (gap records) | `statuses` {id: {`key`, `word`, `cause`, `reason`, `errored`}}; `errored` [ids]; `summary.counts` {token: n}, sum = `n_claims`; `summary.errored`, `errored_ids`, `unresolved_ids`, `unbound_ids`, `all_required_checked` |
+| `claim list --json` rows, `claim show --json`, `check --json` `blocking[]`, `claim physical --json` | `status` (enum) | `key`, `word`, `cause`, `reason`, `errored` |
+| `check --json` | `ready` (nothing stops `check`) | `all_required_checked` |
+| JUnit root properties | `ready` | `all_required_checked` |
+| `last_check.json` | `statuses` (enum) | `errored` [ids]; `worst.cause`; `worst.detail` by outcome |
+| `state.json` | see `docs/SITE_CONTRACT.md` | |
+
+From P2.1 the kept keys hold Table 1's readings: `blocked` holds errored claims beside
+skipped ones (the `errored` mark tells them apart), `unclaimed` unqualified evaluators'
+and unowned assumptions' claims, `pending` a pass beside an unrun evaluator.
+**Deviation from the phase's brief, said here:** the brief asked for a `status` field
+carrying the new word; GLOSSARY §7 keeps JSON values out of the human channels until
+the rename pass, so `status` keeps the enum and the word is `word` (and the token
+`key`) beside it — a reader that wants GLOSSARY's word reads `statuses[id].word`, and
+one that wants *ready* reads `summary.all_required_checked`, never `summary.ready`.
+*Rejected:* re-valuing `status` in place (a deny-list reader would go generous on
+"failing"); a top-level `status` map (two meanings of one key in one document).
 
 ## Limits: what the spine cannot see, named
 
@@ -2805,8 +3008,8 @@ a reader of the output meets it:
 - **Admission outside `check` is static.** `status`, `report` and `site build` judge a
   control from its entry's static part, its recorded files and host reads, and its
   fixture closure's digests — none of them runs a fixture. When a fixture's code moved
-  they count the control **pending**, with a note (`<k> control(s) pending — inputs
-  moved …`), until the next `check`, `gate selftest` or `check --force` re-verifies it
+  they count the control **pending**, with a note (`<k> evaluator(s) to re-qualify —
+  control inputs moved …`), until the next `check`, `gate selftest` or `check --force` re-verifies it
   by the values it feeds its gate. So a model edit that defuses a bracket control is
   caught at the next `check` and is never counted as demonstrated in the meantime
   without that note; CI and P2's `export` re-run it (R-9).

@@ -1363,6 +1363,14 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
     from the trace; a gate that could set it could key its verdict to inputs it
     never read, and the cache would serve that verdict as current.
 
+    ``unqualified`` is cleared for the same reason (P2.1): it is the spine's
+    word for an evaluator refused at its version, and a claim with one reads
+    Gap. A gate that could set it could make its own crash read Gap instead of
+    errored — quieter than a missing tool, against invariant 2. So whatever a
+    gate returns is read on its flags alone, and a gate's own
+    ``error="not admitted: …"`` (or the error ``Verdict.__post_init__`` writes
+    for a mark it set) is a crash like any other.
+
     ``passed`` is forced False whenever the gate skipped or errored. ``Verdict.ok``
     already encodes that, but ``passed`` is what lands in the JSON a human reads,
     and "passed: true, error: ..." is a sentence nobody should have to interpret.
@@ -1396,6 +1404,7 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
         duration_s=round(max(0.0, float(duration)), 6),
         cpu_s=round(max(0.0, float(cpu)), 6),
         rho="",
+        unqualified="",
         passed=passed,
         skipped=bool(verdict.skipped),
         measured=_plain_number(verdict.measured),

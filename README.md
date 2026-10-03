@@ -45,7 +45,7 @@ Try it immediately on the reference project, which has zero dependencies:
 
 ```sh
 cd examples/bracket
-atompipe status         # 7 claims: 3 proven, 1 failing, 1 gap, 1 physical, 1 assumed
+atompipe status         # 7 claims · 3 checked · 1 failing · 2 gaps · 1 pending build
 atompipe check          # 6 gates; one fails on purpose — fix `thickness` 7.0 -> 8.0
 atompipe gate selftest  # every gate proves it can fail on known-bad input
 atompipe why thickness  # one parameter's full history, including what was rejected
@@ -57,8 +57,8 @@ is committed under `.atompipe/verdicts/`, so a fresh clone's first `check` is se
 from the cache and reads the same answer the author saw.
 
 Nothing heavy installs until a claim needs it and you have said yes. The two packs
-that want `trimesh` report their claims as **BLOCKED** — visibly — when it is absent,
-rather than quietly skipping.
+that want `trimesh` report their claims as **Skipped** — visibly — when it is absent,
+rather than quietly passing.
 
 ## What using it looks like
 
@@ -75,8 +75,8 @@ C4  Runtime >=20 min at cruise on one pack               [measurable]
 C5  Watertight at the hatch seam                         [physical only]
 ```
 
-C5 cannot be validated by any tool. It stays UNVERIFIED, visibly, until you build one
-and record a result. Everything else gets gated:
+No evaluator here can settle C5. It stays **pending build**, visibly, until you build
+one and record a result. Everything else gets gated:
 
 ```
 $ atompipe check
@@ -107,14 +107,20 @@ whole thing as a pack so nobody has to do it again.
 ## Why you should believe the output
 
 Because of what it refuses to claim. Every row in the PROVEN table cites the gate that
-proved it and the evidence file it wrote. Everything else is listed as physical,
-blocked, stale or assumed, with the reason.
+passed it and the evidence file it wrote, and a claim is listed there only when every
+gate covering it ran and passed — *checked*, which does not mean true. Everything else
+is listed under its own status, with the reason: failing, skipped, a gap, open, stale,
+pending build or assumed.
 
-Three statuses never blur into "pass":
+None of these ever blurs into a pass, even beside a gate that passed:
 
-- **skipped** — the gate did not run. Its tool is missing. Nothing was proven.
-- **errored** — the gate crashed. Nothing was proven.
-- **stale** — it passed, but inputs have changed since. Nothing is proven *now*.
+- **Skipped** — a gate did not run: its tool is missing. Nothing was evaluated.
+- **Skipped, errored** — a gate crashed. Nothing was evaluated, and it reads louder
+  than a missing tool: the gate itself is broken.
+- **Open** — a gate exists and has not run on the current inputs.
+- **Gap** — no gate covers the claim, or one has not shown it can fail; or an
+  assumption nobody owns.
+- **Stale** — it passed, but inputs have changed since. Nothing is checked *now*.
 
 And every gate must declare a **negative control**: known-bad input it has been shown
 to fail on. The registry refuses to register a gate without one. This is not

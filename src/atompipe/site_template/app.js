@@ -21,7 +21,7 @@
 // `view-source` and audited by whoever has to trust it.
 
 import { el, mount, $ } from "./lib/dom.js";
-import { code, stamp, age, isAged } from "./lib/format.js";
+import { code, stamp, age, isAged, useWords } from "./lib/format.js";
 import {
   headline, staleBanner, locatorProblems, claimsPanel, verdictsPanel,
   paramsPanel, evidencePanel, gapsPanel, decisionsPanel, aboutPanel, cssId,
@@ -73,13 +73,14 @@ async function boot() {
   }
 
   app.state = state;
+  useWords(state.words, state.outcome_words);
   for (const v of state.verdicts || []) app.index.verdictByGate.set(v.gate, v);
   for (const v of state.views || []) app.index.viewById.set(v.id, v);
   for (const c of state.claims || []) app.index.claimById.set(c.id, c);
 
   document.documentElement.toggleAttribute("data-stale", !!(state.meta || {}).stale);
   const name = (state.meta || {}).name || "atompipe project";
-  document.title = `${name} — ${(state.readiness || {}).ready ? "ready" : "not ready"}`;
+  document.title = `${name} — ${(state.readiness || {}).all_required_checked ? "ready" : "not ready"}`;
 
   render(root, state);
 }
@@ -189,7 +190,7 @@ function noState(err) {
           el("pre", { class: "cmd" }, code("atompipe site build")),
           el("p", { class: "small muted" },
             "That runs the viewgens and writes ", code("site/data/state.json"),
-            " from the ledger. It does not run gates — if the results are out of date, ",
+            " from the ledger. It does not run gates — if a verdict is invalidated, ",
             code("atompipe check"), " first.")),
     el("p", { class: "small muted", text:
       "The site is an output. Nothing under site/data/ is hand-edited, and nothing here is a " +

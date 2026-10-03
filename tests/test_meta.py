@@ -53,19 +53,25 @@ CLAUDE_MD = os.path.join(_env.REPO, "CLAUDE.md")
 #: be a list. When CLAUDE.md gains an invariant, it gains its entry here in the
 #: same commit, moved out of PLANNED_INVARIANT_CLASSES.
 INVARIANT_CLASSES: dict[int, str | list[str]] = {
-    1: "test_invariants.SkipIsNotPass",
+    # 1 and 4 through GLOSSARY §3's composition, exhaustively (P2.1): a claim
+    # reads Checked iff every evaluator ran, passed, is qualified and current.
+    1: ["test_invariants.SkipIsNotPass", "test_invariants.CheckedMeansEveryEvaluatorPassed"],
     # 2's second sentence, "reads louder than a missing tool", in what every
-    # command prints (P2.0, R-1): carried by FAIL until Phase 2 moves an errored
-    # claim to Skipped, and from then on only by these tests.
-    2: ["test_invariants.ErrorIsNotPass", "test_louder.ErrorIsLouder"],
+    # command prints (P2.0, R-1): from P2.1 an errored claim reads Skipped, and
+    # "louder" is carried only by these tests. And a gate cannot make its crash
+    # read the quieter Gap: the unqualified mark is the spine's (P2.1).
+    2: ["test_invariants.ErrorIsNotPass", "test_louder.ErrorIsLouder",
+        "test_invariants.UnqualifiedIsTheSpinesWord"],
     3: "test_invariants.RegistryRefusesLoggers",
     # 4 over a pass beside an evaluator that is not admitted (P2.0): an
     # invariant-9 change that drops the refused verdict would leave the pass
     # alone and the claim under PROVEN. In process on a planted verdict, and
-    # end to end on a gate refused at its first check — where today's readers
-    # already drop the refusal (its ratchet, KNOWN_OVERCLAIMS, names each one).
+    # end to end on a gate refused at its first check — where P2.0's readers
+    # dropped the refusal, until P2.1 made `resolve` say it (the ratchet,
+    # KNOWN_OVERCLAIMS, emptied and gone).
     4: ["test_invariants.ReportNeverOverclaims",
-        "test_status_table.UnqualifiedBesideAPassIsNeverChecked"],
+        "test_status_table.UnqualifiedBesideAPassIsNeverChecked",
+        "test_invariants.CheckedMeansEveryEvaluatorPassed"],
     5: "test_packs.ControlsAreSealed",
     6: "test_packs.NegativeControlsFire",
     7: "test_staleness.StaleIsNotCurrent",
@@ -89,7 +95,13 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
 #: "each is added to CLAUDE.md in the phase that makes it mechanical".
 #: *Rejected:* keeping it planned past P2 — mutation would ship inside
 #: qualification with its seal stated nowhere a reader of CLAUDE.md looks.
+#:
+#: 11 is PLAN §4.0.1's first half — a human or physical terminal is satisfied
+#: only through a channel the proposer cannot author — from its first line
+#: (R-7): P2.1 lands `Claim.owner` and refuses to count one written by hand; it
+#: moves to INVARIANT_CLASSES with CLAUDE.md's 11 when the signing channel lands.
 PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {
+    11: "test_owner.AnOwnerWrittenByHandNeverCounts",
     15: "test_mutation.MutationIsSealed",
 }
 

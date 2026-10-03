@@ -251,6 +251,8 @@ class Verdict:                         # what a gate returns (or a (bool, detail
     rho: str = ""                      # the hash of everything it read: set by the sweep
                                        #   that records it, never by the gate
     cpu_s: float = 0.0                 # CPU seconds, child processes included: measured
+    unqualified: str = ""              # the SPINE's mark for an evaluator refused at its
+                                       #   version; run_gate clears whatever a gate sets
     outcome -> str                     # property: "error" | "skipped" | "pass" | "fail"
     ok -> bool                         # property: outcome == "pass"; a skip is never ok
     def render(self) -> str            # "[FAIL] fdm.overhang : worst face 63.2deg vs 50deg limit"
@@ -281,6 +283,17 @@ class GateContext:                     # a gate's one argument — a traced view
                                                   #   sweep; it and every file the loader
                                                   #   opened recorded for EVERY caller
 ```
+
+**`Verdict.unqualified` is the spine's, never a gate's** (P2.1). The resolver and
+the sweep set it — with `error="not admitted: <why>"` — when a gate's known-bad
+control PASSED at its current version (or its control crashed), and a claim with
+such an evaluator reads Gap, `unqualified: <gate> : <why>`, even beside a pass.
+`run_gate` clears it on whatever your gate returns, as it clears `rho`: a gate
+that could set it could make its own crash read Gap, quieter than a missing tool.
+So a gate that returns `unqualified="…"`, or wraps its own exception as
+`error="not admitted: …"`, reads as the crash it is (Skipped, `errored:`), never
+as a refusal. Raise, or return `error=`, when your gate cannot evaluate; never
+claim a qualification state.
 
 **The context a gate receives is a traced view of its own.** `run_gate` never hands a
 gate the sweep's context. Every read of `ctx.params`, of a claim through `ctx.ledger`,

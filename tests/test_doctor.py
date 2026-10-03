@@ -626,8 +626,11 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         with open(os.path.join(project, "model", "bracket.py"), "a", encoding="utf-8") as fh:
             fh.write("\n# a comment: the bytes moved, no value did\n")
         _code, rows = _doctor(project)
-        self.assertRow(rows, "pending-controls", "warn", "pending", "model/bracket.py",
-                       "the next check re-verifies")
+        # R-6, words only: GLOSSARY §9's "to re-qualify … the next check run
+        # re-qualifies them" from P2.1, where it said "pending" (Open's word)
+        # and "re-verifies"; the row still names the file that moved.
+        self.assertRow(rows, "pending-controls", "warn", "to re-qualify", "model/bracket.py",
+                       "the next check run re-qualifies them")
         self.assertClean("pending-controls")
 
         # The next check re-verifies them by their values, and the row is clean.

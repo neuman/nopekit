@@ -232,6 +232,24 @@ class TwoOutcomes(_env.EnvCase):
                   encoding="utf-8") as fh:
             return json.load(fh)
 
+    def _errored(self, project: str, claim: str, *, status: dict | None = None) -> None:
+        """``claim`` reads Skipped with its errored mark, in ``status --json`` and
+        in ``last_check.json``. A contradiction on disk is an evaluator error, and
+        from P2.1 an error is Skipped (`blocked`) marked errored, never Failing —
+        until then these assertions read `fail`, a crash borrowing Failing's
+        status (R-6: the move is GLOSSARY §3's, and the errored mark is the
+        stronger half: a missing tool can no longer stand in for it)."""
+        status = status if status is not None else self._status(project)
+        self.assertEqual(status["claims"][claim], "blocked", status["freshness"])
+        row = status["statuses"][claim]
+        self.assertEqual((row["key"], row["cause"], row["errored"]),
+                         ("skipped", "errored", True), row)
+        self.assertIn(claim, status["errored"])
+        last = self._last_check(project)
+        self.assertEqual(last["statuses"][claim], "blocked",
+                         "last_check.json recorded what status does not say")
+        self.assertIn(claim, last["errored"])
+
     def _refused_by_check(self, project: str, doc: dict, gate_id: str, claim: str) -> None:
         """``check``'s own row for ``gate_id`` is the error ``status`` reads,
         served without a run, and ``claim`` blocks — in the document, the exit
@@ -246,8 +264,7 @@ class TwoOutcomes(_env.EnvCase):
                                             f"with one of the two and settles nothing")
         self.assertIn(claim, [b["claim"] for b in doc["blocking"]], doc["blocking"])
         self.assertFalse(doc["ready"])
-        self.assertEqual(self._last_check(project)["statuses"][claim], "fail",
-                         "last_check.json recorded what status does not say")
+        self._errored(project, claim)
 
     def test_equal_instruments_is_an_error(self):
         self.assertIs(verdicts.TWO_OUTCOMES_IS_ERROR, True,
@@ -265,7 +282,8 @@ class TwoOutcomes(_env.EnvCase):
         self.assertIn("two outcomes recorded for identical inputs", row["detail"])
 
         status = self._status(project)
-        self.assertEqual(status["claims"]["C4"], "fail", status["freshness"]["bracket.bed_fit"])
+        self.assertEqual(status["claims"]["C4"], "blocked", status["freshness"]["bracket.bed_fit"])
+        self.assertTrue(status["statuses"]["C4"]["errored"], status["statuses"]["C4"])
         self.assertNotIn("**C4**", self._proven(project))
 
         # check reads it as status does. The bracket's C1 fails anyway, so the
@@ -274,19 +292,18 @@ class TwoOutcomes(_env.EnvCase):
         self._refused_by_check(project, self._check(project, code=1),
                                "bracket.bed_fit", "C4")
         self.assertEqual(len(verdicts.read_entries(project, "bracket.bed_fit")), 2)
-        self.assertEqual(self._status(project)["claims"]["C4"], "fail")
+        self._errored(project, "C4")
 
         # A forced re-run agrees with one of the two and settles nothing: the
         # entry it writes already exists, both files stay, and the claim still
-        # FAILs — in check's own row, not only in status afterwards.
+        # reads errored — in check's own row, not only in status afterwards.
         forced = self._check(project, "--force", code=1)
         row = {r["gate"]: r for r in forced["verdicts"]}["bracket.bed_fit"]
         self.assertEqual(row["outcome"], "error", row)
         self.assertIn("two outcomes recorded for identical inputs", row.get("error", ""), row)
         self.assertIn("C4", [b["claim"] for b in forced["blocking"]])
-        self.assertEqual(self._last_check(project)["statuses"]["C4"], "fail")
         self.assertEqual(len(verdicts.read_entries(project, "bracket.bed_fit")), 2)
-        self.assertEqual(self._status(project)["claims"]["C4"], "fail")
+        self._errored(project, "C4")
 
     def test_different_instruments_is_not_an_error(self):
         # The negative half: an entry merged from a machine with another numpy
@@ -336,13 +353,18 @@ class TwoOutcomes(_env.EnvCase):
         with open(gates_py, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
         # C7 (first mode) has no gate on the bracket: UNCLAIMED blocks, and the
-        # exit code could not show the laundered C4 while it stands.
+        # exit code could not show the laundered C4 while it stands. C6 neither,
+        # from P2.1: an assumption reads Gap until its owner records it (R-6).
         os.remove(os.path.join(project, "claims", "C7.json"))
+        os.remove(os.path.join(project, "claims", "C6.json"))
 
         first = self._check(project, code=0)
         passed = {r["gate"]: r for r in first["verdicts"]}["bracket.bed_fit"]
-        self.assertEqual(passed["outcome"], "pass", "the positive control: the bracket is ready")
+        self.assertEqual(passed["outcome"], "pass", "the positive control: nothing blocks")
         self.assertTrue(first["ready"])
+        # `ready` is "nothing stops check"; *ready* in GLOSSARY §4's sense it is
+        # not — C5 waits on an article (P2.1, the key beside it).
+        self.assertFalse(first["all_required_checked"])
 
         proc = _env.atompipe(["check", "--force"], cwd=project, env={_FLIP: "1"})
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
@@ -384,7 +406,7 @@ class TwoOutcomes(_env.EnvCase):
                       proc.stdout)
         self.assertIn("BLOCKING", proc.stdout)
 
-        self.assertEqual(self._status(project)["claims"]["C4"], "fail")
+        self._errored(project, "C4")
         code, rows = self._doctor(project)
         self.assertEqual((code, rows["two-outcomes"]["status"]), (1, "FAIL"),
                          rows["two-outcomes"])

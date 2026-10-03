@@ -1,10 +1,10 @@
 # wall-bracket — readiness (v0.1)
 
-**v0.1 is NOT ready: 2 of 7 critical claims are unsettled — 1 failing (C1); 1 with no gate at all (C7).** 3 of 7 claims are machine-verified against the current model. It is unverified in physical hardware: 1 claim needs a real object (C5).
+**v0.1 is NOT ready: 4 of 7 required claims are unresolved — 1 failing (C1); 2 gaps (C6, C7); 1 pending build (C5).** 3 of 7 claims are checked against the current inputs. Pending build: 1 claim needs an article (C5).
 
 > Shelf bracket: 1.5 kg static load on a 60 mm arm, printed in PETG
 
-## What is PROVEN (machine-verified, current)
+## What is PROVEN (checked: every evaluator passed on the current inputs — checked does not mean true)
 
 | Claim | Acceptance | Measured | Gate | Evidence |
 |---|---|---|---|---|
@@ -12,37 +12,39 @@
 | **C3** Fastener bearing stress within the design allowable | bearing stress <= 15.0 MPa | 0.195 MPa | `bracket.bearing` | *none written* |
 | **C4** Prints on a 220 mm bed without supports | bed fit <= 204.0 mm | 73.5 mm; 7 mm | `bracket.bed_fit`, `bracket.min_wall` | *none written* |
 
-Every row above is backed by at least one gate that ran and returned a pass against the inputs, code and control it has now — a skipped, errored, stale or never-run gate can never be the evidence for a row. Where another gate also covers the claim and did **not** produce a pass, the row is marked **PARTIAL** and names it with the reason: the claim stands on the gates that ran, and you can see which ones did not.
+Every row above is checked: each of its evaluators ran and passed against the inputs, code and control it has now. A skipped, errored, unqualified, invalidated or unrun evaluator puts its claim in another section with the reason, never here — and checked does not mean true.
 
-## What is NOT verified
+## Pending build
 
-These need the real object. No gate in any pack can settle them, and no number of passing gates above changes that.
+These need an article. No evaluator in any pack can settle them, and no number of passing evaluators above changes that.
 
 - **C5** Survives two winters outdoors without UV embrittlement
   - **Test that would settle it:** **no test has been written down.** As stated, this claim cannot be settled by any observation — give it an acceptance or a procedure in its note, or it will stay on this list forever
   - **Why it matters:** no analysis settles polymer weathering; it needs a real part on a real wall for two years
   - **Record the result:** `atompipe claim physical C5 --pass|--fail --detail "..." --when <ISO date>`
 
-## Open gaps
+## Gaps
 
-A claim with no gate is a capability gap, not a defect. It is closed by installing or writing a tool — with the cost said out loud before anyone agrees to it.
+A claim with no evaluator is a gap, not a defect. It is closed by installing or writing a tool — with the cost said out loud before anyone agrees to it.
 
-### N-C7 — first mode  *(open)*
-- **Claim:** C7 — First mode is clear of the pump that sits on the shelf  `unclaimed`
-- **Candidate tooling:** none proposed yet — `atompipe gap --propose`
+### N-C7 — first mode  *(identified)*
+- **Claim:** C7 — First mode is clear of the pump that sits on the shelf  `gap`
+- **Tool options:** none proposed yet — `atompipe gap --propose`
 
-## Standing constraints
+### Assumptions nobody owns
 
-Carried on faith. None of this is proven; all of it is visible, which is the whole trade.
+An assumption reads Assumed only with a reason and an owner who recorded it; until then it is a gap.
 
-### Assumptions
+- **C6** The load is static and centred on the arm — no owner recorded — an assumption reads Assumed only once its owner records it; nothing can record one yet
 
-- **C6** The load is static and centred on the arm
-  - this model has no fatigue, impact or eccentricity term — a claim that said otherwise would be lying
+## Assumed
 
-## Failing / blocked
+None recorded: no claim reads Assumed, every parameter carries a rationale, and every ingested artifact has been read.
 
-### [FAIL ] C1 — Tip sags no more than 0.5 mm at rated load  *(fail, critical)*
+## Failing, stale, skipped or open
+
+### [FAIL ] C1 — Tip sags no more than 0.5 mm at rated load  *(failing, critical)*
+- **Why:** bracket.deflection : 0.700 mm at 15 N (limit 0.5 mm)
 - **Acceptance:** tip deflection <= 0.5 mm
 - `[FAIL] bracket.deflection : 0.700 mm at 15 N (limit 0.5 mm)`
 - `[ok  ] bracket.model_validity : slenderness 8.6 (>= 5.0 for Euler-Bernoulli; below this the deflection gate under-predicts)`
@@ -69,7 +71,7 @@ atompipe check --only bracket.bed_fit          # manufacturability, fdm, bed-fit
 atompipe check --only bracket.min_wall         # manufacturability, fdm, wall-thickness, min-wall — gates/structural.py
 ```
 
-And prove the gates above can actually fail, which is the only reason their passes mean anything:
+And show the gates above can actually fail, which is the only reason their passes mean anything:
 
 ```sh
 atompipe gate selftest           # runs every negative control; a gate that passes its

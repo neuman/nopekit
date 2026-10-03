@@ -353,7 +353,7 @@ class CheckServesTheCache(unittest.TestCase):
 
         text = _run(self.project, "status")
         lines = text.stdout.splitlines()
-        self.assertIn("stale: none   (6 checks current)", lines, text.stdout)
+        self.assertIn("invalidated: none   (6 verdicts current)", lines, text.stdout)
         self.assertTrue(any(_transcript.STALE_NONE.fullmatch(line) for line in lines))
         self.assertTrue(any(_transcript.LAST_CHECK.fullmatch(line) for line in lines),
                         text.stdout)

@@ -13,7 +13,12 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine: 70-74 s
+The budget is 90 s as ONE process on an otherwise idle machine: 87 s measured
+2026-10-03 (load average 1.9-2.3, the quietest this machine got that day; 59 s
+user) after P2.1 added four `test_vocabulary` classes, `test_json_keys` and
+`test_owner` (the sentence-branch scan 4.3 s, `claim physical` end to end 3.3 s
+the slowest) and left V15's seven bracket copies to the full suite — near the
+budget, so the next class that joins pays for itself or moves one out; 70-74 s
 measured 2026-10-03 (load average 0.8-1.4) after the P2.0 review grew
 ``test_louder``, ``test_status_table`` (an end-to-end project) and
 ``test_mutation`` to 4.8 s, 2.7 s and 2.3 s alone, and 85 s for the same list
@@ -118,6 +123,19 @@ FAST: list[str] = [
     # end to end on a gate refused at its first check (eight commands, the
     # time: ~2.5 s), with the ratchet of what today's readers overclaim there.
     "test_status_table",
+    # P2.1's vocabulary and JSON: GLOSSARY §3's words from one table on every
+    # channel (the louder and refused worlds shared with the two modules above,
+    # one process; a bracket, an empty project and an unevaluated one of its
+    # own), *ready* as one predicate in process, the JSON keys kept beside the
+    # words, and an owner written by hand counting for nothing (planned 11).
+    # V15 through the commands — seven bracket copies at 8 mm, ~25 s — is left
+    # to the full suite (below): the predicate it reads is held here, in process.
+    "test_vocabulary.StatusWordsAreTheGlossarys",
+    "test_vocabulary.StatusLinesSpeakTheTable",
+    "test_vocabulary.StatusWordsComeFromOneTable",
+    "test_vocabulary.ReadyIsThePredicate",
+    "test_json_keys",
+    "test_owner",
     # Planned invariant 15: the mutation harness, its planted runners, the
     # tripwire, and the reference and planted runners over the bracket's six
     # gates and a bundled pack's eight. ~2.3 s.
@@ -323,10 +341,10 @@ LEFT_FOR_THE_GATE: list[str] = [
 #   replays of what the tests above hold piece by piece.
 #   test_packs.DemonstrateAgrees 37 and PacksValidate 1: `gate selftest` and
 #   `pack validate` over every pack, which a pack author runs anyway.
-#   test_staleness's other classes 46 (E4Localisation, GateVersionRows, LastCheck,
+#   test_staleness's other classes 46 (InvalidationIsLocalised, GateVersionRows, LastCheck,
 #   LastCheckWatches, CostIsKept, InstrumentMismatchIsNoted): mostly how NARROW a
 #   stale set is and what a hit costs, where too wide wastes a rerun and never
-#   serves a lie. Not only that: E4Localisation and GateVersionRows also fail in
+#   serves a lie. Not only that: InvalidationIsLocalised and GateVersionRows also fail in
 #   the lie's direction, on real content — a stale set SMALLER than expected is
 #   an under-recorded read set on the bracket's model, and GateVersionRows
 #   (8 s) is the one test that edits a real bundled pack module (fdm-print) and
@@ -343,6 +361,10 @@ LEFT_FOR_THE_GATE: list[str] = [
 #   iteration that touches it runs these with test_admission and test_staleness
 #   (module docstring); the lie they guard against is StaleIsNotCurrent's, whose
 #   in-process scenarios are above.
+#   test_vocabulary.ReadyMeansEveryRequiredClaimChecked ~25: V15 through the
+#   commands — what `check`, `status`, their JSON, JUnit and the page say about
+#   *ready* on seven bracket copies; `ReadyIsThePredicate` holds the predicate
+#   they all read, in process, every iteration.
 #   The command and document surfaces: shapes 26, param_view 25, site 21,
 #   pack_mode 20, record_commands 19, doctor 19, shims 15, status_stale 13,
 #   fixture_hygiene 10, contracts 9, openmodelica_build 8, junit_cli 4, vcs 2,

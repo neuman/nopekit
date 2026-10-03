@@ -77,7 +77,8 @@ full recorded sweep, never read by the sweep, and fingerprinting what is watched
 What the rest of the file proves end to end, through ``_env.atompipe``
 subprocesses on temp copies (spec §4, W13 · U24):
 
-* ``E4Localisation`` — E4 as a unit test. For each of the bracket's twelve Config
+* ``InvalidationIsLocalised`` (``E4Localisation`` until P2.1: PLAN-v0.14 §1.2 renumbered the
+  studies, so it is named for what it holds, not a number) — invalidation as a unit test. For each of the bracket's twelve Config
   fields, a default edit stales exactly the gates whose recorded reads moved:
   ``status`` names exactly those, ``check`` executes exactly those and no
   control, and ``check --force`` agrees with the affected-only answer (the
@@ -1016,6 +1017,12 @@ def _proven(md: str) -> set[str]:
     if not section.strip():
         raise AssertionError(f"the {heading!r} section is empty:\n{md}")
     return set(re.findall(r"\*\*(C\d+)\*\*", section))
+
+
+def _errored(project: str) -> list[str]:
+    """``status --json``'s errored claim ids: the mark that tells a crash from a
+    missing tool inside Skipped (P2.1)."""
+    return _doc(_cli(project, "status", "--json"), 0)["errored"]
 
 
 def _seen(project: str) -> tuple[dict, set[str]]:
@@ -2652,11 +2659,13 @@ class StaleIsNotCurrent(_env.EnvCase):
         with ``--no-record`` too, where nothing reaches the records at all.
 
         The exit code is the signal CI reads, so the copy is otherwise ready: the
-        bracket at 8 mm (C1 passes) without C7 (no gate covers it), and the
+        bracket at 8 mm (C1 passes) without C7 (no gate covers it) or C6 (an
+        assumption reads Gap until its owner records it, from P2.1: R-6), and the
         costlier path's allowable at 0.3 mm, below the 8 mm bracket's ~0.47."""
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True,
                                          thickness=8.0)
         os.remove(os.path.join(project, "claims", "C7.json"))
+        os.remove(os.path.join(project, "claims", "C6.json"))
         tighter = "ALLOWABLE_MM = (5.0, 5.0, 0.3, 0.3)"
         self.assertEqual(_TIERED_GATE.count("ALLOWABLE_MM = (5.0, 5.0, 0.5, 0.5)"), 1)
         _put(project, "selftest/planted.py", _PLANTED_FIXTURES)
@@ -2771,7 +2780,11 @@ class StaleIsNotCurrent(_env.EnvCase):
         forced = _doc(_env.atompipe(["check", "--force", "--json"], cwd=project,
                                     env={"FLAKY": "1"}))
         self.assertEqual(_rows(forced)[gate_id]["outcome"], "error", _rows(forced)[gate_id])
-        self.assertEqual(_seen(project)[0]["C4"], "fail", "the crash at A is what status shows")
+        # R-6: a crash is Skipped marked errored from P2.1 (GLOSSARY §3), where
+        # it borrowed Failing's `fail` before; the mark is asserted, not only
+        # the enum, so a missing tool cannot stand in for it.
+        self.assertEqual(_seen(project)[0]["C4"], "blocked", "the crash at A is what status shows")
+        self.assertIn("C4", _errored(project), "the crash at A reads errored")
 
         _set_default(project, "bed_xy", 250.0)
         moved = _doc(_cli(project, "check", "--json"))
@@ -2780,8 +2793,9 @@ class StaleIsNotCurrent(_env.EnvCase):
 
         _set_default(project, "bed_xy", 220.0)
         seen, proven = _seen(project)
-        self.assertEqual(seen["C4"], "fail",
+        self.assertEqual(seen["C4"], "blocked",
                          "back at A, status serves the PASS the crash there superseded")
+        self.assertIn("C4", _errored(project), "back at A, the crash there is what reads")
         self.assertNotIn("C4", proven, "a PASS a crash superseded is under PROVEN")
         back = _doc(_cli(project, "check", "--json"))
         self.assertFalse(_rows(back)[gate_id]["cached"],
@@ -2819,7 +2833,7 @@ class LastCheck(_env.EnvCase):
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertEqual(list(data), ["when", "spine", "fingerprint", "reads", "statuses",
-                                      "counts", "worst", "params", "influence"])
+                                      "errored", "counts", "worst", "params", "influence"])
         self.assertEqual(data["when"], NOW)
         self.assertEqual(data["spine"], verdicts.spine_digest())
         self.assertEqual(data["statuses"], {cid: status.value for cid, status in
@@ -2866,7 +2880,7 @@ class LastCheck(_env.EnvCase):
 
 
 # --------------------------------------------------------------------------- #
-# E4Localisation: one Config field at a time, through the CLI
+# InvalidationIsLocalised: one Config field at a time, through the CLI
 # --------------------------------------------------------------------------- #
 def _g(*short: str) -> frozenset[str]:
     return frozenset(f"bracket.{name}" for name in short)
@@ -3017,7 +3031,7 @@ def _side_that_moved(label: str, derived: dict[str, list[str]], typed: frozenset
     return " ".join(parts)
 
 
-class E4Localisation(_env.EnvCase):
+class InvalidationIsLocalised(_env.EnvCase):
     """E4: a Config default edit stales exactly the gates whose reads it moved.
 
     One bracket copy runs its first check (six gates, six controls); every row

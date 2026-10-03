@@ -1384,6 +1384,43 @@ def scaffold(root: str, *, force: bool = False) -> list:
     return sorted(written)
 
 
+def refresh_renderer(root: str) -> list:
+    """Bring every renderer file under ``<root>/site/`` up to the installed
+    template — everything but ``index.html``, the shell that is yours — and
+    return the site paths it rewrote (``[]`` when each already matched).
+
+    ``scaffold``'s docstring always said the renderer "IS refreshed"; nothing
+    did it after ``site init``, which refuses while ``index.html`` exists. What
+    slipped through (review of the P2.1 design): a page scaffolded before P2.1
+    kept a ``format.js`` that read ``blocked`` as "its tooling is missing" in a
+    missing tool's tone and took READY from ``readiness.ready`` — so once P2.1
+    filed a crash under ``blocked``, that page read a crash exactly like a
+    missing tool, and a project waiting for an article READY. ``site build`` is
+    the command every such project runs, so it refreshes the renderer, byte for
+    byte, before it writes the data the renderer reads. *Rejected:* a
+    ``--refresh`` flag on ``site init`` (a step nobody knows to take); refusing
+    the build when the renderer differs (the fix is mechanical, and the shell
+    stays untouched either way)."""
+    site = os.path.join(root, SITE_DIR)
+    out: list[str] = []
+    for source, relative in _template_files():
+        if relative == "index.html":
+            continue
+        target = os.path.join(site, *relative.split("/"))
+        with open(source, "rb") as fh:
+            want = fh.read()
+        try:
+            with open(target, "rb") as fh:
+                if fh.read() == want:
+                    continue
+        except OSError:
+            pass
+        ensure_dir(os.path.dirname(target))
+        _atomic_write_bytes(target, want)
+        out.append(posixpath.join(SITE_DIR, relative))
+    return sorted(out)
+
+
 def _template_files() -> list[tuple[str, str]]:
     """``(absolute source, site-relative destination)`` for every template file.
 
@@ -1469,6 +1506,7 @@ def build(
     assets_dir = os.path.join(site, ASSETS_DIR)
     for directory in (data_dir, views_dir, assets_dir):
         ensure_dir(directory)
+    refreshed = refresh_renderer(root)
 
     warnings: list[str] = []
     model_error = ""
@@ -1587,7 +1625,9 @@ def build(
                    "pack": v.get("pack", ""), "data_url": v.get("data_url", "")}
                   for v in payload["views"]],
         "viewgens": notes,
-        "wrote": sorted(written + [posixpath.join(SITE_DIR, p) for p in ctx.written]),
+        "wrote": sorted(written + refreshed
+                        + [posixpath.join(SITE_DIR, p) for p in ctx.written]),
+        "refreshed": refreshed,
         "removed": sorted(removed),
         "locator_problems": problems,
         "counts": {
@@ -1745,7 +1785,7 @@ def state(
     has, and whether it is current, is ``resolution``'s — the one resolver's
     (:func:`atompipe.verdicts.resolve`, R-5); claim statuses come from
     :mod:`atompipe.claims` given the resolver's ``stale_gates``, the headline
-    sentence and the coverage/PARTIAL logic from :mod:`atompipe.report`. Those
+    sentence, the words and the coverage logic from :mod:`atompipe.report`. Those
     are private helpers in ``report`` and reaching for them is deliberate: a
     second implementation would give the page and the readiness document two
     opinions about the same ledger, and the page is the one more people will
@@ -1791,11 +1831,14 @@ def state(
     # these verdicts, so none of them can disagree with the verdict rows.
     view = dataclasses.replace(ledger, verdicts=list(resolution.verdicts))
 
-    resolved = claim_logic.statuses(view, stale=everything, registry=registry,
-                                    stale_gates=stale_gates)
+    composed = claim_logic.compositions(view, registry=registry, stale=everything,
+                                        stale_gates=stale_gates)
+    resolved = {cid: c.status for cid, c in composed.items()}
     summary = claim_logic.summarise(view, registry, stale=everything,
                                     stale_gates=stale_gates)
     cover = report_logic._coverage(view, registry)
+    stale_reasons = {gid: (resolution.rows[gid].stale_reason if gid in resolution.rows
+                           else "") for gid in stale_gates}
 
     verdict_rows: list[dict] = []
     for verdict in view.verdicts:
@@ -1835,9 +1878,12 @@ def state(
         # gate carries passed=False today, but a pack that sets passed=True next
         # to skipped=True would walk straight into the proof column.
         row["ok"] = verdict.ok
-        row["status"] = ("errored" if verdict.error else
-                         "skipped" if verdict.skipped else
-                         "pass" if verdict.passed else "fail")
+        # From `Verdict.outcome`, the one definition (R-5) — never the flags.
+        # What slipped through (P2.1 design): this read `passed`, so a junk
+        # truthy pass flag (`"yes"`) rendered `pass` on a row whose `ok` was
+        # False, and a skipped-and-errored verdict rendered by its first flag.
+        row["status"] = {"error": "errored", "skipped": "skipped", "pass": "pass",
+                         "fail": "fail"}[verdict.outcome]
         row["views"] = sorted({(loc.view or "") for loc in (verdict.locators or [])
                                if (loc.view or "")})
         if not verdict.locators and not verdict.ok:
@@ -1850,23 +1896,33 @@ def state(
         verdict_rows.append(row)
 
     claim_rows: list[dict] = []
-    for claim in view.claims:
-        status = resolved.get(claim.id)
+    # In severity order (P2.1-D16): what slipped through (P2.0 F-5), the page
+    # listed claims in record order, a skip above the crash it should sit under.
+    for claim in report_logic.in_severity(view, composed):
+        found = composed[claim.id]
+        status = found.status
         unproven = report_logic._unproven_for(claim.id, cover, view)
         row = claim.to_dict()
-        row["status"] = str(status) if status is not None else ""
+        row["status"] = str(status)
+        # The words beside the kept enum (P2.1-D12): `key`, `word`, `cause`,
+        # `reason`, `errored` — all `report.HUMAN`'s, so the page owns none.
+        row.update(report_logic.status_view(found, view, claim,
+                                            stale_reasons=stale_reasons))
         row["acceptance_render"] = claim.acceptance.render()
         row["gates"] = list(cover.get(claim.id) or claim.gates or [])
         row["verdicts"] = [v.gate for v in report_logic._claim_verdicts(view, claim)]
         row["evidence"] = sorted({e for v in report_logic._claim_verdicts(view, claim)
                                   for e in (v.evidence or [])})
-        # PARTIAL is the marker the readiness report prints for a claim that
-        # resolved PASS while a gate covering it produced no proof — it skipped,
-        # it crashed, or it never ran. Without it a claim covered by a cheap
-        # analytic gate and an uninstalled solver reads as fully proven, and the
-        # check that mattered has vanished from the document.
+        # Each covering gate that produced no pass that counts, with its reason
+        # led by the fact (`unrun`, `errored: …`, `skipped: …`, `unqualified:
+        # …`). PARTIAL went with P2.1 (GLOSSARY §3: under the composition no
+        # Checked claim has one); `disagree` is what is left of it — a claim the
+        # resolver calls `pass` while one of these exists — and the page paints
+        # it loud, never as a lesser success (D18; review of the P2.1 design:
+        # with `partial` gone and nothing in its place, a resolver regression
+        # would have reached the page as a clean Checked chip).
         row["unproven"] = [{"gate": gid, "why": why} for gid, why in unproven]
-        row["partial"] = bool(unproven) and str(status) == "pass"
+        row["disagree"] = bool(report_logic._disagreement(view, claim, found, cover))
         claim_rows.append(row)
 
     views = [v.to_dict() for v in view.views]
@@ -1899,16 +1955,32 @@ def state(
             # ready**` rendered literally into HTML reads as a typo in the one
             # sentence that has to be believed.
             "verdict": report_logic._verdict_sentence(
-                view, resolved, registry, stale=everything, markdown=False),
+                view, composed, registry, stale=everything, markdown=False),
+            # Kept as they were (P2.1-D12): `counts` by enum value, `ready` —
+            # nothing stops `check` — and `n_gaps`, gap records. What the page
+            # reads from P2.1: `all_required_checked` for its READY headline
+            # (GLOSSARY §4), and `tally` for its count strip, in HUMAN's words
+            # with a crash counted apart (`N skipped (k errored)`).
             "counts": summary["by_status"],
+            "by_key": summary["counts"],
+            "errored": summary["errored"],
+            "tally": _tally(composed),
             "kinds": summary["by_kind"],
             "ready": summary["ready"],
+            "all_required_checked": summary["all_required_checked"],
+            "unresolved": summary["unresolved_ids"],
             "blocking": summary["blocking_ids"],
             "n_claims": summary["n_claims"],
             "n_critical": summary["n_critical"],
             "n_gates": summary["n_gates"],
             "n_gaps": summary["n_gaps"],
         },
+        # Every status's words, keyed by the enum value a claim row's `status`
+        # holds: the page's chip labels and hints, so the site never owns a word
+        # (D-16). An `errored` entry for a crash's Skipped.
+        "words": report_logic.words_table(),
+        # Each verdict row's outcome word, the same way: `HUMAN`'s.
+        "outcome_words": report_logic.outcome_words(),
         "claims": claim_rows,
         "verdicts": verdict_rows,
         "views": views,
@@ -1947,6 +2019,18 @@ def state(
 _UNJUDGED_META = frozenset({"built", "records_digest", "judgement_digest"})
 _UNJUDGED_ROW = frozenset({"when", "age_s"})
 _UNJUDGED_KEYS = frozenset({"views", "locator_problems"})
+
+
+def _tally(composed: Any) -> list[dict]:
+    """The page's count strip: `report.count_bits`, one item per status word
+    present, Checked first then severity order, each `{key, status, n, errored,
+    label}` — `label` the terminal count line's own bit (`7 skipped (6
+    errored)`), so the strip and the line are one producer. What slipped through
+    (review of the P2.1 design): the strip printed literal labels per enum
+    value, so a crash counted under the skip with no `(k errored)`, and "with no
+    gate" and "capability gap" stayed on the page after every other channel
+    moved."""
+    return report_logic.count_bits(composed)
 
 
 def judgement_digest(payload: Any) -> str:

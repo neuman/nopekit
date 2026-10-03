@@ -7,15 +7,26 @@ even *checkable* yet, and which of those must stop a user from spending money.
 
 The one rule that matters more than all the others:
 
-    **A SKIP IS NEVER A PASS. AN ERROR IS NEVER A PASS.**
+    **A SKIP IS NEVER A PASS. AN ERROR IS NEVER A PASS. AN UNQUALIFIED OR UNRUN
+    EVALUATOR IS NEVER A PASS, beside a pass or not.**
 
 That single line is the difference between this system and a plausible-sounding
 one. A cable-routing validator once shipped green for a whole revision while
 returning a flag nobody read, with the cable geometrically inside a wall — a
 report that had counted "the gate did not object" as "the claim is proven".
 Every branch below is written so the *absence* of evidence can never be spelled
-`PASS`; it gets its own status (`BLOCKED`, `PENDING`, `UNCLAIMED`, `UNVERIFIED`)
-and stays visible in the readiness report until somebody does the work.
+`PASS`; it gets its own status and stays visible in the readiness report until
+somebody does the work.
+
+From P2.1 a claim's status is GLOSSARY §3's composition, one ladder for every
+kind (`compose`): Failing, Skipped (errored first), Gap, Open, Stale, Pending
+build, Assumed, Checked — first match wins, and `compose` returns the fact that
+set it (`ClaimCause`) beside the status. What slipped through the ladder it
+replaced: a pass beside a skip or an unrun evaluator read PASS (S-03), so did a
+pass beside an evaluator `check` had just refused at its version, and a crash
+read FAIL; a physical claim ignored a failing modelled half (S-49); and an
+assumption nobody owned read ASSERTED. The visible changes — what now stops
+`check` — are `blocking`'s docstring and SPINE_CONTRACT's "What P2.1 moved".
 
 Three structural notes:
 
@@ -42,8 +53,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable as _IterableABC
-from dataclasses import replace
-from typing import Any, Collection, Iterable
+from dataclasses import dataclass, replace
+from types import MappingProxyType
+from typing import Any, Collection, Iterable, Mapping, NamedTuple
 
 from .models import (
     BLOCKING_STATUSES,
@@ -54,6 +66,7 @@ from .models import (
     Ledger,
     Need,
     NeedStatus,
+    StrEnum,
     Verdict,
     slugify,
 )
@@ -61,8 +74,15 @@ from .util import AtompipeError, iter_suffix_unique
 
 
 __all__ = [
+    "ClaimCause",
+    "Attribution",
+    "Composed",
+    "STATUS_KEY",
+    "KEY_ORDER",
     "covers",
     "covering_verdicts",
+    "compose",
+    "compositions",
     "resolve_status",
     "explaining_verdict",
     "statuses",
@@ -159,125 +179,256 @@ def covering_verdicts(claim: Claim, verdicts: Iterable[Verdict]) -> list[Verdict
 
 
 # --------------------------------------------------------------------------- #
-# the precedence ladder
+# the composition: one ladder, every kind (GLOSSARY §3)
 # --------------------------------------------------------------------------- #
+class ClaimCause(StrEnum):
+    """Which fact set a claim's status — an identifier, never a word.
+
+    Each status covers more than one fact (Skipped: a missing tool OR a crash;
+    Gap: no evaluator, an unqualified one, or an assumption nobody owns), and
+    GLOSSARY §3 says "the reason line says which". This is that "which", made
+    once, by `compose`, beside the status it explains. What slipped through
+    without it (P2.0 F-8, S-68): each renderer re-derived the fact from the
+    status, so rung 4 moved alone would have called a crash "blocked on missing
+    tooling" in three private fallbacks, and `why` told an unowned assumption
+    it was "UNCLAIMED: no gate can settle it".
+
+    Here, not in `models`: `models` is a spine module (`verdicts.SPINE_MODULES`),
+    so a cause added later (P2.2's prerequisite) would re-key every verdict
+    cache entry in every project. The words for each are `report.HUMAN`'s.
+    """
+
+    FAILED = "failed"
+    PHYSICAL_FAIL = "physical-fail"
+    ERRORED = "errored"
+    SKIPPED = "skipped"
+    UNQUALIFIED = "unqualified"
+    NO_EVALUATOR = "no-evaluator"
+    NO_OWNER = "no-owner"
+    OWNER_UNATTRIBUTED = "owner-unattributed"
+    NO_REASON = "no-reason"
+    UNRUN = "unrun"
+    INVALIDATED = "invalidated"
+    NO_ARTICLE = "no-article"
+    OWNED = "owned"
+    PHYSICAL_PASS = "physical-pass"
+    CHECKED = "checked"
+
+
+class Attribution(NamedTuple):
+    """An assumption's owner as the signing channel recorded it, with the
+    reason they recorded it against — an in-memory seam, not a record.
+
+    It reaches `compose` only through `owners`, the way staleness arrives
+    (this module stays pure). Bound by value (P2.1-D8): it counts only while
+    `owner` equals the claim file's `owner` and `reason` equals its non-empty
+    `rationale`, so an edit to either after the attribution un-attributes it.
+    Sealing it to the claim's digest is the signing channel's (D-13). Nothing
+    in P2.1 produces one: every caller passes no `owners`, and every assumption
+    reads Gap until the channel lands.
+    """
+
+    owner: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class Composed:
+    """`compose`'s answer: the status, the fact that set it (`cause`), the
+    evaluators that fact names (`cites`, errored first), and the verdict that
+    explains it (`verdict`, or None). Renderers take this whole, never the bare
+    status, so none of them has to guess the cause back from the word."""
+
+    status: ClaimStatus
+    cause: ClaimCause
+    cites: tuple = ()
+    verdict: Verdict | None = None
+
+    @property
+    def errored(self) -> bool:
+        """Skipped by a crash — invariant 2's louder Skipped. Never true for an
+        unqualified evaluator, which reads Gap (P2.0 D-8)."""
+        return self.cause is ClaimCause.ERRORED
+
+
+#: Each status's machine token: GLOSSARY §8's proposed rename-pass values, so the
+#: rename pass deletes a map instead of re-deciding it. Identifiers, not words
+#: (GLOSSARY §7: a JSON value is not a human channel), so they live here beside
+#: the statuses `summarise` counts with them; `report.HUMAN` reads them from here.
+STATUS_KEY: Mapping[ClaimStatus, str] = MappingProxyType({
+    ClaimStatus.PASS: "checked", ClaimStatus.VERIFIED: "checked",
+    ClaimStatus.FAIL: "failing", ClaimStatus.REFUTED: "failing",
+    ClaimStatus.STALE: "stale", ClaimStatus.ASSERTED: "assumed",
+    ClaimStatus.UNVERIFIED: "pending_build", ClaimStatus.UNCLAIMED: "gap",
+    ClaimStatus.BLOCKED: "skipped", ClaimStatus.PENDING: "open",
+})
+
+#: The eight tokens in count order: Checked first, then GLOSSARY §9's example's
+#: order of what is unresolved (P2.1-D16). `summarise`'s `counts` is keyed by
+#: exactly these, zero-filled, and sums to `n_claims`.
+KEY_ORDER: tuple[str, ...] = ("checked", "failing", "skipped", "gap", "open", "stale",
+                              "pending_build", "assumed")
+
+
+def _distinct(ids: Iterable[str]) -> list[str]:
+    return list(dict.fromkeys(i for i in ids if i))
+
+
+def _ownership(claim: Claim, owners: Mapping[str, Any] | None) -> ClaimCause | None:
+    """Why an assumption is not Assumed — no owner named, no reason, or an owner
+    the channel never attributed — or None when it is (P2.1-D8)."""
+    owner = str(getattr(claim, "owner", "") or "").strip()
+    reason = str(claim.rationale or "").strip()
+    if not owner:
+        return ClaimCause.NO_OWNER
+    if not reason:
+        return ClaimCause.NO_REASON
+    found = (owners or {}).get(claim.id)
+    if (found is None or str(getattr(found, "owner", "")) != claim.owner
+            or str(getattr(found, "reason", "")) != claim.rationale):
+        return ClaimCause.OWNER_UNATTRIBUTED
+    return None
+
+
+def compose(
+    claim: Claim,
+    verdicts: Iterable[Verdict],
+    *,
+    stale: bool = False,
+    stale_gates: Collection[str] = (),
+    owners: Mapping[str, Any] | None = None,
+) -> Composed:
+    """Resolve one claim to its status AND the fact that set it — GLOSSARY §3's
+    composition, one ladder for every kind, first match wins.
+
+    `verdicts` may be the whole `ledger.verdicts` list (filtered here with
+    `covering_verdicts`). `claim.gates` names the known covering gates — the
+    registry-aware callers top it up with live coverage first — and a known
+    gate with no covering verdict is *unrun*. A verdict whose `unqualified` is
+    set is an evaluator refused at its version (only the spine sets the mark,
+    `Verdict.unqualified`); an `error` outcome without it is a crash.
+    `stale_gates`/`stale` are the resolver's, as before; `owners` maps a claim
+    id to the `Attribution` the signing channel recorded (none in P2.1).
+
+    1. **Failing** — a physical result failed (`refuted`); any covering verdict
+       FAILED, from an evaluator that is not unqualified (`fail`), whatever the
+       kind and whether or not it is stale (D-08; R-3: a result never loses its
+       power to fail).
+    2. **Skipped** — any covering evaluator ERRORED (cause `errored`, louder:
+       invariant 2), else any SKIPPED (`skipped`), even beside a pass.
+    3. **Gap** — any covering evaluator unqualified (`unqualified`), even
+       beside a pass; a measurable claim with no evaluator (`no-evaluator`); an
+       assumption with no owner named, no reason, or an owner the channel did
+       not attribute (`no-owner`, `no-reason`, `owner-unattributed`).
+    4. **Open** — a covering gate unrun (`unrun`), even beside a pass.
+    5. **Stale** — `stale`, or a covering gate in `stale_gates` (`invalidated`).
+    6. **Pending build** — a physical claim with no result (`no-article`).
+    7. **Assumed** — an attributed, reasoned assumption (`owned`).
+    8. **Checked** — a physical pass recorded (`verified`, `physical-pass`);
+       otherwise every covering evaluator ran, passed and is current (`pass`).
+
+    **A SKIP IS NEVER A PASS. AN ERROR IS NEVER A PASS. AN UNQUALIFIED OR UNRUN
+    EVALUATOR IS NEVER A PASS, beside a pass or not.** What slipped through the
+    ladder this replaced (S-03): it read only the verdicts that existed, so a
+    pass beside a skip read PASS, and a pass beside a gate that never ran —
+    including one `check` had just refused at its first run — read PASS too,
+    and `status --json` said `ready: true`. And its rung 4 read a crash as
+    FAIL: a crash failed nothing, so the design took the blame for a broken
+    evaluator (GLOSSARY §3, *Skipped*).
+
+    A pass never makes an assumption Checked: its kind says no evaluator
+    settles it, and a tag-bound evaluator may test an adjacent property. A
+    covering fail, skip, refusal or unrun gate still counts for one (R-3).
+    Physical claims compose their automated evaluators the same way (S-49): a
+    failing modelled half reads Failing before any result is consulted, and an
+    unrun or invalidated one ranks above Pending build (the cheap evaluator
+    first, and Open and Stale stop `check` while Pending build does not).
+    """
+    kind = _kind(claim)
+    mine = covering_verdicts(claim, verdicts)
+    known = _distinct(claim.gates or ())
+    ran = {v.gate for v in mine}
+    unrun = [g for g in known if g not in ran]
+    refused = [v for v in mine if getattr(v, "unqualified", "")]
+    counted = [v for v in mine if not getattr(v, "unqualified", "")]
+    failed = [v for v in counted if v.outcome == "fail"]
+    errored = [v for v in counted if v.outcome == "error"]
+    skipped = [v for v in counted if v.outcome == "skipped"]
+    result = claim.physical_result if kind is ClaimKind.PHYSICAL else None
+
+    def gates_of(*groups: list[Verdict]) -> tuple:
+        return tuple(_distinct(v.gate for group in groups for v in group))
+
+    # 1. Failing
+    if result is not None and not result.passed:
+        return Composed(ClaimStatus.REFUTED, ClaimCause.PHYSICAL_FAIL)
+    if failed:
+        return Composed(ClaimStatus.FAIL, ClaimCause.FAILED, gates_of(failed), failed[0])
+    # 2. Skipped: errored first, in the status and in what it cites
+    if errored:
+        return Composed(ClaimStatus.BLOCKED, ClaimCause.ERRORED, gates_of(errored, skipped),
+                        errored[0])
+    if skipped:
+        return Composed(ClaimStatus.BLOCKED, ClaimCause.SKIPPED, gates_of(skipped), skipped[0])
+    # 3. Gap
+    if refused:
+        return Composed(ClaimStatus.UNCLAIMED, ClaimCause.UNQUALIFIED, gates_of(refused),
+                        refused[0])
+    if kind is ClaimKind.MEASURABLE and not mine and not known:
+        return Composed(ClaimStatus.UNCLAIMED, ClaimCause.NO_EVALUATOR)
+    if kind is ClaimKind.ASSUMPTION:
+        unowned = _ownership(claim, owners)
+        if unowned is not None:
+            return Composed(ClaimStatus.UNCLAIMED, unowned)
+    # 4. Open
+    if unrun:
+        return Composed(ClaimStatus.PENDING, ClaimCause.UNRUN, tuple(unrun))
+    # 5. Stale — the covering gates are the verdicts' and the known ones: a gate
+    # the resolver named stale covers this claim either way.
+    covering = _distinct([*(v.gate for v in mine), *known])
+    stale_set = set(stale_gates or ())
+    moved = covering if stale else [g for g in covering if g in stale_set]
+    if moved:
+        first = next((v for v in mine if v.gate == moved[0]), None)
+        return Composed(ClaimStatus.STALE, ClaimCause.INVALIDATED, tuple(moved), first)
+    # 6. Pending build
+    if kind is ClaimKind.PHYSICAL and result is None:
+        return Composed(ClaimStatus.UNVERIFIED, ClaimCause.NO_ARTICLE)
+    # 7. Assumed
+    if kind is ClaimKind.ASSUMPTION:
+        return Composed(ClaimStatus.ASSERTED, ClaimCause.OWNED)
+    # 8. Checked
+    if kind is ClaimKind.PHYSICAL:
+        return Composed(ClaimStatus.VERIFIED, ClaimCause.PHYSICAL_PASS, gates_of(mine))
+    return Composed(ClaimStatus.PASS, ClaimCause.CHECKED, gates_of(mine))
+
+
 def resolve_status(
     claim: Claim,
     verdicts: Iterable[Verdict],
     *,
     stale: bool = False,
     stale_gates: Collection[str] = (),
+    owners: Mapping[str, Any] | None = None,
 ) -> ClaimStatus:
-    """Resolve one claim to a single honest status.
-
-    `verdicts` may be the whole `ledger.verdicts` list — this function filters it
-    with `covering_verdicts`, so callers never have to reproduce the tag rule.
-
-    `stale_gates` names the gates whose verdict is not current — what
-    `verdicts.resolve` found Stale, Unknown or undemonstrated. A claim whose
-    covering verdicts all ran and passed reads STALE when any covering gate is
-    in it: a stale pass is not a pass, and it is the exact shape of the failure
-    where a report is green against a model nobody has re-checked. A stale FAIL
-    stays FAIL (D-08): the refutation was measured, and staleness never softens
-    a failure into something that looks like progress. `stale=True` is the
-    all-gates alias — every covering gate is stale — kept because
-    `StatusPrecedence.test_stale_is_not_pass` pins it (R-6). What it replaced:
-    one flag for the whole project, from one hash of the projection, so a
-    comment edit in the model staled every claim and ingesting one unread file
-    staled every measurable one (S-33).
-
-    This function will not decide staleness for itself; that needs the model
-    and the cache, and a claim resolver that read either would resolve the same
-    ledger differently on two machines.
-
-    Precedence, exactly as specified in the spine contract:
-
-    * ASSUMPTION -> ASSERTED. Standing and unevidenced, by definition. A gate
-      result would not change it; the honesty is in it being *visible*.
-    * PHYSICAL   -> VERIFIED / REFUTED when a human recorded a `physical_result`,
-      else UNVERIFIED. No simulation ever launders a physical claim into green —
-      "the printed seam is watertight" is settled by water, or not at all.
-    * MEASURABLE -> the ladder below.
-
-    For MEASURABLE claims, in order:
-
-    1. no covering gate at all                 -> UNCLAIMED  (a capability gap)
-    2. every covering verdict was skipped      -> BLOCKED    (tooling missing)
-    3. gates exist but none has a verdict      -> PENDING    (never run)
-    4. any covering verdict failed or errored  -> FAIL
-    5. all ran and passed, and `stale` or a
-       covering gate is in `stale_gates`      -> STALE
-    6. otherwise                               -> PASS
-
-    **A SKIP IS NEVER A PASS. AN ERROR IS NEVER A PASS.** Rungs 2 and 4 exist
-    only to make that true, and every one of BLOCKED/PENDING/UNCLAIMED/FAIL/STALE
-    is in `BLOCKING_STATUSES` — so no amount of not-having-checked can let a
-    critical claim through `blocking()`.
-    """
-    kind = _kind(claim)
-
-    if kind is ClaimKind.ASSUMPTION:
-        return ClaimStatus.ASSERTED
-
-    if kind is ClaimKind.PHYSICAL:
-        result = claim.physical_result
-        if result is None:
-            return ClaimStatus.UNVERIFIED
-        return ClaimStatus.VERIFIED if result.passed else ClaimStatus.REFUTED
-
-    mine = covering_verdicts(claim, verdicts)
-
-    # A gate is known to exist either because a verdict came back from one, or
-    # because the claim records one. `claim.gates` is how a claim with a
-    # registered-but-never-run gate reads PENDING instead of UNCLAIMED; the
-    # registry-aware callers below top it up with live coverage before calling.
-    known_gates = [g for g in (claim.gates or ()) if g]
-
-    if not mine and not known_gates:
-        return ClaimStatus.UNCLAIMED
-
-    # Every rung reads `Verdict.outcome`, the one definition of what a gate run
-    # was. The rungs used to re-derive it from the three flags, in a third copy
-    # that agreed with `Verdict.ok` and `Verdict.render` only because nobody had
-    # yet written the fourth.
-    outcomes = [v.outcome for v in mine]
-
-    # Rung 2. `skip_reason` is free text ("requires openfoam (not installed)"),
-    # so there is no reliable way to tell an availability skip from any other
-    # kind — and it does not matter, because neither is a pass. Every skip is
-    # treated as "the tooling did not run", which is what BLOCKED means.
-    # An errored verdict is deliberately NOT a skip: the gate ran and blew up,
-    # which is a louder problem, and falls through to FAIL on rung 4.
-    if mine and all(o == "skipped" for o in outcomes):
-        return ClaimStatus.BLOCKED
-
-    if not mine:
-        return ClaimStatus.PENDING
-
-    # Rung 4. An outcome is "pass" only for `passed is True` with no skip and no
-    # error, so a gate that crashed cannot reach rungs 5-6 no matter what
-    # `passed` says — a crashed gate that left `passed` at its default is the
-    # plausible-sounding green this whole module exists to prevent — and neither
-    # can a hand-edited `"passed": "yes"`.
-    if any(o in ("error", "fail") for o in outcomes):
-        return ClaimStatus.FAIL
-
-    if stale:
-        return ClaimStatus.STALE
-    # Rung 5, per gate. The covering gates are the verdicts' and the claim's
-    # known ones: a gate the resolver named stale covers this claim either way.
-    if stale_gates:
-        stale_set = set(stale_gates)
-        if any(v.gate in stale_set for v in mine) or any(g in stale_set for g in known_gates):
-            return ClaimStatus.STALE
-    return ClaimStatus.PASS
+    """`compose(...).status` — the contract's name for the one producer of a
+    claim's status (R-5). Everything about the ladder is `compose`'s docstring;
+    `stale=True` is the all-gates alias `StatusPrecedence.test_stale_is_not_pass`
+    pins (R-6), and `owners` the additive keyword the signing channel will use."""
+    return compose(claim, verdicts, stale=stale, stale_gates=stale_gates,
+                   owners=owners).status
 
 
-#: The order `explaining_verdict` ranks outcomes in, most explanatory first. A
-#: gate that RAN and failed carries the measured value and the limit, which is
-#: what the reader is about to go and change; a crash is louder than a missing
-#: tool; a skip explains only when nothing else does. A pass explains nothing.
-_EXPLAINS = ("fail", "error", "skipped")
+#: The order `explaining_verdict` ranks verdicts in, most explanatory first —
+#: `compose`'s rungs 1-3: a gate that RAN and failed carries the measured value
+#: and the limit, which is what the reader is about to go and change; a crash is
+#: louder than a missing tool; a skip explains before a refusal (Skipped ranks
+#: above Gap); a pass explains nothing.
+_EXPLAINS = ("fail", "error", "skipped", "unqualified")
+
+
+def _explains_as(verdict: Verdict) -> str:
+    return "unqualified" if getattr(verdict, "unqualified", "") else verdict.outcome
 
 
 def explaining_verdict(claim: Claim, verdicts: Iterable[Verdict]) -> Verdict | None:
@@ -289,9 +440,11 @@ def explaining_verdict(claim: Claim, verdicts: Iterable[Verdict]) -> Verdict | N
     while `check` — whose own copy of this ranking had already been fixed —
     cited the gate that ran and measured 0.7 mm against a 0.5 mm limit. Two
     commands, two stories, one ledger; the reader went looking for a missing
-    parameter. So the choice lives here, once: ran-and-failed, then errored, then
-    skipped, and within a rank the first in the order given (stable, so the same
-    ledger always cites the same gate).
+    parameter. So the choice lives here, once, in `compose`'s order: ran and
+    failed, then errored, then skipped, then unqualified — and within a rank
+    the first in the order given (stable, so the same ledger always cites the
+    same gate). An unqualified evaluator's verdict says `error` too; it is
+    ranked by its mark, never as a crash (P2.0 D-8).
 
     `verdicts` may be the whole ledger's list; it is filtered with
     `covering_verdicts`, by the same id-or-tag rule as everything else here.
@@ -299,7 +452,7 @@ def explaining_verdict(claim: Claim, verdicts: Iterable[Verdict]) -> Verdict | N
     mine = covering_verdicts(claim, verdicts)
     for wanted in _EXPLAINS:
         for verdict in mine:
-            if verdict.outcome == wanted:
+            if _explains_as(verdict) == wanted:
                 return verdict
     return None
 
@@ -364,8 +517,9 @@ def effective_gates(ledger: Ledger, registry: Any) -> dict[str, list[str]]:
     **This is the single definition of "which gates cover this claim".** Public
     for exactly that reason: `report.py` had grown a second, more optimistic
     copy that kept only the live half whenever a registry was passed, so the
-    PROVEN table's **PARTIAL** caveat — the one naming the covering gate that
-    produced no proof — silently vanished on precisely the machine where the
+    PROVEN table's **PARTIAL** caveat (since P2.1 such a claim leaves that table
+    and reads Skipped or Open, naming the gate) — the one naming the covering gate
+    that produced no proof — silently vanished on precisely the machine where the
     pack was *not* installed. The report read cleaner the less it could see.
     Two answers to a coverage question is one answer too many, and the
     optimistic copy always wins the argument.
@@ -398,12 +552,41 @@ def effective_gates(ledger: Ledger, registry: Any) -> dict[str, list[str]]:
 # --------------------------------------------------------------------------- #
 # whole-ledger views
 # --------------------------------------------------------------------------- #
+def compositions(
+    ledger: Ledger,
+    *,
+    registry: Any = None,
+    stale: bool = False,
+    stale_gates: Collection[str] = (),
+    owners: Mapping[str, Any] | None = None,
+) -> dict[str, Composed]:
+    """`compose` for every claim in the ledger: claim id -> `Composed`.
+
+    The renderers' entry point (P2.1-D3): a reader that needs the words for a
+    status needs its cause too, and asking for both here keeps one producer
+    (R-5). Coverage as `statuses` judges it — with `registry`, the union of the
+    claim's cached gates and live coverage (`effective_gates`); without one,
+    `claim.gates` alone, a cached opinion. `owners` as for `compose`.
+    """
+    gates_for = effective_gates(ledger, registry) if registry is not None else None
+    stale_set = frozenset(stale_gates or ())
+    out: dict[str, Composed] = {}
+    for claim in ledger.claims:
+        if gates_for is not None:
+            # `replace` copies; the ledger is never mutated by a derivation.
+            claim = replace(claim, gates=gates_for.get(claim.id, []))
+        out[claim.id] = compose(claim, ledger.verdicts, stale=stale, stale_gates=stale_set,
+                                owners=owners)
+    return out
+
+
 def statuses(
     ledger: Ledger,
     *,
     stale: bool = False,
     registry: Any = None,
     stale_gates: Collection[str] = (),
+    owners: Mapping[str, Any] | None = None,
 ) -> dict[str, ClaimStatus]:
     """Resolve every claim in the ledger. Claim id -> status.
 
@@ -411,21 +594,14 @@ def statuses(
     cached opinion: a claim whose gate arrived with a pack installed after the
     claim was written will read UNCLAIMED instead of PENDING. Pass the registry
     whenever you have one — `blocking()` and `summarise()` always do. (The
-    contract spells this function `statuses(ledger, *, stale=False)`; `registry`
-    and `stale_gates` are additive keywords, so every contract call site still
-    works.) `stale_gates` is `resolve_status`'s: the gates whose verdict is not
-    current, per gate rather than per project.
+    contract spells this function `statuses(ledger, *, stale=False)`;
+    `registry`, `stale_gates` and `owners` are additive keywords, so every
+    contract call site still works.) `stale_gates` is `resolve_status`'s: the
+    gates whose verdict is not current, per gate rather than per project.
     """
-    gates_for = effective_gates(ledger, registry) if registry is not None else None
-    stale_set = frozenset(stale_gates or ())
-    out: dict[str, ClaimStatus] = {}
-    for claim in ledger.claims:
-        if gates_for is not None:
-            # `replace` copies; the ledger is never mutated by a derivation.
-            claim = replace(claim, gates=gates_for.get(claim.id, []))
-        out[claim.id] = resolve_status(claim, ledger.verdicts, stale=stale,
-                                       stale_gates=stale_set)
-    return out
+    return {cid: composed.status for cid, composed in compositions(
+        ledger, registry=registry, stale=stale, stale_gates=stale_gates,
+        owners=owners).items()}
 
 
 def _gap_quantity(claim: Claim) -> str:
@@ -538,6 +714,7 @@ def blocking(
     *,
     stale: bool = False,
     stale_gates: Collection[str] = (),
+    owners: Mapping[str, Any] | None = None,
 ) -> list[tuple[Claim, ClaimStatus]]:
     """Critical claims whose status must stop an irreversible spend, with the reason.
 
@@ -547,22 +724,24 @@ def blocking(
     installed" is — and because the caller would otherwise recompute the status
     it just discarded, with a second copy of the precedence rules.
 
-    `critical=False` claims never appear: a nice-to-have that failed is a note in
-    the report, not a stop sign, and a stop sign that fires on nice-to-haves gets
-    ignored the third time.
+    `critical=False` claims never appear: a claim no spend requires that failed
+    is a note in the report, not a stop sign, and a stop sign that fires on
+    claims nobody requires gets ignored the third time.
 
-    Note what is *not* in `BLOCKING_STATUSES`: UNVERIFIED. A physical claim
-    awaiting a real-world result cannot block the spend that produces the object
-    you would test it on. It stays loudly UNVERIFIED in the readiness report
-    instead — that is the readiness ledger separating PROVEN from ASSUMED, not
-    the spend gate.
+    Note what is *not* in `BLOCKING_STATUSES`: UNVERIFIED (Pending build) and
+    ASSERTED (Assumed). A physical claim awaiting an article cannot block the
+    spend that produces the article you would test it on, and an owned
+    assumption is carried on purpose. Both are unresolved (GLOSSARY §3) and
+    stop *ready* (`summarise`'s `all_required_checked`), never `check`.
 
-    A passing critical claim covered by a gate in `stale_gates` becomes STALE and
-    therefore blocks — with `stale=True`, every one does. That is the point: a
-    green run against inputs that have since moved is precisely the evidence
-    that is not evidence.
+    From P2.1 the set stays and more facts read into it (its D9): an errored
+    critical claim (Skipped), an assumption nobody owns (Gap), a pass beside an
+    unrun or a skipping evaluator (Open, Skipped), a refused evaluator beside a
+    pass (Gap). A passing critical claim covered by a gate in `stale_gates`
+    becomes STALE and therefore blocks — with `stale=True`, every one does.
     """
-    resolved = statuses(ledger, stale=stale, registry=registry, stale_gates=stale_gates)
+    resolved = statuses(ledger, stale=stale, registry=registry, stale_gates=stale_gates,
+                        owners=owners)
     return [
         (claim, resolved[claim.id])
         for claim in ledger.claims
@@ -576,6 +755,7 @@ def summarise(
     *,
     stale: bool = False,
     stale_gates: Collection[str] = (),
+    owners: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Counts for `atompipe status` — claims and gates, nothing else.
 
@@ -585,39 +765,73 @@ def summarise(
     downstream, and a missing key reads as "no problem here" when it means "no
     key here".
 
-    `ready` is `n_blocking == 0`: nothing critical is in a blocking status *as
-    far as the gates go*. It is not "everything is proven" — UNVERIFIED physical
-    claims and standing assumptions are both compatible with `ready`, by design,
-    and the readiness report is where that distinction is spelled out in words.
+    From P2.1 the kept keys read per Table 1 (P2.1-D12): `by_status["blocked"]`
+    holds errored claims beside skipped ones, `["unclaimed"]` unqualified and
+    unowned ones. Added beside them, never in place of them:
 
-    Input-artifact counts are deliberately absent; `artifacts.unextracted()`
+    * `counts` — `{token: n}` over `KEY_ORDER`, zero-filled, summing to
+      `n_claims` (the words' machine tokens, `STATUS_KEY`);
+    * `errored` and `errored_ids` — the claims Skipped by a crash, counted apart
+      (invariant 2: `N skipped (k errored)`);
+    * `unresolved_ids` — the required (`critical`) claims that do not read
+      Checked, Pending build and Assumed included (GLOSSARY §3);
+    * `unbound_ids` — the required claims that read Checked on a physical pass
+      no article binds to the current inputs (every one, until article binding
+      lands): checked, but not shown to be against the current inputs;
+    * `all_required_checked` — *ready* (GLOSSARY §4, W3): at least one required
+      claim, and every one reads Checked on the current inputs — `unresolved_ids`
+      and `unbound_ids` both empty. Zero required claims is not ready.
+
+    `ready` keeps its meaning — `n_blocking == 0`, nothing stops `check` — for
+    every reader that has it (`status --json`, the private bench, a page
+    scaffolded before P2.1); P2.5's `Readiness` replaces it. *Rejected:*
+    flipping it now, a key changing meaning under every reader at once.
+
+    `n_gaps` counts gap RECORDS (`find_gaps`' Needs: an automated claim no
+    registered evaluator covers), not claims reading Gap — `counts["gap"]` is
+    those. Input-artifact counts are deliberately absent; `artifacts.unextracted()`
     owns those, and a summary assembled from two modules' views of the same
     ledger is how two numbers that must agree stop agreeing.
 
     `stale` in the result is True when any gate is stale — the alias, or a
     non-empty `stale_gates`.
     """
-    resolved = statuses(ledger, stale=stale, registry=registry, stale_gates=stale_gates)
+    composed = compositions(ledger, registry=registry, stale=stale,
+                            stale_gates=stale_gates, owners=owners)
+    resolved = {cid: c.status for cid, c in composed.items()}
     specs = _specs(registry)
     live = coverage(ledger, registry)
     gaps = find_gaps(ledger, registry)
-    blockers = blocking(ledger, registry, stale=stale, stale_gates=stale_gates)
+    blockers = blocking(ledger, registry, stale=stale, stale_gates=stale_gates,
+                        owners=owners)
 
     by_status = {s.value: 0 for s in ClaimStatus}
     for status in resolved.values():
         by_status[status.value] += 1
+
+    counts = {key: 0 for key in KEY_ORDER}
+    for status in resolved.values():
+        counts[STATUS_KEY[status]] += 1
 
     by_kind = {k.value: 0 for k in ClaimKind}
     for claim in ledger.claims:
         by_kind[_kind(claim).value] += 1
 
     covering_specs = {s.id for s in specs if any(covers(s, c) for c in ledger.claims)}
+    required = [c for c in ledger.claims if c.critical]
+    unresolved = [c.id for c in required
+                  if resolved.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
+    unbound = [c.id for c in required if resolved.get(c.id) is ClaimStatus.VERIFIED]
+    errored = [cid for cid, c in composed.items() if c.errored]
 
     return {
         "n_claims": len(ledger.claims),
-        "n_critical": sum(1 for c in ledger.claims if c.critical),
+        "n_critical": len(required),
         "by_status": by_status,
         "by_kind": by_kind,
+        "counts": counts,
+        "errored": len(errored),
+        "errored_ids": errored,
         "n_gates": len(specs),
         "n_gates_binding": len(covering_specs),      # registered gates that reach a claim
         "n_covered_claims": sum(1 for ids in live.values() if ids),
@@ -625,6 +839,9 @@ def summarise(
         "n_gaps": len(gaps),
         "n_blocking": len(blockers),
         "blocking_ids": [c.id for c, _ in blockers],
+        "unresolved_ids": unresolved,
+        "unbound_ids": unbound,
+        "all_required_checked": bool(required) and not unresolved and not unbound,
         "stale": bool(stale) or bool(stale_gates),
         "ready": not blockers,
     }
