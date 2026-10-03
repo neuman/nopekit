@@ -102,6 +102,15 @@ The three tier-2 gates SKIP wherever `omc` is absent, and their claims resolve
 BLOCKED. Their fixtures are real `.mo` files that omc genuinely rejects, so those
 controls fire wherever omc is installed — see `references/installing.md`.
 
+They also SKIP when a library named in `modelica_load_libraries` does not load.
+omc is present but the library is not, so nothing was learned about the model.
+**This pack's selftest cannot tell you whether a library is installed.** Its
+fixtures load no library, on purpose, so that the controls run, and fail as they
+must, on a bare omc.
+For the same reason they pass on an omc with no Modelica Standard Library, and
+that is what most installs produce: the `-minimal` docker image ships none.
+`references/installing.md` gives the one-time install and a check for it.
+
 ## Claim tags
 
 Gates list everything they bear on; **claims carry the narrowest vocabulary that
@@ -187,7 +196,8 @@ what it should conserve, and does not depend on the tolerance. Check all three.
 ## Where to look next
 
 - `references/installing.md` — apt, the official installer, docker, a pinned
-  version, and the smoke test to run before any project data touches it.
+  version, installing the Modelica Standard Library (the `-minimal` image has
+  none), and the smoke test to run before any project data touches it.
 - `references/driving-omc.md` — the `.mos` scripting API, why a script file
   beats a ZMQ session, and the exact scripts these gates generate.
 - `references/result-formats.md` — the CSV format in detail, `.mat`, duplicate

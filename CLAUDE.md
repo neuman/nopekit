@@ -17,6 +17,7 @@ the entry point, and `atompipe doctor` is the first command to run when confused
 ```sh
 PYTHONPATH=src python3 -m atompipe --help
 PYTHONPATH=src python3 -m unittest discover -s tests   # every test, must stay green
+PYTHONPATH=src python3 -m tests.fast                   # fast subset, ≤ 90 s on an idle machine: run it each iteration; the full suite runs before each checkpoint and commit
 cd examples/bracket && PYTHONPATH=../../src python3 -m atompipe check
 ```
 

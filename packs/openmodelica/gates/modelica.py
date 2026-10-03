@@ -1039,16 +1039,58 @@ def _omc_setup(ctx: GateContext, gid: str):
     return class_name, sources, libraries
 
 
-def _load_failed(run: M.OmcRun) -> str:
-    """Why the sources did not load, or "". Checked before every tier-2 verdict."""
+def _load_verdict(run: M.OmcRun, gid: str, verb: str, evidence: list[str]):
+    """The verdict when the load step went wrong, or None. Checked before every tier-2 verdict.
+
+    Two failures, two outcomes, in this order:
+
+    * a SOURCE that did not parse (``loadFile(...) = false``) is the model's
+      defect: FAIL, whatever else went wrong;
+    * a LIBRARY that did not load (``loadModel(X) = false``) is the machine's:
+      omc cannot see it, nothing about the model was learned, and the gate
+      SKIPs, so the claim reads BLOCKED exactly as for a missing omc.
+
+    What slipped through: with no MSL installed (the ``-minimal`` docker image
+    ships none), all three gates read FAIL with "the sources did not load" about
+    sources that had loaded. The ``loadModel`` line sits in the ``libraries``
+    segment, which nothing read; only the buffered error string was seen, it was
+    blamed on the sources, and the line naming the missing package was the fifth
+    error of a detail that keeps three. The pack's own selftest never saw it — its
+    fixtures load no library. ``tests/test_openmodelica_library.py`` replays the
+    real transcripts. *Rejected:* reading "Failed to load package" out of the
+    error text, which changes between omc versions; the ``= false`` line is the
+    script's own print and does not.
+    """
     loaded = run.segment("load")
     if "= false" in loaded:
-        failed = [line for line in loaded.splitlines() if "= false" in line]
-        return "; ".join(failed[:3])
+        failed = [line.strip() for line in loaded.splitlines() if "= false" in line]
+        return Verdict(gate=gid, passed=False,
+                       detail=f"the sources did not load, so nothing was {verb}: "
+                              f"{'; '.join(failed[:3])}",
+                       evidence=evidence)
     errors = run.segment("loaderr")
+    missing = [line.strip() for line in run.segment("libraries").splitlines()
+               if "= false" in line]
+    if missing:
+        named = [line.strip() for line in errors.splitlines()
+                 if "failed to load package" in line.lower()]
+        why = named[0] if named else M.first_errors(errors, limit=1)
+        if why.lower().startswith("error:"):
+            why = why[len("error:"):].strip()
+        # Short on purpose: run_gate caps a skip reason at 200 characters, and
+        # the first draft of this line lost its pointer to the remedy to the cap.
+        return Verdict(gate=gid, passed=False, skipped=True,
+                       skip_reason=(f"library not loaded, nothing {verb}: "
+                                    f"{'; '.join(missing[:3])}"
+                                    + (f"; omc: {why}" if why else "")
+                                    + " (references/installing.md)"),
+                       evidence=evidence)
     if M.error_is_real(errors):
-        return M.first_errors(errors)
-    return ""
+        return Verdict(gate=gid, passed=False,
+                       detail=f"the sources did not load, so nothing was {verb}: "
+                              f"{M.first_errors(errors)}",
+                       evidence=evidence)
+    return None
 
 
 def _run_or_skip(ctx: GateContext, gid: str, lines, name: str, timeout: float):
@@ -1124,12 +1166,9 @@ def checks(ctx: GateContext) -> Verdict:
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
 
-    load_problem = _load_failed(run)
-    if load_problem:
-        return Verdict(gate=gid, passed=False,
-                       detail=f"the sources did not load, so nothing was checked: "
-                              f"{load_problem}",
-                       evidence=evidence)
+    load_problem = _load_verdict(run, gid, "checked", evidence)
+    if load_problem is not None:
+        return load_problem
 
     check_text = run.segment("check")
     errors = run.segment("checkerr")
@@ -1215,12 +1254,9 @@ def compiles(ctx: GateContext) -> Verdict:
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
 
-    load_problem = _load_failed(run)
-    if load_problem:
-        return Verdict(gate=gid, passed=False,
-                       detail=f"the sources did not load, so nothing was built: "
-                              f"{load_problem}",
-                       evidence=evidence)
+    load_problem = _load_verdict(run, gid, "built", evidence)
+    if load_problem is not None:
+        return load_problem
 
     executable = M.printed_value(run.segment("build"))
     # buildModel's first element is the executable, and whether it comes back
@@ -1332,12 +1368,9 @@ def simulates(ctx: GateContext) -> Verdict:
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
 
-    load_problem = _load_failed(run)
-    if load_problem:
-        return Verdict(gate=gid, passed=False,
-                       detail=f"the sources did not load, so nothing was simulated: "
-                              f"{load_problem}",
-                       evidence=evidence)
+    load_problem = _load_verdict(run, gid, "simulated", evidence)
+    if load_problem is not None:
+        return load_problem
 
     echoed = run.segment("simulate")
     file_match = M.RESULT_FILE_RE.search(echoed) or M.RESULT_FILE_RE.search(run.stdout)

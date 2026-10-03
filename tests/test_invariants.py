@@ -122,6 +122,21 @@ class ErrorIsNotPass(unittest.TestCase):
         st = claims_mod.resolve_status(_claim(), [v])
         self.assertNotEqual(st, ClaimStatus.PASS)
 
+    def test_a_pass_beside_an_errored_gate_does_not_pass(self):
+        # The single-verdict test above cannot see this one. A claim with two
+        # covering gates, one passing and one crashed, must not read as a pass
+        # in either order. Today rung 4 makes it FAIL; Phase 2 moves an errored
+        # claim off FAIL, and a status table that lets the passing gate win
+        # there would turn a crash into a pass with every other test green.
+        ok = Verdict(gate="g.one", claims=["C1"], passed=True)
+        boom = Verdict(gate="g.two", claims=["C1"], passed=True,
+                       error="RuntimeError: deliberate")
+        claim = _claim(gates=["g.one", "g.two"])
+        for verdicts in ([ok, boom], [boom, ok]):
+            st = claims_mod.resolve_status(claim, verdicts)
+            self.assertNotIn(st, (ClaimStatus.PASS, ClaimStatus.VERIFIED),
+                             [v.gate for v in verdicts])
+
     def test_crashing_gate_produces_error_verdict_not_a_pass(self):
         reg = gates_mod.Registry()
 

@@ -1,5 +1,9 @@
 # PLAN — bringing atompipe up to "Grounded Refusal Scaling"
 
+> **Amended by [`PLAN-v0.14.md`](PLAN-v0.14.md)** for paper v0.14 and the accepted walkthrough,
+> with the phases re-sequenced (B0, B1, P2–P6). **Where the two disagree, the amendment wins;**
+> a row it does not name stands as written here.
+
 This is the Phase 0 output. It is a hand-written source, not a generated file, and it
 is a plan, not a record of work done. Every `file:line` refers to commit `1e09113` on
 branch `grounded-refusal`; the phase that moves a line updates the reference in the
