@@ -69,7 +69,7 @@ the resulting error names *your* class, sending you to debug the wrong file.
 print("@@ATOMPIPE:libraries\n");
 print("loadModel(Modelica) = " + String(loadModel(Modelica)) + "\n");
 print("@@ATOMPIPE:load\n");
-print("loadFile(ThermalTank.mo) = " + String(loadFile("/abs/.../ThermalTank.mo")) + "\n");
+print("loadFile(ThermalTank.mo) = " + String(loadFile("/abs/<out_dir>/omc/.sources/check/0/model/ThermalTank.mo")) + "\n");
 print("@@ATOMPIPE:loaderr\n");
 print(getErrorString() + "\n");
 print("@@ATOMPIPE:check\n");
@@ -89,6 +89,19 @@ print(built[1] + "\n");`, and `modelica.simulates` with an echoed
 Both the script and a full log (script, return code, duration, stdout, stderr)
 are written to `<out_dir>/omc/` and cited in the verdict's `evidence`. To
 reproduce any tier-2 verdict: `cd` to that directory and run `omc check.mos`.
+
+The script never loads your files where they live. Each run first copies every
+`modelica_sources` entry under `.sources/<script>/<n>/` beside the script — a
+directory as its whole tree, so a package keeps its name, its `package.order`
+and its `Resources/`; dot-directories left out — and `loadFile` names the copy.
+omc runs from that directory, so an omc behind a wrapper sees everything it is
+asked to load as long as the wrapper mounts the directory omc runs in, which it
+must anyway. The log lists each copy beside its original, and keeps omc's output
+as printed; the verdicts put every copy's path back to yours, so an error points
+at the file you edit. Edit the originals: the copies are rebuilt on every run,
+which is also why a file you deleted is never loaded from an old copy.
+`omc check.mos` by hand reproduces the copies the gate loaded, not your edits
+since.
 
 Before every run the gate deletes each `*.o` in that directory. omc's generated
 makefile rebuilds the main object `<Class>.o` only when `<Class>.c` is newer, and

@@ -89,12 +89,12 @@ To let the gates use it, put an `omc` on PATH that forwards into the container.
 It has to get two things right:
 
 1. **Paths.** The gates write their `.mos` under `<out_dir>/omc` (by default
-   `<project>/.atompipe/out/omc`, and a temp directory under `gate selftest`).
-   They run omc from there and pass it **absolute paths** to sources that live
-   somewhere else. If the wrapper mounts only `$PWD`, every `loadFile` returns
-   `false` and the gate FAILs a model nobody read. So mount the trees your
-   projects and your temp directory live in, at the same paths inside the
-   container.
+   `<project>/.atompipe/out/omc`, and a temp directory under `gate selftest`),
+   copy the sources beside it (`.sources/<script>/`), and run omc from there.
+   So mount `$PWD` at the **same path** inside the container and start omc in
+   it; the gates hand omc no other path of yours. The one exception is a model
+   that opens a file by absolute path (a table, an external C library): mount
+   that tree too, because nothing here can see such a read.
 2. **Libraries.** Point `HOME` at the volume. Then `installPackage` has somewhere
    to write, and every later run finds what it wrote.
 
@@ -103,13 +103,17 @@ It has to get two things right:
 # ~/bin/omc — omc-in-docker, pinned, with its libraries in the omc-home volume
 set -euo pipefail
 IMAGE=openmodelica/openmodelica:v1.22.0-minimal
-tmp=${TMPDIR:-/tmp}
-# If all your projects live under one directory, mount that instead of $HOME.
-mounts=(-v omc-home:/omhome -e HOME=/omhome -v "$HOME:$HOME")
-[ "$tmp" != "$HOME" ] && mounts+=(-v "$tmp:$tmp")
-case "$PWD/" in "$HOME"/*|"$tmp"/*) ;; *) mounts+=(-v "$PWD:$PWD") ;; esac
-exec docker run --rm -u "$(id -u):$(id -g)" "${mounts[@]}" -w "$PWD" "$IMAGE" omc "$@"
+exec docker run --rm -u "$(id -u):$(id -g)" -v omc-home:/omhome -e HOME=/omhome \
+  -v "$PWD:$PWD" -w "$PWD" "$IMAGE" omc "$@"
 ```
+
+Until the gates copied their sources, they handed `loadFile` absolute paths
+into the project, and this page told the wrapper to mount `$HOME` and the temp
+directory as well. A wrapper that guessed wrong saw nothing: under a test
+suite's temp `HOME`, a checkout under the real home was invisible, omc answered
+`loadFile(...) = false` with **no error at all**, and the gates FAILed a model
+nobody read. If you see that line with an empty error string, the wrapper is not
+mounting the directory omc runs in.
 
 Then install the library once. This is the only step that needs the network:
 

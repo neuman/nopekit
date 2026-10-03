@@ -1024,7 +1024,7 @@ def mirror_agrees(ctx: GateContext) -> Verdict:
 # tier 2 — omc
 # =========================================================================== #
 def _omc_setup(ctx: GateContext, gid: str):
-    """``(class, sources, libraries, timeout)`` or a SKIP verdict."""
+    """``(class, entries, sources, libraries)`` or a SKIP verdict."""
     values, missing = _need(ctx, "modelica_class", "modelica_sources")
     if missing:
         return _skip_missing(gid, missing,
@@ -1036,7 +1036,15 @@ def _omc_setup(ctx: GateContext, gid: str):
         return _skip(gid, f"modelica_sources names no readable .mo file "
                           f"(looked at {', '.join(entries[:3])} under {ctx.root or '.'})")
     libraries = [str(x) for x in _as_list(ctx.param("modelica_load_libraries", []))]
-    return class_name, sources, libraries
+    return class_name, entries, sources, libraries
+
+
+def _preamble(ctx: GateContext, name: str, entries, sources, libraries):
+    """``(lines, staged)``: the load half of ``<name>.mos``, over copies of the
+    sources staged in the directory omc runs from (:func:`M.stage_sources` says
+    why), and the staging, which :func:`M.run_mos` logs and maps back."""
+    staged = M.stage_sources(entries, ctx.root, ctx.out_path("omc"), name)
+    return M.mos_preamble([M.staged_path(s, staged) for s in sources], libraries), staged
 
 
 def _load_verdict(run: M.OmcRun, gid: str, verb: str, evidence: list[str]):
@@ -1093,9 +1101,10 @@ def _load_verdict(run: M.OmcRun, gid: str, verb: str, evidence: list[str]):
     return None
 
 
-def _run_or_skip(ctx: GateContext, gid: str, lines, name: str, timeout: float):
+def _run_or_skip(ctx: GateContext, gid: str, lines, name: str, timeout: float,
+                 staged=()):
     """Run omc; return the OmcRun, or a SKIP verdict when nothing was learned."""
-    run = M.run_mos(lines, ctx.out_path("omc"), name, timeout_s=timeout)
+    run = M.run_mos(lines, ctx.out_path("omc"), name, timeout_s=timeout, staged=staged)
     if run.launch_error:
         return _skip(gid, f"could not launch omc: {run.launch_error}")
     if run.timed_out:
@@ -1150,18 +1159,18 @@ def checks(ctx: GateContext) -> Verdict:
     setup = _omc_setup(ctx, gid)
     if isinstance(setup, Verdict):
         return setup
-    class_name, sources, libraries = setup
+    class_name, entries, sources, libraries = setup
     timeout = _as_float(ctx.param("modelica_omc_timeout_s", DEFAULT_OMC_TIMEOUT_S),
                         DEFAULT_OMC_TIMEOUT_S) or DEFAULT_OMC_TIMEOUT_S
 
-    lines = M.mos_preamble(sources, libraries)
+    lines, staged = _preamble(ctx, "check", entries, sources, libraries)
     lines.append(M.mos_mark("check"))
     lines.append(f'print(checkModel({class_name}) + "\\n");')
     lines.append(M.mos_mark("checkerr"))
     lines.append('print(getErrorString() + "\\n");')
     lines.append(M.mos_mark("end"))
 
-    run = _run_or_skip(ctx, gid, lines, "check", timeout)
+    run = _run_or_skip(ctx, gid, lines, "check", timeout, staged)
     if isinstance(run, Verdict):
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
@@ -1237,11 +1246,11 @@ def compiles(ctx: GateContext) -> Verdict:
     setup = _omc_setup(ctx, gid)
     if isinstance(setup, Verdict):
         return setup
-    class_name, sources, libraries = setup
+    class_name, entries, sources, libraries = setup
     timeout = _as_float(ctx.param("modelica_omc_timeout_s", DEFAULT_OMC_TIMEOUT_S),
                         DEFAULT_OMC_TIMEOUT_S) or DEFAULT_OMC_TIMEOUT_S
 
-    lines = M.mos_preamble(sources, libraries)
+    lines, staged = _preamble(ctx, "build", entries, sources, libraries)
     lines.append(M.mos_mark("build"))
     lines.append(f"built := buildModel({class_name});")
     lines.append('print(built[1] + "\\n");')
@@ -1249,7 +1258,7 @@ def compiles(ctx: GateContext) -> Verdict:
     lines.append('print(getErrorString() + "\\n");')
     lines.append(M.mos_mark("end"))
 
-    run = _run_or_skip(ctx, gid, lines, "build", timeout)
+    run = _run_or_skip(ctx, gid, lines, "build", timeout, staged)
     if isinstance(run, Verdict):
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
@@ -1335,7 +1344,7 @@ def simulates(ctx: GateContext) -> Verdict:
     setup = _omc_setup(ctx, gid)
     if isinstance(setup, Verdict):
         return setup
-    class_name, sources, libraries = setup
+    class_name, entries, sources, libraries = setup
 
     values, missing = _need(ctx, "modelica_stop_time_s")
     if missing:
@@ -1354,7 +1363,7 @@ def simulates(ctx: GateContext) -> Verdict:
                                    DEFAULT_STOP_TIME_TOL_FRAC),
                          DEFAULT_STOP_TIME_TOL_FRAC) or DEFAULT_STOP_TIME_TOL_FRAC
 
-    lines = M.mos_preamble(sources, libraries)
+    lines, staged = _preamble(ctx, "simulate", entries, sources, libraries)
     lines.append(M.mos_mark("simulate"))
     lines.append(f"simulate({class_name}, startTime={start_time!r}, "
                  f"stopTime={stop_time!r}, numberOfIntervals={intervals}, "
@@ -1363,7 +1372,7 @@ def simulates(ctx: GateContext) -> Verdict:
     lines.append('print(getErrorString() + "\\n");')
     lines.append(M.mos_mark("end"))
 
-    run = _run_or_skip(ctx, gid, lines, "simulate", timeout)
+    run = _run_or_skip(ctx, gid, lines, "simulate", timeout, staged)
     if isinstance(run, Verdict):
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
