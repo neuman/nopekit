@@ -794,7 +794,10 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
         phrases = report_mod.page_phrases()
         self.assertEqual(phrases["invalidated"], "invalidated")
         self.assertEqual(phrases["need"]["open"], "identified")
-        self.assertEqual(sorted(phrases["outcome_hint"]), ["errored", "fail", "pass", "skipped"])
+        # R-6, widened (review of P2.4): a pass outside its operating context
+        # has a chip of its own, and so a title from the table.
+        self.assertEqual(sorted(phrases["outcome_hint"]),
+                         ["errored", "fail", "outside-context", "pass", "skipped"])
         self.assertNotIn("hint:", _page_sources()["format.js"].split("const VERDICT_STATUS", 1)[1]
                          .split("};", 1)[0])
         with mock.patch.object(report_mod, "HUMAN", sentinel_human()):
@@ -1358,3 +1361,153 @@ class QualificationWordsComeFromOneTable(unittest.TestCase):
         self.assertIsNotNone(QUALIFICATION_NEVER.search(
             "[ERR ] bracket.never : not admitted: known-good fail"),
             "a `not admitted:` in a rendered row is a Never-say")
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.4 — the acceptance condition has one name
+# --------------------------------------------------------------------------- #
+def acceptance_never_says(text: str) -> set[str]:
+    """The non-italic Never-says of GLOSSARY §1's *acceptance condition* row
+    alone, parsed — §1's other rows forbid words (*gate*) the shipped doctrine
+    still uses until the rename pass, so this scan reads the one row P2.4's
+    words went around."""
+    for row in _rows(_section(text, 1)):
+        if re.sub(r"\*\*", "", row[0]).strip() == "acceptance condition":
+            return {re.sub(r"\s*\(.*?\)\s*", " ", item).strip().lower()
+                    for item in row[-1].split(" · ")
+                    if item.strip() and not item.strip().startswith("*")}
+    return set()
+
+
+def _strings(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, (dict, MappingProxyType)):
+        return [s for v in value.values() for s in _strings(v)]
+    if isinstance(value, (tuple, list)):
+        return [s for v in value for s in _strings(v)]
+    return [s for s in (getattr(value, f, None) for f in getattr(value, "_fields", ()))
+            if isinstance(s, str)]
+
+
+#: The shipped doctrine an agent quotes (GLOSSARY §7): every word P2.4 put on it.
+_DOCTRINE = ("CLAUDE.md", "README.md", "METHOD.md", "skills/atompipe/SKILL.md",
+             "skills/pack-authoring/SKILL.md", "examples/bracket/README.md")
+
+
+class TheAcceptanceConditionHasOneName(unittest.TestCase):
+    """What slipped through P2.4 (review): *goalpost* — in no GLOSSARY row — named
+    the acceptance condition or its limit on every human channel P2.4 touched:
+    `value moves with its goalpost` on the qualification line, `never chosen by
+    its goalpost` in a Gap reason, `gate show`'s `goalpost` rows, an errored
+    pass's detail, CLAUDE.md's invariants 4, 7 and 9, both skills and the
+    bracket's README. One term per concept (D-16): it is now a Never-say of the
+    acceptance condition's row, parsed here, so the next one is red."""
+
+    def _lines(self) -> dict[str, list[str]]:
+        out = {"HUMAN": _strings(report_mod.HUMAN)}
+        for rel in _DOCTRINE:
+            with open(os.path.join(_env.REPO, *rel.split("/")), encoding="utf-8") as fh:
+                out[rel] = fh.read().splitlines()
+        from atompipe import gates as gates_mod, verdicts as verdicts_mod
+        from atompipe.models import Acceptance, Claim, Comparator, Ledger, Verdict
+        claim = Claim(id="c1", statement="c1", acceptance=Acceptance(
+            quantity="x", comparator=Comparator.LE, limit=0.5, units="mm"))
+
+        def lying(ctx):
+            ctx.acceptance("c1")
+            return Verdict(gate="t.g", passed=True, measured=0.7, units="mm")
+        spec = gates_mod.GateSpec(id="t.g", claims=["c1"], negative_control=(
+            models_mod.NegativeControl(fixture="selftest/bad.py:make")))
+        ctx = gates_mod.GateContext(root="", ledger=Ledger(claims=[claim]), params={})
+        held = gates_mod.run_gate(spec, lying, ctx, trace=verdicts_mod.GateTrace())
+        out["errored pass"] = [held.error, held.detail]
+        out["no claim"] = [verdicts_mod.acceptance_of([claim], "nowhere").problem]
+        return out
+
+    def test_the_row_forbids_goalpost(self):
+        self.assertTrue({"goalpost", "goalposts", "pass criteria"}
+                        <= acceptance_never_says(_glossary()))
+
+    def test_no_human_channel_says_it(self):
+        banned = acceptance_never_says(_glossary())
+        masks = masked_terms(_glossary())
+        found = [f"{channel}: {hit}: {line[:90]}" for channel, lines in self._lines().items()
+                 for line in lines for hit in never_say_hits(line, banned, masks)]
+        self.assertEqual(found, [])
+
+    def test_the_scan_finds_the_words_p24_shipped(self):
+        banned = acceptance_never_says(_glossary())
+        masks = masked_terms(_glossary())
+        for line in ("t.keyed : known-good pass · known-bad fail · value moves with its "
+                     "goalpost → unqualified",
+                     "**Never move a goalpost in a gate.**",
+                     "the acceptance conditions it read as goalposts"):
+            with self.subTest(line=line):
+                self.assertTrue(never_say_hits(line, banned, masks))
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.4 — the operating context's and the comparison's prose
+# --------------------------------------------------------------------------- #
+def _context_world():
+    """A ledger with one claim of each P2.4 fact: Checked (c2, its value
+    compared and inside), a pass outside its operating context (c1) and a pass
+    whose value misses its claim's condition (c3)."""
+    from atompipe import gates as gates_mod
+    from atompipe.models import (Acceptance, Claim, Comparator, GateSpec, Ledger,
+                                 NegativeControl, Verdict)
+    nc = NegativeControl(fixture="selftest/bad.py:make")
+    specs = [GateSpec(id=gid, claims=[cid], settles="sag", negative_control=nc,
+                      operating_context=({"load_n": (0.0, 40.0)} if gid == "t.span" else {}))
+             for gid, cid in (("t.span", "c1"), ("t.ok", "c2"), ("t.loose", "c3"))]
+    token = gates_mod.context_token(gates_mod.ContextBreach("load_n", 60, 0.0, 40.0, "outside"))
+
+    def claim(cid):
+        return Claim(id=cid, statement=f"{cid} holds", gates=[], acceptance=Acceptance(
+            quantity="sag", comparator=Comparator.LE, limit=0.5, units="mm"))
+
+    def passed(gid, cid, measured, limit, **kw):
+        return Verdict(gate=gid, passed=True, claims=[cid], measured=measured, limit=limit,
+                       units="mm", comparator="<=", settles="sag", **kw)
+    ledger = Ledger(claims=[claim("c1"), claim("c2"), claim("c3")],
+                    verdicts=[passed("t.span", "c1", 0.3, 0.5, unqualified=token),
+                              passed("t.ok", "c2", 0.3, 0.5),
+                              passed("t.loose", "c3", 0.7, 1.0)])
+    registry = gates_mod.Registry()
+    for spec in specs:
+        registry.register(spec, lambda ctx: None)
+    return ledger, registry
+
+
+class ContextAndComparisonWordsComeFromOneTable(unittest.TestCase):
+    """What slipped through P2.4 (review): the report's `### Outside an
+    evaluator's operating context` paragraph and the checked table's new clause
+    were literals beside `HUMAN["context"]` and `HUMAN["acceptance"]`, which hold
+    the same words — editing the table left them behind, and V11's sentinel had
+    no outside-context world to notice. P2.4-D22: words only in `report.HUMAN`."""
+
+    def _rendered(self, human):
+        ledger, specs = _context_world()
+        with mock.patch.object(report_mod, "HUMAN", human):
+            return report_mod.render_markdown(ledger, specs)
+
+    def test_the_world_reaches_each_fact(self):
+        text = self._rendered(report_mod.HUMAN)
+        self.assertIn("### Outside an evaluator's operating context", text)
+        self.assertIn("An evaluator was qualified on a range of its inputs", text)
+        self.assertIn("inside its operating context, and every value compared", text)
+        self.assertIn("acceptance condition not met", text)
+
+    def test_the_prose_moves_with_the_table(self):
+        human = report_mod.HUMAN
+        moved = MappingProxyType(dict(human, context=_sentinel(human["context"]),
+                                      acceptance=_sentinel(human["acceptance"])))
+        text = self._rendered(moved)
+        for literal in ("An evaluator was qualified on a range of its inputs",
+                        "outside it a pass does not count",
+                        "inside its operating context, and every value compared"):
+            with self.subTest(literal=literal):
+                self.assertNotIn(literal, text)
+        self.assertIn("zzAn zzevaluator zzwas zzqualified zzon zza zzrange", text)
+        self.assertIn("zzinside zzits zzoperating zzcontext", text)

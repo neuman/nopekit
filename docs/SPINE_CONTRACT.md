@@ -874,6 +874,9 @@ class GateTrace:
                                        #   was recorded; keyed under the project or a pack only
     acceptances: dict[str, Acceptance] # P2.4: what each ctx.acceptance(key) returned — in memory
                                        #   only: run_gate holds a pass to it
+    acceptance_sites: dict[str, GoalpostSite]   # where each acceptance condition a qualification
+                                       #   run read was first read with a verdict (the known-good
+                                       #   run, or a walk run): gates.goalpost_runs moves it there
     def self_modified(self) -> list[str]   # read, THEN written, in this window
     def stat_existed(self, path) -> bool | None   # what the first question found; None: cannot say
 
@@ -882,8 +885,13 @@ class ParamTrace(dict):
 class LedgerView(Ledger):
     def __init__(self, ledger=None, trace=None, **fields)   # **fields: dataclasses.replace's path
     def acceptance(self, key) -> Acceptance     # P2.4: records acceptance:/acceptance-shape:, raises
-ACCEPTANCE_KEY = "acceptance:"                  # P2.4: a goalpost read's ledger key (the condition)
-SHAPE_KEY = "acceptance-shape:"                 # ... and its shape (claims, quantity, comparator, units)
+ACCEPTANCE_KEY = "acceptance:"                  # P2.4: an acceptance read's ledger key (the condition)
+SHAPE_KEY = "acceptance-shape:"                 # ... and its shape: claims, quantity, comparator, units,
+                                                #   which limits are stated, a one-sided limit_hi, and
+                                                #   whether the read returns one condition
+def moving_limits(form) -> tuple[str, ...]      # ("limit",) | ("limit", "limit_hi") for a stated band
+def moved_goalposts(control) -> frozenset       # the keys its goalpost runs moved in full: only these
+                                                #   may hold another limit on a check run
 class AcceptanceRead(NamedTuple): condition; digest; shape; ids=(); problem=""
 def claims_named(claims, key) -> list           # the claim whose id is key, else those tagged key
 def acceptance_of(claims, key) -> AcceptanceRead   # THE goalpost rule: the read and every re-read
@@ -1208,6 +1216,9 @@ def record_verdict(root, spec, fn, verdict, *, trace=None, reads=None, anchors=N
 def selftest_walk(owner_dir, *, digests=None) -> dict[str, str | None]
 def control_static(spec, fn, root, *, digests=None, anchors=None) -> tuple[str, dict]
 def write_control(root, entry) -> WriteResult
+def entry_problem(entry) -> str                  # why the strict reader would refuse it ("" if none):
+                                                 #   asked before filing; a refusal holds that gate
+                                                 #   `control:unwritable`, never aborts the check run
 def read_controls(root, gate_id, *, problems=None) -> list[ControlEntry]
 def record_control(root, spec, fn, *, result=None, trace=None, host="live", bad=None,
                    detail="", digests=None, anchors=None, when="", good=None,
@@ -1911,9 +1922,13 @@ class ContextBreach(NamedTuple): key; value; lo; hi; why   # outside | absent | 
 def context_breach(spec, params, *, read=None) -> ContextBreach | None   # pure; on the spellings read
 def context_token(breach) -> str                        # "context:outside|<canonical json>"
 def context_of(token) -> ContextBreach | None           # its inverse
-GOALPOST_FACTORS = (0.5, 2.0)                           # where the known-good control's goalposts move
-class GoalpostRun: key, limit, outcome, measured, units
-def goalpost_runs(spec, fn, good_ctx, good_verdict, *, trace=None) -> tuple[GoalpostRun, ...]
+GOALPOST_FACTORS = (0.1, 0.5, 2.0, 10.0)                # where each limit a qualification run read moves
+class GoalpostSite(NamedTuple): params; measured; units  # where it was first read with a verdict
+def note_goalpost_sites(into, run, params, verdict) -> None   # the known-good half's, then each walk run's
+class GoalpostRun: end, limit, outcome, measured, units  # end: "limit" | "limit_hi" (a band's, alone)
+class GoalpostRuns: key, measured, units, runs           # one acceptance condition, at its site
+def goalpost_runs(spec, fn, good_ctx, good_verdict, *, trace=None) -> tuple[GoalpostRuns, ...]
+                                                        #   AFTER the walk, every site on the trace
 def load_fixture(ref: str, root: str) -> Any            # "mod:fn" or "path/to/file.py"
 def load_project_gates(root, registry) -> list[str]     # <root>/gates/*.py; the ids they register
 def describe(spec) -> str                               # one dense line for `atompipe gate list`
@@ -2158,7 +2173,9 @@ def cross_check(claim, verdict) -> Compared                  # settles == quanti
 def compared_gates(claim, verdicts) -> list[str]             # the evaluators whose value IS the claim's
 def not_compared(claim, verdicts, prerequisites=None) -> list[tuple[str, str]]   # (gate, quantity|units)
 class LimitDisagreement(NamedTuple): claim; gate; limit; units; acceptance
-def limit_disagreements(ledger, verdicts=None) -> list[LimitDisagreement]
+LIMIT_REL_TOL = 1e-9                                         # two limits are one number: float noise only
+def limit_disagreements(ledger, verdicts=None, *, stale_gates=()) -> list[LimitDisagreement]
+                                                             #   current verdicts only (review of P2.4)
 def outside_context(verdict) -> bool                         # its unqualified token is CONTEXT_OUTSIDE's
 def assumption_reason(claim) -> str                          # rationale (assumption) | fallback (otherwise)
 ```
@@ -2491,6 +2508,7 @@ def reason(composed, ledger, claim, *, full=False, cut=None, stale_reasons=None)
 def status_view(composed, ledger, claim, *, stale_reasons=None) -> dict  # {key, word, cause, reason, errored}
 def words_table() -> dict;  def outcome_words() -> dict;  def need_word(status) -> str
 def page_phrases() -> dict                   # state.json `phrases`: {invalidated, need, outcome_hint}
+def limit_words(acceptance) -> str            # a claim's limit beside a value: "0.5 mm", "0.2..0.8 mm", ""
 def recorded_by(who) -> str                  # "recorded by sam" | "recorded, unattributed" — one line
 def prerequisite_phrase(verdict) -> str      # "prerequisite failed: <root>" | "… not established:
                                              #   <root> (<kind>)", from HUMAN and the spine's mark
@@ -3295,14 +3313,28 @@ never "ignored").
   `verdicts.acceptance_of` is the one rule, shared with `_ledger_now`. A pass that read
   one is held to it by `run_gate` — no value, other units, or a value it rejects is
   **errored**. `bracket.deflection` reads C1's; `DEFLECTION_LIMIT_MM` is gone (S-35).
-- **Controls read their own goalposts.** A project's `selftest/known_good.py` states
-  `CLAIMS` (the bracket's C1 as calibrated). `_ledger_unseen` exempts `acceptance:` keys
-  — and only them — from `channels:ledger`, because the qualification moves each goalpost
-  the known-good control read (`gates.goalpost_runs`, x0.5 and x2) and requires its
-  value and units unmoved (`goalpost:moves|<key>` otherwise), and an entry that read a
-  goalpost and moved none is refused by the strict reader; the shape key stays under
-  `channels:ledger` (critique 1 of the design: a gate keyed to its calibrated goalpost,
-  or to whether its claim exists, read Checked under a blanket exemption).
+- **Controls read their own acceptance conditions.** A project's
+  `selftest/known_good.py` states `CLAIMS` (the bracket's C1 as calibrated).
+  `_ledger_unseen` exempts an `acceptance:` key — and only it — from `channels:ledger`,
+  and only where the qualification moved that condition in full (`moved_goalposts`):
+  after the walk, every acceptance condition a qualification run read is re-run where it
+  was first read with a verdict — the known-good run, or a walk run past a branch the
+  known-good design never takes — with each of its limits moved on its own by x0.1, x0.5,
+  x2 and x10 (`gates.goalpost_runs`), and the value and units there must not move
+  (`goalpost:moves|<key>` otherwise). The shape key stays under `channels:ledger` (critique
+  1 of the design: a gate keyed to its calibrated limit, or to whether its claim exists,
+  read Checked under a blanket exemption) and holds which limits are stated, a one-sided
+  condition's `limit_hi`, and whether the read returns one condition. *Review of P2.4:*
+  x0.5 and x2 alone let a gate keyed below 0.2 (calibrated at 0.5) read Checked at 0.1;
+  scaling both ends of a band kept its ratio; a stray `limit_hi` on a `<=` claim was in
+  no digest a reader held; and the strict reader REQUIRED runs for every goalpost the
+  folded trace held, so a walk run's own read made the writer refuse its entry and
+  `check` stop at exit 2 — an entry that moved nothing now simply exempts nothing, and a
+  writer/reader disagreement holds its one evaluator (`control:unwritable`). The
+  control entry's `good.goalpost` holds one row per acceptance condition moved —
+  `{key, measured, units, runs: [{end, limit, outcome, measured, units}]}`, `measured`
+  and `units` its site's — and P2.4's first cut's flat rows (`{key, limit, outcome,
+  measured, units}`) are read, never written, and move nothing.
 - **`Verdict.comparator`** is set by every bundled gate with a finite limit (R-4: the
   detector over every bundled gate on both controls and the bracket's six — zero
   without one, and every margin on its pass flag's side but `bom.availability`'s
@@ -3331,13 +3363,21 @@ never "ignored").
 
 ## Limits: what the spine cannot see, named
 
-- **A goalpost one exact value no run reads (P2.4).** The qualification moves each
-  goalpost the known-good control read to half and double its limit and requires the
-  gate's value unmoved; a gate that lies only at one exact goalpost — the live one,
-  say, and nowhere else — passes both runs and the walk, as a gate keyed to one exact
-  parameter value the walk never visits does. No tool catches a lying value but an
-  independent evaluator. *Rejected:* substituting the live goalpost into the known-good
-  design (a record per live value, and a control that re-keys on every goalpost edit).
+- **A limit no run visits (P2.4, as its review restated it).** The qualification moves
+  each limit a qualification run read — x0.1, x0.5, x2, x10, each limit of a band alone
+  — where it was read, and requires the gate's value unmoved. A gate may still lie at
+  EVERY limit the runs do not visit: between those points or past them — below 0.04
+  where the runs looked at 0.05, at the live 0.37 exactly — as a gate keyed to a
+  parameter value the walk never visits does; and a limit read only on a branch no
+  qualification run takes is never moved, so it is never exempt (it reads
+  `channels:ledger` whenever it differs from the known-good design's). The earlier
+  wording here, "a gate that lies only at one exact goalpost", understated it: the
+  review planted gates lying over an open range of limits (`acc.limit < 0.2`), over
+  every band of another ratio, and at every `limit_hi` on a one-sided claim, and each
+  passed x0.5 and x2. No tool catches a lying value but an independent evaluator.
+  *Rejected:* substituting the live limit into the known-good design (a record per live
+  value, and a control that re-keys on every limit edit); random points (a qualification
+  must be reproducible); more fixed points (each a run, and none closes the residual).
 
 A verdict is keyed by what its gate was SEEN to read (rho), a control counts only when
 it was SEEN to fail, and a record is read strictly from its file. Each of those has an

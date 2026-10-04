@@ -49,19 +49,20 @@ two copies would pass for that reason alone (packs:H4). A path-salted name is on
 module per file, content-keyed, and — loaded while the spine records a fixture —
 part of that fixture's recorded code.
 
-Why `CLAIMS` (P2.4). `bracket.deflection` reads its goalpost from C1
-(`ctx.acceptance`), and a control reads the goalpost the design was calibrated
-against — this file's, never the live `claims/C1.json`. Measured before it
+Why `CLAIMS` (P2.4). `bracket.deflection` reads its limit from C1
+(`ctx.acceptance`), and a control reads the acceptance condition the design was
+calibrated against — this file's, never the live `claims/C1.json`. Measured before it
 landed: a known-good design handed the LIVE claim read `known-good fail` the
 moment C1 was tightened to 0.4 (0.469 > 0.4), where 0.700 > 0.4 is plain
-Failing — moving a goalpost changed a control's severity, invariant 5's failure
+Failing — moving a limit changed a control's severity, invariant 5's failure
 for a project gate; and one handed no claim errored on every control. Moving
 the live C1 to 0.75 re-runs `bracket.deflection` against it and no control. The
-spine holds the two to one shape — the claim, its quantity, comparator and units
-— and lets only the limit differ, after moving this C1's limit both ways and
-finding the gate's value unmoved (`gates.goalpost_runs`). *Rejected:* reading
+spine holds the two to one shape — the claim, its quantity, comparator and units,
+and which limits it states — and lets only the limit differ, after moving this
+C1's limit (x0.1, x0.5, x2, x10) and finding the gate's value unmoved
+(`gates.goalpost_runs`). *Rejected:* reading
 `claims/C1.json` here (the coupling above, by a file read); a spine-supplied
-goalpost on a control (the same coupling one level down).
+acceptance condition on a control (the same coupling one level down).
 
 `ctx.model` is left as it was handed. On a control the spine hands `context` no model,
 no params, an empty ledger and no `extra` — only where the run lives — so nothing here
@@ -106,8 +107,8 @@ CONFIG: dict = {
 }
 
 
-#: The claims this design was calibrated against, as claim records: C1's goalpost,
-#: which `bracket.deflection` reads. Its limit is the one the design passes
+#: The claims this design was calibrated against, as claim records: C1's
+#: acceptance condition, which `bracket.deflection` reads. Its limit is the one the design passes
 #: (0.469 <= 0.5); a live C1 moved anywhere leaves it, and every control, where
 #: it is.
 CLAIMS: list = [

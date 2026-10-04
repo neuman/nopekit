@@ -2,21 +2,21 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.deflection",
-  "rho": "dad770938cf892354d59aaab51e8f4f0d23b413998193c7e4004a38a1c354512",
-  "static": "ab452ea4c96b57b4dab715795ac9ecd507d5d0ad6df834727f4b49862879547b",
+  "rho": "0fafddb4311a704d4cc2a910fe1ae41b59c8e876b15205e501fe6ac995c418b1",
+  "static": "bb4b664abbd0e5b1b41619d123d8305fe61ffb80bbb2b1527a37e70ace3a67a0",
   "static_parts": {
-    "spine": "71f45240af6180d5bd456f588c766edd4ab9fddf0f34afbb6b215f31b8254857",
+    "spine": "56ae569ada37d43859cafab7b78b026460656849e83248c6d317acd23a119d63",
     "code": {
-      "digest": "6f70e779536d71339a31dd23f791e6093eca29d608722f4640f06819b11be2e4",
+      "digest": "34392efdd277f2b08bbcc8d289bb858b9d3a9a6e2c8f81224cf1098584aa9a98",
       "files": [
         "gates/structural.py"
       ]
     },
     "selftest": {
-      "digest": "d189dfd49d6e13f7aee32b7fe0b285cfd4e29c5dd8474582582af9460da0499a",
+      "digest": "54b47c809fedc4f67f74e03ae930f5d0e1a3b50087a5674014c35bf2c036fb58",
       "files": {
         "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-        "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
+        "selftest/known_good.py": "72ac6ff4b1083baa4b4f809e598b8784f534f880a0d90e457316cbfda74f2c16"
       }
     },
     "nc": {
@@ -29,11 +29,11 @@
   },
   "host": "known-good",
   "fixture": {
-    "digest": "3645413f71d05619f92c2a1b5e8e5385fdfbd05b0b0bcf779cb6c4871c71b220",
+    "digest": "bfea838ca994a9ca7c38c37351130038df6d85b08b7dbb688591f0ec7e92b9e6",
     "files": {
       "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
       "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-      "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
+      "selftest/known_good.py": "72ac6ff4b1083baa4b4f809e598b8784f534f880a0d90e457316cbfda74f2c16"
     }
   },
   "reads": {
@@ -57,7 +57,7 @@
     "files": {},
     "dirs": {},
     "ledger": {
-      "acceptance-shape:C1": "d05bbce618eec99c78d3ef96f6b57b877a2fef2b44539f09fa46c7cf0d9e77d3",
+      "acceptance-shape:C1": "04b454824a817fa1904f35e6309f60e4e618ce5cf78622f699a39da1a5cc8371",
       "acceptance:C1": "61f55d0f08419b115da9741b71408cd4965bc9f930ac41ddeb70310a5323b572"
     },
     "host": [],
@@ -88,7 +88,7 @@
       "files": {},
       "dirs": {},
       "ledger": {
-        "acceptance-shape:C1": "d05bbce618eec99c78d3ef96f6b57b877a2fef2b44539f09fa46c7cf0d9e77d3",
+        "acceptance-shape:C1": "04b454824a817fa1904f35e6309f60e4e618ce5cf78622f699a39da1a5cc8371",
         "acceptance:C1": "61f55d0f08419b115da9741b71408cd4965bc9f930ac41ddeb70310a5323b572"
       },
       "host": [],
@@ -102,17 +102,38 @@
     "goalpost": [
       {
         "key": "C1",
-        "limit": 0.25,
-        "outcome": "fail",
         "measured": 0.4688,
-        "units": "mm"
-      },
-      {
-        "key": "C1",
-        "limit": 1.0,
-        "outcome": "pass",
-        "measured": 0.4688,
-        "units": "mm"
+        "units": "mm",
+        "runs": [
+          {
+            "end": "limit",
+            "limit": 0.05,
+            "outcome": "fail",
+            "measured": 0.4688,
+            "units": "mm"
+          },
+          {
+            "end": "limit",
+            "limit": 0.25,
+            "outcome": "fail",
+            "measured": 0.4688,
+            "units": "mm"
+          },
+          {
+            "end": "limit",
+            "limit": 1.0,
+            "outcome": "pass",
+            "measured": 0.4688,
+            "units": "mm"
+          },
+          {
+            "end": "limit",
+            "limit": 5.0,
+            "outcome": "pass",
+            "measured": 0.4688,
+            "units": "mm"
+          }
+        ]
       }
     ]
   },
@@ -147,5 +168,5 @@
   "measured": 30.0,
   "limit": 0.5,
   "units": "mm",
-  "digest": "55d76d73cea68f084deb3934382aeb361aed5e7959cd4d1be67c06a996833404"
+  "digest": "8db9524bf0cab8c74224fdd3efaec8ca6cfdf3f012558cd6a3f62ff36be93f12"
 }

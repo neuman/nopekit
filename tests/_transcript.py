@@ -125,6 +125,19 @@ CONTEXT_LINE = re.compile(
     r"(?:= \S+(?: \(not a number\))?|absent|not read by the run that passed), "
     r"qualified on (?P<interval>[\[(]\S+, \S+[\])])$")
 
+#: An unqualified evaluator's row where the evaluator is the row and no facts
+#: are at hand — `why` and `claim show` (review of P2.4), as `gate show` and
+#: `check` print it: the table's words, never a crash's tag and never the
+#: spine's token (`kind:kind|…`).
+UNQUALIFIED_ROW = re.compile(
+    r"^(?P<gate>[^\s\[]\S*) : unqualified: (?P<reason>(?![a-z-]+:[a-z-]+(?:\||$))\S.*)$")
+
+#: `claim show`'s line under its header for a claim Failing by comparison
+#: (review of P2.4): the composition's reason, indented two.
+ACCEPTANCE_REASON = re.compile(
+    r"^  acceptance condition not met: (?P<gate>\S+) : (?P<value>\S+(?: \S+)?) against "
+    r"(?P<claim>\S+)'s (?P<condition>.+?)(?: \(its own limit (?P<limit>[^)]+)\))?$")
+
 #: `check`'s warning for an evaluator whose own limit is not its claim's (P2.4,
 #: S-35): one line per compared pair, after the qualification lines.
 LIMIT_WARNING = re.compile(
@@ -201,8 +214,9 @@ QUALIFICATION_LINE = re.compile(
     r"(?: \((?P<inconclusive>\d+) inconclusive\)| \(none made: [^()]+\))?"
     r"| · mutation could not (?:run|finish)| · mutation errored)?"
     r"(?: · check run reads another ledger)?"
-    r"(?: · value moves with its goalpost)?"
-    r"(?: · two outcomes| · outcomes differ by tier| · outcome differs from its cached entry)?"
+    r"(?: · value moves with its limit)?"
+    r"(?: · two outcomes| · outcomes differ by tier| · outcome differs from its cached entry"
+    r"| · qualification not recorded)?"
     r" → (?P<verdict>qualified|unqualified)$")
 
 #: `gate show`'s `qualification:` row (it replaced `last selftest:`), one shape
@@ -216,7 +230,7 @@ QUALIFICATION_SHOW = re.compile(
 
 #: `gate show`'s detail rows under `qualification:`.
 QUALIFICATION_DETAIL = re.compile(
-    r"^    (?P<what>known-good|known-bad|mutation|not mutated|why|goalpost) +(?P<body>\S.*)$")
+    r"^    (?P<what>known-good|known-bad|mutation|not mutated|why|limit moved) +(?P<body>\S.*)$")
 
 #: `gate selftest`'s summary, both modes, in qualification's words (P2.3; R-6,
 #: words only: `N control(s) in T: F fired, B BROKEN, S skipped (tooling)`

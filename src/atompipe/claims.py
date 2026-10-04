@@ -117,6 +117,7 @@ __all__ = [
     "not_compared",
     "LimitDisagreement",
     "limit_disagreements",
+    "LIMIT_REL_TOL",
     "outside_context",
     "assumption_reason",
 ]
@@ -767,6 +768,16 @@ def _finite_real(value: Any) -> bool:
             and math.isfinite(float(value)))
 
 
+def _band_hi_unusable(acceptance: Any) -> bool:
+    """Whether ``acceptance`` is a band (``between``) whose ``limit_hi`` is there
+    and is not a finite number — ``None`` is usable: an exact value."""
+    comparator = getattr(acceptance, "comparator", None)
+    if str(getattr(comparator, "value", comparator) or "") != "between":
+        return False
+    hi = getattr(acceptance, "limit_hi", None)
+    return hi is not None and not _finite_real(hi)
+
+
 def _quantity(text: Any) -> str:
     """A quantity as the comparison matches it: casefolded, ``-`` and ``_`` read
     as spaces, whitespace collapsed — "Tip-Deflection" is "tip deflection"."""
@@ -802,6 +813,13 @@ def cross_check(claim: Claim, verdict: Verdict) -> Compared:
     if str(verdict.units or "").strip() != str(getattr(acceptance, "units", "") or "").strip():
         return Compared("not-compared", "units")
     if not _finite_real(getattr(acceptance, "limit", None)):
+        return Compared("not-compared", "no-limit")
+    if _band_hi_unusable(acceptance):
+        # A band's upper limit that is there and is not a finite number — a hand
+        # or agent edit typed `"limit_hi": "0.8"` — has nothing ``holds`` can
+        # compare. What slipped through (review of P2.4): ``holds`` raised
+        # TypeError out of compose, and `check`, `status` and `report` printed a
+        # traceback in place of the claim. Not compared, as a missing limit is.
         return Compared("not-compared", "no-limit")
     if not _finite_real(verdict.measured):
         return Compared("not-compared", "no-value")
@@ -862,17 +880,38 @@ class LimitDisagreement(NamedTuple):
     acceptance: str
 
 
-def limit_disagreements(ledger: Ledger, verdicts: Iterable[Verdict] | None = None
-                        ) -> list[LimitDisagreement]:
-    """Every compared pair — a counted pass or fail whose value ``cross_check``
-    compares with its claim — whose two finite limits differ (``math.isclose``,
-    relative 1e-9: a limit the gate rounded to its reporting precision still
-    agrees). In claim order, then verdict order. A ``check`` warning, a
-    ``doctor`` row and a JSON key; never a status: the comparison already fails
-    the generous case, and a claim looser than its evaluator is over-strict,
-    not a lie. What slipped through before it (S-35): C3's and C4's limits
-    were snapshots of what their evaluators compute, and a ``bed_xy`` edit
-    moved the gate's 204 to 234 with nothing saying the claim still said 204."""
+#: How close two limits must be to be one number (``limit_disagreements``):
+#: relative 1e-9 — binary floating-point noise and nothing more, so a limit
+#: computed as 0.1 + 0.2 agrees with a claim's 0.3. A gate that ROUNDS the limit
+#: it reports (``bed_fit``'s ``round(usable, 1)``) parts from a claim holding the
+#: unrounded value — C4 at 203.96 against a reported 204.0 — and is warned, on
+#: purpose: two spellings of one number is the slip (S-35), and the fix is one
+#: home. *Rejected:* a tolerance as loose as a gate's reporting precision
+#: (relative 1e-3, or an absolute per-unit epsilon): it would hide exactly the
+#: drift the warning exists for — a derived limit moved by less than its last
+#: printed digit — and no single number fits a 0.5 mm deflection and a 204 mm
+#: bed (review of P2.4: the docstring said a rounded limit "still agrees", which
+#: 1e-9 never allowed).
+LIMIT_REL_TOL = 1e-9
+
+
+def limit_disagreements(ledger: Ledger, verdicts: Iterable[Verdict] | None = None, *,
+                        stale_gates: Iterable[str] = ()) -> list[LimitDisagreement]:
+    """Every compared pair — a counted, CURRENT pass or fail whose value
+    ``cross_check`` compares with its claim — whose two finite limits differ
+    (``math.isclose`` at ``LIMIT_REL_TOL``). In claim order, then verdict order. A
+    ``check`` warning, a ``doctor`` row and a JSON key; never a status: the
+    comparison already fails the generous case, and a claim looser than its
+    evaluator is over-strict, not a lie. What slipped through before it (S-35):
+    C3's and C4's limits were snapshots of what their evaluators compute, and a
+    ``bed_xy`` edit moved the gate's 204 to 234 with nothing saying the claim
+    still said 204. A verdict of a gate in ``stale_gates`` is left out: its
+    limit is the one its old inputs gave, and the next check run settles it.
+    What slipped through without that (review of P2.4): with C1 moved to 0.75
+    before a check run, ``doctor`` blamed ``bracket.deflection`` — a gate that
+    reads its limit FROM C1 — for "one number in two places", sending the
+    reader to delete a constant that no longer exists."""
+    stale = set(stale_gates or ())
     out: list[LimitDisagreement] = []
     for claim in ledger.claims:
         limit = getattr(claim.acceptance, "limit", None)
@@ -882,10 +921,12 @@ def limit_disagreements(ledger: Ledger, verdicts: Iterable[Verdict] | None = Non
                                          else verdicts):
             if verdict.outcome not in ("pass", "fail") or getattr(verdict, "unqualified", ""):
                 continue
+            if verdict.gate in stale:
+                continue
             if cross_check(claim, verdict).state not in ("holds", "fails"):
                 continue
             if not _finite_real(verdict.limit) or math.isclose(
-                    float(verdict.limit), float(limit), rel_tol=1e-9, abs_tol=0.0):
+                    float(verdict.limit), float(limit), rel_tol=LIMIT_REL_TOL, abs_tol=0.0):
                 continue
             out.append(LimitDisagreement(claim.id, verdict.gate, float(verdict.limit),
                                          str(verdict.units or ""), claim.acceptance.render()))

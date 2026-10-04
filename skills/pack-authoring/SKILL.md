@@ -119,14 +119,18 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
   baseline and its own control on a machine with trimesh and no boolean engine, while
   availability said it could run.
 - **Read claims through `ctx.ledger.claim(id)`**; the ledger a gate gets has no
-  verdicts in it. **Read a goalpost through `ctx.acceptance(claim)`** — a claim id or
-  a tag — never a number in the gate: it returns the claim's acceptance condition,
+  verdicts in it. **Read a claim's limit through `ctx.acceptance(claim)`** — a claim id
+  or a tag — never a number in the gate: it returns the claim's acceptance condition,
   re-runs your gate when the limit moves (and only then), and holds your pass to it — a
   pass with no value, in other units, or at a value the condition rejects is errored.
   Report its limit and side as yours: `limit=acc.limit, comparator=acc.comparator.value,
-  passed=acc.holds(value)`. A pack's baseline states no claims, so a pack gate that
-  reads one errors on its own control; a project gate's controls read the claims its
-  `selftest/known_good.py` states (`CLAIMS`), never the live files.
+  passed=acc.holds(value)` — and the units YOUR arithmetic computes in (`units="mm"`),
+  never `acc.units`: a gate that repeats the claim's units back agrees with any claim,
+  and the units check never fires. Never key anything on the limit itself: the
+  qualification re-runs your known-good design with each limit moved (x0.1, x0.5, x2,
+  x10) and your value must not move. A pack's baseline states no claims, so a pack
+  gate that reads one errors on its own control; a project gate's controls read the
+  claims its `selftest/known_good.py` states (`CLAIMS`), never the live files.
 - **Say which side of your limit passes: `comparator`.** Every verdict that reports a
   finite `limit` sets `comparator` (`"<="`, `">="`, …, `"between"`) on that branch; a
   branch with no one-sided reading reports no limit. The spine derives the verdict's

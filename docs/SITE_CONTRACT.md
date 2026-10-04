@@ -329,7 +329,11 @@ an agent can read the site's state without a browser.
   (`claims.not_compared`, a guard of another of its evaluators left out). The page
   shows the first of `compared` as the claim's value, and none when it is empty: it
   never picks one itself. What slipped through: it headlined the first passing
-  verdict, so failing C1 showed its guard's passing `8.57 L/h`.
+  verdict, so failing C1 showed its guard's passing `8.57 L/h`. Beside that value it
+  shows the CLAIM's limit — `limit_text`, written by `site.state` from the claim's
+  acceptance condition — never the verdict's: a compared pair is the one kind whose
+  two limits can part (review of P2.4: Failing C3 summarised as `0.195 MPa / 15 MPa`
+  against a claim of `<= 0.1 MPa`, S-35's slip on the page).
 - **The margin (P2.4, D-17).** Every verdict row carries `margin` — `claims.margin`,
   a signed fraction of the limit, > 0 inside and < 0 past, 6 significant figures — and
   `margin_why`, why there is none (`no-value`, `no-limit`, `no-comparator`, `band`,
@@ -348,7 +352,13 @@ an agent can read the site's state without a browser.
   `error`, which carries the token as R-2's fallback): never `errored`, a crash's word for
   something that crashed nothing, and Gap's
   tone on the page (`lib/format.js`'s `VERDICT_STATUS`). A gate never run reads so too
-  (`not yet qualified at this version`), its row with no entry behind it. `unanchored` says out loud that a failure
+  (`not yet qualified at this version`), its row with no entry behind it. From the
+  review of P2.4, a pass outside its evaluator's operating context reads
+  `outside-context` — never `unqualified`, since its evaluator still is qualified —
+  with its `qualification.text` `outside operating context: …`, Gap's glyph and tone,
+  and its word and chip title from `outcome_words` and `phrases.outcome_hint` (what
+  slipped through: the page painted `? UNQUALIFIED` beside that row text, while
+  `check` and `status` counted it apart). `unanchored` says out loud that a failure
   carries no locator, instead of leaving an overlay that looks broken.
 - How the resolver reached each row, said on the row: `cached` — it is a cache
   entry's verdict as recorded (its `tier` and `pack` are the ones it ran under);

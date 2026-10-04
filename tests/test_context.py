@@ -43,6 +43,7 @@ from unittest import mock
 
 import _env
 import _projects
+import _transcript as T
 from atompipe import claims, gates, modelio, report, verdicts
 from atompipe.models import (Acceptance, Claim, ClaimKind, ClaimStatus, GateSpec, Ledger,
                              NegativeControl, Verdict)
@@ -652,3 +653,106 @@ class MalformedContextsAreRefused(unittest.TestCase):
         spec.operating_context["load_n"] = (0.0, 1.0)
         (fresh,) = registry.specs()
         self.assertEqual(fresh.operating_context["load_n"], (0.0, 40.0))
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.4 — every channel says an outside pass in the context's words
+# --------------------------------------------------------------------------- #
+class EveryChannelSaysOutsideInItsOwnWords(_env.EnvCase):
+    """What slipped through P2.4 (review): the CLI said a pass outside its
+    operating context in the context's words, and three channels did not —
+    ``check --json``'s qualification row carried the ``context:outside`` token
+    on a row whose state is admitted and whose line says qualified; the page
+    labelled the row ``? UNQUALIFIED``, the classification P2.4-D22 rejected; and
+    ``why`` and ``claim show`` printed ``[ERR ] t.span : unqualified:
+    context:outside|{…}`` — a crash's tag and the spine's token."""
+
+    def _project(self) -> str:
+        project = span_project(self, load_n=60.0, stiffness=12000.0)
+        run(self, project, "check", code=1)
+        return project
+
+    def test_the_json_qualification_row_carries_only_the_qualification(self):
+        """The context fact stays where it is a fact of this pass — the verdict
+        row's ``unqualified`` and ``counts.outside_context``."""
+        project = span_project(self, load_n=60.0, stiffness=12000.0)
+        data = json.loads(run(self, project, "check", "--json", code=1).stdout)
+        (row,) = [q for q in data["qualifications"] if q["gate"] == "t.span"]
+        self.assertEqual((row["state"], row["token"]), ("admitted", ""))
+        self.assertTrue(row["line"].endswith("→ qualified"), row["line"])
+        (verdict,) = [v for v in data["verdicts"] if v["gate"] == "t.span"]
+        self.assertTrue(verdict["unqualified"].startswith("context:outside|"))
+        self.assertEqual(data["counts"]["outside_context"], 1)
+
+    def test_the_page_row_reads_outside_context_never_unqualified(self):
+        project = self._project()
+        run(self, project, "site", "init", code=0)
+        run(self, project, "site", "build", code=0)
+        with open(os.path.join(project, "site", "data", "state.json"), encoding="utf-8") as fh:
+            state = json.load(fh)
+        (row,) = [v for v in state["verdicts"] if v["gate"] == "t.span"]
+        self.assertEqual(row["status"], "outside-context")
+        self.assertEqual(state["outcome_words"]["outside-context"],
+                         "outside operating context")
+        self.assertTrue(state["phrases"]["outcome_hint"]["outside-context"])
+        self.assertTrue(row["qualification"]["text"].startswith("outside operating context: "))
+        with open(os.path.join(project, "site", "lib", "format.js"), encoding="utf-8") as fh:
+            self.assertIn('"outside-context": { glyph: "?", tone: "warn" }', fh.read())
+
+    def test_why_and_claim_show_say_the_context_never_the_token(self):
+        project = self._project()
+        for argv in (["why", "c1"], ["claim", "show", "c1"]):
+            with self.subTest(argv=argv):
+                text = run(self, project, *argv, code=0).stdout
+                self.assertNotIn("context:outside|", text)
+                self.assertNotIn("[ERR ]", text)
+                # The evaluator's row as `check` and `gate show` print it.
+                rows = [ln.strip() for ln in text.splitlines()
+                        if ln.strip().startswith("t.span : ")]
+                self.assertEqual(len(rows), 1, text)
+                self.assertRegex(rows[0], T.CONTEXT_LINE)
+                self.assertIn("t.span : outside operating context: load_n = 60, qualified on "
+                              "[0, 40]", rows[0])
+
+
+class APackBaselineOutsideItsContextIsNotPublishable(_env.EnvCase):
+    """What slipped through P2.4 (review): `pack validate` mapped the known-good
+    outcome without judging the context (P2.4-D19 lived only in `check`'s and
+    `gate selftest`'s known-good half), so a pack whose baseline sat outside a
+    declared range validated `publishable` while `gate selftest` printed
+    `known-good outside its operating context · known-bad fail → unqualified`."""
+
+    def _pack(self) -> str:
+        import shutil
+        pack_dir = os.path.join(self.tmp(), "beamctx")
+        shutil.copytree(os.path.join(_projects.PACKS, "beam-analytic"), pack_dir,
+                        ignore=shutil.ignore_patterns("__pycache__", ".selftest-out"))
+        manifest_path = os.path.join(pack_dir, "pack.json")
+        with open(manifest_path, encoding="utf-8") as fh:
+            manifest = json.load(fh)
+        manifest["name"] = "beamctx"
+        with open(manifest_path, "w", encoding="utf-8") as fh:
+            json.dump(manifest, fh, indent=2)
+        path = os.path.join(pack_dir, "gates", "beam.py")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        anchor = '    id="beam.deflection",\n'
+        self.assertEqual(text.count(anchor), 1)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace(anchor, anchor + '    operating_context={"load_n": '
+                                  '(0.0, 100.0)},\n'))
+        return pack_dir
+
+    def test_validate_names_the_known_good_outside(self):
+        from atompipe import packs
+        problems = packs.validate(self._pack())
+        hits = [p for p in problems if p.startswith("beam.deflection:")
+                and "known-good outside its operating context" in p]
+        self.assertEqual(len(hits), 1, problems)
+
+    def test_without_the_judgement_it_reads_publishable(self):
+        """The violator: the breach rule stubbed out on validate's path."""
+        from atompipe import packs
+        with mock.patch.object(gates, "context_breach", lambda *a, **k: None):
+            problems = packs.validate(self._pack())
+        self.assertEqual([p for p in problems if "operating context" in p], [], problems)

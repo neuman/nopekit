@@ -1885,7 +1885,13 @@ def state(
         # An unqualified evaluator's row reads `unqualified` (P2.3-D17), never
         # `errored`: its verdict says `error` only so that it is never ok (R-2),
         # and the page painted a crash's word on something that crashed nothing.
-        row["status"] = ("unqualified" if getattr(verdict, "unqualified", "") else
+        # A pass outside its operating context reads `outside-context` (P2.4-D22:
+        # never counted `unqualified` — outside its context the evaluator is
+        # still qualified; what does not hold is this pass's inputs). What
+        # slipped through (review of P2.4): the CLI split it out and the page
+        # painted `? UNQUALIFIED` beside the row text "outside operating context".
+        row["status"] = ("outside-context" if claim_logic.outside_context(verdict) else
+                         "unqualified" if getattr(verdict, "unqualified", "") else
                          {"error": "errored", "skipped": "skipped", "pass": "pass",
                           "fail": "fail"}[verdict.outcome])
         if getattr(verdict, "unqualified", ""):
@@ -1957,6 +1963,12 @@ def state(
         row["compared"] = claim_logic.compared_gates(claim, view.verdicts)
         row["not_compared"] = [gid for gid, _why in claim_logic.not_compared(
             claim, view.verdicts, needs)]
+        # The CLAIM's limit, which the page shows beside the claim's value — never
+        # the verdict's: a compared pair is the one kind whose two limits can
+        # part. What slipped through (review of P2.4): the summary drew the
+        # headline verdict's own limit, so Failing C3 read `0.195 MPa / 15 MPa`
+        # against a claim of `<= 0.1 MPa` — S-35's slip, on the page.
+        row["limit_text"] = report_logic.limit_words(claim.acceptance)
         claim_rows.append(row)
 
     views = [v.to_dict() for v in view.views]

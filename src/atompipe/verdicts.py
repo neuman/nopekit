@@ -160,8 +160,10 @@ __all__ = [
     # part four: admission at its current version, the sweep, last_check (U20)
     "CONTROLS_CACHE", "WATCHED", "known_good_context", "admission", "SweepRow",
     "SweepResult", "sweep", "write_last_check", "watched_paths", "fingerprint",
+    "entry_problem",
     # P2.4: the goalpost read (`GateContext.acceptance`) and its two ledger keys
     "ACCEPTANCE_KEY", "SHAPE_KEY", "AcceptanceRead", "claims_named", "acceptance_of",
+    "moving_limits", "moved_goalposts",
 ]
 
 
@@ -615,6 +617,11 @@ class GateTrace:
     #: (P2.4-D4) and the qualification moves each one (``gates.goalpost_runs``).
     #: Not a read either — the read is the ledger key it recorded.
     acceptances: dict = field(default_factory=dict)
+    #: ``{key: gates.GoalpostSite}`` — where each goalpost a qualification run
+    #: read was first read with a verdict: the known-good run's params, or a walk
+    #: run's (``gates.note_goalpost_sites``). In memory only, never an entry
+    #: field: ``gates.goalpost_runs`` moves each goalpost there (review of P2.4).
+    acceptance_sites: dict = field(default_factory=dict)
     _read_set: set = field(default_factory=set, init=False, repr=False)
     _source_set: set = field(default_factory=set, init=False, repr=False)
     _existed: dict = field(default_factory=dict, init=False, repr=False)
@@ -1176,6 +1183,48 @@ def _acceptance_form(acceptance: Any) -> dict:
     return {k: form.get(k) for k in ("quantity", "comparator", "limit", "limit_hi", "units")}
 
 
+def moving_limits(form: Mapping[str, Any]) -> tuple[str, ...]:
+    """The limits of an acceptance condition (``_acceptance_form``) that are MEANT
+    to differ between calibration and use — what the qualification moves
+    (``gates.goalpost_runs``) and the shape leaves out: ``limit``, and
+    ``limit_hi`` only for a ``between`` condition that states one. A
+    ``limit_hi`` on a one-sided condition moves nothing a reader can see —
+    ``render`` and ``holds`` ignore it — so it is shape, never a limit. What
+    slipped through when the shape left out both whatever the comparator (review
+    of P2.4): a gate keyed to ``acc.limit_hi is not None`` read Checked once a
+    live ``<=`` claim gained ``"limit_hi": 0.0``, its value made up, while the
+    claim still rendered ``<= 0.5 mm``; no qualification run moves a ``None``."""
+    band = str(form.get("comparator") or "") == "between" and form.get("limit_hi") is not None
+    return ("limit", "limit_hi") if band else ("limit",)
+
+
+def _shape_form(form: Mapping[str, Any]) -> dict:
+    """An acceptance condition's shape: the condition with each moving limit
+    (``moving_limits``) replaced by whether it is there. Presence is shape — a
+    condition with no limit cannot be read (``acceptance_of``'s problem), so a
+    gate that catches that problem takes another path than one handed a limit,
+    and a known-good control stating no limit qualifies nothing about one that
+    does. A ``between`` condition that states no ``limit_hi`` judges an exact
+    value: stating one turns it into a band, which is shape too."""
+    out = dict(form)
+    for k in moving_limits(form):
+        out[k] = form.get(k) is not None
+    return out
+
+
+def _bad_limit(form: Mapping[str, Any]) -> str:
+    """The first limit of a condition that is there and is not a finite number
+    (``limit``; ``limit_hi`` of a band), or ``""``. A claim file is JSON a hand
+    or an agent edits: ``"limit_hi": "0.8"`` reads, and ``holds`` raises
+    ``TypeError`` on it wherever it is judged (review of P2.4: `check`,
+    `status` and `report` died with a traceback from ``claims.cross_check``)."""
+    for key in moving_limits(form):
+        value = form.get(key)
+        if value is not None and not _a_number(value):
+            return key
+    return ""
+
+
 def acceptance_of(claims: Iterable[Any], key: str) -> AcceptanceRead:
     """THE goalpost rule (P2.4-D1), shared by ``LedgerView.acceptance`` — which
     records it — and ``_ledger_now`` — which re-reads it — so a gate's read and
@@ -1187,14 +1236,19 @@ def acceptance_of(claims: Iterable[Any], key: str) -> AcceptanceRead:
     named = sorted(claims_named(claims, key), key=lambda c: str(getattr(c, "id", "")))
     if not named:
         return AcceptanceRead(None, ABSENT, ABSENT, (), (
-            f"no claim is named or tagged {key!r}: a goalpost lives in claims/ — read it "
-            f"by a claim's id or a tag it carries"))
+            f"no claim is named or tagged {key!r}: an acceptance condition lives in claims/ "
+            f"— read it by a claim's id or a tag it carries"))
     forms = [[str(c.id), _acceptance_form(c.acceptance)] for c in named]
     digest = digest_value(forms)
-    shape = digest_value([[cid, {k: v for k, v in form.items() if k not in ("limit", "limit_hi")}]
-                          for cid, form in forms])
     ids = tuple(cid for cid, _form in forms)
     distinct = {_canonical_json(form): cid for cid, form in forms}
+    # The shape also says whether the read returns ONE condition: two claims
+    # under a tag that differ only by a limit are two conditions here (the
+    # gate is told so, and errors) and one wherever their limits agree, so the
+    # count is shape, or a gate that catches the problem on its controls would
+    # take another path on a check run whose limits agree (review of P2.4).
+    shape = digest_value([[cid, _shape_form(form)] for cid, form in forms]
+                         + [["conditions", len(distinct)]])
     if len(distinct) > 1:
         said = " and ".join(f"{c.id} ({c.acceptance.render()})" for c in named)
         return AcceptanceRead(None, digest, shape, ids,
@@ -1205,6 +1259,12 @@ def acceptance_of(claims: Iterable[Any], key: str) -> AcceptanceRead:
         return AcceptanceRead(None, digest, shape, ids,
                               f"{who}'s acceptance condition has no limit to judge against "
                               f"({key!r}): state one in claims/")
+    bad = _bad_limit(forms[0][1])
+    if bad:
+        who = ", ".join(ids)
+        return AcceptanceRead(None, digest, shape, ids,
+                              f"{who}'s acceptance condition has a {bad} that is not a finite "
+                              f"number ({forms[0][1].get(bad)!r}): state it as one in claims/")
     return AcceptanceRead(copy.deepcopy(acceptance), digest, shape, ids, "")
 
 
@@ -3103,7 +3163,17 @@ _GOOD_FIELDS = ("outcome", "reads", "extra", "measured", "limit", "units", "deta
 #: refusing it would name every historical file in `doctor`.
 _LEGACY_GOOD_FIELDS = ("outcome", "reads", "extra", "measured", "limit", "units", "detail")
 _GOOD_OUTCOMES = ("pass", "fail", "not-run", "outside")
-_GOALPOST_FIELDS = ("key", "limit", "outcome", "measured", "units")
+#: One goalpost's runs (`gates.GoalpostRuns`): its key, the value and units
+#: where it was read with nothing moved, and each run — which limit moved
+#: (`end`), to what, and what the gate said there.
+_GOALPOST_FIELDS = ("key", "measured", "units", "runs")
+_GOALPOST_RUN_FIELDS = ("end", "limit", "outcome", "measured", "units")
+#: A goalpost row as P2.4's first cut wrote it (one flat row per run, x0.5 and x2
+#: of the known-good run's goalposts): read, never written — such an entry is
+#: never current (its static part names another spine) and moves nothing
+#: (`moved_goalposts` reads no runs in it), and refusing it would name every
+#: file that spine left in `doctor` (D7's precedent for the P2.3 block).
+_LEGACY_GOALPOST_FIELDS = ("key", "limit", "outcome", "measured", "units")
 #: The mutation pass's fields (`gates.mutation_walk`), and each record's.
 _WALK_FIELDS = ("runs", "boundary", "results", "inconclusive", "not_mutated")
 _RESULT_FIELDS = ("key", "before", "after", "outcome", "measured", "limit")
@@ -4817,17 +4887,33 @@ def _problem_in_good(good: Any) -> str:
     if not isinstance(good, dict) or list(good) not in (list(_GOOD_FIELDS),
                                                         list(_LEGACY_GOOD_FIELDS)):
         return f"good must be null or an object with keys {list(_GOOD_FIELDS)}"
-    for row in good.get("goalpost") or ():
-        if not isinstance(row, dict) or list(row) != list(_GOALPOST_FIELDS):
-            return f"good.goalpost rows must have keys {list(_GOALPOST_FIELDS)}"
-        if not isinstance(row["key"], str) or not isinstance(row["units"], str) \
-                or row["outcome"] not in ("pass", "fail", "error", "skipped"):
-            return "good.goalpost rows hold a key, an outcome word and units"
-        for what in ("limit", "measured"):
-            if row[what] is not None and not _a_number(row[what]):
-                return f"good.goalpost {what} must be a number or null"
+    # The type first, then the rows (review of P2.4: `"goalpost": 5` reached the
+    # loop and raised TypeError out of every reader — check, status, doctor).
     if not isinstance(good.get("goalpost", []), list):
         return "good.goalpost must be a list"
+    keys: set = set()
+    for group in good.get("goalpost") or ():
+        if isinstance(group, dict) and list(group) == list(_LEGACY_GOALPOST_FIELDS):
+            continue
+        if not isinstance(group, dict) or list(group) != list(_GOALPOST_FIELDS):
+            return f"good.goalpost rows must have keys {list(_GOALPOST_FIELDS)}"
+        if not isinstance(group["key"], str) or not isinstance(group["units"], str) \
+                or not isinstance(group["runs"], list):
+            return "good.goalpost rows hold a key, units and a list of runs"
+        if group["key"] in keys:
+            return f"good.goalpost moves {group['key']!r} twice"
+        keys.add(group["key"])
+        if group["measured"] is not None and not _a_number(group["measured"]):
+            return "good.goalpost measured must be a number or null"
+        for run in group["runs"]:
+            if not isinstance(run, dict) or list(run) != list(_GOALPOST_RUN_FIELDS):
+                return f"good.goalpost runs must have keys {list(_GOALPOST_RUN_FIELDS)}"
+            if run["end"] not in ("limit", "limit_hi") or not isinstance(run["units"], str) \
+                    or run["outcome"] not in ("pass", "fail", "error", "skipped"):
+                return "good.goalpost runs hold an end, an outcome word and units"
+            for what in ("limit", "measured"):
+                if run[what] is not None and not _a_number(run[what]):
+                    return f"good.goalpost {what} must be a number or null"
     if good["outcome"] not in _GOOD_OUTCOMES:
         return f"good.outcome must be one of {list(_GOOD_OUTCOMES)}, not {good['outcome']!r}"
     why = _problem_in_reads(good["reads"], control=True)
@@ -4988,21 +5074,15 @@ def _problem_in_control(data: Any) -> str:
     elif _walk_applies(data):
         return ("mutation is null where the walk applies and both controls held: an "
                 "entry missing its walk is not a qualification")
-    if _walk_applies(data):
-        # P2.4: a goalpost the known-good control read present must have been
-        # moved (`gates.goalpost_runs`) — `_ledger_unseen` exempts a check run's
-        # moved goalpost on that evidence alone, so an entry without it (hand
-        # placed, or an older spine's) is not a qualification.
-        from .gates import GOALPOST_FACTORS            # gates imports this module
-        read = {str(k)[len(ACCEPTANCE_KEY):]
-                for k, digest in ((data["good"].get("reads") or {}).get("ledger") or {}).items()
-                if str(k).startswith(ACCEPTANCE_KEY) and digest != ABSENT}
-        rows = data["good"].get("goalpost") or []
-        for key in sorted(read):
-            if sum(1 for row in rows if row.get("key") == key) != len(GOALPOST_FACTORS):
-                return (f"good.goalpost does not move the goalpost {key!r} its known-good "
-                        f"half read: an entry missing its goalpost runs is not a "
-                        f"qualification")
+    elif isinstance(data["good"], dict) and data["good"].get("goalpost"):
+        # Goalpost runs are walked with the mutation pass: an entry that moved a
+        # goalpost where nothing was walked was not written by this spine.
+        return "good.goalpost is recorded where the walk did not run"
+    # No goalpost runs are REQUIRED here (review of P2.4): a goalpost no run
+    # moved is simply not exempt from channels:ledger (`moved_goalposts`). The
+    # rule this replaced — runs for every goalpost the folded trace read — made
+    # the writer refuse its own entry whenever a walk run read one, and `check`
+    # stopped at exit 2 for the whole project.
     if data["admitted"] not in _ADMITTED:
         return f"admitted must be one of {list(_ADMITTED)}, not {data['admitted']!r}"
     return _admitted_problem(data)
@@ -5045,6 +5125,22 @@ def _load_control(path: str, gate_id: str | None) -> tuple[ControlEntry | None, 
     return entry, ""
 
 
+def _control_body(entry: ControlEntry) -> dict:
+    body = _clean(entry.body())
+    body["reads"] = _as_reads(body["reads"]).to_dict(control=True)
+    return body
+
+
+def entry_problem(entry: ControlEntry) -> str:
+    """Why the strict reader would refuse ``entry`` as ``write_control`` would
+    write it, or ``""``. Asked by ``_run_control`` before anything is filed,
+    recorded or not, so a writer/reader disagreement holds that one evaluator
+    unqualified (``control:unwritable``) instead of raising out of the check
+    run (review of P2.4: one gate's refused entry stopped every `check` of the
+    project at exit 2, nothing reported for any gate)."""
+    return _problem_in_control({**_control_body(entry), "digest": ""})
+
+
 def write_control(root: str, entry: ControlEntry) -> WriteResult:
     """Write ``entry`` at ``.atompipe/verdicts/<gate>/control-<rhoC16>-<out8>.json``,
     once — ``write_entry``'s rules, with one difference: bytes that differ only
@@ -5052,8 +5148,7 @@ def write_control(root: str, entry: ControlEntry) -> WriteResult:
     closure is a hint; a model edit moves it on every control, and re-verifying
     must write no new file when the control's values did not move (§3.8)."""
     _check_gate_id(entry.gate)
-    body = _clean(entry.body())
-    body["reads"] = _as_reads(body["reads"]).to_dict(control=True)
+    body = _control_body(entry)
     why = _problem_in_control({**body, "digest": ""})
     if why:
         raise AtompipeError(f"{entry.gate}: refusing to write a control entry its reader "
@@ -5282,11 +5377,14 @@ def _good_record(good: Any, *, anchors: Anchors, digests: FileDigests,
             "extra": sorted(good.extra), "measured": _number(verdict.measured, "measured"),
             "limit": _number(verdict.limit, "limit"), "units": str(verdict.units or ""),
             "detail": portable(str(verdict.detail or ""), anchors),
-            "goalpost": [{"key": str(run.key), "limit": _number(run.limit, "limit"),
-                          "outcome": str(run.outcome),
-                          "measured": _number(run.measured, "measured"),
-                          "units": str(run.units or "")}
-                         for run in getattr(good, "goalpost", ()) or ()]}, reads
+            "goalpost": [{"key": str(group.key),
+                          "measured": _number(group.measured, "measured"),
+                          "units": str(group.units or ""),
+                          "runs": [{"end": str(run.end), "limit": _number(run.limit, "limit"),
+                                    "outcome": str(run.outcome),
+                                    "measured": _number(run.measured, "measured"),
+                                    "units": str(run.units or "")} for run in group.runs]}
+                         for group in getattr(good, "goalpost", ()) or ()]}, reads
 
 
 def _walk_record(walk: Any) -> dict | None:
@@ -6605,23 +6703,61 @@ def _entry_facts(entry: Any, *, blocker: str = "") -> QualificationFacts:
         known_bad=str(entry.bad), known_good=(good or {}).get("outcome") or "not-run",
         channels=channels, check_channel=check, mutation=mutation, boundary=boundary,
         blocker=blocker, expect=str(nc.get("expect") or "fail"),
-        goalpost=_goalpost_fact((good or {}).get("measured"), (good or {}).get("units") or "",
-                                (good or {}).get("goalpost") or ()))
+        goalpost=_goalpost_fact((good or {}).get("goalpost") or ()))
 
 
-def _goalpost_fact(measured: Any, units: str, runs: Iterable[Any]) -> str:
-    """``moves|<key>`` for the first goalpost (sorted) whose run reported another
-    value or other units than the known-good run — or measured nothing — else
-    ``""`` (P2.4, critique 1). ``runs`` are ``gates.GoalpostRun`` records or an
-    entry's rows. The pass flag may differ (the goalpost moved, so may the
-    verdict): only the value and its units must not."""
+def _field(record: Any, name: str) -> Any:
+    """``name`` of a goalpost record: an entry's row (a mapping) or a
+    ``gates.GoalpostRuns``/``GoalpostRun``."""
+    return record.get(name) if isinstance(record, Mapping) else getattr(record, name, None)
+
+
+def _goalpost_fact(groups: Iterable[Any]) -> str:
+    """``moves|<key>`` for the first goalpost (sorted) one of whose runs reported
+    another value or other units than where it was read with nothing moved — or
+    gave no verdict (an error or a skip) — else ``""`` (P2.4, critique 1).
+    ``groups`` are ``gates.GoalpostRuns`` records or an entry's rows. The pass
+    flag may differ (the limit moved, so may the verdict): only the value and
+    its units must not. Each goalpost is compared with its OWN site — the
+    known-good run's value, or the walk run's that read it (review of P2.4)."""
     moved: list[str] = []
-    for run in runs or ():
-        get = run.get if isinstance(run, Mapping) else (lambda k, r=run: getattr(r, k, None))
-        if (get("outcome") not in ("pass", "fail") or get("measured") != measured
-                or str(get("units") or "") != str(units or "")):
-            moved.append(str(get("key")))
+    for group in groups or ():
+        base = (_field(group, "measured"), str(_field(group, "units") or ""))
+        for run in _field(group, "runs") or ():
+            if (_field(run, "outcome") not in ("pass", "fail")
+                    or (_field(run, "measured"), str(_field(run, "units") or "")) != base):
+                moved.append(str(_field(group, "key")))
+                break
     return f"moves|{sorted(moved)[0]}" if moved else ""
+
+
+def moved_goalposts(control: Any) -> frozenset:
+    """The goalposts ``control``'s qualification moved in full: every limit it
+    names (``moving_limits``: the runs' ``end``s, ``limit`` among them) by each
+    of ``gates.GOALPOST_FACTORS``. Only these may hold another limit on a check
+    run (``_ledger_unseen``). An entry that moved a goalpost in part, or not at
+    all — hand placed, an older spine's, a goalpost read only where no run gave
+    a verdict — exempts nothing: what no run moved stays under
+    ``channels:ledger``. What it replaced (review of P2.4): the strict reader
+    REQUIRED runs for every goalpost the folded trace held and refused the entry
+    otherwise; a goalpost only a walk run read was in the trace and in no run,
+    so the writer refused its own entry and `check` stopped at exit 2 for the
+    whole project."""
+    from .gates import GOALPOST_FACTORS            # gates imports this module
+    good = getattr(control, "good", None)
+    if not isinstance(good, Mapping):
+        return frozenset()
+    done = set()
+    for group in good.get("goalpost") or ():
+        if not isinstance(group, Mapping):
+            continue
+        runs = [r for r in group.get("runs") or () if isinstance(r, Mapping)]
+        ends: dict[str, int] = {}
+        for run in runs:
+            ends[str(run.get("end"))] = ends.get(str(run.get("end")), 0) + 1
+        if "limit" in ends and all(n == len(GOALPOST_FACTORS) for n in ends.values()):
+            done.add(str(group.get("key")))
+    return frozenset(done)
 
 
 def _incomplete(entry: Any) -> bool:
@@ -6668,14 +6804,19 @@ def _ledger_unseen(reads: Any, control: Any) -> tuple:
     seen = _good_reads(control).get("ledger") or {}
     # A goalpost's LIMIT is meant to differ between calibration and use
     # (P2.4-D3, as critique 1 narrowed it): `acceptance:<key>` is exempt, and
-    # only it. Its shape — which claims, quantity, comparator, units — is not:
-    # a check run's goalpost of another shape, or one its known-good control
-    # never had, is a path no qualification run took. And the limit alone is
-    # exempt only because the qualification moved it (`gates.goalpost_runs`,
-    # held by the strict reader: an entry that read a goalpost and moved none
-    # is refused) and the known-good value stayed where it was.
+    # only it, and only where the qualification moved that goalpost in full
+    # (`moved_goalposts`; whether its value stayed put is the judge's
+    # `goalpost:moves`). Its shape — which claims, quantity, comparator, units,
+    # which limits are there — is never exempt: a check run's goalpost of
+    # another shape, or one its known-good control never had, is a path no
+    # qualification run took. Review of P2.4: the exemption used to cover every
+    # `acceptance:` key, moved or not, on the strength of a strict-reader rule
+    # that aborted `check` whenever the walk read one the runs had not moved.
+    moved = moved_goalposts(control)
     return tuple(sorted(str(k) for k, digest in live.items()
-                        if not str(k).startswith(ACCEPTANCE_KEY) and seen.get(k) != digest))
+                        if not (str(k).startswith(ACCEPTANCE_KEY)
+                                and str(k)[len(ACCEPTANCE_KEY):] in moved)
+                        and seen.get(k) != digest))
 
 
 def _counted_with(found: "Admission", reads: Any) -> "Admission":
@@ -8672,6 +8813,9 @@ def _good_half(s: _Session, spec: Any, fn: Any, host_ctx: Any) -> _GoodHalf:
     ctx = _no_model(dataclasses.replace(built, out_dir=out_dir),
                     _mutation_applies(fn, s.root))
     verdict = _gates.run_gate(spec, fn, ctx, trace=trace)
+    # The goalposts the known-good run read are moved at its own design
+    # (`gates.goalpost_runs`); a walk run adds the ones only it reads.
+    _gates.note_goalpost_sites(trace, trace, ctx.params, verdict)
     half = dict(trace=trace, closure=trace.fixture_code, verdict=verdict, ctx=ctx,
                 extra=tuple(trace.handed_extra or ()))
     if verdict.outcome == "skipped":
@@ -8775,11 +8919,6 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
     walk = None
     walk_token = ""
     if applies and bad == "fail" and good.outcome == "pass" and not channels and not check:
-        # P2.4 (critique 1): each goalpost the known-good run read, moved —
-        # before the walk, so the walk's folded reads leave its recorded
-        # goalposts at their calibrated digests either way.
-        good = dataclasses.replace(good, goalpost=_gates.goalpost_runs(
-            spec, fn, good.ctx, good.verdict, trace=good.trace))
         try:
             walk = _gates.mutation_walk(spec, fn, good.ctx, good.verdict, trace=good.trace,
                                         roots=_walk_roots(s))
@@ -8788,6 +8927,16 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
         else:
             if walk.flaky:
                 walk_token = f"errored|{walk.flaky}"
+            # P2.4 (critique 1): every goalpost a qualification run read, moved
+            # where it was read — AFTER the walk, so a goalpost only a walk run
+            # reads is moved too. What slipped through when these ran first, over
+            # the known-good run's goalposts alone (review of P2.4): the strict
+            # reader required runs for every goalpost the folded trace held, a
+            # walk run's included, and refused the entry its own writer made —
+            # every `check` of the project stopped at exit 2, while status and
+            # doctor promised "the next check run qualifies it".
+            good = dataclasses.replace(good, goalpost=_gates.goalpost_runs(
+                spec, fn, good.ctx, good.verdict, trace=good.trace))
     facts = QualificationFacts(
         known_bad=bad if bad is not None else ("skipped" if kind == "self-skip"
                                                 else "errored"),
@@ -8799,9 +8948,7 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
                    len(walk.inconclusive))),
         boundary=walk.boundary if walk is not None and not walk_token else "",
         walk=walk_token, expect=expect,
-        goalpost=(_goalpost_fact(_number(good.verdict.measured, "measured"),
-                                 str(good.verdict.units or ""), good.goalpost)
-                  if good.goalpost else ""))
+        goalpost=_goalpost_fact(good.goalpost))
     token = _qualification(facts)
     # The path a failure is held on, and an entry answers: either half's tier
     # (`_entry_tier`) — a known-good crash on the tier-1 path, behind a
@@ -8839,6 +8986,17 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
                            detail="", digests=s.digests, anchors=s.anchors, good=good,
                            walk=walk)
     entry = built.entry
+    refused = entry_problem(entry)
+    if refused:
+        # A spine defect — the writer made an entry its own reader refuses —
+        # held for this evaluator alone, louder than a quiet Gap, and re-run on
+        # the next check: never an exception out of the whole check run.
+        facts = dataclasses.replace(facts, blocker=f"unwritable|{refused}")
+        if s.record:
+            record_obs(s.root, gid, entry="", when=s.when, duration_s=cost, cpu_s=cpu,
+                       control=True)
+        return _hold(s, spec, fn, static_digest, tier, facts, executed=True,
+                     detail=f"{gid}: its control entry is one its reader refuses: {refused}")
     if s.record:
         record_obs(s.root, gid, entry=entry.name, when=s.when, duration_s=cost, cpu_s=cpu,
                    control=True)

@@ -1450,14 +1450,16 @@ def _qualification_lines(rows: list[verdicts.SweepRow]) -> list[str]:
     return out
 
 
-def _limit_lines(view: Ledger) -> list[str]:
+def _limit_lines(view: Ledger, stale_gates: Iterable[str] = ()) -> list[str]:
     """`check`'s warning lines (P2.4-D13, S-35): one per compared pair whose
     evaluator judged against a limit of its own that is not its claim's — one
     number in two places. On stdout, after the qualification lines: a warning
-    on stderr is one nobody reads in a captured run. Never a status."""
+    on stderr is one nobody reads in a captured run. Never a status. Current
+    verdicts only (`stale_gates` left out): a stale one's limit is its old
+    inputs', and the next check run settles it."""
     said = report.HUMAN["acceptance"]
     out = []
-    for found in claims.limit_disagreements(view):
+    for found in claims.limit_disagreements(view, stale_gates=stale_gates):
         unit = f" {found.units}" if found.units else ""
         out.append(said["warning"].format(line=said["limits"].format(
             gate=found.gate, limit=f"{report._num(found.limit)}{unit}", claim=found.claim,
@@ -1708,14 +1710,22 @@ def cmd_check(args: argparse.Namespace) -> int:
             "notes": notes,
             # Additive (P2.4-D13): the compared pairs whose two limits part.
             "limit_disagreements": [found._asdict()
-                                    for found in claims.limit_disagreements(view)],
+                                    for found in claims.limit_disagreements(
+                                        view, stale_gates=stale_gates)],
             # Additive (P2.1-D12): each evaluator's qualification as this check
             # judged it — the line in words, the judge's token, and the state.
+            # The token is the QUALIFICATION's alone: a pass outside its
+            # operating context carries `context:outside` on the verdict, a fact
+            # about this pass's inputs, and its evaluator is qualified (review of
+            # P2.4: the row read `state: admitted`, its line `→ qualified`, and a
+            # non-empty token a reader took for a refusal). The context fact is
+            # the verdict row's `unqualified` and `counts.outside_context`.
             "qualifications": [
                 {"gate": row.verdict.gate,
                  "line": report.qualification_line(row.verdict.gate,
                                                    row.admission.qualification),
-                 "token": row.verdict.unqualified or "",
+                 "token": ("" if claims.outside_context(row.verdict)
+                           else row.verdict.unqualified or ""),
                  "state": row.admission.state}
                 for row in rows
                 if row.admission is not None and row.admission.qualification is not None],
@@ -1727,7 +1737,7 @@ def cmd_check(args: argparse.Namespace) -> int:
         _say(_controls_line(counts["controls"]))
     for line in _qualification_lines(rows):
         _say(line)
-    for line in _limit_lines(view):
+    for line in _limit_lines(view, stale_gates):
         _say(line)
     for note in notes:
         _say(f"note: {note}")
@@ -2200,6 +2210,15 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
                                         stale_reasons=_stale_reasons(resolution))))
         return 0
     _say(f"{report.status_tag(status, errored=found.errored)} {claim.id}")
+    if found.cause is not claims.ClaimCause.CHECKED:
+        # Why it reads what it reads, under the header — the composition's
+        # reason, as `status` prints it. What slipped through (review of P2.4):
+        # C3 tightened to 0.1 MPa printed `[FAIL ] C3` over one evaluator line,
+        # `[ok  ] bracket.bearing : 0.19 MPa …`, and nothing on the screen said
+        # the acceptance condition was not met.
+        said = report.reason(found, view, claim, full=True,
+                             stale_reasons=_stale_reasons(resolution))
+        _say(f"  {said}")
     sys.stdout.write(why)
     return 0
 
@@ -5571,12 +5590,17 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _doctor_qualification_rows(results, root, registry, resolution, projection=projection,
                                ledger=ledger)
     # P2.4-D13: an evaluator judging against a limit of its own that is not its
-    # claim's — a warning, never a status; the row only when one parts (S-35).
-    parted = _limit_lines(view)
+    # claim's — a warning, never a status (S-35) — over current verdicts only.
+    # The row is always there (review of P2.4): it appeared only when it warned,
+    # so a reader could not tell it had run, and the count of diagnostics moved
+    # with the outcome.
+    parted = _limit_lines(view, resolution.stale_gates)
+    said = report.HUMAN["acceptance"]
     if parted:
-        said = report.HUMAN["acceptance"]
         _check(results, "limits", "warn", said["doctor_warn"].format(
             n=len(parted), list="; ".join(line.split(": ", 1)[1] for line in parted)))
+    else:
+        _check(results, "limits", "ok", said["doctor_ok"])
     _doctor_seal_row(results, registry,
                      _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
 

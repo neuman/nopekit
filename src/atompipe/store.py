@@ -910,6 +910,23 @@ def _parse_record(label: str, kind: str, stem: str, raw: bytes, *, model_entry: 
             f'{label}: "critical" must be true or false, not {json.dumps(data["critical"])} '
             f"— a claim is required (true, the default when the key is absent) or not "
             f"(false); a value nobody wrote as a bool never makes a claim not required")
+    # A claim's limits are numbers or absent, named against the file. What
+    # slipped through (review of P2.4): `"limit_hi": "0.8"` read, and from P2.4
+    # the comparison judges a value against it — `holds` raised TypeError and
+    # `check`, `status` and `report` printed a traceback in place of the claim.
+    # Measured before it refused (R-4): zero hits over the bracket's claims.
+    # *Rejected:* coercing "0.8" to 0.8 (it rewrites what the file says, as the
+    # `critical` rule above refuses to); reading the claim with no limit (a
+    # typed limit silently ignored compares the value with nothing).
+    acceptance = data.get("acceptance") if kind == "claims" else None
+    if isinstance(acceptance, dict):
+        for key in ("limit", "limit_hi"):
+            value = acceptance.get(key)
+            if value is not None and (isinstance(value, bool)
+                                      or not isinstance(value, (int, float))):
+                raise AtompipeError(
+                    f'{label}: "acceptance.{key}" must be a number or null, not '
+                    f"{json.dumps(value)} — a limit typed as text is compared with nothing")
     idf = _id_field(cls)
     if idf in data and data[idf] != stem:
         raise AtompipeError(

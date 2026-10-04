@@ -75,10 +75,13 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     4: ["test_invariants.ReportNeverOverclaims",
         "test_status_table.UnqualifiedBesideAPassIsNeverChecked",
         "test_invariants.CheckedMeansEveryEvaluatorPassed",
-        # P2.4: a pass must meet the goalpost it read, and a value outside its
-        # claim's acceptance condition is never Checked (D-23 of its design).
+        # P2.4: a pass must meet the acceptance condition it read, and a value
+        # outside its claim's acceptance condition is never Checked (D-23 of its
+        # design) — nor one whose evaluator repeats the claim's units back
+        # (review of P2.4: C1 in `um` read Checked at 700 um against 600).
         "test_goalposts.APassMustMeetTheAcceptanceItRead",
-        "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked"],
+        "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked",
+        "test_goalposts.AnEvaluatorStatesItsOwnUnits"],
     5: "test_packs.ControlsAreSealed",
     6: "test_packs.NegativeControlsFire",
     # 7, and P2.4: a goalpost edit re-keys exactly the gates that read it.

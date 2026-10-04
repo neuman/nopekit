@@ -238,11 +238,15 @@ function claimRow(claim, state, app) {
     claim.disagree ? tag("status and evidence disagree", { tone: "bad",
       title: "the resolver and the verdicts contradict each other — a defect to report" }) : null,
     claim.critical === false ? tag("not required", { tone: "muted" }) : null,
+    // Beside it, the CLAIM's limit (`claim.limit_text`, written by site.state),
+    // never the verdict's: a compared pair is the one kind whose two limits can
+    // part. What slipped through (review of P2.4): Failing C3 summarised as
+    // `0.195 MPa / 15 MPa` — its evaluator's own limit — against `<= 0.1 MPa`.
     headline && headline.measured !== null && headline.measured !== undefined
       ? el("span", { class: "claim-measure mono", title: `measured by ${headline.gate}` },
           quantity(headline.measured, headline.units || claim.acceptance?.units || ""),
-          headline.limit !== null && headline.limit !== undefined
-            ? el("span", { class: "muted", text: ` / ${quantity(headline.limit, headline.units || "")}` })
+          claim.limit_text
+            ? el("span", { class: "muted", text: ` / ${claim.limit_text}` })
             : null)
       : null);
 

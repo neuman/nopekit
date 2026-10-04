@@ -1573,7 +1573,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         # (spec §3.11): the gate is never called, the claim it covers FAILs in
         # the sweep's BLOCKING list and in the statuses `last_check.json` keeps.
         project = self._bracket()
-        edit(project, "gates/structural.py", "passed=u <= 1.0,", "passed=True,")
+        edit(project, "gates/structural.py", "passed=util <= 1.0,", "passed=True,")
         code, data = check_json(self, project)
         self.assertEqual(code, 1)
         got = verdict_row(data, "bracket.bending_stress")

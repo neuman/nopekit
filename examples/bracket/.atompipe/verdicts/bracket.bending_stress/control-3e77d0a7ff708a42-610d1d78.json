@@ -2,21 +2,21 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.bending_stress",
-  "rho": "5ae8bb00fad4d59e26ad36aa9fb248576650d98dfd12c2adde6d8f32a0397d33",
-  "static": "dc9e5bdd17046aafd77b3a34be8fb22e7ae811db667177e4032d146ba14f775d",
+  "rho": "3e77d0a7ff708a420ea47cadcef9827c5b6fa57d7c398f4ac7a764ccc923b159",
+  "static": "fff9ffe95b6478885ec2388e3c36bbb47cb0188abb0d5875be4c519554018862",
   "static_parts": {
-    "spine": "71f45240af6180d5bd456f588c766edd4ab9fddf0f34afbb6b215f31b8254857",
+    "spine": "56ae569ada37d43859cafab7b78b026460656849e83248c6d317acd23a119d63",
     "code": {
-      "digest": "7dc66ecf8b0ad544940cccf6b8ca8514694a95b54da4d140fb306bf1e9e48161",
+      "digest": "347df3c56331d1d0853e3871b36280e18ad06bdd25378afeff9af96621ae975b",
       "files": [
         "gates/structural.py"
       ]
     },
     "selftest": {
-      "digest": "d189dfd49d6e13f7aee32b7fe0b285cfd4e29c5dd8474582582af9460da0499a",
+      "digest": "54b47c809fedc4f67f74e03ae930f5d0e1a3b50087a5674014c35bf2c036fb58",
       "files": {
         "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-        "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
+        "selftest/known_good.py": "72ac6ff4b1083baa4b4f809e598b8784f534f880a0d90e457316cbfda74f2c16"
       }
     },
     "nc": {
@@ -29,11 +29,11 @@
   },
   "host": "known-good",
   "fixture": {
-    "digest": "3645413f71d05619f92c2a1b5e8e5385fdfbd05b0b0bcf779cb6c4871c71b220",
+    "digest": "bfea838ca994a9ca7c38c37351130038df6d85b08b7dbb688591f0ec7e92b9e6",
     "files": {
       "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
       "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-      "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
+      "selftest/known_good.py": "72ac6ff4b1083baa4b4f809e598b8784f534f880a0d90e457316cbfda74f2c16"
     }
   },
   "reads": {
@@ -163,5 +163,5 @@
   "measured": 3.75,
   "limit": 1.0,
   "units": "utilisation",
-  "digest": "2a111f9371567302a95f6d4e3c8780687101fb0882b86ed75c4fb0c55095d5e2"
+  "digest": "4a7041c08ac13f30650f44087722705dbfdfefb6504798ff7f602663999b2b39"
 }

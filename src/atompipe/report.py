@@ -263,8 +263,16 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "unread": "{key} not read by the run that passed, qualified on {interval}",
         "declared": "operating context: {ranges} — outside it a pass does not count; a fail "
                     "still does",
+        # The report's subsection under Gaps (review of P2.4: it was a literal
+        # beside this table, a second copy of `declared`'s words).
+        "gaps_intro": "An evaluator was qualified on a range of its inputs; outside it a "
+                      "{pass_} does not count, so its claim is a {gap} — and a {fail} outside "
+                      "it still does.",
         "range": "{key} in {interval}",
         "tally": "outside operating context",
+        # The page's chip title for such a pass (`page_phrases`).
+        "hint": "the evaluator passed on inputs outside the range it was qualified on — "
+                "the pass does not count; a fail there would",
         "fallback_hint": "an owned assumption would carry it as Assumed: name its owner and a "
                          "fallback reason in claims/{id}.json (owner, fallback) — nothing can "
                          "record the owner yet",
@@ -288,6 +296,10 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "limits": "{gate} : its limit {limit} is not {claim}'s acceptance condition "
                   "({condition}) — one number in two places",
         "warning": "warning: {line}",
+        # The checked table's closing sentence: what every row stands on beyond
+        # "ran and passed" (P2.4), and what keeps a claim out of it.
+        "closing_counts": "inside its operating context, and every value compared with the "
+                          "claim's acceptance condition meets it",
         "closing_more": "or one outside its operating context, or a value its claim's "
                         "acceptance condition does not admit",
         "doctor_ok": "every compared evaluator judges against its claim's own limit",
@@ -390,11 +402,16 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "channels": "channels differ",
         "check_channel": "known-good and known-bad via ctx.extra",
         "ledger": "check run reads another ledger",
-        # P2.4 (critique 1): the known-good value moved with a goalpost it read.
-        "goalpost": "value moves with its goalpost",
+        # P2.4 (critique 1): the known-good value moved with a limit it read.
+        # No *goalpost* on a human channel (GLOSSARY §1: the acceptance
+        # condition, or its limit — review of P2.4).
+        "goalpost": "value moves with its limit",
         "blocker": MappingProxyType({"two-outcomes": "two outcomes",
                                      "tier": "outcomes differ by tier",
-                                     "differs": "outcome differs from its cached entry"}),
+                                     "differs": "outcome differs from its cached entry",
+                                     # Review of P2.4: the writer made an entry
+                                     # its own reader refuses — a defect, held.
+                                     "unwritable": "qualification not recorded"}),
         "qualified": "→ qualified",
         "unqualified": "→ unqualified",
         # The reason after `unqualified: <evaluator> : ` — the FIRST fact that
@@ -410,8 +427,8 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
             "known-good:live": "known-good control reads the candidate",
             "known-good:outside": "known-good outside its operating context",
             "goalpost:moves": "its known-good value moves when the acceptance condition it "
-                              "reads ({text}) moves: a value is measured, never chosen by its "
-                              "goalpost",
+                              "reads ({text}) moves: a value is measured, never chosen by the "
+                              "limit it is judged against",
             "channels:differ": "known-good and known-bad reach it through different channels "
                                "(ctx.extra: known-bad {{{bad}}}, known-good {{{good}}})",
             "channels:check": "its controls reach it through ctx.extra, which a check run never "
@@ -428,8 +445,22 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
             "control:tier": "qualification differs by ctx.tier ({text}): unqualified on one "
                             "tier's path",
             "control:differs": "control outcome differs from its cached entry ({text})",
+            "control:unwritable": "its qualification could not be recorded — atompipe made "
+                                  "a control entry its own reader refuses ({text}); a defect "
+                                  "to report, and the next check run tries again",
             "qualification:not-yet": "not yet qualified at this version — {how}",
         }),
+        # `channels:ledger` over an acceptance condition (P2.4's `acceptance:` and
+        # `acceptance-shape:` keys): its own words, never the raw keys. What
+        # slipped through (review of P2.4): the reason printed `ledger
+        # acceptance-shape:C1` and said "hand its known-good design the same
+        # claims" — copying the live C1 into CLAIMS, the coupling D2 measured as
+        # wrong (the live C1 at 0.4 read `known-good fail`).
+        "acceptance_ledger": "the acceptance condition of {claims} is not one a qualification "
+                             "run read, and only a limit its qualification moved may differ: "
+                             "state {claims} in selftest/known_good.py CLAIMS with the same "
+                             "quantity, comparator and units, keeping the limit it was "
+                             "calibrated at",
         # What to do, after a pack-mode problem's reason (`packs._unqualified_problem`),
         # by the token's kind; none where the reason says it.
         "remedy": MappingProxyType({
@@ -482,8 +513,11 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
             "not walked", "not-finite": "not a finite number: not walked",
             "other": "not a number, a flag or a list of numbers: not walked",
             "budget_key": "the walk's budget ran out before it",
-            "goalpost": "goalpost",
-            "goalpost_row": "{key} limit -> {limit}: {outcome}, {value}",
+            # One row per run with a limit moved (`gates.goalpost_runs`).
+            "goalpost": "limit moved",
+            "goalpost_row": "{key} {end} -> {limit}: {outcome}, {value}",
+            "ends": MappingProxyType({"limit": "limit", "limit_hi": "upper limit"}),
+            "no_value": "no value",
         }),
         "selftest_summary": "{n} evaluators in {t}: {q} qualified, {u} unqualified, "
                             "{s} skipped",
@@ -763,7 +797,13 @@ def qualification_reason(token: Any, *, pruned_by: str = "") -> str:
     if template is None:
         return f"{kind}: {text}" if text else kind
     if kind == "channels:ledger":
-        return template.format(keys=", ".join(k for k in text.split(",") if k))
+        keys = [k for k in text.split(",") if k]
+        goal = (verdict_logic.ACCEPTANCE_KEY, verdict_logic.SHAPE_KEY)
+        named = sorted({k.split(":", 1)[1] for k in keys if k.startswith(goal)})
+        rest = [k for k in keys if not k.startswith(goal)]
+        said = ([q["acceptance_ledger"].format(claims=", ".join(named))] if named else []) \
+            + ([template.format(keys=", ".join(rest))] if rest else [])
+        return "; ".join(said) or template.format(keys="")
     if kind == "goalpost:moves":
         return template.format(text=text)
     if kind.startswith("channels:"):
@@ -884,10 +924,13 @@ def qualification_detail(entry: Any, spec: Any, *, facts: Any = None) -> list[st
                 (facts is not None and facts.known_good == "not-run"):
             row(d["known_good"], d["none"])
     if isinstance(good, Mapping):
-        for r in good.get("goalpost") or ():
-            row(d["goalpost"], d["goalpost_row"].format(
-                key=r.get("key"), limit=_num(r.get("limit")), outcome=r.get("outcome"),
-                value=_value_words(r.get("measured"), None, r.get("units") or "") or "no value"))
+        for group in good.get("goalpost") or ():
+            for r in (group.get("runs") or ()) if isinstance(group, Mapping) else ():
+                row(d["goalpost"], d["goalpost_row"].format(
+                    key=group.get("key"), end=d["ends"].get(r.get("end"), r.get("end")),
+                    limit=_num(r.get("limit")), outcome=r.get("outcome"),
+                    value=_value_words(r.get("measured"), None, r.get("units") or "")
+                    or d["no_value"]))
     if entry is not None:
         value = _value_words(entry.measured, entry.limit, entry.units or "")
         fixture = getattr(nc, "fixture", "") if nc is not None else ""
@@ -1110,7 +1153,10 @@ def outcome_words() -> dict[str, str]:
             "errored": said["error"],
             # An unqualified evaluator's verdict row (P2.3-D17): never a crash's
             # word; Gap's tone on the page.
-            "unqualified": HUMAN["lead"][ClaimCause.UNQUALIFIED]}
+            "unqualified": HUMAN["lead"][ClaimCause.UNQUALIFIED],
+            # A pass outside its operating context (P2.4-D22): the tally's word,
+            # never `unqualified` (review of P2.4: the page said UNQUALIFIED).
+            "outside-context": HUMAN["context"]["tally"]}
 
 
 def words_table() -> dict[str, dict[str, str]]:
@@ -1139,7 +1185,8 @@ def page_phrases() -> dict[str, Any]:
     return {"invalidated": HUMAN["lead"][ClaimCause.INVALIDATED],
             "need": {str(status.value): said for status, said in HUMAN["need"].items()},
             "outcome_hint": {"pass": hints["pass"], "fail": hints["fail"],
-                             "skipped": hints["skipped"], "errored": hints["error"]}}
+                             "skipped": hints["skipped"], "errored": hints["error"],
+                             "outside-context": HUMAN["context"]["hint"]}}
 
 
 def need_word(status: Any) -> str:
@@ -1153,6 +1200,25 @@ def need_word(status: Any) -> str:
 # --------------------------------------------------------------------------- #
 # small render helpers
 # --------------------------------------------------------------------------- #
+def limit_words(acceptance: Any) -> str:
+    """An acceptance condition's limit as a page or a line shows it beside a
+    value: `0.5 mm`, a band's `0.2..0.8 mm`, ``""`` with no finite limit."""
+    limit = getattr(acceptance, "limit", None)
+    if not _finite(limit):
+        return ""
+    units = str(getattr(acceptance, "units", "") or "")
+    comparator = getattr(acceptance, "comparator", None)
+    hi = getattr(acceptance, "limit_hi", None)
+    if str(getattr(comparator, "value", comparator) or "") == "between" and _finite(hi):
+        return f"{_num(limit)}..{_num(hi)} {units}".strip()
+    return f"{_num(limit)} {units}".strip()
+
+
+def _finite(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
 def _num(value: Any) -> str:
     """Render a measured number without trailing-zero noise: 220.0 -> `220`."""
     if isinstance(value, bool):          # bool is an int; check it first
@@ -1663,9 +1729,8 @@ def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
             out.append("")
         lead = HUMAN["lead"]
         out.append(f"Every row above is {checked}: each of its evaluators ran and passed "
-                   f"against the inputs, code and controls it has now, inside its "
-                   f"operating context, and every value compared with the claim's "
-                   f"acceptance condition meets it. A "
+                   f"against the inputs, code and controls it has now, "
+                   f"{said['closing_counts']}. A "
                    f"{lead[ClaimCause.SKIPPED]}, {lead[ClaimCause.ERRORED]}, "
                    f"{lead[ClaimCause.UNQUALIFIED]}, {lead[ClaimCause.INVALIDATED]} or "
                    f"{lead[ClaimCause.UNRUN]} evaluator — {said['closing_more']} — puts its "
@@ -1885,9 +1950,8 @@ def _section_gaps(ledger: Ledger, composed: Mapping[str, Any], registry: Any, *,
         # outside its evaluator's operating context counts nowhere.
         out.append(HUMAN["heading"]["gaps_context"])
         out.append("")
-        out.append(f"An evaluator was qualified on a range of its inputs; outside it a pass "
-                   f"does not count, so its claim is a {word(gap)} — and a fail outside it "
-                   f"still does.")
+        out.append(HUMAN["context"]["gaps_intro"].format(
+            pass_=HUMAN["outcome"]["pass"], fail=HUMAN["outcome"]["fail"], gap=word(gap)))
         out.append("")
         for claim in outside:
             why = reason(composed[claim.id], ledger, claim, full=True,
@@ -2944,6 +3008,7 @@ __all__ = [
     "outcome_words",
     "need_word",
     "page_phrases",
+    "limit_words",
     "recorded_by",
     "readiness",
     "not_ready_line",

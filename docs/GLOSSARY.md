@@ -38,7 +38,7 @@ scanner (§7).
 | **generator** | §7 "any generator, human or model"; it "cannot settle a claim by asserting it" | whoever proposes candidates, claims, parameters and evaluators | — (the agent, the user) | proposer · *the AI* |
 | **candidate** | §7 "one configuration of the design, together with the claims made about it" | one point in the tradespace | the current design point; values in `Rejected`; **not** `ToolCandidate` (§6) | design point · *variant* · *alternative* · *option* |
 | **claim** | §3 "a verdict about a scoped claim" | a scoped statement that must be true for the design to work | `Claim`, `claims/<id>.json`, `ClaimKind` | *requirement* · *must be true* (as a noun) · *spec* |
-| **acceptance condition** | §2.3 "Acceptance conditions must be explicit" | quantity, comparator, limit and units a claim is judged by | `Acceptance`, `claim.acceptance`, `limit`, `limit_hi` | pass criteria · *threshold* · *criterion* |
+| **acceptance condition** | §2.3 "Acceptance conditions must be explicit" | quantity, comparator, limit and units a claim is judged by; its **limit** is the number (a band's are `limit` and `limit_hi`) | `Acceptance`, `claim.acceptance`, `limit`, `limit_hi`; from P2.4 `GateContext.acceptance`, `verdicts.acceptance_of`, the ledger keys `acceptance:` / `acceptance-shape:`, `gates.goalpost_runs`, `GOALPOST_FACTORS`, the token `goalpost:moves\|<key>`, the words in `report.HUMAN["acceptance"]`; identifiers keep *goalpost* until the rename pass | pass criteria · goalpost · goalposts · *threshold* · *criterion* |
 | **falsification** | §1 "an evaluator produces evidence that a candidate fails a declared claim … A falsification is scoped" | one evaluator failing one candidate on one claim | refusal (the plans' older word); the verb for an evaluator failing: site FAIL hint "the gate ran and refused", `skills/atompipe` "It must refuse", `skills/pack-authoring` "anything that already refuses", "compares … and refuses" | refusal · refuser · refuter. The verb *refuse* stays only for a boundary that declines to act — the registry refuses an evaluator, an export refuses to emit, a permission rule refuses an edit — never for an evaluator failing a candidate (§6) |
 | **evaluator** | §3 "An evaluator consumes registered inputs and produces a verdict about a scoped claim" | anything that settles a claim and has shown it can fail; domain names such as *design-rule check* stay | `GateSpec`, `gates.py`, `Verdict.gate`, `Claim.gates`, `Param.gates`, `gates/`, CLI `gate`; prose: gate, validator, check | gate · validator · verifier · refuser · *check* (noun) · *test* (noun, for an automated evaluator) |
 | **automated evaluator** | §1 "verification is performed largely by automated and physical evaluators" | an evaluator that needs neither an article nor a person: a closed-form calculation, a simulation, a design-rule check. The counterpart of physical evaluator | `ClaimKind.MEASURABLE` ("a gate can settle it from the model"); prose "machine", "the model" | model evaluator · machine evaluator (*model-written* is §6.3's word for who wrote an evaluator, not what kind it is) |
@@ -90,10 +90,11 @@ failed, or one passed at a value that does not meet the claim's acceptance condi
 otherwise **Skipped** if any skipped or errored; otherwise **Gap** if none is
 qualified, any is unqualified, or a pass lies outside its evaluator's operating context
 with no owned fallback (P2.4); otherwise **Open** if any is unrun; otherwise **Stale** if
-any pass's read set has moved; otherwise **Checked**. A physical evaluator with no result
-reads **Pending build** where an automated one would read Open; an assumption, or an
-expert-judgment claim its authority has not settled, reads **Assumed** — or **Gap** with no
-owner. Controls qualify automated evaluators; a physical result stands on its article and
+any pass's read set has moved; otherwise **Assumed** if a pass outside its evaluator's
+operating context is carried by an owned fallback (P2.4); otherwise **Checked**. A physical
+evaluator with no result reads **Pending build** where an automated one would read Open;
+an assumption, or an expert-judgment claim its authority has not settled, reads **Assumed**
+— or **Gap** with no owner. Controls qualify automated evaluators; a physical result stands on its article and
 who recorded it, and an expert judgment on its authority. So a passing evaluator never
 hides one that skipped, errored, is unqualified or is unrun. On `0474f5c`, `claims.resolve_status` differs in four places, each a P2 change under
 R-8's oracle: an error reads FAIL (rung 4); an unqualified evaluator reads FAIL; pass beside

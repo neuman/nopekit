@@ -64,6 +64,7 @@ from unittest import mock
 
 import _env
 import _projects
+import _transcript as T
 from atompipe import claims, gates, modelio, packs, report, store, verdicts
 from atompipe.models import (Acceptance, Claim, ClaimStatus, Comparator, GateSpec, Ledger,
                              NegativeControl, Verdict)
@@ -698,6 +699,40 @@ class LimitsLiveInOnePlace(_env.EnvCase):
         proc = run(self, same, "check", code=1)
         self.assertNotIn("warning:", proc.stdout)
         self.assertEqual(run_json(self, same, "check", code=1)["limit_disagreements"], [])
+        # Review of P2.4: the row is there when nothing parts, too — it was
+        # printed only when it warned, and `doctor_ok` was a word nothing read.
+        rows = [r for r in run_json(self, same, "doctor")["checks"]
+                if r.get("check") == "limits"]
+        self.assertEqual([(r.get("status"), r.get("detail")) for r in rows],
+                         [("ok", "every compared evaluator judges against its claim's own "
+                                 "limit")])
+
+    def test_a_stale_verdict_is_never_blamed_for_its_old_limit(self):
+        """What slipped through (review of P2.4): C1 moved to 0.75 before a check
+        run, and ``doctor`` and ``check --only bracket.bearing`` warned that
+        ``bracket.deflection`` — which reads its limit FROM C1 — judged "its
+        limit 0.5 mm … one number in two places". Its verdict was stale."""
+        claim = Claim(id="C1", statement="c1", tags=["stiffness"],
+                      acceptance=Acceptance(quantity="tip deflection",
+                                            comparator=Comparator.LE, limit=0.75,
+                                            units="mm"))
+        verdict = Verdict(gate="bracket.deflection", passed=False, claims=["stiffness"],
+                          measured=0.6997, limit=0.5, units="mm", comparator="<=",
+                          settles="tip deflection")
+        view = Ledger(claims=[claim], verdicts=[verdict])
+        self.assertEqual([found.gate for found in claims.limit_disagreements(view)],
+                         ["bracket.deflection"], "told nothing of staleness, it blames (violator)")
+        self.assertEqual(claims.limit_disagreements(view, stale_gates={"bracket.deflection"}),
+                         [])
+
+    def test_doctor_and_a_partial_check_run_say_nothing_of_a_stale_limit(self):
+        project = bracket(self)
+        edit_claim(project, "C1", limit=0.75)
+        rows = [r for r in run_json(self, project, "doctor")["checks"]
+                if r.get("check") == "limits"]
+        self.assertEqual([r.get("status") for r in rows], ["ok"])
+        proc = run(self, project, "check", "--only", "bracket.bearing")
+        self.assertNotIn("warning:", proc.stdout)
 
 
 # --------------------------------------------------------------------------- #
@@ -1011,8 +1046,11 @@ class AGoalpostIsNeverAKey(_env.EnvCase):
     def test_a_gate_keyed_to_whether_its_claim_exists_is_unqualified(self):
         p = goal_project(self)
         got = p.row(p.sweep(only=["t.presence"]), "t.presence")
+        # Both keys (review of P2.4): a limit is exempt only where a
+        # qualification run moved it, and none can move a claim that did not
+        # exist on the known-good design.
         self.assertEqual(verdicts.parse_token(got.verdict.unqualified),
-                         ("channels:ledger", "acceptance-shape:c3"))
+                         ("channels:ledger", "acceptance-shape:c3,acceptance:c3"))
         self.assertEqual(p.composed()["c3"].status, ClaimStatus.UNCLAIMED)
 
     def test_the_design_as_written_would_read_both_checked(self):
@@ -1030,8 +1068,588 @@ class AGoalpostIsNeverAKey(_env.EnvCase):
                                create=True), \
                 mock.patch.object(verdicts, "_ledger_unseen", every_goalpost_exempt), \
                 mock.patch.object(gates, "goalpost_runs", lambda *a, **k: ()):
-            # Judged, not written: the strict reader refuses an entry that read a
-            # goalpost and moved none — this file's guard against a forged one.
+            # Judged, not written: an entry that moved no goalpost exempts
+            # nothing (`moved_goalposts`), so only the planted exemption counts.
             result = p.sweep(only=["t.keyed", "t.presence"], record=False)
             self.assertEqual(p.row(result, "t.keyed").verdict.unqualified, "")
             self.assertEqual(p.row(result, "t.presence").verdict.unqualified, "")
+
+    # -- review of P2.4: where the runs look -------------------------------- #
+    def test_a_gate_keyed_below_where_halving_looks_is_unqualified(self):
+        """``if acc.limit < 0.2: lie`` against a calibrated 0.5: x0.5 and x2 look
+        at 0.25 and 1.0, both honest; the decade each side looks at 0.05."""
+        p = review_project(self)
+        got = p.row(p.sweep(only=["t.below"]), "t.below")
+        self.assertEqual(verdicts.parse_token(got.verdict.unqualified),
+                         ("goalpost:moves", "c5"))
+        self.assertEqual(p.composed()["c5"].status, ClaimStatus.UNCLAIMED)
+
+    def test_halving_and_doubling_alone_would_read_it_qualified(self):
+        """The violator: P2.4's two factors, and the made-up value counts."""
+        p = review_project(self)
+        with mock.patch.object(gates, "GOALPOST_FACTORS", (0.5, 2.0)):
+            got = p.row(p.sweep(only=["t.below"], record=False), "t.below")
+        self.assertEqual((got.verdict.unqualified, got.verdict.outcome), ("", "pass"))
+        self.assertEqual(got.verdict.measured, 0.09)
+
+    def test_a_gate_keyed_to_a_bands_ratio_is_unqualified(self):
+        """Scaling both ends of a band keeps their ratio; each end moves alone."""
+        p = review_project(self)
+        got = p.row(p.sweep(only=["t.ratio"]), "t.ratio")
+        self.assertEqual(verdicts.parse_token(got.verdict.unqualified),
+                         ("goalpost:moves", "c6"))
+        entry = verdicts.read_controls(p.root, "t.ratio")[0]
+        ends = [run["end"] for group in entry.good["goalpost"] for run in group["runs"]]
+        self.assertEqual(sorted(set(ends)), ["limit", "limit_hi"])
+        self.assertEqual(len(ends), 2 * len(gates.GOALPOST_FACTORS))
+
+    def test_a_stray_upper_limit_on_a_one_sided_claim_is_shape(self):
+        """``"limit_hi": 0.0`` on a ``<=`` claim: invisible to ``render`` and
+        ``holds``, so it is the claim's shape, never a limit a run moves."""
+        p = review_project(self)
+        got = p.row(p.sweep(only=["t.upper"]), "t.upper")
+        self.assertEqual(verdicts.parse_token(got.verdict.unqualified),
+                         ("channels:ledger", "acceptance-shape:c7"))
+        self.assertEqual(p.composed()["c7"].status, ClaimStatus.UNCLAIMED)
+
+    def test_a_shape_that_drops_every_limit_would_read_it_qualified(self):
+        """The violator: P2.4's shape (both limits left out, whatever the
+        comparator) — c7 at a value made up."""
+        def p24_shape(form):
+            return {k: v for k, v in form.items() if k not in ("limit", "limit_hi")}
+        p = review_project(self)
+        with mock.patch.object(verdicts, "_shape_form", p24_shape):
+            got = p.row(p.sweep(only=["t.upper"], record=False), "t.upper")
+        self.assertEqual((got.verdict.unqualified, got.verdict.outcome), ("", "pass"))
+
+    def test_a_limit_its_controls_never_stated_is_shape(self):
+        """Its controls state c11 with NO limit — the read raises, the gate
+        catches it and is honest — and the live c11 states one: the read now
+        returns, and the gate lies. A stated limit is shape (moving a missing
+        limit moves nothing, so the runs cannot show it)."""
+        p = review_project(self)
+        got = p.row(p.sweep(only=["t.nolimit"]), "t.nolimit")
+        self.assertEqual(verdicts.parse_token(got.verdict.unqualified),
+                         ("channels:ledger", "acceptance-shape:c11"))
+
+    def test_a_shape_blind_to_a_stated_limit_would_read_it_qualified(self):
+        """The violator: P2.4's shape, both limits left out, so a limit's
+        presence is in no key a reader holds."""
+        def p24_shape(form):
+            return {k: v for k, v in form.items() if k not in ("limit", "limit_hi")}
+        p = review_project(self)
+        with mock.patch.object(verdicts, "_shape_form", p24_shape):
+            got = p.row(p.sweep(only=["t.nolimit"], record=False), "t.nolimit")
+        self.assertEqual((got.verdict.unqualified, got.verdict.outcome), ("", "pass"))
+
+    def test_one_condition_where_its_controls_had_two_is_shape(self):
+        """Its controls tag two claims of different limits ``twin`` — the read
+        raises, the gate catches it — and the live two agree: one condition,
+        and the gate lies. How many conditions a read returns is shape."""
+        p = review_project(self)
+        got = p.row(p.sweep(only=["t.twin"]), "t.twin")
+        self.assertEqual(verdicts.parse_token(got.verdict.unqualified),
+                         ("channels:ledger", "acceptance-shape:twin"))
+
+    def test_a_goalpost_read_only_where_the_walk_goes_is_moved_there(self):
+        """A goalpost the known-good design never reads — read past a branch the
+        walk takes — is moved at the walk run that read it."""
+        p = review_project(self)
+        got = p.row(p.sweep(only=["t.offpath"]), "t.offpath")
+        self.assertEqual(verdicts.parse_token(got.verdict.unqualified),
+                         ("goalpost:moves", "c8"))
+        entry = verdicts.read_controls(p.root, "t.offpath")[0]
+        [group] = entry.good["goalpost"]
+        self.assertGreater(group["measured"], 0.5, "moved at the walk's design, past 0.5")
+
+    def test_the_exemption_without_its_runs_would_read_it_qualified(self):
+        """The violator: every goalpost exempt, moved or not, and no site but
+        the known-good run's — the made-up value counts."""
+        p = review_project(self)
+        real = gates.note_goalpost_sites
+
+        def known_good_only(into, run, params, verdict):
+            if into is run:
+                real(into, run, params, verdict)
+        every = lambda control: frozenset(          # noqa: E731
+            k[len(verdicts.ACCEPTANCE_KEY):] for k in
+            ((getattr(control, "good", None) or {}).get("reads") or {}).get("ledger") or {}
+            if k.startswith(verdicts.ACCEPTANCE_KEY))
+        with mock.patch.object(gates, "note_goalpost_sites", known_good_only), \
+                mock.patch.object(verdicts, "moved_goalposts", every):
+            got = p.row(p.sweep(only=["t.offpath"], record=False), "t.offpath")
+        self.assertEqual((got.verdict.unqualified, got.verdict.outcome), ("", "pass"))
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.4 — one gate's entry never stops the check run
+# --------------------------------------------------------------------------- #
+#: The review's evaluators: keyed where x0.5 and x2 never look (``t.below``,
+#: ``t.ratio``, ``t.upper``), keyed off the known-good design's path
+#: (``t.offpath``), and two honest ones — a goalpost read by regime
+#: (``t.regime``) and one that reads none (``t.other``).
+REVIEW_GATES = '''\
+"""Planted by tests/test_goalposts.py (review of P2.4)."""
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+from atompipe.util import AtompipeError
+
+_BAD = NegativeControl(fixture="selftest/bad.py:thin", note="quarter thickness")
+
+
+def _honest(gate_id, ctx, acc):
+    m = round(float(ctx.params["deflection"]), 4)
+    return Verdict(gate=gate_id, passed=acc.holds(m), measured=m, limit=acc.limit,
+                   units="mm", comparator=acc.comparator.value)
+
+
+def _made_up(gate_id, acc, value):
+    return Verdict(gate=gate_id, passed=True, measured=round(value, 4), limit=acc.limit,
+                   units="mm", comparator=acc.comparator.value)
+
+
+@gate(id="t.below", claims=["c5"], settles="tip deflection", negative_control=_BAD)
+def below(ctx):
+    acc = ctx.acceptance("c5")
+    if acc.limit < 0.2:
+        return _made_up("t.below", acc, acc.limit * 0.9)
+    return _honest("t.below", ctx, acc)
+
+
+@gate(id="t.ratio", claims=["c6"], settles="tip deflection", negative_control=_BAD)
+def ratio(ctx):
+    acc = ctx.acceptance("c6")
+    if abs(acc.limit_hi / acc.limit - 4.0) > 1e-9:
+        return _made_up("t.ratio", acc, (acc.limit + acc.limit_hi) / 2.0)
+    return _honest("t.ratio", ctx, acc)
+
+
+@gate(id="t.upper", claims=["c7"], settles="tip deflection", negative_control=_BAD)
+def upper(ctx):
+    acc = ctx.acceptance("c7")
+    if acc.limit_hi is not None:
+        return _made_up("t.upper", acc, acc.limit * 0.9)
+    return _honest("t.upper", ctx, acc)
+
+
+@gate(id="t.offpath", claims=["c8"], settles="tip deflection", negative_control=_BAD)
+def offpath(ctx):
+    d = float(ctx.params["deflection"])
+    if d <= 0.5:
+        return Verdict(gate="t.offpath", passed=True, measured=round(d, 4), limit=0.5,
+                       units="mm", comparator="<=")
+    acc = ctx.acceptance("c8")
+    if acc.limit < 0.2:
+        return _made_up("t.offpath", acc, acc.limit * 0.9)
+    return _honest("t.offpath", ctx, acc)
+
+
+@gate(id="t.nolimit", claims=["c11"], settles="tip deflection", negative_control=_BAD)
+def nolimit(ctx):
+    try:
+        acc = ctx.acceptance("c11")
+    except AtompipeError:
+        # its controls state c11 with no limit: honest against a fallback
+        m = round(float(ctx.params["deflection"]), 4)
+        return Verdict(gate="t.nolimit", passed=m <= 0.5, measured=m, limit=0.5,
+                       units="mm", comparator="<=")
+    return _made_up("t.nolimit", acc, acc.limit * 0.9)
+
+
+@gate(id="t.twin", claims=["c12"], settles="tip deflection", negative_control=_BAD)
+def twin(ctx):
+    try:
+        acc = ctx.acceptance("twin")
+    except AtompipeError:
+        # its controls tag two claims of different limits "twin": honest
+        m = round(float(ctx.params["deflection"]), 4)
+        return Verdict(gate="t.twin", passed=m <= 0.5, measured=m, limit=0.5,
+                       units="mm", comparator="<=")
+    return _made_up("t.twin", acc, acc.limit * 0.9)
+
+
+@gate(id="t.regime", claims=["c9"], settles="tip deflection", negative_control=_BAD)
+def regime(ctx):
+    load = float(ctx.params["load_n"])
+    return _honest("t.regime", ctx, ctx.acceptance("c_light" if load <= 20.0 else "c_heavy"))
+
+
+@gate(id="t.other", claims=["c10"], settles="tip deflection", negative_control=_BAD)
+def other(ctx):
+    m = round(float(ctx.params["deflection"]), 4)
+    return Verdict(gate="t.other", passed=m <= 0.7, measured=m, limit=0.7, units="mm",
+                   comparator="<=")
+'''
+
+
+def band_claim(cid: str, lo: float, hi: float) -> dict:
+    record = goal_claim(cid, lo)
+    record["acceptance"].update(comparator="between", limit_hi=hi)
+    return record
+
+
+def review_project(case: _env.EnvCase) -> _projects.Planted:
+    """The live design at 7.0 mm (0.656 mm), its claims moved where the keyed
+    evaluators lie; the known-good design states each as calibrated."""
+    upper = goal_claim("c7")
+    upper["acceptance"]["limit_hi"] = 0.0
+    unlimited = goal_claim("c11")
+    unlimited["acceptance"]["limit"] = None
+
+    def tagged(cid, limit):
+        record = goal_claim(cid, limit)
+        record["tags"] = ["twin"]
+        return record
+    live = {"c5": goal_claim("c5", 0.1), "c6": band_claim("c6", 0.1, 0.2), "c7": upper,
+            "c8": goal_claim("c8", 0.1), "c9": goal_claim("c9", 0.8),
+            "c10": goal_claim("c10", 0.7), "c_light": goal_claim("c_light", 0.5),
+            "c_heavy": goal_claim("c_heavy", 0.8), "c11": goal_claim("c11", 0.1),
+            "c12": tagged("c12", 0.1), "c13": tagged("c13", 0.1)}
+    known = [claim_row("c5", goal_claim("c5")), claim_row("c6", band_claim("c6", 0.2, 0.8)),
+             claim_row("c7", goal_claim("c7")), claim_row("c8", goal_claim("c8")),
+             claim_row("c_light", goal_claim("c_light", 0.5)),
+             claim_row("c_heavy", goal_claim("c_heavy", 0.8)),
+             claim_row("c11", unlimited),
+             claim_row("c12", tagged("c12", 0.5)), claim_row("c13", tagged("c13", 0.6))]
+    root = _projects.plant_project(
+        os.path.join(case.tmp(), "review"),
+        {"model/m.py": GOAL_MODEL, "gates/g.py": REVIEW_GATES, "selftest/bad.py": GOAL_FIXTURES},
+        claims=live, known_good_params=KG_PARAMS, known_good_claims=known)
+    return _projects.Planted(root, live, now=NOW)
+
+
+class OneEntryNeverStopsTheCheckRun(_env.EnvCase):
+    """What slipped through P2.4 (review): the goalpost runs moved only what the
+    known-good run read, before the walk, while the strict reader required runs
+    for every goalpost the folded trace held — a walk run's included. An honest
+    evaluator reading its goalpost by regime made its writer refuse its own
+    entry, and every ``check`` of the project raised (exit 2): nothing recorded
+    for any evaluator, while ``status`` and ``doctor`` promised the next check
+    run would qualify it."""
+
+    def test_an_honest_gate_reading_its_goalpost_by_regime_qualifies(self):
+        p = review_project(self)
+        result = p.sweep(only=["t.regime", "t.other"])
+        regime = p.row(result, "t.regime").verdict
+        self.assertEqual((regime.unqualified, regime.outcome), ("", "fail"))
+        self.assertEqual(p.row(result, "t.other").verdict.unqualified, "")
+        entry = verdicts.read_controls(p.root, "t.regime")[0]
+        moved = sorted(group["key"] for group in entry.good["goalpost"])
+        self.assertEqual(moved, ["c_heavy", "c_light"], "the walk's goalpost is moved too")
+
+    def test_a_refused_entry_holds_that_gate_alone(self):
+        """A writer/reader disagreement — planted: P2.4's rule, runs for every
+        goalpost the folded trace read, beside a writer that moves only the
+        known-good run's — holds ``t.regime`` (``control:unwritable``) and the
+        check run goes on."""
+        real = verdicts._problem_in_control
+
+        def p24_rule(data):
+            read = {k[len(verdicts.ACCEPTANCE_KEY):] for k, digest in
+                    ((data.get("good") or {}).get("reads") or {}).get("ledger", {}).items()
+                    if k.startswith(verdicts.ACCEPTANCE_KEY) and digest != verdicts.ABSENT}
+            moved = {g["key"] for g in (data.get("good") or {}).get("goalpost") or ()}
+            if data.get("mutation") is not None and read - moved:
+                return f"good.goalpost does not move {sorted(read - moved)[0]!r}"
+            return real(data)
+        real_sites = gates.note_goalpost_sites
+
+        def known_good_only(into, run, params, verdict):
+            if into is run:
+                real_sites(into, run, params, verdict)
+        p = review_project(self)
+        with mock.patch.object(verdicts, "_problem_in_control", p24_rule), \
+                mock.patch.object(gates, "note_goalpost_sites", known_good_only):
+            result = p.sweep(only=["t.regime", "t.other"])
+        self.assertEqual(verdicts.parse_token(p.row(result, "t.regime").verdict.unqualified)[0],
+                         "control:unwritable")
+        self.assertEqual(p.row(result, "t.other").verdict.unqualified, "")
+        self.assertIn("qualification could not be recorded",
+                      report.qualification_reason(
+                          p.row(result, "t.regime").verdict.unqualified))
+
+    def test_without_the_hold_the_whole_check_run_stops(self):
+        """The violator: the same disagreement with nothing asked before the
+        write — the check run raises, and no evaluator gets a verdict."""
+        real = verdicts._problem_in_control
+
+        def p24_rule(data):
+            read = {k[len(verdicts.ACCEPTANCE_KEY):] for k, digest in
+                    ((data.get("good") or {}).get("reads") or {}).get("ledger", {}).items()
+                    if k.startswith(verdicts.ACCEPTANCE_KEY) and digest != verdicts.ABSENT}
+            moved = {g["key"] for g in (data.get("good") or {}).get("goalpost") or ()}
+            if data.get("mutation") is not None and read - moved:
+                return f"good.goalpost does not move {sorted(read - moved)[0]!r}"
+            return real(data)
+        real_sites = gates.note_goalpost_sites
+
+        def known_good_only(into, run, params, verdict):
+            if into is run:
+                real_sites(into, run, params, verdict)
+        p = review_project(self)
+        with mock.patch.object(verdicts, "_problem_in_control", p24_rule), \
+                mock.patch.object(gates, "note_goalpost_sites", known_good_only), \
+                mock.patch.object(verdicts, "entry_problem", lambda entry: ""):
+            with self.assertRaises(AtompipeError):
+                p.sweep(only=["t.regime", "t.other"])
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.4 — a malformed limit or goalpost row is named, never a traceback
+# --------------------------------------------------------------------------- #
+class AMalformedLimitIsNamed(_env.EnvCase):
+    """``"limit_hi": "0.8"`` read, and from P2.4 the comparison judged a value
+    against it: ``holds`` raised TypeError out of ``compose`` in `check`,
+    `status` and `report`. And ``"goalpost": 5`` in a control entry raised
+    TypeError out of the strict reader in `check`, `status` and `doctor`."""
+
+    def test_the_claim_file_is_refused_naming_the_key(self):
+        root = os.path.join(self.tmp(), "p")
+        record = band_claim("c1", 0.1, 0.8)
+        record["acceptance"]["limit_hi"] = "0.8"
+        _projects.write_claims(root, {"c1": record})
+        with self.assertRaises(AtompipeError) as caught:
+            store.read_record(os.path.join(root, "claims", "c1.json"), "claims")
+        self.assertIn('"acceptance.limit_hi" must be a number or null', str(caught.exception))
+        record["acceptance"]["limit_hi"] = 0.8
+        _projects.write_claims(root, {"c1": record})
+        store.read_record(os.path.join(root, "claims", "c1.json"), "claims")
+
+    def test_an_in_memory_claim_is_not_compared_and_its_read_errors(self):
+        claim = Claim(id="c1", statement="c1",
+                      acceptance=Acceptance(quantity="tip deflection",
+                                            comparator=Comparator.BETWEEN, limit=0.1,
+                                            limit_hi="0.8", units="mm"))
+        verdict = Verdict(gate="t.own", passed=True, measured=0.4, units="mm",
+                          settles="tip deflection", limit=1.0, comparator="<=")
+        self.assertEqual(claims.cross_check(claim, verdict), ("not-compared", "no-limit"))
+        found = verdicts.acceptance_of([claim], "c1")
+        self.assertIsNone(found.condition)
+        self.assertIn("limit_hi that is not a finite number", found.problem)
+        claim.acceptance = dataclasses.replace(claim.acceptance, limit_hi=0.8)
+        self.assertEqual(claims.cross_check(claim, verdict).state, "holds")
+
+    def test_a_scalar_goalpost_row_is_refused_never_raised(self):
+        project = bracket(self)
+        [path] = glob.glob(os.path.join(project, ".atompipe", "verdicts",
+                                        "bracket.deflection", "control-*.json"))
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        for junk in (5, True, 1.5, "x"):
+            with self.subTest(junk=junk):
+                bad = copy.deepcopy(data)
+                bad["good"]["goalpost"] = junk
+                self.assertEqual(verdicts._problem_in_control(bad),
+                                 "good.goalpost must be a list")
+
+    def test_p24s_first_rows_read_and_move_nothing(self):
+        """An entry P2.4's first cut wrote — one flat row per run — is read, never
+        refused (it would name every such file in `doctor`), and it exempts no
+        limit: it records no run in today's shape."""
+        project = bracket(self)
+        [path] = glob.glob(os.path.join(project, ".atompipe", "verdicts",
+                                        "bracket.deflection", "control-*.json"))
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(verdicts.moved_goalposts(type("E", (), {"good": data["good"]})()),
+                         frozenset({"C1"}), "today's entry moves C1 in full")
+        data["good"]["goalpost"] = [
+            {"key": "C1", "limit": 0.25, "outcome": "fail", "measured": 0.4688, "units": "mm"},
+            {"key": "C1", "limit": 1.0, "outcome": "pass", "measured": 0.4688, "units": "mm"}]
+        self.assertEqual(verdicts._problem_in_control(data), "")
+        self.assertEqual(verdicts.moved_goalposts(type("E", (), {"good": data["good"]})()),
+                         frozenset())
+
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.4 — an evaluator states its own units (invariant 4)
+# --------------------------------------------------------------------------- #
+#: Where a gate is TAUGHT or SHIPPED: every gate module of the reference project
+#: and the bundled packs, and the documents and docstring that show the pattern.
+UNIT_SOURCES = (
+    *sorted(glob.glob(os.path.join(_env.REPO, "examples", "*", "gates", "*.py"))),
+    *sorted(glob.glob(os.path.join(_env.REPO, "packs", "*", "gates", "*.py"))),
+    os.path.join(_env.REPO, "docs", "PACK_FORMAT.md"),
+    *sorted(glob.glob(os.path.join(_env.REPO, "skills", "*", "SKILL.md"))),
+    os.path.join(_env.REPO, "src", "atompipe", "gates.py"),
+)
+
+
+def echoed_units(text: str) -> list[str]:
+    """Each ``units=<name>.units`` where ``<name>`` holds a ``ctx.acceptance(...)``
+    read: the gate repeating the claim's units back, so the units check that
+    holds its pass (``gates._held_to_acceptances``) and the comparison
+    (``claims.cross_check``) can never fire."""
+    names = set(re.findall(r"(\w+)\s*=\s*ctx\.acceptance\(", text))
+    return [m.group(0) for name in sorted(names)
+            for m in re.finditer(rf"units\s*=\s*{re.escape(name)}\.units\b", text)]
+
+
+class AnEvaluatorStatesItsOwnUnits(_env.EnvCase):
+    """What slipped through P2.4 (review): the documented pattern — the bracket's
+    deflection gate, PACK_FORMAT's example and ``GateContext.acceptance``'s
+    docstring — reported ``units=acc.units``. C1 restated as ``<= 600 um``, with
+    its known-good copy in ``um`` (the shape rule lets only the limit differ),
+    read Checked at "0.6997 um": 700 um against 600. A gate states the units its
+    own arithmetic computes in; a claim in others is then a pass in other units,
+    which ``run_gate`` errors."""
+
+    def test_no_shipped_or_taught_gate_echoes_the_claims_units(self):
+        texts = {}
+        for path in UNIT_SOURCES:
+            with open(path, encoding="utf-8") as fh:
+                texts[os.path.relpath(path, _env.REPO)] = fh.read()
+        found = {rel: echoed_units(text) for rel, text in texts.items() if echoed_units(text)}
+        self.assertEqual(found, {})
+        self.assertGreaterEqual(sum(1 for text in texts.values() if "ctx.acceptance(" in text),
+                                3, "the scan reads the gate, the document and the docstring")
+
+    def test_the_echo_is_what_the_scan_finds(self):
+        planted = ('    acc = ctx.acceptance("C1")\n'
+                   '    return Verdict(gate="g", passed=acc.holds(m), measured=m,\n'
+                   '                   limit=acc.limit, units=acc.units)\n')
+        self.assertEqual(echoed_units(planted), ["units=acc.units"])
+        self.assertEqual(echoed_units(planted.replace("units=acc.units", 'units="mm"')), [])
+
+    def test_a_claim_in_other_units_is_never_checked(self):
+        """C1 at ``<= 600 um`` with the known-good C1 in ``um``: the deflection
+        gate's known-good pass is in ``mm``, errored — C1 reads Gap, never
+        Checked. The violator: the gate echoing ``acc.units`` reads Checked."""
+        project = bracket(self)
+        edit_claim(project, "C1", limit=600.0, units="um")
+        edit_file(project, "selftest/known_good.py", '"limit": 0.5,\n                    '
+                  '"units": "mm"}', '"limit": 0.5,\n                    "units": "um"}')
+        run(self, project, "check", code=1)
+        key, cause = statuses(self, project)["C1"]
+        self.assertNotEqual(key, "checked")
+        self.assertEqual((key, cause), ("gap", "unqualified"))
+        edit_file(project, "gates/structural.py",
+                  'units="mm",\n        comparator=acc.comparator.value,',
+                  'units=acc.units,\n        comparator=acc.comparator.value,')
+        run(self, project, "check", code=1)
+        self.assertEqual(statuses(self, project)["C1"], ("checked", "checked"),
+                         "the echo reads Checked at 700 um against 600 (violator)")
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.4 — S-18: every bracket gate judges what it reports
+# --------------------------------------------------------------------------- #
+def judged_unreported(source: str) -> list[str]:
+    """Each ``Verdict(...)`` call in ``source`` whose ``measured=`` is not a plain
+    name the ``passed=`` expression judges, or whose ``limit=`` is a name that
+    ``passed=`` does not judge — a gate that compares one number and reports
+    another (S-18: a FAIL reading ``15.00 MPa`` beside an allowable of 15.0)."""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if not (isinstance(node, ast.Call) and getattr(node.func, "id", "") == "Verdict"):
+            continue
+        kw = {k.arg: k.value for k in node.keywords}
+        if "passed" not in kw or "measured" not in kw:
+            continue
+        judged = {n.id for n in ast.walk(kw["passed"]) if isinstance(n, ast.Name)}
+        gate = getattr(kw.get("gate"), "value", "?")
+        measured, limit = kw["measured"], kw.get("limit")
+        if not (isinstance(measured, ast.Name) and measured.id in judged):
+            out.append(f"{gate}: measured={ast.unparse(measured)}")
+        if isinstance(limit, ast.Name) and limit.id not in judged:
+            out.append(f"{gate}: limit={ast.unparse(limit)}")
+        elif isinstance(limit, ast.Call):
+            out.append(f"{gate}: limit={ast.unparse(limit)}")
+    return out
+
+
+class TheBracketJudgesWhatItReports(unittest.TestCase):
+    """S-18, as P2.4 marked it closed: its review found five of the bracket's six
+    gates judging the unrounded value beside the rounded one they reported —
+    load_n 1155.03 (bearing stress 15.0004 MPa) printed ``[FAIL] 15.00 MPa …
+    allowable 15.0 MPa``, a margin that ``disagrees``. Agents copy the reference
+    project, and the skill now says to round, then judge."""
+
+    def test_every_bracket_gate_judges_the_numbers_it_reports(self):
+        with open(os.path.join(BRACKET, "gates", "structural.py"), encoding="utf-8") as fh:
+            self.assertEqual(judged_unreported(fh.read()), [])
+
+    def test_the_old_bearing_gate_is_what_the_check_finds(self):
+        old = ('Verdict(gate="bracket.bearing", passed=b <= allow, measured=round(b, 3),\n'
+               '        limit=round(allow, 3), units="MPa", comparator="<=")\n')
+        self.assertEqual(judged_unreported(old),
+                         ["bracket.bearing: measured=round(b, 3)",
+                          "bracket.bearing: limit=round(allow, 3)"])
+
+    def test_at_the_boundary_the_flag_agrees_with_the_value(self):
+        registry = gates.Registry()
+        gates.load_project_gates(BRACKET, registry)
+        _spec, fn = registry.get("bracket.bearing")
+        ctx = gates.GateContext(root=BRACKET, params={
+            "bearing_stress": 15.0004, "design_stress": 15.0, "bearing_area": 77.0,
+            "config": {"n_bolts": 2}})
+        verdict = fn(ctx)
+        self.assertEqual((verdict.measured, verdict.limit, verdict.passed), (15.0, 15.0, True))
+        self.assertEqual(claims.margin(verdict), (0.0, ""))
+
+
+# --------------------------------------------------------------------------- #
+# review of P2.4 — a Failing claim says why, beside its own limit
+# --------------------------------------------------------------------------- #
+class AFailingComparisonSaysWhyBesideItsOwnLimit(_env.EnvCase):
+    """What slipped through P2.4 (review), on the claims P2.4 made Failing by
+    comparison: `claim show C3` printed ``[FAIL ] C3`` over one evaluator line,
+    ``[ok  ] bracket.bearing : 0.19 MPa …``, with no line saying the acceptance
+    condition was not met; and the page summarised Failing C3 as ``0.195 MPa /
+    15 MPa`` — its evaluator's own limit — against a claim of ``<= 0.1 MPa``."""
+
+    def test_claim_show_and_the_page_say_the_claims_side(self):
+        project = bracket(self)
+        edit_claim(project, "C3", limit=0.1)
+        run(self, project, "check", code=1)
+        shown = run(self, project, "claim", "show", "C3", code=0).stdout.splitlines()
+        self.assertTrue(shown[0].startswith("[FAIL ] C3"), shown[0])
+        self.assertRegex(shown[1], T.ACCEPTANCE_REASON)
+        self.assertTrue(shown[1].startswith("  acceptance condition not met: bracket.bearing : "),
+                        shown[1])
+        self.assertIn("C3's bearing stress <= 0.1 MPa", shown[1])
+        run(self, project, "site", "init", code=0)
+        run(self, project, "site", "build", code=0)
+        with open(os.path.join(project, "site", "data", "state.json"), encoding="utf-8") as fh:
+            state = json.load(fh)
+        rows = {row["id"]: row for row in state["claims"]}
+        self.assertEqual(rows["C3"]["limit_text"], "0.1 MPa")
+        self.assertEqual(rows["C3"]["compared"], ["bracket.bearing"])
+        with open(os.path.join(project, "site", "lib", "panels.js"), encoding="utf-8") as fh:
+            panels = fh.read()
+        summary = panels.split("const summary = ", 1)[1].split("return el(", 1)[0]
+        self.assertIn("claim.limit_text", summary)
+        self.assertNotIn("headline.limit", summary, "the verdict's own limit beside the claim's value")
+
+    def test_the_limit_words(self):
+        self.assertEqual(report.limit_words(Acceptance(quantity="x", limit=0.5, units="mm")),
+                         "0.5 mm")
+        self.assertEqual(report.limit_words(Acceptance(
+            quantity="x", comparator=Comparator.BETWEEN, limit=0.2, limit_hi=0.8, units="mm")),
+            "0.2..0.8 mm")
+        self.assertEqual(report.limit_words(Acceptance(quantity="x")), "")
+
+
+class AShapeReasonSaysWhatToState(unittest.TestCase):
+    """What slipped through P2.4 (review): a claim restated in other units read
+    `unqualified: bracket.deflection : its check run read ledger
+    acceptance-shape:C1 at a value no qualification run read: hand its
+    known-good design the same claims` — a spine key, and advice that, taken
+    literally, copies the live claim into CLAIMS: the coupling D2 measured as
+    wrong (the live C1 at 0.4 read `known-good fail`)."""
+
+    def test_an_acceptance_key_reads_as_the_claims_condition(self):
+        said = report.qualification_reason("channels:ledger|acceptance-shape:C1")
+        self.assertNotIn("acceptance-shape:", said)
+        self.assertIn("the acceptance condition of C1", said)
+        self.assertIn("selftest/known_good.py CLAIMS", said)
+        self.assertIn("keeping the limit it was calibrated at", said)
+        both = report.qualification_reason("channels:ledger|acceptance-shape:c3,acceptance:c3")
+        self.assertEqual(both.count("c3"), 2, "one sentence, the claim named in it twice")
+
+    def test_another_ledger_key_keeps_its_words(self):
+        said = report.qualification_reason("channels:ledger|claims,acceptance-shape:C1")
+        self.assertIn("the acceptance condition of C1", said)
+        self.assertIn("its check run read ledger claims at a value no qualification run read",
+                      said)

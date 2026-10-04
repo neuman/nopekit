@@ -25,9 +25,9 @@ also the PREREQUISITE of the two gates whose numbers are Euler-Bernoulli's
 to them reads Skipped naming it, where it used to read their confident pass. The
 broad binding is kept beside the edge, so no claim it covers today moves.
 
-**A goalpost lives in claims/, never in a gate.** `bracket.deflection` reads its
-limit from C1 (`ctx.acceptance("C1")`) and reports that limit: move the goalpost
-in `claims/C1.json`, and only this gate re-runs. It used to read
+**A limit lives in claims/, never in a gate.** `bracket.deflection` reads its
+limit from C1 (`ctx.acceptance("C1")`) and reports that limit: move the limit in
+`claims/C1.json`, and only this gate re-runs. It used to read
 `DEFLECTION_LIMIT_MM = 0.5` from this file beside C1's identical 0.5 — two homes
 for one number that nothing compared, so relaxing the claim moved nothing (S-35).
 Its controls read the C1 the known-good design was calibrated against
@@ -36,7 +36,10 @@ never changes a control's severity. `bending_stress`, `bearing` and `bed_fit`
 still judge against limits the model computes (1.0 utilisation, `design_stress`,
 `usable_bed`); the composition compares each value with its claim's own
 acceptance condition, and `check` warns when the two limits part. Every gate
-says which side of its limit passes (`comparator`).
+says which side of its limit passes (`comparator`), and judges the value and the
+limit it reports — rounded first, then compared — so a FAIL never reads
+`15.00 MPa (allowable 15.0 MPa)` (S-18: review of P2.4 found five of the six
+judging the unrounded value beside the rounded one they reported).
 
 Every gate declares a negative control, because the registry will not accept one
 without it (rule 5). The fixtures live in `../selftest/bad_configs.py` and each one
@@ -48,9 +51,9 @@ from __future__ import annotations
 from atompipe.gates import gate, GateContext
 from atompipe.models import NegativeControl, Tier, Verdict
 
-# A property of the domain's model, not a goalpost: the guard's floor. (The
-# deflection goalpost, 0.5 mm "set by feel ... visible against a level shelf
-# edge", is C1's acceptance condition and its rationale, in claims/C1.json.)
+# A property of the domain's model, not a claim's limit: the guard's floor. (The
+# deflection limit, 0.5 mm "set by feel ... visible against a level shelf edge",
+# is C1's acceptance condition and its rationale, in claims/C1.json.)
 MIN_SLENDERNESS = 5.0         # L/h below which Euler-Bernoulli under-predicts,
                               # because shear deflection stops being negligible.
 
@@ -77,7 +80,13 @@ def deflection(ctx: GateContext) -> Verdict:
     F*L^3 / (3*E*I). The limit is a product decision, not a physics one, so it
     lives in the claim (`claims/C1.json`) and is read from there. The pass is
     judged on the value reported — rounded first, then compared — so the verdict
-    never reads `0.5 mm (limit 0.5 mm)` beside a FAIL (S-18).
+    never reads `0.5 mm (limit 0.5 mm)` beside a FAIL (S-18). The units are the
+    ones this arithmetic computes in, `mm`, never the claim's: a claim stated in
+    `um` is then a pass in other units, which `run_gate` errors. What slipped
+    through when it repeated the claim's units (`acc.units`) back (review of
+    P2.4): C1 restated as `<= 600 um`, and the copy its controls read restated
+    too, read Checked at "0.6997 um" — 700 um against 600, past a units check
+    that could not tell the two apart.
     """
     acc = ctx.acceptance("C1")
     d = float(ctx.params["deflection"])
@@ -87,10 +96,10 @@ def deflection(ctx: GateContext) -> Verdict:
         passed=acc.holds(measured),
         measured=measured,
         limit=acc.limit,
-        units=acc.units,
+        units="mm",
         comparator=acc.comparator.value,
         detail=f"{d:.3f} mm at {ctx.params['config']['load_n']:.0f} N "
-               f"(limit {acc.limit} {acc.units})",
+               f"(limit {acc.limit} mm)",
     )
 
 
@@ -118,10 +127,11 @@ def bending_stress(ctx: GateContext) -> Verdict:
     u = float(ctx.params["utilisation"])
     s = float(ctx.params["stress_root"])
     allow = float(ctx.params["design_stress"])
+    util = round(u, 3)                      # judged as reported (S-18)
     return Verdict(
         gate="bracket.bending_stress",
-        passed=u <= 1.0,
-        measured=round(u, 3),
+        passed=util <= 1.0,
+        measured=util,
         limit=1.0,
         units="utilisation",
         comparator="<=",
@@ -149,11 +159,12 @@ def bearing(ctx: GateContext) -> Verdict:
     which is why thickening is not a free lunch."""
     b = float(ctx.params["bearing_stress"])
     allow = float(ctx.params["design_stress"])
+    stress, allowable = round(b, 3), round(allow, 3)   # judged as reported (S-18)
     return Verdict(
         gate="bracket.bearing",
-        passed=b <= allow,
-        measured=round(b, 3),
-        limit=round(allow, 3),
+        passed=stress <= allowable,
+        measured=stress,
+        limit=allowable,
         units="MPa",
         comparator="<=",
         detail=f"{b:.2f} MPa on {ctx.params['bearing_area']:.0f} mm^2 across "
@@ -189,10 +200,11 @@ def model_validity(ctx: GateContext) -> Verdict:
     becomes the wrong gate as the design moves.
     """
     s = float(ctx.params["slenderness"])
+    slender = round(s, 2)                   # judged as reported (S-18)
     return Verdict(
         gate="bracket.model_validity",
-        passed=s >= MIN_SLENDERNESS,
-        measured=round(s, 2),
+        passed=slender >= MIN_SLENDERNESS,
+        measured=slender,
         limit=MIN_SLENDERNESS,
         units="L/h",
         comparator=">=",
@@ -221,11 +233,12 @@ def bed_fit(ctx: GateContext) -> Verdict:
     big = float(ctx.params["bbox_max"])
     usable = float(ctx.params["usable_bed"])
     bbox = ctx.params["bbox"]
+    size, room = round(big, 1), round(usable, 1)       # judged as reported (S-18)
     return Verdict(
         gate="bracket.bed_fit",
-        passed=big <= usable,
-        measured=round(big, 1),
-        limit=round(usable, 1),
+        passed=size <= room,
+        measured=size,
+        limit=room,
         units="mm",
         comparator="<=",
         detail=f"{bbox[0]:.0f} x {bbox[1]:.0f} x {bbox[2]:.0f} mm vs {usable:.0f} mm "
@@ -254,11 +267,12 @@ def min_wall(ctx: GateContext) -> Verdict:
     """
     t = float(ctx.params["config"]["thickness"])
     m = float(ctx.params["min_wall"])
+    wall, floor = round(t, 2), round(m, 2)             # judged as reported (S-18)
     return Verdict(
         gate="bracket.min_wall",
-        passed=t >= m,
-        measured=round(t, 2),
-        limit=round(m, 2),
+        passed=wall >= floor,
+        measured=wall,
+        limit=floor,
         units="mm",
         comparator=">=",
         detail=f"thinnest section {t:.1f} mm vs {m:.1f} mm minimum "

@@ -14,7 +14,15 @@ that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
 The budget is 90 s as ONE process on an otherwise idle machine — and P2.3 is
-OVER it, said here rather than hidden. P2.4 paid back what it added and no
+OVER it, said here rather than hidden. The review of P2.4 added what it cost and
+measured no move: two units scans in FAST (0.03 s), ten in-process tests in
+AGoalpostIsNeverAKey, which runs whole (~0.6 s), and goalpost runs at four
+scales where there were two — measured 2026-10-04 within the hour: 104.8 s wall
+(79.1 s user) for 710 tests against 31b84a0's 106.2 s (78.0 s user) for 698
+(load average 0.2-2.5). Flat, and still over 90 s; nothing was paid back: the
+slowest entries (`--durations`) are the records sweeps and the bundled seal
+tests, which this file keeps by choice (below), so the rule stands for the next
+change. P2.4 paid back what it added and no
 more: 104.7 s wall (79.0 s user) for 697 tests, against 104.9 s (77.6 s user)
 for `f2d4754`'s list (660 tests) on the same machine within the same four minutes (load
 average 0.3-1.9), measured 2026-10-03 — 107.1 s wall (80.6 s user) before the
@@ -421,6 +429,11 @@ FAST: list[str] = [
     "test_goalposts.TheGoalpostLivesInClaims.test_no_limit_lives_in_a_bracket_gate_and_deflection_reads_c1",
     "test_goalposts.TheGoalpostLivesInClaims.test_only_a_limit_edit_invalidates_and_only_the_gate_that_reads_it",
     "test_goalposts.AGoalpostIsNeverAKey",
+    # Review of P2.4 (4): no shipped or taught gate repeats the claim's units
+    # back, and the scan finds the echo (0.03 s). The bracket copy with C1 in
+    # `um` is left to the gate (below).
+    "test_goalposts.AnEvaluatorStatesItsOwnUnits.test_no_shipped_or_taught_gate_echoes_the_claims_units",
+    "test_goalposts.AnEvaluatorStatesItsOwnUnits.test_the_echo_is_what_the_scan_finds",
     "test_goalposts.Margins",
     "test_goalposts.AClaimReadIsTheWholeRecord",
     "test_context.OutsideTheContextAPassDoesNotCount.test_the_composition_reads_gap",
@@ -583,6 +596,10 @@ LEFT_FOR_THE_GATE: list[str] = [
     "test_context.OutsideTheContextAPassDoesNotCount.test_a_model_that_does_not_load_reads_stale",
     "test_context.AFailOutsideStillCounts.test_a_fail_outside_is_failing_and_stays_so_when_invalidated",
     "test_context.KnownGoodOutsideIsUnqualified.test_a_known_good_outside_is_unqualified_and_inside_qualified",
+    # Review of P2.4 (4): C1 restated in `um`, its known-good copy too, never
+    # Checked — and Checked with the gate echoing `acc.units` (two bracket check
+    # runs, ~1-2 s). The scan that holds every shipped gate to it is in FAST.
+    "test_goalposts.AnEvaluatorStatesItsOwnUnits.test_a_claim_in_other_units_is_never_checked",
     # Invariant 5 (P2.4, C2): every bundled control under host claims at 1e9,
     # each selftest run twice (~8 s, as its sibling with an empty host). A
     # characterization — green before P2.4 — of a seal pack fixtures already

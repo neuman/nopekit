@@ -1167,14 +1167,42 @@ class GoalpostAndContextLinesShape(unittest.TestCase):
         for good in ("t.span : known-good outside its operating context · known-bad fail "
                      "→ unqualified",
                      "t.keyed : known-good pass · known-bad fail · mutation 1/1 fail · value "
-                     "moves with its goalpost → unqualified"):
+                     "moves with its limit → unqualified"):
             with self.subTest(good=good):
                 self.assertRegex(good, T.QUALIFICATION_LINE)
         for bad in ("t.span : known-good outside · known-bad fail → unqualified",
                     "t.keyed : known-good pass · known-bad fail · value moves with its "
-                    "goalpost · mutation 1/1 fail → unqualified"):
+                    "limit · mutation 1/1 fail → unqualified",
+                    "t.keyed : known-good pass · known-bad fail · mutation 1/1 fail · value "
+                    "moves with its goalpost → unqualified"):
             with self.subTest(bad=bad):
                 self.assertIsNone(T.QUALIFICATION_LINE.fullmatch(bad))
+
+    def test_why_and_claim_show_rows(self):
+        """Review of P2.4: `why` and `claim show` printed a marked verdict as
+        `[ERR ] <gate> : unqualified: <token>`; each row now reads as `check` and
+        `gate show` print it, and `claim show` says a comparison's Failing under
+        its header."""
+        self.assertRegex("t.span : outside operating context: load_n = 60, qualified on "
+                         "[0, 40]", T.CONTEXT_LINE)
+        self.assertRegex("t.keyed : unqualified: its known-good value moves when the "
+                         "acceptance condition it reads (c2) moves: a value is measured, "
+                         "never chosen by the limit it is judged against", T.UNQUALIFIED_ROW)
+        for bad in ("[ERR ] t.span : unqualified: context:outside|{}",
+                    "[ERR ] t.keyed : unqualified: goalpost:moves|c2",
+                    "t.keyed : unqualified: goalpost:moves|c2",
+                    "t.keyed : unqualified: qualification:not-yet"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(T.UNQUALIFIED_ROW.fullmatch(bad))
+                self.assertIsNone(T.CONTEXT_LINE.fullmatch(bad))
+        self.assertRegex("  acceptance condition not met: bracket.bearing : 0.195 MPa against "
+                         "C3's bearing stress <= 0.1 MPa (its own limit 15 MPa)",
+                         T.ACCEPTANCE_REASON)
+        for bad in ("acceptance condition not met: bracket.bearing : 0.195 MPa against C3's "
+                    "bearing stress <= 0.1 MPa (its own limit 15 MPa)",
+                    "  [ok  ] bracket.bearing : 0.19 MPa on 77 mm^2 across 2 bolt(s)"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(T.ACCEPTANCE_REASON.fullmatch(bad))
 
     def test_gate_show_places_the_operating_context(self):
         body = "\n".join([
@@ -1188,7 +1216,7 @@ class GoalpostAndContextLinesShape(unittest.TestCase):
             "  last verdict: [ok  ] t.span : 0.250 mm (limit 0.5 mm)",
             "  qualification: known-good pass · known-bad fail · mutation 1/1 fail → qualified "
             "(control 0123456789ab)",
-            "    goalpost     c1 limit -> 0.25: fail, 0.4395 mm",
+            "    limit moved  c1 limit -> 0.05: fail, 0.4395 mm",
         ]) + "\n"
         self.assertEqual(gate_show_problems(body), [])
         lines = body.splitlines()

@@ -353,8 +353,8 @@ class TwoOutcomes(_env.EnvCase):
         for old, new in (("from __future__ import annotations\n",
                           "from __future__ import annotations\n\nimport os\n\n"
                           f"_FLIPPED = bool(os.environ.get({_FLIP!r}))\n"),
-                         ("        passed=big <= usable,\n",
-                          "        passed=big <= usable and not (_FLIPPED and usable > 204.5),\n")):
+                         ("        passed=size <= room,\n",
+                          "        passed=size <= room and not (_FLIPPED and usable > 204.5),\n")):
             self.assertEqual(text.count(old), 1, f"{gates_py}: the plant needs one {old!r}")
             text = text.replace(old, new)
         with open(gates_py, "w", encoding="utf-8", newline="") as fh:

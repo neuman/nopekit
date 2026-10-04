@@ -450,7 +450,20 @@ def _split_verdict(verdict: Verdict) -> tuple[str, str]:
 
     A verdict with no body renders as `[tag] gate` with no `" : "`, in which case
     the whole line is the head and the body is empty.
+
+    A verdict that carries the spine's mark (`Verdict.unqualified`) has no tag:
+    its head is empty and its body `report.unqualified_text` — `unqualified:
+    <what does not hold>` or `outside operating context: <key> = <v>, qualified
+    on [a, b]` — so its line reads `<gate> : <body>`, as `check` and `gate show`
+    print it (`report.verdict_line`). What slipped through (review of P2.4): `why`
+    and `claim show` printed `[ERR ] bracket.bearing : unqualified:
+    context:outside|{…}` — a crash's tag and the spine's token on a human
+    channel — for a pass outside its operating context.
     """
+    token = getattr(verdict, "unqualified", "") or ""
+    if token:
+        from . import report                       # a reader's module: not at import
+        return "", report.unqualified_text(token)
     rendered = verdict.render()
     head, sep, body = rendered.partition(f" {verdict.gate} : ")
     return (head, body) if sep else (rendered, "")
@@ -553,14 +566,15 @@ def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],
 
     lines: list[str] = []
     for (head, body), ids in sorted(groups.items(), key=lambda item: ranks[item[0]]):
+        lead = f"{head} " if head else ""          # an untagged row: the spine's mark
         if len(ids) == 1:
             # One gate, one line: the dense `[skip] gate.id : reason` form, which
             # is strictly better than a two-line form when there is nothing to
             # share the reason with.
-            one = f"{head} {ids[0]}" + (f" : {body}" if body else "")
+            one = f"{lead}{ids[0]}" + (f" : {body}" if body else "")
             lines += _wrap(one, indent="  ", hanging="         ", collapse=False)
             continue
-        lines += _wrap(f"{head} " + ", ".join(ids), indent="  ",
+        lines += _wrap(lead + ", ".join(ids), indent="  ",
                        hanging="         ", collapse=False)
         if body:
             # Indented to the same column the single-gate form wraps to, so the

@@ -1629,6 +1629,15 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                     f"until one of them is fixed")
             known_good = {"pass": "pass", "fail": "fail", "skipped": "skipped"}.get(
                 outcome, "errored")
+            if known_good == "pass" and _gates.context_breach(
+                    spec, good_ctx.params, read=good_trace.params) is not None:
+                # P2.4-D19, judged here as `check` and `gate selftest` judge it
+                # (`verdicts._good_half`): a known-good control outside the
+                # evaluator's own operating context never showed it passing where
+                # it claims to hold. What slipped through (review of P2.4): a pack
+                # whose baseline sat outside a declared range validated
+                # `publishable` while `gate selftest` and `check` held it unqualified.
+                known_good = "outside"
             # 1b. the good fixture's seal: like the known-bad fixture's, it builds
             #     from the pack's own baseline, never from its host's params.
             if good_ref:
@@ -1675,7 +1684,7 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                 (invariant 6's words, which name the baseline)."""
                 said = _unqualified_problem(spec.id, judged)
                 kind = _verdicts.parse_token(_verdicts._qualification(judged))[0]
-                if said and (good_ref or not kind.startswith("known-good:")):
+                if said and (good_ref or kind not in _BASELINE_SAID):
                     shown.problems.append(said)
                 shown.qualifications[spec.id] = judged
 
@@ -1748,6 +1757,12 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
         if out_dir is None:
             shutil.rmtree(base, ignore_errors=True)
     return shown
+
+
+#: The known-good facts whose problem the baseline's own line already says
+#: (step 1: "fails its own baseline", "skips its own baseline"), so the judge's
+#: is not said twice. `known-good:outside` is not one: nothing above says it.
+_BASELINE_SAID = ("known-good:fail", "known-good:errored", "known-good:skipped")
 
 
 def _unqualified_problem(gate_id: str, facts: Any) -> str:

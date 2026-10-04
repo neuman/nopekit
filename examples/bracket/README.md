@@ -127,7 +127,7 @@ There is no `params/` directory: a parameter record holds only what the model ca
 (where a number came from), and every value, rationale and rejected alternative here
 lives in `model/bracket.py`.
 
-## Move a goalpost in the claim, never in the gate
+## Move a limit in the claim, never in the gate
 
 C1's limit lives in `claims/C1.json`, and `bracket.deflection` reads it
 (`ctx.acceptance("C1")`). Change the limit there and `atompipe check` re-runs that

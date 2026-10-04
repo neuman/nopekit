@@ -285,7 +285,7 @@ What you must not do is leave the claim Skipped and move on as though the design
 checked. A claim Skipped by a crash (its reason starts `errored:`, its tag is
 `[SKIP ]`) is louder still — the evaluator, or a prerequisite of it, is broken.
 
-**Never move a goalpost in a gate.** A limit is a claim's acceptance condition, in
+**Never move a limit in a gate.** A limit is a claim's acceptance condition, in
 `claims/<id>.json`; a gate reads it with `ctx.acceptance("<id>")` and reports it as
 its limit. Move the limit in the claim — the gates that read it re-run, nothing else
 does — and never edit a gate's number to make a claim pass. Two readings follow from it:

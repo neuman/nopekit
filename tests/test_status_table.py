@@ -1048,11 +1048,18 @@ def overclaims_end_to_end(run: _Refused) -> list[str]:
               if re.match(r"^\[[^\]]+\] C2 ", ln)]
     if not listed or listed[0].startswith("[ok"):
         out.append("claim.list: C2 tagged ok")
-    why = [ln for ln in run.out["why"].stdout.splitlines() if f"] {LOGGER}" in ln]
+    # The row tagged or not (R-6, review of P2.4: an unqualified evaluator's row
+    # in `why` lost the crash's `[ERR ]` tag and the spine's token, and reads
+    # `<gate> : unqualified: <reason>` as `check` and `gate show` print it) —
+    # and it must SAY unqualified, which the tagged form never had to.
+    why = [ln for ln in run.out["why"].stdout.splitlines()
+           if re.match(rf"^\s*(?:\[[^\]]+\] )?{re.escape(LOGGER)} : ", ln)]
     if not why:
         out.append(f"why: no row for {LOGGER}")
     elif "never run" in why[0] or why[0].lstrip().startswith(("[ok", "[ --")):
         out.append(f"why: {LOGGER} reads as never run")
+    elif "unqualified: " not in why[0]:
+        out.append(f"why: {LOGGER} does not say unqualified")
     claims = {row.get("id"): row for row in run.state.get("claims") or ()}
     if (claims.get("C2") or {}).get("status") in _CHECKED:
         out.append("site: C2 reads checked")
@@ -1126,11 +1133,17 @@ class UnqualifiedBesideAPassIsNeverChecked(unittest.TestCase):
                           if p.startswith("status.json")},
                          {"status.json: C2 reads checked", "status.json: ready",
                           "status.json: C2 is not blocking"})
-        why = run.out["why"].stdout.replace(f"] {LOGGER} : ", "] ").replace(
-            "[ERR ]", f"[ -- ] {LOGGER} : never run |")
+        why = run.out["why"].stdout.replace(f"{LOGGER} : unqualified: ",
+                                            f"[ -- ] {LOGGER} : never run | ")
+        self.assertNotEqual(why, run.out["why"].stdout)
         self.assertIn(f"why: {LOGGER} reads as never run",
                       overclaims_end_to_end(run._replace(out=dict(run.out,
                                                                   why=_Stdout(why)))))
+        quiet_why = run.out["why"].stdout.replace(f"{LOGGER} : unqualified: ",
+                                                  f"{LOGGER} : ")
+        self.assertIn(f"why: {LOGGER} does not say unqualified",
+                      overclaims_end_to_end(run._replace(out=dict(run.out,
+                                                                  why=_Stdout(quiet_why)))))
 
 
 def refusal_problems(run: _Refused) -> list[str]:

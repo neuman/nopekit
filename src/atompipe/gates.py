@@ -220,7 +220,10 @@ __all__ = [
     "context_token",
     "context_of",
     "GOALPOST_FACTORS",
+    "GoalpostSite",
+    "note_goalpost_sites",
     "GoalpostRun",
+    "GoalpostRuns",
     "goalpost_runs",
 ]
 
@@ -632,19 +635,23 @@ class GateContext:
         claim ``claim`` names: an exact claim id first, else the claims carrying
         it as a tag (one condition among them). A copy: editing it moves nothing.
 
-        **A goalpost lives in claims/, never in a gate** (P2.4-D1, D-10). Read it
-        here and report it as your limit::
+        **A limit lives in claims/, never in a gate** (P2.4-D1, D-10). Read it
+        here and report it as your limit, in the units YOUR arithmetic computes
+        in — never ``acc.units``::
 
             acc = ctx.acceptance("C1")
-            measured = round(deflection, 4)          # compare what you report
+            measured = round(deflection_mm, 4)       # compare what you report
             return Verdict(gate=..., passed=acc.holds(measured), measured=measured,
-                           limit=acc.limit, units=acc.units,
+                           limit=acc.limit, units="mm",
                            comparator=acc.comparator.value)
 
         The read is recorded as ``acceptance:<claim>`` — the condition alone, so
         moving the limit re-keys this gate and editing the statement re-keys
         nothing — and a pass is then held to it (:func:`run_gate`: a finite
-        value, in its units, that it admits; else the run is errored). On a
+        value, in its units, that it admits; else the run is errored). The units
+        check holds only units a gate states for itself: one that repeats
+        ``acc.units`` back agrees with any claim, and C1 restated as ``<= 600
+        um`` read Checked at "0.6997 um" — 700 um (review of P2.4). On a
         control the condition is the known-good design's own (a project's
         ``selftest/known_good.py`` states ``CLAIMS``), so moving the live claim
         never changes a control's severity; a pack's baseline states none, so a
@@ -1912,8 +1919,9 @@ def _held_to_acceptances(verdict: Verdict, trace: Any) -> Verdict:
         return dataclasses.replace(
             verdict, passed=False, error=why,
             detail=(f"{verdict.detail} | " if verdict.detail else "")
-            + "a pass must meet the goalpost it read: report the value you compared, in its "
-              "units, and pass only when the condition holds (acc.holds(value))")
+            + "a pass must meet the acceptance condition it read: report the value you "
+              "compared, in the units you computed it in, and pass only when the condition "
+              "holds (acc.holds(value))")
     return verdict
 
 
@@ -4088,6 +4096,7 @@ def _mutated_run(spec: GateSpec, fn: Callable[[GateContext], Any], good_ctx: Gat
                     anchors=getattr(trace, "anchors", None))
     verdict = run_gate(spec, fn, dataclasses.replace(good_ctx, **changes), trace=own)
     _fold_reads(trace, own, known_good)
+    note_goalpost_sites(trace, own, params, verdict)
     return verdict
 
 
@@ -4095,103 +4104,182 @@ def _mutated_run(spec: GateSpec, fn: Callable[[GateContext], Any], good_ctx: Gat
 # the goalpost runs (P2.4, critique 1): the known-good control with each goalpost
 # it read moved — its value must not move with it
 # --------------------------------------------------------------------------- #
-#: Where each goalpost the known-good control read is moved to: its limit (and
-#: a band's upper bound) halved and doubled — a zero limit moved to -0.5 and to
-#: 1.0. Why two runs, one each side: a gate keyed to "my goalpost is above X"
-#: shows only on the side that crosses X. Why x0.5 and x2: far enough that a
-#: limit typed to one significant figure moves (0.5 -> 0.25, 1.0), near enough
-#: to stay the same order of magnitude a gate's own arithmetic expects; the
-#: value must not move at all, so how far is not a margin. What it closes
-#: (critique 1 of the P2.4 design): ``if acc.limit != 0.5: report 0.9 *
-#: acc.limit`` passed both controls and the walk on the calibrated goalpost,
-#: and read Checked at whatever the live goalpost was moved to. *Rejected:* the
-#: live goalpost substituted into the known-good design (one record per live
-#: value, and a control that re-keys on every goalpost edit — D2's coupling by
-#: another field); no run at all (the P2.4 design's D25: D4 checks only that a
-#: reported value meets the condition read, which a keyed gate arranges);
-#: moving the known-good acceptance until the known-good value lands past it
-#: and reading the pass flag (a control's severity consulted, and the flag of
-#: a gate keyed to its goalpost is what it chooses). Named residual: a gate
-#: keyed to one exact goalpost no run reads — the walk's own residual for a
-#: value it never visits.
-GOALPOST_FACTORS = (0.5, 2.0)
+#: Where each limit a qualification run read is moved to: x0.1, x0.5, x2 and
+#: x10 — a zero limit to -0.9, -0.5, 1.0 and 9.0 — each limit of a band on its
+#: own (``verdicts.moving_limits``). The value must not move at all, so how far
+#: is not a margin: these are where the runs LOOK. Why x0.5 and x2: near, and
+#: far enough that a limit typed to one significant figure moves (0.5 -> 0.25,
+#: 1.0); why x0.1 and x10 beside them (review of P2.4): a gate keyed to "my
+#: limit is below 0.2", calibrated at 0.5, was honest at every point x0.5 and
+#: x2 visit (0.25, 0.5, 1.0) and read Checked at a live 0.1, a value made up;
+#: the decade each side puts a run at 0.05 and at 5.0. Why each end of a band
+#: alone: scaling both ends keeps their ratio, and a gate keyed to it
+#: (``limit_hi / limit != 4``) read Checked at every live band of another
+#: shape — moving one end changes the ratio and the width at once. What it
+#: closes (critique 1 of the P2.4 design): ``if acc.limit != 0.5: report 0.9 *
+#: acc.limit`` passed both controls and the walk on the calibrated goalpost.
+#: *Rejected:* the live goalpost substituted into the known-good design (one
+#: record per live value, and a control that re-keys on every goalpost edit —
+#: D2's coupling by another field); no run at all (the P2.4 design's D25: D4
+#: checks only that a reported value meets the condition read, which a keyed
+#: gate arranges); moving the known-good acceptance until the known-good value
+#: lands past it and reading the pass flag (a control's severity consulted, and
+#: the flag of a gate keyed to its goalpost is what it chooses); random points
+#: (a qualification is reproducible — the same entry from the same inputs; a
+#: random run makes "two outcomes for identical inputs" a coin toss); the
+#: other sign (outside most quantities' range, where an honest gate's own
+#: arithmetic on its limit — a root, a log — may crash and read unqualified
+#: for a goalpost no claim states); an additive offset (for a one-sided limit
+#: one more scale; for a band, moving one end already changes its width and
+#: its ratio); more points (each is a run of the gate, and no finite set
+#: closes the residual). Named residual (SPINE_CONTRACT's Limits): a gate may
+#: lie at every goalpost the runs do not visit — between these points, or
+#: past them — as a gate keyed to one parameter value the walk never visits
+#: does. Only an independent evaluator catches a lying value.
+GOALPOST_FACTORS = (0.1, 0.5, 2.0, 10.0)
+
+
+class GoalpostSite(NamedTuple):
+    """Where a goalpost was read: the ``params`` of the first qualification run
+    that read it and gave a verdict (pass or fail) — the known-good run, or a
+    walk run — and that run's ``measured`` and ``units``: what every run with
+    the goalpost moved must report again."""
+
+    params: Any
+    measured: Any
+    units: str
+
+
+def note_goalpost_sites(into: GateTrace, run: GateTrace, params: Any,
+                        verdict: Verdict) -> None:
+    """Record on ``into.acceptance_sites`` each goalpost ``run`` read — an
+    ``acceptance:<key>`` naming a claim (not ``ABSENT``) — that has no site yet,
+    at ``params`` (a deep copy), when ``verdict`` is a pass or a fail. The
+    known-good half records its own first, then every walk run
+    (``_mutated_run``). What slipped through when only the known-good run's
+    goalposts were moved (review of P2.4): a goalpost read only past a branch the
+    known-good design never takes (``ctx.acceptance("c_light" if load <= 20
+    else "c_heavy")``) had no run, the strict reader then refused the entry its
+    own writer made, and every ``check`` of the project stopped at exit 2."""
+    sites = getattr(into, "acceptance_sites", None)
+    if not isinstance(sites, dict) or verdict.outcome not in ("pass", "fail"):
+        return
+    from .verdicts import ABSENT, ACCEPTANCE_KEY
+    for key, digest in sorted((getattr(run, "ledger", None) or {}).items()):
+        if not str(key).startswith(ACCEPTANCE_KEY) or digest == ABSENT:
+            continue
+        name = str(key)[len(ACCEPTANCE_KEY):]
+        if name not in sites:
+            sites[name] = GoalpostSite(copy.deepcopy(dict(params or {})),
+                                       _plain_number(verdict.measured),
+                                       str(verdict.units or ""))
 
 
 @dataclass(frozen=True)
 class GoalpostRun:
-    """One goalpost run: the goalpost ``key``, the moved ``limit``, and what the
-    gate said there — ``outcome``, ``measured``, ``units``."""
+    """One goalpost run: which ``end`` moved (``limit``, or a band's
+    ``limit_hi``), where it moved to (``limit``, the first named claim's), and
+    what the gate said there — ``outcome``, ``measured``, ``units``."""
 
-    key: str
+    end: str
     limit: Any
     outcome: str
     measured: Any = None
     units: str = ""
 
 
+@dataclass(frozen=True)
+class GoalpostRuns:
+    """One goalpost's runs: its ``key``, the value and units where it was read
+    with nothing moved (``measured``, ``units`` — its ``GoalpostSite``), and
+    each run (``runs``): every limit it names moved by every factor."""
+
+    key: str
+    measured: Any
+    units: str
+    runs: tuple = ()
+
+
 def _moved_limit(limit: Any, factor: float) -> Any:
-    if limit is None:
-        return None
+    if not _finite_number(limit):
+        return limit
     return float(limit) * factor if float(limit) else factor - 1.0
 
 
 def goalpost_runs(spec: GateSpec, fn: Callable[[GateContext], Any], good_ctx: GateContext,
                   good_verdict: Verdict, *, trace: GateTrace | None = None
-                  ) -> tuple[GoalpostRun, ...]:
-    """The known-good control re-run with each acceptance condition its run read
-    (``trace.acceptances``) moved by ``GOALPOST_FACTORS`` — the claims that
-    goalpost names, in the known-good design's own ledger, their limits moved
-    and nothing else — one run per goalpost per factor. Each run's reads are
-    folded into ``trace`` at the known-good digests (a goalpost key keeps the
-    calibrated one: ``_fold_reads`` never overwrites a recorded ledger key), so
-    a file only the moved-goalpost path reads is keyed into the qualification.
-    The caller compares each run's value and units with the known-good run's:
-    they must not move (``verdicts._goalpost_fact``). Nothing runs unless the
-    known-good run passed. Sealed as the walk is: a deep copy of the known-good
+                  ) -> tuple[GoalpostRuns, ...]:
+    """Every goalpost a qualification run read, moved where it was read: for each
+    site on ``trace.acceptance_sites`` (``note_goalpost_sites``), the gate re-run
+    on that site's params with the claims the goalpost names — in the known-good
+    design's own ledger — moved one limit at a time (``verdicts.moving_limits``)
+    by each of ``GOALPOST_FACTORS``, nothing else moved. Run AFTER the walk, so
+    a goalpost only a walk run read is moved at that run's design. Each run's
+    reads are folded into ``trace`` at the known-good digests (a goalpost key
+    keeps the one it was read at: ``_fold_reads`` never overwrites a recorded
+    ledger key), so a file only the moved-goalpost path reads is keyed into the
+    qualification. The caller requires every run's value and units to be the
+    site's (``verdicts._goalpost_fact``); ``_ledger_unseen`` exempts a goalpost's
+    limit from ``channels:ledger`` only where its runs are complete. Nothing runs
+    unless the known-good run passed. Sealed as the walk is: deep copies of the
     params and ledger, a fresh memo, a temp out dir removed after, no write
     under the project or a pack."""
-    acceptances = dict(getattr(trace, "acceptances", None) or {})
-    if not acceptances or good_verdict.outcome != "pass":
+    from .verdicts import _acceptance_form, moving_limits
+    sites = dict(getattr(trace, "acceptance_sites", None) or {})
+    if not sites or good_verdict.outcome != "pass":
         return ()
     known_good = copy.deepcopy(dict(good_ctx.params or {}))
     ledger = getattr(good_ctx, "ledger", None)
     claims = list(getattr(ledger, "claims", None) or ())
     out_dir = tempfile.mkdtemp(prefix="atompipe-goalpost-")
     names = {f.name for f in dataclasses.fields(good_ctx)}
-    runs: list[GoalpostRun] = []
+    groups: list[GoalpostRuns] = []
     try:
-        for key in sorted(acceptances):
-            named = {c.id for c in claims_named(claims, key)}
-            for factor in GOALPOST_FACTORS:
-                moved_claims = []
-                moved_limit = None
-                for claim in claims:
-                    claim = copy.deepcopy(claim)
-                    if claim.id in named:
-                        acc = claim.acceptance
-                        moved_limit = _moved_limit(acc.limit, factor)
-                        claim.acceptance = dataclasses.replace(
-                            acc, limit=moved_limit, limit_hi=_moved_limit(acc.limit_hi, factor))
-                    moved_claims.append(claim)
-                moved = dataclasses.replace(ledger if isinstance(ledger, Ledger) else Ledger(),
-                                            claims=moved_claims)
-                changes: dict[str, Any] = {"params": copy.deepcopy(known_good),
-                                           "ledger": moved, "out_dir": out_dir}
-                if "memo" in names:
-                    from . import verdicts as _verdicts
-                    changes["memo"] = _verdicts.SweepMemo()
-                own = GateTrace(kind=getattr(trace, "kind", "control"),
-                                anchors=getattr(trace, "anchors", None))
-                verdict = run_gate(spec, fn, dataclasses.replace(good_ctx, **changes),
-                                   trace=own)
-                if trace is not None:
-                    _fold_reads(trace, own, known_good)
-                runs.append(GoalpostRun(key=key, limit=moved_limit, outcome=verdict.outcome,
-                                        measured=_plain_number(verdict.measured),
-                                        units=str(verdict.units or "")))
+        for key in sorted(sites):
+            site = sites[key]
+            named = sorted(claims_named(claims, key), key=lambda c: str(c.id))
+            ids = {c.id for c in named}
+            ends: list[str] = []
+            for claim in named:
+                for end in moving_limits(_acceptance_form(claim.acceptance)):
+                    if end not in ends:
+                        ends.append(end)
+            runs: list[GoalpostRun] = []
+            for end in ends:
+                for factor in GOALPOST_FACTORS:
+                    moved_claims = []
+                    shown = None
+                    for claim in claims:
+                        claim = copy.deepcopy(claim)
+                        if claim.id in ids:
+                            moved = _moved_limit(getattr(claim.acceptance, end), factor)
+                            claim.acceptance = dataclasses.replace(claim.acceptance,
+                                                                   **{end: moved})
+                            if shown is None:
+                                shown = moved
+                        moved_claims.append(claim)
+                    moved_ledger = dataclasses.replace(
+                        ledger if isinstance(ledger, Ledger) else Ledger(), claims=moved_claims)
+                    changes: dict[str, Any] = {"params": copy.deepcopy(site.params),
+                                               "ledger": moved_ledger, "out_dir": out_dir}
+                    if "memo" in names:
+                        from . import verdicts as _verdicts
+                        changes["memo"] = _verdicts.SweepMemo()
+                    own = GateTrace(kind=getattr(trace, "kind", "control"),
+                                    anchors=getattr(trace, "anchors", None))
+                    verdict = run_gate(spec, fn, dataclasses.replace(good_ctx, **changes),
+                                       trace=own)
+                    if trace is not None:
+                        _fold_reads(trace, own, known_good)
+                    runs.append(GoalpostRun(end=end, limit=_plain_number(shown),
+                                            outcome=verdict.outcome,
+                                            measured=_plain_number(verdict.measured),
+                                            units=str(verdict.units or "")))
+            groups.append(GoalpostRuns(key=key, measured=site.measured, units=site.units,
+                                       runs=tuple(runs)))
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
-    return tuple(runs)
+    return tuple(groups)
 
 
 # --------------------------------------------------------------------------- #

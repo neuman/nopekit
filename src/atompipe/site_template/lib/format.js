@@ -76,16 +76,20 @@ export function needWord(status) {
 }
 
 /** Verdict statuses, as written by site.state(): pass | fail | skipped | errored
- *  | unqualified. `skipped` and `errored` are deliberately NOT neutral greys — a
- *  gate whose solver is missing proved nothing, and an errored gate reads louder
- *  still, because a crash is a defect in the check itself. `unqualified` takes
- *  Gap's glyph and tone (P2.3): its claim reads Gap, and it crashed nothing. */
+ *  | unqualified | outside-context. `skipped` and `errored` are deliberately NOT
+ *  neutral greys — a gate whose solver is missing proved nothing, and an errored
+ *  gate reads louder still, because a crash is a defect in the check itself.
+ *  `unqualified` takes Gap's glyph and tone (P2.3): its claim reads Gap, and it
+ *  crashed nothing. `outside-context` too (P2.4): a pass outside the inputs its
+ *  evaluator was qualified on — its claim reads Gap, its evaluator is still
+ *  qualified, and the word is state.json's, never UNQUALIFIED (review of P2.4). */
 const VERDICT_STATUS = {
   pass:    { glyph: "✓", tone: "ok" },
   fail:    { glyph: "✕", tone: "bad" },
   skipped: { glyph: "⊘", tone: "warn" },
   errored: { glyph: "!", tone: "bad" },
   unqualified: { glyph: "?", tone: "warn" },
+  "outside-context": { glyph: "?", tone: "warn" },
 };
 
 /** Each verdict row's outcome word, from state.json's `outcome_words`

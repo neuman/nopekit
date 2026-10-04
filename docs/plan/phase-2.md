@@ -306,6 +306,23 @@ fluids' Reynolds inputs) or keep the guard gates, each with provenance; a baseli
 `modelica.result_claim` moving to `ctx.acceptance`. The rename pass — `rationale`
 (for an assumption) and `fallback` fold into GLOSSARY §8's `assumed: {reason, owner}`.
 
+**Review of P2.4 (`P2.4-Rn`).** Each finding confirmed by at least two of three
+refuters, applied test first where it was a laundering path.
+
+| Id | Decision | Rejected |
+|---|---|---|
+| R1 | the goalpost runs move each limit by x0.1, x0.5, x2 and x10, a band's two limits one at a time (`verdicts.moving_limits`); the shape holds which limits are stated, a one-sided condition's `limit_hi`, and whether the read returns one condition (`_shape_form`) | x0.5 and x2 alone (a gate keyed below 0.2 at a calibrated 0.5 read Checked at 0.1); both ends scaled together (a ratio-keyed gate read Checked); random points (not reproducible); the other sign; an additive offset; more fixed points (none closes the residual, now worded as "every limit the runs do not visit") |
+| R2 | the goalpost runs run AFTER the walk, at each limit's site — the known-good run's params, or the first walk run that read it with a verdict (`GoalpostSite`, `note_goalpost_sites`); a limit is exempt from `channels:ledger` only where its runs are complete (`moved_goalposts`); the strict reader requires none | requiring runs for every `acceptance:` key the folded trace held (the writer refused its own entry; `check` exited 2 for the whole project); moving a walk-only limit at the known-good params (it is not read there: the runs would prove nothing about the branch that reads it); exempting a limit no run moved |
+| R3 | a writer/reader disagreement holds that one evaluator, `control:unwritable` (`verdicts.entry_problem`, asked before filing, recorded or not) | an exception out of the check run (nothing recorded for any evaluator, while status and doctor promised the next check run) |
+| R4 | a claim file's `acceptance.limit`/`limit_hi` is a number or null, named against the file by the strict reader; in memory, `cross_check` leaves a band with an unusable `limit_hi` not compared and `acceptance_of` makes it a problem | coercing `"0.8"` (it rewrites what the file says); a traceback |
+| R5 | a gate reports the units its own arithmetic computes in — the bracket's deflection, PACK_FORMAT and the `GateContext.acceptance` docstring; a scan holds every shipped and taught gate to it (`AnEvaluatorStatesItsOwnUnits`, invariant 4) | units moved by a goalpost run (an honest gate's pass would error under D4 there and read unqualified); openmodelica's binding units (the pack's stated no-conversion stance: a pack change, not this review's) |
+| R6 | every bracket gate judges the numbers it reports (S-18 closed for all six) | narrowing S-18's "closed" |
+| R7 | limit disagreements over current verdicts only; `doctor`'s `limits` row always printed; `LIMIT_REL_TOL` with its real reason (float noise; a rounded limit is a disagreement on purpose) | blaming a stale verdict of a gate that reads its limit from the claim; a tolerance as loose as a reporting precision |
+| R8 | a pass outside its operating context: the page's row reads `outside-context` (Gap's glyph and tone, the tally's word, its own chip title); `check --json`'s qualification token is the qualification's alone; `why` and `claim show` print a marked verdict as `<gate> : <lead>: <words>`, never `[ERR ]` and never the token, and `claim show` prints the claim's reason under its header; `pack validate` judges the known-good control's context as `check` does | `unqualified` on the page (D22's rejection) |
+| R9 | the page shows the claim's own limit beside its value (`limit_text`, written by `site.state` through `report.limit_words`) | the headline verdict's limit (S-35 on the page) |
+| R10 | *goalpost* leaves every human channel for *acceptance condition* or *limit*, and joins the acceptance condition row's Never-say (`TheAcceptanceConditionHasOneName`); the shape keys get words of their own (`acceptance_ledger`) that keep the calibrated limit | the raw keys; "hand its known-good design the same claims" (D2's coupling, taken literally) |
+| R11 | the outside-context paragraph and the checked table's P2.4 clause in `HUMAN` (`context.gaps_intro`, `acceptance.closing_counts`); GLOSSARY §3's chain reads Assumed for an owned fallback before Checked | literals beside the table |
+
 #### Checkpoint 2.2: the refusal graph
 
 ```python

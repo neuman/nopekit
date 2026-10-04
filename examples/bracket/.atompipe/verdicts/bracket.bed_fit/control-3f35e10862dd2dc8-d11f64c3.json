@@ -2,21 +2,21 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.bed_fit",
-  "rho": "061680dca9e9b79b30031d6e9e4c4b1bd5e91111f9128e7c618c617b9ef30bda",
-  "static": "a4117c9aec693a8605a706499a7da3d9b82cb0a47cad84534d409aa45bc19dfe",
+  "rho": "3f35e10862dd2dc85d9d2f258fa02a526cd84f87826aa34ca35835abd7b0f694",
+  "static": "4b19f5f6e2b4592faa0e7dccbf91f3e4277d2474dc6741f478a0e250c22cbd48",
   "static_parts": {
-    "spine": "71f45240af6180d5bd456f588c766edd4ab9fddf0f34afbb6b215f31b8254857",
+    "spine": "56ae569ada37d43859cafab7b78b026460656849e83248c6d317acd23a119d63",
     "code": {
-      "digest": "7388f765d70a5beda4f307eb209932e99dbf493d1479c3d2f14bcbf1112611f3",
+      "digest": "9945773aa9f0e2dcdf3a276e11fad113575cc41283531a8fbeb67f3cbe6d379e",
       "files": [
         "gates/structural.py"
       ]
     },
     "selftest": {
-      "digest": "d189dfd49d6e13f7aee32b7fe0b285cfd4e29c5dd8474582582af9460da0499a",
+      "digest": "54b47c809fedc4f67f74e03ae930f5d0e1a3b50087a5674014c35bf2c036fb58",
       "files": {
         "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-        "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
+        "selftest/known_good.py": "72ac6ff4b1083baa4b4f809e598b8784f534f880a0d90e457316cbfda74f2c16"
       }
     },
     "nc": {
@@ -29,11 +29,11 @@
   },
   "host": "known-good",
   "fixture": {
-    "digest": "3645413f71d05619f92c2a1b5e8e5385fdfbd05b0b0bcf779cb6c4871c71b220",
+    "digest": "bfea838ca994a9ca7c38c37351130038df6d85b08b7dbb688591f0ec7e92b9e6",
     "files": {
       "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
       "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-      "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
+      "selftest/known_good.py": "72ac6ff4b1083baa4b4f809e598b8784f534f880a0d90e457316cbfda74f2c16"
     }
   },
   "reads": {
@@ -191,5 +191,5 @@
   "measured": 413.5,
   "limit": 204.0,
   "units": "mm",
-  "digest": "93e3089a14e36fc68626f62a8f6bb43905d6712990cdd54aae77518254e45111"
+  "digest": "df65d3c2be1343cf4c5a03f1b89afc7c59ebf28ff384d5150d23b7d280df999f"
 }
