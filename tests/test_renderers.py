@@ -370,8 +370,38 @@ def _facts_space(seed: int = 2303, n: int = 320) -> list:
             walk=rng.choice(["", "", "", "could-not-run|its temp directory is inside the project",
                              "errored|MemoryError: once"]),
             blocker=rng.choice(["", "", "", "two-outcomes|a, b", "tier|a, b"]),
-            expect=rng.choice(["fail", "fail", "error"])))
+            expect=rng.choice(["fail", "fail", "error"]),
+            ledger=rng.choice([(), (), ("claims",)])))
     return out
+
+
+class TheWalkWordsComeFromTheWalksConstants(unittest.TestCase):
+    """Review of P2.3: `gate show`'s not-mutated row hard-coded the walk's
+    numbers — "from x0.001 to x1000 … 15% past its limit" — beside the
+    constants they describe, so a retuned margin left the row saying 15%. The
+    row is filled from `gates.MUTATION_RUNGS` and `MUTATION_MARGIN` when
+    rendered."""
+
+    def _row(self) -> str:
+        from types import SimpleNamespace
+        entry = SimpleNamespace(good=None, measured=1.0, limit=2.0, units="mm",
+                                mutation={"results": [], "inconclusive": [], "boundary": "",
+                                          "not_mutated": [{"key": ["config", "load_n"],
+                                                           "why": "never-lands"}]})
+        spec = SimpleNamespace(negative_control=None, pack="")
+        rows = report_mod.qualification_detail(entry, spec)
+        (row,) = [r for r in rows if "config.load_n" in r]
+        return row
+
+    def test_the_row_moves_with_the_constants(self):
+        from unittest import mock
+        from atompipe import gates as gates_mod
+        self.assertIn("from x0.001 to x1000 its value never landed 15% past its limit",
+                      self._row())
+        with mock.patch.object(gates_mod, "MUTATION_MARGIN", 0.2), \
+                mock.patch.object(gates_mod, "MUTATION_RUNGS", (1.2, 10.0, 100.0)):
+            self.assertIn("from x0.01 to x100 its value never landed 20% past its limit",
+                          self._row())
 
 
 class QualificationLineAgrees(unittest.TestCase):

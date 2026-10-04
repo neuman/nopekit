@@ -981,8 +981,13 @@ class QualificationLineShape(unittest.TestCase):
     GOOD = (
         "bracket.deflection : known-good pass · known-bad fail · mutation 1/1 fail → qualified",
         "q.never : known-good fail · known-bad fail → unqualified",
-        "q.parser : known-good pass · known-bad errored · mutation 0 conclusive "
-        "(1 inconclusive) → qualified",
+        "q.parser : known-good pass · known-bad fail (raised, as declared) · mutation 0 "
+        "conclusive (1 inconclusive) → qualified",
+        "q.crashy : known-good pass · known-bad errored → unqualified",
+        "cad.watertight : known-good pass · known-bad fail · known-good and known-bad via "
+        "ctx.extra → unqualified",
+        "q.waiver : known-good pass · known-bad fail · mutation 1/1 fail · check run reads "
+        "another ledger → unqualified",
         "q.slow1 : known-good pass · known-bad fail · mutation 0 conclusive (none made: tier 1) "
         "→ qualified",
         "beam.deflection : known-good pass · known-bad fail → qualified",
@@ -1003,6 +1008,9 @@ class QualificationLineShape(unittest.TestCase):
         "→ qualified",
         "[ok  ] bracket.deflection : known-good pass · known-bad fail → qualified",
         "gate bracket.deflection: known-good pass · known-bad fail → qualified",
+        "q.parser : known-good pass · known-bad raised → qualified",
+        "cad.watertight : known-good pass · known-bad fail · channels differ · known-good "
+        "and known-bad via ctx.extra → unqualified",
     )
 
     def test_every_printed_form_matches(self):
@@ -1031,6 +1039,25 @@ class QualificationLineShape(unittest.TestCase):
                          T.QUALIFICATION_DETAIL)
         self.assertIsNone(T.QUALIFICATION_SHOW.fullmatch(
             "  last selftest: [ok  ] fired at this version (control 75cbd091db21)"))
+
+    def test_a_non_bundled_extra_channel_pack_prints_its_own_segment(self):
+        """Review of P2.3: a copy of sourcing outside the bundled packs read
+        `channels differ` on all seven lines, while both controls hand the
+        SAME ctx.extra key — the reason, which said so, was suppressed. In pack
+        mode, on the line itself: every line matches, and names the fact."""
+        base = tempfile.mkdtemp(prefix="atompipe-shape-pack-")
+        self.addCleanup(shutil.rmtree, base, ignore_errors=True)
+        pack = os.path.join(base, "srcshape")
+        shutil.copytree(os.path.join(_projects.PACKS, "sourcing"), pack,
+                        ignore=shutil.ignore_patterns("__pycache__"))
+        out = _env.atompipe(["gate", "selftest", "--pack", pack], cwd=base).stdout.splitlines()
+        lines = [ln for ln in out if ln.startswith("bom.")]
+        self.assertEqual(len(lines), 7, out)
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertRegex(line, T.QUALIFICATION_LINE)
+                self.assertIn(" · known-good and known-bad via ctx.extra → unqualified", line)
+                self.assertNotIn("channels differ", line)
 
     def test_the_bracket_selftest_prints_six_lines_and_the_summary(self):
         root = _projects.bracket_copy(os.path.join(tempfile.mkdtemp(prefix="atompipe-shape-"),

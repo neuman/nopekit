@@ -1690,10 +1690,14 @@ NOT_A_MUTATION: dict[str, str] = {
     "verdicts.py:_problem_in_walk": "the strict reader's walk half",
     "verdicts.py:_entry_facts": "reads a stored walk back into facts",
     "verdicts.py:_mutation_applies": "decides whether the walk applies",
+    "verdicts.py:_ledger_unseen": "reads a recorded walk's ledger reads beside a verdict's",
+    "report.py:_not_mutated_words": "words a recorded not-mutated reason from the constants",
     "report.py:<module>": "the word table; the line that uses it is held by V5 and V10",
     "report.py:qualification_detail": "renders a recorded result in `gate show`",
     "cli.py": "prints a recorded result",
-    "packs.py:demonstrate": "calls gates.mutation_walk, the subject",
+    # (`packs.py:demonstrate` pruned in review of P2.3: its one string saying
+    # "mutation" was a token kind it filtered on, gone with the per-fact
+    # problems; it calls gates.mutation_walk, the subject, and speaks no word.)
 }
 
 #: The bundled pack every subject also runs over, installed into a project.
@@ -2219,8 +2223,8 @@ class MutationIsSealed(_env.EnvCase):
         the line counts it neither way."""
         root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         _write(os.path.join(root, "gates", "raises.py"), RAISES_PAST)
-        want = "bracket.raises : known-good pass · known-bad errored · mutation 0 conclusive " \
-               "(1 inconclusive) → qualified"
+        want = "bracket.raises : known-good pass · known-bad fail (raised, as declared) · " \
+               "mutation 0 conclusive (1 inconclusive) → qualified"
         truth = [("errored", False)]
         check = _env.atompipe(["check"], cwd=root).stdout
         show = _env.atompipe(["gate", "show", "bracket.raises"], cwd=root).stdout
@@ -2411,6 +2415,56 @@ class TheBracketsKnownGoodVerdicts(_env.EnvCase):
         for gid, (values, read) in BRACKET_KNOWN_GOOD.items():
             with self.subTest(gate=gid):
                 self.assertEqual(seen[gid], ("pass", values, read))
+
+
+
+class TheWalkCountsEveryRun(_env.EnvCase):
+    """(MUTATION_RUNS_MAX's provenance) Every call the walk makes of the
+    evaluator is one of the runs it records, its crash re-checks included, and
+    never more than the budget. What slipped through (review of P2.3,
+    ``walkcount``): the re-check that tells a repeating crash from a flaky one
+    re-ran every crashed run outside the count — an evaluator that crashed on
+    every changed value of 40 recorded 720 runs and was called 1440 times, and
+    at the budget a walk could run twice what it said."""
+
+    N = 12
+
+    def _walk(self, wrap=None) -> tuple[int, Any]:
+        expected = {f"v{i}": 1.0 + i * 0.01 for i in range(self.N)}
+        calls = [0]
+
+        def fn(ctx):
+            calls[0] += 1
+            seen = {k: ctx.params[k] for k in expected}
+            if seen == expected:
+                return Verdict(gate="t.crash", passed=True, measured=5.0, limit=10.0)
+            raise RuntimeError("planted: every changed value crashes")
+
+        spec = GateSpec(id="t.crash", tier=Tier.INSTANT)
+        root = self.tmp()
+        ctx = gates_mod.GateContext(params=dict(expected), root=root)
+        trace = GateTrace(kind="control")
+        good = gates_mod.run_gate(spec, fn, ctx, trace=trace)
+        calls[0] = 0
+        with (mock.patch.object(gates_mod, "_mutated_run", wrap(gates_mod._mutated_run))
+              if wrap else contextlib.nullcontext()):
+            walk = gates_mod.mutation_walk(spec, fn, ctx, good, trace=trace, roots=[root])
+        return calls[0], walk
+
+    def test_every_call_is_a_recorded_run(self):
+        calls, walk = self._walk()
+        self.assertEqual(walk.flaky, "", "every crash repeats")
+        self.assertEqual(calls, walk.runs)
+        self.assertLessEqual(walk.runs, gates_mod.MUTATION_RUNS_MAX)
+
+        def twice(real):
+            def run(*a, **k):
+                real(*a, **k)                   # an uncounted re-run, the old re-check
+                return real(*a, **k)
+            return run
+
+        calls, walk = self._walk(twice)
+        self.assertNotEqual(calls, walk.runs, "an uncounted re-run is seen")
 
 
 if __name__ == "__main__":

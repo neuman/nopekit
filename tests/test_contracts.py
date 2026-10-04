@@ -1625,7 +1625,7 @@ QUALIFICATION_NAMES = (
     (SPINE_CONTRACT, "mutation_walk(", "the walk"),
     (SPINE_CONTRACT, "MUTATION_MARGIN", "the walk's margin"),
     (SITE_CONTRACT, "`unqualified`", "the verdict row's status"),
-    (SITE_CONTRACT, "qualification: {token, reason}", "the verdict row's qualification"),
+    (SITE_CONTRACT, "qualification: {token, reason, text}", "the verdict row's qualification"),
     (PACK_FORMAT, "good: str = \"\"", "NegativeControl.good"),
 )
 
@@ -1649,9 +1649,9 @@ class QualificationIsDocumented(unittest.TestCase):
     def test_a_document_that_drops_one_is_caught(self):
         texts = self._texts()
         texts[SITE_CONTRACT] = texts[SITE_CONTRACT].replace(
-            "qualification: {token, reason}", "")
+            "qualification: {token, reason, text}", "")
         self.assertEqual(qualification_doc_problems(texts),
-                         ["SITE_CONTRACT.md does not document 'qualification: {token, reason}' "
+                         ["SITE_CONTRACT.md does not document 'qualification: {token, reason, text}' "
                           "(the verdict row's qualification)"])
 
 

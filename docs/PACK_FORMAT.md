@@ -718,8 +718,12 @@ the bundled packs — every conclusive mutation of its known-good control failed
   `good=` fixtures that hand the baseline through `extra` too (cad-solid's
   `selftest/good_meshes.py`, sourcing's `selftest/good_boms.py`). And a check run
   never hands a gate `ctx.extra`, so a gate not from a bundled pack whose controls
-  reach it through `extra` is unqualified as well: its controls test a path `check`
-  never takes.
+  reach it through `extra` is unqualified as well (`known-good and known-bad via
+  ctx.extra`): its controls test a path `check` never takes. For the same reason a
+  gate not from a bundled pack is handed no `ctx.model` on any run, and a verdict of
+  it that read a ledger value no qualification run read does not count (`check run
+  reads another ledger`): a pack's baseline hands its gates an empty ledger, so a
+  gate that reads a claim in `check` never qualifies outside the bundled packs.
 - **The mutation pass** (gates outside the bundled packs: a project's own, and a pack
   under `.atompipe/packs/`, `~/.atompipe/packs` or `$ATOMPIPE_PACK_PATH`): each value
   the known-good run read is pushed along a fixed ladder until the gate's own

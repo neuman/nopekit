@@ -176,11 +176,12 @@ MODEL_BROKEN = re.compile(r"^model: (?P<entry>\S+) DOES NOT LOAD — (?P<error>.
 #: `rejected`, `flipped`, a fourth segment, an outcome tag before the id).
 QUALIFICATION_LINE = re.compile(
     r"^(?P<id>[^\s\[]\S*) : known-good (?P<good>pass|fail|skipped|errored|not run|reads the candidate)"
-    r" · known-bad (?P<bad>pass|fail|skipped|errored)"
-    r"(?: · channels differ)?"
+    r" · known-bad (?P<bad>pass|fail(?: \(raised, as declared\))?|skipped|errored)"
+    r"(?: · channels differ| · known-good and known-bad via ctx\.extra)?"
     r"(?: · mutation (?:(?P<fails>\d+)/(?P<conclusive>[1-9]\d*) fail|0 conclusive)"
     r"(?: \((?P<inconclusive>\d+) inconclusive\)| \(none made: [^()]+\))?"
     r"| · mutation could not (?:run|finish)| · mutation errored)?"
+    r"(?: · check run reads another ledger)?"
     r"(?: · two outcomes| · outcomes differ by tier| · outcome differs from its cached entry)?"
     r" → (?P<verdict>qualified|unqualified)$")
 
@@ -195,7 +196,7 @@ QUALIFICATION_SHOW = re.compile(
 
 #: `gate show`'s detail rows under `qualification:`.
 QUALIFICATION_DETAIL = re.compile(
-    r"^    (?P<what>known-good|known-bad|mutation|not mutated) +(?P<body>\S.*)$")
+    r"^    (?P<what>known-good|known-bad|mutation|not mutated|why) +(?P<body>\S.*)$")
 
 #: `gate selftest`'s summary, both modes, in qualification's words (P2.3; R-6,
 #: words only: `N control(s) in T: F fired, B BROKEN, S skipped (tooling)`

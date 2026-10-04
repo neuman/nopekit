@@ -111,7 +111,10 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    project's `selftest/known_good.py` and its fixture), and both reaching it through
    the same channel. An evaluator not from a bundled pack must also fail every
    conclusive mutation of its known-good control: one value it read, pushed until its
-   own value lands 15% past its own limit. `check` runs whatever of that is not on
+   own value lands 15% past its own limit — and its check run is handed nothing its
+   qualification runs were not: no model, and a verdict that read a ledger value no
+   qualification run read does not count. Where its code lives decides which it is,
+   never a `PACK_DIR` it sets itself. `check` runs whatever of that is not on
    record; until then a pass from an evaluator qualified at an earlier version reads
    Stale, and one never qualified reads Gap. An evaluator that is not qualified reads
    Gap — `unqualified: <evaluator> : <what does not hold>`, beside a passing one too —
@@ -121,7 +124,9 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    nothing ran the control; then every project gate counted on its known-bad half
    alone, so a gate that failed everything (S-04) was let through, and one keyed to its
    own control — failing the one input that control changes, passing everything else —
-   read Checked.)
+   read Checked; then, in review of P2.3, such an evaluator read Checked again by claiming a
+   bundled pack's `PACK_DIR` on one line, or by passing whenever it was handed a model
+   or a ledger with a claim in it — channels no control or mutation had.)
 
 One more came with checkpoint P2.2, when gates gained prerequisites — a dependent
 verdict is a new place to show a pass nothing earned. Enforced in

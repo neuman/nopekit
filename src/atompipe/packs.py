@@ -1286,7 +1286,7 @@ def validate(pack_dir: str, *, tier: int = Tier.BUILD,
                 unusable_control.add(spec.id)
                 problems.append(f"gate {spec.id!r}: negative_control good fixture "
                                 f"{good_ref!r} does not exist — this gate was never shown "
-                                f"to pass a known-good input")
+                                f"to pass its known-good control")
 
         for tool in spec.requires_tools:
             if tool not in manifest.requires_tools:
@@ -1337,10 +1337,17 @@ def validate(pack_dir: str, *, tier: int = Tier.BUILD,
     # Only once the gates loaded and the baseline is an object with parameters:
     # before that, every gate would "fail" for the one reason already stated.
     if loaded and specs and baseline_usable:
+        from . import report as _report    # the one word table (D-16); not at import
         shown = demonstrate(pack_dir, tier=tier)
+        # A demonstration line that restates the static problem: the control
+        # that could not be built, in the table's words for either half.
+        q = _report.HUMAN["qualification"]
+        restating = (_CONTROL_PREFIX, *(f"{_report.unqualified_text('')}{q[half]} "
+                                        f"{q['outcome']['errored']}"
+                                        for half in ("known_bad", "known_good")))
         for line in shown.problems:
             gate_id, _, why = line.partition(": ")
-            if gate_id in unusable_control and why.startswith(_CONTROL_PREFIX):
+            if gate_id in unusable_control and why.startswith(restating):
                 continue
             problems.append(line)
         if notes is not None:
@@ -1587,10 +1594,9 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                     good_ctx = None
                     good_line = str(exc).splitlines()[0] if str(exc) else "unusable"
             if good_ctx is None:
+                # Said once, by the judge, with the rest of its facts (`settle`).
                 verdict = None
                 outcome = "errored"
-                shown.problems.append(
-                    f"{spec.id}: its known-good control {good_ref} is unusable: {good_line}")
             else:
                 verdict = _gates.run_gate(spec, fn, good_ctx, trace=good_trace)
                 outcome = verdict.outcome
@@ -1603,20 +1609,19 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                     shown.skipped.append(f"{spec.id} ({missing or 'not available here'})")
                     continue
                 good_line = verdict.skip_reason or "no reason given"
-                shown.problems.append(
-                    f"{spec.id}: skips its own baseline while its tools are present "
-                    f"({good_line}) — a gate never shown to accept a good design is not "
-                    f"shown to measure anything; state what it reads in "
-                    f"{SELFTEST_DIR}/{BASELINE_NAME}")
+                if not good_ref:
+                    shown.problems.append(
+                        f"{spec.id}: skips its own baseline while its tools are present "
+                        f"({good_line}) — a gate never shown to accept a good design is not "
+                        f"shown to measure anything; state what it reads in "
+                        f"{SELFTEST_DIR}/{BASELINE_NAME}")
             elif outcome == "error":
                 good_line = (str(verdict.error).splitlines() or [""])[0]
-                shown.problems.append(
-                    f"{spec.id}: fails its own baseline — it crashed: {_why(verdict)}")
+                if not good_ref:
+                    shown.problems.append(
+                        f"{spec.id}: fails its own baseline — it errored: {_why(verdict)}")
             elif outcome == "fail" and good_ref:
-                shown.problems.append(
-                    f"{spec.id}: fails its known-good control {good_ref}: {_why(verdict)} — "
-                    f"the fixture is not good or the gate is wrong, and its known-bad "
-                    f"control proves nothing until one of them is fixed")
+                pass                    # the judge's, with the rest of its facts (`settle`)
             elif outcome == "fail":
                 shown.problems.append(
                     f"{spec.id}: fails its own baseline: {_why(verdict)} — the baseline "
@@ -1630,7 +1635,9 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                 unsealed_good = _seal_problem(_seal_finding(spec, good_trace))
                 if unsealed_good:
                     shown.problems.append(unsealed_good.replace(
-                        f"{_CONTROL_PREFIX}reads", "known-good control reads", 1))
+                        f"{_CONTROL_PREFIX}reads",
+                        f"{_report.HUMAN['qualification']['known_good']} {_CONTROL_PREFIX}reads",
+                        1))
 
             # 2. the known-bad input, over the pack's baseline — traced, so the
             #    seal detector (4.) reads what the control took from its host
@@ -1652,24 +1659,33 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
             elif control.outcome == "error":
                 known_bad = ("skipped" if str(control.error).startswith("skipped on its own")
                              else "errored")
-                bad_line = (str(control.error).splitlines() or [""])[0]
+                bad_line = trace.gate_said or _verdicts._bad_line(trace, control)
             elif "PASSED its own known-bad" in (control.detail or ""):
                 known_bad, bad_line = "pass", ""
             else:
-                known_bad, bad_line = "errored", (control.detail or "").splitlines()[0] \
-                    if control.detail else "it crashed on its fixture"
+                # It crashed on its fixture: the gate's own first line, never the
+                # selftest's prose about it (review of P2.3).
+                known_bad, bad_line = "errored", (trace.gate_said or "no reason given")
             facts = _verdicts.QualificationFacts(known_bad=known_bad, known_good=known_good,
                                                  bad_line=bad_line, good_line=good_line,
                                                  expect=expect)
-            # After what the control DID, never before: `gate selftest --pack`
-            # shows the first `control …` line per gate (cli._read_back), and a
-            # control that did not fire is the louder news.
+            def settle(judged: Any) -> None:
+                """The qualification, judged once, and its one problem — a known-good
+                fact the baseline's own problem above already said excepted
+                (invariant 6's words, which name the baseline)."""
+                said = _unqualified_problem(spec.id, judged)
+                kind = _verdicts.parse_token(_verdicts._qualification(judged))[0]
+                if said and (good_ref or not kind.startswith("known-good:")):
+                    shown.problems.append(said)
+                shown.qualifications[spec.id] = judged
+
+            # After what the control DID, never before: the qualification's own
+            # problem is the louder news.
             unsealed = _seal_problem(_seal_finding(spec, trace))
             if control.outcome != "pass":
-                shown.problems.append(f"{spec.id}: {_CONTROL_PREFIX}did not fire: {_why(control)}")
+                settle(facts)
                 if unsealed:
                     shown.problems.append(unsealed)
-                shown.qualifications[spec.id] = facts
                 continue
 
             # 2b. channel parity (D-26, P2.3-D5): both controls hand the gate the
@@ -1678,11 +1694,6 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
             #     has shown nothing.
             if known_good == "pass" and bad_extra != good_extra:
                 facts = dataclasses.replace(facts, channels=(bad_extra, good_extra))
-                shown.problems.append(
-                    f"{spec.id}: known-good and known-bad reach it through different "
-                    f"channels (ctx.extra: known-bad {{{', '.join(bad_extra)}}}, known-good "
-                    f"{{{', '.join(good_extra)}}}) — declare a known-good fixture "
-                    f"(NegativeControl.good) that hands it the same keys")
 
             # 3. the same known-bad input with nothing to inherit from
             bare = dataclasses.replace(
@@ -1732,16 +1743,34 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                             mutation=(sum(1 for r in walk.results if r.outcome == "fail"),
                                       len(walk.results), len(walk.inconclusive)),
                             boundary=walk.boundary)
-                token = _verdicts._qualification(facts)
-                if token and _verdicts.parse_token(token)[0].split(":")[0] in (
-                        "mutation", "channels"):
-                    shown.problems.append(f"{spec.id}: unqualified: "
-                                          f"{_report.qualification_reason(token)}")
-            shown.qualifications[spec.id] = facts
+            settle(facts)
     finally:
         if out_dir is None:
             shutil.rmtree(base, ignore_errors=True)
     return shown
+
+
+def _unqualified_problem(gate_id: str, facts: Any) -> str:
+    """``"<gate>: unqualified: <the first fact that does not hold>[ — <what to
+    do>]"`` for a judged qualification, or ``""`` when it holds — in the
+    table's words alone (``report.qualification_reason``, the remedy from
+    ``HUMAN["qualification"]["remedy"]``). The one problem a qualification
+    adds to a pack's list, whatever fact failed. What slipped through (review
+    of P2.3): each fact had its own string typed here — `control did not fire:
+    … PASSED its own known-bad fixture … the gate is a logger` printed under
+    the line that already said `known-bad pass → unqualified`, the
+    channels:differ reason a second copy of the table's, `fails its known-good
+    control …` and `its known-good control … is unusable` beside it — so a
+    reworded table moved `check` and left every pack-mode problem saying the
+    old thing (D-16)."""
+    from . import report as _report        # the one word table (D-16); not at import
+    from . import verdicts as _verdicts
+    token = _verdicts._qualification(facts)
+    if not token:
+        return ""
+    kind = _verdicts.parse_token(token)[0]
+    remedy = _report.HUMAN["qualification"]["remedy"].get(kind, "")
+    return f"{gate_id}: {_report.unqualified_text(token)}" + (f" — {remedy}" if remedy else "")
 
 
 def _walked_origin(pack_dir: str) -> bool:
@@ -1792,12 +1821,12 @@ def _isolation_problems(pack_dir: str, registry: Any, spec: GateSpec, fn: Any,
             return out, unchecked
         verdict = _gates.run_gate(need_spec, need_fn, bad)
         if verdict.outcome != "pass":
+            q = _report.HUMAN["qualification"]
             word = _report.HUMAN["outcome"].get(verdict.outcome, verdict.outcome)
-            out.append(f"{spec.id}: control not isolated — its prerequisite {need.id} does not "
-                       f"pass {spec.id}'s known-bad control ({word}: "
-                       f"{_one_line_of(verdict)}); the guard pre-empts the control wherever "
-                       f"both run. Make the control move only what {spec.id} judges, or "
-                       f"drop the edge")
+            out.append(f"{spec.id}: "
+                       + q["isolation"].format(need=need.id, gate=spec.id, word=word,
+                                               body=_one_line_of(verdict))
+                       + q["isolation_fix"].format(gate=spec.id))
     return out, unchecked
 
 

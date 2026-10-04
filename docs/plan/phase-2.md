@@ -218,6 +218,19 @@ required to change (V12's trade); file-location parity — fdm's known-bad fixtu
 reach their gates by path, the channel `check` takes, so D5's key check holds them, and
 a check of file-location parity is not built (critique 19: deferred).
 
+**Check-in batch (P2.3 review):** the check run is handed nothing its qualification
+runs were not — no model for an evaluator outside the bundled packs, on any run
+(`_no_model`), and a verdict that read ledger values no qualification run read does not
+count (`channels:ledger`): a project gate that reads its limit off a claim now needs a
+known-good design that hands it the same claim record (the shelf and staleness
+fixtures were moved so, R-6); what stays visible is named in SPINE_CONTRACT's limits —
+`ctx.out_dir`'s path, the call stack, the clock (`br8`: out_dir parity rejected, the
+walk must write outside the project); a walked pack whose baseline hands no ledger can
+never qualify a gate that reads a claim in `check` (the baseline holds params only);
+the crash re-check counted in the walk's budget, once per value that crashed;
+`gate selftest --json`'s `broken`/`skipped` back to 860ffa6's suffixed ids and
+membership (P2.1-D12).
+
 **Hand-offs:** P2.4 — the claim's acceptance as the walk's limit once goalposts live
 in one place. P2.5 — `export` refuses a critical claim resting on an unqualified
 evaluator with no new code. P3 — `init` scaffolds a `known_good.py` stub that

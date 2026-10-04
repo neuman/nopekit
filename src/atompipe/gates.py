@@ -141,8 +141,8 @@ from typing import Any, Callable, Iterable, NamedTuple
 from . import modelio
 from .models import GateSpec, Ledger, NegativeControl, PrerequisiteKind, Tier, Verdict
 from .util import AtompipeError, ensure_dir, rel, short_hash
-from .verdicts import (GateTrace, ParamTrace, SweepMemo, memo_entries, not_yet, replay,
-                       sweep_memo, traced_context, tracing)
+from .verdicts import (GateTrace, ParamTrace, SweepMemo, _pack_dir_of, memo_entries, not_yet,
+                       replay, sweep_memo, traced_context, tracing)
 
 __all__ = [
     "SCOPE_SEP",
@@ -351,6 +351,11 @@ class GateContext:
                  content address, a staleness that feeds itself.
     ``model``    the loaded model module/instance, or None when the gate is
                  checking something else (a file, a netlist, an input artifact).
+                 None on EVERY run of an evaluator not from the bundled packs —
+                 its check run, its controls and its walk (``verdicts._no_model``):
+                 no known-good design has a model object, so none of its
+                 qualification runs saw one, and a model only the check run had
+                 was a path nothing qualified (review of P2.3, ``br6``).
     ``params``   the projection flattened to ``{name: value}`` — config AND
                  derived together. Gates read numbers from here, never by
                  re-deriving them, because a gate that recomputes a derived
@@ -2486,7 +2491,21 @@ def _looks_like_path(ref: str) -> bool:
     return ref.endswith(".py") or "/" in ref or os.sep in ref
 
 
-def _load_py_file(path: str, root: str = "", name: str = "") -> Any:
+#: What an unusable control costs, by which control it is — the tail of every
+#: fixture-loading message ("… until it does", "… until it loads"). In GLOSSARY
+#: §2's words: a known-bad control shows an evaluator can fail, a known-good one
+#: that it passes a good design. What slipped through (review of P2.3): one
+#: message for both, "the gate cannot be proven able to fail", on a known-good
+#: control's typo. *Rejected:* routing them through ``report.HUMAN`` — an
+#: ``AtompipeError`` is worded where it is raised, as every one in the spine is,
+#: and these name a file and its fix, not a status, an outcome or a
+#: qualification fact; the halves' names are GLOSSARY §2's terms.
+_UNUSABLE_COST = {"known-bad": "the evaluator cannot be shown able to fail until it",
+                  "known-good": "the evaluator cannot be shown to pass a good design until it"}
+
+
+def _load_py_file(path: str, root: str = "", name: str = "", *,
+                  half: str = "known-bad") -> Any:
     """Import a standalone .py file as a private module and return it.
 
     The module name is salted with a hash of the absolute path so two packs can
@@ -2520,14 +2539,14 @@ def _load_py_file(path: str, root: str = "", name: str = "") -> Any:
         # exit code it chose, including 0. "Every control passed" and "the process
         # died during the first control" must never render the same.
         raise AtompipeError(
-            f"fixture {path} called sys.exit({exc.code!r}) while importing — a fixture "
-            f"builds known-bad input, it does not exit the process; the gate it guards "
-            f"is unproven until it stops"
+            f"{half} control fixture {path} called sys.exit({exc.code!r}) while importing "
+            f"— a fixture builds its input, it does not exit the process; "
+            f"{_UNUSABLE_COST[half]} stops"
         ) from exc
     except Exception as exc:                     # noqa: BLE001 - user's fixture code
         raise AtompipeError(
-            f"fixture {path} failed to import ({type(exc).__name__}: {exc}) — the "
-            f"known-bad input is broken, so the gate it guards is unproven"
+            f"{half} control fixture {path} failed to import ({type(exc).__name__}: {exc}) "
+            f"— {_UNUSABLE_COST[half]} loads"
         ) from exc
 
 
@@ -2559,16 +2578,25 @@ def load_fixture(ref: str, root: str) -> Any:
     return _load_fixture(ref, root)[0]
 
 
-def _load_fixture(ref: str, root: str) -> tuple[Callable[..., Any], Any]:
+def _load_fixture(ref: str, root: str, *,
+                  half: str = "known-bad") -> tuple[Callable[..., Any], Any]:
     """:func:`load_fixture`, returning ``(the callable, the module the
     reference named)``. The control records the closure of that MODULE, not of
     the module that defines the callable: a fixture file that re-exports
     ``make`` from a helper is keyed by the file the reference names — the one
     an edit to point it at another helper moves — and its closure already holds
-    the helper's (``modelio``'s walk of its globals)."""
+    the helper's (``modelio``'s walk of its globals).
+
+    ``half`` is the control being built — ``"known-bad"`` or ``"known-good"`` —
+    and every message names it and what its loss costs (``_UNUSABLE_COST``).
+    What slipped through (review of P2.3): the known-good control reused this
+    loader worded for the known-bad one, so a typo in ``good=`` read
+    "negative-control fixture … does not exist … The gate cannot be proven
+    able to fail" — the wrong control, the wrong half, and two GLOSSARY §2
+    Never-says on a claim's row."""
     ref = (ref or "").strip()
     if not ref:
-        raise AtompipeError("negative control has an empty fixture reference")
+        raise AtompipeError(f"{half} control has an empty fixture reference")
 
     func_name = ""
     target = ref
@@ -2582,31 +2610,30 @@ def _load_fixture(ref: str, root: str) -> tuple[Callable[..., Any], Any]:
         path = target if os.path.isabs(target) else os.path.join(root or os.curdir, target)
         if not os.path.isfile(path):
             raise AtompipeError(
-                f"negative-control fixture {target!r} does not exist "
-                f"(looked in {os.path.abspath(path)}). The gate cannot be proven able "
-                f"to fail until it does."
+                f"{half} control fixture {target!r} does not exist "
+                f"(looked in {os.path.abspath(path)}) — {_UNUSABLE_COST[half]} does"
             )
-        module = _load_py_file(path, root or os.curdir)
+        module = _load_py_file(path, root or os.curdir, half=half)
         wanted = func_name or "make"
         source = target
     else:
-        module = _import_fixture_module(target, root or os.curdir)
+        module = _import_fixture_module(target, root or os.curdir, half=half)
         wanted = func_name or "make"
         source = target
 
     fn = getattr(module, wanted, None)
     if fn is None:
         raise AtompipeError(
-            f"negative-control fixture {source!r} has no {wanted}() function — a fixture "
+            f"{half} control fixture {source!r} has no {wanted}() function — a fixture "
             f"exposes `def make(ctx):` returning a GateContext or a dict merged into "
             f"ctx.extra"
         )
     if not callable(fn):
-        raise AtompipeError(f"negative-control fixture {source}:{wanted} is not callable")
+        raise AtompipeError(f"{half} control fixture {source}:{wanted} is not callable")
     return fn, module
 
 
-def _import_fixture_module(name: str, root: str) -> Any:
+def _import_fixture_module(name: str, root: str, *, half: str = "known-bad") -> Any:
     """``import name`` for a ``module:function`` fixture — fresh and recorded
     when ``name`` is a plain module of Python source that is code
     (``modelio.is_code`` against ``root``), through the stock import otherwise.
@@ -2640,36 +2667,36 @@ def _import_fixture_module(name: str, root: str) -> Any:
         found = None                             # in sys.modules with no __spec__: as it was
     except ImportError as exc:
         raise AtompipeError(
-            f"cannot import negative-control fixture module {name!r}: {exc}") from exc
+            f"cannot import {half} control fixture module {name!r}: {exc}") from exc
     except SystemExit as exc:                    # BaseException: see _load_py_file
         raise AtompipeError(
-            f"negative-control fixture module {name!r} called sys.exit({exc.code!r}) "
-            f"while importing — the control cannot be built, so the gate is unproven"
+            f"{half} control fixture module {name!r} called sys.exit({exc.code!r}) "
+            f"while importing — {_UNUSABLE_COST[half]} stops"
         ) from exc
     except Exception as exc:                     # noqa: BLE001 - user's fixture code
         raise AtompipeError(
-            f"negative-control fixture module {name!r} failed to import "
+            f"{half} control fixture module {name!r} failed to import "
             f"({type(exc).__name__}: {exc})") from exc
     origin = getattr(found, "origin", None) if found is not None else None
     if (found is not None and found.has_location and isinstance(origin, str)
             and found.submodule_search_locations is None
             and isinstance(found.loader, importlib.machinery.SourceFileLoader)
             and modelio.is_code(origin, [root])):
-        return _load_py_file(origin, root, name=name)
+        return _load_py_file(origin, root, name=name, half=half)
     try:
         return importlib.import_module(name)
     except ImportError as exc:
         raise AtompipeError(
-            f"cannot import negative-control fixture module {name!r}: {exc}"
+            f"cannot import {half} control fixture module {name!r}: {exc}"
         ) from exc
     except SystemExit as exc:                    # BaseException: see _load_py_file
         raise AtompipeError(
-            f"negative-control fixture module {name!r} called sys.exit({exc.code!r}) "
-            f"while importing — the control cannot be built, so the gate is unproven"
+            f"{half} control fixture module {name!r} called sys.exit({exc.code!r}) "
+            f"while importing — {_UNUSABLE_COST[half]} stops"
         ) from exc
     except Exception as exc:                     # noqa: BLE001 - user's fixture code
         raise AtompipeError(
-            f"negative-control fixture module {name!r} failed to import "
+            f"{half} control fixture module {name!r} failed to import "
             f"({type(exc).__name__}: {exc})"
         ) from exc
 
@@ -2692,7 +2719,12 @@ def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | Non
        on a module that registered it (``modelio.registered_by``): a gate a
        factory in the pack's helper made is defined in a module no pack
        loaded, and its fixture was looked for in the project (Phase 1 review,
-       ``p4`` — ``verdicts._pack_dir_of`` answers the same way).
+       ``p4``). Asked of ``verdicts._pack_dir_of``, the one answer: a
+       ``PACK_DIR`` counts only from a module whose own file is under it — a
+       project gate module that assigns itself a bundled pack's directory is
+       a project's, here as for its owner and its mutation pass (review of
+       P2.3, ``br1``: this copy read the global as given while the static
+       part read it the same way, so the two agreed on the lie).
     4. ``root`` when the caller names one, else ``ctx.root`` — a project's own
        gates, whose ``selftest/`` sits beside the model. The sweep names the
        project root (P2.3): the context a control's fixture is handed is the
@@ -2713,11 +2745,9 @@ def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | Non
     if isinstance(single, str) and single:
         return single
     if fn is not None:
-        module = sys.modules.get(getattr(fn, "__module__", "") or "")
-        for owner in (module, *modelio.registered_by(fn)):
-            pack_dir = getattr(owner, "PACK_DIR", "") if owner is not None else ""
-            if isinstance(pack_dir, str) and pack_dir:
-                return pack_dir
+        pack_dir = _pack_dir_of(fn)
+        if pack_dir:
+            return pack_dir
     return root or ctx.root or os.curdir
 
 
@@ -2762,11 +2792,13 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
     ``ctx.root`` may not be the project's (``_fixture_root``, step 4).
     """
     nc = spec.negative_control
+    half = "known-bad" if ref is None else "known-good"
     ref = nc.fixture if ref is None else ref
     host = traced_context(dataclasses.replace(ctx, out_dir=out_dir) if out_dir else ctx,
                           trace, readonly=False)
     try:
-        make, module = _load_fixture(ref, _fixture_root(spec, ctx, fn, fixture_root))
+        make, module = _load_fixture(ref, _fixture_root(spec, ctx, fn, fixture_root),
+                                     half=half)
         trace.fixture_code = modelio.code_closure(module)
         # The fixture's module-level memos too: re-verification runs a fixture
         # and a miss then runs it again, in one process, and a hit on the second
@@ -2775,7 +2807,7 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
         with tracing(trace):
             built = make(host)
     except AtompipeError as exc:
-        return None, {"error": "negative control unusable", "detail": str(exc)}
+        return None, {"error": f"{half} control unusable", "detail": str(exc)}
     except (SystemExit, GeneratorExit) as exc:
         # Same hole as run_gate's: neither is an Exception, so the clause below
         # would miss them and a fixture that exits would abort `gate selftest`
@@ -2786,7 +2818,8 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
             "error": f"fixture called sys.exit({code!r})" if isinstance(exc, SystemExit)
                      else "fixture raised GeneratorExit",
             "detail": f"{ref} must build its input and return it, not exit "
-                      f"the process — the control is unusable, so {spec.id} is unproven",
+                      f"the process — the {half} control is unusable: "
+                      f"{_UNUSABLE_COST[half]} stops",
         }
     except Exception as exc:                     # noqa: BLE001 - user's fixture code
         # Formatted after the window closed: the traceback's source reads are
@@ -2874,7 +2907,7 @@ def run_good_fixture(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: Gate
 
 def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
              trace: GateTrace | None = None, out_dir: str | None = None,
-             fixture_root: str | None = None) -> Verdict:
+             fixture_root: str | None = None, blank_model: bool = False) -> Verdict:
     """Run the gate against its own known-bad input. The verdict is on the GATE.
 
     ``passed=True`` here means *the gate correctly failed on input that is known
@@ -2922,6 +2955,11 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
     fixture's files and host reads and the gate's params alike. ``trace=None``
     makes a throwaway one (``kind="control"``). ``duration_s`` and ``cpu_s``
     cover the fixture and the gate together.
+
+    ``blank_model``: the gate runs on what the fixture built with no model
+    (``verdicts._no_model``) — set for an evaluator the mutation pass applies
+    to, whose check run is handed none, so neither control sees a channel the
+    check run lacks.
     """
     selftest_id = f"{spec.id}#selftest"
     tier = Tier(int(spec.tier))
@@ -2971,9 +3009,15 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
     # input (P2.3-D5, D-26): the known-good control must hand the same keys.
     from . import verdicts as _verdicts
     trace.handed_extra = _verdicts._extra_keys(bad_ctx)
+    bad_ctx = _verdicts._no_model(bad_ctx, blank_model)
 
     inner = run_gate(spec, fn, bad_ctx, trace=trace)
     elapsed, cpu = clock.spent()
+    # What the gate itself said, when it crashed or skipped itself: the line a
+    # qualification shows, never this function's prose below (review of P2.3).
+    said = (inner.error if inner.outcome == "error"
+            else inner.skip_reason if inner.outcome == "skipped" else "")
+    trace.gate_said = (str(said or "").strip().splitlines() or [""])[0] or None
     shared = {
         "measured": inner.measured, "limit": inner.limit, "units": inner.units,
         "evidence": list(inner.evidence or []), "duration_s": round(elapsed, 6),
@@ -3083,14 +3127,25 @@ MUTATION_RUNGS = (1.15, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0, 100.0, 1000.0)
 #: qualifies (measured: `Unaimed`, and V2c's planted gate).
 MUTATION_BISECT = 16
 
-#: Runs per walk, the influence probes and the bisection included. The widest
-#: aimed walk measured is 291 runs (`fdm.print_time_est`), the bracket's 107
-#: (`bed_fit`): 3.5x headroom for a project evaluator that reads more. Spent on
-#: the values that move the evaluator's value first (`_walk_order`), so a
-#: budget an evaluator's junk reads exhaust leaves the junk unwalked, not the
-#: judged value. *Rejected:* 512 (set for an unaimed walk, whose widest was
-#: 148); unbounded (a 600-value evaluator walks ~10^4 runs inside `check`); a
-#: clock (two machines, two outcomes for one control's inputs — D-29's lesson).
+#: Runs per walk, the influence probes, the bisection and the crash re-checks
+#: included — every call of the evaluator the walk makes counts, and
+#: `MutationPass.runs` is that count. The widest aimed walk measured is 291 runs
+#: (`fdm.print_time_est`), the bracket's 107 (`bed_fit`): 3.5x headroom for a
+#: project evaluator that reads more. Spent on the values that move the
+#: evaluator's value first (`_walk_order`), so a budget an evaluator's junk
+#: reads exhaust leaves the junk unwalked, not the judged value. The re-check
+#: that tells a crash that repeats from one that does not (`flaky`) runs ONCE
+#: per value that crashed — its first crash — and is counted here; with the
+#: budget spent before every crashed value is re-checked, the walk could not
+#: finish (`budget`), never a pass. What slipped through (review of P2.3): the
+#: re-check re-ran every crashed run outside the count, so an evaluator that
+#: crashed on every changed value of 40 recorded 720 runs and was called 1440
+#: times, and at the budget a walk could make 1024 counted runs and 1024 more.
+#: *Rejected:* 512 (set for an unaimed walk, whose widest was 148); unbounded
+#: (a 600-value evaluator walks ~10^4 runs inside `check`); a clock (two
+#: machines, two outcomes for one control's inputs — D-29's lesson); re-checking
+#: every crashed run (up to twice the budget, for a fact one re-run per value
+#: shows).
 MUTATION_RUNS_MAX = 1024
 
 #: The costliest declared tier the walk runs at: a tier-0 run is under ~2 s by
@@ -3110,7 +3165,19 @@ _LAND_TOLERANCE = 1e-9
 
 #: A read value within this of the reported one is the reported value straight
 #: through, and is walked first: bracket.deflection reads `deflection` and
-#: reports it. 0.5%: the bracket rounds its values to 3-4 places.
+#: reports it. 0.5%: the bracket reports its values rounded, and the widest gap
+#: measured between a value one of its gates reads and the value it reports is
+#: 0.27% (`bracket.bearing` reads 0.170455 and reports 0.17; `bending_stress`
+#: 0.27% too) — inside 0.5% by about 1.9x. It decides walk ORDER, and whether a
+#: budget left with that value unwalked is `budget`; never an outcome.
+#: *Rejected:* exact equality (three of the bracket's six — deflection,
+#: bending_stress, bearing — report a rounded copy of what they read, and would
+#: lose their place to reads sorted before them, the slip `_walk_order` exists
+#: for); a wider band such as 5% (nothing on the bracket sits between 0.27% and
+#: the next read, 85% away, so it buys nothing measured, and an unrelated read
+#: inside it would jump the queue and could end a walk as `budget` over a value
+#: that never moved the evaluator's). Review of P2.3: it landed with no
+#: rejected alternative, and a later window would have re-litigated it.
 _STRAIGHT_THROUGH = 0.005
 
 
@@ -3562,9 +3629,15 @@ def mutation_walk(spec: GateSpec, fn: Callable[[GateContext], Any], good_ctx: Ga
             else:
                 not_mutated.append((key, "never-lands"))
         flaky = ""
+        rechecked: set = set()
         for key, value, outcome, line in errors:
-            if outcome != "error":
+            if outcome != "error" or key in rechecked:
                 continue
+            rechecked.add(key)
+            if spent[0] >= MUTATION_RUNS_MAX:
+                boundary = "budget"           # a crash left un-rechecked: not finished
+                break
+            spent[0] += 1                     # counted: MUTATION_RUNS_MAX's provenance
             again = _mutated_run(spec, fn, good_ctx, known_good, key, value, out_dir, trace)
             if again.outcome != "error":
                 flaky = line or "a crash that did not repeat"
@@ -3634,6 +3707,10 @@ def load_project_gates(root: str, registry: Registry) -> list[str]:
       ``Registry`` per command is never handed back empty.
     * ``PACK_DIR`` is NOT set, so ``_fixture_root`` falls through to ``ctx.root``
       and ``selftest/bad_configs.py`` resolves beside the model, where it lives.
+      A module that sets it itself is still a project's: a ``PACK_DIR`` counts
+      only from a module whose file is under it (``verdicts._pack_dir_of``;
+      review of P2.3, ``br1`` — one line opted a project gate out of the
+      mutation pass).
     * ``KeyboardInterrupt`` passes through untouched, as it does for a pack: the
       CLI copy caught it with everything else and reported a Ctrl-C as the
       user's gate module failing to import.

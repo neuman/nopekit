@@ -450,11 +450,13 @@ class JUnitNeverGreenerThanTheExitCode(unittest.TestCase):
     def test_not_admitted_is_error_type(self):
         """`type="not-admitted"` is keyed on the spine's mark, `Verdict.unqualified`
         (P2.1, R-6): a verdict carrying only the text — a gate that worded its
-        own crash so (`g.text`) — is a crash."""
+        own crash so (`g.text`) — is a crash. Its message is the token in the
+        table's words, never `error`, R-2's fallback that carries the token
+        (review of P2.3; R-6: this read the fallback text back)."""
         reg = _registry({"g.na": ["C1"], "g.crash": ["C1"], "g.quoted": ["C1"],
                          "g.text": ["C1"]})
-        vs = [_v("g.na", "error", ["C1"], error="not admitted: PASSED its own known-bad",
-                 unqualified="PASSED its own known-bad"),
+        vs = [_v("g.na", "error", ["C1"], error="unqualified: known-bad:pass",
+                 unqualified="known-bad:pass"),
               _v("g.crash", "error", ["C1"]),
               _v("g.quoted", "error", ["C1"], error="ValueError: not admitted: x"),
               _v("g.text", "error", ["C1"], error="not admitted: worded by the gate")]
@@ -464,8 +466,7 @@ class JUnitNeverGreenerThanTheExitCode(unittest.TestCase):
         self.assertEqual([_result(cases[g]).get("type")
                           for g in ("g.na", "g.crash", "g.quoted", "g.text")],
                          ["not-admitted", "error", "error", "error"])
-        self.assertEqual(_result(cases["g.na"]).get("message"),
-                         "not admitted: PASSED its own known-bad")
+        self.assertEqual(_result(cases["g.na"]).get("message"), "unqualified: known-bad pass")
 
     def test_cached_testcase_carries_the_property(self):
         reg = _registry({"g.a": ["C1"], "g.b": ["C1"], "g.c": ["C2"]})

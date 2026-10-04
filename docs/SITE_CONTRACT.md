@@ -327,8 +327,10 @@ an agent can read the site's state without a browser.
   `pass`, `fail`, `skipped` or `errored`, from `Verdict.outcome` (P2.1: it read the
   flags, so a junk truthy `passed` showed `pass` beside `ok: false`) — or, from P2.3,
   `unqualified` for an evaluator not qualified at its version, beside a
-  `qualification: {token, reason}` (the judge's token, and `report.qualification_reason`'s
-  words): never `errored`, a crash's word for something that crashed nothing, and Gap's
+  `qualification: {token, reason, text}` (the judge's token, `report.qualification_reason`'s
+  words, and `text`, the row's sentence `unqualified: <reason>` the page shows — never
+  `error`, which carries the token as R-2's fallback): never `errored`, a crash's word for
+  something that crashed nothing, and Gap's
   tone on the page (`lib/format.js`'s `VERDICT_STATUS`). A gate never run reads so too
   (`not yet qualified at this version`), its row with no entry behind it. `unanchored` says out loud that a failure
   carries no locator, instead of leaving an overlay that looks broken.

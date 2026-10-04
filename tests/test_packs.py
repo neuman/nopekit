@@ -1608,7 +1608,7 @@ class DemonstrateAgrees(unittest.TestCase):
         """``return True``: passes its baseline, and its known-bad input too."""
         out = self._planted(lambda d: _plant(d, "gates/beam.py", _DEFLECTION_DEF,
                                              "    return True\n"))
-        self._assert_named(out, "beam.deflection", "control did not fire")
+        self._assert_named(out, "beam.deflection", "unqualified: known-bad pass")
 
     def test_a_gate_that_always_fails_is_named(self):
         """``return False``: its control fires, and proves nothing, because it
@@ -1624,8 +1624,7 @@ class DemonstrateAgrees(unittest.TestCase):
                 'if k != "deflection_limit_mm"}\n'
                 '    return dataclasses.replace(ctx, params=params)\n')
         out = self._planted(lambda d: _plant(d, "selftest/bad_beams.py", _SHALLOW_DEF, body))
-        self._assert_named(out, "beam.deflection",
-                           "control did not fire: skipped on its own known-bad input")
+        self._assert_named(out, "beam.deflection", "unqualified: known-bad skipped itself")
 
     def test_a_gate_that_skips_its_own_baseline_is_named(self):
         """The gate reads a key its pack's baseline never states, so it skips

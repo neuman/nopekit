@@ -1154,7 +1154,7 @@ if __name__ == "__main__":
 QUALIFICATION_NEVER = re.compile(
     r"(?i)(?<![\w-])(?:admitted|admission|undemonstrated|selftest passed|re-verif\w*"
     r"|negative control|known-bad input|mutants?|killed|survived|flip\w*|perturb\w*"
-    r"|fired|broken)(?![\w-])")
+    r"|fire|fires|fired|broken)(?![\w-])")
 
 #: Qualification's own words: none may reach a channel except through
 #: `HUMAN["qualification"]`.
@@ -1217,10 +1217,51 @@ def _never_bracket() -> str:
     return root
 
 
-def _qualification_channels(root: str) -> dict[str, list[str]]:
-    """Every channel that shows a qualification, captured in process: `check`,
-    `status`, `gate show`, `gate selftest` (project mode), `report`, `doctor`,
-    and the help of the two commands that run controls."""
+#: A planted logger in a copy of beam-analytic outside the bundled packs: its
+#: deflection gate passes whatever it is handed. Pack mode's channels.
+_LOGGER_PLANT = ("def deflection(ctx: GateContext) -> Verdict:\n",
+                 "    return Verdict(gate=\"beam.deflection\", passed=True)\n")
+
+
+def _logger_pack() -> str:
+    """The planted copy, under a pack name of its own (one process loads a
+    pack name from one place)."""
+    base = _tmp("atompipe-vocab-pack-")
+    name = "beamvocab"
+    pack_dir = os.path.join(base, name)
+    shutil.copytree(os.path.join(_projects.PACKS, "beam-analytic"), pack_dir,
+                    ignore=shutil.ignore_patterns("__pycache__", ".selftest-out"))
+    with open(os.path.join(pack_dir, "pack.json"), encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    manifest["name"] = name
+    with open(os.path.join(pack_dir, "pack.json"), "w", encoding="utf-8") as fh:
+        json.dump(manifest, fh, indent=2)
+    path = os.path.join(pack_dir, "gates", "beam.py")
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    anchor, body = _LOGGER_PLANT
+    assert text.count(anchor) == 1, "the beam pack moved: plant the logger elsewhere"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text.replace(anchor, anchor + body))
+    return pack_dir
+
+
+def _junit_file_messages(path: str) -> list[str]:
+    """Every outcome message a JUnit file carries, gate and claim suites alike:
+    a human channel (GLOSSARY §7)."""
+    tree = ET.parse(path)
+    return [el.get("message", "") for el in tree.iter()
+            if el.tag in ("failure", "error", "skipped") and el.get("message")]
+
+
+def _qualification_channels(root: str, pack: str = "") -> dict[str, list[str]]:
+    """Every channel that shows a qualification, captured in process: `check`
+    and its JUnit messages, `status`, `gate show`, `gate selftest` (project mode,
+    and pack mode with `pack validate` over ``pack``), `report`, `doctor`, and
+    the help of the two commands that run controls. What slipped through
+    (review of P2.3): pack mode and the JUnit message were scanned by nothing,
+    so `control did not fire … PASSED its own known-bad fixture` and the
+    token `unqualified: qualification:not-yet|0` reached them."""
     out: dict[str, list[str]] = {}
     for key, argv in (("check", ["check"]), ("status", ["status"]),
                       ("gate.show", ["gate", "show", "bracket.never"]),
@@ -1228,6 +1269,12 @@ def _qualification_channels(root: str) -> dict[str, list[str]]:
                       ("gate.selftest", ["gate", "selftest"]), ("report", ["report"]),
                       ("doctor", ["doctor"])):
         out[key] = _captured([*argv, "-C", root]).splitlines()
+    junit = os.path.join(_tmp("atompipe-vocab-junit-"), "check.xml")
+    _captured(["check", "--junit", junit, "-C", root])
+    out["check.junit"] = _junit_file_messages(junit)
+    if pack:
+        out["gate.selftest.pack"] = _captured(["gate", "selftest", "--pack", pack]).splitlines()
+        out["pack.validate"] = _captured(["pack", "validate", pack]).splitlines()
     for key, argv in (("help.selftest", ["gate", "selftest", "--help"]),
                       ("help.check", ["check", "--help"])):
         buf = io.StringIO()
@@ -1252,9 +1299,24 @@ class QualificationWordsComeFromOneTable(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.root = _never_bracket()
+        cls.pack = _logger_pack()
         with mock.patch.object(report_mod, "HUMAN", qualification_sentinel()):
-            cls.patched = _qualification_channels(cls.root)
-        cls.real = _qualification_channels(cls.root)
+            cls.patched = _qualification_channels(cls.root, cls.pack)
+        cls.real = _qualification_channels(cls.root, cls.pack)
+
+    def test_pack_mode_and_junit_are_scanned(self):
+        """The floor for the channels review of P2.3 found unscanned: each says
+        something, and says the planted logger is unqualified."""
+        for channel in ("gate.selftest.pack", "pack.validate", "check.junit"):
+            with self.subTest(channel=channel):
+                self.assertTrue(self.real[channel], f"{channel} captured nothing")
+        self.assertTrue(any("beam.deflection" in ln and "unqualified" in ln
+                            for ln in self.real["pack.validate"]), self.real["pack.validate"])
+        self.assertTrue(any("bracket.never" in ln or "unqualified" in ln
+                            for ln in self.real["check.junit"]), self.real["check.junit"])
+        self.assertIsNotNone(QUALIFICATION_NEVER.search(
+            "problem: beam.deflection: control did not fire: it is a logger"),
+            "the pack-mode line review of P2.3 found is a Never-say")
 
     def test_every_qualification_word_comes_from_the_table(self):
         problems = []

@@ -134,6 +134,16 @@ def _write(project: str, rel: str, text: str) -> str:
     return path
 
 
+def _edit(project: str, rel: str, old: str, new: str) -> None:
+    """Replace ``old`` (there exactly once) with ``new`` in one project file."""
+    path = os.path.join(project, *rel.split("/"))
+    with open(path, encoding="utf-8") as fh:
+        text = fh.read()
+    assert text.count(old) == 1, (rel, old)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text.replace(old, new))
+
+
 def _entry(project: str, gate_id: str) -> verdicts.Entry:
     found = verdicts.read_entries(project, gate_id)
     if len(found) != 1:
@@ -673,9 +683,71 @@ def never(ctx):
         project = self.copy()
         os.remove(os.path.join(project, "selftest", "known_good.py"))
         _code, rows = _doctor(project)
-        self.assertRow(rows, "known-good", "FAIL", "no selftest/known_good.py",
-                       "known-good not run", "context(ctx)")
+        self.assertRow(rows, "known-good", "FAIL", "6 project evaluator(s) with no known-good "
+                       "control", "bracket.deflection", "known-good not run", "context(ctx)")
         self.assertClean("known-good")
+
+    def test_known_good_counts_a_declared_good_fixture(self):
+        """Review of P2.3, ``p3``: a project whose every gate declares ``good=``
+        and has no ``selftest/known_good.py`` — `check` ready, every claim
+        Checked — failed doctor, exit 1, "every project evaluator reads
+        known-good not run". D4 resolves ``good=`` first; so does the row."""
+        project = self.copy()
+        selftest = os.path.join(project, "selftest")
+        os.rename(os.path.join(selftest, "known_good.py"), os.path.join(selftest, "good.py"))
+        _edit(project, "selftest/bad_configs.py", '"known_good.py"))', '"good.py"))')
+        gates_py = os.path.join(project, "gates", "structural.py")
+        with open(gates_py, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count("negative_control=NegativeControl("), 6)
+        with open(gates_py, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("negative_control=NegativeControl(",
+                                  'negative_control=NegativeControl(good="selftest/good.py:'
+                                  'context", '))
+        _run(project, "check")
+        code, rows = _doctor(project)
+        self.assertRow(rows, "known-good", "ok", "every project evaluator has a known-good "
+                       "control")
+        self.assertEqual(rows["qualification"]["status"], "ok", rows["qualification"])
+        with open(gates_py, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("negative_control=NegativeControl(",
+                                  'negative_control=NegativeControl(good="selftest/good.py:'
+                                  'context", ', 5))
+        _code, rows = _doctor(project)
+        self.assertRow(rows, "known-good", "FAIL", "1 project evaluator(s) with no known-good "
+                       "control")
+
+    def test_qualification_warns_when_every_evaluator_is_not_yet_qualified_here(self):
+        """Review of P2.3, ``b3``: after a code edit every evaluator was
+        undemonstrated — `gate show` "not yet qualified at this version" — while
+        doctor said "every evaluator qualified at its version"."""
+        project = self.copy()
+        path = os.path.join(project, "gates", "structural.py")
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("\n# an edit\n")
+        code, rows = _doctor(project)
+        self.assertRow(rows, "qualification", "warn", "not yet qualified at their version",
+                       "bracket.deflection", "the next check run qualifies it",
+                       absent=("every evaluator qualified", "unqualified"))
+        self.assertEqual(code, 0, "a warning, never a problem: the next check run settles it")
+
+    def test_a_pruned_dependent_is_promised_its_root_never_the_next_check(self):
+        """Review of P2.3: a dependent its prerequisite prunes is never qualified
+        by the next check run, which prunes it again — `gate show` and doctor
+        promised it was."""
+        project = self.copy()
+        for gid in ("bracket.deflection", "bracket.bending_stress"):
+            shutil.rmtree(os.path.join(project, ".atompipe", "verdicts", gid))
+        _edit(project, "model/bracket.py", "thickness: float = 7.0", "thickness: float = 14.0")
+        _run(project, "check")
+        _run(project, "check")
+        _code, rows = _doctor(project)
+        once = "it qualifies once bracket.model_validity is established"
+        self.assertRow(rows, "qualification", "warn", once,
+                       absent=("the next check run qualifies it",))
+        shown = _run(project, "gate", "show", "bracket.deflection").stdout
+        self.assertIn(once, shown)
+        self.assertNotIn("the next check run qualifies it", shown)
 
     def test_orphan_entries_warn_and_do_not_fail_integrity(self):
         project = self.copy()

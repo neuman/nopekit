@@ -601,6 +601,12 @@ class GateTrace:
     #: one on this trace: set by ``gates.selftest`` and the known-good half, read
     #: by channel parity (P2.3-D5). Not a read: what the fixture handed.
     handed_extra: Any = None
+    #: The first line of what the gate itself said when it crashed or skipped
+    #: itself on what a control built (``gates.selftest``), or ``None``: the
+    #: known-bad half's line names the crash, never the selftest's prose about
+    #: it (review of P2.3: the reason read `known-bad errored: <gate> CRASHED on
+    #: … instead of failing`, *crashed* an outcome Never-say). Not a read.
+    gate_said: Any = None
     _read_set: set = field(default_factory=set, init=False, repr=False)
     _source_set: set = field(default_factory=set, init=False, repr=False)
     _existed: dict = field(default_factory=dict, init=False, repr=False)
@@ -3114,6 +3120,16 @@ def anchors_for(root: str, registry: Any, *, out_dir: str) -> Anchors:
                    controls_out=os.path.join(base, *CONTROL_OUT_DIR.split("/")) if base else "")
 
 
+def _under(path: Any, base: Any) -> bool:
+    """Is ``path`` ``base`` itself or below it, both resolved (``realpath``)?
+    ``False`` for an empty or non-string either side."""
+    if not isinstance(path, str) or not path or not isinstance(base, str) or not base:
+        return False
+    here = os.path.realpath(path)
+    top = os.path.realpath(base)
+    return here == top or here.startswith(top.rstrip(os.sep) + os.sep)
+
+
 def _pack_dir_of(fn: Any) -> str:
     """``PACK_DIR`` of the module that defines ``fn`` (``packs.load_gates`` sets
     it before the module runs), else of a module that registered it
@@ -3122,12 +3138,24 @@ def _pack_dir_of(fn: Any) -> str:
     pack gate a factory in the pack's helper made — the helper is imported,
     not loaded by the pack, and carries no ``PACK_DIR`` — was owned by the
     PROJECT, so its control's static part walked the project's ``selftest/``
-    and an edit of the pack's fixture moved nothing."""
+    and an edit of the pack's fixture moved nothing.
+
+    A module's ``PACK_DIR`` counts only when the module's own file lies under
+    it: the attribute is a global the module may assign itself, and where the
+    code lives is not. What slipped through (review of P2.3, ``br1``): a
+    project gate module that said ``PACK_DIR = <a bundled pack's directory>``
+    on one line was read as that pack's gate everywhere — its controls on the
+    live host, its owner's ``selftest/`` the pack's, and the mutation pass
+    skipped as for a bundled gate — so a gate keyed to its own control read
+    Checked at a live deflection 40% past its limit. Ignored, the module is
+    what its file says it is: a project's (``_mutation_applies`` asks the
+    function's own code file as well)."""
     target = getattr(fn, "__func__", fn)
     home = sys.modules.get(getattr(target, "__module__", None) or "")
     for module in (home, *modelio.registered_by(fn)):
         pack_dir = vars(module).get("PACK_DIR") if module is not None else None
-        if isinstance(pack_dir, str) and pack_dir:
+        if isinstance(pack_dir, str) and pack_dir \
+                and _under(vars(module).get("__file__"), pack_dir):
             return os.path.abspath(pack_dir)
     return ""
 
@@ -4522,14 +4550,30 @@ def _mutation_applies(fn: Any, root: str) -> bool:
     *Rejected:* project ``gates/`` only (a pack born under ``.atompipe/packs``,
     EXTENSION_PROTOCOL's path, escapes by one directory); every evaluator (§1.5
     places the pass on the evaluator the generator wrote; ~12 s per upgrade for
-    54 lines nobody reads)."""
+    54 lines nobody reads).
+
+    Bundled only when the CODE is: the pack directory ``_pack_dir_of`` reads
+    (whose module's own file is under it), the file ``fn`` was compiled from
+    (``__code__.co_filename``, which no global reassigns), and the file of
+    every module that registered it — all under ``BUNDLED_PACKS``. What
+    slipped through (review of P2.3, ``br1``): the decision read the
+    ``PACK_DIR`` global alone, so one line in a project gate module —
+    ``PACK_DIR = os.path.join(BUNDLED_PACKS, "beam-analytic")`` — opted it out
+    of the walk, and a gate keyed to its own control read Checked; deleting
+    that line alone made it `mutation 0/1 fail → unqualified`. The stated
+    limit stands beside D-32's: a module that rewrites its own ``__file__``
+    and builds its function from code compiled under a bundled path is a
+    forger the location rule cannot see."""
     pack_dir = _pack_dir_of(fn)
     if not pack_dir:
         return True
     from . import packs as _packs                  # packs imports gates, which imports this
-    bundled = os.path.realpath(_packs.BUNDLED_PACKS)
-    here = os.path.realpath(pack_dir)
-    return not (here == bundled or here.startswith(bundled.rstrip(os.sep) + os.sep))
+    bundled = _packs.BUNDLED_PACKS
+    if not _under(pack_dir, bundled):
+        return True
+    homes = [_defining_file(fn)]
+    homes += [vars(module).get("__file__") for module in modelio.registered_by(fn)]
+    return not all(_under(home, bundled) for home in homes)
 
 
 def control_static(spec: Any, fn: Any, root: str, *, digests: FileDigests | None = None,
@@ -6179,7 +6223,11 @@ class QualificationFacts:
     not hold); ``boundary`` — why nothing, or not everything, was walked;
     ``walk`` — ``could-not-run|<why>`` or ``errored|<line>`` (a crash a re-run
     did not repeat); ``blocker`` — a control-level fact over the entries:
-    ``two-outcomes|<names>``, ``tier|<names>``, ``differs|<names>``.
+    ``two-outcomes|<names>``, ``tier|<names>``, ``differs|<names>``;
+    ``ledger`` — the ledger keys the counted verdict read at a value no
+    qualification run read (``_ledger_unseen``), ``()`` when it read none or
+    the walk does not apply: a fact of the verdict beside the qualification,
+    judged in the channels' place.
 
     Named for what it holds, not ``Qualification``: GLOSSARY §8's rename pass
     gives that name to ``Admission`` (critique of the P2.3 design)."""
@@ -6195,6 +6243,7 @@ class QualificationFacts:
     walk: str = ""
     blocker: str = ""
     expect: str = "fail"
+    ledger: tuple = ()
 
     def to_dict(self) -> dict:
         return {"known_bad": self.known_bad, "known_good": self.known_good,
@@ -6203,7 +6252,7 @@ class QualificationFacts:
                 "check_channel": [list(k) for k in self.check_channel],
                 "mutation": None if self.mutation is None else list(self.mutation),
                 "boundary": self.boundary, "walk": self.walk, "blocker": self.blocker,
-                "expect": self.expect}
+                "expect": self.expect, "ledger": list(self.ledger)}
 
     @classmethod
     def from_dict(cls, data: Any) -> "QualificationFacts | None":
@@ -6220,7 +6269,8 @@ class QualificationFacts:
                        boundary=str(data.get("boundary") or ""),
                        walk=str(data.get("walk") or ""),
                        blocker=str(data.get("blocker") or ""),
-                       expect=str(data.get("expect") or "fail"))
+                       expect=str(data.get("expect") or "fail"),
+                       ledger=tuple(str(k) for k in data.get("ledger") or ()))
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -6250,7 +6300,8 @@ def _qualification(facts: QualificationFacts) -> str:
     3. The known-good control: crashed, skipped itself, read the candidate it
        was handed, failed, or does not exist (known-bad shown).
     4. The channels: the two controls hand the gate different ``ctx.extra``
-       keys (D-26), or — where the walk applies — keys a check run never hands.
+       keys (D-26), or — where the walk applies — keys a check run never hands,
+       or a counted verdict read ledger values no qualification run read.
     5. The walk: it could not run, or crashed and did not repeat it; a
        conclusive mutation passed; the budget ran out with a value that moves
        the evaluator's value unwalked.
@@ -6276,6 +6327,8 @@ def _qualification(facts: QualificationFacts) -> str:
     if facts.check_channel:
         return (f"channels:check|{_keys(facts.check_channel[0])}/"
                 f"{_keys(facts.check_channel[1])}")
+    if facts.ledger:
+        return f"channels:ledger|{_keys(facts.ledger)}"
     if facts.walk:
         return f"mutation:{facts.walk}"
     if facts.mutation is not None:
@@ -6372,6 +6425,58 @@ def _incomplete(entry: Any) -> bool:
     return not isinstance(entry.good, Mapping)
 
 
+def _ledger_unseen(reads: Any, control: Any) -> tuple:
+    """The ledger keys a verdict read (``reads``, an entry's block or a
+    ``Reads``) at a digest its qualification's known-good half — every walk
+    run folded in — did not read them at: ``()`` when it read none, every one
+    was seen, or the walk does not apply to the evaluator (``nc.mutation`` in
+    the entry's static part).
+
+    What slipped through channel parity over ``ctx.extra`` alone (review of
+    P2.3, ``br7``): a project evaluator's controls and walk runs are handed
+    the known-good design's ledger — empty unless ``known_good.context``
+    builds one — and its check run the live one. ``waived = any(ctx.ledger.
+    claims)``, then ``passed = waived or d <= 0.5``, passed both controls and
+    every mutation honestly on the empty ledger and every live design on the
+    live one: Checked at 0.700 mm against 0.5. The read is traced (a
+    ``LedgerView`` records each claim and list it hands out), so the check
+    run's ledger values are compared with what the walk saw. *Rejected:* the
+    live ledger on the controls (a known-good design that depends on the
+    candidate is S-07 in the good direction, ``_KNOWN_GOOD_BLANK``); comparing
+    which ledger keys were read, not their values (the waiver reads ``claims``
+    in both runs)."""
+    if control is None:
+        return ()
+    parts = control.static_parts if isinstance(control.static_parts, Mapping) else {}
+    nc = parts.get("nc") if isinstance(parts.get("nc"), Mapping) else {}
+    if not nc.get("mutation"):
+        return ()
+    block = reads.to_dict(control=False) if isinstance(reads, Reads) else reads
+    live = (block or {}).get("ledger") if isinstance(block, Mapping) else None
+    if not isinstance(live, Mapping) or not live:
+        return ()
+    seen = _good_reads(control).get("ledger") or {}
+    return tuple(sorted(str(k) for k, digest in live.items() if seen.get(k) != digest))
+
+
+def _counted_with(found: "Admission", reads: Any) -> "Admission":
+    """``found`` — an admission a verdict counts under — beside that verdict's
+    ``reads``: unchanged unless the verdict read ledger values no qualification
+    run read (``_ledger_unseen``), then not admitted, the judge's token naming
+    them. Asked wherever an admitted or pending admission meets the verdict it
+    counts — ``resolve``'s Fresh and stale rungs, the sweep's served entry, its
+    run, and ``_outranked`` — so ``check`` and every reader read one answer."""
+    if found.state not in ("admitted", "pending") or found.entry is None:
+        return found
+    unseen = _ledger_unseen(reads, found.entry)
+    if not unseen:
+        return found
+    facts = dataclasses.replace(found.qualification or _entry_facts(found.entry),
+                                ledger=unseen)
+    return Admission("not-admitted", found.entry, _qualification(facts), qualification=facts,
+                     executed=found.executed, reverified=found.reverified)
+
+
 @dataclass(frozen=True)
 class Admission:
     """Whether a gate's control is demonstrated at its current version.
@@ -6408,7 +6513,10 @@ class Admission:
 
 #: The token kinds a remembered control failure carries: a half that crashed,
 #: skipped itself or was unusable, a walk that could not run or crashed and did
-#: not repeat it. Remembered, never cached (P2.3-D12).
+#: not repeat it. Remembered, never cached (P2.3-D12). (A qualification whose
+#: first failing fact is another — a known-bad pass beside a known-good half
+#: that did not measure — is remembered too, its facts carrying the token:
+#: ``_run_control`` holds whatever it cannot file.)
 _HELD_KINDS = ("known-bad:errored", "known-bad:skipped", "known-good:errored",
                "known-good:skipped", "known-good:live", "mutation:could-not-run",
                "mutation:errored")
@@ -6440,26 +6548,57 @@ def _control_failure(record: Mapping[str, Any]) -> str:
     return _held_token(record)[0]
 
 
+def _good_reads(control: ControlEntry) -> Mapping[str, Any]:
+    """The known-good half's recorded reads — every walk run's folded in — or
+    ``{}`` when the entry has no good half."""
+    good = control.good if isinstance(control.good, Mapping) else None
+    reads = (good or {}).get("reads")
+    return reads if isinstance(reads, Mapping) else {}
+
+
+def _good_on_live(control: ControlEntry) -> bool:
+    """Was the known-good half handed the LIVE design? Only a declared ``good=``
+    fixture on a live host (``_good_context``): a pack's gate in a project, or
+    a project's with no known-good design. A pack's baseline and a project's
+    ``known_good.py`` are never the live design."""
+    parts = control.static_parts if isinstance(control.static_parts, Mapping) else {}
+    nc = parts.get("nc") if isinstance(parts.get("nc"), Mapping) else {}
+    return control.host == "live" and bool(nc.get("good"))
+
+
 def _control_moved(control: ControlEntry, now: _Now) -> str:
     """Why ``control``'s recorded inputs are not current, or ``""`` when they
-    are: its files and listings by digest, and — when the fixture got the LIVE
-    host — the host params it read, against the live projection. An opaque
-    control is never current. A live host's LEDGER is ``_ledger_moved``'s: a
-    difference there is settled by re-running the fixture, not by this."""
-    reads = control.reads or {}
-    opaque = list(reads.get("opaque") or ())
-    if opaque:
-        return "opaque control inputs: " + ", ".join(opaque)
-    for spelled, digest in (reads.get("files") or {}).items():
-        where = now.locate(spelled)
-        if where is None or _path_digest(where, now.digests) != digest:
-            return f"{spelled} changed"
-    for spelled, digest in (reads.get("dirs") or {}).items():
-        where = now.locate(spelled)
-        if where is None or _dir_digest(where) != digest:
-            return f"listing of {spelled} changed"
+    are: BOTH halves' files and listings by digest — the known-good half's
+    with every walk run's folded in — and, when the fixture got the LIVE host,
+    the host params it read, against the live projection. An opaque control
+    is never current. A live host's LEDGER is ``_ledger_moved``'s: a
+    difference there is settled by re-running the fixture, not by this.
+
+    What slipped through comparing the known-bad half alone (review of P2.3,
+    ``p9``/``p4``): rho_control keyed the known-good half's reads (D11) and
+    nothing here read them back, so a gate that refuses an obviously-bad
+    input before it opens ``data/cal.json`` kept its qualification after the
+    file moved its slack 1.0 -> 1.3 — `check` re-ran the live verdict, which
+    passed, and served the old qualification; only ``--force`` said ``mutation
+    0/2 fail → unqualified``. A known-good fixture's own data file, edited so
+    the known-good design failed, was served the same way."""
+    halves = (("", control.reads or {}), ("known-good ", _good_reads(control)))
+    for _half, reads in halves:
+        opaque = list(reads.get("opaque") or ())
+        if opaque:
+            return "opaque control inputs: " + ", ".join(opaque)
+    for half, reads in halves:
+        for spelled, digest in (reads.get("files") or {}).items():
+            where = now.locate(spelled)
+            if where is None or _path_digest(where, now.digests) != digest:
+                return f"{half}{spelled} changed".lstrip()
+        for spelled, digest in (reads.get("dirs") or {}).items():
+            where = now.locate(spelled)
+            if where is None or _dir_digest(where) != digest:
+                return f"{half}listing of {spelled} changed"
     if control.host == "live":
-        for row in reads.get("host") or ():
+        # The known-bad half's host reads (the good half's are never keyed).
+        for row in (control.reads or {}).get("host") or ():
             if now.flat is None:
                 return f"{_NO_MODEL}, and the control read the live host"
             digest, _value = now.param(tuple(row[0]), row[1])
@@ -6501,37 +6640,54 @@ def _ledger_moved(control: ControlEntry, now: _Now, verified: Mapping[str, Any])
     catch only an import-time read, which params share and which is not a
     ledger question.
     """
-    if control.host != "live":
-        return ""
-    recorded = (control.reads or {}).get("ledger") or {}
-    if not recorded:
+    halves = _live_ledger_reads(control)
+    if not halves:
         return ""
     live: dict[str, str] = {}
-    for key in recorded:
-        digest = now.ledger_digest(key)
-        if digest is None:
-            return f"cannot re-read ledger {key} here, and the control read the live host"
-        live[key] = digest
-    if live == dict(recorded):
+    for recorded in halves:
+        for key in recorded:
+            digest = now.ledger_digest(key)
+            if digest is None:
+                return f"cannot re-read ledger {key} here, and the control read the live host"
+            live[key] = digest
+    if all(all(live[key] == digest for key, digest in recorded.items())
+           for recorded in halves):
         return ""
     snapshot = verified.get(control.name) if isinstance(verified, Mapping) else None
     if isinstance(snapshot, Mapping) and snapshot.get("ledger") == live \
             and not _snapshot_moved(snapshot, now):
         return ""
-    moved = sorted(key for key in recorded if live[key] != recorded[key])
+    moved = sorted({key for recorded in halves for key in recorded
+                    if live[key] != recorded[key]})
     more = f" (+{len(moved) - 1} more)" if len(moved) > 1 else ""
     return f"ledger {moved[0]} changed{more}"
+
+
+def _live_ledger_reads(control: ControlEntry) -> list[dict]:
+    """The recorded ledger reads of each half that was handed the LIVE ledger:
+    the known-bad half's when its fixture got the live host, and the known-good
+    half's when its declared ``good=`` fixture did too (``_good_on_live``) —
+    empty halves left out. What slipped through reading the known-bad half
+    alone (review of P2.3): the good half's ledger reads were keyed and never
+    compared, the D10 gap ``_control_moved`` closes for its files."""
+    if control.host != "live":
+        return []
+    halves = [dict((control.reads or {}).get("ledger") or {})]
+    if _good_on_live(control):
+        halves.append(dict(_good_reads(control).get("ledger") or {}))
+    return [half for half in halves if half]
 
 
 def _live_ledger(control: ControlEntry, now: _Now) -> dict[str, str] | None:
     """What ``controls.json`` remembers beside a LIVE-host control that read
     the ledger: each key's digest in the live ledger it was just demonstrated
-    or re-verified under (``_ledger_moved`` reads it back). ``None`` for any
-    other control, or when a key cannot be re-read — then nothing vouches."""
-    recorded = (control.reads or {}).get("ledger") or {}
-    if control.host != "live" or not recorded:
+    or re-verified under (``_ledger_moved`` reads it back), over both halves'
+    keys (``_live_ledger_reads``). ``None`` for any other control, or when a
+    key cannot be re-read — then nothing vouches."""
+    keys = sorted({key for half in _live_ledger_reads(control) for key in half})
+    if not keys:
         return None
-    live = {key: now.ledger_digest(key) for key in sorted(recorded)}
+    live = {key: now.ledger_digest(key) for key in keys}
     return None if any(v is None for v in live.values()) else live
 
 
@@ -6580,11 +6736,34 @@ def _hint_holds(control: ControlEntry, now: _Now, verified: Mapping[str, Any]) -
     return snapshot is not None and not _snapshot_moved(snapshot, now)
 
 
+def _entry_tier(control: ControlEntry) -> int | None:
+    """The tier whose path a qualification shows: the one its known-bad half
+    read through ``ctx.tier``, else the one its known-good half (and so every
+    walk run) read, else ``None`` — no half looked, and every tier's path is
+    the same path. Both halves of one qualification run at one tier, so they
+    never name two. What slipped through reading the known-bad half alone
+    (review of P2.3, ``p8``/``p6``): a gate that fails an obviously-bad input
+    before it reads ``ctx.tier`` recorded no tier on that half, so a
+    qualification shown on the tier-0 path (slack 1.0) was served at ``check
+    --tier 1``, whose path (slack 1.3) passed every mutation — ``ready`` until
+    ``--force`` said ``mutation 0/2 fail → unqualified``."""
+    tier = _read_tier(control.reads)
+    return tier if tier is not None else _read_tier(_good_reads(control))
+
+
+def _run_tier(trace: Any, good: Any) -> int | None:
+    """``_entry_tier`` for a qualification still in memory: the known-bad
+    trace's tier, else the known-good half's (``_GoodHalf.trace``)."""
+    tier = _trace_tier(trace)
+    return tier if tier is not None else _trace_tier(getattr(good, "trace", None))
+
+
 def _at_tier(controls: Iterable[ControlEntry], at: int | None) -> bool:
     """Is some control in ``controls`` a demonstration of the path tier ``at``
-    picks — one run at ``at``, or one whose run never read ``ctx.tier`` (then
-    every tier's path is the same path)? Always, when ``at`` is ``None``."""
-    return at is None or any(_read_tier(c.reads) in (None, at) for c in controls)
+    picks — one run at ``at``, or one whose run never read ``ctx.tier`` in
+    either half (then every tier's path is the same path; ``_entry_tier``)?
+    Always, when ``at`` is ``None``."""
+    return at is None or any(_entry_tier(c) in (None, at) for c in controls)
 
 
 def _disagree(pool: list[ControlEntry]) -> str:
@@ -6608,7 +6787,7 @@ def _disagree(pool: list[ControlEntry]) -> str:
     tokens = {_qualification(_entry_facts(c)) for c in pool}
     if len(tokens) <= 1:
         return ""
-    if len({_read_tier(c.reads) for c in pool}) > 1:
+    if len({_entry_tier(c) for c in pool}) > 1:
         return f"tier|{names}"
     return f"two-outcomes|{names}"
 
@@ -7003,7 +7182,8 @@ def _resolve_gate(here: _Now, spec: Any, fn: Any, state: Any, *, held: Mapping[s
     if isinstance(state, Fresh):
         verdict = _as_spec(entry.to_verdict(), spec)
         at = _read_tier(entry.reads)
-        admission = _admission(here, spec, fn, held, notes, verified, at=at)
+        admission = _counted_with(_admission(here, spec, fn, held, notes, verified, at=at),
+                                  entry.reads)
         when = when_of(entry)
         if admission.state == "not-admitted":
             return (_unqualified(spec, admission.reason, rho=entry.rho),
@@ -7026,8 +7206,8 @@ def _resolve_gate(here: _Now, spec: Any, fn: Any, state: Any, *, held: Mapping[s
         if isinstance(state, Stale) and state.conflict and TWO_OUTCOMES_IS_ERROR:
             return (_synthesized(spec, error=state.reasons[0], rho=entry.rho),
                     Row(gid, state.state, entry=entry, when=when, notes=row_notes))
-        admission = _admission(here, spec, fn, held, notes, verified,
-                               at=_read_tier(entry.reads))
+        admission = _counted_with(_admission(here, spec, fn, held, notes, verified,
+                                             at=_read_tier(entry.reads)), entry.reads)
         if admission.state == "not-admitted":
             return (_unqualified(spec, admission.reason, rho=entry.rho),
                     Row(gid, state.state, entry=entry, admission=admission, when=when,
@@ -7486,6 +7666,29 @@ def _known_good_module(root: str) -> Any:
 _KNOWN_GOOD_BLANK = ("params", "ledger", "extra", "model")
 
 
+def _no_model(ctx: Any, walked: bool) -> Any:
+    """``ctx`` as an evaluator the mutation pass applies to is handed it on
+    EVERY run — its live run in ``check``, both controls and so every walk
+    run: with no model. No known-good design has a model object to hand (the
+    known-good context is built from values, ``_KNOWN_GOOD_BLANK``), so no
+    qualification run of such an evaluator ever saw one; a model only the
+    check run had would be a path no control or mutation exercised.
+
+    What slipped through (review of P2.3, ``br6``): ``if ctx.model is not
+    None: passed = True`` — invisible to rho, since ``ModelProxy`` records a
+    use of the model, never its absence — passed both controls and every
+    mutation honestly on ``model=None`` and read Checked at a live deflection
+    40% past its limit. *Rejected:* detecting it (an identity test cannot be
+    traced); handing the controls a stand-in model (whatever it is, the gate
+    can tell it from the candidate's by using it, and a use on a control is
+    already opaque, so such an evaluator could never qualify anyway — this
+    takes away nothing a qualified evaluator had). A bundled pack's gate keeps
+    the model: its qualification is not the walk's, and none reads it."""
+    if not walked or getattr(ctx, "model", None) is None:
+        return ctx
+    return dataclasses.replace(ctx, model=None)
+
+
 def _known_good(root: str, ctx: Any, trace: GateTrace | None = None) -> tuple[Any, Any] | None:
     """``(the known-good context, the module's code closure)``, or ``None``.
 
@@ -7573,6 +7776,7 @@ def _control_host(root: str, spec: Any, fn: Any, host_ctx: Any,
     if (trace is not None and "tier" in names and type(tier) is not TierRead
             and isinstance(tier, int) and not isinstance(tier, bool)):
         host_ctx = dataclasses.replace(host_ctx, tier=TierRead(tier, trace))
+    host_ctx = _no_model(host_ctx, _mutation_applies(fn, root))
     if _pack_dir_of(fn):
         return host_ctx, "live", None
     found = _known_good(root, host_ctx, trace)
@@ -8118,7 +8322,7 @@ def _good_context(root: str, spec: Any, fn: Any, host_ctx: Any, trace: GateTrace
     direction: ``return ctx`` passes whatever the live design is, until it does
     not."""
     from . import gates as _gates                  # gates imports this module
-    prepared = _prepared_host(host_ctx, trace)
+    prepared = _no_model(_prepared_host(host_ctx, trace), _mutation_applies(fn, root))
     nc = spec.negative_control
     ref = (getattr(nc, "good", "") or "").strip()
     pack_dir = _pack_dir_of(fn)
@@ -8178,7 +8382,10 @@ def _good_half(s: _Session, spec: Any, fn: Any, host_ctx: Any) -> _GoodHalf:
         return _GoodHalf("errored", line=_first(exc), trace=trace, closure=trace.fixture_code)
     if built is None:
         return _GoodHalf("not-run", trace=trace)
-    ctx = dataclasses.replace(built, out_dir=out_dir)
+    # No model, whatever the builder put there (`_no_model`): the walk runs on
+    # this context, and the check run is handed none either.
+    ctx = _no_model(dataclasses.replace(built, out_dir=out_dir),
+                    _mutation_applies(fn, s.root))
     verdict = _gates.run_gate(spec, fn, ctx, trace=trace)
     half = dict(trace=trace, closure=trace.fixture_code, verdict=verdict, ctx=ctx,
                 extra=tuple(trace.handed_extra or ()))
@@ -8191,6 +8398,22 @@ def _good_half(s: _Session, spec: Any, fn: Any, host_ctx: Any) -> _GoodHalf:
     if label == "live" and trace.host_reads:
         return _GoodHalf("live", **half)
     return _GoodHalf(verdict.outcome, **half)
+
+
+def _bad_line(trace: Any, held: Verdict | None) -> str:
+    """The known-bad half's line when it proved nothing: what the gate itself
+    said on the control (``GateTrace.gate_said``: its crash's or self-skip's
+    first line), else — the gate never ran: the fixture was unusable — the
+    control's own error and the first line of why. ``""`` for a measurement."""
+    if held is None:
+        return ""
+    said = getattr(trace, "gate_said", None)
+    if said:
+        return str(said)
+    error = _first(held.error).removeprefix("control error: ").removeprefix(
+        "control self-skip: ")
+    why = _first(held.detail) if held.outcome == "error" else ""
+    return f"{error} — {why}" if why and why != error else error
 
 
 def _walk_roots(s: _Session) -> list[str]:
@@ -8233,7 +8456,8 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
                                    bad_line=_first(exc), good_line=_first(exc), expect=expect)
         return _hold(s, spec, fn, static_digest, _trace_tier(trace), facts, executed=True)
     result = _gates.selftest(spec, fn, handed, trace=trace, out_dir=out_dir,
-                             fixture_root=s.root)
+                             fixture_root=s.root,
+                             blank_model=_mutation_applies(fn, s.root))
     _add_closure(trace, closure)
     bad, kind = _control_outcome(spec, result)
     if bad is None and kind == "availability":
@@ -8268,8 +8492,7 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
         known_bad=bad if bad is not None else ("skipped" if kind == "self-skip"
                                                 else "errored"),
         known_good=good.outcome,
-        bad_line=_first(held_bad.error if held_bad is not None else "").removeprefix(
-            "control error: ").removeprefix("control self-skip: "),
+        bad_line=_bad_line(trace, held_bad),
         good_line=good.line, channels=channels, check_channel=check,
         mutation=(None if walk is None or walk_token else
                   (sum(1 for r in walk.results if r.outcome == "fail"), len(walk.results),
@@ -8277,7 +8500,10 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
         boundary=walk.boundary if walk is not None and not walk_token else "",
         walk=walk_token, expect=expect)
     token = _qualification(facts)
-    tier = _trace_tier(trace)
+    # The path a failure is held on, and an entry answers: either half's tier
+    # (`_entry_tier`) — a known-good crash on the tier-1 path, behind a
+    # known-bad half that never looked, is that path's.
+    tier = _run_tier(trace, good)
     if s.record:
         cost = result.duration_s + float(getattr(good.verdict, "duration_s", 0.0) or 0.0)
         cpu = result.cpu_s + float(getattr(good.verdict, "cpu_s", 0.0) or 0.0)
@@ -8289,14 +8515,23 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
         if s.record:
             record_obs(s.root, gid, entry="", when=s.when, duration_s=cost, cpu_s=cpu,
                        control=True)
-        if token and parse_token(token)[0] in _HELD_KINDS:
+        if token:
+            # Held, never cached, whatever the first fact that does not hold —
+            # a known-bad PASS beside a known-good half that crashed, skipped
+            # itself or read the candidate included: no tracked entry can be
+            # filed for half a measurement, and what is not filed must still be
+            # remembered. What slipped through (review of P2.3, ``b2``): that
+            # token is not a held kind, so it was neither filed nor remembered;
+            # every check said `known-good errored · known-bad pass →
+            # unqualified` while `gate show` promised "the next check run
+            # qualifies it", and with a paired entry at an earlier version the
+            # PASS read Stale to every reader and Gap to check.
             refusal = (held_bad.detail if held_bad is not None
                        else getattr(good.verdict, "detail", "") or good.line or "")
             return _hold(s, spec, fn, static_digest, tier, facts, executed=True,
                          detail=refusal)
         # Only a planted judge reads a crashed half as qualified: nothing to file.
-        return Admission("not-admitted" if token else "admitted", None, token,
-                         qualification=facts, executed=True)
+        return Admission("admitted", None, token, qualification=facts, executed=True)
     built = _control_entry(s.root, spec, fn, result=result, trace=trace, host=host, bad=None,
                            detail="", digests=s.digests, anchors=s.anchors, good=good,
                            walk=walk)
@@ -8313,7 +8548,7 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
         wrote = write_control(s.root, entry)
         s.notes.extend(wrote.warnings)
     # Written first: a write that raises must leave the failure it would answer.
-    _release_control_failures(s, gid, _answered_controls(entry.static, built.tier, s.now.tier))
+    _release_control_failures(s, gid, _answered_controls(entry.static, tier, s.now.tier))
     if s.record:
         # The entry on disk keeps the fixture hint it was FIRST written with
         # (same inputs, same outcome: "exists"); the closure it was just
@@ -8440,7 +8675,7 @@ def _other_tiers(found: Admission, current: list, s: _Session, spec: Any) -> Adm
         return found
     mine = s.verified.get(spec.id) or {}
     others = [c for c in current
-              if c.name != entry.name and _read_tier(c.reads) != _read_tier(entry.reads)
+              if c.name != entry.name and _entry_tier(c) != _entry_tier(entry)
               and not _incomplete(c)
               and not _ledger_moved(c, s.now, mine) and _hint_holds(c, s.now, mine)]
     blocker = _disagree([entry, *others])
@@ -8662,9 +8897,9 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
     above = tier is not None and tier != s.now.tier
     # The served tier's admission, carrying what this sweep's own control run
     # did: the counts say a forced control executed, whichever tier it decided.
-    admitted = judged if not above else dataclasses.replace(
+    admitted = _counted_with(judged if not above else dataclasses.replace(
         _admit(s, spec, fn, run_ctx, may_run=False, force=False, at=tier),
-        executed=judged.executed, reverified=judged.reverified)
+        executed=judged.executed, reverified=judged.reverified), served.reads)
     # The same outcome is the run's own answer only while the served entry
     # COUNTS. What slipped through (review, `repro_undemonstrated`): a forced
     # tier-0 PASS matched a tier-2 PASS whose path no current control shows,
@@ -8753,6 +8988,8 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     at = _read_tier(state.entry.reads) if served else s.now.tier
     may_run = at is None or at == s.now.tier
     judged = _admit(s, spec, fn, run_ctx, may_run=may_run, force=force, at=at)
+    if served:
+        judged = _counted_with(judged, state.entry.reads)
     if judged.state == "undemonstrated" and not may_run:
         # The costlier path's entry, with no control current on that path: what
         # `resolve` reads, the entry's verdict and stale, never a skip. What
@@ -8810,9 +9047,12 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
             return SweepRow(_synthesized(spec, error=state.reasons[0], rho=state.rho),
                             rho=state.rho, admission=judged)
 
-    # 4. run, traced with the sweep's anchors, and key what it read
+    # 4. run, traced with the sweep's anchors, and key what it read — with no
+    # model where the walk applies: none of its qualification runs had one
+    # (`_no_model`).
     trace = GateTrace(anchors=s.anchors)
-    verdict = _gates.run_gate(spec, fn, run_ctx, trace=trace)
+    verdict = _gates.run_gate(spec, fn, _no_model(run_ctx, _mutation_applies(fn, s.root)),
+                              trace=trace)
     keyed = _keyed(gid, spec, fn, trace=trace, reads=None, anchors=s.anchors,
                    digests=s.digests)
     verdict = dataclasses.replace(verdict, rho=keyed.rho)
@@ -8856,6 +9096,15 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         refused = dataclasses.replace(_synthesized(spec, error=clash, rho=keyed.rho),
                                       duration_s=verdict.duration_s, cpu_s=verdict.cpu_s)
         return SweepRow(refused, executed=True, rho=keyed.rho, admission=judged)
+    if measured:
+        # What it read beside the qualification it counts under: a ledger value
+        # no qualification run read leaves it uncounted (`_counted_with`), as
+        # every reader will read its filed entry.
+        counted = _counted_with(judged, keyed.reads)
+        if counted.state == "not-admitted" and judged.state != "not-admitted":
+            refused = dataclasses.replace(_unqualified(spec, counted.reason, rho=keyed.rho),
+                                          duration_s=verdict.duration_s, cpu_s=verdict.cpu_s)
+            return SweepRow(refused, executed=True, rho=keyed.rho, admission=counted)
     # 5. a run over a current answer — `--force`, or a crash that superseded it —
     # is one entry beside that answer, not the answer: the row is what the
     # records resolve to with it filed and what it answered forgotten

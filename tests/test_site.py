@@ -710,6 +710,21 @@ class HonestyOnThePage(_SiteCase):
         self.assertEqual(verdict["status"], "unqualified")
         self.assertEqual(verdict["qualification"]["token"], "qualification:not-yet|0")
         self.assertIn("not yet qualified at this version", verdict["qualification"]["reason"])
+        # The sentence the page shows (review of P2.3: it showed `error`, R-2's
+        # fallback, `unqualified: qualification:not-yet|0`): the table's, no token.
+        self.assertEqual(verdict["qualification"]["text"],
+                         "unqualified: not yet qualified at this version — the next check "
+                         "run qualifies it")
+        self.assertIn("qualification:not-yet|0", verdict["error"], "the fallback stays")
+        panels = os.path.join(os.path.dirname(site_mod.__file__), "site_template", "lib",
+                              "panels.js")
+        with open(panels, encoding="utf-8") as fh:
+            js = fh.read()
+        row = js[js.index("function verdictRow("):]
+        row = row[:row.index("\n}\n")]
+        self.assertIn("v.qualification && v.qualification.text", row,
+                      "the page renders the qualification's text before `error`")
+        self.assertLess(row.index("v.qualification.text"), row.index("v.error ||"))
         self.assertEqual(state["claims"][0]["status"], "unclaimed")
         self.assertFalse(state["readiness"]["ready"])
 

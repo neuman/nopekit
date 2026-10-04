@@ -764,9 +764,12 @@ def projection(derived: dict | None = None, **over) -> dict:
 #: test's edit to the live design or its files moves the real run alone.
 KNOWN_GOOD = modelio.flat_params(projection(x=0.25))[0]
 
-#: The claim limit the known-good design states for t.claim, which reads it off
-#: claim C_CL: :func:`ledger`'s default.
-KNOWN_GOOD_LIMITS = {"C_CL": 10.0}
+#: The claim the known-good design hands t.claim, which reads its limit off
+#: C_CL: :func:`ledger`'s default record, exactly — a verdict that read a ledger
+#: value no qualification run read does not count (review of P2.3, ``br7``; R-6:
+#: this was ``{"C_CL": 10.0}``, a claim with the limit and another statement).
+KNOWN_GOOD_CLAIMS = [Claim(id="C_CL", statement="claim C_CL", tags=["claimread"],
+                           acceptance=Acceptance(limit=10.0)).to_dict()]
 
 
 def ledger(limit: float = 10.0) -> Ledger:
@@ -816,7 +819,7 @@ def plant(root: str, extra: dict[str, str] | None = None) -> str:
     # Every project gate's known-good control (P2.3): the design above, and the
     # data files as planted — the extras' included.
     _projects.write_known_good(root, KNOWN_GOOD, files=_projects.tree_files(root, "data"),
-                               limits=KNOWN_GOOD_LIMITS)
+                               claims=KNOWN_GOOD_CLAIMS)
     return root
 
 

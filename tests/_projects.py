@@ -286,7 +286,8 @@ never ``return ctx`` — a known-good design that is the live one passes whateve
 the live design is, until it does not (S-07, in the good direction). ``ROOT`` is
 where the design's files live, or ``None`` when it has none of its own and keeps
 the root it is handed; ``LIMITS`` are the claim limits it states, as a claim
-record would carry them.
+record would carry them; ``CLAIMS`` are whole claim records it hands its gates as
+they are.
 """
 from __future__ import annotations
 
@@ -302,13 +303,16 @@ ROOT = {root}
 
 LIMITS = {limits}
 
+CLAIMS = {claims}
+
 
 def context(ctx):
     """``ctx`` with this design in place of whatever it carried: the params, the
-    stated claim limits as its only ledger, no ``extra`` — and its own files."""
+    stated claims as its only ledger, no ``extra`` — and its own files."""
     ledger = Ledger(claims=[Claim(id=cid, statement=f"{{cid}}, as the known-good design states it",
                                   acceptance=Acceptance(limit=limit))
-                            for cid, limit in LIMITS.items()])
+                            for cid, limit in LIMITS.items()]
+                    + [Claim.from_dict(copy.deepcopy(row)) for row in CLAIMS])
     root = ctx.root if ROOT is None else ROOT
     return dataclasses.replace(ctx, params=copy.deepcopy(PARAMS), ledger=ledger, extra={{}},
                                root=root)
@@ -322,7 +326,8 @@ KNOWN_GOOD_FILES = "selftest/good"
 
 def write_known_good(root: str, params: dict[str, Any], *,
                      files: dict[str, str | bytes] | None = None,
-                     limits: dict[str, float] | None = None) -> str:
+                     limits: dict[str, float] | None = None,
+                     claims: list[dict] | None = None) -> str:
     """Give the project at ``root`` a ``selftest/known_good.py``; return its path.
 
     P2.3: a project evaluator is qualified only when it passes a known-good
@@ -340,7 +345,10 @@ def write_known_good(root: str, params: dict[str, Any], *,
     read the live data files, so an edit meant to make the real run fail made
     the known-good control fail too, and the claim read Gap where the test
     meant Not met. ``limits`` (claim id -> limit) are the claim limits the
-    design states, for a gate that reads its limit off a claim.
+    design states, for a gate that reads its limit off a claim; ``claims`` are
+    whole claim records (``Claim.to_dict``) handed as they are — the live
+    records, for a gate whose check run reads one: a verdict that read a ledger
+    value no qualification run read does not count (review of P2.3, ``br7``).
     """
     base = os.path.abspath(root)
     good_root = "None"
@@ -363,7 +371,8 @@ def write_known_good(root: str, params: dict[str, Any], *,
         fh.write(_KNOWN_GOOD_MODULE.format(
             params=pprint.pformat(params, indent=1, width=88, sort_dicts=True),
             root=good_root,
-            limits=pprint.pformat(dict(limits or {}), indent=1, width=88, sort_dicts=True)))
+            limits=pprint.pformat(dict(limits or {}), indent=1, width=88, sort_dicts=True),
+            claims=pprint.pformat(list(claims or []), indent=1, width=88, sort_dicts=True)))
     return path
 
 

@@ -311,7 +311,10 @@ function verdictRow(v, app) {
   const locators = v.locators || [];
   const anchored = locators.filter((loc) => app.index.viewById.has(loc.view));
 
-  const detail = v.error || v.detail || v.skip_reason || "";
+  // An unqualified evaluator's row says what state.json words for it, never
+  // `error` — R-2's fallback, which carries the spine's token (review of P2.3).
+  const unqualified = v.qualification && v.qualification.text;
+  const detail = unqualified || v.error || v.detail || v.skip_reason || "";
   const measured = v.measured !== null && v.measured !== undefined
     ? el("span", { class: "verdict-measure mono" },
         quantity(v.measured, v.units),
@@ -321,7 +324,8 @@ function verdictRow(v, app) {
     : null;
 
   const body = el("div", { class: "verdict-detail" },
-    detail ? el("p", { class: `verdict-text${v.error ? " mono" : ""}`, text: detail }) : null,
+    detail ? el("p", { class: `verdict-text${v.error && !unqualified ? " mono" : ""}`,
+                       text: detail }) : null,
     el("dl", { class: "kv" },
       ...(v.pack ? field("Pack", code(v.pack)) : []),
       ...field("Tier", `${v.tier} — ${["instant", "build", "solve", "external"][v.tier] || "?"}`),

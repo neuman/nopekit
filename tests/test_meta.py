@@ -83,9 +83,12 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     # 9 is the paired rule from P2.3: both controls (QualificationIsPaired), and
     # every conclusive mutation a fail for an evaluator outside the bundled packs
     # (EveryConclusiveMutationMustFail); the known-bad half's guards stay where
-    # they were written (AdmissionIsDemonstrated).
+    # they were written (AdmissionIsDemonstrated); and the check run handed no
+    # channel its qualification runs were not (TheCheckRunTakesTheQualifiedPath,
+    # review of P2.3).
     9: ["test_admission.AdmissionIsDemonstrated", "test_admission.QualificationIsPaired",
-        "test_admission.EveryConclusiveMutationMustFail"],
+        "test_admission.EveryConclusiveMutationMustFail",
+        "test_admission.TheCheckRunTakesTheQualifiedPath"],
     # 10 (P2.2): the rule in the run loop, the resolver and the composition; a
     # cached pass behind a failed guard, end to end in process; and the graph
     # the rule walks — a cycle or an inversion refused at registration.

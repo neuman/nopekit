@@ -14,7 +14,13 @@ that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
 The budget is 90 s as ONE process on an otherwise idle machine — and P2.3 is
-OVER it, said here rather than hidden: 101 s measured 2026-10-03 (load average
+OVER it, said here rather than hidden. The review of P2.3 added its laundering
+paths' in-process tests (~2 s: the PACK_DIR line, a known-good-only file and tier
+read, a held known-bad pass, the words of an unusable control,
+TheCheckRunTakesTheQualifiedPath) and pack mode and JUnit to
+QualificationWordsComeFromOneTable's scan (~1 s): 104 s before it, 104-109 s after
+over two runs, measured 2026-10-03 within the hour (load average 1.0-1.7; 77 s
+user). Before: 101 s measured 2026-10-03 (load average
 1.1-1.5; 74 s user) against 90 s for the P2.2 list on the same machine within
 the hour (65 s user). What crossed, measured test by test: P2.3's own classes
 (~4 s: QualificationIsPaired's in-process cases, the walk's cases, V3, V4, V8)
@@ -282,6 +288,15 @@ FAST: list[str] = [
     "test_admission.EveryConclusiveMutationMustFail.test_an_inconclusive_mutation_counts_neither_way",
     "test_admission.EveryConclusiveMutationMustFail.test_extra_channel_controls_outside_the_bundled_packs_are_unqualified",
     "test_admission.EveryConclusiveMutationMustFail.test_the_walk_is_aimed",
+    # Review of P2.3's laundering paths, in process (~0.3 s each): the PACK_DIR
+    # line, a known-good-only file read, a known-good-only tier read, a held
+    # known-bad pass, the model and the ledger a check run alone was handed.
+    "test_admission.EveryConclusiveMutationMustFail.test_a_project_gate_that_names_a_bundled_pack_dir_is_still_walked",
+    "test_admission.QualificationIsPaired.test_a_file_only_the_known_good_half_reads_moves_the_qualification",
+    "test_admission.QualificationIsPaired.test_a_tier_only_the_known_good_half_reads_picks_the_path",
+    "test_admission.QualificationIsPaired.test_a_known_bad_pass_beside_a_crashed_known_good_half_is_remembered",
+    "test_admission.QualificationIsPaired.test_each_unusable_or_crashed_control_is_named_in_its_own_words",
+    "test_admission.TheCheckRunTakesTheQualifiedPath",
     # The control entry's paired shape and its strict reader (V8). 0.1 s.
     "test_cache.PairedEntries",
 

@@ -3230,7 +3230,7 @@ one under `-v`) and its `problem:` lines. `doctor` gains `qualification` and
 `known-good`. JSON is additive: `check --json` `qualifications`; `gate show --json`
 `qualification` (and `last_selftest.outcome` `"unqualified"`); `gate selftest --json`
 `qualifications` and `counts.qualified`/`unqualified`; `state.json` verdict rows read
-`status: "unqualified"` with `qualification: {token, reason}`.
+`status: "unqualified"` with `qualification: {token, reason, text}`.
 
 ## Limits: what the spine cannot see, named
 
@@ -3271,7 +3271,23 @@ a reader of the output meets it:
   keyed: the `atompipe.*` modules outside the spine digest that such a helper imports.
 - **`ctx.model is None` is not recorded.** A gate that branches on whether a model is
   loaded at all is invisible to rho on that branch; `ModelProxy` records a real use of
-  the model, never its absence. No bundled gate reads `ctx.model`.
+  the model, never its absence. No bundled gate reads `ctx.model`, and an evaluator not
+  from the bundled packs is handed none on any run — its check run, its controls, its
+  walk (`verdicts._no_model`) — so the branch is the same branch everywhere for it
+  (review of P2.3: `if ctx.model is not None: passed = True` read Checked).
+- **A qualification run is told apart from a check run by what nothing keys.** A
+  project evaluator's check run is handed nothing its qualification runs were not —
+  no model, and a verdict that read ledger values no qualification run read does not
+  count (`verdicts._ledger_unseen`). What stays visible to an evaluator that looks: the
+  path of its `ctx.out_dir` (a control's is under `.atompipe/out/controls/`, a walk
+  run's is a temp directory outside the project, as invariant 15 requires; a check
+  run's is `.atompipe/out`, where the evidence a cached pass cites lives), the call
+  stack (`inspect.stack()` names `mutation_walk`), the clock. A gate that branches on
+  them is a forger the controls cannot see. *Rejected:* one path for every run (the
+  walk must write outside the project, the check run's evidence inside it); recording
+  a read of the `out_dir` string as opaque (`os.path.join(ctx.out_dir, …)` reads it,
+  so every gate that writes evidence would never be Fresh). On the check-in list
+  (review of P2.3, `br8`).
 - **Admission outside `check` is static.** `status`, `report` and `site build` judge a
   control from its entry's static part, its recorded files and host reads, and its
   fixture closure's digests — none of them runs a fixture. When a fixture's code moved

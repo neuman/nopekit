@@ -308,6 +308,8 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "outcome": MappingProxyType({"pass": "pass", "fail": "fail", "errored": "errored",
                                      "skipped": "skipped", "not-run": "not run",
                                      "live": "reads the candidate"}),
+        # A known-bad control declared `expect="error"` that raised, as declared.
+        "raised": "fail (raised, as declared)",
         "sep": " · ",
         "id_sep": " : ",
         "mutation": "mutation {fails}/{conclusive} fail",
@@ -320,7 +322,13 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "could_not_run": "mutation could not run",
         "could_not_finish": "mutation could not finish",
         "walk_errored": "mutation errored",
+        # One segment per channel fact (review of P2.3: `channels differ` was
+        # printed for channels:check too, where both controls hand the SAME
+        # keys — one word for two facts, the conflation D8 fixed for `none
+        # made` — and an author who "fixed" the channels got the line again).
         "channels": "channels differ",
+        "check_channel": "known-good and known-bad via ctx.extra",
+        "ledger": "check run reads another ledger",
         "blocker": MappingProxyType({"two-outcomes": "two outcomes",
                                      "tier": "outcomes differ by tier",
                                      "differs": "outcome differs from its cached entry"}),
@@ -341,6 +349,8 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
                                "(ctx.extra: known-bad {{{bad}}}, known-good {{{good}}})",
             "channels:check": "its controls reach it through ctx.extra, which a check run never "
                               "hands it (known-bad {{{bad}}}, known-good {{{good}}})",
+            "channels:ledger": "its check run read ledger {keys} at a value no qualification "
+                               "run read: hand its known-good design the same claims",
             "mutation:pass": "mutation {text} fail",
             "mutation:could-not-run": "mutation pass could not run: {text}",
             "mutation:could-not-finish": "mutation pass could not finish: the values that move "
@@ -353,8 +363,29 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
             "control:differs": "control outcome differs from its cached entry ({text})",
             "qualification:not-yet": "not yet qualified at this version — {how}",
         }),
+        # What to do, after a pack-mode problem's reason (`packs._unqualified_problem`),
+        # by the token's kind; none where the reason says it.
+        "remedy": MappingProxyType({
+            "known-bad:pass": "the fixture is not bad in the way this evaluator checks, "
+                              "or the evaluator is a logger",
+            "known-good:fail": "the known-good fixture is not good or the evaluator is "
+                               "wrong, and its known-bad control shows nothing until one "
+                               "of them is fixed",
+            "channels:differ": "declare a known-good fixture (NegativeControl.good) that "
+                               "hands it the same keys",
+        }),
+        # A prerequisite that does not pass a dependent's known-bad control
+        # (P2.2-D13): `gate selftest`'s note and `pack validate`'s problem.
+        "isolation": "control not isolated — its prerequisite {need} does not pass "
+                     "{gate}'s known-bad control ({word}: {body})",
+        "isolation_fix": "; the guard pre-empts the control wherever both run. Make the "
+                         "control move only what {gate} judges, or drop the edge",
         "how": MappingProxyType({"plain": "the next check run qualifies it",
-                                 "tier": "atompipe check --tier {tier} qualifies it"}),
+                                 "tier": "atompipe check --tier {tier} qualifies it",
+                                 # A dependent its prerequisite prunes: no check run
+                                 # reaches its qualification until the root holds
+                                 # (review of P2.3: it was promised the next one).
+                                 "once": "it qualifies once {root} is established"}),
         # `gate show`'s `qualification:` row, for the states with no line.
         "pending": "due to re-qualify — {moved} moved; the next check run re-qualifies it",
         "undemonstrated": "not yet qualified at this version — the next check run qualifies it",
@@ -362,7 +393,7 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         # `gate show`'s detail rows under it.
         "detail": MappingProxyType({
             "known_good": "known-good", "known_bad": "known-bad", "mutation": "mutation",
-            "not_mutated": "not mutated",
+            "not_mutated": "not mutated", "why": "why",
             "none": "none: no known-good control exists for it (a pack's "
                     "selftest/baseline.json, a project's selftest/known_good.py, or a "
                     "good= fixture)",
@@ -374,7 +405,12 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
             "at-limit": "none: its value is exactly at its limit",
             "tier": "none: the walk runs at tier 0, and this evaluator is tier {tier}",
             "budget": "it could not finish: the values that move its value need more runs",
-            "never-lands": "from x0.001 to x1000 its value never landed 15% past its limit",
+            # A template: the ladder's ends and the margin are the walk's own
+            # constants (`gates.MUTATION_RUNGS`, `MUTATION_MARGIN`), filled when the
+            # row is rendered — never a second home for the numbers (review of
+            # P2.3: retuning the margin would have left this saying 15%).
+            "never-lands": "from x{lo} to x{hi} its value never landed {margin}% past its "
+                           "limit",
             "word": "a word: not walked", "zero": "zero: not walked", "none_value": "None: "
             "not walked", "not-finite": "not a finite number: not walked",
             "other": "not a number, a flag or a list of numbers: not walked",
@@ -389,11 +425,13 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "doctor": MappingProxyType({
             "ok": "every evaluator qualified at its version",
             "unqualified": "{n} evaluator(s) unqualified: {list}",
+            "also_waiting": "; {n} more not yet qualified at their version",
+            "not_yet": "{n} evaluator(s) not yet qualified at their version: {list}",
             "known_good_ok": "every project evaluator has a known-good control",
-            "known_good": "no selftest/known_good.py: every project evaluator reads "
-                          "\"known-good not run\", so its claims read Gap; write "
-                          "context(ctx) returning the design every control is one change "
-                          "from",
+            "known_good": "{n} project evaluator(s) with no known-good control ({list}): "
+                          "each reads \"known-good not run\", so its claims read Gap; write "
+                          "selftest/known_good.py's context(ctx) returning the design every "
+                          "control is one change from, or declare a good= fixture",
         }),
         "help": "run each evaluator's known-good and known-bad controls, and the mutation "
                 "pass for one not from a bundled pack; exits 1 on any unqualified evaluator",
@@ -574,10 +612,14 @@ def count_line(composed: Mapping[str, Any]) -> str:
 # qualification, in words (P2.3-D13, D14): facts in, the table's words out
 # --------------------------------------------------------------------------- #
 def _bad_word(facts: Any) -> str:
-    words = HUMAN["qualification"]["outcome"]
+    q = HUMAN["qualification"]
     if facts.known_bad == "fail" and facts.expect == "error":
-        return words["errored"]          # rejected as its control declares: by raising
-    return words.get(facts.known_bad, facts.known_bad)
+        # Failed as its control declares, by raising: never the bare `errored`,
+        # which a crashed known-bad control prints too — the same segment ended
+        # `→ qualified` on one line and `→ unqualified` on the next (review of
+        # P2.3; GLOSSARY §1 keeps *errored* for a crash).
+        return q["raised"]
+    return q["outcome"].get(facts.known_bad, facts.known_bad)
 
 
 def mutation_words(fails: int, conclusive: int, inconclusive: int, boundary: str = "") -> str:
@@ -615,13 +657,17 @@ def qualification_line(gate_id: str, facts: Any) -> str:
     parts = [f"{gate_id}{q['id_sep']}{q['known_good']} "
              f"{words.get(facts.known_good, facts.known_good)}",
              f"{q['known_bad']} {_bad_word(facts)}"]
-    if facts.channels or facts.check_channel:
+    if facts.channels:
         parts.append(q["channels"])
+    elif facts.check_channel:
+        parts.append(q["check_channel"])
     elif facts.walk:
         kind = verdict_logic.parse_token(facts.walk)[0]
         parts.append(q["could_not_run"] if kind == "could-not-run" else q["walk_errored"])
     elif facts.mutation is not None:
         parts.append(mutation_words(*facts.mutation, boundary=facts.boundary))
+    if getattr(facts, "ledger", ()):
+        parts.append(q["ledger"])
     if facts.blocker:
         kind = verdict_logic.parse_token(facts.blocker)[0]
         parts.append(q["blocker"].get(kind, kind))
@@ -629,10 +675,13 @@ def qualification_line(gate_id: str, facts: Any) -> str:
     return q["sep"].join(parts) + " " + (q["unqualified"] if token else q["qualified"])
 
 
-def qualification_reason(token: Any) -> str:
+def qualification_reason(token: Any, *, pruned_by: str = "") -> str:
     """A token's words (``verdicts.parse_token`` reads it; nothing here splits
     the string itself): what follows `unqualified: <evaluator> : ` on a claim's
-    row — the first fact that does not hold (P2.3-D15). ``""`` for no token."""
+    row — the first fact that does not hold (P2.3-D15). ``""`` for no token.
+    ``pruned_by``: the prerequisite root that prunes the evaluator, for a
+    not-yet token — then it qualifies once that root is established, never at
+    "the next check run", which would prune it again."""
     kind, text = verdict_logic.parse_token(token)
     if not kind:
         return ""
@@ -640,15 +689,29 @@ def qualification_reason(token: Any) -> str:
     template = q["reason"].get(kind)
     if template is None:
         return f"{kind}: {text}" if text else kind
+    if kind == "channels:ledger":
+        return template.format(keys=", ".join(k for k in text.split(",") if k))
     if kind.startswith("channels:"):
         bad, _sep, good = text.partition("/")
         return template.format(bad=", ".join(k for k in bad.split(",") if k),
                                good=", ".join(k for k in good.split(",") if k))
     if kind == "qualification:not-yet":
-        how = (q["how"]["tier"].format(tier=text) if text and text != "0"
+        how = (q["how"]["once"].format(root=pruned_by) if pruned_by
+               else q["how"]["tier"].format(tier=text) if text and text != "0"
                else q["how"]["plain"])
         return template.format(how=how)
     return template.format(text=text)
+
+
+def unqualified_text(token: Any) -> str:
+    """`unqualified: <the first fact that does not hold>` — an unqualified
+    evaluator's own row where the evaluator is the row (the page's verdict row,
+    a JUnit message), in the table's words. What slipped through (review of
+    P2.3): the page rendered `v.error` and JUnit `verdict.error`, which carry
+    R-2's fallback `unqualified: <token>`, so a person read
+    `unqualified: qualification:not-yet|0` — the spine's token on a human
+    channel P2.3-D13 says only `HUMAN` words."""
+    return f"{HUMAN['lead'][ClaimCause.UNQUALIFIED]}: {qualification_reason(token)}"
 
 
 def verdict_line(verdict: Verdict, qualification: Any = None) -> str:
@@ -721,8 +784,23 @@ def qualification_detail(entry: Any, spec: Any, *, facts: Any = None) -> list[st
             for r in walk.get("not_mutated") or ():
                 key = ".".join(str(p) for p in r["key"])
                 why = {"none": "none_value", "budget": "budget_key"}.get(r["why"], r["why"])
-                row(d["not_mutated"], f"{key} — {d.get(why, r['why'])}")
+                row(d["not_mutated"], f"{key} — {_not_mutated_words(d, why, r['why'])}")
     return rows
+
+
+def _not_mutated_words(d: Mapping[str, str], why: str, said: str) -> str:
+    """A not-mutated reason's words; ``never-lands`` filled from the walk's own
+    constants — the ladder's ends (``1/MUTATION_RUNGS[-1]`` to
+    ``MUTATION_RUNGS[-1]``) and ``MUTATION_MARGIN`` — at render time."""
+    template = d.get(why)
+    if template is None:
+        return said
+    if why != "never-lands":
+        return template
+    from . import gates as _gates                  # not at import: report stays light
+    top = max(_gates.MUTATION_RUNGS)
+    return template.format(lo=_num(1.0 / top), hi=_num(top),
+                           margin=_num(_gates.MUTATION_MARGIN * 100))
 
 
 def _verdict_body(verdict: Verdict) -> str:
@@ -2360,10 +2438,9 @@ def _junit_outcome(case: Any, verdict: Verdict) -> None:
                          message=verdict.detail or "the gate reported a failure")
         _xml_text(child, _junit_measured(verdict))
     elif outcome == "error":
-        child = _xml_sub(case, "error",
-                         type="not-admitted" if getattr(verdict, "unqualified", "")
-                         else "error",
-                         message=str(verdict.error))
+        token = getattr(verdict, "unqualified", "") or ""
+        child = _xml_sub(case, "error", type="not-admitted" if token else "error",
+                         message=unqualified_text(token) if token else str(verdict.error))
         _xml_text(child, verdict.detail)
     else:
         _xml_sub(case, "skipped", message=verdict.skip_reason or "skipped")

@@ -189,7 +189,11 @@ cad.watertight : known-good pass · known-bad fail → qualified
 ```
 
 A pack loaded from outside the bundled `packs/` — under `.atompipe/packs/` while you
-write it, or `~/.atompipe/packs` — also faces the **mutation pass**: each value its
+write it, or `~/.atompipe/packs` — reads its controls through `ctx.extra` at its peril
+(`known-good and known-bad via ctx.extra`: a check run never hands `extra`), is handed
+no `ctx.model` on any run, and a verdict that read a ledger value its baseline never
+handed it does not count (`check run reads another ledger`). It also faces the
+**mutation pass**: each value its
 known-good run read is pushed until the gate's own value lands 15% past its own
 limit, and that run must fail (`mutation 2/2 fail`). A gate keyed to its own control
 — failing the one value the fixture changes, passing every other — reads

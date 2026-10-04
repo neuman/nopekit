@@ -1891,9 +1891,14 @@ def state(
         if getattr(verdict, "unqualified", ""):
             # The reason in the table's words (`report.HUMAN`), the token kept
             # for a machine reader; the page owns neither.
+            # `text` is the row's sentence, lead and all (`report.unqualified_text`):
+            # the page rendered `error`, R-2's fallback, which carries the token
+            # (review of P2.3: `unqualified: qualification:not-yet|0` on every
+            # bracket row of a clone without its cache).
             row["qualification"] = {
                 "token": verdict.unqualified,
-                "reason": report_logic.qualification_reason(verdict.unqualified)}
+                "reason": report_logic.qualification_reason(verdict.unqualified),
+                "text": report_logic.unqualified_text(verdict.unqualified)}
         row["views"] = sorted({(loc.view or "") for loc in (verdict.locators or [])
                                if (loc.view or "")})
         if not verdict.locators and not verdict.ok:
