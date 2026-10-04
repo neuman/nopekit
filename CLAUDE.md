@@ -101,21 +101,27 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    that read that claim's acceptance condition, and a statement edit none. A physical
    pass is bound to its article — the design it was recorded on: when that design
    moves it reads Stale, naming the article to rebuild — a check run cannot restore
-   it (P2.5a).
+   it (P2.5a). An article `export` built is what its generator read, and every value
+   its package hands the builder: it moves only when something its generator read
+   moves, and the rebuild prediction names exactly those articles (P2.5b).
    (Observed before this: one hash of the whole model decided every gate, and a model
    that failed to import compared equal, so three claims read Checked for a design that
    could not be built.)
 
 8. **The index never disagrees with the records, and no command writes a record
    it was not asked to write.** The records are files — `claims/`, `params/`,
-   `decisions/`, `needs/`, `inputs/`, `results/`, `views/` and
-   `.atompipe/project.json` — and `.atompipe/ledger.json` is an index generated
+   `decisions/`, `needs/`, `inputs/`, `results/`, `views/`, `milestones/`,
+   `exports/` and `.atompipe/project.json` — and `.atompipe/ledger.json` is an index generated
    from them, rebuilt after every command (`doctor`, `init` and `--no-record` runs
    write none of it), so a hand edit made since the last command reaches it;
    nothing reads it for truth. `check` writes no record: every path it writes is
    ignored by git at the moment it is written, or is a new verdict entry. Each kept
    writer (`ingest`, `extract`, `decide`, `packs add`, `claim physical`) writes the
-   one record it was asked for. The one carve-out is the one-time legacy migration,
+   one record it was asked for; `export` (P2.5b) writes its export record
+   (`exports/<milestone>.json`), the new verdict and control entries its re-run
+   files, as `check --force` files them, and the marked ignore blocks — every other
+   path it writes (`out/<milestone>/`, its package) is ignored when written; and
+   `report --write` writes `REPORT.md`, an output git ignores. The one carve-out is the one-time legacy migration,
    which only `check` and those writers perform; every other command reads a legacy
    ledger in memory and writes nothing. (Observed before this: `check`, a sweep, saved the whole ledger on
    every run, so a claim a human edited between two commands was put back from the
@@ -195,7 +201,14 @@ earned. Enforced in `tests/test_signing.py`, `tests/test_physical.py` and
     read it, with its evidence's bytes unchanged; when the article's design moves it
     reads Stale and the rebuild prediction names that article. A fail counts across
     every edit — a claim file renamed or deleted included: a results file no claim
-    file holds keeps its fail counting, and on its evaluator's track record. An
+    file holds keeps its fail counting, and on its evaluator's track record. From
+    P2.5b a fail loses its power to fail only on the object that failed: a fail on an
+    article `export` built stops counting beside a pass a person records on another
+    exported article that differs from it in what it was built from, while the design
+    is no longer the failed one, and counts again the moment the design returns to
+    it — a fail on any other article never stops counting. A result recorded with
+    `--article` is bound to an exported article, and its pass counts only while
+    `exports/` holds that export. An
     owner, and an expert-judgment claim's authority, count only as that person
     recorded them, as themselves: the claim is Gap until then, and an expert
     judgment Assumed under its authority's name until they judge it — and Gap again
@@ -210,9 +223,40 @@ earned. Enforced in `tests/test_signing.py`, `tests/test_physical.py` and
     dropped a physical claim's evidence; in its review, a judged claim's rewritten
     statement read Stale and passed `check`, a claim file renamed away from its fail
     stopped it failing, and a fail flipped to a pass was left out of the refusal's
-    advice, whose checkout then erased it.) What the seal does not stop — a process
+    advice, whose checkout then erased it; and, until P2.5b, no fix and reprint could
+    ever read Checked.) What the seal does not stop — a process
     that recomputes it, or opens a pty with the agent markers unset — is in
     `docs/SPINE_CONTRACT.md`'s limits; P3's permission rule closes it.
+
+One more came with checkpoint P2.5b, when a spend gained a name and a boundary — the
+one place a pass nothing earned costs money. Enforced in `tests/test_export.py`,
+`tests/test_physical.py` and `tests/test_vocabulary.py`:
+
+12. **No reader says more than the composition, and the boundary that spends
+    re-executes.** No renderer shows a claim more resolved than `claims.compose`
+    composes it, nor says *ready* more generously than `claims.unresolved` — the one
+    predicate the readiness sentence, `export`, the JSON summaries and the page read.
+    A milestone (`milestones/<name>.json`) names the claims its spend requires; it is
+    ready only when every one reads Checked — Assumed, Pending build and a Stale that
+    waits on a person included in what is not. Every reader but `export` says *ready*
+    as last evaluated, and says so. `export <milestone>` refuses while a required
+    claim is unresolved, and re-runs every evaluator a required claim rests on, with
+    its controls, its mutation pass and its prerequisites, at the top tier, refusing
+    when a re-run disagrees with the entry the cache served or with what the records
+    hold — on every later export too; `--dry-run` is the same code path and writes
+    nothing of its own (a generator it runs that writes outside its directory is
+    refused and named, not undone). Going ahead over an unresolved claim is a
+    decision a person records in their own shell, naming each claim with its status,
+    sealed into `exports/<milestone>.json` with the article the export was built
+    from; no decision goes ahead over a disagreement. The readiness sentence says, in
+    every branch, what is pending build, which articles need a rebuild and what is
+    checked on an article. (What slipped through: the site's tab said ready whenever
+    nothing stopped `check`, with a required physical claim untested and an
+    assumption unowned (S-60); "5 checked" on the count line sat beside "NOT ready"
+    because an unbound pass read Checked everywhere but there (review of P2.1); the
+    committed readiness report had drifted from its ledger (S-41); and the tracked
+    cache is forgeable in the inner loop — a hand-placed entry was served Checked
+    until something re-ran it, and nothing at a spend did.)
 
 One more came with checkpoint P2.3, numbered as PLAN §4.0.1 numbers it (11–14 land with
 their mechanisms). Enforced in `tests/test_mutation.py`, over every mutation entry point
@@ -257,7 +301,9 @@ Each fact has one home; everything else that shows it is an output of that home.
 - **Records** — tracked, one file per record, edited by hand or by the agent and read
   strictly (an unknown key is refused, with a suggestion): `claims/<id>.json`,
   `params/`, `decisions/`, `needs/`, `inputs/<id>.json`, `results/<claim-id>.json`,
-  `views/*.json`, and `.atompipe/project.json` (meta, `model_entry`, the live `packs`).
+  `views/*.json`, `milestones/<name>.json` (a spend and the claims it requires),
+  `exports/<name>.json` (that spend's exports, sealed and chained, appended only by
+  `export`), and `.atompipe/project.json` (meta, `model_entry`, the live `packs`).
   `results/<claim-id>.json` holds a claim's physical results and its owner's or
   authority's attributions, sealed and chained, appended only by `claim physical`
   (P2.5a): never edit one by hand — a broken seal refuses the file.
@@ -270,8 +316,10 @@ Each fact has one home; everything else that shows it is an output of that home.
 - **Outputs, ignored** — `.atompipe/ledger.json` (the index of every record, rebuilt
   after each command), `.atompipe/cache/last_check.json` (statuses, counts and the
   parameter view as the last full `check` saw them), `.atompipe/obs/` (what each run
-  cost), `.atompipe/out/` (scratch and evidence). The index and `last_check.json` are
-  the whole project in two reads; nothing reads either for truth.
+  cost), `.atompipe/out/` (scratch and evidence), `REPORT.md` (the readiness report,
+  `report --write`) and `out/<milestone>/` (the package `export` wrote). The index
+  and `last_check.json` are the whole project in two reads; nothing reads either for
+  truth.
 
 `docs/SPINE_CONTRACT.md` ("Where facts live", then `store.py`'s section) has the
 layout in full, with each writer.
@@ -282,6 +330,7 @@ layout in full, with each writer.
 |---|---|
 | `src/atompipe/` | the spine — stdlib-only modules; `models.py` is the type contract |
 | `src/atompipe/store.py` | the records: one file per record, the strict reader, the writer, the generated index, the one-time legacy migration |
+| `src/atompipe/milestones.py` | the boundary that spends: a milestone's closure, the export's refusals and judgment, disagreements, the test card, the package |
 | `src/atompipe/verdicts.py` | the per-gate verdict cache: what a gate read (`ParamTrace`, `LedgerView`, the audit hook), portable digests and the spine digest, rho, cache and control entries, freshness, admission at the gate's current version, the one resolver every reader uses, the sweep `check` runs, and `last_check.json` |
 | `src/atompipe/vcs.py` | the only git edge: argv form, a clean environment, a timeout, never raises |
 | `site/` | a project's site — scaffolded by `atompipe site init` from `src/atompipe/site_template/`. Plain HTML/CSS/ES modules, no build step |

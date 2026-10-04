@@ -131,6 +131,21 @@ BLOCKING_STATUSES = frozenset(
 )
 
 
+#: The units a physical claim's DECLARED latency may be stated in, each with its
+#: seconds (P2.5b-D4; GLOSSARY §5 *latency*: "declared ahead only for a physical
+#: evaluator, until an article measures it"). What a person writes beside a print
+#: or a field trial — hours, days, a season — and nothing a reader must convert
+#: twice. ``year`` is the Julian year, 365.25 days, the astronomers' fixed one:
+#: "two winters" is two of them, whatever the calendar. *Rejected:* ``month``
+#: (28 to 31 days — two readers, two numbers); bare seconds (``86400`` is not
+#: what anyone writes, and a typo in it is invisible); free text ("two winters"
+#: cannot feed P4's Λ₀, which reads seconds).
+LATENCY_UNITS: dict[str, float] = {
+    "s": 1.0, "min": 60.0, "h": 3600.0, "day": 86400.0, "week": 604800.0,
+    "year": 31557600.0,
+}
+
+
 class Tier(enum.IntEnum):
     """Cost tier of a gate. The inner loop only ever runs tier 0.
 
@@ -545,9 +560,19 @@ class EntryStanding:
     ``non-interactive``, ``legacy``, ``who``, ``authority``, ``measured``,
     ``evidence:<path>``, ``claim-moved``, ``article-moved``, ``judgment-moved``,
     ``article-unjudged``, ``beside`` — a pass beside an automated evaluator —
-    or ``none`` — on an assumption), ``""`` when it counts; ``article`` — its
-    article's hash; ``article_state`` — ``current``, ``moved``, ``unjudged`` or
-    ``""`` (no article); ``moved`` — what moved, in words, inputs first."""
+    ``none`` — on an assumption — or, from P2.5b, ``export-missing`` — on an
+    exported article no record of `exports/` holds), ``""`` when it counts;
+    ``article`` — its article's hash; ``article_state`` — ``current``,
+    ``moved``, ``unjudged`` or ``""`` (no article); ``moved`` — what moved, in
+    words, inputs first.
+
+    ``stands`` (P2.5b, the LAST field, R-2) — a pass a person made that every
+    fact but the terminal holds for, on its current article: what a fail's
+    supersession reads (``verdicts._supersedes``). On a measurement it is
+    ``counts``; beside an automated evaluator a pass settles nothing
+    (``beside``) and still stands on its article — the reprint after a fix,
+    measured, is the pass a ruler's fail on the old print waits for (critique
+    13 of the P2.5b design)."""
 
     index: int
     passed: bool
@@ -556,6 +581,7 @@ class EntryStanding:
     article: str = ""
     article_state: str = ""
     moved: tuple = ()
+    stands: bool = False
 
 
 @dataclass(frozen=True)
@@ -571,13 +597,22 @@ class Standing:
     ``not-counted:<why>`` (the newest pass, and why it never counted), or ``""``
     (no pass). ``counted`` — the deciding entry's index (the counting pass, or
     the one ``state`` is about), or None. ``article``, ``moved`` — its article
-    and what moved. ``entries`` — every entry's ``EntryStanding``."""
+    and what moved. ``entries`` — every entry's ``EntryStanding``.
+
+    From P2.5b, LAST (R-2): ``fail`` — the index of the fail that counts (the
+    newest not superseded), or None when none does; ``superseded`` — the
+    indices of the fails a pass on another exported article superseded
+    (``verdicts._supersedes``, PLAN Q2.11). ``verdicts.view`` puts the counting
+    result in ``Claim.physical_result`` from these; a raw ``store.load``
+    reader, with no standing, still reads the newest fail (R-2)."""
 
     state: str = ""
     counted: int | None = None
     article: str = ""
     moved: tuple = ()
     entries: tuple = ()
+    fail: int | None = None
+    superseded: tuple = ()
 
 
 @dataclass
@@ -650,6 +685,18 @@ class Claim(Record):
     adding ``"terminal": "human", "authority": "<anyone>"`` would have turned any
     Gap into a passing ``check`` (Assumed does not block). Refused by the strict
     reader on a claim whose terminal is not ``human``."""
+    expected_latency: dict = field(default_factory=dict)
+    """How long an article takes to settle this claim, DECLARED ahead —
+    ``{"value": <number > 0>, "units": <a LATENCY_UNITS key>}`` — or ``{}``
+    (P2.5b-D4, W3). Allowed only on a claim whose terminal is a measurement
+    (the strict reader refuses it elsewhere, only when present — R-10;
+    critique 16 of the P2.5b design: a judgment has no article to measure it).
+    Never measured here: ``claims.latency`` measures it — a result's ``when``
+    minus its exported article's ``when`` — and until then this is what is
+    shown, "declared". Not in ``claims.claim_digest`` (a schedule edit asks no
+    retest), and empty it digests as before (``verdicts._ABSENT_WHEN_EMPTY``).
+    *Rejected:* in the milestone (a claim two milestones require would carry two
+    numbers); on an automated claim (its latency is measured on every run)."""
     results: tuple = ()
     """In memory only (``FORBIDDEN_KEYS``): every entry of
     ``results/<id>.json``'s ``results``, oldest first, assembled by ``store``;
@@ -1234,6 +1281,86 @@ class Decision(Record):
 
 
 # --------------------------------------------------------------------------- #
+# milestones and their exports (P2.5b)
+# --------------------------------------------------------------------------- #
+@dataclass
+class Milestone(Record):
+    """A named spend — a print, a board order, a field test — and the claims it
+    requires (GLOSSARY §4 *milestone*, *required claim*; P2.5b-D1). One file,
+    ``milestones/<name>.json``, hand-written and reviewed like a claim: the stem
+    is the name, and it is a directory under ``out/``.
+
+    ``requires`` — the claim ids the spend needs Checked: *ready* for it is
+    exactly that (``claims.unresolved``), never ``Claim.critical``, which stays
+    what ``check`` blocks on (D2). ``generator`` — ``"<path>.py:<function>"``,
+    the function ``export`` runs to write the package (D11), or ``""``.
+
+    What it replaced: one implicit spend for the whole project — ``critical``
+    "required by every spend" — so a print and a safety release could not ask
+    for different evidence (§2.3 of the paper), and the page said ready whenever
+    nothing stopped ``check`` (S-60). *Rejected:* one ``milestones.json`` (two
+    branches editing two milestones would conflict: P1.3's records-as-files
+    argument); a ``milestone`` field on each claim (a claim two spends require
+    needs a list, and what a spend requires belongs to the spend); a declared
+    list of the physical claims an article settles (derived instead — the test
+    card — since a declared list drifts from the claims)."""
+
+    id: str
+    description: str = ""
+    requires: list[str] = field(default_factory=list)
+    generator: str = ""
+
+
+@dataclass
+class ExportRecord(Record):
+    """One export of a milestone: an entry of ``exports/<milestone>.json``'s
+    ``exports`` list, append-only, sealed and chained (``store.append_sealed``,
+    P2.5b-D9), written only by ``atompipe export``. Enough to answer from git
+    alone what was required, what was checked, what was re-run, what the person
+    decided and what was built (D26):
+
+    * ``when``, ``who``, ``channel``, ``revision``, ``dirty`` — the clock, git's
+      identity, how it was entered (``cli._channel``), the commit and whether
+      the tree had uncommitted changes (shown, never hashed);
+    * ``requires`` — the milestone's required ids at export;
+    * ``claims`` — every claim's ``{status, cause, reran}`` at export: ``reran``
+      false where its evaluators were served from the verdicts on record, not
+      re-run (critique 18 of the P2.5b design: a claim the milestone does not
+      require is shown as last evaluated);
+    * ``reran`` — each re-run: ``{gate, rho, out8, code, outcome, qualified}``;
+    * ``counted`` — per REQUIRED claim, the covering evaluators whose pass
+      counted on the re-executed view (``claims.contradicted_by``'s rows): what
+      a fail recorded later on this article contradicts (D13);
+    * ``article`` — what was built (``verdicts.export_article``): ``{source:
+      "export", hash, traced, milestone, when, revision, dirty, built_from}``;
+    * ``package`` — ``{hash, files: {rel: sha256}, manifest: sha256}``;
+    * ``proceed`` — ``None``, or the person's decision to go ahead over
+      unresolved required claims: ``{claims: [{id, status, cause}], why}`` (D8);
+    * ``prev``, ``digest`` — the chain and the seal.
+
+    *Rejected:* inside ``milestones/<m>.json`` (a hand-edited source and a
+    tool-written seal in one file); under ``.atompipe/`` (hidden from review);
+    one file per export (an export removed to escape a rebuild prediction would
+    leave no hole; a chain shows one)."""
+
+    milestone: str
+    when: str = ""
+    who: str = ""
+    channel: str = ""
+    revision: str = ""
+    dirty: bool = False
+    requires: list = field(default_factory=list)
+    claims: dict = field(default_factory=dict)
+    reran: list = field(default_factory=list)
+    counted: dict = field(default_factory=dict)
+    article: dict = field(default_factory=dict)
+    package: dict = field(default_factory=dict)
+    proceed: Any = None
+    prev: str = ""
+    digest: str = ""
+
+
+# --------------------------------------------------------------------------- #
 # packs
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -1383,11 +1510,23 @@ class Ledger(Record):
     would write it back as a claim file nobody wrote); refusing every command
     (a dropped requirement is an ordinary edit, and the fail it leaves is a
     fact to show, not a file to repair)."""
+    milestones: list = field(default_factory=list)
+    """``milestones/*.json`` (P2.5b-D1): each a ``Milestone``, in natural id
+    order. Readable by a gate, traced like ``decisions`` (``verdicts``'
+    ``_LEDGER_WHOLE``)."""
+    exports: list = field(default_factory=list)
+    """``exports/*.json`` (P2.5b-D9): every ``ExportRecord``, each milestone's
+    oldest first, milestones in natural order. Hidden from every gate
+    (``verdicts._LEDGER_HIDDEN``): a gate that read the boundary's record would
+    key on its own spend — a staleness that feeds itself."""
 
     def to_dict(self) -> dict[str, Any]:
         out = super().to_dict()
         out.pop("removed", None)
         return out
+
+    def milestone(self, name: str) -> "Milestone | None":
+        return next((m for m in self.milestones if m.id == name), None)
 
     # -- lookups ---------------------------------------------------------- #
     def claim(self, cid: str) -> Claim | None:
@@ -1427,6 +1566,8 @@ class Ledger(Record):
             decisions=[Decision.from_dict(d) for d in data.get("decisions") or []],
             verdicts=[Verdict.from_dict(v) for v in data.get("verdicts") or []],
             views=[View.from_dict(v) for v in data.get("views") or []],
+            milestones=[Milestone.from_dict(m) for m in data.get("milestones") or []],
+            exports=[ExportRecord.from_dict(e) for e in data.get("exports") or []],
         )
 
 
@@ -1442,7 +1583,10 @@ class Ledger(Record):
 #: inverts once a branch is a candidate (brief). `results/<claim-id>.json` holds
 #: a claim's PhysicalResults as `{"results": [...]}`, append-only (D-11), apart
 #: from the claim so a candidate's refutation survives a trade overlay (Q1.10).
-#: `views/` holds viewgens too; only its `*.json` files are records.
+#: `views/` holds viewgens too; only its `*.json` files are records. P2.5b adds
+#: `milestones/<name>.json` (a declared spend) and `exports/<name>.json` (that
+#: spend's export records, sealed and chained like a results file), last, so
+#: every kind before them keeps its place.
 #: The order is `store.RECORD_DIRS`' and a test holds the two equal. Rejected: a
 #: `ledger.json` sharded by kind (`claims.json`, …) — the same conflict per kind.
 RECORD_KINDS: dict[str, type] = {
@@ -1453,6 +1597,8 @@ RECORD_KINDS: dict[str, type] = {
     "inputs": InputArtifact,
     "results": PhysicalResult,
     "views": View,
+    "milestones": Milestone,
+    "exports": ExportRecord,
 }
 
 #: Keys a record FILE may never carry, per kind (the class name), each with the
@@ -1515,5 +1661,6 @@ __all__ = [
     "Verdict", "NegativeControl", "GateSpec", "PrerequisiteKind", "CONTEXT_OUTSIDE",
     "ToolCandidate", "Need", "Extraction", "InputArtifact", "Decision",
     "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta", "Ledger",
-    "RECORD_KINDS", "FORBIDDEN_KEYS", "ALWAYS_WRITTEN",
+    "RECORD_KINDS", "FORBIDDEN_KEYS", "ALWAYS_WRITTEN", "Milestone", "ExportRecord",
+    "LATENCY_UNITS",
 ]

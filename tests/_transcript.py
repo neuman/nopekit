@@ -450,11 +450,14 @@ STEPS: Tuple[Step, ...] = (
     Step("clean-after-check", (1, 3), PORCELAIN, starred(exactly())),
     # P2.1: what a person reads after the first check, in GLOSSARY §3's words —
     # the readiness sentence naming every unresolved required claim, the count
-    # line, C6 a Gap with its reason, C5 waiting on an article.
+    # line, C6 a Gap with its reason, C5 waiting on an article. From P2.5b
+    # (D18, W13; R-6, words) the sentence ends with its hardware clause in
+    # every branch: nothing is checked on an article yet.
     Step("status-words", (2, 1), Atompipe(("status",)), (
         line(r"^v0\.1 is NOT ready: 4 of 7 required claims are unresolved — 1 failing \(C1\); "
              r"2 gaps \(C6, C7\); 1 pending build \(C5\)\. 3 of 7 claims are checked against "
-             r"the current inputs\. Pending build: 1 claim needs an article \(C5\)\.$"),
+             r"the current inputs\. Pending build: 1 claim needs an article \(C5\)\. "
+             r"No claim is checked on any article\.$"),
         line(r"^7 claims · 3 checked · 1 failing · 2 gaps · 1 pending build$"),
         line(r"^\[gap  \] C6 The load is static and centred on the arm — no owner recorded$"),
         line(r"^\[build\] C5 .+ — needs an article; no test written down$"),

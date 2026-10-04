@@ -948,5 +948,61 @@ def owners_callers(sources: dict[str, str]) -> list[str]:
     return hits
 
 
+# --------------------------------------------------------------------------- #
+# C-1 (P2.5b) — the results seal is unmoved by the export record's
+# --------------------------------------------------------------------------- #
+#: A results file exactly as P2.5a's ``append_signed`` wrote it (ecaad99): one
+#: sealed fail on a design article, one owner attribution. Values, not a
+#: recording: the seals below are what ecaad99's writer computed for them.
+_FROZEN_RESULTS = {
+    "results": [{
+        "passed": False, "when": "2026-10-04T10:00:00Z", "who": "Dana <dana@example.invalid>",
+        "detail": "sagged at the tip", "evidence": [], "channel": "interactive",
+        "authority": "", "measured": 0.62, "units": "mm",
+        "article": {"source": "design", "hash": "a" * 64,
+                    "built_from": {"params": [[["config", "thickness"], "b" * 64, 8.0]],
+                                   "model": {"model/bracket.py": "c" * 64}, "files": {}},
+                    "revision": "", "dirty": False},
+        "claim_digest": "d" * 64, "rho": "e" * 64, "evidence_sha256": {},
+        "contradicts": [{"gate": "bracket.deflection", "code": "f" * 64, "rho": "1" * 64,
+                         "value": 0.469, "units": "mm", "inside": True}],
+        "contradiction_check": "", "prev": "",
+        "digest": "2b2db1470fd1dc857fc71a23f70d6aa642c90544bea06696fa421be56743b12d"}],
+    "attributions": [{
+        "role": "owner", "name": "Dana", "reason": "carried", "claim_digest": "2" * 64,
+        "who": "Dana <dana@example.invalid>", "when": "2026-10-04T10:01:00Z",
+        "channel": "interactive", "prev": "",
+        "digest": "d86e51b11117ae91f1fcc9f1b004a0157a5d1695c6f127fc35f7a44e1ed34031"}],
+}
+
+#: The seal ecaad99's writer gives the pass appended after it.
+_FROZEN_NEXT = "1d4082341e286b51397d3a78703b1de00c89a6d047b3ad91eaf9f3964d5775a1"
+
+
+class TheResultsSealIsUnmoved(_env.EnvCase):
+    """(C-1, P2.5b) P2.5b generalises the one sealed writer to the export record
+    (``store.append_sealed``): a results file P2.5a wrote still verifies, and a
+    result appended to it is sealed byte for byte as P2.5a sealed it. What this
+    pins against: a seal form that gained the export record's ``kind`` would
+    move every result's digest, and every results file a person committed would
+    refuse every command."""
+
+    def test_a_p25a_results_file_verifies_and_extends_as_it_did(self):
+        root = self.tmp()
+        P.write_json(os.path.join(root, "results", "C1.json"), _FROZEN_RESULTS)
+        found = store.read_record(os.path.join(root, "results", "C1.json"), "results")
+        self.assertEqual([r.passed for r in found], [False])
+        self.assertEqual([a.name for a in found.attributions], ["Dana"])
+        entry = {k: v for k, v in _FROZEN_RESULTS["results"][0].items()
+                 if k not in ("prev", "digest")}
+        entry.update(passed=True, detail="held", measured=None, units="", contradicts=[],
+                     when="2026-10-05T10:00:00Z")
+        stored = store.append_signed(root, "C1", "results", entry)
+        self.assertEqual(stored["prev"], _FROZEN_RESULTS["results"][0]["digest"])
+        self.assertEqual(stored["digest"], _FROZEN_NEXT)
+        again = store.read_record(os.path.join(root, "results", "C1.json"), "results")
+        self.assertEqual([r.passed for r in again], [False, True])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

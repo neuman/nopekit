@@ -728,8 +728,10 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
         index = self._index()
         self.assertEqual(list(index), [
             "generated", "schema", "records_digest", "meta", "claims", "params", "decisions",
-            "needs", "inputs", "results", "attributions", "views", "unregistered_inputs",
-            "problems"])
+            "needs", "inputs", "results", "attributions", "views", "milestones", "exports",
+            "unregistered_inputs", "problems"])
+        # P2.5b: a milestone's export entries are records as stored — their
+        # `counted` is what the export saw, sealed, not a status now.
         self.assertEqual(index["generated"], store.INDEX_BANNER)
         self.assertEqual(index["schema"], store.PROJECT_SCHEMA)
         self.assertEqual(index["records_digest"], store.records_digest(self.root))
@@ -1410,14 +1412,45 @@ def _legacy_bracket(dest: str, *, template: bool = False) -> str:
 
 def _migrated_bracket(dest: str) -> str:
     """The enriched bracket, migrated in-process the way its first `check` would
-    (the real `static_param_prose`), with `_HAND_FORMATTED` rewritten by hand."""
+    (the real `static_param_prose`), with `_HAND_FORMATTED` rewritten by hand —
+    and, from P2.5b, an export record of `print-v1` (`_EXPORT`), so a command
+    that rewrites one can be caught: every record kind is here."""
     project = _legacy_bracket(dest)
     store.migrate_legacy(project, apply=True, when=_WHEN,
                          model_prose=modelio.static_param_prose)
     path = os.path.join(project, *_HAND_FORMATTED.split("/"))
     data = json.loads(_read_bytes(path))
     _write(path, json.dumps(dict(reversed(list(data.items()))), indent=4, ensure_ascii=False))
+    _write(os.path.join(project, "exports", "print-v1.json"),
+           json.dumps({"exports": [_sealed_export(_EXPORT, "print-v1", "")]}, indent=2,
+                      ensure_ascii=False) + "\n")
     return project
+
+
+#: One export of `print-v1`, as `export` records it (P2.5b-D9) — written by hand
+#: and sealed by this file's own copy of the export seal form (`_sealed_export`):
+#: a fixture written by the code under test changes shape with it.
+_EXPORT = {
+    "milestone": "print-v1", "when": "2026-10-04T10:00:00Z",
+    "who": "Dana <dana@example.invalid>", "channel": "interactive", "revision": "",
+    "dirty": False, "requires": ["C1", "C2", "C3", "C4"],
+    "claims": {"C1": {"status": "pass", "cause": "checked", "reran": True}},
+    "reran": [], "counted": {},
+    "article": {"source": "export", "hash": "a" * 64, "traced": True,
+                "milestone": "print-v1", "when": "2026-10-04T10:00:00Z", "revision": "",
+                "dirty": False, "built_from": {"params": [], "model": {}, "files": {}}},
+    "package": {"hash": "b" * 64, "files": {"REPORT.md": "c" * 64}, "manifest": "d" * 64},
+    "proceed": None,
+}
+
+
+def _sealed_export(entry: dict, milestone: str, prev: str) -> dict:
+    """``entry`` sealed and chained as an export record entry: the seal over the
+    entry with the record kind, the milestone and the list (P2.5b-D9)."""
+    body = {k: v for k, v in entry.items() if k not in ("prev", "digest")}
+    body["prev"] = prev
+    form = {"schema": 1, "kind": "exports", "file": milestone, "list": "exports", **body}
+    return {**body, "digest": util.seal(form)}
 
 
 def _hand_edit(project: str, n: int) -> None:
@@ -1476,7 +1509,8 @@ def _touched_records(before: dict, after: dict) -> list[str]:
 #: Every command that is neither `check` nor a shim, as a person types it, in
 #: the order the tests run them (`site init` before the site commands that need
 #: a site), with ``True`` where the command was ASKED to write an output that is
-#: not a record — `report --write`'s `docs/readiness.md`, `model --write`'s
+#: not a record — `report --write`'s `REPORT.md` (P2.5b; `docs/readiness.md`
+#: before it), `model --write`'s
 #: `.atompipe/model.json`, the site's scaffold and `data/`. `init` refuses on a
 #: project before it writes anything; it is here so "every command" means every
 #: command. `check --no-record` and `gate selftest --no-record` are the dry runs.
@@ -1506,6 +1540,12 @@ _NON_SHIM: tuple[tuple[tuple[str, ...], bool], ...] = (
     (("init",), False),
     (("report", "--write"), True), (("model", "--write"), True),
     (("site", "init"), True), (("site", "build"), True), (("site", "status"), False),
+    # P2.5b (rows added, never removed): the milestone list, the boundary's dry
+    # run — which re-runs the evaluators and writes only ignored scratch — and
+    # the milestone's report.
+    (("export",), False), (("export", "--json"), False),
+    (("export", "print-v1", "--dry-run"), False),
+    (("report", "--milestone", "print-v1"), False),
 )
 
 #: The exit codes each command may end with while doing its work: 1 is a
@@ -2511,3 +2551,304 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+
+# --------------------------------------------------------------------------- #
+# P2.5b — milestones and export records; REPORT.md an ignored output
+# --------------------------------------------------------------------------- #
+def _export_file(root: str, name: str, entries: list[dict]) -> str:
+    path = os.path.join(root, "exports", f"{name}.json")
+    chained, prev = [], ""
+    for entry in entries:
+        sealed = _sealed_export(entry, name, prev)
+        chained.append(sealed)
+        prev = sealed["digest"]
+    _write(path, json.dumps({"exports": chained}, indent=2, ensure_ascii=False) + "\n")
+    return path
+
+
+class TheExportRecordIsSealedAndChained(_env.EnvCase):
+    """(V-6, invariants 8 and 12) `exports/<milestone>.json` is sealed and
+    chained like a results file, its milestone and its kind inside every seal:
+    a hand edit, a removed entry, an entry copied to another milestone's file or
+    into a results file — each refuses the file on every command, naming it, the
+    entry and the restore. The one writer is `store.append_sealed`."""
+
+    def project(self) -> str:
+        return _projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True)
+
+    def refusal(self, root: str) -> str:
+        with self.assertRaises(AtompipeError) as caught:
+            store.load(root)
+        return str(caught.exception)
+
+    def test_two_exports_read(self):
+        root = self.project()
+        _export_file(root, "print-v1", [_EXPORT, dict(_EXPORT, when="2026-10-05T10:00:00Z")])
+        ledger = store.load(root)
+        found = getattr(ledger, "exports", None)
+        if found is None:
+            self.fail("Ledger.exports does not exist yet")
+        self.assertEqual([e.when for e in found], ["2026-10-04T10:00:00Z",
+                                                   "2026-10-05T10:00:00Z"])
+
+    def test_each_tampering_is_refused(self):
+        three = [_EXPORT, dict(_EXPORT, when="2026-10-05T10:00:00Z"),
+                 dict(_EXPORT, when="2026-10-06T10:00:00Z")]
+        with self.subTest("a hand-edited article hash"):
+            root = self.project()
+            path = _export_file(root, "print-v1", three[:2])
+            data = json.loads(_read_bytes(path))
+            data["exports"][1]["article"]["hash"] = "f" * 64
+            _write(path, json.dumps(data, indent=2))
+            said = self.refusal(root)
+            for needle in ("exports/print-v1.json", "exports[1]", "git checkout -- exports/"
+                                                                   "print-v1.json"):
+                self.assertIn(needle, said)
+        with self.subTest("the middle of three removed"):
+            root = self.project()
+            path = _export_file(root, "print-v1", three)
+            data = json.loads(_read_bytes(path))
+            del data["exports"][1]
+            _write(path, json.dumps(data, indent=2))
+            self.assertIn("exports/print-v1.json", self.refusal(root))
+        with self.subTest("an entry copied into another milestone's file"):
+            root = self.project()
+            path = _export_file(root, "print-v1", three[:1])
+            data = json.loads(_read_bytes(path))
+            _write(os.path.join(root, "exports", "fit-check.json"),
+                   json.dumps(data, indent=2))
+            self.assertIn("exports/fit-check.json", self.refusal(root))
+        with self.subTest("an export entry pasted into a results file"):
+            root = self.project()
+            path = _export_file(root, "print-v1", three[:1])
+            entry = json.loads(_read_bytes(path))["exports"][0]
+            _write(os.path.join(root, "results", "C5.json"),
+                   json.dumps({"results": [entry]}, indent=2))
+            self.assertIn("results/C5.json", self.refusal(root))
+
+    def test_the_only_writer_is_append_sealed(self):
+        """An AST scan: a function under `src/atompipe` that names `exports` and
+        writes a file is `store.append_sealed`."""
+        self.assertEqual(export_writers(), [])
+        planted = {"rogue.py": "def save_export(root, data):\n"
+                               "    atomic_write_text(os.path.join(root, 'exports', 'x.json'),"
+                               " data)\n"}
+        self.assertEqual(export_writers(planted), ["rogue.py:save_export"])
+
+    def test_a_seal_without_the_milestone_is_caught(self):
+        """Two guards against an entry copied to another milestone's file: its
+        own `milestone` field, and the seal, which names the milestone. Planted:
+        the field check gone — the seal still refuses the copy; and the seal
+        form without the milestone too — then the copy verifies, so the seal's
+        milestone is what holds once the field check is gone."""
+        real = getattr(store, "_seal_form_for", None)
+        if real is None:
+            self.fail("store._seal_form_for does not exist yet")
+
+        def no_milestone(kind, stem, list_name, entry):
+            form = real(kind, stem, list_name, entry)
+            form.pop("file", None)
+            return form
+
+        def copied(root):
+            data = json.loads(_read_bytes(os.path.join(root, "exports", "print-v1.json")))
+            _write(os.path.join(root, "exports", "fit-check.json"),
+                   json.dumps(data, indent=2))
+
+        root = self.project()
+        store.append_sealed(root, "exports", "print-v1", "exports", dict(_EXPORT))
+        copied(root)
+        with mock.patch.object(store, "_export_milestone_problem", lambda item, stem: ""):
+            self.assertIn("exports/fit-check.json", self.refusal(root))
+        root = self.project()
+        with mock.patch.object(store, "_seal_form_for", no_milestone), \
+                mock.patch.object(store, "_export_milestone_problem", lambda item, stem: ""):
+            store.append_sealed(root, "exports", "print-v1", "exports", dict(_EXPORT))
+            copied(root)
+            store.load(root)            # both guards planted away: the copy verifies
+
+
+_WRITERS = frozenset({"atomic_write_text", "atomic_write_json", "_write_if_changed",
+                      "_write_once", "write_bytes", "write_text"})
+
+
+def export_writers(planted: dict[str, str] | None = None) -> list[str]:
+    """``module:function`` for every function that mentions ``"exports"`` and
+    calls a file writer, but ``store.append_sealed``."""
+    sources = dict(planted or {})
+    if planted is None:
+        base = os.path.join(_env.REPO, "src", "atompipe")
+        for name in sorted(os.listdir(base)):
+            if name.endswith(".py"):
+                with open(os.path.join(base, name), encoding="utf-8") as fh:
+                    sources[name] = fh.read()
+    hits = []
+    for name, text in sources.items():
+        for node in ast.walk(ast.parse(text)):
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            names_exports = any(isinstance(n, ast.Constant) and n.value == "exports"
+                                for n in ast.walk(node))
+            writes = any(isinstance(n, ast.Call) and (
+                getattr(n.func, "attr", None) in _WRITERS
+                or getattr(n.func, "id", None) in _WRITERS) for n in ast.walk(node))
+            if names_exports and writes and (name, node.name) != ("store.py", "append_sealed"):
+                hits.append(f"{name}:{node.name}")
+    return hits
+
+
+class ReportIsAnIgnoredOutput(_env.EnvCase):
+    """(V-12, D-14, S-41) `report --write` writes `REPORT.md` at the project root,
+    an output git ignores — never `docs/readiness.md`, which drifted from its
+    ledger while tracked. A project migrated before P2.5b gains the ignore lines
+    on its next `report --write`, inside the marked block only."""
+
+    #: The root block a project migrated before P2.5b carries (ecaad99's).
+    ECAAD99_BLOCK = ("# atompipe:begin\n"
+                     "# Written by atompipe: bytecode from importing model/, gates/ and "
+                     "selftest/.\n__pycache__/\n*.py[cod]\n# atompipe:end\n")
+
+    def test_the_bracket_tracks_no_report(self):
+        proc = _env.git(["ls-files", "examples/bracket"], cwd=_env.REPO)
+        listed = proc.stdout.splitlines()
+        self.assertFalse([p for p in listed if p.endswith(("/REPORT.md", "docs/readiness.md"))],
+                         listed)
+
+    def project(self) -> str:
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True)
+        _write(os.path.join(root, ".gitignore"), self.ECAAD99_BLOCK + "\n# mine\nscratch/\n")
+        _projects._commit_all(root, "a project migrated before P2.5b")
+        return root
+
+    def porcelain(self, root: str) -> list[str]:
+        return _env.git(["status", "--porcelain"], cwd=root).stdout.splitlines()
+
+    def test_report_write_writes_an_ignored_report(self):
+        root = self.project()
+        proc = _env.atompipe(["report", "--write"], cwd=root)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertTrue(os.path.isfile(os.path.join(root, "REPORT.md")))
+        self.assertFalse(os.path.exists(os.path.join(root, "docs", "readiness.md")))
+        self.assertEqual(self.porcelain(root), [" M .gitignore"])
+        text = _read_bytes(os.path.join(root, ".gitignore")).decode("utf-8")
+        block = text.split("# atompipe:end", 1)[0]
+        for line in ("/REPORT.md", "/out/"):
+            self.assertIn(line, block.splitlines())
+        self.assertIn("scratch/", text.split("# atompipe:end", 1)[1])
+        before = _read_bytes(os.path.join(root, ".gitignore"))
+        _env.atompipe(["report", "--write"], cwd=root)
+        self.assertEqual(_read_bytes(os.path.join(root, ".gitignore")), before)
+
+    def test_the_planted_writers_are_caught(self):
+        """Planted: `write_report` to the old path; `report --write` that skips
+        the ignore lines."""
+        from atompipe import cli as cli_mod
+        from atompipe import report as report_mod
+        root = self.project()
+        real = report_mod.write_report
+
+        def old_path(root_, *args, **kwargs):
+            path = real(root_, *args, **kwargs)
+            target = os.path.join(root_, "docs", "readiness.md")
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            os.replace(path, target)
+            return target
+
+        with mock.patch.object(report_mod, "write_report", old_path), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli_mod.main(["report", "--write", "-C", root])
+        self.assertTrue(os.path.exists(os.path.join(root, "docs", "readiness.md")),
+                        "the planted old path wrote nothing to catch")
+        self.assertFalse(os.path.isfile(os.path.join(root, "REPORT.md")))
+        root = self.project()
+        with mock.patch.object(store, "ensure_ignore_blocks", lambda root_: []), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cli_mod.main(["report", "--write", "-C", root])
+        self.assertIn("?? REPORT.md", self.porcelain(root))
+
+
+class MilestonesAreRecords(_env.EnvCase):
+    """(V-14, invariant 8) `milestones/<name>.json` is a record, read strictly;
+    the index lists milestones and export records; `export` is a kept writer
+    that writes its export record, new verdict and control entries and the
+    marked ignore blocks, and no other record (critiques 5 and 12 of the P2.5b
+    design: it files its re-run as `check --force` does)."""
+
+    def write(self, name: str, record: Any) -> str:
+        root = self.tmp()
+        _write(os.path.join(root, "milestones", name),
+               json.dumps(record, indent=2) if not isinstance(record, str) else record)
+        return os.path.join(root, "milestones", name)
+
+    def test_the_strict_reader(self):
+        good = self.write("print-v1.json", {"description": "the print",
+                                            "requires": ["C1", "C2"],
+                                            "generator": "generators/profile.py:side_profile"})
+        found = store.read_record(good, "milestones")
+        self.assertEqual((found.id, list(found.requires), found.generator),
+                         ("print-v1", ["C1", "C2"], "generators/profile.py:side_profile"))
+        refused = {
+            "an unknown key, with its suggestion": ("print-v1.json", {"require": ["C1"]},
+                                                    'did you mean "requires"'),
+            "a stem that is no directory name": ("Print V1.json", {"requires": ["C1"]},
+                                                 "milestones/Print V1.json"),
+            "requires not a list": ("m.json", {"requires": "C1"}, "requires"),
+            "a duplicate id": ("m.json", {"requires": ["C1", "C1"]}, "C1"),
+            "an empty id": ("m.json", {"requires": ["C1", ""]}, "requires"),
+            "a generator outside the project": ("m.json", {"requires": ["C1"],
+                                                           "generator": "../x.py:f"},
+                                                "generator"),
+            "a generator naming no function": ("m.json", {"requires": ["C1"],
+                                                          "generator": "x.py"}, "generator"),
+        }
+        for name, (stem, record, needle) in refused.items():
+            with self.subTest(name):
+                with self.assertRaises(AtompipeError) as caught:
+                    store.read_record(self.write(stem, record), "milestones")
+                self.assertIn(needle, str(caught.exception))
+                self.assertIn("milestones/", str(caught.exception))
+
+    def test_the_index_lists_milestones_and_exports(self):
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True)
+        _export_file(root, "print-v1", [_EXPORT])
+        index = store.build_index(root)
+        self.assertIn("milestones", index)
+        self.assertIn("exports", index)
+        self.assertEqual([row.get("id") for row in index["milestones"]], ["print-v1"])
+        self.assertEqual(list(index["exports"]), ["print-v1"])
+        store.write_index(root)
+        self.assertEqual(store.agree(root), [])
+
+    def test_export_writes_its_record_and_nothing_else(self):
+        project = _migrated_bracket(os.path.join(self.tmp(), "m"))
+        os.remove(os.path.join(project, "exports", "print-v1.json"))
+        _projects.set_thickness(project, 8.0)
+        _env.atompipe(["check"], cwd=project, identity=True)
+        before = _records(project)
+        run = _watched(self, project, "export", "print-v1")
+        self.assertEqual(run.proc.returncode, 0, run.proc.stdout + run.proc.stderr)
+        touched = _touched_records(before, _records(project))
+        self.assertEqual(touched, ["exports/print-v1.json"])
+        carve = frozenset({("write", "exports/print-v1.json")})
+        self.assertEqual(_unexplained(self, run, blocks=True, carve_out=carve), [])
+
+    def test_a_refused_export_files_its_re_run_and_no_record(self):
+        """On a forged copy (critique 5 of the P2.5b design): the refused export
+        writes no record and no package, and what it writes beside its re-run's
+        new entries is ignored when written — the property `check --force`
+        meets, never a path list."""
+        import test_export
+        project = _migrated_bracket(os.path.join(self.tmp(), "f"))
+        os.remove(os.path.join(project, "exports", "print-v1.json"))
+        _env.atompipe(["check"], cwd=project, identity=True)
+        test_export.forge_entry(project, "bracket.deflection", passed=True)
+        before = _records(project)
+        run = _watched(self, project, "export", "print-v1")
+        self.assertEqual(run.proc.returncode, 1, run.proc.stdout + run.proc.stderr)
+        self.assertEqual(_touched_records(before, _records(project)), [])
+        self.assertEqual(_unexplained(self, run, blocks=True), [])
+        self.assertTrue(any(_transcript.ENTRY_PATH.fullmatch(p) and p not in run.before
+                            for p in run.after),
+                        "the refused export filed no re-run: the property held vacuously")

@@ -14,7 +14,7 @@ Four conventions hold across every command:
 * **Terse and greppable by default.** One line per verdict, one line per claim,
   one line per gate. `[ok  ] beam.deflection : 0.700 mm at 15 N` is a line you
   can `grep FAIL` and a line an agent can hold fifty of. Anything longer is
-  behind `--json` or in `docs/readiness.md`.
+  behind `--json` or in `REPORT.md`.
 * **`--json` on every read command.** Not a pretty-printer switch: the JSON is
   the same data the human output renders, so an agent never has to parse
   columns. When `--json` is given, nothing but JSON goes to stdout.
@@ -67,8 +67,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Mapping
 
 from . import __version__
-from . import (artifacts, claims, decisions, gates, modelio, packs, report, site, store, vcs,
-               verdicts)
+from . import (artifacts, claims, decisions, gates, milestones, modelio, packs, report, site,
+               store, vcs, verdicts)
 from .models import (
     ArtifactKind,
     Claim,
@@ -1864,6 +1864,519 @@ def _stale_reasons(resolution: verdicts.Resolution) -> dict[str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# export: the boundary that spends (P2.5b)
+# --------------------------------------------------------------------------- #
+def _load_generator(root: str, ref: str) -> Callable[..., Any]:
+    """The function a milestone's ``generator`` names, loaded as a project gate
+    module is (``modelio.load_source_module``, the project root on ``sys.path``
+    for the load): the bytes on disk are the bytes that run, and its code
+    closure is recorded — the article's code half (P2.5b-D12)."""
+    path, name = store.generator_parts(ref)
+    full = os.path.join(root, *path.split("/"))
+    if not os.path.isfile(full):
+        raise AtompipeError(f"{path} does not exist")
+    salt = short_hash(os.path.abspath(full))
+    stem = re.sub(r"\W", "_", os.path.splitext(os.path.basename(full))[0]) or "generator"
+    sys.path.insert(0, root)
+    try:
+        module = modelio.load_source_module(full, name=f"atompipe_generator_{stem}_{salt}",
+                                            roots=[root])
+    except Exception as exc:                              # noqa: BLE001 - project code
+        first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        raise AtompipeError(f"{path}: {first}") from None
+    finally:
+        try:
+            sys.path.remove(root)
+        except ValueError:
+            pass
+    fn = getattr(module, name, None)
+    if not callable(fn):
+        raise AtompipeError(f"{path} has no function {name}")
+    return fn
+
+
+def _export_list(root: str, ledger: Ledger, *, as_json: bool) -> int:
+    """`atompipe export`: every milestone's line, as last evaluated — the cache's
+    view, nothing re-run (critique 17 of the P2.5b design: the head says so, and
+    `export <m> --dry-run` is the boundary's)."""
+    registry, _problems = _registry(root, ledger, strict=False)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    composed = claims.compositions(view, registry=registry,
+                                   stale_gates=resolution.stale_gates)
+    said = report.HUMAN["milestone"]
+    declared = list(view.milestones)
+    if as_json:
+        summary = claims.summarise(view, registry, stale_gates=resolution.stale_gates)
+        _dump({"milestones": summary["milestones"]})
+        return 0
+    if not declared:
+        _say(said["none"])
+        return 0
+    _say(said["list_head"].format(n=len(declared),
+                                  milestones=_plural_word(len(declared), "milestone")))
+    for milestone in declared:
+        line = report.milestone_line(view, composed, milestone)
+        mine = [e for e in view.exports if e.milestone == milestone.id]
+        if mine:
+            last = mine[-1]
+            line += said["last_export"].format(
+                article=report.article12(last.article), who=report._one(last.who),
+                when=str(last.when)[:10])
+        _say(f"  {line}")
+    return 0
+
+
+def _plural_word(n: int, one: str) -> str:
+    return one if n == 1 else one + "s"
+
+
+def _proceed_refusal(name: str, marker: str, isatty: bool) -> str:
+    said = report.HUMAN["export"]
+    why = (said["proceed_agent"].format(marker=marker) if marker
+           else said["proceed_pipe"] if not isatty else "")
+    return said["proceed_shell"].format(m=name, why=why)
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """`atompipe export [<milestone>] [--dry-run] [--proceed --why TEXT]` — the
+    boundary that spends (P2.5b; METHOD rule 4; R-9). One code path for both
+    modes (D-15: `--dry-run` is `/ready`), in order:
+
+    0. Refused before anything runs: `--proceed` with `--dry-run`; `--proceed`
+       from an agent session or a pipe, or with no `--why` (exit 2). Written:
+       no git identity, a legacy project (exit 2); under `--dry-run` each is a
+       refusal it says it would make (critique 21 of the design).
+    1. Load; the milestone (exit 2 naming the declared ones when absent).
+    2. Under the build lock, the re-run: `check --force --only <closure>`'s
+       sweep at the top tier (`verdicts.sweep(force=True, max_tier=3)`), every
+       evaluator a required claim rests on with its prerequisites and both
+       controls; filed as `check --force` files it, except under `--dry-run`.
+    3. Judged on the RE-EXECUTED view (`_resolved(sweep=…)`, the view `check`
+       builds): *ready* (`claims.unresolved`) and the disagreements (D7).
+    4. Only with no refusal — or only unresolved ones and `--proceed`: the
+       generator, traced (`verdicts.export_article`), the package built aside,
+       and the inputs held: an input the judgment stood on that moved while the
+       package was built refuses it (critique 4).
+    5. `--dry-run`: print, remove the scratch, exit. Written: the person's
+       decision typed (`--proceed`), the package swapped in, the export record
+       appended (`store.append_sealed`), sealed and chained.
+
+    Exit 0 written or would write (or the list); 1 refused or would refuse; 2
+    a usage or record error. What slipped through without it: one implicit
+    spend, so the page said ready whenever nothing stopped `check` (S-60), and
+    a forged cache entry was served Checked at the one place it costs money."""
+    root = _root(args)
+    said = report.HUMAN["export"]
+    name = getattr(args, "milestone", None)
+    if not name:
+        return _export_list(root, _load(root), as_json=args.json)
+    dry = bool(args.dry_run)
+    proceed = bool(args.proceed)
+    environ = dict(os.environ)
+    isatty = bool(sys.stdin and sys.stdin.isatty())
+    marker = _agent_marker(environ)
+    if proceed and dry:
+        raise AtompipeError(said["proceed_dry"])
+    if proceed and (marker or not isatty):
+        raise AtompipeError(_proceed_refusal(name, marker, isatty))
+    if proceed and not str(args.why or "").strip():
+        raise AtompipeError(said["proceed_why"])
+    now = utcnow_iso()
+    preconditions: list[milestones.Refusal] = []
+    legacy = store.is_legacy(root)
+    who = vcs.ident(root)
+    if legacy:
+        if not dry:
+            raise AtompipeError(said["legacy"])
+        preconditions.append(milestones.Refusal("precondition", "legacy", said["legacy"]))
+    if not who:
+        if not dry:
+            raise AtompipeError(said["identity"])
+        preconditions.append(milestones.Refusal("precondition", "identity", said["identity"]))
+    ledger = _load(root)
+    milestone = ledger.milestone(name)
+    if milestone is None:
+        declared = [m.id for m in ledger.milestones]
+        raise AtompipeError(said["no_milestone"].format(
+            name=name, declared=said["declared"].format(names=", ".join(declared))
+            if declared else said["none_declared"]))
+    if not dry:
+        # The marked ignore lines first (D17): `out/` is ignored before a byte
+        # of a package lands in it, on a project migrated before P2.5b too.
+        store.ensure_ignore_blocks(root)
+
+    scratch = milestones.scratch_dir(root, name, dry)
+    try:
+        with _lock(root):
+            return _export_locked(args, root, ledger, milestone, now=now, dry=dry,
+                                  proceed=proceed, who=who, isatty=isatty, marker=marker,
+                                  environ=environ, scratch=scratch,
+                                  preconditions=preconditions)
+    finally:
+        if os.path.exists(scratch):
+            shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _export_locked(args: argparse.Namespace, root: str, ledger: Ledger, milestone: Any, *,
+                   now: str, dry: bool, proceed: bool, who: str, isatty: bool, marker: str,
+                   environ: Mapping[str, str], scratch: str,
+                   preconditions: list) -> int:
+    said = report.HUMAN["export"]
+    name = milestone.id
+    records_before = store.records_digest(root)
+    registry, _problems = _registry(root, ledger, strict=True)
+    model, projection, model_error = _projection_safe(root, ledger)
+    before = verdicts.resolve(root, registry, projection, ledger, model_error=model_error,
+                              now=now, model=model)
+    closure = milestones.closure(ledger, registry, milestone)
+    result = None
+    if closure and projection is not None:
+        ctx = _context(root, ledger, model, projection, int(Tier.EXTERNAL), quiet=True)
+        result = verdicts.sweep(root, registry, ctx, projection=projection, ledger=ledger,
+                                max_tier=int(Tier.EXTERNAL), only=closure, force=True,
+                                record=not dry, now=now)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error, now=now,
+                                 model=model, sweep=result)
+    composed = claims.compositions(view, registry=registry,
+                                   stale_gates=resolution.stale_gates)
+    found = milestones.disagreements(before, result, set(closure)) if result is not None \
+        else []
+    extra = list(preconditions)
+    judged = milestones.judge(view, composed, milestone, disagreements=found, extra=extra,
+                              decided=proceed)
+    unresolved_ = [r for r in judged.refusals if r.kind == "unresolved"]
+
+    # 4. the generator and the package — only where the export may write.
+    article: dict = {}
+    package = None
+    carried: dict = {}
+    if judged.writes:
+        built = _export_build(root, ledger, milestone, view, registry, composed, projection,
+                              model, model_error, resolution, scratch, now=now)
+        if isinstance(built, milestones.Refusal):
+            extra.append(built)
+        else:
+            article, package, carried = built
+            moved = _inputs_moved(root, records_before, registry, projection, ledger, model,
+                                  result, article)
+            if moved:
+                extra.append(milestones.Refusal("package", "inputs", said["package_moved"].format(
+                    what=moved, m=name)))
+        if not isinstance(built, milestones.Refusal):
+            for kind, rel_path in milestones.package_problems(root, name, ledger.exports):
+                key = "package_foreign" if kind == "foreign" else "package_edited"
+                newest = [e for e in ledger.exports if e.milestone == name]
+                extra.append(milestones.Refusal("package", rel_path, said[key].format(
+                    m=name, file=rel_path,
+                    package=report.article12((newest[-1].package or {}).get("hash", ""))
+                    if newest else "")))
+        judged = milestones.judge(view, composed, milestone, disagreements=found,
+                                  extra=extra, decided=proceed)
+        if not judged.writes:
+            article, package = {}, None
+
+    lines = _export_lines(view, composed, milestone, result, found, judged)
+    decision = None
+    decided_line = ""
+    if judged.writes and proceed:
+        if unresolved_:
+            groups = report._groups(view, composed, [view.claim(r.subject)
+                                                     for r in unresolved_])
+            if dry:
+                pass
+            else:
+                answer = _ask(said["proceed_prompt"].format(groups=groups, m=name), lines)
+                if answer is None or answer.strip() != name:
+                    typed = "nothing" if not (answer or "").strip() else repr(answer.strip())
+                    raise AtompipeError(said["typed"].format(typed=typed, m=name))
+                decision = {"claims": [{"id": r.subject,
+                                        "status": str(composed[r.subject].status),
+                                        "cause": str(composed[r.subject].cause.value)}
+                                       for r in unresolved_],
+                            "why": str(args.why)}
+                decided_line = said["decided"].format(who=report._one(who), groups=groups,
+                                                      why=report._one(args.why))
+        else:
+            decided_line = said["proceed_nothing"]
+    written = False
+    if judged.writes and package is not None and not dry:
+        channel = (_channel(isatty, environ, name if decision is not None else None, name)
+                   if (marker or not isatty or decision is not None) else "interactive")
+        milestones.swap_package(root, name, scratch)
+        entry = _export_entry(view, composed, milestone, result, registry, resolution,
+                              article, package, decision, now=now, who=who, channel=channel)
+        store.append_sealed(root, "exports", name, "exports", entry)
+        written = True
+
+    reasons = "; ".join(r.reason for r in judged.refusals
+                        if r.kind not in milestones.COVERED or not (proceed and judged.writes))
+    if judged.writes and package is not None:
+        args_out = dict(path=f"{store.PACKAGES_NAME}/{name}", article=report.article12(article),
+                        package=report.article12(package.hash), n=len(package.files),
+                        files=_plural_word(len(package.files), "file"), m=name)
+        outcome = said["written" if written else "would_write"].format(**args_out)
+    else:
+        outcome = said["would_refuse" if dry else "refused"].format(reasons=reasons)
+    card = (milestones.test_card(view, composed, milestone, article.get("hash", ""),
+                                 view.exports) if article else [])
+    if args.json:
+        _dump(_export_json(view, composed, milestone, judged, result, found, article, package,
+                           decision, dry=dry, written=written, card=card,
+                           exports=view.exports))
+    else:
+        for line in lines:
+            _say(line)
+        if decided_line:
+            _say(decided_line)
+        _say(outcome)
+        for line in card:
+            _say(line)
+    return 0 if judged.writes and package is not None else 1
+
+
+def _ask(prompt: str, rows: Iterable[str]) -> str | None:
+    """The go-ahead's prompt, on stderr — after the lines the person reads —
+    and the line they typed, or ``None`` at end of input."""
+    for row in rows:
+        print(row, file=sys.stderr)
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    try:
+        line = sys.stdin.readline()
+    except OSError:
+        return None
+    return line.rstrip("\r\n") if line else None
+
+
+def _export_build(root: str, ledger: Ledger, milestone: Any, view: Ledger, registry: Any,
+                  composed: Mapping[str, Any], projection: Any, model: Any, model_error: str,
+                  resolution: Any, scratch: str, *, now: str) -> Any:
+    """Run the generator traced into ``scratch`` and build the package there:
+    ``(article, package, carried)``, or the ``generator`` refusal."""
+    said = report.HUMAN["export"]
+    name = milestone.id
+    if os.path.exists(scratch):
+        shutil.rmtree(scratch)
+    os.makedirs(scratch)
+    if projection is None:
+        return milestones.Refusal("generator", milestone.generator or name,
+                                  said["generator_model"].format(
+                                      why=report._trunc(model_error or "no model entry", 120)))
+    anchors = verdicts.anchors_for(root, registry, out_dir=store.out_dir(root))
+    digests = FileDigests()
+    if milestone.generator:
+        try:
+            fn = _load_generator(root, milestone.generator)
+        except AtompipeError as exc:
+            return milestones.Refusal("generator", milestone.generator,
+                                      said["generator_load"].format(why=str(exc)))
+    else:
+        fn = (lambda ctx: None)
+    built = verdicts.export_article(root, projection, fn, out_dir=scratch, anchors=anchors,
+                                    digests=digests, model=model, milestone=name, when=now,
+                                    resolution=resolution)
+    if built.outside:
+        return milestones.Refusal("generator", built.outside[0], said["generator_outside"]
+                                  .format(path=", ".join(built.outside)))
+    if built.error:
+        return milestones.Refusal("generator", milestone.generator, said["generator_errored"]
+                                  .format(first=report._trunc(built.error, 160)))
+    if milestone.generator and not built.written:
+        return milestones.Refusal("generator", milestone.generator, said["generator_none"])
+    clashing = [rel_path for rel_path in built.written if rel_path in milestones.SPINE_FILES]
+    if clashing:
+        return milestones.Refusal("generator", clashing[0], said["generator_outside"].format(
+            path=clashing[0]))
+    # Rendered exactly as `report --milestone` renders it (V-7): the same
+    # parameter view and model error, over the boundary's re-executed view.
+    params = _shown_params(root, ledger, model, model_error, resolution, registry)
+    report_md = report.render_markdown(view, registry, stale_gates=resolution.stale_gates,
+                                       model_error=model_error, root=root, params=params,
+                                       milestone=milestone,
+                                       stale_reasons=_stale_reasons(resolution))
+    required = claims.required_ids(view, milestone)
+    manifest = {"milestone": name, "revision": built.article.get("revision", ""),
+                "records_digest": store.records_digest(root, exclude=("exports",)),
+                "spine": verdicts.spine_digest(), "article": built.article["hash"],
+                "traced": built.article["traced"],
+                "claims": {cid: str(composed[cid].status) for cid in required
+                           if cid in composed}}
+    package = milestones.build_package(scratch, report_md=report_md, carried=built.params,
+                                       manifest=manifest)
+    return built.article, package, built.params
+
+
+def _inputs_moved(root: str, records_before: str, registry: Any, projection: Any,
+                  ledger: Ledger, model: Any, result: Any, article: Mapping[str, Any]) -> str:
+    """What moved between the judgment and the swap, in words, or ``""``
+    (critique 4 of the P2.5b design): the records, the article's read set, or a
+    file a re-run evaluator read. Nothing is run: the design is re-read and each
+    read set digested now. What it catches: an editor saving a file a required
+    evaluator read while a tier-3 re-run took minutes — the package would ship
+    bytes no evaluator saw, under a record that said ready."""
+    if store.records_digest(root) != records_before:
+        return "the records"
+    try:
+        model_now, projection_now, _error = _projection_safe(root, ledger)
+    except AtompipeError as exc:
+        return str(exc)
+    anchors = verdicts.anchors_for(root, registry, out_dir=store.out_dir(root))
+    here = verdicts._Now(root, projection_now, ledger, anchors=anchors, digests=FileDigests(),
+                         model=model_now)
+    state, moved = verdicts._article_moves(article, here)
+    if state != "current":
+        return verdicts._stale_text(moved) if moved else "the article's design"
+    pairs = {spec.id: (spec, fn) for spec, fn in registry.pairs()} \
+        if registry is not None else {}
+    for row in getattr(result, "rows", None) or ():
+        if not row.executed or not row.rho or row.reads is None:
+            continue
+        gid = row.verdict.gate
+        reads = row.reads.to_dict() if hasattr(row.reads, "to_dict") else dict(row.reads)
+        now_reads, _why = verdicts._reads_now(reads, here)
+        if now_reads is None or gid not in pairs:
+            continue
+        spec, fn = pairs[gid]
+        rho_now = verdicts.rho(gid, here.spine, verdicts.code_digest(spec, fn, anchors=anchors),
+                               now_reads)
+        if rho_now != row.rho:
+            return f"what {gid} read"
+    return ""
+
+
+def _export_lines(view: Ledger, composed: Mapping[str, Any], milestone: Any, result: Any,
+                  found: list, judged: Any) -> list[str]:
+    """`export <m>`'s lines up to its outcome (P2.5b §2.2), every word
+    `report.HUMAN`'s."""
+    said = report.HUMAN["export"]
+    name = milestone.id
+    lines = [said["head"].format(name=name, description=report._one(milestone.description))
+             if milestone.description else name]
+    lines.append(report.milestone_line(view, composed, milestone))
+    for claim in report.in_severity(view, composed, judged.found.unresolved):
+        status = composed[claim.id]
+        lines.append(f"{report.status_tag(status.status, errored=status.errored)} {claim.id} "
+                     f"{report._one(claim.statement)} — "
+                     f"{report.reason(status, view, claim, stale_reasons=None)}")
+    requires = set(claims.required_ids(view, milestone))
+    others = [c for c in view.claims if c.id not in requires and c.id in composed
+              and composed[c.id].status not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
+    if others:
+        lines.append(said["not_required"].format(m=name,
+                                                 groups=report._groups(view, composed, others)))
+    rows = list(getattr(result, "rows", None) or ())
+    if rows:
+        how = (said["differ"].format(k=len(found), differs="differs" if len(found) == 1
+                                     else "differ")
+               if found else said["as_recorded"])
+        lines.append(said["rerun"].format(n=len(rows),
+                                          evaluators=_plural_word(len(rows), "evaluator"),
+                                          tier=int(Tier.EXTERNAL), how=how))
+    else:
+        lines.append(said["rerun_none"].format(m=name))
+    lines += [found_.line for found_ in found]
+    lines.append(report._verdict_sentence(view, composed, None, stale=False, markdown=False,
+                                          milestone=milestone))
+    lines.append(report.limits_line(view))
+    return lines
+
+
+def _rerun_rows(result: Any, found: list) -> list[dict]:
+    differing = {d.gate for d in found}
+    out = []
+    for row in getattr(result, "rows", None) or ():
+        verdict = row.verdict
+        admission = row.admission
+        out.append({"gate": verdict.gate, "rho": row.rho, "outcome": verdict.outcome,
+                    "out8": verdicts.out8(verdict) if verdict.outcome in ("pass", "fail")
+                    else "",
+                    "qualified": bool(admission is not None
+                                      and admission.state in ("admitted", "pending")),
+                    "agrees": verdict.gate not in differing, "executed": bool(row.executed),
+                    "cached": bool(row.cached),
+                    "control_executed": bool(admission is not None and admission.executed),
+                    "tier": int(getattr(result, "max_tier", 0))})
+    return out
+
+
+def _export_entry(view: Ledger, composed: Mapping[str, Any], milestone: Any, result: Any,
+                  registry: Any, resolution: Any, article: dict, package: Any,
+                  decision: Any, *, now: str, who: str, channel: str) -> dict:
+    """The export record's entry (P2.5b-D9, D26): what was required, what each
+    claim read and whether it was re-run, what was re-run, what counted on the
+    article's inputs, the article, the package and the decision."""
+    reran = {row.verdict.gate for row in getattr(result, "rows", None) or () if row.executed}
+    rows = []
+    pairs = dict((spec.id, (spec, fn)) for spec, fn in registry.pairs()) \
+        if registry is not None else {}
+    for row in getattr(result, "rows", None) or ():
+        verdict = row.verdict
+        spec_fn = pairs.get(verdict.gate)
+        code = (verdicts.code_digest(spec_fn[0], spec_fn[1], anchors=resolution.anchors).digest
+                if spec_fn is not None else "")
+        rows.append({"gate": verdict.gate, "rho": row.rho,
+                     "out8": verdicts.out8(verdict) if verdict.outcome in ("pass", "fail")
+                     else "", "code": code, "outcome": verdict.outcome,
+                     "qualified": bool(row.admission is not None
+                                       and row.admission.state in ("admitted", "pending"))})
+    claim_rows = {}
+    for claim in view.claims:
+        found = composed.get(claim.id)
+        if found is None:
+            continue
+        gates_ = list(claim.gates or ())
+        claim_rows[claim.id] = {"status": str(found.status), "cause": str(found.cause.value),
+                                "reran": bool(gates_) and all(g in reran for g in gates_)}
+    return {"milestone": milestone.id, "when": now, "who": who, "channel": channel,
+            "revision": article.get("revision", ""), "dirty": bool(article.get("dirty")),
+            "requires": list(milestone.requires), "claims": claim_rows, "reran": rows,
+            "counted": milestones.counted_on(view, composed, milestone, registry, resolution),
+            "article": article,
+            "package": {"hash": package.hash, "files": dict(package.files),
+                        "manifest": package.manifest},
+            "proceed": decision}
+
+
+def _export_json(view: Ledger, composed: Mapping[str, Any], milestone: Any, judged: Any,
+                 result: Any, found: list, article: dict, package: Any, decision: Any, *,
+                 dry: bool, written: bool, card: list, exports: Iterable[Any]) -> dict:
+    """`export <m> --json` (P2.5b §2.6): additive, keys not a channel."""
+    requires = claims.required_ids(view, milestone)
+    unresolved_ = judged.found.unresolved
+    requires_set = set(requires)
+    test = []
+    for claim in view.claims:
+        if any(line.startswith(f"  {claim.id} ") for line in card):
+            test.append({"id": claim.id, "test": claim.note or claim.acceptance.render(),
+                         "latency": report.latency_words(claim, exports)})
+    return {
+        "milestone": milestone.id, "description": milestone.description, "dry_run": dry,
+        "ready": judged.ready, "required": requires,
+        "checked": [c.id for c in judged.found.required if c not in unresolved_],
+        "unresolved": [{"id": c.id, "status": str(composed[c.id].status),
+                        "cause": str(composed[c.id].cause.value),
+                        "reason": report.reason(composed[c.id], view, c, full=True)}
+                       for c in unresolved_],
+        "missing": list(judged.found.missing),
+        "not_required": [{"id": c.id, "status": str(composed[c.id].status),
+                          "cause": str(composed[c.id].cause.value)}
+                         for c in view.claims if c.id not in requires_set and c.id in composed
+                         and composed[c.id].status not in (ClaimStatus.PASS,
+                                                           ClaimStatus.VERIFIED)],
+        "reran": _rerun_rows(result, found),
+        "refusals": [r.to_dict() for r in judged.refusals],
+        "proceed": decision,
+        "article": {"hash": article["hash"], "traced": article["traced"]} if article else None,
+        "package": ({"hash": package.hash, "files": len(package.files)}
+                    if package is not None else None),
+        "written": written,
+        "test_card": test,
+    }
+
+
+# --------------------------------------------------------------------------- #
 # ask / ingest / inputs / extract
 # --------------------------------------------------------------------------- #
 def cmd_ask(args: argparse.Namespace) -> int:
@@ -2168,7 +2681,8 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
         rows = [c for c in rows if args.tag in (c.tags or ())]
 
     if args.json:
-        _dump({"claims": [dict(report.claim_json(c, composed=composed[c.id]),
+        _dump({"claims": [dict(report.claim_json(c, composed=composed[c.id],
+                                                 exports=view.exports),
                                status=str(resolved.get(c.id)),
                                covered_by=cover.get(c.id, []),
                                **report.status_view(composed[c.id], view, c,
@@ -2221,7 +2735,8 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
 
     why = _why_text(root, ledger, registry, model, model_error, view, resolution, claim.id)
     if args.json:
-        _dump(dict(report.claim_json(claim, composed=found), status=str(status),
+        _dump(dict(report.claim_json(claim, composed=found, exports=view.exports),
+                   status=str(status),
                    covered_by=claims.coverage(view, registry).get(claim.id, []),
                    verdicts=[_resolved_row(v, resolution)
                              for v in claims.covering_verdicts(claim, view.verdicts)],
@@ -2499,6 +3014,9 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
         raise AtompipeError(said["measured_bad"].format(value=measured))
     if act is None and measured is None:
         raise AtompipeError(said["no_act"].format(id=args.id))
+    given = getattr(args, "article", None)
+    if given is not None and not re.fullmatch(r"[0-9a-f]{12,64}", str(given).strip()):
+        raise AtompipeError(said["article_short"])
     root = _root(args)
     now = utcnow_iso()
     environ = dict(os.environ)
@@ -2512,6 +3030,7 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
         if not who:
             raise AtompipeError(said["no_identity"])
         terminal = claims.terminal_of(claim)
+        exported = _exported_article(ledger, given) if given is not None else None
         registry, _problems = _registry(root, ledger, strict=False)
         model, projection, model_error = _projection_safe(root, ledger)
         view, resolution = _resolved(root, ledger, registry, projection, model_error,
@@ -2541,7 +3060,8 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
             list_name = "results"
             entry, rows = _result_entry(args, root, claim, current, terminal, typed, measured,
                                         who, now, view, resolution, registry, model,
-                                        projection, model_error, person=person)
+                                        projection, model_error, person=person,
+                                        exported=exported)
         rows = head + rows + ["  " + said["recorded_by"].format(who=report._one(who))]
         answer = _confirm(claim.id, rows) if person else None
         entry["channel"] = _channel(isatty, environ, answer, claim.id)
@@ -2571,7 +3091,8 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
         # printed act "fail" over a pass in the file).
         written = "assume" if list_name == "attributions" else (
             "pass" if entry.get("passed") is True else "fail")
-        _dump(dict(report.claim_json(claim, composed=found), status=str(found.status),
+        _dump(dict(report.claim_json(claim, composed=found, exports=view.exports),
+                   status=str(found.status),
                    recorded={"act": written,
                              "channel": entry["channel"], "who": who,
                              "article": (entry.get("article") or {}).get("hash", ""),
@@ -2645,14 +3166,38 @@ def _attribution_entry(args: argparse.Namespace, claim: Claim, terminal: str, wh
     return entry, rows
 
 
+def _exported_article(ledger: Ledger, given: str) -> Any:
+    """The export record whose article ``given`` (12 hex or more) names — unique
+    among `exports/`' articles — or an AtompipeError naming why not (P2.5b-D13):
+    no default to the newest export (a guess about which object the person
+    holds), no ``--milestone`` (a milestone has many exports)."""
+    said = report.HUMAN["signing"]
+    prefix = str(given).strip()
+    found: dict[str, Any] = {}
+    for entry in ledger.exports:
+        digest = str((entry.article or {}).get("hash") or "")
+        if digest.startswith(prefix):
+            found.setdefault(digest, entry)
+    if not found:
+        raise AtompipeError(said["article_unknown"].format(article=prefix[:12]))
+    if len(found) > 1:
+        names = ", ".join(f"{digest[:14]}…" for digest in sorted(found))
+        raise AtompipeError(said["article_ambiguous"].format(article=prefix, articles=names))
+    return next(iter(found.values()))
+
+
 def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Claim,
                   terminal: str, typed: bool | None, measured: float | None, who: str,
                   now: str, view: Ledger, resolution: verdicts.Resolution,
                   registry: Any, model: Any, projection: Any, model_error: str, *,
-                  person: bool = True) -> tuple[dict, list[str]]:
+                  person: bool = True, exported: Any = None) -> tuple[dict, list[str]]:
     """The physical result `pass`/`fail` records, and its prompt rows
     (P2.5a-D9, D10, D14, D15). ``person``: the shell is a person's own (a TTY,
-    no agent marker) — only there can a pass count."""
+    no agent marker) — only there can a pass count. ``exported`` (P2.5b-D13,
+    `--article`): the export whose article the result binds to — its article
+    copied whole, and a fail's contradictions the ones the export sealed on the
+    article's own inputs (`milestones.sealed_contradictions`), never re-read
+    from the evaluators' verdicts after they moved."""
     said = report.HUMAN["signing"]
     if measured is not None and typed is None and not isinstance(
             getattr(claim.acceptance, "limit", None), (int, float)):
@@ -2687,12 +3232,15 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
             raise AtompipeError(said["no_test"].format(id=claim.id))
     listed, sha = _evidence(root, _collect(args.evidence), required=passed and physical,
                             claim_id=claim.id)
-    article = verdicts.article_of(root, projection, model, anchors=resolution.anchors,
-                                  resolution=resolution)
+    if exported is not None:
+        article = dict(exported.article or {})
+    else:
+        article = verdicts.article_of(root, projection, model, anchors=resolution.anchors,
+                                      resolution=resolution)
     if passed and terminal in ("measurement", "human") and not article:
         raise AtompipeError(said["no_model"].format(
             error=report._trunc(model_error or "its code was not recorded", 160)))
-    if passed and person and terminal in ("measurement", "human"):
+    if passed and person and terminal in ("measurement", "human") and exported is None:
         # An article names the files the registered evaluators read on the
         # design (`verdicts.article_of`), so a pass waits until each has run
         # here at least once. What slipped through (review of P2.5a): a pass
@@ -2714,7 +3262,13 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
             raise AtompipeError(said["unread"].format(gates=shown, id=claim.id))
     contradicts: list[dict] = []
     check = ""
-    if not passed and terminal != "human":
+    if not passed and terminal != "human" and exported is not None:
+        contradicts = milestones.sealed_contradictions(exported, claim.id)
+        if claim.id not in (exported.counted or {}):
+            check = (f"its evaluators were not re-run when article "
+                     f"{report.article12(article)} was exported for {exported.milestone}, "
+                     f"so no verdict on its inputs is sealed to charge")
+    elif not passed and terminal != "human":
         if not article:
             check = f"the model does not load: {report._trunc(model_error, 160)}" \
                 if model_error else "the model's code was not recorded"
@@ -2749,10 +3303,15 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
     if listed:
         what += " [" + ", ".join(report._one(path) for path in listed) + "]"
     rows = ["  " + what]
-    if article:
+    if exported is not None:
+        rows.append("  " + said["article_exported"].format(
+            article=report.article12(article), milestone=exported.milestone,
+            who=report._one(exported.who), when=str(exported.when)[:10],
+            revision=str(article.get("revision") or "")[:12] or "none"))
+    elif article:
         rows.append("  " + said["article"].format(article=report.article12(article),
                                                   values=_design_values(projection)))
-        if article.get("revision"):
+        if article.get("revision") and exported is None:
             rows.append("  " + said["revision"].format(revision=article["revision"][:12])
                         + (said["dirty"] if article.get("dirty") else ""))
     else:
@@ -3795,11 +4354,16 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     Prints the markdown by default because the markdown IS the deliverable — the
     thing you hand someone before they spend money. `--write` puts it at
-    `docs/readiness.md`, and — whenever a decision exists — regenerates the
-    decision log, `docs/decisions.md`, beside it: from checkpoint 1.3 `decide`
-    writes one record and no generated document, so the log is an output of the
-    command that writes outputs. `atompipe status` is the compressed terminal
-    view of the same records.
+    `REPORT.md` at the project root — an output git ignores (P2.5b-D17, PLAN
+    D-14; it was the tracked `docs/readiness.md`, which drifted from its ledger,
+    S-41) — writing the root ignore block's `/REPORT.md` first, so a project
+    migrated before P2.5b never shows it untracked; and — whenever a decision
+    exists — regenerates the decision log, `docs/decisions.md`, beside it: from
+    checkpoint 1.3 `decide` writes one record and no generated document, so the
+    log is an output of the command that writes outputs. `--milestone <m>`
+    renders the report for one spend, as last evaluated (the package's REPORT.md
+    is this, rendered from the boundary's re-run). `atompipe status` is the
+    compressed terminal view of the same records.
 
     `strict=False` here is deliberate — a report must render on a machine where
     the packs are not installed — but the *failures it swallows* were being
@@ -3821,6 +4385,20 @@ def cmd_report(args: argparse.Namespace) -> int:
     stale_reasons = _stale_reasons(resolution)
     banner = _load_failure_banner(problems, model_error)
     params = _shown_params(root, ledger, model, model_error, resolution, registry)
+    milestone = None
+    if getattr(args, "milestone", None):
+        milestone = view.milestone(args.milestone)
+        if milestone is None:
+            said = report.HUMAN["export"]
+            declared = [m.id for m in view.milestones]
+            raise AtompipeError(said["no_milestone"].format(
+                name=args.milestone,
+                declared=said["declared"].format(names=", ".join(declared))
+                if declared else said["none_declared"]))
+        if args.write:
+            raise AtompipeError(
+                f"--write writes the project's report; the report for {milestone.id} is "
+                f"written into its package by `atompipe export {milestone.id}`")
 
     if args.json:
         composed = claims.compositions(view, registry=registry, stale_gates=stale_gates)
@@ -3845,6 +4423,9 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     if args.write:
         with _lock(root):
+            # The ignore line before the file (D17): a project migrated before
+            # P2.5b gains `/REPORT.md` and `/out/` inside its marked block.
+            store.ensure_ignore_blocks(root)
             path = report.write_report(root, view, registry, stale_gates=stale_gates,
                                        model_error=model_error, params=params,
                                        stale_reasons=stale_reasons)
@@ -3860,7 +4441,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     sys.stdout.write(_with_banner(
         report.render_markdown(view, registry, stale_gates=stale_gates,
                                model_error=model_error, root=root, params=params,
-                               stale_reasons=stale_reasons), banner))
+                               stale_reasons=stale_reasons, milestone=milestone), banner))
     return 0
 
 
@@ -5874,6 +6455,99 @@ def _doctor_results_rows(results: list[dict], root: str, ledger: Ledger) -> None
                "every physical result is sealed and its evidence is as recorded")
 
 
+def _doctor_milestone_rows(results: list[dict], root: str, ledger: Ledger) -> None:
+    """`doctor`'s P2.5b rows, each writing nothing:
+
+    * `milestones` — a required id no claim file holds (the milestone reads
+      unresolved, `missing`, and no export can write), a generator that does not
+      resolve to a `.py` file and a function in it — problems;
+    * `exports` — a package file in `out/<m>/` edited after its export, or one
+      no export wrote (a problem: the next export refuses to replace it), a
+      leftover `.tmp-`/`.old-` scratch directory (a problem), and — a note —
+      the last export's package not here (`out/` is an ignored output: a fresh
+      clone has none);
+    * `report` — a leftover `docs/readiness.md`, which nothing writes since
+      `REPORT.md` replaced it (S-41): a warning, never deleted (a command
+      removing a tracked file it did not write is invariant 8's failure)."""
+    claim_ids = {c.id for c in ledger.claims}
+    problems = []
+    for milestone in ledger.milestones:
+        missing = [cid for cid in milestone.requires if cid not in claim_ids]
+        if missing:
+            problems.append(f"milestones/{milestone.id}.json requires {', '.join(missing)}, "
+                            f"which no claim file holds — {milestone.id} can never be ready")
+        if milestone.generator:
+            try:
+                path, name = store.generator_parts(milestone.generator)
+            except AtompipeError as exc:
+                problems.append(f"milestones/{milestone.id}.json: {exc}")
+                continue
+            full = os.path.join(root, *path.split("/"))
+            if not os.path.isfile(full):
+                problems.append(f"milestones/{milestone.id}.json: its generator {path} does "
+                                f"not exist")
+                continue
+            try:
+                with open(full, encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read())
+            except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+                problems.append(f"milestones/{milestone.id}.json: its generator {path} does "
+                                f"not parse ({exc})")
+                continue
+            if not any(isinstance(node, ast.FunctionDef) and node.name == name
+                       for node in tree.body):
+                problems.append(f"milestones/{milestone.id}.json: {path} has no function "
+                                f"{name}")
+    for problem in problems:
+        _check(results, "milestones", "FAIL", problem)
+    if not problems:
+        n = len(ledger.milestones)
+        _check(results, "milestones", "ok",
+               f"{n} milestone(s), each requiring claims that exist" if n
+               else "none declared — a milestone is milestones/<name>.json")
+
+    base = os.path.join(root, store.PACKAGES_NAME)
+    rows = []
+    notes = []
+    try:
+        leftovers = sorted(name for name in os.listdir(base)
+                           if name.startswith(".") and (".tmp-" in name or ".old-" in name))
+    except OSError:
+        leftovers = []
+    for name in leftovers:
+        rows.append(f"{store.PACKAGES_NAME}/{name} is a package an export built or set "
+                    f"aside and did not finish — remove it")
+    for milestone in ledger.milestones:
+        mine = [e for e in ledger.exports if e.milestone == milestone.id]
+        if not mine:
+            continue
+        if not os.path.isdir(os.path.join(base, milestone.id)):
+            notes.append(f"the last export of {milestone.id}'s package is not here "
+                          f"({store.PACKAGES_NAME}/ is an output git ignores) — atompipe "
+                          f"export {milestone.id} writes it again")
+            continue
+        for kind, rel_path in milestones.package_problems(root, milestone.id, ledger.exports):
+            rows.append(f"{store.PACKAGES_NAME}/{milestone.id}/{rel_path} "
+                        + ("was edited after its export" if kind == "edited"
+                           else "was not written by an export")
+                        + f" — the next export of {milestone.id} refuses to replace it")
+    for row in rows:
+        _check(results, "exports", "FAIL", row)
+    if not rows:
+        _check(results, "exports", "ok",
+               "; ".join(notes) if notes else
+               f"{len(ledger.exports)} export(s) recorded, each package as it was written")
+
+    leftover = store.project_paths(root)["readiness"]
+    if os.path.isfile(leftover):
+        _check(results, "report", "warn",
+               "docs/readiness.md is no longer written — REPORT.md is, and is ignored: "
+               "git rm docs/readiness.md")
+    else:
+        _check(results, "report", "ok",
+               "REPORT.md is the readiness report, an output (`atompipe report --write`)")
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     """Everything that could be wrong with this environment, in one pass.
 
@@ -5944,6 +6618,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         return _doctor_finish(args, results)
     _doctor_records_rows(results, root, ledger)
     _doctor_results_rows(results, root, ledger)
+    _doctor_milestone_rows(results, root, ledger)
 
     paths = store.project_paths(root)
     missing = [key for key in ("out", "inputs", "docs", "model")
@@ -6338,6 +7013,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--measured", type=float, default=None, metavar="VALUE",
                    help=said["measured_help"])
     p.add_argument("--authority", default=None, metavar="NAME", help=said["authority_help"])
+    p.add_argument("--article", default=None, metavar="HEX", help=said["article_help"])
     p.set_defaults(func=cmd_claim_physical)
 
     # -- gap -------------------------------------------------------------- #
@@ -6396,8 +7072,22 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- report / why / decide -------------------------------------------- #
     p = sub.add_parser("report", parents=[common], help="the readiness report")
-    p.add_argument("--write", action="store_true", help="write docs/readiness.md")
+    p.add_argument("--write", action="store_true",
+                   help="write REPORT.md at the project root (an output git ignores)")
+    p.add_argument("--milestone", default=None, metavar="NAME",
+                   help="the report for one milestone (milestones/<name>.json): what it "
+                        "requires, as last evaluated")
     p.set_defaults(func=cmd_report)
+
+    # -- export (P2.5b; D-24: a top-level command the brief names) ---------- #
+    said_export = report.HUMAN["export"]
+    p = sub.add_parser("export", parents=[common], help=said_export["help"],
+                       description=said_export["help"])
+    p.add_argument("milestone", nargs="?", default=None, help=said_export["milestone_help"])
+    p.add_argument("--dry-run", action="store_true", help=said_export["dry_run_help"])
+    p.add_argument("--proceed", action="store_true", help=said_export["proceed_help"])
+    p.add_argument("--why", default=None, metavar="TEXT", help=said_export["why_help"])
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("why", parents=[common],
                        help="one param or claim's full history, instead of the whole log")

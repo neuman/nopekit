@@ -68,8 +68,9 @@ easy and has been made:
    missing tooling" for a crash, "PARTIAL" for a lesser success).
 
 Nothing in this module reads a clock or a module-level registry, and the
-markdown report prints no time at all: a regenerated `docs/readiness.md` changes
-only when the claims or the verdict outcomes do (S-89). It used to be titled
+markdown report prints no time at all: a regenerated `REPORT.md` (P2.5b; it was the
+tracked `docs/readiness.md`) changes only when the claims or the verdict outcomes
+do (S-89). It used to be titled
 with the last sweep's time and to end with that sweep's model and inputs hashes,
 so every re-run of an unchanged design rewrote a tracked file — and once
 verdicts are served from the cache, "this run" would be false on every hit. The
@@ -78,6 +79,7 @@ tested against a project it had already imported.
 """
 from __future__ import annotations
 
+import dataclasses
 import math
 import os
 import re
@@ -298,6 +300,12 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "beside": "a physical pass beside the automated evaluator settles nothing",
         "none": "nothing settles an assumption with a pass",
         "authority": "a judgment recorded by anyone but {authority} does not count",
+        # P2.5b-D15: a pass on an exported article counts only while the export
+        # that built it is on record — an export removed to escape a rebuild
+        # prediction leaves the pass counting for nothing.
+        "export-missing": "a pass on an exported article no record in exports/ holds does "
+                          "not count — restore the export record from git, or record the "
+                          "result again on an article an export holds",
     }),
     "judgment_not_counted": MappingProxyType({
         "agent-session": "a judgment recorded from an agent session does not count",
@@ -324,6 +332,8 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
                          "pass or fail where the claim has a limit",
         "authority_help": "the authority the claim file names, typed as a confirmation (an "
                           "expert-judgment claim)",
+        "article_help": "the exported article it was measured on: at least 12 hex of its "
+                        "hash, as `atompipe export` prints it",
         # The flags' help (review of P2.5a: "(what the report prints)" stopped
         # being true when the report moved to the positional `pass|fail`).
         "pass_help": "same as the positional `pass`",
@@ -399,6 +409,16 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "no_detail": "no detail",
         "you_record_measured": "you record: {act} — {measured} against {condition}",
         "article": "on article {article}: the design as the model holds it now ({values})",
+        # P2.5b-D13: a result bound to an exported article, and `--article`'s
+        # refusals — each naming the way.
+        "article_exported": "article {article} — exported for {milestone} by {who}, {when} "
+                            "(revision {revision})",
+        "article_short": "--article takes at least 12 hex of an exported article's hash, as "
+                         "`atompipe export` prints it. Nothing was written.",
+        "article_unknown": "no export recorded article {article} — `atompipe export` lists "
+                           "each milestone's last export. Nothing was written.",
+        "article_ambiguous": "--article {article} names two articles: {articles} — give more "
+                             "of the hash. Nothing was written.",
         "no_article": "no article: the model does not load ({error})",
         "revision": "revision {revision}",
         "dirty": ", with uncommitted changes to model/",
@@ -457,6 +477,15 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "does_not_count": "it does not count: {why}",
         "contradiction_of": "a contradiction of {gate} (version {code}), which gave {value}",
         "checked_article": "Checked on an article",
+        # P2.5b-D14 (PLAN Q2.11): a fail a pass on another exported article
+        # superseded, named on the claim's row — kept on the evaluator's track
+        # record, and counting again the moment the design returns to it.
+        "superseded": "(the fail on article {article} is superseded: the design is no "
+                      "longer the one that failed, and it counts again if it returns)",
+        # The superseded fail's own row (`result_facts`): why it does not count
+        # now, naming the pass that superseded it.
+        "superseded_by": "superseded by the pass on article {article}: the design is no "
+                         "longer the one that failed, and it counts again if it returns",
         "checked_judgment": "Checked by expert judgment",
         # An expert judgment in its own words (review of P2.5a): it read as an
         # article test — "C8 changed since article … was tested — test it
@@ -631,6 +660,146 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "failing": "## Failing, stale, skipped or open",
         "reproduce": "## Reproduce",
         "gaps_context": "### Outside an evaluator's operating context",
+    }),
+    # A milestone's one line (P2.5b-D18; critique 20 of its design: one shape
+    # everywhere — the `export` list, REPORT.md, `export <m>`), the list's head,
+    # and REPORT.md's: *ready* as last evaluated, from the verdicts on record
+    # (critique 17: the boundary's is `export <m> --dry-run`'s). GLOSSARY §4:
+    # *milestone*, *required claim*, *ready*; no *blocking*, *non-critical*.
+    "milestone": MappingProxyType({
+        "line": "{name}: {k} of {n} required {claims} {checked} · {s} {stale}{stale_ids}"
+                "{rest}",
+        "nothing": "{name}: requires no claim, so nothing can be ready for it — list the "
+                   "claims it needs in milestones/{name}.json (\"requires\")",
+        "missing": "{n} with no claim file ({ids})",
+        "last_export": " · last export {article} by {who}, {when}",
+        "list_head": "{n} {milestones}, as last evaluated — `atompipe export <milestone> "
+                     "--dry-run` re-runs what each requires",
+        "none": "no milestone declared — a milestone is milestones/<name>.json: "
+                "{\"description\": \"…\", \"requires\": [\"C1\", …]}",
+        "report_head": "Milestones, as last evaluated — `atompipe export <milestone> "
+                       "--dry-run` re-runs what each requires:",
+    }),
+    # The readiness sentence's milestone forms and its hardware clause, in every
+    # branch (W13; P2.5a's hand-off), and the limits paragraph (M18.1: "Say so,
+    # in the report, every time"). GLOSSARY §9: no *unverified in physical
+    # hardware* — Pending build's Never-say.
+    "readiness": MappingProxyType({
+        "ready_for": "{rev} is ready for {m}: every claim it requires is checked against "
+                     "the current inputs.",
+        "not_ready_for": "{rev} is NOT ready for {m}: {k} of {n} required {claims} {is_} "
+                         "unresolved — {groups}.",
+        "requires_nothing": "{rev} is NOT ready for {m}: {m} requires no claim, so nothing "
+                            "can be ready for it — list the claims it needs in "
+                            "milestones/{m}.json (\"requires\").",
+        "missing": "{n} with no claim file ({ids})",
+        "rebuild": "Rebuild article {article} ({claims}): {moves}.",
+        # The status word comes from its row, as every channel's does (D-16):
+        # `{Checked}` the term, `{checked}` the word. "on any article", so the
+        # clause never reads as P2.1's "checked on an article" said of a pass
+        # that does not count (`ReadyIsThePredicate`'s rule).
+        "on_article": "{Checked} on an article: {n} ({ids}).",
+        "none_on_article": "No claim is {checked} on any article.",
+        # Its evaluators "have shown they can fail": qualification's own words
+        # are its table's alone (`HUMAN["qualification"]`).
+        "limits": "{Checked} does not mean true: its evaluators have shown they can fail, "
+                  "not that they are right or enough, and nothing outside these {n} "
+                  "{claims} has been evaluated.",
+        "title_for": "{name} — readiness for {m} ({rev})",
+        "as_last_evaluated": "Claims {m} does not require are shown as last evaluated: "
+                             "`atompipe export {m}` re-runs only the evaluators of the {n} "
+                             "it requires.",
+    }),
+    # A physical claim's latency (W3; GLOSSARY §5: "declared ahead only for a
+    # physical evaluator, until an article measures it") — never *duration*,
+    # *run time* or *turnaround*.
+    "latency": MappingProxyType({
+        "declared": "expected {declared} (declared)",
+        "measured": "measured {measured} on article {article} (expected {declared})",
+        "measured_bare": "measured {measured} on article {article}",
+        "none": "no expected latency declared",
+        # `why`'s and `claim show`'s row (P2.5b-D19), only where one is declared
+        # or measured: an empty row on every physical claim says nothing.
+        "row": "latency: {words}",
+    }),
+    # `export` (P2.5b §2): every line it prints. A boundary *refuses*
+    # (GLOSSARY §6); a disagreement is "two outcomes" — the words the filed
+    # re-run reads as everywhere after (critique 14 of the design: *disagree*
+    # is the status-and-evidence defect's word).
+    "export": MappingProxyType({
+        "head": "{name} — {description}",
+        "rerun": "re-run: {n} {evaluators} at tier {tier}, with their controls — {how}",
+        "as_recorded": "every outcome as recorded",
+        "differ": "{k} {differs} from the record",
+        "rerun_none": "re-run: none — no evaluator settles a claim {m} requires",
+        "not_required": "not required by {m}, unresolved: {groups}",
+        "two_outcomes": "[two outcomes] {gate} : recorded {before} at ρ {rho}, a re-run "
+                        "gives {after}{detail}",
+        "two_outcomes_records": "[two outcomes] {gate} : {text}",
+        "two_outcomes_qualification": "[two outcomes] {gate} : qualified on the record, "
+                                      "unqualified when re-run — {why}",
+        "would_refuse": "export: would refuse — {reasons}",
+        "refused": "export: refused — {reasons}",
+        "would_write": "export: would write {path}/ — article {article} · package {package} "
+                       "· {n} {files} (dry run: nothing written)",
+        "written": "export: {path}/ — article {article} · package {package} · {n} {files}, "
+                   "recorded in exports/{m}.json",
+        "unresolved": "{id} {word}",
+        "reprint": "{id} failed on article {article}, which the design has since moved "
+                   "from: building a new article to test it again is a decision — "
+                   "atompipe export {m} --proceed --why \"…\"",
+        "missing": "{m} requires {id}, which no claim file holds",
+        "requires_nothing": "{m} requires no claim",
+        "disagrees": "{gate}: two outcomes for one read set — `atompipe check --force` "
+                     "records the re-run",
+        "generator_errored": "generator errored: {first}",
+        "generator_none": "generator wrote no file",
+        "generator_outside": "generator wrote {path}, outside its directory",
+        "generator_load": "generator does not load: {why}",
+        "generator_model": "the model does not load, so the generator cannot run: {why}",
+        "package_foreign": "out/{m}/{file} was not written by an export of {m}",
+        "package_edited": "out/{m}/{file} was edited after export {package}",
+        "package_moved": "inputs moved during export: {what} — run atompipe export {m} again",
+        "identity": "no git identity: an export names who spent — set git config "
+                    "user.name and user.email",
+        "legacy": "the project keeps its records in the legacy .atompipe/ledger.json — "
+                  "run atompipe check, which migrates it",
+        "proceed_shell": "going ahead with unresolved claims is a decision a person records "
+                         "in their own shell: they run atompipe export {m} --proceed --why "
+                         "\"…\"{why}",
+        "proceed_agent": " (this shell is an agent session: {marker} is set)",
+        "proceed_pipe": " (stdin is not a terminal)",
+        "proceed_why": "--proceed needs --why \"…\": why a person goes ahead is part of the "
+                       "decision recorded. Nothing was written.",
+        "proceed_dry": "a dry run records no decision — drop --proceed or --dry-run. "
+                       "Nothing was written.",
+        # The prompt ends as `claim physical`'s does (`HUMAN["signing"]["type"]`):
+        # one convention for every line a person answers by typing a name.
+        "proceed_prompt": "go ahead over {groups}? type {m} to record that decision "
+                          "(anything else records nothing): ",
+        "proceed_nothing": "nothing to decide: every required claim is checked",
+        "decided": "decided by {who}: go ahead over {groups} — {why}",
+        "typed": "you typed {typed}, not {m} — nothing was recorded",
+        "no_milestone": "no milestone {name!r} — {declared}",
+        "declared": "the declared ones are {names}",
+        "none_declared": "none is declared: a milestone is milestones/<name>.json",
+        "card_head": "test card for article {article}: {n} physical {results} to record, "
+                     "{k} {checks}",
+        "card_row": "{id} {statement} — {test} — {latency}",
+        "card_command": "atompipe claim physical {id} pass|fail --article {article} "
+                        "--evidence <file> --detail \"…\"",
+        "card_cross": "cross-check {id} {statement} — {condition}; its evaluators: {gates}",
+        "card_cross_command": "atompipe claim physical <id> fail --article {article} "
+                              "--measured <value> --detail \"…\" — a fail on a cross-check "
+                              "contradicts its evaluator, on its track record",
+        "no_test": "no test written down: a pass needs one in claims/{id}.json (\"note\")",
+        "help": "the boundary that spends: re-run what a milestone requires, refuse while "
+                "a required claim is unresolved, and write its package",
+        "milestone_help": "the milestone (milestones/<name>.json); none lists them",
+        "dry_run_help": "the same run, writing nothing: what the export would do",
+        "proceed_help": "go ahead over unresolved required claims — a decision a person "
+                        "records in their own shell, typing the milestone's name",
+        "why_help": "why the person goes ahead (with --proceed)",
     }),
     # Qualification (GLOSSARY §2, P2.3-D13, D14): every word of the line, the
     # reasons a claim's Gap row gives, `gate show`'s rows, `gate selftest`'s
@@ -1570,7 +1739,15 @@ def _physical_reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool,
             text += f": {cut_(claim.rationale, 52)}"
         return text + _uncounted_tail(claim, standing)
     if cause is ClaimCause.ON_ARTICLE:
-        return f"{lead.format(article=article)} ({recorded_words(entry)})"
+        text = f"{lead.format(article=article)} ({recorded_words(entry)})"
+        superseded = tuple(getattr(standing, "superseded", ()) or ())
+        if superseded:
+            # P2.5b-D14: the fail it superseded named on the row, and kept on
+            # the evaluator's track record.
+            failed = _entry(claim, superseded[-1])
+            text += " " + said["superseded"].format(
+                article=article12(getattr(failed, "article", None) or {}))
+        return text
     if cause is ClaimCause.JUDGED:
         return f"{lead.format(authority=authority)} ({_one(getattr(entry, 'when', ''))})"
     cited = ""
@@ -1649,12 +1826,16 @@ def track_words(gate_id: str, contradictions: Iterable[Any], code_now: str) -> s
     return text
 
 
-def claim_json(claim: Claim, *, composed: Any = None) -> dict[str, Any]:
+def claim_json(claim: Claim, *, composed: Any = None,
+               exports: Iterable[Any] | None = None) -> dict[str, Any]:
     """A claim as every JSON channel shows it (P2.5a-D20; additive, P2.1-D12):
     its record fields and `physical_result`, never the in-memory `results`,
     `attributions` and `standing` objects, and beside them `terminal` (as
     declared), `terminal_word`, `authority`, `article` (the deciding result's
-    hash), `standing` (the judge's state) and `contradicts` (evaluator ids)."""
+    hash), `standing` (the judge's state) and `contradicts` (evaluator ids).
+    From P2.5b, additive: `superseded` (the fails a pass on another exported
+    article superseded, by index) and `latency` (`{seconds, source, article}`:
+    measured from an export, else declared — `claims.latency`)."""
     row = claim.to_dict()
     for name in ("results", "attributions", "standing"):
         row.pop(name, None)
@@ -1666,6 +1847,10 @@ def claim_json(claim: Claim, *, composed: Any = None) -> dict[str, Any]:
     row["standing"] = str(getattr(standing, "state", "") or "")
     row["contradicts"] = list(composed.cites) if composed is not None and \
         composed.cause is ClaimCause.CONTRADICTION else []
+    row["superseded"] = list(getattr(standing, "superseded", ()) or ())
+    found = claim_logic.latency(claim, exports or ())
+    row["latency"] = {"seconds": found.seconds, "source": found.source,
+                      "article": found.article}
     if claim.physical_result is not None and isinstance(row.get("physical_result"), dict):
         row["physical_result"].update(result_facts(claim, claim.physical_result))
     return row
@@ -1683,7 +1868,18 @@ def result_facts(claim: Claim, entry: Any) -> dict[str, Any]:
     index = max((i for i, item in enumerate(results) if item == entry), default=None)
     found = next((e for e in getattr(standing, "entries", ()) or () if e.index == index),
                  None)
-    if getattr(entry, "passed", None) is not True:
+    superseded = tuple(getattr(standing, "superseded", ()) or ())
+    if getattr(entry, "passed", None) is not True and index in superseded:
+        # P2.5b-D14: a fail a pass on another exported article superseded is
+        # the one fail that does not count — said, with the pass that did it.
+        # What slipped through without it: `why` and the page read every fail
+        # "it counts" (R-3's rule before P2.5b), beside a row reading Checked.
+        passing = (_entry(claim, standing.counted)
+                   if getattr(standing, "counted", None) is not None else None)
+        counts = False
+        why = HUMAN["physical"]["superseded_by"].format(
+            article=article12(getattr(passing, "article", None) or {}))
+    elif getattr(entry, "passed", None) is not True:
         counts, why = True, ""
     elif found is None:
         counts, why = False, HUMAN["not_counted"]["legacy"] if standing is None else ""
@@ -2118,24 +2314,141 @@ def _groups(ledger: Ledger, composed: Mapping[str, Any], chosen: Iterable[Claim]
     return "; ".join(parts)
 
 
-def readiness(ledger: Ledger, composed: Mapping[str, Any]) -> dict[str, Any]:
-    """What *ready* turns on, as lists of claims (GLOSSARY §4, W3): `required`;
-    `unresolved` — required and not Checked, Pending build and Assumed included;
+def readiness(ledger: Ledger, composed: Mapping[str, Any],
+              milestone: Any = None) -> dict[str, Any]:
+    """What *ready* turns on, as lists of claims (GLOSSARY §4, W3) — for
+    ``milestone``, or with none for the project (``critical``, what ``check``
+    blocks on): `required`; `unresolved` — required and not Checked, Pending
+    build and Assumed included; `missing` — required ids no claim holds (P2.5b);
     `unbound` — the unresolved ones with a physical pass recorded that does not
-    count (Pending build, cause `physical-pass`: from an agent session, a pipe,
-    before results were bound, or its evidence changed — P2.5a); `ready` — at least
-    one required claim, and none unresolved. `claims.summarise`'s
-    `all_required_checked` is this predicate; `ready` in a JSON summary is not
-    (it keeps "nothing stops check"). What slipped through (review of P2.1): an
-    unbound pass read Checked everywhere but here, so *checked* meant two
-    things — `5 checked` on the count line beside "is NOT ready: every required
-    claim is checked, but…"."""
-    required = [c for c in ledger.claims if c.critical]
-    unresolved = [c for c in required if composed[c.id].status
-                  not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
-    unbound = [c for c in required if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
-    return {"required": required, "unresolved": unresolved, "unbound": unbound,
-            "ready": bool(required) and not unresolved}
+    count; `ready` — at least one required claim, and none unresolved or
+    missing. `claims.unresolved` — THE predicate (P2.5b-D3) — decides; this is
+    its fields as the dict every reader took before. `ready` in a JSON summary
+    is not this (it keeps "nothing stops check"). What slipped through (review
+    of P2.1): an unbound pass read Checked everywhere but here, so *checked*
+    meant two things."""
+    found = claim_logic.unresolved(ledger, composed, milestone)
+    return {"required": list(found.required), "unresolved": list(found.unresolved),
+            "unbound": list(found.unbound), "missing": list(found.missing),
+            "ready": found.ready}
+
+
+def _missing_words(missing: Sequence[str]) -> str:
+    return HUMAN["readiness"]["missing"].format(n=len(missing), ids=", ".join(missing))
+
+
+def milestone_line(ledger: Ledger, composed: Mapping[str, Any], milestone: Any) -> str:
+    """`print-v1: 3 of 4 required claims checked · 0 stale · 1 failing (C1)` —
+    ONE line per milestone, one shape wherever it is printed (critique 20 of the
+    P2.5b design): the `export` list, REPORT.md and `export <m>`. The stale
+    count always printed (W11: "required claims checked and stale"), the other
+    unresolved required claims grouped by word, ids no claim holds last.
+    *Ready* is what the line's numbers say — k of n, nothing stale, nothing
+    else — and the readiness sentence says the word."""
+    name = str(getattr(milestone, "id", "") or "")
+    found = claim_logic.unresolved(ledger, composed, milestone)
+    said = HUMAN["milestone"]
+    if not list(getattr(milestone, "requires", None) or ()):
+        return said["nothing"].format(name=name)
+    n = len(found.required) + len(found.missing)
+    stale = [c for c in found.unresolved if composed[c.id].status is ClaimStatus.STALE]
+    rest = [c for c in found.unresolved if composed[c.id].status is not ClaimStatus.STALE]
+    tail = ""
+    if rest:
+        tail += " · " + _groups(ledger, composed, rest)
+    if found.missing:
+        tail += " · " + _missing_words(found.missing)
+    return said["line"].format(
+        name=name, k=len(found.required) - len(found.unresolved), n=n,
+        claims=_plural(n, "claim"), checked=word(ClaimStatus.PASS), s=len(stale),
+        stale=word(ClaimStatus.STALE, n=len(stale)),
+        stale_ids=f" ({_ids(stale)})" if stale else "", rest=tail)
+
+
+def _hardware_clause(ledger: Ledger, composed: Mapping[str, Any]) -> list[str]:
+    """The readiness sentence's hardware clause (W13), in EVERY branch, ready
+    included: `Pending build: N claims need an article (ids)` when any does —
+    naming apart those with a pass that does not count — then one `Rebuild
+    article <a12> (ids): <moved>.` per article the rebuild prediction names
+    (`claims.rebuild`, the producer `### Articles to rebuild` reads), then
+    `Checked on an article: N (ids).` or `No claim is checked on any article.`
+    What slipped through before P2.5b: the sentence named what waited for an
+    article and said nothing of what had been tested on one, or of the prints
+    a design change had made obsolete — they were a heading below. *Rejected:*
+    dropping the clause where no physical claim exists (that design is the one
+    most easily read as built); "It is unverified in physical hardware"
+    (GLOSSARY §9: *unverified* is Pending build's Never-say)."""
+    status_of = {cid: c.status for cid, c in composed.items()}
+    parts: list[str] = []
+    pending = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.UNVERIFIED]
+    if pending:
+        recorded = [c for c in pending if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
+        text = (f"{words(ClaimStatus.UNVERIFIED).term}: {len(pending)}"
+                f" {_plural(len(pending), 'claim')}"
+                f" {_plural(len(pending), 'needs', 'need')} an article ({_ids(pending)})")
+        if recorded:
+            text += "; " + HUMAN["physical"]["unbound"].format(
+                ids=_ids(recorded), has=_plural(len(recorded), "has", "have"))
+        parts.append(text + ".")
+    said = HUMAN["readiness"]
+    for found in claim_logic.rebuild(ledger):
+        parts.append(said["rebuild"].format(
+            article=article12(found.article), claims=", ".join(found.claims),
+            moves=verdict_logic._stale_text(found.moved) if found.moved
+            else "the design moved"))
+    on_article = [c for c in ledger.claims if c.id in composed
+                  and composed[c.id].cause is ClaimCause.ON_ARTICLE]
+    parts.append(said["on_article"].format(Checked=words(ClaimStatus.PASS).term,
+                                           n=len(on_article), ids=_ids(on_article))
+                 if on_article else said["none_on_article"].format(
+                     checked=word(ClaimStatus.PASS)))
+    return parts
+
+
+def limits_line(ledger: Ledger) -> str:
+    """The limits line (M18.1; METHOD rule 9: "Say so, in the report, every
+    time"): what a checked claim does not mean, and that nothing outside the
+    claims was evaluated — REPORT.md's paragraph and `export`'s line, verbatim
+    on both (critique 10 of the P2.5b design: `/ready` must carry it too)."""
+    n = len(ledger.claims)
+    return HUMAN["readiness"]["limits"].format(Checked=words(ClaimStatus.PASS).term, n=n,
+                                               claims=_plural(n, "claim"))
+
+
+def latency_words(claim: Claim, exports: Iterable[Any]) -> str:
+    """A physical claim's latency in words (W3): `measured 26 h on article
+    <a12> (expected 1 day)`, `expected 1 day (declared)`, or that none is
+    declared (`claims.latency`)."""
+    found = claim_logic.latency(claim, exports)
+    said = HUMAN["latency"]
+    declared = getattr(claim, "expected_latency", None) or {}
+    declared_text = ""
+    if isinstance(declared, Mapping) and declared.get("units"):
+        value = declared.get("value")
+        units = str(declared.get("units"))
+        plural = units in ("day", "week", "year") and value != 1
+        declared_text = f"{_num(value)} {units}{'s' if plural else ''}"
+    if found.source == "measured":
+        measured = _span(found.seconds)
+        if declared_text:
+            return said["measured"].format(measured=measured, article=found.article[:12],
+                                           declared=declared_text)
+        return said["measured_bare"].format(measured=measured, article=found.article[:12])
+    if found.source == "declared":
+        return said["declared"].format(declared=declared_text)
+    return said["none"]
+
+
+def _span(seconds: Any) -> str:
+    """A measured span as a person reads it: minutes under an hour, hours under
+    two days, days past that — rounded, the way a print log says it."""
+    value = float(seconds or 0.0)
+    if value < 3600:
+        return f"{round(value / 60)} min"
+    if value < 2 * 86400:
+        return f"{round(value / 3600)} h"
+    days = round(value / 86400)
+    return f"{days} {_plural(days, 'day')}"
 
 
 def not_ready_line(ledger: Ledger, composed: Mapping[str, Any]) -> str:
@@ -2158,7 +2471,7 @@ def not_ready_line(ledger: Ledger, composed: Mapping[str, Any]) -> str:
 
 
 def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any,
-                      *, stale: bool, markdown: bool) -> str:
+                      *, stale: bool, markdown: bool, milestone: Any = None) -> str:
     """The readiness sentence, then what stays true whatever it says. Bad news
     first, always.
 
@@ -2183,7 +2496,17 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
     clears its evaluators from a working thing (W13, GLOSSARY §9). What slipped
     through the P2.1 design (review): it folded the clause into the not-ready
     groups, so a ready project with a not-required physical claim said nothing
-    about hardware.
+    about hardware. From P2.5b the clause also names each article the rebuild
+    prediction names and what is checked on an article (`_hardware_clause`),
+    in every branch, the no-claims one too.
+
+    ``milestone`` (P2.5b-D18): the same sentence for one spend — `<rev> is
+    ready for <m>: …` / `<rev> is NOT ready for <m>: k of n required claims …`,
+    from the one predicate (`claims.unresolved` with the milestone), an id no
+    claim holds named among them; the hardware clause after it as for the
+    project. One renderer: REPORT.md's milestone variant, the package's
+    REPORT.md and `export`'s line all call this. *Rejected:* a second sentence
+    builder for milestones (two answers to "is it ready").
 
     Every branch that is not ready SAYS so, the never-evaluated one included,
     and the claims not required are grouped by word as the required ones are,
@@ -2201,7 +2524,12 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
     if total == 0:
         return bold(f"{rev} has no claims recorded, so nothing has been evaluated.") + \
             " A project with no claims is not ready — start with one: write" \
-            " `claims/C1.json`, a statement and an acceptance."
+            " `claims/C1.json`, a statement and an acceptance. " + \
+            " ".join(_hardware_clause(ledger, composed))
+
+    if milestone is not None:
+        return " ".join([_milestone_sentence(ledger, composed, milestone, rev, bold),
+                         *_hardware_clause(ledger, composed)])
 
     found = readiness(ledger, composed)
     status_of = {cid: c.status for cid, c in composed.items()}
@@ -2256,17 +2584,28 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
                      f" {_plural(len(unrun), 'is', 'are')}"
                      f" {HUMAN['lead'][ClaimCause.UNRUN]}.")
 
-    pending = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.UNVERIFIED]
-    if pending:
-        recorded = [c for c in pending if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
-        text = (f"{words(ClaimStatus.UNVERIFIED).term}: {len(pending)}"
-                f" {_plural(len(pending), 'claim')}"
-                f" {_plural(len(pending), 'needs', 'need')} an article ({_ids(pending)})")
-        if recorded:
-            text += "; " + HUMAN["physical"]["unbound"].format(
-                ids=_ids(recorded), has=_plural(len(recorded), "has", "have"))
-        parts.append(text + ".")
+    parts += _hardware_clause(ledger, composed)
     return " ".join(parts)
+
+
+def _milestone_sentence(ledger: Ledger, composed: Mapping[str, Any], milestone: Any,
+                        rev: str, bold: Callable[[str], str]) -> str:
+    """The milestone variant's head (P2.5b §2.4), from `claims.unresolved`."""
+    said = HUMAN["readiness"]
+    name = str(getattr(milestone, "id", "") or "")
+    if not list(getattr(milestone, "requires", None) or ()):
+        return bold(said["requires_nothing"].format(rev=rev, m=name))
+    found = claim_logic.unresolved(ledger, composed, milestone)
+    if found.ready:
+        return bold(said["ready_for"].format(rev=rev, m=name))
+    n = len(found.required) + len(found.missing)
+    k = len(found.unresolved) + len(found.missing)
+    groups = "; ".join(part for part in (
+        _groups(ledger, composed, found.unresolved) if found.unresolved else "",
+        _missing_words(found.missing) if found.missing else "") if part)
+    return bold(said["not_ready_for"].format(rev=rev, m=name, k=k, n=n,
+                                             claims=_plural(n, "claim"),
+                                             is_=_plural(k, "is", "are"), groups=groups))
 
 
 # --------------------------------------------------------------------------- #
@@ -2827,7 +3166,8 @@ def _bullet_rank(verdict: Verdict) -> int:
 def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
                      cover: dict[str, list[str]], registry: Any, *,
                      stale_gates: Collection[str] = (),
-                     stale_reasons: Mapping[str, str] | None = None) -> list[str]:
+                     stale_reasons: Mapping[str, str] | None = None,
+                     required_word: str = "critical") -> list[str]:
     """Everything that is red, with the verdict line that made it red — and any
     claim the resolver calls Checked that its evidence contradicts, first and
     loudly (D18)."""
@@ -2844,7 +3184,7 @@ def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
     if bad:
         for claim in bad:
             found = composed[claim.id]
-            flag = "critical" if claim.critical else "not required"
+            flag = required_word if claim.critical else "not required"
             if claim.id in disagreeing:
                 out.append(f"### {status_tag(found.status)} {claim.id} — "
                            f"{_claim_text(claim)}  *(status and evidence disagree, {flag})*")
@@ -3000,7 +3340,10 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
                    f"          # everything registered"
                    f"{' — solvers included' if max_tier >= 2 else ''}")
     out.append("atompipe report --write"
-               "          # regenerates docs/readiness.md")
+               "          # renders REPORT.md, an output git ignores")
+    for declared in list(getattr(ledger, "milestones", None) or ())[:4]:
+        out.append(f"atompipe export {declared.id} --dry-run".ljust(33)
+                   + "# re-runs what it requires, at the boundary")
     out.append("```")
     out.append("")
     out.append("`check` re-runs only the gates whose inputs, code or control moved; "
@@ -3064,7 +3407,8 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
                     stale_gates: Collection[str] = (), model_error: str = "",
                     title: str = "", root: str = "",
                     params: Sequence[Any] | None = None,
-                    stale_reasons: Mapping[str, str] | None = None) -> str:
+                    stale_reasons: Mapping[str, str] | None = None,
+                    milestone: Any = None) -> str:
     """The full readiness report as markdown — the project's public deliverable.
 
     Sections, in the order a sceptical reader needs them: the readiness
@@ -3106,17 +3450,53 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
 
     The title is the project and its revision — no time: a regenerated report
     of an unchanged design must be byte-identical (S-89).
+
+    From P2.5b, under the sentence (its head unmoved, C-6), the limits
+    paragraph (M18.1) and each milestone's line, as last evaluated
+    (`milestone_line`; no `##` heading of its own: `ReportSectionOrder` pins the
+    order, and a heading above `SECTION_PROVEN` for a list of one-liners would
+    move it). ``milestone`` renders the report for one spend — the package's
+    REPORT.md, `report --milestone`: titled for it, its sentence the milestone
+    variant, every claim flagged required or not by the milestone's
+    ``requires`` and never by ``critical`` (critique 7 of the P2.5b design: the
+    package's body said `critical` under a head that said the milestone), and a
+    line saying that the claims it does not require are shown as last evaluated
+    (critique 18).
     """
     composed = _compositions(ledger, registry, stale, stale_gates)
     cover = _coverage(ledger, registry)
 
     name = ledger.meta.name or "(unnamed project)"
     rev = ledger.meta.revision or "unversioned"
-    heading = title or f"{name} — readiness ({rev})"
+    said = HUMAN["readiness"]
+    if milestone is not None:
+        heading = title or said["title_for"].format(name=name, m=milestone.id, rev=rev)
+    else:
+        heading = title or f"{name} — readiness ({rev})"
 
     out: list[str] = [f"# {heading}", ""]
-    out.append(_verdict_sentence(ledger, composed, registry, stale=stale, markdown=True))
+    out.append(_verdict_sentence(ledger, composed, registry, stale=stale, markdown=True,
+                                 milestone=milestone))
     out.append("")
+    out.append(limits_line(ledger))
+    out.append("")
+    requires = set(getattr(milestone, "requires", None) or ())
+    if milestone is not None:
+        others = [c for c in ledger.claims if c.id not in requires]
+        if others:
+            out.append(said["as_last_evaluated"].format(m=milestone.id,
+                                                        n=len(requires)))
+            out.append("")
+        # The sections flag a claim by the milestone's `requires`: the same
+        # claims, each `critical` read as "required by this milestone".
+        ledger = dataclasses.replace(ledger, claims=[
+            dataclasses.replace(c, critical=c.id in requires) for c in ledger.claims])
+    else:
+        declared = list(getattr(ledger, "milestones", None) or ())
+        if declared:
+            out.append(HUMAN["milestone"]["report_head"])
+            out += [f"- {milestone_line(ledger, composed, m)}" for m in declared]
+            out.append("")
     if model_error:
         out.append(f"**The model does not load**, so no verdict that reads it is "
                    f"current: {_trunc(model_error, 300)}")
@@ -3130,7 +3510,8 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     out += _section_gaps(ledger, composed, registry, stale_reasons=stale_reasons)
     out += _section_assumed(ledger, composed, params, model_error)
     out += _section_failing(ledger, composed, cover, registry, stale_gates=stale_gates,
-                            stale_reasons=stale_reasons)
+                            stale_reasons=stale_reasons,
+                            required_word="required" if milestone is not None else "critical")
     out += _section_reproduce(ledger, registry, root=root)
 
     out.append("---")
@@ -3198,7 +3579,7 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
                      f"{_trunc(claim.statement, 52)} — {why}")
     if len(problems) > _MAX_TERMINAL_CLAIMS:
         lines.append(f"       ... and {len(problems) - _MAX_TERMINAL_CLAIMS} more "
-                     f"unresolved claims — see docs/readiness.md")
+                     f"unresolved claims — see `atompipe report`")
     lines.extend(rebuild_line(found) for found in claim_logic.rebuild(ledger))
 
     # The gap RECORDS (`find_gaps`' Needs), with their tool options. Headed
@@ -3292,15 +3673,20 @@ def write_report(root: str, ledger: Ledger, registry: Any, *,
                  stale: bool = False, stale_gates: Collection[str] = (),
                  model_error: str = "", params: Sequence[Any] | None = None,
                  stale_reasons: Mapping[str, str] | None = None) -> str:
-    """Render the markdown report to `docs/readiness.md` and return its path.
+    """Render the markdown report to `REPORT.md` at the project root — an output
+    git ignores (P2.5b-D17, PLAN D-14) — and return its path. What slipped
+    through while it was the tracked `docs/readiness.md` (S-41): it drifted from
+    its ledger, and every candidate branch rewrote it. The CLI writes the root
+    ignore block first (`store.ensure_ignore_blocks`), so a project migrated
+    before P2.5b gains `/REPORT.md` before the file exists.
 
     Written atomically: a half-truncated readiness report left behind by a crash
     would be a document that claims less than is true, which is a strange way to
     fail but still a wrong one.
 
     The destination comes from `store.project_paths`, not from a join spelled
-    here. Layout is `store`'s job alone; a second module that knows where
-    `docs/readiness.md` lives is a second module to edit when it moves.
+    here. Layout is `store`'s job alone; a second module that knows where the
+    report lives is a second module to edit when it moves.
 
     `stale_gates`, `stale_reasons`, `model_error` and `params` as for
     `render_markdown`; `root` spells the gates' code files. The file holds no
@@ -3309,7 +3695,7 @@ def write_report(root: str, ledger: Ledger, registry: Any, *,
     file as it reaches `report`'s stdout: without it, a broken model's
     parameters would be judged from whatever records exist.
     """
-    path = store.project_paths(root)["readiness"]
+    path = store.project_paths(root)["report"]
     ensure_dir(os.path.dirname(path))
     atomic_write_text(path, render_markdown(ledger, registry, stale=stale,
                                             stale_gates=stale_gates, root=root,

@@ -1,5 +1,9 @@
 # atompipe:begin
-# Written by atompipe: bytecode from importing model/, gates/ and selftest/.
+# Written by atompipe: bytecode from importing model/, gates/ and selftest/,
+# the readiness report `atompipe report --write` renders, and the packages
+# `atompipe export` writes. Outputs, never sources.
 __pycache__/
 *.py[cod]
+/REPORT.md
+/out/
 # atompipe:end

@@ -61,7 +61,7 @@ BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearin
 #: regeneration is idempotent; examples/bracket/README.md spells out every step.
 REGENERATE = ("the committed bracket cache was written by another spine or model: in "
               "examples/bracket run `rm -rf .atompipe/verdicts && atompipe check; "
-              "atompipe gate selftest; atompipe report --write` and commit the result "
+              "atompipe gate selftest` and commit the result "
               "(examples/bracket/README.md, \"The committed cache\")")
 
 #: What it says instead when the walk, not the cache, is what moved.
@@ -417,7 +417,10 @@ class CacheCheckersRefuse(_env.EnvCase):
 
     def test_the_message_names_the_fix(self):
         self.assertIn("rm -rf .atompipe/verdicts && atompipe check", fix_message(portable=True))
-        self.assertIn("atompipe report --write", fix_message(portable=True))
+        self.assertIn("atompipe gate selftest", fix_message(portable=True))
+        # P2.5b (R-6, the same property): the report is an ignored output, so
+        # regenerating the cache writes no tracked report.
+        self.assertNotIn("report --write", fix_message(portable=True))
         not_portable = fix_message(portable=False)
         self.assertIn("not portable", not_portable)
         self.assertIn(platform.python_version(), not_portable)
@@ -472,6 +475,14 @@ class BracketIsMigrated(unittest.TestCase):
             self.assertIn("# atompipe:begin", block, rel)
             for needle in needles:
                 self.assertIn(needle, block.splitlines(), rel)
+
+    def test_no_readiness_report_is_tracked(self):
+        """P2.5b-D17 (S-41): the readiness report is `REPORT.md`, an ignored
+        output; `docs/readiness.md` is gone from the bracket, and nothing
+        generated replaces it in git."""
+        tracked = sorted(rel for rel in self.files
+                         if rel in ("docs/readiness.md", "REPORT.md") or rel.startswith("out/"))
+        self.assertEqual(tracked, [])
 
     def test_thickness_is_still_seven(self):
         """The failure a fresh clone is meant to show (phase-1.md, the brief)."""

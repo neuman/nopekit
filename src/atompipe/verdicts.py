@@ -1092,13 +1092,17 @@ _LEDGER_FIELD_SET = frozenset(_LEDGER_FIELDS)
 #: Reading one of these through ``ctx.ledger`` makes the whole list an input.
 #: openmodelica's ``claims_addressable`` walks ``claims``: honest (packs:H21).
 _LEDGER_WHOLE = frozenset({"claims", "params", "inputs", "needs", "decisions",
-                           "views", "meta"})
+                           "views", "meta", "milestones"})
 
 #: Never an input: a gate that read other gates' verdicts would put verdicts
 #: inside rho, a staleness that feeds itself. (The ledger's run record — the
 #: previous sweep's hashes — was hidden here for the same reason until 1.2
-#: removed it from the ledger altogether.)
-_LEDGER_HIDDEN = frozenset({"verdicts"}) & _LEDGER_FIELD_SET
+#: removed it from the ledger altogether.) P2.5b hides the export records for
+#: the same reason (D22): a gate that read the boundary's record would key on
+#: its own spend, and every export after a check would invalidate any gate
+#: that read the ledger whole. *Rejected:* hiding `milestones` too (a gate that
+#: reads what a spend requires is honest, and traced like `decisions`).
+_LEDGER_HIDDEN = frozenset({"verdicts", "exports"}) & _LEDGER_FIELD_SET
 
 #: Filled in memory from somewhere other than the record: `Claim.gates` from
 #: registry coverage, `physical_result`, `results` and `attributions` from
@@ -1115,14 +1119,16 @@ _IN_MEMORY_FIELDS = {"claims": ("gates", "physical_result", "results", "attribut
 #: claim no file names an owner or a fallback for digests exactly as it did
 #: before the field existed, and only an edit that names one moves the gates
 #: that read the claim.
-_ABSENT_WHEN_EMPTY = frozenset({"owner", "fallback", "terminal", "authority"})
+_ABSENT_WHEN_EMPTY = frozenset({"owner", "fallback", "terminal", "authority",
+                                # P2.5b-D4: a declared latency, empty ({}).
+                                "expected_latency"})
 
 
 def _record_form(item: Any, strip: tuple = ()) -> Any:
     form = item.to_dict() if hasattr(item, "to_dict") else item
     if isinstance(form, dict):
         form = {k: v for k, v in form.items()
-                if k not in strip and not (k in _ABSENT_WHEN_EMPTY and v == "")}
+                if k not in strip and not (k in _ABSENT_WHEN_EMPTY and (v == "" or v == {}))}
     return form
 
 
@@ -6012,6 +6018,13 @@ class _Now:
             config = projection.get("config") if isinstance(projection, Mapping) else None
             self.config_keys = frozenset(config) if isinstance(config, Mapping) else frozenset()
         self.ledger = ledger
+        # The articles `exports/` holds (P2.5b-D15): a pass on one counts only
+        # while its export is on record. Here, beside the ledger it is read
+        # from, so ``_judge_entry`` keeps the one signature every caller (and
+        # every planted judge) has.
+        self.exported = frozenset(
+            str((getattr(e, "article", None) or {}).get("hash") or "")
+            for e in getattr(ledger, "exports", None) or ()) - {""}
         self.model = model
         self.spine = spine_digest()
         self.walks: dict = {}
@@ -7489,6 +7502,187 @@ def article_of(root: str, projection: Any, model: Any, *, anchors: Anchors | Non
             "revision": vcs.git_head(root) or "", "dirty": bool(dirty)}
 
 
+# --------------------------------------------------------------------------- #
+# an exported article: what a generator read (P2.5b-D11, D12)
+# --------------------------------------------------------------------------- #
+class ExportedArticle(NamedTuple):
+    """What ``export_article`` found: ``article`` (``{}`` when the generator
+    did not run to the end), ``written`` — the files under ``out_dir``, posix,
+    sorted — ``outside`` — project or pack files it opened for writing outside
+    ``out_dir``, named — and ``error``, the first line of what it raised."""
+
+    article: dict
+    written: tuple
+    outside: tuple
+    error: str
+    params: dict
+
+
+def _code_digests(module: Any, anchors: Anchors) -> dict[str, str] | None:
+    """A generator's code closure as an article digests it — ``_model_code``'s
+    rule (canonical AST for Python, bytes for data a module read at import)."""
+    return _model_code(module, anchors)
+
+
+def _now_code(spelled: str, here: "_Now") -> str:
+    """The digest a recorded code file has NOW, by ``_model_code``'s rule; ``""``
+    when it is gone."""
+    where = here.locate(spelled)
+    data = _file_bytes(where) if where else None
+    if data is None:
+        return ""
+    if spelled.endswith(_SOURCE_SUFFIXES):
+        return canonical_ast_digest(data) or ""
+    return hashlib.sha256(data).hexdigest()
+
+
+def _flat_value(flat: Any, path: tuple) -> Any:
+    node = flat
+    for part in path:
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return _MISSING
+    return node
+
+
+def export_article(root: str, projection: Any, fn: Any, *, out_dir: str, anchors: Anchors,
+                   digests: FileDigests, model: Any = None, milestone: str = "",
+                   when: str = "", resolution: Any = None) -> ExportedArticle:
+    """Run a milestone's generator ``fn(ctx)`` traced, exactly as a gate is run,
+    and name the article it built (P2.5b-D11, D12): GLOSSARY's *article*, "named
+    by the hash of what it was built from".
+
+    ``ctx`` is a ``GateContext`` — ``root``, ``params`` (the projection's flat
+    params, read-only, traced: ``traced_context``), ``out_dir`` (the package's
+    scratch), no model, an empty ledger — and the run is inside ``tracing``, so
+    the audit hook sees what it opens. A TRACED article (``traced: true``):
+    ``built_from`` = the params it read (each digested as a gate's read, its
+    small value kept), its code closure (canonical AST of its module and the
+    project code it imported), and the project files it read. An opaque read in
+    its trace — an environment variable, a subprocess, a file outside the
+    project — or a code closure that was not recorded: ``traced: false`` and
+    ``built_from`` is the whole design (``article_of``) — over-prediction,
+    never under (invariant 7). ``revision``/``dirty`` are shown, never hashed.
+
+    The hash seals ``{"source": "export", "built_from": …}``: an export of the
+    whole design never shares a hash with a design article recorded at the same
+    inputs. Nothing is refused here: what the generator wrote outside
+    ``out_dir`` and what it raised come back, and ``export`` refuses on them.
+    What a generator writes outside its directory is detected, never undone
+    (critique 5 of the P2.5b design): it is project code, and P3's permission
+    rule is the lock. *Rejected:* the generator's declared inputs
+    (under-recording: invariant 7's failure); the required claims' evaluators'
+    read sets (a print depends on values no evaluator reads); a model object in
+    ``ctx`` (a whole-model read would make every article the whole design)."""
+    from . import gates as _gates
+    params, _conflicts = modelio.flat_params(projection)
+    ctx = _gates.GateContext(root=root, ledger=Ledger(), model=None, params=params,
+                             out_dir=out_dir, tier=int(Tier.EXTERNAL))
+    trace = GateTrace(anchors=anchors)
+    view = traced_context(ctx, trace, readonly=True)
+    error = ""
+    try:
+        modelio.clear_caches(fn)
+        with tracing(trace):
+            fn(view)
+    except (Exception, SystemExit) as exc:          # noqa: BLE001 - the project's code
+        error = (str(exc).strip().splitlines() or [type(exc).__name__])[0] or \
+            type(exc).__name__
+    base = os.path.abspath(out_dir)
+    written = []
+    for dirpath, _dirnames, filenames in os.walk(base):
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            written.append(os.path.relpath(full, base).replace(os.sep, "/"))
+    places = _Places(anchors)
+    project = os.path.normcase(os.path.abspath(root))
+    outside = []
+    for path in sorted(trace.files_written):
+        p = _norm(path)
+        if p == _norm(base) or p.startswith(_norm(base) + os.sep):
+            continue
+        inside_project = p == project or p.startswith(project + os.sep)
+        in_pack = any(places.rel(p, spellings) is not None for _n, spellings in places.packs)
+        if inside_project or in_pack:
+            outside.append(places.shown(p) if not inside_project
+                           else os.path.relpath(p, project).replace(os.sep, "/"))
+    if error:
+        return ExportedArticle({}, tuple(sorted(written)), tuple(outside), error, {})
+    reads = Reads.from_trace(trace, anchors=anchors, digests=digests)
+    module = sys.modules.get(getattr(fn, "__module__", "") or "")
+    code = _code_digests(module, anchors) if module is not None else None
+    traced = not reads.opaque and code is not None and not trace.model_used
+    carried: dict[str, Any] = {}
+    if traced:
+        built: dict[str, Any] = {"params": [list(row) for row in reads.params],
+                                 "model": code, "files": dict(reads.files)}
+        if reads.dirs:
+            built["dirs"] = dict(reads.dirs)
+        for row in reads.params:
+            value = _flat_value(params, tuple(row[0]))
+            if value is not _MISSING:
+                carried[_dotted(tuple(row[0]))] = value
+    else:
+        design = article_of(root, projection, model, anchors=anchors, digests=digests,
+                            resolution=resolution)
+        built = dict(design.get("built_from") or {})
+        carried = dict(params)
+    revision = vcs.git_head(root) or ""
+    code_files = sorted(k for k in (code or {}) if not k.startswith("<"))
+    dirty = bool(vcs.model_dirty(root, code_files)) if code_files else False
+    article = {"source": "export", "hash": seal({"source": "export", "built_from": built}),
+               "built_from": built, "traced": bool(traced), "milestone": milestone,
+               "when": when, "revision": revision, "dirty": dirty}
+    return ExportedArticle(article, tuple(sorted(written)), tuple(outside), "", carried)
+
+
+def _traced_moves(article: Mapping[str, Any], here: "_Now") -> tuple[str, tuple]:
+    """``_article_moves`` for an exported, TRACED article (P2.5b §5.4): only the
+    rows it recorded are compared — a parameter its generator never read moves
+    nothing; one it read that is now absent moves it — then its code files'
+    canonical digests now, then the files it read. Inputs first, a derived value
+    named only when no input moved, the code only when no value moved
+    (``_reasons``' rule). What it ends (P2.5a-D16's hand-off): any value change
+    moved every recorded article, so the rebuild prediction named prints a
+    change never reached."""
+    built = article.get("built_from")
+    if not isinstance(built, Mapping):
+        return "unjudged", ()
+    rows = [row for row in built.get("params") or () if isinstance(row, list) and row]
+    if rows and here.flat is None:
+        return "unjudged", ()
+    inputs: list[str] = []
+    derived: list[str] = []
+    for row in rows:
+        path, recorded = tuple(row[0]), str(row[1])
+        digest, value = here.param(path, recorded)
+        if digest == recorded:
+            continue
+        before = _display_of(row)
+        small, display = (False, None) if value is _MISSING else small_value(value,
+                                                                              here.anchors)
+        after = "absent" if value is _MISSING else (repr(display) if small else None)
+        text = (f"{_dotted(path)} {before} -> {after}" if before and after
+                else f"{_dotted(path)} changed")
+        (inputs if path and path[0] in here.config_keys else derived).append(text)
+    reasons = inputs or derived
+    if not reasons:
+        for spelled, digest in sorted((built.get("model") or {}).items()):
+            if _now_code(str(spelled), here) != digest:
+                reasons.append(f"generator code {str(spelled).rsplit('/', 1)[-1]} changed")
+    for spelled, digest in sorted((built.get("files") or {}).items()):
+        where = here.locate(spelled)
+        now = _path_digest(where, here.digests) if where else None
+        if now != digest:
+            reasons.append(f"{spelled} {'removed' if now is None else 'changed'}")
+    for spelled, digest in sorted((built.get("dirs") or {}).items()):
+        where = here.locate(spelled)
+        if (_dir_digest(where) if where else None) != digest:
+            reasons.append(f"{spelled} listing changed")
+    return ("moved", _capped(reasons)) if reasons else ("current", ())
+
+
 def _display_of(row: list) -> str | None:
     if len(row) > 2:
         return repr(row[2])
@@ -7511,6 +7705,10 @@ def _article_moves(article: Mapping[str, Any], here: "_Now") -> tuple[str, tuple
     key = str(article.get("hash"))
     memo = here.__dict__.setdefault("_article_memo", {})
     if key in memo:
+        return memo[key]
+    if article.get("traced") is True:
+        # An exported article is what its generator read (P2.5b-D12).
+        memo[key] = _traced_moves(article, here)
         return memo[key]
     files = sorted((built.get("files") or {}))
     now = None
@@ -7577,6 +7775,18 @@ def _fact_terminal(terminal: str) -> str:
     return "none" if terminal == "none" else "beside"
 
 
+def _fact_export(entry: Any, exported: Collection[str]) -> str:
+    """A pass on an exported article counts only while `exports/` holds the
+    export that built it (P2.5b-D15): an export record removed — to make a
+    rebuild disappear, say — leaves its passes counting for nothing. A fail
+    counts regardless (R-3); this is asked of passes only."""
+    article = getattr(entry, "article", None) or {}
+    if (isinstance(article, Mapping) and article.get("source") == "export"
+            and str(article.get("hash") or "") not in exported):
+        return "export-missing"
+    return ""
+
+
 def _fact_authority(entry: Any, claim: Any, terminal: str) -> str:
     """A judgment counts only as the claim's authority's own (critique 10 of the
     P2.5a design: recorded for the authority the claim names now, by them)."""
@@ -7640,8 +7850,12 @@ def _judge_entry(index: int, entry: Any, claim: Any, terminal: str, digest_now: 
     if getattr(entry, "passed", None) is not True:
         return EntryStanding(index, False, False, "", article_hash, state, moved)
     # The terminal first: beside an automated evaluator a pass settles nothing
-    # whoever typed it, and that is the reason to give.
-    why = (_fact_terminal(terminal) or _fact_channel(entry) or _fact_who(entry)
+    # whoever typed it, and that is the reason to give. The other facts are
+    # judged all the same (P2.5b): a pass that stands on its article is what a
+    # fail's supersession reads, whatever the terminal (`EntryStanding.stands`).
+    terminal_why = _fact_terminal(terminal)
+    exported = getattr(here, "exported", frozenset())
+    why = (_fact_channel(entry) or _fact_who(entry) or _fact_export(entry, exported)
            or _fact_authority(entry, claim, terminal))
     claim_moved = _fact_claim(entry, digest_now)
     if not why and terminal == "human" and claim_moved:
@@ -7671,12 +7885,65 @@ def _judge_entry(index: int, entry: Any, claim: Any, terminal: str, digest_now: 
             why = claim_moved
         if not why and _kind_of(claim) == "physical":
             why = _fact_evidence(entry, here.root, here.digests)
-    return EntryStanding(index, True, not why, why, article_hash, state, moved)
+    stands = not why and terminal_why in ("", "beside")
+    why = terminal_why or why
+    return EntryStanding(index, True, not why, why, article_hash, state, moved, stands)
 
 
 def _kind_of(claim: Any) -> str:
     kind = getattr(claim, "kind", "")
     return str(getattr(kind, "value", kind) or "measurable")
+
+
+def _recorded_rows(article: Mapping[str, Any]) -> dict[tuple, str]:
+    """``{(part, key): digest}`` of what an exported article recorded: its
+    params, its code files and its files (and listings)."""
+    built = article.get("built_from") if isinstance(article, Mapping) else None
+    if not isinstance(built, Mapping):
+        return {}
+    rows: dict[tuple, str] = {}
+    for row in built.get("params") or ():
+        if isinstance(row, list) and len(row) > 1:
+            rows[("param", json.dumps(row[0]))] = str(row[1])
+    for part in ("model", "files", "dirs"):
+        for key, digest in (built.get(part) or {}).items():
+            rows[(part, str(key))] = str(digest)
+    return rows
+
+
+def _differs_on_recorded(failed: Mapping[str, Any], passed: Mapping[str, Any]) -> bool:
+    """Whether the article ``passed`` was built from differs from ``failed``'s on
+    a row ``failed`` RECORDED (critique 2 of the P2.5b design): the object that
+    passed must differ from the one that failed in what that object was built
+    from — never only in rows the failed generator never read, and never by
+    hash alone (two articles' hashes differ across their generators)."""
+    a, b = _recorded_rows(failed), _recorded_rows(passed)
+    return any(key in b and b[key] != digest for key, digest in a.items())
+
+
+def _supersedes(fail: Any, fs: EntryStanding, passing: Any, ps: EntryStanding) -> bool:
+    """Whether the pass ``passing`` (later) supersedes the fail ``fail``
+    (P2.5b-D14; PLAN Q2.11: R-3 "for every object but the one that failed").
+    All of: the fail's article A was EXPORTED and TRACED — a design article, or
+    an export of the whole design, over-predicts what moved, which is safe for
+    staling a pass and unsafe for releasing a fail (critique 2); the pass stands
+    — a person's own, on its current article, every fact but the terminal
+    holding, its export on record (D15) — on an article B that is exported and
+    traced too; A no longer matches the design (``moved``); and B differs from A
+    on a row A recorded. The moment the design returns to A, A is current and
+    the fail counts again. *Rejected:* any later pass (the review of P2.1's
+    one-second laundering); a pass on a design article (P2.5a-D12's "a nudge
+    plus a typed pass"); B == A, or B differing from A by hash alone (a retest
+    of the same object until it passes, Q2.11)."""
+    a = getattr(fail, "article", None) or {}
+    b = getattr(passing, "article", None) or {}
+    if not (isinstance(a, Mapping) and isinstance(b, Mapping)):
+        return False
+    return bool(ps.stands and a.get("source") == "export" and a.get("traced") is True
+                and b.get("source") == "export" and b.get("traced") is True
+                and fs.article_state == "moved"
+                and str(a.get("hash") or "") != str(b.get("hash") or "")
+                and _differs_on_recorded(a, b))
 
 
 def judge_results(ledger: Any, here: "_Now") -> dict[str, Standing]:
@@ -7715,19 +7982,32 @@ def judge_results(ledger: Any, here: "_Now") -> dict[str, Standing]:
         counting = [e for e in entries if e.counts]
         person = [e for e in entries if e.passed and e.why in _PERSON_WHYS]
         passes = [e for e in entries if e.passed]
+        # Supersession (P2.5b-D14): a fail a later standing pass on another
+        # exported article supersedes stops counting; never a judgment's (a
+        # person, not a print) or an assumption's.
+        superseded: list[int] = []
+        if terminal not in ("human", "none"):
+            for e in entries:
+                if not e.passed and any(
+                        p.passed and p.index > e.index
+                        and _supersedes(results[e.index], e, results[p.index], p)
+                        for p in entries):
+                    superseded.append(e.index)
+        fails = [e.index for e in entries if not e.passed and e.index not in superseded]
+        fail = fails[-1] if fails else None
         if counting:
             chosen = counting[-1]
-            out[claim.id] = Standing("current", chosen.index, chosen.article, (), entries)
+            found = Standing("current", chosen.index, chosen.article, (), entries)
         elif person:
             chosen = person[-1]
-            out[claim.id] = Standing(chosen.why, chosen.index, chosen.article, chosen.moved,
-                                     entries)
+            found = Standing(chosen.why, chosen.index, chosen.article, chosen.moved, entries)
         elif passes:
             chosen = passes[-1]
-            out[claim.id] = Standing(f"not-counted:{chosen.why}", chosen.index,
-                                     chosen.article, chosen.moved, entries)
+            found = Standing(f"not-counted:{chosen.why}", chosen.index, chosen.article,
+                             chosen.moved, entries)
         else:
-            out[claim.id] = Standing("", None, "", (), entries)
+            found = Standing("", None, "", (), entries)
+        out[claim.id] = dataclasses.replace(found, fail=fail, superseded=tuple(superseded))
     return out
 
 
@@ -7814,8 +8094,30 @@ def view(ledger: Any, resolution: Resolution) -> Ledger:
                    for entry in getattr(claim, "results", ()) or ())]
     return dataclasses.replace(
         ledger, verdicts=list(resolution.verdicts),
-        claims=[*(dataclasses.replace(claim, standing=standings.get(claim.id))
-                  for claim in ledger.claims), *removed])
+        claims=[*(_judged(claim, standings.get(claim.id)) for claim in ledger.claims),
+                *removed])
+
+
+def _judged(claim: Any, standing: Any) -> Any:
+    """``claim`` with its standing — and, where a fail was superseded (P2.5b-D14),
+    ``physical_result`` the result that counts now: the fail that still counts,
+    else the newest pass that stands, so rung 1 is unchanged and reads it. A
+    claim with nothing superseded keeps the store's choice (the newest fail, R-3)
+    exactly; a raw ``store.load`` reader, with no standing, reads the newest
+    fail whatever was recorded after it (R-2)."""
+    if standing is None or not getattr(standing, "superseded", ()):
+        return dataclasses.replace(claim, standing=standing)
+    results = tuple(getattr(claim, "results", ()) or ())
+    chosen = None
+    if standing.fail is not None and 0 <= standing.fail < len(results):
+        chosen = results[standing.fail]
+    else:
+        stands = [e.index for e in standing.entries if e.passed and e.stands]
+        if stands:
+            chosen = results[stands[-1]]
+    return dataclasses.replace(claim, standing=standing,
+                               physical_result=chosen if chosen is not None
+                               else claim.physical_result)
 
 
 #: ``Standing.state`` of a claim whose file is gone and whose results file holds
@@ -8566,6 +8868,9 @@ WATCHED = (
     "claims/**", "params/**", "decisions/**", "needs/**", "inputs/**", "results/**",
     "views/**", ".atompipe/verdicts/**", "model/**", "gates/**", "selftest/**",
     ".atompipe/project.json", ".atompipe/packs/**", "objectives.json",
+    # P2.5b-D22: a milestone, its export records, and the generators an export
+    # runs — each a fact a reader's *ready* or an article stands on.
+    "milestones/**", "exports/**", "generators/**",
 )
 
 _LAST_CHECK = "last_check.json"
@@ -9774,6 +10079,19 @@ class SweepRow:
     or the run's ``Reads`` — where it can be a pass, so the sweep judges its
     operating context on the spellings it read (P2.4, ``_contexted``); ``None``
     elsewhere. In memory only."""
+    disagrees: tuple = ()
+    """What a FORCED run found that the records it overrode did not say
+    (P2.5b-D7, R-9; set by ``_sweep_one``, the one place that holds both),
+    ``()`` when nothing: ``("outcome", before out8, before outcome, after
+    outcome, rho)`` — the entry served Fresh at a ρ and this run at the SAME ρ
+    give two outcomes (compared by out8 whatever either's instruments say:
+    critique 3 of the P2.5b design, a forgery stamped with a foreign machine's
+    instruments is no clash under ``_contradicted`` and still two outcomes
+    here); ``("records", reason)`` — the records already held two outcomes at
+    the current ρ; ``("qualification", token)`` — a qualification the records
+    held (admitted) does not hold when re-run. A run at another ρ (a tier read,
+    an opaque read) is no disagreement: it is the evidence. The LAST field
+    (R-2)."""
 
 
 @dataclass
@@ -9989,7 +10307,16 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
               and _standing(s.held.get(gid), state) is None)
     at = _read_tier(state.entry.reads) if served else s.now.tier
     may_run = at is None or at == s.now.tier
+    # Under `force`, what the records said of the qualification before the run
+    # (P2.5b-D7): a forced re-qualification that does not hold where the records
+    # held is a disagreement — the boundary refuses it (R-9).
+    recorded = (_admission(s.now, spec, fn, s.held, [], s.verified, at=at)
+                if force and may_run else None)
     judged = _admit(s, spec, fn, run_ctx, may_run=may_run, force=force, at=at)
+    disagrees: tuple = ()
+    if (recorded is not None and recorded.state == "admitted"
+            and judged.state == "not-admitted"):
+        disagrees = ("qualification", str(judged.reason or ""))
     if served:
         judged = _counted_with(judged, state.entry.reads)
     if judged.state == "undemonstrated" and not may_run:
@@ -10030,7 +10357,7 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
                                f"entry {state.entry.name} at these inputs, whose own "
                                f"path's control stands, is the more thorough answer, and "
                                f"what status and a plain check serve ({shown})")
-        return SweepRow(refused, admission=judged)
+        return SweepRow(refused, admission=judged, disagrees=disagrees)
 
     # 3. the cache — unless a remembered crash at these inputs superseded it.
     # Two outcomes at the current rho are the cache's answer too: resolve's
@@ -10061,9 +10388,17 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     measured = verdict.outcome in ("pass", "fail")
     name = ""
     clash = ""
+    if force and isinstance(state, Stale) and state.conflict and not disagrees:
+        disagrees = ("records", str(state.reasons[0] if state.reasons else _TWO_OUTCOMES))
     if measured:
         entry = _entry_for(spec, verdict, keyed, s.anchors)
         name = entry.name
+        if (force and not disagrees and isinstance(state, Fresh)
+                and state.entry.rho == keyed.rho
+                and out8(state.entry.verdict) != out8(entry.verdict)):
+            before = _as_spec(state.entry.to_verdict(), spec).outcome
+            disagrees = ("outcome", out8(state.entry.verdict), before, verdict.outcome,
+                         keyed.rho)
         # `--force` (or a remembered crash) ran it over a conflict, or this run
         # just made one: the row is the error the resolver will read, not the
         # run's own answer. The entry is still filed — it is what the gate said.
@@ -10097,7 +10432,8 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
     if clash:
         refused = dataclasses.replace(_synthesized(spec, error=clash, rho=keyed.rho),
                                       duration_s=verdict.duration_s, cpu_s=verdict.cpu_s)
-        return SweepRow(refused, executed=True, rho=keyed.rho, admission=judged)
+        return SweepRow(refused, executed=True, rho=keyed.rho, admission=judged,
+                        disagrees=disagrees or (("records", clash) if force else ()))
     if measured:
         # What it read beside the qualification it counts under: a ledger value
         # no qualification run read leaves it uncounted (`_counted_with`), as
@@ -10106,7 +10442,8 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         if counted.state == "not-admitted" and judged.state != "not-admitted":
             refused = dataclasses.replace(_unqualified(spec, counted.reason, rho=keyed.rho),
                                           duration_s=verdict.duration_s, cpu_s=verdict.cpu_s)
-            return SweepRow(refused, executed=True, rho=keyed.rho, admission=counted)
+            return SweepRow(refused, executed=True, rho=keyed.rho, admission=counted,
+                            disagrees=disagrees)
     # 5. a run over a current answer — `--force`, or a crash that superseded it —
     # is one entry beside that answer, not the answer: the row is what the
     # records resolve to with it filed and what it answered forgotten
@@ -10118,9 +10455,9 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         outranked = _outranked(s, spec, fn, run_ctx, keyed.code, entry, verdict, judged,
                                held=held)
         if outranked is not None:
-            return outranked
+            return dataclasses.replace(outranked, disagrees=disagrees)
     return SweepRow(verdict, executed=True, fresh=measured, rho=keyed.rho, admission=judged,
-                    reads=keyed.reads)
+                    reads=keyed.reads, disagrees=disagrees)
 
 
 def _reader_state(s: _Session, spec: Any, fn: Any) -> tuple:

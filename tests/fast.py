@@ -13,7 +13,22 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine. The review of
+The budget is 90 s as ONE process on an otherwise idle machine. P2.5b is OVER
+it, said here rather than hidden: measured 2026-10-04 within the hour (load
+average 0.7-1.3), 93.4 s wall (67.8 s user) for 738 tests, against 88.3 s wall
+(63.6 s user) for `ecaad99`'s 713 on the same machine. What it added (~13 s,
+measured test by test with --durations): invariant 12's in-process rows and
+the in-process halves of 7, 8 and 11 over an exported article (~3 s, each with
+its planted violator); four rows in each records sweep — `export`, its JSON,
+its dry run, `report --milestone` (+3.8 s; kept, as every row of those sweeps
+is: a command that writes is what they exist to catch); the export channel in
+the vocabulary world and the imports of two more test modules. What it paid
+back (~8 s): `claim list --status` reads a bracket copy of its own instead of
+building that world (-4.7 s, same assertions); the forged export's end-to-end
+row (re-run filed, read back through `status`) and the one-time migration's
+index row left to the gate, named below; the Fig. 4 and bracket export rows
+here run `check` and `export` in process. The remaining ~3.5 s stands: the
+next change that touches the fast tier pays it back first. Before it, the review of
 P2.5a added fifteen in-process rows (~2 s: its laundering paths, each with its
 planted violator) and moved nothing out: measured 2026-10-04, 86.7 s wall (62.3 s
 user) for 713 tests — under the budget, so the next change that adds pays for
@@ -481,10 +496,22 @@ FAST: list[str] = [
     "test_context.NoContextMovesNothing",
 
     # -- invariant 8: records are the source, the index an output --------- #
-    # The whole class, the index-agrees test among it: a hand-edited index
-    # loses, every record change reaches it, and every command run after a
-    # hand edit leaves `agree()` empty (14 s of the 17). ~17 s.
-    "test_records.IndexNeverDisagreesWithRecords",
+    # The class but its legacy row, the index-agrees test among it: a
+    # hand-edited index loses, every record change reaches it, and every
+    # command run after a hand edit leaves `agree()` empty (13 s of the 15).
+    # ~15 s. (P2.5b's pay-back: the one-time migration's row is left to the
+    # gate, below, with the legacy sweeps.)
+    "test_records.IndexNeverDisagreesWithRecords.test_a_hand_edited_index_loses_to_the_records",
+    "test_records.IndexNeverDisagreesWithRecords.test_every_record_change_reaches_the_index",
+    "test_records.IndexNeverDisagreesWithRecords.test_the_build_is_deterministic",
+    "test_records.IndexNeverDisagreesWithRecords.test_the_index_is_ignored_through_fnmatch",
+    "test_records.IndexNeverDisagreesWithRecords.test_an_input_rewritten_in_place_drifts",
+    "test_records.IndexNeverDisagreesWithRecords.test_unregistered_inputs_are_hand_dropped_evidence",
+    "test_records.IndexNeverDisagreesWithRecords.test_the_index_is_written_only_when_it_changes",
+    "test_records.IndexNeverDisagreesWithRecords.test_the_index_holds_no_verdict_status_or_coverage",
+    "test_records.IndexNeverDisagreesWithRecords.test_the_records_digest_moves_with_a_record_and_not_with_the_index",
+    "test_records.IndexNeverDisagreesWithRecords.test_a_legacy_project_gets_no_index",
+    "test_records.IndexNeverDisagreesWithRecords.test_every_command_leaves_the_index_agreeing",
     # Invariant 8's second half, its planted violator and the property on the
     # command that writes most: `check` writes only ignored paths and new
     # entries. ~4 s.
@@ -594,6 +621,32 @@ FAST: list[str] = [
     "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_in_process_a_judgments_fail_names_no_article",
     "test_physical.RenderersAgreeOnPhysicalClaims.test_the_page_groups_an_expert_judgment_apart",
     "test_priors.ShippedTextCarriesNoScenarioPrior.test_planted_terms_are_found",
+    # -- invariant 12 (P2.5b): ready is one predicate, the boundary re-executes,
+    # going ahead is a decision, an export is a sealed record — and 7, 8 and
+    # 11 over an exported article. In process, each with its planted violator
+    # (~4 s together, measured 2026-10-04 one by one): the predicate's rows and
+    # every reader of it, the export record's tamperings and its one writer
+    # (an AST scan), the strict milestone reader and the index's rows, the
+    # supersession rows and their planted judges, the hardware clause in every
+    # branch, the article prediction's planted predictions; and four export
+    # runs in process on a bracket or Fig. 4 copy (0.3-0.9 s each): the
+    # planted boundaries (cache served, tier 0, no prerequisite expansion), a
+    # forged cache pass refused as a disagreement beside the planted finder
+    # that misses it, the planted dry-run predicate, a fail on an exported
+    # article charged to the verdicts the export sealed. The rest run the commands end to end — left to the gate,
+    # below, each named.
+    "test_export.ReadyIsOnePredicate",
+    "test_export.TheBoundaryReExecutes.test_the_planted_boundaries_are_caught",
+    "test_export.ACacheThatLiesIsCaughtAtTheBoundary.test_a_planted_disagreement_finder_is_caught",
+    "test_export.DryRunIsTheSamePath.test_a_planted_dry_run_predicate_is_caught",
+    "test_export.GoingAheadIsAPersonsDecision.test_a_record_that_drops_the_claims_is_caught",
+    "test_records.TheExportRecordIsSealedAndChained",
+    "test_records.MilestonesAreRecords.test_the_strict_reader",
+    "test_records.MilestonesAreRecords.test_the_index_lists_milestones_and_exports",
+    "test_physical.AFailIsSupersededOnlyOnAnotherExportedArticle",
+    "test_physical.AResultBindsToAnExportedArticle.test_a_fail_is_charged_to_the_verdicts_sealed_at_export",
+    "test_vocabulary.TheHardwareClauseIsAlwaysSaid",
+    "test_fig4.TwoArticlesExactly.test_the_planted_predictions_are_caught",
 ]
 
 
@@ -785,6 +838,10 @@ LEFT_FOR_THE_GATE: list[str] = [
     "test_records.NoCommandWritesARecord.test_no_command_writes_a_record_on_a_legacy_project",
     "test_records.NoCommandWritesARecord.test_check_on_a_legacy_project_writes_only_the_migration",
     "test_records.NoCommandWritesARecord.test_a_shim_on_a_legacy_project_writes_the_migration_and_its_record",
+    # P2.5b's pay-back (~2 s): the index arriving with that one-time migration,
+    # `check` and each shim on a legacy copy — the same carve-out, the same
+    # escalation.
+    "test_records.IndexNeverDisagreesWithRecords.test_a_migration_leaves_the_index_agreeing",
     # P2.4's channels on bracket copies and planted projects, through the
     # commands (~1-3 s each): a goalpost moved and tightened (and its coupled
     # and whole-record violators), the control entry unmoved, every channel
@@ -812,6 +869,45 @@ LEFT_FOR_THE_GATE: list[str] = [
     # keep; an iteration touching a pack's fixtures or `GateContext.acceptance`
     # runs test_packs whole (module docstring).
     "test_packs.ControlsAreSealed.test_host_claims_never_reach_a_pack_control",
+    # Invariant 12's end-to-end rows (P2.5b): each runs `export` (or `claim
+    # physical --article`) through the commands on a bracket or Fig. 4 copy —
+    # the bracket at 8 re-executed, a prerequisite covering no required claim
+    # re-run, a forgery's re-run filed and read back through `status` (its
+    # disagreement is in FAST, in process), a forgery after its first refusal
+    # and under foreign instruments,
+    # dry run at 7, 8 and forged and its text against the written export's,
+    # the preconditions dry run reports, a generator writing under dry run,
+    # the go-ahead's channels in a pty (agent, pipe, no reason, a mistyped
+    # name, the person) and a ready milestone's, export writing its record and
+    # nothing else and a refused one filing only its re-run, the two Fig. 4
+    # articles each moved by its own change, a short, unknown or ambiguous
+    # `--article`, the planted capture from the current resolution. 0.3-5.7 s
+    # each, ~25 s together. The rule each holds runs in process above with
+    # its planted violator; an iteration touching `cli.cmd_export`,
+    # `milestones.py`, `verdicts.export_article`/`_supersedes`/`judge_results`,
+    # `claims.unresolved` or `store.append_sealed` runs test_export,
+    # test_physical, test_fig4 and test_records whole.
+    "test_export.TheBoundaryReExecutes.test_the_bracket_at_eight",
+    "test_export.ACacheThatLiesIsCaughtAtTheBoundary.test_a_forged_pass_is_refused_and_the_re_run_filed",
+    "test_export.TheBoundaryReExecutes.test_a_prerequisite_covering_no_required_claim_is_re_run",
+    "test_export.ACacheThatLiesIsCaughtAtTheBoundary.test_no_go_ahead_covers_it_after_the_first_refusal",
+    "test_export.ACacheThatLiesIsCaughtAtTheBoundary.test_a_forgery_under_foreign_instruments_is_refused",
+    "test_export.DryRunIsTheSamePath.test_at_seven_eight_and_forged",
+    "test_export.DryRunIsTheSamePath.test_the_text_differs_only_in_the_outcome_line",
+    "test_export.DryRunIsTheSamePath.test_dry_run_says_what_the_written_export_would_refuse",
+    "test_export.DryRunIsTheSamePath.test_a_generator_that_writes_under_dry_run_is_refused_and_named",
+    "test_export.GoingAheadIsAPersonsDecision.test_the_channels",
+    "test_export.GoingAheadIsAPersonsDecision.test_ready_needs_no_decision",
+    "test_records.MilestonesAreRecords.test_export_writes_its_record_and_nothing_else",
+    "test_records.MilestonesAreRecords.test_a_refused_export_files_its_re_run_and_no_record",
+    "test_fig4.TwoArticlesExactly.test_both_count_at_seventy",
+    "test_fig4.TwoArticlesExactly.test_the_cell_moves_the_board_alone",
+    "test_fig4.TwoArticlesExactly.test_the_cavity_moves_the_enclosure_alone",
+    "test_fig4.TwoArticlesExactly.test_a_change_no_generator_read_moves_neither",
+    "test_fig4.TwoArticlesExactly.test_an_unregistered_read_never_under_predicts",
+    "test_fig4.TwoArticlesExactly.test_each_package_carries_only_what_its_article_records",
+    "test_physical.AResultBindsToAnExportedArticle.test_a_short_unknown_or_ambiguous_article_is_refused",
+    "test_physical.AResultBindsToAnExportedArticle.test_a_planted_capture_from_the_current_resolution_is_caught",
 ]
 
 # Left out, carrying no invariant class; seconds as measured with eight modules

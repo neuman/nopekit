@@ -1938,7 +1938,7 @@ def state(
         # its record fields, its terminal and authority, and `physical_result`
         # carrying the judge's `counts` and `why` — the page keys its ok tone on
         # those, never on `passed` (critique 3 of the P2.5a design).
-        row = report_logic.claim_json(claim, composed=found)
+        row = report_logic.claim_json(claim, composed=found, exports=view.exports)
         row["status"] = str(status)
         # The words beside the kept enum (P2.1-D12): `key`, `word`, `cause`,
         # `reason`, `errored` — all `report.HUMAN`'s, so the page owns none.
@@ -2025,6 +2025,11 @@ def state(
             "n_critical": summary["n_critical"],
             "n_gates": summary["n_gates"],
             "n_gaps": summary["n_gaps"],
+            # P2.5b (S-60's field half): *ready* per milestone, the one
+            # predicate's (`claims.unresolved` through `summarise`), as last
+            # evaluated — the boundary's is `export <m> --dry-run`'s. The page
+            # renders it in P5; until then it is here for an agent to read.
+            "milestones": summary.get("milestones") or {},
         },
         # Every status's words, keyed by the enum value a claim row's `status`
         # holds: the page's chip labels and hints, so the site never owns a word

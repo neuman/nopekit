@@ -129,6 +129,25 @@ def results(root: str, cid: str) -> dict:
     return read_json(path) if os.path.isfile(path) else {}
 
 
+def milestone(root: str, name: str, requires: list[str], generator: str = "",
+              description: str = "") -> str:
+    """Write ``milestones/<name>.json`` as a person declares a spend (P2.5b-D1);
+    its path."""
+    record: dict[str, Any] = {"description": description or f"the {name} spend",
+                              "requires": list(requires)}
+    if generator:
+        record["generator"] = generator
+    path = os.path.join(root, "milestones", f"{name}.json")
+    write_json(path, record)
+    return path
+
+
+def exports(root: str, name: str) -> dict:
+    """``exports/<name>.json`` as `export` sealed it, parsed (``{}`` with none)."""
+    path = os.path.join(root, "exports", f"{name}.json")
+    return read_json(path) if os.path.isfile(path) else {}
+
+
 def file_bytes(root: str, rel: str) -> bytes | None:
     path = os.path.join(root, *rel.split("/"))
     if not os.path.isfile(path):

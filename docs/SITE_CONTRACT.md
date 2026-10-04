@@ -239,7 +239,11 @@ was the one a reader of the contract would never look for.
                               "label": "3 checked" }, … ],
                  "ready": false, "all_required_checked": false,
                  "unresolved": ["C1", "C5", "C6", "C7"], "blocking": ["C1", "C6", "C7"],
-                 "n_claims": 7, "n_critical": 7, "n_gates": 6, "n_gaps": 1 },
+                 "n_claims": 7, "n_critical": 7, "n_gates": 6, "n_gaps": 1,
+                 "milestones": { "print-v1": { "ready": false,             // P2.5b
+                     "required": ["C1", "C2", "C3", "C4"], "unresolved": ["C1"],
+                     "missing": [], "exports": 0, "last_export": null } } },
+                     // last_export: null, or { "article": "<64 hex>", "when", "who" }
   "claims":   [ { "id": "C1", "statement": …, "status": "fail", "key": "failing",
                   "word": "failing", "cause": "failed",
                   "reason": "bracket.deflection : 0.700 mm at 15 N (limit 0.5 mm)",
@@ -352,7 +356,11 @@ an agent can read the site's state without a browser.
   current inputs) and its count strip `tally` (`report.count_bits`: HUMAN's words, a
   crash counted apart, `7 skipped (6 errored)`); `by_key` and `errored` are the same
   counts by token; `unresolved` the required claims not Checked; `n_gaps` counts gap
-  records, not claims reading Gap (`by_key.gap` is those).
+  records, not claims reading Gap (`by_key.gap` is those). `milestones` (P2.5b) is
+  `claims.unresolved` per milestone, as last evaluated: `ready`, its `required` ids,
+  the `unresolved` ones, the `missing` ones (no claim file: never ready), how many
+  `exports` are on record and the newest one's article hash, `when` and `who`. The page renders it; it never
+  re-derives one, and only `atompipe export` re-executes what a spend requires.
 - **Which value is the claim's (P2.4).** A claim row's `compared` lists the
   evaluators whose value is compared with its acceptance condition
   (`claims.compared_gates`: the verdict measures the claim's quantity, in its units),

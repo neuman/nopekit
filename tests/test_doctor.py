@@ -81,7 +81,9 @@ from atompipe.models import GateSpec, NegativeControl, Tier, Verdict
 #: The rows this file holds `doctor` to, by the name each prints.
 ROWS = ("instruments", "opaque-inputs", "cache-entries", "two-outcomes", "sealed-fixtures",
         "imports", "env-reads", "memos", "dynamic-imports", "code-digest", "pending-controls",
-        "orphan-entries", "qualification", "known-good")
+        "orphan-entries", "qualification", "known-good",
+        # P2.5b: the milestones, their export records and packages, the report.
+        "milestones", "exports", "report")
 
 #: A fixture every planted project gate can borrow: the bracket's own, which
 #: sags the known-good design 30 mm — past any limit the planted gates use.
@@ -760,6 +762,71 @@ def never(ctx):
         self.assertRow(rows, "ledger-integrity", "ok")
         self.assertEqual(code, 0, "an uninstalled gate's verdicts are not corruption")
         self.assertClean("orphan-entries")
+
+
+
+# --------------------------------------------------------------------------- #
+# V-16 (P2.5b) — milestones, exports and the report
+# --------------------------------------------------------------------------- #
+class MilestonesExportsAndTheReport(_env.EnvCase):
+    """(V-16) `doctor`'s `milestones` row names a required id no claim file holds
+    and a generator that does not resolve; its `exports` row names a package
+    file edited after export and a leftover scratch directory, and says when the
+    last export's package is not here; its `report` row warns on a leftover
+    `docs/readiness.md`, which nothing writes any more."""
+
+    def setUp(self):
+        super().setUp()
+        import _physical as P
+        self.P = P
+        self.root = P.project(os.path.join(self.tmp(), "b"), thickness=8.0, git=True)
+        P.run(self.root, "check")
+
+    def rows(self) -> tuple[int, dict]:
+        return _doctor(self.root)
+
+    def assertRow(self, rows: dict, name: str, status: str, *present: str) -> None:
+        row = rows.get(name)
+        self.assertIsNotNone(row, f"doctor printed no {name!r} row: {sorted(rows)}")
+        self.assertEqual(row["status"], status, row)
+        for text in present:
+            self.assertIn(text, row["detail"], row)
+
+    def test_clean(self):
+        _code, rows = self.rows()
+        for name in ("milestones", "exports", "report"):
+            with self.subTest(name):
+                self.assertRow(rows, name, "ok")
+
+    def test_milestones(self):
+        self.P.milestone(self.root, "fit-check", ["C1", "C9"])
+        _code, rows = self.rows()
+        self.assertRow(rows, "milestones", "FAIL", "fit-check", "C9")
+        os.remove(os.path.join(self.root, "milestones", "fit-check.json"))
+        self.P.milestone(self.root, "fit-check", ["C1"], generator="generators/nowhere.py:f")
+        _code, rows = self.rows()
+        self.assertRow(rows, "milestones", "FAIL", "generators/nowhere.py")
+
+    def test_exports(self):
+        self.P.run(self.root, "export", "print-v1", code=0)
+        _code, rows = self.rows()
+        self.assertRow(rows, "exports", "ok")
+        svg = os.path.join(self.root, "out", "print-v1", "bracket-profile.svg")
+        with open(svg, "a", encoding="utf-8") as fh:
+            fh.write("<!-- edited -->")
+        _code, rows = self.rows()
+        self.assertRow(rows, "exports", "FAIL", "bracket-profile.svg")
+        shutil.rmtree(os.path.join(self.root, "out", "print-v1"))
+        _code, rows = self.rows()
+        self.assertRow(rows, "exports", "ok", "not here")
+        os.makedirs(os.path.join(self.root, "out", ".print-v1.tmp-123"))
+        _code, rows = self.rows()
+        self.assertRow(rows, "exports", "FAIL", ".print-v1.tmp-123")
+
+    def test_report(self):
+        _write(self.root, "docs/readiness.md", "# an old report\n")
+        _code, rows = self.rows()
+        self.assertRow(rows, "report", "warn", "docs/readiness.md", "git rm docs/readiness.md")
 
 
 if __name__ == "__main__":

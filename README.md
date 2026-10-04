@@ -226,7 +226,8 @@ atompipe check [--tier N]      run gates; exits non-zero while anything critical
 atompipe gap [--propose]       claims with no gate, and packs that might cover them
 atompipe why <param|claim>     one thing's full history, instead of the whole log
 atompipe gate selftest         every negative control; fails any gate that can't fail
-atompipe report [--write]      the readiness report
+atompipe report [--write]      the readiness report (--write: REPORT.md, an ignored output)
+atompipe export <milestone>    the spend: re-runs what it requires, then builds out/<milestone>/
 atompipe site build|serve      the project site: the ledger, rendered and clickable
 atompipe doctor                run this first when something is confusing
 ```

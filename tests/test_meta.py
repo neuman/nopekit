@@ -90,9 +90,13 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     # 7, and P2.4: a goalpost edit re-keys exactly the gates that read it.
     7: ["test_staleness.StaleIsNotCurrent", "test_goalposts.TheGoalpostLivesInClaims",
         # P2.5a: a physical pass whose article's design moved reads Stale.
-        "test_physical.AMovedArticleReadsStale"],
+        "test_physical.AMovedArticleReadsStale",
+        # P2.5b: an exported article moves exactly with what its generator read.
+        "test_fig4.TwoArticlesExactly"],
     8: ["test_records.IndexNeverDisagreesWithRecords",
-        "test_records.NoCommandWritesARecord"],
+        "test_records.NoCommandWritesARecord",
+        # P2.5b: milestones and export records are records; `export` a kept writer.
+        "test_records.MilestonesAreRecords", "test_records.TheExportRecordIsSealedAndChained"],
     # 9 is the paired rule from P2.3: both controls (QualificationIsPaired), and
     # every conclusive mutation a fail for an evaluator outside the bundled packs
     # (EveryConclusiveMutationMustFail); the known-bad half's guards stay where
@@ -124,7 +128,19 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
          "test_signing.AnOwnerOnlyThroughTheChannel", "test_physical.SignedMeansSomething",
          "test_physical.APhysicalFailNeverLosesItsPowerToFail",
          "test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord",
-         "test_physical.AnExpertJudgmentStaysWithItsAuthority"],
+         "test_physical.AnExpertJudgmentStaysWithItsAuthority",
+         # P2.5b: a result bound to an exported article; a fail superseded only
+         # on another one, and counting again when the design returns.
+         "test_physical.AResultBindsToAnExportedArticle",
+         "test_physical.AFailIsSupersededOnlyOnAnotherExportedArticle"],
+    # 12 (P2.5b): no reader says more than the composition — a claim's status on
+    # every channel (P2.5a's renderer agreement), *ready* as one predicate — and
+    # the boundary that spends re-executes; moved here from
+    # PLANNED_INVARIANT_CLASSES with CLAUDE.md's item.
+    12: ["test_physical.RenderersAgreeOnPhysicalClaims", "test_export.ReadyIsOnePredicate",
+         "test_export.TheBoundaryReExecutes", "test_export.ACacheThatLiesIsCaughtAtTheBoundary",
+         "test_export.DryRunIsTheSamePath", "test_export.GoingAheadIsAPersonsDecision",
+         "test_vocabulary.TheHardwareClauseIsAlwaysSaid"],
     # 15 (P2.3): the mutation pass's seal, over the real walk and every planted
     # runner — moved here from PLANNED_INVARIANT_CLASSES with CLAUDE.md's item.
     15: "test_mutation.MutationIsSealed",
@@ -150,12 +166,12 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
 #: `Claim.owner` and refused to count one written by hand — until P2.5a's channel
 #: made it mechanical and moved it to INVARIANT_CLASSES with CLAUDE.md's 11.
 #:
-#: 12 is "no renderer is more generous than the composition" (PLAN §4.0.1),
-#: planned from P2.5a's renderer agreement over physical claims; it lands with
-#: P2.5b's readiness object.
-PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {
-    12: "test_physical.RenderersAgreeOnPhysicalClaims",
-}
+#: 12 was "no renderer is more generous than the composition" (PLAN §4.0.1),
+#: planned from P2.5a's renderer agreement over physical claims, until P2.5b's
+#: readiness predicate and boundary made it mechanical and moved it to
+#: INVARIANT_CLASSES with CLAUDE.md's 12. Nothing is planned now: P3, P4 and P5
+#: add classes to 12 (`status --short`, trade, the site), never a new number.
+PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {}
 
 
 def _refs(mapping: dict[int, str | list[str]]) -> list[str]:

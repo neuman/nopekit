@@ -71,6 +71,7 @@ from typing import Any, Collection, Iterable, Mapping, NamedTuple
 from .models import (
     BLOCKING_STATUSES,
     CONTEXT_OUTSIDE,
+    LATENCY_UNITS,
     Claim,
     ClaimKind,
     ClaimStatus,
@@ -130,6 +131,11 @@ __all__ = [
     "contradicted_by",
     "Rebuild",
     "rebuild",
+    "Unresolved",
+    "required_ids",
+    "unresolved",
+    "Latency",
+    "latency",
 ]
 
 
@@ -1546,7 +1552,11 @@ def summarise(
     * `rebuild` (P2.5a-D16) — the rebuild prediction, `rebuild(ledger)` as
       dicts: `[{article, claims, moved}]`, empty when no article moved;
     * `contradictions` (P2.5a-D14) — `{claim id: [evaluator ids]}`, each claim
-      Failing on a contradiction and the evaluators it contradicts.
+      Failing on a contradiction and the evaluators it contradicts;
+    * `milestones` (P2.5b) — `{name: {ready, required, unresolved, missing,
+      exports, last_export}}`, each milestone's *ready* from `unresolved`, the
+      one predicate, as last evaluated (a reader of the cache; the boundary
+      re-runs, `export <m> --dry-run`).
 
     `ready` keeps its meaning — `n_blocking == 0`, nothing stops `check` — for
     every reader that has it (`status --json`, the private bench, a page
@@ -1587,10 +1597,27 @@ def summarise(
     needs = {s.id: list(getattr(s, "needs", None) or ()) for s in specs}
     unlisted = {claim.id: [gate for gate, _why in not_compared(claim, ledger.verdicts, needs)]
                 for claim in ledger.claims}
-    required = [c for c in ledger.claims if c.critical]
-    unresolved = [c.id for c in required
-                  if resolved.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
-    unbound = [c.id for c in required if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
+    # The one predicate (P2.5b-D3): the project's required claims — `critical`,
+    # what `check` blocks on — and each milestone's, through `unresolved`. It
+    # held a second copy of `unresolved_ids` here until P2.5b.
+    found = unresolved(ledger, composed)
+    required = found.required
+    milestones = {}
+    for milestone in getattr(ledger, "milestones", None) or ():
+        mine = unresolved(ledger, composed, milestone)
+        exports = [e for e in getattr(ledger, "exports", None) or ()
+                   if getattr(e, "milestone", "") == milestone.id]
+        last = exports[-1] if exports else None
+        article = dict(getattr(last, "article", None) or {}) if last is not None else {}
+        milestones[milestone.id] = {
+            "ready": mine.ready,
+            "required": [c.id for c in mine.required],
+            "unresolved": [c.id for c in mine.unresolved],
+            "missing": list(mine.missing),
+            "exports": len(exports),
+            "last_export": None if last is None else {
+                "article": str(article.get("hash") or ""), "when": last.when,
+                "who": last.who}}
     errored = [cid for cid, c in composed.items() if c.errored]
     contradictions = {cid: list(c.cites) for cid, c in composed.items()
                       if c.cause is ClaimCause.CONTRADICTION}
@@ -1610,14 +1637,18 @@ def summarise(
         "n_gaps": len(gaps),
         "n_blocking": len(blockers),
         "blocking_ids": [c.id for c, _ in blockers],
-        "unresolved_ids": unresolved,
-        "unbound_ids": unbound,
-        "all_required_checked": bool(required) and not unresolved,
+        "unresolved_ids": [c.id for c in found.unresolved],
+        "unbound_ids": [c.id for c in found.unbound],
+        "all_required_checked": found.ready,
         "stale": bool(stale) or bool(stale_gates),
         "ready": not blockers,
         "not_compared": {cid: gates for cid, gates in unlisted.items() if gates},
         "rebuild": [r.to_dict() for r in rebuild(ledger)],
         "contradictions": contradictions,
+        # P2.5b (S-60's field half): *ready* per milestone, from the one
+        # predicate, with the export records each has. From the verdicts on
+        # record, as every summary is: `export <m> --dry-run` re-runs them.
+        "milestones": milestones,
     }
 
 
@@ -1747,6 +1778,132 @@ def rebuild(ledger: Ledger) -> list[Rebuild]:
             claims_on.append(claim_id)
     return [Rebuild(article, tuple(claims_on), moved)
             for article, (claims_on, moved) in sorted(named.items())]
+
+
+# --------------------------------------------------------------------------- #
+# ready, per milestone (P2.5b-D3)
+# --------------------------------------------------------------------------- #
+class Unresolved(NamedTuple):
+    """What *ready* turns on (GLOSSARY §4): ``required`` — the claims the
+    milestone requires (with none, the project's: ``critical``), record order;
+    ``unresolved`` — those not Checked, Assumed, Pending build and every Stale
+    included; ``missing`` — required ids no claim holds; ``unbound`` — the
+    unresolved with a physical pass that does not count; ``ready`` — at least
+    one required id, none unresolved, none missing."""
+
+    required: list
+    unresolved: list
+    missing: list
+    unbound: list
+    ready: bool
+
+
+#: The statuses that resolve a claim (GLOSSARY §3): Checked, on an evaluator's
+#: pass or an article's.
+_RESOLVED = (ClaimStatus.PASS, ClaimStatus.VERIFIED)
+
+
+def required_ids(ledger: Ledger, milestone: Any = None) -> list[str]:
+    """The ids ``milestone`` requires — its ``requires``, in its order — or,
+    with none, the project's required claims: ``critical`` (what ``check``
+    blocks on, G4). Never the union: a milestone requires exactly its
+    ``requires`` (P2.5b-D2) — every physical claim is ``critical`` by default,
+    so the union would make no first article exportable without a decision."""
+    if milestone is None:
+        return [c.id for c in ledger.claims if c.critical]
+    return [str(cid) for cid in (getattr(milestone, "requires", None) or ())]
+
+
+def unresolved(ledger: Ledger, composed: Mapping[str, Composed],
+               milestone: Any = None) -> Unresolved:
+    """THE predicate (P2.1-D11, now with a milestone; P2.5b-D3): every reader of
+    *ready* — the readiness sentence, `report.readiness`, `summarise`, the
+    export's refusals and judgment, the JSON and the page — reads this.
+    ``composed`` is ``compositions(ledger, ...)`` over the view the reader
+    judges on (the cache's, or the boundary's re-executed one).
+
+    A required id no claim holds is ``missing``, unresolved, never dropped (a
+    claim file renamed away must not make a spend ready); a results file no
+    claim file holds is composed beside the claims by ``verdicts.view`` and
+    reads Failing here. Zero required claims is not ready. What slipped through
+    the copies this replaced: `summarise` held a second `unresolved_ids`, and a
+    milestone predicate beside it would have been a third."""
+    by_id = {c.id: c for c in ledger.claims}
+    required: list = []
+    missing: list[str] = []
+    for cid in required_ids(ledger, milestone):
+        claim = by_id.get(cid)
+        if claim is None or cid not in composed:
+            missing.append(cid)
+        else:
+            required.append(claim)
+    left = [c for c in required if composed[c.id].status not in _RESOLVED]
+    unbound = [c for c in required if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
+    return Unresolved(required, left, missing, unbound,
+                      bool(required or missing) and not left and not missing)
+
+
+# --------------------------------------------------------------------------- #
+# latency (P2.5b-D4, GLOSSARY §5)
+# --------------------------------------------------------------------------- #
+class Latency(NamedTuple):
+    """How long an article takes to settle a claim: ``seconds`` — measured or
+    declared, or None; ``source`` — ``measured``, ``declared`` or ``none``;
+    ``article`` — the exported article it was measured on; ``declared`` — the
+    declared seconds, beside a measured value too."""
+
+    seconds: float | None
+    source: str
+    article: str = ""
+    declared: float | None = None
+
+
+def _instant(text: Any) -> Any:
+    from datetime import datetime, timezone
+    try:
+        return datetime.strptime(str(text or ""), "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def declared_seconds(claim: Claim) -> float | None:
+    """``claim``'s declared latency in seconds, or None."""
+    declared = getattr(claim, "expected_latency", None) or {}
+    if not isinstance(declared, Mapping):
+        return None
+    value, units = declared.get("value"), declared.get("units")
+    if isinstance(value, bool) or not isinstance(value, (int, float)) \
+            or units not in LATENCY_UNITS:
+        return None
+    return float(value) * LATENCY_UNITS[units]
+
+
+def latency(claim: Claim, exports: Iterable[Any]) -> Latency:
+    """``claim``'s latency (W3; GLOSSARY §5: "declared ahead only for a physical
+    evaluator, until an article measures it"): MEASURED — the newest result on
+    an exported article whose export `exports/` holds, its ``when`` minus the
+    article's ``when``; else DECLARED (``expected_latency``); else none. A result
+    on a design article measures nothing: a design article has no build time,
+    only the instant a person recorded it. A negative or unparseable span is not
+    a measurement. Pure: the export records come in."""
+    declared = declared_seconds(claim)
+    held = {str((getattr(e, "article", None) or {}).get("hash") or "")
+            for e in exports or ()}
+    held.discard("")
+    for entry in reversed(tuple(getattr(claim, "results", ()) or ())):
+        article = getattr(entry, "article", None) or {}
+        if not isinstance(article, Mapping) or article.get("source") != "export" \
+                or str(article.get("hash") or "") not in held:
+            continue
+        built, seen = _instant(article.get("when")), _instant(getattr(entry, "when", ""))
+        if built is None or seen is None or seen < built:
+            continue
+        return Latency((seen - built).total_seconds(), "measured", str(article["hash"]),
+                       declared)
+    if declared is not None:
+        return Latency(declared, "declared", "", declared)
+    return Latency(None, "none", "", None)
 
 
 def next_claim_id(ledger: Ledger, prefix: str = "C") -> str:

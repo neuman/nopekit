@@ -1438,3 +1438,189 @@ class PhysicalLinesShape(unittest.TestCase):
             with self.subTest(name):
                 self.assertNotEqual(physical_shape_problems(dict(f, **{key: mutated})), [],
                                     f"{name} was not refused")
+
+
+
+# --------------------------------------------------------------------------- #
+# V-15 (P2.5b) — `export`'s lines and REPORT.md's head
+# --------------------------------------------------------------------------- #
+MILESTONE_ROW = re.compile(
+    r"^  (?P<m>[a-z0-9][a-z0-9._-]*): (?:\d+ of \d+ required claims? checked · \d+ stale"
+    r"(?: \([^)]*\))?(?: · .+)?|requires no claim, so nothing can be ready for it — .+)$")
+EXPORT_LIST = (
+    ("head", re.compile(r"^(?:\d+ milestones?, as last evaluated — `atompipe export "
+                        r"<milestone> --dry-run` re-runs what each requires|no milestone "
+                        r"declared — a milestone is milestones/<name>\.json: .+)$"), 1, 1),
+    ("milestone", MILESTONE_ROW, 0, None),
+)
+EXPORT_HEAD = re.compile(r"^(?P<m>[a-z0-9][a-z0-9._-]*)(?: — .+)?$")
+MILESTONE_LINE = re.compile(
+    r"^(?P<m>[a-z0-9][a-z0-9._-]*): (?:\d+ of \d+ required claims? checked · \d+ stale"
+    r"(?: \([^)]*\))?(?: · (?P<groups>.+))?|requires no claim, so nothing can be ready for "
+    r"it — .+)$")
+EXPORT_ROW = re.compile(r"^\[.{5}\] (?P<id>\S+) .+ — .+$")
+NOT_REQUIRED = re.compile(r"^not required by \S+, unresolved: .+$")
+RERUN = re.compile(r"^re-run: (?:\d+ evaluators? at tier \d, with their controls — .+|none — "
+                   r".+)$")
+TWO_OUTCOMES = re.compile(r"^\[two outcomes\] \S+ : .+$")
+EXPORT_SENTENCE = re.compile(
+    r"^\S+ is (?:NOT )?ready for \S+: .+ (?:Checked on an article: \d+ \([^)]+\)\."
+    r"|No claim is checked on any article\.)$")
+LIMITS = re.compile(r"^Checked does not mean true: its evaluators have shown they can "
+                    r"fail, not that they are right or enough, and nothing outside these \d+ "
+                    r"claims? has been evaluated\.$")
+DECIDED = re.compile(r"^(?:decided by .+: go ahead over .+|nothing to decide: every required "
+                     r"claim is checked)$")
+OUTCOME = re.compile(
+    r"^export: (?:would refuse — .+|refused — .+"
+    r"|would write out/\S+/ — article [0-9a-f]{12} · package [0-9a-f]{12} · \d+ files? "
+    r"\(dry run: nothing written\)"
+    r"|out/\S+/ — article [0-9a-f]{12} · package [0-9a-f]{12} · \d+ files?, recorded in "
+    r"exports/\S+\.json)$")
+CARD_HEAD = re.compile(r"^test card for article [0-9a-f]{12}: .+$")
+CARD_ROW = re.compile(r"^  \S.*$")
+EXPORT_RUN = (
+    ("head", EXPORT_HEAD, 1, 1),
+    ("milestone line", MILESTONE_LINE, 1, 1),
+    ("claim row", EXPORT_ROW, 0, None),
+    ("not-required line", NOT_REQUIRED, 0, 1),
+    ("re-run line", RERUN, 1, 1),
+    ("two outcomes", TWO_OUTCOMES, 0, None),
+    ("sentence", EXPORT_SENTENCE, 1, 1),
+    ("limits line", LIMITS, 1, 1),
+    ("decision", DECIDED, 0, 1),
+    ("outcome", OUTCOME, 1, 1),
+    ("test card", CARD_HEAD, 0, 1),
+    ("card row", CARD_ROW, 0, None),
+)
+
+
+def export_list_problems(stdout: str) -> list[str]:
+    lines = stdout.splitlines()
+    problems: list[str] = []
+    at = _grammar(lines, 0, EXPORT_LIST, problems, "export list")
+    _trailing(lines, at, problems, "export list")
+    return problems
+
+
+def export_problems(stdout: str) -> list[str]:
+    """`export <m>` text (P2.5b §2.2, §2.3): the head, the milestone line, a row
+    per unresolved required claim, the not-required line, the re-run line and its
+    two-outcomes rows, the readiness sentence with its hardware clause, the
+    limits line, the decision, the outcome and the test card. And what the lines
+    must agree on: each required claim the milestone line names unresolved has a
+    row; a sentence naming claims the milestone does not require has the
+    not-required line; a written or would-write outcome names its article."""
+    lines = stdout.splitlines()
+    problems: list[str] = []
+    at = _grammar(lines, 0, EXPORT_RUN, problems, "export")
+    _trailing(lines, at, problems, "export")
+    rows = {m.group("id") for m in map(EXPORT_ROW.fullmatch, lines) if m}
+    line = next((MILESTONE_LINE.fullmatch(ln) for ln in lines if MILESTONE_LINE.fullmatch(ln)),
+                None)
+    groups = (line.group("groups") or "") if line else ""
+    named = set(re.findall(r"\b([A-Z]+\d+)\b", re.sub(r"\d+ with no claim file \([^)]*\)", "",
+                                                      groups)))
+    for cid in sorted(named - rows):
+        problems.append(f"export: {cid} is unresolved and has no row")
+    sentence = next((ln for ln in lines if EXPORT_SENTENCE.fullmatch(ln)), "")
+    pending = re.search(r"Pending build: \d+ claims? needs? an article \(([^)]*)\)", sentence)
+    unrequired = [cid for cid in re.findall(r"\b([A-Z]+\d+)\b", pending.group(1))
+                  if cid not in rows] if pending else []
+    line_ = " ".join(ln for ln in lines if NOT_REQUIRED.fullmatch(ln))
+    for cid in unrequired:
+        if not re.search(rf"\b{cid}\b", line_):
+            problems.append(f"export: {cid} is unresolved, not required, and on no "
+                            f"not-required line")
+    return problems
+
+
+def report_head_problems(md: str) -> list[str]:
+    """REPORT.md's head (P2.5b §2.4): the title, the readiness sentence with its
+    hardware clause, the limits paragraph, the milestones as last evaluated."""
+    lines = md.splitlines()
+    out = []
+    if not re.fullmatch(r"# .+ — readiness(?: for \S+)? \(.+\)", lines[0] if lines else ""):
+        out.append(f"title: {lines[:1]}")
+    sentence = lines[2] if len(lines) > 2 else ""
+    if not re.search(r"(?:Checked on an article: \d+ \([^)]+\)\.|No claim is checked on any "
+                     r"article\.)$", sentence):
+        out.append(f"sentence without its hardware clause: {sentence[-80:]}")
+    if len(lines) < 5 or not LIMITS.fullmatch(lines[4]):
+        out.append(f"limits: {lines[4:5]}")
+    return out
+
+
+class ExportShape(unittest.TestCase):
+    """(V-15, R-11) `export`'s list, `export <m>` refused, would-refuse,
+    would-write, written, over a disagreement and over a decision, and REPORT.md's
+    head — each matched, and each matcher run against mutants it must refuse."""
+
+    @classmethod
+    def setUpClass(cls):
+        import _physical as P
+        import test_export as X
+        cls.base = tempfile.mkdtemp(prefix="atompipe-shapes-export-")
+        cls.addClassCleanup(_env._rmtree, cls.base)
+        seven = X.bracket(os.path.join(cls.base, "seven"), thickness=7.0, git=True)
+        eight = X.bracket(os.path.join(cls.base, "eight"), thickness=8.0, git=True)
+        forged = X.bracket(os.path.join(cls.base, "forged"), thickness=7.0, git=True)
+        decided = X.bracket(os.path.join(cls.base, "decided"), thickness=7.0, git=True)
+        for root in (seven, eight, forged, decided):
+            P.run(root, "check")
+        X.forge_entry(forged, "bracket.deflection", passed=True)
+        cls.out = {
+            "list": P.run(seven, "export", code=0),
+            "would-refuse": P.run(seven, "export", "print-v1", "--dry-run", code=1),
+            "refused": P.run(seven, "export", "print-v1", code=1),
+            "would-write": P.run(eight, "export", "print-v1", "--dry-run", code=0),
+            "written": P.run(eight, "export", "print-v1", code=0),
+            "disagree": P.run(forged, "export", "print-v1", "--dry-run", code=1),
+            "decided": P.tty(decided, "export", "print-v1", "--proceed", "--why",
+                             "a fit print", answer="print-v1", code=0),
+            "report": P.run(seven, "report", code=0),
+            "report.milestone": P.run(seven, "report", "--milestone", "print-v1", code=0),
+        }
+
+    def test_the_real_transcripts_match(self):
+        self.assertEqual(export_list_problems(self.out["list"].stdout), [])
+        for key in ("would-refuse", "refused", "would-write", "written", "disagree",
+                    "decided"):
+            with self.subTest(key):
+                problems = export_problems(self.out[key].stdout)
+                self.assertEqual(problems, [], "\n".join(problems) + "\n" +
+                                 self.out[key].stdout)
+        self.assertTrue(any(TWO_OUTCOMES.fullmatch(ln)
+                            for ln in self.out["disagree"].stdout.splitlines()))
+        for key in ("report", "report.milestone"):
+            with self.subTest(key):
+                self.assertEqual(report_head_problems(self.out[key].stdout), [])
+
+    def test_each_mutant_is_refused(self):
+        refused = self.out["would-refuse"].stdout
+        written = self.out["written"].stdout
+        mutants = {
+            "a line added": add_line(refused, lambda ln: ln.startswith("re-run:")),
+            "the hardware clause removed": re.sub(
+                r" (?:No claim is checked on any article\.|Checked on an article: [^.]+\.)$", "",
+                refused, flags=re.M),
+            "the article hash removed": re.sub(r"article [0-9a-f]{12}", "article", written),
+            "the re-run line removed": "\n".join(ln for ln in refused.splitlines()
+                                                 if not ln.startswith("re-run:")) + "\n",
+            "a refusal row removed": "\n".join(ln for ln in refused.splitlines()
+                                               if not ln.startswith("[FAIL ] C1")) + "\n",
+            "the not-required line removed": "\n".join(
+                ln for ln in refused.splitlines() if not ln.startswith("not required by")) + "\n",
+            "the limits line removed": "\n".join(
+                ln for ln in refused.splitlines() if not LIMITS.fullmatch(ln)) + "\n",
+        }
+        for name, text in mutants.items():
+            with self.subTest(name):
+                self.assertTrue(export_problems(text), f"{name} was not refused:\n{text}")
+        report = self.out["report"].stdout
+        for name, text in (("the report's hardware clause removed", re.sub(
+                r" No claim is checked on any article\.", "", report, count=1)),
+                           ("the report's limits removed", report.replace(
+                               "Checked does not mean true: ", "Note: ", 1))):
+            with self.subTest(name):
+                self.assertTrue(report_head_problems(text), name)

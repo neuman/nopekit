@@ -409,6 +409,71 @@ re-test); P2.5a-D27 (a person-awaiting Stale never stops `check`); paper F3 (the
 bracket at 8.0, C1 measured with a ruler, as E4's first article) and F4 (P2.5a records
 the human-authority boundary; P3 enforces it).
 
+#### P2.5b's decision rows (`P2.5b-Dn`)
+
+Checkpoint 2.5's second half — milestones, the money boundary and the readiness
+sentence — as it landed (PLAN-v0.14 §1.4, §1.5; §2 W3, W7, W11, W13; §3 row P2; GLOSSARY
+§4, §5). Where it disagrees with checkpoint 2.5's text below, these rows win: the
+package is `out/<m>/` at the root (not `.atompipe/export/…`), REPORT.md replaces
+`docs/readiness.md`, and `fold` is gone (D18). Rows the design's critique moved say so
+(its numbers in parentheses, as the build received them; every one was applied, 7
+in part).
+
+| Id | Decision | Rejected |
+|---|---|---|
+| D1 | a milestone is a record: `milestones/<name>.json` = `{description, requires, generator}`; the stem is the name (`store.MILESTONE_NAME`); read strictly (`requires` distinct plain ids, `generator` a project-relative `<path>.py:<function>`); a record kind (`RECORD_DIRS`, the index, `records_digest`) | one `milestones.json`; a `milestone` field per claim; a declared `tests` list; a `name` key |
+| D2 | a milestone requires exactly its `requires`; `critical` keeps meaning what `check` blocks on and what the project-level sentence counts. **Moved in part by the critique (7):** the milestone's own report and its package flag each claim *required*/*not required* by `requires`, never by `critical`; the project-level words stay (C-6, G4, `CheckShape` pin them) and *critical*'s GLOSSARY term goes on the check-in batch | the union with `critical` (no first article could export without a decision); `critical` as an implicit milestone |
+| D3 | *ready* is one predicate: `claims.unresolved(ledger, composed, milestone=None)`; at least one required claim and every one Checked; a required id with no claim file is `missing`. **Moved by the critique (6):** V-1's equalities include `state.json`'s `readiness.milestones` and `milestones.judge` (export's JSON `ready` comes from it) | a copy per reader (`summarise` held one; deleted); `missing` as a strict-reader refusal |
+| D4 | `Claim.expected_latency` `{value, units}`, `LATENCY_UNITS` s…year (Julian); measured from an exported article's `when` to the newest result on it; out of the claim digest. **Moved by the critique (16):** allowed only on a measurement terminal — a judgment has no article to measure it | in the milestone; bare seconds; free text; `month` |
+| D5 | `export <m>` is one path for both modes (`cli.cmd_export` driving `milestones.py`): load; under the build lock the re-run (D6); the judgment on the re-executed view; the generator traced and the package built aside; then dry run stops, written swaps and appends. **Moved by the critiques:** the inputs the judgment stood on are re-hashed before the swap and a move refuses it, kind `package` (4); under `--dry-run` a missing git identity or a legacy project is a `precondition` refusal it says it would make, exit 1 (21) | a second predicate for `/ready`; short-circuiting the re-run; skipping the generator in a dry run |
+| D6 | the re-run is `check --force --only <closure>`'s sweep at tier 3, controls and prerequisites included, filed as `check --force` files it (never in a dry run); it writes no `last_check.json`. **Moved by the critiques:** the base case re-runs too and reads Checked where the cache read Stale (8); the export record's `claims` map marks each claim `reran`, `counted` is sealed only for required claims, and the package's REPORT.md says the rest are as last evaluated (18) | refusing whatever is not Fresh; never filing the re-run; re-running every evaluator |
+| D7 | a disagreement refuses, and no go-ahead covers it: a forced run at the ρ the cache served Fresh with another `out8` (`SweepRow.disagrees`, whatever the instruments). **Moved by the critique (3):** also from the records — two outcomes already on record (the error row, a control's two-outcomes token, a conflict in the resolution before the run) and a qualification that held on the record and not when re-run; **(14):** its rows read `[two outcomes]`, never *disagree* (the status-and-evidence defect's word) | by gate id; by the claim's status; a tolerance |
+| D8 | going ahead over unresolved required claims is a person's decision: `--proceed --why`, `interactive` only, the milestone's name typed; sealed as the entry's `proceed`; covers `unresolved` alone. **Decided by the critique (13):** it is the reprint path after a physical fail on a required claim, and the refusal's words name it | a `decisions/` record; `--force`; an agent's go-ahead; a standing waiver; a carve-out letting the new article answer its own fail |
+| D9 | `exports/<m>.json`, append-only, each entry sealed and chained by `store.append_sealed` (P2.5a's chain by kind; the `results` form byte-identical, C-1). **Found by the build (V-6):** the seal form names the file's stem as `file` — under `milestone` the entry's own key overrode it and an entry copied to another milestone's file verified — and `_export_milestone_problem` refuses an entry naming another milestone | inside `milestones/`; under `.atompipe/`; one file per export |
+| D10 | the package `out/<m>/` (root, ignored): the generator's files, `REPORT.md` (= `report --milestone <m>`), `model.json`, `MANIFEST.json`; built aside, swapped whole, refused over a file no export recorded or one edited since. **Moved by the critique (1, option 2):** `model.json` holds exactly the article's param rows, so the generator is the only channel by which a value reaches the builder. **Found by the build:** the manifest's records digest leaves `exports/` out (`records_digest(exclude=…)`), or two exports of one state differ | `.atompipe/out/<m>/`; a path per export; tracking it; the package hash as the article |
+| D11 | the generator `fn(ctx)` runs traced as a gate is, in the package's scratch; refused when it raises, writes nothing, or writes outside its directory. **Moved by the critique (12):** a write outside it under `--dry-run` is refused and named — not undone (undoing is a second writer) — and invariant 12 says so | a model object; `fn(params, out_dir)`; a list of generators |
+| D12 | the exported article `{source: export, hash, built_from, traced, milestone, when, revision, dirty}`: traced, what the generator read; untraced, P2.5a's whole design (over-predicts) | always the whole design; declared inputs; the evaluators' read sets |
+| D13 | `claim physical <id> pass\|fail --article <hex>` (≥ 12 hex, unique among exports); a fail's `contradicts` is the export's sealed `counted[<id>]` (`milestones.sealed_contradictions`) | the newest export by default; `--milestone`; re-deriving from the current resolution |
+| D14 | supersession (Q2.11): **moved by the critique (2):** a fail F on article A stops counting only when A and B are both exported and traced, A moved, a later pass P stands on B (`EntryStanding.stands`), B ≠ A, and B differs from A on a row A recorded (`_differs_on_recorded`); never a judgment's or an assumption's; F counts again the moment the design returns to A; kept and named. `view` releases a claim's `physical_result` only to the counting fail or a standing pass | none (step 8 dead-ends); hash-only B ≠ A (the same geometry reprinted until it passes) |
+| D15 | a result on an exported article counts only while `exports/` holds it (`export-missing`) | trusting the copied article; refusing every command |
+| D16 | the rebuild prediction over judged standings: an exported article moves only with its reads | per-claim lines |
+| D17 | `report --write` writes `REPORT.md` at the root, ignored (`/REPORT.md`, `/out/` in the root block, written by `report --write` and `export` first); `docs/readiness.md` deleted, `doctor`'s `report` row names a leftover. **Moved by the critique (17):** every cache-based *ready* — `export`'s list, `status`, REPORT.md's milestone lines — says "as last evaluated" | a committed REPORT.md; keeping both |
+| D18 | the readiness sentence in every branch: Pending build, `Rebuild article …`, then `Checked on an article: N (ids).` or `No claim is checked on any article.`; one renderer with `milestone=`; the project REPORT.md lists each milestone's line under the sentence. **Moved by the critiques:** the limits line is printed by `export` in every mode as well as REPORT.md (10); one milestone line, `<m>: k of n required claims checked · s stale[ (ids)][ · …]`, keeps the walkthrough's stale count (20) | a second sentence builder; `fold` |
+| D19 | channels: `export` (list), `export <m>`, `--dry-run`, `--json`; `report --milestone`; `summary.milestones`; `state.json` `readiness.milestones`; `why`/`claim show` a `latency:` row where one is declared or measured, and a superseded fail's row "does not count", naming the pass; `doctor` rows `milestones`, `exports`, `report`. **Moved by the critique (11):** `export`, its dry run and `report --milestone` join `StatusLinesSpeakTheTable`'s GLOSSARY-parsed scans and the sentinel run | a `milestone` command; `check`'s exit over milestones |
+| D20 | words only in `report.HUMAN`: `milestone`, `readiness`, `latency`, `export`; the status words in the hardware clause, the limits line and the milestone line through `words()` (the sentinel run found them literal) | literals beside the table |
+| D21 | CLAUDE.md 12 new; 11, 8 and 7 amended; `INVARIANT_CLASSES[12]`; `PLANNED` empties. **Moved by the critiques:** 12's headline is PLAN §4.0.1's general one, no renderer more generous (15); 8 names what `export` writes — its record, new verdict and control entries, the ignore blocks (5, 12) | a 16th number |
+| D22 | `Ledger.milestones`, `Ledger.exports`; `exports` hidden from gates (`_LEDGER_HIDDEN`); `WATCHED` gains `milestones/**`, `exports/**`, `generators/**` | hiding milestones; exports visible |
+| D23 | the bracket: `milestones/print-v1.json` (C1–C4) with `generators/profile.py:side_profile` — the side profile SVG and, **moved by the critique (1)**, `print-settings.txt` carrying the material it reads (never `load_n` or `bed_xy`); `docs/readiness.md` deleted; README; the cache regenerated. C5 gains no `expected_latency` (C-2) | a milestone requiring every claim; a generator in the model |
+| D24 | deferred: `GateSpec.terminal`, `terminal-unmet`, the closed-form/simulation/datasheet words → P3; Λ₀ → P4; the page's milestones and test card → P5. **(23):** PLAN-v0.14 §3's P3 row amendment goes on the check-in batch | landing `terminal-unmet` beside the money boundary |
+| D25 | edges: no identity or a legacy project refuses a written export (exit 2) and is a refusal a dry run reports (D5); exit 0 written, would write or listed; 1 refused; 2 usage or record error | an anonymous export; migrating on export |
+| D26 | what an export seals: every claim's `{status, cause, reran}`, each re-run's `{gate, rho, out8, code, outcome, qualified}`, `counted` per required claim, the article, the package, `proceed` | the sentence's text |
+| D27 | **the test card (critique 9):** every claim whose terminal is a measurement and that is not Checked, required or not (C5 is on print-v1's card), then every required automated claim with a limit, as a cross-check — E4's first article (a ruler on C1) is on it; each with its test, its latency and the command that records it on this article | the physical claims alone; a per-claim opt-in |
+| D28 | **Fig. 4 (critiques 19, 22):** V-2's prerequisite row on a guarded copy (`fig4.guard`, covering no required claim), its plant `gates.plan` without expansion; K8 through `fig4(extra_claims=…)`, so P2.5a's rows over the shared claims stay unedited | the bracket's `model_validity` (it already covers C2); K8 in the shared claims |
+
+**Hand-offs.** P3 — `/ready <m>` = `export <m> --dry-run` (D-15); `/tested` = `claim
+physical --article` from the test card; the permission rule refusing agent edits to
+`exports/**` and making `milestones/**` ask-first (a milestone names its own
+requirements: SPINE_CONTRACT's limits); `GateSpec.terminal`, `terminal-unmet` and the
+display words (D24); `next:` naming the export a milestone awaits. P4 — Λ₀ per milestone
+from `claims.latency`; the proceed decision beside decisions; a merged `exports/` chain
+in `trade`. P5 — the page's milestone lines and test card (`readiness.milestones` is in
+`state.json` now).
+
+**Check-in batch (P2.5b).** Q-1's reading of GLOSSARY *required claim* and a term for
+`critical` (D2: required by `check` and the project sentence; a milestone requires its
+`requires`); PLAN-v0.14 §3's P3 row gaining the terminal words and `terminal-unmet`
+(D24, critique 23); invariant 11's amended wording (supersession, Q2.11's "for every
+object but the one that failed"); `/out/` at the project root (the walkthrough's path);
+`year` in `LATENCY_UNITS`; the hardware clause's words (`No claim is checked on any
+article.`, `Rebuild article …`) and the limits line; the go-ahead's home in the export
+record (GLOSSARY *decision*); the test card derived, not declared, automated claims as
+cross-checks (D27); GLOSSARY *terminal*'s "until P2.5b" → "until P3"; GLOSSARY §7's
+channel row naming `export` (done here, for review); paper F3: the bracket at 8.0
+exported as `print-v1` is E4's first article.
+
+**Slips closed.** S-41 (REPORT.md generated and ignored); S-59 (pinned by C-6 and V-1);
+S-60's field half (`readiness.milestones`). S-62 moves with D24 to P3.
+
 #### Checkpoint 2.2: the refusal graph
 
 ```python

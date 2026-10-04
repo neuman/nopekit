@@ -37,6 +37,10 @@ is `cli.py`'s.
 | a crash or a self-skip, remembered — never evidence | `.atompipe/cache/last_outcomes.json` | ignored | `check`, `gate selftest` |
 | time savers: file digests, re-verified fixtures | `.atompipe/cache/digests.json`, `controls.json` | ignored | `check`; losing either costs a re-hash or a fixture run, never a verdict |
 | gate scratch and evidence | `.atompipe/out/` (a control's: `out/controls/<gate id>/`) | ignored | gates |
+| a milestone: a named spend and the claims it requires (P2.5b) | `milestones/<name>.json` | tracked | a human or the agent, editing the file |
+| an export: what was required, checked, re-run, decided and built (P2.5b) | `exports/<name>.json`, append-only, sealed and chained | tracked | `export <milestone>` |
+| the readiness report (P2.5b; was `docs/readiness.md`) | `REPORT.md` at the root | ignored | `report --write` |
+| a milestone's package: what the spend gets (P2.5b) | `out/<milestone>/` at the root | ignored | `export <milestone>` |
 
 The index and `last_check.json` are the whole project in two reads (D-06); neither
 is read for truth by any spine code, and the index never holds a status, a coverage
@@ -87,6 +91,8 @@ class Terminal(StrEnum): CLOSED_FORM | SOLVER | DATASHEET | MEASUREMENT | HUMAN 
                                               # P2.5a: where a claim's evidence bottoms out
 TERMINALS_BY_KIND: dict[ClaimKind, frozenset[str]]   # measurable {closed_form, solver, datasheet}
                                               #   physical {measurement, human}; assumption {none, human}
+LATENCY_UNITS: dict[str, float]               # P2.5b: s min h day week year -> seconds (year
+                                              #   Julian, 365.25 d); Claim.expected_latency's units
 class ViewKind(StrEnum): MODEL3D | IMAGE | CHART | TABLE | FIELD | DIAGRAM
 class ArtifactKind(StrEnum): SKETCH | REFERENCE | CAD | SCREENSHOT | DATASHEET | SPEC
                              | MEASUREMENT | STANDARD | DATA | LINK | OTHER
@@ -137,9 +143,14 @@ class AttributionRecord(Record):   # P2.5a: one entry of results/<id>.json's "at
 class EntryStanding:            # frozen, in memory: the judge's facts about one result entry
     index: int; passed: bool; counts: bool = False; why: str = ""; article: str = ""
     article_state: str = ""; moved: tuple = ()
+    stands: bool = False            # P2.5b, LAST: a person's pass still standing on its own
+                                    #   article, counted or not (what may supersede a fail)
 class Standing:                 # frozen, in memory: what a claim's results stand for NOW
     state: str = ""; counted: int | None = None; article: str = ""; moved: tuple = ()
     entries: tuple = ()
+    fail: int | None = None         # P2.5b: the newest fail no later pass supersedes
+    superseded: tuple = ()          # P2.5b, LAST: the fails a pass on another exported
+                                    #   article superseded (verdicts._supersedes)
 class Claim(Record):            # something that must be true for the design to work
     id: str; statement: str; kind: ClaimKind = MEASURABLE; acceptance: Acceptance
     rationale: str = ""; source: str = ""; grounded_by: list[str]; gates: list[str]
@@ -149,6 +160,8 @@ class Claim(Record):            # something that must be true for the design to 
                                       #   context; counts only through an attribution
     terminal: str = ""                # P2.5a: declared Terminal, "" = by kind; strict reader
     authority: str = ""               # P2.5a: an expert judgment's NOMINEE (terminal human)
+    expected_latency: dict            # P2.5b: {value > 0, units in LATENCY_UNITS} or {}; a
+                                      #   measurement-terminal claim's alone (strict reader)
     results: tuple = ()               # in memory: every entry of results/<id>.json, oldest first
     attributions: tuple = ()          # in memory: interactive AttributionRecords, newest first
     standing: Standing | None = None  # in memory: set by verdicts.view only
@@ -176,6 +189,20 @@ class Decision(Record):         # one decision-log entry; names what LOST
     id: str; title: str = ""; when: str = ""; summary: str = ""; rejected: list[Rejected]
     params_changed: list[str]; claims_changed: list[str]; evidence: list[str]
     body: str = ""                                                       # long-form markdown
+class Milestone(Record):        # P2.5b: milestones/<name>.json — a named spend; the stem IS the id
+    id: str; description: str = ""; requires: list[str]   # the claim ids it needs Checked
+    generator: str = ""             # "<path>.py:<function>": what export builds the article with
+class ExportRecord(Record):     # P2.5b: one entry of exports/<milestone>.json's "exports"
+    milestone: str; when: str = ""; who: str = ""; channel: str = ""; revision: str = ""
+    dirty: bool = False; requires: list   # the milestone's ids at export
+    claims: dict                    # {id: {status, cause, reran}} — every claim, at export
+    reran: list                     # [{gate, rho, out8, code, outcome, qualified}]
+    counted: dict                   # {required id: [counting covering verdict rows]} (D13)
+    article: dict                   # verdicts.export_article's: {source "export", hash, traced,
+                                    #   milestone, when, revision, dirty, built_from}
+    package: dict                   # {hash, files: {rel: sha256}, manifest: sha256}
+    proceed: Any = None             # None, or {claims: [{id, status, cause}], why} (D8)
+    prev: str = ""; digest: str = ""   # the chain and the seal (store.append_sealed)
 class PackManifest(Record):     # pack.json, tier 1 (docs/PACK_FORMAT.md)
     name: str; version: str = "0.1.0"; description: str = ""; settles: list[str]
     claim_classes: list[str]; provides_gates: list[str]; provides_views: list[str]
@@ -196,7 +223,10 @@ class Ledger(Record):           # the whole project, in memory (store.load assem
     views: list[View]
     removed: tuple[Claim, ...]   # review of P2.5a, in memory only: a results file no claim
                                  # file holds, as a claim (to_dict drops it; view composes it)
-    def claim(cid) | param(name) | artifact(aid) | need(nid) | verdict(gate_id) -> record | None
+    milestones: list[Milestone]  # P2.5b
+    exports: list[ExportRecord]  # P2.5b: every milestone's, file by file, oldest first
+    def claim(cid) | param(name) | artifact(aid) | need(nid) | verdict(gate_id)
+        | milestone(name) -> record | None
     def verdicts_for(cid) -> list[Verdict];  def upsert_verdict(verdict) -> None
 ```
 **Records as files** (checkpoint 1.3). Three constants tell `store` how a record
@@ -205,7 +235,8 @@ types, not about the disk:
 ```python
 RECORD_KINDS: dict[str, type]    # record dir -> kind: claims Claim, params Param,
                                  # decisions Decision, needs Need, inputs InputArtifact,
-                                 # results PhysicalResult, views View (store.RECORD_DIRS' order)
+                                 # results PhysicalResult, views View, milestones Milestone,
+                                 # exports ExportRecord (store.RECORD_DIRS' order)
 FORBIDDEN_KEYS: dict[str, dict[str, str]]   # class name -> {key: the home that owns it};
                                  # "*" applies at every depth of every kind
 ALWAYS_WRITTEN: frozenset[tuple[str, str]]  # {("Claim", "kind"), ("Acceptance", "comparator")}
@@ -389,7 +420,8 @@ LEDGER_NAME  = "ledger.json"          # the GENERATED index (records project); t
 PROJECT_NAME = "project.json"         # .atompipe/project.json — meta, and the commit marker
 LEGACY_LEDGER_NAME = "ledger.legacy.json"   # what a migrated ledger.json is renamed to
 PROJECT_SCHEMA = 2                    # project.json's schema; a newer one is refused
-RECORD_DIRS = ("claims", "params", "decisions", "needs", "inputs", "results", "views")
+RECORD_DIRS = ("claims", "params", "decisions", "needs", "inputs", "results", "views",
+               "milestones", "exports")   # the last two P2.5b's: never on a legacy project
 VERDICTS_NAME = "verdicts"; CACHE_NAME = "cache"; OBS_NAME = "obs"   # under .atompipe/
 INDEX_BANNER: str                     # the index's "generated" value: edit the records, never this
 LEGACY_GITIGNORE_TEMPLATES: tuple[str, str]  # init's .atompipe/.gitignore at 1e09113, and at 1.2
@@ -413,7 +445,15 @@ RESULTS_LISTS = ("results", "attributions")   # P2.5a: a results file's two seal
 SEAL_SCHEMA = 1; ROLES = ("owner", "authority")
 CONTRADICTS_KEYS = ("gate", "code", "rho", "value", "units", "inside")
 class ResultsFile(list):        # P2.5a: list[PhysicalResult], plus .attributions and .raw
-def append_signed(root, claim_id, list_name, entry: dict) -> dict  # THE writer of a sealed entry
+def append_signed(root, claim_id, list_name, entry: dict) -> dict  # a results entry: append_sealed's
+def append_sealed(root, kind, stem, list_name, entry: dict) -> dict  # P2.5b: THE writer of a sealed
+                                       #   entry — results/<id>.json's lists, exports/<m>.json's
+class ExportsFile(list):        # P2.5b: list[ExportRecord], plus .raw (the file as stored)
+MILESTONE_NAME: re.Pattern      # P2.5b: ^[a-z0-9][a-z0-9._-]{0,63}$ — a milestone file's stem
+def generator_parts(ref) -> tuple[str, str]   # "<path>.py:<function>" -> (path, function); refuses
+ARTICLE_KEYS = ("source", "hash", "built_from", "traced", "milestone", "when", "revision",
+                "dirty")        # an article dict's closed keys, a result's and an export's
+REPORT_NAME = "REPORT.md"; PACKAGES_NAME = "out"   # P2.5b: at the root, both ignored
 def write_record(root, kind, record, *, record_id=None) -> str | None             # None: unchanged
 def load(root, *, model_prose=None) -> Ledger   # the records; a legacy ledger migrated IN MEMORY; verdicts []
 def save(root, ledger: Ledger) -> None  # tests and the migration only (see below)
@@ -421,7 +461,8 @@ def is_legacy(root) -> bool             # ledger.json present, project.json abse
 def build_index(root, *, digests: FileDigests | None = None) -> dict   # pure
 def write_index(root) -> bool           # True when .atompipe/ledger.json changed; best-effort
 def agree(root) -> list[str]            # every way the index disagrees with the records
-def records_digest(root) -> str         # sha256 over the record files and project.json
+def records_digest(root, *, exclude=()) -> str   # sha256 over the record files and project.json;
+                                        # exclude: record dirs left out (export's manifest: "exports")
 class MigrationPlan(NamedTuple):
     ledger: Ledger; files: dict[str, bytes]; notice: str
 def migrate_legacy(root, *, apply: bool, when: str,
@@ -445,7 +486,9 @@ refuses **only when a marker exists**: a directory holding only `.atompipe/packs
 is not a project, and `init` there succeeds.
 
 `project_paths` is the layout in one call (`"ledger"`, `"project"`, `"legacy_ledger"`,
-`"readiness"`, `"decisions"`, `"inputs_<bucket>"`, ...), whether or not the paths exist
+`"report"`, `"packages"`, `"milestones"`, `"exports"`, `"decisions"`, `"inputs_<bucket>"`,
+...; `"readiness"` is where `report --write` wrote before P2.5b, kept so `doctor` can
+name a leftover one), whether or not the paths exist
 yet: this is the map, not an inventory. No other module joins a well-known path by
 hand, so moving the layout is one edit here instead of a grep across the spine.
 
@@ -464,6 +507,10 @@ needs/<id>.json            TRACKED  SPARSE: only an enriched Need
 inputs/<id>.json           TRACKED  one InputArtifact; its bytes stay in inputs/<bucket>/
 results/<claim-id>.json    TRACKED  {"results": [PhysicalResult, ...]}, append-only
 views/<id>.json            TRACKED  declared views, beside the viewgens views/*.py
+milestones/<name>.json     TRACKED  one Milestone (P2.5b); the stem IS the id
+exports/<name>.json        TRACKED  {"exports": [ExportRecord, ...]}, append-only, sealed
+REPORT.md                  IGNORED  the readiness report (`report --write`)
+out/<name>/                IGNORED  a milestone's package (`export`)
 ```
 `init` writes the empty record directories, the input buckets and `inputs/README.md`
 (only when missing), `docs/`, `model/`, the three blocks, and `project.json` **last** —
@@ -614,7 +661,9 @@ bracket's twelve duplicates (a generated output edited by hand).
 `.atompipe/.gitignore` — the deny-list `ledger.json ledger.legacy.json obs/ cache/ out/
 export/ runs/ *.tmp *.lock` (never an allow-list: `.atompipe/packs/` is source and
 `model.json` is reviewed; `verdicts/` is evidence and stays tracked); the root
-`.gitignore` — `__pycache__/`, `*.py[cod]`; the root `.gitattributes` —
+`.gitignore` — `__pycache__/`, `*.py[cod]`, and from P2.5b `/REPORT.md` and `/out/` (the
+report and the packages, outputs: S-41's committed report drifted from its ledger;
+anchored, so a `model/out/` stays a source); the root `.gitattributes` —
 `* text=auto eol=lf` and `*.stl`, `*.step`, `*.glb`, `*.png`, `*.jpg` `-text`, one
 pattern per line. A `.atompipe/.gitignore` that **begins with** a
 `LEGACY_GITIGNORE_TEMPLATES` text has that prefix replaced by the block; a line outside
@@ -1539,7 +1588,32 @@ def track_record(ledger) -> dict[str, tuple[Contradiction, ...]]   # every resul
 def view(ledger, resolution) -> Ledger    # THE view builder: verdicts + each claim's standing,
                                           # + each Ledger.removed claim holding a fail
 REMOVED = "removed"                       # the Standing.state of such a claim
+# P2.5b: the exported article
+class ExportedArticle(NamedTuple): article; written; outside; error; params
+def export_article(root, projection, fn, *, out_dir, anchors, digests, model=None,
+                   milestone="", when="", resolution=None) -> ExportedArticle
+                                          # runs a milestone's generator traced: the article
+                                          # is what it READ (traced) or the design (not)
 ```
+**The exported article (P2.5b-D11, D12).** `export_article` runs a milestone's
+generator as a gate is run — `GateContext` at tier 3, traced — and the article is what
+it read: `built_from` the reads (`Reads.from_trace`), `traced: True` when nothing
+opaque was read, its code is recorded and no model was used. Untraced, it is
+`article_of`'s whole design (over-predicts, never under). A pass on an exported
+article is judged by `_traced_moves`: only a moved read moves it, so a change no
+generator read rebuilds nothing (`claims.rebuild` names that article alone). A pass
+on one counts only while `exports/` holds it (`_fact_export`). What `outside` names
+is a write outside the package's scratch (refused, named, never undone).
+
+**Supersession (P2.5b-D14).** A fail stops counting when a later pass stands
+(`EntryStanding.stands`) on an exported, traced article B other than the fail's A,
+A moved, and B differs from A on a row A recorded (`_differs_on_recorded`) —
+`_supersedes`; never a judgment's (a person, not a print) or an assumption's. The
+fail is kept (`Standing.superseded`, its contradiction too) and named in every
+channel; `view` releases a claim's `physical_result` only to the counting fail or to a
+standing pass, so nothing else reaches it. What slipped through before it: a fail on
+a print the design no longer described blocked its claim forever, so a reprint after a
+fix could never clear it.
 **`apply_prerequisites`** (P2.2-D7, D8) is `resolve`'s last rung and `check`'s again over
 the view it merges with its sweep (`cli._swept`). It walks `gates.plan`'s order over
 every registered gate, building a `gates.Reading` per gate from the resolution (current
@@ -1707,6 +1781,10 @@ def admission(root, spec, fn, host_ctx, *, may_run=True, force=False, record=Tru
 class SweepRow:
     verdict: Verdict; executed: bool; cached: bool; fresh: bool
     stale_reason: str; rho: str; admission: Admission | None
+    disagrees: tuple = ()           # P2.5b, LAST: what a forced re-run found that the
+                                    #   records it overrode did not say: ("outcome", out8,
+                                    #   before, after, rho) | ("records", why) |
+                                    #   ("qualification", why)
 @dataclass
 class SweepResult:
     rows: list[SweepRow]            # one per selected gate, registration order
@@ -2246,7 +2324,23 @@ def contradicted_by(claim, verdicts, *, stale_gates=(), needs=None, codes=None) 
 @dataclass(frozen=True)
 class Rebuild: article: str; claims: tuple; moved: tuple    # to_dict()
 def rebuild(ledger) -> list[Rebuild]          # the rebuild prediction, over a judged view
+# P2.5b: ready is one predicate; a milestone; latency
+class Unresolved(NamedTuple): required; unresolved; missing; unbound; ready
+def required_ids(ledger, milestone=None) -> list[str]   # the milestone's `requires`, else every critical claim
+def unresolved(ledger, composed, milestone=None) -> Unresolved   # THE predicate: ready iff every
+                                              #   required id exists and reads Checked
+class Latency(NamedTuple): seconds; source; article; declared   # source: measured | declared | none
+def declared_seconds(claim) -> float | None   # expected_latency in seconds, or None
+def latency(claim, exports) -> Latency        # measured from its exported article's `when` to the
+                                              #   newest result recorded on it; else declared
 ```
+**Ready is one predicate (P2.5b-D1, invariant 12).** `unresolved` is the one place that
+decides *ready*: every reader — `check`'s line, `status`, the report's sentence,
+JUnit's properties, `summarise`'s `milestones`, `state.json` and `export` — asks it,
+with the milestone or without (the project's spend: every `critical` claim). A required
+id with no claim file is `missing` and never ready. What slipped through before it
+(S-60): the page said ready whenever nothing stopped `check`, and each reader had its
+own copy of the test.
 `covers` binds by id **or** by tag, and an empty `spec.claims` covers nothing, never
 everything: a wildcard would let one misregistered gate mark a project proven.
 
@@ -2580,15 +2674,20 @@ def limit_words(acceptance) -> str            # a claim's limit beside a value: 
 def recorded_by(who) -> str                  # "recorded by dana" | "recorded, unattributed" — one line
 def prerequisite_phrase(verdict) -> str      # "prerequisite failed: <root>" | "… not established:
                                              #   <root> (<kind>)", from HUMAN and the spine's mark
-def readiness(ledger, composed) -> dict      # {required, unresolved, unbound, ready}
+def readiness(ledger, composed, milestone=None) -> dict   # claims.unresolved's rows, + missing
+def milestone_line(ledger, composed, milestone) -> str     # "<m>: k of n required claims checked · …"
+def limits_line(ledger) -> str               # what Checked does not mean, said where ready is (P2.5b)
+def latency_words(claim, exports) -> str     # "measured 26 h on article <a12> (expected 1 day)" |
+                                             #   "expected 1 day (declared)" | that none is declared
 def not_ready_line(ledger, composed) -> str  # `check`'s line when nothing blocks it
 RATIONALE_UNKNOWN = "Parameter rationales are not known"  # + ": <why>" — no view, or no model
 def render_terminal(ledger, registry, *, stale=False, stale_gates=(), params=None,
                     stale_reasons=None) -> str
 def render_markdown(ledger, registry, *, stale=False, stale_gates=(), model_error="",
-                    title="", root="", params=None, stale_reasons=None) -> str
+                    title="", root="", params=None, stale_reasons=None,
+                    milestone=None) -> str  # milestone: the report for that spend (P2.5b)
 def write_report(root, ledger, registry, *, stale=False, stale_gates=(), model_error="",
-                 params=None, stale_reasons=None) -> str   # docs/readiness.md
+                 params=None, stale_reasons=None) -> str   # REPORT.md, ignored (P2.5b)
 def render_junit(ledger, verdicts, registry, *, tier, ready, exit_code, when,
                  not_run=None, cached=frozenset(), stale=False, spine="",
                  stale_gates=(), stale_reasons=None) -> str
@@ -2659,7 +2758,7 @@ gone: under the composition there is nothing left to mark.
 is never under PROVEN; a stale FAIL stays FAIL (`claims.resolve_status`). `stale=True`
 stays the all-gates override. The report reads no sweep time and no rho: its title is
 `(<rev>)`, and `## Reproduce` lists `atompipe check` and each gate's code files, so a
-regenerated `docs/readiness.md` changes only when the claims or the verdict outcomes
+regenerated `REPORT.md` changes only when the claims or the verdict outcomes
 do. The code files are spelled as the verdict cache spells them (`gates/structural.py`,
 `<pack:NAME>/gates/…`), which needs the project: `render_markdown` lists them only when
 handed `root=` (`write_report` passes it) and otherwise leaves them out, never spelling
@@ -2693,11 +2792,12 @@ list — never `ledger.params`, the sparse records (review, checkpoint 1.3). Wit
 `RATIONALE_UNKNOWN: <why>` and never "every parameter carries a rationale".
 
 `store` is in the deps for two reasons: `write_report` takes its destination from
-`store.project_paths(root)["readiness"]`, and the Reproduce file list anchors its
+`store.project_paths(root)["report"]`, and the Reproduce file list anchors its
 paths with `store.out_dir(root)`. `verdicts` is in them for `anchors_for` and
 `code_digest`, the one spelling of a gate's code files. Layout is `store`'s job alone, and a
-second module that knows where `docs/readiness.md` lives is a second module to
-edit when it moves.
+second module that knows where the report lives is a second module to
+edit when it moves — as it did in P2.5b, from `docs/readiness.md` to an ignored
+`REPORT.md` at the root: committed, it drifted from its ledger (S-41).
 
 A covering gate that produced no pass that counts (`_unproven_for`) is named with its
 reason led by the fact — `unrun`, `errored: <exception>`, `skipped: <reason>`,
@@ -2841,6 +2941,56 @@ A locator is never dropped for being undrawable: it stays on its verdict, and
 that believes it is drawing and is not looks exactly like a gate that found nothing. `clean_assets` deletes only what
 it can prove is unreferenced, which is why every asset arrives through `write_asset`.
 
+### `milestones.py`  (deps: models, util, store, claims, report, verdicts)
+The boundary that spends (P2.5b): what `export <milestone>` judges, and the package
+it builds. Pure functions the CLI drives; the sweep, the lock, the prompt and the
+record's write are `cli.cmd_export`'s. Not in `verdicts.SPINE_MODULES`: an edit here
+keys no verdict. Standard library only, like every module under `src/atompipe/`.
+```python
+@dataclass(frozen=True)
+class Refusal: kind; subject; reason          # kind: unresolved | missing | requires-nothing |
+    def to_dict(self) -> dict                 #   disagrees | generator | package | precondition
+COVERED = frozenset({"unresolved"})           # the only kind a person's --proceed covers
+class Judgment(NamedTuple): ready; refusals; writes; found   # found: claims.Unresolved
+class Disagreement(NamedTuple): gate; kind; line   # kind: outcome | records | qualification
+def closure(view, registry, milestone) -> list[str]   # the evaluators its required claims rest on
+def disagreements(before, result, gates=()) -> list[Disagreement]   # the re-run vs the records (D7)
+def refusals(view, composed, milestone, *, disagreements=(), extra=()) -> list[Refusal]
+def judge(view, composed, milestone, *, disagreements=(), extra=(), decided=False) -> Judgment
+def counted_on(view, composed, milestone, registry, resolution) -> dict[str, list]
+                                              # per required claim, its counting covering rows
+def sealed_contradictions(entry, claim_id) -> list   # a later fail's contradicts: the rows sealed
+                                              #   at export, never the evaluator's verdict now
+def test_card(view, composed, milestone, article, exports) -> list[str]   # what to measure (§4.6)
+MANIFEST = "MANIFEST.json"; SPINE_FILES = ("REPORT.md", "model.json", MANIFEST)
+class Package(NamedTuple): hash; files; manifest
+def scratch_dir(root, name, dry_run) -> str   # dry: .atompipe/out/export-<m>; else out/.<m>.tmp-<pid>
+def build_package(scratch, *, report_md, carried, manifest) -> Package
+def package_problems(root, name, exports) -> list[tuple[str, str]]   # (foreign | edited, rel)
+def swap_package(root, name, scratch) -> str  # out/<m>/ replaced whole, never over a person's file
+```
+**One path, two modes.** `--dry-run` runs everything `export` runs — the forced re-run
+at tier 3 with controls and prerequisites, the judgment on the re-executed view, the
+generator, the package built aside — and stops before the decision, the swap and the
+record (P2.5b-D6, PLAN D-15: it is `/ready`). The text of the two differs in the outcome
+line alone; `tests/test_export.py` (`DryRunIsTheSamePath`) holds that. A refusal under
+`--dry-run` reads `would refuse`, and the preconditions a written export refuses on (no
+git identity, a legacy project) are refusals it says it would make.
+
+**What a go-ahead covers.** `judge` writes when there is no refusal, or only
+`unresolved` ones and the person decided (`--proceed --why`, typed in their own shell:
+the milestone's name, as `claim physical` takes the id). Never a disagreement, a missing
+id, an empty milestone, a broken generator or a package that is not what was recorded.
+The decision is sealed into the export record with each claim's status and cause.
+
+**The package** is `out/<m>/`: `REPORT.md` (the milestone's report as `report
+--milestone` renders it), `model.json` (exactly the article's param rows: what was
+built, not the project), `MANIFEST.json` (the article, the records digest without
+`exports/`, each file's sha256) and whatever the generator wrote. Built in a scratch
+directory and swapped in whole; a file in `out/<m>/` that no export recorded is a
+person's (`foreign`), and one whose bytes moved since its export is `edited` — either
+refuses, named. Two exports of one state write byte-identical packages.
+
 ### `cli.py`  (deps: everything)
 `argparse`, subcommands, `main(argv=None) -> int`, and `build_parser()` — the whole
 command surface as one `argparse.ArgumentParser`, so a test can check a command
@@ -2853,7 +3003,8 @@ atompipe ingest <path...> [--kind] [--desc]   atompipe inputs [--unextracted]
 atompipe extract <artifact> --what ... --grounds ...
 atompipe ask [--kind]                     # what evidence to request from the user
 atompipe check [--tier N] [--only GATE] [--force] [--no-record]   atompipe gate list|selftest|show
-atompipe report [--write]                 atompipe why <param-or-claim>
+atompipe report [--write] [--milestone M]   atompipe why <param-or-claim>
+atompipe export [M [--dry-run] [--proceed --why TEXT]]   # P2.5b: the boundary that spends
 atompipe decide --title ... --summary ...  atompipe packs [list|show|validate|add]
 atompipe model [--write]                  atompipe doctor
 atompipe check [--junit [PATH]]
@@ -3526,7 +3677,70 @@ Each a slip a refuter reproduced; decision rows `P2.5a-Rn` in `docs/plan/phase-2
   own page group). The readiness tally counts Checked on an article; the Stale advice
   is its own sentence.
 
+## What P2.5b moved
+
+A spend is named, and the place it costs money re-executes. The spine digest moved
+(models, verdicts); every entry re-keys once. Decision rows: `P2.5b-Dn` in
+`docs/plan/phase-2.md`.
+
+- **Milestones** (`milestones/<name>.json`, `Milestone`): a description, the claim ids
+  it `requires`, and a `generator`. Records, read strictly, in the index; a required id
+  with no claim file is named (`missing`), never ready.
+- **Ready is one predicate** (`claims.unresolved`, invariant 12): every reader asks it,
+  with a milestone or without. `status` and the report list every milestone on one line
+  each (`<m>: k of n required claims checked · s stale …`), "as last evaluated" — from
+  the cache, which only `export` re-executes.
+- **`export <m>`** (`cli.cmd_export`, `milestones.py`): the forced re-run of the
+  closure at tier 3 with controls and prerequisites, filed as `check --force` files it;
+  the judgment on the re-executed view; the generator run traced
+  (`verdicts.export_article`); the package in `out/<m>/`; the record appended to
+  `exports/<m>.json` by `store.append_sealed`, sealed and chained. `--dry-run` is the
+  same path, stopping before the record. A disagreement between the re-run and the
+  records it overrode (`SweepRow.disagrees`) refuses it, and no go-ahead covers it.
+- **The exported article** carries what the generator read (`traced`); a pass on it is
+  stale only when one of those reads moved, and counts only while its export is on
+  record. `claim physical --article <hash>` binds a result to it; a fail recorded on it
+  contradicts the verdicts the export sealed (`counted`), not the evaluator's verdict
+  after its inputs moved.
+- **Supersession**: a fail stops counting when a later pass stands on another exported
+  article that moved where the fail's did (`verdicts._supersedes`); kept and named.
+- **The hardware clause and the limits line**: the readiness sentence says, in every
+  branch, what is checked on an article or that nothing is, and what needs one; the
+  report and `export` say what Checked does not mean (`report.limits_line`).
+- **The report is an output**: `report --write` writes `REPORT.md` at the root, ignored
+  (`/REPORT.md` in the root block); `doctor` names a leftover `docs/readiness.md`.
+  `report --milestone <m>` is the milestone's report, the one the package carries.
+- **Latency** (`Claim.expected_latency`, `claims.latency`): declared on a
+  measurement-terminal claim, measured from its exported article to the newest result
+  recorded on it; `why` and `claim show` (when there is one to say), every JSON claim
+  row (`report.claim_json`) and the test card carry it. A superseded fail reads "does
+  not count" in `why`, on the page and in JSON, named with the pass that superseded it.
+- **Words** (`report.HUMAN`): `milestone`, `readiness`, `latency`, `export`; the
+  test card lists every required automated claim with a limit as a cross-check.
+
 ## Limits: what the spine cannot see, named
+
+- **Ready on `status` and the page is as last evaluated (P2.5b).** It reads the
+  verdict cache, which the inner loop never re-executes and can be forged (below);
+  only `export` re-runs what a spend requires. Every milestone line says so.
+- **An export records an intent to build, not a build (P2.5b).** The article is what
+  the generator read and the package what it wrote; nothing sees the slicer, the
+  printer or which package a person printed. A result binds to an article by its hash
+  (`--article`), which the person types from the package.
+- **An untraced generator's article over-predicts (P2.5b).** A generator that reads
+  something opaque, has no recorded code or uses the model gets the whole design as its
+  article, so any change predicts its rebuild. A traced one names only what it read —
+  and a read the tracer cannot see (the environment, a module-level memo; the edges
+  below) is not in it.
+- **A milestone names its own requirements (P2.5b).** Anyone who edits
+  `milestones/<m>.json` can shrink what a spend requires, and an export after the edit
+  is ready by the new list; the edit is in git and in the export record's `requires`.
+  P3's permission rule on `milestones/` is the lock.
+- **A re-sealed export is a forgery the seal does not catch (P2.5b),** as a results
+  file's (below): `exports/<m>.json` is sealed and chained with a plain sha256.
+- **A generator's writes during `--dry-run` are refused and named, not undone
+  (P2.5b).** It runs in the scratch directory; a write outside it is reported as the
+  refusal and left where it landed, since undoing a write is a second writer.
 
 - **A re-sealed forgery counts (P2.5a).** A seal is a plain sha256: a process that
   writes `results/<id>.json` with `channel: interactive` and recomputes the seal, calls
@@ -3662,7 +3876,9 @@ a reader of the output meets it:
 - **The tracked cache is forgeable in the inner loop.** An entry's `digest` is
   integrity (a hand edit is ignored as `hand-edited entry`), not authentication:
   a hand-made entry with a matching digest is served until something re-runs it. R-9
-  is the defence — `check --force` in CI, and P2's `export` — never the cache.
+  is the defence — `check --force` in CI, and from P2.5b `export`, which re-runs every
+  evaluator a milestone requires and refuses when the re-run and the records disagree —
+  never the cache.
 - **A concurrent writer during a gate run is not detected.** File digests are taken
   after the gate returns, so a file rewritten while the gate read it keys the rewrite.
 - **Smaller edges, named in their sections:** an explicit `dict.__getitem__` call on

@@ -413,7 +413,9 @@ def _forged_project() -> _Forged:
         if proc.returncode != (1 if key == "check" else 0):
             raise AssertionError(f"`atompipe {key}` exited {proc.returncode}:\n"
                                  f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
-    with open(os.path.join(root, "docs", "readiness.md"), encoding="utf-8") as fh:
+    # P2.5b-D17: `report --write` renders REPORT.md at the root (R-6: the same
+    # rendering, read where it is written now).
+    with open(os.path.join(root, "REPORT.md"), encoding="utf-8") as fh:
         markdown = fh.read()
     with open(os.path.join(root, ".atompipe", "out", "junit.xml"), encoding="utf-8") as fh:
         junit = fh.read()

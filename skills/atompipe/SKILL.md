@@ -60,6 +60,7 @@ stale now.
 | `inputs/<id>.json` | one piece of evidence and what was extracted from it (its bytes stay in `inputs/<bucket>/`) |
 | `params/<name>.json` | only the provenance the model cannot hold: `source`, `grounded_by`, `tags` |
 | `needs/<id>.json` | a gap someone enriched (candidates, a chosen tool) |
+| `milestones/<name>.json` | one spend — a print, a board order, a field test: the claim ids it `requires` and the `generator` (`<path>.py:<function>`) that builds what it gets |
 | `.atompipe/project.json` | the project: `"model_entry"` — the model file that is the single source of truth — and `"packs"`, the live packs |
 
 Every record file is read strictly: a misspelled key is refused, naming the file,
@@ -67,9 +68,11 @@ the key and the suggestion, instead of being dropped. A parameter's value, units
 rationale live in the model (its `Config` field and that field's docstring), and the
 alternatives that lost in the model's `PARAMS` — never copy them into `params/`.
 
-Five commands write one record for you, with the time stamped for you:
+Six commands write one record for you, with the time stamped for you:
 `atompipe ingest` (copies the file in and pins its hash), `atompipe extract`,
-`atompipe decide`, `atompipe packs add` and `atompipe claim physical`. `check` writes
+`atompipe decide`, `atompipe packs add`, `atompipe claim physical` and
+`atompipe export <milestone>` (appends to `exports/<milestone>.json`; never edit it —
+it is sealed, like `results/`). `check` writes
 no record — only verdicts under `.atompipe/verdicts/`, which you commit with the
 records, and ignored scratch (the one exception: a project still in the old one-file
 layout is migrated to record files by its first `check`).
@@ -223,7 +226,8 @@ atompipe check                 # tier-0 gates, seconds — run this constantly
 atompipe check --tier 2        # the full sweep, before any spend decision
 atompipe gap --propose         # claims with no gate, and packs that might cover them
 atompipe why <param|claim>     # one thing's full history, instead of the whole log
-atompipe report --write        # the readiness report
+atompipe report --write        # REPORT.md, the readiness report — an ignored output
+atompipe export <m> --dry-run  # ready for milestone <m>? re-runs everything it requires
 atompipe site build            # rebuild the page after a sweep
 atompipe decide --title ...    # record a decision, including what LOST
 ```
@@ -353,11 +357,28 @@ productive.
 
 ## Before an irreversible spend
 
-Ordering boards, buying stock, booking machine time, committing to a mould: run the
-full sweep and read `atompipe report`. `atompipe check` exits non-zero while any
-required claim is Failing, Skipped, a Gap, Open or Stale. Pending build and Assumed do
-not stop it, and they are still unresolved: say *ready* only when the report's first
-sentence does — every required claim checked against the current inputs.
+Ordering boards, buying stock, booking machine time, committing to a mould: that is a
+**milestone**. Declare it — `milestones/<name>.json` with the claim ids the spend
+requires and the generator that builds its files — and ask:
+
+```sh
+atompipe export <name> --dry-run   # re-runs every evaluator it requires, controls included
+```
+
+`status` and the report say what each milestone is missing *as last evaluated*, from
+the verdict cache, which the inner loop never re-executes. `export` is where the cache
+is not trusted: it re-runs what the milestone requires at the top tier and refuses when
+any required claim is not Checked, or when the re-run disagrees with the records. Say
+*ready* only when it says `would write` — and when the person runs `atompipe export
+<name>`, the package is `out/<name>/`, with the article hash its results bind to
+(`atompipe claim physical <id> --article <hash>`) and a test card of what to measure.
+
+Going ahead over an unresolved required claim is the person's decision, never yours:
+`atompipe export <name> --proceed --why "…"`, typed in their own shell. From an agent
+session it is refused; tell them the command and why.
+
+`atompipe check` exits non-zero while any required claim is Failing, Skipped, a Gap,
+Open or Stale. Pending build and Assumed do not stop it, and they are still unresolved.
 
 Then say the honest sentence out loud, in the shape the report uses:
 

@@ -14,7 +14,7 @@ omission). What each class below holds against:
   ``write_report`` take ``stale_gates``: a PASS whose covering gate is stale is
   STALE and never under PROVEN. The PROVEN heading says "current", not "this run"
   — a cached verdict is current without having run this time. And the report
-  carries no sweep timestamp and no rho, so a regenerated ``docs/readiness.md``
+  carries no sweep timestamp and no rho, so a regenerated ``REPORT.md``
   changes only when the claims or the verdict outcomes do (S-89, the report half).
 * **SiteAgesAreNeverZero.** A verdict's age comes from the obs run that last hit
   or wrote its entry, else the entry's commit time, else it is ``null`` — never 0,
@@ -221,7 +221,7 @@ class ReadersTakeStaleGates(unittest.TestCase):
         self.assertEqual(md.splitlines()[0], "# readers — readiness (v0.3)")
 
     def test_no_timestamp_and_no_rho_reach_the_report(self):
-        """S-89, the report half: a regenerated `docs/readiness.md` changes only
+        """S-89, the report half: a regenerated `REPORT.md` changes only
         when the claims or the verdict outcomes do. A legacy ledger still
         carrying a sweep record, and verdicts carrying rho and costs, render
         nothing a re-run would move."""

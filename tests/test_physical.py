@@ -130,7 +130,9 @@ class TheClaimDigestIgnoresAbsentFields(unittest.TestCase):
         self.assertEqual(got, CLAIM_DIGESTS)
         fields = {f.name for f in dataclasses.fields(Claim)}
         for claim in ledger.claims:
-            extra = {name: value for name, value in (("terminal", ""), ("authority", ""))
+            # P2.5b (R-6, a strengthening): `expected_latency` empty moves none.
+            extra = {name: value for name, value in (("terminal", ""), ("authority", ""),
+                                                     ("expected_latency", {}))
                      if name in fields}
             with self.subTest(claim.id):
                 self.assertEqual(verdicts._claim_digest(dataclasses.replace(claim, **extra)),
@@ -1655,6 +1657,505 @@ class APhysicalResultIsNoTier(unittest.TestCase):
     def test_the_old_comment_is_caught(self):
         planted = "    EXTERNAL = 3    # CI, a fab house, a lab, a human with calipers.\n"
         self.assertRegex(self._comment(planted), r"human|calipers|person")
+
+
+# --------------------------------------------------------------------------- #
+# P2.5b — a result on an exported article; supersession; latency
+# --------------------------------------------------------------------------- #
+def _fig4_exported(test: Any, name: str = "f") -> tuple[str, str]:
+    """Fig. 4 (``tests/test_fig4.py``) with its milestones and generators, its
+    `enclosure` exported at ``cavity_w`` 70: ``(root, article hash)``."""
+    import test_fig4 as F
+    root = F.fig4(os.path.join(test.tmp(), name), generators=F.GENERATORS,
+                  milestones=F.MILESTONES)
+    _projects._commit_all(root, "fig4")
+    # In process (`_captured`, the test identity in git's variables): the fast
+    # tier runs one row on this helper, and two processes were most of its cost.
+    code, _out, err = _captured(["check", "-C", root])
+    test.assertIn(code, (0, 1), err)
+    code, out, err = _captured(["export", "enclosure", "--json", "-C", root])
+    test.assertEqual(code, 0, out[-2000:] + err[-2000:])
+    return root, json.loads(out)["article"]["hash"]
+
+
+def _captured(argv: list[str]) -> tuple[int, str, str]:
+    import contextlib
+    import io
+    from atompipe import cli
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+            mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": P.NAME,
+                                         "GIT_AUTHOR_EMAIL": "tests@atompipe.invalid",
+                                         "GIT_COMMITTER_NAME": P.NAME,
+                                         "GIT_COMMITTER_EMAIL": "tests@atompipe.invalid"}):
+        code = cli.main(argv)
+    return code, out.getvalue(), err.getvalue()
+
+
+class AResultBindsToAnExportedArticle(_env.EnvCase):
+    """(V-9, invariant 11; P2.5b-D13) `claim physical <id> pass|fail --article
+    <hex>` binds a result to an exported article — what its generator read —
+    named by at least 12 hex that one export holds; and a fail's contradiction
+    is charged to the verdicts the export sealed on the article's own inputs,
+    never to the evaluator's verdict after they moved."""
+
+    def test_a_short_unknown_or_ambiguous_article_is_refused(self):
+        root, article = _fig4_exported(self)
+        for given, words in ((article[:11], "at least 12 hex"),
+                             ("0" * 12, "no export recorded article")):
+            with self.subTest(given=given):
+                proc = P.run(root, "claim", "physical", "K5", "fail", "--detail", "x",
+                             "--article", given, code=2)
+                self.assertIn(words, proc.stderr)
+        entry = dict(P.exports(root, "enclosure")["exports"][-1])
+        twin = dict(entry["article"], hash=article[:12] + "f" * 52)
+        store_append = _need(store, "append_sealed")
+        store_append(root, "exports", "enclosure", "exports",
+                     {k: v for k, v in dict(entry, article=twin).items()
+                      if k not in ("prev", "digest")})
+        proc = P.run(root, "claim", "physical", "K5", "fail", "--detail", "x",
+                     "--article", article[:12], code=2)
+        self.assertIn("names two articles", proc.stderr)
+        self.assertEqual(P.results(root, "K5"), {}, "a refused --article wrote a result")
+
+    def test_a_fail_is_charged_to_the_verdicts_sealed_at_export(self):
+        import test_fig4 as F
+        root, article = _fig4_exported(self)
+        counted = P.exports(root, "enclosure")["exports"][-1]["counted"]["K1"]
+        self.assertTrue([c for c in counted if c.get("inside") is True],
+                        "the export sealed no counted verdict for K1: nothing to charge")
+        F.set_cavity(root, 82.0)
+        code, out, err = _captured(["claim", "physical", "K1", "fail", "--detail",
+                                    "the enclosure would not close", "--article", article,
+                                    "-C", root])
+        self.assertEqual(code, 0, out + err)
+        entry = P.results(root, "K1")["results"][-1]
+        self.assertEqual(entry["article"]["hash"], article)
+        self.assertEqual(entry["contradicts"], counted)
+
+    def test_a_planted_capture_from_the_current_resolution_is_caught(self):
+        """Planted: the contradiction read from the resolution now — after the
+        move, `fig4.enclosure_fit` is invalidated and nothing is charged."""
+        import test_fig4 as F
+        root, article = _fig4_exported(self)
+        counted = P.exports(root, "enclosure")["exports"][-1]["counted"]["K1"]
+        F.set_cavity(root, 82.0)
+        from atompipe import milestones
+        with mock.patch.object(milestones, "sealed_contradictions", lambda entry, cid: []):
+            code, out, err = _captured(["claim", "physical", "K1", "fail", "--detail", "x",
+                                        "--article", article, "-C", root])
+        self.assertEqual(code, 0, out + err)
+        self.assertNotEqual(P.results(root, "K1")["results"][-1]["contradicts"], counted)
+
+
+# -- V-10, in process: the judge over real sealed entries --------------------- #
+def _exported(params: dict, *, traced: bool = True, milestone: str = "enclosure",
+              when: str = "2026-10-04T10:00:00Z") -> dict:
+    """An exported article as `export` records it: ``params`` ``{path: value}``
+    (a traced generator's reads), sealed."""
+    from atompipe.util import seal
+    rows = [[list(path), verdicts.digest_value(value), value]
+            for path, value in sorted(params.items())]
+    built = {"params": rows, "model": {}, "files": {}}
+    return {"source": "export", "hash": seal(built), "built_from": built, "traced": traced,
+            "milestone": milestone, "when": when, "revision": "", "dirty": False}
+
+
+def _design(cavity: float) -> dict:
+    return {"source": "design", "hash": ("d%03d" % int(cavity)) * 16,
+            "built_from": None, "revision": "", "dirty": False}
+
+
+class _Judged:
+    """K5 (a physical claim with its test written down) with ``entries`` as
+    results, judged at ``cavity_w`` = ``cavity`` against ``exports`` (article
+    hashes `exports/` holds) — the view every reader composes."""
+
+    def __init__(self, root: str, entries: list[dict], *, cavity: float,
+                 exports: list[str], claim: Claim | None = None,
+                 verdicts_: list | None = None) -> None:
+        from atompipe.models import ExportRecord
+        from atompipe.util import FileDigests
+        photo = os.path.join(root, "photos", "k5.jpg")
+        os.makedirs(os.path.dirname(photo), exist_ok=True)
+        with open(photo, "wb") as fh:
+            fh.write(b"a photo")
+        base = claim or Claim(id="K5", statement="The printed parts assemble",
+                              kind=ClaimKind.PHYSICAL, note="assemble by hand")
+        digest = claims.claim_digest(base)
+        sha = __import__("hashlib").sha256(b"a photo").hexdigest()
+        results = []
+        for entry in entries:
+            full = {"who": P.WHO, "channel": "interactive", "claim_digest": digest,
+                    "evidence": ["photos/k5.jpg"], "evidence_sha256": {"photos/k5.jpg": sha},
+                    "when": "2026-10-05T10:00:00Z", **entry}
+            results.append(PhysicalResult.from_dict(full))
+        fail = next((r for r in reversed(results) if r.passed is not True), None)
+        self.claim = dataclasses.replace(base, results=tuple(results),
+                                         physical_result=fail or (results[-1] if results
+                                                                  else None))
+        records = [ExportRecord(milestone="enclosure", article={"hash": h}) for h in exports]
+        self.ledger = dataclasses.replace(Ledger(claims=[self.claim],
+                                                 verdicts=list(verdicts_ or [])),
+                                          exports=records)
+        projection = {"config": {"cavity_w": cavity, "cell_mah": 2000.0},
+                      "derived": {"enclosure": cavity + 6.0}}
+        here = verdicts._Now(root, projection, self.ledger,
+                             anchors=verdicts.Anchors(root=os.path.abspath(root)),
+                             digests=FileDigests(), model=None)
+        real_moves = verdicts._article_moves
+
+        def moves(article: Any, now: Any) -> tuple[str, tuple]:
+            # A design article in process, with no model to digest: current
+            # exactly when it is this cavity's (`_design`), else moved.
+            if isinstance(article, dict) and article.get("source") == "design":
+                return (("current", ()) if article.get("hash") == _design(cavity)["hash"]
+                        else ("moved", ("config.cavity_w moved",)))
+            return real_moves(article, now)
+
+        with mock.patch.object(verdicts, "_article_moves", moves):
+            self.standings = verdicts.judge_results(self.ledger, here)
+        self.view = verdicts.view(self.ledger, verdicts.Resolution(
+            verdicts=list(verdicts_ or []), standings=self.standings))
+        self.composed = claims.compose(self.view.claim(base.id), self.view.verdicts)
+
+    @property
+    def reads(self) -> tuple[str, str]:
+        return self.composed.status.value, self.composed.cause.value
+
+
+A70 = {("cavity_w",): 70.0}
+A72 = {("cavity_w",): 72.0}
+
+
+class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
+    """(V-10, invariant 11; PLAN Q2.11, R-3 "for every object but the one that
+    failed") A fail F on an exported, traced article A stops counting only
+    beside a pass P a person records on ANOTHER exported, traced article B —
+    which `exports/` holds, which is current, and which differs from A on a row
+    A recorded — while the design is no longer A. F counts again the moment the
+    design returns to A. Every other later pass leaves F Failing."""
+
+    def judge(self, entries: list[dict], *, cavity: float, exports: list[str],
+              **kw: Any) -> _Judged:
+        return _Judged(self.tmp(), entries, cavity=cavity, exports=exports, **kw)
+
+    def fail(self, article: dict) -> dict:
+        return {"passed": False, "detail": "a gap at the seam", "article": article}
+
+    def passed(self, article: dict, **kw: Any) -> dict:
+        return {"passed": True, "detail": "assembled", "article": article, **kw}
+
+    def rows(self) -> dict[str, tuple[_Judged, tuple[str, str]]]:
+        """``{row: (judged, (status, cause) it must read)}`` — §4.5 row by row,
+        and critique 2's rows."""
+        E, E2 = _exported(A70), _exported(A72)
+        both = [E["hash"], E2["hash"]]
+        return {
+            "a: a pass on another exported article, the design moved":
+                (self.judge([self.fail(E), self.passed(E2)], cavity=72.0, exports=both),
+                 ("verified", "on-article")),
+            "b: the design returned to the failed article":
+                (self.judge([self.fail(E), self.passed(E2)], cavity=70.0, exports=both),
+                 ("refuted", "physical-fail")),
+            "c: a pass on a design article after the move":
+                (self.judge([self.fail(E), self.passed(_design(72.0))], cavity=72.0,
+                            exports=both), ("refuted", "physical-fail")),
+            "d: a pass on the failed article itself":
+                (self.judge([self.fail(E), self.passed(E)], cavity=70.0, exports=both),
+                 ("refuted", "physical-fail")),
+            "e: a pass from an agent session on another exported article":
+                (self.judge([self.fail(E), self.passed(E2, channel="agent-session s1")],
+                            cavity=72.0, exports=both), ("refuted", "physical-fail")),
+            "f: the other article's export record removed":
+                (self.judge([self.fail(E), self.passed(E2)], cavity=72.0,
+                            exports=[E["hash"]]), ("refuted", "physical-fail")),
+            "j: the fail on a design article, a pass on an exported one":
+                (self.judge([self.fail(_design(70.0)), self.passed(E2)], cavity=72.0,
+                            exports=both), ("refuted", "physical-fail")),
+            "k: the fail on an untraced export":
+                (self.judge([self.fail(_exported(A70, traced=False)), self.passed(E2)],
+                            cavity=72.0, exports=both + [_exported(A70, traced=False)["hash"]]),
+                 ("refuted", "physical-fail")),
+            "l: the pass's article differs only in a row the failed one never read":
+                (self.judge([self.fail(E), self.passed(_exported({("cell_mah",): 2000.0},
+                                                                  milestone="board"))],
+                            cavity=72.0, exports=both + [_exported(
+                                {("cell_mah",): 2000.0}, milestone="board")["hash"]]),
+                 ("refuted", "physical-fail")),
+        }
+
+    def problems(self) -> list[str]:
+        return [f"{name}: reads {judged.reads}, not {want}"
+                for name, (judged, want) in self.rows().items() if judged.reads != want]
+
+    def test_each_row(self):
+        self.assertEqual(self.problems(), [])
+
+    def test_the_superseded_fail_is_named_and_kept(self):
+        E, E2 = _exported(A70), _exported(A72)
+        judged = self.judge([self.fail(E), self.passed(E2)], cavity=72.0,
+                            exports=[E["hash"], E2["hash"]])
+        standing = judged.standings["K5"]
+        self.assertEqual(tuple(getattr(standing, "superseded", ()) or ()), (0,))
+        self.assertIsNone(getattr(standing, "fail", "absent"))
+        said = report.reason(judged.composed, judged.view, judged.view.claim("K5"))
+        self.assertIn(report.article12(E), said, "the row does not name the superseded fail")
+        self.assertEqual(claims.rebuild(judged.view), [],
+                         "the rebuild prediction still names the superseded fail's article")
+        self.assertEqual(judged.claim.physical_result.passed, False,
+                         "a raw ledger reader (no standing) must read the fail (R-2)")
+        raw = claims.compose(judged.claim, [])
+        self.assertEqual(raw.status, ClaimStatus.REFUTED)
+
+    def test_the_superseded_fail_does_not_count_where_results_are_listed(self):
+        """`why`'s PHYSICAL RESULTS row, the page's and JSON's `counts`
+        (`report.result_facts`): the superseded fail does not count, naming the
+        pass that superseded it — never "it counts" beside a row reading
+        Checked. The fail it supersedes nothing for still counts."""
+        E, E2 = _exported(A70), _exported(A72)
+        judged = self.judge([self.fail(E), self.passed(E2)], cavity=72.0,
+                            exports=[E["hash"], E2["hash"]])
+        claim = judged.view.claim("K5")
+        failed = report.result_facts(claim, claim.results[0])
+        self.assertFalse(failed["counts"])
+        self.assertIn(report.article12(E2), failed["why"])
+        self.assertTrue(report.result_facts(claim, claim.results[1])["counts"])
+        unsuperseded = self.judge([self.fail(E), self.passed(E)], cavity=72.0,
+                                  exports=[E["hash"]])
+        claim = unsuperseded.view.claim("K5")
+        self.assertTrue(report.result_facts(claim, claim.results[0])["counts"])
+
+    def test_a_superseded_fail_keeps_its_contradiction(self):
+        E, E2 = _exported(A70), _exported(A72)
+        contra = [{"gate": "fig4.enclosure_fit", "code": "c" * 64, "rho": "r" * 64,
+                   "value": 76.0, "units": "mm", "inside": True}]
+        judged = self.judge([dict(self.fail(E), contradicts=contra), self.passed(E2)],
+                            cavity=72.0, exports=[E["hash"], E2["hash"]])
+        self.assertEqual(judged.reads, ("verified", "on-article"))
+        record = verdicts.track_record(judged.ledger)
+        self.assertEqual([c.gate for c in record.get("fig4.enclosure_fit", ())],
+                         ["fig4.enclosure_fit"])
+
+    def test_an_automated_claims_fail_is_superseded_by_a_reprints_pass(self):
+        """A fail on an automated claim (E4: a ruler on C1) is superseded by a
+        pass on the reprint — a pass that settles nothing an evaluator settles,
+        and stands on its article — and the claim reads its evaluators again
+        (critique 13 of the P2.5b design: otherwise no fix and reprint ever
+        reads Checked)."""
+        E, E2 = _exported(A70), _exported(A72)
+        claim = Claim(id="K1", statement="The enclosure fits the bay", gates=["fig4.fit"],
+                      acceptance=Acceptance(quantity="enclosure width", limit=100.0,
+                                            units="mm"))
+        verdict = Verdict(gate="fig4.fit", claims=["K1"], passed=True, measured=78.0,
+                          limit=100.0, units="mm")
+        judged = self.judge([self.fail(E), self.passed(E2, evidence=[],
+                                                       evidence_sha256={})],
+                            cavity=72.0, exports=[E["hash"], E2["hash"]], claim=claim,
+                            verdicts_=[verdict])
+        self.assertEqual(judged.reads, ("pass", "checked"))
+        back = self.judge([self.fail(E), self.passed(E2, evidence=[], evidence_sha256={})],
+                          cavity=70.0, exports=[E["hash"], E2["hash"]], claim=claim,
+                          verdicts_=[verdict])
+        self.assertEqual(back.reads[0], "refuted")
+
+    def test_the_planted_judges_are_caught(self):
+        """Planted into `verdicts._supersedes`: any later counting pass; B == A
+        allowed; supersession never judged against the design again; B and A
+        compared by hash alone; a fail on a design article supersedable."""
+        real = _need(verdicts, "_supersedes")
+
+        def any_pass(fail, fs, passing, ps):
+            return bool(ps.counts)
+
+        def same_article(fail, fs, passing, ps):
+            return ps.counts and (fs.article_state == "moved" or True) and \
+                (passing.article or {}).get("source") == "export"
+
+        def not_current(fail, fs, passing, ps):
+            # Supersession decided once and never judged against the design
+            # again: the design back on the failed article (row b) still leaves
+            # the fail superseded. (A moved and B current are one fact here: B
+            # current and differing from A on a row A recorded imply A moved.)
+            return real(fail, dataclasses.replace(fs, article_state="moved"), passing,
+                        dataclasses.replace(ps, stands=ps.passed and ps.why in (
+                            "", "article-moved", "beside")))
+
+        def hash_only(fail, fs, passing, ps):
+            a, b = fail.article or {}, passing.article or {}
+            return (ps.counts and a.get("source") == b.get("source") == "export"
+                    and a.get("traced") and b.get("traced") and a.get("hash") != b.get("hash")
+                    and fs.article_state == "moved")
+
+        def design_ok(fail, fs, passing, ps):
+            a = dict(fail.article or {})
+            if a.get("source") == "design":
+                return bool(ps.counts) and fs.article_state == "moved"
+            return real(fail, fs, passing, ps)
+
+        real_judged = verdicts._judged
+
+        def released_to_any_pass(claim, standing):
+            # The view's half of the same violator: the fail released to the
+            # newest pass, whether or not it stands on its article now.
+            found = real_judged(claim, standing)
+            if standing is not None and standing.superseded and standing.fail is None:
+                passes = [e.index for e in standing.entries if e.passed]
+                if passes:
+                    found = dataclasses.replace(found, physical_result=claim.results[passes[-1]])
+            return found
+
+        for name, planted, row in (("any later pass", any_pass, "c:"),
+                                   ("B == A allowed", same_article, "d:"),
+                                   ("never judged against the design again", not_current, "b:"),
+                                   ("hash only", hash_only, "l:"),
+                                   ("a design article's fail", design_ok, "j:")):
+            with self.subTest(name), mock.patch.object(verdicts, "_supersedes", planted), \
+                    mock.patch.object(verdicts, "_judged", released_to_any_pass):
+                found = self.problems()
+                self.assertTrue([p for p in found if p.startswith(row)],
+                                f"{name} was not caught at row {row}: {found}")
+
+
+class AReprintAfterAFailIsADecision(_env.EnvCase):
+    """(V-10, end to end; critique 13 of the P2.5b design) A fail on a claim the
+    milestone requires keeps `export` refused — the reprint that could answer it
+    is a decision a person records (`--proceed`), never a carve-out — and a
+    pass on the reprint, once the design moved, supersedes the fail: the next
+    export is ready. Back on the failed design, the fail counts again."""
+
+    def test_fail_reprint_pass(self):
+        import test_fig4 as F
+        root, article = _fig4_exported(self)
+        P.tty(root, "claim", "physical", "K1", "fail", "--measured", "104",
+              "--detail", "the shell measured 104 mm", "--article", article,
+              answer="K1", code=0)
+        self.assertEqual(_status(root, "K1")[0], "refuted")
+        F.set_cavity(root, 72.0)
+        refused = F.export(root, "enclosure", code=1)
+        self.assertEqual([(r["kind"], r["subject"]) for r in refused["refusals"]],
+                         [("unresolved", "K1")])
+        text = P.run(root, "export", "enclosure", "--dry-run", code=1).stdout
+        self.assertIn("--proceed", text, "the refusal does not say a reprint is a decision")
+        P.tty(root, "export", "enclosure", "--proceed", "--why", "the reprint after the fix",
+              answer="enclosure", code=0)
+        reprint = P.exports(root, "enclosure")["exports"][-1]["article"]["hash"]
+        self.assertNotEqual(reprint, article)
+        P.tty(root, "claim", "physical", "K1", "pass", "--measured", "78",
+              "--detail", "the reprint measured 78 mm", "--article", reprint,
+              answer="K1", code=0)
+        self.assertEqual(_status(root, "K1")[:2], ("pass", "checked"))
+        F.export(root, "enclosure", "--dry-run", code=0)
+        F.set_cavity(root, 70.0)
+        self.assertEqual(_status(root, "K1")[0], "refuted")
+
+
+class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
+    """(V-13, W3; GLOSSARY §5 *latency*) A physical claim declares its expected
+    latency — `expected_latency: {value, units}` — read until an article
+    measures it: a result's `when` minus its exported article's `when`. Only a
+    measurement takes one (critique 16 of the P2.5b design); the strict reader
+    refuses it elsewhere, a bad value or unit; it moves no claim digest."""
+
+    def _write(self, record: dict) -> str:
+        root = self.tmp()
+        path = os.path.join(root, "claims", "C9.json")
+        P.write_json(path, record)
+        return path
+
+    def test_the_strict_reader(self):
+        physical = {"statement": "s", "kind": "physical", "note": "n"}
+        accepted = dict(physical, expected_latency={"value": 2, "units": "week"})
+        claim = store.read_record(self._write(accepted), "claims")
+        self.assertEqual(getattr(claim, "expected_latency", None), {"value": 2, "units": "week"})
+        refused = {
+            "on an automated claim": {"statement": "s", "kind": "measurable",
+                                      "expected_latency": {"value": 1, "units": "day"}},
+            "on an expert judgment": {"statement": "s", "kind": "assumption",
+                                      "terminal": "human", "authority": "Dana",
+                                      "expected_latency": {"value": 1, "units": "day"}},
+            "months": dict(physical, expected_latency={"value": 1, "units": "month"}),
+            "zero": dict(physical, expected_latency={"value": 0, "units": "day"}),
+            "negative": dict(physical, expected_latency={"value": -1, "units": "day"}),
+            "text": dict(physical, expected_latency={"value": "1", "units": "day"}),
+            "a key too many": dict(physical, expected_latency={"value": 1, "units": "day",
+                                                               "when": "now"}),
+        }
+        for name, record in refused.items():
+            with self.subTest(name):
+                with self.assertRaises(AtompipeError) as caught:
+                    store.read_record(self._write(record), "claims")
+                self.assertIn("claims/C9.json", str(caught.exception))
+                self.assertIn("expected_latency", str(caught.exception))
+
+    def test_it_moves_no_digest(self):
+        claim = Claim(id="C9", statement="s", kind=ClaimKind.PHYSICAL, note="n")
+        if "expected_latency" not in {f.name for f in dataclasses.fields(Claim)}:
+            self.fail("Claim.expected_latency does not exist yet")
+        declared = dataclasses.replace(claim, expected_latency={"value": 1, "units": "day"})
+        self.assertEqual(claims.claim_digest(declared), claims.claim_digest(claim))
+        self.assertEqual(verdicts._claim_digest(dataclasses.replace(claim, expected_latency={})),
+                         verdicts._claim_digest(claim))
+
+    def _words(self, results: list[dict], exports: list[dict]) -> str:
+        from atompipe.models import ExportRecord
+        claim = Claim(id="K8", statement="s", kind=ClaimKind.PHYSICAL, note="n",
+                      results=tuple(PhysicalResult.from_dict(r) for r in results))
+        if "expected_latency" not in {f.name for f in dataclasses.fields(Claim)}:
+            self.fail("Claim.expected_latency does not exist yet")
+        claim = dataclasses.replace(claim, expected_latency={"value": 1, "units": "day"})
+        records = [ExportRecord(milestone="board", article=a) for a in exports]
+        return _need(report, "latency_words")(claim, records)
+
+    def test_declared_until_measured(self):
+        B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
+        self.assertEqual(self._words([], [B]), "expected 1 day (declared)")
+        measured = self._words([{"passed": True, "when": "2026-10-05T12:00:00Z",
+                                 "article": B}], [B])
+        self.assertEqual(measured, f"measured 26 h on article {B['hash'][:12]} "
+                                   f"(expected 1 day)")
+        on_design = self._words([{"passed": True, "when": "2026-10-05T12:00:00Z",
+                                  "article": _design(70.0)}], [B])
+        self.assertEqual(on_design, "expected 1 day (declared)")
+
+    def test_why_says_it_where_there_is_one(self):
+        """`why` and `claim show` (P2.5b-D19): a `latency:` row on a claim that
+        declares one or has measured one, and none on a physical claim with
+        neither — an empty row on every physical claim would say nothing."""
+        from atompipe import decisions
+        from atompipe.models import ExportRecord
+        bare = Claim(id="K8", statement="s", kind=ClaimKind.PHYSICAL, note="n")
+        declared = dataclasses.replace(bare, expected_latency={"value": 1, "units": "day"})
+        B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
+        measured = dataclasses.replace(bare, results=(PhysicalResult.from_dict(
+            {"passed": True, "when": "2026-10-05T12:00:00Z", "article": B}),))
+        exports = [ExportRecord(milestone="board", article=B)]
+        for name, claim, want in (("neither", bare, None),
+                                  ("declared", declared, "  latency: expected 1 day (declared)"),
+                                  ("measured", measured, f"  latency: measured 26 h on article "
+                                                         f"{B['hash'][:12]}")):
+            with self.subTest(name):
+                text = decisions.why(Ledger(claims=[claim], exports=exports), "K8")
+                rows = [ln for ln in text.splitlines() if ln.startswith("  latency:")]
+                self.assertEqual(rows, [want] if want else [], text)
+
+    def test_a_planted_measure_from_a_design_article_is_caught(self):
+        """Planted: a latency measured from a design article too (its `when`
+        absent read as the result's own)."""
+        real = _need(claims, "latency")
+
+        def any_article(claim, exports):
+            for entry in reversed(tuple(getattr(claim, "results", ()) or ())):
+                article = dict(getattr(entry, "article", None) or {})
+                if article and article.get("source") == "design":
+                    return claims.Latency(0.0, "measured", article.get("hash", ""))
+            return real(claim, exports)
+
+        B = _exported({("board",): 20.0}, milestone="board")
+        with mock.patch.object(claims, "latency", any_article):
+            said = self._words([{"passed": True, "when": "2026-10-05T12:00:00Z",
+                                 "article": _design(70.0)}], [B])
+        self.assertNotEqual(said, "expected 1 day (declared)")
 
 
 if __name__ == "__main__":

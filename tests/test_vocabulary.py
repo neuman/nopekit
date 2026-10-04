@@ -277,11 +277,22 @@ def _tmp(prefix: str) -> str:
     return tmp
 
 
+#: The export channel's runs (P2.5b): each scanned for GLOSSARY §3's, §4's and
+#: §5's Never-says — *ready*, *required*, *milestone* and *latency* are §4's
+#: and §5's terms, and their Never-says (*blocking*, *non-critical*,
+#: *turnaround*, *cached*) are what an export line would reach for.
+EXPORT_RUNS = (("export", ["export"]), ("export.dry", ["export", "print-v1", "--dry-run"]),
+               ("report.milestone", ["report", "--milestone", "print-v1"]))
+EXPORT_KEYS = tuple(key for key, _argv in EXPORT_RUNS)
+
 _BRACKET_RUNS = (("check", ["check", "--junit"]), ("status", ["status"]),
                  ("status.json", ["status", "--json"]), ("report", ["report"]),
                  ("claim.list", ["claim", "list"]), ("claim.show", ["claim", "show", "C6"]),
                  ("why.C6", ["why", "C6"]), ("why.C7", ["why", "C7"]),
-                 ("site.init", ["site", "init"]), ("site.build", ["site", "build"]))
+                 ("site.init", ["site", "init"]), ("site.build", ["site", "build"]),
+                 # P2.5b (critique 11 of its design): the milestone list, the
+                 # boundary's dry run and the milestone's report are channels too.
+                 *EXPORT_RUNS)
 _FILES = (("junit", ".atompipe/out/junit.xml"), ("state", "site/data/state.json"))
 
 
@@ -407,9 +418,18 @@ def _state_lines(state: dict) -> list[str]:
 
 
 def vocabulary_problems(worlds: dict[str, World], banned: set[str], masks: list[str],
-                        reasons: set[str]) -> list[str]:
+                        reasons: set[str], wider: set[str] = frozenset()) -> list[str]:
     out: list[str] = []
     for name, world in worlds.items():
+        statuses_ = {}
+        if "status.json" in world.out:
+            statuses_ = _status_view(json.loads(world.out["status.json"].stdout))
+        for key in EXPORT_KEYS:
+            if key in world.out:
+                text = world.out[key].stdout
+                lines = _markdown_lines(text) if key.startswith("report") else _lines(text)
+                out += scan(f"{name}.{key}", lines, set(banned) | set(wider), masks, reasons)
+                out += tag_problems(f"{name}.{key}", text, statuses_)
         statuses = {}
         if "status.json" in world.out:
             statuses = _status_view(json.loads(world.out["status.json"].stdout))
@@ -491,7 +511,26 @@ class StatusLinesSpeakTheTable(unittest.TestCase):
 
     def test_every_status_line_speaks_the_table(self):
         banned, masks, reasons = self._lists()
-        self.assertEqual(vocabulary_problems(self.worlds(), banned, masks, reasons), [])
+        wider = never_says(_glossary(), 4) | never_says(_glossary(), 5)
+        self.assertEqual(vocabulary_problems(self.worlds(), banned, masks, reasons, wider), [])
+
+    def test_the_export_channel_is_scanned(self):
+        """P2.5b: the export lines reach the scan, with §4's and §5's lists —
+        and a planted *blocking* or *turnaround* there is caught."""
+        wider = never_says(_glossary(), 4) | never_says(_glossary(), 5)
+        self.assertTrue({"blocking", "non-critical", "turnaround", "cached"} <= wider, wider)
+        banned, masks, reasons = self._lists()
+        world = bracket_world()
+        for key in EXPORT_KEYS:
+            self.assertIn(key, world.out)
+            self.assertTrue(_lines(world.out[key].stdout), f"{key} printed nothing")
+        for planted in ("1 blocking claim (C1)", "turnaround 1 day"):
+            with self.subTest(planted):
+                text = world.out["export.dry"].stdout + planted + "\n"
+                found = vocabulary_problems(
+                    {"p": World("", {"export.dry": _Proc(text)}, {})}, banned, masks, reasons,
+                    wider)
+                self.assertTrue(found, planted)
 
     def test_every_sentence_branch_is_reached(self):
         """The worlds reach each readiness branch: not ready, never evaluated,
@@ -650,7 +689,13 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
             outputs = {key: _captured([*argv, "-C", root]) for key, argv in (
                 ("status", ["status"]), ("check", ["check", "--no-record"]),
                 ("claim.list", ["claim", "list"]), ("claim.show", ["claim", "show", "C6"]),
-                ("why", ["why", "C6"]), ("report", ["report"]))}
+                ("why", ["why", "C6"]), ("report", ["report"]),
+                # P2.5b (critique 11 of its design): the export channel.
+                ("export", ["export", "print-v1", "--dry-run"]),
+                ("report.milestone", ["report", "--milestone", "print-v1"]))}
+        export_rows = [ln for ln in outputs["export"].splitlines() if _CLAIM_ROW.match(ln)]
+        self.assertEqual(routing_problems("export", export_rows), [])
+        self.assertIn("## Zzgaps", outputs["report.milestone"])
         status = outputs["status"].splitlines()
         self.assertEqual(routing_problems("status", self._terminal_lines(outputs["status"])),
                          [])
@@ -669,7 +714,12 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
         through (review of P2.1, which traded argparse's `choices` for a free
         filter): `--status failed` printed "no claims match that filter", exit 0
         — an agent told that nothing is failing."""
-        root = bracket_world().root
+        # A bracket copy of its own, not `bracket_world()`: the committed cache
+        # already reads C1 Failing, C5 Pending build, C6 and C7 Gap, and the
+        # world runs fourteen commands (P2.5b's export among them, ~4.5 s) for
+        # one in-process question — the fast tier's pay-back for P2.5b.
+        root = _projects.bracket_copy(os.path.join(_tmp("atompipe-vocab-status-"), "bracket"),
+                                      migrated=True)
 
         def run(*argv):
             out, err = io.StringIO(), io.StringIO()
@@ -1635,3 +1685,121 @@ class PhysicalWordsComeFromOneTable(unittest.TestCase):
         self.assertNotIn("a pass recorded from an agent session", said)
         self.assertIn("zza zzpass zzrecorded zzfrom zzan zzagent zzsession", said)
         self.assertIn("zza zznew zzarticle zzis zzneeded", said_moved)
+
+
+
+# --------------------------------------------------------------------------- #
+# V-11 (P2.5b) — the hardware clause, in every branch of every rendering
+# --------------------------------------------------------------------------- #
+#: The two forms of the clause that says what is checked on an article.
+_ON_ARTICLE = re.compile(r"Checked on an article: \d+ \(|No claim is checked on any article\.")
+_LIMITS = "Checked does not mean true: "
+
+
+def hardware_problems(name: str, sentence: str, ledger: Any, composed: Any) -> list[str]:
+    """The hardware clause (W13) in one rendering of the readiness sentence:
+    exactly one on-article clause; `Pending build: …` iff a claim reads Pending
+    build; one `Rebuild article <a12>` per rebuild row."""
+    out = []
+    found = _ON_ARTICLE.findall(sentence)
+    if len(found) != 1:
+        out.append(f"{name}: {len(found)} on-article clauses: {sentence[-160:]}")
+    pending = any(c.status is ClaimStatus.UNVERIFIED for c in composed.values())
+    if ("Pending build: " in sentence) is not pending:
+        out.append(f"{name}: Pending build {'missing' if pending else 'said'}: "
+                   f"{sentence[-160:]}")
+    rows = claims_mod.rebuild(ledger)
+    if sentence.count("Rebuild article ") != len(rows):
+        out.append(f"{name}: {sentence.count('Rebuild article ')} rebuild clauses for "
+                   f"{len(rows)} rows")
+    for row in rows:
+        if f"Rebuild article {row.article[:12]} " not in sentence:
+            out.append(f"{name}: no rebuild clause for {row.article[:12]}")
+    return out
+
+
+def _sentence_of(md: str) -> str:
+    return next(ln for ln in md.splitlines()[1:] if ln.strip())
+
+
+class TheHardwareClauseIsAlwaysSaid(unittest.TestCase):
+    """(V-11, W13; P2.5a's hand-off) Every rendering of the readiness sentence —
+    the project's and a milestone's, markdown and plain, `report`, REPORT.md and
+    the page — says, in every branch, what is pending build, which articles
+    need a rebuild and what is checked on an article; REPORT.md carries the
+    limits paragraph; and no rendering says a GLOSSARY §3-§5 Never-say."""
+
+    def ledgers(self) -> list[tuple[str, Any, frozenset]]:
+        import test_export
+        out = []
+        case = ReadyIsThePredicate()
+        for name, (rows, _ready, _line) in ReadyIsThePredicate.CASES.items():
+            ledger, _composed = case._composed(*rows)
+            out.append((name, ledger, frozenset()))
+        for seed in range(80):
+            ledger, stale = test_export.seeded(seed)
+            out.append((f"seed {seed}", ledger, stale))
+        return out
+
+    def problems(self) -> list[str]:
+        text = _glossary()
+        banned = never_says(text, 3) | never_says(text, 4) | never_says(text, 5)
+        masks = masked_terms(text)
+        out = []
+        for name, ledger, stale in self.ledgers():
+            composed = claims_mod.compositions(ledger, stale_gates=stale)
+            renderings = {}
+            for markdown in (False, True):
+                renderings[f"sentence{'.md' if markdown else ''}"] = report_mod._verdict_sentence(
+                    ledger, composed, None, stale=False, markdown=markdown)
+            md = report_mod.render_markdown(ledger, None, stale_gates=stale)
+            renderings["REPORT.md"] = _sentence_of(md)
+            if md.count(_LIMITS) != 1:
+                out.append(f"{name}: REPORT.md carries {md.count(_LIMITS)} limits paragraphs")
+            for milestone in getattr(ledger, "milestones", None) or ():
+                renderings[f"sentence[{milestone.id}]"] = report_mod._verdict_sentence(
+                    ledger, composed, None, stale=False, markdown=False, milestone=milestone)
+                mmd = report_mod.render_markdown(ledger, None, stale_gates=stale,
+                                                 milestone=milestone)
+                renderings[f"REPORT.md[{milestone.id}]"] = _sentence_of(mmd)
+                if mmd.count(_LIMITS) != 1:
+                    out.append(f"{name}: REPORT.md[{milestone.id}] carries "
+                               f"{mmd.count(_LIMITS)} limits paragraphs")
+            for key, sentence in renderings.items():
+                out += hardware_problems(f"{name} {key}", sentence, ledger, composed)
+                for hit in never_say_hits(sentence, banned, masks):
+                    out.append(f"{name} {key}: says {hit!r}")
+        return out
+
+    def test_every_branch(self):
+        found = self.problems()
+        self.assertEqual(found[:10], [], f"{len(found)} problems")
+
+    def test_the_seeds_reach_a_rebuild_and_an_article(self):
+        """Not vacuous: some ledger names a rebuild, some a claim checked on an
+        article, some neither."""
+        kinds = set()
+        for _name, ledger, stale in self.ledgers():
+            composed = claims_mod.compositions(ledger, stale_gates=stale)
+            sentence = report_mod._verdict_sentence(ledger, composed, None, stale=False,
+                                                    markdown=False)
+            kinds |= {k for k, needle in (("rebuild", "Rebuild article "),
+                                          ("article", "Checked on an article: "),
+                                          ("none", "No claim is checked on any article."),
+                                          ("pending", "Pending build: "))
+                      if needle in sentence}
+        self.assertEqual(kinds, {"rebuild", "article", "none", "pending"})
+
+    def test_a_ready_branch_without_the_clause_is_caught(self):
+        """Planted: the ready branch drops the clause."""
+        real = report_mod._verdict_sentence
+
+        def dropped(*args, **kwargs):
+            said = real(*args, **kwargs)
+            if re.search(r"\bis ready\b", said):
+                said = _ON_ARTICLE.sub("", said)
+            return said
+
+        with mock.patch.object(report_mod, "_verdict_sentence", dropped):
+            found = self.problems()
+        self.assertTrue([p for p in found if "on-article clauses" in p], found[:5])

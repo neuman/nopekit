@@ -1040,6 +1040,8 @@ def _SKIP_FIRST(composed: Any) -> int:
 #: (key, argv), in the order they run. The two check runs come before the model
 #: edit that makes C4 Stale; everything after reads it.
 _BEFORE_EDIT = (("check", ["check", "--junit"]), ("check.json", ["check", "--json"]))
+#: The planted project's one milestone (P2.5b), requiring every probe claim.
+PROBE_MILESTONE = "probe"
 _AFTER_EDIT = (
     ("status", ["status"]), ("status.json", ["status", "--json"]),
     ("report", ["report"]), ("report.json", ["report", "--json"]),
@@ -1051,6 +1053,9 @@ _AFTER_EDIT = (
     ("gate.show", ["gate", "show", BOTH_GATE]),
     ("doctor", ["doctor"]),
     ("site.init", ["site", "init"]), ("site.build", ["site", "build"]),
+    # P2.5b: the boundary's dry run over a milestone requiring every probe — its
+    # rows are the unresolved required claims, a crash's loud among them.
+    ("export.probe", ["export", PROBE_MILESTONE, "--dry-run"]),
     # Last: it records a result, and every command above reads P8 without one.
     # With its evidence (P2.5a-D9: a pass on a physical claim needs a file), and
     # under the test identity (D5: with none, nothing is recorded).
@@ -1063,7 +1068,9 @@ _AFTER_EDIT = (
 #: the parser to this set and the next.
 RENDERED = frozenset({("check",), ("status",), ("report",), ("why",), ("claim", "list"),
                       ("claim", "show"), ("claim", "physical"), ("gate", "show"),
-                      ("doctor",), ("site", "init"), ("site", "build")})
+                      ("doctor",), ("site", "init"), ("site", "build"),
+                      # P2.5b: run above over the probe milestone.
+                      ("export",)})
 
 #: The rest, each with why it shows no errored claim or verdict. A new command
 #: that does — `export <milestone>`, `export --dry-run`, the `/ready` path (P2,
@@ -1127,7 +1134,9 @@ def _check_the_fixture(run: _Run) -> None:
     Stale. A rotted fixture fails HERE, naming the evaluator, instead of passing
     every property on nothing."""
     for key, proc in run.out.items():
-        want = 1 if key.startswith("check") else 0
+        # A refused export exits 1 like a blocking check (P2.5b): the probes
+        # leave every required claim unresolved, so it refuses.
+        want = 1 if key.startswith(("check", "export")) else 0
         if proc.returncode != want:
             raise AssertionError(f"`atompipe {key}` exited {proc.returncode}, not {want}:\n"
                                  f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
@@ -1167,6 +1176,8 @@ def _louder_project() -> _Run:
             record["critical"] = False
         with open(os.path.join(root, "claims", f"{cid}.json"), "w", encoding="utf-8") as fh:
             json.dump(record, fh, indent=2)
+    with open(os.path.join(root, "milestones", f"{PROBE_MILESTONE}.json"), "w", encoding="utf-8") as fh:
+        json.dump({"description": "the probes", "requires": list(PROBE_CLAIMS)}, fh, indent=2)
     out: dict[str, Any] = {}
     for key, argv in _BEFORE_EDIT:
         out[key] = _env.atompipe(argv, cwd=root, home=home)
@@ -1184,7 +1195,8 @@ def _louder_project() -> _Run:
     for key, argv in _AFTER_EDIT:
         out[key] = _env.atompipe(argv, cwd=root, home=home, identity=True)
     files = {}
-    for name, rel in (("junit", report_mod.JUNIT_DEFAULT), ("readiness", "docs/readiness.md"),
+    # P2.5b (R-6, the same file): `report --write` renders REPORT.md at the root.
+    for name, rel in (("junit", report_mod.JUNIT_DEFAULT), ("readiness", "REPORT.md"),
                       ("state", "site/data/state.json"), ("format.js", "site/lib/format.js"),
                       ("panels.js", "site/lib/panels.js"),
                       ("last_check", ".atompipe/cache/last_check.json")):
@@ -1232,6 +1244,10 @@ def cli_problems(run: _Run) -> list[Problem]:
             if "last verdict:" in ln]
     out += row_problems("gate.show", gate_rows(last), cites=False, floor=("errored",))
     out += doctor_problems(run.out["doctor"].stdout)
+    # P2.5b: `export <m> --dry-run`'s rows — the unresolved required claims, in
+    # severity order, each as `check` prints a BLOCKING row.
+    out += row_problems("export.probe", claim_rows(run.out["export.probe"].stdout.splitlines()),
+                        full=True, lead=True)
     # `claim physical`'s own row: the status composed after the write — never
     # one built from the result alone (review of the P2.1 design: it printed
     # `[ok   ]` beside a crashing modelled half that `status` read Skipped).
@@ -1646,14 +1662,15 @@ class ErrorIsLouder(_env.EnvCase):
                          "a listed command no longer exists")
         self.assertEqual(sorted(RENDERED & set(NOT_A_STATUS_RENDERER)), [])
         ran = {tuple(a for a in argv if not a.startswith("-") and a not in ERRORED_CLAIMS
-                     and a not in ERRORED_GATES)
+                     and a not in ERRORED_GATES and a != PROBE_MILESTONE)
                for _k, argv in _BEFORE_EDIT + _AFTER_EDIT}
         self.assertEqual(sorted(RENDERED - ran), [], "a rendered command nobody runs")
         planted = cli_mod.build_parser()
         sub = next(a for a in planted._actions if isinstance(a, argparse._SubParsersAction))
-        sub.add_parser("export")
+        # P2.5b: `export` exists and is run above; the planted newcomer is P4's.
+        sub.add_parser("trade")
         self.assertEqual(sorted(command_paths(planted) - RENDERED - set(NOT_A_STATUS_RENDERER)),
-                         [("export",)])
+                         [("trade",)])
 
 
 # --------------------------------------------------------------------------- #

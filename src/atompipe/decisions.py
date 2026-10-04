@@ -883,6 +883,13 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
         out += _wrap("tags: " + ", ".join(claim.tags), indent="  ")
     if str(getattr(claim, "authority", "") or "").strip():
         out += _wrap(f"authority: {claim.authority}", indent="  ")
+    # P2.5b-D19: a measurement's latency, declared until an article an export
+    # built measures it — only where there is one to say.
+    from . import claims as claim_logic              # a reader's module: not at import
+    exports = tuple(getattr(ledger, "exports", None) or ())
+    if claim_logic.latency(claim, exports).source != "none":
+        out += _wrap(report.HUMAN["latency"]["row"].format(
+            words=report.latency_words(claim, exports)), indent="  ")
     for record in getattr(claim, "attributions", ()) or ():
         out += _wrap(f"{record.role} recorded: {record.name} ({record.when}, "
                      f"{report.recorded_words(record)})", indent="  ", hanging="    ")
