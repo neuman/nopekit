@@ -80,10 +80,12 @@ from .models import (
     NeedStatus,
     PrerequisiteKind,
     StrEnum,
+    Terminal,
+    TERMINALS_BY_KIND,
     Verdict,
     slugify,
 )
-from .util import AtompipeError, iter_suffix_unique
+from .util import AtompipeError, iter_suffix_unique, seal
 
 
 __all__ = [
@@ -120,6 +122,14 @@ __all__ = [
     "LIMIT_REL_TOL",
     "outside_context",
     "assumption_reason",
+    "terminal_of",
+    "identity_matches",
+    "claim_digest",
+    "AWAITS_A_PERSON",
+    "blocks",
+    "contradicted_by",
+    "Rebuild",
+    "rebuild",
 ]
 
 
@@ -270,6 +280,47 @@ class ClaimCause(StrEnum):
     ACCEPTANCE = "acceptance"
     OUTSIDE_CONTEXT = "outside-context"
     FALLBACK = "fallback"
+    # P2.5a (its D19): the physical path and expert judgment. Failing: a
+    # physical fail on a claim a counted evaluator had passed (`contradiction`,
+    # E4), or the authority's own no (`judged-fail`). Gap: an expert-judgment
+    # claim naming no authority (`no-authority`), or naming one who has not
+    # recorded it (`authority-unattributed`). Stale: the newest pass a person
+    # made in their own shell, and its first half that no longer holds — the
+    # article (`article-moved`; `judgment-moved` for a judgment), the claim as
+    # they read it (`claim-moved`), or a model that does not load to judge the
+    # article by (`article-unjudged`). Assumed: an expert-judgment claim its
+    # authority recorded and has not judged (`awaiting-judgment`). Checked
+    # (VERIFIED): a pass on the current article (`on-article`), the
+    # authority's judgment (`judged`).
+    CONTRADICTION = "contradiction"
+    JUDGED_FAIL = "judged-fail"
+    NO_AUTHORITY = "no-authority"
+    AUTHORITY_UNATTRIBUTED = "authority-unattributed"
+    ARTICLE_MOVED = "article-moved"
+    CLAIM_MOVED = "claim-moved"
+    JUDGMENT_MOVED = "judgment-moved"
+    ARTICLE_UNJUDGED = "article-unjudged"
+    AWAITING_JUDGMENT = "awaiting-judgment"
+    ON_ARTICLE = "on-article"
+    JUDGED = "judged"
+
+
+#: The Stale causes that wait on a person's act on an article — a new article
+#: built, the claim tested again, the authority judging again — which no check
+#: run can answer (P2.5a-D27, critique 11 of its design). Like Pending build they
+#: never stop `check` (`blocks`), and like it they are unresolved: *ready* stays
+#: false. What slipped through the design as written: a recorded pass made
+#: `check` exit 1 after ANY later design edit — and `check` gates the build of
+#: the very article that would answer it, so recording a pass left a project
+#: more blocked than not recording one, until a new article was tested that
+#: `check` would not let anyone build. *Rejected:* blocking (that deadlock);
+#: Pending build for a moved pass (§1.4: "Not Pending build" — Table 1's Stale
+#: is "previously checked evidence no longer matches current inputs"). A claim
+#: whose covering automated evaluator is invalidated too still blocks: the
+#: evaluator's half is a check run's to answer (`Composed.cites` names it).
+AWAITS_A_PERSON: frozenset = frozenset({ClaimCause.ARTICLE_MOVED, ClaimCause.CLAIM_MOVED,
+                                         ClaimCause.JUDGMENT_MOVED,
+                                         ClaimCause.ARTICLE_UNJUDGED})
 
 
 class Attribution(NamedTuple):
@@ -432,6 +483,101 @@ def assumption_reason(claim: Claim) -> str:
     return str(getattr(claim, "fallback", "") or "")
 
 
+def terminal_of(claim: Claim) -> str:
+    """Where ``claim``'s evidence bottoms out (``models.Terminal``): its declared
+    ``terminal``, else by kind — physical -> ``measurement``, assumption ->
+    ``none``, measurable -> ``""`` (automated; P2.5a-D1: a declared
+    closed_form, solver or datasheet composes exactly as undeclared). An
+    unknown in-memory value raises, as ``_kind`` does for a kind: the strict
+    reader refuses it on disk, and a hand-built claim that carries one is a
+    caller's mistake worth naming."""
+    kind = _kind(claim)
+    declared = str(getattr(claim, "terminal", "") or "")
+    if declared:
+        try:
+            value = Terminal(declared).value
+        except ValueError:
+            raise AtompipeError(f"claim {claim.id!r} has unknown terminal {declared!r}; "
+                                f"expected one of: {', '.join(t.value for t in Terminal)}"
+                                ) from None
+        if value not in TERMINALS_BY_KIND[kind]:
+            raise AtompipeError(f"claim {claim.id!r}: a {kind.value} claim cannot end in "
+                                f"{value!r}")
+        return "" if kind is ClaimKind.MEASURABLE else value
+    return {ClaimKind.PHYSICAL: "measurement", ClaimKind.ASSUMPTION: "none"}.get(kind, "")
+
+
+def identity_matches(who: Any, name: Any) -> bool:
+    """Whether the git identity ``who`` (``Name <email>``) IS the person ``name``
+    names: the whole identity, or its name part, exactly. Exact on purpose (R13
+    of the P2.5a design): prefix or case-folded matching would let ``Sam`` stand
+    for ``Samantha``, and the refusal names both spellings and the fix."""
+    who, name = str(who or "").strip(), str(name or "").strip()
+    return bool(name) and (who == name or who.split("<", 1)[0].strip() == name)
+
+
+def claim_digest(claim: Claim) -> str:
+    """The claim as a person read it when they recorded a result or an
+    attribution (P2.5a-D8's claim half): its statement, kind, effective
+    terminal, acceptance condition, note and authority, sealed. A result is
+    bound to it, so an edit to any of those after a test reads Stale — "test it
+    again" — and never Checked. Includes the statement on purpose (R14 of the
+    design): a person attests the sentence; the cost is that a typo fix asks for
+    a re-test."""
+    acceptance = claim.acceptance
+    comparator = getattr(acceptance, "comparator", "")
+    try:
+        terminal = terminal_of(claim)
+    except AtompipeError:
+        terminal = str(getattr(claim, "terminal", "") or "")
+    return seal({"statement": str(claim.statement or ""), "kind": _kind(claim).value,
+                 "terminal": terminal,
+                 "acceptance": {"quantity": str(getattr(acceptance, "quantity", "") or ""),
+                                "comparator": str(getattr(comparator, "value", comparator)
+                                                  or ""),
+                                "limit": getattr(acceptance, "limit", None),
+                                "limit_hi": getattr(acceptance, "limit_hi", None),
+                                "units": str(getattr(acceptance, "units", "") or "")},
+                 "note": str(getattr(claim, "note", "") or ""),
+                 "authority": str(getattr(claim, "authority", "") or "")})
+
+
+def _attributed(claim: Claim, role: str) -> list[Any]:
+    """``claim``'s recorded attributions for ``role``, newest first, each a
+    person's own (``interactive``, recorded by the person it names) — the
+    store assembles only sealed ``interactive`` ones; this re-checks the
+    channel and the identity, so a hand-built claim cannot slip one past."""
+    return [record for record in getattr(claim, "attributions", ()) or ()
+            if getattr(record, "role", "") == role
+            and getattr(record, "channel", "") == "interactive"
+            and identity_matches(getattr(record, "who", ""), getattr(record, "name", ""))]
+
+
+def _owners_of(claim: Claim) -> dict[str, Attribution]:
+    """``{claim id: Attribution}`` from the newest owner attribution the channel
+    recorded — what ``compose`` reads when no ``owners`` is passed (P2.5a-D11).
+    Bound by value exactly as before (P2.1-D8): to the owner and the reason."""
+    found = _attributed(claim, "owner")
+    if not found:
+        return {}
+    return {claim.id: Attribution(str(found[0].name), str(found[0].reason or ""))}
+
+
+def _authority_attributed(claim: Claim) -> bool:
+    """Whether the authority ``claim`` names recorded it, in their own shell,
+    against the claim as it reads now (``claim_digest``): a judgment's own
+    binding — an edited statement un-records the acceptance of it (P2.5a-D11).
+    Never the file's ``authority`` alone: D17's laundering — an edit adding
+    ``"terminal": "human", "authority": "<anyone>"`` would turn a Gap into a
+    passing ``check``."""
+    authority = str(getattr(claim, "authority", "") or "").strip()
+    if not authority:
+        return False
+    digest = claim_digest(claim)
+    return any(str(record.name) == authority and str(record.claim_digest or "") == digest
+               for record in _attributed(claim, "authority"))
+
+
 def _ownership(claim: Claim, owners: Mapping[str, Any] | None) -> ClaimCause | None:
     """Why an assumption is not Assumed — no owner named, no reason, or an owner
     the channel never attributed — or None when it is (P2.1-D8). From P2.4 the
@@ -498,16 +644,35 @@ def compose(
        `no-reason`, `owner-unattributed`).
     4. **Open** — a covering gate unrun (`unrun`), even beside a pass.
     5. **Stale** — `stale`, or a covering gate in `stale_gates` (`invalidated`).
-    6. **Pending build** — a physical claim no article settles: no result
-       (`no-article`), or a pass recorded that no article binds to the current
-       inputs (`physical-pass`) — every recorded pass, until article binding.
+    6. **Pending build** — a claim whose terminal is a measurement and no
+       article settles: no result (`no-article`), or a pass that does not count
+       (`physical-pass`: from an agent session, a pipe, before results were
+       bound, its evidence changed — `Claim.standing` says which; with no
+       standing, a raw ledger nobody judged, every pass, in P2.1's words).
     7. **Assumed** — an attributed, reasoned assumption (`owned`); a pass
-       outside an operating context carried by an owned fallback (`fallback`).
-       *Rejected:* Assumed at rung 3 (an owned fallback would hide an unrun or
-       invalidated evaluator beside it).
+       outside an operating context carried by an owned fallback (`fallback`);
+       an expert-judgment claim its authority recorded and has not judged
+       (`awaiting-judgment`). *Rejected:* Assumed at rung 3 (an owned fallback
+       would hide an unrun or invalidated evaluator beside it).
     8. **Checked** — every covering evaluator ran, passed and is current
-       (`pass`). A physical claim reaches it only on a pass bound to an article
-       built from the current inputs (`verified`), which nothing records yet.
+       (`checked`); a measurement on the current article (`on-article`) or the
+       authority's judgment (`judged`), each only with `Claim.standing` judged
+       `current` by the resolver (`verdicts.judge_results`), every covering
+       automated evaluator composing first (S-49).
+
+    P2.5a's rows (its D11, D12, D17; §4.4 of its design), and what slipped
+    through without each: rung 1 reads a fail that carries a contradiction as
+    `contradiction` (E4) and the authority's own no as `judged-fail`; rung 3
+    reads an expert-judgment claim Gap until its authority records it
+    (`no-authority`, `authority-unattributed`) — never Assumed from the file's
+    `authority` alone, D17's laundering; rung 5 reads the newest pass a person
+    made Stale, LEADING an invalidated covering evaluator and citing it (the
+    fact a check run cannot clear first; `article-moved`, `claim-moved`,
+    `judgment-moved`, `article-unjudged`), and with `stale=True` a counted pass
+    reads Stale too (critique 8 of the design: the all-stale override promised
+    nothing current, and a Checked physical claim with no covering gate slipped
+    it); rung 8 mints VERIFIED. Owners come from `Claim.attributions` when no
+    `owners` is passed (P2.5a-D11) — the keyword stays a test seam.
 
     What slipped through rungs 1 and 6 (review of P2.1): the result rung read
     only the LAST result and only for a physical claim, so a pass typed after a
@@ -528,8 +693,10 @@ def compose(
     FAIL: a crash failed nothing, so the design took the blame for a broken
     evaluator (GLOSSARY §3, *Skipped*).
 
-    A pass never makes an assumption Checked: its kind says no evaluator
-    settles it, and a tag-bound evaluator may test an adjacent property. A
+    An automated evaluator's pass never makes an assumption Checked: its kind
+    says no evaluator settles it, and a tag-bound evaluator may test an
+    adjacent property. Only the authority's judgment does, on a claim whose
+    terminal is `human`. A
     covering fail, skip, refusal or unrun gate still counts for one (R-3).
     Physical claims compose their automated evaluators the same way (S-49): a
     failing modelled half reads Failing before any result is consulted, and an
@@ -537,6 +704,12 @@ def compose(
     first, and Open and Stale stop `check` while Pending build does not).
     """
     kind = _kind(claim)
+    terminal = terminal_of(claim)
+    judgment = terminal == Terminal.HUMAN.value
+    standing = getattr(claim, "standing", None)
+    state = str(getattr(standing, "state", "") or "") if standing is not None else ""
+    if owners is None:
+        owners = _owners_of(claim)
     mine = covering_verdicts(claim, verdicts)
     known = _distinct(claim.gates or ())
     ran = {v.gate for v in mine}
@@ -554,9 +727,18 @@ def compose(
         return tuple(_distinct(v.gate for group in groups for v in group))
 
     # 1. Failing — a recorded fail whatever the kind (R-3); a recorded PASS
-    # counts only for a physical claim (rung 6), never for one an evaluator is
-    # meant to settle.
+    # counts only where the terminal is a measurement or a judgment (rungs 6-8),
+    # never for a claim an evaluator is meant to settle.
     if result is not None and result.passed is not True:
+        contradicted = _distinct(str(item.get("gate") or "")
+                                 for item in (getattr(result, "contradicts", None) or ())
+                                 if isinstance(item, dict) and item.get("inside") is True)
+        if contradicted and not judgment:
+            return Composed(ClaimStatus.REFUTED, ClaimCause.CONTRADICTION, tuple(contradicted))
+        if (judgment and str(getattr(result, "authority", "") or "")
+                == str(getattr(claim, "authority", "") or "")
+                and identity_matches(result.who, claim.authority)):
+            return Composed(ClaimStatus.REFUTED, ClaimCause.JUDGED_FAIL)
         return Composed(ClaimStatus.REFUTED, ClaimCause.PHYSICAL_FAIL)
     if failed:
         return Composed(ClaimStatus.FAIL, ClaimCause.FAILED, gates_of(failed), failed[0])
@@ -600,36 +782,83 @@ def compose(
                         outside[0])
     if kind is ClaimKind.MEASURABLE and not mine and not known:
         return Composed(ClaimStatus.UNCLAIMED, ClaimCause.NO_EVALUATOR)
-    if kind is ClaimKind.ASSUMPTION:
+    if kind is ClaimKind.ASSUMPTION and not judgment:
         unowned = _ownership(claim, owners)
         if unowned is not None:
             return Composed(ClaimStatus.UNCLAIMED, unowned)
+    # An expert-judgment claim (P2.5a-D17): Gap until its authority records it
+    # — unless the authority's judgment counts, or went stale (rungs 5 and 8).
+    judged = state in _JUDGED_STATES
+    if judgment and not judged:
+        if not str(getattr(claim, "authority", "") or "").strip():
+            return Composed(ClaimStatus.UNCLAIMED, ClaimCause.NO_AUTHORITY)
+        if not _authority_attributed(claim):
+            return Composed(ClaimStatus.UNCLAIMED, ClaimCause.AUTHORITY_UNATTRIBUTED)
     # 4. Open
     if unrun:
         return Composed(ClaimStatus.PENDING, ClaimCause.UNRUN, tuple(unrun))
     # 5. Stale — the covering gates are the verdicts' and the known ones: a gate
-    # the resolver named stale covers this claim either way.
+    # the resolver named stale covers this claim either way. The newest pass a
+    # person made leads, citing an invalidated evaluator beside it: the fact a
+    # check run cannot clear first (P2.5a-D19). What slipped through the order
+    # the other way round: the person runs `check`, and the claim still reads
+    # Stale for the reason it hid.
     covering = _distinct([*(v.gate for v in mine), *known])
     stale_set = set(stale_gates or ())
     moved = covering if stale else [g for g in covering if g in stale_set]
+    if carried and not stale:
+        # A pass outside its evaluator's operating context counts for nothing,
+        # current or not — the owned fallback carries the claim (P2.4-D18), as
+        # its absence reads Gap at rung 3 whatever the pass's age. What slipped
+        # through until the fallback's owner could be recorded (P2.5a, Fig. 4's
+        # base case): the moved input that took the pass outside also
+        # invalidated it, and the claim read Stale — "a check run settles it" —
+        # where a check run would only confirm the pass lies outside.
+        beyond = {v.gate for v in outside}
+        moved = [g for g in moved if g not in beyond]
+    first = next((v for v in mine if moved and v.gate == moved[0]), None)
+    if state in _PERSON_STATES and terminal in (Terminal.MEASUREMENT.value,
+                                                Terminal.HUMAN.value):
+        return Composed(ClaimStatus.STALE, _PERSON_STATES[state], tuple(moved), first)
     if moved:
-        first = next((v for v in mine if v.gate == moved[0]), None)
         return Composed(ClaimStatus.STALE, ClaimCause.INVALIDATED, tuple(moved), first)
-    # 6. Pending build — no result, or a pass no article binds (all of them,
-    # until article binding: then a bound pass reads `verified`, Checked).
-    if kind is ClaimKind.PHYSICAL:
+    if stale and state == "current":
+        # The all-stale override (critique 8 of the P2.5a design): a counted
+        # physical pass with no covering gate is current by its article, and
+        # `stale=True` promises that nothing reads current.
+        return Composed(ClaimStatus.STALE, ClaimCause.INVALIDATED)
+    # 6. Pending build — a measurement no article settles.
+    if terminal == Terminal.MEASUREMENT.value and state != "current":
         if result is None:
             return Composed(ClaimStatus.UNVERIFIED, ClaimCause.NO_ARTICLE)
         return Composed(ClaimStatus.UNVERIFIED, ClaimCause.PHYSICAL_PASS, gates_of(mine))
     # 7. Assumed — an assumption by its own ownership (its reason IS its
-    # fallback: `assumption_reason`), any other claim by an owned fallback.
-    if kind is ClaimKind.ASSUMPTION:
+    # fallback: `assumption_reason`), any other claim by an owned fallback, an
+    # expert-judgment claim its authority recorded and has not judged.
+    if kind is ClaimKind.ASSUMPTION and not judgment:
         return Composed(ClaimStatus.ASSERTED, ClaimCause.OWNED)
+    if judgment and state != "current":
+        return Composed(ClaimStatus.ASSERTED, ClaimCause.AWAITING_JUDGMENT)
     if carried:
         return Composed(ClaimStatus.ASSERTED, ClaimCause.FALLBACK, gates_of(outside),
                         outside[0])
     # 8. Checked
+    if terminal == Terminal.MEASUREMENT.value:
+        return Composed(ClaimStatus.VERIFIED, ClaimCause.ON_ARTICLE, gates_of(mine))
+    if judgment:
+        return Composed(ClaimStatus.VERIFIED, ClaimCause.JUDGED, gates_of(mine))
     return Composed(ClaimStatus.PASS, ClaimCause.CHECKED, gates_of(mine))
+
+
+#: ``Standing.state`` -> the Stale cause it reads as (P2.5a-D19, rung 5).
+_PERSON_STATES: Mapping[str, ClaimCause] = MappingProxyType({
+    "article-moved": ClaimCause.ARTICLE_MOVED, "claim-moved": ClaimCause.CLAIM_MOVED,
+    "judgment-moved": ClaimCause.JUDGMENT_MOVED,
+    "article-unjudged": ClaimCause.ARTICLE_UNJUDGED})
+
+#: The standings under which an expert-judgment claim's judgment exists — it
+#: counts, or went stale — so rung 3 lets the ladder reach rung 5 or 8.
+_JUDGED_STATES = frozenset({"current", *_PERSON_STATES})
 
 
 def resolve_status(
@@ -1208,7 +1437,12 @@ def blocking(
     ASSERTED (Assumed). A physical claim awaiting an article cannot block the
     spend that produces the article you would test it on, and an owned
     assumption is carried on purpose. Both are unresolved (GLOSSARY §3) and
-    stop *ready* (`summarise`'s `all_required_checked`), never `check`.
+    stop *ready* (`summarise`'s `all_required_checked`), never `check`. From
+    P2.5a the same holds for a Stale that waits on a person's act on an
+    article — a new article, a retest, a judgment again (`blocks`,
+    `AWAITS_A_PERSON`, P2.5a-D27, which reopens P2.1-D9 for these causes
+    alone): what slipped through without it, a recorded pass made `check` exit
+    1 after any design edit, until an article `check` gates was built.
 
     From P2.1 the set stays and more facts read into it (its D9): an errored
     critical claim (Skipped), an assumption nobody owns (Gap), a pass beside an
@@ -1216,13 +1450,27 @@ def blocking(
     pass (Gap). A passing critical claim covered by a gate in `stale_gates`
     becomes STALE and therefore blocks — with `stale=True`, every one does.
     """
-    resolved = statuses(ledger, stale=stale, registry=registry, stale_gates=stale_gates,
-                        owners=owners)
+    composed = compositions(ledger, registry=registry, stale=stale, stale_gates=stale_gates,
+                            owners=owners)
     return [
-        (claim, resolved[claim.id])
+        (claim, composed[claim.id].status)
         for claim in ledger.claims
-        if claim.critical and resolved.get(claim.id) in BLOCKING_STATUSES
+        if claim.critical and claim.id in composed and blocks(composed[claim.id])
     ]
+
+
+def blocks(composed: "Composed") -> bool:
+    """Whether a REQUIRED claim reading ``composed`` stops ``check`` — the one
+    predicate ``blocking``, JUnit's red and ``check``'s exit code share: its
+    status is in ``BLOCKING_STATUSES``, except a Stale that waits on a
+    person's act on an article (``AWAITS_A_PERSON``) with no invalidated
+    covering evaluator beside it (P2.5a-D27: a check run cannot answer it, and
+    `check` gates the build of the article that would). It is unresolved all
+    the same: *ready* is ``summarise``'s ``all_required_checked``."""
+    if composed.status not in BLOCKING_STATUSES:
+        return False
+    return not (composed.status is ClaimStatus.STALE and composed.cause in AWAITS_A_PERSON
+                and not composed.cites)
 
 
 def summarise(
@@ -1261,7 +1509,11 @@ def summarise(
     * `not_compared` (P2.4-D10, critique 10) — `{claim id: [evaluator ids]}`,
       every claim whatever its status with a covering pass whose value measures
       another quantity or units than its acceptance condition (`not_compared`),
-      claims with none left out.
+      claims with none left out;
+    * `rebuild` (P2.5a-D16) — the rebuild prediction, `rebuild(ledger)` as
+      dicts: `[{article, claims, moved}]`, empty when no article moved;
+    * `contradictions` (P2.5a-D14) — `{claim id: [evaluator ids]}`, each claim
+      Failing on a contradiction and the evaluators it contradicts.
 
     `ready` keeps its meaning — `n_blocking == 0`, nothing stops `check` — for
     every reader that has it (`status --json`, the private bench, a page
@@ -1307,6 +1559,8 @@ def summarise(
                   if resolved.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
     unbound = [c.id for c in required if composed[c.id].cause is ClaimCause.PHYSICAL_PASS]
     errored = [cid for cid, c in composed.items() if c.errored]
+    contradictions = {cid: list(c.cites) for cid, c in composed.items()
+                      if c.cause is ClaimCause.CONTRADICTION}
 
     return {
         "n_claims": len(ledger.claims),
@@ -1329,7 +1583,137 @@ def summarise(
         "stale": bool(stale) or bool(stale_gates),
         "ready": not blockers,
         "not_compared": {cid: gates for cid, gates in unlisted.items() if gates},
+        "rebuild": [r.to_dict() for r in rebuild(ledger)],
+        "contradictions": contradictions,
     }
+
+
+# --------------------------------------------------------------------------- #
+# contradictions and the rebuild prediction (P2.5a-D14, D16)
+# --------------------------------------------------------------------------- #
+def _counted_pass(verdict: Verdict, claim: Claim, stale: Collection[str]) -> bool:
+    """Whether ``verdict`` is a pass that COUNTED for ``claim`` when a fail was
+    recorded: a pass, qualified (no ``unqualified`` mark), current (not in
+    ``stale``), and not one whose value the claim's acceptance condition
+    refutes. What a contradiction may be charged to; what slipped through the
+    design's first recorder (critique of P2.5a's V-10): ``Verdict.passed`` —
+    an invalidated or unqualified pass would have taken the hit."""
+    return (verdict.outcome == "pass" and not getattr(verdict, "unqualified", "")
+            and verdict.gate not in stale and cross_check(claim, verdict).state != "fails")
+
+
+def contradicted_by(claim: Claim, verdicts: Iterable[Verdict], *,
+                    stale_gates: Collection[str] = (),
+                    needs: Mapping[str, Iterable[str]] | None = None,
+                    codes: Mapping[str, str] | None = None) -> list[dict]:
+    """The covering automated evaluators a physical FAIL on ``claim`` contradicts
+    (P2.5a-D14, E4), as the channel seals them into the fail: ``[{gate, code,
+    rho, value, units, inside}]`` — each covering verdict that counted
+    (``_counted_pass``, ``inside: true``), plus each covering pass that lay
+    outside its evaluator's operating context (``inside: false``: it never
+    counted, and the record says where the context ends — P2.4's hand-off keys
+    the track record by code digest AND inside/outside). Left out: a
+    prerequisite of another covering evaluator (P2.4-D10: a guard vouches for
+    its model, not for the claim). ``codes`` maps an evaluator to its serving
+    entry's code digest — its version. Pure over what the channel resolved
+    under its lock; called by the channel before it writes a fail, never by a
+    reader (the verdict on the failed article's inputs is gone once they move).
+    Never for an authority's no (the channel's: an expert judgment is not a
+    physical result — GLOSSARY *contradiction*)."""
+    stale = set(stale_gates or ())
+    mine = covering_verdicts(claim, verdicts)
+    guarded = {need for v in mine for need in (needs or {}).get(v.gate, ()) or ()}
+    out: list[dict] = []
+    for verdict in mine:
+        if verdict.gate in guarded:
+            continue
+        if outside_context(verdict):
+            if verdict.gate in stale or cross_check(claim, verdict).state == "fails":
+                continue
+            inside = False
+        elif _counted_pass(verdict, claim, stale):
+            inside = True
+        else:
+            continue
+        value = verdict.measured if _finite_real(verdict.measured) else None
+        out.append({"gate": verdict.gate, "code": str((codes or {}).get(verdict.gate) or ""),
+                    "rho": str(verdict.rho or ""),
+                    "value": float(value) if value is not None else None,
+                    "units": str(verdict.units or ""), "inside": inside})
+    return out
+
+
+@dataclass(frozen=True)
+class Rebuild:
+    """One article the rebuild prediction names: its hash, the claims a counting
+    result on it binds, and what moved (inputs first, capped)."""
+
+    article: str
+    claims: tuple
+    moved: tuple
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"article": self.article, "claims": list(self.claims),
+                "moved": list(self.moved)}
+
+
+def _rebuild_candidates(ledger: Ledger) -> list[tuple[str, Any]]:
+    """``[(claim id, EntryStanding)]`` — the entries whose article the
+    prediction may name: per claim, its counting fail (``physical_result``, any
+    claim, any terminal but an expert judgment's — a person, not a print), and
+    the newest pass a person made on a measurement terminal when its article
+    moved. Never an agent's pass, a claim-moved pass, a judgment, or a pass
+    beside an automated evaluator (P2.5a-D16)."""
+    out: list[tuple[str, Any]] = []
+    for claim in ledger.claims:
+        standing = getattr(claim, "standing", None)
+        entries = tuple(getattr(standing, "entries", ()) or ())
+        if not entries:
+            continue
+        try:
+            terminal = terminal_of(claim)
+        except AtompipeError:
+            continue
+        if terminal == Terminal.HUMAN.value:
+            continue
+        results = list(getattr(claim, "results", ()) or ())
+        counting = claim.physical_result
+        if counting is not None and counting.passed is not True and counting in results:
+            index = max(i for i, item in enumerate(results) if item == counting)
+            found = next((e for e in entries if e.index == index), None)
+            if found is not None:
+                out.append((claim.id, found))
+        if (terminal == Terminal.MEASUREMENT.value
+                and getattr(standing, "state", "") == "article-moved"
+                and standing.counted is not None):
+            found = next((e for e in entries if e.index == standing.counted), None)
+            if found is not None:
+                out.append((claim.id, found))
+    return out
+
+
+def rebuild(ledger: Ledger) -> list[Rebuild]:
+    """The rebuild prediction (P2.5a-D16; PLAN-v0.14 §1.5): the articles a
+    counting result is bound to whose read set moved — each once, with every
+    claim on it and what moved — sorted by article. Pure over a judged view
+    (``Claim.standing``); a raw ledger names none. One producer for ``check``,
+    ``status``, the report and every JSON channel.
+
+    In P2.5a an article is the whole design at recording (P2.5a-D8), so this
+    never under-predicts and over-predicts freely: any value change moves every
+    recorded article. "Names nothing else" is P2.5b's, with ``export``'s traced
+    articles (critique 12 of the P2.5a design). *Rejected:* per-claim lines (a
+    person rebuilds an article; two claims on one print need one rebuild);
+    naming the articles of passes that never counted (nothing rests on them)."""
+    named: dict[str, tuple[list[str], tuple]] = {}
+    for claim_id, entry in _rebuild_candidates(ledger):
+        if entry.article_state != "moved" or not entry.article:
+            continue
+        claims_on, moved = named.setdefault(entry.article, ([], tuple(entry.moved)))
+        if claim_id not in claims_on:
+            claims_on.append(claim_id)
+    return [Rebuild(article, tuple(claims_on), moved)
+            for article, (claims_on, moved) in sorted(named.items())]
 
 
 def next_claim_id(ledger: Ledger, prefix: str = "C") -> str:

@@ -64,6 +64,8 @@ __all__ = [
     "read_json",
     "sha256_text",
     "short_hash",
+    "canonical_json",
+    "seal",
     "FileDigests",
     "human_bytes",
     "human_duration",
@@ -321,6 +323,33 @@ def sha256_text(text: str) -> str:
     ``json.dumps(..., sort_keys=True)`` is the usual move.
     """
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def canonical_json(value: Any) -> str:
+    """THE canonical JSON form: sorted keys, compact separators, UTF-8 as itself
+    (``ensure_ascii=False``), and NaN or Infinity refused (``allow_nan=False``).
+
+    One rule for every digest the spine takes over a JSON value: the verdict
+    cache's (``verdicts._canonical_json`` delegates here, byte for byte, so every
+    pinned digest holds — ``test_digests``, ``test_spine_digest``) and a physical
+    result's seal (``seal``, P2.5a-D6). A float is written as ``repr`` writes it,
+    which every CPython since 3.1 writes identically, so a seal made on one
+    machine verifies on another (R12 of the P2.5a design). *Rejected:* a second
+    canonical form for seals (two forms drift, and one of them would be the
+    one a reviewer never reads); ``sort_keys`` alone (``", "`` and ``": "`` move
+    with a json default nobody pinned)."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False)
+
+
+def seal(form: Any) -> str:
+    """sha256 hex of ``canonical_json(form)`` — the seal of a physical result or
+    an attribution (``store.append_signed``, P2.5a-D6). What a seal is: tamper
+    EVIDENCE against drift and a helpful agent's shortcut — a hand edit of a
+    recorded result breaks it, and every command then refuses the file. What it
+    is not: a lock. Anyone who can write the file can recompute it (D-13's
+    stated limit; P3's permission rule on ``results/`` is the lock)."""
+    return hashlib.sha256(canonical_json(form).encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def short_hash(text: str, n: int = 12) -> str:

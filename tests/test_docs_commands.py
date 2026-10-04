@@ -223,6 +223,12 @@ def command_problems(words: list[str], parser: argparse.ArgumentParser) -> list[
                          if flag in p._option_string_actions]
                 if not found:
                     problems.append(f"`{' '.join(path)}` has no option {flag}")
+                # P2.5a (V-17): a flag the command parses only to refuse — every
+                # value of `--who` and `--when` exits 2 — is a command nobody can
+                # run as printed (`cli.REFUSED_FLAGS`, the one list).
+                elif path[-2:] == ["claim", "physical"] and flag in cli.REFUSED_FLAGS:
+                    problems.append(f"`{' '.join(path)}` refuses {flag}: who recorded a "
+                                    f"result is git's identity, and when is the clock")
                 actions += found
             if not actions:
                 continue
@@ -538,6 +544,8 @@ class DocsCommandsParse(unittest.TestCase):
             "a flag on the wrong level": "Run `atompipe gate --selftest`.\n",
             "one bad alternative": "`atompipe site build|deploy`\n",
             "a bad subcommand in an optional group": "`atompipe packs [list|publish]`\n",
+            # P2.5a (V-17): the skill's line before P2.5a — `--who` is refused.
+            "a refused flag": "`atompipe claim physical C5 pass --who <name> --detail x`\n",
             "a table row": """
                 ```
                 atompipe init                  atompipe pack new
@@ -632,6 +640,10 @@ class SpineStringsParse(unittest.TestCase):
             "a numbered bare line": 'say("  2. atompipe claim edit C1 --gates x")\n',
             "a placeholder, then a bad flag": 'say(f"atompipe check --only {g} --tierr 1")\n',
             "a bad flag alternative": 'say("`atompipe claim physical C1 --pass|--fial`")\n',
+            # P2.5a (V-17): a refused flag in a spine string — the report's line
+            # printed `--when <ISO date>` until P2.5a, its first catch.
+            "a refused flag": ('say("`atompipe claim physical C5 --pass|--fail '
+                               '--detail \\"...\\" --when <ISO date>`")\n'),
         }
         for label, source in python.items():
             with self.subTest(planted=label):

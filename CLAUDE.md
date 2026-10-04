@@ -73,7 +73,10 @@ violate it (`tests/test_invariants.py`):
    limit it computed read Checked at a value its claim's own condition rejected
    (S-35) — `claims.cross_check`, P2.4; and, in review of P2.4, the reference gate
    repeated `acc.units` back, so C1 restated in `um` read Checked at 700 um against
-   600.)
+   600.) A physical or expert-judgment claim is listed Checked only on a physical
+   result that counts — a pass on its current article, or its authority's judgment
+   — and one the resolver calls Checked without it is listed loud, as status and
+   evidence disagreeing (P2.5a; `tests/test_physical.py`).
 
 Two more, learned the hard way and enforced in `tests/test_packs.py`:
 
@@ -94,7 +97,10 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    what its gate actually read — parameters, files, claim records, the acceptance
    conditions it read, its own code, the spine. When any of those moves, its pass
    reads Stale until the gate runs again — and a limit edit re-keys exactly the gates
-   that read that claim's acceptance condition, and a statement edit none.
+   that read that claim's acceptance condition, and a statement edit none. A physical
+   pass is bound to its article — the design it was recorded on: when that design
+   moves it reads Stale, naming the article to rebuild — a check run cannot restore
+   it (P2.5a).
    (Observed before this: one hash of the whole model decided every gate, and a model
    that failed to import compared equal, so three claims read Checked for a design that
    could not be built.)
@@ -170,6 +176,37 @@ verdict is a new place to show a pass nothing earned. Enforced in
     `deflection` read Checked on a beam whose guard reported Euler-Bernoulli omitting
     32% of the deflection.)
 
+One more came with checkpoint P2.5a, when a physical result, an owner and an
+expert judgment gained a channel — each a new place to settle a claim nothing
+earned. Enforced in `tests/test_signing.py`, `tests/test_physical.py` and
+`tests/test_owner.py`:
+
+11. **A measurement or an expert judgment settles a claim, and an owner or an
+    authority counts, only when entered through a channel the generator cannot
+    author — typed by a person in their own shell, confirming the claim's id. A
+    physical result can lose its power to check, never its power to fail.** `claim
+    physical` records who from the git identity and when from the clock (`--who`
+    and `--when` are refused, naming where each comes from); from an agent session
+    or a pipe a pass is recorded and counts for nothing, and a fail counts. Every
+    entry in `results/<id>.json` is sealed and chained, and a broken seal refuses
+    the file, naming any fail the fix would discard. A pass counts only bound to
+    its article — the design it was recorded on — and to the claim as the person
+    read it, with its evidence's bytes unchanged; when the article's design moves it
+    reads Stale and the rebuild prediction names that article. A fail counts across
+    every edit. An owner, and an expert-judgment claim's authority, count only as
+    that person recorded them, as themselves: the claim is Gap until then, and an
+    expert judgment Assumed under its authority's name until they judge it. A fail
+    on a claim an automated evaluator had passed — qualified and current — is a
+    contradiction, kept on that evaluator's track record at its version. (What
+    slipped through: `claim physical --who` took a name the agent typed and
+    defaulted to nobody (S-48); a pass typed one second after a fail read Checked
+    (review of P2.1); a pass survived any change to the design it was tested on
+    (S-50); an owner was whatever a file said; and, in review of the P2.5a design,
+    an authority was whoever typed its name, and a hand-written `terminal: human`
+    dropped a physical claim's evidence.) What the seal does not stop — a process
+    that recomputes it, or opens a pty with the agent markers unset — is in
+    `docs/SPINE_CONTRACT.md`'s limits; P3's permission rule closes it.
+
 One more came with checkpoint P2.3, numbered as PLAN §4.0.1 numbers it (11–14 land with
 their mechanisms). Enforced in `tests/test_mutation.py`, over every mutation entry point
 in `src/`:
@@ -214,6 +251,9 @@ Each fact has one home; everything else that shows it is an output of that home.
   strictly (an unknown key is refused, with a suggestion): `claims/<id>.json`,
   `params/`, `decisions/`, `needs/`, `inputs/<id>.json`, `results/<claim-id>.json`,
   `views/*.json`, and `.atompipe/project.json` (meta, `model_entry`, the live `packs`).
+  `results/<claim-id>.json` holds a claim's physical results and its owner's or
+  authority's attributions, sealed and chained, appended only by `claim physical`
+  (P2.5a): never edit one by hand — a broken seal refuses the file.
 - **The model** — `model/*.py` owns every parameter's value, units and rationale, and
   in `PARAMS` what lost to it; a param record holds only the provenance the model
   cannot (`source`, `grounded_by`, `tags`).

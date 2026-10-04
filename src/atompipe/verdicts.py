@@ -135,8 +135,9 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Collection, Iterable, Mapping, NamedTuple
 
 from . import modelio, store, vcs
-from .models import Ledger, Locator, Tier, Verdict
-from .util import AtompipeError, FileDigests, atomic_write_json, atomic_write_text
+from .models import EntryStanding, Ledger, Locator, Standing, Tier, Verdict
+from .util import (AtompipeError, FileDigests, atomic_write_json, atomic_write_text,
+                   canonical_json, seal)
 
 
 __all__ = [
@@ -164,6 +165,8 @@ __all__ = [
     # P2.4: the goalpost read (`GateContext.acceptance`) and its two ledger keys
     "ACCEPTANCE_KEY", "SHAPE_KEY", "AcceptanceRead", "claims_named", "acceptance_of",
     "moving_limits", "moved_goalposts",
+    # P2.5a: the article a physical result is bound to, the judge, the one view
+    "article_of", "judge_results", "Contradiction", "track_record", "view",
 ]
 
 
@@ -489,8 +492,9 @@ def _tagged(value: Any, anchors: Anchors | None, opaque: list[str], depth: int) 
 
 
 def _canonical_json(form: Any) -> str:
-    return json.dumps(form, sort_keys=True, separators=(",", ":"),
-                      ensure_ascii=False, allow_nan=False)
+    # `util.canonical_json`, the one canonical form (P2.5a-D26): a physical
+    # result's seal digests what a verdict's digest does, byte for byte.
+    return canonical_json(form)
 
 
 def _digest(value: Any, anchors: Anchors | None = None) -> tuple[str, list[str]]:
@@ -1097,17 +1101,21 @@ _LEDGER_WHOLE = frozenset({"claims", "params", "inputs", "needs", "decisions",
 _LEDGER_HIDDEN = frozenset({"verdicts"}) & _LEDGER_FIELD_SET
 
 #: Filled in memory from somewhere other than the record: `Claim.gates` from
-#: registry coverage, `physical_result` from `results/`, `Param.gates` from the
-#: last read sets. A coverage change is not something a gate read.
-_IN_MEMORY_FIELDS = {"claims": ("gates", "physical_result"), "params": ("gates",)}
+#: registry coverage, `physical_result`, `results` and `attributions` from
+#: `results/`, `standing` from the judge (P2.5a), `Param.gates` from the last
+#: read sets. A coverage change is not something a gate read.
+_IN_MEMORY_FIELDS = {"claims": ("gates", "physical_result", "results", "attributions",
+                                "standing"),
+                     "params": ("gates",)}
 
 
 #: Fields a gate's read of a record leaves out of the digest while they hold
-#: their default: ``Claim.owner`` (P2.1) and ``Claim.fallback`` (P2.4), so a
+#: their default: ``Claim.owner`` (P2.1), ``Claim.fallback`` (P2.4),
+#: ``Claim.terminal`` and ``Claim.authority`` (P2.5a), so a
 #: claim no file names an owner or a fallback for digests exactly as it did
 #: before the field existed, and only an edit that names one moves the gates
 #: that read the claim.
-_ABSENT_WHEN_EMPTY = frozenset({"owner", "fallback"})
+_ABSENT_WHEN_EMPTY = frozenset({"owner", "fallback", "terminal", "authority"})
 
 
 def _record_form(item: Any, strip: tuple = ()) -> Any:
@@ -7301,6 +7309,466 @@ def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
 
 
 # --------------------------------------------------------------------------- #
+# physical results: the article, and the judge (P2.5a)
+# --------------------------------------------------------------------------- #
+#: The longest path-valued parameter ``article_of`` follows to a file. A design
+#: names its files by short project-relative paths (``build/part.stl``); a
+#: longer string is prose, never a path anyone typed. *Rejected:* every string
+#: (a statement-length value stat-ed on every read for nothing).
+_ARTICLE_PATH_MAX = 260
+
+
+def _article_params(projection: Mapping[str, Any]) -> list[tuple[tuple, Any]]:
+    """``[(path, value)]`` the design holds: every input as ``("config", name)``
+    and every derived value as ``(name,)`` — ``modelio.flat_params``' content,
+    named so an input reads ``config.thickness`` — a derived ``config`` that
+    only echoes the inputs left out (the reference model returns it)."""
+    config = dict(projection.get("config") or {}) if isinstance(projection, Mapping) else {}
+    derived = dict(projection.get("derived") or {}) if isinstance(projection, Mapping) else {}
+    rows: list[tuple[tuple, Any]] = [(("config", str(k)), v) for k, v in config.items()]
+    for key, value in derived.items():
+        if key == "config" and value == config:
+            continue
+        rows.append(((str(key),), value))
+    return rows
+
+
+def _named_files(root: str, values: Iterable[Any]) -> list[str]:
+    """The project files ``values`` name — a path-valued parameter, or a list of
+    them — as root-relative posix paths: regular files under ``root``, never
+    under ``.atompipe/`` (critique 1 of the P2.5a design: a mesh named by a
+    ``mesh_path`` parameter is part of what an article was built from, and a
+    re-export changes it while the path string does not)."""
+    base = os.path.abspath(root)
+    state = os.path.join(base, _STATE_DIR)
+    found: list[str] = []
+    stack = list(values)
+    while stack:
+        value = stack.pop()
+        if isinstance(value, (list, tuple)):
+            stack.extend(value)
+            continue
+        if not isinstance(value, str) or not value or len(value) > _ARTICLE_PATH_MAX \
+                or "\n" in value or "\x00" in value:
+            continue
+        full = os.path.normpath(value if os.path.isabs(value) else os.path.join(base, value))
+        if (full == base or not full.startswith(base + os.sep) or full == state
+                or full.startswith(state + os.sep) or not os.path.isfile(full)):
+            continue
+        found.append(os.path.relpath(full, base).replace(os.sep, "/"))
+    return sorted(set(found))
+
+
+def _read_files(root: str, resolution: Any, anchors: Anchors) -> list[str]:
+    """The project files the current verdicts' traced read sets name — a file a
+    gate read while it judged the design is part of the design (critique 1)."""
+    base = os.path.abspath(root)
+    state = os.path.join(base, _STATE_DIR)
+    places = _places_of(anchors)
+    found: list[str] = []
+    for row in (getattr(resolution, "rows", None) or {}).values():
+        entry = getattr(row, "entry", None)
+        for spelled in ((getattr(entry, "reads", None) or {}).get("files") or {}):
+            where = _locate(spelled, base, places)
+            if not where:
+                continue
+            full = os.path.normpath(where)
+            if (full.startswith(base + os.sep) and not full.startswith(state + os.sep)
+                    and os.path.isfile(full)):
+                found.append(os.path.relpath(full, base).replace(os.sep, "/"))
+    return sorted(set(found))
+
+
+def _model_code(model: Any, anchors: Anchors) -> dict[str, str] | None:
+    """The model's code closure as an article digests it: ``{portable path:
+    digest}`` — the canonical AST for Python (a comment or a docstring moves
+    nothing), the bytes for data a module read at import; ``None`` when the
+    model's code was not recorded (then no article can be named)."""
+    module = getattr(model, "module", model)
+    closure = modelio.code_closure(module) if module is not None else None
+    if closure is None:
+        return None
+    code: dict[str, str] = {}
+    for path, sha in closure.files:
+        digest = ""
+        if str(path).endswith(_SOURCE_SUFFIXES):
+            data = _file_bytes(path)
+            digest = canonical_ast_digest(data) if data is not None else ""
+        code[_clean(_spell_code(path, anchors))] = digest or sha or ""
+    for path, sha in closure.data:
+        code[_clean(_spell_code(path, anchors))] = sha or ""
+    if any(not digest for digest in code.values()):
+        return None
+    return dict(sorted(code.items()))
+
+
+def _built_from(root: str, projection: Any, model: Any, *, anchors: Anchors,
+                digests: FileDigests, files: Iterable[str]) -> dict | None:
+    """``built_from`` for the design ``projection`` and ``model`` hold, with the
+    bytes of ``files`` (root-relative) — or ``None`` when the model's code was
+    not recorded."""
+    if not isinstance(projection, Mapping):
+        return None
+    code = _model_code(model, anchors)
+    if code is None:
+        return None
+    params: list[list] = []
+    for path, value in _article_params(projection):
+        row: list = [list(path), digest_value(value, anchors)]
+        small, display = small_value(value, anchors)
+        if small:
+            row.append(display)
+        params.append(row)
+    base = os.path.abspath(root)
+    named = {rel: _path_digest(os.path.join(base, *rel.split("/")), digests) or ""
+             for rel in sorted(set(files))}
+    return {"params": params, "model": code, "files": named}
+
+
+def article_of(root: str, projection: Any, model: Any, *, anchors: Anchors | None = None,
+               digests: FileDigests | None = None, resolution: Any = None) -> dict:
+    """The article a physical result recorded NOW is bound to (P2.5a-D8): the
+    design as the model holds it — ``{"source": "design", "hash", "built_from",
+    "revision", "dirty"}`` — or ``{}`` when the model does not load.
+
+    ``built_from`` — ``params``: every input and derived value the projection
+    holds (``modelio.flat_params``' content, named ``config.<k>`` for an input),
+    each digested as a gate's read is (``digest_value``), a small value kept for
+    the stale line; ``model``: the model's code closure (canonical AST: a
+    comment moves nothing); ``files``: the bytes of every project file the
+    design names — a path-valued parameter (critique 1 of the P2.5a design: a
+    re-exported ``mesh_path`` moved nothing) — and every project file the
+    current verdicts read. ``hash`` — the seal of ``built_from``: "named by the
+    hash of what it was built from" (GLOSSARY *article*), printed as its first
+    12 hex. ``revision`` and ``dirty`` are provenance the prompt shows, never
+    in the hash (an unrelated commit would rename every article).
+
+    The article is the DESIGN at recording, not the object (R4 of the design):
+    a person who records a result on a part printed from an older revision
+    binds it to this one — the prompt shows the revision and any uncommitted
+    model edits for that reason, and P2.5b's ``export`` records build-time
+    articles in this same shape (``source: "export"``). And it is the whole
+    design: any value change moves every recorded article, so the rebuild
+    prediction never under-predicts and over-predicts freely (R3). *Rejected:*
+    the covering evaluators' read sets (C5 has none, and a print depends on
+    values no evaluator reads); a declared ``depends_on`` (under-recording: a
+    key left out keeps a moved article current — invariant 7's failure);
+    ``model_digest``'s file bytes (a docstring edit would demand a two-winter
+    re-test)."""
+    if projection is None or model is None:
+        return {}
+    anchors = anchors if anchors is not None else (
+        getattr(resolution, "anchors", None) or Anchors(root=os.path.abspath(root)))
+    digests = digests if digests is not None else FileDigests()
+    flat, _conflicts = modelio.flat_params(projection)
+    files = set(_named_files(root, flat.values()))
+    if resolution is not None:
+        files |= set(_read_files(root, resolution, anchors))
+    built = _built_from(root, projection, model, anchors=anchors, digests=digests,
+                        files=files)
+    if built is None:
+        return {}
+    module = getattr(model, "module", model)
+    closure = modelio.code_closure(module) if module is not None else None
+    model_files = [os.path.relpath(path, os.path.abspath(root)).replace(os.sep, "/")
+                   for path, _sha in (closure.files if closure is not None else ())
+                   if os.path.abspath(path).startswith(os.path.abspath(root) + os.sep)]
+    dirty = vcs.model_dirty(root, model_files) if model_files else None
+    return {"source": "design", "hash": seal(built), "built_from": built,
+            "revision": vcs.git_head(root) or "", "dirty": bool(dirty)}
+
+
+def _display_of(row: list) -> str | None:
+    if len(row) > 2:
+        return repr(row[2])
+    return None
+
+
+def _article_moves(article: Mapping[str, Any], here: "_Now") -> tuple[str, tuple]:
+    """``(state, what moved)`` for a recorded ``article`` against the design
+    NOW: ``current``; ``moved`` with the reasons, inputs first (a derived value
+    named only when no input moved — ``_reasons``' rule), then the model's
+    code, then the files; ``unjudged`` when the model does not load here; ``""``
+    with no article. Compared key by key with what was recorded — never the
+    entry with itself (V-7's planted judge) — and memoised per call only, never
+    on disk (a standing is judged on every read)."""
+    if not isinstance(article, Mapping) or not article.get("hash"):
+        return "", ()
+    built = article.get("built_from")
+    if not isinstance(built, Mapping):
+        return "unjudged", ()
+    key = str(article.get("hash"))
+    memo = here.__dict__.setdefault("_article_memo", {})
+    if key in memo:
+        return memo[key]
+    files = sorted((built.get("files") or {}))
+    now = None
+    if here.projection is not None and here.model is not None:
+        now = _built_from(here.root, here.projection, here.model, anchors=here.anchors,
+                          digests=here.digests, files=files)
+    if now is None:
+        memo[key] = ("unjudged", ())
+        return memo[key]
+    was = {tuple(row[0]): row for row in built.get("params") or () if row}
+    is_ = {tuple(row[0]): row for row in now["params"]}
+    inputs: list[str] = []
+    derived: list[str] = []
+    for path in list(was) + [p for p in is_ if p not in was]:
+        old, new = was.get(path), is_.get(path)
+        if old is not None and new is not None and old[1] == new[1]:
+            continue
+        before = "absent" if old is None else _display_of(old)
+        after = "absent" if new is None else _display_of(new)
+        text = (f"{_dotted(path)} {before} -> {after}" if before and after
+                else f"{_dotted(path)} changed")
+        (inputs if path[0] == "config" else derived).append(text)
+    reasons = inputs or derived
+    old_code, new_code = dict(built.get("model") or {}), now["model"]
+    if not reasons:
+        # The model's code is named only when no value moved — then `build()`
+        # itself changed and the code IS the news. An input's default lives in
+        # the model's source, so editing it moves the code too, and a reason
+        # line that said both would echo one edit twice (`_reasons`' rule).
+        for path in sorted(set(old_code) | set(new_code)):
+            if old_code.get(path) != new_code.get(path):
+                reasons.append(f"model code {path.rsplit('/', 1)[-1]} changed")
+    for rel, digest in sorted((built.get("files") or {}).items()):
+        here_digest = now["files"].get(rel)
+        if here_digest != digest:
+            reasons.append(f"{rel} {'removed' if not here_digest else 'changed'}")
+    memo[key] = ("moved", _capped(reasons)) if reasons else ("current", ())
+    return memo[key]
+
+
+# The judge's facts, one function each, so a test can stub out exactly one
+# (V-5's planted violators). Each returns why an entry does not count — an
+# identifier — or "" when the fact holds.
+def _fact_channel(entry: Any) -> str:
+    """Only a pass a person typed in their own shell counts (invariant 11)."""
+    channel = str(getattr(entry, "channel", "") or "")
+    if channel == "interactive":
+        return ""
+    if channel.startswith("agent-session"):
+        return "agent-session"
+    return "non-interactive" if channel else "legacy"
+
+
+def _fact_who(entry: Any) -> str:
+    """A pass recorded by no one counts for nothing (S-48)."""
+    return "" if str(getattr(entry, "who", "") or "").strip() else "who"
+
+
+def _fact_terminal(terminal: str) -> str:
+    """A pass settles a measurement or a judgment, nothing else (P2.5a-D10): on
+    an automated claim it sits beside the evaluator; an assumption takes none."""
+    if terminal in ("measurement", "human"):
+        return ""
+    return "none" if terminal == "none" else "beside"
+
+
+def _fact_authority(entry: Any, claim: Any, terminal: str) -> str:
+    """A judgment counts only as the claim's authority's own (critique 10 of the
+    P2.5a design: recorded for the authority the claim names now, by them)."""
+    if terminal != "human":
+        return ""
+    from . import claims as _claims                # a reader's module: never at import
+    authority = str(getattr(claim, "authority", "") or "")
+    if (authority and str(getattr(entry, "authority", "") or "") == authority
+            and _claims.identity_matches(getattr(entry, "who", ""), authority)):
+        return ""
+    return "authority"
+
+
+def _fact_measured(entry: Any, claim: Any) -> str:
+    """A pass at a value its claim's acceptance condition refutes never counts —
+    re-checked at read, so a recomputed seal over an inconsistent entry is
+    caught (D-13 *consistent*)."""
+    measured = getattr(entry, "measured", None)
+    acceptance = getattr(claim, "acceptance", None)
+    limit = getattr(acceptance, "limit", None)
+    if (isinstance(measured, (int, float)) and not isinstance(measured, bool)
+            and math.isfinite(float(measured)) and isinstance(limit, (int, float))
+            and not isinstance(limit, bool)):
+        try:
+            holds = acceptance.holds(float(measured))
+        except (TypeError, ValueError):
+            return "measured"
+        return "" if holds else "measured"
+    return ""
+
+
+def _fact_claim(entry: Any, digest_now: str) -> str:
+    """The claim as the person read it, still (P2.5a-D8's claim half)."""
+    return "" if str(getattr(entry, "claim_digest", "") or "") == digest_now \
+        else "claim-moved"
+
+
+def _fact_evidence(entry: Any, root: str, digests: FileDigests) -> str:
+    """Every evidence file's bytes as recorded (D-13 *evidenced*), and at least
+    one — re-hashed through the call's one ``FileDigests``."""
+    recorded = getattr(entry, "evidence_sha256", None) or {}
+    if not isinstance(recorded, Mapping) or not recorded:
+        listed = list(getattr(entry, "evidence", None) or ())
+        return f"evidence:{listed[0] if listed else 'none'}"
+    for rel, digest in sorted(recorded.items()):
+        full = os.path.join(root, *str(rel).split("/"))
+        if digests.digest(full) != digest:
+            return f"evidence:{rel}"
+    return ""
+
+
+#: An entry's ``why`` that a person's act could answer: the Stale reasons.
+_PERSON_WHYS = ("article-moved", "judgment-moved", "claim-moved", "article-unjudged")
+
+
+def _judge_entry(index: int, entry: Any, claim: Any, terminal: str, digest_now: str,
+                 here: "_Now") -> EntryStanding:
+    article = getattr(entry, "article", None) or {}
+    article_hash = str(article.get("hash") or "") if isinstance(article, Mapping) else ""
+    state, moved = _article_moves(article, here) if article_hash else ("", ())
+    if getattr(entry, "passed", None) is not True:
+        return EntryStanding(index, False, False, "", article_hash, state, moved)
+    # The terminal first: beside an automated evaluator a pass settles nothing
+    # whoever typed it, and that is the reason to give.
+    why = (_fact_terminal(terminal) or _fact_channel(entry) or _fact_who(entry)
+           or _fact_authority(entry, claim, terminal) or _fact_measured(entry, claim))
+    if not why:
+        # The article before the claim before the evidence (critique 7 of the
+        # P2.5a design): a moved article reads Stale and is named for rebuild
+        # whatever happened to the photo since.
+        if state == "moved":
+            why = "judgment-moved" if terminal == "human" else "article-moved"
+        elif state != "current":
+            why = "article-unjudged"
+        else:
+            why = _fact_claim(entry, digest_now)
+        if not why and _kind_of(claim) == "physical":
+            why = _fact_evidence(entry, here.root, here.digests)
+    return EntryStanding(index, True, not why, why, article_hash, state, moved)
+
+
+def _kind_of(claim: Any) -> str:
+    kind = getattr(claim, "kind", "")
+    return str(getattr(kind, "value", kind) or "measurable")
+
+
+def judge_results(ledger: Any, here: "_Now") -> dict[str, Standing]:
+    """``{claim id: Standing}`` for every claim with physical results — what each
+    stands for NOW (P2.5a-D11, D13; §4.5 of its design). Per entry
+    (``_judge_entry``): a pass counts when it was typed in a person's own shell
+    (``_fact_channel``), recorded by someone (``_fact_who``), on a terminal a
+    pass settles (``_fact_terminal``), for the claim's authority by them
+    (``_fact_authority``), at a value its acceptance admits
+    (``_fact_measured``), on the current article (``_article_moves``), for the
+    claim as it reads now (``_fact_claim``), with its evidence's bytes as
+    recorded (``_fact_evidence``, a physical claim's). The standing: the newest
+    counting pass (``current``); else the newest pass a person made whose
+    article, claim or model no longer holds (Stale's causes); else the newest
+    pass and why it never counted (``not-counted:<why>``); else ``""``. Fails
+    are judged only for their article (the rebuild prediction and the Failing
+    row): every fail counts (R-3).
+
+    In the spine, inside the one resolver, never cached: judged on every read,
+    nothing written. What slipped through before it (S-50): a pass survived any
+    change to the design it was tested on; and a pass typed by the agent read as
+    one a person made."""
+    from . import claims as _claims                # a reader's module: never at import
+    out: dict[str, Standing] = {}
+    for claim in getattr(ledger, "claims", None) or ():
+        results = tuple(getattr(claim, "results", ()) or ())
+        if not results:
+            continue
+        try:
+            terminal = _claims.terminal_of(claim)
+        except AtompipeError:
+            continue
+        digest_now = _claims.claim_digest(claim)
+        entries = tuple(_judge_entry(i, entry, claim, terminal, digest_now, here)
+                        for i, entry in enumerate(results))
+        counting = [e for e in entries if e.counts]
+        person = [e for e in entries if e.passed and e.why in _PERSON_WHYS]
+        passes = [e for e in entries if e.passed]
+        if counting:
+            chosen = counting[-1]
+            out[claim.id] = Standing("current", chosen.index, chosen.article, (), entries)
+        elif person:
+            chosen = person[-1]
+            out[claim.id] = Standing(chosen.why, chosen.index, chosen.article, chosen.moved,
+                                     entries)
+        elif passes:
+            chosen = passes[-1]
+            out[claim.id] = Standing(f"not-counted:{chosen.why}", chosen.index,
+                                     chosen.article, chosen.moved, entries)
+        else:
+            out[claim.id] = Standing("", None, "", (), entries)
+    return out
+
+
+class Contradiction(NamedTuple):
+    """One contradiction on an evaluator's track record (P2.5a-D14): ``gate``
+    at version ``code``, by a fail on ``claim`` (article ``article``) recorded
+    ``when`` by ``who`` through ``channel``; the evaluator gave ``value``
+    (``units``) where the fail measured ``measured``."""
+
+    gate: str
+    code: str
+    claim: str
+    article: str
+    when: str
+    who: str
+    channel: str
+    value: Any
+    measured: Any
+    units: str
+
+
+def track_record(ledger: Any) -> dict[str, tuple]:
+    """``{gate id: (Contradiction, ...)}`` from every fail's sealed
+    ``contradicts`` with ``inside: true`` — derived from ``results/`` on every
+    read, never a file of its own (``rm -rf .atompipe/verdicts`` must not erase
+    it). A pass outside its operating context (``inside: false``) is in no
+    count. It changes no status and no qualification (P2.5a-D14: one print
+    defect would otherwise Gap every claim the evaluator settles)."""
+    out: dict[str, list] = {}
+    for claim in getattr(ledger, "claims", None) or ():
+        for entry in getattr(claim, "results", ()) or ():
+            if getattr(entry, "passed", None) is True:
+                continue
+            article = getattr(entry, "article", None) or {}
+            for item in getattr(entry, "contradicts", None) or ():
+                if not isinstance(item, Mapping) or item.get("inside") is not True:
+                    continue
+                out.setdefault(str(item.get("gate") or ""), []).append(Contradiction(
+                    str(item.get("gate") or ""), str(item.get("code") or ""), claim.id,
+                    str(article.get("hash") or "") if isinstance(article, Mapping) else "",
+                    str(entry.when or ""), str(entry.who or ""),
+                    str(getattr(entry, "channel", "") or ""), item.get("value"),
+                    getattr(entry, "measured", None), str(item.get("units") or "")))
+    return {gate: tuple(found) for gate, found in sorted(out.items())}
+
+
+def view(ledger: Any, resolution: Resolution) -> Ledger:
+    """THE view builder (P2.5a-D13): ``ledger`` with the resolution's verdicts
+    and each claim's ``standing`` — what every reader composes. ``cli._resolved``,
+    ``site.state`` and ``write_last_check`` call it; a new
+    ``dataclasses.replace(..., verdicts=...)`` under ``src/atompipe`` is red in
+    ``test_physical.RenderersAgreeOnPhysicalClaims`` until it is named there
+    with its reason. What slipped through the design's first draft: three view
+    builders, each its own ``replace``; a standing added to one would have left
+    the other two reading every pass Pending build — the page saying one thing
+    and the report another."""
+    standings = getattr(resolution, "standings", None)
+    if not isinstance(standings, Mapping):
+        # A resolution that carries none (a test's stand-in, a caller's own):
+        # no claim is judged, so every pass reads Pending build (R-2).
+        standings = {}
+    return dataclasses.replace(
+        ledger, verdicts=list(resolution.verdicts),
+        claims=[dataclasses.replace(claim, standing=standings.get(claim.id))
+                for claim in ledger.claims])
+
+
+# --------------------------------------------------------------------------- #
 # the one resolver
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
@@ -7349,6 +7817,14 @@ class Resolution:
     notes: list = field(default_factory=list)
     read_sets: dict = field(default_factory=dict)
     anchors: Any = None
+    standings: dict = field(default_factory=dict)
+    """``{claim id: models.Standing}`` — what each claim's physical results
+    stand for now (``judge_results``, P2.5a-D13); it reaches ``compose`` only
+    through ``view``. Never cached."""
+    track: dict = field(default_factory=dict)
+    """``{gate id: (Contradiction, ...)}`` — each evaluator's track record
+    (``track_record``, P2.5a-D14), derived from the results files on every
+    read."""
 
 
 def _as_spec(verdict: Verdict, spec: Any) -> Verdict:
@@ -7804,11 +8280,16 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
             emit(legacy[gid], Row(gid, "legacy", stale_reason=_LEGACY))
 
     # 7. prerequisites, over the whole resolution, in plan order (P2.2-D8)
-    return apply_prerequisites(
+    resolution = apply_prerequisites(
         Resolution(verdicts=verdicts_out, stale_gates=frozenset(stale), rows=rows,
                    notes=list(dict.fromkeys(notes)), read_sets=last_read_sets(root_abs),
                    anchors=here.anchors),
         registry)
+    # 8. physical results (P2.5a-D13): what each stands for now, and the track
+    # record the fails carry — judged here, inside the one resolver, so every
+    # reader that renders this resolution renders the same standings.
+    return dataclasses.replace(resolution, standings=judge_results(ledger, here),
+                               track=track_record(ledger))
 
 
 def _under_rule(spec: Any, own: Verdict | None, unmet: Any) -> Verdict:
@@ -9872,7 +10353,7 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
     would stand for the whole project's.
 
     ``{"when", "spine", "fingerprint", "reads", "statuses", "errored", "counts",
-    "worst", "params", "influence"}``: the CLI's stamp; the spine digest; the
+    "worst", "params", "influence", "rebuild"}``: the CLI's stamp; the spine digest; the
     ``fingerprint`` of ``watched_paths``; per gate the reads of the entry the
     resolution used (``param:<json path>``, ``file:``, ``dir:``, ``ledger:``,
     ``model``, ``opaque:``) — what lets P3's hook say which checks a change
@@ -9885,7 +10366,8 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
     ``detail`` by outcome — an error's first line, a skip's reason, a fail's
     detail, never a crash's traceback (P2.0 F-1) — nulls when nothing blocks;
     ``params`` (the parameter view, from 1.3) and ``influence`` (P3), empty
-    until then. Untracked, and read by nothing in the sweep: ``check`` never
+    until then; ``rebuild`` (P2.5a-D16), the rebuild prediction as the check
+    run saw it. Untracked, and read by nothing in the sweep: ``check`` never
     trusts its own summary of a previous run.
     """
     if not result.record or _filtered(result.only):
@@ -9893,11 +10375,11 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
     from . import claims as _claims                # a reader's module: never at import (§3.1)
     root = os.path.abspath(root)
     base = result.ledger if result.ledger is not None else Ledger()
-    view = dataclasses.replace(base, verdicts=list(resolution.verdicts))
+    view_ = view(base, resolution)
     stale = resolution.stale_gates
-    composed = _claims.compositions(view, registry=result.registry, stale_gates=stale)
+    composed = _claims.compositions(view_, registry=result.registry, stale_gates=stale)
     worst: dict[str, Any] = {"claim": None, "gate": None, "detail": None, "cause": None}
-    blocking = (_claims.blocking(view, result.registry, stale_gates=stale)
+    blocking = (_claims.blocking(view_, result.registry, stale_gates=stale)
                 if result.registry is not None else [])
     if blocking:
         # The most urgent blocker by `claims.severity` — the order `check`
@@ -9906,7 +10388,7 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
         # `blocking[0]`, record order, so a claim Skipped by a missing tool
         # named before it hid a crash or a fail from the file P3's hook reads.
         claim, status = min(blocking, key=lambda pair: _claims.severity(composed[pair[0].id]))
-        why = _claims.explaining_verdict(claim, view.verdicts)
+        why = _claims.explaining_verdict(claim, view_.verdicts)
         worst = {"claim": claim.id, "gate": why.gate if why is not None else None,
                  "detail": _detail_by_outcome(why) if why is not None else str(status.value),
                  "cause": str(composed[claim.id].cause.value)}
@@ -9923,6 +10405,7 @@ def write_last_check(root: str, result: SweepResult, resolution: Resolution, *, 
         "worst": worst,
         "params": dict(params or {}),
         "influence": {},
+        "rebuild": [r.to_dict() for r in _claims.rebuild(view_)],
     }
     path = os.path.join(root, _STATE_DIR, _CACHE_DIR, _LAST_CHECK)
     # Fixed key order, as documented, rather than atomic_write_json's sorted one:

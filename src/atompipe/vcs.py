@@ -55,6 +55,8 @@ __all__ = [
     "git_head",
     "ls_files",
     "ident",
+    "show",
+    "model_dirty",
     "commit_times",
 ]
 
@@ -225,6 +227,39 @@ def ident(root: str | os.PathLike[str]) -> str | None:
     end = line.rfind(">")
     who = line[:end + 1].strip() if end >= 0 else ""
     return who if "<" in who else None
+
+
+def show(root: str | os.PathLike[str], relpath: str) -> bytes | None:
+    """The bytes the last commit holds at ``relpath`` (``git show HEAD:<path>``),
+    or ``None`` — outside a repository, before a first commit, or a path the
+    commit does not hold. Read-only.
+
+    For the strict results reader's refusal (P2.5a, critique 6 of its design):
+    "git checkout -- results/C1.json" discards whatever the commit does not
+    hold, and a fail recorded since is exactly that — so the refusal compares
+    the two and names each fail the restore would drop. A path with a ``:`` or
+    a leading ``-`` is refused as no answer rather than handed to git as syntax."""
+    rel = _normal(os.fspath(relpath))
+    if not rel or rel.startswith("-") or ":" in rel:
+        return None
+    return _git(root, ["show", f"HEAD:./{rel}"])
+
+
+def model_dirty(root: str | os.PathLike[str], relpaths: Iterable[str]) -> bool | None:
+    """Whether any of ``relpaths`` (the model's files) differs from the last
+    commit — staged, unstaged or untracked — or ``None`` outside a repository.
+    Read-only (``git status --porcelain``). For ``claim physical``'s prompt
+    (P2.5a, R4 of its design): the moment a person attests that the object in
+    hand was built from this design is the moment to see that the design moved
+    since the last commit."""
+    paths = _paths(relpaths)
+    if not paths:
+        return None if paths is None else False
+    out = _git(root, ["status", "--porcelain", "-z", "--untracked-files=all", "--", *paths],
+               literal_pathspecs=True)
+    if out is None:
+        return None
+    return bool(out.strip(b"\0"))
 
 
 def _iso(epoch: int) -> str:

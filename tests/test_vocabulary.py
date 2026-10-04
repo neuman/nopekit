@@ -43,6 +43,7 @@ Run:  PYTHONPATH=src python3 -m unittest discover -s tests -p test_vocabulary.py
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -64,7 +65,7 @@ from atompipe import cli as cli_mod
 from atompipe import models as models_mod
 from atompipe import report as report_mod
 from atompipe import site as site_mod
-from atompipe.models import ClaimStatus
+from atompipe.models import Claim, ClaimKind, ClaimStatus, Ledger
 
 GLOSSARY = os.path.join(_env.REPO, "docs", "GLOSSARY.md")
 
@@ -917,7 +918,22 @@ def _variant(name: str, *, drop: tuple = (), not_required: tuple = (),
         with open(path, "w", encoding="utf-8") as fh:
             json.dump(record, fh, indent=2)
     if physical_pass:
-        _env.atompipe(["claim", "physical", "C5", "--pass"], cwd=root)
+        # A pass from a pipe (P2.5a): recorded, and it counts for nothing. C5
+        # is given what a pass needs — a test written down and evidence — so
+        # the refusals of an incomplete pass are not what this world shows.
+        path = os.path.join(root, "claims", "C5.json")
+        with open(path, encoding="utf-8") as fh:
+            record = json.load(fh)
+        record["note"] = "outdoor rack, two winters, look for crazing at the root"
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
+        os.makedirs(os.path.join(root, "photos"), exist_ok=True)
+        with open(os.path.join(root, "photos", "c5.jpg"), "wb") as fh:
+            fh.write(b"a photo")
+        proc = _env.atompipe(["claim", "physical", "C5", "--pass", "--evidence",
+                              "photos/c5.jpg"], cwd=root, identity=True)
+        if proc.returncode != 0:
+            raise AssertionError(f"claim physical: {proc.stderr}")
     if edit_model:
         model = os.path.join(root, "model", "bracket.py")
         with open(model, encoding="utf-8") as fh:
@@ -1028,8 +1044,8 @@ class ReadyIsThePredicate(unittest.TestCase):
                     and "Pending build: 1 claim needs an article (C5)." not in sentence:
                 out.append(f"{name}: no hardware sentence")
             if any(kind == "physical" and result is True for _c, kind, _r, result in rows):
-                if "Pending build: 1 claim needs an article (C5); C5 has a pass recorded " \
-                        "that no article binds to the current inputs." not in sentence:
+                if "Pending build: 1 claim needs an article (C5); C5 has a pass that does " \
+                        "not count." not in sentence:
                     out.append(f"{name}: the hardware sentence does not name the typed pass")
                 if re.search(r"(?i)\bchecked on an article\b", sentence + check_line):
                     out.append(f"{name}: says the typed pass is checked")
@@ -1096,10 +1112,11 @@ class ReadyMeansEveryRequiredClaimChecked(unittest.TestCase):
         world = _variant("typed", drop=("C6", "C7"), physical_pass=True)
         self.assertEqual(ready_problems(world, ready=False), [])
         status = world.out["status"].stdout
-        self.assertIn("C5 has a pass recorded that no article binds to the current inputs",
-                      status)
+        self.assertIn("C5 has a pass that does not count", status)
         self.assertTrue(any(ln.startswith("[build] C5 ") and ln.endswith(
-            "a pass recorded, unattributed, not bound to an article")
+            "a pass recorded from a pipe or a script does not count — the person who tested "
+            "it records it in their own shell (recorded by atompipe tests "
+            "<tests@atompipe.invalid>)")
             for ln in status.splitlines()), status)
         self.assertRegex(status, r"(?m)^\d+ claims · \d+ checked · 1 pending build$")
         world = _variant("typed-edited", drop=("C6", "C7"), physical_pass=True,
@@ -1511,3 +1528,110 @@ class ContextAndComparisonWordsComeFromOneTable(unittest.TestCase):
                 self.assertNotIn(literal, text)
         self.assertIn("zzAn zzevaluator zzwas zzqualified zzon zza zzrange", text)
         self.assertIn("zzinside zzits zzoperating zzcontext", text)
+
+
+# --------------------------------------------------------------------------- #
+# V-15 (P2.5a): the physical path's words come from one table
+# --------------------------------------------------------------------------- #
+#: GLOSSARY's Never-says for what the physical path prints (§1 *physical result*,
+#: *recorded by*, *authority*, *article*; §2 *verified*; §3 *Checked*) — and the
+#: P2.5a design's own rejected words (*signed*, *unsigned*, *attested*).
+PHYSICAL_NEVER_SAY = ("signed", "unsigned", "signer", "verified", "unverified", "confirmed",
+                      "attested", "proven", "hardware", "real part", "approver", "real-world")
+
+#: A terminal's identifier on a human line (P2.5a-D1: the display words only).
+_RAW_TERMINAL = re.compile(r"\b(?:closed_form|solver|human)\b|\[none\]")
+
+
+def physical_word_problems(lines: dict[str, str], masks: tuple = ()) -> list[str]:
+    """Every Never-say and every raw terminal token on the physical path's
+    human lines, and a *contradict* anywhere but a contradiction's own line.
+    A line that is a record's own text (``masks``: a claim's statement,
+    rationale or note — the user's words, which no table owns) and the checked
+    section's heading (``SECTION_PROVEN``, allowlisted until A-11) are not
+    scanned."""
+    out: list[str] = []
+    record = " ".join(" ".join(str(m).split()) for m in masks)
+    for key, text in lines.items():
+        for line in text.splitlines():
+            low = line.lower()
+            if line.startswith(report_mod.SECTION_PROVEN) or (
+                    line.strip() and " ".join(line.split()) in record):
+                continue
+            for word in PHYSICAL_NEVER_SAY:
+                if re.search(rf"(?<![\w-]){re.escape(word)}(?![\w-])", low):
+                    out.append(f"{key}: says {word!r}: {line[:90]}")
+            if _RAW_TERMINAL.search(line) and not line.lstrip().startswith(("usage:", "-")):
+                out.append(f"{key}: a raw terminal token: {line[:90]}")
+            if "contradict" in low and not re.search(r"contradiction|contradicts", low):
+                out.append(f"{key}: 'contradict' off a contradiction line: {line[:90]}")
+    return out
+
+
+class PhysicalWordsComeFromOneTable(unittest.TestCase):
+    """(V-15; D-16, GLOSSARY §7) Every word `claim physical`, its prompt, its
+    refusals, `gate show`'s track record, `why`'s results and the report say
+    about a physical result, an owner or an authority is `report.HUMAN`'s, and
+    none is a Never-say."""
+
+    def test_no_line_says_a_never_say(self):
+        import _physical as P
+        from atompipe import store
+        found = P.transcript()
+        lines = P.human_lines(found)
+        self.assertGreaterEqual(len(lines), 15)
+        masks = tuple(text for claim in store.load(found["root"]).claims
+                      for text in (claim.statement, claim.rationale, claim.note) if text)
+        self.assertEqual(physical_word_problems(lines, masks), [])
+
+    def test_the_planted_lines_are_caught(self):
+        planted = {"recorded": "recorded C5 pass — confirmed in hardware",
+                   "claim.list": "[ok   ] C1     Tip sags  [measurable] tip deflection <= 0.5 mm",
+                   "page": "the resolver and the verdicts contradict each other",
+                   "terminal": "[gap  ] C8 Safe  [human] no acceptance condition"}
+        found = physical_word_problems(planted)
+        for key in ("recorded", "page", "terminal"):
+            with self.subTest(key):
+                self.assertTrue(any(p.startswith(f"{key}:") for p in found), found)
+
+    def test_the_page_owns_no_contradict(self):
+        path = os.path.join(_env.REPO, "src", "atompipe", "site_template", "lib", "panels.js")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertNotIn("contradict each other", text)
+        self.assertIn('phrase("disagree")', text)
+
+    def test_claim_list_prints_the_terminals_word(self):
+        import _physical as P
+        rows = [ln for ln in P.transcript()["claim.list"].stdout.splitlines()
+                if re.match(r"^\[.{5}\] C\d", ln)]
+        self.assertTrue(rows)
+        for row in rows:
+            with self.subTest(row=row[:20]):
+                self.assertRegex(row, r"  \[(automated|measurement|assumption|expert judgment: "
+                                      r".+)\] ")
+                self.assertNotRegex(row, r"\[(measurable|physical)\]")
+
+    def test_the_words_move_with_the_table(self):
+        """The physical sentences are the table's: a sentinel table reaches the
+        rendered reasons."""
+        from atompipe.models import EntryStanding, PhysicalResult, Standing
+        result = PhysicalResult(passed=True, who="Sam <s@x>", channel="agent-session s1",
+                                article={"hash": "a" * 64})
+        claim = Claim(id="C5", statement="s", kind=ClaimKind.PHYSICAL, physical_result=result,
+                      results=(result,),
+                      standing=Standing("not-counted:agent-session", 0, "a" * 64, (),
+                                        (EntryStanding(0, True, False, "agent-session",
+                                                       "a" * 64, "current"),)))
+        moved = dataclasses.replace(claim, standing=Standing(
+            "article-moved", 0, "a" * 64, ("config.t 7.0 -> 8.0",),
+            (EntryStanding(0, True, False, "article-moved", "a" * 64, "moved"),)))
+        human = report_mod.HUMAN
+        sentinel = MappingProxyType(dict(human, not_counted=_sentinel(human["not_counted"]),
+                                         physical=_sentinel(human["physical"])))
+        with mock.patch.object(report_mod, "HUMAN", sentinel):
+            said = report_mod.reason(claims_mod.compose(claim, []), Ledger(), claim)
+            said_moved = report_mod.reason(claims_mod.compose(moved, []), Ledger(), moved)
+        self.assertNotIn("a pass recorded from an agent session", said)
+        self.assertIn("zza zzpass zzrecorded zzfrom zzan zzagent zzsession", said)
+        self.assertIn("zza zznew zzarticle zzis zzneeded", said_moved)

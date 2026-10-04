@@ -306,6 +306,12 @@ def gate_show_problems(stdout: str) -> list[str]:
     else:
         got = repr(lines[at]) if at < len(lines) else "the end of the output"
         problems.append(f"gate show: expected `qualification:` at line {at + 1}, got {got}")
+    # P2.5a (R-6, an addition): the evaluator's track record, last, always.
+    if at < len(lines) and TRACK.fullmatch(lines[at]):
+        at += 1
+    else:
+        got = repr(lines[at]) if at < len(lines) else "the end of the output"
+        problems.append(f"gate show: expected `track record:` at line {at + 1}, got {got}")
     _trailing(lines, at, problems, "gate show")
     return problems
 
@@ -1217,6 +1223,8 @@ class GoalpostAndContextLinesShape(unittest.TestCase):
             "  qualification: known-good pass · known-bad fail · mutation 1/1 fail → qualified "
             "(control 0123456789ab)",
             "    limit moved  c1 limit -> 0.05: fail, 0.4395 mm",
+            # P2.5a (R-6, an addition): the track record row, last.
+            "  track record: 0 contradictions at this version, 0 at earlier versions",
         ]) + "\n"
         self.assertEqual(gate_show_problems(body), [])
         lines = body.splitlines()
@@ -1224,3 +1232,157 @@ class GoalpostAndContextLinesShape(unittest.TestCase):
         self.assertTrue(gate_show_problems(moved), "the context row after the control")
         worded = body.replace("a fail still does", "fails still count")
         self.assertTrue(gate_show_problems(worded), "the context row in other words")
+
+
+# --------------------------------------------------------------------------- #
+# V-16 (P2.5a): the physical path's lines, each pinned with its negative control
+# --------------------------------------------------------------------------- #
+#: `claim physical`'s prompt (stderr), in order: the claim, what it is and how it
+#: reads now, what is recorded, the article (or why there is none), the revision
+#: when there is one, any contradiction, who records it, the typed-id line.
+PROMPT = (
+    ("claim", re.compile(r"^C\d+ .+$"), 1, 1),
+    ("status", re.compile(r"^  (?:automated|measurement|assumption|expert judgment(?:: .+)?)"
+                          r" · (?:required|not required) · reads now: .+$"), 1, 1),
+    ("record", re.compile(r"^  you record: (?:pass|fail) — .+$"), 1, 1),
+    ("article", re.compile(r"^  on article [0-9a-f]{12}: the design as the model holds it "
+                           r"now \(.+\)$"), 1, 1),
+    ("revision", re.compile(r"^  revision [0-9a-f]{12}(?:, with uncommitted changes to "
+                            r"model/)?$"), 0, 1),
+    ("contradicts", re.compile(r"^  this contradicts \S+, which passed C\d+ at .+ \(version "
+                               r"[0-9a-f]{12}\)$"), 0, 9),
+    ("recorded by", re.compile(r"^  recorded by: .+ <.+>$"), 1, 1),
+    ("type", re.compile(r"^type C\d+ to record it \(anything else records nothing\): $"), 1, 1),
+)
+RECORDED = re.compile(r"^recorded C\d+ (?:pass|fail) in results/C\d+\.json \(entry \d+\)"
+                      r"(?: — from (?:an agent session|a pipe or a script): .+)?$")
+RECORDED_ASSUME = re.compile(r"^recorded C\d+'s (?:owner|authority) .+ in results/C\d+\.json "
+                             r"\(attribution \d+\)$")
+CLAIM_ROW = re.compile(r"^\[.{5}\] C\d+ .+ — .+$")
+CONTRADICTS = re.compile(r"^contradicts: \S+ \(version [0-9a-f]{12}\) — on its track record$")
+REFUSALS = {
+    "refuse.who": re.compile(r"^error: --who is not accepted: who recorded a result is read "
+                             r"from git's identity .+ Nothing was written\.$"),
+    "refuse.when": re.compile(r"^error: --when is not accepted: .+ --detail\. Nothing was "
+                              r"written\.$"),
+    "refuse.identity": re.compile(r"^error: no git identity here — .+ Nothing was written\.$"),
+    "refuse.typed": re.compile(r"^error: you typed 'C4', not C5 — nothing was recorded$"),
+    "refuse.assume": re.compile(r"^error: assume records a person accepting C6; .+ Ask .+ to "
+                                r"run: atompipe claim physical C6 assume$"),
+}
+REBUILD = re.compile(r"^rebuild: article [0-9a-f]{12} \(C\d+(?:, C\d+)*\) — .+ -> .+$")
+TRACK = re.compile(r"^  track record: \d+ contradictions? at this version, \d+ at earlier "
+                   r"versions(?: — C\d+ on article [0-9a-f]{12} \(.+\))?$")
+CLAIM_LIST = re.compile(r"^\[.{5}\] C\d+\s+.+  \[(?:automated|measurement|assumption|expert "
+                        r"judgment: .+)\] .+$")
+RESULTS_HEAD = re.compile(r"^PHYSICAL RESULTS \(\d+, oldest first\)$")
+RESULT_ROW = re.compile(r"^  (?:pass|fail)(?: on article [0-9a-f]{12})? \(recorded .+$")
+
+
+def prompt_problems(stderr: str) -> list[str]:
+    """The prompt's rows in order, once each, then the typed-id line last."""
+    lines = stderr.splitlines()
+    problems: list[str] = []
+    at = _grammar(lines, 0, PROMPT, problems, "prompt")
+    if at != len(lines):
+        problems.append(f"prompt: {len(lines) - at} line(s) after the typed-id line")
+    return problems
+
+
+def recorded_problems(stdout: str, *, assume: bool = False) -> list[str]:
+    """`claim physical`'s stdout: the recorded line, the composed row, and any
+    `contradicts:` lines — nothing else."""
+    lines = stdout.splitlines()
+    out: list[str] = []
+    if not lines or not (RECORDED_ASSUME if assume else RECORDED).match(lines[0]):
+        out.append(f"recorded: {lines[:1]}")
+    if len(lines) < 2 or not CLAIM_ROW.match(lines[1]):
+        out.append(f"row: {lines[1:2]}")
+    out += [f"extra: {ln}" for ln in lines[2:] if not CONTRADICTS.match(ln)]
+    return out
+
+
+def physical_shape_problems(found: dict) -> list[str]:
+    """Every physical-path line of a transcript (`_physical.transcript`) held to
+    its shape."""
+    out = [f"tty.pass {p}" for p in prompt_problems(found["tty.pass"].stderr)]
+    out += [f"contradiction {p}" for p in prompt_problems(found["contradiction"].stderr)]
+    for key in ("tty.pass", "agent.pass", "agent.fail", "contradiction"):
+        out += [f"{key} {p}" for p in recorded_problems(found[key].stdout)]
+    out += [f"assume {p}" for p in recorded_problems(found["assume"].stdout, assume=True)]
+    if not any(CONTRADICTS.match(ln) for ln in found["contradiction"].stdout.splitlines()):
+        out.append("contradiction: no contradicts: line")
+    for key, pattern in REFUSALS.items():
+        lines = found[key].stderr.splitlines()
+        # A refusal after the prompt follows the typed-id line on the same
+        # terminal line: the person's Enter is echoed by their terminal, not here.
+        last = re.sub(r"^type C\d+ to record it \(anything else records nothing\): ", "",
+                      lines[-1]) if lines else ""
+        if key != "refuse.typed" and len(lines) != 1:
+            out.append(f"{key}: {lines}")
+        elif not pattern.match(last):
+            out.append(f"{key}: {last}")
+    rebuild = [ln for ln in found["status"].stdout.splitlines() if ln.startswith("rebuild:")]
+    if len(rebuild) != 1 or not REBUILD.match(rebuild[0]):
+        out.append(f"status rebuild: {rebuild}")
+    check = [ln for ln in found["check"].stdout.splitlines() if ln.startswith("rebuild:")]
+    if check != rebuild:
+        out.append(f"check rebuild: {check} != {rebuild}")
+    track = [ln for ln in found["gate.show"].stdout.splitlines() if "track record" in ln]
+    if len(track) != 1 or not TRACK.match(track[0]):
+        out.append(f"gate show track: {track}")
+    rows = [ln for ln in found["claim.list"].stdout.splitlines() if ln.startswith("[")]
+    out += [f"claim list: {ln}" for ln in rows if not CLAIM_LIST.match(ln)]
+    lines = found["why.C1"].stdout.splitlines()
+    heads = [i for i, ln in enumerate(lines) if RESULTS_HEAD.match(ln)]
+    if len(heads) != 1 or not RESULT_ROW.match(lines[heads[0] + 1] if heads and
+                                               heads[0] + 1 < len(lines) else ""):
+        out.append(f"why results: {[lines[i] for i in heads]}")
+    return out
+
+
+class PhysicalLinesShape(unittest.TestCase):
+    """(V-16, R-11) `claim physical`'s prompt, its recorded lines, its
+    `contradicts:` line and refusals, the `rebuild:` line, `gate show`'s `track
+    record:` row, `why`'s `PHYSICAL RESULTS` block and `claim list`'s terminal
+    column — each matched, and each matcher run against a mutated transcript
+    that must fail."""
+
+    def setUp(self):
+        import _physical as P
+        self.found = P.transcript()
+
+    def test_the_real_transcript_matches(self):
+        self.assertEqual(physical_shape_problems(self.found), [])
+
+    def test_each_mutation_is_refused(self):
+        class _Out:
+            def __init__(self, stdout="", stderr=""):
+                self.stdout, self.stderr = stdout, stderr
+
+        f = self.found
+        mutations = {
+            "a prompt row added": ("tty.pass", _Out(f["tty.pass"].stdout,
+                                                    "  a friendly note\n" + f["tty.pass"].stderr)),
+            "the article id removed": ("tty.pass", _Out(f["tty.pass"].stdout, re.sub(
+                r"on article [0-9a-f]{12}", "on the article", f["tty.pass"].stderr))),
+            "a recorded line with a word added": ("agent.pass", _Out(
+                f["agent.pass"].stdout.replace("recorded C5", "signed C5", 1))),
+            "the contradicts line without its version": ("contradiction", _Out(re.sub(
+                r"\(version [0-9a-f]{12}\) ", "", f["contradiction"].stdout),
+                f["contradiction"].stderr)),
+            "a refusal without its way": ("refuse.who", _Out("", "error: --who is refused\n")),
+            "the rebuild line without its article": ("status", _Out(re.sub(
+                r"rebuild: article [0-9a-f]{12}", "rebuild: the part", f["status"].stdout))),
+            "the track record without its count": ("gate.show", _Out(f["gate.show"].stdout
+                                                                      .replace(" at earlier",
+                                                                               " earlier"))),
+            "claim list printing the kind": ("claim.list", _Out(f["claim.list"].stdout.replace(
+                "[measurement]", "[physical]"))),
+            "why without its results head": ("why.C1", _Out(f["why.C1"].stdout.replace(
+                "PHYSICAL RESULTS", "RESULTS"))),
+        }
+        for name, (key, mutated) in mutations.items():
+            with self.subTest(name):
+                self.assertNotEqual(physical_shape_problems(dict(f, **{key: mutated})), [],
+                                    f"{name} was not refused")

@@ -24,7 +24,7 @@ These need an article. No evaluator in any pack can settle them, and no number o
 - **C5** Survives two winters outdoors without UV embrittlement
   - **Test that would settle it:** **no test has been written down.** As stated, this claim cannot be settled by any observation — give it an acceptance or a procedure in its note, or it will stay on this list forever
   - **Why it matters:** no analysis settles polymer weathering; it needs a real part on a real wall for two years
-  - **Record the result:** `atompipe claim physical C5 --pass|--fail --detail "..." --when <ISO date>`
+  - **Record the result:** `atompipe claim physical C5 pass|fail --evidence <file> --detail "..."` — run by the person who tested it, in their own shell
 
 ## Gaps
 
@@ -38,7 +38,7 @@ A claim with no evaluator is a gap, not a defect. It is closed by installing or 
 
 An assumption reads Assumed only with a reason and an owner who recorded it; until then it is a gap.
 
-- **C6** The load is static and centred on the arm — no owner recorded — an assumption reads Assumed only once its owner records it; nothing can record one yet
+- **C6** The load is static and centred on the arm — no owner recorded — an assumption reads Assumed only once its owner records it: name the owner in claims/C6.json ("owner"), and they run atompipe claim physical C6 assume in their own shell
 
 ## Assumed
 

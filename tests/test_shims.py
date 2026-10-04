@@ -98,8 +98,14 @@ def _outside(paths: set[str], prefixes: tuple[str, ...]) -> set[str]:
     return {p for p in paths if not p.startswith(prefixes)}
 
 
-def _run(project: str, *argv: str):
-    return _env.atompipe(list(argv), cwd=project)
+def _write(path: str, text: str) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def _run(project: str, *argv: str, identity: bool = False):
+    return _env.atompipe(list(argv), cwd=project, identity=identity)
 
 
 def _json(proc) -> dict:
@@ -147,9 +153,9 @@ class ShimsWriteExactlyOneFile(_env.EnvCase):
         self.project = _migrated(os.path.join(self.tmp(), "bracket"))
         self.outside = os.path.join(self.tmp(), "downloads")
 
-    def _one_shim(self, *argv: str, want: set[str]):
+    def _one_shim(self, *argv: str, want: set[str], identity: bool = False):
         before = _snapshot(self.project)
-        proc = _run(self.project, *argv)
+        proc = _run(self.project, *argv, identity=identity)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         after = _snapshot(self.project)
         self.assertEqual(_changed(before, after) - {INDEX}, want,
@@ -218,18 +224,29 @@ class ShimsWriteExactlyOneFile(_env.EnvCase):
                          "adding an installed pack again wrote something")
 
     def test_claim_physical_appends_to_results(self):
-        self._one_shim("claim", "physical", "C5", "pass", "--who", "a tester",
-                       "--detail", "held 1.5 kg for 24 h", want={"results/C5.json"})
+        """P2.5a (R-6, a strengthening): no `--who` — who recorded it is the git
+        identity, never typed — and a pass on C5 needs its written test and its
+        evidence, which the project is given first, outside the shim's run."""
+        with open(os.path.join(self.project, "claims", "C5.json"), encoding="utf-8") as fh:
+            record = json.load(fh)
+        record["note"] = "hang 1.5 kg for 24 h; look for creep at the root"
+        _write(os.path.join(self.project, "claims", "C5.json"), json.dumps(record, indent=2))
+        _write(os.path.join(self.project, "photos", "c5.jpg"), "a photo")
+        self._one_shim("claim", "physical", "C5", "pass", "--evidence", "photos/c5.jpg",
+                       "--detail", "held 1.5 kg for 24 h", want={"results/C5.json"},
+                       identity=True)
         path = os.path.join(self.project, "results", "C5.json")
         with open(path, "rb") as fh:
             first = fh.read()
-        self._one_shim("claim", "physical", "C5", "--fail", "--who", "a tester",
+        self._one_shim("claim", "physical", "C5", "--fail",
                        "--detail", "cracked at the bolt after a week",
-                       want={"results/C5.json"})
+                       want={"results/C5.json"}, identity=True)
         results = store.read_record(path, "results")
         self.assertEqual([r.passed for r in results], [True, False],
                          "a result must be appended, never replace the one before")
         self.assertEqual(results[0].detail, "held 1.5 kg for 24 h")
+        who = f"{_env.IDENTITY['GIT_AUTHOR_NAME']} <{_env.IDENTITY['GIT_AUTHOR_EMAIL']}>"
+        self.assertEqual([r.who for r in results], [who, who])
         self.assertTrue(STAMP.fullmatch(results[1].when), results[1].when)
         with open(path, "rb") as fh:
             self.assertEqual(json.loads(first)["results"][0], json.loads(fh.read())["results"][0])
@@ -280,17 +297,32 @@ class ClaimPhysicalNamesTheFile(_env.EnvCase):
     """`claim edit` is gone, so the refusal that sent a user to it names the edit
     that replaces it."""
 
-    def test_claim_physical_refusal_names_the_file_edit(self):
+    def test_a_result_on_an_automated_claim_settles_nothing(self):
+        """P2.5a-D10 (R-6: reversed from `test_claim_physical_refusal_names_the_file_edit`,
+        and stronger): a physical result is recordable against a claim an
+        automated evaluator settles — E4 needs it (PLAN-v0.14 §1.2), F3 — and a
+        pass there settles nothing: C1 reads by its evaluator on every channel,
+        exactly as before. The property the refusal stood for is kept: a typed
+        pass never stands in for an evaluator."""
         project = _migrated(os.path.join(self.tmp(), "bracket"))
-        before = _snapshot(project)
-        proc = _run(project, "claim", "physical", "C1", "pass")
-        self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
-        self.assertIn('"kind": "physical"', proc.stderr)
-        self.assertIn("claims/C1.json", proc.stderr)
-        self.assertNotIn("claim edit", proc.stderr)
-        self.assertEqual(_changed(before, _snapshot(project)) - {INDEX}, set(),
-                         "a refused result was recorded")
-        self.assertFalse(os.path.exists(os.path.join(project, "results", "C1.json")))
+        before = {key: _json(_run(project, *argv)) for key, argv in (
+            ("status", ("status", "--json")), ("report", ("report", "--json")),
+            ("show", ("claim", "show", "C1", "--json")))}
+        proc = _run(project, "claim", "physical", "C1", "pass", "--detail", "looked fine",
+                    identity=True)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertIn("settles nothing", proc.stdout)
+        self.assertTrue(os.path.exists(os.path.join(project, "results", "C1.json")))
+        after = {key: _json(_run(project, *argv)) for key, argv in (
+            ("status", ("status", "--json")), ("report", ("report", "--json")),
+            ("show", ("claim", "show", "C1", "--json")))}
+        for key in ("status", "report"):
+            with self.subTest(key):
+                self.assertEqual(after[key]["claims"]["C1"], before[key]["claims"]["C1"])
+                self.assertEqual(after[key]["statuses"]["C1"]["cause"],
+                                 before[key]["statuses"]["C1"]["cause"])
+        self.assertEqual((after["show"]["status"], after["show"]["cause"]),
+                         (before["show"]["status"], before["show"]["cause"]))
 
 
 # --------------------------------------------------------------------------- #

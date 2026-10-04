@@ -13,8 +13,21 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine — and P2.3 is
-OVER it, said here rather than hidden. The review of P2.4 added what it cost and
+The budget is 90 s as ONE process on an otherwise idle machine. P2.5a paid back
+what P2.3 left over it, as its rule required: measured 2026-10-04, 83.7 s wall
+(59.9 s user, load average 0.9) for 698 tests, against 107.2 s wall (79.5 s
+user) for d23ff8e's 710 the same morning. What P2.5a added: its invariant
+classes' in-process rows (~1.5 s: the channel table, the sealed file's
+tamperings, the judge's facts, a fail across every edit, an authority's rows,
+the checked section, the article moved by a nudge, the AST scans) and one pty
+row (~0.9 s). What it moved out, each named in LEFT_FOR_THE_GATE or below with
+its reason (~30 s): invariant 2's planted project (test_louder.ErrorIsLouder's
+command rows) with test_json_keys, which reads the same project; S-05/S-07 and
+S-20/S-21/S-32 through the CLI; P2.1's owner projects; UnqualifiedBesideAPass's
+end-to-end project; StatusLinesSpeakTheTable's three projects — each the
+commands half of a rule an in-process row here still holds. The records sweeps
+and the bundled seal tests stay, as below. Before it, P2.3 was OVER the budget,
+said here rather than hidden. The review of P2.4 added what it cost and
 measured no move: two units scans in FAST (0.03 s), ten in-process tests in
 AGoalpostIsNeverAKey, which runs whole (~0.6 s), and goalpost runs at four
 scales where there were two — measured 2026-10-04 within the hour: 104.8 s wall
@@ -186,7 +199,16 @@ FAST: list[str] = [
     # V11 — an unqualified evaluator never wears an outcome tag, on every
     # channel of a project of its own (~2 s) — is left to the full suite: the
     # word routing it reads is held here by `QualificationWordsComeFromOneTable`.
-    "test_louder.ErrorIsLouder",
+    # P2.5a's pay-back: the planted project (every command once, ~6 s) is left to
+    # the gate, named below; its in-process half stays here.
+    "test_louder.ErrorIsLouder.test_a_fail_beside_an_error_reads_failing",
+    "test_louder.ErrorIsLouder.test_a_gates_line_that_folds_a_crash_into_the_skip_is_caught",
+    "test_louder.ErrorIsLouder.test_a_skipped_and_errored_verdict_is_a_crash_in_either_form",
+    "test_louder.ErrorIsLouder.test_render_junit_required_or_not",
+    "test_louder.ErrorIsLouder.test_render_markdown",
+    "test_louder.ErrorIsLouder.test_render_terminal",
+    "test_louder.ErrorIsLouder.test_every_command_is_rendered_or_says_why",
+    "test_louder.ErrorIsLouder.test_the_checkers_refuse_what_they_forbid",
     "test_louder.WorstIsTheMostUrgent",
     # Today's resolve_status table, the report's section order, and invariant 4
     # over a pass beside an evaluator that is not admitted — in process, and
@@ -198,7 +220,10 @@ FAST: list[str] = [
     "test_status_table.StatusesMoveOnlyTowardUnresolved",
     "test_status_table.BlockingMembers",
     "test_status_table.ReportSectionOrder",
-    "test_status_table.UnqualifiedBesideAPassIsNeverChecked",
+    # (P2.5a's pay-back: its end-to-end project and that project's checker, ~3 s,
+    # are left to the gate below.)
+    "test_status_table.UnqualifiedBesideAPassIsNeverChecked.test_a_pass_beside_an_unadmitted_evaluator_is_never_checked",
+    "test_status_table.UnqualifiedBesideAPassIsNeverChecked.test_a_resolver_that_lets_the_pass_win_is_caught",
     "test_status_table.UnqualifiedReadsGap.test_resolve_says_a_refusal_with_no_entry",
     "test_status_table.UnqualifiedReadsGap.test_the_refusal_checks_refuse_today",
     "test_status_table.UnqualifiedReadsGap.test_an_unqualified_claim_never_reads_errored",
@@ -211,16 +236,26 @@ FAST: list[str] = [
     # words, and an owner written by hand counting for nothing (planned 11).
     # V15 through the commands — seven bracket copies at 8 mm, ~25 s — is left
     # to the full suite (below): the predicate it reads is held here, in process.
+    # (P2.5a's pay-back: StatusLinesSpeakTheTable — three projects run through
+    # every command, ~5 s — is left to the full suite: no invariant reads it, and
+    # StatusWordsComeFromOneTable holds its routing here.)
     "test_vocabulary.StatusWordsAreTheGlossarys",
-    "test_vocabulary.StatusLinesSpeakTheTable",
     "test_vocabulary.StatusWordsComeFromOneTable",
     "test_vocabulary.ReadyIsThePredicate",
     # P2.3's words (V4): patching `HUMAN["qualification"]` moves every channel
     # that shows a qualification, and none says a §2 Never-say. One bracket copy,
     # every command twice, in process. ~3 s.
     "test_vocabulary.QualificationWordsComeFromOneTable",
-    "test_json_keys",
-    "test_owner",
+    # (P2.5a's pay-back: test_json_keys — the kept JSON keys, read through the
+    # louder project's commands, ~7 s — is left to the full suite: no invariant
+    # reads it; an iteration touching a JSON channel runs it whole.)
+    # P2.1's owner (planned 11 until P2.5a, now invariant 11 with test_signing and
+    # test_physical, above): its in-process rows. P2.5a's pay-back left its two
+    # planted projects — every command run once on each (~5 s) — to the gate.
+    "test_owner.AnOwnerWrittenByHandNeverCounts.test_an_owner_counts_only_as_recorded_and_only_as_it_still_reads",
+    "test_owner.AnOwnerWrittenByHandNeverCounts.test_a_compose_that_trusts_the_file_is_caught",
+    "test_owner.AnOwnerWrittenByHandNeverCounts.test_the_strict_reader_accepts_owner_and_names_a_misspelling",
+    "test_owner.ARecordedResultNeverOutranksTheEvaluators.test_a_status_built_from_the_result_alone_is_caught",
     # Invariant 15 (P2.3): the mutation harness — the plan rule, the seal, the
     # planted runners each caught by the rule it breaks, the tripwire's own
     # negative control, and inconclusive never a fail on any channel. ~3.5 s.
@@ -286,13 +321,8 @@ FAST: list[str] = [
     "test_admission.AdmissionIsDemonstrated.test_a_closure_move_with_equal_values_is_reverified_by_the_fixture_alone",
     "test_admission.AdmissionIsDemonstrated.test_a_control_value_change_reruns_the_control_and_writes_a_new_entry",
     "test_admission.AdmissionIsDemonstrated.test_a_model_edit_that_defuses_a_control_is_not_admitted",
-    # S-05 and S-07 through the commands a human types: `check`, `status` and
-    # the report are wired to admission (the hole was every piece existing in a
-    # library and the CLI never asking). The four cheapest; ~8 s.
-    "test_admission.AdmissionIsDemonstrated.test_cli_a_no_op_fixture_is_not_admitted_though_the_cache_would_hit",
-    "test_admission.AdmissionIsDemonstrated.test_cli_an_always_true_gate_is_never_pass",
-    "test_admission.AdmissionIsDemonstrated.test_cli_a_logger_with_no_honest_past_is_refused_by_check",
-    "test_admission.AdmissionIsDemonstrated.test_cli_identity_fixtures_for_deflection_are_not_admitted",
+    # (S-05 and S-07 through the commands a human types — the four cheapest
+    # CLI rows, ~8 s — were left to the gate by P2.5a's pay-back, named below.)
     # A missing tool reads skipped, never "not admitted"; availability comes
     # before admission. 0.4 s.
     "test_admission.SweepOrder",
@@ -377,11 +407,9 @@ FAST: list[str] = [
     "test_staleness.StaleIsNotCurrent.test_a_control_crash_on_a_path_this_check_does_not_run_is_its_answer",
     "test_staleness.StaleIsNotCurrent.test_a_helper_module_edit",
     "test_staleness.StaleIsNotCurrent.test_s26_a_same_second_gate_edit",
-    # The three defects first read through the CLI: a filtered first check
-    # (S-20), a model that does not load (S-21), a dry check (S-32). ~7 s.
-    "test_staleness.StaleIsNotCurrent.test_s20_cli_a_filtered_first_check_then_an_input_change",
-    "test_staleness.StaleIsNotCurrent.test_s21_cli_a_model_that_does_not_load_proves_nothing",
-    "test_staleness.StaleIsNotCurrent.test_s32_cli_a_dry_check_leaves_a_moved_gate_stale",
+    # (The three defects first read through the CLI — S-20, S-21, S-32, ~7.5 s —
+    # were left to the gate by P2.5a's pay-back, named below; their in-process
+    # twins stay above.)
     # (S-25's bulk readers, fourteen gates qualified on one sweep — 2.2 s since
     # P2.3 walks each — are left to the gate, below.)
 
@@ -496,12 +524,144 @@ FAST: list[str] = [
     # The whole walk and its planted violators. Note: it reads the working
     # tree, untracked files included, here as in the full suite. 0.1 s.
     "test_packs.NoLeakedProvenance",
+    # -- invariant 11 (P2.5a): the channel, the sealed results file, an owner
+    # and an authority only as recorded, what a physical result can do — and 4,
+    # 7 and planned 12 over a physical claim. Their in-process rows (~1.5 s): the
+    # channel's table and its planted channels, the parser that has no channel
+    # flag, the refused `--who` with its planted parser, the seal and the chain
+    # over every tampering with their planted readers, the strict reader's
+    # closed keys, `append_signed`, `save`'s refusal, the AST scans for an
+    # `owners=` caller and a view builder that skips the judge, the judge's one
+    # row per fact with its stubbed check, a fail across every channel and
+    # edit, an authority's rows, the checked section's rows, the article moved
+    # by a nudge; and one `run_tty` row from V-1 (a mistyped id or no answer
+    # writes nothing, ~2 s). The rest — every channel end to end, Fig. 4 — are
+    # left to the gate, below, each named.
+    "test_signing.HumanChannelOnly.test_the_channel_table",
+    "test_signing.HumanChannelOnly.test_planted_channels_are_caught",
+    "test_signing.HumanChannelOnly.test_no_flag_sets_the_channel",
+    "test_signing.HumanChannelOnly.test_a_mistyped_id_or_no_answer_writes_nothing",
+    "test_signing.WhoAndWhenAreNeverTyped.test_a_parser_that_accepts_who_is_caught",
+    "test_signing.WhoAndWhenAreNeverTyped.test_help_lists_neither_and_one_list_names_both",
+    "test_signing.TheResultsFileIsSealedAndChained.test_a_hand_written_attribution_is_refused",
+    "test_signing.TheResultsFileIsSealedAndChained.test_a_legacy_prefix_and_a_sealed_chain_read",
+    "test_signing.TheResultsFileIsSealedAndChained.test_an_entry_copied_to_another_claim_does_not_verify",
+    "test_signing.TheResultsFileIsSealedAndChained.test_append_keeps_every_earlier_entry_and_refuses_a_broken_file",
+    "test_signing.TheResultsFileIsSealedAndChained.test_every_tampering_is_refused",
+    "test_signing.TheResultsFileIsSealedAndChained.test_planted_readers_are_caught",
+    "test_signing.TheResultsFileIsSealedAndChained.test_save_never_appends_an_unsealed_entry_after_a_sealed_one",
+    "test_signing.TheResultsFileIsSealedAndChained.test_the_strict_reader_closes_every_key",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_no_spine_module_passes_owners",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_planted_owner_paths_are_caught",
+    "test_physical.SignedMeansSomething.test_a_every_fact_holds",
+    "test_physical.SignedMeansSomething.test_b_c_d_the_channel",
+    "test_physical.SignedMeansSomething.test_e_evidence_changed_then_restored",
+    "test_physical.SignedMeansSomething.test_f_no_one_recorded_it",
+    "test_physical.SignedMeansSomething.test_g_a_raw_ledger_never_judges",
+    "test_physical.SignedMeansSomething.test_i_the_claim_half_moved",
+    "test_physical.SignedMeansSomething.test_j_a_measured_value_its_acceptance_refutes",
+    "test_physical.APhysicalFailNeverLosesItsPowerToFail.test_in_process_every_fail_counts",
+    "test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord.test_in_process_only_a_counted_current_pass_is_contradicted",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_in_process_the_rows",
+    "test_physical.TheCheckedSectionHoldsOnlyBoundResults.test_in_process_rows",
+    "test_physical.AMovedArticleReadsStale.test_in_process_a_nudge_moves_the_article",
+    "test_physical.RenderersAgreeOnPhysicalClaims.test_no_view_builder_skips_the_judge",
+    "test_physical.RenderersAgreeOnPhysicalClaims.test_a_planted_view_builder_is_caught",
 ]
+
 
 # Tests of an INVARIANT class that this tier does not run, each group with why
 # leaving it to the full suite is safe. FastTierHoldsEveryInvariant reads this
 # list: a test of an invariant class must be named in FAST or here.
 LEFT_FOR_THE_GATE: list[str] = [
+    # P2.5a's pay-back (~27 s, measured 2026-10-04 with --durations): the CLI
+    # rows whose rule an in-process row above already holds. Invariant 2's
+    # planted project — every command run once over an errored evaluator (~6 s);
+    # its in-process renderers stay in FAST. S-05/S-07 (invariant 9) and
+    # S-20/S-21/S-32 (invariant 7) through the commands (~15.5 s); admission's
+    # and staleness's in-process rows stay. P2.1's owner on its two planted
+    # projects (~5 s; not every row an invariant class's). An iteration that
+    # touches a renderer runs test_louder whole; one that touches `check`'s or
+    # `status`'s wiring to the resolver or to admission runs test_admission and
+    # test_staleness whole (the rule above, for what a gate's read set records).
+    "test_louder.ErrorIsLouder.test_check_json",
+    "test_louder.ErrorIsLouder.test_check_junit",
+    "test_louder.ErrorIsLouder.test_check_output",
+    "test_louder.ErrorIsLouder.test_claim_list",
+    "test_louder.ErrorIsLouder.test_claim_physical",
+    "test_louder.ErrorIsLouder.test_counts_say_skipped_with_errored_apart",
+    "test_louder.ErrorIsLouder.test_doctor",
+    "test_louder.ErrorIsLouder.test_gate_show",
+    "test_louder.ErrorIsLouder.test_reason_leads_with_errored",
+    "test_louder.ErrorIsLouder.test_report",
+    "test_louder.ErrorIsLouder.test_site_state",
+    "test_louder.ErrorIsLouder.test_status",
+    "test_louder.ErrorIsLouder.test_the_fixture_is_what_it_says",
+    "test_louder.ErrorIsLouder.test_why_and_claim_show",
+    "test_admission.AdmissionIsDemonstrated.test_cli_a_no_op_fixture_is_not_admitted_though_the_cache_would_hit",
+    "test_admission.AdmissionIsDemonstrated.test_cli_an_always_true_gate_is_never_pass",
+    "test_admission.AdmissionIsDemonstrated.test_cli_a_logger_with_no_honest_past_is_refused_by_check",
+    "test_admission.AdmissionIsDemonstrated.test_cli_identity_fixtures_for_deflection_are_not_admitted",
+    "test_staleness.StaleIsNotCurrent.test_s20_cli_a_filtered_first_check_then_an_input_change",
+    "test_staleness.StaleIsNotCurrent.test_s21_cli_a_model_that_does_not_load_proves_nothing",
+    "test_staleness.StaleIsNotCurrent.test_s32_cli_a_dry_check_leaves_a_moved_gate_stale",
+    "test_owner.AnOwnerWrittenByHandNeverCounts.test_every_channel_reads_gap_with_the_unattributed_reason",
+    "test_owner.AnOwnerWrittenByHandNeverCounts.test_no_command_writes_the_owner",
+    "test_owner.AnOwnerWrittenByHandNeverCounts.test_the_channel_checks_refuse_what_they_forbid",
+    "test_status_table.UnqualifiedBesideAPassIsNeverChecked.test_a_refused_evaluator_beside_a_pass_end_to_end",
+    "test_status_table.UnqualifiedBesideAPassIsNeverChecked.test_the_end_to_end_checks_refuse_what_they_forbid",
+    # Invariant 11's end-to-end rows (P2.5a): each runs the bracket through the
+    # commands — a pass typed in a pty and read on every channel (`channels`:
+    # check, JUnit, status, report, claim show and list, the site), an owner
+    # recorded then edited, every channel and every edit over a fail (4 x 7
+    # copies), the contradiction recorded and shown, an authority's judgment,
+    # the seal's refusal through `status` and `doctor` and in git — 3-30 s each.
+    # The rule each holds is held in process above; an iteration touching
+    # `cli.cmd_claim_physical`, `store`'s results reader or writer,
+    # `verdicts.judge_results`/`article_of`, `claims.compose`'s P2.5a rows or a
+    # renderer's physical words runs test_signing, test_physical and test_fig4
+    # whole.
+    "test_signing.HumanChannelOnly.test_a_pass_typed_in_a_persons_shell_counts",
+    "test_signing.HumanChannelOnly.test_an_agents_pass_is_recorded_and_settles_nothing",
+    "test_signing.HumanChannelOnly.test_assume_off_the_terminal_is_refused",
+    "test_signing.WhoAndWhenAreNeverTyped.test_every_value_is_refused_before_the_project_is_read",
+    "test_signing.WhoAndWhenAreNeverTyped.test_no_identity_records_nothing",
+    "test_signing.WhoAndWhenAreNeverTyped.test_who_is_the_git_identity",
+    "test_signing.TheResultsFileIsSealedAndChained.test_a_fix_that_would_discard_an_uncommitted_fail_names_it",
+    "test_signing.TheResultsFileIsSealedAndChained.test_doctor_names_a_refused_file_and_answers",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_a_fallback_owner_reads_assumed_outside_the_context",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_every_edit_after_unattributes_it",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_someone_else_cannot_record_the_owner",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_the_owner_records_it_and_every_channel_reads_assumed",
+    "test_physical.SignedMeansSomething.test_end_to_end_a_typed_pass_reads_checked_everywhere",
+    "test_physical.SignedMeansSomething.test_h_a_covering_fail_outranks_a_counting_pass",
+    "test_physical.APhysicalFailNeverLosesItsPowerToFail.test_a_nudge_and_a_pass_on_the_new_article_leave_it_failing",
+    "test_physical.APhysicalFailNeverLosesItsPowerToFail.test_every_channel_and_every_edit",
+    "test_physical.APhysicalFailNeverLosesItsPowerToFail.test_planted_laundering_is_caught",
+    "test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord.test_a_contradiction_is_recorded_and_shown",
+    "test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord.test_an_agents_fail_is_a_contradiction_shown_with_its_channel",
+    "test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord.test_controls_record_no_contradiction",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_a_physical_judgment_needs_its_evidence",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_an_agents_judgment_does_not_count_and_a_fail_does",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_only_the_authority_settles_it",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_planted_compositions_are_caught",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_the_rows",
+    "test_physical.TheCheckedSectionHoldsOnlyBoundResults.test_a_section_that_lists_every_pass_is_caught",
+    "test_physical.TheCheckedSectionHoldsOnlyBoundResults.test_checked_rows_and_exactly_one_section",
+    "test_physical.AMovedArticleReadsStale.test_a_derived_value_moved_by_the_model_reads_stale",
+    "test_physical.AMovedArticleReadsStale.test_a_file_the_design_names_is_part_of_the_article",
+    "test_physical.AMovedArticleReadsStale.test_a_nudge_reads_stale_and_names_the_article",
+    "test_physical.AMovedArticleReadsStale.test_moved_evidence_never_hides_a_moved_article",
+    "test_physical.AMovedArticleReadsStale.test_planted_judges_are_caught",
+    "test_physical.AMovedArticleReadsStale.test_the_all_stale_override_stales_a_counted_pass",
+    "test_physical.AMovedArticleReadsStale.test_the_article_leads_an_invalidated_evaluator",
+    "test_physical.AMovedArticleReadsStale.test_the_claim_moved_and_the_model_not_loading",
+    "test_physical.AMovedArticleReadsStale.test_what_the_article_was_not_built_from_moves_nothing",
+    # Planned 12 (P2.5a): one copy holding every standing, read on every channel
+    # (~25 s to build); its AST scans run above.
+    "test_physical.RenderersAgreeOnPhysicalClaims.test_every_channel_reads_the_composition",
+    "test_physical.RenderersAgreeOnPhysicalClaims.test_the_page_paints_only_a_counted_pass_ok",
+    "test_physical.RenderersAgreeOnPhysicalClaims.test_a_verified_claim_its_standing_does_not_back_is_loud",
     # Invariant 15 on the real walk (P2.3): `gates.mutation_walk` judged by the
     # harness over the bracket's six gates and beam-analytic's eight, the
     # tripwire's scan (it judges every subject on those gates too), the hiding

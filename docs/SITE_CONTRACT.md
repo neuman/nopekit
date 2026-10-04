@@ -248,7 +248,13 @@ was the one a reader of the contract would never look for.
                   "gates": ["bracket.deflection"], "grounded_by": ["sk"],
                   "verdicts": [ … ], "evidence": [ … ],
                   "unproven": [ { "gate": …, "why": "fail: 0.700 mm …" } ],
-                  "compared": ["bracket.deflection"], "not_compared": [ ], … } ],
+                  "compared": ["bracket.deflection"], "not_compared": [ ],
+                  "terminal": "", "terminal_word": "automated", "authority": "",
+                  "article": "", "standing": "", "contradicts": [ ],          // P2.5a
+                  "physical_result": { "passed": true, …, "counts": false,
+                                       "why": "a pass recorded from an agent session does not count",
+                                       "recorded": "recorded by Sam, from an agent session" },
+                  … } ],
   "verdicts": [ { "gate": …, "passed": …, "ok": false, "status": "fail", "detail": …,
                   "measured": …, "limit": …, "comparator": "<=", "settles": "tip deflection",
                   "margin": -0.3994, "margin_why": "", "locators": [ … ], "views": [ … ],
@@ -271,6 +277,8 @@ was the one a reader of the contract would never look for.
                   "extracted": true, … } ],
   "gaps":     [ … ],
   "decisions":[ … ],
+  "rebuild":  [ { "article": "<64 hex>", "claims": ["C5"],
+                  "moved": ["config.thickness 7.0 -> 7.5"] } ],             // P2.5a
   "words":    { "pass": { "key": "checked", "word": "checked", "term": "Checked",
                           "plural": "checked", "hint": "every evaluator passed on the current
                           inputs — checked does not mean true" }, …,
@@ -278,6 +286,8 @@ was the one a reader of the contract would never look for.
   "outcome_words": { "pass": "pass", "fail": "fail", "skipped": "skipped",
                      "errored": "errored" },
   "phrases":  { "invalidated": "invalidated",
+                "disagree": "the resolver and the verdicts disagree — a defect to report",
+                "result_recorded": …, "result_counts": …, "result_not_counted": …,
                 "need": { "open": "identified", "proposed": "proposed", … },
                 "outcome_hint": { "pass": "the evaluator ran and passed", … } }
 }
@@ -309,6 +319,19 @@ an agent can read the site's state without a browser.
   Skipped · Gap · Open · Stale · Pending build · Assumed · Checked; ties critical
   first, then record order), and the page keeps it: what slipped through (P2.0 F-5),
   record order put a skip above the crash it should sit under.
+- **The physical path (P2.5a).** A claim row is `report.claim_json`: beside its
+  record fields, `terminal` (as declared), `terminal_word` (`automated`,
+  `measurement`, `assumption`, `expert judgment: <authority>`), `authority`, `article`
+  and `standing` (the judge's: `current`, `article-moved`, `not-counted:<why>` …) and
+  `contradicts` (the evaluators a Failing contradiction names). `physical_result`
+  carries `counts` — the judge counted it (a pass on its current article, or any
+  fail) — `why` in words when it does not, and `recorded` (who, and from where): the
+  page paints a result's ok tone ONLY on `counts` and a pass, never on `passed` (what
+  slipped through, critique 3 of the P2.5a design: an agent's pass on a Pending build
+  claim read green on the page alone). `rebuild` is the rebuild prediction
+  (`claims.rebuild`). `phrases.disagree` is the title of a claim whose status its
+  evidence does not back — the page's own "contradict" was a second sense for the
+  ledger's *contradiction*.
 - **No `partial` (P2.1).** Under GLOSSARY §3's composition a Checked claim has no
   covering evaluator that did not pass, so PARTIAL went. `unproven` names each
   covering gate that produced no pass that counts, its reason led by the fact

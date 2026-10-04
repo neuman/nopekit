@@ -323,6 +323,71 @@ refuters, applied test first where it was a laundering path.
 | R10 | *goalpost* leaves every human channel for *acceptance condition* or *limit*, and joins the acceptance condition row's Never-say (`TheAcceptanceConditionHasOneName`); the shape keys get words of their own (`acceptance_ledger`) that keep the calibrated limit | the raw keys; "hand its known-good design the same claims" (D2's coupling, taken literally) |
 | R11 | the outside-context paragraph and the checked table's P2.4 clause in `HUMAN` (`context.gaps_intro`, `acceptance.closing_counts`); GLOSSARY §3's chain reads Assumed for an owned fallback before Checked | literals beside the table |
 
+#### P2.5a's decision rows (`P2.5a-Dn`)
+
+Checkpoint 2.5's first half — terminal, authority and the physical path — as it landed
+(PLAN-v0.14 §1.4 rows ASSERTED, VERIFIED, REFUTED; §1.5 rows *Assumed needs an owner*,
+*Rebuild prediction*, *Physical evidence is article-bound*, *Track record*; §2 W8,
+W12; §1.6 C7; GLOSSARY §1, §3, §6). Where it disagrees with checkpoint 2.5's text
+below, these rows win: no supersession of a fail yet (D12, P2.5b's), the channel value
+is `interactive` (D4), and `GateSpec.refuser`/`terminal-unmet` wait for P2.5b (D1).
+Rows the design's critique moved say so (its numbers in parentheses, as the build
+received them).
+
+| Id | Decision | Rejected |
+|---|---|---|
+| D1 | `Claim.terminal` (after `fallback`): a `models.Terminal` value, `""` = by kind (physical → measurement, assumption → none, measurable → automated); allowed by kind `TERMINALS_BY_KIND`; the strict reader refuses a value outside the set (a display word typed as a value is named: `"simulation"` → `solver`) and a pair outside the table, only when the field is present (R-10). Human channels print `report.HUMAN["terminal"]`'s word: *measurement*, *expert judgment: <authority>*, *assumption* (for `none`, now a GLOSSARY display word — **moved by the critique (14)**), and *automated* for every measurable claim, declared or not | deriving closed_form vs solver now (S-62); printing a declared word over evidence nobody judged (P2.5b's `terminal-unmet`); replacing `ClaimKind` (the rename pass) |
+| D2 | `Claim.authority`: the person or institution an expert-judgment claim stays with, a nominee like `owner`; refused on a non-human terminal, and `owner` refused on a human one (one name per role) | the authority as `owner`; refusing human-without-authority (a status says it: Gap `no-authority`) |
+| D3 | one channel, three acts: `claim physical <id> pass\|fail\|assume`; `assume` records an owner (an assumption's or a fallback's — P2.4-D18's hand-off) or an expert-judgment claim's authority | `claim assume` (D-12: one channel; a rename-pass alias on the check-in batch) |
+| D4 | the channel is derived (`cli._channel`): `interactive` (a TTY, no agent marker, the claim's id typed), `agent-session <id>` (a marker: `CLAUDECODE`, `AI_AGENT`, any `CLAUDE_CODE_*`), `non-interactive` (a pipe); only `interactive` lets a pass count or an attribution exist | the value `terminal` (GLOSSARY: one word for two fields); a flag or variable; the TTY alone; the markers alone; a y/n confirmation; the whole `CLAUDE` prefix |
+| D5 | `who` = `vcs.ident`, `when` = the clock; `--who`/`--when` parsed only to be refused, before the project is read (`cli.REFUSED_FLAGS`, hidden from `--help`); no identity → nothing recorded | removing the flags now (A-14 stays open); accepting and ignoring |
+| D6 | `results/<id>.json` = `{"results", "attributions"}`, each list sealed (claim id and list inside the seal) and chained, a legacy prefix chained whole by virtual digests; `store.append_signed` the one writer, never re-encoding an earlier entry | one list with a discriminator; a file of their own; an HMAC; chaining from the last legacy entry only |
+| D7 | a broken seal or chain refuses the file on every command, naming file, list, entry and fix; **moved by the critique (6):** the fix compares the file with what git holds (`vcs.show`) and names every fail a `git checkout` would discard, with the command that records it again | degrading a broken entry to "does not count" (two laundering paths); "git checkout" alone (it discarded an uncommitted fail silently) |
+| D8 | the article (in P2.5a) is the design at recording: every input and derived value (`config.<k>`, `<k>`), the model's code closure (canonical AST), and — **moved by the critique (1)** — the bytes of every project file a path-valued parameter names and every project file a current verdict read; hashed; `revision`/`dirty` shown, never hashed. The claim half (`claims.claim_digest`): statement, kind, terminal, acceptance, note, authority | build-time articles now (no command could record one before P2.5b); the covering evaluators' read sets; a declared `depends_on`; file bytes of the model (a docstring would demand a re-test); the path string alone (a re-exported mesh left a pass Checked) |
+| D9 | what a record requires, in order, nothing written otherwise: a refused flag; the claim; an identity; the act fitting the claim; for any pass on a physical claim a written test and evidence (**moved by the critique (5):** whatever its terminal — a hand-written `terminal: human` no longer drops either), and a model that loads; `--measured` consistent; the typed id. `assume`: off `interactive` refused; the owner — and, **moved by the critiques (4, 10)**, the authority too — must be the git identity's name part or whole identity, exactly; an expert-judgment pass the same | matching an authority by the typed `--authority` alone (whoever typed the name settled a judgment the claim named someone else for — W8's "only the named authority settles it" did not hold); evidence optional; recording a pass that can never count |
+| D10 | a result on any claim (E4, F3): a fail fails it; a pass settles a measurement or a judgment; beside an automated evaluator a pass settles nothing (`why` says so — **moved by the critique (15):** not called *agreement*, which paired with the defect's *disagree*); on terminal `none` a pass is refused | refusing a measurable claim (E4 needs it) |
+| D11 | a pass counts (VERIFIED: `on-article`, `judged`) at rung 8 only, every covering automated evaluator composing first; the judge (`verdicts.judge_results`) checks the terminal, channel, who, authority, measured value, then — **moved by the critique (7)** — the article before the claim before the evidence, so a moved article reads Stale and is named whatever happened to the photo | the evidence first (a moved article read non-blocking Pending build once its photo changed) |
+| D12 | R-3 at its strictest: every fail counts, any channel, legacy or sealed, across every edit; no supersession in P2.5a; a moved fail's row says `(invalidated: article …'s design moved: … — a new article is needed)` and joins the rebuild prediction | supersession on a recording-time article (a nudge plus a typed pass would clear a no) — P2.5b's, on recorded articles |
+| D13 | one judge in the one resolver (`Resolution.standings`), never cached; one view builder (`verdicts.view`) for `cli._resolved`, `site.state` and `write_last_check`; a raw ledger (`standing is None`) reads every pass Pending build in P2.1's words | `owners=`/`results=` keywords through every call site; judging in `claims`; caching standings |
+| D14 | a contradiction is captured when the fail is recorded (`claims.contradicted_by`): each covering automated evaluator whose pass counted — qualified, current, admitted by the claim's acceptance — excluding a prerequisite of another; a pass outside its operating context recorded `inside: false`, never counted; never for an authority's no; the track record (`verdicts.track_record`) keyed by code digest | a track-record file of its own; deriving at read time; unqualifying a contradicted evaluator |
+| D15 | `--measured VALUE`, finite, in the claim's units: it decides the outcome where the claim has a limit, a disagreeing typed outcome refused | `--value --units`; a typed outcome only |
+| D16 | the rebuild prediction (`claims.rebuild`): the articles a counting result (the counting fail, or the newest moved pass a person made on a measurement) is bound to whose design moved, one line each with its claims; **moved by the critique (12):** in P2.5a it never under-predicts and over-predicts freely — "names nothing else" is P2.5b's, with `export`'s traced articles, and the Fig. 4 test records one article for that reason | per-claim lines; naming passes that never counted, judgments, claim-moved passes |
+| D17 | an expert-judgment claim: Gap `no-authority`; Gap `authority-unattributed` until its authority records it with `assume`; Assumed `awaiting-judgment`; Checked `judged`; Stale `judgment-moved`; any fail Failing (`judged-fail` when the authority's). **Kept against the critique (13), and put on the check-in batch:** the walkthrough shows it Assumed from the moment it is written; read literally, an agent's edit `"terminal": "human", "authority": "<anyone>"` would turn any Gap into a passing `check` | Assumed from the file's `authority` alone (that laundering); "judged for X, recorded by Y" (**dropped by the critiques (4, 10)**) |
+| D18 | words from one table (`report.HUMAN`: `terminal`, the leads, `recorded`, `not_counted`, `signing`, `physical`); no *signed*, *confirmed*, *verified*; the console is "their own shell"; the page's "contradict" title is `phrases.disagree`; **moved by the critiques:** the Stale line says the result "was recorded on a design that has since moved" (18 — never "was built from" before P2.5b's export articles), the report's Stale advice follows its cause (9 — a moved article is never told `atompipe check` restores it), `claim physical --help` draws from `HUMAN` and names the three acts (16) | *signed*/*unsigned*; "confirmed by hand"; "at a terminal" |
+| D19 | `ClaimCause` gains eleven; within rung 5 the person's cause leads an invalidated evaluator and cites it; **moved by the critique (8):** under `stale=True` a counted pass reads Stale (`invalidated`) | invalidated-first; an enum member per fact |
+| D20 | terminal words on `claim list` (`[automated]`, `[measurement]`, `[assumption]`, `[expert judgment: Dana]`), `why`'s header (`[measurement · required]`), `why`'s `PHYSICAL RESULTS` block; JSON claim rows gain `terminal`, `terminal_word`, `authority`, `article`, `standing`, `contradicts`; `physical_result` gains `counts`, `why`, `recorded` — **moved by the critique (3):** the page paints a result's ok tone only on `counts` | the kind's code word; the tone on `passed` |
+| D21 | `doctor`'s `results` rows: a refused file named with its fix, legacy passes counted, evidence changed or missing named | doctor crashing on the refusal |
+| D22 | CLAUDE.md invariant 11; 4 and 7 extended; `RenderersAgreeOnPhysicalClaims` planned for 12 | a new number for the article |
+| D23 | the paper's Fig. 4 as `tests/test_fig4.py`, its physical-article control recording one article; **moved by the critique (19):** the owner-removed control records K4's owner first, then removes it | a second article now (an over-prediction pinned as correct) |
+| D24 | S-61: `Tier.EXTERNAL`'s comment loses "a human with calipers" | leaving it to the rename pass |
+| D25 | the bracket's records do not change: C6 stays Gap (A-15), C5 Pending build; the cache regenerated, `docs/readiness.md` re-rendered | recording C6's owner in a commit |
+| D26 | `util.canonical_json` is the one canonical form; `verdicts._canonical_json` delegates byte for byte | a second canonical form; `SCHEMA = 2` |
+| D27 | **added by the critique (11), reopening P2.1-D9 for these causes alone:** a Stale that waits on a person's act on an article — `article-moved`, `claim-moved`, `judgment-moved`, `article-unjudged` — with no invalidated covering evaluator beside it never stops `check` (`claims.blocks`), exactly as Pending build does; it is unresolved (*ready* false, P2.5b's `export` refuses it) | blocking (a recorded pass made `check` exit 1 after any design edit, until an article was tested that `check` itself would not let anyone build — recording a pass left a project more blocked than not recording one) |
+| D28 | **found by the build:** an owned fallback carries a pass outside its operating context whether or not that pass is invalidated (rung 5 skips the outside evaluator when carried) | Stale (Fig. 4's base case read "a check run settles it" where a check run would only confirm the pass lies outside) |
+
+**Hand-offs.** P2.5b — milestones and `export`; build-time articles (`source:
+"export"`, traced `built_from`) and `--article`; supersession of a fail by a pass on a
+different recorded article; Fig. 4's two-article exactness row; `GateSpec.terminal`,
+`terminal-unmet` and the closed-form calculation, simulation and datasheet words on
+human channels; the readiness sentence's rebuild clause; invariant 12. P3 — `/tested`;
+the permission rule on `results/**` and human-terminal claim files (W9: the seal's
+lock); `next:` naming who records what. P4 — a merged results chain in `trade`.
+
+**Check-in batch (P2.5a).** A-14 (delete `--who`/`--when` — refused here); A-15 with
+its new fact (C6's owner can now record it: `atompipe claim physical C6 assume`); an
+expert-judgment claim reads Gap until its authority records it with `assume`
+(walkthrough step 6 shows Assumed from the start; D17's laundering is why); an
+institution as an authority — its git identity must be a person's, so named delegates
+in the claim file would be the way (D9); GLOSSARY — a *channel* row (`interactive`,
+`agent-session`, `non-interactive`; "in their own shell", "from an agent session", "from
+a pipe or a script"), *contradiction* reworded "a physical result that fails a claim
+one of whose automated evaluators had passed, qualified and current" (W12's reading
+over §1.4's "Checked"), and the physical-pass-beside-an-automated-evaluator fact (D10's
+words, no *agreement*); the claim half including the statement (a typo fix asks for a
+re-test); P2.5a-D27 (a person-awaiting Stale never stops `check`); paper F3 (the
+bracket at 8.0, C1 measured with a ruler, as E4's first article) and F4 (P2.5a records
+the human-authority boundary; P3 enforces it).
+
 #### Checkpoint 2.2: the refusal graph
 
 ```python

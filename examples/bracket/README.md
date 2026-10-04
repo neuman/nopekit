@@ -32,9 +32,14 @@ The exit code is 1.
 against a 0.5 mm limit. Open `model/bracket.py`, change `thickness` to `8.0`, and run
 `atompipe check` again — `bracket.deflection` goes green at 0.47 mm (C7 still blocks:
 no evaluator covers it yet; and C6 is an assumption nobody owns, a gap until its owner
-records it — writing a name into `claims/C6.json` does not count). C5 waits on an
-article: `atompipe status` says *pending build*, and the project is not *ready* until
-every required claim reads checked. Before you run anything, `atompipe status` names each gate the
+records it — name them as `"owner"` in `claims/C6.json`, and they run `atompipe claim
+physical C6 assume` in their own shell; the name in the file alone does not count). C5
+waits on an article: `atompipe status` says *pending build*, and the project is not
+*ready* until every required claim reads checked. Once its test is written down (a
+`note` in `claims/C5.json`), the person who tested a printed bracket records the result
+in their own shell — `atompipe claim physical C5 pass --evidence <photo> --detail "..."`
+— and it counts on that design only: change a value afterwards and C5 reads stale, the
+article named for rebuild. Before you run anything, `atompipe status` names each gate the
 edit reached and what moved for it; `check` re-runs exactly those and serves the rest
 from the cache.
 

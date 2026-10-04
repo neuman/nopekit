@@ -728,7 +728,8 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
         index = self._index()
         self.assertEqual(list(index), [
             "generated", "schema", "records_digest", "meta", "claims", "params", "decisions",
-            "needs", "inputs", "results", "views", "unregistered_inputs", "problems"])
+            "needs", "inputs", "results", "attributions", "views", "unregistered_inputs",
+            "problems"])
         self.assertEqual(index["generated"], store.INDEX_BANNER)
         self.assertEqual(index["schema"], store.PROJECT_SCHEMA)
         self.assertEqual(index["records_digest"], store.records_digest(self.root))
@@ -783,7 +784,7 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
                 else:
                     self.assertEqual(store.agree(project), [])
                     unwritten = _read_bytes(index) if os.path.isfile(index) else None
-                proc = _env.atompipe(list(argv), cwd=project)
+                proc = _env.atompipe(list(argv), cwd=project, identity=True)
                 self.assertIn(proc.returncode, _codes(argv), proc.stdout + proc.stderr)
                 self.assertNotIn("Traceback", proc.stderr)
                 if repairs:
@@ -804,7 +805,7 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
         for argv in [("check",)] + [argv for argv, _named in _shims(self.tmp())]:
             with self.subTest(argv=argv[0]):
                 project = _legacy_bracket(os.path.join(self.tmp(), "legacy"))
-                proc = _env.atompipe(list(argv), cwd=project)
+                proc = _env.atompipe(list(argv), cwd=project, identity=True)
                 self.assertIn(proc.returncode, _WORKED, proc.stdout + proc.stderr)
                 self.assertFalse(store.is_legacy(project), "the trigger did not migrate")
                 with open(os.path.join(project, ".atompipe", "ledger.json"),
@@ -1529,7 +1530,9 @@ def _shims(outside: str) -> list[tuple[tuple[str, ...], set[str] | None]]:
         (("extract", _CALIPER_ID, "--what", "arm is 60.2 mm", "--grounds", "arm_length",
           "--confidence", "measured"), {f"inputs/{_CALIPER_ID}.json"}),
         (("packs", "add", "beam-analytic"), {".atompipe/project.json"}),
-        (("claim", "physical", "C5", "--fail", "--who", "a tester",
+        # P2.5a: `--who` is refused, and who is the git identity (the runs give
+        # every shim the test identity; R-6: the property — one record — kept).
+        (("claim", "physical", "C5", "--fail",
           "--detail", "chalked after the second winter"), {"results/C5.json"}),
         (("ingest", evidence, "--desc", "the anchor's datasheet line", "--json"), None),
     ]
@@ -1646,7 +1649,8 @@ def _watched(test: _env.EnvCase, project: str, *argv: str) -> _Run:
     """``atompipe <argv>`` in ``project``, in a fresh process under `_WRITES_DRIVER`."""
     out = os.path.join(test.tmp(), "writes.json")
     before = _tree(project)
-    proc = _env.run([sys.executable, "-c", _WRITES_DRIVER, out, project, *argv], cwd=project)
+    proc = _env.run([sys.executable, "-c", _WRITES_DRIVER, out, project, *argv], cwd=project,
+                    identity=True)
     try:
         with open(out, encoding="utf-8") as fh:
             data = json.load(fh)

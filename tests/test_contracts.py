@@ -987,6 +987,17 @@ REMOVED_NAMES: tuple[tuple[str, str], ...] = (
     ("decide --when", "went at 1.3 (S-44): it backdated a decision; the edge stamps the time"),
 )
 
+#: The placeholders a document printed beside each refused `claim physical` flag
+#: (P2.5a, V-17): the skill's `--who <name>` and the report's `--when <ISO date>`.
+#: Read off `cli.REFUSED_FLAGS`, so a flag added there without a line here is a
+#: KeyError, never a silent gap.
+_REFUSED_PLACEHOLDERS = {"--who": "<name>", "--when": "<ISO date>"}
+REMOVED_NAMES += tuple(
+    (f"{flag} {_REFUSED_PLACEHOLDERS[flag]}",
+     f"refused from P2.5a: `claim physical` reads who from git's identity and when from "
+     f"the clock")
+    for flag in __import__("atompipe.cli", fromlist=["cli"]).REFUSED_FLAGS)
+
 #: The documents an agent reads for how atompipe works: the contract documents, the
 #: skills, README and CLAUDE.md (spec §3.16), and — because a removed name misleads
 #: from them as much — the rest of what `test_docs_commands` reads for commands.

@@ -1546,10 +1546,11 @@ def build(
     warnings.extend(conflicts_views)
 
     # `state` reads views off the ledger, so the generated ones are grafted onto
-    # an in-memory copy. The copy never reaches disk: see the docstring.
-    for_state = dataclasses.replace(
-        Ledger.from_dict(ledger.to_dict()), views=list(merged)
-    )
+    # an in-memory copy. The copy never reaches disk: see the docstring. A
+    # `replace`, not a dict round trip: a claim's results and attributions live
+    # in memory only (P2.5a, `FORBIDDEN_KEYS`), and a round trip dropped them —
+    # an owner recorded in their own shell read unattributed on the page alone.
+    for_state = dataclasses.replace(ledger, views=list(merged))
     if resolution is None:
         # Resolved against the LEDGER the caller handed in, not `for_state`:
         # the generated views are page furniture, never a gate input.
@@ -1829,7 +1830,7 @@ def state(
     # The page's ledger IS the resolution laid over the records: every judgement
     # below — statuses, coverage, PARTIAL, the headline, locator problems — reads
     # these verdicts, so none of them can disagree with the verdict rows.
-    view = dataclasses.replace(ledger, verdicts=list(resolution.verdicts))
+    view = verdict_logic.view(ledger, resolution)
 
     composed = claim_logic.compositions(view, registry=registry, stale=everything,
                                         stale_gates=stale_gates)
@@ -1933,7 +1934,11 @@ def state(
         found = composed[claim.id]
         status = found.status
         unproven = report_logic._unproven_for(claim.id, cover, view)
-        row = claim.to_dict()
+        # The claim as every JSON channel shows it (`report.claim_json`, P2.5a-D20):
+        # its record fields, its terminal and authority, and `physical_result`
+        # carrying the judge's `counts` and `why` — the page keys its ok tone on
+        # those, never on `passed` (critique 3 of the P2.5a design).
+        row = report_logic.claim_json(claim, composed=found)
         row["status"] = str(status)
         # The words beside the kept enum (P2.1-D12): `key`, `word`, `cause`,
         # `reason`, `errored` — all `report.HUMAN`'s, so the page owns none.
@@ -2040,6 +2045,8 @@ def state(
                    for artifact in view.inputs],
         "gaps": [need.to_dict() for need in report_logic._needs(view, registry)],
         "decisions": [decision.to_dict() for decision in view.decisions],
+        # The rebuild prediction (P2.5a-D16): `claims.rebuild`, the one producer.
+        "rebuild": [found.to_dict() for found in claim_logic.rebuild(view)],
     }
     # What this page judged, so `cli._site_state` can ask whether a rebuild now
     # would judge the same (`judgement_digest`). Set last, over the finished

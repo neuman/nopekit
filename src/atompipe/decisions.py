@@ -852,10 +852,13 @@ def _why_view(ledger: Ledger, view: Any, views: Sequence[Any], evidence: _Eviden
 
 
 def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
+    from . import report                             # a reader's module: not at import
     names = {claim.id}
-    flags = [str(claim.kind)]
-    flags.append("critical" if claim.critical else "not required")
-    out: list[str] = [f"claim  {claim.id}  [{', '.join(flags)}]"]
+    # Where the claim's evidence bottoms out, in its display word, and
+    # *required* (P2.5a-D20; GLOSSARY §8: the kind's code word was a raw enum
+    # leak, and "critical" is *required*'s Never-say).
+    flags = [report.terminal_word(claim), "required" if claim.critical else "not required"]
+    out: list[str] = [f"claim  {claim.id}  [{' · '.join(flags)}]"]
     out += _wrap(claim.statement)
 
     acceptance = claim.acceptance.render() if claim.acceptance else ""
@@ -868,16 +871,11 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
         out += _wrap(f"source: {claim.source}", indent="  ")
     if claim.tags:
         out += _wrap("tags: " + ", ".join(claim.tags), indent="  ")
-    if claim.physical_result is not None:
-        result = claim.physical_result
-        verdict = "pass" if result.passed else "fail"
-        stamp = " ".join(x for x in (result.when, result.who or "unattributed") if x)
-        out += _wrap(
-            f"physical result: {verdict}" + (f" (recorded {stamp})" if stamp else "")
-            + (f" — {result.detail}" if result.detail else ""),
-            indent="  ",
-            hanging="    ",
-        )
+    if str(getattr(claim, "authority", "") or "").strip():
+        out += _wrap(f"authority: {claim.authority}", indent="  ")
+    for record in getattr(claim, "attributions", ()) or ():
+        out += _wrap(f"{record.role} recorded: {record.name} ({record.when}, "
+                     f"{report.recorded_words(record)})", indent="  ", hanging="    ")
 
     _section(out, "WHY")
     out += _wrap(claim.rationale or "(no rationale recorded — what breaks if this is false?)")
@@ -896,6 +894,17 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
         f"(none — {_no_evaluator(ledger, claim, evidence)})"
     )
 
+    results = list(getattr(claim, "results", ()) or ())
+    if not results and claim.physical_result is not None:
+        results = [claim.physical_result]
+    if results:
+        # Every recorded physical result, oldest first, each with whether it
+        # counts now and why not (P2.5a-D20) — so a reader who recorded one
+        # learns from the claim itself why it settles nothing.
+        _section(out, f"PHYSICAL RESULTS ({len(results)}, oldest first)")
+        for entry in results:
+            out += _wrap(_result_line(claim, entry), indent="  ", hanging="    ")
+
     _section(out, f"GROUNDED BY ({len(claim.grounded_by)})")
     out += _grounding_lines(ledger, claim.grounded_by, names) if claim.grounded_by else _wrap(
         "(nothing — this claim came from a conversation, not from evidence)"
@@ -910,6 +919,33 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _result_line(claim: Claim, entry: Any) -> str:
+    """One physical result in `why`: its outcome, article, who recorded it and
+    from where, when, what was observed and measured, whether it counts now
+    (`report.result_facts`), and the evaluators a fail contradicts — every word
+    `report.HUMAN`'s (D-16)."""
+    from . import report                             # a reader's module: not at import
+    said = report.HUMAN["physical"]
+    facts = report.result_facts(claim, entry)
+    outcome = report.HUMAN["outcome"]["pass" if entry.passed is True else "fail"]
+    article = report.article12(getattr(entry, "article", None) or {})
+    text = (f"{outcome}" + (f" on article {article}" if article else "")
+            + f" ({report.recorded_words(entry)}, {entry.when or 'date not recorded'})")
+    if getattr(entry, "measured", None) is not None:
+        text += f": {report._num(entry.measured)} {entry.units or ''}".rstrip()
+    if entry.detail:
+        text += f" — {entry.detail}"
+    text += " — " + (said["counts"] if facts["counts"]
+                     else said["does_not_count"].format(why=facts["why"]))
+    for item in getattr(entry, "contradicts", None) or ():
+        if isinstance(item, dict) and item.get("inside") is True:
+            unit = f" {item.get('units')}" if item.get("units") else ""
+            text += " — " + said["contradiction_of"].format(
+                gate=item.get("gate"), code=report.article12(item.get("code")),
+                value=f"{report._num(item.get('value'))}{unit}")
+    return text
+
+
 def _no_evaluator(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
     """Why nothing evaluates `claim`, by its kind and in its status's word —
     `report`'s, through `claims.compose`, never a status spelled here. What
@@ -922,6 +958,9 @@ def _no_evaluator(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
         else list(ledger.verdicts)
     found = claim_logic.compose(claim, verdicts)
     status = report.word(found.status, errored=found.errored)
+    if getattr(claim, "terminal", "") == "human":
+        return (f"settled by expert judgment: {status}, "
+                f"{report.reason(found, ledger, claim)}")
     if claim.kind == ClaimKind.ASSUMPTION:
         return (f"an assumption is carried by its owner, not settled by an evaluator: "
                 f"{status}, {report.reason(found, ledger, claim)}")

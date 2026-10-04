@@ -77,9 +77,46 @@ class ClaimStatus(StrEnum):
                                   # prerequisite is not established; none failed
     PENDING = "pending"           # Open: an evaluator unrun on the current inputs
     UNVERIFIED = "unverified"     # Pending build: physical, no result
-    VERIFIED = "verified"         # Checked: a physical pass recorded (not article-bound yet)
+    VERIFIED = "verified"         # Checked: an `interactive` pass on the current article,
+                                  # or the authority's judgment (P2.5a)
     REFUTED = "refuted"           # Failing: a physical fail recorded
     ASSERTED = "asserted"         # Assumed: a reason and an attributed owner
+
+
+class Terminal(StrEnum):
+    """Where a claim's evidence bottoms out (GLOSSARY §1 *terminal*; PLAN M14.1) —
+    identifiers, never words: the words are ``report.HUMAN["terminal"]``'s, and in
+    P2.5a every automated one prints *automated* (P2.5a-D1).
+
+    Declared on a claim (``Claim.terminal``) or derived from its kind
+    (``claims.terminal_of``). A declaration can raise the bar, never lower it,
+    and never stands in for an evaluator: a measurable claim declared
+    ``closed_form`` with no evaluator still reads Gap. *Rejected:* "external
+    tool" as a terminal (Q-W3: the program that runs an evaluator is provenance);
+    replacing ``ClaimKind`` now (the rename pass: R-8 could not tell a word move
+    from a status move)."""
+
+    CLOSED_FORM = "closed_form"
+    SOLVER = "solver"                 # display word: simulation
+    DATASHEET = "datasheet"
+    MEASUREMENT = "measurement"
+    HUMAN = "human"                   # display word: expert judgment
+    NONE = "none"
+
+
+#: The terminals each kind may declare (P2.5a §4.1). A pair outside this table
+#: is refused by the strict reader, and only when ``terminal`` is present (R-10:
+#: a refusal binds a new declaration). Here, in the type contract, because
+#: ``store`` refuses by it and ``claims`` derives by it. *Rejected:* measurable
+#: + measurement (that is a physical claim, and the kind already says so);
+#: physical + closed_form (a calculation that settled a physical claim would
+#: make it measurable); assumption + solver (an assumption a solver settles is
+#: no longer an assumption).
+TERMINALS_BY_KIND: dict[ClaimKind, frozenset[str]] = {
+    ClaimKind.MEASURABLE: frozenset({"closed_form", "solver", "datasheet"}),
+    ClaimKind.PHYSICAL: frozenset({"measurement", "human"}),
+    ClaimKind.ASSUMPTION: frozenset({"none", "human"}),
+}
 
 
 #: statuses that must block an irreversible spend (ordering a board, buying stock).
@@ -105,7 +142,10 @@ class Tier(enum.IntEnum):
     INSTANT = 0     # < ~2 s, analytic / closed form. Run on every edit.
     BUILD = 1       # seconds to minutes. Geometry builds, mesh gates, netlists.
     SOLVE = 2       # minutes to hours. External solvers: CFD, FEA, autorouters.
-    EXTERNAL = 3    # CI, a fab house, a lab, a human with calipers.
+    EXTERNAL = 3    # CI, a fab house, an external lab service.
+    # Not a physical result (S-61): this said "a human with calipers" — a second
+    # route for what a physical claim and its result own (`claim physical`,
+    # P2.5a). A tier is an evaluator's latency class; a person is recorded by.
 
 
 class PrerequisiteKind(StrEnum):
@@ -413,13 +453,131 @@ class Acceptance(Record):
 
 @dataclass
 class PhysicalResult(Record):
-    """A real-world test result a human recorded against a PHYSICAL claim."""
+    """A physical result: a physical evaluator's verdict on one article, with who
+    recorded it (GLOSSARY §1). One entry of ``results/<claim id>.json``'s
+    ``results`` list, append-only, written only by ``claim physical`` through
+    ``store.append_signed`` (P2.5a).
+
+    What slipped through before P2.5a (S-48, S-50): ``who`` was a name anyone
+    typed (``--who``) and defaulted to nobody; ``when`` was typed too; a pass
+    bound to nothing survived any change to the design it was tested on; and a
+    pass typed by the agent counted as one a person made.
+
+    The fields after ``evidence`` are P2.5a's, each LAST (R-2), each defaulting
+    to "not recorded", so a P2.1-shape entry — a **legacy** entry — reads with
+    them empty, and an empty one never makes a pass count:
+
+    * ``channel`` — how it was entered (``cli._channel``): ``interactive`` (a
+      person's own shell, the claim's id typed), ``agent-session <id>``,
+      ``non-interactive``, or ``""`` (legacy). Only ``interactive`` lets a pass
+      count; every fail counts (R-3).
+    * ``authority`` — for an expert-judgment claim, the authority it was
+      recorded for (equal to the claim's, typed as a confirmation).
+    * ``measured``, ``units`` — the value measured, in the claim's acceptance
+      units (D-13 *consistent*: it decides the outcome where the claim has a
+      limit).
+    * ``article`` — what it was tested on: ``{"source": "design", "hash",
+      "built_from": {"params", "model", "files"}, "revision", "dirty"}``
+      (``verdicts.article_of``), or ``{}`` when the model did not load.
+    * ``claim_digest`` — the claim as the person read it (``claims.claim_digest``).
+    * ``rho`` — the digest of (article hash, claim digest): the physical
+      evaluator's read-set hash (§6.2).
+    * ``evidence_sha256`` — each evidence file's bytes when recorded.
+    * ``contradicts``, ``contradiction_check`` — for a fail, the covering
+      evaluators whose counted, current pass it contradicts
+      (``claims.contradicted_by``), or why none could be judged.
+    * ``prev``, ``digest`` — the chain and the seal (``store``, P2.5a-D6).
+
+    What a seal does not stop is in ``store.append_signed``'s docstring and
+    SPINE_CONTRACT's limits: anyone who can write the file can recompute it."""
 
     passed: bool
-    when: str = ""                   # ISO date, supplied by the caller
-    who: str = ""
+    when: str = ""                   # the command's clock (never typed, from P2.5a)
+    who: str = ""                    # git's identity (never typed, from P2.5a)
     detail: str = ""
     evidence: list[str] = field(default_factory=list)   # photo / log paths
+    channel: str = ""
+    authority: str = ""
+    measured: float | None = None
+    units: str = ""
+    article: dict = field(default_factory=dict)
+    claim_digest: str = ""
+    rho: str = ""
+    evidence_sha256: dict = field(default_factory=dict)
+    contradicts: list = field(default_factory=list)
+    contradiction_check: str = ""
+    prev: str = ""
+    digest: str = ""
+
+
+@dataclass
+class AttributionRecord(Record):
+    """An owner's or an authority's attribution, as ``claim physical <id>
+    assume`` recorded it — one entry of ``results/<claim id>.json``'s
+    ``attributions`` list, sealed and chained like a result (P2.5a-D6).
+
+    ``role`` is ``owner`` (an assumption's owner, or a fallback's — P2.4-D18's
+    hand-off) or ``authority`` (an expert-judgment claim's). ``name`` is the
+    nominee the claim file named when it was recorded, ``reason`` the reason it
+    was recorded against (``claims.assumption_reason``), ``claim_digest`` the
+    claim as read then. It counts only while the claim still names ``name`` for
+    that role and — for an owner — still gives ``reason``; for an authority,
+    while the claim as a whole is unchanged (an edited statement un-records an
+    acceptance of it). What slipped through before it: an owner was whatever a
+    claim file said (P2.1-D8 made that read Gap; nothing could record one)."""
+
+    role: str
+    name: str
+    reason: str = ""
+    claim_digest: str = ""
+    who: str = ""
+    when: str = ""
+    channel: str = ""
+    prev: str = ""
+    digest: str = ""
+
+
+@dataclass(frozen=True)
+class EntryStanding:
+    """The judge's facts about ONE result entry (``verdicts.judge_results``):
+    ``index`` in the results list; ``passed``; ``counts`` — a pass that settles
+    the claim now; ``why`` — why not, an identifier (``agent-session``,
+    ``non-interactive``, ``legacy``, ``who``, ``authority``, ``measured``,
+    ``evidence:<path>``, ``claim-moved``, ``article-moved``, ``judgment-moved``,
+    ``article-unjudged``, ``beside`` — a pass beside an automated evaluator —
+    or ``none`` — on an assumption), ``""`` when it counts; ``article`` — its
+    article's hash; ``article_state`` — ``current``, ``moved``, ``unjudged`` or
+    ``""`` (no article); ``moved`` — what moved, in words, inputs first."""
+
+    index: int
+    passed: bool
+    counts: bool = False
+    why: str = ""
+    article: str = ""
+    article_state: str = ""
+    moved: tuple = ()
+
+
+@dataclass(frozen=True)
+class Standing:
+    """What a claim's physical results stand for NOW — judged on every read by
+    ``verdicts.judge_results`` inside the one resolver, never cached, never
+    written (P2.5a-D13). It reaches ``claims.compose`` on the claim
+    (``Claim.standing``), set by ``verdicts.view`` only.
+
+    ``state`` — ``current`` (a pass counts), ``article-moved``,
+    ``judgment-moved``, ``claim-moved``, ``article-unjudged`` (the newest pass
+    a person made in their own shell, and its first half that no longer holds),
+    ``not-counted:<why>`` (the newest pass, and why it never counted), or ``""``
+    (no pass). ``counted`` — the deciding entry's index (the counting pass, or
+    the one ``state`` is about), or None. ``article``, ``moved`` — its article
+    and what moved. ``entries`` — every entry's ``EntryStanding``."""
+
+    state: str = ""
+    counted: int | None = None
+    article: str = ""
+    moved: tuple = ()
+    entries: tuple = ()
 
 
 @dataclass
@@ -476,6 +634,35 @@ class Claim(Record):
     rename pass, which folds both). A spine before P2.4 refuses a claim file
     carrying it (as P2.1's ``owner``); no command writes it, and an empty one
     digests as before (``verdicts._ABSENT_WHEN_EMPTY``). The LAST field (R-2)."""
+    terminal: str = ""
+    """Where this claim's evidence bottoms out, DECLARED (``Terminal``), or
+    ``""`` — derived from the kind (``claims.terminal_of``: physical ->
+    measurement, assumption -> none, measurable -> automated). Validated by the
+    strict reader only when present (R-10), against ``TERMINALS_BY_KIND``; a
+    declaration never makes a claim read more than it would without it
+    (P2.5a-D1). Empty, it digests as before (``_ABSENT_WHEN_EMPTY``)."""
+    authority: str = ""
+    """The person or institution an expert-judgment claim (terminal ``human``)
+    stays with — a NOMINEE, like ``owner`` (P2.5a-D2, GLOSSARY §1 *authority*).
+    It counts only as ``claim physical <id> assume --authority`` recorded it,
+    typed by the authority in their own shell; named here and nowhere recorded,
+    the claim reads Gap. What slipped through the design read literally: an edit
+    adding ``"terminal": "human", "authority": "<anyone>"`` would have turned any
+    Gap into a passing ``check`` (Assumed does not block). Refused by the strict
+    reader on a claim whose terminal is not ``human``."""
+    results: tuple = ()
+    """In memory only (``FORBIDDEN_KEYS``): every entry of
+    ``results/<id>.json``'s ``results``, oldest first, assembled by ``store``;
+    ``physical_result`` is the one that counts for rung 1. What the judge reads."""
+    attributions: tuple = ()
+    """In memory only: the owner and authority attributions recorded through
+    the channel — sealed, ``interactive`` — newest first, assembled by
+    ``store`` so a raw ``store.load`` reader sees the same owners as the view
+    (P2.5a-D11)."""
+    standing: Any = None
+    """In memory only: the judge's ``Standing``, set by ``verdicts.view`` and
+    nothing else. ``None`` — a raw ledger nobody judged — reads every pass
+    Pending build in P2.1's words (degrade-closed, R-2)."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Claim":
@@ -485,6 +672,10 @@ class Claim(Record):
         kw["acceptance"] = Acceptance.from_dict(kw.get("acceptance") or {})
         pr = kw.get("physical_result")
         kw["physical_result"] = PhysicalResult.from_dict(pr) if isinstance(pr, dict) else pr
+        # In-memory fields never come from a dict: a record never holds them
+        # (FORBIDDEN_KEYS), and an index row that did would be a second home.
+        for name in ("results", "attributions", "standing"):
+            kw.pop(name, None)
         return cls(**kw)
 
 
@@ -1262,6 +1453,10 @@ FORBIDDEN_KEYS: dict[str, dict[str, str]] = {
     "Claim": {
         "gates": "derived from gate coverage — the registry says which gates cover a claim",
         "physical_result": "a claim's results live in results/<id>.json, append-only",
+        "results": "a claim's results live in results/<id>.json, append-only",
+        "attributions": "an owner or an authority is recorded in results/<id>.json by "
+                        "`atompipe claim physical <id> assume`, typed in their own shell",
+        "standing": "the resolver judges a result's standing on every read",
     },
     "Param": {
         "value": "the model ({model}) owns it",
@@ -1295,7 +1490,8 @@ __all__ = [
     "StrEnum", "ClaimKind", "ClaimStatus", "BLOCKING_STATUSES", "Tier", "ViewKind",
     "ArtifactKind", "EXT_KIND_HINTS", "NeedStatus", "Comparator",
     "Record", "slugify", "sha256_file",
-    "Rejected", "Param", "Acceptance", "PhysicalResult", "Claim",
+    "Rejected", "Param", "Acceptance", "PhysicalResult", "AttributionRecord",
+    "EntryStanding", "Standing", "Terminal", "TERMINALS_BY_KIND", "Claim",
     "Verdict", "NegativeControl", "GateSpec", "PrerequisiteKind", "CONTEXT_OUTSIDE",
     "ToolCandidate", "Need", "Extraction", "InputArtifact", "Decision",
     "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta", "Ledger",

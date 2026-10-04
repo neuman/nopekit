@@ -120,6 +120,12 @@ const CLAIM_KIND = {
   },
 };
 
+/** An outcome's word (`pass`, `fail`, …) from state.json's `outcome_words`;
+ *  the raw key until a state that has it. */
+export function outcomeWord(key) {
+  return String(OUTCOME_WORDS[key] || key);
+}
+
 /** A claim row's chip: the glyph and tone for its enum value (Failing's tone
  *  when `errored`), the word and hint from state.json's `words`. */
 export function claimStatus(key, { errored = false } = {}) {

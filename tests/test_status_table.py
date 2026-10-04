@@ -692,15 +692,35 @@ class BlockingMembers(unittest.TestCase):
         self.assertEqual({s.value for s in BLOCKING_STATUSES}, set(self.WANT))
 
     def test_blocking_stops_on_one_critical_claim_per_status(self):
+        """Per status, through the composition `blocking` reads (P2.5a: it reads
+        the cause too — the patched producer moved from `statuses` to
+        `compositions`, R-6)."""
         for status in ClaimStatus:
             with self.subTest(status=status.value):
                 claim = _claim([])
                 ledger = Ledger(meta=ProjectMeta(name="t", revision="v0.1"), claims=[claim])
-                with mock.patch.object(claims_mod, "statuses",
-                                       lambda *_a, _s=status, **_k: {"C1": _s}):
+                composed = claims_mod.Composed(status, claims_mod.ClaimCause.CHECKED)
+                with mock.patch.object(claims_mod, "compositions",
+                                       lambda *_a, _c=composed, **_k: {"C1": _c}):
                     found = claims_mod.blocking(ledger, None)
                 self.assertEqual([(c.id, s) for c, s in found],
                                  [("C1", status)] if status.value in self.WANT else [])
+
+    def test_a_stale_awaiting_a_person_never_stops_check(self):
+        """P2.5a-D27 (critique 11 of its design): a Stale that waits on a person's
+        act on an article — a new article, a retest, a judgment again — never
+        stops `check`, which gates the build of that article; beside an
+        invalidated evaluator it still does (a check run answers that half)."""
+        claim = _claim([])
+        ledger = Ledger(meta=ProjectMeta(name="t", revision="v0.1"), claims=[claim])
+        for cause in claims_mod.AWAITS_A_PERSON:
+            for cites, blocks in (((), False), (("g.one",), True)):
+                with self.subTest(cause=cause.value, cites=cites):
+                    composed = claims_mod.Composed(ClaimStatus.STALE, cause, cites)
+                    with mock.patch.object(claims_mod, "compositions",
+                                           lambda *_a, _c=composed, **_k: {"C1": _c}):
+                        found = claims_mod.blocking(ledger, None)
+                    self.assertEqual(bool(found), blocks)
 
 
 class KnownBadShownIsAGap(_env.EnvCase):

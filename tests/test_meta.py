@@ -81,11 +81,16 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
         # (review of P2.4: C1 in `um` read Checked at 700 um against 600).
         "test_goalposts.APassMustMeetTheAcceptanceItRead",
         "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked",
-        "test_goalposts.AnEvaluatorStatesItsOwnUnits"],
+        "test_goalposts.AnEvaluatorStatesItsOwnUnits",
+        # P2.5a: a physical or expert-judgment claim is listed Checked only on a
+        # result that counts, and every claim in exactly one section.
+        "test_physical.TheCheckedSectionHoldsOnlyBoundResults"],
     5: "test_packs.ControlsAreSealed",
     6: "test_packs.NegativeControlsFire",
     # 7, and P2.4: a goalpost edit re-keys exactly the gates that read it.
-    7: ["test_staleness.StaleIsNotCurrent", "test_goalposts.TheGoalpostLivesInClaims"],
+    7: ["test_staleness.StaleIsNotCurrent", "test_goalposts.TheGoalpostLivesInClaims",
+        # P2.5a: a physical pass whose article's design moved reads Stale.
+        "test_physical.AMovedArticleReadsStale"],
     8: ["test_records.IndexNeverDisagreesWithRecords",
         "test_records.NoCommandWritesARecord"],
     # 9 is the paired rule from P2.3: both controls (QualificationIsPaired), and
@@ -111,6 +116,15 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     10: ["test_prerequisites.PrerequisiteFailureIsNeverAPass",
          "test_prerequisites.ACachedPassNeverSurvivesAFailedPrerequisite",
          "test_prerequisites.NeedsCycleRefused", "test_prerequisites.TierInversionRefused"],
+    # 11 (P2.5a): the channel, the sealed results file, an owner and an
+    # authority only as recorded, and what a physical result can and cannot do —
+    # moved here from PLANNED_INVARIANT_CLASSES with CLAUDE.md's item.
+    11: ["test_owner.AnOwnerWrittenByHandNeverCounts", "test_signing.HumanChannelOnly",
+         "test_signing.WhoAndWhenAreNeverTyped", "test_signing.TheResultsFileIsSealedAndChained",
+         "test_signing.AnOwnerOnlyThroughTheChannel", "test_physical.SignedMeansSomething",
+         "test_physical.APhysicalFailNeverLosesItsPowerToFail",
+         "test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord",
+         "test_physical.AnExpertJudgmentStaysWithItsAuthority"],
     # 15 (P2.3): the mutation pass's seal, over the real walk and every planted
     # runner — moved here from PLANNED_INVARIANT_CLASSES with CLAUDE.md's item.
     15: "test_mutation.MutationIsSealed",
@@ -132,12 +146,15 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
 #: planned past P2 — mutation would ship inside qualification with its seal
 #: stated nowhere a reader of CLAUDE.md looks.
 #:
-#: 11 is PLAN §4.0.1's first half — a human or physical terminal is satisfied
-#: only through a channel the proposer cannot author — from its first line
-#: (R-7): P2.1 lands `Claim.owner` and refuses to count one written by hand; it
-#: moves to INVARIANT_CLASSES with CLAUDE.md's 11 when the signing channel lands.
+#: 11 was PLAN §4.0.1's first half — planned here from P2.1, which landed
+#: `Claim.owner` and refused to count one written by hand — until P2.5a's channel
+#: made it mechanical and moved it to INVARIANT_CLASSES with CLAUDE.md's 11.
+#:
+#: 12 is "no renderer is more generous than the composition" (PLAN §4.0.1),
+#: planned from P2.5a's renderer agreement over physical claims; it lands with
+#: P2.5b's readiness object.
 PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {
-    11: "test_owner.AnOwnerWrittenByHandNeverCounts",
+    12: "test_physical.RenderersAgreeOnPhysicalClaims",
 }
 
 
@@ -497,8 +514,12 @@ def _subprocess_findings(source: str, filename: str = "<planted>") -> list[str]:
                     hit(node, f"from os import {alias.name}")
                 elif module == "asyncio" and alias.name.startswith("create_subprocess"):
                     hit(node, f"from asyncio import {alias.name}")
-                elif module == "pty" and alias.name == "spawn":
-                    hit(node, "from pty import spawn")
+                elif module == "pty":
+                    # P2.5a: a pty is a person's own shell to `claim physical`, so
+                    # only `_env.run_tty` opens one (`from pty import openpty` too).
+                    hit(node, f"from pty import {alias.name}")
+                elif module == "os" and alias.name == "openpty":
+                    hit(node, "from os import openpty")
         elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
             base = node.value.id
             if base in sub_names:
@@ -507,8 +528,10 @@ def _subprocess_findings(source: str, filename: str = "<planted>") -> list[str]:
                 hit(node, f"{base}.{node.attr}")
             elif base == "asyncio" and node.attr.startswith("create_subprocess"):
                 hit(node, f"asyncio.{node.attr}")
-            elif base == "pty" and node.attr == "spawn":
-                hit(node, "pty.spawn")
+            elif base == "pty":
+                hit(node, f"pty.{node.attr}")
+            elif base in os_names and node.attr == "openpty":
+                hit(node, f"{base}.openpty")
         elif isinstance(node, ast.Call) and node.args:
             func = node.func
             called = (func.id if isinstance(func, ast.Name)
@@ -558,6 +581,12 @@ class NoSubprocessOutsideRun(unittest.TestCase):
             "__import__('subprocess').run(['x'])\n",
             "import importlib\nimportlib.import_module('subprocess')\n",
             "import asyncio\nasyncio.create_subprocess_exec('git')\n",
+            # P2.5a: a pty or a fork outside `_env.run_tty` is a channel a test
+            # would open on its own terms.
+            "import pty\nm, s = pty.openpty()\n",
+            "from pty import openpty\n",
+            "import os\nos.openpty()\n",
+            "import os\nos.fork()\n",
         ]
         for source in planted:
             with self.subTest(source=source):

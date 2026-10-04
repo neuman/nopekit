@@ -181,6 +181,87 @@ def atompipe(args: Sequence[Any], *, cwd: str, **kw: Any) -> subprocess.Complete
     return run([sys.executable, "-m", "atompipe", *args], cwd=cwd, **kw)
 
 
+#: What ``claim physical`` writes to stderr when it waits for the claim's id —
+#: the end of its prompt line (P2.5a-D4). ``run_tty`` types its answer once this
+#: has appeared, never before: a line typed before the prompt is a line a person
+#: could not have read the prompt before typing.
+TTY_PROMPT_END = "(anything else records nothing): "
+
+
+def run_tty(argv: Sequence[Any], *, cwd: str, answer: str | None, home: str | None = None,
+            identity: bool = True, env: Mapping[str, Any] | None = None,
+            timeout: float = 60.0) -> subprocess.CompletedProcess:
+    """``python -m atompipe <argv>`` with its stdin a terminal — the ONE place a
+    pty is opened in ``tests/`` — as a person's own shell runs it (P2.5a-D4).
+
+    The child's stdin is the slave end of ``pty.openpty()``; stdout and stderr
+    are pipes, captured as :func:`run` captures them, under :func:`clean_env`
+    (every agent marker stripped unless ``env`` sets it). When ``answer`` is a
+    string it is typed, with a newline, once ``TTY_PROMPT_END`` has appeared on
+    stderr; ``None`` closes the terminal instead (end of input). A child that
+    never prompts is left to finish. POSIX only, which every CI runner is: off
+    POSIX this RAISES — the test errors, it never skips (R-7: a skipped row in an
+    invariant class is a red test wearing green). Identity on by default: the
+    channel refuses to record without one (P2.5a-D5)."""
+    if os.name != "posix":
+        raise AssertionError("run_tty needs a POSIX pty; this platform has none")
+    import pty
+    import select
+    import time
+    own_home = None
+    if home is None:
+        own_home = tempfile.mkdtemp(prefix="atompipe-home-")
+        home = own_home
+    command = [sys.executable, "-m", "atompipe", *(os.fspath(a) for a in argv)]
+    master, slave = pty.openpty()
+    try:
+        proc = subprocess.Popen(command, cwd=cwd,
+                                env=clean_env(home=home, identity=identity, extra=env),
+                                stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        os.close(slave)
+        slave = -1
+        out, err = b"", b""
+        typed = False
+        deadline = time.monotonic() + timeout
+        streams = {proc.stdout.fileno(): "out", proc.stderr.fileno(): "err"}
+        while streams:
+            if time.monotonic() > deadline:
+                proc.kill()
+                raise AssertionError(f"{command!r} in {cwd} did not finish in {timeout}s")
+            ready, _w, _x = select.select(list(streams), [], [], 0.2)
+            for fd in ready:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    streams.pop(fd)
+                    continue
+                if streams[fd] == "out":
+                    out += chunk
+                else:
+                    err += chunk
+            if not typed and TTY_PROMPT_END.encode() in err:
+                typed = True
+                if answer is None:
+                    os.close(master)
+                    master = -1
+                else:
+                    os.write(master, answer.encode("utf-8") + b"\n")
+        code = proc.wait(timeout=max(1.0, deadline - time.monotonic()))
+        proc.stdout.close()
+        proc.stderr.close()
+        return subprocess.CompletedProcess(command, code,
+                                           out.decode("utf-8", "replace"),
+                                           err.decode("utf-8", "replace"))
+    finally:
+        for fd in (master, slave):
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        if own_home is not None:
+            _rmtree(own_home)
+
+
 def git(args: Sequence[Any], *, cwd: str, identity: bool = False,
         **kw: Any) -> subprocess.CompletedProcess:
     """``git <args>`` via :func:`run`. No identity unless asked for, as on a runner."""

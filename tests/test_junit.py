@@ -428,7 +428,8 @@ class JUnitNeverGreenerThanTheExitCode(unittest.TestCase):
                           _result(cases["C6"]).get("message")),
                          ("failure", "unclaimed",
                           "no owner recorded — an assumption reads Assumed only once its owner "
-                          "records it; nothing can record one yet"))
+                          "records it: name the owner in claims/C6.json (\"owner\"), and they "
+                          "run atompipe claim physical C6 assume in their own shell"))
         self.assertEqual(_result(cases["C1"]).get("message"),
                          "g.defl : 0.700 mm at 15 N (limit 0.5 mm)")
         self.assertEqual(_result(cases["C7"]).get("type"), "unclaimed")

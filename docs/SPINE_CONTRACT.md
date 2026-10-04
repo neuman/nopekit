@@ -83,6 +83,10 @@ class PrerequisiteKind(StrEnum): ERRORED | FAILED | SKIPPED | UNQUALIFIED | NOT_
                                  | INVALIDATED | UNRUN   # why a prerequisite is not established, rank order
 CONTEXT_OUTSIDE = "context:outside"           # P2.4: the Verdict.unqualified token kind of a
                                               #   pass outside its evaluator's operating context
+class Terminal(StrEnum): CLOSED_FORM | SOLVER | DATASHEET | MEASUREMENT | HUMAN | NONE
+                                              # P2.5a: where a claim's evidence bottoms out
+TERMINALS_BY_KIND: dict[ClaimKind, frozenset[str]]   # measurable {closed_form, solver, datasheet}
+                                              #   physical {measurement, human}; assumption {none, human}
 class ViewKind(StrEnum): MODEL3D | IMAGE | CHART | TABLE | FIELD | DIAGRAM
 class ArtifactKind(StrEnum): SKETCH | REFERENCE | CAD | SCREENSHOT | DATASHEET | SPEC
                              | MEASUREMENT | STANDARD | DATA | LINK | OTHER
@@ -113,8 +117,29 @@ class Acceptance(Record):       # the machine-checkable threshold behind a claim
     limit_hi: float | None = None                                        # BETWEEN only
     units: str = ""
     def holds(self, measured) -> bool;  def render(self) -> str
-class PhysicalResult(Record):   # a real-world result a human recorded against a claim
+class PhysicalResult(Record):   # a physical result: one entry of results/<id>.json's "results"
     passed: bool; when: str = ""; who: str = ""; detail: str = ""; evidence: list[str]
+    # P2.5a, each LAST and empty by default (a legacy entry reads with them empty):
+    channel: str = ""               # interactive | non-interactive | agent-session <id> | "" legacy
+    authority: str = ""             # an expert judgment: the authority it was recorded for
+    measured: float | None = None; units: str = ""      # --measured, in the claim's units
+    article: dict                   # verdicts.article_of: {source, hash, built_from, revision, dirty}
+    claim_digest: str = ""          # claims.claim_digest: the claim as the person read it
+    rho: str = ""                   # seal of (article hash, claim digest)
+    evidence_sha256: dict           # {path: sha256} of each evidence file when recorded
+    contradicts: list               # [{gate, code, rho, value, units, inside}] (a fail's)
+    contradiction_check: str = ""   # why no contradiction could be judged
+    prev: str = ""; digest: str = ""   # the chain and the seal (store.append_signed)
+class AttributionRecord(Record):   # P2.5a: one entry of results/<id>.json's "attributions"
+    role: str; name: str            # owner | authority; the nominee the claim named
+    reason: str = ""; claim_digest: str = ""; who: str = ""; when: str = ""
+    channel: str = ""; prev: str = ""; digest: str = ""
+class EntryStanding:            # frozen, in memory: the judge's facts about one result entry
+    index: int; passed: bool; counts: bool = False; why: str = ""; article: str = ""
+    article_state: str = ""; moved: tuple = ()
+class Standing:                 # frozen, in memory: what a claim's results stand for NOW
+    state: str = ""; counted: int | None = None; article: str = ""; moved: tuple = ()
+    entries: tuple = ()
 class Claim(Record):            # something that must be true for the design to work
     id: str; statement: str; kind: ClaimKind = MEASURABLE; acceptance: Acceptance
     rationale: str = ""; source: str = ""; grounded_by: list[str]; gates: list[str]
@@ -122,6 +147,11 @@ class Claim(Record):            # something that must be true for the design to 
     note: str = ""; owner: str = ""   # P2.1: a NOMINEE for an assumption, never an attribution
     fallback: str = ""                # P2.4: why it may be carried outside an operating
                                       #   context; counts only through an attribution
+    terminal: str = ""                # P2.5a: declared Terminal, "" = by kind; strict reader
+    authority: str = ""               # P2.5a: an expert judgment's NOMINEE (terminal human)
+    results: tuple = ()               # in memory: every entry of results/<id>.json, oldest first
+    attributions: tuple = ()          # in memory: interactive AttributionRecords, newest first
+    standing: Standing | None = None  # in memory: set by verdicts.view only
 class Need(Record):             # a claim with no gate: the extension protocol's trigger
     id: str; claim_ids: list[str]; quantity: str = ""; claim_class: str = ""
     status: NeedStatus = OPEN; candidates: list[ToolCandidate]; chosen: str = ""
@@ -275,6 +305,8 @@ def atomic_write_text(path, text) -> None    # write temp + os.replace; never tr
 def atomic_write_json(path, obj) -> None     # sorted keys, indent=2, trailing newline; NaN refused
 def read_json(path, default=None) -> Any
 def sha256_text(text: str) -> str
+def canonical_json(value) -> str             # P2.5a: THE canonical form: sorted, compact, no NaN
+def seal(form) -> str                        # sha256 of canonical_json(form): a result's seal
 def short_hash(text: str, n: int = 12) -> str
 def human_bytes(n: int) -> str
 def human_duration(seconds: float) -> str
@@ -322,6 +354,8 @@ def is_repo(path) -> bool
 def git_head(root) -> str | None                     # HEAD's sha; None outside git
 def ls_files(root, relpaths, *, others=True) -> list[str] | None   # -z; relative to root
 def ident(root) -> str | None                        # author identity, timestamp dropped
+def show(root, relpath) -> bytes | None              # P2.5a: the bytes HEAD holds at relpath
+def model_dirty(root, relpaths) -> bool | None       # P2.5a: any of them differs from HEAD
 def commit_times(root, relpaths) -> dict[str, str]   # path -> its last commit's time
 ```
 Argv form with `-C root`, never a shell string. The environment strips `GIT_DIR`,
@@ -370,7 +404,12 @@ def project_paths(root) -> dict[str, str]              # every well-known path, 
 
 def read_project(root) -> ProjectMeta                   # .atompipe/project.json, strict
 def write_project(root, meta) -> str | None             # the path, or None when unchanged
-def read_record(path, kind, *, model_entry="") -> Record | list[PhysicalResult]   # STRICT
+def read_record(path, kind, *, model_entry="") -> Record | ResultsFile           # STRICT
+RESULTS_LISTS = ("results", "attributions")   # P2.5a: a results file's two sealed lists
+SEAL_SCHEMA = 1; ROLES = ("owner", "authority")
+CONTRADICTS_KEYS = ("gate", "code", "rho", "value", "units", "inside")
+class ResultsFile(list):        # P2.5a: list[PhysicalResult], plus .attributions and .raw
+def append_signed(root, claim_id, list_name, entry: dict) -> dict  # THE writer of a sealed entry
 def write_record(root, kind, record, *, record_id=None) -> str | None             # None: unchanged
 def load(root, *, model_prose=None) -> Ledger   # the records; a legacy ledger migrated IN MEMORY; verdicts []
 def save(root, ledger: Ledger) -> None  # tests and the migration only (see below)
@@ -1481,9 +1520,19 @@ class Resolution:
     rows: dict[str, Row]; notes: list[str]
     read_sets: dict[str, set[tuple]]   # last_read_sets: Param.gates and why (S-30)
     anchors: Anchors | None            # what the entries were judged against (watched_paths)
+    standings: dict[str, Standing]     # P2.5a: judge_results; reaches compose through view
+    track: dict[str, tuple[Contradiction, ...]]   # P2.5a: track_record, per evaluator
 def resolve(root, registry, projection, ledger, *, model_error="", availability=None,
             digests=None, anchors=None, now="", model=None) -> Resolution
 def apply_prerequisites(resolution, registry) -> Resolution   # rung 7: the rule over a resolution
+# P2.5a: the article a physical result is bound to, the judge, the one view
+def article_of(root, projection, model, *, anchors=None, digests=None,
+               resolution=None) -> dict          # {} when the model does not load
+def judge_results(ledger, here) -> dict[str, Standing]   # resolve's rung 8, never cached
+class Contradiction(NamedTuple): gate; code; claim; article; when; who; channel; value;
+                                 measured; units
+def track_record(ledger) -> dict[str, tuple[Contradiction, ...]]   # from every fail's contradicts
+def view(ledger, resolution) -> Ledger    # THE view builder: verdicts + each claim's standing
 ```
 **`apply_prerequisites`** (P2.2-D7, D8) is `resolve`'s last rung and `check`'s again over
 the view it merges with its sweep (`cli._swept`). It walks `gates.plan`'s order over
@@ -2141,6 +2190,9 @@ class ClaimCause(StrEnum): FAILED | PHYSICAL_FAIL | ERRORED | PREREQUISITE_ERROR
                          | NO_EVALUATOR | NO_OWNER | OWNER_UNATTRIBUTED | NO_REASON
                          | UNRUN | INVALIDATED | NO_ARTICLE | OWNED | PHYSICAL_PASS | CHECKED
                          | ACCEPTANCE | OUTSIDE_CONTEXT | FALLBACK      # P2.4
+                         | CONTRADICTION | JUDGED_FAIL | NO_AUTHORITY | AUTHORITY_UNATTRIBUTED
+                         | ARTICLE_MOVED | CLAIM_MOVED | JUDGMENT_MOVED | ARTICLE_UNJUDGED
+                         | AWAITING_JUDGMENT | ON_ARTICLE | JUDGED      # P2.5a
 class Attribution(NamedTuple): owner: str; reason: str     # the signing channel's record of an owner
 @dataclass(frozen=True)
 class Composed: status: ClaimStatus; cause: ClaimCause; cites: tuple; verdict: Verdict | None
@@ -2178,6 +2230,16 @@ def limit_disagreements(ledger, verdicts=None, *, stale_gates=()) -> list[LimitD
                                                              #   current verdicts only (review of P2.4)
 def outside_context(verdict) -> bool                         # its unqualified token is CONTEXT_OUTSIDE's
 def assumption_reason(claim) -> str                          # rationale (assumption) | fallback (otherwise)
+# P2.5a: terminal, authority and the physical path
+def terminal_of(claim) -> str                 # declared, or by kind; "" for every automated claim
+def identity_matches(who, name) -> bool       # the whole git identity, or its name part, exactly
+def claim_digest(claim) -> str                # statement, kind, terminal, acceptance, note, authority
+AWAITS_A_PERSON: frozenset[ClaimCause]        # the Stale causes a check run cannot answer
+def blocks(composed) -> bool                  # BLOCKING_STATUSES, but not a Stale AWAITS_A_PERSON alone
+def contradicted_by(claim, verdicts, *, stale_gates=(), needs=None, codes=None) -> list[dict]
+@dataclass(frozen=True)
+class Rebuild: article: str; claims: tuple; moved: tuple    # to_dict()
+def rebuild(ledger) -> list[Rebuild]          # the rebuild prediction, over a judged view
 ```
 `covers` binds by id **or** by tag, and an empty `spec.claims` covers nothing, never
 everything: a wildcard would let one misregistered gate mark a project proven.
@@ -3361,7 +3423,84 @@ never "ignored").
   Nothing else moves without a new declaration (`ctx.acceptance`,
   `operating_context`, `Claim.fallback`).
 
+## What P2.5a moved
+
+A physical result, an owner and an expert judgment gained a channel; a physical pass
+is bound to its article and to the claim as the person read it; a fail on a claim an
+evaluator had passed is a contradiction on that evaluator's track record. The spine
+digest moved (models, verdicts); every entry re-keys once. Decision rows: `P2.5a-Dn`
+in `docs/plan/phase-2.md`.
+
+- **The channel** (`cli._channel`, `claim physical <id> pass|fail|assume`):
+  `interactive` from a TTY with no agent marker (`cli.AGENT_MARKERS`, any
+  `CLAUDE_CODE_*`) once the person typed the claim's id; `agent-session <id>` under a
+  marker; `non-interactive` from a pipe. Only `interactive` makes a pass count or an
+  attribution exist; `assume` is refused off it. `who` is `vcs.ident`, `when` the clock;
+  `--who`/`--when` are refused before the project is read (`cli.REFUSED_FLAGS`). With
+  no git identity nothing is recorded.
+- **`results/<id>.json`** is `{"results": [...], "attributions": [...]}` (the second
+  absent when empty): every entry written by `store.append_signed` is sealed —
+  `digest = util.seal({"schema", "claim_id", "list", ...every stored key but digest})`
+  — and chained (`prev`); a legacy prefix gets virtual digests, so the first sealed
+  entry covers it whole. A broken seal or link refuses the file on every command,
+  naming the file, the list, the entry and the fix, and every fail a `git checkout`
+  would discard (`vcs.show`); `doctor` names it as a `results` row and still answers.
+  `store.save` never appends after a sealed entry; `write_record("results")` never
+  writes one. The index carries each file's `attributions`.
+- **The article** (`verdicts.article_of`): the design as the model holds it when a
+  result is recorded — every input and derived value, the model's code closure
+  (canonical AST), and the bytes of every project file a path-valued parameter names or
+  a current verdict read — hashed; `revision`/`dirty` are shown, never hashed.
+- **The judge** (`verdicts.judge_results`, in `resolve`; `Resolution.standings`): a
+  pass counts when it is `interactive`, recorded by someone, on a measurement or a
+  judgment, for the claim's authority by them, at a value its acceptance admits, on
+  the current article, for the claim as it reads now, with its evidence's bytes as
+  recorded — the article judged before the evidence. Never cached. It reaches `compose`
+  through `verdicts.view`, the one view builder (`cli._resolved`, `site.state`,
+  `write_last_check`); a raw `store.load` ledger (`standing is None`) reads every pass
+  Pending build in P2.1's words.
+- **The ladder** (`claims.compose`): Failing `contradiction` / `judged-fail`; Gap
+  `no-authority` / `authority-unattributed` (an expert-judgment claim until its
+  authority records it, as themselves); Stale `article-moved` / `claim-moved` /
+  `judgment-moved` / `article-unjudged`, leading an invalidated evaluator and citing it;
+  Assumed `awaiting-judgment`; Checked (VERIFIED) `on-article` / `judged`. Owners come
+  from `Claim.attributions` (`store` assembles them), so no spine module passes
+  `owners=`. A Stale that awaits a person's act never stops `check` (`claims.blocks`,
+  P2.5a-D27); it is unresolved. An owned fallback carries a pass outside its context
+  whether or not that pass is invalidated.
+- **The rebuild prediction** (`claims.rebuild`): the articles a counting result is bound
+  to whose design moved — `rebuild:` lines on `check` and `status`, `### Articles to
+  rebuild` in the report, `rebuild` in every JSON channel, `last_check.json` and
+  `state.json`. In P2.5a it never under-predicts and over-predicts freely (the article
+  is the whole design); "names nothing else" is P2.5b's, with `export`'s articles.
+- **The track record** (`verdicts.track_record`, `Resolution.track`): from every fail's
+  sealed `contradicts`, keyed by the evaluator's code digest; `gate show`'s `track
+  record:` row and `--json` `track_record`. It moves no status but the claim's own.
+- **Words** (`report.HUMAN`): `terminal`, the new leads, `not_counted`, `signing`,
+  `physical`; `claim list` prints the terminal's word (`[automated]`, `[measurement]`,
+  `[assumption]`, `[expert judgment: <authority>]`); `why` gains `PHYSICAL RESULTS`.
+  JSON claim rows (`report.claim_json`) gain `terminal`, `terminal_word`, `authority`,
+  `article`, `standing`, `contradicts`; `physical_result` gains `counts`, `why`,
+  `recorded`. The page's "contradict" title is `phrases.disagree`, and a result's tone
+  keys on `counts`.
+
 ## Limits: what the spine cannot see, named
+
+- **A re-sealed forgery counts (P2.5a).** A seal is a plain sha256: a process that
+  writes `results/<id>.json` with `channel: interactive` and recomputes the seal, calls
+  `store.append_signed` in process, or opens a pty with the agent markers unset mints
+  an entry indistinguishable from a person's. The seal catches drift and a helpful
+  agent's shortcut — a hand edit, a fail flipped, an entry removed — nothing more
+  (D-13); P3's permission rule on `results/` (W9) is the lock. Tail truncation is not
+  detectable by a chain; git is (the file is tracked).
+- **The article is the design at recording, not the object (P2.5a).** A person who
+  records a result on a part printed from an older revision binds it to the current
+  design; the prompt shows the revision and any uncommitted model edits for that reason.
+  And it is the whole design: any value change moves every recorded article (the
+  rebuild prediction over-predicts). P2.5b's `export` records build-time articles.
+- **An institution as an authority (P2.5a).** The authority's git identity must be
+  theirs; an institution with no person's identity cannot record its judgment until
+  named delegates exist (on the check-in batch).
 
 - **A limit no run visits (P2.4, as its review restated it).** The qualification moves
   each limit a qualification run read — x0.1, x0.5, x2, x10, each limit of a band alone

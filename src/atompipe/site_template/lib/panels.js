@@ -21,7 +21,7 @@
 import { el, mount, field } from "./dom.js";
 import {
   chip, tag, claimStatus, verdictStatus, claimKind,
-  num, quantity, age, isAged, stamp, plural, code, phrase, needWord,
+  num, quantity, age, isAged, stamp, plural, code, phrase, needWord, outcomeWord,
 } from "./format.js";
 
 /** `invalidated` -> `Invalidated`, for a field label. */
@@ -235,8 +235,10 @@ function claimRow(claim, state, app) {
     chip(status),
     el("span", { class: "claim-id mono", text: claim.id }),
     el("span", { class: "claim-statement", text: claim.statement || "(no statement)" }),
+    // The title is state.json's `phrases.disagree` (P2.5a-D18): the page's own
+    // "contradict" was a second sense for the ledger's *contradiction*.
     claim.disagree ? tag("status and evidence disagree", { tone: "bad",
-      title: "the resolver and the verdicts contradict each other — a defect to report" }) : null,
+      title: phrase("disagree") }) : null,
     claim.critical === false ? tag("not required", { tone: "muted" }) : null,
     // Beside it, the CLAIM's limit (`claim.limit_text`, written by site.state),
     // never the verdict's: a compared pair is the one kind whose two limits can
@@ -254,13 +256,24 @@ function claimRow(claim, state, app) {
     el("details", { class: "disclosure" }, summary, body));
 }
 
+/** One recorded physical result. Its tone is keyed on `result.counts` — the
+ *  judge's word (state.json, `report.result_facts`) — and on `passed` only to
+ *  tell a fail from a pass: a pass that does not count (from an agent session,
+ *  on a moved article, with changed evidence) is never the ok tone, and says
+ *  why. What slipped through (critique 3 of the P2.5a design): this painted any
+ *  `passed` in the ok tone, so an agent's pass on a Pending build claim read
+ *  green on the page alone. */
 function physicalResult(result) {
-  const ok = !!result.passed;
-  return el("div", { class: `physical-result ${ok ? "tone-ok" : "tone-bad"}` },
-    el("b", { text: ok ? "A physical result was recorded: pass. " : "A physical result was recorded: fail. " }),
+  const pass = result.passed === true;
+  const counts = result.counts === true;
+  const tone = !pass ? "tone-bad" : counts ? "tone-ok" : "tone-muted";
+  return el("div", { class: `physical-result ${tone}` },
+    el("b", { text: `${phrase("result_recorded")} ${outcomeWord(pass ? "pass" : "fail")} — ` +
+                    `${phrase(counts ? "result_counts" : "result_not_counted")}. ` }),
     el("span", { text: result.detail || "" }),
+    !counts && result.why ? el("p", { class: "claim-reason", text: result.why }) : null,
     el("p", { class: "muted small" },
-      [result.who, stamp(result.when)].filter(Boolean).join(" · ")),
+      [result.recorded || result.who, stamp(result.when)].filter(Boolean).join(" · ")),
     (result.evidence || []).length
       ? el("ul", { class: "file-list" }, ...result.evidence.map((e) => fileRef(e)))
       : null);

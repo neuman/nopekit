@@ -460,7 +460,7 @@ class ReportNeverOverclaims(unittest.TestCase):
 #: Where each status's claims are listed in the report (P2.1-D19), typed here:
 #: a claim is in exactly its section, once.
 _SECTION_OF = {
-    "pass": "## What is PROVEN", "verified": "## Pending build",
+    "pass": "## What is PROVEN", "verified": "## What is PROVEN",
     "unverified": "## Pending build", "unclaimed": "## Gaps", "asserted": "## Assumed",
     "fail": "## Failing, stale, skipped or open", "refuted": "## Failing, stale, skipped or open",
     "stale": "## Failing, stale, skipped or open", "blocked": "## Failing, stale, skipped or open",
@@ -480,6 +480,56 @@ _HEAD_WORD = {"fail": "failing", "refuted": "failing", "stale": "stale", "blocke
 #: The operating-context mark (P2.4), as the spine mints it.
 _OUTSIDE = ('context:outside|{"hi":40.0,"key":"load_n","lo":0.0,"value":60,'
             '"why":"outside"}')
+
+
+def _physical_claims(c) -> list:
+    """One claim per P2.5a cause, built in memory with the standing the judge
+    would give it (``verdicts.judge_results`` has its own tests)."""
+    from atompipe.models import AttributionRecord, EntryStanding, Standing
+    phys, assume = ClaimKind.PHYSICAL, ClaimKind.ASSUMPTION
+    dana = {"terminal": "human", "authority": "Dana"}
+    passed = PhysicalResult(passed=True, who="Sam <s@x>", channel="interactive",
+                            article={"hash": "a" * 64}, when="2026-10-04")
+    judged = PhysicalResult(passed=True, who="Dana <d@x>", channel="interactive",
+                            authority="Dana", article={"hash": "a" * 64}, when="2026-10-04")
+
+    def standing(state, result, counts=False):
+        why = "" if counts else state
+        return Standing(state, 0, "a" * 64, ("config.t 7.0 -> 8.0",),
+                        (EntryStanding(0, True, counts, why, "a" * 64,
+                                       "moved" if "moved" in state else "current"),))
+
+    def judged_claim(cid, **kw):
+        return c(cid, assume, rationale="a safety call", **dana, **kw)
+
+    awaiting = judged_claim("K29")
+    awaiting = dataclasses.replace(awaiting, attributions=(AttributionRecord(
+        role="authority", name="Dana", reason="a safety call",
+        claim_digest=claims_mod.claim_digest(awaiting), who="Dana <d@x>",
+        channel="interactive"),))
+    return [
+        c("K21", phys, physical_result=PhysicalResult(passed=False, detail="sagged",
+                                                      contradicts=[
+            {"gate": "g.k1", "code": "c" * 64, "rho": "", "value": 0.4, "units": "mm",
+             "inside": True}])),
+        judged_claim("K22", physical_result=PhysicalResult(
+            passed=False, who="Dana <d@x>", authority="Dana", detail="too heavy")),
+        c("K23", assume, rationale="r", terminal="human"),
+        judged_claim("K24"),
+        c("K25", phys, physical_result=passed, results=(passed,),
+          standing=standing("article-moved", passed)),
+        c("K26", phys, physical_result=passed, results=(passed,),
+          standing=standing("claim-moved", passed)),
+        judged_claim("K27", physical_result=judged, results=(judged,),
+                     standing=standing("judgment-moved", judged)),
+        c("K28", phys, physical_result=passed, results=(passed,),
+          standing=standing("article-unjudged", passed)),
+        awaiting,
+        c("K30", phys, physical_result=passed, results=(passed,),
+          standing=standing("current", passed, counts=True)),
+        judged_claim("K31", physical_result=judged, results=(judged,),
+                     standing=standing("current", judged, counts=True)),
+    ]
 
 
 def _every_status_ledger() -> tuple[Ledger, _Reg, dict, frozenset]:
@@ -507,6 +557,9 @@ def _every_status_ledger() -> tuple[Ledger, _Reg, dict, frozenset]:
         # fallback carries (R-6: three more causes the report must place)
         c("K18", gates=["g.k18"]), c("K19", gates=["g.k19"]),
         c("K20", gates=["g.k20"], owner="Bo", fallback="linear past the range"),
+        # P2.5a: the physical path and expert judgment (R-6: eleven more causes
+        # the report must place, and VERIFIED reachable at last).
+        *_physical_claims(c),
     ]
     verdicts = [
         Verdict(gate="g.k1", claims=["K1"], passed=True),
@@ -585,12 +638,11 @@ class EveryUnresolvedClaimIsListed(unittest.TestCase):
         return md, composed
 
     def test_every_status_and_cause_is_reached(self):
-        """Every status `compose` can give — `verified` is not one until article
-        binding (a typed pass reads Pending build, review of P2.1) — and every
-        cause."""
+        """Every status `compose` can give — `verified` too from P2.5a, a pass
+        on the current article and an authority's judgment (until then a typed
+        pass read Pending build, review of P2.1) — and every cause."""
         _md, composed = self._md()
-        self.assertEqual({c.status.value for c in composed.values()},
-                         set(_SECTION_OF) - {"verified"})
+        self.assertEqual({c.status.value for c in composed.values()}, set(_SECTION_OF))
         self.assertEqual({c.cause.value for c in composed.values()},
                          {cause.value for cause in claims_mod.ClaimCause})
 
@@ -607,7 +659,7 @@ class EveryUnresolvedClaimIsListed(unittest.TestCase):
 
         md, composed = self._md(gaps=needs_only)
         missing = {p.split(" ", 1)[0] for p in listing_problems(md, composed)}
-        self.assertEqual(missing, {"K7", "K8", "K9", "K10", "K19"})
+        self.assertEqual(missing, {"K7", "K8", "K9", "K10", "K19", "K23", "K24"})
 
 
 class RequiredIsSaidAsABool(unittest.TestCase):

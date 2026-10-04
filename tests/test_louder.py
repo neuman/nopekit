@@ -1052,7 +1052,10 @@ _AFTER_EDIT = (
     ("doctor", ["doctor"]),
     ("site.init", ["site", "init"]), ("site.build", ["site", "build"]),
     # Last: it records a result, and every command above reads P8 without one.
-    ("claim.physical", ["claim", "physical", PHYSICAL_PROBE, "--pass"]),
+    # With its evidence (P2.5a-D9: a pass on a physical claim needs a file), and
+    # under the test identity (D5: with none, nothing is recorded).
+    ("claim.physical", ["claim", "physical", PHYSICAL_PROBE, "--pass",
+                        "--evidence=photos/p8.jpg"]),
 )
 
 #: Every CLI command path that renders a claim's status or an evaluator's
@@ -1175,8 +1178,11 @@ def _louder_project() -> _Run:
         raise AssertionError(f"{model}: expected one `bed_xy: float = 220.0` line, found {n}")
     with open(model, "w", encoding="utf-8") as fh:
         fh.write(edited)
+    os.makedirs(os.path.join(root, "photos"), exist_ok=True)
+    with open(os.path.join(root, "photos", "p8.jpg"), "wb") as fh:
+        fh.write(b"\xff\xd8 the probe article \xff\xd9")
     for key, argv in _AFTER_EDIT:
-        out[key] = _env.atompipe(argv, cwd=root, home=home)
+        out[key] = _env.atompipe(argv, cwd=root, home=home, identity=True)
     files = {}
     for name, rel in (("junit", report_mod.JUNIT_DEFAULT), ("readiness", "docs/readiness.md"),
                       ("state", "site/data/state.json"), ("format.js", "site/lib/format.js"),

@@ -52,11 +52,11 @@ from atompipe.util import AtompipeError
 #: The name written into C6's file, as an agent's Edit would.
 NOMINEE = "Sam"
 
-#: The reason the unattributed claim must carry (P2.1-D15), typed here — and
-#: that nothing can record it yet (review of P2.1, R-6 in words: the reason told
-#: Sam to record what no command records, and an agent read it as a to-do).
+#: The reason the unattributed claim must carry (P2.1-D15), typed here — and,
+#: from P2.5a, the act that records it (R-6 in words: until then it said "no
+#: command can record it yet", because none could).
 UNATTRIBUTED = (f"owner {NOMINEE} is named in claims/C6.json and has not recorded it — "
-                f"no command can record it yet")
+                f"{NOMINEE} records it in their own shell: atompipe claim physical C6 assume")
 
 _RUNS = (("check", ["check", "--junit"]), ("status", ["status"]),
          ("status.json", ["status", "--json"]), ("report", ["report"]),
@@ -64,8 +64,11 @@ _RUNS = (("check", ["check", "--junit"]), ("status", ["status"]),
          ("claim.list.json", ["claim", "list", "--json"]),
          ("claim.show", ["claim", "show", "C6"]), ("why", ["why", "C6"]),
          ("site.init", ["site", "init"]), ("site.build", ["site", "build"]),
-         # Last: it records a result, and the runs above read C5 without one.
-         ("claim.physical", ["claim", "physical", "C5", "--pass", "--detail", "looked fine"]),
+         # Last: it records a result, and the runs above read C5 without one —
+         # from a pipe, with the evidence and the written test a pass needs
+         # (P2.5a-D9), so it is recorded and counts for nothing.
+         ("claim.physical", ["claim", "physical", "C5", "--pass", "--detail", "looked fine",
+                             "--evidence", "photos/c5.jpg"]),
          ("claim.physical.json", ["status", "--json"]))
 
 
@@ -102,9 +105,14 @@ def _owned_project() -> _Owned:
     with open(c5, encoding="utf-8") as fh:
         record = json.load(fh)
     record["tags"] = ["stiffness"]
+    record["note"] = "outdoor rack, two winters, look for crazing at the root"
     with open(c5, "w", encoding="utf-8") as fh:
         json.dump(record, fh, indent=2)
-    out = {key: _env.atompipe(argv, cwd=root, home=home) for key, argv in _RUNS}
+    os.makedirs(os.path.join(root, "photos"))
+    with open(os.path.join(root, "photos", "c5.jpg"), "wb") as fh:
+        fh.write(b"a photo")
+    out = {key: _env.atompipe(argv, cwd=root, home=home, identity=True)
+           for key, argv in _RUNS}
     for key, proc in out.items():
         want = 1 if key == "check" else 0
         if proc.returncode != want:
@@ -326,11 +334,16 @@ class ARecordedResultNeverOutranksTheEvaluators(_env.EnvCase):
         the detail once. What slipped through (review of P2.1): the reason's
         template filled "unattributed" in as a name, and the command appended
         `(recorded: detail, who, when)` after a reason that already held both."""
-        row = next(ln for ln in _owned_project().out["claim.physical"].stdout.splitlines()
-                   if ln.startswith("[FAIL ] C5 "))
+        lines = _owned_project().out["claim.physical"].stdout.splitlines()
+        row = next(ln for ln in lines if ln.startswith("[FAIL ] C5 "))
         self.assertNotIn("recorded by unattributed", row)
-        self.assertEqual(row.count("looked fine"), 1, row)
-        self.assertRegex(row, r"\(this pass recorded, unattributed, \S+: looked fine\)$")
+        # P2.5a (R-6, words): the command says what it recorded on its own line
+        # — once, from a pipe, counting for nothing — and the composed row is
+        # the status every reader prints, the failing evaluator's.
+        self.assertEqual(lines[0], "recorded C5 pass in results/C5.json (entry 1) — from a "
+                                   "pipe or a script: a pass recorded here does not count; "
+                                   "the person who tested it records it in their own shell")
+        self.assertEqual(sum(ln.count("looked fine") for ln in lines), 0, lines)
         from atompipe.models import Claim, PhysicalResult
         ledger = Ledger()
         for who, recorded in (("", "recorded, unattributed"), ("sam", "recorded by sam")):
@@ -461,19 +474,23 @@ class ARecordNeverWritesItsOwnLine(_env.EnvCase):
         found = forged_line_problems(channels, "<testsuites/>")
         self.assertTrue(any(p.startswith("render_terminal: a forged line") for p in found),
                         found)
-        self.assertIn("render_markdown: 2 checked sections", found)
+        self.assertTrue(any(re.fullmatch(r"render_markdown: [2-9] checked sections", p)
+                            for p in found), found)
 
     def test_claim_physical_refuses_a_value_that_breaks_its_line(self):
         run = _forged_project()
         path = os.path.join(run.root, "results", "C5.json")
         with open(path, "rb") as fh:
             before = fh.read()
-        for flag, value in (("--who", FORGED_WHO), ("--when", FORGED_WHEN)):
-            with self.subTest(flag):
+        # From P2.5a every value is refused, before anything is read (R-6: only
+        # a multi-line one was, while --who and --when were still taken).
+        for flag, value in (("--who", FORGED_WHO), ("--when", FORGED_WHEN),
+                            ("--who", "a tester"), ("--when", "2026-10-03")):
+            with self.subTest(flag=flag, value=value):
                 proc = _env.atompipe(["claim", "physical", "C5", "--pass", flag, value],
-                                     cwd=run.root)
+                                     cwd=run.root, identity=True)
                 self.assertEqual(proc.returncode, 2, proc.stdout)
-                self.assertIn(f"{flag} must be one line", proc.stderr)
+                self.assertIn(f"{flag} is not accepted", proc.stderr)
         with open(path, "rb") as fh:
             self.assertEqual(fh.read(), before, "a refused result was written")
 

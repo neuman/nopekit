@@ -78,12 +78,16 @@ import types
 import typing
 from typing import Any, Callable, NamedTuple
 
+from . import vcs
 from .models import (
     ALWAYS_WRITTEN,
     FORBIDDEN_KEYS,
     RECORD_KINDS,
+    TERMINALS_BY_KIND,
     ArtifactKind,
+    AttributionRecord,
     Claim,
+    ClaimKind,
     Decision,
     InputArtifact,
     Ledger,
@@ -92,9 +96,11 @@ from .models import (
     Param,
     PhysicalResult,
     ProjectMeta,
+    Terminal,
     View,
 )
-from .util import AtompipeError, FileDigests, atomic_write_json, atomic_write_text, ensure_dir
+from .util import (AtompipeError, FileDigests, atomic_write_json, atomic_write_text,
+                   canonical_json, ensure_dir, seal)
 
 # --------------------------------------------------------------------------- #
 # layout constants
@@ -666,7 +672,20 @@ def write_record(root: str, kind: str, record: Any, *, record_id: str | None = N
         for item in record:
             if not isinstance(item, PhysicalResult):
                 raise TypeError(f"results hold PhysicalResult, not {type(item).__name__}")
+            # A sealed or channel-recorded entry is `append_signed`'s alone: this
+            # writer re-encodes through the dataclass, dropping defaults, which
+            # changes the keys a seal covers (P2.5a-D6).
+            if item.digest or item.prev or item.channel:
+                raise ValueError("a sealed or channel-recorded result is written by "
+                                 "store.append_signed only")
         rid = record_id
+        existing = os.path.join(root, kind, f"{rid}.json") if isinstance(rid, str) else ""
+        if existing and os.path.isfile(existing):
+            found = read_record(existing, kind)
+            if _holds_sealed(found):
+                raise AtompipeError(
+                    f"results/{rid}.json holds sealed entries — a whole-file write would "
+                    f"drop or re-encode them; only `atompipe claim physical` appends to it")
     else:
         if not isinstance(record, cls):
             raise TypeError(f"write_record({kind!r}) takes a {cls.__name__}, "
@@ -872,29 +891,7 @@ def _parse_record(label: str, kind: str, stem: str, raw: bytes, *, model_entry: 
     _check_id(stem, label)
 
     if kind == "results":
-        for key in data:
-            if key in FORBIDDEN_KEYS["*"]:
-                _refuse_anywhere(data, label, "", "")
-            if key != "results":
-                raise AtompipeError(
-                    f'{label}: unknown key "{key}" (did you mean "results"?) — a results '
-                    f'file is {{"results": [...]}}, oldest first')
-        items = data.get("results")
-        if not isinstance(items, list):
-            raise AtompipeError(f'{label}: expected {{"results": [...]}} — "results" must '
-                                f"be a list of physical results")
-        out: list[PhysicalResult] = []
-        for i, item in enumerate(items):
-            where = _join("results", i)
-            if not isinstance(item, dict):
-                raise AtompipeError(f"{label}: {where} must be an object")
-            _check_keys(item, PhysicalResult, label, where)
-            if not isinstance(item.get("passed"), bool):
-                raise AtompipeError(
-                    f'{label}: {where}.passed must be true or false — a result nobody wrote '
-                    f"as a bool is not a pass")
-            out.append(PhysicalResult.from_dict(item))
-        return out
+        return _parse_results(label, stem, data)
 
     _check_keys(data, cls, label, model_entry=model_entry, hint=hint)
     # A claim's `critical` is a statement — required, or not — so it is a bool
@@ -918,6 +915,8 @@ def _parse_record(label: str, kind: str, stem: str, raw: bytes, *, model_entry: 
     # *Rejected:* coercing "0.8" to 0.8 (it rewrites what the file says, as the
     # `critical` rule above refuses to); reading the claim with no limit (a
     # typed limit silently ignored compares the value with nothing).
+    if kind == "claims":
+        _check_terminal(label, data)
     acceptance = data.get("acceptance") if kind == "claims" else None
     if isinstance(acceptance, dict):
         for key in ("limit", "limit_hi"):
@@ -960,6 +959,374 @@ def _parse_record(label: str, kind: str, stem: str, raw: bytes, *, model_entry: 
     return record
 
 
+# --------------------------------------------------------------------------- #
+# a claim's terminal and authority (P2.5a-D1, D2)
+# --------------------------------------------------------------------------- #
+#: A display word typed as a terminal value -> the value it names. The words
+#: are GLOSSARY §1's and never values (P2.5a-D1): "simulation" is how `solver`
+#: prints, once P2.5b judges the declaration.
+_TERMINAL_WORDS = {"simulation": "solver", "closed-form calculation": "closed_form",
+                   "closed form": "closed_form", "expert judgment": "human",
+                   "physical": "measurement"}
+
+
+def _check_terminal(label: str, data: dict) -> None:
+    """Refuse a declared ``terminal`` outside ``Terminal`` or outside its kind's
+    set (``TERMINALS_BY_KIND``), an ``authority`` on a claim whose terminal is
+    not ``human``, and an ``owner`` on one whose terminal is — each only when
+    the field is PRESENT (R-10: a new refusal binds the new declaration; zero
+    bundled claim files declare either, measured before it landed).
+
+    What a refusal stops (P2.5a-D1): a terminal typed to lower the bar — an
+    agent writing ``"terminal": "human"`` on a measurable claim to leave its
+    evaluator — and a display word typed as a value (``"simulation"``), which
+    would otherwise print over evidence nobody judged to be one. *Rejected:*
+    lower-casing and accepting (``"Simulation"`` would read as nothing it
+    names); refusing a physical claim with no terminal (every existing project:
+    the kind says measurement)."""
+    try:
+        kind = ClaimKind(data.get("kind") or ClaimKind.MEASURABLE)
+    except ValueError:
+        return                                   # `from_dict` names the kind
+    allowed = TERMINALS_BY_KIND[kind]
+    order = ("closed_form", "solver", "datasheet", "measurement", "none", "human")
+    terminal = ""
+    if "terminal" in data:
+        terminal = data["terminal"]
+        values = [t.value for t in Terminal]
+        if not isinstance(terminal, str) or terminal not in values:
+            shown = json.dumps(terminal)
+            named = _TERMINAL_WORDS.get(str(terminal).strip().lower()) \
+                if isinstance(terminal, str) else None
+            close = named or (difflib.get_close_matches(terminal, values, n=1, cutoff=0.6)
+                              or [None])[0] if isinstance(terminal, str) else None
+            guess = f' (did you mean "{close}"? — a display word is never a value)' \
+                if close else ""
+            raise AtompipeError(
+                f'{label}: "terminal" {shown} is not a terminal{guess} — one of '
+                f"{', '.join(values)}; a {kind.value} claim takes "
+                f"{', '.join(sorted(allowed, key=order.index))}")
+        if terminal not in allowed:
+            raise AtompipeError(
+                f'{label}: "terminal": "{terminal}" is not one a {kind.value} claim can end in '
+                f"— it takes {', '.join(sorted(allowed, key=order.index))}; a declared "
+                f"terminal can raise the bar a claim is held to, never lower it")
+    effective = terminal or {ClaimKind.PHYSICAL: "measurement",
+                             ClaimKind.ASSUMPTION: "none"}.get(kind, "")
+    if "authority" in data:
+        if not isinstance(data["authority"], str):
+            raise AtompipeError(f'{label}: "authority" must be a name, not '
+                                f'{json.dumps(data["authority"])}')
+        if effective != "human" and data["authority"].strip():
+            raise AtompipeError(
+                f'{label}: "authority" names who an expert-judgment claim stays with, and '
+                f'this claim does not end in one ("terminal": "human") — delete the key, or '
+                f'declare the terminal')
+    if effective == "human" and str(data.get("owner") or "").strip():
+        raise AtompipeError(
+            f'{label}: "owner" is an assumption\'s, and this claim ends in expert judgment — '
+            f'the person or institution it stays with is its "authority"; one name per role')
+
+
+# --------------------------------------------------------------------------- #
+# results/<id>.json — two sealed, chained, append-only lists (P2.5a-D6, D7)
+# --------------------------------------------------------------------------- #
+#: The two lists a results file holds, in file order: physical results, and the
+#: owners' and authorities' attributions. `attributions` is absent when empty,
+#: so every file written before P2.5a is byte-identical (D6). *Rejected:* one
+#: list with a kind discriminator (a reader not taught the discriminator reads
+#: an attribution as a result — `_counting_result` reads every entry as
+#: passed-or-not); a file of their own (a second channel-written path for P3's
+#: permission rule).
+RESULTS_LISTS: tuple[str, ...] = ("results", "attributions")
+
+#: The seal's schema: part of every sealed form, so a change to what a seal
+#: covers is a new number, never a silent re-reading of an old seal.
+SEAL_SCHEMA = 1
+
+#: An attribution's roles (`AttributionRecord.role`).
+ROLES: tuple[str, ...] = ("owner", "authority")
+
+#: The closed keys of one `contradicts` item (P2.5a-D14): what a contradiction
+#: names — the evaluator, its code digest and read-set hash, the value it gave,
+#: its units, and whether its pass lay inside its operating context.
+CONTRADICTS_KEYS: tuple[str, ...] = ("gate", "code", "rho", "value", "units", "inside")
+
+#: What a `channel` may hold (`cli._channel`): a person's own shell, a pipe or a
+#: script, or an agent session with its id; "" is a legacy entry.
+_CHANNEL = re.compile(r"^(?:|interactive|non-interactive|agent-session \S+)$")
+
+#: The text-valued keys of each list's entries: a non-string there is refused.
+_TEXT_KEYS = {"results": ("when", "who", "detail", "channel", "authority", "units",
+                          "claim_digest", "rho", "contradiction_check", "prev", "digest"),
+              "attributions": ("role", "name", "reason", "claim_digest", "who", "when",
+                               "channel", "prev", "digest")}
+
+
+class ResultsFile(list):
+    """``read_record(path, "results")``: a claim's physical results, oldest
+    first — a list, so every reader that took one before P2.5a reads it as
+    before — carrying ``attributions`` (every verified ``AttributionRecord``,
+    oldest first) and ``raw`` (each list's entries exactly as the file stores
+    them: the writer re-seals nothing, and appends to these)."""
+
+    def __init__(self, items: Any = (), *, attributions: Any = (),
+                 raw: dict[str, list[dict]] | None = None) -> None:
+        super().__init__(items)
+        self.attributions: list[AttributionRecord] = list(attributions)
+        self.raw: dict[str, list[dict]] = raw if raw is not None else {
+            "results": [], "attributions": []}
+
+
+def _holds_sealed(found: Any) -> bool:
+    raw = getattr(found, "raw", None) or {}
+    return bool(raw.get("attributions")) or any("digest" in entry
+                                                  for entry in raw.get("results") or ())
+
+
+def _seal_form(claim_id: str, list_name: str, entry: dict) -> dict:
+    """What a sealed entry's digest is taken over: the entry's stored keys but
+    its digest, with the seal's schema, the CLAIM ID and the LIST NAME — so an
+    entry copied into another claim's file, or from one list to the other, does
+    not verify there (critique of the invariants-first design: without the id,
+    a pass copied from C5's file into C1's read as C1's)."""
+    return {"schema": SEAL_SCHEMA, "claim_id": claim_id, "list": list_name,
+            **{key: value for key, value in entry.items() if key != "digest"}}
+
+
+def _virtual_digest(claim_id: str, list_name: str, entry: dict, prev: str) -> str:
+    """A legacy (unsealed) entry's place in the chain: the seal of its stored
+    form and the previous link. The first sealed entry's ``prev`` is the last of
+    these, so it covers the WHOLE legacy prefix — an edit to any legacy entry
+    before a sealed one breaks the chain (D6). *Rejected:* chaining from the
+    last legacy entry only (a fail flipped to a pass earlier in the prefix
+    would move Failing to Pending build unseen)."""
+    return seal({"schema": SEAL_SCHEMA, "claim_id": claim_id, "list": list_name,
+                 "legacy": entry, "prev": prev})
+
+
+def _chain_tip(claim_id: str, list_name: str, entries: list[dict]) -> str:
+    """The ``prev`` the next entry of ``entries`` must carry."""
+    prev = ""
+    for entry in entries:
+        prev = entry["digest"] if "digest" in entry else _virtual_digest(
+            claim_id, list_name, entry, prev)
+    return prev
+
+
+def _verify_chain(label: str, entries: list[dict], claim_id: str, list_name: str,
+                  data: dict) -> None:
+    """Refuse ``entries`` unless every sealed entry's seal and link hold, no
+    unsealed entry follows a sealed one, and (for ``attributions``) every entry
+    is sealed — naming the file, the list, the entry and the fix (D7). Tail
+    truncation is not detectable by a chain; git is (the file is tracked)."""
+    prev = ""
+    sealed = False
+    for i, entry in enumerate(entries):
+        where = f"{list_name}[{i}]"
+        if "digest" not in entry:
+            if list_name == "attributions":
+                _broken(label, where, "an attribution with no seal — an owner or an "
+                        "authority is recorded only by `atompipe claim physical "
+                        f"{claim_id} assume`, typed in their own shell", claim_id, data)
+            if sealed:
+                _broken(label, where, "an entry with no seal after a sealed one — only "
+                        "`atompipe claim physical` appends to this file, and it seals what "
+                        "it writes", claim_id, data)
+            if entry.get("channel") or entry.get("prev"):
+                _broken(label, where, "an entry that names a channel but carries no seal",
+                        claim_id, data)
+            prev = _virtual_digest(claim_id, list_name, entry, prev)
+            continue
+        sealed = True
+        if entry.get("prev", None) != prev:
+            _broken(label, where, "its link to the entry before it does not hold — an "
+                    "entry before it was removed, edited, reordered or inserted",
+                    claim_id, data)
+        if seal(_seal_form(claim_id, list_name, entry)) != entry.get("digest"):
+            _broken(label, where, "its seal does not match what it says — it was edited "
+                    "after it was recorded, or copied here from another file or list",
+                    claim_id, data)
+        prev = entry["digest"]
+
+
+def _entry_words(entry: dict) -> str:
+    when = str(entry.get("when") or "an unknown date")
+    who = str(entry.get("who") or "nobody named")
+    detail = " ".join(str(entry.get("detail") or "").split())
+    return f"recorded {when} by {who}" + (f" ({detail})" if detail else "")
+
+
+def _restore_advice(label: str, claim_id: str, data: dict) -> str:
+    """The fix a refused results file needs, and every fail that fix would
+    discard (critique 6 of the P2.5a design: "git checkout" alone undid an
+    uncommitted fail, and the claim read Checked again with nothing saying so).
+    Compares the working file with the committed one (``vcs.show``, read-only);
+    a fail the commit does not hold is named, with the command that records it
+    again after the restore."""
+    rel = f"results/{claim_id}.json"
+    head = vcs.show(_CURRENT_ROOT[-1], rel) if _CURRENT_ROOT else None
+    committed: set[str] = set()
+    if head is not None:
+        try:
+            old = json.loads(head.decode("utf-8"))
+            for name in RESULTS_LISTS:
+                for entry in (old.get(name) or ()) if isinstance(old, dict) else ():
+                    committed.add(canonical_json(entry))
+        except (UnicodeDecodeError, ValueError, TypeError):
+            committed = set()
+    fails = [entry for entry in (data.get("results") or ()) if isinstance(entry, dict)
+             and entry.get("passed") is not True and canonical_json(entry) not in committed]
+    if head is None:
+        fix = (f"restore {rel} from where it was copied, or from git if it was ever "
+               f"committed — nothing can verify it as it is")
+    else:
+        fix = f"git checkout -- {rel}, then record again"
+    if fails:
+        named = "; ".join(_entry_words(entry) for entry in fails)
+        detail = " ".join(str(fails[0].get("detail") or "...").split())
+        fix += (f". That discards {len(fails)} fail(s) git does not hold — {named} — "
+                f"so record each again after the restore: atompipe claim physical "
+                f"{claim_id} fail --detail \"{detail}\"")
+    return fix
+
+
+#: The project root a results file is being read under, for `_restore_advice`
+#: (`read_record` pushes it; a parse with no file — the migration's plan — has
+#: none, and the advice then says nothing git holds).
+_CURRENT_ROOT: list[str] = []
+
+
+def _broken(label: str, where: str, what: str, claim_id: str, data: dict) -> None:
+    raise AtompipeError(
+        f"{label}: {where} — {what}. Every command refuses this file until it is "
+        f"restored: {_restore_advice(label, claim_id, data)}")
+
+
+def _refuse_entry_values(label: str, list_name: str, where: str, item: dict) -> None:
+    for key in _TEXT_KEYS[list_name]:
+        if key in item and not isinstance(item[key], str):
+            raise AtompipeError(f"{label}: {where}.{key} must be text, not "
+                                f"{json.dumps(item[key])}")
+    if "channel" in item and not _CHANNEL.match(item["channel"]):
+        raise AtompipeError(
+            f'{label}: {where}.channel "{item["channel"]}" is not a channel — interactive, '
+            f"non-interactive or agent-session <id>")
+    if list_name == "attributions":
+        if item.get("role") not in ROLES:
+            raise AtompipeError(f"{label}: {where}.role must be one of {', '.join(ROLES)}, "
+                                f"not {json.dumps(item.get('role'))}")
+        if not str(item.get("name") or "").strip():
+            raise AtompipeError(f"{label}: {where}.name is empty — an attribution names who")
+        return
+    if not isinstance(item.get("passed"), bool):
+        raise AtompipeError(
+            f"{label}: {where}.passed must be true or false — a result nobody wrote as a "
+            f"bool is not a pass")
+    measured = item.get("measured")
+    if measured is not None and (isinstance(measured, bool)
+                                 or not isinstance(measured, (int, float))):
+        raise AtompipeError(f"{label}: {where}.measured must be a number or null")
+    for key, kind in (("evidence", list), ("contradicts", list), ("article", dict),
+                      ("evidence_sha256", dict)):
+        if key in item and not isinstance(item[key], kind):
+            raise AtompipeError(f"{label}: {where}.{key} must be a "
+                                f"{'list' if kind is list else 'object'}")
+    for j, contra in enumerate(item.get("contradicts") or ()):
+        if not isinstance(contra, dict):
+            raise AtompipeError(f"{label}: {where}.contradicts[{j}] must be an object")
+        unknown = [key for key in contra if key not in CONTRADICTS_KEYS]
+        if unknown:
+            raise AtompipeError(
+                f'{label}: {where}.contradicts[{j}] has unknown key "{unknown[0]}" — a '
+                f"contradiction names {', '.join(CONTRADICTS_KEYS)} and nothing else")
+
+
+def _parse_results(label: str, stem: str, data: dict) -> ResultsFile:
+    """The strict reader for ``results/<id>.json`` (``_parse_record``'s branch):
+    ``{"results": [...], "attributions": [...]}``, each entry's keys closed
+    (``PhysicalResult``'s, ``AttributionRecord``'s, with a suggestion), each
+    chain verified (``_verify_chain``)."""
+    for key in data:
+        if key in FORBIDDEN_KEYS["*"]:
+            _refuse_anywhere(data, label, "", "")
+        if key not in RESULTS_LISTS:
+            close = difflib.get_close_matches(key, RESULTS_LISTS, n=1, cutoff=0.6)
+            raise AtompipeError(
+                f'{label}: unknown key "{key}"'
+                + (f' (did you mean "{close[0]}"?)' if close else "")
+                + ' — a results file is {"results": [...], "attributions": [...]}, oldest '
+                  'first')
+    items = data.get("results")
+    if not isinstance(items, list):
+        raise AtompipeError(f'{label}: expected {{"results": [...]}} — "results" must '
+                            f"be a list of physical results")
+    attributions = data.get("attributions", [])
+    if not isinstance(attributions, list):
+        raise AtompipeError(f'{label}: "attributions" must be a list')
+    for name, entries, cls in (("results", items, PhysicalResult),
+                               ("attributions", attributions, AttributionRecord)):
+        for i, item in enumerate(entries):
+            where = _join(name, i)
+            if not isinstance(item, dict):
+                raise AtompipeError(f"{label}: {where} must be an object")
+            _check_keys(item, cls, label, where)
+            _refuse_entry_values(label, name, where, item)
+    for name, entries in (("results", items), ("attributions", attributions)):
+        _verify_chain(label, entries, stem, name, data)
+    return ResultsFile([PhysicalResult.from_dict(item) for item in items],
+                       attributions=[AttributionRecord.from_dict(item)
+                                     for item in attributions],
+                       raw={"results": [dict(item) for item in items],
+                            "attributions": [dict(item) for item in attributions]})
+
+
+def append_signed(root: str, claim_id: str, list_name: str, entry: dict) -> dict:
+    """Append ``entry`` to ``results/<claim_id>.json``'s ``list_name``, sealed and
+    chained; return it as stored. THE one writer of a sealed entry (P2.5a-D6):
+    ``claim physical`` calls it under the CLI's lock.
+
+    It re-reads the file's stored entries (the strict reader verifies every seal
+    and link — a broken file is refused, never appended to), sets ``prev`` to
+    the chain's tip and ``digest`` to the seal (``_seal_form``), and writes the
+    file with every earlier entry exactly as it was stored: never re-encoded
+    through the dataclass, whose defaults would change the keys a seal covers.
+    The bytes it writes are read back through the strict reader before they
+    are written, so it never writes a file its own reader refuses.
+
+    What a seal does NOT stop (D-13's stated limit; SPINE_CONTRACT's limits): a
+    process that recomputes a seal, calls this function in process, or opens a
+    pty with the agent markers unset mints an entry indistinguishable from a
+    person's. The seal catches drift and a helpful agent's shortcut — a hand
+    edit of a recorded result, a fail flipped, an entry removed — and P3's
+    permission rule on ``results/`` is the lock (W9)."""
+    if list_name not in RESULTS_LISTS:
+        raise ValueError(f"not a results list: {list_name!r}")
+    label = f"results/{claim_id}.json"
+    _check_id(claim_id, label)
+    directory = os.path.join(root, "results")
+    _refuse_case_variant(directory, claim_id, label)
+    path = os.path.join(directory, claim_id + ".json")
+    if os.path.isfile(path):
+        found = read_record(path, "results")
+        raw = {name: [dict(item) for item in found.raw.get(name) or ()]
+               for name in RESULTS_LISTS}
+    else:
+        raw = {name: [] for name in RESULTS_LISTS}
+    chain = raw[list_name]
+    stored = {key: value for key, value in entry.items() if key not in ("prev", "digest")}
+    stored["prev"] = _chain_tip(claim_id, list_name, chain)
+    stored["digest"] = seal(_seal_form(claim_id, list_name, stored))
+    chain.append(stored)
+    body: dict[str, Any] = {"results": raw["results"]}
+    if raw["attributions"]:
+        body["attributions"] = raw["attributions"]
+    data = _dumps(body, label)
+    _parse_record(label, "results", claim_id, data)
+    atomic_write_text(path, data.decode("utf-8"))
+    return stored
+
+
 def _label(path: str) -> str:
     """`claims/C1.json`: the record's name inside the project, which is what a
     person looks for — never a temp-dir path three screens wide."""
@@ -989,7 +1356,13 @@ def read_record(path: str, kind: str, *, model_entry: str = "") -> Any:
         raw = _read_bytes(path)
     except OSError as exc:
         raise AtompipeError(f"{label}: cannot be read ({exc.strerror or exc})") from None
-    return _parse_record(label, kind, stem, raw, model_entry=model_entry)
+    if kind != "results":
+        return _parse_record(label, kind, stem, raw, model_entry=model_entry)
+    _CURRENT_ROOT.append(os.path.dirname(os.path.dirname(os.path.abspath(path))))
+    try:
+        return _parse_record(label, kind, stem, raw, model_entry=model_entry)
+    finally:
+        _CURRENT_ROOT.pop()
 
 
 def _record_files(root: str, kind: str) -> list[tuple[str, str]]:
@@ -1090,7 +1463,19 @@ def _assemble(root: str, meta: ProjectMeta, parsed: dict[str, list[tuple[str, An
     results = dict(parsed.get("results", []))
     claims = ordered["claims"]
     for claim in claims:
-        claim.physical_result = _counting_result(results.get(claim.id) or [])
+        found = results.get(claim.id)
+        if found is None:
+            # Never `or []`: a file holding only attributions is an EMPTY list of
+            # results, and `or` would drop its attributions with it.
+            found = ResultsFile()
+        claim.physical_result = _counting_result(found)
+        claim.results = tuple(found)
+        # Only an attribution a person typed in their own shell counts, and the
+        # strict reader has verified its seal (P2.5a-D11). Assembled HERE, so a
+        # raw `store.load` reader sees the same owners as the judged view.
+        claim.attributions = tuple(reversed([
+            record for record in getattr(found, "attributions", ()) or ()
+            if record.channel == "interactive"]))
     for artifact in ordered["inputs"]:
         artifact.bytes = _input_size(root, artifact.path)
     # Newest first, as `decisions.render_log` prints storage order and `add` used
@@ -1287,6 +1672,11 @@ def save(root: str, ledger: Ledger) -> None:
         # earlier fail, when one exists, not the last line: appended only when
         # it is not already there, or a save would write that fail a second time.
         if claim.physical_result not in existing:
+            if _holds_sealed(existing):
+                raise AtompipeError(
+                    f"results/{claim.id}.json holds sealed entries — a whole-ledger save "
+                    f"never appends an unsealed result after them; record it with "
+                    f"`atompipe claim physical`")
             write_record(root, "results", [*existing, claim.physical_result],
                          record_id=claim.id)
     write_index(root)
@@ -1362,7 +1752,9 @@ def build_index(root: str, *, digests: FileDigests | None = None) -> dict[str, A
 
     Keys, in this order: `generated` (`INDEX_BANNER`), `schema`,
     `records_digest`, `meta`, `claims`, `params`, `decisions`, `needs`, `inputs`,
-    `results`, `views`, `unregistered_inputs`, `problems`. Each record row is its
+    `results`, `attributions` (P2.5a: each results file's attributions, where it
+    has any), `views`, `unregistered_inputs`, `problems`. A results row is the
+    entry as the file stores it. Each record row is its
     file's content with its id; each input row adds `sha256` (the digest of the
     bytes NOW), `pinned` (the record's sha256), `drift` (the two differ) and
     `exists` (null for an input with no path). `unregistered_inputs` are evidence
@@ -1458,7 +1850,12 @@ def build_index(root: str, *, digests: FileDigests | None = None) -> dict[str, A
         "decisions": [_row(d) for d in ledger.decisions],
         "needs": [_row(n) for n in ledger.needs],
         "inputs": inputs,
-        "results": {cid: [_encode(r) for r in items] for cid, items in results},
+        "results": {cid: [dict(r) for r in getattr(items, "raw", {}).get("results", ())]
+                    if hasattr(items, "raw") else [_encode(r) for r in items]
+                    for cid, items in results},
+        "attributions": {cid: list(items.raw.get("attributions") or ())
+                         for cid, items in results
+                         if getattr(items, "raw", {}).get("attributions")},
         "views": [_row(v) for v in ledger.views],
         "unregistered_inputs": unregistered,
         "problems": sorted(problems),
@@ -2270,4 +2667,6 @@ __all__ = [
     "load", "save", "is_legacy",
     "build_index", "write_index", "agree", "records_digest",
     "MigrationPlan", "migrate_legacy", "ensure_ignore_blocks", "init",
+    # P2.5a: the sealed results file
+    "RESULTS_LISTS", "SEAL_SCHEMA", "ROLES", "CONTRADICTS_KEYS", "ResultsFile", "append_signed",
 ]

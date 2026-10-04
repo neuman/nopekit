@@ -328,7 +328,8 @@ class OutsideTheContextAPassDoesNotCount(_env.EnvCase):
                          {"cause": "outside-context", "errored": False, "key": "gap",
                           "reason": OUTSIDE + " — an owned assumption would carry it as "
                           "Assumed: name its owner and a fallback reason in claims/c1.json "
-                          "(owner, fallback) — nothing can record the owner yet",
+                          "(owner, fallback), and the owner records it in their own shell: "
+                          "atompipe claim physical c1 assume",
                           "word": "gap"})
         text = run(self, project, "report", code=0).stdout
         gaps = text.split("## Gaps", 1)[1].split("\n## ", 1)[0]

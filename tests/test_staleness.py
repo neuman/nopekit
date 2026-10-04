@@ -2892,7 +2892,8 @@ class LastCheck(_env.EnvCase):
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertEqual(list(data), ["when", "spine", "fingerprint", "reads", "statuses",
-                                      "errored", "counts", "worst", "params", "influence"])
+                                      "errored", "counts", "worst", "params", "influence",
+                                      "rebuild"])
         self.assertEqual(data["when"], NOW)
         self.assertEqual(data["spine"], verdicts.spine_digest())
         self.assertEqual(data["statuses"], {cid: status.value for cid, status in

@@ -140,30 +140,59 @@ else.
 
 Classify each one honestly:
 
-| Kind | Meaning |
-|---|---|
-| `measurable` | An automated evaluator settles it from the model — the only kind one settles. |
-| `physical` | Only an article settles it. Watertightness, feel, RF range, taste. |
-| `assumption` | Accepted provisionally, with a reason and an owner. Recorded so it stays visible. |
+| Kind | Meaning | Where its evidence bottoms out |
+|---|---|---|
+| `measurable` | An automated evaluator settles it from the model — the only kind one settles. | *automated* |
+| `physical` | Only an article settles it. Watertightness, feel, RF range, taste. | *measurement*, or *expert judgment: <authority>* |
+| `assumption` | Accepted provisionally, with a reason and an owner. Recorded so it stays visible. | *assumption*, or *expert judgment: <authority>* |
+
+`claim list` prints that last column. A claim may declare it with `"terminal"` in its
+file — `measurement` or `human` for a physical claim, `none` or `human` for an
+assumption — and a declaration never lowers the bar: the reader refuses a pairing
+outside those, and a measurable claim declared `closed_form`, `solver` or `datasheet`
+reads exactly as an undeclared one.
 
 Say the physical ones out loud early: *"No evaluator here can settle C5 — it needs a
 real hull in real water. It is pending build until you test it."* This builds trust
-and sets expectations correctly. When the test happens, record what was observed:
-`atompipe claim physical C5 pass --who <name> --detail "<what was seen>"`. Until
-article binding lands, a recorded pass still reads **Pending build** (its reason: "a
-pass recorded by <name>, not bound to an article") and never makes the project
-*ready*: nothing yet ties it to an article built from the current design. A recorded
-**fail** keeps counting: no later pass, and no edit of the claim's kind, takes it
-back.
+and sets expectations correctly. A physical claim needs a test written down — an
+acceptance condition, or a `note` saying what to do — before any pass can count.
 
-**An assumption needs an owner who records it — and no command can record one yet.**
-Writing `"owner": "<name>"` into `claims/<id>.json` does not make it Assumed: an owner
-counts only through the signing channel, which has not landed, and a hand or agent
-edit reads unattributed. So until it lands every assumption reads Gap, and `check`
-exits 1 for each one that is required. Say it as it is: *"C6 is a gap, and nothing
-here can record its owner yet: `check` exits 1 on it until the signing channel
-lands."* Never edit the owner in to clear a gap, and never make a claim not required
-to get `check` to pass — whether it is required is the user's call.
+**The person who tested it records the result, in their own shell — never you.**
+Ask them to run `atompipe claim physical C5 pass --evidence photos/c5.jpg --detail
+"<what was seen>"` (or `fail`); the command shows what it will record, and they type
+the claim's id to confirm it. Who recorded it is read from git's identity; there is no
+`--who` and no `--when` (both are refused — say when it was observed in `--detail`).
+A pass on a physical claim needs at least one `--evidence` file under the project.
+From your own shell — your Bash tool, or a `!`-prefixed command inside Claude Code,
+which runs in your environment — a pass is recorded and **counts for nothing**: say
+so, and ask the person to record it themselves. A fail counts wherever it is
+recorded. A pass counts only on the article it was recorded on — the design as it
+was then — so when the design moves, the claim reads **Stale** and `check` and
+`status` name the article to rebuild (`rebuild: article <hash> (C5) — …`): a check run
+cannot restore it, a new article can. A fail keeps counting through every later pass
+and every edit, until a later checkpoint records a pass on a new build. `--measured
+<value>` records the value in the claim's units, and decides pass or fail where the
+claim has a limit. A result is recordable on an automated claim too: a fail there,
+beside an evaluator that passed, is a **contradiction** on that evaluator's track
+record (`gate show`); a pass there settles nothing.
+
+**An assumption needs an owner who records it.** Name the owner in the claim file
+(`"owner": "<name>"`, as git names them), and the owner runs `atompipe claim physical
+C6 assume` in their own shell. An owner you write into the file counts for nothing on
+its own: until the owner records it, C6 reads Gap, and `check` exits 1 for it if it is
+required. Say it as it is: *"C6 is a gap until Sam records its owner: ask Sam to run
+`atompipe claim physical C6 assume`."* Editing the owner or the rationale after it was
+recorded un-records it. Never edit an owner in to clear a gap, and never make a claim
+not required to get `check` to pass — whether it is required is the user's call.
+
+**Some claims end in a person's judgment** — "safe to run near people". Write
+`"terminal": "human"` and `"authority": "<name>"` into its file. It reads Gap until
+that person records it with `atompipe claim physical <id> assume --authority
+"<name>"`, Assumed under their name until they judge it with `atompipe claim physical
+<id> pass --authority "<name>"` (or `fail`), each in their own shell, as themselves.
+Only the authority settles it; you never record it, and a physical claim judged this
+way still needs its test written down and its evidence. `results/<id>.json` records
+each person's git name and email beside what they recorded.
 
 ### 3. Reach first light fast
 
@@ -302,7 +331,7 @@ does — and never edit a gate's number to make a claim pass. Two readings follo
   its pass counts nothing here (a fail outside would). Bring the input inside, find an
   evaluator qualified where the design is, or — the human's call, never yours —
   carry the claim on an owned fallback (`owner` and `fallback` in its claim file,
-  recorded through the signing channel).
+  and the owner runs `atompipe claim physical <id> assume` in their own shell).
 
 **Never simulate a physical claim.** No CFD run makes a printed seam watertight.
 
