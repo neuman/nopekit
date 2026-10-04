@@ -1559,9 +1559,13 @@ def summarise(
       re-runs, `export <m> --dry-run`).
 
     `ready` keeps its meaning — `n_blocking == 0`, nothing stops `check` — for
-    every reader that has it (`status --json`, the private bench, a page
-    scaffolded before P2.1); P2.5's `Readiness` replaces it. *Rejected:*
-    flipping it now, a key changing meaning under every reader at once.
+    every reader that has it (`status --json`, any reader outside this
+    repository, a page scaffolded before P2.1), until the rename pass; *ready*
+    is `all_required_checked` and `milestones[<m>].ready`, both from
+    `unresolved`, the one predicate (P2.5b-D3). What slipped through: this
+    paragraph promised a `Readiness` object that P2.5b never built, and named a
+    reader shipped text never names. *Rejected:* flipping it now, a key
+    changing meaning under every reader at once.
 
     `n_gaps` counts gap RECORDS (`find_gaps`' Needs: an automated claim no
     registered evaluator covers), not claims reading Gap — `counts["gap"]` is

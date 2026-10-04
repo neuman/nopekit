@@ -38,8 +38,9 @@ clean and nobody read it.)
 ## Invariants — do not break these
 
 The entire value of this project is that its report refuses to claim anything it has
-not checked. Four properties carry that, each with a test that actively tries to
-violate it (`tests/test_invariants.py`):
+not checked. Four properties carry that, each with tests that actively try to
+violate it (`tests/test_invariants.py` first; the table at the end of this section names
+every class that holds each invariant):
 
 1. **A skipped gate is never a pass.** A missing solver leaves the claim **Skipped**
    — beside a gate that passed, too.
@@ -92,7 +93,8 @@ Two more, learned the hard way and enforced in `tests/test_packs.py`:
 Three more came with Phase 1, which moved every verdict into a per-gate cache and
 every record into its own file — each move a new place to show a PASS nothing
 earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
-`tests/test_admission.py`:
+`tests/test_admission.py`, and — as Phase 2 extended them — in the classes the table
+below names:
 
 7. **A stale verdict is never served as current.** A verdict is keyed by the hash of
    what its gate actually read — parameters, files, claim records, the acceptance
@@ -265,9 +267,9 @@ one place a pass nothing earned costs money. Enforced in `tests/test_export.py`,
     `report --milestone` said the boundary's *ready* over a forged cache and `status`
     listed no milestone at all.)
 
-One more came with checkpoint P2.3, numbered as PLAN §4.0.1 numbers it (11–14 land with
-their mechanisms). Enforced in `tests/test_mutation.py`, over every mutation entry point
-in `src/`:
+One more came with checkpoint P2.3, numbered as PLAN §4.0.1 numbers it (13 and 14 land
+with their mechanisms: preferences in P4, the site in P5). Enforced in
+`tests/test_mutation.py`, over every mutation entry point in `src/`:
 
 15. **A mutation pass writes nothing, changes nothing it was handed, and never says more
     than it ran.** It runs in process on a copy of the known-good control: nothing is
@@ -280,6 +282,30 @@ in `src/`:
     `mutation 0 conclusive` over every evaluator; a runner that drew up its plan after
     seeing which mutations passed printed `mutation 1/1 fail` over an evaluator one of
     two had passed.)
+
+**Which test holds each.** `tests/test_meta.py`'s `INVARIANT_CLASSES` maps every number
+above to the classes that try to break it, and this table is that map, row for row:
+`EveryInvariantHasItsTest` goes red on a number nothing maps, `TheInvariantTableIsTheMap`
+on a row that names other classes than the map, and `InvariantClassesNeverSkip` on any
+skip inside them. (What slipped through: each group above named its test files once,
+the day it landed, and Phase 2 grew invariants 2, 4, 7 and 9 in files no sentence here
+named.)
+
+| # | Classes |
+|---|---|
+| 1 | `test_invariants.SkipIsNotPass`, `test_invariants.CheckedMeansEveryEvaluatorPassed` |
+| 2 | `test_invariants.ErrorIsNotPass`, `test_louder.ErrorIsLouder`, `test_invariants.UnqualifiedIsTheSpinesWord`, `test_prerequisites.AnErroredPrerequisiteStaysLouder` |
+| 3 | `test_invariants.RegistryRefusesLoggers` |
+| 4 | `test_invariants.ReportNeverOverclaims`, `test_status_table.UnqualifiedBesideAPassIsNeverChecked`, `test_invariants.CheckedMeansEveryEvaluatorPassed`, `test_goalposts.APassMustMeetTheAcceptanceItRead`, `test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked`, `test_goalposts.AnEvaluatorStatesItsOwnUnits`, `test_physical.TheCheckedSectionHoldsOnlyBoundResults` |
+| 5 | `test_packs.ControlsAreSealed` |
+| 6 | `test_packs.NegativeControlsFire` |
+| 7 | `test_staleness.StaleIsNotCurrent`, `test_goalposts.TheGoalpostLivesInClaims`, `test_physical.AMovedArticleReadsStale`, `test_fig4.TwoArticlesExactly` |
+| 8 | `test_records.IndexNeverDisagreesWithRecords`, `test_records.NoCommandWritesARecord`, `test_records.MilestonesAreRecords`, `test_records.TheExportRecordIsSealedAndChained` |
+| 9 | `test_admission.AdmissionIsDemonstrated`, `test_admission.QualificationIsPaired`, `test_admission.EveryConclusiveMutationMustFail`, `test_admission.TheCheckRunTakesTheQualifiedPath`, `test_context.OutsideTheContextAPassDoesNotCount`, `test_context.AFailOutsideStillCounts`, `test_context.KnownGoodOutsideIsUnqualified`, `test_context.AMutationPassingOutsideStillCounts`, `test_goalposts.AGoalpostIsNeverAKey` |
+| 10 | `test_prerequisites.PrerequisiteFailureIsNeverAPass`, `test_prerequisites.ACachedPassNeverSurvivesAFailedPrerequisite`, `test_prerequisites.NeedsCycleRefused`, `test_prerequisites.TierInversionRefused` |
+| 11 | `test_owner.AnOwnerWrittenByHandNeverCounts`, `test_signing.HumanChannelOnly`, `test_signing.WhoAndWhenAreNeverTyped`, `test_signing.TheResultsFileIsSealedAndChained`, `test_signing.AnOwnerOnlyThroughTheChannel`, `test_physical.SignedMeansSomething`, `test_physical.APhysicalFailNeverLosesItsPowerToFail`, `test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord`, `test_physical.AnExpertJudgmentStaysWithItsAuthority`, `test_physical.AResultBindsToAnExportedArticle`, `test_physical.AFailIsSupersededOnlyOnAnotherExportedArticle` |
+| 12 | `test_physical.RenderersAgreeOnPhysicalClaims`, `test_export.ReadyIsOnePredicate`, `test_export.TheBoundaryReExecutes`, `test_export.ACacheThatLiesIsCaughtAtTheBoundary`, `test_export.DryRunIsTheSamePath`, `test_export.GoingAheadIsAPersonsDecision`, `test_vocabulary.TheHardwareClauseIsAlwaysSaid`, `test_export.EveryCacheReaderSaysAsLastEvaluated` |
+| 15 | `test_mutation.MutationIsSealed` |
 
 ## House rules
 

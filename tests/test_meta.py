@@ -11,6 +11,9 @@ here exists because it is the route of least resistance (R-6, R-7):
   test class that exists and holds at least one test, and CLAUDE.md numbers
   exactly the invariants mapped here: a new invariant without a test, or a test
   class renamed out from under its invariant, is red.
+* **TheInvariantTableIsTheMap** — CLAUDE.md's table of which classes hold each
+  invariant names exactly what is mapped here: a class added to the map and not
+  to the table, or a row naming a class nothing maps, is red (Phase 2's close).
 * **InvariantClassesNeverSkip** — no skip and no expected-failure anywhere in
   those classes, nor in a class PLANNED to carry a later invariant, from the
   commit that first creates it (before CLAUDE.md names it). A tool-dependent
@@ -271,6 +274,96 @@ class EveryInvariantHasItsTest(unittest.TestCase):
         mapping[1] = "test_invariants.SkipIsNotPassRenamed"
         problems = _mapping_problems(_read(CLAUDE_MD), mapping)
         self.assertTrue(any("SkipIsNotPassRenamed" in p for p in problems), problems)
+
+
+# --------------------------------------------------------------------------- #
+# TheInvariantTableIsTheMap
+# --------------------------------------------------------------------------- #
+#: A row of CLAUDE.md's "Which test holds each" table: ``| 9 | `a.B`, `c.D` |``.
+_TABLE_ROW = re.compile(r"^\|\s*(\d+)\s*\|(.*)\|\s*$")
+
+
+def _table(claude_text: str) -> dict[int, list[str]]:
+    """The invariant table under CLAUDE.md's ``## Invariants``: number -> the
+    backticked ``module.Class`` names its row gives, in the row's order. A
+    number given twice keeps every name, so a split row reads as a duplicate."""
+    match = re.search(r"^## Invariants\b[^\n]*\n(.*?)(?=^## |\Z)", claude_text, re.M | re.S)
+    out: dict[int, list[str]] = {}
+    for line in (match.group(1) if match else "").splitlines():
+        row = _TABLE_ROW.match(line)
+        if row:
+            out.setdefault(int(row.group(1)), []).extend(
+                re.findall(r"`(test_\w+\.\w+)`", row.group(2)))
+    return out
+
+
+def _table_problems(claude_text: str, mapping: dict[int, str | list[str]]) -> list[str]:
+    table = _table(claude_text)
+    if not table:
+        return ["CLAUDE.md's invariants carry no table naming each one's test classes"]
+    problems: list[str] = []
+    for number in sorted(set(table) | set(mapping)):
+        mapped = mapping.get(number, [])
+        mapped = [mapped] if isinstance(mapped, str) else list(mapped)
+        named = table.get(number, [])
+        if len(named) != len(set(named)):
+            problems.append(f"invariant {number}: the table names a class twice: {named}")
+        missing = [ref for ref in mapped if ref not in named]
+        extra = [ref for ref in named if ref not in mapped]
+        if missing:
+            problems.append(f"invariant {number}: INVARIANT_CLASSES maps {missing}, "
+                            f"which CLAUDE.md's table does not name")
+        if extra:
+            problems.append(f"invariant {number}: CLAUDE.md's table names {extra}, "
+                            f"which INVARIANT_CLASSES does not map")
+    return problems
+
+
+class TheInvariantTableIsTheMap(unittest.TestCase):
+    """CLAUDE.md says, for each invariant, which classes hold it — exactly the
+    classes ``INVARIANT_CLASSES`` maps, no more and no fewer.
+
+    What slipped through (Phase 2's close): each group of invariants named its
+    test files once, the day it landed, and Phase 2 grew invariants 2, 4, 7 and
+    9 in files no sentence there named — a reader asking which test holds 9 found
+    `test_admission` and not the operating-context classes in `test_context`, nor
+    `AGoalpostIsNeverAKey`. `EveryInvariantHasItsTest` held the numbers, never
+    the names a reader is told."""
+
+    def test_the_table_is_the_map(self):
+        problems = _table_problems(_read(CLAUDE_MD), INVARIANT_CLASSES)
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_every_number_has_a_row(self):
+        self.assertEqual(sorted(_table(_read(CLAUDE_MD))), sorted(INVARIANT_CLASSES))
+
+    def test_a_class_dropped_from_a_row_is_caught(self):
+        """Planted: the table loses the operating-context class 9 gained in P2.4."""
+        text = _read(CLAUDE_MD)
+        ref = "`test_context.OutsideTheContextAPassDoesNotCount`, "
+        self.assertIn(ref, text, "the planted edit has nothing to drop")
+        problems = _table_problems(text.replace(ref, "", 1), INVARIANT_CLASSES)
+        self.assertEqual(problems, [
+            "invariant 9: INVARIANT_CLASSES maps "
+            "['test_context.OutsideTheContextAPassDoesNotCount'], which CLAUDE.md's "
+            "table does not name"])
+
+    def test_a_class_the_map_does_not_hold_is_caught(self):
+        """Planted: a row naming a class no invariant maps — a reader would trust it."""
+        mapping = dict(INVARIANT_CLASSES)
+        mapping[3] = []
+        problems = _table_problems(_read(CLAUDE_MD), mapping)
+        self.assertEqual(problems, [
+            "invariant 3: CLAUDE.md's table names ['test_invariants.RegistryRefusesLoggers'], "
+            "which INVARIANT_CLASSES does not map"])
+
+    def test_no_table_is_caught(self):
+        text = _read(CLAUDE_MD)
+        stripped = "\n".join(line for line in text.splitlines()
+                             if not _TABLE_ROW.match(line))
+        self.assertEqual(_table_problems(stripped, INVARIANT_CLASSES),
+                         ["CLAUDE.md's invariants carry no table naming each one's "
+                          "test classes"])
 
 
 # --------------------------------------------------------------------------- #

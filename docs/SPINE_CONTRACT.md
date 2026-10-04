@@ -28,7 +28,7 @@ is `cli.py`'s.
 |---|---|---|---|
 | a claim, a decision, an enriched need, an input's record, a param's provenance, a declared view | `claims/`, `decisions/`, `needs/`, `inputs/<id>.json`, `params/`, `views/*.json` — one file per record | tracked | a human or the agent, editing the file; the shims `ingest`, `extract`, `decide` |
 | project meta, the model entry, the live packs | `.atompipe/project.json` | tracked | the same; `init`; `packs add` |
-| a physical result | `results/<claim-id>.json`, append-only | tracked | `claim physical` |
+| a physical result, and an owner's or an authority's attribution (P2.5a) | `results/<claim-id>.json`, append-only, every entry sealed and chained | tracked | `claim physical`, typed in a person's own shell — never by hand |
 | a parameter's value, units, rationale and what lost to it | the model (`model/*.py`: `Config`, its docstrings, `PARAMS`) | tracked | the model's author |
 | a gate's verdict, and its control's | `.atompipe/verdicts/<gate id>/`, one file per rho, never rewritten | tracked | `check`, `gate selftest` |
 | every record, in one read | `.atompipe/ledger.json` — the **index**, generated | ignored | every command but `doctor`, `init` and `--no-record` runs |
@@ -507,7 +507,8 @@ params/<name>.json         TRACKED  SPARSE: only what the model cannot hold
 decisions/<slug>.json      TRACKED  one Decision
 needs/<id>.json            TRACKED  SPARSE: only an enriched Need
 inputs/<id>.json           TRACKED  one InputArtifact; its bytes stay in inputs/<bucket>/
-results/<claim-id>.json    TRACKED  {"results": [PhysicalResult, ...]}, append-only
+results/<claim-id>.json    TRACKED  {"results": [PhysicalResult, ...], "attributions":
+                                   [AttributionRecord, ...]}, append-only, sealed (P2.5a)
 views/<id>.json            TRACKED  declared views, beside the viewgens views/*.py
 milestones/<name>.json     TRACKED  one Milestone (P2.5b); the stem IS the id
 exports/<name>.json        TRACKED  {"exports": [ExportRecord, ...]}, append-only, sealed
@@ -2452,10 +2453,19 @@ claims reading Gap: `counts["gap"]` is those), `n_blocking`, `blocking_ids`,
 `unbound_ids` (required claims with a physical pass recorded that no article binds:
 each reads Pending build, so each is in `unresolved_ids` too),
 `all_required_checked` (*ready*, GLOSSARY §4: at least one required claim, every one
-Checked — `unresolved_ids` empty), `stale`,
-and `ready`. **`ready` keeps its meaning** — `n_blocking == 0`, nothing stops `check` —
-for every reader that has it, until P2.5's `Readiness` replaces it; a reader that wants
-*ready* reads `all_required_checked`. *Rejected:* flipping `ready` in place, a key
+Checked — `unresolved_ids` empty), `stale`, `ready`, and four that Phase 2 added after
+P2.1: `not_compared` (P2.4: `{claim id: [evaluator ids]}`, the covering passes whose
+value measures another quantity or units than the claim's acceptance condition, claims
+with none left out), `rebuild` (P2.5a-D16: the rebuild prediction as `[{article, claims,
+moved}]`, empty when no article moved), `contradictions` (P2.5a-D14: `{claim id:
+[evaluator ids]}` for each claim Failing on a contradiction) and `milestones` (P2.5b:
+`{name: {ready, required, unresolved, missing, exports, last_export}}` — each
+milestone's *ready* from `unresolved`, as last evaluated; `last_export` is `null` or
+`{article, when, who}`). **`ready` keeps its meaning** — `n_blocking == 0`, nothing
+stops `check` — for every reader that has it, until the rename pass; *ready* is
+`all_required_checked` and, per milestone, `milestones[<m>].ready`, both from
+`unresolved`, the one predicate (P2.5b-D3: no `Readiness` object replaced it, as this
+paragraph promised until Phase 2 closed). *Rejected:* flipping `ready` in place, a key
 changing meaning under every reader at once.
 
 `effective_gates` is the **single** definition of which gates cover a claim, and
@@ -3343,14 +3353,22 @@ not pass, as `f"{line:<77} cached"`; then
 `6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0` (`, S skipped`, `, R errored`
 and `, U unqualified` when non-zero — an evaluator refused at its version is
 `unqualified`, never errored, here and in `--json`'s `counts`; the time and the model
-hash left this line), then
-`controls: E executed, C cached, R re-verified` when a control executed or was
-re-verified, a `note: <note>` line per `SweepResult.notes` entry (the writer's
+hash left this line), then a qualification line for every unqualified evaluator and for
+every walked one whose qualification ran (P2.3-D16: `<id> : known-good pass · known-bad
+fail · mutation n/m fail → qualified`), then
+`controls: N run, N preserved, N re-qualified` (GLOSSARY §9's words from P2.3; it read
+`E executed, C cached, R re-verified` until then) when a control ran or re-qualified,
+a `rebuild:` line per article to rebuild (P2.5a), a `note: <note>` line per
+`SweepResult.notes` entry (the writer's
 `two outcomes recorded for identical inputs` among them — collected and printed nowhere
 until the review), the skip digest, a note for gates outside the sweep, and the BLOCKING
 list.
 
-**`status`** text: `render_terminal`'s block, then in this order — `invalidated: <gate> —
+**`status`** text: `render_terminal`'s block (the readiness sentence with its hardware
+clause, the count line, a row per unresolved claim, a `rebuild:` line per article to
+rebuild, the gap records, the gates line, `next:`), then — from the review of
+P2.5b, when the project declares one — the milestones head and one line per milestone,
+as last evaluated (`report.milestone_line`), then in this order — `invalidated: <gate> —
 <reasons>` per invalidated gate (continuations indented under `invalidated: `) with
 `   (N verdicts current[, n unrun])` on the last, or `invalidated: none   (N verdicts
 current)`; `last check run: <when> (<age> ago)` from `last_check.json`, or `last check
@@ -3364,14 +3382,35 @@ admitted or pending. `status --json` drops the sweep record and its age, keeps
 "reasons", "admission", "notes"}}`) and `last_check` (`{"when", "age_s"}`, nulls
 before the first). It never runs a gate or a fixture and never writes.
 
-**`gate show`**: `last verdict` from the view (with `(stale: <why>)` when it is not
-current); the last line is the control's standing at this version, read by
-`verdicts.admission_state` (which runs nothing): `  last selftest: [ok  ] fired at this
-version (control <rho12>)`, `… [FAIL] PASSED its own known-bad at this version (control
-<rho12>)`, `… pending — control inputs moved; the next check re-verifies (control
-<rho12>)`, `… [FAIL] not admitted at this version — <why>` (a remembered crash, two
-disagreeing controls), or `… not demonstrated at this version`. JSON `last_selftest` =
-`{"outcome", "control", "at_this_version", "admission", "detail"}` or `null`. What
+`status --json` as Phase 2 closed it — every key additive (P2.1-D12), none renamed or
+re-valued: top level `root`, `meta`, `summary` (`claims.summarise`'s keys, above),
+`claims` (`{id: enum}`, the enum values kept until the rename pass), `statuses`
+(P2.1: `{id: {key, word, cause, reason, errored}}` — GLOSSARY's word is `word`),
+`errored` (P2.1: the ids Skipped by a crash), `gaps` (gap records), `stale`,
+`stale_reason`, `stale_gates`, `freshness`, `last_check`, `model` (its entry, whether
+it loaded, its error, its hash and the parameters no record defends), `packs` (`{installed, available}`), `inputs`
+(`{total, unextracted}`), `site`, `problems` and `rebuild` (P2.5a: `summary.rebuild`
+again, at the top). Against `860ffa6`, Phase 2 added `statuses`, `errored`, `rebuild`
+and, under `summary`, `counts`, `errored`, `errored_ids`, `unresolved_ids`,
+`unbound_ids`, `all_required_checked`, `not_compared`, `rebuild`, `contradictions` and
+`milestones`; `tests/test_json_keys.py` (`JsonKeysAreKept`) holds that no older key
+went.
+
+**`gate show`**: the header and docstring, `tier`/`pack`/`entry`, `claims:`,
+`runnable here:`, `prerequisites:` and `prerequisite of:` (P2.2), `control:` with its
+note, `last verdict` from the view (with `(stale: <why>)` when it is not current), then
+the evaluator's standing at this version, read by `verdicts.admission_state` (which
+runs nothing): from P2.3 `qualification: <the qualification line> (control <rho12>)`
+and its detail rows (`report.qualification_detail`: `known-good`, `limit moved`,
+`known-bad`, `mutation`, `not mutated`); a pending one's re-qualification and its last
+line, or the reason it is not qualified (`report.qualification_reason`, not yet
+qualified included) in its place; and from P2.5a `track record: N contradictions at
+this version, M at earlier versions`. Until P2.3 that standing was one `last selftest:` line in
+`fired`/`PASSED its own known-bad`/`not admitted` words (GLOSSARY §9). JSON keys:
+`gate`, `availability`, `available`, `last_verdict`, `needed_by` (P2.2),
+`qualification` (P2.3: `{state, token, reason, line, facts, moved}`), `track_record`
+(P2.5a) and `last_selftest` — kept, `{"outcome", "control", "at_this_version",
+"admission", "detail"}` or `null`, its `outcome` `"unqualified"` from P2.3. What
 slipped through (S-08): it read a ledger key `gate selftest` never wrote, so every gate
 read "(never run)" forever.
 
@@ -3470,6 +3509,34 @@ the rename pass, so `status` keeps the enum and the word is `word` (and the toke
 one that wants *ready* reads `summary.all_required_checked`, never `summary.ready`.
 *Rejected:* re-valuing `status` in place (a deny-list reader would go generous on
 "failing"); a top-level `status` map (two meanings of one key in one document).
+
+## What P2.2 moved
+
+Evaluators gained prerequisites (invariant 10). Written here when Phase 2 closed: P2.2
+documented every surface in its module's section (`gates.py`'s "Prerequisites",
+`models.py`'s prerequisite mark, `cli.py`'s `check --json`) and left this list out,
+so it was the one checkpoint a reader of these sections could not find. Decision rows:
+`P2.2-Dn` in `docs/plan/phase-2.md`.
+
+- **`GateSpec.needs`** (the last field then; `@gate(needs=[...])`): exact gate ids,
+  refused at registration when malformed, when they close a cycle or when a
+  prerequisite sits in a costlier tier than its dependent. Not in rho (D-04): declaring
+  an edge re-keys only the declaring file, through its code digest.
+- **The plan and the rule**: `gates.plan` runs each evaluator after its prerequisites,
+  registration order otherwise, and lists rows in registration order
+  (`SweepResult.order` records the run order); `gates.prerequisite_root` decides, and
+  `verdicts.apply_prerequisites` applies it to a resolution. Under a prerequisite that
+  failed, skipped, errored, is unqualified or is not registered, the dependent is not run
+  and reads `gates.blocked`'s skip, never cached or remembered; under one invalidated or
+  unrun it keeps its verdict and reads Stale.
+- **`Verdict.blocked_by` and `Verdict.blocked_kind`** (`PrerequisiteKind`), spine-only;
+  `blocked_by` writes `skipped=True, passed=False` (R-2). The claim's cause is
+  `prerequisite` or, behind a crash, `prerequisite-errored` — as loud as the crash.
+- **Channels**: `check --json` rows carry `blocked_by`/`blocked_kind`; `gate list --json`
+  rows `needs` and `needed_by`; `gate show` `prerequisites:` and `prerequisite of:`;
+  `pack validate` and `gate selftest --pack` check an edge's isolation (a bundled pack
+  may need only its own gates); `doctor` names an unregistered need. No `pruned` key and
+  no measured latency or cost descriptor (S-56 to P4).
 
 ## What P2.3 moved
 
@@ -3740,6 +3807,36 @@ A spend is named, and the place it costs money re-executes. The spine digest mov
   not count" in `why`, on the page and in JSON, named with the pass that superseded it.
 - **Words** (`report.HUMAN`): `milestone`, `readiness`, `latency`, `export`; the
   test card lists every required automated claim with a limit as a cross-check.
+
+## What the review of P2.5b moved
+
+Each a slip a refuter reproduced; decision rows `P2.5b-Rn` in `docs/plan/phase-2.md`.
+Written here when Phase 2 closed, as the review's surfaces were scattered over the
+sections above.
+
+- **Supersession needs other bytes printed**: a fail on article A stops counting
+  beside a pass on B only when no export of B carries the generator's bytes an export
+  of A carried (`EntryStanding.built`, `verdicts._built_seal` — the package's files
+  but `REPORT.md`, `model.json`, `MANIFEST.json`) and A's own export is on record. A
+  no-op line in the generator no longer releases the same print's fail.
+- **A link is a read**: `os.link`/`os.symlink` in a generator are traced (source read,
+  link written); a link inside the package is refused (`generator_linked`), and a file
+  there that no traced write put makes the article untraced — the whole design.
+- **The scratch** is `.atompipe/out/export-<m>/` in both modes (`milestones.scratch_dir`),
+  created and removed under the lock, inside the trace's out anchor.
+- **Every export record of an article is charged**: `claim physical --article` reads
+  them all (`milestones.sealed_on`, `milestones.bound_export`); latency is a
+  measurement's, from the person channel only.
+- **As last evaluated, everywhere but the boundary**: `report --milestone` and its JSON
+  (`milestone`, `last_evaluated`), the project's sentence and `status`'s milestone
+  lines say so; the package's `REPORT.md` is the boundary's (`render_markdown` with
+  `boundary=True`).
+- **Smaller**: a disagreement's refusal names the entry served and the way out, a
+  model that does not load is its own refusal kind (`model`); the swap appends the
+  record inside it and undoes itself when the append raises; a broken `exports/` seal's
+  restore walks git (`store._export_restore_advice`); the Reproduce block's comments
+  never glue to a word (`report._REPRODUCE_COLUMN`); `doctor` resolves a generator
+  bound any way at module level (`cli._bound_at_module`).
 
 ## Limits: what the spine cannot see, named
 
