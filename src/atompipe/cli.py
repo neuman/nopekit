@@ -1241,6 +1241,13 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     sys.stdout.write(report.render_terminal(view, registry, stale_gates=stale_gates,
                                             params=params, stale_reasons=stale_reasons))
+    if view.milestones:
+        # Each milestone's line, as last evaluated (D17; review of P2.5b,
+        # finding 5: SPINE_CONTRACT and the skill said `status` listed them, and
+        # it printed none).
+        _say(report.HUMAN["milestone"]["report_head"])
+        for milestone_ in view.milestones:
+            _say("  " + report.milestone_line(view, composed, milestone_))
     for line in _stale_lines(resolution, registry, model_error=model_error):
         _say(line)
     # "last check run" (GLOSSARY §6: one invocation of `check` is a check run):
@@ -2007,16 +2014,21 @@ def cmd_export(args: argparse.Namespace) -> int:
         # of a package lands in it, on a project migrated before P2.5b too.
         store.ensure_ignore_blocks(root)
 
-    scratch = milestones.scratch_dir(root, name, dry)
-    try:
-        with _lock(root):
+    # The scratch is created, and removed, only under the lock: a run refused
+    # by the lock never touches it. What slipped through (review of P2.5b,
+    # finding 8): the `finally` that removed it wrapped the lock, so a dry run
+    # the lock refused deleted the running one's package half way, and that one
+    # refused with a false "generator errored".
+    with _lock(root):
+        scratch = milestones.scratch_dir(root, name, dry)
+        try:
             return _export_locked(args, root, ledger, milestone, now=now, dry=dry,
                                   proceed=proceed, who=who, isatty=isatty, marker=marker,
                                   environ=environ, scratch=scratch,
                                   preconditions=preconditions)
-    finally:
-        if os.path.exists(scratch):
-            shutil.rmtree(scratch, ignore_errors=True)
+        finally:
+            if os.path.exists(scratch):
+                shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _export_locked(args: argparse.Namespace, root: str, ledger: Ledger, milestone: Any, *,
@@ -2044,6 +2056,14 @@ def _export_locked(args: argparse.Namespace, root: str, ledger: Ledger, mileston
     found = milestones.disagreements(before, result, set(closure)) if result is not None \
         else []
     extra = list(preconditions)
+    if closure and projection is None:
+        # Nothing could re-run: say why, as a refusal no decision covers
+        # (review of P2.5b, finding 11: the boundary said "no evaluator settles
+        # a claim" and refused on the cache's statuses, which `--proceed`
+        # covers — a spend over evaluators that never ran).
+        extra.append(milestones.Refusal("model", "model", said["model_broken"].format(
+            n=len(closure), m=name,
+            why=report._trunc(report._one(model_error or "no model entry"), 160))))
     judged = milestones.judge(view, composed, milestone, disagreements=found, extra=extra,
                               decided=proceed)
     unresolved_ = [r for r in judged.refusals if r.kind == "unresolved"]
@@ -2077,7 +2097,8 @@ def _export_locked(args: argparse.Namespace, root: str, ledger: Ledger, mileston
         if not judged.writes:
             article, package = {}, None
 
-    lines = _export_lines(view, composed, milestone, result, found, judged)
+    lines = _export_lines(view, composed, milestone, result, found, judged,
+                          unrunnable=len(closure) if closure and projection is None else 0)
     decision = None
     decided_line = ""
     if judged.writes and proceed:
@@ -2104,10 +2125,12 @@ def _export_locked(args: argparse.Namespace, root: str, ledger: Ledger, mileston
     if judged.writes and package is not None and not dry:
         channel = (_channel(isatty, environ, name if decision is not None else None, name)
                    if (marker or not isatty or decision is not None) else "interactive")
-        milestones.swap_package(root, name, scratch)
         entry = _export_entry(view, composed, milestone, result, registry, resolution,
                               article, package, decision, now=now, who=who, channel=channel)
-        store.append_sealed(root, "exports", name, "exports", entry)
+        # The record is appended inside the swap, which takes the new package
+        # back out if the append raises (review of P2.5b, finding 9).
+        milestones.swap_package(root, name, scratch, record=lambda: store.append_sealed(
+            root, "exports", name, "exports", entry))
         written = True
 
     reasons = "; ".join(r.reason for r in judged.refusals
@@ -2185,17 +2208,29 @@ def _export_build(root: str, ledger: Ledger, milestone: Any, view: Ledger, regis
                                   .format(first=report._trunc(built.error, 160)))
     if milestone.generator and not built.written:
         return milestones.Refusal("generator", milestone.generator, said["generator_none"])
+    if built.linked:
+        # Review of P2.5b (finding 2): a link into the project is no package —
+        # a symlink hands the builder whatever the project holds when it is
+        # followed, a hard link the bytes the project's next in-place edit makes.
+        return milestones.Refusal("generator", built.linked[0], said["generator_linked"]
+                                  .format(path=", ".join(built.linked)))
     clashing = [rel_path for rel_path in built.written if rel_path in milestones.SPINE_FILES]
     if clashing:
         return milestones.Refusal("generator", clashing[0], said["generator_outside"].format(
             path=clashing[0]))
-    # Rendered exactly as `report --milestone` renders it (V-7): the same
-    # parameter view and model error, over the boundary's re-executed view.
+    # Rendered as `report --milestone` renders it (V-7): the same parameter
+    # view and model error, over the boundary's re-executed view — and as the
+    # boundary's: its sentence plain, each result recorded on this article, the
+    # test card under the head (review of P2.5b, findings 3 and 16).
     params = _shown_params(root, ledger, model, model_error, resolution, registry)
+    card = milestones.test_card(view, composed, milestone, built.article["hash"],
+                                view.exports)
     report_md = report.render_markdown(view, registry, stale_gates=resolution.stale_gates,
                                        model_error=model_error, root=root, params=params,
                                        milestone=milestone,
-                                       stale_reasons=_stale_reasons(resolution))
+                                       stale_reasons=_stale_reasons(resolution),
+                                       boundary=True, article=built.article["hash"],
+                                       test_card=card)
     required = claims.required_ids(view, milestone)
     manifest = {"milestone": name, "revision": built.article.get("revision", ""),
                 "records_digest": store.records_digest(root, exclude=("exports",)),
@@ -2247,9 +2282,11 @@ def _inputs_moved(root: str, records_before: str, registry: Any, projection: Any
 
 
 def _export_lines(view: Ledger, composed: Mapping[str, Any], milestone: Any, result: Any,
-                  found: list, judged: Any) -> list[str]:
+                  found: list, judged: Any, *, unrunnable: int = 0) -> list[str]:
     """`export <m>`'s lines up to its outcome (P2.5b §2.2), every word
-    `report.HUMAN`'s."""
+    `report.HUMAN`'s. ``unrunnable``: the evaluators the milestone requires that
+    could not run because the model does not load — said apart from "none
+    settles a claim" (review of P2.5b, finding 11)."""
     said = report.HUMAN["export"]
     name = milestone.id
     lines = [said["head"].format(name=name, description=report._one(milestone.description))
@@ -2274,11 +2311,14 @@ def _export_lines(view: Ledger, composed: Mapping[str, Any], milestone: Any, res
         lines.append(said["rerun"].format(n=len(rows),
                                           evaluators=_plural_word(len(rows), "evaluator"),
                                           tier=int(Tier.EXTERNAL), how=how))
+    elif unrunnable:
+        lines.append(said["rerun_model"].format(
+            n=unrunnable, evaluators=_plural_word(unrunnable, "evaluator"), m=name))
     else:
         lines.append(said["rerun_none"].format(m=name))
     lines += [found_.line for found_ in found]
     lines.append(report._verdict_sentence(view, composed, None, stale=False, markdown=False,
-                                          milestone=milestone))
+                                          milestone=milestone, boundary=True))
     lines.append(report.limits_line(view))
     return lines
 
@@ -3166,18 +3206,23 @@ def _attribution_entry(args: argparse.Namespace, claim: Claim, terminal: str, wh
     return entry, rows
 
 
-def _exported_article(ledger: Ledger, given: str) -> Any:
-    """The export record whose article ``given`` (12 hex or more) names — unique
-    among `exports/`' articles — or an AtompipeError naming why not (P2.5b-D13):
-    no default to the newest export (a guess about which object the person
-    holds), no ``--milestone`` (a milestone has many exports)."""
+def _exported_article(ledger: Ledger, given: str) -> list:
+    """EVERY export record whose article ``given`` (12 hex or more) names — one
+    article, unique among `exports/`' articles — or an AtompipeError naming why
+    not (P2.5b-D13): no default to the newest export (a guess about which object
+    the person holds), no ``--milestone`` (a milestone has many exports). All of
+    them, never the first (review of P2.5b, findings 7 and 15: two milestones
+    sharing a generator record one article, and the first in name order was
+    kept — its `counted` did not hold the claim, so the fail sealed no
+    contradiction): `milestones.bound_export` picks the one the prompt shows and
+    `milestones.sealed_on` charges what any of them sealed."""
     said = report.HUMAN["signing"]
     prefix = str(given).strip()
-    found: dict[str, Any] = {}
+    found: dict[str, list] = {}
     for entry in ledger.exports:
         digest = str((entry.article or {}).get("hash") or "")
         if digest.startswith(prefix):
-            found.setdefault(digest, entry)
+            found.setdefault(digest, []).append(entry)
     if not found:
         raise AtompipeError(said["article_unknown"].format(article=prefix[:12]))
     if len(found) > 1:
@@ -3194,10 +3239,11 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
     """The physical result `pass`/`fail` records, and its prompt rows
     (P2.5a-D9, D10, D14, D15). ``person``: the shell is a person's own (a TTY,
     no agent marker) — only there can a pass count. ``exported`` (P2.5b-D13,
-    `--article`): the export whose article the result binds to — its article
-    copied whole, and a fail's contradictions the ones the export sealed on the
-    article's own inputs (`milestones.sealed_contradictions`), never re-read
-    from the evaluators' verdicts after they moved."""
+    `--article`): every export record of the article the result binds to — the
+    article copied whole from the one `milestones.bound_export` picks, and a
+    fail's contradictions the ones any of them sealed on the article's own
+    inputs (`milestones.sealed_on`), never re-read from the evaluators' verdicts
+    after they moved."""
     said = report.HUMAN["signing"]
     if measured is not None and typed is None and not isinstance(
             getattr(claim.acceptance, "limit", None), (int, float)):
@@ -3232,15 +3278,17 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
             raise AtompipeError(said["no_test"].format(id=claim.id))
     listed, sha = _evidence(root, _collect(args.evidence), required=passed and physical,
                             claim_id=claim.id)
-    if exported is not None:
-        article = dict(exported.article or {})
+    records = list(exported or ())
+    bound = milestones.bound_export(records, claim.id) if records else None
+    if bound is not None:
+        article = dict(bound.article or {})
     else:
         article = verdicts.article_of(root, projection, model, anchors=resolution.anchors,
                                       resolution=resolution)
     if passed and terminal in ("measurement", "human") and not article:
         raise AtompipeError(said["no_model"].format(
             error=report._trunc(model_error or "its code was not recorded", 160)))
-    if passed and person and terminal in ("measurement", "human") and exported is None:
+    if passed and person and terminal in ("measurement", "human") and bound is None:
         # An article names the files the registered evaluators read on the
         # design (`verdicts.article_of`), so a pass waits until each has run
         # here at least once. What slipped through (review of P2.5a): a pass
@@ -3262,11 +3310,12 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
             raise AtompipeError(said["unread"].format(gates=shown, id=claim.id))
     contradicts: list[dict] = []
     check = ""
-    if not passed and terminal != "human" and exported is not None:
-        contradicts = milestones.sealed_contradictions(exported, claim.id)
-        if claim.id not in (exported.counted or {}):
+    if not passed and terminal != "human" and bound is not None:
+        contradicts = milestones.sealed_on(records, claim.id)
+        if not any(claim.id in (e.counted or {}) for e in records):
+            names = ", ".join(sorted({str(e.milestone) for e in records}))
             check = (f"its evaluators were not re-run when article "
-                     f"{report.article12(article)} was exported for {exported.milestone}, "
+                     f"{report.article12(article)} was exported for {names}, "
                      f"so no verdict on its inputs is sealed to charge")
     elif not passed and terminal != "human":
         if not article:
@@ -3303,15 +3352,15 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
     if listed:
         what += " [" + ", ".join(report._one(path) for path in listed) + "]"
     rows = ["  " + what]
-    if exported is not None:
+    if bound is not None:
         rows.append("  " + said["article_exported"].format(
-            article=report.article12(article), milestone=exported.milestone,
-            who=report._one(exported.who), when=str(exported.when)[:10],
+            article=report.article12(article), milestone=bound.milestone,
+            who=report._one(bound.who), when=str(bound.when)[:10],
             revision=str(article.get("revision") or "")[:12] or "none"))
     elif article:
         rows.append("  " + said["article"].format(article=report.article12(article),
                                                   values=_design_values(projection)))
-        if article.get("revision") and exported is None:
+        if article.get("revision"):
             rows.append("  " + said["revision"].format(revision=article["revision"][:12])
                         + (said["dirty"] if article.get("dirty") else ""))
     else:
@@ -4402,7 +4451,21 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     if args.json:
         composed = claims.compositions(view, registry=registry, stale_gates=stale_gates)
+        extra: dict[str, Any] = {}
+        if milestone is not None:
+            # The milestone's own predicate (review of P2.5b, finding 10: the
+            # JSON was the project's document — `ready` false beside a page
+            # saying ready for the milestone), as last evaluated.
+            found = claims.unresolved(view, composed, milestone)
+            extra["milestone"] = {
+                "name": milestone.id, "ready": found.ready, "last_evaluated": True,
+                "required": list(claims.required_ids(view, milestone)),
+                "unresolved": [{"id": c.id, "status": str(composed[c.id].status),
+                                "cause": str(composed[c.id].cause.value)}
+                               for c in found.unresolved],
+                "missing": list(found.missing)}
         _dump({
+            **extra,
             "summary": claims.summarise(view, registry, stale_gates=stale_gates),
             "claims": {cid: str(c.status) for cid, c in composed.items()},
             "statuses": _status_views(view, composed, stale_reasons),
@@ -6455,6 +6518,69 @@ def _doctor_results_rows(results: list[dict], root: str, ledger: Ledger) -> None
                "every physical result is sealed and its evidence is as recorded")
 
 
+#: The compound statements whose bodies run at module level when the module does.
+_BLOCKS = tuple(getattr(ast, kind) for kind in ("If", "For", "AsyncFor", "While", "With",
+                                                "AsyncWith", "Try", "TryStar")
+                if hasattr(ast, kind))
+
+
+def _bound_at_module(tree: Any, name: str) -> bool | None:
+    """Whether module ``tree`` binds ``name`` at module level — a ``def`` or an
+    ``async def``, a class, an assignment, an import, at the top or inside a
+    top-level ``if``/``try``/``with``/``for``/``while`` — as `_load_generator`'s
+    ``getattr`` would find it; ``None`` when a star import or a module
+    ``__getattr__`` could bind it unseen. What slipped through (review of P2.5b,
+    finding 14): only a top-level ``def`` counted, so ``print_package =
+    side_profile`` read FAIL "has no function" while `export` loaded and ran
+    it. *Rejected:* importing the module here (`doctor` runs no project code
+    it can avoid; the generator runs at `export`)."""
+    found = False
+    unseen = False
+
+    def names_of(target: Any) -> list[str]:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [n for item in target.elts for n in names_of(item)]
+        if isinstance(target, ast.Starred):
+            return names_of(target.value)
+        return []
+
+    def visit(body: Iterable[Any]) -> None:
+        nonlocal found, unseen
+        for node in body:
+            bound: list[str] = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound = [node.name]
+                if node.name == "__getattr__":
+                    unseen = True
+            elif isinstance(node, ast.Assign):
+                bound = [n for target in node.targets for n in names_of(target)]
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                bound = names_of(node.target)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if alias.name == "*":
+                        unseen = True
+                    else:
+                        bound.append(alias.asname or alias.name.split(".")[0])
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                bound = names_of(node.target)
+            if isinstance(node, (ast.With, ast.AsyncWith)):
+                bound += [n for item in node.items if item.optional_vars is not None
+                          for n in names_of(item.optional_vars)]
+            if name in bound:
+                found = True
+            if isinstance(node, _BLOCKS):
+                for field in ("body", "orelse", "finalbody"):
+                    visit(getattr(node, field, None) or ())
+                for handler in getattr(node, "handlers", None) or ():
+                    visit(handler.body)
+
+    visit(getattr(tree, "body", ()) or ())
+    return True if found else (None if unseen else False)
+
+
 def _doctor_milestone_rows(results: list[dict], root: str, ledger: Ledger) -> None:
     """`doctor`'s P2.5b rows, each writing nothing:
 
@@ -6471,6 +6597,7 @@ def _doctor_milestone_rows(results: list[dict], root: str, ledger: Ledger) -> No
       removing a tracked file it did not write is invariant 8's failure)."""
     claim_ids = {c.id for c in ledger.claims}
     problems = []
+    warnings = []
     for milestone in ledger.milestones:
         missing = [cid for cid in milestone.requires if cid not in claim_ids]
         if missing:
@@ -6494,13 +6621,19 @@ def _doctor_milestone_rows(results: list[dict], root: str, ledger: Ledger) -> No
                 problems.append(f"milestones/{milestone.id}.json: its generator {path} does "
                                 f"not parse ({exc})")
                 continue
-            if not any(isinstance(node, ast.FunctionDef) and node.name == name
-                       for node in tree.body):
+            bound = _bound_at_module(tree, name)
+            if bound is None:
+                warnings.append(f"milestones/{milestone.id}.json: {path} may bind {name} in a "
+                                f"way doctor cannot see without running it — atompipe "
+                                f"export {milestone.id} --dry-run loads it")
+            elif not bound:
                 problems.append(f"milestones/{milestone.id}.json: {path} has no function "
                                 f"{name}")
     for problem in problems:
         _check(results, "milestones", "FAIL", problem)
-    if not problems:
+    for warning in warnings if not problems else ():
+        _check(results, "milestones", "warn", warning)
+    if not problems and not warnings:
         n = len(ledger.milestones)
         _check(results, "milestones", "ok",
                f"{n} milestone(s), each requiring claims that exist" if n
@@ -6511,7 +6644,8 @@ def _doctor_milestone_rows(results: list[dict], root: str, ledger: Ledger) -> No
     notes = []
     try:
         leftovers = sorted(name for name in os.listdir(base)
-                           if name.startswith(".") and (".tmp-" in name or ".old-" in name))
+                           if name.startswith(".") and any(
+                               mark in name for mark in (".tmp-", ".old-", ".new-", ".copy-")))
     except OSError:
         leftovers = []
     for name in leftovers:
@@ -6519,13 +6653,17 @@ def _doctor_milestone_rows(results: list[dict], root: str, ledger: Ledger) -> No
                     f"aside and did not finish — remove it")
     for milestone in ledger.milestones:
         mine = [e for e in ledger.exports if e.milestone == milestone.id]
-        if not mine:
+        here = os.path.isdir(os.path.join(base, milestone.id))
+        if not mine and not here:
             continue
-        if not os.path.isdir(os.path.join(base, milestone.id)):
+        if not here:
             notes.append(f"the last export of {milestone.id}'s package is not here "
                           f"({store.PACKAGES_NAME}/ is an output git ignores) — atompipe "
                           f"export {milestone.id} writes it again")
             continue
+        # A package with no export record is judged too (review of P2.5b,
+        # finding 9: `if not mine: continue` read "each package as it was
+        # written" over one the next export refuses whole).
         for kind, rel_path in milestones.package_problems(root, milestone.id, ledger.exports):
             rows.append(f"{store.PACKAGES_NAME}/{milestone.id}/{rel_path} "
                         + ("was edited after its export" if kind == "edited"

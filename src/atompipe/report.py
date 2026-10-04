@@ -460,6 +460,9 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
                   "settles nothing an evaluator settles",
         "record": "`atompipe claim physical {id} pass|fail --evidence <file> --detail "
                   "\"...\"` — run by the person who tested it, in their own shell",
+        "record_article": "`atompipe claim physical {id} pass|fail --article {article} "
+                          "--evidence <file> --detail \"...\"` — run by the person who "
+                          "tested it, in their own shell",
         "rebuild": "rebuild: article {article} ({claims}) — {moves}",
         "rebuild_heading": "### Articles to rebuild",
         "rebuild_intro": "A result counts on the article it was recorded on, and the design "
@@ -685,10 +688,20 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
     # in the report, every time"). GLOSSARY §9: no *unverified in physical
     # hardware* — Pending build's Never-say.
     "readiness": MappingProxyType({
+        # The boundary's (`export` over its re-run, and the package it writes):
+        # said plainly. Every other reader reads the cache, and says *ready* as
+        # last evaluated (invariant 12; review of P2.5b: `report --milestone`
+        # said the boundary's words over a forged cache).
         "ready_for": "{rev} is ready for {m}: every claim it requires is checked against "
                      "the current inputs.",
         "not_ready_for": "{rev} is NOT ready for {m}: {k} of {n} required {claims} {is_} "
                          "unresolved — {groups}.",
+        "ready_for_last": "{rev} is ready for {m}, as last evaluated: every claim it "
+                          "requires is checked against the current inputs.",
+        "not_ready_for_last": "{rev} is NOT ready for {m}, as last evaluated: {k} of {n} "
+                              "required {claims} {is_} unresolved — {groups}.",
+        "ready_last": "{rev} is ready, as last evaluated: every required claim is {checked} "
+                      "against the current inputs.",
         "requires_nothing": "{rev} is NOT ready for {m}: {m} requires no claim, so nothing "
                             "can be ready for it — list the claims it needs in "
                             "milestones/{m}.json (\"requires\").",
@@ -709,6 +722,12 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "as_last_evaluated": "Claims {m} does not require are shown as last evaluated: "
                              "`atompipe export {m}` re-runs only the evaluators of the {n} "
                              "it requires.",
+        # `report --milestone` (the cache's): nothing was re-run, the required
+        # claims included — never the package's line above, which implies they
+        # were (review of P2.5b, finding 3).
+        "nothing_rerun": "Nothing here was re-run: every claim is shown as last evaluated — "
+                         "`atompipe export {m} --dry-run` re-runs the evaluators of the {n} "
+                         "it requires, at the boundary.",
     }),
     # A physical claim's latency (W3; GLOSSARY §5: "declared ahead only for a
     # physical evaluator, until an article measures it") — never *duration*,
@@ -732,9 +751,13 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "as_recorded": "every outcome as recorded",
         "differ": "{k} {differs} from the record",
         "rerun_none": "re-run: none — no evaluator settles a claim {m} requires",
+        "rerun_model": "re-run: none — the model does not load, so none of the {n} "
+                       "{evaluators} {m} requires could run",
+        "model_broken": "the model does not load, so none of the {n} evaluators {m} "
+                        "requires ran: {why}",
         "not_required": "not required by {m}, unresolved: {groups}",
-        "two_outcomes": "[two outcomes] {gate} : recorded {before} at ρ {rho}, a re-run "
-                        "gives {after}{detail}",
+        "two_outcomes": "[two outcomes] {gate} : recorded {before} at ρ {rho} (entry "
+                        "{entry}), a re-run gives {after}{detail}",
         "two_outcomes_records": "[two outcomes] {gate} : {text}",
         "two_outcomes_qualification": "[two outcomes] {gate} : qualified on the record, "
                                       "unqualified when re-run — {why}",
@@ -748,13 +771,32 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "reprint": "{id} failed on article {article}, which the design has since moved "
                    "from: building a new article to test it again is a decision — "
                    "atompipe export {m} --proceed --why \"…\"",
+        # A fail no reprint can release (review of P2.5b, finding 17): its
+        # article is not one an export built and traced.
+        "reprint_never": "{id} failed on article {article}, {which}: no pass on a reprint "
+                         "releases that fail, so it counts on every design — going ahead "
+                         "over it is a decision each time: atompipe export {m} --proceed "
+                         "--why \"…\"",
+        "reprint_unexported": "which no export built (recorded without --article)",
+        "reprint_untraced": "whose export did not trace what its generator read",
         "missing": "{m} requires {id}, which no claim file holds",
         "requires_nothing": "{m} requires no claim",
-        "disagrees": "{gate}: two outcomes for one read set — `atompipe check --force` "
-                     "records the re-run",
+        # The way out that works (review of P2.5b, findings 12, 20): two
+        # outcomes at one ρ are two entries in the cache, and one of them is
+        # not this evaluator's output. A re-run cannot clear it (the refused
+        # export filed one already, and `check --force` only files another),
+        # nor can a go-ahead (D7). *Rejected:* "`atompipe check --force` records
+        # the re-run" — what it said, and the next export said it again.
+        "disagrees": "{gate}: two outcomes for one read set — its entries in "
+                     ".atompipe/verdicts/{gate}/ named above disagree, so one is not this "
+                     "evaluator's output: remove the one that is wrong, or find why it "
+                     "does not repeat (no re-run and no go-ahead clears it)",
         "generator_errored": "generator errored: {first}",
         "generator_none": "generator wrote no file",
         "generator_outside": "generator wrote {path}, outside its directory",
+        "generator_linked": "generator linked {path} into its directory — a package holds "
+                            "the bytes it hands the builder, never a link to a project "
+                            "file: copy it",
         "generator_load": "generator does not load: {why}",
         "generator_model": "the model does not load, so the generator cannot run: {why}",
         "package_foreign": "out/{m}/{file} was not written by an export of {m}",
@@ -785,13 +827,18 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "none_declared": "none is declared: a milestone is milestones/<name>.json",
         "card_head": "test card for article {article}: {n} physical {results} to record, "
                      "{k} {checks}",
+        "card_heading": "### Test card for article {article}",
         "card_row": "{id} {statement} — {test} — {latency}",
         "card_command": "atompipe claim physical {id} pass|fail --article {article} "
                         "--evidence <file> --detail \"…\"",
         "card_cross": "cross-check {id} {statement} — {condition}; its evaluators: {gates}",
-        "card_cross_command": "atompipe claim physical <id> fail --article {article} "
-                              "--measured <value> --detail \"…\" — a fail on a cross-check "
-                              "contradicts its evaluator, on its track record",
+        # The value decides the outcome (P2.5a-D15), never a typed `fail`: a
+        # measurement that agrees is recorded too — E4's denominator — where a
+        # hard-coded `fail` was refused for it (review of P2.5b, finding 22).
+        "card_cross_command": "atompipe claim physical <id> --article {article} "
+                              "--measured <value> --detail \"…\" — the value decides; a "
+                              "fail on a cross-check contradicts its evaluator, on its track "
+                              "record",
         "no_test": "no test written down: a pass needs one in claims/{id}.json (\"note\")",
         "help": "the boundary that spends: re-run what a milestone requires, refuse while "
                 "a required claim is unresolved, and write its package",
@@ -2441,7 +2488,13 @@ def latency_words(claim: Claim, exports: Iterable[Any]) -> str:
 
 def _span(seconds: Any) -> str:
     """A measured span as a person reads it: minutes under an hour, hours under
-    two days, days past that — rounded, the way a print log says it."""
+    two days, days past that — rounded, the way a print log says it. Why these
+    cuts: an hour is where "N min" stops reading at a glance; two days, so a
+    print-and-test that took 26 h reads "26 h" (a day and a bit, said exactly)
+    rather than "1 day", and anything a week or a winter long reads in days.
+    *Rejected:* seconds (no person reads 93600 s); one unit per declared
+    `expected_latency` unit (a measured span would change its unit when the
+    declaration did); cutting at one day (26 h would read "1 day", 31 h too)."""
     value = float(seconds or 0.0)
     if value < 3600:
         return f"{round(value / 60)} min"
@@ -2471,7 +2524,8 @@ def not_ready_line(ledger: Ledger, composed: Mapping[str, Any]) -> str:
 
 
 def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any,
-                      *, stale: bool, markdown: bool, milestone: Any = None) -> str:
+                      *, stale: bool, markdown: bool, milestone: Any = None,
+                      boundary: bool = False) -> str:
     """The readiness sentence, then what stays true whatever it says. Bad news
     first, always.
 
@@ -2499,6 +2553,13 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
     about hardware. From P2.5b the clause also names each article the rebuild
     prediction names and what is checked on an article (`_hardware_clause`),
     in every branch, the no-claims one too.
+
+    ``boundary`` (review of P2.5b): the sentence is the boundary's — `export`
+    over its re-run, the package it writes — and says *ready* plainly. Every
+    other caller reads the verdict cache, which the inner loop never re-executes
+    and a hand can forge, so its *ready* (the project's or a milestone's) is
+    "as last evaluated", said in the sentence (invariant 12). The default is the
+    cache's: a new reader that forgets the flag says less, never more.
 
     ``milestone`` (P2.5b-D18): the same sentence for one spend — `<rev> is
     ready for <m>: …` / `<rev> is NOT ready for <m>: k of n required claims …`,
@@ -2528,7 +2589,8 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
             " ".join(_hardware_clause(ledger, composed))
 
     if milestone is not None:
-        return " ".join([_milestone_sentence(ledger, composed, milestone, rev, bold),
+        return " ".join([_milestone_sentence(ledger, composed, milestone, rev, bold,
+                                             boundary=boundary),
                          *_hardware_clause(ledger, composed)])
 
     found = readiness(ledger, composed)
@@ -2568,8 +2630,7 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
             f" {_groups(ledger, composed, found['unresolved'])}."))
         parts.append(tally)
     else:
-        parts.append(bold(f"{rev} is ready: every required claim is {checked} against"
-                          f" the current inputs."))
+        parts.append(bold(HUMAN["readiness"]["ready_last"].format(rev=rev, checked=checked)))
 
     other = [c for c in ledger.claims if not c.critical
              and status_of.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
@@ -2589,23 +2650,27 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
 
 
 def _milestone_sentence(ledger: Ledger, composed: Mapping[str, Any], milestone: Any,
-                        rev: str, bold: Callable[[str], str]) -> str:
-    """The milestone variant's head (P2.5b §2.4), from `claims.unresolved`."""
+                        rev: str, bold: Callable[[str], str], *,
+                        boundary: bool = False) -> str:
+    """The milestone variant's head (P2.5b §2.4), from `claims.unresolved` —
+    the boundary's words plainly, a cache reader's as last evaluated."""
     said = HUMAN["readiness"]
     name = str(getattr(milestone, "id", "") or "")
     if not list(getattr(milestone, "requires", None) or ()):
         return bold(said["requires_nothing"].format(rev=rev, m=name))
     found = claim_logic.unresolved(ledger, composed, milestone)
+    tail = "" if boundary else "_last"
     if found.ready:
-        return bold(said["ready_for"].format(rev=rev, m=name))
+        return bold(said["ready_for" + tail].format(rev=rev, m=name))
     n = len(found.required) + len(found.missing)
     k = len(found.unresolved) + len(found.missing)
     groups = "; ".join(part for part in (
         _groups(ledger, composed, found.unresolved) if found.unresolved else "",
         _missing_words(found.missing) if found.missing else "") if part)
-    return bold(said["not_ready_for"].format(rev=rev, m=name, k=k, n=n,
-                                             claims=_plural(n, "claim"),
-                                             is_=_plural(k, "is", "are"), groups=groups))
+    return bold(said["not_ready_for" + tail].format(rev=rev, m=name, k=k, n=n,
+                                                    claims=_plural(n, "claim"),
+                                                    is_=_plural(k, "is", "are"),
+                                                    groups=groups))
 
 
 # --------------------------------------------------------------------------- #
@@ -2766,11 +2831,22 @@ def _proven_physical(ledger: Ledger, composed: Mapping[str, Any],
     return out
 
 
-def _section_pending_build(ledger: Ledger, composed: Mapping[str, Any]) -> list[str]:
+def _record_line(claim_id: str, article: str = "") -> str:
+    """The command that records a result: on ``article`` when the report is a
+    package's (`--article`, so the result binds to what was built and a fail
+    on it can be answered by a reprint), else on the design."""
+    if article:
+        return HUMAN["physical"]["record_article"].format(id=claim_id,
+                                                          article=article12(article))
+    return HUMAN["physical"]["record"].format(id=claim_id)
+
+
+def _section_pending_build(ledger: Ledger, composed: Mapping[str, Any], *,
+                           article: str = "") -> list[str]:
     """Physical claims that wait on an article: how to settle each, and those a
     physical pass was recorded for that no article binds to the current inputs
     (Pending build too, until article binding — the pass is listed, never
-    counted as Checked)."""
+    counted as Checked). ``article``: the package's (`_record_line`)."""
     out = [HUMAN["heading"]["pending_build"], ""]
     status_of = {cid: c.status for cid, c in composed.items()}
     waiting = [c for c in ledger.claims if status_of.get(c.id) is ClaimStatus.UNVERIFIED]
@@ -2792,8 +2868,7 @@ def _section_pending_build(ledger: Ledger, composed: Mapping[str, Any]) -> list[
             out.append(f"  - **Test that would settle it:** {_physical_test(claim)}")
             if claim.rationale:
                 out.append(f"  - **Why it matters:** {_trunc(claim.rationale, 200)}")
-            out.append(f"  - **Record the result:** "
-                       + HUMAN["physical"]["record"].format(id=claim.id))
+            out.append(f"  - **Record the result:** " + _record_line(claim.id, article))
         out.append("")
 
     if verified:
@@ -2815,8 +2890,7 @@ def _section_pending_build(ledger: Ledger, composed: Mapping[str, Any]) -> list[
             why = reason(composed[claim.id], ledger, claim, full=True)
             out.append(f"- **{claim.id}** {_claim_text(claim)}{crit} — {why}, "
                        f"{when}{detail}{ev}")
-            out.append(f"  - **Record the result:** "
-                       + HUMAN["physical"]["record"].format(id=claim.id))
+            out.append(f"  - **Record the result:** " + _record_line(claim.id, article))
         out.append("")
 
     if not physical:
@@ -3317,6 +3391,23 @@ def _code_files(registry: Any, root: str) -> dict[str, list[str]]:
     return files
 
 
+#: The column the Reproduce block's comments start at: `atompipe check --tier 0`
+#: and ten spaces, where the block's first commands put theirs. A command as long
+#: or longer keeps two spaces before its `#` (`_commented`). What slipped through
+#: (review of P2.5b, findings 13, 21): `.ljust(33)` pads nothing past 33
+#: characters, so the bracket's own `atompipe export print-v1 --dry-run` was
+#: glued to its comment — `--dry-run#` is one word to a shell, and the pasted
+#: line failed. *Rejected:* a column computed from the longest command (one
+#: long milestone name would push every comment in the block across the page).
+_REPRODUCE_COLUMN = 33
+
+
+def _commented(command: str, comment: str) -> str:
+    """``command``, then ``# comment`` at ``_REPRODUCE_COLUMN`` — or two spaces
+    after a command that reaches it: a `#` is never glued to a word."""
+    return command.ljust(max(_REPRODUCE_COLUMN, len(command) + 2)) + "# " + comment
+
+
 def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list[str]:
     """The exact commands, and the code behind each row. A readiness report
     nobody can re-derive is a press release.
@@ -3327,6 +3418,8 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
     gate's verdict is keyed on.
     """
     out = [HUMAN["heading"]["reproduce"], ""]
+    # Every milestone gets its line: the cap of four it replaced dropped the
+    # fifth with nothing said (review of P2.5b, finding 21).
     specs = _specs(registry)
     max_tier = max((int(s.tier) for s in specs), default=0)
 
@@ -3341,9 +3434,9 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
                    f"{' — solvers included' if max_tier >= 2 else ''}")
     out.append("atompipe report --write"
                "          # renders REPORT.md, an output git ignores")
-    for declared in list(getattr(ledger, "milestones", None) or ())[:4]:
-        out.append(f"atompipe export {declared.id} --dry-run".ljust(33)
-                   + "# re-runs what it requires, at the boundary")
+    for declared in list(getattr(ledger, "milestones", None) or ()):
+        out.append(_commented(f"atompipe export {declared.id} --dry-run",
+                              "re-runs what it requires, at the boundary"))
     out.append("```")
     out.append("")
     out.append("`check` re-runs only the gates whose inputs, code or control moved; "
@@ -3393,8 +3486,8 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
         else:
             line = f"{line} {word}" if line else word
     lines.append(line)
-    out.append("atompipe gate selftest".ljust(33) + "# " + lines[0])
-    out.extend(" " * 33 + "# " + rest for rest in lines[1:])
+    out.append(_commented("atompipe gate selftest", lines[0]))
+    out.extend(" " * _REPRODUCE_COLUMN + "# " + rest for rest in lines[1:])
     out.append("```")
     out.append("")
     return out
@@ -3408,7 +3501,8 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
                     title: str = "", root: str = "",
                     params: Sequence[Any] | None = None,
                     stale_reasons: Mapping[str, str] | None = None,
-                    milestone: Any = None) -> str:
+                    milestone: Any = None, boundary: bool = False,
+                    article: str = "", test_card: Sequence[str] = ()) -> str:
     """The full readiness report as markdown — the project's public deliverable.
 
     Sections, in the order a sceptical reader needs them: the readiness
@@ -3462,6 +3556,18 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
     package's body said `critical` under a head that said the milestone), and a
     line saying that the claims it does not require are shown as last evaluated
     (critique 18).
+
+    ``boundary`` (review of P2.5b): the package's copy, rendered over the
+    export's re-run — its sentence plain, its line naming the claims that were
+    not re-run. Without it (`report --milestone`, the cache's) the sentence is
+    "as last evaluated" and the line says nothing here was re-run: what slipped
+    through was the package's words on the cache's view, a forged pass read
+    "ready … checked against the current inputs". ``article`` and
+    ``test_card`` (the package's alone): every "Record the result" line names
+    the article the package was built as (`--article`), and the card — what
+    to measure on it — is printed under the head (finding 16: a builder
+    following the package's REPORT.md recorded on a design article no reprint
+    could ever answer).
     """
     composed = _compositions(ledger, registry, stale, stale_gates)
     cover = _coverage(ledger, registry)
@@ -3476,16 +3582,26 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
 
     out: list[str] = [f"# {heading}", ""]
     out.append(_verdict_sentence(ledger, composed, registry, stale=stale, markdown=True,
-                                 milestone=milestone))
+                                 milestone=milestone, boundary=boundary))
     out.append("")
     out.append(limits_line(ledger))
     out.append("")
     requires = set(getattr(milestone, "requires", None) or ())
     if milestone is not None:
         others = [c for c in ledger.claims if c.id not in requires]
-        if others:
+        if not boundary:
+            out.append(said["nothing_rerun"].format(m=milestone.id, n=len(requires)))
+            out.append("")
+        elif others:
             out.append(said["as_last_evaluated"].format(m=milestone.id,
                                                         n=len(requires)))
+            out.append("")
+        if test_card:
+            out.append(HUMAN["export"]["card_heading"].format(article=article12(article)))
+            out.append("")
+            out.append("```")
+            out += list(test_card)
+            out.append("```")
             out.append("")
         # The sections flag a claim by the milestone's `requires`: the same
         # claims, each `critical` read as "required by this milestone".
@@ -3506,7 +3622,7 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
         out.append("")
 
     out += _section_proven(ledger, composed, cover, stale=stale, registry=registry)
-    out += _section_pending_build(ledger, composed)
+    out += _section_pending_build(ledger, composed, article=article)
     out += _section_gaps(ledger, composed, registry, stale_reasons=stale_reasons)
     out += _section_assumed(ledger, composed, params, model_error)
     out += _section_failing(ledger, composed, cover, registry, stale_gates=stale_gates,

@@ -1487,6 +1487,35 @@ class ErrorIsLouder(_env.EnvCase):
             found = junit_problems("render_junit", self._junit(ledger, registry))
         self.assertEqual({p.subject for p in found if p.prop == "junit"}, set(ERRORED_CLAIMS))
 
+    def test_an_export_refusal_says_errored(self):
+        """Review of P2.5b (finding 23): the export's refusal — the sentence a
+        person acts on — said `C1 skipped` for a crash, the words a missing tool
+        produces. Each errored required claim's refusal says errored, and a
+        missing tool's does not; planted, the bare word is caught."""
+        from atompipe import claims as claims_mod
+        from atompipe import milestones
+        from atompipe.models import Milestone
+        ledger, registry = self._render()
+        milestone = Milestone(id="probe", requires=sorted(PROBE_CLAIMS))
+        composed = claims_mod.compositions(ledger, registry=registry,
+                                           stale_gates={"probe.moved"})
+
+        def said(refused):
+            return {r.subject: r.reason for r in refused if r.kind == "unresolved"}
+
+        found = said(milestones.refusals(ledger, composed, milestone))
+        errored = {cid for cid in ERRORED_CLAIMS if cid in milestone.requires}
+        self.assertTrue(errored)
+        for cid in errored:
+            self.assertRegex(found.get(cid, ""), rf"^{cid} skipped \(errored\)", found)
+        for cid in SKIPPED_CLAIMS:
+            self.assertNotIn("errored", found.get(cid, "errored"), found)
+        with mock.patch.object(milestones, "_unresolved_words",
+                               lambda status: report_mod.word(status.status)):
+            planted = said(milestones.refusals(ledger, composed, milestone))
+        self.assertFalse([cid for cid in errored if "errored" in planted.get(cid, "")],
+                         "the bare word was not caught")
+
     def test_a_skipped_and_errored_verdict_is_a_crash_in_either_form(self):
         """F-10's verdict: `run_gate` hands both spellings back as an error, never
         ok, and both render the same — so a fix keyed on `outcome` covers both."""

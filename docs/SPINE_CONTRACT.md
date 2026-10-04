@@ -143,8 +143,10 @@ class AttributionRecord(Record):   # P2.5a: one entry of results/<id>.json's "at
 class EntryStanding:            # frozen, in memory: the judge's facts about one result entry
     index: int; passed: bool; counts: bool = False; why: str = ""; article: str = ""
     article_state: str = ""; moved: tuple = ()
-    stands: bool = False            # P2.5b, LAST: a person's pass still standing on its own
+    stands: bool = False            # P2.5b: a person's pass still standing on its own
                                     #   article, counted or not (what may supersede a fail)
+    built: tuple = ()               # review of P2.5b, LAST: the seal of the generator's files
+                                    #   of each held export of this article (what was printed)
 class Standing:                 # frozen, in memory: what a claim's results stand for NOW
     state: str = ""; counted: int | None = None; article: str = ""; moved: tuple = ()
     entries: tuple = ()
@@ -1098,6 +1100,8 @@ traceback. The hook never raises and never opens a file; with no window open it 
 at once. It records `open` by mode — or by flags for `os.open` — as a read, a write
 (`w`, `a`, `x`, `+`, `O_CREAT`...) or both (`r+`), ignoring int fds and directory fds;
 `os.listdir`/`os.scandir` as a listed dir; `os.rename`/`os.replace` as writes;
+`os.link`/`os.symlink` as a read of the source and a write of the link (review of P2.5b:
+a linked project file put bytes where no `open` named them);
 `subprocess.Popen`, `os.system`, `os.exec*`, `os.spawn*`, `os.posix_spawn`, `os.fork`,
 `_winapi.CreateProcess` and `_posixsubprocess.fork_exec` (the process probe, below) as
 opaque `subprocess:<name>`, plus any argv element naming an existing file as a read;
@@ -1589,7 +1593,7 @@ def view(ledger, resolution) -> Ledger    # THE view builder: verdicts + each cl
                                           # + each Ledger.removed claim holding a fail
 REMOVED = "removed"                       # the Standing.state of such a claim
 # P2.5b: the exported article
-class ExportedArticle(NamedTuple): article; written; outside; error; params
+class ExportedArticle(NamedTuple): article; written; outside; error; params; linked = ()
 def export_article(root, projection, fn, *, out_dir, anchors, digests, model=None,
                    milestone="", when="", resolution=None) -> ExportedArticle
                                           # runs a milestone's generator traced: the article
@@ -1603,12 +1607,23 @@ opaque was read, its code is recorded and no model was used. Untraced, it is
 article is judged by `_traced_moves`: only a moved read moves it, so a change no
 generator read rebuilds nothing (`claims.rebuild` names that article alone). A pass
 on one counts only while `exports/` holds it (`_fact_export`). What `outside` names
-is a write outside the package's scratch (refused, named, never undone).
+is a write outside the package's scratch (refused, named, never undone); `linked`, a
+symlink or a hard link the generator put in its directory (refused: a package holds
+bytes, never a second name for a project file). A file in the package that no write the
+trace saw put there makes the article untraced — the whole design (review of P2.5b: the
+backstop behind the link handlers). The scratch is `.atompipe/out/export-<m>/` in both
+modes, under the trace's out directory, so the generator's own directory is never a
+read (review of P2.5b: built in `out/.<m>.tmp-<pid>/`, a `makedirs` of it put the pid
+into the article).
 
 **Supersession (P2.5b-D14).** A fail stops counting when a later pass stands
 (`EntryStanding.stands`) on an exported, traced article B other than the fail's A,
-A moved, and B differs from A on a row A recorded (`_differs_on_recorded`) —
-`_supersedes`; never a judgment's (a person, not a print) or an assumption's. The
+A moved, B differs from A on a row A recorded (`_differs_on_recorded`), and what was
+printed from B is not what was printed from A — no package of B carries a package of
+A's generator bytes (`EntryStanding.built`, `_built_seal`; review of P2.5b: a no-op
+line in the generator moved its code row, and the same print reprinted byte for byte
+released its fail) — `_supersedes`; never a judgment's (a person, not a print) or an
+assumption's. The
 fail is kept (`Standing.superseded`, its contradiction too) and named in every
 channel; `view` releases a claim's `physical_result` only to the counting fail or to a
 standing pass, so nothing else reaches it. What slipped through before it: a fail on
@@ -2331,8 +2346,10 @@ def unresolved(ledger, composed, milestone=None) -> Unresolved   # THE predicate
                                               #   required id exists and reads Checked
 class Latency(NamedTuple): seconds; source; article; declared   # source: measured | declared | none
 def declared_seconds(claim) -> float | None   # expected_latency in seconds, or None
-def latency(claim, exports) -> Latency        # measured from its exported article's `when` to the
-                                              #   newest result recorded on it; else declared
+def latency(claim, exports) -> Latency        # a measurement's: from the newest export of its
+                                              #   article not after the newest result a person
+                                              #   typed on it; else declared; an automated
+                                              #   claim's is none (its evaluator's run's)
 ```
 **Ready is one predicate (P2.5b-D1, invariant 12).** `unresolved` is the one place that
 decides *ready*: every reader — `check`'s line, `status`, the report's sentence,
@@ -2949,7 +2966,8 @@ keys no verdict. Standard library only, like every module under `src/atompipe/`.
 ```python
 @dataclass(frozen=True)
 class Refusal: kind; subject; reason          # kind: unresolved | missing | requires-nothing |
-    def to_dict(self) -> dict                 #   disagrees | generator | package | precondition
+    def to_dict(self) -> dict                 #   disagrees | generator | package | precondition |
+                                              #   model (the model does not load: nothing re-ran)
 COVERED = frozenset({"unresolved"})           # the only kind a person's --proceed covers
 class Judgment(NamedTuple): ready; refusals; writes; found   # found: claims.Unresolved
 class Disagreement(NamedTuple): gate; kind; line   # kind: outcome | records | qualification
@@ -2961,13 +2979,17 @@ def counted_on(view, composed, milestone, registry, resolution) -> dict[str, lis
                                               # per required claim, its counting covering rows
 def sealed_contradictions(entry, claim_id) -> list   # a later fail's contradicts: the rows sealed
                                               #   at export, never the evaluator's verdict now
+def sealed_on(entries, claim_id) -> list      # every record of one article: their rows together
+def bound_export(entries, claim_id) -> ExportRecord  # the newest that re-ran the claim, else newest
 def test_card(view, composed, milestone, article, exports) -> list[str]   # what to measure (§4.6)
-MANIFEST = "MANIFEST.json"; SPINE_FILES = ("REPORT.md", "model.json", MANIFEST)
+MANIFEST = "MANIFEST.json"; SPINE_FILES = verdicts._PACKAGE_SPINE_FILES  # REPORT.md, model.json, MANIFEST
 class Package(NamedTuple): hash; files; manifest
-def scratch_dir(root, name, dry_run) -> str   # dry: .atompipe/out/export-<m>; else out/.<m>.tmp-<pid>
+def scratch_dir(root, name, dry_run) -> str   # .atompipe/out/export-<m>, both modes, under the lock
 def build_package(scratch, *, report_md, carried, manifest) -> Package
 def package_problems(root, name, exports) -> list[tuple[str, str]]   # (foreign | edited, rel)
-def swap_package(root, name, scratch) -> str  # out/<m>/ replaced whole, never over a person's file
+def swap_package(root, name, scratch, record=None) -> str  # out/<m>/ replaced whole, then
+                                              #   record() (the export record's append); undone
+                                              #   when it raises, the older package put back
 ```
 **One path, two modes.** `--dry-run` runs everything `export` runs — the forced re-run
 at tier 3 with controls and prerequisites, the judgment on the re-executed view, the
@@ -3703,7 +3725,8 @@ A spend is named, and the place it costs money re-executes. The spine digest mov
   contradicts the verdicts the export sealed (`counted`), not the evaluator's verdict
   after its inputs moved.
 - **Supersession**: a fail stops counting when a later pass stands on another exported
-  article that moved where the fail's did (`verdicts._supersedes`); kept and named.
+  article that moved where the fail's did and whose export printed other bytes
+  (`verdicts._supersedes`); kept and named.
 - **The hardware clause and the limits line**: the readiness sentence says, in every
   branch, what is checked on an article or that nothing is, and what needs one; the
   report and `export` say what Checked does not mean (`report.limits_line`).
@@ -3722,7 +3745,15 @@ A spend is named, and the place it costs money re-executes. The spine digest mov
 
 - **Ready on `status` and the page is as last evaluated (P2.5b).** It reads the
   verdict cache, which the inner loop never re-executes and can be forged (below);
-  only `export` re-runs what a spend requires. Every milestone line says so.
+  only `export` re-runs what a spend requires. Every milestone line says so, and so
+  does every *ready* sentence but the boundary's (review of P2.5b): `report`,
+  `report --milestone` and its JSON (`milestone.last_evaluated`), `status`. The page
+  is P5's.
+- **A generator whose bytes move on every run (review of P2.5b).** Supersession
+  compares what two exports printed (`_built_seal`); a generator that writes a clock
+  or a random id differs from itself, so a reprint of the object that failed would
+  read as another object. The bracket's is deterministic by design (its docstring
+  says so); nothing enforces it.
 - **An export records an intent to build, not a build (P2.5b).** The article is what
   the generator read and the package what it wrote; nothing sees the slicer, the
   printer or which package a person printed. A result binds to an article by its hash

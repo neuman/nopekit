@@ -103,7 +103,9 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    moves it reads Stale, naming the article to rebuild — a check run cannot restore
    it (P2.5a). An article `export` built is what its generator read, and every value
    its package hands the builder: it moves only when something its generator read
-   moves, and the rebuild prediction names exactly those articles (P2.5b).
+   moves, and the rebuild prediction names exactly those articles (P2.5b) — a file it
+   linked into its package is a read, and one there that no write the trace saw put
+   makes the article the whole design (review of P2.5b).
    (Observed before this: one hash of the whole model decided every gate, and a model
    that failed to import compared equal, so three claims read Checked for a design that
    could not be built.)
@@ -204,9 +206,10 @@ earned. Enforced in `tests/test_signing.py`, `tests/test_physical.py` and
     file holds keeps its fail counting, and on its evaluator's track record. From
     P2.5b a fail loses its power to fail only on the object that failed: a fail on an
     article `export` built stops counting beside a pass a person records on another
-    exported article that differs from it in what it was built from, while the design
-    is no longer the failed one, and counts again the moment the design returns to
-    it — a fail on any other article never stops counting. A result recorded with
+    exported article that differs from it in what it was built from and in the bytes
+    its generator wrote, while the design is no longer the failed one, and counts
+    again the moment the design returns to it — a fail on any other article never
+    stops counting. A result recorded with
     `--article` is bound to an exported article, and its pass counts only while
     `exports/` holds that export. An
     owner, and an expert-judgment claim's authority, count only as that person
@@ -223,8 +226,10 @@ earned. Enforced in `tests/test_signing.py`, `tests/test_physical.py` and
     dropped a physical claim's evidence; in its review, a judged claim's rewritten
     statement read Stale and passed `check`, a claim file renamed away from its fail
     stopped it failing, and a fail flipped to a pass was left out of the refusal's
-    advice, whose checkout then erased it; and, until P2.5b, no fix and reprint could
-    ever read Checked.) What the seal does not stop — a process
+    advice, whose checkout then erased it; until P2.5b, no fix and reprint could
+    ever read Checked; and, in review of P2.5b, a no-op line in the generator let the
+    same print, reprinted byte for byte, release its own fail, and a fail bound to an
+    article two milestones shared charged no evaluator.) What the seal does not stop — a process
     that recomputes it, or opens a pty with the agent markers unset — is in
     `docs/SPINE_CONTRACT.md`'s limits; P3's permission rule closes it.
 
@@ -256,7 +261,9 @@ one place a pass nothing earned costs money. Enforced in `tests/test_export.py`,
     because an unbound pass read Checked everywhere but there (review of P2.1); the
     committed readiness report had drifted from its ledger (S-41); and the tracked
     cache is forgeable in the inner loop — a hand-placed entry was served Checked
-    until something re-ran it, and nothing at a spend did.)
+    until something re-ran it, and nothing at a spend did; and, in review of P2.5b,
+    `report --milestone` said the boundary's *ready* over a forged cache and `status`
+    listed no milestone at all.)
 
 One more came with checkpoint P2.3, numbered as PLAN §4.0.1 numbers it (11–14 land with
 their mechanisms). Enforced in `tests/test_mutation.py`, over every mutation entry point

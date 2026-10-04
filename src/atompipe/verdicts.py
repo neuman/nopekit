@@ -127,6 +127,7 @@ import operator
 import os
 import re
 import shutil
+import stat as stat_module
 import sys
 import tempfile
 import threading
@@ -2305,6 +2306,37 @@ def _on_rename(traces: tuple, args: tuple) -> None:
                 trace._note_write(path)
 
 
+def _on_link(traces: tuple, args: tuple) -> None:
+    """``os.link(src, dst, …)``: the source's bytes now sit at ``dst`` with no
+    ``open`` naming them, so the source is a read and the link is written. What
+    slipped through (review of P2.5b, finding 2): a generator that hard-linked
+    a project mesh into its package recorded nothing of the mesh — the article
+    stayed traced, its hash unmoved by any edit of the mesh, and a pass on the
+    print counted for the new bytes. (A ``src_dir_fd``/``dst_dir_fd`` is not
+    followed: a relative path is read against the working directory, as
+    ``open``'s is — and a package file it misplaces is one no traced write put
+    there, which ``export_article`` makes untraced.)"""
+    _linked(traces, _path_arg(args[0] if args else None),
+            _path_arg(args[1] if len(args) > 1 else None))
+
+
+def _on_symlink(traces: tuple, args: tuple) -> None:
+    """``os.symlink(src, dst, …)``: what the link names is read wherever the
+    link is followed — a relative ``src`` against the link's own directory."""
+    dst = _path_arg(args[1] if len(args) > 1 else None)
+    raw = _text(args[0] if args else None)
+    src = _path_arg(raw, os.path.dirname(dst)) if raw is not None and dst else None
+    _linked(traces, src, dst)
+
+
+def _linked(traces: tuple, src: str | None, dst: str | None) -> None:
+    for trace in traces:
+        if src is not None and not _library_path(src):
+            trace._note_read(src)
+        if dst is not None and not _library_path(dst):
+            trace._note_write(dst)
+
+
 def _argv_files(argv: Any, cwd: Any) -> list[str]:
     """Arguments that name existing files: what a subprocess was handed to read."""
     if isinstance(argv, (str, bytes)) or not isinstance(argv, (list, tuple)):
@@ -2430,7 +2462,8 @@ def _on_network(traces: tuple, args: tuple) -> None:
 
 
 #: Event -> handler. ``os.replace`` audits as ``os.rename`` on CPython; both
-#: names are here in case another implementation does not. ``os.fork`` and the
+#: names are here in case another implementation does not. ``os.link`` and
+#: ``os.symlink`` came with the review of P2.5b (``_on_link``). ``os.fork`` and the
 #: datagram sends go beyond the plan's table: a forked child's reads are as
 #: invisible as a spawned one's, and a UDP send needs no ``connect``.
 #: ``_winapi.CreateProcess`` and ``_posixsubprocess.fork_exec`` are how
@@ -2442,6 +2475,8 @@ _HANDLERS: dict[str, Callable[[tuple, tuple], None]] = {
     "os.scandir": _on_listdir,
     "os.rename": _on_rename,
     "os.replace": _on_rename,
+    "os.link": _on_link,
+    "os.symlink": _on_symlink,
     "subprocess.Popen": _on_popen,
     "os.system": _on_system,
     "os.exec": _on_exec,
@@ -6025,6 +6060,15 @@ class _Now:
         self.exported = frozenset(
             str((getattr(e, "article", None) or {}).get("hash") or "")
             for e in getattr(ledger, "exports", None) or ()) - {""}
+        # What each held article's exports printed (`_built_seal`), for
+        # supersession (review of P2.5b): an article exported twice keeps both.
+        built: dict[str, set] = {}
+        for e in getattr(ledger, "exports", None) or ():
+            digest = str((getattr(e, "article", None) or {}).get("hash") or "")
+            files = (getattr(e, "package", None) or {}).get("files")
+            if digest and isinstance(files, Mapping):
+                built.setdefault(digest, set()).add(_built_seal(files))
+        self.built = {digest: tuple(sorted(seals)) for digest, seals in built.items()}
         self.model = model
         self.spine = spine_digest()
         self.walks: dict = {}
@@ -7509,13 +7553,35 @@ class ExportedArticle(NamedTuple):
     """What ``export_article`` found: ``article`` (``{}`` when the generator
     did not run to the end), ``written`` — the files under ``out_dir``, posix,
     sorted — ``outside`` — project or pack files it opened for writing outside
-    ``out_dir``, named — and ``error``, the first line of what it raised."""
+    ``out_dir``, named — ``error``, the first line of what it raised, and
+    ``linked`` — what under ``out_dir`` is a symlink or a hard link (review of
+    P2.5b: a package holds the bytes it hands the builder, never a second name
+    for a project file; ``export`` refuses each)."""
 
     article: dict
     written: tuple
     outside: tuple
     error: str
     params: dict
+    linked: tuple = ()
+
+
+def _links_under(base: str) -> tuple[str, ...]:
+    """Every path under ``base`` that is a symlink, or a file with another hard
+    link: posix, relative, sorted. A symlink to a directory is listed and never
+    followed."""
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(base):
+        for name in list(dirnames) + list(filenames):
+            full = os.path.join(dirpath, name)
+            try:
+                info = os.lstat(full)
+            except OSError:
+                continue
+            if stat_module.S_ISLNK(info.st_mode) or (stat_module.S_ISREG(info.st_mode)
+                                                     and info.st_nlink > 1):
+                found.append(os.path.relpath(full, base).replace(os.sep, "/"))
+    return tuple(sorted(found))
 
 
 def _code_digests(module: Any, anchors: Anchors) -> dict[str, str] | None:
@@ -7591,10 +7657,16 @@ def export_article(root: str, projection: Any, fn: Any, *, out_dir: str, anchors
             type(exc).__name__
     base = os.path.abspath(out_dir)
     written = []
+    seen = {_norm(path) for path in trace.files_written}
+    unseen = []
     for dirpath, _dirnames, filenames in os.walk(base):
         for name in filenames:
             full = os.path.join(dirpath, name)
-            written.append(os.path.relpath(full, base).replace(os.sep, "/"))
+            rel = os.path.relpath(full, base).replace(os.sep, "/")
+            written.append(rel)
+            if _norm(full) not in seen:
+                unseen.append(rel)
+    linked = _links_under(base)
     places = _Places(anchors)
     project = os.path.normcase(os.path.abspath(root))
     outside = []
@@ -7608,11 +7680,17 @@ def export_article(root: str, projection: Any, fn: Any, *, out_dir: str, anchors
             outside.append(places.shown(p) if not inside_project
                            else os.path.relpath(p, project).replace(os.sep, "/"))
     if error:
-        return ExportedArticle({}, tuple(sorted(written)), tuple(outside), error, {})
+        return ExportedArticle({}, tuple(sorted(written)), tuple(outside), error, {},
+                               linked)
     reads = Reads.from_trace(trace, anchors=anchors, digests=digests)
     module = sys.modules.get(getattr(fn, "__module__", "") or "")
     code = _code_digests(module, anchors) if module is not None else None
-    traced = not reads.opaque and code is not None and not trace.model_used
+    # A file in the package no write the trace saw put there: whatever wrote it
+    # (a C library, a channel no handler takes) read what the trace cannot name
+    # either, so the article is the whole design — over-prediction, never under
+    # (review of P2.5b's finding 2, the backstop behind `_on_link`).
+    traced = (not reads.opaque and not unseen and code is not None
+              and not trace.model_used)
     carried: dict[str, Any] = {}
     if traced:
         built: dict[str, Any] = {"params": [list(row) for row in reads.params],
@@ -7634,7 +7712,8 @@ def export_article(root: str, projection: Any, fn: Any, *, out_dir: str, anchors
     article = {"source": "export", "hash": seal({"source": "export", "built_from": built}),
                "built_from": built, "traced": bool(traced), "milestone": milestone,
                "when": when, "revision": revision, "dirty": dirty}
-    return ExportedArticle(article, tuple(sorted(written)), tuple(outside), "", carried)
+    return ExportedArticle(article, tuple(sorted(written)), tuple(outside), "", carried,
+                           linked)
 
 
 def _traced_moves(article: Mapping[str, Any], here: "_Now") -> tuple[str, tuple]:
@@ -7847,8 +7926,9 @@ def _judge_entry(index: int, entry: Any, claim: Any, terminal: str, digest_now: 
     article = getattr(entry, "article", None) or {}
     article_hash = str(article.get("hash") or "") if isinstance(article, Mapping) else ""
     state, moved = _article_moves(article, here) if article_hash else ("", ())
+    built = tuple(getattr(here, "built", {}).get(article_hash, ())) if article_hash else ()
     if getattr(entry, "passed", None) is not True:
-        return EntryStanding(index, False, False, "", article_hash, state, moved)
+        return EntryStanding(index, False, False, "", article_hash, state, moved, built=built)
     # The terminal first: beside an automated evaluator a pass settles nothing
     # whoever typed it, and that is the reason to give. The other facts are
     # judged all the same (P2.5b): a pass that stands on its article is what a
@@ -7887,7 +7967,8 @@ def _judge_entry(index: int, entry: Any, claim: Any, terminal: str, digest_now: 
             why = _fact_evidence(entry, here.root, here.digests)
     stands = not why and terminal_why in ("", "beside")
     why = terminal_why or why
-    return EntryStanding(index, True, not why, why, article_hash, state, moved, stands)
+    return EntryStanding(index, True, not why, why, article_hash, state, moved, stands,
+                         built=built)
 
 
 def _kind_of(claim: Any) -> str:
@@ -7911,6 +7992,23 @@ def _recorded_rows(article: Mapping[str, Any]) -> dict[tuple, str]:
     return rows
 
 
+#: The files the spine writes into every package beside the generator's
+#: (`milestones.SPINE_FILES` is this tuple): the milestone's report, the values
+#: the article recorded, and the manifest. What was PRINTED is the rest.
+_PACKAGE_SPINE_FILES = ("REPORT.md", "model.json", "MANIFEST.json")
+
+
+def _built_seal(files: Mapping[str, Any]) -> str:
+    """The seal of what a package's generator wrote — its ``{rel: sha256}`` but
+    the spine's files: the bytes a person prints from. *Rejected:* the package
+    hash (it covers REPORT.md, whose words move with any claim's status, and
+    model.json, which carries a value the generator read whether or not the
+    print shows it); the article hash (a no-op line in the generator moves it,
+    the review of P2.5b's finding 1)."""
+    return seal({rel: str(sha) for rel, sha in sorted(files.items())
+                 if rel not in _PACKAGE_SPINE_FILES})
+
+
 def _differs_on_recorded(failed: Mapping[str, Any], passed: Mapping[str, Any]) -> bool:
     """Whether the article ``passed`` was built from differs from ``failed``'s on
     a row ``failed`` RECORDED (critique 2 of the P2.5b design): the object that
@@ -7931,19 +8029,31 @@ def _supersedes(fail: Any, fs: EntryStanding, passing: Any, ps: EntryStanding) -
     holding, its export on record (D15) — on an article B that is exported and
     traced too; A no longer matches the design (``moved``); and B differs from A
     on a row A recorded. The moment the design returns to A, A is current and
-    the fail counts again. *Rejected:* any later pass (the review of P2.1's
-    one-second laundering); a pass on a design article (P2.5a-D12's "a nudge
-    plus a typed pass"); B == A, or B differing from A by hash alone (a retest
-    of the same object until it passes, Q2.11)."""
+    the fail counts again. And (review of P2.5b) what was printed from B is not
+    what was printed from A: no package an export of B wrote carries the bytes
+    a package of A carried (``EntryStanding.built``), and A's own export is on
+    record to say what those were — a fail whose bytes nobody holds is never
+    released. *Rejected:* any later pass (the review of P2.1's one-second
+    laundering); a pass on a design article (P2.5a-D12's "a nudge plus a typed
+    pass"); B == A, or B differing from A by hash alone (a retest of the same
+    object until it passes, Q2.11); B differing on a recorded row alone (what
+    slipped through: one no-op line, `unused = None`, moved the generator's
+    code row, and the same print reprinted byte for byte released its fail);
+    dropping the code rows instead (a fix made in the generator's code, its
+    bytes moved, could then never release a fail). Named residual: a generator
+    whose bytes move on every run (a clock in a comment) differs from itself;
+    SPINE_CONTRACT's limits."""
     a = getattr(fail, "article", None) or {}
     b = getattr(passing, "article", None) or {}
     if not (isinstance(a, Mapping) and isinstance(b, Mapping)):
         return False
+    printed_a, printed_b = set(fs.built or ()), set(ps.built or ())
     return bool(ps.stands and a.get("source") == "export" and a.get("traced") is True
                 and b.get("source") == "export" and b.get("traced") is True
                 and fs.article_state == "moved"
                 and str(a.get("hash") or "") != str(b.get("hash") or "")
-                and _differs_on_recorded(a, b))
+                and _differs_on_recorded(a, b)
+                and printed_a and printed_b and not printed_a & printed_b)
 
 
 def judge_results(ledger: Any, here: "_Now") -> dict[str, Standing]:

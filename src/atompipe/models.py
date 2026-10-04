@@ -566,13 +566,21 @@ class EntryStanding:
     ``moved``, ``unjudged`` or ``""`` (no article); ``moved`` — what moved, in
     words, inputs first.
 
-    ``stands`` (P2.5b, the LAST field, R-2) — a pass a person made that every
-    fact but the terminal holds for, on its current article: what a fail's
-    supersession reads (``verdicts._supersedes``). On a measurement it is
-    ``counts``; beside an automated evaluator a pass settles nothing
-    (``beside``) and still stands on its article — the reprint after a fix,
-    measured, is the pass a ruler's fail on the old print waits for (critique
-    13 of the P2.5b design)."""
+    ``stands`` (P2.5b) — a pass a person made that every fact but the
+    terminal holds for, on its current article: what a fail's supersession
+    reads (``verdicts._supersedes``). On a measurement it is ``counts``; beside
+    an automated evaluator a pass settles nothing (``beside``) and still stands
+    on its article — the reprint after a fix, measured, is the pass a ruler's
+    fail on the old print waits for (critique 13 of the P2.5b design).
+
+    ``built`` (review of P2.5b, the LAST field, R-2) — what was printed from
+    this article: the seal of the generator's files (``verdicts.built_seal``) of
+    each export ``exports/`` holds that built it, sorted; ``()`` for a design
+    article or one no export record holds. Supersession reads it: a pass on an
+    article whose package carries the failed one's bytes is a reprint of the
+    object that failed, whatever else differs (what slipped through: a no-op
+    line in the generator moved its code digest, so the same print, reprinted
+    byte for byte, released its own fail)."""
 
     index: int
     passed: bool
@@ -582,6 +590,7 @@ class EntryStanding:
     article_state: str = ""
     moved: tuple = ()
     stands: bool = False
+    built: tuple = ()
 
 
 @dataclass(frozen=True)

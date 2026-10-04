@@ -764,6 +764,33 @@ class AuditTrace(_env.EnvCase):
         self.assertEqual(trace.files_read, [self.path, second, third])
         self.assertTrue(all(isinstance(p, str) for p in trace.files_read))
 
+    def test_a_link_reads_its_source(self):
+        """Review of P2.5b (finding 2): a hard link or a symlink puts a file's
+        bytes where the trace sees no read — a generator linking a project mesh
+        into its package recorded nothing of the mesh, and an edit of it moved
+        no article. The source is a read; the link is written."""
+        hard = os.path.join(self.dir, "hard.csv")
+        soft = os.path.join(self.dir, "soft.csv")
+        relative = os.path.join(self.dir, "relative.csv")
+        target = self.file("target.csv")
+        trace = GateTrace()
+        with tracing(trace):
+            os.link(self.path, hard)
+            os.symlink(target, soft)
+            os.symlink("input.csv", relative)        # relative to the link's directory
+        self.assertEqual(trace.files_read, [self.path, target])
+        self.assertTrue({hard, soft, relative} <= trace.files_written)
+
+    def test_a_planted_hook_without_links_is_caught(self):
+        """Planted: the handlers for `os.link` and `os.symlink` removed — the
+        source is read by nothing the trace sees."""
+        hidden = {k: v for k, v in verdicts._HANDLERS.items()
+                  if k not in ("os.link", "os.symlink")}
+        trace = GateTrace()
+        with mock.patch.dict(verdicts._HANDLERS, hidden, clear=True), tracing(trace):
+            os.link(self.path, os.path.join(self.dir, "hard.csv"))
+        self.assertNotIn(self.path, trace.files_read, "the planted hook was not caught")
+
     def test_listdir_and_scandir(self):
         sub = os.path.join(self.dir, "sub")
         os.mkdir(sub)

@@ -23,6 +23,12 @@ here exists because it is the route of least resistance (R-6, R-7):
 * **NoGitOutsideVcs** — only ``src/atompipe/vcs.py`` starts git, so one clean
   environment, one timeout and one never-raise rule cover every git call.
 * **EnvIsFaithful** — ``_env`` hides the machine without hiding the tools.
+* **NoTestShadowsTheFramework** — no test class defines a method the
+  framework's assertions call: ``fail``, an ``assert*``, ``skipTest``,
+  ``subTest``. What slipped through (review of P2.5b): V-10's class named its
+  fail-entry builder ``fail``, and ``assertEqual`` raises through ``self.fail``
+  — so every assertion in it returned a dict and passed, rows that read wrong
+  included.
 
 Every static check is a pure function of source text, and each has a planted
 violator it must catch — a checker that has never refused anything is a logger.
@@ -140,7 +146,11 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     12: ["test_physical.RenderersAgreeOnPhysicalClaims", "test_export.ReadyIsOnePredicate",
          "test_export.TheBoundaryReExecutes", "test_export.ACacheThatLiesIsCaughtAtTheBoundary",
          "test_export.DryRunIsTheSamePath", "test_export.GoingAheadIsAPersonsDecision",
-         "test_vocabulary.TheHardwareClauseIsAlwaysSaid"],
+         "test_vocabulary.TheHardwareClauseIsAlwaysSaid",
+         # Review of P2.5b: every reader but the boundary says ready as last
+         # evaluated, through the commands (`report --milestone` said the
+         # boundary's words over a forged cache; `status` listed no milestone).
+         "test_export.EveryCacheReaderSaysAsLastEvaluated"],
     # 15 (P2.3): the mutation pass's seal, over the real walk and every planted
     # runner — moved here from PLANNED_INVARIANT_CLASSES with CLAUDE.md's item.
     15: "test_mutation.MutationIsSealed",
@@ -1003,6 +1013,74 @@ class EnvIsFaithful(_env.EnvCase):
         if shutil.which("git") is None:
             self.skipTest("git is not on PATH")
 
+
+
+# --------------------------------------------------------------------------- #
+# NoTestShadowsTheFramework
+# --------------------------------------------------------------------------- #
+#: The framework's own methods a test class must never define: every assertion
+#: raises through ``self.fail`` (and ``failureException``), and the skip and
+#: subtest machinery through the rest. *Rejected:* every public ``TestCase``
+#: name (``setUp``, ``run``, ``id`` are meant to be overridden).
+_FRAMEWORK = frozenset(
+    {name for name in dir(unittest.TestCase)
+     if name.startswith(("assert", "fail")) and not name.startswith("assert_")}
+    | {"skipTest", "subTest", "addCleanup", "doCleanups", "enterContext"})
+
+
+def _shadow_findings(source: str, filename: str = "<planted>") -> list[str]:
+    """Every method or class attribute a ``*Case`` class in ``source`` defines
+    under a name in ``_FRAMEWORK``."""
+    findings: list[str] = []
+    for node in ast.walk(ast.parse(source, filename)):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        bases = [b.attr if isinstance(b, ast.Attribute) else getattr(b, "id", "")
+                 for b in node.bases]
+        if not any(str(b).endswith("Case") for b in bases):
+            continue
+        for item in node.body:
+            names = []
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                names = [item.name]
+            elif isinstance(item, (ast.Assign, ast.AnnAssign)):
+                targets = item.targets if isinstance(item, ast.Assign) else [item.target]
+                names = [t.id for t in targets if isinstance(t, ast.Name)]
+            for name in names:
+                if name in _FRAMEWORK:
+                    findings.append(f"{filename}:{item.lineno}: {node.name}.{name}")
+    return findings
+
+
+class NoTestShadowsTheFramework(unittest.TestCase):
+    def test_no_test_class_shadows_an_assertion(self):
+        findings: list[str] = []
+        for path in _test_sources():
+            findings += _shadow_findings(_read(path), os.path.relpath(path, _env.REPO))
+        self.assertEqual(findings, [], "a test class that defines one of the framework's "
+                         "methods turns every assertion through it into a no-op: "
+                         + "; ".join(findings))
+
+    def test_planted_shadows_are_caught(self):
+        planted = [
+            "import unittest\nclass T(unittest.TestCase):\n    def fail(self, a):\n"
+            "        return {}\n",
+            "import _env\nclass T(_env.EnvCase):\n    def assertEqual(self, a, b):\n"
+            "        pass\n",
+            "class T(_ShapeCase):\n    fail = None\n",
+            "import unittest\nclass T(unittest.TestCase):\n    def skipTest(self, r):\n"
+            "        pass\n",
+        ]
+        for source in planted:
+            with self.subTest(source=source):
+                self.assertTrue(_shadow_findings(source), f"not caught: {source!r}")
+
+    def test_a_helper_of_its_own_name_is_clean(self):
+        source = ("import unittest\nclass T(unittest.TestCase):\n"
+                  "    def assertRow(self, rows):\n        pass\n"
+                  "    def failed_on(self, a):\n        return {}\n"
+                  "class _Helper:\n    def fail(self):\n        return 1\n")
+        self.assertEqual(_shadow_findings(source), [])
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

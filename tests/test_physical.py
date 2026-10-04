@@ -44,7 +44,7 @@ import _projects
 from atompipe import claims, report, store, verdicts
 from atompipe.models import (Acceptance, Claim, ClaimKind, ClaimStatus, Ledger,
                              PhysicalResult, Verdict)
-from atompipe.util import AtompipeError
+from atompipe.util import AtompipeError, sha256_text
 
 
 def _need(module: Any, name: str) -> Any:
@@ -1733,6 +1733,52 @@ class AResultBindsToAnExportedArticle(_env.EnvCase):
         self.assertEqual(entry["article"]["hash"], article)
         self.assertEqual(entry["contradicts"], counted)
 
+    def test_in_process_every_record_of_one_article_is_read(self):
+        """Review of P2.5b (findings 7, 15): one article, two export records —
+        two milestones sharing a generator, or one exported again unchanged —
+        and the first record in name order alone was read: its `counted` lacked
+        the claim, so the fail charged no evaluator. Every record's seal is
+        charged, the newest export that re-ran the claim is the one the prompt
+        names; planted, the first record alone is caught."""
+        from atompipe import milestones
+        from atompipe.models import ExportRecord
+        row = {"gate": "bracket.deflection", "code": "c" * 64, "rho": "r" * 64,
+               "value": 0.469, "units": "mm", "inside": True}
+        fit = ExportRecord(milestone="fit-check", when="2026-10-04T10:00:00Z",
+                           counted={"C3": []}, article={"hash": "a" * 64})
+        fit_again = dataclasses.replace(fit, when="2026-10-04T12:00:00Z")
+        printed = ExportRecord(milestone="print-v1", when="2026-10-04T11:00:00Z",
+                               counted={"C1": [row]}, article={"hash": "a" * 64})
+        records = [fit, fit_again, printed]               # `ledger.exports`' name order
+        self.assertEqual(milestones.sealed_on(records, "C1"), [row])
+        self.assertIs(milestones.bound_export(records, "C1"), printed)
+        self.assertIs(milestones.bound_export(records, "C5"), fit_again)
+        self.assertEqual(milestones.sealed_on(records, "C5"), [])
+        planted = milestones.sealed_contradictions(records[0], "C1")
+        self.assertNotEqual(planted, milestones.sealed_on(records, "C1"),
+                            "the first record alone was not caught")
+
+    def test_a_fail_on_an_article_two_milestones_share_is_a_contradiction(self):
+        """End to end on the bracket: `fit-check` requires C3 alone and shares
+        `print-v1`'s generator, so both exports record one article — exported
+        `fit-check`, `print-v1`, then `fit-check` again. A ruler's fail on C1
+        bound to it charges `bracket.deflection`, as with `print-v1` alone."""
+        import test_export as X
+        root = X.bracket(os.path.join(self.tmp(), "b"), thickness=8.0, git=True)
+        P.milestone(root, "fit-check", ["C3"], generator="generators/profile.py:side_profile")
+        P.run(root, "check")
+        for name in ("fit-check", "print-v1", "fit-check"):
+            P.run(root, "export", name, code=0)
+        article = P.exports(root, "print-v1")["exports"][-1]["article"]["hash"]
+        self.assertEqual(P.exports(root, "fit-check")["exports"][0]["article"]["hash"], article)
+        proc = P.tty(root, "claim", "physical", "C1", "fail", "--measured", "0.7",
+                     "--detail", "ruler at the tip", "--article", article, answer="C1", code=0)
+        self.assertIn("exported for print-v1", proc.stderr)
+        entry = P.results(root, "C1")["results"][-1]
+        self.assertEqual([c["gate"] for c in entry["contradicts"]], ["bracket.deflection"])
+        self.assertEqual(entry["contradiction_check"], "")
+        self.assertEqual(entry["article"]["milestone"], "print-v1")
+
     def test_a_planted_capture_from_the_current_resolution_is_caught(self):
         """Planted: the contradiction read from the resolution now — after the
         move, `fig4.enclosure_fit` is invalidated and nothing is charged."""
@@ -1750,13 +1796,14 @@ class AResultBindsToAnExportedArticle(_env.EnvCase):
 
 # -- V-10, in process: the judge over real sealed entries --------------------- #
 def _exported(params: dict, *, traced: bool = True, milestone: str = "enclosure",
-              when: str = "2026-10-04T10:00:00Z") -> dict:
+              when: str = "2026-10-04T10:00:00Z", model: dict | None = None) -> dict:
     """An exported article as `export` records it: ``params`` ``{path: value}``
-    (a traced generator's reads), sealed."""
+    (a traced generator's reads) and ``model`` (its code files' digests),
+    sealed."""
     from atompipe.util import seal
     rows = [[list(path), verdicts.digest_value(value), value]
             for path, value in sorted(params.items())]
-    built = {"params": rows, "model": {}, "files": {}}
+    built = {"params": rows, "model": dict(model or {}), "files": {}}
     return {"source": "export", "hash": seal(built), "built_from": built, "traced": traced,
             "milestone": milestone, "when": when, "revision": "", "dirty": False}
 
@@ -1773,9 +1820,15 @@ class _Judged:
 
     def __init__(self, root: str, entries: list[dict], *, cavity: float,
                  exports: list[str], claim: Claim | None = None,
-                 verdicts_: list | None = None) -> None:
+                 verdicts_: list | None = None, packages: dict | None = None,
+                 files: dict | None = None) -> None:
         from atompipe.models import ExportRecord
         from atompipe.util import FileDigests
+        for rel, data in (files or {}).items():
+            path = os.path.join(root, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as fh:
+                fh.write(data)
         photo = os.path.join(root, "photos", "k5.jpg")
         os.makedirs(os.path.dirname(photo), exist_ok=True)
         with open(photo, "wb") as fh:
@@ -1794,7 +1847,15 @@ class _Judged:
         self.claim = dataclasses.replace(base, results=tuple(results),
                                          physical_result=fail or (results[-1] if results
                                                                   else None))
-        records = [ExportRecord(milestone="enclosure", article={"hash": h}) for h in exports]
+        # Each export's package as `export` records it: the generator's files by
+        # their sha256, beside the spine's (`model.json`, `REPORT.md`). By
+        # default every article's generator wrote bytes of its own; `packages`
+        # names an article's files where a row needs two to be one object.
+        packages = dict(packages or {})
+        records = [ExportRecord(milestone="enclosure", article={"hash": h}, package={
+            "hash": "p" * 64, "files": dict(packages.get(h) or {
+                "part.svg": sha256_text(h), "model.json": "m" * 64,
+                "REPORT.md": "r" * 64})}) for h in exports]
         self.ledger = dataclasses.replace(Ledger(claims=[self.claim],
                                                  verdicts=list(verdicts_ or [])),
                                           exports=records)
@@ -1827,6 +1888,22 @@ class _Judged:
 A70 = {("cavity_w",): 70.0}
 A72 = {("cavity_w",): 72.0}
 
+#: A generator's source, and the same with one line that changes nothing it
+#: writes (review of P2.5b, finding 1: `unused = None` moved the code digest, so
+#: the article moved, and the same print, reprinted byte for byte, superseded
+#: its own fail).
+GEN = b"def make(ctx):\n    return None\n"
+GEN_NOOP = GEN + b"unused = None\n"
+
+
+def _code(source: bytes) -> dict:
+    return {"generators/gen.py": verdicts.canonical_ast_digest(source)}
+
+
+#: One package's generator files, byte for byte, for the rows where two
+#: articles printed one object.
+SAME_PRINT = {"part.svg": "a" * 64, "model.json": "m" * 64, "REPORT.md": "r" * 64}
+
 
 class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
     """(V-10, invariant 11; PLAN Q2.11, R-3 "for every object but the one that
@@ -1840,7 +1917,7 @@ class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
               **kw: Any) -> _Judged:
         return _Judged(self.tmp(), entries, cavity=cavity, exports=exports, **kw)
 
-    def fail(self, article: dict) -> dict:
+    def failed_on(self, article: dict) -> dict:
         return {"passed": False, "detail": "a gap at the seam", "article": article}
 
     def passed(self, article: dict, **kw: Any) -> dict:
@@ -1850,39 +1927,57 @@ class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
         """``{row: (judged, (status, cause) it must read)}`` — §4.5 row by row,
         and critique 2's rows."""
         E, E2 = _exported(A70), _exported(A72)
+        Ec, Ec2 = _exported(A70, model=_code(GEN)), _exported(A70, model=_code(GEN_NOOP))
         both = [E["hash"], E2["hash"]]
         return {
             "a: a pass on another exported article, the design moved":
-                (self.judge([self.fail(E), self.passed(E2)], cavity=72.0, exports=both),
+                (self.judge([self.failed_on(E), self.passed(E2)], cavity=72.0, exports=both),
                  ("verified", "on-article")),
             "b: the design returned to the failed article":
-                (self.judge([self.fail(E), self.passed(E2)], cavity=70.0, exports=both),
+                (self.judge([self.failed_on(E), self.passed(E2)], cavity=70.0, exports=both),
                  ("refuted", "physical-fail")),
             "c: a pass on a design article after the move":
-                (self.judge([self.fail(E), self.passed(_design(72.0))], cavity=72.0,
+                (self.judge([self.failed_on(E), self.passed(_design(72.0))], cavity=72.0,
                             exports=both), ("refuted", "physical-fail")),
             "d: a pass on the failed article itself":
-                (self.judge([self.fail(E), self.passed(E)], cavity=70.0, exports=both),
+                (self.judge([self.failed_on(E), self.passed(E)], cavity=70.0, exports=both),
                  ("refuted", "physical-fail")),
             "e: a pass from an agent session on another exported article":
-                (self.judge([self.fail(E), self.passed(E2, channel="agent-session s1")],
+                (self.judge([self.failed_on(E), self.passed(E2, channel="agent-session s1")],
                             cavity=72.0, exports=both), ("refuted", "physical-fail")),
             "f: the other article's export record removed":
-                (self.judge([self.fail(E), self.passed(E2)], cavity=72.0,
+                (self.judge([self.failed_on(E), self.passed(E2)], cavity=72.0,
                             exports=[E["hash"]]), ("refuted", "physical-fail")),
             "j: the fail on a design article, a pass on an exported one":
-                (self.judge([self.fail(_design(70.0)), self.passed(E2)], cavity=72.0,
+                (self.judge([self.failed_on(_design(70.0)), self.passed(E2)], cavity=72.0,
                             exports=both), ("refuted", "physical-fail")),
             "k: the fail on an untraced export":
-                (self.judge([self.fail(_exported(A70, traced=False)), self.passed(E2)],
+                (self.judge([self.failed_on(_exported(A70, traced=False)), self.passed(E2)],
                             cavity=72.0, exports=both + [_exported(A70, traced=False)["hash"]]),
                  ("refuted", "physical-fail")),
             "l: the pass's article differs only in a row the failed one never read":
-                (self.judge([self.fail(E), self.passed(_exported({("cell_mah",): 2000.0},
+                (self.judge([self.failed_on(E), self.passed(_exported({("cell_mah",): 2000.0},
                                                                   milestone="board"))],
                             cavity=72.0, exports=both + [_exported(
                                 {("cell_mah",): 2000.0}, milestone="board")["hash"]]),
                  ("refuted", "physical-fail")),
+            # Review of P2.5b (finding 1): B differs from A on a row A recorded
+            # — its generator's code — and the generator wrote the same bytes.
+            # The object printed is the one that failed.
+            "m: generator code differs, the package byte for byte the failed one's":
+                (self.judge([self.failed_on(Ec), self.passed(Ec2)], cavity=70.0,
+                            exports=[Ec["hash"], Ec2["hash"]],
+                            packages={Ec["hash"]: SAME_PRINT, Ec2["hash"]: SAME_PRINT},
+                            files={"generators/gen.py": GEN_NOOP}),
+                 ("refuted", "physical-fail")),
+            "n: generator code differs and so do the bytes it wrote":
+                (self.judge([self.failed_on(Ec), self.passed(Ec2)], cavity=70.0,
+                            exports=[Ec["hash"], Ec2["hash"]],
+                            files={"generators/gen.py": GEN_NOOP}),
+                 ("verified", "on-article")),
+            "o: the failed article's export record removed (its bytes unknown)":
+                (self.judge([self.failed_on(E), self.passed(E2)], cavity=72.0,
+                            exports=[E2["hash"]]), ("refuted", "physical-fail")),
         }
 
     def problems(self) -> list[str]:
@@ -1894,7 +1989,7 @@ class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
 
     def test_the_superseded_fail_is_named_and_kept(self):
         E, E2 = _exported(A70), _exported(A72)
-        judged = self.judge([self.fail(E), self.passed(E2)], cavity=72.0,
+        judged = self.judge([self.failed_on(E), self.passed(E2)], cavity=72.0,
                             exports=[E["hash"], E2["hash"]])
         standing = judged.standings["K5"]
         self.assertEqual(tuple(getattr(standing, "superseded", ()) or ()), (0,))
@@ -1914,14 +2009,14 @@ class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
         pass that superseded it — never "it counts" beside a row reading
         Checked. The fail it supersedes nothing for still counts."""
         E, E2 = _exported(A70), _exported(A72)
-        judged = self.judge([self.fail(E), self.passed(E2)], cavity=72.0,
+        judged = self.judge([self.failed_on(E), self.passed(E2)], cavity=72.0,
                             exports=[E["hash"], E2["hash"]])
         claim = judged.view.claim("K5")
         failed = report.result_facts(claim, claim.results[0])
         self.assertFalse(failed["counts"])
         self.assertIn(report.article12(E2), failed["why"])
         self.assertTrue(report.result_facts(claim, claim.results[1])["counts"])
-        unsuperseded = self.judge([self.fail(E), self.passed(E)], cavity=72.0,
+        unsuperseded = self.judge([self.failed_on(E), self.passed(E)], cavity=72.0,
                                   exports=[E["hash"]])
         claim = unsuperseded.view.claim("K5")
         self.assertTrue(report.result_facts(claim, claim.results[0])["counts"])
@@ -1930,7 +2025,7 @@ class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
         E, E2 = _exported(A70), _exported(A72)
         contra = [{"gate": "fig4.enclosure_fit", "code": "c" * 64, "rho": "r" * 64,
                    "value": 76.0, "units": "mm", "inside": True}]
-        judged = self.judge([dict(self.fail(E), contradicts=contra), self.passed(E2)],
+        judged = self.judge([dict(self.failed_on(E), contradicts=contra), self.passed(E2)],
                             cavity=72.0, exports=[E["hash"], E2["hash"]])
         self.assertEqual(judged.reads, ("verified", "on-article"))
         record = verdicts.track_record(judged.ledger)
@@ -1949,12 +2044,12 @@ class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
                                             units="mm"))
         verdict = Verdict(gate="fig4.fit", claims=["K1"], passed=True, measured=78.0,
                           limit=100.0, units="mm")
-        judged = self.judge([self.fail(E), self.passed(E2, evidence=[],
+        judged = self.judge([self.failed_on(E), self.passed(E2, evidence=[],
                                                        evidence_sha256={})],
                             cavity=72.0, exports=[E["hash"], E2["hash"]], claim=claim,
                             verdicts_=[verdict])
         self.assertEqual(judged.reads, ("pass", "checked"))
-        back = self.judge([self.fail(E), self.passed(E2, evidence=[], evidence_sha256={})],
+        back = self.judge([self.failed_on(E), self.passed(E2, evidence=[], evidence_sha256={})],
                           cavity=70.0, exports=[E["hash"], E2["hash"]], claim=claim,
                           verdicts_=[verdict])
         self.assertEqual(back.reads[0], "refuted")
@@ -2005,11 +2100,18 @@ class AFailIsSupersededOnlyOnAnotherExportedArticle(_env.EnvCase):
                     found = dataclasses.replace(found, physical_result=claim.results[passes[-1]])
             return found
 
+        def rows_only(fail, fs, passing, ps):
+            # The recorded rows compared and never the bytes the generator
+            # wrote: a code-only edit releases the same print (finding 1).
+            return real(fail, dataclasses.replace(fs, built=("a" * 64,)), passing,
+                        dataclasses.replace(ps, built=("b" * 64,)))
+
         for name, planted, row in (("any later pass", any_pass, "c:"),
                                    ("B == A allowed", same_article, "d:"),
                                    ("never judged against the design again", not_current, "b:"),
                                    ("hash only", hash_only, "l:"),
-                                   ("a design article's fail", design_ok, "j:")):
+                                   ("a design article's fail", design_ok, "j:"),
+                                   ("the bytes written never compared", rows_only, "m:")):
             with self.subTest(name), mock.patch.object(verdicts, "_supersedes", planted), \
                     mock.patch.object(verdicts, "_judged", released_to_any_pass):
                 found = self.problems()
@@ -2048,6 +2150,53 @@ class AReprintAfterAFailIsADecision(_env.EnvCase):
         F.export(root, "enclosure", "--dry-run", code=0)
         F.set_cavity(root, 70.0)
         self.assertEqual(_status(root, "K1")[0], "refuted")
+
+    def test_a_fail_no_reprint_can_release_is_never_offered_one(self):
+        """Review of P2.5b (finding 17): a fail recorded without `--article`
+        sits on a design article, which supersession never releases — yet the
+        refusal offered "building a new article to test it again is a
+        decision", a path that led nowhere. It says the fail counts on every
+        design, and what that leaves: a go-ahead each time."""
+        import test_export as X
+        root = X.bracket(os.path.join(self.tmp(), "w"), thickness=8.0, git=True)
+        P.milestone(root, "weather", ["C5"], generator="generators/profile.py:side_profile")
+        P.run(root, "check")
+        P.run(root, "claim", "physical", "C5", "fail", "--detail", "crazing at the root",
+              code=0)
+        _projects.set_thickness(root, 8.5)
+        text = P.run(root, "export", "weather", "--dry-run", code=1).stdout
+        self.assertNotIn("building a new article to test it again", text)
+        self.assertIn("no pass on a reprint releases", text)
+        self.assertIn("--proceed", text)
+
+    def test_a_no_op_edit_to_the_generator_reprints_the_object_that_failed(self):
+        """Review of P2.5b (finding 1): one line that changes nothing the
+        generator writes moves its code, so the article moves — and the reprint,
+        byte for byte the print that failed, must not release its fail."""
+        import test_export as X
+        root = X.bracket(os.path.join(self.tmp(), "b"), thickness=8.0, git=True)
+        P.run(root, "check")
+        P.run(root, "export", "print-v1", code=0)
+        first = P.exports(root, "print-v1")["exports"][-1]
+        P.tty(root, "claim", "physical", "C1", "fail", "--measured", "0.62",
+              "--detail", "ruler at the tip", "--article", first["article"]["hash"],
+              answer="C1", code=0)
+        self.assertEqual(_status(root, "C1")[0], "refuted")
+        _append(os.path.join(root, "generators", "profile.py"), "\nunused = None\n")
+        P.tty(root, "export", "print-v1", "--proceed", "--why", "a reprint",
+              answer="print-v1", code=0)
+        second = P.exports(root, "print-v1")["exports"][-1]
+        self.assertNotEqual(second["article"]["hash"], first["article"]["hash"],
+                            "the no-op edit did not move the article: the row is vacuous")
+        self.assertEqual(
+            {k: v for k, v in second["package"]["files"].items() if k != "REPORT.md"},
+            {k: v for k, v in first["package"]["files"].items() if k != "REPORT.md"},
+            "the generator wrote other bytes: the row is not the one it names")
+        P.tty(root, "claim", "physical", "C1", "pass", "--measured", "0.47",
+              "--detail", "the same print, measured again", "--article",
+              second["article"]["hash"], answer="C1", code=0)
+        self.assertEqual(_status(root, "C1")[0], "refuted",
+                         "a byte-for-byte reprint released the fail on the object it is")
 
 
 class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
@@ -2111,12 +2260,61 @@ class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
         B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
         self.assertEqual(self._words([], [B]), "expected 1 day (declared)")
         measured = self._words([{"passed": True, "when": "2026-10-05T12:00:00Z",
-                                 "article": B}], [B])
+                                 "article": B, "channel": "interactive"}], [B])
         self.assertEqual(measured, f"measured 26 h on article {B['hash'][:12]} "
                                    f"(expected 1 day)")
         on_design = self._words([{"passed": True, "when": "2026-10-05T12:00:00Z",
-                                  "article": _design(70.0)}], [B])
+                                  "article": _design(70.0), "channel": "interactive"}], [B])
         self.assertEqual(on_design, "expected 1 day (declared)")
+
+    def test_only_a_persons_result_measures_it(self):
+        """Review of P2.5b (finding 4): a result that counts for nothing — a pass
+        from an agent session, anything from a pipe — measured the latency, so a
+        two-winter test read "measured 0 min" the moment an agent typed a pass.
+        Only an entry a person typed in their own shell measures it, pass or
+        fail."""
+        B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
+        later = "2026-10-05T12:00:00Z"
+        for name, entry, measured in (
+                ("an agent's pass", {"passed": True, "channel": "agent-session s1"}, False),
+                ("a pipe's fail", {"passed": False, "channel": "non-interactive"}, False),
+                ("a legacy entry", {"passed": True}, False),
+                ("a person's fail", {"passed": False, "channel": "interactive"}, True),
+                ("a person's pass", {"passed": True, "channel": "interactive"}, True)):
+            with self.subTest(name):
+                said = self._words([dict(entry, when=later, article=B)], [B])
+                self.assertEqual(said.startswith("measured "), measured, said)
+
+    def test_measured_from_the_newest_export_before_the_result(self):
+        """Review of P2.5b (finding 7): one article, exported twice — the span
+        runs from the newest export that is not after the result, never from
+        whichever record a result happened to copy."""
+        first = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
+        again = dict(first, when="2026-10-05T10:00:00Z", milestone="bench")
+        result = {"passed": True, "channel": "interactive", "article": first}
+        self.assertTrue(self._words([dict(result, when="2026-10-05T12:00:00Z")],
+                                    [first, again]).startswith("measured 2 h "))
+        self.assertTrue(self._words([dict(result, when="2026-10-04T12:00:00Z")],
+                                    [first, again]).startswith("measured 2 h "))
+
+    def test_an_automated_claim_has_no_latency_of_an_article(self):
+        """Review of P2.5b (finding 24; GLOSSARY §5): an automated evaluator's
+        latency is its run's, measured per run. A ruler's fail on C1, recorded
+        on an exported article, measured no latency of C1's — `why` showed
+        "latency: measured 6 min", and P4's Λ₀ would have read it."""
+        from atompipe import decisions
+        from atompipe.models import ExportRecord
+        B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
+        claim = Claim(id="K1", statement="s", gates=["fig4.fit"],
+                      acceptance=Acceptance(quantity="width", limit=100.0, units="mm"),
+                      results=(PhysicalResult.from_dict(
+                          {"passed": False, "when": "2026-10-04T10:06:00Z", "article": B,
+                           "channel": "interactive", "measured": 104.0}),))
+        found = claims.latency(claim, [ExportRecord(milestone="board", article=B)])
+        self.assertEqual(found.source, "none")
+        text = decisions.why(Ledger(claims=[claim],
+                                    exports=[ExportRecord(milestone="board", article=B)]), "K1")
+        self.assertNotIn("latency:", text)
 
     def test_why_says_it_where_there_is_one(self):
         """`why` and `claim show` (P2.5b-D19): a `latency:` row on a claim that
@@ -2128,7 +2326,8 @@ class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
         declared = dataclasses.replace(bare, expected_latency={"value": 1, "units": "day"})
         B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
         measured = dataclasses.replace(bare, results=(PhysicalResult.from_dict(
-            {"passed": True, "when": "2026-10-05T12:00:00Z", "article": B}),))
+            {"passed": True, "when": "2026-10-05T12:00:00Z", "article": B,
+             "channel": "interactive"}),))
         exports = [ExportRecord(milestone="board", article=B)]
         for name, claim, want in (("neither", bare, None),
                                   ("declared", declared, "  latency: expected 1 day (declared)"),
@@ -2156,6 +2355,24 @@ class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
             said = self._words([{"passed": True, "when": "2026-10-05T12:00:00Z",
                                  "article": _design(70.0)}], [B])
         self.assertNotEqual(said, "expected 1 day (declared)")
+
+    def test_a_planted_measure_from_an_agents_result_is_caught(self):
+        """Planted: the channel ignored — an agent's pass measures it."""
+        real = _need(claims, "latency")
+        B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
+
+        def any_channel(claim, exports):
+            people = tuple(dataclasses.replace(e, channel="interactive")
+                           for e in claim.results)
+            return real(dataclasses.replace(claim, results=people), exports)
+
+        entry = {"passed": True, "when": "2026-10-05T12:00:00Z", "article": B,
+                 "channel": "agent-session s1"}
+        self.assertEqual(self._words([entry], [B]), "expected 1 day (declared)")
+        with mock.patch.object(claims, "latency", any_channel):
+            said = self._words([entry], [B])
+        self.assertNotEqual(said, "expected 1 day (declared)", "the planted latency was not "
+                                                               "caught")
 
 
 if __name__ == "__main__":

@@ -1881,26 +1881,54 @@ def declared_seconds(claim: Claim) -> float | None:
 
 def latency(claim: Claim, exports: Iterable[Any]) -> Latency:
     """``claim``'s latency (W3; GLOSSARY §5: "declared ahead only for a physical
-    evaluator, until an article measures it"): MEASURED — the newest result on
-    an exported article whose export `exports/` holds, its ``when`` minus the
-    article's ``when``; else DECLARED (``expected_latency``); else none. A result
-    on a design article measures nothing: a design article has no build time,
-    only the instant a person recorded it. A negative or unparseable span is not
-    a measurement. Pure: the export records come in."""
+    evaluator, until an article measures it"): MEASURED — the newest result a
+    person typed in their own shell on an exported article whose export
+    `exports/` holds, its ``when`` minus the newest export of that article not
+    after it; else DECLARED (``expected_latency``); else none. A result on a
+    design article measures nothing: a design article has no build time, only
+    the instant a person recorded it. A negative or unparseable span is not a
+    measurement. Pure: the export records come in.
+
+    Only a claim whose terminal is a measurement has one: an automated
+    evaluator's latency is its run's (`Verdict.duration_s`), and a ruler's
+    cross-check on its claim measures the ruler, not the evaluator. Only an
+    entry of the person channel (``interactive``) measures it: a pass that
+    counts for nothing measures nothing, and nor does a fail typed into a pipe
+    — the time from print to result is a person's. What slipped through
+    (review of P2.5b, findings 4 and 24): an agent's pass on a two-winter test
+    read "measured 0 min", the export test card said so, and `why C1` showed a
+    ruler's fail as C1's latency — each a number P4's Λ₀ would have read. And
+    the span ran from whichever export record a result copied (finding 7: the
+    oldest of two that held one article). *Rejected:* a counting pass alone (a
+    person's fail is the result the print was waiting for, as much as a
+    pass)."""
+    try:
+        terminal = terminal_of(claim)
+    except AtompipeError:
+        terminal = ""
+    if terminal != "measurement":
+        return Latency(None, "none", "", None)
     declared = declared_seconds(claim)
-    held = {str((getattr(e, "article", None) or {}).get("hash") or "")
-            for e in exports or ()}
-    held.discard("")
+    built_at: dict[str, list] = {}
+    for record in exports or ():
+        article = getattr(record, "article", None) or {}
+        digest = str(article.get("hash") or "") if isinstance(article, Mapping) else ""
+        when = _instant(article.get("when") or getattr(record, "when", "")) if digest else None
+        if digest and when is not None:
+            built_at.setdefault(digest, []).append(when)
     for entry in reversed(tuple(getattr(claim, "results", ()) or ())):
+        if str(getattr(entry, "channel", "") or "") != "interactive":
+            continue
         article = getattr(entry, "article", None) or {}
-        if not isinstance(article, Mapping) or article.get("source") != "export" \
-                or str(article.get("hash") or "") not in held:
+        if not isinstance(article, Mapping) or article.get("source") != "export":
             continue
-        built, seen = _instant(article.get("when")), _instant(getattr(entry, "when", ""))
-        if built is None or seen is None or seen < built:
+        digest = str(article.get("hash") or "")
+        seen = _instant(getattr(entry, "when", ""))
+        before = [when for when in built_at.get(digest, ()) if seen is not None
+                  and when <= seen]
+        if not before:
             continue
-        return Latency((seen - built).total_seconds(), "measured", str(article["hash"]),
-                       declared)
+        return Latency((seen - max(before)).total_seconds(), "measured", digest, declared)
     if declared is not None:
         return Latency(declared, "declared", "", declared)
     return Latency(None, "none", "", None)

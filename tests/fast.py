@@ -13,7 +13,11 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine. P2.5b is OVER
+The budget is 90 s as ONE process on an otherwise idle machine. The review of
+P2.5b added eight rows (the in-process halves of its laundering paths, ~0.3 s;
+its end-to-end rows are left to the gate, below) and measured flat: 93.6 s wall
+(67 s user) for 746 tests against 93.6 s for 7e71aac's 738 in the same session,
+2026-10-04 — still over, so the rule below stands. P2.5b is OVER
 it, said here rather than hidden: measured 2026-10-04 within the hour (load
 average 0.7-1.3), 93.4 s wall (67.8 s user) for 738 tests, against 88.3 s wall
 (63.6 s user) for `ecaad99`'s 713 on the same machine. What it added (~13 s,
@@ -647,6 +651,14 @@ FAST: list[str] = [
     "test_physical.AResultBindsToAnExportedArticle.test_a_fail_is_charged_to_the_verdicts_sealed_at_export",
     "test_vocabulary.TheHardwareClauseIsAlwaysSaid",
     "test_fig4.TwoArticlesExactly.test_the_planted_predictions_are_caught",
+    # The review of P2.5b's laundering paths, in process (~0.2 s together): one
+    # article's every export record charged; a crash said errored in a
+    # refusal; every cache reader's *ready* said as last evaluated, over the
+    # seeded ledgers. (Its supersession rows — byte-identical reprints, a fail
+    # whose bytes nobody holds — run in AFailIsSuperseded… above, whole.)
+    "test_physical.AResultBindsToAnExportedArticle.test_in_process_every_record_of_one_article_is_read",
+    "test_louder.ErrorIsLouder.test_an_export_refusal_says_errored",
+    "test_export.EveryCacheReaderSaysAsLastEvaluated.test_a_cache_reader_says_ready_as_last_evaluated",
 ]
 
 
@@ -908,6 +920,25 @@ LEFT_FOR_THE_GATE: list[str] = [
     "test_fig4.TwoArticlesExactly.test_each_package_carries_only_what_its_article_records",
     "test_physical.AResultBindsToAnExportedArticle.test_a_short_unknown_or_ambiguous_article_is_refused",
     "test_physical.AResultBindsToAnExportedArticle.test_a_planted_capture_from_the_current_resolution_is_caught",
+    # The review of P2.5b's end-to-end rows (~20 s together): each runs `export`
+    # or `claim physical --article` through the commands on a bracket copy — a
+    # fail on an article two milestones share, a model that does not load at
+    # the boundary, the disagreement's way out followed, a generator handling
+    # its own directory written and dry-run alike, and every cache reader
+    # (`report`, `report --milestone` and its JSON, `status`) over a forged
+    # cache. The rule each holds runs in process in FAST (the records'
+    # union, the seeded as-last-evaluated row); an iteration
+    # touching `cli.cmd_export`, `cmd_report`, `cmd_status` or `milestones.py`
+    # runs test_export and test_physical whole (above).
+    "test_physical.AResultBindsToAnExportedArticle.test_a_fail_on_an_article_two_milestones_share_is_a_contradiction",
+    "test_export.TheBoundaryReExecutes.test_a_model_that_does_not_load_is_said_and_never_covered",
+    "test_export.ACacheThatLiesIsCaughtAtTheBoundary.test_the_refusal_names_the_way_out_that_works",
+    "test_export.DryRunIsTheSamePath.test_a_generator_that_handles_its_own_directory_builds_one_article",
+    "test_export.EveryCacheReaderSaysAsLastEvaluated.test_the_milestone_report",
+    "test_export.EveryCacheReaderSaysAsLastEvaluated.test_the_milestone_reports_json_is_the_milestones",
+    "test_export.EveryCacheReaderSaysAsLastEvaluated.test_status_lists_each_milestone_as_last_evaluated",
+    "test_export.EveryCacheReaderSaysAsLastEvaluated.test_the_project_report",
+    "test_export.EveryCacheReaderSaysAsLastEvaluated.test_the_boundary_says_it_plainly",
 ]
 
 # Left out, carrying no invariant class; seconds as measured with eight modules

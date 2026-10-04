@@ -56,6 +56,7 @@ from atompipe import gates as gates_mod
 from atompipe import report as report_mod
 from atompipe import store
 from atompipe import verdicts
+from atompipe.util import AtompipeError
 from atompipe.models import (AttributionRecord, Claim, ClaimKind, ClaimStatus,
                              EntryStanding, Ledger, PhysicalResult, Standing, Verdict)
 
@@ -577,6 +578,27 @@ class TheBoundaryReExecutes(_env.EnvCase):
         self.assertNotIn("fig4.power", rerun_rows(doc), "the boundary pays for what the "
                                                         "spend requires, not every evaluator")
 
+    def test_a_model_that_does_not_load_is_said_and_never_covered(self):
+        """Review of P2.5b (finding 11): with a model that does not load the
+        boundary ran nothing and said "no evaluator settles a claim print-v1
+        requires" — false: six do — and refused on the cache's statuses alone,
+        which a go-ahead covers. It says the model does not load, as a refusal
+        no decision covers."""
+        root = bracket(os.path.join(self.tmp(), "m"), thickness=8.0, git=True)
+        P.run(root, "check")
+        with open(os.path.join(root, "model", "bracket.py"), "a", encoding="utf-8") as fh:
+            fh.write('\nraise RuntimeError("broken model")\n')
+        proc, doc = export_json(root, MILESTONE, "--dry-run", code=1)
+        self.assertIn("model", refusal_kinds(doc))
+        self.assertIn("broken model", json.dumps(doc["refusals"]))
+        text = P.run(root, "export", MILESTONE, "--dry-run", code=1).stdout
+        self.assertNotIn("no evaluator settles", text)
+        self.assertRegex(text, r"(?m)^re-run: none — the model does not load")
+        P.tty(root, "export", MILESTONE, "--proceed", "--why", "print it anyway",
+              answer=MILESTONE, code=1)
+        self.assertEqual(P.exports(root, MILESTONE), {}, "a go-ahead covered a model that "
+                                                        "does not load")
+
     def test_the_planted_boundaries_are_caught(self):
         """Planted: the re-run served from the cache (`force=False`), at tier 0,
         and with no prerequisite expansion (`gates.plan` returning the
@@ -675,6 +697,31 @@ class ACacheThatLiesIsCaughtAtTheBoundary(_env.EnvCase):
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertFalse(os.path.exists(os.path.join(again, "exports", f"{MILESTONE}.json")))
 
+    def test_the_refusal_names_the_way_out_that_works(self):
+        """Review of P2.5b (findings 12, 20): the refusal told the person to run
+        `atompipe check --force` — which the refused export had already done, and
+        which never clears two outcomes at one ρ — so the next export said the
+        same. It names the entry and the way out: the entry that is not the
+        evaluator's output removed, the disagreement is gone (C1 then reads the
+        honest re-run: an ordinary unresolved claim)."""
+        root = self.forged("w")
+        forged = [name for name in os.listdir(os.path.join(
+            root, ".atompipe", "verdicts", "bracket.deflection"))
+            if not name.startswith("control-")]
+        text = P.run(root, "export", MILESTONE, code=1).stdout
+        self.assertNotIn("check --force", text)
+        self.assertIn(".atompipe/verdicts/bracket.deflection/", text)
+        served = [name[:-len(".json")] for name in forged if name[:-len(".json")] in text]
+        self.assertTrue(served, f"no entry named: {forged}\n{text}")
+        again = P.run(root, "export", MILESTONE, "--dry-run", code=1).stdout
+        self.assertNotIn("check --force", again)
+        os.remove(os.path.join(root, ".atompipe", "verdicts", "bracket.deflection",
+                               served[0] + ".json"))
+        _proc, doc = export_json(root, MILESTONE, "--dry-run", code=1)
+        self.assertNotIn("disagrees", refusal_kinds(doc))
+        self.assertEqual([(r["kind"], r["subject"]) for r in doc["refusals"]],
+                         [("unresolved", "C1")])
+
     def test_a_forgery_under_foreign_instruments_is_refused(self):
         """Stamped with another machine's instruments, the forgery is no clash
         under ``_contradicted`` — the served entry and the re-run are still two
@@ -710,6 +757,33 @@ class ACacheThatLiesIsCaughtAtTheBoundary(_env.EnvCase):
 # --------------------------------------------------------------------------- #
 #: The outcome line, the one line `--dry-run` and the written export may differ on.
 OUTCOME = re.compile(r"^export: ")
+
+
+#: Generators that handle their own directory as ordinary code does (review of
+#: P2.5b, finding 6): make it, list it to write an index, copy a file into it.
+OWN_DIRECTORY = '''
+
+def makes_it(ctx):
+    import os
+    os.makedirs(ctx.out_dir, exist_ok=True)
+    side_profile(ctx)
+
+
+def lists_it(ctx):
+    import os
+    side_profile(ctx)
+    with open(os.path.join(ctx.out_dir, "INDEX.txt"), "w", encoding="utf-8") as fh:
+        fh.write("\\n".join(sorted(os.listdir(ctx.out_dir))) + "\\n")
+
+
+def copies_into_it(ctx):
+    import os
+    import shutil
+    side_profile(ctx)
+    shutil.copy(os.path.join(ctx.out_dir, "print-settings.txt"),
+                os.path.join(ctx.out_dir, "settings-copy.txt"))
+    shutil.copy(os.path.join(ctx.root, "claims", "C1.json"), ctx.out_dir)
+'''
 
 
 def comparable(text: str) -> list[str]:
@@ -797,6 +871,41 @@ class DryRunIsTheSamePath(_env.EnvCase):
         self.assertRegex(dry.stdout, r"(?m)^export: would refuse — .*atompipe check")
         self.assertTrue(store.is_legacy(legacy), "--dry-run migrated a legacy project")
 
+    def test_a_generator_that_handles_its_own_directory_builds_one_article(self):
+        """Review of P2.5b (finding 6): the written export built in
+        `out/.<m>.tmp-<pid>/`, a path the trace did not know for an out dir —
+        so `os.makedirs(ctx.out_dir)` put the pid into the article (a scratch
+        removed by the swap: the article read moved the moment it existed), a
+        listing of it refused every written export, and a copy into it made
+        the written article untraced while the dry run's was traced. Each such
+        generator: the dry run's article and package are the written one's,
+        traced, and a pass on it counts."""
+        root = bracket(os.path.join(self.tmp(), "g"), thickness=8.0, git=True)
+        with open(os.path.join(root, "generators", "profile.py"), "a", encoding="utf-8") as fh:
+            fh.write(OWN_DIRECTORY)
+        P.run(root, "check")
+        for name in ("makes_it", "lists_it", "copies_into_it"):
+            with self.subTest(name):
+                P.write_json(os.path.join(root, "milestones", f"{MILESTONE}.json"),
+                             {"description": "the print", "requires": REQUIRES,
+                              "generator": f"generators/profile.py:{name}"})
+                _p, dry = export_json(root, MILESTONE, "--dry-run", code=0)
+                _p, written = export_json(root, MILESTONE, code=0)
+                self.assertEqual(dry["article"], written["article"])
+                self.assertEqual(dry["package"], written["package"])
+                self.assertIs(written["article"]["traced"], True)
+                recorded = P.exports(root, MILESTONE)["exports"][-1]["article"]
+                self.assertEqual([f for f in recorded["built_from"].get("files") or {}
+                                  if f.startswith(("out/", ".atompipe/"))], [],
+                                 "the package's own directory is in the article")
+        article = P.exports(root, MILESTONE)["exports"][-1]["article"]["hash"]
+        P.tty(root, "claim", "physical", "C5", "pass", "--detail", "no crazing",
+              "--evidence", P.EVIDENCE, "--article", article, answer="C5", code=0)
+        status = json.loads(P.run(root, "status", "--json", code=0).stdout)
+        self.assertEqual((status["claims"]["C5"], status["statuses"]["C5"]["cause"]),
+                         ("verified", "on-article"))
+        self.assertEqual(status.get("rebuild"), [])
+
     def test_a_generator_that_writes_under_dry_run_is_refused_and_named(self):
         """A generator is project code, and `--dry-run` runs it: one that writes
         outside its directory is refused and named — detected, not undone
@@ -815,6 +924,170 @@ class DryRunIsTheSamePath(_env.EnvCase):
         self.assertIn("claims/C9.json", proc.stdout)
         self.assertRegex(proc.stdout, r"(?m)^export: would refuse — .*generator")
         os.remove(os.path.join(root, "claims", "C9.json"))
+
+
+# --------------------------------------------------------------------------- #
+# invariant 12's second sentence: every reader but export says ready as last
+# evaluated (review of P2.5b, findings 3, 5, 10, 18)
+# --------------------------------------------------------------------------- #
+#: A *ready* sentence: the project's or a milestone's head.
+READY_SAID = re.compile(r"\bis ready(?: for \S+?)?(?P<tail>[:,][^.]*)")
+
+
+def cache_ready_problems(text: str) -> list[str]:
+    """Each place ``text`` says *ready* without saying it is as last evaluated
+    — a cache reader's words (invariant 12)."""
+    return [m.group(0) for m in READY_SAID.finditer(text)
+            if not m.group("tail").startswith(", as last evaluated")]
+
+
+class EveryCacheReaderSaysAsLastEvaluated(_env.EnvCase):
+    """(Invariant 12; D17) Every reader but `export` reads the verdict cache,
+    which the inner loop never re-executes and a hand can forge: its *ready* is
+    as last evaluated, and it says so — `report`, `report --milestone` (and its
+    JSON, which carries the milestone's own predicate), `status` (which lists
+    every milestone's line) — while `export <m> --dry-run`, the boundary, says
+    it plainly over its re-run. What slipped through (review of P2.5b): on a
+    forged cache `report --milestone` opened "v0.1 is ready for print-v1: every
+    claim it requires is checked against the current inputs" and implied its
+    required claims had been re-run, its JSON was the project's document (ready
+    false beside a human page saying ready), and `status` printed no milestone
+    at all."""
+
+    _forged: list[str] = []
+
+    @property
+    def root(self) -> str:
+        """The bracket at 7.0 with a forged pass on `bracket.deflection` and C5-C7
+        not required — built once, for the commands' rows only (the in-process
+        row needs none, and runs in the fast tier)."""
+        if not self._forged:
+            import tempfile
+            base = tempfile.mkdtemp(prefix="atompipe-last-evaluated-")
+            type(self).addClassCleanup(_env._rmtree, base)
+            root = bracket(os.path.join(base, "f"), thickness=7.0, git=True)
+            P.run(root, "check")
+            forge_entry(root, "bracket.deflection", passed=True)
+            for cid in ("C5", "C6", "C7"):
+                P.edit_claim(root, cid, critical=False)
+            self._forged.append(root)
+        return self._forged[0]
+
+    def test_a_cache_reader_says_ready_as_last_evaluated(self):
+        """Invariant 12's second sentence, in process over the seeds (review of
+        P2.5b): the cache's readiness sentence — the project's and each
+        milestone's, and `report --milestone`'s whole page — says *ready* only
+        "as last evaluated"; the boundary's says it plainly, and the checker
+        refuses that as a cache reader's (it is not vacuous)."""
+        boundary_ready = 0
+        for seed in range(0, ReadyIsOnePredicate.SEEDS, 8):
+            ledger, stale = seeded(seed)
+            composed = claims_mod.compositions(ledger, stale_gates=stale)
+            project = report_mod._verdict_sentence(ledger, composed, None, stale=False,
+                                                   markdown=False)
+            self.assertEqual(cache_ready_problems(project), [], f"seed {seed}")
+            for milestone in _milestones_of(ledger):
+                with self.subTest(seed=seed, milestone=milestone.id):
+                    cache = report_mod._verdict_sentence(ledger, composed, None, stale=False,
+                                                         markdown=False, milestone=milestone)
+                    page = report_mod.render_markdown(ledger, None, stale_gates=stale,
+                                                      milestone=milestone)
+                    self.assertEqual(cache_ready_problems(cache), [])
+                    self.assertEqual(cache_ready_problems(page), [])
+                    if expected_ready(ledger, composed, milestone):
+                        boundary = report_mod._verdict_sentence(
+                            ledger, composed, None, stale=False, markdown=False,
+                            milestone=milestone, boundary=True)
+                        self.assertTrue(cache_ready_problems(boundary), boundary)
+                        boundary_ready += 1
+        self.assertTrue(boundary_ready, "no seed was ready: the boundary rows are vacuous")
+
+
+    def test_the_milestone_report(self):
+        text = P.run(self.root, "report", "--milestone", MILESTONE, code=0).stdout
+        self.assertIn(f"is ready for {MILESTONE}, as last evaluated", text)
+        self.assertEqual(cache_ready_problems(text), [])
+        self.assertNotIn("re-runs only the evaluators", text,
+                         "the cache's report implies its required claims were re-run")
+        self.assertIn("Nothing here was re-run", text)
+
+    def test_the_milestone_reports_json_is_the_milestones(self):
+        proc, _doc = export_json(self.root, MILESTONE, "--dry-run")
+        boundary = json.loads(proc.stdout)
+        doc = json.loads(P.run(self.root, "report", "--milestone", MILESTONE, "--json",
+                               code=0).stdout)
+        project = json.loads(P.run(self.root, "report", "--json", code=0).stdout)
+        found = doc.get("milestone") or {}
+        self.assertEqual(found.get("name"), MILESTONE)
+        self.assertIs(found.get("ready"), True)
+        self.assertIs(found.get("last_evaluated"), True)
+        self.assertEqual(found.get("required"), REQUIRES)
+        self.assertEqual(found.get("unresolved"), [])
+        self.assertNotIn("milestone", project)
+        self.assertIs(boundary.get("ready"), False,
+                      "the boundary agrees with the forged cache: the row is vacuous")
+
+    def test_status_lists_each_milestone_as_last_evaluated(self):
+        text = P.run(self.root, "status", code=0).stdout
+        lines = text.splitlines()
+        head = report_mod.HUMAN["milestone"]["report_head"]
+        self.assertIn(head, lines)
+        row = lines[lines.index(head) + 1]
+        self.assertRegex(row, rf"^  {MILESTONE}: 4 of 4 required claims checked · 0 stale$")
+        self.assertEqual(cache_ready_problems(text), [])
+        self.assertRegex(text, r"\bis ready, as last evaluated: ")
+
+    def test_the_project_report(self):
+        text = P.run(self.root, "report", code=0).stdout
+        self.assertRegex(text, r"\bis ready, as last evaluated: ")
+        self.assertEqual(cache_ready_problems(text), [])
+
+    def test_the_boundary_says_it_plainly(self):
+        """The control: the boundary's sentence over its re-run, at 8.0 where it
+        is ready, carries no qualifier — and the checker refuses it as a cache
+        reader's (the checker is not vacuous)."""
+        eight = bracket(os.path.join(self.tmp(), "e"), thickness=8.0)
+        P.run(eight, "check")
+        text = P.run(eight, "export", MILESTONE, "--dry-run", code=0).stdout
+        self.assertIn(f"is ready for {MILESTONE}: every claim it requires", text)
+        self.assertTrue(cache_ready_problems(text))
+
+
+class TheReproduceBlockRunsAsPrinted(unittest.TestCase):
+    """Review of P2.5b (findings 13, 21): REPORT.md's Reproduce block padded
+    each export line to 33 columns and put `#` straight after it, so for a
+    milestone name of seven characters or more — the bracket's own `print-v1`
+    — the line read `--dry-run# re-runs …` and failed in a shell, and it
+    listed four milestones and dropped the rest unsaid. Every line, pasted,
+    is the command and nothing else, and every milestone has one."""
+
+    def lines(self, names: list[str]) -> list[str]:
+        from atompipe.models import Milestone, ProjectMeta
+        ledger = Ledger(meta=ProjectMeta(name="t", revision="v0.1"),
+                        milestones=[Milestone(id=name, requires=["C1"]) for name in names])
+        text = report_mod.render_markdown(ledger, None)
+        return [ln for ln in text.splitlines() if ln.startswith("atompipe export ")]
+
+    @staticmethod
+    def argv(line: str) -> list[str]:
+        """What a POSIX shell runs: the words before the first word that
+        starts with `#` (a `#` inside a word starts nothing). `shlex` is not
+        that rule — it cuts at a `#` anywhere — so it is not used here."""
+        words = line.split()
+        cut = next((i for i, word in enumerate(words) if word.startswith("#")), len(words))
+        return words[:cut]
+
+    def test_each_line_is_the_command(self):
+        names = ["p1", "print-v1", "a-much-longer-milestone-name", "x" * 40, "five", "sixth"]
+        found = self.lines(names)
+        self.assertEqual(len(found), len(names), found)
+        for name, line in zip(names, found):
+            with self.subTest(name):
+                self.assertEqual(self.argv(line), ["atompipe", "export", name, "--dry-run"])
+
+    def test_the_glued_line_is_caught(self):
+        glued = "atompipe export print-v1 --dry-run# re-runs what it requires"
+        self.assertNotEqual(self.argv(glued), ["atompipe", "export", "print-v1", "--dry-run"])
 
 
 # --------------------------------------------------------------------------- #
@@ -930,7 +1203,59 @@ def oops(ctx):
         fh.write("oops")
     with open(os.path.join(ctx.out_dir, "x.txt"), "w") as fh:
         fh.write("x")
+
+
+def linking(ctx):
+    import os
+    os.link(os.path.join(ctx.root, "cad", "insert.stl"),
+            os.path.join(ctx.out_dir, "insert.stl"))
+
+
+def symlinking(ctx):
+    import os
+    os.symlink(os.path.join(ctx.root, "cad", "insert.stl"),
+               os.path.join(ctx.out_dir, "insert.stl"))
+
+
+def unseen(ctx):
+    import os
+    from atompipe import verdicts
+    saved = dict(verdicts._HANDLERS)
+    verdicts._HANDLERS.clear()
+    try:
+        with open(os.path.join(ctx.out_dir, "x.txt"), "w") as fh:
+            fh.write("x")
+    finally:
+        verdicts._HANDLERS.update(saved)
+
+
+def seen(ctx):
+    import os
+    from atompipe import verdicts
+    saved = dict(verdicts._HANDLERS)
+    try:
+        with open(os.path.join(ctx.out_dir, "x.txt"), "w") as fh:
+            fh.write("x")
+    finally:
+        verdicts._HANDLERS.update(saved)
 '''
+
+
+def as_the_cache_reads_it(package_md: str, article: str) -> str:
+    """The package's REPORT.md (the boundary's) as `report --milestone` (the
+    cache's) renders the same view: the sentence's "as last evaluated", the
+    cache's nothing-re-run line for the boundary's, no test card, and each
+    record line without `--article` — every other byte the same (V-7; review
+    of P2.5b, findings 3 and 16)."""
+    said = report_mod.HUMAN["readiness"]
+    text = re.sub(r"\*\*(\S+) is (NOT )?ready for (\S+?):",
+                  r"**\1 is \2ready for \3, as last evaluated:", package_md, count=1)
+    text = re.sub(r"(?m)^Claims (\S+) does not require are shown as last evaluated: .*$",
+                  lambda m: said["nothing_rerun"].format(m=m.group(1), n=len(REQUIRES)),
+                  text, count=1)
+    text = re.sub(r"(?ms)^### Test card for article [0-9a-f]{12}\n\n```\n.*?```\n\n", "",
+                  text, count=1)
+    return text.replace(f" --article {article[:12]}", "")
 
 
 class ThePackageIsWhatWasRecorded(_env.EnvCase):
@@ -961,10 +1286,37 @@ class ThePackageIsWhatWasRecorded(_env.EnvCase):
         for rel, digest in listed.items():
             self.assertEqual(hashlib.sha256(one[rel]).hexdigest(), digest, rel)
         report = P.run(root, "report", "--milestone", MILESTONE, code=0).stdout
-        self.assertEqual(one["REPORT.md"].decode("utf-8"), report)
+        self.assertEqual(as_the_cache_reads_it(one["REPORT.md"].decode("utf-8"),
+                                               first["article"]["hash"]), report)
         model = json.loads(one["model.json"])
         self.assertNotIn("load_n", json.dumps(model), "the package hands the builder a value "
                                                        "the article does not record")
+
+    def test_the_packages_report_records_on_its_article(self):
+        """Review of P2.5b (finding 16): the package's REPORT.md — the one
+        document a builder reads — said to record results without `--article`,
+        and named the article nowhere, so a builder following it bound a fail
+        to a design article no reprint could ever answer. It names the article
+        on every record line and carries the test card; the card's commands,
+        run as printed, record on it — a cross-check whose value agrees
+        included (finding 22: a hard-coded `fail` was refused for it)."""
+        _p, doc = export_json(self.root, MILESTONE, code=0)
+        article = doc["article"]["hash"]
+        text = package(self.root)["REPORT.md"].decode("utf-8")
+        records = re.findall(r"(?m)^\s*- \*\*Record the result:\*\* (.+)$", text)
+        self.assertTrue(records, "the package's REPORT.md has no record line")
+        for line in records:
+            self.assertIn(f"--article {article[:12]}", line)
+        self.assertIn(f"### Test card for article {article[:12]}", text)
+        card = text.split(f"### Test card for article {article[:12]}", 1)[1]
+        cross = re.search(r"(?m)^  (atompipe claim physical <id> --article [0-9a-f]{12} "
+                          r"--measured <value>)", card)
+        self.assertIsNotNone(cross, card[:800])
+        argv = cross.group(1).replace("<id>", "C1").replace("<value>", "0.3").split()[1:]
+        proc = P.run(self.root, *argv, "--detail", "ruler at the tip", code=0)
+        entry = P.results(self.root, "C1")["results"][-1]
+        self.assertIs(entry["passed"], True, proc.stdout + proc.stderr)
+        self.assertEqual(entry["article"]["hash"], article)
 
     def test_a_persons_file_is_never_replaced(self):
         root = self.root
@@ -1021,9 +1373,100 @@ class ThePackageIsWhatWasRecorded(_env.EnvCase):
                 self.assertEqual(package(self.root), older)
                 self.assertFalse(glob.glob(os.path.join(self.root, "out", ".*")),
                                  "scratch left in out/")
+                self.assertFalse(glob.glob(os.path.join(self.root, ".atompipe", "out",
+                                                        "export-*")),
+                                 "scratch left in .atompipe/out/")
                 oops = os.path.join(self.root, "model", "oops.txt")
                 if os.path.exists(oops):
                     os.remove(oops)
+
+    def test_a_run_the_lock_refuses_leaves_the_running_ones_scratch(self):
+        """Review of P2.5b (finding 8): a dry run refused by the build lock
+        removed the scratch package the running export was building into, and
+        that one refused with a false "generator errored". Another process holds
+        the lock here (the test's parent: alive, on this host); the scratch it
+        builds in must be as it was."""
+        from atompipe import util
+        scratch = milestones_mod().scratch_dir(self.root, MILESTONE, True)
+        os.makedirs(scratch, exist_ok=True)
+        sentinel = os.path.join(scratch, "bracket-profile.svg")
+        with open(sentinel, "w", encoding="utf-8") as fh:
+            fh.write("<svg/>")
+        lock = os.path.join(self.root, ".atompipe", cli_mod.LOCK_NAME)
+        with open(lock, "w", encoding="utf-8") as fh:
+            json.dump({"pid": os.getppid(), "host": util._HOST, "when": "2026-10-04T10:00:00Z",
+                       "command": "atompipe export print-v1"}, fh)
+        try:
+            for argv in (["export", MILESTONE, "--dry-run"], ["export", MILESTONE]):
+                with self.subTest(" ".join(argv)):
+                    code, _out, err = captured(argv + ["-C", self.root])
+                    self.assertEqual(code, 2, err)
+                    self.assertIn(str(os.getppid()), err)
+                    self.assertTrue(os.path.isfile(sentinel),
+                                    "a run the lock refused removed the running one's scratch")
+        finally:
+            os.remove(lock)
+
+    def test_a_record_that_cannot_be_written_leaves_no_package(self):
+        """Review of P2.5b (finding 9): the package was swapped in before its
+        record was appended, so an unwritable `exports/` left a package no
+        record names — the next export refused all of it as "not written by an
+        export", and `doctor` said every package was as written. Now the older
+        package stays, the next export writes, and `doctor` judges a package
+        with no export record too."""
+        export_json(self.root, MILESTONE, code=0)
+        older = package(self.root)
+        records = len(P.exports(self.root, MILESTONE)["exports"])
+        _projects.set_thickness(self.root, 8.5)
+
+        def unwritable(*_args, **_kwargs):
+            raise AtompipeError("cannot write exports/print-v1.json: Permission denied")
+
+        with mock.patch.object(store, "append_sealed", unwritable):
+            code, out, err = captured(["export", MILESTONE, "-C", self.root])
+        self.assertEqual(code, 2, out + err)
+        self.assertEqual(package(self.root), older, "a package no record names was left")
+        self.assertEqual(len(P.exports(self.root, MILESTONE)["exports"]), records)
+        self.assertFalse(glob.glob(os.path.join(self.root, "out", ".*")))
+        export_json(self.root, MILESTONE, code=0)
+        self.assertEqual(len(P.exports(self.root, MILESTONE)["exports"]), records + 1)
+
+        stray = bracket(os.path.join(self.tmp(), "stray"), thickness=8.0)
+        os.makedirs(os.path.join(stray, "out", MILESTONE))
+        with open(os.path.join(stray, "out", MILESTONE, "bracket-profile.svg"), "w") as fh:
+            fh.write("<svg/>")
+        doctor = P.run(stray, "doctor")
+        self.assertRegex(doctor.stdout, r"(?m)^\[FAIL\] +exports .*out/print-v1/"
+                                        r"bracket-profile\.svg was not written by an export")
+
+    def test_a_linked_project_file_is_refused(self):
+        """Review of P2.5b (finding 2): a generator that links a project file
+        into its package — hard or symbolic — hands the builder bytes no open
+        named, and a package that aliases the project changes with it. Refused,
+        named, nothing written."""
+        os.makedirs(os.path.join(self.root, "cad"), exist_ok=True)
+        with open(os.path.join(self.root, "cad", "insert.stl"), "wb") as fh:
+            fh.write(b"solid insert\nendsolid insert\n")
+        for name in ("linking", "symlinking"):
+            with self.subTest(name):
+                self.generator(name)
+                proc, doc = export_json(self.root, MILESTONE, "--dry-run", code=1)
+                self.assertIn(("generator", "insert.stl"),
+                              [(r["kind"], r["subject"]) for r in doc["refusals"]])
+                self.assertIn("linked", proc.stdout)
+                self.assertFalse(os.path.exists(os.path.join(self.root, "out", MILESTONE)))
+
+    def test_a_file_written_where_the_trace_never_saw_is_untraced(self):
+        """Review of P2.5b (finding 2's backstop): a file the generator put in
+        its directory with no write the trace saw — a C library's, a channel no
+        handler takes — names no read either, so the article cannot be what the
+        generator read: it is the whole design (over-prediction, never under).
+        The control: the same generator with the hook intact stays traced."""
+        for name, traced in (("seen", True), ("unseen", False)):
+            with self.subTest(name):
+                self.generator(name)
+                _proc, doc = export_json(self.root, MILESTONE, "--dry-run", code=0)
+                self.assertIs(doc["article"]["traced"], traced)
 
     def test_a_planted_in_place_writer_is_caught(self):
         """Planted: the package built in place, no scratch directory. The crash

@@ -807,6 +807,33 @@ class MilestonesExportsAndTheReport(_env.EnvCase):
         _code, rows = self.rows()
         self.assertRow(rows, "milestones", "FAIL", "generators/nowhere.py")
 
+    def test_a_generator_bound_any_way_export_loads_it(self):
+        """Review of P2.5b (finding 14): only a top-level `def` was a function
+        to `doctor`, so a generator bound by assignment, inside an `if`, or by
+        an import read FAIL "has no function" while `export` loaded and ran it.
+        A name bound at module level is resolved; one doctor cannot see without
+        running the module (a star import) is a warning; one bound nowhere
+        stays a problem."""
+        with open(os.path.join(self.root, "generators", "profile.py"), encoding="utf-8") as fh:
+            source = fh.read()
+        _write(self.root, "generators/profile.py", source
+               + "\n\nprint_package = side_profile\n\nif True:\n"
+                 "    def in_if(ctx):\n        side_profile(ctx)\n"
+                 "\nfrom os.path import join as joined\n")
+        _write(self.root, "generators/starred.py", "from os.path import *\n")
+        for ref, status in (("generators/profile.py:print_package", "ok"),
+                            ("generators/profile.py:in_if", "ok"),
+                            ("generators/profile.py:joined", "ok"),
+                            ("generators/starred.py:join", "warn"),
+                            ("generators/profile.py:nowhere", "FAIL")):
+            with self.subTest(ref):
+                self.P.milestone(self.root, "print-v1", ["C1", "C2", "C3", "C4"],
+                                 generator=ref)
+                _code, rows = self.rows()
+                self.assertRow(rows, "milestones", status)
+                if status != "ok":
+                    self.assertIn(ref.split(":")[1], rows["milestones"]["detail"])
+
     def test_exports(self):
         self.P.run(self.root, "export", "print-v1", code=0)
         _code, rows = self.rows()

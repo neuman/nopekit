@@ -1238,12 +1238,67 @@ def _seal_form_for(kind: str, stem: str, list_name: str, entry: dict) -> dict:
     raise ValueError(f"not a sealed record kind: {kind!r}")
 
 
-def _broken_export(label: str, where: str, what: str) -> None:
-    rel = label
+def _broken_export(label: str, where: str, what: str, stem: str, data: dict) -> None:
+    """Refuse a broken `exports/<m>.json`, with the restore that works
+    (`_export_restore_advice`). What slipped through (review of P2.5b, finding
+    19): the advice was `git checkout -- <file>` — HEAD alone, which P2.5a-R1
+    rejected for sealed files — so a committed tamper stayed refused after the
+    checkout, and a file never committed was called "tracked"."""
+    if _ADVISING:
+        raise AtompipeError(f"{label}: {where} — {what}")
     raise AtompipeError(
         f"{label}: {where} — {what}. Every command refuses this file until it is restored: "
-        f"git checkout -- {rel} (it is tracked; an export entry is written only by "
-        f"`atompipe export`, and the package it names is in out/)")
+        f"{_export_restore_advice(stem, data)}")
+
+
+def _export_restore_advice(stem: str, data: dict) -> str:
+    """The restore a refused export record needs, and what it would drop: the
+    newest commit whose version verifies (`_restore_source`, the walk
+    `results/` takes), then each entry of the working file that version does
+    not hold — an export whose record a restore removes, after which a pass on
+    its article counts again only once an export records that article again
+    (P2.5b-D15); a fail on it counts regardless (R-3)."""
+    rel = f"exports/{stem}.json"
+    how, source = _restore_source(stem, rel, kind="exports")
+    if how == "head":
+        fix = f"git checkout -- {rel}, then export again what it discards"
+        holder = "the last commit"
+    elif how == "broken":
+        fix = (f"no commit among the last {_RESTORE_WALK} that changed {rel} holds a version "
+               f"whose seals hold, so a checkout restores nothing — `git log -p -- {rel}` shows "
+               f"each version: restore the newest that `atompipe export` wrote")
+        holder = "git"
+    elif how == "none":
+        fix = (f"no commit holds {rel}, so nothing can verify it as it is — restore it from "
+               f"where it was copied, or move it aside: the next `atompipe export {stem}` "
+               f"starts its record again")
+        holder = "git"
+    else:
+        fix = (f"the last commit holds {rel} broken too, so `git checkout -- {rel}` changes "
+               f"nothing — the newest commit whose {rel} has its seals whole is {how[:12]}: git "
+               f"checkout {how[:12]} -- {rel}")
+        holder = f"commit {how[:12]}"
+    held = {canonical_json(e) for e in ((source or {}).get("exports") or ())
+            if isinstance(e, dict)}
+    named: list[str] = []
+    entries = data.get("exports") if isinstance(data.get("exports"), list) else []
+    for i, entry in enumerate(entries):
+        if not isinstance(entry, dict) or canonical_json(entry) in held:
+            continue
+        try:
+            holds = seal(_seal_form_for("exports", stem, "exports", entry)) == entry.get("digest")
+        except (TypeError, ValueError):
+            holds = False
+        article = entry.get("article") if isinstance(entry.get("article"), dict) else {}
+        said = (f"exports[{i}], an export {_entry_words(entry)} of article "
+                f"{printable(str(article.get('hash') or '')[:12]) or 'unnamed'}")
+        named.append(said + (" — its seal does not hold, so what it said cannot be read back"
+                             if not holds else ""))
+    if not named:
+        return fix
+    return (f"{fix}. A restore drops each export {holder} does not hold: " + "; ".join(named)
+            + f" — a pass recorded on such an article counts again once `atompipe export "
+              f"{stem}` records it again; a fail on it counts regardless")
 
 
 def _export_milestone_problem(item: dict, stem: str) -> str:
@@ -1307,15 +1362,16 @@ def _parse_exports(label: str, stem: str, data: dict) -> ExportsFile:
                                 f'{{"claims": [...], "why": "..."}}')
         if "digest" not in item:
             _broken_export(label, where, "an entry with no seal — only `atompipe export` "
-                                         "writes this file, and it seals what it writes")
+                                         "writes this file, and it seals what it writes",
+                           stem, data)
         if item.get("prev", None) != prev:
             _broken_export(label, where, "its link to the entry before it does not hold — an "
                                          "entry before it was removed, edited, reordered or "
-                                         "inserted")
+                                         "inserted", stem, data)
         if seal(_seal_form_for("exports", stem, "exports", item)) != item.get("digest"):
             _broken_export(label, where, "its seal does not match what it says — it was "
                                          "edited after it was recorded, or copied here from "
-                                         "another file")
+                                         "another file", stem, data)
         prev = item["digest"]
     return ExportsFile([ExportRecord.from_dict(item) for item in entries],
                        raw=[dict(item) for item in entries])
@@ -1491,17 +1547,18 @@ _RESTORE_WALK = 50
 _ADVISING: list[bool] = []
 
 
-def _commit_version(root: str, rel: str, claim_id: str, rev: str = "HEAD"
-                    ) -> tuple[bool, dict | None]:
+def _commit_version(root: str, rel: str, claim_id: str, rev: str = "HEAD", *,
+                    kind: str = "results") -> tuple[bool, dict | None]:
     """``(held, data)`` for ``rel`` at commit ``rev``: ``held`` — the commit
     holds the file; ``data`` — its content when the strict reader verifies it
-    (every seal and link), else ``None``."""
+    (every seal and link), else ``None``. ``kind``: ``results`` or ``exports``
+    (the stem is then the milestone's name)."""
     raw = vcs.show(root, rel, rev)
     if raw is None:
         return False, None
     _ADVISING.append(True)
     try:
-        _parse_record(rel, "results", claim_id, raw)
+        _parse_record(rel, kind, claim_id, raw)
         data = json.loads(raw.decode("utf-8"))
     except (AtompipeError, UnicodeDecodeError, ValueError):
         return True, None
@@ -1510,7 +1567,8 @@ def _commit_version(root: str, rel: str, claim_id: str, rev: str = "HEAD"
     return True, data if isinstance(data, dict) else None
 
 
-def _restore_source(claim_id: str, rel: str) -> tuple[str, dict | None]:
+def _restore_source(claim_id: str, rel: str, *, kind: str = "results"
+                    ) -> tuple[str, dict | None]:
     """What a restore brings back: ``("head", data)`` when the last commit's
     version verifies; ``("<sha>", data)`` for the newest commit whose version
     does when HEAD's does not, or no longer holds the file; ``("broken", None)``
@@ -1519,12 +1577,12 @@ def _restore_source(claim_id: str, rel: str) -> tuple[str, dict | None]:
     root = _CURRENT_ROOT[-1] if _CURRENT_ROOT else None
     if root is None:
         return "none", None
-    held, data = _commit_version(root, rel, claim_id)
+    held, data = _commit_version(root, rel, claim_id, kind=kind)
     if data is not None:
         return "head", data
     walked = vcs.history(root, rel, _RESTORE_WALK)
     for sha in walked:
-        older_held, older = _commit_version(root, rel, claim_id, sha)
+        older_held, older = _commit_version(root, rel, claim_id, sha, kind=kind)
         held = held or older_held
         if older is not None:
             return sha, older
@@ -1847,7 +1905,7 @@ def read_record(path: str, kind: str, *, model_entry: str = "") -> Any:
         raw = _read_bytes(path)
     except OSError as exc:
         raise AtompipeError(f"{label}: cannot be read ({exc.strerror or exc})") from None
-    if kind != "results":
+    if kind not in ("results", "exports"):
         return _parse_record(label, kind, stem, raw, model_entry=model_entry)
     _CURRENT_ROOT.append(os.path.dirname(os.path.dirname(os.path.abspath(path))))
     try:

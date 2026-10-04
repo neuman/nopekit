@@ -188,10 +188,11 @@ atompipe export print-v1             # writes out/print-v1/ and exports/print-v1
 
 The package holds the plate's outline (`bracket-profile.svg`), the print settings,
 the values the article was built from (`model.json`), the milestone's `REPORT.md` and
-a `MANIFEST.json` naming every file's digest. The export prints a test card: C5's
-measurement, and C1-C4 as cross-checks — a ruler on the tip of the printed arm is a
-result `atompipe claim physical C1 fail --article <hash> --measured <mm>` records,
-and a fail there is a contradiction on `bracket.deflection`'s track record.
+a `MANIFEST.json` naming every file's digest. The export prints a test card, and the
+package's `REPORT.md` carries it with the article's hash: C5's measurement, and C1-C4
+as cross-checks — a ruler on the tip of the printed arm is a result `atompipe claim
+physical C1 --article <hash> --measured <mm>` records (the value decides pass or
+fail), and a fail there is a contradiction on `bracket.deflection`'s track record.
 
 ## Try breaking it
 

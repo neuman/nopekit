@@ -39,12 +39,13 @@ something re-ran it, and nothing at a spend did.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
 import shutil
 from dataclasses import dataclass
-from typing import Any, Collection, Iterable, Mapping, NamedTuple, Sequence
+from typing import Any, Callable, Collection, Iterable, Mapping, NamedTuple, Sequence
 
 from . import claims as claim_logic
 from . import report
@@ -57,15 +58,16 @@ from .util import AtompipeError, seal
 __all__ = [
     "Refusal", "COVERED", "Judgment", "Disagreement", "closure", "disagreements",
     "refusals", "judge", "test_card", "scratch_dir", "build_package", "Package",
-    "package_problems", "swap_package", "sealed_contradictions", "counted_on",
-    "MANIFEST", "SPINE_FILES",
+    "package_problems", "swap_package", "sealed_contradictions", "sealed_on",
+    "bound_export", "counted_on", "MANIFEST", "SPINE_FILES",
 ]
 
 #: The refusal kinds a person's recorded go-ahead covers (D8): an unresolved
 #: required claim, and nothing else. *Rejected:* covering a disagreement (the
 #: person decided on what the cache showed, and the cache lied); a missing id or
 #: an empty milestone (nothing to decide over); a generator or a package problem
-#: (no spend can be made from a broken package).
+#: (no spend can be made from a broken package); a model that does not load
+#: (nothing re-ran: the statuses a go-ahead would name are the cache's).
 COVERED = frozenset({"unresolved"})
 
 #: The package's manifest (D10): sorted keys, no clock; outside the package
@@ -75,16 +77,19 @@ MANIFEST = "MANIFEST.json"
 #: The files the spine writes into every package beside the generator's: the
 #: milestone's readiness report and the values the article recorded. A
 #: generator that wrote one of these names would have its bytes replaced, so it
-#: is refused instead.
-SPINE_FILES = ("REPORT.md", "model.json", MANIFEST)
+#: is refused instead. One tuple with the judge's (`verdicts._built_seal`
+#: leaves these out of what was printed).
+SPINE_FILES = verdicts._PACKAGE_SPINE_FILES
 
 
 @dataclass(frozen=True)
 class Refusal:
     """One reason an export does not write: ``kind`` (``unresolved``,
     ``missing``, ``requires-nothing``, ``disagrees``, ``generator``,
-    ``package``, ``precondition``), its ``subject`` (a claim id, a gate, the
-    milestone, a path) and ``reason`` in `report.HUMAN`'s words."""
+    ``package``, ``precondition``, ``model`` — the model does not load, so
+    nothing the milestone requires re-ran: the review of P2.5b), its
+    ``subject`` (a claim id, a gate, the milestone, a path) and ``reason`` in
+    `report.HUMAN`'s words."""
 
     kind: str
     subject: str
@@ -159,10 +164,11 @@ def disagreements(before: Any, result: Any, gates: Collection[str] = ()) -> list
         error = str(getattr(verdict, "error", "") or "")
         token = str(getattr(verdict, "unqualified", "") or "")
         if found and found[0] == "outcome":
-            _kind, _before8, was, now, rho_ = found
+            _kind, before8, was, now, rho_ = found
             detail = report._one(verdict.detail)
             out.append(Disagreement(gate, "outcome", said["two_outcomes"].format(
-                gate=gate, before=was, rho=str(rho_)[:12], after=now,
+                gate=gate, before=was, rho=str(rho_)[:12],
+                entry=f"{str(rho_)[:16]}-{before8}", after=now,
                 detail=f" ({detail})" if detail else "")))
         elif found and found[0] == "qualification":
             out.append(Disagreement(gate, "qualification", said[
@@ -189,7 +195,14 @@ def _reprint(view: Ledger, composed: Mapping[str, Any], claim: Any, name: str) -
     """A required claim Failing on a physical fail whose article the design has
     since moved from: the reprint that could answer it is a decision a person
     records — `--proceed` — and the words say so (critique 13 of the P2.5b
-    design: never a carve-out, never a dead end)."""
+    design: never a carve-out, never a dead end).
+
+    Only a fail on an article an export built, traced, can be released by a
+    pass on a reprint (`verdicts._supersedes`). A fail on any other article —
+    recorded without `--article`, or on an untraced export — counts on every
+    design from now on, and the words say that instead: what slipped through
+    (review of P2.5b, finding 17) was the reprint offered for such a fail too,
+    a path that ended where it began."""
     found = composed.get(claim.id)
     if found is None or found.cause not in (ClaimCause.PHYSICAL_FAIL, ClaimCause.CONTRADICTION):
         return ""
@@ -203,8 +216,28 @@ def _reprint(view: Ledger, composed: Mapping[str, Any], claim: Any, name: str) -
                  None)
     if entry is None or entry.article_state != "moved":
         return ""
-    return report.HUMAN["export"]["reprint"].format(
-        id=claim.id, article=report.article12(entry.article), m=name)
+    article = getattr(result, "article", None) or {}
+    said = report.HUMAN["export"]
+    if not (isinstance(article, Mapping) and article.get("source") == "export"
+            and article.get("traced") is True):
+        which = said["reprint_untraced" if isinstance(article, Mapping)
+                     and article.get("source") == "export" else "reprint_unexported"]
+        return said["reprint_never"].format(id=claim.id, article=report.article12(entry.article),
+                                            which=which, m=name)
+    return said["reprint"].format(id=claim.id, article=report.article12(entry.article),
+                                  m=name)
+
+
+def _unresolved_words(status: Any) -> str:
+    """An unresolved required claim's word in a refusal: its status word, and
+    a crash said apart — `skipped (errored)` — as every count and sentence says
+    it (invariant 2, GLOSSARY §3). What slipped through (review of P2.5b,
+    finding 23): `report.word` gives Skipped's one word for both, so the line a
+    person acts on said `C1 skipped` for a crash, a missing tool's words."""
+    words = report.word(status.status, errored=status.errored)
+    if status.errored:
+        words += f" ({report.HUMAN['lead'][ClaimCause.ERRORED]})"
+    return words
 
 
 def refusals(view: Ledger, composed: Mapping[str, Any], milestone: Any, *,
@@ -227,9 +260,7 @@ def refusals(view: Ledger, composed: Mapping[str, Any], milestone: Any, *,
         out.append(Refusal("missing", cid, said["missing"].format(m=name, id=cid)))
     for claim in report.in_severity(view, composed, found.unresolved):
         status = composed[claim.id]
-        text = said["unresolved"].format(id=claim.id,
-                                         word=report.word(status.status,
-                                                          errored=status.errored))
+        text = said["unresolved"].format(id=claim.id, word=_unresolved_words(status))
         hint = _reprint(view, composed, claim, name)
         out.append(Refusal("unresolved", claim.id, f"{text} ({hint})" if hint else text))
     for found_ in disagreements:
@@ -284,6 +315,40 @@ def sealed_contradictions(entry: Any, claim_id: str) -> list:
     planted reader (V-9) read one place."""
     found = (getattr(entry, "counted", None) or {}).get(claim_id)
     return [dict(item) for item in found or () if isinstance(item, Mapping)]
+
+
+def sealed_on(entries: Iterable[Any], claim_id: str) -> list:
+    """What a fail on ``claim_id`` contradicts when ``entries`` — every export
+    record that holds one article — sealed it: each one's ``counted``
+    (``sealed_contradictions``), together, one row per evaluator version
+    (``gate``, ``code``), the newest export's row where two seal one version.
+
+    One article, many records: its hash leaves out the milestone and the
+    clock, so two milestones that share a generator, or one exported again at
+    an unchanged design, record it twice. What slipped through (review of
+    P2.5b, findings 7 and 15): the record kept was the first in name order, so
+    a ruler's fail on the bracket bound to a milestone that did not require
+    C1 — `contradicts: []` — and the evaluator's track record lost what the
+    other milestone's export had sealed. *Rejected:* the newest record alone
+    (an export of a milestone that does not require the claim, after one that
+    does, would drop it the same way); asking the person to choose (both
+    records describe one object)."""
+    rows: dict[tuple, dict] = {}
+    for entry in sorted(entries or (), key=lambda e: str(getattr(e, "when", "") or "")):
+        for item in sealed_contradictions(entry, claim_id):
+            rows[(str(item.get("gate") or ""), str(item.get("code") or ""))] = item
+    return [rows[key] for key in sorted(rows)]
+
+
+def bound_export(entries: Iterable[Any], claim_id: str) -> Any:
+    """The export record a result on ``claim_id`` names among ``entries`` (one
+    article's): the newest whose re-run sealed the claim, else the newest. Its
+    milestone, clock and revision are what the prompt shows; ``sealed_on`` is
+    what a fail charges, and ``claims.latency`` measures from the newest export
+    of the article that is not after the result, whichever record this is."""
+    ordered = sorted(entries or (), key=lambda e: str(getattr(e, "when", "") or ""))
+    sealed = [e for e in ordered if claim_id in (getattr(e, "counted", None) or {})]
+    return (sealed or ordered or [None])[-1]
 
 
 # --------------------------------------------------------------------------- #
@@ -364,14 +429,27 @@ class Package(NamedTuple):
 
 
 def scratch_dir(root: str, name: str, dry_run: bool) -> str:
-    """Where an export builds its package: ``out/.<m>.tmp-<pid>/`` — beside the
-    package it replaces, so the swap is two renames on one filesystem — or,
-    under ``--dry-run``, ``.atompipe/out/export-<m>/``, removed by the end. Never
-    ``out/<m>/`` itself: a build that failed half way would leave half a
-    package where a person looks for one (V-7's planted writer)."""
-    if dry_run:
-        return os.path.join(store.out_dir(root), f"export-{name}")
-    return os.path.join(root, store.PACKAGES_NAME, f".{name}.tmp-{os.getpid()}")
+    """Where an export builds its package: ``.atompipe/out/export-<m>/``, in
+    BOTH modes, created and removed under the build lock — under the out
+    directory the generator's trace knows (``verdicts.anchors_for``'s
+    ``out_dir``), so what the generator does to its own directory is never a
+    read of the project, and the dry run builds exactly what the written export
+    builds (D-15). The written swap moves it to ``out/<m>/`` on the project's
+    filesystem. Never ``out/<m>/`` itself: a build that failed half way would
+    leave half a package where a person looks for one (V-7's planted writer).
+
+    What slipped through (review of P2.5b, finding 6): the written export built
+    in ``out/.<m>.tmp-<pid>/``, a project path to the trace — so a generator's
+    ``os.makedirs(ctx.out_dir)`` put the scratch, pid and all, into the article
+    (removed by the swap, it read moved the moment it was recorded), a listing
+    of it refused every written export as "inputs moved", and a copy into it
+    made the written article untraced where the dry run's was traced.
+    *Rejected:* a pid suffix (the lock serialises exports; the pid made the two
+    modes' paths differ, and a generator that writes its directory's name into
+    a file then differed between them); adding the scratch as a second out
+    anchor (two rules for one directory)."""
+    del dry_run                                  # one path for both modes (D-15)
+    return os.path.join(store.out_dir(root), f"export-{name}")
 
 
 def _sha(path: str) -> str:
@@ -438,16 +516,53 @@ def package_problems(root: str, name: str, exports: Iterable[Any]) -> list[tuple
     return out
 
 
-def swap_package(root: str, name: str, scratch: str) -> str:
+def _move(source: str, target: str) -> None:
+    """``source`` renamed to ``target``; across filesystems (a ``.atompipe/``
+    linked elsewhere) copied beside ``target`` first, then renamed, so a
+    reader never finds half a package."""
+    try:
+        os.replace(source, target)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        beside = os.path.join(os.path.dirname(target),
+                              f".{os.path.basename(target)}.copy-{os.getpid()}")
+        shutil.copytree(source, beside, symlinks=True)
+        os.replace(beside, target)
+        shutil.rmtree(source, ignore_errors=True)
+
+
+def swap_package(root: str, name: str, scratch: str,
+                 record: Callable[[], Any] | None = None) -> str:
     """``scratch`` becomes ``out/<name>/``: the older package aside, the new one
-    in, the older one removed — two renames on one filesystem, so a reader never
-    finds half a package. Returns the package's path."""
+    in, then ``record`` — the export record's append — and only then the older
+    one removed. When ``record`` raises, the new package is taken back out and
+    the older one put back before the error goes on: a package no record names
+    is never left where the next export would refuse it as a file "not written
+    by an export" — atompipe's own bytes, while `doctor` said every package was
+    as written (review of P2.5b, finding 9: the swap ran first and the append
+    after it, so an unwritable `exports/` left exactly that). Returns the
+    package's path. *Rejected:* appending before the swap (a swap that then
+    failed left a record naming a package that is not there)."""
     base = os.path.join(root, store.PACKAGES_NAME)
+    os.makedirs(base, exist_ok=True)
     final = os.path.join(base, name)
     aside = os.path.join(base, f".{name}.old-{os.getpid()}")
-    if os.path.exists(final):
+    had = os.path.exists(final)
+    if had:
         os.replace(final, aside)
-    os.replace(scratch, final)
-    if os.path.exists(aside):
+    try:
+        _move(scratch, final)
+        if record is not None:
+            record()
+    except BaseException:
+        if os.path.exists(final):
+            taken = os.path.join(base, f".{name}.new-{os.getpid()}")
+            os.replace(final, taken)
+            shutil.rmtree(taken, ignore_errors=True)
+        if had:
+            os.replace(aside, final)
+        raise
+    if had:
         shutil.rmtree(aside, ignore_errors=True)
     return final

@@ -2568,6 +2568,69 @@ def _export_file(root: str, name: str, entries: list[dict]) -> str:
     return path
 
 
+class ABrokenExportRecordNamesARestoreThatWorks(_env.EnvCase):
+    """Review of P2.5b (finding 19): a broken `exports/` seal advised `git
+    checkout -- <file>` — HEAD alone, the advice P2.5a-R1 rejected for sealed
+    files: on a committed tamper the checkout changed nothing and every command
+    stayed refused, and on a file never committed "(it is tracked; …)" was
+    false. The restore is the newest commit whose version verifies, every
+    entry it would drop named — as `results/` has it."""
+
+    def project(self, *, git: bool = True) -> str:
+        return _projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True, git=git)
+
+    def refusal(self, root: str) -> str:
+        with self.assertRaises(AtompipeError) as caught:
+            store.load(root)
+        return str(caught.exception)
+
+    def commit(self, root: str, message: str) -> str:
+        for argv, identity in ((["add", "-A"], False), (["commit", "-q", "-m", message], True)):
+            proc = _env.git(argv, cwd=root, identity=identity)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        return _env.git(["rev-parse", "HEAD"], cwd=root).stdout.strip()
+
+    def tamper(self, path: str, index: int = 0) -> None:
+        data = json.loads(_read_bytes(path))
+        data["exports"][index]["who"] = "Someone Else <x@example.invalid>"
+        _write(path, json.dumps(data, indent=2))
+
+    def test_a_committed_tamper_names_the_commit_that_verifies(self):
+        root = self.project()
+        path = _export_file(root, "print-v1", [_EXPORT])
+        good = self.commit(root, "an export")
+        self.tamper(path)
+        self.commit(root, "an edit")
+        said = self.refusal(root)
+        self.assertNotIn("restored: git checkout -- exports/print-v1.json", said)
+        self.assertIn("changes nothing", said)
+        self.assertIn(f"git checkout {good[:12]} -- exports/print-v1.json", said)
+        proc = _env.git(["checkout", good[:12], "--", "exports/print-v1.json"], cwd=root)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual([e.who for e in store.load(root).exports], [_EXPORT["who"]])
+
+    def test_what_the_restore_drops_is_named(self):
+        root = self.project()
+        path = _export_file(root, "print-v1", [_EXPORT])
+        self.commit(root, "an export")
+        _export_file(root, "print-v1", [_EXPORT, dict(_EXPORT, when="2026-10-05T10:00:00Z")])
+        self.tamper(path, 0)
+        said = self.refusal(root)
+        self.assertIn("git checkout -- exports/print-v1.json", said)
+        self.assertIn("exports[1]", said)
+        self.assertIn("2026-10-05T10:00:00Z", said)
+        self.assertIn("atompipe export print-v1", said)
+
+    def test_a_file_never_committed_is_not_called_tracked(self):
+        root = self.project(git=False)
+        path = _export_file(root, "print-v1", [_EXPORT])
+        self.tamper(path)
+        said = self.refusal(root)
+        self.assertNotIn("it is tracked", said)
+        self.assertNotIn("git checkout -- exports/print-v1.json", said)
+        self.assertIn("exports/print-v1.json", said)
+
+
 class TheExportRecordIsSealedAndChained(_env.EnvCase):
     """(V-6, invariants 8 and 12) `exports/<milestone>.json` is sealed and
     chained like a results file, its milestone and its kind inside every seal:
@@ -2603,8 +2666,11 @@ class TheExportRecordIsSealedAndChained(_env.EnvCase):
             data["exports"][1]["article"]["hash"] = "f" * 64
             _write(path, json.dumps(data, indent=2))
             said = self.refusal(root)
-            for needle in ("exports/print-v1.json", "exports[1]", "git checkout -- exports/"
-                                                                   "print-v1.json"):
+            # (Review of P2.5b, finding 19: the needle was "git checkout --
+            # exports/print-v1.json" on a project no commit holds, advice that
+            # restored nothing; the restore now says what git does hold.)
+            for needle in ("exports/print-v1.json", "exports[1]",
+                           "no commit holds exports/print-v1.json"):
                 self.assertIn(needle, said)
         with self.subTest("the middle of three removed"):
             root = self.project()

@@ -92,6 +92,18 @@ STATUS_HEAD = (
     ("next", re.compile(r"^next: .+$"), 1, 1),
 )
 
+#: P2.5b's milestones under the readiness block, as last evaluated (D17; the
+#: review of P2.5b: `status` listed none): the head, then one line each.
+STATUS_MILESTONES = (
+    ("milestones head", re.compile(r"^Milestones, as last evaluated — `atompipe export "
+                                   r"<milestone> --dry-run` re-runs what each requires:$"),
+     0, 1),
+    ("milestone", re.compile(
+        r"^  [a-z0-9][a-z0-9._-]*: (?:\d+ of \d+ required claims? checked · \d+ stale"
+        r"(?: \([^)]*\))?(?: · .+)?|requires no claim, so nothing can be ready for it — "
+        r".+)$"), 0, None),
+)
+
 #: What `status` may print after its fixed block, in this order (spec §3.13).
 STATUS_TAIL = (
     ("packs", re.compile(r"^packs: .+$"), 0, 1),
@@ -238,6 +250,10 @@ def status_problems(stdout: str) -> list[str]:
     lines = stdout.splitlines()
     problems: list[str] = []
     at = _grammar(lines, 0, STATUS_HEAD, problems, "status head")
+    head_at = at
+    at = _grammar(lines, at, STATUS_MILESTONES, problems, "status milestones")
+    if at == head_at + 1:
+        problems.append("status: the milestones head with no milestone under it")
 
     # stale: one block, the counts on its last line and nowhere else
     first = lines[at] if at < len(lines) else ""
@@ -690,6 +706,19 @@ class StatusShape(_ShapeCase):
                 text = self.out(step, 0)
                 self.refuses(sub_line(text, T.LAST_CHECK, r" \([^()]+ ago\)$", ""),
                              "`last check run:` without its age")
+
+    def test_the_milestone_block(self):
+        """The review of P2.5b: `status` lists each milestone, as last
+        evaluated, under the readiness block — the bracket's `print-v1`."""
+        text = self.out("status-current", 0)
+        lines = text.splitlines()
+        head = STATUS_MILESTONES[0][1]
+        at = next((i for i, line in enumerate(lines) if head.fullmatch(line)), None)
+        self.assertIsNotNone(at, text)
+        self.assertRegex(lines[at + 1], r"^  print-v1: \d+ of 4 required claims checked")
+        self.refuses(add_line(text, head.fullmatch), "prose under the milestones head")
+        rowless = "\n".join(ln for ln in lines if not ln.startswith("  print-v1: ")) + "\n"
+        self.refuses(rowless, "the milestones head with no milestone under it")
 
 
 class GateShowShape(_ShapeCase):

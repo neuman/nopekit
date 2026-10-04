@@ -450,6 +450,29 @@ in part).
 | D27 | **the test card (critique 9):** every claim whose terminal is a measurement and that is not Checked, required or not (C5 is on print-v1's card), then every required automated claim with a limit, as a cross-check — E4's first article (a ruler on C1) is on it; each with its test, its latency and the command that records it on this article | the physical claims alone; a per-claim opt-in |
 | D28 | **Fig. 4 (critiques 19, 22):** V-2's prerequisite row on a guarded copy (`fig4.guard`, covering no required claim), its plant `gates.plan` without expansion; K8 through `fig4(extra_claims=…)`, so P2.5a's rows over the shared claims stay unedited | the bracket's `model_validity` (it already covers C2); K8 in the shared claims |
 
+#### P2.5b's review rows (`P2.5b-Rn`)
+
+The adversarial review of P2.5b, each finding confirmed by at least two of three
+refuters and fixed with its test (red first where it was a laundering path). Where a
+row disagrees with a D-row above, the R-row wins. Found while fixing: V-10's class named
+its fail-entry builder `fail`, shadowing `TestCase.fail`, so every assertion in it had
+been a no-op (`test_meta.NoTestShadowsTheFramework` now refuses the name).
+
+| Id | Decision | Rejected |
+|---|---|---|
+| R1 | supersession also needs what was PRINTED to differ: no export of B carries the generator's bytes an export of A carried (`EntryStanding.built`, `verdicts._built_seal` — the package's files but REPORT.md, model.json, MANIFEST.json), and A's own export on record; amends D14 | the recorded rows alone (a no-op `unused = None` moved the code row, and the same print reprinted byte for byte released its fail); dropping the code rows (a fix in the generator's code could then never release a fail); the package hash (REPORT.md's words move with any status) |
+| R2 | `os.link`/`os.symlink` are traced (source read, link written); a link in the package is refused (`generator_linked`); a file in the package no traced write put there makes the article untraced | the link's target alone (a hard link's bytes change with the project's next in-place edit) |
+| R3 | the scratch is `.atompipe/out/export-<m>/` in both modes, created and removed under the lock, under the trace's out anchor; amends D10's path | `out/.<m>.tmp-<pid>/` (a project path to the trace: `makedirs` put the pid in the article, a listing refused every written export, a copy made it untraced); a pid suffix (the modes' paths differed) |
+| R4 | `--article` reads EVERY export record of the article: `milestones.sealed_on` charges what any sealed (one row per evaluator version), `bound_export` names the newest that re-ran the claim; latency runs from the newest export of the article not after the result; amends D13 | the first record in name order (a milestone that did not require C1 bound its fail: `contradicts: []`); the newest alone |
+| R5 | latency is a measurement's, measured only from an entry of the person channel; amends D4 | any entry on an exported article (an agent's pass read "measured 0 min"); an automated claim's (a ruler measured C1's "latency") |
+| R6 | every reader but the boundary says *ready* "as last evaluated" in its sentence — the project's, `report --milestone`'s (whose line now says nothing was re-run), its JSON (`milestone`, `last_evaluated`) — and `status` lists each milestone's line; the package's REPORT.md is the boundary's (`render_markdown(boundary=True)`); amends D17, D18 | the package's words on the cache's view; `status` silent (SPINE_CONTRACT and the skill said it listed them) |
+| R7 | the package's REPORT.md records on its article (`--article`) and carries the test card; the card's cross-check lets `--measured` decide; amends D10, D27 | a record line with no article (a builder's fail landed on a design article no reprint answers); a hard-coded `fail` (an agreeing value was refused) |
+| R8 | the reprint is offered only for a fail on an exported, traced article; any other fail's refusal says no reprint releases it; amends D8 | offering it for every moved fail (a path back to where it began) |
+| R9 | a disagreement's refusal names the entry served and the way out — remove the entry that is not the evaluator's output; a model that does not load is a refusal of its own (`model`), never covered; an errored claim's refusal says `skipped (errored)`; amends D7 | "`atompipe check --force` records the re-run" (done already, and it clears nothing); "re-run: none — no evaluator settles a claim" over six that could not run |
+| R10 | the swap appends the record inside it and undoes itself when the append raises; `doctor` judges a package with no export record; a dry run the lock refuses touches no scratch | swap then append (an unwritable `exports/` left a package every later export refused) |
+| R11 | a broken `exports/` seal's restore walks git as `results/`' does (`store._export_restore_advice`), naming every export it drops | HEAD alone (P2.5a-R1's rejected advice, again) |
+| R12 | the Reproduce block never glues `#` to a word (`_REPRODUCE_COLUMN`, `_commented`) and lists every milestone; `doctor` resolves a generator bound any way at module level (`cli._bound_at_module`), a star import a warning | `ljust(33)` (`--dry-run#` failed in a shell for `print-v1`); a cap of four; a top-level `def` alone |
+
 **Hand-offs.** P3 — `/ready <m>` = `export <m> --dry-run` (D-15); `/tested` = `claim
 physical --article` from the test card; the permission rule refusing agent edits to
 `exports/**` and making `milestones/**` ask-first (a milestone names its own
