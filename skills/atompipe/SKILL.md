@@ -248,7 +248,12 @@ re-litigates every settled number.
 
 **Never let a validator merely log.** It must refuse. And every gate declares a
 negative control — a known-bad input it must fail on. The registry will not accept
-one without it. Run `atompipe gate selftest` and believe the result.
+one without it. And it must pass a known-good one: a gate is *qualified* only when it
+passes its known-good control (a pack's `selftest/baseline.json`, a project's
+`selftest/known_good.py`) and fails its known-bad one — and, for a gate of your own,
+fails every conclusive mutation of the known-good design. Until then its claim reads
+Gap: `unqualified: <gate> : <what does not hold>`. Write `selftest/known_good.py`
+before your first gate. Run `atompipe gate selftest` and believe the result.
 
 **Never call a skipped or errored gate a pass.** A Skipped claim is not fine — even
 beside a gate that passed. Say so — and then **clear it**: Skipped is a call to
@@ -269,8 +274,9 @@ action, not a resting state, and its reason says which action:
   `(skipped)` — read the evaluator's own row: if it says `requires <tool>`, install
   what it names; otherwise it skipped itself on its input, and the fix is to publish the
   parameter it names — installing changes nothing. `(unqualified)` — the evaluator is
-  not qualified at its version (its known-bad control did not fail): fix the evaluator
-  or its control — `atompipe gate selftest` says which — never the gate behind it.
+  not qualified at its version (one of its controls did not hold, or a mutation of its
+  known-good control passed): fix the evaluator or its control — `atompipe gate
+  selftest` says which — never the gate behind it.
   `(not registered)` — no evaluator has that id here: install the pack that provides
   it, or drop the edge, as `atompipe doctor` says. A prerequisite that crashed reads
   `errored:`, below.

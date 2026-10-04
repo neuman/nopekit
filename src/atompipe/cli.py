@@ -1018,11 +1018,6 @@ def cmd_init(args: argparse.Namespace) -> int:
 #: entries — are `doctor`'s rows, where each says what to do about it.
 _INSTRUMENT_NOTE = re.compile(r"^\S+ — recorded under \S+ \S+; here \S+$")
 
-#: A pending admission's reason as `verdicts.admission_state` words it; the
-#: files are read back out so several pending controls fold into one `note:`.
-_PENDING_REASON = re.compile(r"^control inputs moved \((?P<files>.*)\); the next check re-verifies$")
-
-
 def _never_run(resolution: verdicts.Resolution, registry: gates.Registry | None) -> list[str]:
     """Registered gates with nothing to show — *unrun*: no row, or only an
     availability skip over no entry. A remembered crash is not unrun (S-68),
@@ -1091,8 +1086,9 @@ def _pending(resolution: verdicts.Resolution) -> tuple[list[str], str]:
                if row.admission is not None and row.admission.state == "pending"]
     files: list[str] = []
     for gate_id in pending:
-        match = _PENDING_REASON.fullmatch(resolution.rows[gate_id].admission.reason or "")
-        for name in (match.group("files").split(", ") if match else ()):
+        # Structured (P2.3-D18): what `_PENDING_REASON` parsed back out of the
+        # spine's prose, the admission now carries.
+        for name in resolution.rows[gate_id].admission.moved:
             if name and name not in files:
                 files.append(name)
     return pending, ", ".join(sorted(files)) or "fixture code"
@@ -1376,8 +1372,9 @@ _CACHED_COLUMN = 77
 def _check_row_line(row: verdicts.SweepRow) -> str | None:
     """How one sweep row streams, or None when it does not.
 
-    An executed row, a refusal (`not admitted`) and a cached row that did not
-    pass each print; a cached pass does not — the inner loop is for what moved
+    An executed row and a cached row that did not pass each print — an
+    unqualified evaluator's row does not: its qualification line follows the
+    summary (P2.3-D17); a cached pass does not — the inner loop is for what moved
     or what is wrong, and five unchanged `[ok  ]` lines between you and the FAIL
     you came for is the wall `_skip_digest` exists to collapse. Skips are that
     digest's, after the summary — keyed on `Verdict.outcome`, never the flag:
@@ -1387,6 +1384,12 @@ def _check_row_line(row: verdicts.SweepRow) -> str | None:
     """
     verdict = row.verdict
     if verdict.outcome == "skipped":
+        return None
+    if getattr(verdict, "unqualified", ""):
+        # Its qualification line follows the summary (`_qualification_lines`):
+        # an unqualified evaluator crashed nothing, and `[ERR ]` is a crash's
+        # tag (P2.3-D17). What slipped through P2.1's review: the count was
+        # fixed and this row was not — `[ERR ] <gate> : not admitted: …`.
         return None
     if row.cached:
         if verdict.ok:
@@ -1401,6 +1404,35 @@ def _row_outcome(verdict: Verdict) -> str:
     GLOSSARY §2: a qualification is not an outcome; the refusal's verdict says
     `error` only so that it is never ok (R-2)."""
     return "unqualified" if getattr(verdict, "unqualified", "") else verdict.outcome
+
+
+def _qualification_lines(rows: list[verdicts.SweepRow]) -> list[str]:
+    """`check`'s qualification lines (P2.3-D16): one for every unqualified
+    evaluator, on every check run, and one for every evaluator walked by the
+    mutation pass — not from a bundled pack — whose qualification ran in this
+    one. A bundled evaluator that qualified is counted in the `controls:` line
+    and printed nowhere here: up to 54 lines after an upgrade, none a person
+    acts on. *Rejected:* a line per qualification run; no lines (W7: the
+    walkthrough's moment in prose)."""
+    out = []
+    for row in rows:
+        admission = row.admission
+        facts = getattr(admission, "qualification", None) if admission is not None else None
+        if getattr(row.verdict, "unqualified", ""):
+            out.append(report.verdict_line(row.verdict, facts))
+        elif facts is not None and admission.executed and facts.mutation is not None:
+            out.append(report.qualification_line(row.verdict.gate, facts))
+    return out
+
+
+def _controls_line(controls: Mapping[str, int]) -> str:
+    """`controls: N run, N preserved, N re-qualified` (GLOSSARY §9): run —
+    fixtures and gate ran; preserved — the records settled it; re-qualified —
+    the fixtures alone ran and every value held. The JSON keeps
+    `executed`/`cached`/`reverified` (P2.1-D12)."""
+    return report.HUMAN["qualification"]["controls"].format(
+        run=controls["executed"], preserved=controls["cached"],
+        requalified=controls["reverified"])
 
 
 def _check_summary(rows: list[verdicts.SweepRow], counts: Mapping[str, int], tier: int) -> str:
@@ -1631,14 +1663,24 @@ def cmd_check(args: argparse.Namespace) -> int:
             "spine": spine,
             "junit": written,
             "notes": notes,
+            # Additive (P2.1-D12): each evaluator's qualification as this check
+            # judged it — the line in words, the judge's token, and the state.
+            "qualifications": [
+                {"gate": row.verdict.gate,
+                 "line": report.qualification_line(row.verdict.gate,
+                                                   row.admission.qualification),
+                 "token": row.verdict.unqualified or "",
+                 "state": row.admission.state}
+                for row in rows
+                if row.admission is not None and row.admission.qualification is not None],
         })
         return code
 
     _say(_check_summary(rows, result.counts, tier))
     if counts["controls"]["executed"] or counts["controls"]["reverified"]:
-        controls = counts["controls"]
-        _say(f"controls: {controls['executed']} executed, {controls['cached']} cached, "
-             f"{controls['reverified']} re-verified")
+        _say(_controls_line(counts["controls"]))
+    for line in _qualification_lines(rows):
+        _say(line)
     for note in notes:
         _say(f"note: {note}")
 
@@ -2366,29 +2408,51 @@ def cmd_gate_list(args: argparse.Namespace) -> int:
     return 0
 
 
-def _last_selftest(admission: verdicts.Admission) -> dict[str, Any] | None:
-    """`gate show --json`'s `last_selftest`, from how the gate's control stands
-    at its current version (`verdicts.admission_state`), or None when no control
-    was ever demonstrated for it.
+#: Token kinds a crash or a broken record leaves: `last_selftest.outcome` keeps
+#: calling those `error`, its meaning before P2.3 (P2.1-D12).
+_ERROR_KINDS = frozenset({"known-bad:errored", "known-bad:skipped", "known-good:errored",
+                          "known-good:skipped", "mutation:errored", "mutation:could-not-run",
+                          "control:two-outcomes", "control:differs"})
 
-    `outcome` is the selftest's own (the verdict on the INSTRUMENT): `"pass"` —
-    it fired, admitted or pending; `"fail"` — it PASSED its own known-bad input;
-    `"error"` — it crashed, its fixture was unusable, or two recorded outcomes
-    disagree. `control` is the control entry's rho (the text prints its first
-    12), `at_this_version` whether that entry is at the gate's current static
-    part, `admission` the state, `detail` the reason or the entry's words.
+
+def _last_selftest(admission: verdicts.Admission) -> dict[str, Any] | None:
+    """`gate show --json`'s `last_selftest`, from how the gate's qualification
+    stands at its current version (`verdicts.admission_state`), or None when
+    nothing was ever recorded for it.
+
+    `outcome` keeps the meaning it had for the known-bad half: `"pass"` — its
+    control fired and it is qualified, or due to re-qualify; `"fail"` — it
+    PASSED its own known-bad input; `"error"` — a control crashed, skipped
+    itself or was unusable, the walk crashed or could not run, or two recorded
+    outcomes disagree; and, new with P2.3, `"unqualified"` — every other reason
+    it is not qualified (its known-good control failed or does not exist, the
+    channels differ, a conclusive mutation passed, it is not yet qualified).
+    What slipped through the design (critique of P2.3): an always-False gate, a
+    known-bad-shown one and a gate whose mutation passed all read `"error"`, a
+    crash's word for evaluators that crashed nothing. `qualification` (beside
+    it) is the field to read. `control` is the control entry's rho (the text
+    prints its first 12), `at_this_version` whether that entry is at the gate's
+    current static part, `admission` the state, `detail` the reason or the
+    entry's words.
 
     What slipped through (S-08): this read a ledger key `<gate>#selftest` that
     `gate selftest` deliberately never wrote, so every gate read "(never run)"
     forever, including the six the selftest had just demonstrated.
     """
     state, entry = admission.state, admission.entry
-    if entry is None and state == "undemonstrated":
+    kind = verdicts.parse_token(admission.reason)[0] if state == "not-admitted" else ""
+    # Not yet qualified with no entry behind it is "nothing was ever recorded"
+    # (P2.3): the reading that was `undemonstrated` with no entry before
+    # critique 10 made a never-qualified evaluator read Gap. What slipped
+    # through: a gate nothing had run showed a last selftest, `unqualified`.
+    if entry is None and (state == "undemonstrated" or kind == verdicts.NOT_YET):
         return None
     if state in ("admitted", "pending"):
         outcome = "pass"
+    elif state == "not-admitted" and kind == "known-bad:pass":
+        outcome = "fail"
     elif state == "not-admitted":
-        outcome = "fail" if entry is not None and entry.bad == "pass" else "error"
+        outcome = "error" if kind in _ERROR_KINDS else "unqualified"
     else:                                     # an entry at another version
         outcome = "pass" if entry.bad == "fail" else "fail"
     return {
@@ -2396,26 +2460,46 @@ def _last_selftest(admission: verdicts.Admission) -> dict[str, Any] | None:
         "control": entry.rho if entry is not None else None,
         "at_this_version": state != "undemonstrated",
         "admission": state,
-        "detail": admission.reason or (entry.detail if entry is not None else ""),
+        "detail": (report.qualification_reason(admission.reason) if kind
+                   else admission.reason or (entry.detail if entry is not None else "")),
     }
 
 
-def _last_selftest_line(admission: verdicts.Admission) -> str:
-    """`gate show`'s last line (spec §3.13): fired, PASSED its own known-bad,
-    pending re-verification, or not demonstrated — each at this version, with
-    the control entry's rho to 12 places where there is one."""
-    state, entry = admission.state, admission.entry
+def _qualification_view(gate_id: str, admission: verdicts.Admission) -> dict[str, Any]:
+    """`gate show --json`'s `qualification`: the state, the judge's token, the
+    line and the reason in words, and the facts (P2.3, additive)."""
+    facts = admission.qualification
+    return {"state": admission.state,
+            "token": admission.reason if admission.state == "not-admitted" else "",
+            "line": report.qualification_line(gate_id, facts) if facts is not None else None,
+            "reason": report.qualification_reason(admission.reason)
+            if admission.state == "not-admitted" else "",
+            "moved": list(admission.moved),
+            "facts": facts.to_dict() if facts is not None else None}
+
+
+def _qualification_rows(gate_id: str, spec: Any, admission: verdicts.Admission) -> list[str]:
+    """`gate show`'s `qualification:` row and the rows under it (P2.3-D18: it
+    replaced `last selftest:`), read off the entry — it runs nothing."""
+    q = report.HUMAN["qualification"]
+    state, entry, facts = admission.state, admission.entry, admission.qualification
     control = f" (control {entry.rho[:12]})" if entry is not None else ""
-    if state == "admitted":
-        return f"  last selftest: {_tag('ok')} fired at this version{control}"
-    if state == "pending":
-        return (f"  last selftest: pending — control inputs moved; the next check "
-                f"re-verifies{control}")
-    if state == "not-admitted" and entry is not None and entry.bad == "pass":
-        return f"  last selftest: {_tag('FAIL')} PASSED its own known-bad at this version{control}"
-    if state == "not-admitted":
-        return f"  last selftest: {_tag('FAIL')} not admitted at this version — {admission.reason}"
-    return "  last selftest: not demonstrated at this version"
+    prefix = f"{gate_id}{q['id_sep']}"
+
+    def line() -> str:
+        return report.qualification_line(gate_id, facts).removeprefix(prefix)
+
+    if state == "pending" and facts is not None:
+        moved = ", ".join(admission.moved) or "fixture code"
+        rows = [f"  qualification: {q['pending'].format(moved=moved)}",
+                f"                 {q['last'].format(line=line())}"]
+    elif facts is not None:
+        rows = [f"  qualification: {line()}{control}"]
+    elif state == "not-admitted":
+        rows = [f"  qualification: {report.qualification_reason(admission.reason)}"]
+    else:
+        rows = [f"  qualification: {q['undemonstrated']}"]
+    return rows + report.qualification_detail(entry, spec, facts=facts)
 
 
 def cmd_gate_show(args: argparse.Namespace) -> int:
@@ -2423,7 +2507,9 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     and whether its control is demonstrated at this version.
 
     `last verdict` is the resolver's (`_resolved`), with why it is not current
-    when it is not; `last selftest` is read off the control entries by
+    when it is not — an unqualified evaluator's in its qualification's words,
+    never a crash's; `qualification` (and the known-good, known-bad, mutation
+    and not-mutated rows under it) is read off the control entries by
     `verdicts.admission_state`, which never runs a fixture — `check` and `gate
     selftest` are the commands that spend that time.
     """
@@ -2449,7 +2535,8 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
         _dump({"gate": spec.to_dict(), "needed_by": needed_by, "available": ok,
                "availability": reason,
                "last_verdict": _resolved_row(verdict, resolution) if verdict else None,
-               "last_selftest": _last_selftest(admission)})
+               "last_selftest": _last_selftest(admission),
+               "qualification": _qualification_view(spec.id, admission)})
         return 0
 
     _say(gates.describe(spec))
@@ -2472,8 +2559,11 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     else:
         _say("  control: NONE — this gate cannot be shown to fail, so it is a logger")
     stale = f" (stale: {row.stale_reason})" if row is not None and row.stale_reason else ""
-    _say(f"  last verdict: {verdict.render() + stale if verdict else '(never run)'}")
-    _say(_last_selftest_line(admission))
+    shown = (report.verdict_line(verdict, admission.qualification) if verdict
+             and verdict.unqualified else verdict.render() if verdict else "(never run)")
+    _say(f"  last verdict: {shown + stale if verdict else shown}")
+    for line in _qualification_rows(spec.id, spec, admission):
+        _say(line)
     return 0
 
 
@@ -2496,17 +2586,19 @@ def _selftest_code(*, broken: int, baselines_failed: int, exercised: int,
     return 0
 
 
-def _selftest_summary(controls: int, elapsed: float, fired: int, broken: int,
+def _selftest_summary(evaluators: int, elapsed: float, qualified: int, unqualified: int,
                       skipped: int) -> str:
-    """`<n> control(s) in <t>: <f> fired, <b> BROKEN, <k> skipped (tooling)`.
-
-    One spelling for both modes (spec §3.13), and the last line of a clean run —
-    the fresh-clone transcript matches it there. `(tooling)` because a control can
-    only skip for missing tooling: `gates.selftest` turns any other skip into an
-    error (S-12), so the word says which skips these are.
-    """
-    return (f"{controls} control(s) in {human_duration(elapsed)}: {fired} fired, "
-            f"{broken} BROKEN, {skipped} skipped (tooling)")
+    """`<n> evaluators in <t>: <q> qualified, <u> unqualified, <s> skipped` — one
+    spelling for both modes, and the last line of a clean run (the fresh-clone
+    transcript matches it there). In qualification's words (P2.3-D18): it was
+    `<n> control(s) in <t>: <f> fired, <b> BROKEN, <k> skipped (tooling)`, two
+    Never-says for the known-bad half alone. *Rejected:* GLOSSARY §9's "6 fail
+    as required, 0 pass (unqualified)" — written for the known-bad half alone,
+    before qualification had a known-good half and a mutation pass (on the
+    check-in list as a GLOSSARY edit). A skip is a missing tool's: availability
+    is asked once, before either control."""
+    return report.HUMAN["qualification"]["selftest_summary"].format(
+        n=evaluators, t=human_duration(elapsed), q=qualified, u=unqualified, s=skipped)
 
 
 def _say_empty(allow_empty: bool, why: str) -> None:
@@ -2521,21 +2613,22 @@ def _say_empty(allow_empty: bool, why: str) -> None:
 
 def _selftest_one(root: str, spec: Any, fn: Any, ctx: gates.GateContext, *,
                   projection: dict | None, record: bool, now: str,
-                  anchors: verdicts.Anchors, digests: FileDigests) -> Verdict:
-    """One control, run and filed as `check` files it; the row `gate selftest` prints.
+                  anchors: verdicts.Anchors, digests: FileDigests
+                  ) -> tuple[Verdict, verdicts.Admission | None]:
+    """One evaluator qualified as `check` qualifies it, and the row `gate
+    selftest` reports: ``(row, admission)``.
 
     Where the gate's tools are missing nothing runs and nothing is filed: the
-    row is `gates.selftest`'s own skip. Otherwise `verdicts.admission` with
-    `force=True` runs fixture and gate and files the outcome (`record`), and the
-    row is read back from what it decided: fired (admitted) is a passing row
-    carrying the entry's words and numbers; PASSED its own known-bad input, a
-    crash, an unusable fixture or an outcome that contradicts a cached entry is a
-    failing row with the reason; tools that vanished mid-run a skip. Its time is
-    the wall time of that one call.
+    row is `gates.selftest`'s own skip, and there is no admission. Otherwise
+    `verdicts.admission` with `force=True` runs both controls and, for an
+    evaluator not from a bundled pack, the mutation pass, and files them
+    (`record`); the row passes exactly when the evaluator is qualified, its
+    detail the qualification line (JUnit's message). Its time is the wall time
+    of that one call.
     """
     ok, _why = gates.availability(spec)
     if not ok:
-        return gates.selftest(spec, fn, ctx)
+        return gates.selftest(spec, fn, ctx), None
     clock = time.perf_counter()
     judged = verdicts.admission(root, spec, fn, ctx, force=True, record=record,
                                 projection=projection, digests=digests, anchors=anchors,
@@ -2546,15 +2639,61 @@ def _selftest_one(root: str, spec: Any, fn: Any, ctx: gates.GateContext, *,
     entry = judged.entry
     numbers: dict[str, Any] = ({"measured": entry.measured, "limit": entry.limit,
                                 "units": entry.units} if entry is not None else {})
-    if judged.state == "admitted" and entry is not None:
-        return Verdict(passed=True, detail=entry.detail, **numbers, **base)
     if judged.state == "undemonstrated":
         return Verdict(passed=False, skipped=True,
-                       skip_reason=judged.reason or "its tooling is not available", **base)
-    passed_bad = entry is not None and entry.bad == "pass" and \
-        (judged.reason or "").startswith("PASSED its own known-bad")
-    detail = entry.detail if passed_bad else (judged.reason or "control not demonstrated")
-    return Verdict(passed=False, detail=detail, **numbers, **base)
+                       skip_reason=judged.reason or "its tooling is not available",
+                       **base), judged
+    line = _selftest_line(spec.id, judged)
+    return Verdict(passed=judged.state == "admitted", detail=line, **numbers, **base), judged
+
+
+def _selftest_line(gate_id: str, judged: verdicts.Admission) -> str:
+    """The evaluator's qualification line, or — with no facts recorded — its
+    reason in the table's words."""
+    if judged.qualification is not None:
+        return report.qualification_line(gate_id, judged.qualification)
+    q = report.HUMAN["qualification"]
+    return (f"{gate_id}{q['id_sep']}{report.qualification_reason(judged.reason)} "
+            f"{q['unqualified']}")
+
+
+def _isolation_notes(root: str, registry: gates.Registry, spec: Any, fn: Any,
+                     ctx: gates.GateContext) -> list[str]:
+    """P2.2-D13's hand-off, for a project's edges (P2.3-D20): every prerequisite
+    of ``spec`` must PASS ``spec``'s known-bad control, built on the host its
+    control gets (the known-good design); one that does not pre-empts the
+    control wherever both run. A diagnostic printed under the line — never part
+    of the qualification, never cached; the words are `pack validate`'s.
+    *Rejected:* inside the line or a condition of *qualified* (the line and the
+    word stay GLOSSARY §2's); in `check` (a third run per dependent per miss)."""
+    closure = [s for s in gates.plan(registry, [spec]) if s.id != spec.id]
+    if not closure:
+        return []
+    out_dir = tempfile.mkdtemp(prefix="atompipe-isolation-")
+    try:
+        host = verdicts.known_good_context(root, ctx) or ctx
+        try:
+            bad = gates.run_fixture(spec, fn, host, trace=None, out_dir=out_dir,
+                                    fixture_root=root)
+        except AtompipeError:
+            return []
+        notes = []
+        for need in closure:
+            entry = registry.get(need.id)
+            if entry is None or not gates.availability(need)[0]:
+                continue
+            verdict = gates.run_gate(entry[0], entry[1], bad)
+            if verdict.outcome != "pass":
+                word = report.HUMAN["outcome"].get(verdict.outcome, verdict.outcome)
+                body = ((verdict.error if verdict.outcome == "error" else
+                         verdict.skip_reason if verdict.outcome == "skipped" else
+                         verdict.detail) or "no reason given").splitlines()[0]
+                notes.append(f"note: {spec.id}: control not isolated — its prerequisite "
+                             f"{need.id} does not pass {spec.id}'s known-bad control "
+                             f"({word}: {body})")
+        return notes
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def cmd_gate_selftest(args: argparse.Namespace) -> int:
@@ -2617,7 +2756,13 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
         ledger = _load(root)
         registry, _ = _registry(root, ledger, strict=True)
         model, projection = _projection(root, ledger)
-        ctx = _context(root, ledger, model, projection, max_tier, quiet=args.json)
+        # The context's tier is a real one: `ALL_TIERS` is a selection, not a
+        # tier a gate can read. What slipped through (critique of P2.3): a
+        # project gate that read `ctx.tier` was handed 99, and its control entry
+        # was refused by its own reader (`reads.tier must be one of [0, 1, 2,
+        # 3]`), so `gate selftest` at its default crashed on it.
+        ctx = _context(root, ledger, model, projection, min(max_tier, int(Tier.EXTERNAL)),
+                       quiet=args.json)
         # Private, on purpose: `--only` must mean exactly what it means for
         # `check`, and a second copy of the id/pack/glob matching rule would
         # eventually disagree with the first — always in the permissive
@@ -2632,24 +2777,38 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
 
         started = time.perf_counter()
         results: list[Verdict] = []
+        judged: dict[str, verdicts.Admission] = {}
         for spec in specs:
             pair = registry.get(spec.id)
             if pair is None:                        # pragma: no cover - defensive
                 continue
-            verdict = _selftest_one(root, spec, pair[1], ctx, projection=projection,
-                                    record=record, now=now, anchors=anchors,
-                                    digests=digests)
+            verdict, admission = _selftest_one(root, spec, pair[1], ctx,
+                                               projection=projection, record=record, now=now,
+                                               anchors=anchors, digests=digests)
             results.append(verdict)
+            if admission is not None:
+                judged[spec.id] = admission
             if not args.json:
-                _say(verdict.render())
+                if verdict.skipped:
+                    _say(f"{spec.id}{report.HUMAN['qualification']['id_sep']}"
+                         f"{report.HUMAN['outcome']['skipped']}: {verdict.skip_reason}")
+                else:
+                    _say(verdict.detail)
+                    for note in _isolation_notes(root, registry, spec, pair[1], ctx):
+                        _say(note)
         elapsed = time.perf_counter() - started
         installed = packs.installed(root, ledger=ledger)
 
-    broken = [v for v in results if not v.ok and not v.skipped]
     skipped = [v for v in results if v.skipped]
-    fired = len(results) - len(broken) - len(skipped)
-    code = _selftest_code(broken=len(broken), baselines_failed=0,
-                          exercised=fired + len(broken), allow_empty=args.allow_empty)
+    qualified = [v for v in results if v.ok]
+    unqualified = [v for v in results if not v.ok and not v.skipped]
+    fired = [gid for gid, a in judged.items()
+             if a.qualification is not None and a.qualification.known_bad == "fail"]
+    broken = [gid for gid, a in judged.items()
+              if a.qualification is None or a.qualification.known_bad != "fail"]
+    code = _selftest_code(broken=len(unqualified), baselines_failed=0,
+                          exercised=len(qualified) + len(unqualified),
+                          allow_empty=args.allow_empty)
     written = _junit_write(junit, lambda: report.render_selftest_junit(
         results, exit_code=code, when=now))
 
@@ -2658,25 +2817,25 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
                "packs": [_pack_row(name, root) for name in installed],
                "selftests": [_verdict_row(v) for v in results],
                "baselines": None,
-               "broken": [v.gate for v in broken],
-               "skipped": [v.gate for v in skipped],
-               "counts": {"controls": len(results), "fired": fired,
-                          "broken": len(broken), "skipped": len(skipped)},
+               # `broken`, `fired` keep their meaning (P2.1-D12): the known-bad
+               # half that did not, or did, fail as declared.
+               "broken": broken,
+               "skipped": [_bare(v.gate) for v in skipped],
+               "unqualified": [_bare(v.gate) for v in unqualified],
+               "qualifications": [_qualification_view(gid, a) for gid, a in judged.items()],
+               "counts": {"controls": len(results), "fired": len(fired),
+                          "broken": len(broken), "skipped": len(skipped),
+                          "qualified": len(qualified), "unqualified": len(unqualified)},
                "allow_empty": bool(args.allow_empty),
                "junit": written,
                "ok": code == 0})
         return code
 
-    _say(_selftest_summary(len(results), elapsed, fired, len(broken), len(skipped)))
-    if fired + len(broken) == 0:
+    _say(_selftest_summary(len(results), elapsed, len(qualified), len(unqualified),
+                           len(skipped)))
+    if len(qualified) + len(unqualified) == 0:
         _say_empty(args.allow_empty,
                    "no gates registered" if not results else "every control skipped")
-    if broken:
-        _say("these gates cannot be trusted — each one failed to reject its own "
-             "known-bad input, or lost its control:")
-        for verdict in broken:
-            _say(f"{_tag('FAIL')} {verdict.gate} — "
-                 f"{verdict.detail or verdict.error or 'no detail'}")
     return code
 
 
@@ -2862,7 +3021,7 @@ def _selftest_packs(args: argparse.Namespace, root: str | None, junit: str | Non
     # Pass 2: demonstrate, then read the result back per chosen gate.
     controls: list[Verdict] = []
     baselines: list[Verdict] = []
-    failed_rows: list[tuple[str, str]] = []      # (label, why): each failed baseline
+    failed_rows: list[tuple[str, str]] = []      # (label, why): each pack-level problem
     with tempfile.TemporaryDirectory(prefix="atompipe-selftest-",
                                      ignore_cleanup_errors=True) as scratch:
         for index, plan in enumerate(plans):
@@ -2879,24 +3038,18 @@ def _selftest_packs(args: argparse.Namespace, root: str | None, junit: str | Non
                 notes.extend(entry for entry in shown.unchecked
                              if entry.partition(": ")[0] in plan["chosen"])
             for problem in plan["problems"]:
-                baselines.append(Verdict(gate=plan["name"], pack=plan["name"],
-                                         passed=False, detail=problem))
                 failed_rows.append((plan["name"], problem))
             controls.extend(plan.get("controls", []))
-            for verdict in plan.get("baselines", []):
-                baselines.append(verdict)
-                if verdict.outcome in ("fail", "error"):
-                    failed_rows.append((f"{verdict.gate} ({plan['name']})",
-                                        verdict.detail or verdict.error))
+            baselines.extend(plan.get("baselines", []))
     elapsed = time.perf_counter() - started
     now = utcnow_iso()
 
-    broken = [v for v in controls if v.outcome in ("fail", "error")]
+    qualified = [v for v in controls if v.outcome == "pass"]
+    unqualified = [v for v in controls if v.outcome in ("fail", "error")]
     skipped = [v for v in controls if v.outcome == "skipped"
                and not v.skip_reason.startswith(_NOT_RUN)]
-    fired = [v for v in controls if v.outcome == "pass"]
-    code = _selftest_code(broken=len(broken), baselines_failed=len(failed_rows),
-                          exercised=len(fired) + len(broken),
+    code = _selftest_code(broken=len(unqualified), baselines_failed=len(failed_rows),
+                          exercised=len(qualified) + len(unqualified),
                           allow_empty=args.allow_empty)
     written = _junit_write(junit, lambda: report.render_selftest_junit(
         controls, exit_code=code, when=now, baselines=baselines))
@@ -2906,7 +3059,8 @@ def _selftest_packs(args: argparse.Namespace, root: str | None, junit: str | Non
                "tier": ceiling,
                "packs": [{"name": p["name"], "dir": p["dir"], "origin": p["origin"],
                           "gates": list(p["chosen"]),
-                          "fired": sum(1 for v in p.get("controls", []) if v.ok),
+                          "fired": sum(1 for v in p.get("fired", [])),
+                          "qualified": sum(1 for v in p.get("controls", []) if v.ok),
                           "broken": [_bare(v.gate) for v in p.get("controls", [])
                                      if v.outcome in ("fail", "error")],
                           "skipped": [_bare(v.gate) for v in p.get("controls", [])
@@ -2918,12 +3072,19 @@ def _selftest_packs(args: argparse.Namespace, root: str | None, junit: str | Non
                "notes": notes,
                "selftests": [_verdict_row(v) for v in controls],
                "baselines": [_verdict_row(v) for v in baselines],
-               "broken": [_bare(v.gate) for v in broken],
+               "broken": [_bare(v.gate) for v in unqualified],
                "skipped": [_bare(v.gate) for v in skipped],
-               "baselines_failed": [label for label, _ in failed_rows],
-               "counts": {"controls": len(fired) + len(broken) + len(skipped),
-                          "fired": len(fired), "broken": len(broken),
-                          "skipped": len(skipped), "baselines_failed": len(failed_rows)},
+               "baselines_failed": [v.gate for v in baselines if v.outcome in ("fail", "error")],
+               # Every evaluator's line (critique of the P2.3 design: in pack mode
+               # a qualified evaluator's line was printed nowhere, so "54 read
+               # the line" could not be observed): here, and under `-v` in text.
+               "qualifications": [q for p in plans for q in p.get("qualifications", [])],
+               "counts": {"controls": len(qualified) + len(unqualified) + len(skipped),
+                          "fired": sum(len(p.get("fired", [])) for p in plans),
+                          "broken": len(unqualified), "skipped": len(skipped),
+                          "qualified": len(qualified), "unqualified": len(unqualified),
+                          "baselines_failed": sum(1 for v in baselines
+                                                  if v.outcome in ("fail", "error"))},
                "allow_empty": bool(args.allow_empty),
                "junit": written,
                "ok": code == 0})
@@ -2931,50 +3092,50 @@ def _selftest_packs(args: argparse.Namespace, root: str | None, junit: str | Non
 
     for note in notes:
         _say(f"note: {note}")
+    verbose = bool(getattr(args, "verbose", False))
     for plan in plans:
         line = _pack_line(plan, filtered=bool(selection), ceiling=ceiling)
         if line:
             _say(line)
-    _say(_selftest_summary(len(fired) + len(broken) + len(skipped), elapsed,
-                           len(fired), len(broken), len(skipped)))
-    if not fired and not broken:
+        for q in plan.get("qualifications", []):
+            if verbose or q["token"]:
+                _say(q["line"])
+        for problem in plan["problems"]:
+            if not problem.startswith(tuple(f"{q['gate']}: unqualified: "
+                                            for q in plan.get("qualifications", []))):
+                _say(f"problem: {problem}")
+    _say(_selftest_summary(len(qualified) + len(unqualified) + len(skipped), elapsed,
+                           len(qualified), len(unqualified), len(skipped)))
+    if not qualified and not unqualified:
         _say_empty(args.allow_empty, "no pack to demonstrate" if not targets
                    else "every control skipped" if skipped else "no gate selected")
-    if broken:
-        _say("these gates cannot be trusted — each one failed to reject its own "
-             "known-bad input, or lost its control:")
-        for verdict in broken:
-            _say(f"{_tag('FAIL')} {_bare(verdict.gate)} ({verdict.pack}) — "
-                 f"{verdict.detail or verdict.error or 'no detail'}")
-    if failed_rows:
-        _say(f"{len(failed_rows)} baseline(s) failed:")
-        for label, why in failed_rows:
-            _say(f"{_tag('FAIL')} {label} — {why}")
     return code
 
 
 def _read_back(plan: dict[str, Any], shown: Any, tier: int) -> None:
-    """Turn one `packs.demonstrate` result into per-gate control and baseline verdicts.
+    """Turn one `packs.demonstrate` result into per-gate qualification rows.
 
-    `demonstrate` reports `"<gate id>: <why>"` per defect — `control …`
-    (`packs._CONTROL_PREFIX`) for the control and the seal probe, anything else for
-    the baseline — `"<gate id> (<reason>)"` per tooling skip, and a count of
-    controls run. A problem that names no gate of this pack is the pack's own (no
-    baseline file, a gate file that will not import). Sets `plan["controls"]`,
-    `plan["baselines"]`, and appends to `plan["problems"]`.
+    `demonstrate` judges each gate in scope (`Demonstration.qualifications`:
+    its facts, which `verdicts._qualification` decides), lists every defect as
+    `"<gate id>: <why>"` — a qualification that does not hold, an unsealed or
+    unisolated control, a pack-level defect naming no gate — `"<gate id>
+    (<reason>)"` per tooling skip, and a count of controls run. An evaluator is
+    qualified here when the judge says so AND no problem names it (an unsealed
+    control is a pack defect whatever it qualified on). Sets
+    `plan["controls"]` (one row per gate, passing iff qualified, its detail the
+    line), `plan["baselines"]` (the known-good half, for JUnit's suite),
+    `plan["qualifications"]` and `plan["fired"]`, and appends to
+    `plan["problems"]`.
     """
     name = plan["name"]
     in_scope = [s for s in plan["specs"] if int(s.tier) <= tier]
     ids = {s.id for s in in_scope}
-    control_bad: dict[str, str] = {}
-    baseline_bad: dict[str, str] = {}
+    named: dict[str, list[str]] = {}
     for line in shown.problems:
         gate_id, sep, why = line.partition(": ")
         if sep and gate_id in ids:
-            bucket = control_bad if why.startswith(packs._CONTROL_PREFIX) else baseline_bad
-            bucket.setdefault(gate_id, why)
-        else:
-            plan["problems"].append(line)
+            named.setdefault(gate_id, []).append(line)
+        plan["problems"].append(line)
     tooling: dict[str, str] = {}
     for entry in shown.skipped:
         gate_id, sep, reason = entry.partition(" (")
@@ -2983,86 +3144,87 @@ def _read_back(plan: dict[str, Any], shown: Any, tier: int) -> None:
         else:
             plan["problems"].append(f"skipped an unknown gate: {entry}")
 
-    # The counts must add up before a single control is called fired. Every gate
-    # in scope either skipped for tooling or ran its control; a demonstration
-    # that stopped early (no baseline file) or dropped a gate ran fewer.
+    # The counts must add up before a single evaluator is called qualified.
+    # Every gate in scope either skipped for tooling or ran its controls; a
+    # demonstration that stopped early (no baseline file) or dropped a gate ran
+    # fewer.
     expected = len(ids) - len(tooling)
     complete = shown.ran == expected
     if not complete and not plan["problems"]:
         plan["problems"].append(
             f"the demonstration ran {shown.ran} control(s) of the {expected} this "
-            f"pack's gates call for — none of its controls is counted as fired")
+            f"pack's gates call for — none of its evaluators is counted as qualified")
 
     controls: list[Verdict] = []
     baselines: list[Verdict] = []
+    qualifications: list[dict] = []
+    fired: list[str] = []
     for spec in in_scope:
         if spec.id not in plan["chosen"]:
             continue
         common = {"pack": spec.pack or name, "tier": Tier(int(spec.tier))}
-        if spec.id in control_bad:
-            control = Verdict(gate=f"{spec.id}#selftest", passed=False,
-                              detail=control_bad[spec.id], **common)
-        elif spec.id in tooling:
-            control = Verdict(gate=f"{spec.id}#selftest", skipped=True,
-                              skip_reason=tooling[spec.id], **common)
-        elif not complete:
-            control = Verdict(gate=f"{spec.id}#selftest", skipped=True,
-                              skip_reason=f"{_NOT_RUN}{name} could not be demonstrated",
-                              **common)
+        facts = shown.qualifications.get(spec.id)
+        if spec.id in tooling:
+            controls.append(Verdict(gate=f"{spec.id}#selftest", skipped=True,
+                                    skip_reason=tooling[spec.id], **common))
+            baselines.append(Verdict(gate=spec.id, skipped=True, skip_reason=tooling[spec.id],
+                                     **common))
+            continue
+        if facts is None or not complete:
+            reason = f"{_NOT_RUN}{name} could not be demonstrated"
+            controls.append(Verdict(gate=f"{spec.id}#selftest", skipped=True,
+                                    skip_reason=reason, **common))
+            baselines.append(Verdict(gate=spec.id, skipped=True, skip_reason=reason, **common))
+            continue
+        token = verdicts._qualification(facts)
+        line = report.qualification_line(spec.id, facts)
+        ok = not token and not named.get(spec.id)
+        if ok:
+            qualifications.append({"gate": spec.id, "pack": name, "line": line, "token": ""})
         else:
-            control = Verdict(gate=f"{spec.id}#selftest", passed=True,
-                              detail="fired on its known-bad input, and again with an "
-                                     "empty host", **common)
-        controls.append(control)
-
-        if spec.id in baseline_bad:
-            baseline = Verdict(gate=spec.id, passed=False, detail=baseline_bad[spec.id],
-                               **common)
-        elif spec.id in tooling:
-            baseline = Verdict(gate=spec.id, skipped=True, skip_reason=tooling[spec.id],
-                               **common)
-        elif not complete:
-            baseline = Verdict(gate=spec.id, skipped=True,
-                               skip_reason=f"{_NOT_RUN}{name} could not be demonstrated",
-                               **common)
-        else:
-            baseline = Verdict(gate=spec.id, passed=True,
-                               detail=f"passed {packs.SELFTEST_DIR}/{packs.BASELINE_NAME}",
-                               **common)
-        baselines.append(baseline)
+            q = report.HUMAN["qualification"]
+            shown_line = line if token else (line.rsplit(" ", 2)[0] + " " + q["unqualified"]
+                                             if line.endswith(q["qualified"]) else line)
+            qualifications.append({"gate": spec.id, "pack": name, "line": shown_line,
+                                   "token": token or "problem"})
+        if facts.known_bad == "fail":
+            fired.append(spec.id)
+        controls.append(Verdict(gate=f"{spec.id}#selftest", passed=ok, detail=line,
+                                **common))
+        baselines.append(Verdict(gate=spec.id, passed=facts.known_good == "pass",
+                                 detail=f"known-good {facts.known_good}", **common))
     plan["controls"] = controls
     plan["baselines"] = baselines
+    plan["qualifications"] = qualifications
+    plan["fired"] = fired
 
 
 def _pack_line(plan: dict[str, Any], *, filtered: bool, ceiling: int) -> str:
-    """One pack's line: `[ok  ] beam-analytic (bundled) : 8 fired`.
+    """One pack's row: `beam-analytic (bundled) : 8 qualified` (P2.3-D18).
 
     `(origin)` because a pack that is not the one you are editing looks exactly
     like one that is (`packs.origin_of`). Nothing for a pack a gate filter left
-    untouched: it was not part of this run.
+    untouched: it was not part of this run. No outcome tag: a qualification is
+    not an outcome (GLOSSARY §1), and `[FAIL]` named three things at once.
     """
     controls = plan.get("controls", [])
     problems = plan["problems"]
+    q = report.HUMAN["qualification"]
     if not controls and not problems:
         if filtered:
             return ""
         what = "no gates" if not plan["specs"] else f"no gate at or below tier {ceiling}"
-        return f"{_tag('skip')} {plan['name']} ({plan['origin']}) : {what}"
-    fired = sum(1 for v in controls if v.outcome == "pass")
-    broken = sum(1 for v in controls if v.outcome in ("fail", "error"))
+        return f"{plan['name']} ({plan['origin']}) : {what}"
+    qualified = sum(1 for v in controls if v.outcome == "pass")
+    unqualified = sum(1 for v in controls if v.outcome in ("fail", "error"))
     tooling = sum(1 for v in controls if v.outcome == "skipped"
                   and not v.skip_reason.startswith(_NOT_RUN))
-    failed = sum(1 for v in plan.get("baselines", []) if v.outcome in ("fail", "error"))
-    failed += len(problems)
-    bits = [f"{fired} fired"]
-    if broken:
-        bits.append(f"{broken} BROKEN")
+    line = q["pack_row"].format(pack=plan["name"], origin=plan["origin"], q=qualified)
+    if unqualified:
+        line += q["pack_unqualified"].format(u=unqualified)
     if tooling:
-        bits.append(f"{tooling} skipped (tooling)")
-    if failed:
-        bits.append(f"{failed} baseline(s) failed")
-    tag = "FAIL" if broken or failed else ("ok" if fired else "skip")
-    return f"{_tag(tag)} {plan['name']} ({plan['origin']}) : {', '.join(bits)}"
+        line += q["pack_skipped"].format(s=tooling)
+    return line
 
 
 # --------------------------------------------------------------------------- #
@@ -4856,7 +5018,7 @@ def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
     pending, moved = _pending(resolution)
     _check(results, "pending-controls", "warn" if pending else "ok",
            f"{_pending_sentence(len(pending), moved)}: {_listed(pending, ', ')}" if pending
-           else "no control is waiting to be re-verified")
+           else "no evaluator is waiting to re-qualify")
 
     found = _undeclared_imports(registry)
     _check(results, "imports", "warn" if found else "ok",
@@ -4888,6 +5050,42 @@ def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
                             "atompipe.modelio.load_path"
            if found else "every module a gate or its control imports is named where it "
                          "is imported")
+
+
+def _doctor_qualification_rows(results: list[dict], root: str, registry: gates.Registry,
+                               resolution: verdicts.Resolution) -> None:
+    """The two rows qualification adds (P2.3, GLOSSARY §2's words): every
+    evaluator unqualified at its version, named with the first fact that does
+    not hold; and, once per project with evaluators of its own, a missing
+    `selftest/known_good.py` — without it every project evaluator is known-bad
+    shown, `known-good not run`, and its claims read Gap — with the fix. An
+    evaluator not yet qualified at all (no check run since it appeared) is a
+    warning: the next check run settles it. The tag column stays `doctor`'s
+    until GLOSSARY §9's word pass (`[problem]`/`[ok]`, on the check-in list)."""
+    q = report.HUMAN["qualification"]["doctor"]
+    unqualified: list[str] = []
+    not_yet: list[str] = []
+    for gate_id in registry.ids():
+        row = resolution.rows.get(gate_id)
+        admission = row.admission if row is not None else None
+        if admission is None or admission.state != "not-admitted":
+            continue
+        kind = verdicts.parse_token(admission.reason)[0]
+        named = f"{gate_id} ({report.qualification_reason(admission.reason)})"
+        (not_yet if kind == "qualification:not-yet" else unqualified).append(named)
+    if unqualified or not_yet:
+        found = unqualified or not_yet
+        _check(results, "qualification", "FAIL" if unqualified else "warn",
+               q["unqualified"].format(n=len(found), list=_listed(found, ", ")))
+    else:
+        _check(results, "qualification", "ok", q["ok"])
+    project_gates = [spec for spec in registry.specs() if not (spec.pack or "").strip()]
+    missing = project_gates and not os.path.isfile(
+        os.path.join(root, "selftest", "known_good.py"))
+    # The row's name is the table's word too (D-16): `known-good` is
+    # qualification's, and a channel that typed it would be a second copy.
+    _check(results, report.HUMAN["qualification"]["known_good"], "FAIL" if missing else "ok",
+           q["known_good"] if missing else q["known_good_ok"])
 
 
 def _doctor_seal_row(results: list[dict], registry: gates.Registry,
@@ -5244,6 +5442,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                and not getattr(v, "unqualified", "")]
     results[crash_at:crash_at] = crashes
     _doctor_cache_rows(results, root, registry, resolution)
+    _doctor_qualification_rows(results, root, registry, resolution)
     _doctor_seal_row(results, registry,
                      _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
 
@@ -5485,13 +5684,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id")
     p.set_defaults(func=cmd_gate_show)
 
+    # Its help in qualification's words, from the one table (P2.3, GLOSSARY §6
+    # *fail*): "fails any gate that cannot fail" used the outcome word for two
+    # things in one sentence, and "negative control" is a §2 Never-say.
     p = gate_sub.add_parser("selftest", parents=[common],
-                            help="run every negative control; fails any gate that cannot fail")
+                            help=report.HUMAN["qualification"]["help"])
     # The positional form exists because `gates.py` prints `atompipe gate
     # selftest <id>` when it refuses a control-less gate, and a command the tool
     # tells you to run has to work as printed.
     p.add_argument("gates", nargs="*", metavar="GATE",
-                   help="gate ids, pack names or globs; default is every control")
+                   help="gate ids, pack names or globs; default is every evaluator")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="pack mode: print every evaluator's line, not only the "
+                        "unqualified ones")
     p.add_argument("--only", action="append", metavar="GATE",
                    help="same as the positional form (repeatable)")
     p.add_argument("--tier", type=int, default=None,

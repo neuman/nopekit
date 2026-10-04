@@ -180,6 +180,17 @@ assume, and the assumptions are expensive.
 | `cad.clash` | 1 | interfering pairs | 0 pairs; per-pair volume **and** depth tolerance | `selftest/bad_meshes.py:overlapping_pair` — two valid boxes sharing 800 mm³ |
 | `cad.assembly_connected` | 1 | parts in no contact at all, groups not joined to the assembly, and the surface-to-surface gap on every DECLARED contact, mm | `max_mating_gap_mm` (or a per-entry `tol_mm`); coverage falls back to the pack's 0.05 mm tessellation floor when the projection states none | `selftest/bad_meshes.py:broken_chain` — the cover 3 mm off the rim it seats on, nothing else changed |
 
+The six mesh gates also declare their **known-good** control,
+`selftest/good_meshes.py:baseline_meshes`: the baseline assembly's four solids, handed
+through `ctx.extra["meshes"]` — the channel every known-bad fixture above uses — as
+absolute paths into this pack's `selftest/meshes/`, so they load (and an STL is welded)
+exactly as the projection's paths do, in any host project. The baseline alone names
+them in `params["meshes"]`, and a pair that reaches a gate through two channels shows
+nothing (`channels differ`): a gate that loaded `extra` and `params` differently could
+pass one and fail the other. A gate qualifies when it passes its known-good control and
+fails its known-bad one (GLOSSARY §2); `cad.bounding` reads params on both, and its
+known-good control is the baseline itself.
+
 `cad.clash` is the one gate here whose other direction needs proving too. A negative
 control can only require a FAILURE, and half of this gate's job is to come out clear
 on a pair that *touches* — without anyone writing an allowlist entry for it. A gate

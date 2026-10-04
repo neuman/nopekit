@@ -806,7 +806,7 @@ the model owns entirely has no record, and is no orphan); `model` and `doctor` l
 them from it. `_explicit_params` refuses an unknown key in a `PARAMS` dict item with a
 `difflib` suggestion (the model-side cousin of S-40).
 
-### `verdicts.py`  (deps: models, util, store, modelio, vcs; gates, packs and claims only inside functions)
+### `verdicts.py`  (deps: models, util, store, modelio, vcs; gates, packs, claims and report only inside functions)
 What a gate read, so its verdict can be keyed by it — the home of per-gate
 content-addressed verdicts (PLAN D-05). Its first half is the primitives (below);
 its second half turns a trace into entries you can commit (part two, further down);
@@ -1163,8 +1163,9 @@ class Entry:                                              # .atompipe/verdicts/<
 @dataclass
 class ControlEntry:                                       # .../control-<rhoC16>-<out8>.json
     gate: str; rho: str; static: str; static_parts: dict; host: str; fixture: dict
-    reads: dict; bad: str; good: None; admitted: str; detail: str
+    reads: dict; bad: str; good: dict | None; admitted: str; detail: str
     measured: float | None; limit: float | None; units: str; digest: str; path: str
+    bad_extra: list; mutation: dict | None; legacy: bool  # P2.3: the whole qualification
     name: str                                             # property: "control-<rhoC16>-<out8>"
     def body(self) -> dict;  def read_set(self) -> Reads
 
@@ -1183,7 +1184,8 @@ def control_static(spec, fn, root, *, digests=None, anchors=None) -> tuple[str, 
 def write_control(root, entry) -> WriteResult
 def read_controls(root, gate_id, *, problems=None) -> list[ControlEntry]
 def record_control(root, spec, fn, *, result=None, trace=None, host="live", bad=None,
-                   detail="", digests=None, anchors=None, when="") -> WriteResult | None
+                   detail="", digests=None, anchors=None, when="", good=None,
+                   mutation=None) -> WriteResult | None
 def remember(root, key, verdict, *, input_rho, kind, when) -> None
 def remembered(root) -> dict      # {key: {input_rho: {"input_rho", "kind", "verdict": Verdict, "when"}}}
 def forget(root, key, input_rhos) -> bool    # only the records at those rhos
@@ -1422,9 +1424,11 @@ def freshness(root, registry, projection, ledger, *, digests=None, anchors=None,
 class Admission:
     state: str            # "admitted" | "pending" | "not-admitted" | "undemonstrated"
     entry: ControlEntry | None
-    reason: str           # why not admitted; for pending, the note
+    reason: str           # not-admitted: the judge's token (P2.3); else why, or ""
     executed: bool        # a fixture or control ran to decide it: never, from admission_state
     reverified: bool
+    qualification: QualificationFacts | None   # P2.3: the facts it was decided on
+    moved: tuple          # pending: the fixture-closure files that moved
 def admission_state(root, spec, fn, *, projection, ledger=None, digests=None,
                     anchors=None) -> Admission
 
@@ -1860,8 +1864,20 @@ PREREQUISITE_FAILED = "prerequisite failed"             # skip_reason leads (spi
 PREREQUISITE_NOT_ESTABLISHED = "prerequisite not established"
 NEGATIVE_KINDS: tuple[str, ...]                         # errored failed skipped unqualified not-registered
 NOT_CURRENT_KINDS: tuple[str, ...]                      # invalidated unrun
-def selftest(spec, fn, ctx, *, trace=None, out_dir=None) -> Verdict   # runs the NEGATIVE CONTROL, traced
-def run_fixture(spec, fn, ctx, *, trace, out_dir) -> GateContext      # the fixture ONLY; never calls fn
+def selftest(spec, fn, ctx, *, trace=None, out_dir=None, fixture_root=None) -> Verdict
+                                                        # runs the KNOWN-BAD control, traced
+def run_fixture(spec, fn, ctx, *, trace, out_dir, fixture_root=None) -> GateContext
+                                                        # the known-bad fixture ONLY; never calls fn
+def run_good_fixture(spec, fn, ctx, *, trace, out_dir, fixture_root=None) -> GateContext
+                                                        # the declared known-good fixture ONLY
+def mutation_walk(spec, fn, good_ctx, good_verdict, *, trace=None, roots=()) -> MutationPass
+MUTATION_MARGIN = 0.15                                  # how far past its own limit a value lands
+MUTATION_RUNGS = (1.15, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0, 100.0, 1000.0)   # x then ÷, nearest first
+MUTATION_BISECT = 16                                    # halvings, in log-factor, to aim
+MUTATION_RUNS_MAX = 1024                                # runs per walk, probes included
+MUTATION_TIER_MAX = Tier.INSTANT                        # the costliest tier walked
+class MutationResult: key, before, after, outcome, measured, limit, why
+class MutationPass: results, inconclusive, not_mutated, boundary, runs, errors, flaky
 def load_fixture(ref: str, root: str) -> Any            # "mod:fn" or "path/to/file.py"
 def load_project_gates(root, registry) -> list[str]     # <root>/gates/*.py; the ids they register
 def describe(spec) -> str                               # one dense line for `atompipe gate list`
@@ -1935,8 +1951,29 @@ in one process); `trace.fixture_code` is
 fixture file that re-exports a helper's `make` is keyed by the file an edit moves — or
 `None` when the stock import served it; the gate then runs through `run_gate` with the same trace.
 `duration_s` and `cpu_s` cover both. `run_fixture(spec, fn, ctx, *, trace, out_dir)`
-is the fixture half alone — for re-verifying a control whose fixture code moved without
+is the fixture half alone — for re-qualifying a control whose fixture code moved without
 re-running the gate — and raises `AtompipeError` when the control is unusable.
+`run_good_fixture` is its twin for a declared known-good fixture (`NegativeControl.good`,
+P2.3): the same builder under the same guards, handed exactly what the known-bad one is.
+`fixture_root` is where a project's relative fixture ref resolves when `ctx.root` may
+not be the project's — the sweep names the project root, since a
+`selftest/known_good.py` may point its context's root at the design's own files.
+
+**The mutation pass (P2.3).** `mutation_walk(spec, fn, good_ctx, good_verdict, *,
+trace, roots)` walks every value the known-good run read (a leaf it keyed, or one under
+a level it read whole): along `MUTATION_RUNGS`, x then ÷, until the gate's OWN
+`measured` lands `MUTATION_MARGIN` past its OWN `limit` on the side opposite its
+known-good run — never the pass flag — then `MUTATION_BISECT` halvings aim at the
+smallest landing factor, rounded outward to 3 significant figures; that run's outcome
+is the key's `MutationResult`. A skip or error is inconclusive (a crash that does not
+repeat sets `flaky`, and the walk is held); a value that never lands, a word, a zero or
+a key the budget does not reach is `not_mutated`, with why. Influence probes order the
+keys (a value equal to the reported one first). It runs in process on deep copies, a
+fresh memo per run, at tier `<= MUTATION_TIER_MAX`, with its scratch in one temp dir
+that must lie outside `roots` (the project and every pack directory — else
+`MutationCannotRun`), and every run's reads are folded into `trace` at their
+KNOWN-GOOD digests: a value only a mutated run reads is an input of the
+qualification. It writes nothing.
 
 **Prerequisites (`needs`, P2.2).** A gate may name the gates that must be
 established before its verdict counts: a validity guard before the analyses it
@@ -3125,6 +3162,75 @@ the rename pass, so `status` keeps the enum and the word is `word` (and the toke
 one that wants *ready* reads `summary.all_required_checked`, never `summary.ready`.
 *Rejected:* re-valuing `status` in place (a deny-list reader would go generous on
 "failing"); a top-level `status` map (two meanings of one key in one document).
+
+## What P2.3 moved
+
+An evaluator's verdict counts only when it is **qualified** at its current version
+(GLOSSARY §2, invariant 9): its known-good control passed, its known-bad control
+failed, both reached it through the same `ctx.extra` keys, and — for one not loaded
+from the bundled packs — every conclusive mutation of its known-good control failed
+(`gates.mutation_walk`, invariant 15). The spine digest moved; every project entry
+re-qualifies once.
+
+- **One entry carries the whole qualification**: `bad_extra` after `bad`, `good`
+  (`{outcome, reads, extra, measured, limit, units, detail}`; `outcome` `"not-run"`
+  where no known-good control exists — known-bad shown is a fact about the project,
+  filed, never `null`), `mutation` after it (`{runs, boundary, results, inconclusive,
+  not_mutated}`; tallies are derived, never stored), and `admitted`, which the strict
+  reader re-derives from those facts and refuses when it does not follow. `SCHEMA`
+  stays 1. An entry whose writer ran no known-good half (`good` null where one now
+  resolves, or `mutation` null where the walk applies and both controls held) is
+  *incomplete*: never served, and a miss for `check`. `rho_control` keys both halves'
+  reads and every walk run's; the static part's `nc` gains `good` and whether the walk
+  applies.
+- **One judge**: `verdicts._qualification(QualificationFacts) -> token` — `""` when
+  qualified, else the first fact that does not hold, in the rule's order:
+  `known-bad:pass`, `known-good:fail`, `known-good:not-run`, `channels:differ|…`,
+  `mutation:1/2`, `control:two-outcomes|…`, `qualification:not-yet|<tier>`, … The
+  writer, the strict reader, `_decide`, `_admission` and `_run_control` all call it.
+  `Verdict.unqualified` holds the token, `verdicts.parse_token` is its one inverse,
+  and `report.HUMAN["qualification"]` words every token, every segment of the line
+  (`report.qualification_line`, `report.verdict_line`), the Gap reason
+  (`report.qualification_reason`) and `gate show`'s rows (`report.qualification_detail`).
+- **Not yet qualified** (`verdicts.not_yet`): an evaluator never qualified at any
+  version reads Gap until a check run qualifies it — no pass of it counts, beside a
+  passing one too; one qualified at an earlier version reads Stale (`not yet qualified
+  at this version — the next check run qualifies it`). A gate with nothing recorded
+  at all reads so too (`verdicts.never_run`: no entry behind it), and the
+  prerequisite rule reads it as an UNRUN root, never a negative one — a project never
+  checked reads every claim Gap, not Skipped behind its guards. *Moved from the
+  design's Q5 default* (Open/Stale until the first check run), by its critique: a
+  claim left Gap before any control had run.
+- **The project fixture root**: a project's relative fixture ref resolves against the
+  project root the sweep names (`gates.selftest(..., fixture_root=)`), not the
+  context's — a `selftest/known_good.py` may point its root at the design's own files.
+- **A held qualification keeps its refusal**: a half that crashed, skipped itself or
+  was unusable is remembered under `control:<gate>` with the facts and the refusal's
+  own detail.
+
+**What now stops `check`**, added to P2.1's table:
+
+| a critical claim that | reads | stops `check` until |
+|---|---|---|
+| has a project evaluator and the project has no `selftest/known_good.py` (nor a `good=` fixture) | Gap, `unqualified: <id> : known-good not run` | a known-good design is written down |
+| has an evaluator that fails its known-good control | Gap, `known-good fail` | the evaluator or the design is fixed |
+| has an evaluator outside the bundled packs that passes a conclusive mutation | Gap, `mutation n/m fail` | the evaluator judges the value it reports |
+| has an evaluator whose two controls reach it through different `ctx.extra` keys | Gap, `known-good and known-bad reach it through different channels` | a `good=` fixture on the same channel |
+| has an evaluator never qualified | Gap, `not yet qualified at this version` | `atompipe check` |
+
+**Channels.** `check` prints a line for every unqualified evaluator and for every walked
+one whose qualification ran (`bracket.deflection : known-good pass · known-bad fail ·
+mutation 1/1 fail → qualified`), never an `[ERR ]` row for an unqualified one, and the
+controls line as `controls: N run, N preserved, N re-qualified`. `gate show` prints
+`qualification:` and its detail rows where `last selftest:` was. `gate selftest` prints
+every evaluator's line, sums them (`6 evaluators in 0.4s: 6 qualified, 0 unqualified,
+0 skipped`) and exits 1 on any unqualified; pack mode prints a row per pack
+(`cad-solid (bundled) : 7 qualified`), the line of every unqualified evaluator (every
+one under `-v`) and its `problem:` lines. `doctor` gains `qualification` and
+`known-good`. JSON is additive: `check --json` `qualifications`; `gate show --json`
+`qualification` (and `last_selftest.outcome` `"unqualified"`); `gate selftest --json`
+`qualifications` and `counts.qualified`/`unqualified`; `state.json` verdict rows read
+`status: "unqualified"` with `qualification: {token, reason}`.
 
 ## Limits: what the spine cannot see, named
 

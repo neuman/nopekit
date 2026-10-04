@@ -50,6 +50,15 @@ def quarter_thickness(ctx):
     Deflection goes as 1/t^3, so this is 64x worse: 0.469 mm becomes 30.0 mm. It was
     1.75 mm while the base was the live 7.0; on the known-good 8.0 that would be
     ~95x, and the gate's note ("1/4 thickness ... ~64x worse") would be false.
+
+    Far past the limit on purpose: the design with its protective element removed.
+    The at-the-limit evidence S-17 asked a control for is the mutation pass's
+    (P2.3): it pushes the known-good deflection until it lands 15% past the limit,
+    0.575 mm against 0.5, and the gate must fail that run. *Rejected:* recalibrating
+    this fixture to ~1.15x (the old checkpoint 2.3, the margin beam-analytic's
+    fixtures use) — the known-bad control and the at-the-limit test would be one
+    input under two names, and a tracked fixture and its entry would move for
+    evidence the walk now gives.
     """
     return _with(ctx, thickness=known_good.CONFIG["thickness"] / 4.0)
 

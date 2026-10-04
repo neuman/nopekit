@@ -338,3 +338,84 @@ class BlockingTagIsStatusTag(_env.EnvCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --------------------------------------------------------------------------- #
+# V5 (invariant 12): the qualification line never says more than the judge
+# --------------------------------------------------------------------------- #
+_LINE_END = re.compile(r" → (qualified|unqualified)$")
+
+
+def _facts_space(seed: int = 2303, n: int = 320) -> list:
+    """Seeded combinations of every fact the judge reads: the known-bad and
+    known-good halves, the channels, the mutation tally (conclusive and
+    inconclusive mixes), whether nothing was walked and why, a walk that could
+    not run, and a control-level blocker."""
+    import random
+    from atompipe import verdicts as verdicts_mod
+    rng = random.Random(seed)
+    out = []
+    for _ in range(n):
+        mutation = rng.choice([None, (0, 0, 0), (1, 1, 0), (0, 1, 0), (2, 3, 1), (3, 3, 2),
+                               (0, 0, 2)])
+        out.append(verdicts_mod.QualificationFacts(
+            known_bad=rng.choice(["fail", "pass", "errored", "skipped"]),
+            known_good=rng.choice(["pass", "fail", "errored", "skipped", "not-run", "live"]),
+            bad_line="x", good_line="y",
+            channels=rng.choice([(), (("meshes",), ())]),
+            check_channel=rng.choice([(), (), (("bom",), ("bom",))]),
+            mutation=mutation,
+            boundary=(rng.choice(["", "no-limit", "at-limit", "tier:1", "budget"])
+                      if mutation == (0, 0, 0) else rng.choice(["", "", "budget"])),
+            walk=rng.choice(["", "", "", "could-not-run|its temp directory is inside the project",
+                             "errored|MemoryError: once"]),
+            blocker=rng.choice(["", "", "", "two-outcomes|a, b", "tier|a, b"]),
+            expect=rng.choice(["fail", "fail", "error"])))
+    return out
+
+
+class QualificationLineAgrees(unittest.TestCase):
+    """(V5, invariant 12) Over seeded combinations of the facts, the line ends
+    `→ qualified` exactly when the one judge (`verdicts._qualification`) says
+    so, its mutation counts are held by `test_mutation.line_problems`, and the
+    claim's reason is empty exactly when it is qualified. What it stops: a
+    renderer that decides for itself — a line saying *qualified* for a
+    known-bad-shown evaluator, as P2.1's admitted reject-only did."""
+
+    def _problems(self, line_of) -> list[str]:
+        from atompipe import verdicts as verdicts_mod
+        import test_mutation
+        out = []
+        for facts in _facts_space():
+            token = verdicts_mod._qualification(facts)
+            line = line_of("g.x", facts)
+            m = _LINE_END.search(line)
+            if not m:
+                out.append(f"no ending: {line!r}")
+                continue
+            if (m.group(1) == "qualified") != (token == ""):
+                out.append(f"{line!r} against the judge's {token!r}")
+            if (report_mod.qualification_reason(token) == "") != (token == ""):
+                out.append(f"reason {report_mod.qualification_reason(token)!r} for {token!r}")
+            if facts.mutation is not None and " · mutation " in line \
+                    and not re.search(r"could not|errored", line):
+                fails, conclusive, inconclusive = facts.mutation
+                truth = ([("fail", True)] * fails + [("pass", True)] * (conclusive - fails)
+                         + [("errored", False)] * inconclusive)
+                out += test_mutation.line_problems(line.split(" · mutation ", 1)[1]
+                                                   .join(("mutation ", "")), truth)
+        return out
+
+    def test_the_line_agrees_with_the_judge(self):
+        self.assertEqual(self._problems(report_mod.qualification_line), [])
+
+    def test_a_line_that_says_qualified_for_known_bad_shown_is_caught(self):
+        real = report_mod.qualification_line
+
+        def planted(gate_id, facts):
+            line = real(gate_id, facts)
+            if facts.known_good == "not-run":
+                return _LINE_END.sub(" → qualified", line)
+            return line
+
+        self.assertTrue(self._problems(planted))

@@ -203,10 +203,13 @@ import tokenize
 from atompipe.gates import gate
 from atompipe.models import NegativeControl, Verdict
 
-#: t.crashy crashes on the REAL design (x below 10) while "crash" is set, and not
-#: on its control's known-bad input (x = 50): a crash of the gate, not of its
-#: control, at inputs that did not move. "control" is the other half: it crashes
-#: on the known-bad input only — a crash of the control, not of the gate.
+#: t.crashy crashes on the REAL design (x = 1, between 0.5 and 2) while "crash"
+#: is set, and not on its control's known-bad input (x = 50) or the known-good
+#: design (x = 0.25): a crash of the gate, not of its controls, at inputs that
+#: did not move. "control" is the other half: it crashes on the known-bad input
+#: only — a crash of the control, not of the gate. (Every x below 10 until P2.3:
+#: the known-good control runs the gate on a passing design too, and a crash on
+#: every passing x crashed it as well.)
 FLAGS = {"crash": False, "control": False}
 
 
@@ -310,7 +313,7 @@ def buf_b(ctx):
 @gate(id="t.crashy", title="t", claims=["crashy"], negative_control=_nc("bad_x"))
 def crashy(ctx):
     x = float(ctx.params["config"]["x"])
-    if FLAGS["crash"] and x < 10.0:
+    if FLAGS["crash"] and 0.5 < x < 2.0:
         raise RuntimeError("tripped over the real design")
     if FLAGS["control"] and x >= 10.0:
         raise RuntimeError("tripped over its known-bad input")
@@ -381,17 +384,24 @@ def outside(ctx):
 
 # The channels no audit event of an ``open`` reported (review round 1, the
 # ``probe.env``/``probe.sqlite``/``probe.linecache`` repro). Every control is
-# ``bad_x``, which keeps the root: the control reads the SAME variable, database
-# and file as the real run, in the same process, first.
+# ``bad_x``, which points at the project root: the control reads the SAME
+# variable, database and file as the real run, in the same process, first.
 def _x_ok(ctx):
     return float(ctx.params["config"]["x"]) < 10.0
 
 
 @gate(id="t.env", title="t", claims=["env"], negative_control=_nc("bad_x"))
 def from_env(ctx):
-    vetoed = os.environ.get("ATOMPIPE_TEST_ENV_VETO") is not None
-    return Verdict(gate="t.env", passed=_x_ok(ctx) and not vetoed, measured=float(vetoed),
-                   limit=0.0)
+    # The variable vetoes every design past the x it holds: set to 0.5, the real
+    # design (1.0) and never the known-good one (0.25). Until P2.3 it vetoed
+    # everything, and reported the veto as its measurement; the known-good
+    # control then failed beside the real run, and its re-run under the variable
+    # (opaque, so never Fresh) filed a second outcome at the same inputs. The
+    # number reported is x, which no veto moves, so the walk lands where it did.
+    x = float(ctx.params["config"]["x"])
+    veto = os.environ.get("ATOMPIPE_TEST_ENV_VETO")
+    vetoed = veto is not None and x > float(veto)
+    return Verdict(gate="t.env", passed=x < 10.0 and not vetoed, measured=x, limit=10.0)
 
 
 def _db_number(target, **kw):
@@ -480,9 +490,9 @@ LIMITS = "LIMIT = 9.0\n"
 #: ``ctx.load_file``, no ``extra`` — in each spelling a gate module uses: an
 #: ``lru_cache``, a bare ``cache``, a cached staticmethod on a class, and a memo
 #: in a helper loaded by path (another module of the gate's closure). Every
-#: control is ``bad_x``, which keeps the root: the admission control calls the
-#: memo on the SAME path, in the same process, before the gate runs — the
-#: review's repro. ``t.memo_lru_b`` shares ``t.memo_lru``'s memo and file, the
+#: control is ``bad_x``, which points at the project root: the admission control
+#: calls the memo on the SAME path, in the same process, before the gate runs —
+#: the review's repro. ``t.memo_lru_b`` shares ``t.memo_lru``'s memo and file, the
 #: cross-gate shape S-27 had on ``extra``.
 MEMO = '''\
 import functools
@@ -576,9 +586,10 @@ MEMO_GATES = list(MEMO_FILES)
 #: the cheap bound below tier 2, and at 2 a refined path that also opens
 #: ``data/solver.txt`` — an input only that path reads, so an edit to it moves the
 #: tier-2 entry and leaves the tier-0 one current. ``FLAGS`` names the path that
-#: crashes on the REAL design (x below 10), never on the control's known-bad
-#: input (x = 50): one path broken, the other still measuring, the control
-#: firing on both. ``"<path> control"`` is the other half: that path crashes on
+#: crashes on the REAL design (x = 1, between 0.5 and 2), never on the control's
+#: known-bad input (x = 50) or the known-good design (x = 0.25): one path broken,
+#: the other still measuring, the controls holding on both (every x below 10
+#: until P2.3, which runs the gate on the known-good design too). ``"<path> control"`` is the other half: that path crashes on
 #: the known-bad input only — a crash of one path's control, the gate still
 #: measuring the design on both. Planted only where a test asks
 #: (``Project(extra=...)``), so no other test's sweep grows a gate.
@@ -600,7 +611,7 @@ def tiered(ctx):
         with open(os.path.join(ctx.root, "data", "solver.txt"), encoding="utf-8") as fh:
             float(fh.read())
     path = "costly" if costly else "cheap"
-    if FLAGS[path] and x < 10.0:
+    if FLAGS[path] and 0.5 < x < 2.0:
         raise RuntimeError(("the refined" if costly else "the cheap") + " path diverged")
     if FLAGS[path + " control"] and x >= 10.0:
         raise RuntimeError(("the refined" if costly else "the cheap")
@@ -691,6 +702,14 @@ def bad_stress(ctx):
                       "config": {"x": 1.0, "load_n": 20000.0}})
 
 
+#: The project these fixtures belong to. ``bad_x`` points its context here: since
+#: P2.3 a control's fixture is handed the known-good design, whose root is the
+#: design's own files (``selftest/good``), and a control that read THOSE would
+#: no longer read the same variable, database and file as the real run, first —
+#: the memo, linecache and sqlite scenarios would quietly test nothing.
+PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
 def low_root(ctx):
     # the same gate, pointed at a project whose data files are all too low
     return dataclasses.replace(ctx, root=LOW)
@@ -707,7 +726,7 @@ def bad_opt(ctx):
 
 
 def bad_x(ctx):
-    return _ctx(ctx, {"x": 50.0, "config": {"x": 50.0}})
+    return _ctx(ctx, {"x": 50.0, "config": {"x": 50.0}}, root=PROJECT)
 '''
 
 TAGS = {"C_ST": "stress", "C_FI": "file", "C_SU": "sub", "C_SP": "spawned",
@@ -734,6 +753,22 @@ def projection(derived: dict | None = None, **over) -> dict:
     return {"config": cfg, "derived": built}
 
 
+#: The known-good design (P2.3), as ``check`` would hand it a gate: ``projection()``
+#: at x = 0.25. Below the real design's 1.0 on purpose: a test that edits a
+#: gate's limit to make the real design fail (``LIMIT = 0.5``) must leave the
+#: known-good design passing, or the gate reads unqualified where the test means
+#: Not met. Clear of t.crashy's and t.tiered's crash on the real design (x
+#: between 0.5 and 2) — and so is every rung the walk tries before it lands,
+#: 0.25 x 100. Written into the project's ``selftest/known_good.py`` as a
+#: literal, with a copy of every ``data/`` file as planted (:func:`plant`), so a
+#: test's edit to the live design or its files moves the real run alone.
+KNOWN_GOOD = modelio.flat_params(projection(x=0.25))[0]
+
+#: The claim limit the known-good design states for t.claim, which reads it off
+#: claim C_CL: :func:`ledger`'s default.
+KNOWN_GOOD_LIMITS = {"C_CL": 10.0}
+
+
 def ledger(limit: float = 10.0) -> Ledger:
     """One claim per gate; C_CL carries the limit its gate reads from it."""
     return Ledger(claims=[Claim(id=cid, statement=f"claim {cid}", tags=[tag],
@@ -741,7 +776,9 @@ def ledger(limit: float = 10.0) -> Ledger:
                           for cid, tag in TAGS.items()])
 
 
-def plant(root: str) -> str:
+def plant(root: str, extra: dict[str, str] | None = None) -> str:
+    """The project, its ``extra`` files (planted before any gate loads), and its
+    known-good design: :data:`KNOWN_GOOD` and the ``data/`` files as planted."""
     write(root, "gates/g.py", GATES)
     write(root, "gates/same.py", SAME)
     write(root, "gates/helped.py", HELPED)
@@ -774,6 +811,12 @@ def plant(root: str) -> str:
         set_db_number(os.path.join(root, *rel.split("/")), 2.0)
     write(root, "data/lines.txt", "2.0\n")
     write(root, "data/tokens.txt", "2.0\n")
+    for rel, text in (extra or {}).items():
+        write(root, rel, text)
+    # Every project gate's known-good control (P2.3): the design above, and the
+    # data files as planted — the extras' included.
+    _projects.write_known_good(root, KNOWN_GOOD, files=_projects.tree_files(root, "data"),
+                               limits=KNOWN_GOOD_LIMITS)
     return root
 
 
@@ -793,9 +836,7 @@ class Project:
     """The project above, loaded into a fresh registry in this process."""
 
     def __init__(self, case: _env.EnvCase, extra: dict[str, str] | None = None) -> None:
-        self.root = plant(os.path.join(case.tmp(), "project"))
-        for rel, text in (extra or {}).items():     # planted before any gate loads
-            write(self.root, rel, text)
+        self.root = plant(os.path.join(case.tmp(), "project"), extra)
         self.registry = gates.Registry()
         gates.load_project_gates(self.root, self.registry)
         self.ledger = ledger()
@@ -1519,7 +1560,7 @@ class StaleIsNotCurrent(_env.EnvCase):
             self.assertIn("t.env", p.resolve(base).stale_gates)
             self.assertNotEqual(p.statuses(base)["C_EN"], PASS)
 
-            os.environ["ATOMPIPE_TEST_ENV_VETO"] = "1"
+            os.environ["ATOMPIPE_TEST_ENV_VETO"] = "0.5"
             got = row(p.sweep(base, only=["t.env"]), "t.env")
         self.assertTrue(got.executed, "an entry that read the environment was served "
                                       "from the cache")
@@ -2417,7 +2458,11 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertEqual({seen[c] for c in ("C2", "C3", "C4")}, {"pass"}, seen)
         self.assertEqual(proven, {"C2", "C3", "C4"}, "the positive control")
 
-        _replace_once(project, rel, "15.0", "0.10")
+        # 0.18 MPa: past the real 7 mm design's 0.195 and short of the known-good
+        # 8 mm one's 0.170. The known-good control reads the same file (the
+        # bracket's known-good design keeps the project root), and from P2.3 an
+        # allowable that fails it as well — S-33's 0.10 — reads Gap, not Not met.
+        _replace_once(project, rel, "15.0", "0.18")
         status = _doc(_cli(project, "status", "--json"), 0)
         self.assertEqual(status["stale_gates"], ["bracket.datasheet"],
                          "an ingested file a gate opened moved; only that gate is stale")
@@ -2515,12 +2560,16 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertNotIn("beamlib", entry["instruments"],
                          "a helper beside the project was filed as a third-party instrument")
 
-        # S-26's edit, on the helper: a pyc the stock loader would trust...
+        # S-26's edit, on the helper: a pyc the stock loader would trust... The
+        # allowable goes to 0.6 mm, past the real 7 mm design's 0.70 and short
+        # of the known-good 8 mm one's 0.469: the repro's 0.1 rejected the
+        # known-good design too, and an evaluator that fails its known-good
+        # control is unqualified from P2.3 — the re-run read Gap, not Not met.
         pyc = importlib.util.cache_from_source(helper)
         py_compile.compile(helper, cfile=pyc, doraise=True,
                            invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
         before = os.stat(helper)
-        _replace_once(mono, "shared/beamlib.py", "5.0", "0.1")
+        _replace_once(mono, "shared/beamlib.py", "5.0", "0.6")
         os.utime(helper, ns=(before.st_atime_ns, before.st_mtime_ns))
         after = os.stat(helper)
         self.assertEqual((after.st_size, after.st_mtime_ns),
@@ -2543,7 +2592,7 @@ class StaleIsNotCurrent(_env.EnvCase):
 
         again = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
         self.assertFalse(again["cached"], "the cached PASS was served after the helper moved")
-        self.assertEqual((again["outcome"], again["limit"]), ("fail", 0.1),
+        self.assertEqual((again["outcome"], again["limit"]), ("fail", 0.6),
                          "the re-run ran the stale bytecode, not the helper's new bytes")
 
     def test_cli_a_gate_a_factory_makes_is_keyed_on_the_module_that_registered_it(self):
@@ -2579,7 +2628,9 @@ class StaleIsNotCurrent(_env.EnvCase):
                       f"the module that registered the gate is not in its code: {code}")
         self.assertIn("gates/_kit.py", code["files"], f"the factory is not in its code: {code}")
 
-        _replace_once(project, "gates/limits.py", "5.0", "0.1")
+        # 0.6 mm: past the real design's 0.70, short of the known-good one's
+        # 0.469 (the repro's 0.1 rejected both, and from P2.3 read Gap).
+        _replace_once(project, "gates/limits.py", "5.0", "0.6")
         status = _doc(_cli(project, "status", "--json"), 0)
         self.assertIn(gate_id, status["stale_gates"],
                       "the table's limit moved and the PASS read current")
@@ -2589,7 +2640,7 @@ class StaleIsNotCurrent(_env.EnvCase):
 
         again = _rows(_doc(_cli(project, "check", "--only", gate_id, "--json")))[gate_id]
         self.assertFalse(again["cached"], "the cached PASS was served after the limit moved")
-        self.assertEqual((again["outcome"], again["limit"]), ("fail", 0.1), again)
+        self.assertEqual((again["outcome"], again["limit"]), ("fail", 0.6), again)
 
     def test_cli_a_pass_from_the_cheap_path_is_never_served_to_a_costlier_tier(self):
         """V: the review's repro (false-fresh probes, round 1, ``probe.tier``),
@@ -2659,14 +2710,17 @@ class StaleIsNotCurrent(_env.EnvCase):
         with ``--no-record`` too, where nothing reaches the records at all.
 
         The exit code is the signal CI reads, so the copy is otherwise ready: the
-        bracket at 8 mm (C1 passes) without C7 (no gate covers it) or C6 (an
-        assumption reads Gap until its owner records it, from P2.1: R-6), and the
-        costlier path's allowable at 0.3 mm, below the 8 mm bracket's ~0.47."""
+        bracket at 7.9 mm (C1 passes at ~0.487 mm) without C7 (no gate covers it)
+        or C6 (an assumption reads Gap until its owner records it, from P2.1:
+        R-6), and the costlier path's allowable at 0.48 mm, below the 7.9 mm
+        bracket's ~0.487 and above the known-good 8 mm design's ~0.469. (R-6,
+        P2.3: 8 mm and 0.3 mm until then — the copy WAS the known-good design,
+        and an allowable that fails its known-good control reads unqualified.)"""
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True,
-                                         thickness=8.0)
+                                         thickness=7.9)
         os.remove(os.path.join(project, "claims", "C7.json"))
         os.remove(os.path.join(project, "claims", "C6.json"))
-        tighter = "ALLOWABLE_MM = (5.0, 5.0, 0.3, 0.3)"
+        tighter = "ALLOWABLE_MM = (5.0, 5.0, 0.48, 0.48)"
         self.assertEqual(_TIERED_GATE.count("ALLOWABLE_MM = (5.0, 5.0, 0.5, 0.5)"), 1)
         _put(project, "selftest/planted.py", _PLANTED_FIXTURES)
         _put(project, "gates/tiered.py",
@@ -2743,7 +2797,7 @@ class StaleIsNotCurrent(_env.EnvCase):
         again = _doc(_cli(project, "check", "--force", "--json"))
         row_ = _rows(again)[gate_id]
         self.assertFalse(row_["cached"], f"--force served the cache instead of running: {row_}")
-        self.assertEqual((row_["outcome"], row_["limit"]), ("fail", 0.3),
+        self.assertEqual((row_["outcome"], row_["limit"]), ("fail", 0.48),
                          f"the forced row is not what the records resolve to: {row_}")
         self.assertFalse(again["ready"])
         self.assertTrue(any(note.startswith(f"{gate_id}: ran at tier 0 (PASS)")
@@ -2755,7 +2809,9 @@ class StaleIsNotCurrent(_env.EnvCase):
         """V: the review's repro (remembered outcomes, round 1), through the CLI a
         person runs. ``bracket.bed_fit`` patched to crash on the real design under
         ``FLAKY`` (read at import: an env read inside the gate is opaque, and an
-        opaque entry is never Fresh — the repro would prove nothing). A crash at
+        opaque entry is never Fresh — the repro would prove nothing) — the real
+        7 mm design, never the known-good 8 mm one, whose control P2.3 runs too
+        (on every design that fits, the forced run's control crashed with it). A crash at
         A under ``--force``; ``bed_xy`` moved and checked (a PASS at B); moved
         back — and ``check`` said ``0 executed, 6 cached`` with C4 PASS: the
         PASS the crash at A superseded, served because the PASS at B had
@@ -2767,7 +2823,7 @@ class StaleIsNotCurrent(_env.EnvCase):
                       "import os\n\n_FLAKY = bool(os.environ.get(\"FLAKY\"))\n")
         _replace_once(project, rel, '    usable = float(ctx.params["usable_bed"])\n',
                       '    usable = float(ctx.params["usable_bed"])\n'
-                      '    if _FLAKY and big <= usable:\n'
+                      '    if _FLAKY and big <= usable and float(ctx.params["thickness"]) < 7.5:\n'
                       '        raise RuntimeError("flaked on the real design")\n')
         gate_id = "bracket.bed_fit"
 

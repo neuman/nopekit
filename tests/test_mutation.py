@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""MutationIsSealed: the mutation half of invariant 15, landed before the code it holds.
+"""MutationIsSealed: invariant 15, held over every mutation runner in `src/`.
 
 PLAN-v0.14 §1.5 makes a mutation pass part of a project evaluator's
 qualification: in process, on the known-good control, changing the parameters
@@ -11,14 +11,15 @@ mutation runner, through a small interface, to three properties (PLAN §4.0.1
 invariant 15 as PLAN-v0.14 §4.1 splits it; "bench writes nothing" left with the
 bench):
 
-* **M1, the tree.** While the runner runs, nothing is written under the project
-  or any pack directory: no create, modify, delete, rename, truncate, link,
-  chmod or utime, and no write-then-restore. Watched two ways: an audit hook,
-  armed only inside the run, and a content digest of every watched tree before
-  and after. Bytecode is not exempt: the window sets `sys.dont_write_bytecode`,
-  so a `.pyc` that appears was written by the runner (review of the design: an
-  exemption for `__pycache__/` let a runner rewrite a `.pyc` whose header still
-  matched its source — the next import loads it instead of the source).
+* **M1, the tree.** While the runner runs — its planning included — nothing is
+  written under the project or any pack directory: no create, modify, delete,
+  rename, truncate, link, chmod or utime, and no write-then-restore. Watched two
+  ways: an audit hook, armed only inside the run, and a content digest of every
+  watched tree before and after. Bytecode is not exempt: the window sets
+  `sys.dont_write_bytecode`, so a `.pyc` that appears was written by the runner
+  (review of the design: an exemption for `__pycache__/` let a runner rewrite a
+  `.pyc` whose header still matched its source — the next import loads it
+  instead of the source).
 * **M2, memory.** Afterwards the known-good parameters, the module-level design
   they came from, and a live run of the evaluator are what they were. In process
   the likelier leak is aliasing, not a file: a mutation applied to the design in
@@ -27,22 +28,45 @@ bench):
 * **M3, honest results.** Every result is checked against an ORACLE that calls
   the evaluator's function directly on a context whose params record every path
   read through them, nested levels included, and applies `run_gate`'s outcome
-  rules as its docstring states them, restated here. A mutation is *conclusive*
-  when the known-good run read its key and the re-run passes or fails (GLOSSARY
-  §2, mutation); an inconclusive one is never reported as a fail; a reported
-  outcome is the re-run's, in GLOSSARY's four words; a conclusive pass is never
-  a fail. Every planned mutation has exactly one result. With no plan handed in
-  (the production mode) the plan is the runner's OWN, for the keys the oracle
-  saw read, and the judge draws it up BEFORE the run, from a runner that has
-  not run, twice (a plan is a function of the params and the read set), and
-  again afterwards from a fresh runner and from the one that ran — so no plan
-  can be picked after seeing which mutations survive. For each read key holding
-  a number, a flag, a string or a list of numbers, that plan holds a change of
-  the same kind: a finite number, the other flag, another string, a list of the
-  same length. The line is held by its numbers, not its words: `mutation n/m
+  rules as its docstring states them, restated here — its outcome, and the value
+  and limit it reported. A mutation is *conclusive* when the known-good run read
+  its key and the re-run passes or fails (GLOSSARY §2, mutation); an
+  inconclusive one is never reported as a fail; a reported outcome is the
+  re-run's, in GLOSSARY's four words; a conclusive pass is never a fail. Every
+  planned mutation has exactly one result. With no plan handed in (the
+  production mode) the plan is the runner's OWN, and the judge draws it up
+  BEFORE the run, from a runner that has not run, twice (a plan is a function of
+  the evaluator and its known-good control), and again afterwards from a fresh
+  runner and from the one that ran — so no plan can be picked after seeing which
+  mutations pass. The line is held by its numbers, not its words: `mutation n/m
   fail` counting conclusive mutations only, the inconclusive count shown when
   there is one, `mutation 0 conclusive` when none is (PLAN-v0.14 §1.5's panel
   default) — never `0/0`, and never the words GLOSSARY's mutation row forbids.
+
+**The plan rule** (P2.3, replacing the provisional "every read key holds a
+change of the same kind"): a runner declares its ladder — strictly increasing
+factors above 1, the first at most 1.15, the last at least 1000 — and its margin,
+in (0, 0.25]. For every read leaf holding an orderable value (a finite non-zero
+number, a flag, a list of finite numbers not all zero) the judge walks that
+ladder itself, by direct oracle calls, ×f then ÷f per rung, and calls the leaf
+*landing* when the evaluator's OWN value lands the margin past its OWN limit, on
+the side opposite its known-good value — read off the value, never the pass
+flag. A landing leaf: the plan holds exactly one mutation of it, of the same
+kind, whose run lands, no further from the known-good value than the first
+landing rung, and which moved 2% back toward the known-good value (an int: one
+step) no longer lands — aimed. A leaf with no landing whose walk saw a skip or a
+crash: one mutation whose run skips or errors (inconclusive). Every other read
+leaf — one that never lands, a word, a zero, a None — is in no mutation, and the
+runner names it *not mutated* with the reason. What is stronger: the old rule
+pinned no direction and no margin (×2 on a `≥` gate met it, a change in the
+safe direction an honest evaluator survives); this pins the plan to an
+independent walk, on the failing side, aimed, and still accounts for every read
+leaf. What is weaker, said plainly (R-6, on the check-in list for the user): a
+read that never lands — `config.load_n`, read for a detail line — and a word
+are no longer required to be CHANGED, only named not mutated. Under PLAN-v0.14
+§1.5's two clauses read together ("changing the parameters its run read";
+"every conclusive mutation must fail") a changed display read passes an honest
+evaluator, and 5 of the bracket's 6 could never qualify.
 
 What slipped through the first version of this harness (its review):
 
@@ -69,6 +93,13 @@ What slipped through the first version of this harness (its review):
   mutation, so a second pass under another name went unjudged once one
   subject existed.
 
+And what the P2.0 plan rule let through, which the walk above closes: a runner
+that pushed in the safe direction (`SafeSide`), stopped at the first failing
+OUTCOME — reading the pass flag (`StopsAtFirstFail`, which qualifies an
+evaluator keyed to its own control) — or took the first landing rung unaimed
+(`Unaimed`: ×1000 past a ×120 margin overshoots a limit the evaluator applies
+at 3× the one it reports) met it.
+
 *Rejected* (in the P2.0 design and its review): the M1 check as a before/after
 diff alone — a mutation that writes the model and restores it leaves the tree
 identical and is exactly the in-place mutation §1.5 redesigned away (a crash
@@ -84,13 +115,9 @@ dir outside the project, and recording an outcome is the caller's write, held
 by invariant 8); the spine's own tracer as the oracle (the test would call the
 code it guards; a tracer that under-records would make the runner and the
 oracle agree that a read key was unread); dotted keys (`a.b`) — pack keys carry
-dots (`fdm.bbox_mm`), so a key is a tuple path; the reference runner's ×2 and
-−x as the operators every plan must hold — under §1.5 "every conclusive
-mutation must fail" and the walkthrough's "push past the limit", a change in the
-safe direction survives an honest evaluator (bracket.deflection reads 1/4 on
-them), so pinning them would make P2.3's runner unqualify every evaluator or
-edit this judge (R-6); operators that know the failing direction are P2.3's
-design, and when it lands they strengthen the rule above.
+dots (`fdm.bbox_mm`), so a key is a tuple path; the spine's walk as the judge's
+(it would hold the runner to itself: the walk below is restated, never
+imported, D-25).
 
 The stated limit: a write made by a subprocess, or by C code that bypasses
 `open`, and undone before the run ends is seen by neither the hook nor the
@@ -99,11 +126,10 @@ relative to a directory fd is resolved through `/proc/self/fd` (Linux) or
 `F_GETPATH` (macOS); where neither names the directory, the event is reported
 as unresolved rather than passed.
 
-**Planned, not yet numbered.** CLAUDE.md states invariants 1–9; this class is
-`test_meta.PLANNED_INVARIANT_CLASSES[15]` (R-7 binds it from its first line)
-and moves to `INVARIANT_CLASSES` with CLAUDE.md's new item in the checkpoint
-that makes mutation mechanical (P2.3). Until then `SUBJECTS` is empty and the
-tripwire below keeps it from staying empty once the spine runs a mutation.
+**Invariant 15** (CLAUDE.md, from P2.3): `test_meta.INVARIANT_CLASSES[15]`.
+`SUBJECTS` holds the spine's one runner, `gates.mutation_walk`, judged on the
+bracket's six gates and an installed pack's eight; the tripwire below keeps a
+second pass from shipping unjudged.
 
 Run:  PYTHONPATH=src python3 -m unittest discover -s tests -p test_mutation.py -v
 """
@@ -125,6 +151,7 @@ import sys
 import tempfile
 import unittest
 from typing import Any, Callable, Iterator, NamedTuple
+from unittest import mock
 
 import _env
 import _projects
@@ -203,94 +230,6 @@ def mutable(value: Any) -> bool:
     anything else (None, a nested structure) is not required to be."""
     return (isinstance(value, (bool, str)) or _numbers(value)
             or (isinstance(value, (list, tuple)) and bool(value) and all(map(_numbers, value))))
-
-
-def _operators(value: Any) -> list[Any]:
-    """The reference runner's operator set: deterministic, blind to outcomes."""
-    if isinstance(value, bool):
-        return [not value]
-    if _numbers(value):
-        return [value * 2, -value] if value else [1]
-    if isinstance(value, str):
-        return [value + "-mutated"]
-    if mutable(value):
-        return [type(value)(x * 2 for x in value)]
-    return []
-
-
-class ReferenceRunner:
-    """The harness's positive control: honest on every rule, and the shape a
-    real runner (P2.3) takes from outside. It copies the design before each
-    change, runs through `gates.run_gate` in an out dir outside every project,
-    reads the read set from the spine's trace, and reports by the rules."""
-
-    def __init__(self, **where: str) -> None:
-        self.where = where              # the planted runners' targets; unused here
-
-    def plan(self, spec: GateSpec, good_params: dict, read: set) -> list[Mutation]:
-        """The mutations for the keys in `read`, from the params alone: no run."""
-        out = []
-        for key in sorted(read, key=repr):
-            try:
-                value = _get(good_params, key)
-            except (KeyError, TypeError, IndexError):
-                continue
-            out += [Mutation(key, after) for after in _operators(value)]
-        return out
-
-    def read_set(self, spec: GateSpec, fn: Callable, good_ctx: Any, out_dir: str) -> set:
-        trace = GateTrace()
-        gates_mod.run_gate(spec, fn, dataclasses.replace(
-            good_ctx, params=copy.deepcopy(good_ctx.params), out_dir=out_dir), trace=trace)
-        leaves = set(_leaves(good_ctx.params))
-        whole = set(trace.whole)
-        return {leaf for leaf in leaves
-                if leaf in trace.params or any(leaf[:i] in whole for i in range(len(leaf)))}
-
-    def one(self, spec: GateSpec, fn: Callable, good_ctx: Any, base: dict, read: set,
-            m: Mutation, out_dir: str) -> MutationResult:
-        before = _get(base, m.key)
-        if m.key not in read:
-            return MutationResult(m.key, before, m.after, None, False, "outside the read set")
-        params = copy.deepcopy(base)
-        _set(params, m.key, m.after)
-        verdict = gates_mod.run_gate(spec, fn, dataclasses.replace(good_ctx, params=params,
-                                                                   out_dir=out_dir))
-        outcome = _WORD[verdict.outcome]
-        return MutationResult(m.key, before, m.after, outcome, outcome in ("pass", "fail"),
-                              verdict.error or verdict.skip_reason or verdict.detail)
-
-    def run(self, spec: GateSpec, fn: Callable, good_ctx: Any,
-            plan: list[Mutation] | None = None) -> list[MutationResult]:
-        out_dir = tempfile.mkdtemp(prefix="atompipe-mutation-")
-        try:
-            base = copy.deepcopy(good_ctx.params)
-            read = self.read_set(spec, fn, good_ctx, out_dir)
-            todo = self.plan(spec, base, read) if plan is None else plan
-            return [self.one(spec, fn, good_ctx, base, read, m, out_dir) for m in todo]
-        finally:
-            shutil.rmtree(out_dir, ignore_errors=True)
-
-    @staticmethod
-    def line(results: list[MutationResult]) -> str:
-        conclusive = [r for r in results if r.conclusive]
-        fails = sum(1 for r in conclusive if r.outcome == "fail")
-        k = len(results) - len(conclusive)
-        head = f"mutation {fails}/{len(conclusive)} fail" if conclusive else "mutation 0 conclusive"
-        return head + (f" · {k} inconclusive" if k else "")
-
-
-def expected_line(truth: list[tuple[str, bool]]) -> str:
-    """The reference runner's wording for `(oracle outcome, conclusive)` pairs,
-    written out again here rather than borrowed from the runner — what the toy
-    tests pin for the runner this file owns. Any other runner's line is held by
-    its numbers (`line_problems`), not by this wording."""
-    m = sum(1 for _o, c in truth if c)
-    n = sum(1 for o, c in truth if c and o == "fail")
-    k = len(truth) - m
-    return (f"mutation {n}/{m} fail" if m else "mutation 0 conclusive") + (
-        f" · {k} inconclusive" if k else "")
-
 
 # --------------------------------------------------------------------------- #
 # M3's oracle: not the spine's tracer, not the spine's outcome rules
@@ -450,6 +389,306 @@ def oracle(spec: GateSpec, fn: Callable, good_ctx: Any, params: dict,
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
 
+
+
+# --------------------------------------------------------------------------- #
+# the walk, restated: the judge's own, never the spine's (D-25)
+# --------------------------------------------------------------------------- #
+def _oracle_numbers(result: Any) -> tuple[Any, Any]:
+    """``(measured, limit)`` of whatever a gate returned, by `run_gate`'s
+    documented rules (a Verdict's fields, a dict's keys; nothing for a bare
+    flag or a tuple), or ``(None, None)``."""
+    if isinstance(result, Verdict):
+        return result.measured, result.limit
+    if isinstance(result, dict):
+        return result.get("measured"), result.get("limit")
+    return None, None
+
+
+def oracle_run(spec: GateSpec, fn: Callable, good_ctx: Any, params: dict,
+               mutation: Mutation | None = None) -> tuple[str, Any, Any]:
+    """`oracle`, with the measurement: ``(outcome, measured, limit)``, the two
+    numbers only when the outcome is pass or fail and they are finite."""
+    data = copy.deepcopy(params)
+    if mutation is not None:
+        _set(data, mutation.key, mutation.after)
+    out_dir = tempfile.mkdtemp(prefix="atompipe-oracle-")
+    try:
+        ctx = dataclasses.replace(good_ctx, params=data, out_dir=out_dir, pack=spec.pack,
+                                  key_scope=gates_mod.scope_of(spec.id))
+        try:
+            result = fn(ctx)
+        except (Exception, SystemExit, GeneratorExit):  # noqa: BLE001 - a crash is an outcome
+            return "errored", None, None
+        outcome = _oracle_outcome(result)
+        if outcome not in ("pass", "fail"):
+            return outcome, None, None
+        m, limit = _oracle_numbers(result)
+        finite = all(_a_measurement(x) and x is not None for x in (m, limit))
+        return (outcome, float(m), float(limit)) if finite else (outcome, None, None)
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+def _orderable(value: Any) -> bool:
+    """What a walk can push along a ladder: a finite non-zero number (not a
+    flag), a flag, a non-empty list of finite numbers not all zero."""
+    if isinstance(value, bool):
+        return True
+    if _numbers(value):
+        return math.isfinite(value) and value != 0
+    return (isinstance(value, (list, tuple)) and bool(value) and all(map(_numbers, value))
+            and all(math.isfinite(x) for x in value) and any(value))
+
+
+def _unwalked(value: Any) -> str:
+    """Why a read leaf is not walked: its kind, as a runner names it."""
+    if isinstance(value, str):
+        return "word"
+    if value is None:
+        return "none"
+    if _numbers(value) and value == 0:
+        return "zero"
+    if _numbers(value):
+        return "not-finite"
+    return "other"
+
+
+def _scaled(value: Any, factor: float) -> Any:
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (list, tuple)):
+        return type(value)(int(round(x * factor)) if isinstance(x, int) else x * factor
+                           for x in value)
+    return int(round(value * factor)) if isinstance(value, int) else value * factor
+
+
+#: Two decimal values one float step apart read as equal when a walk asks how
+#: far past a limit a value sits: 2.3 - 2.0 is 0.29999999999999982 in binary,
+#: and "15% past 2.0" must hold for the 2.3 a person reads. Restated from the
+#: spine's rule (`gates._lands`), never imported.
+_LAND_TOLERANCE = 1e-9
+
+
+def lands(run: tuple[str, Any, Any], side: int, margin: float, m0: float) -> bool:
+    """Past the evaluator's OWN limit by ``margin``, on the side opposite its
+    known-good value, read off its measurement — never its pass flag."""
+    outcome, m, limit = run
+    if outcome not in ("pass", "fail") or m is None or limit is None:
+        return False
+    scale = abs(limit) if limit else abs(m0)
+    return side * (m - limit) >= margin * scale * (1 - _LAND_TOLERANCE)
+
+
+class Walked(NamedTuple):
+    """One read leaf, as the restated walk classifies it: ``"lands"`` (with the
+    first landing factor and the factor before it in that direction),
+    ``"inconclusive"`` (no landing, a skip or error seen: ``error_after`` the
+    first value that did) or ``"untouched"`` (it never lands)."""
+    key: tuple
+    kind: str
+    first: float = 0.0
+    before: float = 1.0
+    error_after: Any = None
+
+
+def oracle_walk(spec: GateSpec, fn: Callable, good_ctx: Any, *, rungs: tuple,
+                margin: float) -> tuple[tuple | None, list[Walked]]:
+    """``(the known-good run, [Walked per read orderable leaf])`` — the ladder
+    walked by direct oracle calls, ×f then ÷f per rung, nearest first; ``None``
+    and no leaves when the known-good run does not pass a finite value against
+    a finite limit it is not exactly at (no boundary)."""
+    snapshot = copy.deepcopy(good_ctx.params)
+    v0 = oracle_run(spec, fn, good_ctx, snapshot)
+    _o, log = oracle(spec, fn, good_ctx, snapshot)
+    if v0[0] != "pass" or v0[1] is None or v0[1] == v0[2]:
+        return None, []
+    side = 1 if v0[1] < v0[2] else -1
+    out = []
+    for leaf in sorted((lf for lf in _leaves(snapshot) if lf in log), key=repr):
+        x0 = _get(snapshot, leaf)
+        if not _orderable(x0):
+            continue
+        tried: set = set()
+        found = None
+        error_after = None
+        prev = {+1: 1.0, -1: 1.0}
+        for f in (rungs if not isinstance(x0, bool) else (rungs[0],)):
+            for d, g in ((+1, f), (-1, 1.0 / f)):
+                after = _scaled(x0, g)
+                if repr(after) in tried or after == x0:
+                    continue
+                tried.add(repr(after))
+                run = oracle_run(spec, fn, good_ctx, snapshot, Mutation(leaf, after))
+                if run[0] in ("errored", "skipped") and error_after is None:
+                    error_after = after
+                if lands(run, side, margin, v0[1]):
+                    found = (g, prev[d])
+                    break
+                prev[d] = g
+            if found:
+                break
+        if found:
+            out.append(Walked(leaf, "lands", found[0], found[1]))
+        elif error_after is not None:
+            out.append(Walked(leaf, "inconclusive", error_after=error_after))
+        else:
+            out.append(Walked(leaf, "untouched"))
+    return v0, out
+
+
+#: The spec's ladder and margin (P2.3 §4), restated: the floor every runner's
+#: declared ladder is held to, and the reference runner's own.
+RUNGS = (1.15, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0, 100.0, 1000.0)
+MARGIN = 0.15
+
+
+def _outward(x: float, origin: Any) -> Any:
+    """``x`` rounded AWAY from ``origin`` to 3 significant figures (an int: to the
+    next integer away, at least one step), so rounding only pushes further."""
+    if isinstance(origin, int):
+        r = math.ceil(x) if x > origin else math.floor(x)
+        return r if r != origin else origin + (1 if x > origin else -1)
+    if x == 0:
+        return x
+    q = 10.0 ** (math.floor(math.log10(abs(x))) - 2)
+    return float(f"{(math.ceil(x / q) if x > origin else math.floor(x / q)) * q:.3g}")
+
+
+def aimed(spec: GateSpec, fn: Callable, good_ctx: Any, v0: tuple, walked: Walked, *,
+          margin: float, halvings: int = 16) -> tuple[Any, tuple]:
+    """The restated aim for a landing leaf: bisect in log-factor between the
+    factor before the landing rung and the landing rung, take the smallest
+    landing factor, round it outward to 3 significant figures (an int: away,
+    at least one step), fall back to the rung's value when the rounded one does
+    not land. ``(the value, its oracle run)``."""
+    snapshot = copy.deepcopy(good_ctx.params)
+    x0 = _get(snapshot, walked.key)
+    side = 1 if v0[1] < v0[2] else -1
+    if isinstance(x0, bool):
+        after = not x0
+        return after, oracle_run(spec, fn, good_ctx, snapshot, Mutation(walked.key, after))
+    lo, hi = walked.before, walked.first
+    for _ in range(halvings):
+        mid = math.exp((math.log(lo) + math.log(hi)) / 2)
+        if lands(oracle_run(spec, fn, good_ctx, snapshot,
+                            Mutation(walked.key, _scaled(x0, mid))), side, margin, v0[1]):
+            hi = mid
+        else:
+            lo = mid
+    if isinstance(x0, (list, tuple)):
+        after = type(x0)(_outward(e * hi, e) if e else e for e in x0)
+    else:
+        after = _outward(x0 * hi, x0)
+    run = oracle_run(spec, fn, good_ctx, snapshot, Mutation(walked.key, after))
+    if not lands(run, side, margin, v0[1]):
+        after = _scaled(x0, walked.first)
+        run = oracle_run(spec, fn, good_ctx, snapshot, Mutation(walked.key, after))
+    return after, run
+
+
+class ReferenceRunner:
+    """The harness's positive control: honest on every rule, and the shape a
+    real runner takes from outside. It plans by the restated walk (its declared
+    `rungs` and `margin`), copies the design before each change, runs through
+    `gates.run_gate` in an out dir outside every project, reads the read set
+    from the spine's trace, and reports by the rules."""
+
+    rungs = RUNGS
+    margin = MARGIN
+
+    def __init__(self, **where: str) -> None:
+        self.where = where              # the planted runners' targets; unused here
+
+    def plan(self, spec: GateSpec, fn: Callable, good_ctx: Any, read: set) -> list[Mutation]:
+        """The mutations for the read leaves: one aimed mutation per landing
+        leaf, one erroring value per inconclusive one — a function of the
+        evaluator and its known-good control, drawn up without any outcome of a
+        mutation it plans."""
+        v0, walked = oracle_walk(spec, fn, good_ctx, rungs=self.rungs, margin=self.margin)
+        out = []
+        for w in walked:
+            if w.key not in read:
+                continue
+            if w.kind == "lands":
+                after, _run = aimed(spec, fn, good_ctx, v0, w, margin=self.margin)
+                out.append(Mutation(w.key, after))
+            elif w.kind == "inconclusive":
+                out.append(Mutation(w.key, w.error_after))
+        return out
+
+    def unmutated(self, spec: GateSpec, fn: Callable, good_ctx: Any,
+                  read: set) -> dict[tuple, str]:
+        """``{read leaf: why}`` for every read leaf in no mutation."""
+        snapshot = copy.deepcopy(good_ctx.params)
+        v0, walked = oracle_walk(spec, fn, good_ctx, rungs=self.rungs, margin=self.margin)
+        kinds = {w.key: w.kind for w in walked}
+        out = {}
+        for leaf in read:
+            try:
+                value = _get(snapshot, leaf)
+            except (KeyError, TypeError, IndexError):
+                continue
+            if v0 is None:
+                out[leaf] = "no-boundary"
+            elif not _orderable(value):
+                out[leaf] = _unwalked(value)
+            elif kinds.get(leaf) == "untouched":
+                out[leaf] = "never-lands"
+        return out
+
+    def read_set(self, spec: GateSpec, fn: Callable, good_ctx: Any, out_dir: str) -> set:
+        trace = GateTrace()
+        gates_mod.run_gate(spec, fn, dataclasses.replace(
+            good_ctx, params=copy.deepcopy(good_ctx.params), out_dir=out_dir), trace=trace)
+        leaves = set(_leaves(good_ctx.params))
+        whole = set(trace.whole)
+        return {leaf for leaf in leaves
+                if leaf in trace.params or any(leaf[:i] in whole for i in range(len(leaf)))}
+
+    def one(self, spec: GateSpec, fn: Callable, good_ctx: Any, base: dict, read: set,
+            m: Mutation, out_dir: str) -> MutationResult:
+        before = _get(base, m.key)
+        if m.key not in read:
+            return MutationResult(m.key, before, m.after, None, False, "outside the read set")
+        params = copy.deepcopy(base)
+        _set(params, m.key, m.after)
+        verdict = gates_mod.run_gate(spec, fn, dataclasses.replace(good_ctx, params=params,
+                                                                   out_dir=out_dir))
+        outcome = _WORD[verdict.outcome]
+        return MutationResult(m.key, before, m.after, outcome, outcome in ("pass", "fail"),
+                              verdict.error or verdict.skip_reason or verdict.detail)
+
+    def run(self, spec: GateSpec, fn: Callable, good_ctx: Any,
+            plan: list[Mutation] | None = None) -> list[MutationResult]:
+        out_dir = tempfile.mkdtemp(prefix="atompipe-mutation-")
+        try:
+            base = copy.deepcopy(good_ctx.params)
+            read = self.read_set(spec, fn, good_ctx, out_dir)
+            todo = self.plan(spec, fn, good_ctx, read) if plan is None else plan
+            return [self.one(spec, fn, good_ctx, base, read, m, out_dir) for m in todo]
+        finally:
+            shutil.rmtree(out_dir, ignore_errors=True)
+
+    @staticmethod
+    def line(results: list[MutationResult]) -> str:
+        conclusive = [r for r in results if r.conclusive]
+        fails = sum(1 for r in conclusive if r.outcome == "fail")
+        k = len(results) - len(conclusive)
+        head = f"mutation {fails}/{len(conclusive)} fail" if conclusive else "mutation 0 conclusive"
+        return head + (f" ({k} inconclusive)" if k else "")
+
+
+def expected_line(truth: list[tuple[str, bool]]) -> str:
+    """The reference runner's wording for `(oracle outcome, conclusive)` pairs,
+    written out again here rather than borrowed from the runner — what the toy
+    tests pin for the runner this file owns. Any other runner's line is held by
+    its numbers (`line_problems`), not by this wording."""
+    m = sum(1 for _o, c in truth if c)
+    n = sum(1 for o, c in truth if c and o == "fail")
+    k = len(truth) - m
+    return (f"mutation {n}/{m} fail" if m else "mutation 0 conclusive") + (
+        f" ({k} inconclusive)" if k else "")
 
 # --------------------------------------------------------------------------- #
 # M1's watch: an audit hook armed only inside the run, and a tree digest
@@ -704,19 +943,140 @@ def line_problems(line: str, truth: list[tuple[str, bool]]) -> list[str]:
     return out
 
 
+
+def ladder_problems(runner: Any) -> list[str]:
+    """The runner's declared ladder and margin against the floor (the plan rule):
+    strictly increasing factors above 1, the first at most 1.15 and the last at
+    least 1000; a margin in (0, 0.25]."""
+    rungs = tuple(getattr(runner, "rungs", ()) or ())
+    margin = getattr(runner, "margin", None)
+    out = []
+    numeric = all(isinstance(f, (int, float)) and not isinstance(f, bool) for f in rungs)
+    if not rungs or not numeric or any(f <= 1 for f in rungs) \
+            or any(b <= a for a, b in zip(rungs, rungs[1:])):
+        out.append(f"its ladder {rungs!r} is not strictly increasing factors above 1")
+    elif rungs[0] > RUNGS[0] or rungs[-1] < RUNGS[-1]:
+        out.append(f"its ladder {rungs!r} does not run from at most {RUNGS[0]} to at "
+                   f"least {RUNGS[-1]}")
+    if isinstance(margin, bool) or not isinstance(margin, (int, float)) \
+            or not 0 < margin <= 0.25:
+        out.append(f"its margin {margin!r} is outside (0, 0.25]")
+    return out
+
+
+def _further(x0: Any, after: Any, rung: Any) -> bool:
+    """Is ``after`` further from ``x0`` than the landing rung's value — with one
+    rounding step (1%) of slack, since an aim rounded outward may pass a rung
+    that is not itself a 3-figure number?"""
+    def dist(a: Any) -> float:
+        if isinstance(x0, (list, tuple)):
+            return max(abs(float(b) - float(c)) for b, c in zip(a, x0))
+        return abs(float(a) - float(x0))
+
+    def size(a: Any) -> float:
+        if isinstance(a, (list, tuple)):
+            return max(abs(float(b)) for b in a)
+        return abs(float(a))
+
+    return dist(after) > dist(rung) + 0.01 * size(rung) + 1e-12
+
+
+def _back(x0: Any, after: Any) -> Any:
+    """``after`` moved back toward ``x0``: by 2% of its size (one rounding step
+    of 3 significant figures is at most 1%), an int by one step."""
+    def one(a: Any, o: Any) -> Any:
+        if isinstance(o, int) and isinstance(a, int):
+            return a - 1 if a > o else a + 1 if a < o else a
+        return a - 0.02 * abs(a) if a > o else a + 0.02 * abs(a) if a < o else a
+
+    if isinstance(x0, (list, tuple)):
+        return type(x0)(one(a, o) for a, o in zip(after, x0))
+    return one(after, x0)
+
+
+def plan_problems(runner: Any, spec: GateSpec, fn: Callable, good_ctx: Any,
+                  snapshot: dict, read: set, expected: list[Mutation],
+                  unmutated: dict) -> list[str]:
+    """The plan rule (module docstring), on a runner's own plan drawn up before
+    the run, with ``unmutated`` its not-mutated names."""
+    out = ladder_problems(runner)
+    rungs = RUNGS if out else tuple(runner.rungs)
+    margin = MARGIN if out else float(runner.margin)
+    v0, walked = oracle_walk(spec, fn, good_ctx, rungs=rungs, margin=margin)
+    planned: dict[tuple, list[Mutation]] = {}
+    for m in expected:
+        planned.setdefault(m.key, []).append(m)
+    for key in planned:
+        if key not in read:
+            out.append(f"{key}: planned, and the known-good run never read it")
+    if v0 is None:
+        if expected:
+            out.append("no value against a limit to land past, and the plan changes "
+                       f"{sorted(planned, key=repr)}")
+        for leaf in sorted(read, key=repr):
+            if leaf not in unmutated:
+                out.append(f"{leaf} was read and is named neither mutated nor not mutated")
+        return out
+    side = 1 if v0[1] < v0[2] else -1
+    kinds = {w.key: w for w in walked}
+    for leaf in sorted(read, key=repr):
+        mine = planned.get(leaf, [])
+        w = kinds.get(leaf)
+        x0 = _get(snapshot, leaf)
+        if w is None or w.kind == "untouched":
+            if mine:
+                out.append(f"{leaf}: never lands past its limit, and the plan changes it")
+            if leaf not in unmutated:
+                out.append(f"{leaf} was read and is named neither mutated nor not mutated")
+            elif w is not None and unmutated[leaf] != "never-lands":
+                out.append(f"{leaf}: named not mutated for {unmutated[leaf]!r}, and it "
+                           f"never lands")
+            continue
+        if len(mine) != 1:
+            out.append(f"{leaf}: the walk {'lands' if w.kind == 'lands' else 'errors'} "
+                       f"there, and the plan holds {len(mine)} changes of it, not 1")
+            continue
+        m = mine[0]
+        if not _same_kind(x0, m.after):
+            out.append(f"{leaf} -> {m.after!r}: not a change of the same kind")
+            continue
+        run = oracle_run(spec, fn, good_ctx, snapshot, m)
+        if w.kind == "inconclusive":
+            if run[0] not in ("errored", "skipped"):
+                out.append(f"{leaf} -> {m.after!r}: the walk only errors there, and this "
+                           f"change runs {run[0]}")
+            continue
+        if not lands(run, side, margin, v0[1]):
+            out.append(f"{leaf} -> {m.after!r}: does not land {margin:.0%} past its own "
+                       f"limit ({run[0]}, {run[1]!r} against {run[2]!r})")
+            continue
+        if not isinstance(x0, bool):
+            if _further(x0, m.after, _scaled(x0, w.first)):
+                out.append(f"{leaf} -> {m.after!r}: further than the first landing rung "
+                           f"(x{w.first:g})")
+            back = _back(x0, m.after)
+            if back != m.after and lands(oracle_run(spec, fn, good_ctx, snapshot,
+                                                    Mutation(leaf, back)),
+                                         side, margin, v0[1]):
+                out.append(f"{leaf} -> {m.after!r}: not aimed — moved back to {back!r} it "
+                           f"still lands")
+    return out
+
+
 def judge(make: Callable[[], Any], spec: GateSpec, fn: Callable, good_ctx: Any, *,
           roots: list[str], plan: list[Mutation] | None = None,
           design: dict | None = None) -> Judgement:
     """Build runners with `make` and hold them to M1–M3 on one evaluator.
 
     With no plan handed in, the plan is drawn up BEFORE the run by a runner
-    that has not run, asked twice (a plan is a function of the params and the
-    read set), and asked again after the run by a fresh runner and by the one
-    that ran: all four must agree. Then the results are held to that plan. What
-    slipped through the first version: it asked the runner that had just run
-    for its plan, after the run, so a runner that remembered its passing
-    results (`Hides`, `PlansAfterSeeing`) returned a plan without them and
-    read `mutation 1/1 fail` over an evaluator one mutation survived."""
+    that has not run, asked twice (a plan is a function of the evaluator and its
+    known-good control), and asked again after the run by a fresh runner and by
+    the one that ran: all four must agree, and it is held to the plan rule.
+    Then the results are held to that plan. What slipped through the first
+    version: it asked the runner that had just run for its plan, after the run,
+    so a runner that remembered its passing results (`Hides`,
+    `PlansAfterSeeing`) returned a plan without them and read `mutation 1/1
+    fail` over an evaluator one mutation survived."""
     if spec.requires_tools or spec.requires_python or getattr(spec, "requires_one_of", ()):
         raise AssertionError(f"{spec.id}: the oracle does not judge availability; "
                              f"judge an evaluator with no requirements")
@@ -729,16 +1089,21 @@ def judge(make: Callable[[], Any], spec: GateSpec, fn: Callable, good_ctx: Any, 
         read = {leaf for leaf in _leaves(snapshot) if leaf in log}
         honesty: list[str] = []
 
+        def fresh_ctx() -> Any:
+            return dataclasses.replace(good_ctx, params=copy.deepcopy(snapshot))
+
         def drawn(runner: Any) -> list[Mutation]:
-            return list(runner.plan(spec, copy.deepcopy(snapshot), set(read)))
+            return list(runner.plan(spec, fn, fresh_ctx(), set(read)))
 
         before = {root: tree_digest(root) for root in roots}
+        unmutated: dict = {}
         with watching(roots) as window:
             if plan is None:
                 planner = make()
                 expected = drawn(planner)
                 if _counted(drawn(planner)) != _counted(expected):
                     honesty.append("its plan differs between two calls on the same inputs")
+                unmutated = dict(planner.unmutated(spec, fn, fresh_ctx(), set(read)))
             else:
                 expected = list(plan)
             runner = make()
@@ -761,13 +1126,8 @@ def judge(make: Callable[[], Any], spec: GateSpec, fn: Callable, good_ctx: Any, 
             memory.append(f"a live run reads {live_after[:3]} after, {live_before[:3]} before")
 
         if plan is None:
-            for leaf in sorted(read, key=repr):
-                value = _get(snapshot, leaf)
-                if mutable(value) and not any(m.key == leaf and _same_kind(value, m.after)
-                                              for m in expected):
-                    honesty.append(f"{leaf} was read and the runner's own plan holds no change "
-                                   f"of the same kind (a finite number, the other flag, "
-                                   f"another string, a list of the same length)")
+            honesty += plan_problems(make(), spec, fn, fresh_ctx(), snapshot, read, expected,
+                                     unmutated)
         want = _counted(expected)
         got = collections.Counter((r.key, repr(r.after)) for r in results)
         for key, after in sorted((want - got).elements()):
@@ -803,32 +1163,52 @@ def judge(make: Callable[[], Any], spec: GateSpec, fn: Callable, good_ctx: Any, 
 # the toy evaluator, its design and its ground truth
 # --------------------------------------------------------------------------- #
 #: The module-level known-good design (M2 watches it, as it watches the
-#: bracket's `known_good.CONFIG`).
-TOY_DESIGN: dict[str, Any] = {"a": 5, "b": 1}
+#: bracket's `known_good.CONFIG`). Redrawn for P2.3's walk: `a` lands past its
+#: limit and fails, `b` is only printed (it never lands), `c` crashes the gate
+#: past what it reads (inconclusive), and `d` is never read.
+TOY_DESIGN: dict[str, Any] = {"a": 5, "b": 1, "c": 2.0, "d": 1}
 
 TOY_SPEC = GateSpec(id="toy.limit", claims=["toy"], tier=Tier.INSTANT,
                     negative_control=NegativeControl(fixture="x:y"))
 
 
 def toy_gate(ctx: Any) -> Verdict:
-    """Reads `a` only: skips below zero, crashes at 13, passes up to 10."""
+    """Judges `a` against 10: skips below zero, crashes at 13; prints `b`;
+    crashes when `c` is past 20."""
     a = ctx.params["a"]
+    b = ctx.params["b"]
+    c = ctx.params["c"]
     if a < 0:
         return Verdict(gate=TOY_SPEC.id, passed=False, skipped=True,
                        skip_reason="needs a non-negative a")
     if a == 13:
         raise ZeroDivisionError("planted at 13")
+    if c > 20:
+        raise ValueError("c is past what the toy reads")
     return Verdict(gate=TOY_SPEC.id, passed=a <= 10, measured=float(a), limit=10.0,
-                   detail=f"a = {a}")
+                   detail=f"a = {a}, b = {b}")
+
+
+def toy_drift(ctx: Any) -> Verdict:
+    """`toy_gate` with its limit drifted: it reports 10 and applies 12, so the
+    aimed mutation (`a` -> 12) passes it — a survivor for the runners that hide
+    one."""
+    verdict = toy_gate(ctx)
+    if verdict.outcome in ("pass", "fail"):
+        return dataclasses.replace(verdict, passed=ctx.params["a"] <= 12)
+    return verdict
 
 
 #: The plan, and the truth about each mutation: (outcome, conclusive).
-TOY_PLAN = [Mutation(("a",), 20), Mutation(("a",), 7), Mutation(("b",), 100),
+TOY_PLAN = [Mutation(("a",), 20), Mutation(("a",), 7), Mutation(("d",), 100),
             Mutation(("a",), -1), Mutation(("a",), 13)]
 TOY_TRUTH = [("fail", True), ("pass", True), ("pass", False), ("skipped", False),
              ("errored", False)]
 TOY_INCONCLUSIVE = [TOY_PLAN[2], TOY_PLAN[3], TOY_PLAN[4]]
 
+#: The honest runner's own plan on the toy, and what it says.
+TOY_OWN_PLAN = [Mutation(("a",), 12), Mutation(("c",), 60.0)]
+TOY_OWN_LINE = "mutation 1/1 fail (1 inconclusive)"
 
 def _write(path: str, text: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -923,10 +1303,10 @@ class DropsOne(ReferenceRunner):
 
 
 class OmitsTheSurvivor(ReferenceRunner):
-    """With no plan handed in: draws up its own plan honestly, runs it, and
-    leaves out the mutation that passed — the qualification-inflating direction."""
+    """With no plan handed in: draws up a plan, runs it, and leaves out the
+    mutation that passed — the qualification-inflating direction."""
 
-    def plan(self, spec, good_params, read):
+    def plan(self, spec, fn, good_ctx, read):
         return [m for m in TOY_PLAN if m.key in read]
 
     def run(self, spec, fn, good_ctx, plan=None):
@@ -953,8 +1333,9 @@ class Hides(ReferenceRunner):
         super().__init__(**where)
         self.kept: list[Mutation] | None = None
 
-    def plan(self, spec, good_params, read):
-        return list(self.kept) if self.kept is not None else super().plan(spec, good_params, read)
+    def plan(self, spec, fn, good_ctx, read):
+        return list(self.kept) if self.kept is not None else super().plan(spec, fn, good_ctx,
+                                                                          read)
 
     def run(self, spec, fn, good_ctx, plan=None):
         honest = super().run(spec, fn, good_ctx, plan)
@@ -976,8 +1357,8 @@ class PlansAfterSeeing(ReferenceRunner):
         super().__init__(**where)
         self.survivors: set[tuple] = set()
 
-    def plan(self, spec, good_params, read):
-        return [m for m in super().plan(spec, good_params, read)
+    def plan(self, spec, fn, good_ctx, read):
+        return [m for m in super().plan(spec, fn, good_ctx, read)
                 if (m.key, repr(m.after)) not in self.survivors]
 
     def run(self, spec, fn, good_ctx, plan=None):
@@ -992,7 +1373,7 @@ class NonePlan(ReferenceRunner):
     reads `mutation 0 conclusive` — qualified, under PLAN-v0.14 §1.5's panel
     default, over any evaluator at all."""
 
-    def plan(self, spec, good_params, read):
+    def plan(self, spec, fn, good_ctx, read):
         return [Mutation(key, None) for key in sorted(read, key=repr)]
 
 
@@ -1002,9 +1383,9 @@ class ImpurePlan(ReferenceRunner):
 
     calls = 0
 
-    def plan(self, spec, good_params, read):
+    def plan(self, spec, fn, good_ctx, read):
         ImpurePlan.calls += 1
-        honest = super().plan(spec, good_params, read)
+        honest = super().plan(spec, fn, good_ctx, read)
         return honest if ImpurePlan.calls == 1 else honest[:-1]
 
 
@@ -1069,13 +1450,149 @@ WRONG_LINES = {
         lambda rs: f"mutation {_fails(rs)}/{len(rs)} fail",
     "a forbidden word":
         lambda rs: (f"mutation {_fails(rs)}/{sum(1 for r in rs if r.conclusive)} killed"
-                    f" · {sum(1 for r in rs if not r.conclusive)} inconclusive"),
+                    f" ({sum(1 for r in rs if not r.conclusive)} inconclusive)"),
 }
 
 
 def _zero_over_zero(rs):
     return f"mutation {_fails(rs)}/{sum(1 for r in rs if r.conclusive)} fail"
 
+
+
+# -- planted runners the walk's plan rule exists for (P2.3) ------------------ #
+class SafeSide(ReferenceRunner):
+    """Moves each value the honest plan moves, by the same factor, the other way:
+    toward passing — the change an honest evaluator survives (`x2` and `-x` read
+    bracket.deflection 1/4 under P2.0's operators)."""
+
+    def plan(self, spec, fn, good_ctx, read):
+        out = []
+        for m in super().plan(spec, fn, good_ctx, read):
+            x0 = _get(good_ctx.params, m.key)
+            if isinstance(x0, bool) or not _numbers(x0) or not _numbers(m.after) or not m.after:
+                out.append(m)
+                continue
+            out.append(Mutation(m.key, _scaled(x0, x0 / m.after)))
+        return out
+
+
+class StopsAtFirstFail(ReferenceRunner):
+    """Walks the ladder until the gate's OUTCOME is fail — it reads the pass flag,
+    so an evaluator keyed to its own control fails a change inside its limit and
+    the plan holds it."""
+
+    def plan(self, spec, fn, good_ctx, read):
+        snapshot = copy.deepcopy(good_ctx.params)
+        out = []
+        for leaf in sorted(read, key=repr):
+            x0 = _get(snapshot, leaf)
+            if not _orderable(x0):
+                continue
+            hit = None
+            for f in self.rungs:
+                for g in (f, 1.0 / f):
+                    after = _scaled(x0, g)
+                    if after != x0 and oracle_run(spec, fn, good_ctx, snapshot,
+                                                  Mutation(leaf, after))[0] == "fail":
+                        hit = after
+                        break
+                if hit is not None:
+                    break
+            if hit is not None:
+                out.append(Mutation(leaf, hit))
+        return out
+
+
+class ShortLadder(ReferenceRunner):
+    """Gives up at x10: a margin past that is never reached."""
+    rungs = (1.15, 1.5, 2.0, 3.0, 5.0, 10.0)
+
+
+class WideMargin(ReferenceRunner):
+    """Lands only 100% past the limit: a limit drifted 0.5 -> 0.6 still fails there."""
+    margin = 1.0
+
+
+class Unaimed(ReferenceRunner):
+    """The first landing rung, never bisected: x1000 past a x120 margin overshoots
+    a limit the evaluator applies at 3x the one it reports."""
+
+    def plan(self, spec, fn, good_ctx, read):
+        v0, walked = oracle_walk(spec, fn, good_ctx, rungs=self.rungs, margin=self.margin)
+        out = []
+        for w in walked:
+            if w.key not in read:
+                continue
+            if w.kind == "lands":
+                out.append(Mutation(w.key, _scaled(_get(good_ctx.params, w.key), w.first)))
+            elif w.kind == "inconclusive":
+                out.append(Mutation(w.key, w.error_after))
+        return out
+
+
+class CrashPlan(ReferenceRunner):
+    """Plans a value that crashes the gate where a landing one exists (S1): every
+    mutation it plans is inconclusive, and the line reads `mutation 0
+    conclusive` over an evaluator that could have been caught."""
+
+    def plan(self, spec, fn, good_ctx, read):
+        return [Mutation(m.key, 13) if m.key == ("a",) else m
+                for m in super().plan(spec, fn, good_ctx, read)]
+
+
+class SkipsTheReportedValue(ReferenceRunner):
+    """Plans nothing for the value the evaluator reports."""
+
+    def plan(self, spec, fn, good_ctx, read):
+        return [m for m in super().plan(spec, fn, good_ctx, read) if m.key != ("a",)]
+
+
+class CountsInconclusiveAsFail(ReferenceRunner):
+    """Honest plan and results, and a line that counts an inconclusive mutation
+    as a fail."""
+
+    @staticmethod
+    def line(results):
+        bad = sum(1 for r in results if not r.conclusive)
+        fails = sum(1 for r in results if r.conclusive and r.outcome == "fail") + bad
+        return f"mutation {fails}/{len(results)} fail"
+
+
+#: Each planted runner the plan rule exists for, and the toy it is caught on.
+PLAN_RULE_VIOLATORS = (SafeSide, StopsAtFirstFail, ShortLadder, WideMargin, Unaimed,
+                       CrashPlan, SkipsTheReportedValue, CountsInconclusiveAsFail)
+
+
+
+def watched_planted(planted: Callable, watch: list[str], events: list, diffs: list,
+                    *args: Any, **kw: Any) -> Any:
+    """`planted` run inside the watch, as `test_the_sweeps_mutation_pass_writes_nothing`
+    runs the spine's walk."""
+    before = {r: tree_digest(r) for r in watch}
+    with watching(watch) as window:
+        out = planted(*args, **kw)
+    events.extend(window.events)
+    diffs.extend(f"{r}: {c}" for r in watch for c in _diff(before[r], tree_digest(r)))
+    return out
+
+
+#: A project evaluator that raises on every value past its limit (declared:
+#: its known-bad control errors as it says), planted into a bracket copy.
+RAISES_PAST = """\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+
+@gate(id="bracket.raises", claims=["raises"],
+      negative_control=NegativeControl(fixture="selftest/bad_configs.py:quarter_thickness",
+                                       expect="error"))
+def raises(ctx):
+    d = float(ctx.params["deflection"])
+    if d > 0.5:
+        raise ValueError("past the limit: refused, not measured")
+    return Verdict(gate="bracket.raises", passed=True, measured=round(d, 4), limit=0.5,
+                   units="mm")
+"""
 
 # --------------------------------------------------------------------------- #
 # real evaluators: the bracket's six and a bundled pack, for SUBJECTS
@@ -1095,13 +1612,89 @@ class Subject(NamedTuple):
     covers: frozenset
 
 
-#: Mutation entry points, each run through M1–M3 on real evaluators. Empty until
-#: P2.3, which must add its own — the tripwire below is red until it does.
-SUBJECTS: list[Subject] = []
+class SpineWalkRunner:
+    """`gates.mutation_walk` behind the harness's interface — the runner `check`
+    and `gate selftest` run on a project evaluator's known-good control. Its
+    ladder and margin are the spine's constants; its plan is the walk's results
+    and inconclusive keys (drawn up by running the walk, which reads no outcome
+    of a mutation it plans: the aim reads the evaluator's value, never its pass
+    flag); its not-mutated names are the walk's; its line is the one `report`
+    prints."""
+
+    def __init__(self, **_where: str) -> None:
+        self.rungs = tuple(gates_mod.MUTATION_RUNGS)
+        self.margin = gates_mod.MUTATION_MARGIN
+
+    @staticmethod
+    def _walk(spec: GateSpec, fn: Callable, good_ctx: Any) -> Any:
+        good = dataclasses.replace(good_ctx, params=copy.deepcopy(good_ctx.params))
+        trace = GateTrace()
+        verdict = gates_mod.run_gate(spec, fn, good, trace=trace)
+        return gates_mod.mutation_walk(spec, fn, good, verdict, trace=trace,
+                                       roots=[good_ctx.root])
+
+    def plan(self, spec, fn, good_ctx, read):
+        walk = self._walk(spec, fn, good_ctx)
+        return [Mutation(tuple(r.key), r.after) for r in (*walk.results, *walk.inconclusive)
+                if tuple(r.key) in read]
+
+    def unmutated(self, spec, fn, good_ctx, read):
+        walk = self._walk(spec, fn, good_ctx)
+        out = {tuple(key): why for key, why in walk.not_mutated}
+        if walk.boundary:
+            for leaf in read:
+                out.setdefault(leaf, "no-boundary")
+        return out
+
+    def run(self, spec, fn, good_ctx, plan=None):
+        if plan is not None:
+            return ReferenceRunner().run(spec, fn, good_ctx, plan)
+        walk = self._walk(spec, fn, good_ctx)
+        return ([MutationResult(tuple(r.key), r.before, r.after, r.outcome, True, "")
+                 for r in walk.results]
+                + [MutationResult(tuple(r.key), r.before, r.after, r.outcome, False, r.why)
+                   for r in walk.inconclusive])
+
+    @staticmethod
+    def line(results):
+        from atompipe import report as report_mod
+        conclusive = [r for r in results if r.conclusive]
+        return report_mod.mutation_words(
+            sum(1 for r in conclusive if r.outcome == "fail"), len(conclusive),
+            len(results) - len(conclusive))
+
+
+#: Mutation entry points, each run through M1–M3 on real evaluators: the
+#: spine's one, `gates.mutation_walk` (P2.3), with everything it is made of
+#: and the words its line is printed in.
+SUBJECTS: list[Subject] = [
+    Subject("gates.mutation_walk", SpineWalkRunner,
+            frozenset({"gates.py:mutation_walk", "gates.py:MutationPass",
+                       "gates.py:MutationResult", "gates.py:MutationCannotRun",
+                       "gates.py:_mutated_run", "gates.py:_walk_key",
+                       "gates.py:_walk_order", "gates.py:_fold_reads",
+                       "report.py:mutation_words"})),
+]
 
 #: Sites (`mutation_sites`) that are not a mutation entry point, each with why.
-#: Empty: today no name matches and no string speaks of mutation.
-NOT_A_MUTATION: dict[str, str] = {}
+#: Each stores, checks or prints a walk's recorded result; none runs one.
+NOT_A_MUTATION: dict[str, str] = {
+    "verdicts.py:<module>": "the control entry's field list and the tokens' spelling",
+    "verdicts.py:QualificationFacts": "the recorded facts of a qualification",
+    "verdicts.py:_static": "the static part names whether the walk applies (`nc.mutation`)",
+    "verdicts.py:ControlEntry": "the entry's field list: stores a walk's results",
+    "verdicts.py:_admitted_from": "reads a stored walk back for the judge",
+    "verdicts.py:_walk_applies": "the strict reader: would the walk have run",
+    "verdicts.py:_qualification": "the one judge, over recorded facts",
+    "verdicts.py:_problem_in_control": "the strict reader: checks a stored walk",
+    "verdicts.py:_problem_in_walk": "the strict reader's walk half",
+    "verdicts.py:_entry_facts": "reads a stored walk back into facts",
+    "verdicts.py:_mutation_applies": "decides whether the walk applies",
+    "report.py:<module>": "the word table; the line that uses it is held by V5 and V10",
+    "report.py:qualification_detail": "renders a recorded result in `gate show`",
+    "cli.py": "prints a recorded result",
+    "packs.py:demonstrate": "calls gates.mutation_walk, the subject",
+}
 
 #: The bundled pack every subject also runs over, installed into a project.
 #: Why beam-analytic: no tool requirement, so every gate runs on any machine,
@@ -1166,6 +1759,40 @@ def judge_on_real_evaluators(test: Any, make: Callable[[RealEvaluator], Any]
         if judgement.problems():
             found[f"{e.where}:{e.spec.id}"] = judgement.problems()
     return found
+
+
+#: A planted evaluator for the runners that hide a survivor: the bracket's
+#: deflection with its limit drifted to 0.6 against a reported 0.5 — the aimed
+#: mutation (0.575 mm) passes it. Written into a bracket copy as
+#: `gates/drifted.py`, so the survivor comes from a real project.
+DRIFTED = """\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+
+@gate(id="bracket.drifted", claims=["drifted"],
+      negative_control=NegativeControl(fixture="selftest/bad_configs.py:quarter_thickness"))
+def drifted(ctx):
+    d = float(ctx.params["deflection"])
+    return Verdict(gate="bracket.drifted", passed=d <= 0.6, measured=round(d, 4), limit=0.5,
+                   units="mm")
+"""
+
+
+def planted_evaluators(tmp: str) -> list[RealEvaluator]:
+    """`DRIFTED` in a bracket copy, on the bracket's known-good design."""
+    scratch = os.path.join(tmp, "out")
+    os.makedirs(scratch, exist_ok=True)
+    root = _projects.bracket_copy(os.path.join(tmp, "drifted"), migrated=True)
+    _write(os.path.join(root, "gates", "drifted.py"), DRIFTED)
+    registry = gates_mod.Registry()
+    gates_mod.load_project_gates(root, registry)
+    known_good = modelio.load_path(os.path.join(root, "selftest", "known_good.py"))
+    good = known_good.context(gates_mod.GateContext(root=root, out_dir=scratch, tier=0))
+    roots = list(dict.fromkeys([root, _projects.PACKS]
+                               + packs_mod.search_paths(root, existing_only=False)))
+    spec, fn = registry.get("bracket.drifted")
+    return [RealEvaluator("planted", spec, fn, good, roots, known_good.CONFIG, root)]
 
 
 # -- the tripwire's scan ---------------------------------------------------- #
@@ -1248,13 +1875,13 @@ def spine_sources() -> dict[str, str]:
                     out[os.path.relpath(path, SRC).replace(os.sep, "/")] = fh.read()
     return out
 
-
 # --------------------------------------------------------------------------- #
 class MutationIsSealed(_env.EnvCase):
-    """(planned 15) A mutation pass writes nothing in the project or a pack
-    directory, leaves the known-good design as it found it, and never reports an
+    """(15) A mutation pass writes nothing in the project or a pack directory,
+    leaves the known-good design as it found it, and never reports an
     inconclusive mutation as a fail — over the runner it holds, every planted
-    runner below is caught by the rule it breaks."""
+    runner below is caught by the rule it breaks, and the spine's own runner
+    (`SUBJECTS`) is held to all of it on real evaluators."""
 
     def setUp(self):
         self.project = self.tmp()
@@ -1270,9 +1897,10 @@ class MutationIsSealed(_env.EnvCase):
         return gates_mod.GateContext(root=self.project, params=copy.deepcopy(TOY_DESIGN),
                                      out_dir=self.tmp(), tier=0)
 
-    def judged(self, runner_cls: type, *args: Any, plan: Any = TOY_PLAN) -> Judgement:
+    def judged(self, runner_cls: type, *args: Any, plan: Any = TOY_PLAN,
+               gate: Callable = toy_gate) -> Judgement:
         return judge(lambda: runner_cls(*args, project=self.project, pack=self.pack),
-                     TOY_SPEC, toy_gate, self.good(), roots=self.roots, plan=plan,
+                     TOY_SPEC, gate, self.good(), roots=self.roots, plan=plan,
                      design=TOY_DESIGN)
 
     # -- positive controls --------------------------------------------------- #
@@ -1282,13 +1910,20 @@ class MutationIsSealed(_env.EnvCase):
                 judgement = self.judged(ReferenceRunner, plan=plan)
                 self.assertEqual(judgement.problems(), [])
         self.assertEqual(self.judged(ReferenceRunner).line,
-                         "mutation 1/2 fail · 3 inconclusive")
+                         "mutation 1/2 fail (3 inconclusive)")
+        own = ReferenceRunner()
+        good = self.good()
+        self.assertEqual(own.plan(TOY_SPEC, toy_gate, good, {("a",), ("b",), ("c",)}),
+                         TOY_OWN_PLAN)
+        self.assertEqual(self.judged(ReferenceRunner, plan=None).line, TOY_OWN_LINE)
+        self.assertEqual(own.unmutated(TOY_SPEC, toy_gate, good, {("a",), ("b",), ("c",)}),
+                         {("b",): "never-lands"})
 
     def test_the_oracle_agrees_with_the_ground_truth(self):
         good = self.good()
         _outcome, log = oracle(TOY_SPEC, toy_gate, good, TOY_DESIGN)
         read = {leaf for leaf in _leaves(TOY_DESIGN) if leaf in log}
-        self.assertEqual(read, {("a",)})
+        self.assertEqual(read, {("a",), ("b",), ("c",)})
         truth = []
         for m in TOY_PLAN:
             outcome, _log = oracle(TOY_SPEC, toy_gate, good, TOY_DESIGN, m)
@@ -1298,9 +1933,9 @@ class MutationIsSealed(_env.EnvCase):
                             {"n": {"c": 1, "d": 2}})
         self.assertIn(("n", "c"), nested)
         self.assertNotIn(("n", "d"), nested)
-        self.assertEqual(expected_line(TOY_TRUTH), "mutation 1/2 fail · 3 inconclusive")
+        self.assertEqual(expected_line(TOY_TRUTH), "mutation 1/2 fail (3 inconclusive)")
         self.assertEqual(expected_line([TOY_TRUTH[i] for i in (2, 3, 4)]),
-                         "mutation 0 conclusive · 3 inconclusive")
+                         "mutation 0 conclusive (3 inconclusive)")
 
     # -- M1 ------------------------------------------------------------------ #
     def test_a_mutation_that_writes_into_the_tree_is_caught(self):
@@ -1331,7 +1966,7 @@ class MutationIsSealed(_env.EnvCase):
             with self.subTest(runner=runner.__name__):
                 judgement = self.judged(runner)
                 self.assertTrue(judgement.memory, judgement)
-                TOY_DESIGN.update({"a": 5, "b": 1})
+                TOY_DESIGN.update({"a": 5, "b": 1, "c": 2.0, "d": 1})
 
     # -- M3 ------------------------------------------------------------------ #
     def test_an_inconclusive_mutation_reported_as_a_fail_is_caught(self):
@@ -1366,7 +2001,7 @@ class MutationIsSealed(_env.EnvCase):
     def test_none_conclusive_says_so(self):
         honest = self.judged(ReferenceRunner, plan=TOY_INCONCLUSIVE)
         self.assertEqual(honest.problems(), [])
-        self.assertEqual(honest.line, "mutation 0 conclusive · 3 inconclusive")
+        self.assertEqual(honest.line, "mutation 0 conclusive (3 inconclusive)")
         planted = self.judged(_line_runner(_zero_over_zero), plan=TOY_INCONCLUSIVE)
         self.assertEqual(planted.line, "mutation 0/0 fail")
         self.assertTrue(planted.honesty)
@@ -1391,16 +2026,16 @@ class MutationIsSealed(_env.EnvCase):
 
     # -- M3: the plan is drawn up before the run ------------------------------ #
     def test_a_runner_that_hides_its_survivors_is_caught(self):
-        judgement = self.judged(Hides, plan=None)
+        judgement = self.judged(Hides, plan=None, gate=toy_drift)
         self.assertTrue(any("planned, no result" in p for p in judgement.honesty), judgement)
 
     def test_a_runner_that_plans_after_seeing_is_caught(self):
-        judgement = self.judged(PlansAfterSeeing, plan=None)
+        judgement = self.judged(PlansAfterSeeing, plan=None, gate=toy_drift)
         self.assertTrue(any("planned, no result" in p for p in judgement.honesty), judgement)
 
     def test_a_plan_that_breaks_every_type_is_caught(self):
         judgement = self.judged(NonePlan, plan=None)
-        self.assertTrue(any("no change of the same kind" in p for p in judgement.honesty),
+        self.assertTrue(any("not a change of the same kind" in p for p in judgement.honesty),
                         judgement)
 
     def test_a_plan_that_moves_between_calls_is_caught(self):
@@ -1410,21 +2045,28 @@ class MutationIsSealed(_env.EnvCase):
                         judgement)
 
     def test_hiding_and_type_breaking_plans_are_caught_on_real_evaluators(self):
-        """The review's two runners over the bracket's six gates and the pack's:
-        NonePlan on every evaluator (each reads a number), and Hides on every
-        evaluator the honest runner shows a survivor on."""
-        honest = {}
+        """The review's two runners on real evaluators: NonePlan on every
+        evaluator with a landing leaf — all six bracket gates among them — and
+        Hides where a survivor exists. An honest aimed plan leaves the bracket's
+        six none, so the survivor comes from a planted evaluator: the drifted
+        limit, written into a bracket copy (`planted_evaluators`)."""
+        landing = set()
         for e in real_evaluators(self.tmp()):
-            honest[f"{e.where}:{e.spec.id}"] = judge(ReferenceRunner, e.spec, e.fn, e.good,
-                                                    roots=e.roots, design=e.design).line
-        survivors = {k for k, line in honest.items()
-                     if (m := re.search(r"mutation (\d+)/(\d+) fail", line))
-                     and m.group(1) != m.group(2)}
-        self.assertTrue(survivors, honest)
+            _v0, walked = oracle_walk(e.spec, e.fn, e.good, rungs=RUNGS, margin=MARGIN)
+            if any(w.kind == "lands" for w in walked):
+                landing.add(f"{e.where}:{e.spec.id}")
+        self.assertTrue({f"bracket:{gid}" for gid in BRACKET_KNOWN_GOOD} <= landing, landing)
         none_plan = judge_on_real_evaluators(self, lambda _e: NonePlan())
-        self.assertEqual(sorted(set(honest) - set(none_plan)), [])
-        hides = judge_on_real_evaluators(self, lambda _e: Hides())
-        self.assertEqual(sorted(survivors - set(hides)), [])
+        self.assertEqual(sorted(landing - set(none_plan)), [])
+        (drifted,) = planted_evaluators(self.tmp())
+        honest = judge(ReferenceRunner, drifted.spec, drifted.fn, drifted.good,
+                       roots=drifted.roots, design=drifted.design)
+        self.assertEqual(honest.problems(), [])
+        self.assertEqual(honest.line, "mutation 0/1 fail", "the drifted limit's survivor")
+        hides = judge(Hides, drifted.spec, drifted.fn, drifted.good, roots=drifted.roots,
+                      design=drifted.design)
+        self.assertTrue(any("planned, no result" in p or "differs" in p
+                            for p in hides.honesty), hides)
 
     # -- M3: the oracle reads a gate as run_gate does ------------------------- #
     def test_the_oracle_reads_a_gate_as_run_gate_does(self):
@@ -1502,6 +2144,99 @@ class MutationIsSealed(_env.EnvCase):
                          "the reference runner's own rmtree of its out dir, by names "
                          "relative to a directory fd, must not read as a write")
 
+
+    # -- the plan rule (P2.3): the walk's planted runners --------------------- #
+    def test_every_runner_the_plan_rule_exists_for_is_caught(self):
+        for runner in PLAN_RULE_VIOLATORS:
+            with self.subTest(runner=runner.__name__):
+                judgement = self.judged(runner, plan=None)
+                self.assertTrue(judgement.honesty, judgement)
+                self.assertEqual(judgement.hook + judgement.tree + judgement.memory, [])
+
+    def test_the_ladder_floor_refuses_what_it_forbids(self):
+        self.assertEqual(ladder_problems(ReferenceRunner()), [])
+        for rungs, margin in (((1.15, 1.5, 10.0), 0.15), ((2.0, 5.0, 1000.0), 0.15),
+                              ((1.5, 1.15, 1000.0), 0.15), ((1.15, 1000.0), 0.0),
+                              ((1.15, 1000.0), 0.3), ((1.0, 1000.0), 0.15)):
+            runner = type("R", (ReferenceRunner,), {"rungs": rungs, "margin": margin})()
+            with self.subTest(rungs=rungs, margin=margin):
+                self.assertTrue(ladder_problems(runner))
+
+    # -- M1 inside the sweep (P2.3) ------------------------------------------- #
+    def test_the_sweeps_mutation_pass_writes_nothing(self):
+        """`check`'s own sweep, in process on a bracket copy, with the spine's
+        walk run inside the watch: no write under the project, the checkout's
+        packs or any pack search path, and all six qualified."""
+        from atompipe import store, verdicts
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"))
+        roots = list(dict.fromkeys([root, _projects.PACKS]
+                                   + packs_mod.search_paths(root, existing_only=False)))
+        real = gates_mod.mutation_walk
+        events: list[str] = []
+        diffs: list[str] = []
+
+        def watched(*a, **k):
+            before = {r: tree_digest(r) for r in roots}
+            with watching(roots) as window:
+                out = real(*a, **k)
+            events.extend(window.events)
+            diffs.extend(f"{r}: {c}" for r in roots for c in _diff(before[r], tree_digest(r)))
+            return out
+
+        def planted(*a, **k):
+            _write(os.path.join(root, "model", "mutated.json"), "{}\n")
+            return real(*a, **k)
+
+        def sweep():
+            ledger = store.load(root, model_prose=modelio.static_param_prose)
+            registry = gates_mod.Registry()
+            gates_mod.load_project_gates(root, registry)
+            model = modelio.load_model(root, "model/bracket.py")
+            projection = modelio.project(model)
+            flat, _c = modelio.flat_params(projection)
+            ctx = gates_mod.GateContext(root=root, ledger=ledger, model=None, params=flat,
+                                        out_dir=store.out_dir(root), tier=0, extra={})
+            return verdicts.sweep(root, registry, ctx, projection=projection, ledger=ledger,
+                                  max_tier=0, record=True, now="2026-10-03T00:00:00Z")
+
+        with mock.patch.object(gates_mod, "mutation_walk", watched):
+            result = sweep()
+        self.assertEqual((events, diffs), ([], []))
+        admitted = {r.verdict.gate: r.admission.state for r in result.rows if r.admission}
+        self.assertEqual(set(admitted.values()), {"admitted"}, admitted)
+        with mock.patch.object(gates_mod, "mutation_walk",
+                               lambda *a, **k: watched_planted(planted, roots, events, diffs,
+                                                               *a, **k)):
+            shutil.rmtree(os.path.join(root, ".atompipe", "verdicts"), ignore_errors=True)
+            sweep()
+        self.assertTrue(events, "the planted write inside the window was not seen by the hook")
+        self.assertTrue(diffs, "the planted write was not seen by the digest")
+
+    # -- M3 in every channel (P2.3) ------------------------------------------- #
+    def test_an_inconclusive_mutation_is_never_a_fail_anywhere(self):
+        """A project evaluator whose every value past its limit raises: its
+        mutation is inconclusive, recorded so, and every channel that prints
+        the line counts it neither way."""
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        _write(os.path.join(root, "gates", "raises.py"), RAISES_PAST)
+        want = "bracket.raises : known-good pass · known-bad errored · mutation 0 conclusive " \
+               "(1 inconclusive) → qualified"
+        truth = [("errored", False)]
+        check = _env.atompipe(["check"], cwd=root).stdout
+        show = _env.atompipe(["gate", "show", "bracket.raises"], cwd=root).stdout
+        selftest = _env.atompipe(["gate", "selftest", "bracket.raises"], cwd=root).stdout
+        for channel, text in (("check", check), ("gate show", show), ("gate selftest", selftest)):
+            with self.subTest(channel=channel):
+                lines = [ln.strip() for ln in text.splitlines() if "bracket.raises :" in ln
+                         or ln.strip().startswith("qualification:")]
+                hit = [re.sub(r" \(control [0-9a-f]{12}\)$", "", ln) for ln in lines
+                       if " · mutation " in ln]
+                self.assertTrue(hit, text)
+                self.assertEqual(line_problems(hit[0], truth), [], hit[0])
+                self.assertTrue(hit[0].endswith(want.split(" : ", 1)[1]), hit[0])
+        folded = hit[0].replace("mutation 0 conclusive (1 inconclusive)", "mutation 1/1 fail")
+        self.assertTrue(line_problems(folded, truth), "a renderer folding it into the fails")
+
     # -- the tripwire ---------------------------------------------------------- #
     def test_every_mutation_entry_point_is_a_subject(self):
         """By name AND by behaviour: every function, class or module named for
@@ -1515,6 +2250,13 @@ class MutationIsSealed(_env.EnvCase):
         scanning raw text would trip on every comment that says "mutates"."""
         named, spoken = mutation_sites(spine_sources())
         self.assertEqual(uncovered_sites(named + spoken, SUBJECTS, NOT_A_MUTATION), [])
+        # And every excuse still excuses something: one that names no site is a
+        # pass signed in advance for whatever function next takes that name.
+        # (Pruned at P2.3's landing: seven excuses written for the design named
+        # functions the build renamed or that no longer speak of mutation.)
+        sites = named + spoken
+        self.assertEqual([k for k in NOT_A_MUTATION
+                          if not any(_covers(k, site) for site in sites)], [])
         for subject in SUBJECTS:
             with self.subTest(subject=subject.name):
                 self.assertEqual(judge_on_real_evaluators(self, lambda _e: subject.factory()),
@@ -1573,6 +2315,103 @@ class MutationIsSealed(_env.EnvCase):
         for key, problems in found.items():
             self.assertTrue(any(p.startswith("M1 hook") for p in problems), (key, problems))
             self.assertTrue(any(p.startswith("M1 tree") for p in problems), (key, problems))
+
+class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
+    """(C12, R-4's detector for the mutation clause) The restated aimed walk
+    over every bundled pack gate on its own baseline: no conclusive mutation
+    passes an honest bundled gate — measured 34 gates with a conclusive
+    mutation, 3 walked with none, 17 with no boundary (a value exactly at its
+    limit, mostly a defect count 0 against 0) where trimesh, numpy and omc are
+    present — and the planted drifted-limit gate is one hit. Full suite only
+    (~12 s): the refusal it licenses is held in the fast tier by V2."""
+
+    def test_no_conclusive_mutation_passes_a_bundled_gate(self):
+        kinds = collections.Counter()
+        passes = []
+        unavailable = 0
+        for name in sorted(os.listdir(_projects.PACKS)):
+            pack_dir = os.path.join(_projects.PACKS, name)
+            if not os.path.isfile(os.path.join(pack_dir, "pack.json")):
+                continue
+            registry = gates_mod.Registry()
+            packs_mod.load_gates(name, registry, root=_env.REPO, include_env=False,
+                                 include_user=False)
+            for spec, fn in registry.pairs():
+                if not gates_mod.availability(spec)[0]:
+                    unavailable += 1
+                    continue
+                good = packs_mod.baseline_context(pack_dir, out_dir=self.tmp())
+                v0, walked = oracle_walk(spec, fn, good, rungs=RUNGS, margin=MARGIN)
+                if v0 is None:
+                    kinds["no-boundary"] += 1
+                    continue
+                landing = [w for w in walked if w.kind == "lands"]
+                kinds["conclusive" if landing else "none-conclusive"] += 1
+                for w in landing:
+                    after, run = aimed(spec, fn, good, v0, w, margin=MARGIN)
+                    if run[0] == "pass":
+                        passes.append(f"{spec.id}: {w.key} -> {after!r}")
+        self.assertEqual(passes, [])
+        self.assertEqual(sum(kinds.values()) + unavailable, 54, kinds)
+        if not unavailable:
+            self.assertEqual(dict(kinds), {"conclusive": 34, "none-conclusive": 3,
+                                           "no-boundary": 17})
+
+    def test_the_planted_drifted_limit_is_one_hit(self):
+        spec = GateSpec(id="beam.drifted", claims=["x"], tier=Tier.INSTANT,
+                        negative_control=NegativeControl(fixture="x:y"))
+
+        def drifted(ctx):
+            d = float(ctx.params["deflection"])
+            return Verdict(gate=spec.id, passed=d <= 0.6, measured=round(d, 4), limit=0.5)
+
+        good = gates_mod.GateContext(root=self.tmp(), params={"deflection": 0.46875,
+                                                              "load_n": 15.0},
+                                     out_dir=self.tmp(), tier=0)
+        v0, walked = oracle_walk(spec, drifted, good, rungs=RUNGS, margin=MARGIN)
+        landing = [w for w in walked if w.kind == "lands"]
+        self.assertEqual([w.key for w in landing], [("deflection",)])
+        after, run = aimed(spec, drifted, good, v0, landing[0], margin=MARGIN)
+        self.assertEqual((after, run[0]), (0.575, "pass"))
+
+
+#: Each bracket gate on its known-good design (``selftest/known_good.py``), by
+#: this file's oracle: ``(measured, limit)`` and the param leaves the run read.
+#: Written down (C7) before P2.3's walk existed: the walk aims at exactly these
+#: values, so a later edit of a bracket gate's rounding or of what it reads is
+#: named here before it moves a qualification.
+BRACKET_KNOWN_GOOD = {
+    "bracket.deflection": ((0.4688, 0.5), {("config", "load_n"), ("deflection",)}),
+    "bracket.bending_stress": ((0.188, 1.0), {("design_stress",), ("material",),
+                                              ("stress_root",), ("utilisation",)}),
+    "bracket.bearing": ((0.17, 15.0), {("bearing_area",), ("bearing_stress",),
+                                       ("config", "n_bolts"), ("design_stress",)}),
+    "bracket.model_validity": ((7.5, 5.0), {("slenderness",)}),
+    "bracket.bed_fit": ((73.5, 204.0), {("bbox",), ("bbox_max",), ("config", "bed_xy"),
+                                        ("config", "brim_mm"), ("usable_bed",)}),
+    "bracket.min_wall": ((8.0, 1.2), {("config", "nozzle_d"), ("config", "thickness"),
+                                      ("min_wall",)}),
+}
+
+
+class TheBracketsKnownGoodVerdicts(_env.EnvCase):
+    """(C7) The input the walk aims from: every bracket gate passes its known-good
+    design, at these values, reading these leaves."""
+
+    def test_each_bracket_gate_on_its_known_good_design(self):
+        seen = {}
+        for e in real_evaluators(self.tmp()):
+            if e.where != "bracket":
+                continue
+            verdict = gates_mod.run_gate(e.spec, e.fn, e.good)
+            outcome, log = oracle(e.spec, e.fn, e.good, e.good.params)
+            read = {leaf for leaf in _leaves(e.good.params) if leaf in log}
+            seen[e.spec.id] = (outcome, (verdict.measured, verdict.limit), read)
+        self.assertEqual(sorted(seen), sorted(BRACKET_KNOWN_GOOD))
+        for gid, (values, read) in BRACKET_KNOWN_GOOD.items():
+            with self.subTest(gate=gid):
+                self.assertEqual(seen[gid], ("pass", values, read))
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

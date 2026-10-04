@@ -63,7 +63,7 @@ RHO_LIKE = re.compile(r"\b[0-9a-f]{16,}\b")
 
 #: The words `verdicts.resolve` gives a Fresh PASS whose control was never shown
 #: to fail at this version (§3.10 step 3).
-UNDEMONSTRATED = "control not demonstrated"
+UNDEMONSTRATED = "not yet qualified at this version"
 
 
 # --------------------------------------------------------------------------- #
@@ -137,7 +137,7 @@ class _Project(_env.EnvCase):
         """Record `verdict` as a cache entry of its registered gate and, with
         `control`, a forged fired control beside it.
 
-        The control is a FORGED admission — `record_control(bad="fail")` with no
+        The control is a FORGED admission — `record_control(bad="fail", good="pass")` with no
         run behind it. That is legitimate only in a renderer test: it forges the
         inner loop, and R-9's re-execution at every money boundary (`check
         --force` in CI, P2's `export`) is what a hand-placed entry cannot get
@@ -147,8 +147,13 @@ class _Project(_env.EnvCase):
         spec, fn = registry.get(verdict.gate)
         written = verdicts_mod.record_verdict(self.root, spec, fn, verdict)
         if control:
-            verdicts_mod.record_control(self.root, spec, fn, bad="fail",
-                                        detail="planted by a reader test")
+            # R-6 (P2.3): the forged form plants a whole qualification — the
+            # known-good half passed and, where the walk applies, a walk that
+            # made none — or the entry is incomplete and nothing counts (D19).
+            verdicts_mod.record_control(
+                self.root, spec, fn, bad="fail", detail="planted by a reader test",
+                good="pass", mutation=() if verdicts_mod._mutation_applies(fn, self.root)
+                else None)
         return written
 
 
@@ -366,7 +371,9 @@ class SiteResolvesForItself(_Project):
 
     def test_state_without_a_resolution_is_not_generous(self):
         """A Fresh PASS whose control was never demonstrated: it reaches the page,
-        and it does not read PASS there."""
+        and it does not read PASS there. R-6 (P2.3): never qualified, it reads
+        not yet qualified — the row ``unqualified``, the claim Gap — where P2.2
+        read it Stale (``control not demonstrated``)."""
         self._plant(self.registry, _pass(), control=False)
         payload = site_mod.state(self.root, self.ledger, self.registry,
                                  now="2026-01-01T00:00:00Z")
@@ -376,21 +383,25 @@ class SiteResolvesForItself(_Project):
         self.assertNotEqual(self._claim_status(payload), "pass",
                             "a PASS from a gate never shown to fail is not proof")
         self.assertFalse(rows[0]["fresh"])
-        self.assertTrue(rows[0]["cached"])
-        self.assertIn(UNDEMONSTRATED, rows[0]["stale_reason"])
-        self.assertTrue(payload["meta"]["stale"])
+        self.assertEqual(rows[0]["status"], "unqualified")
+        self.assertIn(UNDEMONSTRATED, rows[0]["qualification"]["reason"])
+        self.assertEqual(self._claim_status(payload), "unclaimed")
         self.assertFalse(payload["readiness"]["ready"])
 
     def test_build_without_a_resolution_is_not_generous(self):
+        # R-6 (P2.3): the never-demonstrated pass reads not yet qualified (Gap)
+        # on the page build writes, where P2.2 read it Stale (`summary["stale"]`).
         self._plant(self.registry, _pass(), control=False)
         site_mod.scaffold(self.root)
-        summary = site_mod.build(self.root, self.ledger, self.registry,
-                                 site_mod.ViewRegistry(), now="2026-01-01T00:00:00Z")
-        self.assertTrue(summary["stale"])
+        site_mod.build(self.root, self.ledger, self.registry, site_mod.ViewRegistry(),
+                       now="2026-01-01T00:00:00Z")
         with open(os.path.join(self.root, site_mod.SITE_DIR, site_mod.DATA_DIR,
                                site_mod.STATE_NAME), encoding="utf-8") as fh:
             payload = json.load(fh)
         self.assertNotEqual(self._claim_status(payload), "pass")
+        self.assertEqual(self._claim_status(payload), "unclaimed")
+        self.assertEqual([v["status"] for v in payload["verdicts"] if v["gate"] == "r.stiff"],
+                         ["unqualified"])
 
     def test_the_same_pass_with_a_demonstrated_control_reads_pass(self):
         """The positive half: the test above fails for the missing control, not
@@ -406,8 +417,15 @@ class SiteResolvesForItself(_Project):
 
     def test_stale_false_cannot_make_a_stale_gate_current(self):
         """`stale=True` stays an override that marks everything stale; `False`
-        is no override at all — a caller cannot declare the cache current."""
-        self._plant(self.registry, _pass(), control=False)
+        is no override at all — a caller cannot declare the cache current. R-6
+        (P2.3): the stale gate is a qualified one whose entry's code is
+        unrecorded — a never-demonstrated gate reads unqualified now, not
+        stale, and would test nothing about the override."""
+        verdicts_mod.record_verdict(self.root, None, None, _pass())   # unkeyed code
+        spec, fn = self.registry.get("r.stiff")
+        verdicts_mod.record_control(
+            self.root, spec, fn, bad="fail", detail="planted by a reader test", good="pass",
+            mutation=() if verdicts_mod._mutation_applies(fn, self.root) else None)
         payload = site_mod.state(self.root, self.ledger, self.registry, stale=False)
         self.assertNotEqual(self._claim_status(payload), "pass")
         self.assertTrue(payload["meta"]["stale"])
@@ -436,6 +454,11 @@ class SiteResolvesForItself(_Project):
         planted = dataclasses.replace(_pass(claims=("C9",)), tier=Tier.BUILD,
                                       pack="elsewhere")
         verdicts_mod.record_verdict(self.root, None, None, planted)   # unkeyed code
+        # R-6 (P2.3): the gate qualified, or its row is "not yet qualified".
+        spec, fn = self.registry.get("r.stiff")
+        verdicts_mod.record_control(
+            self.root, spec, fn, bad="fail", detail="planted by a reader test", good="pass",
+            mutation=() if verdicts_mod._mutation_applies(fn, self.root) else None)
         payload = site_mod.state(self.root, self.ledger, self.registry)
         row = [v for v in payload["verdicts"] if v["gate"] == "r.stiff"][0]
         self.assertTrue(row["cached"])

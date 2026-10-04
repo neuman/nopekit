@@ -1274,6 +1274,19 @@ def validate(pack_dir: str, *, tier: int = Tier.BUILD,
         elif not nc.fixture.strip():
             unusable_control.add(spec.id)
             problems.append(f"gate {spec.id!r}: negative_control has an empty fixture")
+        good_ref = (getattr(nc, "good", "") or "").strip() if nc is not None else ""
+        if good_ref and _is_file_fixture(good_ref):
+            # The known-good fixture (P2.3), checked as the known-bad one is:
+            # inside the pack, and there.
+            good_path = os.path.abspath(os.path.join(pack_dir, good_ref))
+            if not _inside(pack_dir, good_path):
+                problems.append(f"gate {spec.id!r}: negative_control good fixture "
+                                f"{good_ref!r} points outside the pack")
+            elif not os.path.isfile(good_path):
+                unusable_control.add(spec.id)
+                problems.append(f"gate {spec.id!r}: negative_control good fixture "
+                                f"{good_ref!r} does not exist — this gate was never shown "
+                                f"to pass a known-good input")
 
         for tool in spec.requires_tools:
             if tool not in manifest.requires_tools:
@@ -1381,6 +1394,11 @@ class Demonstration:
     skipped: list[str] = dataclasses.field(default_factory=list)
     ran: int = 0
     unchecked: list[str] = dataclasses.field(default_factory=list)
+    qualifications: dict = dataclasses.field(default_factory=dict)
+    """``{gate id: verdicts.QualificationFacts}`` for each gate in scope whose
+    controls ran: what pack mode prints its lines and counts from (P2.3) — one
+    producer, `verdicts._qualification` judging them. A gate whose tools are
+    absent here is in ``skipped`` and not here."""
 
 
 def baseline_context(pack_dir: str, *, out_dir: str) -> "GateContext":
@@ -1502,7 +1520,9 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
     relaxed by relaxing that code, with no test file touched.
     """
     from . import gates as _gates          # local import: see _fresh_registry
-    from .verdicts import GateTrace        # local: the same edge, the same reason
+    from . import report as _report        # the one word table (D-16); not at import
+    from . import verdicts as _verdicts    # local: the same edge, the same reason
+    from .verdicts import GateTrace
 
     shown = Demonstration()
     pack_dir = os.path.abspath(pack_dir)
@@ -1542,17 +1562,39 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
             shown.problems.append(str(exc))
             return shown
 
+        walked = _walked_origin(pack_dir)
         for spec in in_scope:
             entry = registry.get(spec.id)
             if entry is None:                       # pragma: no cover - defensive
                 shown.problems.append(f"{spec.id}: vanished from the registry")
                 continue
             _spec, fn = entry
+            nc = spec.negative_control
+            expect = (getattr(nc, "expect", "fail") or "fail").strip().lower()
 
-            # 1. the good design
-            verdict = _gates.run_gate(
-                spec, fn, baseline_context(pack_dir, out_dir=_run_dir(base, spec.id, "baseline")))
-            outcome = verdict.outcome
+            # 1. the known-good control: the pack's baseline, or the `good`
+            #    fixture the gate declares, built over it (P2.3-D4) — traced, so
+            #    the fixture's seal (1b) and its channel (2b) are read off it
+            good_trace = GateTrace(kind="control")
+            good_ref = (getattr(nc, "good", "") or "").strip()
+            good_ctx = baseline_context(pack_dir, out_dir=_run_dir(base, spec.id, "baseline"))
+            good_line = ""
+            if good_ref:
+                try:
+                    good_ctx = _gates.run_good_fixture(spec, fn, good_ctx, trace=good_trace,
+                                                       out_dir=good_ctx.out_dir)
+                except AtompipeError as exc:
+                    good_ctx = None
+                    good_line = str(exc).splitlines()[0] if str(exc) else "unusable"
+            if good_ctx is None:
+                verdict = None
+                outcome = "errored"
+                shown.problems.append(
+                    f"{spec.id}: its known-good control {good_ref} is unusable: {good_line}")
+            else:
+                verdict = _gates.run_gate(spec, fn, good_ctx, trace=good_trace)
+                outcome = verdict.outcome
+            good_extra = _verdicts._extra_keys(good_ctx) if good_ctx is not None else ()
             if outcome == "skipped":
                 available, missing = _gates.availability(spec)
                 if not available:
@@ -1560,19 +1602,35 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                     # availability before it builds anything.
                     shown.skipped.append(f"{spec.id} ({missing or 'not available here'})")
                     continue
+                good_line = verdict.skip_reason or "no reason given"
                 shown.problems.append(
                     f"{spec.id}: skips its own baseline while its tools are present "
-                    f"({verdict.skip_reason or 'no reason given'}) — a gate never shown to "
-                    f"accept a good design is not shown to measure anything; state what "
-                    f"it reads in {SELFTEST_DIR}/{BASELINE_NAME}")
+                    f"({good_line}) — a gate never shown to accept a good design is not "
+                    f"shown to measure anything; state what it reads in "
+                    f"{SELFTEST_DIR}/{BASELINE_NAME}")
             elif outcome == "error":
+                good_line = (str(verdict.error).splitlines() or [""])[0]
                 shown.problems.append(
                     f"{spec.id}: fails its own baseline — it crashed: {_why(verdict)}")
+            elif outcome == "fail" and good_ref:
+                shown.problems.append(
+                    f"{spec.id}: fails its known-good control {good_ref}: {_why(verdict)} — "
+                    f"the fixture is not good or the gate is wrong, and its known-bad "
+                    f"control proves nothing until one of them is fixed")
             elif outcome == "fail":
                 shown.problems.append(
                     f"{spec.id}: fails its own baseline: {_why(verdict)} — the baseline "
                     f"is not good or the gate is wrong, and its control proves nothing "
                     f"until one of them is fixed")
+            known_good = {"pass": "pass", "fail": "fail", "skipped": "skipped"}.get(
+                outcome, "errored")
+            # 1b. the good fixture's seal: like the known-bad fixture's, it builds
+            #     from the pack's own baseline, never from its host's params.
+            if good_ref:
+                unsealed_good = _seal_problem(_seal_finding(spec, good_trace))
+                if unsealed_good:
+                    shown.problems.append(unsealed_good.replace(
+                        f"{_CONTROL_PREFIX}reads", "known-good control reads", 1))
 
             # 2. the known-bad input, over the pack's baseline — traced, so the
             #    seal detector (4.) reads what the control took from its host
@@ -1588,6 +1646,21 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                     shown.skipped.append(f"{spec.id} ({missing or 'not available here'})")
                     continue
             shown.ran += 1
+            bad_extra = tuple(trace.handed_extra or ())
+            if control.outcome == "pass":
+                known_bad, bad_line = "fail", ""          # rejected, as declared
+            elif control.outcome == "error":
+                known_bad = ("skipped" if str(control.error).startswith("skipped on its own")
+                             else "errored")
+                bad_line = (str(control.error).splitlines() or [""])[0]
+            elif "PASSED its own known-bad" in (control.detail or ""):
+                known_bad, bad_line = "pass", ""
+            else:
+                known_bad, bad_line = "errored", (control.detail or "").splitlines()[0] \
+                    if control.detail else "it crashed on its fixture"
+            facts = _verdicts.QualificationFacts(known_bad=known_bad, known_good=known_good,
+                                                 bad_line=bad_line, good_line=good_line,
+                                                 expect=expect)
             # After what the control DID, never before: `gate selftest --pack`
             # shows the first `control …` line per gate (cli._read_back), and a
             # control that did not fire is the louder news.
@@ -1596,7 +1669,20 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                 shown.problems.append(f"{spec.id}: {_CONTROL_PREFIX}did not fire: {_why(control)}")
                 if unsealed:
                     shown.problems.append(unsealed)
+                shown.qualifications[spec.id] = facts
                 continue
+
+            # 2b. channel parity (D-26, P2.3-D5): both controls hand the gate the
+            #     same `ctx.extra` keys — or a gate that fails exactly when
+            #     `extra` is not empty passes its baseline, fails its fixture, and
+            #     has shown nothing.
+            if known_good == "pass" and bad_extra != good_extra:
+                facts = dataclasses.replace(facts, channels=(bad_extra, good_extra))
+                shown.problems.append(
+                    f"{spec.id}: known-good and known-bad reach it through different "
+                    f"channels (ctx.extra: known-bad {{{', '.join(bad_extra)}}}, known-good "
+                    f"{{{', '.join(good_extra)}}}) — declare a known-good fixture "
+                    f"(NegativeControl.good) that hands it the same keys")
 
             # 3. the same known-bad input with nothing to inherit from
             bare = dataclasses.replace(
@@ -1624,10 +1710,47 @@ def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
                                                    _run_dir(base, spec.id, "isolation"))
             shown.problems.extend(found)
             shown.unchecked.extend(unchecked)
+
+            # 6. the mutation pass, for a pack whose origin is the session's — a
+            #    project-local, user or path pack (P2.3-D6) — on the known-good
+            #    run, as `check` runs it there: every conclusive mutation must
+            #    fail, and its controls must reach it as a check run does (no
+            #    `ctx.extra` channel).
+            if walked and known_good == "pass" and not facts.channels:
+                if bad_extra or good_extra:
+                    facts = dataclasses.replace(facts, check_channel=(bad_extra, good_extra))
+                else:
+                    try:
+                        walk = _gates.mutation_walk(spec, fn, good_ctx, verdict,
+                                                    trace=good_trace, roots=[pack_dir])
+                    except _gates.MutationCannotRun as exc:
+                        facts = dataclasses.replace(
+                            facts, walk=f"could-not-run|{str(exc).splitlines()[0]}")
+                    else:
+                        facts = dataclasses.replace(
+                            facts, walk=f"errored|{walk.flaky}" if walk.flaky else "",
+                            mutation=(sum(1 for r in walk.results if r.outcome == "fail"),
+                                      len(walk.results), len(walk.inconclusive)),
+                            boundary=walk.boundary)
+                token = _verdicts._qualification(facts)
+                if token and _verdicts.parse_token(token)[0].split(":")[0] in (
+                        "mutation", "channels"):
+                    shown.problems.append(f"{spec.id}: unqualified: "
+                                          f"{_report.qualification_reason(token)}")
+            shown.qualifications[spec.id] = facts
     finally:
         if out_dir is None:
             shutil.rmtree(base, ignore_errors=True)
     return shown
+
+
+def _walked_origin(pack_dir: str) -> bool:
+    """Does the mutation pass apply to this pack's gates — is it NOT one of the
+    packs that ship with the spine (``BUNDLED_PACKS``)? The rule
+    ``verdicts._mutation_applies`` reads for ``check`` (P2.3-D6)."""
+    bundled = os.path.realpath(BUNDLED_PACKS)
+    here = os.path.realpath(pack_dir)
+    return not (here == bundled or here.startswith(bundled.rstrip(os.sep) + os.sep))
 
 
 def _isolation_problems(pack_dir: str, registry: Any, spec: GateSpec, fn: Any,

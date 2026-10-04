@@ -89,6 +89,9 @@ def _load(ctx: GateContext, gate_id: str):
     settles="bill of materials completeness",
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:unpriced_line",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line's unit_price blanked out — the single most common real BOM "
              "defect. Nothing else about the part changes, and the roll-up that "
              "silently treats it as free is exactly what this gate refuses",
@@ -169,6 +172,9 @@ def complete(ctx: GateContext) -> Verdict:
     needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:price_shock",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line repriced so that part alone costs ten times the whole per-unit "
              "budget — the re-quote that arrives the week you order. One number "
              "moves; quantities, vendors and charges are untouched",
@@ -266,6 +272,9 @@ def cost(ctx: GateContext) -> Verdict:
     #    The edge can land once bom.complete's quantity half is its own guard.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:end_of_life",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line's lifecycle moved to 'eol' — the notice that arrives by email "
              "and gets filed. Price, quantity and vendor are unchanged; only the "
              "part's future is",
@@ -435,6 +444,9 @@ def availability(ctx: GateContext) -> Verdict:
     needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:brutal_moq",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line's MOQ raised far past what the build needs, on the line whose "
              "price makes the overbuy real money. The part, the price, the order "
              "multiple and the design are unchanged — only the smallest quantity the "
@@ -570,6 +582,9 @@ def moq(ctx: GateContext) -> Verdict:
     #    capability violation behind a skip naming the wrong root.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:outside_capability",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one declared process attribute moved outside the vendor's stated set — "
              "a finish the quoted line does not offer, or a tolerance ten times "
              "tighter than the process holds — written everywhere the document "
@@ -633,6 +648,9 @@ def process_rules(ctx: GateContext) -> Verdict:
     #    counted here as no second source (the conservative direction).
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:lost_second_source",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="the second source goes away, with nothing written down — expressed on "
              "each line in the terms that line records: the lines that name a "
              "MANUFACTURER keep both distributors and lose the qualified alternate "
@@ -746,6 +764,9 @@ def single_source(ctx: GateContext) -> Verdict:
     # not orderable), so the guard would pre-empt the control.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:foreign_quote",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line re-quoted in a currency the document holds no fx rate for — "
              "the vendor who sends the second quote on their own price list. The "
              "part, the quantity, the vendor and the number itself are unchanged; "

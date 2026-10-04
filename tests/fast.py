@@ -13,7 +13,24 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine: 89 s measured
+The budget is 90 s as ONE process on an otherwise idle machine — and P2.3 is
+OVER it, said here rather than hidden: 101 s measured 2026-10-03 (load average
+1.1-1.5; 74 s user) against 90 s for the P2.2 list on the same machine within
+the hour (65 s user). What crossed, measured test by test: P2.3's own classes
+(~4 s: QualificationIsPaired's in-process cases, the walk's cases, V3, V4, V8)
+and qualification's cost in every CLI test that runs a control — a known-good
+half and a walk beside each known-bad one — spread at 0.2-0.9 s over some
+thirty tests (+6 s). Moved out, named in LEFT_FOR_THE_GATE with their reasons:
+the walk judged on real evaluators and the tripwire's scan (~19 s), the
+600-key budget case (9.5 s), the early-cutoff and walk-keying cases (2.4 s),
+inconclusive across the channels (0.9 s), S-25's bulk readers (2.2 s), and V11
+and C12 to the full suite; and the walk's module-closure scan is now made once
+per walk (`modelio.closure_scope`: 4.2 -> 1.7 s on the first 60-gate sweep).
+Not moved, though each would fit the budget: the records sweeps and the bundled
+seal tests — each carries a "what got through without it" above, and a tier
+that drops a guard against a slip it once missed to meet a clock is the trade
+this file refuses; the next change that touches the fast tier pays this back
+first. Before: 89 s measured
 2026-10-03 (load average 0.8-1.5; 64 s user) after the review of P2.2 grew
 AnErroredPrerequisiteStaysLouder (+1.2 s: the dependent's own skip and refusal
 behind a crashed guard, and the ranking within Skipped) and added
@@ -67,6 +84,9 @@ out below are the channels that code carries:
   in `gates.py`; the recording loader in `modelio.py`; `FileDigests` in
   `util.py`) -> `test_admission`, `test_staleness`, `test_cache`,
   `test_check_cache` and `test_gate_context`;
+* the qualification — `gates.mutation_walk`, `verdicts._run_control`,
+  `_qualification` and the strict reader of a control entry (P2.3) ->
+  `test_admission` and `test_mutation` whole, and `test_packs`;
 * a command's code in `cli.py`, `store.py`, a record writer or a migration ->
   `test_records` (every command on a legacy project, and the shims);
 * a pack's fixtures or baseline, the fixture context in `gates.py`, or
@@ -129,8 +149,12 @@ FAST: list[str] = [
     # every renderer — in process on the report's own renderers, and through
     # one planted project that runs every command once (the commands cost the
     # time: ~5 s, the in-process half <1 s). With the ratchet that names where
-    # today is quieter (ErrorNotYetLouder), and the command tripwire.
-    "test_louder",
+    # today is quieter (ErrorNotYetLouder), and the command tripwire. P2.3's
+    # V11 — an unqualified evaluator never wears an outcome tag, on every
+    # channel of a project of its own (~2 s) — is left to the full suite: the
+    # word routing it reads is held here by `QualificationWordsComeFromOneTable`.
+    "test_louder.ErrorIsLouder",
+    "test_louder.WorstIsTheMostUrgent",
     # Today's resolve_status table, the report's section order, and invariant 4
     # over a pass beside an evaluator that is not admitted — in process, and
     # end to end on a gate refused at its first check (eight commands, the
@@ -147,12 +171,45 @@ FAST: list[str] = [
     "test_vocabulary.StatusLinesSpeakTheTable",
     "test_vocabulary.StatusWordsComeFromOneTable",
     "test_vocabulary.ReadyIsThePredicate",
+    # P2.3's words (V4): patching `HUMAN["qualification"]` moves every channel
+    # that shows a qualification, and none says a §2 Never-say. One bracket copy,
+    # every command twice, in process. ~3 s.
+    "test_vocabulary.QualificationWordsComeFromOneTable",
     "test_json_keys",
     "test_owner",
-    # Planned invariant 15: the mutation harness, its planted runners, the
-    # tripwire, and the reference and planted runners over the bracket's six
-    # gates and a bundled pack's eight. ~2.3 s.
-    "test_mutation",
+    # Invariant 15 (P2.3): the mutation harness — the plan rule, the seal, the
+    # planted runners each caught by the rule it breaks, the tripwire's own
+    # negative control, and inconclusive never a fail on any channel. ~3.5 s.
+    # The spine's walk judged over the bracket's six gates and a bundled pack's
+    # eight, the tripwire's scan of the spine (which judges every subject on
+    # those gates), and the sweep's own pass are left to the gate (below): ~19 s
+    # together, where the whole module was 2.3 s before the walk existed.
+    "test_mutation.MutationIsSealed.test_a_conclusive_pass_reported_as_a_fail_is_caught",
+    "test_mutation.MutationIsSealed.test_a_line_that_miscounts_honest_results_is_caught",
+    "test_mutation.MutationIsSealed.test_a_mutation_that_aliases_the_known_good_design_is_caught",
+    "test_mutation.MutationIsSealed.test_a_mutation_that_writes_into_a_pack_is_caught",
+    "test_mutation.MutationIsSealed.test_a_mutation_that_writes_into_the_tree_is_caught",
+    "test_mutation.MutationIsSealed.test_a_plan_that_breaks_every_type_is_caught",
+    "test_mutation.MutationIsSealed.test_a_plan_that_moves_between_calls_is_caught",
+    "test_mutation.MutationIsSealed.test_a_runner_that_drops_an_inconclusive_mutation_is_caught",
+    "test_mutation.MutationIsSealed.test_a_runner_that_hides_its_survivors_is_caught",
+    "test_mutation.MutationIsSealed.test_a_runner_that_omits_the_survivor_from_its_own_plan_is_caught",
+    "test_mutation.MutationIsSealed.test_a_runner_that_plans_after_seeing_is_caught",
+    "test_mutation.MutationIsSealed.test_a_survivor_reported_as_a_fail_is_caught_whatever_the_gate_returns",
+    "test_mutation.MutationIsSealed.test_a_tracer_that_under_records_is_caught",
+    "test_mutation.MutationIsSealed.test_a_write_then_restore_is_caught_by_the_hook",
+    "test_mutation.MutationIsSealed.test_a_write_then_restore_through_a_directory_fd_is_caught",
+    "test_mutation.MutationIsSealed.test_an_honest_line_in_other_words_is_held_by_its_numbers",
+    "test_mutation.MutationIsSealed.test_an_inconclusive_mutation_reported_as_a_fail_is_caught",
+    "test_mutation.MutationIsSealed.test_bytecode_written_into_the_tree_is_caught",
+    "test_mutation.MutationIsSealed.test_every_runner_the_plan_rule_exists_for_is_caught",
+    "test_mutation.MutationIsSealed.test_ignored_scratch_under_the_project_is_caught",
+    "test_mutation.MutationIsSealed.test_none_conclusive_says_so",
+    "test_mutation.MutationIsSealed.test_the_honest_runner_passes_every_check",
+    "test_mutation.MutationIsSealed.test_the_ladder_floor_refuses_what_it_forbids",
+    "test_mutation.MutationIsSealed.test_the_oracle_agrees_with_the_ground_truth",
+    "test_mutation.MutationIsSealed.test_the_oracle_reads_a_gate_as_run_gate_does",
+    "test_mutation.MutationIsSealed.test_the_tripwire_refuses_what_it_forbids",
     # Freshness, admission state and the one resolver: what any reader may call
     # current. Invariants 7 and 9 are read through it. 2.1 s.
     "test_freshness",
@@ -195,6 +252,38 @@ FAST: list[str] = [
     # A missing tool reads skipped, never "not admitted"; availability comes
     # before admission. 0.4 s.
     "test_admission.SweepOrder",
+    # Invariant 9's paired rule (P2.3, V1 and V2): both controls, in process on
+    # one planted project per case — an always-False gate, a known-bad-shown one,
+    # a crashed half, channels, tiers, the early cutoff over both halves; and
+    # every conclusive mutation a fail — a gate keyed to its own control, a
+    # hidden limit at three distances, the walk aimed, inconclusive counted
+    # neither way. ~5 s. The 600-key budget case (9.5 s) is left to the gate.
+    "test_admission.QualificationIsPaired.test_an_always_false_gate_is_unqualified_and_its_claim_a_gap",
+    "test_admission.QualificationIsPaired.test_an_always_raising_gate_declared_expect_error_is_unqualified",
+    "test_admission.QualificationIsPaired.test_a_known_good_crash_is_remembered_never_cached",
+    "test_admission.QualificationIsPaired.test_known_bad_shown_is_a_gap",
+    "test_admission.QualificationIsPaired.test_a_pass_beside_a_known_bad_shown_evaluator_is_never_checked",
+    "test_admission.QualificationIsPaired.test_an_incomplete_current_entry_is_a_miss",
+    "test_admission.QualificationIsPaired.test_a_hand_placed_paired_entry_that_does_not_follow_is_refused",
+    "test_admission.QualificationIsPaired.test_force_reruns_both_halves_and_the_walk_over_a_forged_paired_entry",
+    "test_admission.QualificationIsPaired.test_controls_reaching_it_through_different_channels_are_unqualified",
+    "test_admission.QualificationIsPaired.test_a_host_key_passed_through_is_a_channel",
+    "test_admission.QualificationIsPaired.test_a_gate_that_skips_its_own_known_good_is_unqualified",
+    "test_admission.QualificationIsPaired.test_a_missing_tool_reads_skipped_and_runs_neither_half",
+    "test_admission.QualificationIsPaired.test_entries_that_disagree_across_tiers_are_unqualified",
+    "test_admission.QualificationIsPaired.test_an_unqualified_reason_never_reads_pending_after_the_fixture_code_moves",
+    "test_admission.EveryConclusiveMutationMustFail.test_a_hidden_limit_is_unqualified_at_three_distances",
+    "test_admission.EveryConclusiveMutationMustFail.test_a_recorded_conclusive_pass_is_unqualified_wherever_the_pack_sits",
+    "test_admission.EveryConclusiveMutationMustFail.test_a_temp_dir_inside_the_project_stops_the_walk_loudly",
+    "test_admission.EveryConclusiveMutationMustFail.test_a_walk_error_that_does_not_repeat_is_held",
+    "test_admission.EveryConclusiveMutationMustFail.test_a_walk_that_makes_no_mutation_says_why",
+    "test_admission.EveryConclusiveMutationMustFail.test_an_evaluator_keyed_to_its_control_is_unqualified",
+    "test_admission.EveryConclusiveMutationMustFail.test_an_evaluator_with_no_mutable_read_qualifies_on_its_controls",
+    "test_admission.EveryConclusiveMutationMustFail.test_an_inconclusive_mutation_counts_neither_way",
+    "test_admission.EveryConclusiveMutationMustFail.test_extra_channel_controls_outside_the_bundled_packs_are_unqualified",
+    "test_admission.EveryConclusiveMutationMustFail.test_the_walk_is_aimed",
+    # The control entry's paired shape and its strict reader (V8). 0.1 s.
+    "test_cache.PairedEntries",
 
     # -- invariant 7: stale is not current (test_staleness is ~95 s whole) - #
     # Every in-process channel: same-size edits with mtime restored, the racy
@@ -208,7 +297,6 @@ FAST: list[str] = [
     "test_staleness.StaleIsNotCurrent.test_a_subprocess_reading_an_unlisted_file_is_never_fresh",
     "test_staleness.StaleIsNotCurrent.test_a_spawned_worker_reading_a_project_file_is_never_fresh",
     "test_staleness.StaleIsNotCurrent.test_s23_a_claim_record_edit",
-    "test_staleness.StaleIsNotCurrent.test_s25_each_bulk_reader_top_level_and_nested",
     "test_staleness.StaleIsNotCurrent.test_a_missing_key_that_appears",
     "test_staleness.StaleIsNotCurrent.test_a_named_file_that_appears_after_its_existence_check",
     "test_staleness.StaleIsNotCurrent.test_every_existence_and_kind_question_is_an_input",
@@ -241,6 +329,8 @@ FAST: list[str] = [
     "test_staleness.StaleIsNotCurrent.test_s20_cli_a_filtered_first_check_then_an_input_change",
     "test_staleness.StaleIsNotCurrent.test_s21_cli_a_model_that_does_not_load_proves_nothing",
     "test_staleness.StaleIsNotCurrent.test_s32_cli_a_dry_check_leaves_a_moved_gate_stale",
+    # (S-25's bulk readers, fourteen gates qualified on one sweep — 2.2 s since
+    # P2.3 walks each — are left to the gate, below.)
 
     # -- invariant 10: a prerequisite not established is never a pass ----- #
     # The rule in the run loop, the resolver and the composition, with the
@@ -319,6 +409,30 @@ FAST: list[str] = [
 # leaving it to the full suite is safe. FastTierHoldsEveryInvariant reads this
 # list: a test of an invariant class must be named in FAST or here.
 LEFT_FOR_THE_GATE: list[str] = [
+    # Invariant 15 on the real walk (P2.3): `gates.mutation_walk` judged by the
+    # harness over the bracket's six gates and beam-analytic's eight, the
+    # tripwire's scan (it judges every subject on those gates too), the hiding
+    # and type-breaking plans on real evaluators, and the sweep's pass writing
+    # nothing. ~19 s together. The rule each holds is held in process above, on
+    # the planted runners; what these add is the spine's runner on real gates,
+    # which is walk code: an iteration touching `gates.mutation_walk` or
+    # `verdicts._run_control` runs test_mutation and test_admission whole.
+    "test_mutation.MutationIsSealed.test_every_mutation_entry_point_is_a_subject",
+    "test_mutation.MutationIsSealed.test_the_subject_harness_holds_real_evaluators",
+    "test_mutation.MutationIsSealed.test_hiding_and_type_breaking_plans_are_caught_on_real_evaluators",
+    "test_mutation.MutationIsSealed.test_the_sweeps_mutation_pass_writes_nothing",
+    # The walk's budget on a 600-key evaluator (9.5 s): the value that moves its
+    # value walked first, and the rest named not mutated. Same escalation.
+    "test_admission.EveryConclusiveMutationMustFail.test_the_budget_walks_the_value_that_moves_first",
+    # The early cutoff over both halves, and a value only a mutated run reads
+    # keyed (V1i, V1j): ~1.2 s each, two `DRIVER` processes per step. The
+    # cutoff is keying code: same escalation as the walk's.
+    "test_admission.QualificationIsPaired.test_the_early_cutoff_compares_both_halves",
+    "test_admission.QualificationIsPaired.test_a_value_only_a_mutated_run_reads_is_keyed",
+    # Inconclusive never a fail, on `check`, `gate show` and `gate selftest` of
+    # a bracket copy (0.9 s): the rule is held in process above by the planted
+    # runners; the channels are renderer code (module docstring).
+    "test_mutation.MutationIsSealed.test_an_inconclusive_mutation_is_never_a_fail_anywhere",
     # Admission through the CLI, one channel each: a pack asset, a fixture or
     # gate module read at import or loaded at run time, the costlier tier's path,
     # a claim edit under a live control, a fixture deriving its known-bad from
@@ -347,6 +461,10 @@ LEFT_FOR_THE_GATE: list[str] = [
     "test_admission.AdmissionIsDemonstrated.test_cli_a_known_good_that_loads_the_live_model_at_run_time_is_keyed",
     "test_admission.AdmissionIsDemonstrated.test_cli_a_helper_a_fixture_loads_at_run_time_is_keyed",
     "test_admission.AdmissionIsDemonstrated.test_cli_a_limit_a_gate_loads_at_run_time_is_keyed",
+    # S-25's fourteen bulk readers on one sweep: 2.2 s once P2.3 walked each
+    # gate's reads. Every reader shape is a tracer case; an iteration touching
+    # the tracer runs test_staleness whole (module docstring).
+    "test_staleness.StaleIsNotCurrent.test_s25_each_bulk_reader_top_level_and_nested",
     # Staleness through the CLI. Most replay an in-process scenario listed in
     # FAST (other-inputs crash, cheap vs costlier path, a file that appears, a
     # helper edit) through `check`; the rest are ingest, a factory-made gate and

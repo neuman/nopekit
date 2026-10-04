@@ -108,6 +108,7 @@ Run:  PYTHONPATH=src python3 -m unittest tests.test_admission -v
 """
 from __future__ import annotations
 
+import collections
 import dataclasses
 import glob
 import importlib.util
@@ -116,12 +117,14 @@ import os
 import py_compile
 import re
 import sys
+import tempfile
 import textwrap
 import unittest
 import xml.etree.ElementTree as ET
 from unittest import mock
 
 from atompipe import claims, gates, modelio, store, verdicts
+from atompipe import packs as packs_mod
 from atompipe import report as report_mod
 from atompipe.models import Claim, ClaimStatus, GateSpec, Ledger, NegativeControl, Verdict
 
@@ -210,7 +213,14 @@ def huge(ctx):
 '''
 
 #: S-07's fixture, literally. Its own file, so it needs no known-good module and
-#: runs in a project that has none (the test's negative control).
+#: runs in a project that has none (the test's negative control). Its gate
+#: declares its known-good control as a fixture of its own (``good=``, P2.3):
+#: ``selftest/good.py`` is KNOWN_GOOD's text, its ``context`` the stated 8.0
+#: design, written in every planted project. Without one the live-host project
+#: has no known-good control, and the identity fixture's lie on that host —
+#: what the negative control shows — would hide behind "known-good not run";
+#: and a known-good HOST at a failing design (``data/kg.json`` at 2.0) would
+#: be its known-good control too, and fail it.
 IDENTITY = '''\
 def make(ctx):
     return ctx
@@ -274,7 +284,8 @@ def defl(ctx):
 
 
 @gate(id="t.ident", title="t", claims=["ident"],
-      negative_control=NegativeControl(fixture="selftest/ident.py"))
+      negative_control=NegativeControl(fixture="selftest/ident.py",
+                                       good="selftest/good.py:context"))
 def ident(ctx):
     return _defl("t.ident", ctx)
 
@@ -352,6 +363,7 @@ def plant_admission_project(root: str, *, thickness: float = 8.0,
     write(root, "model/m.py", MODEL.format(thickness=repr(float(thickness))))
     write(root, "gates/g.py", GATES)
     write(root, "selftest/ident.py", IDENTITY)
+    write(root, "selftest/good.py", KNOWN_GOOD)
     if known_good:
         write(root, "selftest/known_good.py", KNOWN_GOOD)
         write(root, "selftest/bad.py", FIXTURES)
@@ -410,8 +422,14 @@ def main():
     ap.add_argument("--no-record", action="store_true")
     ap.add_argument("--only", action="append")
     ap.add_argument("--tier", type=int, default=0)
+    ap.add_argument("--plant", default="")
     a = ap.parse_args()
     root = os.path.abspath(a.root)
+    if a.plant:
+        # A planted violator, patched into THIS process before anything runs:
+        # the code-editing scenarios run here, out of the test's reach.
+        with open(a.plant, encoding="utf-8") as fh:
+            exec(fh.read(), {"verdicts": verdicts, "gates": gates, "dataclasses": dataclasses})
     with open(a.claims, encoding="utf-8") as fh:
         ledger = Ledger(claims=[Claim.from_dict(row) for row in json.load(fh)])
     if a.model:
@@ -430,6 +448,7 @@ def main():
                                 max_tier=a.tier, only=a.only, force=a.force,
                                 record=not a.no_record, now=NOW)
         out["rows"] = {r.verdict.gate: {"outcome": r.verdict.outcome, "error": r.verdict.error,
+                                        "unqualified": r.verdict.unqualified,
                                         "executed": r.executed, "cached": r.cached,
                                         "fresh": r.fresh,
                                         "admission": (r.admission.state if r.admission
@@ -449,6 +468,7 @@ def main():
                                        stale_gates=resolution.stale_gates).items()}
     out["stale_gates"] = sorted(resolution.stale_gates)
     out["resolved"] = {v.gate: v.outcome for v in resolution.verdicts}
+    out["unqualified"] = {v.gate: v.unqualified for v in resolution.verdicts if v.unqualified}
     out["admission"] = {gid: (row.admission.state if row.admission else None)
                         for gid, row in resolution.rows.items()}
     print(json.dumps(out))
@@ -476,9 +496,11 @@ class Driven:
     def set_projection(self, projection: dict) -> None:
         self.projection_path = write(self.home, "projection.json", json.dumps(projection))
 
-    def run(self, *args: str, mode: str = "sweep") -> dict:
+    def run(self, *args: str, mode: str = "sweep", plant: str = "") -> dict:
         argv = [sys.executable, self.driver, self.root, "--claims", self.claims,
                 "--mode", mode]
+        if plant:
+            argv += ["--plant", write(self.home, "plant.py", plant)]
         argv += ["--model", self.model] if self.model else ["--projection",
                                                             self.projection_path]
         proc = _env.run([*argv, *args], cwd=self.home)
@@ -835,6 +857,47 @@ def context(ctx):
 #: module-form fixture tests replace with an importable `module:function`.
 SHELF_FIXTURE_DECL = 'fixture="selftest/bad.py:long"'
 
+#: The shelf's known-good design (P2.3), the ``good=`` fixture every shelf gate
+#: declares (:func:`write_shelf_gate`). Stated in full, nothing of its host
+#: read: span 40 mm (and the reach the model echoes), C1 at 100 mm for the gate
+#: that takes its limit off the claim. 40, not the live 80: repro D tightens a
+#: limit to 50 mm to make the live design fail, and the known-good design must
+#: still pass it, or the gate reads unqualified where the test means Not met. A
+#: fixture rather than a ``selftest/known_good.py``: most of these projects are
+#: the LIVE-host case on purpose — no known-good design, the known-bad fixture
+#: handed the live host — and a known_good.py would have made every one of them
+#: a known-good host, and the live-host guards untested.
+SHELF_GOOD = '''\
+import dataclasses
+
+from atompipe.models import Acceptance, Claim, Ledger
+
+
+def shelf(ctx):
+    claim = Claim(id="C1", statement="Span within 100 mm",
+                  acceptance=Acceptance(quantity="span", limit=100.0))
+    return dataclasses.replace(ctx, params={"span": 40.0, "reach": 40.0},
+                               ledger=Ledger(claims=[claim]))
+'''
+
+#: How a shelf gate declares that known-good control.
+SHELF_GOOD_DECL = 'good="selftest/good.py:shelf", '
+
+
+def write_shelf_gate(project: str, source: str) -> None:
+    """``gates/g.py`` as ``source``, every shelf gate in it declaring the
+    known-good control :data:`SHELF_GOOD` (``good=``, P2.3), and that control's
+    fixture beside it. Declared here, once, rather than in each gate constant:
+    the constants are the review repros as filed, and their fixture lines are
+    what the module-form and outside-``selftest/`` tests rewrite."""
+    decl = "NegativeControl(fixture="
+    if decl not in source:
+        raise AssertionError("a shelf gate whose control is not declared as "
+                             f"{decl!r}: write_shelf_gate cannot add its known-good control")
+    write(project, "gates/g.py", source.replace(decl, "NegativeControl(" + SHELF_GOOD_DECL
+                                                + "fixture="))
+    write(project, "selftest/good.py", SHELF_GOOD)
+
 #: The known-bad span line of `SHELF_LONG`, and the same-size edit that
 #: defuses it: `040.0` is 40 mm, which the gate accepts. Same size on purpose —
 #: with the source's mtime put back, a `.pyc` beside it still validates, and
@@ -1149,21 +1212,26 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         with open(os.path.join(p.root, ".atompipe", "verdicts", files[0]),
                   encoding="utf-8") as fh:
             entry = json.load(fh)
+        # R-6 (P2.3): "paired", where P2.2 filed "reject-only" — the known-good
+        # half ran too, on selftest/known_good.py, and passed.
         self.assertEqual((entry["bad"], entry["admitted"], entry["host"]),
-                         ("fail", "reject-only", "known-good"))
+                         ("fail", "paired", "known-good"))
         self.assertEqual(p.statuses()["C1"], ClaimStatus.PASS,
                          "the positive control: an admitted, fresh PASS reads PASS")
 
     def test_an_always_true_gate_never_yields_pass(self):
         # A logger with a declared control produced PROVEN rows (S-05). Its
         # control runs, the gate PASSES its own known-bad input, and the gate is
-        # not admitted — its function is never called on the real design.
-        p = Project(self)
+        # not admitted — its function is never called on the real design. The
+        # live design at 7.0, not the default 8.0 (R-6, P2.3): the known-good
+        # half now calls the gate on the known-good 8.0 design, and a live design
+        # equal to it made "never called on the real input" unaskable by value.
+        p = Project(self, thickness=7.0)
         first = p.sweep(only=["t.always"])
         got = row(first, "t.always")
         self.assertEqual(got.verdict.outcome, "error")
-        self.assertTrue(got.verdict.error.startswith("not admitted: "), got.verdict.error)
-        self.assertIn("PASSED its own known-bad", got.verdict.error)
+        self.assertTrue(got.verdict.error.startswith("unqualified: "), got.verdict.error)
+        self.assertIn("known-bad:pass", got.verdict.error)
         self.assertFalse(got.executed)
         live = float(p.projection["derived"]["deflection"])
         self.assertNotIn(("t.always", live), p.gate_module.CALLS,
@@ -1197,9 +1265,8 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         p = Project(self, thickness=7.0)
         got = row(p.sweep(only=["t.ident"]), "t.ident")
         self.assertEqual(got.admission.state, "not-admitted", got.admission)
-        self.assertIn("PASSED its own known-bad fixture selftest/ident.py",
-                      got.admission.reason)
-        self.assertTrue(got.verdict.error.startswith("not admitted: "), got.verdict)
+        self.assertEqual("known-bad:pass", got.admission.reason)
+        self.assertTrue(got.verdict.error.startswith("unqualified: "), got.verdict)
         with open(os.path.join(p.root, ".atompipe", "verdicts",
                                control_files(p.root)[0]), encoding="utf-8") as fh:
             entry = json.load(fh)
@@ -1264,8 +1331,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         got = row(p.sweep(only=["t.ident"]), "t.ident")
         self.assertEqual(got.admission.state, "not-admitted", got.admission)
         self.assertTrue(got.admission.executed, "the moved input must re-run the control")
-        self.assertIn("PASSED its own known-bad fixture selftest/ident.py",
-                      got.admission.reason)
+        self.assertEqual("known-bad:pass", got.admission.reason)
         self.assertNotEqual(p.statuses()["C2"], ClaimStatus.PASS)
 
     def test_force_reruns_every_control_and_a_changed_outcome_is_not_admitted(self):
@@ -1285,7 +1351,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         forced = p.sweep(force=True)
         got = row(forced, "t.defl")
         self.assertEqual(got.admission.state, "not-admitted", got.admission)
-        self.assertIn("control outcome differs from its cached entry", got.admission.reason)
+        self.assertTrue(got.admission.reason.startswith("control:differs|"), got.admission.reason)
         self.assertNotEqual(p.statuses()["C1"], ClaimStatus.PASS)
         after = p.sweep()
         self.assertEqual(row(after, "t.defl").admission.state, "not-admitted",
@@ -1325,8 +1391,8 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                          "the verdict cache would have served the PASS")
         got = second["rows"]["t.defl"]
         self.assertEqual(got["outcome"], "error")
-        self.assertTrue(got["error"].startswith("not admitted: "), got)
-        self.assertIn("PASSED its own known-bad", got["error"])
+        self.assertTrue(got["error"].startswith("unqualified: "), got)
+        self.assertIn("known-bad:pass", got["error"])
         self.assertTrue(got["control_executed"])
         self.assertFalse(got["executed"])
         self.assertNotEqual(second["statuses"]["C1"], "pass")
@@ -1389,7 +1455,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         second = d.run("--only", "t.defl")
         got = second["rows"]["t.defl"]
         self.assertEqual(got["admission"], "not-admitted", got)
-        self.assertIn("PASSED its own known-bad", got["error"])
+        self.assertIn("known-bad:pass", got["error"])
         self.assertNotEqual(second["statuses"]["C1"], "pass")
 
     # -- the CLI: the same holes through `check`, `status` and `report` -------- #
@@ -1420,9 +1486,8 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(code, 1)
         got = verdict_row(data, "bracket.bending_stress")
         self.assertEqual(got["outcome"], "error", got)
-        self.assertTrue(got["error"].startswith("not admitted: "), got)
-        self.assertIn("PASSED its own known-bad fixture selftest/bad_configs.py:overloaded",
-                      got["error"])
+        self.assertTrue(got["error"].startswith("unqualified: "), got)
+        self.assertIn("known-bad:pass", got["error"])
         self.assertEqual(data["counts"]["executed"], 0,
                          "no gate ran on the design: every entry was Fresh, and the "
                          "refused gate is never called")
@@ -1455,8 +1520,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                 self.assertEqual(code, 1)
                 got = verdict_row(data, "bracket.deflection")
                 self.assertEqual(got["outcome"], "error", got)
-                self.assertIn("not admitted: PASSED its own known-bad fixture "
-                              "selftest/bad_configs.py:quarter_thickness", got["error"])
+                self.assertIn("unqualified: known-bad:pass", got["error"])
                 self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
                 if attempt == "first":
                     # structural.py is every bracket gate's code: all six re-key,
@@ -1489,8 +1553,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(code, 1)
         got = verdict_row(data, "bracket.bending_stress")
         self.assertEqual(got["outcome"], "error", got)
-        self.assertIn("not admitted: PASSED its own known-bad fixture "
-                      "selftest/bad_configs.py:overloaded", got["error"])
+        self.assertIn("unqualified: known-bad:pass", got["error"])
         self.assertEqual(blocking_ids(data).get("C2"), "unclaimed", data["blocking"])
         self.assertEqual(data["counts"]["executed"], len(BRACKET_GATES) - 1,
                          "every gate ran but the refused one")
@@ -1524,8 +1587,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                 self.assertEqual(code, 1)
                 got = verdict_row(data, "bracket.deflection")
                 self.assertEqual(got["outcome"], "error", got)
-                self.assertIn("not admitted: PASSED its own known-bad fixture "
-                              "selftest/bad_configs.py:quarter_thickness", got["error"])
+                self.assertIn("unqualified: known-bad:pass", got["error"])
                 newest = [read_control(project, "bracket.deflection", name)
                           for name in control_names(project)["bracket.deflection"]]
                 refusals = [e for e in newest if e["bad"] == "pass"]
@@ -1548,7 +1610,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         S-07 again, and M13.3 broken."""
         project = os.path.join(self.tmp(), "shelf")
         write(project, "model/shelf.py", SHELF_MODEL.format(span="150.0"))
-        write(project, "gates/g.py", SHELF_GATE)
+        write_shelf_gate(project, SHELF_GATE)
         write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
         write(project, "selftest/known_good.py", SHELF_PASSTHROUGH_KNOWN_GOOD)
         write(project, "selftest/bad.py", SHELF_IDENTITY)
@@ -1562,7 +1624,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         code, data = check_json(self, project)
         got = verdict_row(data, "shelf.span")
         self.assertEqual(got["outcome"], "error", got)
-        self.assertTrue(got["error"].startswith("not admitted: "), got)
+        self.assertTrue(got["error"].startswith("unqualified: "), got)
         self.assertEqual(code, 1, "an identity fixture admitted the live design")
         self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
@@ -1590,7 +1652,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         sweep counts is one its own path fired."""
         project = os.path.join(self.tmp(), "shelf")
         write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
-        write(project, "gates/g.py", SHELF_GATE_COSTLY_LOGGER)
+        write_shelf_gate(project, SHELF_GATE_COSTLY_LOGGER)
         write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
         write(project, "selftest/known_good.py", SHELF_KNOWN_GOOD)
         write(project, "selftest/bad.py", SHELF_LONG)
@@ -1608,8 +1670,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         code, data = check_json(self, project, "--tier", "2")
         got = verdict_row(data, "shelf.span")
         self.assertEqual(got["outcome"], "error", got)
-        self.assertIn("not admitted: PASSED its own known-bad fixture selftest/bad.py:long",
-                      got["error"])
+        self.assertIn("unqualified: known-bad:pass", got["error"])
         self.assertEqual(data["counts"]["controls"]["executed"], 1,
                          "the tier-2 path's control never ran: the tier-0 one was served")
         self.assertEqual(code, 1, "a tier-2 sweep admitted a path that passes 400 mm")
@@ -1647,7 +1708,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         ``check --tier 2`` can settle it, so that is what the reason says."""
         project = os.path.join(self.tmp(), "shelf")
         write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
-        write(project, "gates/g.py", SHELF_GATES_TIERED)
+        write_shelf_gate(project, SHELF_GATES_TIERED)
         write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
         write(project, "selftest/known_good.py", SHELF_KNOWN_GOOD)
         write(project, "selftest/bad.py", SHELF_LONG)
@@ -1655,7 +1716,9 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         junit = os.path.join(project, ".atompipe", "out", "junit.xml")
         last_check = os.path.join(project, ".atompipe", "cache", "last_check.json")
-        advice = "run atompipe check --tier 2"
+        # D18's words (R-6): "not yet qualified at this version — atompipe check
+        # --tier 2 qualifies it", where P2.2 said "... — run atompipe check --tier 2".
+        advice = "atompipe check --tier 2 qualifies it"
 
         # The positive controls: tier 2 proves C1, and a plain tier-0 check
         # serves that tier-2 entry as current — admitted by the records alone.
@@ -1744,7 +1807,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         ``claim:C1`` on the host it should have, and C1 under PROVEN."""
         project = os.path.join(self.tmp(), "shelf")
         write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
-        write(project, "gates/g.py", SHELF_GATE_FROM_CLAIM)
+        write_shelf_gate(project, SHELF_GATE_FROM_CLAIM)
         write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
         write(project, "selftest/bad.py", fixture)
         if known_good is not None:
@@ -1796,8 +1859,8 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                          f"the moved claim must re-run the control: {data['counts']}")
         got = verdict_row(data, "shelf.span")
         self.assertEqual(got["outcome"], "error", got)
-        self.assertTrue(got["error"].startswith("not admitted: "), got)
-        self.assertIn("PASSED its own known-bad fixture selftest/bad.py:long", got["error"])
+        self.assertTrue(got["error"].startswith("unqualified: "), got)
+        self.assertIn("known-bad:pass", got["error"])
         self.assertEqual(code, 1, "a control defused by a claim edit admitted its gate")
         self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertEqual(self._last_selftest(project)["admission"], "not-admitted")
@@ -1859,7 +1922,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         code, data = check_json(self, project)
         self.assertEqual(data["counts"]["controls"]["executed"], 1, data["counts"])
         got = verdict_row(data, "shelf.span")
-        self.assertIn("PASSED its own known-bad fixture selftest/bad.py:long", got["error"])
+        self.assertIn("known-bad:pass", got["error"])
         self.assertEqual(code, 1)
         self.assertNotIn("C1", proven_section(self, project))
 
@@ -1876,7 +1939,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         and C1 under PROVEN)."""
         project = os.path.join(self.tmp(), "shelf")
         write(project, "model/shelf.py", SHELF_MODEL.format(span=span))
-        write(project, "gates/g.py", gate.replace(SHELF_FIXTURE_DECL, SHELF_OUTSIDE_DECL))
+        write_shelf_gate(project, gate.replace(SHELF_FIXTURE_DECL, SHELF_OUTSIDE_DECL))
         write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
         write(project, SHELF_OUTSIDE_FIXTURE, fixture)
         proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
@@ -1913,14 +1976,14 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         return entry
 
     def _defused(self, project: str,
-                 why: str = "PASSED its own known-bad fixture fixtures/bad.py:long") -> None:
+                 why: str = "known-bad:pass") -> None:
         """The fixture now builds an input the gate accepts: the control
         PASSED its own known-bad input, and neither ``check`` nor a reader
         may admit the gate. ``why`` is the refusal ``check`` names."""
         code, data = check_json(self, project)
         got = verdict_row(data, "shelf.span")
         self.assertEqual(got["outcome"], "error", got)
-        self.assertIn(f"not admitted: {why}", got["error"])
+        self.assertIn(f"unqualified: {why}", got["error"])
         self.assertEqual(code, 1, "a control the live design defused admitted its gate")
         self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertEqual(self._last_selftest(project)["admission"], "not-admitted")
@@ -2001,10 +2064,10 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         now defuses nothing; filling the memo the fixture was handed is
         refused outright, as an unusable control."""
         refusals = {
-            "model": (SHELF_SEALED_NO_MODEL, "two control outcomes recorded for identical inputs"),
-            "memo": (SHELF_SEALED_NO_MEMO, "two control outcomes recorded for identical inputs"),
+            "model": (SHELF_SEALED_NO_MODEL, "control:two-outcomes|"),
+            "memo": (SHELF_SEALED_NO_MEMO, "control:two-outcomes|"),
             "memo, filled in place": (SHELF_SEALED_FILLS_MEMO,
-                                      "control error: negative control unusable"),
+                                      "known-bad:errored|negative control unusable"),
         }
         for field, (fixture, why) in refusals.items():
             with self.subTest(field=field):
@@ -2201,7 +2264,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         project = os.path.join(self.tmp(), "shelf")
         self.assertEqual(SHELF_GATE.count(SHELF_FIXTURE_DECL), 1)
         write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
-        write(project, "gates/g.py", SHELF_GATE.replace(SHELF_FIXTURE_DECL, f'fixture="{ref}"'))
+        write_shelf_gate(project, SHELF_GATE.replace(SHELF_FIXTURE_DECL, f'fixture="{ref}"'))
         write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
         for rel, text in files.items():
             write(project, rel, text)
@@ -2224,14 +2287,14 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                          f"{data['counts']}")
         got = verdict_row(data, "shelf.span")
         self.assertEqual(got["outcome"], "error", got)
-        self.assertIn(f"not admitted: PASSED its own known-bad fixture {ref}", got["error"])
+        self.assertIn("unqualified: known-bad:pass", got["error"])
         self.assertEqual(code, 1, "a fixture edited into a no-op admitted its gate")
         self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
         self.assertNotEqual(status_json(self, project)["claims"]["C1"], "pass")
         self.assertNotIn("**C1**", proven_section(self, project))
         proc = cli(project, "gate", "selftest", "--no-record")
         self.assertNotEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn(f"PASSED its own known-bad fixture {ref}", proc.stdout)
+        self.assertIn("known-bad pass", proc.stdout)
 
     def test_cli_a_module_fixture_edited_into_a_no_op_is_not_admitted(self):
         """V: the admission review's repro C (round 1). ``load_fixture``'s
@@ -2355,7 +2418,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         is the edit's."""
         project = os.path.join(self.tmp(), "shelf")
         write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
-        write(project, "gates/g.py", SHELF_GATE_LIMIT_FROM_DATA)
+        write_shelf_gate(project, SHELF_GATE_LIMIT_FROM_DATA)
         write(project, "selftest/bad.py", SHELF_LONG)
         write(project, "inputs/data/limit.json", json.dumps({"span": 100.0}) + "\n")
         write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
@@ -2384,7 +2447,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         the model it loaded an input of that control."""
         project = os.path.join(self.tmp(), "shelf")
         write(project, "model/shelf.py", SHELF_MODEL.format(span="150.0"))
-        write(project, "gates/g.py", SHELF_GATE)
+        write_shelf_gate(project, SHELF_GATE)
         write(project, "claims/C1.json", json.dumps(SHELF_CLAIM) + "\n")
         write(project, "selftest/known_good.py", SHELF_KNOWN_GOOD_LOADS_THE_MODEL)
         write(project, "selftest/bad.py", fixture)
@@ -2490,7 +2553,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         passes at 100 mm and each claim is PROVEN."""
         project = os.path.join(self.tmp(), "shelf")
         write(project, "model/shelf.py", SHELF_MODEL.format(span="80.0"))
-        write(project, "gates/g.py", SHELF_GATES_LOAD_AT_RUN_TIME)
+        write_shelf_gate(project, SHELF_GATES_LOAD_AT_RUN_TIME)
         write(project, "gates/_tables.py", SHELF_TABLES)
         write(project, "inputs/data/limit.json", json.dumps({"span": 100.0}) + "\n")
         write(project, "lib/shelf_limits.py", "LIMIT = 100.0\n")
@@ -2629,6 +2692,1063 @@ class SweepOrder(_env.EnvCase):
         p.sweep(only=["t.defl"])
         self.assertFalse(os.path.exists(stale), "a stale file must never become a read")
         self.assertTrue(os.path.exists(keep), "the sweep's out_dir is not the control's")
+
+
+# --------------------------------------------------------------------------- #
+# P2.3: qualification — the known-good half, channel parity, the mutation pass
+# --------------------------------------------------------------------------- #
+#: The synthetic model with two knobs the qualification scenarios edit: `GAIN`
+#: scales the deflection of a section thicker than 5 mm only (the known-good 8.0
+#: and the live 9.0 move; the known-bad 2.0 and 0.5 do not), and `OVERRIDE` is a
+#: value only a mutated run of `q.override` reads (V1i, V1j).
+QMODEL = MODEL.replace('K = 1.0\n', 'K = 1.0\nGAIN = 1.0\nOVERRIDE = False\n').replace(
+    '    return {{"deflection": round(K * c.load_n * c.span / c.thickness ** 3, 6),\n',
+    '    gain = GAIN if c.thickness > 5 else 1.0\n'
+    '    return {{"deflection": round(gain * K * c.load_n * c.span / c.thickness ** 3, 6),\n'
+    '             "override": OVERRIDE,\n')
+assert QMODEL.count("GAIN") == 2 and "override" in QMODEL, "the q model replaced nothing"
+
+#: Two more known-bad fixtures beside `thin` and `huge`: a section so thin the
+#: deflection is 7200 mm (`wafer`, for the x120-margin gate), and one that hands
+#: its gate the known-bad input through `ctx.extra` (`via_extra`, V1k).
+QFIXTURES = FIXTURES + '''
+
+def wafer(ctx):
+    return _with(ctx, thickness=0.5)
+
+
+def via_extra(ctx):
+    return {"probe": True}
+'''
+
+#: The planted evaluators, each beside the honest twin it differs from by one
+#: idea. Live design 9.0 mm (1.235 mm, passes), known-good 8.0 (1.758), known-bad
+#: `thin` 2.0 (112.5), limit 2.0 — so a run on the live design, the known-good
+#: and the known-bad control are told apart by the value a gate was called on.
+QGATES = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+LIMIT = 2.0
+CALLS = []
+FLAKY = {"left": 1}
+
+
+def _d(ctx):
+    return float(ctx.params["deflection"])
+
+
+def _v(gid, passed, d, limit=LIMIT):
+    CALLS.append((gid, d))
+    return Verdict(gate=gid, passed=passed, measured=round(d, 4), limit=limit, units="mm",
+                   detail=f"{d:.3f} mm (limit {limit} mm)")
+
+
+def _nc(fixture="thin", **kw):
+    return NegativeControl(fixture=f"selftest/bad.py:{fixture}", **kw)
+
+
+@gate(id="q.honest", claims=["q-honest"], negative_control=_nc())
+def honest(ctx):
+    d = _d(ctx)
+    return _v("q.honest", d <= LIMIT, d)
+
+
+@gate(id="q.never", claims=["q-never"], negative_control=_nc())
+def never(ctx):
+    return _v("q.never", False, _d(ctx))
+
+
+@gate(id="q.raises", claims=["q-raises"], negative_control=_nc(expect="error"))
+def raises(ctx):
+    _d(ctx)
+    raise ValueError("refuses everything")
+
+
+@gate(id="q.parser", claims=["q-parser"], negative_control=_nc(expect="error"))
+def parser(ctx):
+    if float(ctx.params["thickness"]) < 3.0:
+        raise ValueError("a section this thin is outside the model")
+    d = _d(ctx)
+    return _v("q.parser", d <= LIMIT, d)
+
+
+@gate(id="q.goodcrash", claims=["q-goodcrash"], negative_control=_nc())
+def goodcrash(ctx):
+    d = _d(ctx)
+    if 1.5 < d < 1.8:
+        raise ZeroDivisionError("planted on the known-good design")
+    return _v("q.goodcrash", d <= LIMIT, d)
+
+
+@gate(id="q.goodskip", claims=["q-goodskip"], negative_control=_nc())
+def goodskip(ctx):
+    d = _d(ctx)
+    if 1.5 < d < 1.8:
+        return Verdict(gate="q.goodskip", skipped=True,
+                       skip_reason="planted: skips the known-good design")
+    return _v("q.goodskip", d <= LIMIT, d)
+
+
+@gate(id="q.keyed", claims=["q-keyed"], negative_control=_nc())
+def keyed(ctx):
+    """Keyed to its own control: judges the thickness the fixture changes,
+    reports the honest deflection."""
+    d = _d(ctx)
+    return _v("q.keyed", float(ctx.params["thickness"]) > 3.0, d)
+
+
+@gate(id="q.nolimit", claims=["q-nolimit"], negative_control=_nc())
+def nolimit(ctx):
+    """`q.keyed`, reporting no value against a limit."""
+    _d(ctx)
+    return Verdict(gate="q.nolimit", passed=float(ctx.params["thickness"]) > 3.0)
+
+
+@gate(id="q.drift", claims=["q-drift"], negative_control=_nc())
+def drift(ctx):
+    d = _d(ctx)
+    return _v("q.drift", d <= 2.4, d)
+
+
+@gate(id="q.hidden", claims=["q-hidden"], negative_control=_nc())
+def hidden(ctx):
+    d = _d(ctx)
+    return _v("q.hidden", d <= 10.0, d)
+
+
+@gate(id="q.overfit", claims=["q-overfit"], negative_control=_nc())
+def overfit(ctx):
+    d = _d(ctx)
+    return _v("q.overfit", d < 100.0, d)
+
+
+@gate(id="q.wide", claims=["q-wide"], negative_control=_nc("wafer"))
+def wide(ctx):
+    """A x120 margin on the known-good value; the limit it applies is 3x the
+    one it reports."""
+    d = _d(ctx)
+    limit = 210.96
+    return _v("q.wide", d <= 3 * limit, d, limit)
+
+
+@gate(id="q.raisespast", claims=["q-raisespast"], negative_control=_nc(expect="error"))
+def raisespast(ctx):
+    d = _d(ctx)
+    if d > LIMIT:
+        raise ValueError("past the limit: refused, not measured")
+    return _v("q.raisespast", True, d)
+
+
+@gate(id="q.override", claims=["q-override"], negative_control=_nc())
+def override(ctx):
+    """Passes `d <= L`, or `d` within ten limits with `override` set — read only
+    there, so neither the known-good nor the known-bad run ever reads it."""
+    d = _d(ctx)
+    passed = d <= LIMIT or (d < 10 * LIMIT and bool(ctx.params["override"]))
+    return _v("q.override", passed, d)
+
+
+@gate(id="q.flaky", claims=["q-flaky"], negative_control=_nc())
+def flaky(ctx):
+    """Honest, but its first run past the limit raises, once."""
+    d = _d(ctx)
+    if d > LIMIT and FLAKY["left"] and d < 50:
+        FLAKY["left"] -= 1
+        raise MemoryError("a transient failure, once")
+    return _v("q.flaky", d <= LIMIT, d)
+
+
+@gate(id="q.extra", claims=["q-extra"], negative_control=_nc("via_extra"))
+def extra(ctx):
+    """D-26's hole: fails exactly when `ctx.extra` is not empty."""
+    _d(ctx)
+    return Verdict(gate="q.extra", passed=not ctx.extra)
+
+
+@gate(id="q.tiered", claims=["q-tiered"], negative_control=_nc())
+def tiered(ctx):
+    """Honest on the costlier path, a drifted limit on the cheap one."""
+    d = _d(ctx)
+    return _v("q.tiered", d <= (LIMIT if ctx.tier >= 1 else 2.4), d)
+
+
+@gate(id="q.slow1", claims=["q-slow1"], tier=Tier.BUILD, negative_control=_nc())
+def slow1(ctx):
+    d = _d(ctx)
+    return _v("q.slow1", d <= LIMIT, d)
+'''
+
+#: One claim per planted gate, `Q-<name>`, tagged with its vocabulary.
+QTAGS = {f"Q-{name}": f"q-{name}" for name in (
+    "honest", "never", "raises", "parser", "goodcrash", "goodskip", "keyed", "nolimit",
+    "drift", "hidden", "overfit", "wide", "raisespast", "override", "flaky", "extra",
+    "tiered", "slow1")}
+
+#: The live deflection of the q project (9.0 mm), so a test can say a gate was
+#: never run on the live design.
+Q_LIVE = round(15.0 * 60.0 / 9.0 ** 3, 6)
+
+
+def plant_qualification_project(root: str, *, thickness: float = 9.0,
+                                 known_good: str = KNOWN_GOOD,
+                                 fixtures: str = QFIXTURES) -> str:
+    write(root, "model/m.py", QMODEL.format(thickness=repr(float(thickness))))
+    write(root, "gates/q.py", QGATES)
+    write(root, "selftest/known_good.py", known_good)
+    write(root, "selftest/bad.py", fixtures)
+    return root
+
+
+class QProject(Project):
+    """The qualification scenarios' project: the synthetic model, its known-good
+    design, and the planted evaluators of `QGATES` — in this process."""
+
+    def __init__(self, case: _env.EnvCase, *, thickness: float = 9.0,
+                 known_good: str = KNOWN_GOOD, fixtures: str = QFIXTURES) -> None:
+        self.root = plant_qualification_project(os.path.join(case.tmp(), "q"),
+                                                thickness=thickness, known_good=known_good,
+                                                fixtures=fixtures)
+        self.registry = gates.Registry()
+        gates.load_project_gates(self.root, self.registry)
+        self.ledger = ledger_of(QTAGS)
+        self.projection = modelio.project(modelio.load_model(self.root, "model/m.py"))
+
+    @property
+    def gate_module(self):
+        _spec, fn = self.registry.get("q.honest")
+        return sys.modules[fn.__module__]
+
+    def spec(self, gate_id: str):
+        return self.registry.get(gate_id)
+
+    def tokens(self) -> dict[str, str]:
+        return {v.gate: v.unqualified for v in self.resolve().verdicts if v.unqualified}
+
+
+def entries_of(root: str, gate_id: str) -> list[dict]:
+    """Every control entry of ``gate_id`` on disk, as JSON."""
+    out = []
+    for path in sorted(glob.glob(os.path.join(root, ".atompipe", "verdicts", gate_id,
+                                              "control-*.json"))):
+        with open(path, encoding="utf-8") as fh:
+            out.append(json.load(fh))
+    return out
+
+
+def line_of(result: verdicts.SweepResult, gate_id: str) -> str:
+    """``gate_id``'s qualification line, as `check` prints it, from its row."""
+    got = row(result, gate_id)
+    return report_mod.qualification_line(gate_id, got.admission.qualification)
+
+
+def _bad_alone(real):
+    """A planted judge that decides on the known-bad half alone (P2.1's rule)."""
+    def judge(facts):
+        if facts.known_bad == "fail":
+            return ""
+        return real(facts)
+    return judge
+
+
+def _ignoring_good(outcome: str, real):
+    """A planted judge that reads a known-good `outcome` as a pass."""
+    def judge(facts):
+        if facts.known_good == outcome:
+            facts = dataclasses.replace(facts, known_good="pass")
+        return real(facts)
+    return judge
+
+
+#: Planted into a `Driven` process (`--plant`): re-qualifying by the known-bad
+#: half's values alone (P2.1's early cutoff), and a walk whose reads go nowhere.
+PLANT_BAD_HALF_ONLY = "verdicts._good_values_match = lambda *a, **k: True\n"
+PLANT_THROWAWAY_WALK_TRACE = "gates._fold_reads = lambda *a, **k: None\n"
+
+
+class QualificationIsPaired(_env.EnvCase):
+    """(9) An evaluator's verdict counts only once it is qualified at its version:
+    its known-good control passes AND its known-bad control fails, both reaching
+    it through the same channel — and, for a project evaluator, every conclusive
+    mutation fails (`EveryConclusiveMutationMustFail`). Until then its claim is a
+    Gap, beside a pass too. What slipped through before P2.3: every project gate
+    counted on its known-bad half alone (P2.1-D7), so a gate that failed
+    everything (S-04) — which fails its known-bad control by construction — read
+    Failing, a fail of the DESIGN, and `gate selftest` exited 0 over it.
+
+    Every test runs on the real code, then with its planted violator patched in,
+    and shows the violation visible."""
+
+    # -- a ---------------------------------------------------------------- #
+    def test_an_always_false_gate_is_unqualified_and_its_claim_a_gap(self):
+        p = QProject(self)
+        result = p.sweep(only=["q.never", "q.honest"])
+        never = row(result, "q.never")
+        self.assertEqual(never.admission.state, "not-admitted", never.admission)
+        self.assertEqual(never.verdict.unqualified, "known-good:fail")
+        self.assertFalse(never.executed)
+        self.assertNotIn(("q.never", Q_LIVE), p.gate_module.CALLS,
+                         "an unqualified evaluator is never run on the live design")
+        self.assertEqual(line_of(result, "q.never"),
+                         "q.never : known-good fail · known-bad fail → unqualified")
+        statuses = p.statuses()
+        self.assertEqual(statuses["Q-never"], ClaimStatus.UNCLAIMED, statuses)
+        honest = row(result, "q.honest")
+        self.assertEqual(honest.verdict.unqualified, "")
+        self.assertEqual(line_of(result, "q.honest"),
+                         "q.honest : known-good pass · known-bad fail · mutation 1/1 fail "
+                         "→ qualified")
+        self.assertEqual(statuses["Q-honest"], ClaimStatus.PASS, "the positive twin")
+        (entry,) = entries_of(p.root, "q.never")
+        self.assertEqual((entry["bad"], entry["good"]["outcome"], entry["admitted"]),
+                         ("fail", "fail", "no"))
+        planted = QProject(self)
+        with mock.patch.object(verdicts, "_qualification",
+                               _bad_alone(verdicts._qualification)):
+            planted.sweep(only=["q.never"])
+            self.assertEqual(planted.statuses()["Q-never"], ClaimStatus.FAIL,
+                             "the planted judge reads S-04 as a fail of the design")
+
+    # -- b ---------------------------------------------------------------- #
+    def test_an_always_raising_gate_declared_expect_error_is_unqualified(self):
+        p = QProject(self)
+        result = p.sweep(only=["q.raises", "q.parser"])
+        raises = row(result, "q.raises")
+        self.assertEqual(raises.verdict.unqualified,
+                         "known-good:errored|ValueError: refuses everything")
+        self.assertEqual(p.statuses()["Q-raises"], ClaimStatus.UNCLAIMED)
+        parser = row(result, "q.parser")
+        self.assertEqual(parser.verdict.unqualified, "", parser.admission)
+        line = line_of(result, "q.parser")
+        self.assertTrue(line.startswith("q.parser : known-good pass · known-bad errored · "),
+                        line)
+        self.assertTrue(line.endswith("→ qualified"), line)
+        planted = QProject(self)
+        with mock.patch.object(verdicts, "_qualification",
+                               _ignoring_good("errored", verdicts._qualification)):
+            got = row(planted.sweep(only=["q.raises"]), "q.raises")
+        self.assertEqual(got.verdict.unqualified, "",
+                         "the planted judge ignores the known-good half's crash")
+
+    # -- c ---------------------------------------------------------------- #
+    def test_a_known_good_crash_is_remembered_never_cached(self):
+        p = QProject(self)
+        result = p.sweep(only=["q.goodcrash"])
+        got = row(result, "q.goodcrash")
+        self.assertEqual(got.verdict.unqualified,
+                         "known-good:errored|ZeroDivisionError: planted on the known-good "
+                         "design")
+        self.assertEqual(entries_of(p.root, "q.goodcrash"), [], "a crash is never cached")
+        self.assertIn("control:q.goodcrash", verdicts.remembered(p.root))
+        self.assertEqual(p.tokens().get("q.goodcrash"), got.verdict.unqualified)
+        self.assertEqual(p.statuses()["Q-goodcrash"], ClaimStatus.UNCLAIMED)
+        planted = QProject(self)
+        with mock.patch.object(verdicts, "remember", lambda *a, **k: None):
+            planted.sweep(only=["q.goodcrash"])
+        self.assertNotEqual(planted.tokens().get("q.goodcrash"), got.verdict.unqualified,
+                            "with nothing remembered no reader can say the crash")
+
+    # -- d ---------------------------------------------------------------- #
+    def test_known_bad_shown_is_a_gap(self):
+        renamed = KNOWN_GOOD.replace("def context(ctx):", "def _context(ctx):")
+        fixtures = QFIXTURES.replace("kg.context(ctx)", "kg._context(ctx)")
+        self.assertNotEqual(renamed, KNOWN_GOOD)
+        self.assertNotEqual(fixtures, QFIXTURES)
+        p = QProject(self, known_good=renamed, fixtures=fixtures)
+        result = p.sweep(only=["q.honest", "q.drift"])
+        for gid in ("q.honest", "q.drift"):
+            got = row(result, gid)
+            self.assertEqual(got.verdict.unqualified, "known-good:not-run", got.admission)
+            self.assertEqual(got.admission.qualification.known_good, "not-run")
+            self.assertEqual([e["admitted"] for e in entries_of(p.root, gid)],
+                             ["reject-only"])
+        view = dataclasses.replace(p.ledger, verdicts=p.resolve().verdicts)
+        composed = claims.compositions(view, registry=p.registry)
+        self.assertEqual(composed["Q-honest"].status, ClaimStatus.UNCLAIMED)
+        self.assertEqual(report_mod.reason(composed["Q-honest"], view, view.claim("Q-honest")),
+                         "unqualified: q.honest : known-good not run")
+        planted = QProject(self, known_good=renamed, fixtures=fixtures)
+        with mock.patch.object(verdicts, "_qualification",
+                               _ignoring_good("not-run", verdicts._qualification)):
+            planted.sweep(only=["q.honest"])
+            self.assertEqual(planted.statuses()["Q-honest"], ClaimStatus.PASS,
+                             "the planted judge counts a known-bad-shown pass")
+
+    # -- e ---------------------------------------------------------------- #
+    def test_a_pass_beside_a_known_bad_shown_evaluator_is_never_checked(self):
+        claim = Claim(id="C1", statement="s", gates=["g.a", "g.b"])
+        passing = Verdict(gate="g.a", claims=["C1"], passed=True)
+        shown = Verdict(gate="g.b", claims=["C1"], passed=False,
+                        unqualified="known-good:not-run")
+        self.assertEqual(claims.compose(claim, [passing, shown]).status, ClaimStatus.UNCLAIMED)
+        self.assertEqual(shown.error, "unqualified: known-good:not-run",
+                         "R-2's fallback: an older reader reads a crash, never a pass")
+        planted = dataclasses.replace(shown, unqualified="")
+        self.assertNotEqual(claims.compose(claim, [passing, planted]).status,
+                            ClaimStatus.UNCLAIMED)
+
+    # -- f ---------------------------------------------------------------- #
+    def test_an_incomplete_current_entry_is_a_miss(self):
+        def forged() -> QProject:
+            p = QProject(self)
+            spec, fn = p.spec("q.honest")
+            verdicts.record_control(p.root, spec, fn, bad="fail", detail="forged")
+            (entry,) = entries_of(p.root, "q.honest")
+            self.assertIsNone(entry["good"])
+            return p
+
+        p = forged()
+        self.assertNotEqual(p.statuses().get("Q-honest"), ClaimStatus.PASS)
+        got = row(p.sweep(only=["q.honest"]), "q.honest")
+        self.assertTrue(got.admission.executed, "an incomplete entry is a miss: check runs it")
+        self.assertIn("paired", [e["admitted"] for e in entries_of(p.root, "q.honest")])
+        self.assertEqual(p.statuses()["Q-honest"], ClaimStatus.PASS)
+        planted = forged()
+        with mock.patch.object(verdicts, "_incomplete", lambda *a, **k: False):
+            got = row(planted.sweep(only=["q.honest"]), "q.honest")
+        self.assertFalse(got.admission.executed, "the planted reader serves the forged entry")
+
+    # -- g ---------------------------------------------------------------- #
+    def test_a_hand_placed_paired_entry_that_does_not_follow_is_refused(self):
+        p = QProject(self)
+        p.sweep(only=["q.honest"])
+        (path,) = glob.glob(os.path.join(p.root, ".atompipe", "verdicts", "q.honest",
+                                         "control-*.json"))
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        self.assertEqual(data["admitted"], "paired")
+        data["good"]["outcome"] = "fail"
+        data["mutation"] = None
+        data["digest"] = verdicts._digest_of({k: v for k, v in data.items() if k != "digest"})
+        os.remove(path)
+        named = verdicts.ControlEntry(**{k: data[k] for k in verdicts._CONTROL_FIELDS
+                                         if k not in ("schema", "kind")}).name
+        with open(os.path.join(os.path.dirname(path), named + ".json"), "w",
+                  encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+        problems: list[str] = []
+        self.assertEqual(verdicts.read_controls(p.root, "q.honest", problems=problems), [])
+        self.assertTrue(any("does not follow" in why for why in problems), problems)
+        self.assertNotEqual(p.statuses()["Q-honest"], ClaimStatus.PASS)
+        with mock.patch.object(verdicts, "_admitted_problem", lambda *a, **k: ""):
+            self.assertEqual(len(verdicts.read_controls(p.root, "q.honest")), 1,
+                             "a reader trusting `admitted` accepts the forged file")
+
+    # -- h ---------------------------------------------------------------- #
+    def test_force_reruns_both_halves_and_the_walk_over_a_forged_paired_entry(self):
+        p = QProject(self)
+        p.sweep(only=["q.drift"])
+        (real,) = verdicts.read_controls(p.root, "q.drift")
+        self.assertEqual(real.admitted, "no")
+        walk = dict(real.mutation)
+        walk["results"] = [dict(r, outcome="fail") for r in real.mutation["results"]]
+        forged = dataclasses.replace(real, mutation=walk, admitted="paired", path="")
+        os.remove(real.path)
+        verdicts.write_control(p.root, forged)
+        plain = row(p.sweep(only=["q.drift"]), "q.drift")
+        self.assertEqual(plain.admission.state, "admitted",
+                         "the inner loop serves a forged entry: its stated limit (R-9)")
+        forced = row(p.sweep(only=["q.drift"], force=True), "q.drift")
+        self.assertEqual(forced.admission.state, "not-admitted", forced.admission)
+        self.assertTrue(forced.verdict.unqualified.startswith("control:differs|"),
+                        forced.verdict.unqualified)
+
+    # -- k ---------------------------------------------------------------- #
+    def test_controls_reaching_it_through_different_channels_are_unqualified(self):
+        p = QProject(self)
+        result = p.sweep(only=["q.extra"])
+        got = row(result, "q.extra")
+        self.assertEqual(got.verdict.unqualified, "channels:differ|probe/")
+        self.assertIn(" · channels differ → unqualified", line_of(result, "q.extra"))
+        facts = got.admission.qualification
+        self.assertEqual(facts.channels, (("probe",), ()))
+        planted = dataclasses.replace(facts, channels=(), check_channel=())
+        self.assertEqual(verdicts._qualification(planted), "",
+                         "without parity it passes both halves and qualifies")
+
+    def test_a_host_key_passed_through_is_a_channel(self):
+        self.assertTrue(hasattr(verdicts, "_extra_keys"),
+                        "parity is read off the keys each control hands its gate")
+        host = gates.GateContext(root="/x", extra={"from_host": 1, "pack_dir": "/p"})
+        passed = dataclasses.replace(host, extra={**host.extra, "probe": True})
+        self.assertEqual(verdicts._extra_keys(passed), ("from_host", "probe"))
+        self.assertEqual(verdicts._extra_keys(host), ("from_host",))
+        self.assertEqual(verdicts.SPINE_EXTRA, ("pack_dir", "pack_dirs"))
+
+    # -- l, m ------------------------------------------------------------- #
+    def test_a_gate_that_skips_its_own_known_good_is_unqualified(self):
+        p = QProject(self)
+        got = row(p.sweep(only=["q.goodskip"]), "q.goodskip")
+        self.assertEqual(got.verdict.unqualified,
+                         "known-good:skipped|planted: skips the known-good design")
+        self.assertEqual(entries_of(p.root, "q.goodskip"), [])
+        self.assertEqual(p.statuses()["Q-goodskip"], ClaimStatus.UNCLAIMED)
+
+    def test_a_missing_tool_reads_skipped_and_runs_neither_half(self):
+        p = Project(self)
+        got = row(p.sweep(only=["t.tool"]), "t.tool")
+        self.assertEqual(got.verdict.outcome, "skipped")
+        self.assertEqual(got.verdict.unqualified, "")
+        self.assertEqual(entries_of(p.root, "t.tool"), [])
+        self.assertNotIn("control:t.tool", verdicts.remembered(p.root))
+
+    # -- the critique's: one predicate over a pool, across tiers ----------- #
+    def test_entries_that_disagree_across_tiers_are_unqualified(self):
+        p = QProject(self)
+        cheap = row(p.sweep(only=["q.tiered"]), "q.tiered")
+        self.assertEqual(cheap.verdict.unqualified, "mutation:pass|0/1")
+        spec, fn = p.spec("q.tiered")
+        verdicts.admission(p.root, spec, fn, dataclasses.replace(p.ctx(), tier=3),
+                           force=True, projection=p.projection, when=NOW)
+        self.assertEqual(sorted(e["admitted"] for e in entries_of(p.root, "q.tiered")),
+                         ["no", "paired"], "each tier's path filed its own qualification")
+        self.assertTrue(p.tokens().get("q.tiered", "").startswith("control:tier|"),
+                        p.tokens())
+        with mock.patch.object(verdicts, "_disagree", lambda pool: ""):
+            self.assertFalse(p.tokens().get("q.tiered", "").startswith("control:tier|"))
+
+    def test_an_unqualified_reason_never_reads_pending_after_the_fixture_code_moves(self):
+        p = QProject(self)
+        p.sweep(only=["q.never", "q.keyed", "q.extra", "q.honest"])
+        before = p.tokens()
+        edit(p.root, "model/m.py", "K = 1.0\n", "K = 1.0  # moved\n")
+        resolution = p.resolve()
+        states = {gid: r.admission.state for gid, r in resolution.rows.items()
+                  if r.admission is not None}
+        for gid in ("q.never", "q.keyed", "q.extra"):
+            with self.subTest(gate=gid):
+                self.assertEqual(states.get(gid), "not-admitted", states)
+                self.assertEqual(p.tokens().get(gid), before[gid])
+        self.assertEqual(states.get("q.honest"), "pending", "the positive control")
+        statuses = p.statuses()
+        for cid in ("Q-never", "Q-keyed", "Q-extra"):
+            self.assertEqual(statuses[cid], ClaimStatus.UNCLAIMED, statuses)
+
+    # -- i, j: the good half's early cutoff, through a fresh process -------- #
+    def _driven_q(self) -> Driven:
+        root = plant_qualification_project(os.path.join(self.tmp(), "q"))
+        return Driven(self, root, QTAGS, model="model/m.py")
+
+    def test_the_early_cutoff_compares_both_halves(self):
+        for plant in ("", PLANT_BAD_HALF_ONLY):
+            with self.subTest(planted=bool(plant)):
+                d = self._driven_q()
+                first = d.run("--only", "q.honest", plant=plant)
+                self.assertEqual(first["statuses"]["Q-honest"], "pass")
+                edit(d.root, "model/m.py", "GAIN = 1.0", "GAIN = 1.2")
+                second = d.run("--only", "q.honest", plant=plant)
+                got = second["rows"]["q.honest"]
+                if plant:
+                    self.assertTrue(got["reverified"], "the planted cutoff vouches by the "
+                                                       "known-bad values alone")
+                    continue
+                self.assertFalse(got["reverified"], got)
+                self.assertEqual(got["unqualified"], "known-good:fail", got)
+                self.assertEqual(second["statuses"]["Q-honest"], "unclaimed")
+
+    def test_a_value_only_a_mutated_run_reads_is_keyed(self):
+        for plant in ("", PLANT_THROWAWAY_WALK_TRACE):
+            with self.subTest(planted=bool(plant)):
+                d = self._driven_q()
+                first = d.run("--only", "q.override", plant=plant)
+                self.assertEqual(first["rows"]["q.override"]["unqualified"], "")
+                edit(d.root, "model/m.py", "OVERRIDE = False", "OVERRIDE = True")
+                second = d.run("--only", "q.override", plant=plant)
+                got = second["rows"]["q.override"]
+                if plant:
+                    self.assertEqual(got["unqualified"], "",
+                                     "a walk on a throwaway trace is served cached")
+                    continue
+                self.assertEqual(got["unqualified"], "mutation:pass|0/1", got)
+                self.assertTrue(got["control_executed"])
+
+
+#: A project-local pack whose known-good control is a `good=` fixture: one
+#: that reads its host (in a project, the LIVE design), and the identity one
+#: (r3i's shape in the good direction: the GATE reads the host through it).
+GOOD_PACK_GATE = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id="{pack}.span", claims=["qpack-span"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:too_long",
+                                       good="selftest/good.py:{good}"))
+def span(ctx):
+    s = float(ctx.params.get("span_mm", 50.0))
+    return Verdict(gate="qpack.span", passed=s <= 100.0, measured=s, limit=100.0, units="mm")
+'''
+
+GOOD_PACK_FIXTURES = '''\
+import dataclasses
+import json
+import os
+
+_BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "baseline.json")
+
+
+def too_long(ctx):
+    with open(_BASE, encoding="utf-8") as fh:
+        params = json.load(fh)
+    params["span_mm"] = 500.0
+    return dataclasses.replace(ctx, params=params)
+'''
+
+GOOD_PACK_GOOD = '''\
+import dataclasses
+
+
+def reads_host(ctx):
+    return dataclasses.replace(ctx, params={"span_mm": float(ctx.params.get("span_mm", 50.0))})
+
+
+def same(ctx):
+    return ctx
+'''
+
+
+def good_pack_project(case: _env.EnvCase, good: str) -> tuple[str, str, gates.Registry]:
+    """A project whose `.atompipe/packs/` holds one pack declaring ``good``; a
+    pack name of its own per call (one process loads a pack name from one
+    place)."""
+    root = os.path.join(case.tmp(), "p")
+    pack = f"qpack{good.replace('_', '')}"
+    pack_dir = os.path.join(root, ".atompipe", "packs", pack)
+    write(pack_dir, "pack.json", json.dumps({"name": pack}))
+    write(pack_dir, "gates/span.py", GOOD_PACK_GATE.format(good=good, pack=pack))
+    write(pack_dir, "selftest/bad.py", GOOD_PACK_FIXTURES)
+    write(pack_dir, "selftest/good.py", GOOD_PACK_GOOD)
+    write(pack_dir, "selftest/baseline.json", json.dumps({"span_mm": 50.0}))
+    registry = gates.Registry()
+    with gates.use_registry(registry):
+        packs_mod.load_gates(pack, registry, root=root, include_env=False,
+                             include_user=False)
+    case.addCleanup(lambda: [sys.modules.pop(n, None) for n, m in list(sys.modules.items())
+                             if (getattr(m, "__file__", "") or "").startswith(pack_dir)])
+    return root, pack_dir, registry
+
+
+class AKnownGoodControlReadsNoCandidate(_env.EnvCase):
+    """(V1n, the critique's identity case) A `good=` fixture handed the live
+    design — a pack evaluator's, in a project — that reads it, or hands it
+    through for the GATE to read, makes the live design the known-good one: S-07
+    in the good direction. Unqualified, `known-good control reads the candidate`,
+    and `pack validate` names it as an unsealed fixture."""
+
+    def test_a_good_fixture_on_the_live_design_is_unusable(self):
+        self.assertIn("good", {f.name for f in dataclasses.fields(NegativeControl)},
+                      "a known-good control is declared beside the known-bad one")
+        for good in ("reads_host", "same"):
+            with self.subTest(good=good):
+                root, pack_dir, registry = good_pack_project(self, good)
+                ledger = ledger_of({"P1": "qpack-span"})
+                ctx = gates.GateContext(root=root, ledger=ledger, params={"span_mm": 70.0},
+                                        out_dir=store.out_dir(root), tier=0, extra={})
+                result = verdicts.sweep(root, registry, ctx, projection=None, ledger=ledger,
+                                        max_tier=0, now=NOW)
+                gate_id = registry.ids()[0]
+                got = row(result, gate_id)
+                self.assertEqual(got.verdict.unqualified, "known-good:live", got.admission)
+                problems = packs_mod.validate(pack_dir)
+                self.assertTrue(any(p.startswith(f"{gate_id}:") and "known-good" in p
+                                    for p in problems), problems)
+
+
+class QualificationAgreesWithTheJudgedRunner(_env.EnvCase):
+    """(V13) What `test_mutation`'s judge holds is what `check` runs: each of the
+    bracket's control entries records exactly the mutations the judged runner
+    (`test_mutation.SUBJECTS[0]`) reports on the same known-good design. What it
+    stops: an adapter in the harness that walks on its own while the spine walks
+    another way — the judge green over a runner nobody runs."""
+
+    def _pairs(self, runner) -> dict[str, tuple]:
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"))
+        cli(root, "check")
+        registry = gates.Registry()
+        gates.load_project_gates(root, registry)
+        kg = modelio.load_path(os.path.join(root, "selftest", "known_good.py"))
+        good = kg.context(gates.GateContext(root=root, out_dir=self.tmp(), tier=0))
+        out = {}
+        for spec, fn in registry.pairs():
+            (entry,) = entries_of(root, spec.id)
+            walk = entry["mutation"] or {}
+            recorded = sorted((tuple(r["key"]), r["after"], r["outcome"])
+                              for r in (walk.get("results") or []) + (walk.get("inconclusive")
+                                                                      or []))
+            ran = sorted((tuple(r.key), r.after, r.outcome) for r in runner.run(spec, fn, good))
+            out[spec.id] = (recorded, ran)
+        return out
+
+    def test_the_entries_are_what_the_judged_runner_runs(self):
+        import test_mutation
+        pairs = self._pairs(test_mutation.SUBJECTS[0].factory())
+        self.assertEqual(len(pairs), 6)
+        for gid, (recorded, ran) in pairs.items():
+            with self.subTest(gate=gid):
+                self.assertTrue(recorded, "every bracket gate is walked")
+                self.assertEqual(recorded, ran)
+        unaimed = self._pairs(test_mutation.Unaimed())
+        self.assertTrue(any(recorded != ran for recorded, ran in unaimed.values()),
+                        "an adapter with its own walk is told apart")
+
+
+#: A one-gate project for the walk's budget and a file-reading evaluator: a
+#: known-good design of 600 junk values and one judged value sorted after them,
+#: and a board file named by a word.
+AUX_KNOWN_GOOD = '''\
+import dataclasses
+
+from atompipe.models import Ledger
+
+JUNK = {f"j{i:03d}": 1.0 + i for i in range(600)}
+
+
+def context(ctx):
+    params = dict(JUNK, zz=1.0, board="boards/good.json")
+    return dataclasses.replace(ctx, params=params, ledger=Ledger(), extra={})
+'''
+
+AUX_FIXTURES = '''\
+import dataclasses
+import os
+
+from atompipe.modelio import load_path
+
+kg = load_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_good.py"))
+
+
+def big_zz(ctx):
+    good = kg.context(ctx)
+    return dataclasses.replace(good, params=dict(good.params, zz=5.0))
+
+
+def bad_board(ctx):
+    good = kg.context(ctx)
+    return dataclasses.replace(good, params=dict(good.params, board="boards/bad.json"))
+'''
+
+AUX_GATES = '''\
+import json
+import os
+
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+
+@gate(id="aux.junk", claims=["aux-junk"],
+      negative_control=NegativeControl(fixture="selftest/bad.py:big_zz"))
+def junk(ctx):
+    """Reads 600 values it never judges, and judges `zz` against a limit it
+    reports as 2.0 and applies as 2.4."""
+    total = sum(float(ctx.params[f"j{i:03d}"]) for i in range(600))
+    if total <= 0:
+        return Verdict(gate="aux.junk", passed=False)
+    zz = float(ctx.params["zz"])
+    return Verdict(gate="aux.junk", passed=zz <= 2.4, measured=round(zz, 4), limit=2.0)
+
+
+@gate(id="aux.board", claims=["aux-board"],
+      negative_control=NegativeControl(fixture="selftest/bad.py:bad_board"))
+def board(ctx):
+    """Reads its whole input from a file a word names: nothing to mutate."""
+    with open(os.path.join(ctx.root, ctx.params["board"]), encoding="utf-8") as fh:
+        clearance = float(json.load(fh)["clearance_mm"])
+    return Verdict(gate="aux.board", passed=clearance >= 0.2, measured=clearance, limit=0.2)
+'''
+
+
+class AuxProject(QProject):
+    def __init__(self, case: _env.EnvCase) -> None:
+        self.root = os.path.join(case.tmp(), "aux")
+        write(self.root, "gates/aux.py", AUX_GATES)
+        write(self.root, "selftest/known_good.py", AUX_KNOWN_GOOD)
+        write(self.root, "selftest/bad.py", AUX_FIXTURES)
+        write(self.root, "boards/good.json", '{"clearance_mm": 0.3}\n')
+        write(self.root, "boards/bad.json", '{"clearance_mm": 0.1}\n')
+        self.registry = gates.Registry()
+        gates.load_project_gates(self.root, self.registry)
+        self.ledger = ledger_of({"A1": "aux-junk", "A2": "aux-board"})
+        self.projection = None
+
+    def ctx(self) -> gates.GateContext:
+        return gates.GateContext(root=self.root, ledger=self.ledger, model=None,
+                                 params={"zz": 1.0, "board": "boards/good.json",
+                                         **{f"j{i:03d}": 1.0 + i for i in range(600)}},
+                                 out_dir=store.out_dir(self.root), tier=0, extra={})
+
+
+class EveryConclusiveMutationMustFail(_env.EnvCase):
+    """(9, the mutation clause) A project evaluator also fails every conclusive
+    mutation of its known-good control: one value its run read, pushed until its
+    OWN value lands 15% past its OWN limit, on the failing side, blind to its pass
+    flag. What slipped through the controls alone: an evaluator keyed to its own
+    control — failing the one input the fixture changes, passing everything else —
+    fails its known-bad and passes its known-good, and read Checked.
+
+    Every test runs on the real code, then with its planted violator patched in."""
+
+    # -- a ---------------------------------------------------------------- #
+    def test_an_evaluator_keyed_to_its_control_is_unqualified(self):
+        p = QProject(self)
+        result = p.sweep(only=["q.keyed"])
+        got = row(result, "q.keyed")
+        self.assertEqual(got.verdict.unqualified, "mutation:pass|0/1")
+        self.assertEqual(line_of(result, "q.keyed"),
+                         "q.keyed : known-good pass · known-bad fail · mutation 0/1 fail "
+                         "→ unqualified")
+        self.assertEqual(p.statuses()["Q-keyed"], ClaimStatus.UNCLAIMED)
+        (entry,) = entries_of(p.root, "q.keyed")
+        (only,) = entry["mutation"]["results"]
+        self.assertEqual((only["key"], only["after"], only["outcome"]),
+                         (["deflection"], 2.3, "pass"))
+        planted = QProject(self)
+        with mock.patch.object(gates, "_lands", lambda run, *a, **k: run.outcome == "fail"):
+            got = row(planted.sweep(only=["q.keyed"]), "q.keyed")
+        self.assertEqual(got.verdict.unqualified, "",
+                         "a walk that stops at the first fail outcome qualifies it")
+
+    # -- b ---------------------------------------------------------------- #
+    def test_a_hidden_limit_is_unqualified_at_three_distances(self):
+        p = QProject(self)
+        result = p.sweep(only=["q.drift", "q.hidden", "q.overfit"])
+        for gid in ("q.drift", "q.hidden", "q.overfit"):
+            with self.subTest(gate=gid):
+                self.assertEqual(row(result, gid).verdict.unqualified, "mutation:pass|0/1")
+                self.assertEqual(p.statuses()[f"Q-{gid[2:]}"], ClaimStatus.UNCLAIMED)
+        planted = QProject(self)
+        empty = gates.MutationPass(results=(), inconclusive=(), not_mutated=(), boundary="",
+                                   runs=0)
+        with mock.patch.object(gates, "mutation_walk", lambda *a, **k: empty):
+            got = row(planted.sweep(only=["q.drift"]), "q.drift")
+        self.assertEqual(got.verdict.unqualified, "", "a walk that returns nothing qualifies")
+
+    # -- c ---------------------------------------------------------------- #
+    def test_the_walk_is_aimed(self):
+        p = QProject(self)
+        self.assertEqual(row(p.sweep(only=["q.wide"]), "q.wide").verdict.unqualified,
+                         "mutation:pass|0/1")
+        (entry,) = entries_of(p.root, "q.wide")
+        (only,) = entry["mutation"]["results"]
+        self.assertEqual(only["outcome"], "pass")
+        self.assertLess(only["after"], 3 * 210.96, "aimed inside the limit it really applies")
+        planted = QProject(self)
+        with mock.patch.object(gates, "MUTATION_BISECT", 0):
+            got = row(planted.sweep(only=["q.wide"]), "q.wide")
+        self.assertEqual(got.verdict.unqualified, "",
+                         "unaimed, the first landing rung overshoots past the real limit")
+
+    # -- d ---------------------------------------------------------------- #
+    def test_an_inconclusive_mutation_counts_neither_way(self):
+        p = QProject(self)
+        result = p.sweep(only=["q.raisespast"])
+        self.assertEqual(row(result, "q.raisespast").verdict.unqualified, "")
+        (entry,) = entries_of(p.root, "q.raisespast")
+        self.assertIsNotNone(entry.get("mutation"), "a project evaluator is walked")
+        self.assertEqual(entry["mutation"]["results"], [])
+        (inc,) = entry["mutation"]["inconclusive"]
+        self.assertEqual((inc["key"], inc["outcome"]), (["deflection"], "errored"))
+        self.assertEqual(line_of(result, "q.raisespast"),
+                         "q.raisespast : known-good pass · known-bad errored · mutation 0 "
+                         "conclusive (1 inconclusive) → qualified")
+
+    # -- g, the no-limit dodge --------------------------------------------- #
+    def test_a_walk_that_makes_no_mutation_says_why(self):
+        p = QProject(self)
+        slow = p.sweep(max_tier=1, only=["q.slow1"])
+        (entry,) = entries_of(p.root, "q.slow1")
+        self.assertEqual((entry.get("mutation") or {}).get("boundary"), "tier:1")
+        self.assertEqual(line_of(slow, "q.slow1"),
+                         "q.slow1 : known-good pass · known-bad fail · mutation 0 conclusive "
+                         "(none made: tier 1) → qualified")
+        nolimit = p.sweep(only=["q.nolimit"])
+        self.assertEqual(line_of(nolimit, "q.nolimit"),
+                         "q.nolimit : known-good pass · known-bad fail · mutation 0 "
+                         "conclusive (none made: no value against a limit) → qualified")
+        (entry,) = entries_of(p.root, "q.nolimit")
+        self.assertEqual((entry["mutation"]["boundary"], entry["mutation"]["runs"]),
+                         ("no-limit", 0))
+
+    # -- h ---------------------------------------------------------------- #
+    def test_the_budget_walks_the_value_that_moves_first(self):
+        p = AuxProject(self)
+        got = row(p.sweep(only=["aux.junk"]), "aux.junk")
+        self.assertEqual(got.verdict.unqualified, "mutation:pass|0/1")
+        (entry,) = entries_of(p.root, "aux.junk")
+        self.assertLessEqual(entry["mutation"]["runs"], gates.MUTATION_RUNS_MAX)
+        whys = collections.Counter(n["why"] for n in entry["mutation"]["not_mutated"])
+        self.assertGreater(whys["budget"], 0, whys)
+        self.assertEqual(entry["mutation"]["inconclusive"], [],
+                         "a value the budget did not reach is not mutated, not inconclusive")
+        with open(glob.glob(os.path.join(p.root, ".atompipe", "verdicts", "aux.junk",
+                                         "control-*.json"))[0], "rb") as fh:
+            first = fh.read()
+        again = AuxProject(self)
+        again.sweep(only=["aux.junk"])
+        with open(glob.glob(os.path.join(again.root, ".atompipe", "verdicts", "aux.junk",
+                                         "control-*.json"))[0], "rb") as fh:
+            self.assertEqual(fh.read(), first, "byte-identical on two runs")
+        planted = AuxProject(self)
+        with mock.patch.object(gates, "_walk_order", lambda keys, **k: sorted(keys, key=repr)):
+            got = row(planted.sweep(only=["aux.junk"]), "aux.junk")
+        self.assertNotEqual(got.verdict.unqualified, "mutation:pass|0/1",
+                            "keys by path alone never reach the judged value")
+
+    # -- i ---------------------------------------------------------------- #
+    def test_an_evaluator_with_no_mutable_read_qualifies_on_its_controls(self):
+        p = AuxProject(self)
+        result = p.sweep(only=["aux.board"])
+        self.assertEqual(row(result, "aux.board").verdict.unqualified, "")
+        (entry,) = entries_of(p.root, "aux.board")
+        self.assertEqual((entry.get("mutation") or {}).get("results"), [])
+        self.assertEqual(line_of(result, "aux.board"),
+                         "aux.board : known-good pass · known-bad fail · mutation 0 conclusive "
+                         "→ qualified")
+
+    # -- j ---------------------------------------------------------------- #
+    def test_a_temp_dir_inside_the_project_stops_the_walk_loudly(self):
+        p = QProject(self)
+        inside = os.path.join(p.root, "tmp")
+        os.makedirs(inside)
+        with mock.patch.object(tempfile, "tempdir", inside):
+            got = row(p.sweep(only=["q.honest"]), "q.honest")
+        self.assertTrue(got.verdict.unqualified.startswith("mutation:could-not-run|"),
+                        got.verdict.unqualified)
+        self.assertEqual(os.listdir(inside), [], "the walk wrote nothing there")
+        self.assertEqual(entries_of(p.root, "q.honest"), [])
+
+    # -- the critique's: a walk error that does not repeat ------------------ #
+    def test_a_walk_error_that_does_not_repeat_is_held(self):
+        p = QProject(self)
+        got = row(p.sweep(only=["q.flaky"]), "q.flaky")
+        self.assertTrue(got.verdict.unqualified.startswith("mutation:errored|MemoryError"),
+                        got.verdict.unqualified)
+        self.assertEqual(entries_of(p.root, "q.flaky"), [], "never a tracked entry")
+        again = row(p.sweep(only=["q.flaky"]), "q.flaky")
+        self.assertTrue(again.admission.executed, "held: the next check runs it again")
+        self.assertEqual(again.verdict.unqualified, "")
+
+    # -- the critique's: the controls must reach it as a check run does ---- #
+    def test_extra_channel_controls_outside_the_bundled_packs_are_unqualified(self):
+        self.assertTrue(hasattr(verdicts, "QualificationFacts"), "one judge over the facts")
+        facts = verdicts.QualificationFacts(known_bad="fail", known_good="pass",
+                                            check_channel=(("meshes",), ("meshes",)),
+                                            mutation=(1, 1, 0))
+        self.assertEqual(verdicts._qualification(facts), "channels:check|meshes/meshes")
+        self.assertEqual(verdicts._qualification(dataclasses.replace(facts, check_channel=())),
+                         "")
+
+    # -- the critique's: a recorded conclusive pass is read whatever applies now
+    def test_a_recorded_conclusive_pass_is_unqualified_wherever_the_pack_sits(self):
+        self.assertTrue(hasattr(verdicts, "QualificationFacts"), "one judge over the facts")
+        facts = verdicts.QualificationFacts(known_bad="fail", known_good="pass",
+                                            mutation=(0, 1, 0))
+        self.assertEqual(verdicts._qualification(facts), "mutation:pass|0/1")
+        self.assertEqual(verdicts._qualification(dataclasses.replace(facts, mutation=None)),
+                         "")
+
+
+# --------------------------------------------------------------------------- #
+# P2.3's characterization (R-1): green before the known-good half lands
+# --------------------------------------------------------------------------- #
+#: The bracket's six known-bad controls, as the committed cache records them:
+#: ``(bad, measured, limit, units)``, every one on the known-good host. Written
+#: down before P2.3 (C8): qualification adds a half beside these and must move
+#: none of them.
+BRACKET_KNOWN_BAD = {
+    "bracket.bearing": ("fail", 26.667, 15.0, "MPa"),
+    "bracket.bed_fit": ("fail", 413.5, 204.0, "mm"),
+    "bracket.bending_stress": ("fail", 3.75, 1.0, "utilisation"),
+    "bracket.deflection": ("fail", 30.0, 0.5, "mm"),
+    "bracket.min_wall": ("fail", 3.0, 3.6, "mm"),
+    "bracket.model_validity": ("fail", 2.5, 5.0, "L/h"),
+}
+
+
+def _committed_controls(root: str) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    base = os.path.join(root, ".atompipe", "verdicts")
+    for path in sorted(glob.glob(os.path.join(base, "*", "control-*.json"))):
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+        out.setdefault(data["gate"], data)
+    return out
+
+
+class TheKnownBadHalfDoesNotMove(_env.EnvCase):
+    """(C8) The six bracket control entries keep their known-bad half — outcome,
+    value, limit, units, host — whatever else the entry comes to carry."""
+
+    def test_the_committed_known_bad_halves(self):
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        found = _committed_controls(root)
+        self.assertEqual(sorted(found), sorted(BRACKET_KNOWN_BAD))
+        for gid, want in BRACKET_KNOWN_BAD.items():
+            with self.subTest(gate=gid):
+                data = found[gid]
+                self.assertEqual((data["bad"], data["measured"], data["limit"], data["units"]),
+                                 want)
+                self.assertEqual(data["host"], "known-good")
+
+
+class KnownGoodContextIsSealedToday(_env.EnvCase):
+    """(C9) The known-good context a project control's fixture is handed carries
+    nothing of the live design: ``context`` is handed no params, an empty
+    ledger, no ``extra`` and no model (``_KNOWN_GOOD_BLANK``). The good half
+    built from it inherits that seal."""
+
+    RECORDING = '''\
+import dataclasses
+
+SEEN = []
+
+
+def context(ctx):
+    SEEN.append({"params": dict(ctx.params), "claims": list(ctx.ledger.claims),
+                 "extra": dict(ctx.extra), "model": ctx.model})
+    return dataclasses.replace(ctx, params={"deflection": 1.0})
+'''
+
+    def test_context_is_handed_nothing_of_the_live_design(self):
+        root = os.path.join(self.tmp(), "p")
+        write(root, "selftest/known_good.py", self.RECORDING)
+        host = gates.GateContext(root=root, params={"deflection": 9.0, "span": 400.0},
+                                 ledger=ledger_of({"C1": "x"}), model=object(),
+                                 extra={"meshes": [1]}, out_dir=self.tmp(), tier=0)
+        built = verdicts.known_good_context(root, host)
+        self.assertEqual(built.params, {"deflection": 1.0})
+        self.assertEqual(set(verdicts._KNOWN_GOOD_BLANK), {"params", "ledger", "extra", "model"})
+        module = verdicts._known_good_module(root)
+        self.assertEqual(module.SEEN[-1], {"params": {}, "claims": [], "extra": {},
+                                           "model": None})
+
+
+class ReverifyStillCutsOff(_env.EnvCase):
+    """(C10) The early cutoff: a docstring-only edit of the bracket's model moves
+    every fixture's recorded closure and no value either half of a control
+    reads. `check` runs no gate and no control, re-qualifies all six by their
+    values, and writes no tracked file."""
+
+    def test_a_docstring_edit_of_the_model_runs_nothing(self):
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True,
+                                      git=True)
+        first = json.loads(_env.atompipe(["check", "--json"], cwd=root).stdout)
+        self.assertEqual(first["counts"]["executed"], 0, first["counts"])
+        model = os.path.join(root, "model", "bracket.py")
+        with open(model, encoding="utf-8") as fh:
+            text = fh.read()
+        head, sep, rest = text.partition('"""')
+        self.assertTrue(sep, "the model has a module docstring")
+        with open(model, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(head + sep + "Edited docstring only. " + rest)
+        tracked = _env.run(["git", "status", "--porcelain", "--", ".atompipe/verdicts"],
+                           cwd=root).stdout
+        out = json.loads(_env.atompipe(["check", "--json"], cwd=root).stdout)
+        self.assertEqual(out["counts"]["executed"], 0, out["counts"])
+        self.assertEqual(out["counts"]["controls"]["executed"], 0, out["counts"])
+        self.assertEqual(out["counts"]["controls"]["reverified"], 6, out["counts"])
+        self.assertEqual(_env.run(["git", "status", "--porcelain", "--", ".atompipe/verdicts"],
+                                  cwd=root).stdout, tracked,
+                         "re-qualifying by values wrote a tracked file")
 
 
 if __name__ == "__main__":

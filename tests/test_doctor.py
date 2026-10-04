@@ -81,7 +81,7 @@ from atompipe.models import GateSpec, NegativeControl, Tier, Verdict
 #: The rows this file holds `doctor` to, by the name each prints.
 ROWS = ("instruments", "opaque-inputs", "cache-entries", "two-outcomes", "sealed-fixtures",
         "imports", "env-reads", "memos", "dynamic-imports", "code-digest", "pending-controls",
-        "orphan-entries")
+        "orphan-entries", "qualification", "known-good")
 
 #: A fixture every planted project gate can borrow: the bracket's own, which
 #: sags the known-good design 30 mm — past any limit the planted gates use.
@@ -504,7 +504,10 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         project = self.copy()
         controls = verdicts.read_controls(project, "bracket.bed_fit")
         self.assertEqual(len(controls), 1, [c.name for c in controls])
-        passed_its_bad = dataclasses.replace(controls[0], bad="pass", admitted="no")
+        # R-6 (P2.3): no walk where the known-bad control passed — nothing is
+        # walked then, and the strict writer refuses an entry that says one was.
+        passed_its_bad = dataclasses.replace(controls[0], bad="pass", admitted="no",
+                                             mutation=None)
         self.assertTrue(verdicts.write_control(project, passed_its_bad).written)
         with mock.patch.object(verdicts, "TWO_OUTCOMES_IS_ERROR", False):
             code, rows = _doctor_in_process(project)
@@ -637,6 +640,42 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         self.assertEqual(_run(project, "check").returncode, 1)
         _code, rows = _doctor(project)
         self.assertRow(rows, "pending-controls", "ok")
+
+    def test_qualification(self):
+        """(V16) An unqualified evaluator is named, with what does not hold, in
+        GLOSSARY §2's words — never *admitted* or *re-verified*."""
+        project = self.copy()
+        _write(project, "gates/zz_never.py", f'''
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+
+@gate(id="bracket.never", claims=["never"],
+      negative_control=NegativeControl(fixture="{_FIXTURE}"))
+def never(ctx):
+    d = float(ctx.params["deflection"])
+    return Verdict(gate="bracket.never", passed=False, measured=d, limit=0.5)
+''')
+        _run(project, "check")
+        _code, rows = _doctor(project)
+        row = self.assertRow(rows, "qualification", "FAIL", "1 evaluator(s) unqualified",
+                             "bracket.never (known-good fail)")
+        for word in ("admitted", "re-verif", "negative control"):
+            self.assertNotIn(word, row["detail"])
+        self.assertClean("qualification")
+        self.assertIn("every evaluator qualified at its version",
+                      self.clean["qualification"]["detail"])
+
+    def test_known_good(self):
+        """(V16) A project with evaluators of its own and no known-good control:
+        once per project, with the fix — every such claim reads Gap until it
+        exists. Planted: a doctor that does not name it."""
+        project = self.copy()
+        os.remove(os.path.join(project, "selftest", "known_good.py"))
+        _code, rows = _doctor(project)
+        self.assertRow(rows, "known-good", "FAIL", "no selftest/known_good.py",
+                       "known-good not run", "context(ctx)")
+        self.assertClean("known-good")
 
     def test_orphan_entries_warn_and_do_not_fail_integrity(self):
         project = self.copy()

@@ -507,6 +507,9 @@ def bounding(ctx: GateContext) -> Verdict:
     requires_python=["trimesh", "numpy"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:holed_box",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="a box with the two triangles of its +Z facet deleted: 4 open edges, "
              "winding and every other facet untouched",
     ),
@@ -585,6 +588,9 @@ def watertight(ctx: GateContext) -> Verdict:
     requires_python=["trimesh", "numpy"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:flipped_facet",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="a closed box with one triangle's winding reversed: still watertight, "
              "no longer a volume — the case cad.watertight cannot see",
     ),
@@ -729,6 +735,9 @@ def _weld_and_drop(mesh: Any, digits: int, area_eps: float, max_passes: int = 8)
     # pre-empt it wherever both run.
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:sliver_pair",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="one corner of a closed box emitted twice 1e-6 mm apart with a subset "
              "of its faces repointed at the copy: adjacency splits on a surface "
              "that is still geometrically closed, and the face spanning the two "
@@ -920,6 +929,9 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
     needs=["cad.watertight"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:thin_plate",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="a plate at a quarter of the project's own minimum wall; the same "
              "footprint, watertight, a valid volume, and too thin",
     ),
@@ -1307,6 +1319,9 @@ def _read_bonded(ctx: GateContext, sliding: set[tuple[str, str]],
     needs=["cad.is_volume"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:overlapping_pair",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="two valid 20 mm boxes placed 18 mm apart: 800 mm^3 of shared material, "
              "nothing else about either part changed and no allowlist entry",
     ),
@@ -2946,6 +2961,9 @@ def _gap_text(gap: Any) -> str:
     needs=["cad.is_volume"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:broken_chain",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="the baseline assembly with the cover lifted 3 mm off the housing rim "
              "it is declared to seat on — a lid that is not on the box. One member "
              "of one declared chain moved, in the direction this gate measures, and "

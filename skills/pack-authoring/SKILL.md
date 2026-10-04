@@ -173,6 +173,29 @@ If the gate passes its known-bad fixture, it is broken. Do not proceed. Do not
 rationalise. This is the moment the whole system either earns its credibility or
 quietly loses it.
 
+**And it must pass a known-good one.** A gate is *qualified* only when it passes its
+known-good control and fails its known-bad one (GLOSSARY §2): a gate that refuses
+everything fails its fixture too, and shows nothing. For a pack the known-good
+control is your `selftest/baseline.json` — unless the known-bad fixture hands the
+gate its input through `ctx.extra` (a dict, or `extra=` on the context it returns).
+Then declare `good=` on the `NegativeControl` — a fixture spelled like `fixture`,
+sealed the same way — that hands the baseline through the **same** `ctx.extra` keys
+(`cad-solid/selftest/good_meshes.py`, `sourcing/selftest/good_boms.py`): two halves
+that reach the gate through different channels prove nothing, and the gate reads
+unqualified (`channels differ`). The line says which facts held:
+
+```
+cad.watertight : known-good pass · known-bad fail → qualified
+```
+
+A pack loaded from outside the bundled `packs/` — under `.atompipe/packs/` while you
+write it, or `~/.atompipe/packs` — also faces the **mutation pass**: each value its
+known-good run read is pushed until the gate's own value lands 15% past its own
+limit, and that run must fail (`mutation 2/2 fail`). A gate keyed to its own control
+— failing the one value the fixture changes, passing every other — reads
+`mutation 1/2 fail → unqualified`. Report the value your gate judges as `measured`
+against `limit`, and the pass has something to land on.
+
 ### 4b. Draw what the gate measured, and point at it
 
 A verdict says *what* is wrong. A **view** plus a **locator** says *where*, and that
@@ -312,12 +335,13 @@ atompipe pack validate <name>
 atompipe gate selftest --pack <name> --junit <file>.xml
 ```
 
-`pack validate` checks the layout and demonstrates tiers 0–1: each gate passes the
-pack's own baseline, its control fires, the control still fires against an empty
-host (the seal probe), and it read nothing of its host's `ctx.params` on the way (the
-seal, read off the trace). `gate selftest --pack` runs the same checks at every tier and
-writes them as JUnit XML — that file is the admission evidence, and it goes with the
-PR. A control that could not run for want of a tool is reported as a skip, never as
+`pack validate` checks the layout and demonstrates tiers 0–1: each gate passes its
+known-good control (the pack's own baseline, or its `good` fixture), its known-bad
+control fails, both reach it through the same `ctx.extra` keys, the control still
+fires against an empty host (the seal probe), and it read nothing of its host's
+`ctx.params` on the way (the seal, read off the trace). `gate selftest --pack` runs
+the same checks at every tier and writes them as JUnit XML — that file is the
+qualification evidence, and it goes with the PR; `-v` prints every gate's line. A control that could not run for want of a tool is reported as a skip, never as
 fired; say so in the PR rather than letting the file speak for it. The directory
 itself is the contribution: there is no export step. A pack whose gates have never
 demonstrated failure does not get merged.

@@ -908,6 +908,246 @@ def _two_gate_pack(case: unittest.TestCase, *, fixture: str = "too_long",
     return pack_dir, guard, dependent
 
 
+#: The extra keys the spine itself puts on a context (``gates._fixture_root``
+#: reads them to find a pack's ``selftest/``): never a channel a control hands
+#: its gate. Restated here, never imported (D-25).
+_SPINE_EXTRA = frozenset({"pack_dir", "pack_dirs"})
+
+#: The controls that hand their gate its known-bad input through ``ctx.extra``
+#: — cad-solid's mesh gates and sourcing's BOM gates, by gate id (PLAN D-26,
+#: §4.0.4 item 1) — measured before P2.3 changed anything (C6, R-4's first
+#: step). Each of their packs' baselines reaches the gate through ``params``.
+EXTRA_CHANNEL = {
+    "cad-solid": ("cad.assembly_connected", "cad.clash", "cad.degenerate_faces",
+                  "cad.is_volume", "cad.wall_thickness", "cad.watertight"),
+    "sourcing": ("bom.availability", "bom.complete", "bom.cost", "bom.currency", "bom.moq",
+                 "bom.process_rules", "bom.single_source"),
+}
+
+
+def _extra_keys(ctx: gates_mod.GateContext) -> tuple[str, ...]:
+    return tuple(sorted(set(getattr(ctx, "extra", None) or {}) - _SPINE_EXTRA))
+
+
+def _channel_rows(pack_dir: str, registry: gates_mod.Registry, *,
+                  host: dict) -> tuple[dict[str, tuple], list[str]]:
+    """``({gate id: (known-bad keys, known-good keys)}, skipped)``: the ``ctx.extra``
+    keys each control hands its gate, the spine's own removed — the known-bad
+    fixture's on ``host`` as the projection, and the known-good control's (the
+    pack's baseline, which reaches the gate with an empty ``extra``; a declared
+    ``good`` fixture's where one exists). This file's own reading (D-25): it
+    never calls ``packs.demonstrate``."""
+    rows: dict[str, tuple] = {}
+    skipped: list[str] = []
+    for spec in registry.specs():
+        _spec, fn = registry.get(spec.id)
+        missing = _tooling_absent(spec)
+        if missing:
+            skipped.append(f"{spec.id} ({missing})")
+            continue
+        bad = gates_mod.run_fixture(spec, fn, _pack_ctx(pack_dir, dict(host)), trace=None,
+                                    out_dir=_scratch_out())
+        good_ref = getattr(spec.negative_control, "good", "") or ""
+        if good_ref:
+            good = gates_mod.run_good_fixture(spec, fn, _pack_ctx(pack_dir, dict(host)),
+                                              trace=None, out_dir=_scratch_out())
+        else:
+            good = _pack_ctx(pack_dir, _read_baseline(pack_dir) or {})
+        rows[spec.id] = (_extra_keys(bad), _extra_keys(good))
+    return rows, skipped
+
+
+class TheExtraChannel(unittest.TestCase):
+    """(C6, R-4's detector) Which controls hand their gate a ``ctx.extra`` key
+    the known-good control does not — D-26's hole, a gate that fails exactly
+    when ``extra`` is non-empty — over the bundled corpus, on the pack's own
+    baseline and on an empty host (the seal probe: a wrapped project hands a
+    pack fixture its live host, whose ``extra`` a check run leaves empty);
+    where trimesh is absent the cad-solid half is asserted skipped by
+    availability, never silently.
+
+    Measured before the refusal landed (``e64dee0``): exactly cad-solid's six
+    mesh gates and sourcing's seven BOM gates (``EXTRA_CHANNEL``). Edited once,
+    in the open, after D5 (R-6: a strengthening): each of those thirteen now
+    declares a known-good fixture (``good=``) that hands its gate the same
+    ``extra`` keys as its known-bad one, and the corpus shows zero hits — the
+    planted pack's one is ``ControlsArePaired``'s."""
+
+    def _hits(self, host_of) -> tuple[dict[str, list[str]], list[str]]:
+        hits: dict[str, list[str]] = {}
+        skipped: list[str] = []
+        for path in _pack_dirs():
+            name = os.path.basename(path)
+            registry = gates_mod.Registry()
+            packs_mod.load_gates(name, registry, root=REPO)
+            rows, gone = _channel_rows(path, registry, host=host_of(path))
+            skipped += gone
+            found = sorted(gid for gid, (bad, good) in rows.items() if bad != good)
+            if found:
+                hits[name] = found
+        return hits, skipped
+
+    def _expected(self, skipped: list[str]) -> dict[str, list[str]]:
+        gone = {entry.partition(" (")[0] for entry in skipped}
+        out = {}
+        for pack, ids in EXTRA_CHANNEL.items():
+            left = sorted(gid for gid in ids if gid not in gone)
+            for gid in ids:
+                if gid in gone:
+                    # never silently: a gate left out here is one availability
+                    # says cannot run on this machine
+                    spec = next(s for s in _projects_pack_gates(pack) if s.id == gid)
+                    self.assertTrue(_tooling_absent(spec), gid)
+            if left:
+                out[pack] = left
+        return out
+
+    def test_the_extra_channel_controls_are_exactly_these(self):
+        hits, skipped = self._hits(lambda path: _read_baseline(path) or {})
+        self.assertEqual(hits, {}, "a control handing its gate a ctx.extra key its known-good "
+                                   "control does not")
+        self._expected(skipped)            # a gate left out: only where its tools are absent
+        for pack, ids in EXTRA_CHANNEL.items():
+            declared = {spec.id: getattr(spec.negative_control, "good", "") or ""
+                        for spec in _projects_pack_gates(pack)}
+            for gid in ids:
+                with self.subTest(gate=gid):
+                    self.assertTrue(declared.get(gid),
+                                    f"{gid} hands its known-bad input through ctx.extra and "
+                                    f"declares no known-good fixture on that channel")
+
+    def test_an_empty_host_shows_no_other(self):
+        hits, skipped = self._hits(lambda _path: {})
+        self.assertEqual(hits, {})
+        self._expected(skipped)
+
+
+#: The planted pack D-26's hole needs: a known-bad control through
+#: ``ctx.extra``, the baseline through ``params``, and a gate that fails exactly
+#: when ``extra`` is not empty — it passes its known-good and fails its
+#: known-bad, and has shown nothing.
+_EXTRA_GATE = """\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Tier, Verdict
+
+
+@gate(id={gate_id!r}, claims=["scratch"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:via_extra"{good}))
+def sniff(ctx):
+    return Verdict(gate={gate_id!r}, passed=not ctx.extra)
+"""
+
+_EXTRA_FIXTURES = """\
+def via_extra(ctx):
+    return {"probe": True}
+
+
+def same_channel(ctx):
+    return {"probe": False}
+"""
+
+
+def _extra_pack(case: unittest.TestCase, *, good: str = "") -> tuple[str, gates_mod.Registry, str]:
+    root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-extra-pack-"))
+    case.addCleanup(shutil.rmtree, root, True)
+    name = f"extra-{uuid.uuid4().hex[:12]}"
+    gate_id = f"{name}.sniff"
+    pack_dir = os.path.join(root, ".atompipe", "packs", name)
+    for rel, text in (("pack.json", json.dumps({"name": name, "description": "planted"})),
+                      ("gates/sniff.py", _EXTRA_GATE.format(
+                          gate_id=gate_id,
+                          good=f", good=\"selftest/bad.py:{good}\"" if good else "")),
+                      ("selftest/bad.py", _EXTRA_FIXTURES),
+                      ("selftest/baseline.json", json.dumps({"span_mm": 50.0}))):
+        path = os.path.join(pack_dir, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text)
+
+    def forget_modules() -> None:
+        for mod_name, module in list(sys.modules.items()):
+            origin = getattr(module, "__file__", None) or ""
+            if origin and os.path.realpath(origin).startswith(root + os.sep):
+                sys.modules.pop(mod_name, None)
+
+    case.addCleanup(forget_modules)
+    registry = gates_mod.Registry()
+    with gates_mod.use_registry(registry):
+        packs_mod.load_gates(name, registry, root=root)
+    return pack_dir, registry, gate_id
+
+
+class KnownGoodControlsPass(unittest.TestCase):
+    """(V6, D-25's independent oracle) Every bundled gate passes its resolved
+    known-good control — the pack's baseline, or the `good` fixture it declares
+    built over that baseline — with its tools present. Never through
+    `packs.demonstrate`."""
+
+    def test_every_bundled_known_good_control_passes(self):
+        problems = []
+        for path in _pack_dirs():
+            name = os.path.basename(path)
+            registry = gates_mod.Registry()
+            packs_mod.load_gates(name, registry, root=REPO)
+            for spec, fn in registry.pairs():
+                if _tooling_absent(spec):
+                    continue
+                good_ref = getattr(spec.negative_control, "good", "") or ""
+                ctx = _pack_ctx(path, _read_baseline(path) or {})
+                if good_ref:
+                    ctx = gates_mod.run_good_fixture(spec, fn, ctx, trace=None,
+                                                     out_dir=_scratch_out())
+                verdict = gates_mod.run_gate(spec, fn, ctx)
+                if verdict.outcome != "pass":
+                    problems.append(f"{spec.id}: {verdict.outcome} on its known-good control "
+                                    f"({good_ref or 'the baseline'}): "
+                                    f"{verdict.detail or verdict.error or verdict.skip_reason}")
+        self.assertEqual(problems, [], "\n".join(problems))
+
+
+class ControlsArePaired(unittest.TestCase):
+    """(V6, D-26 after D5) Each bundled gate's known-good and known-bad controls
+    hand it the same `ctx.extra` keys: zero hits. A planted pack that delivers
+    its known-bad input through `extra` and its known-good through `params` is
+    caught by this file's oracle AND by `pack validate`; the same gate with a
+    known-good fixture on the same channel is caught by its outcomes — it passes
+    both."""
+
+    def test_no_bundled_pair_differs_in_channel(self):
+        hits = {}
+        for path in _pack_dirs():
+            name = os.path.basename(path)
+            registry = gates_mod.Registry()
+            packs_mod.load_gates(name, registry, root=REPO)
+            rows, _skipped = _channel_rows(path, registry, host=_read_baseline(path) or {})
+            found = sorted(gid for gid, (bad, good) in rows.items() if bad != good)
+            if found:
+                hits[name] = found
+        self.assertEqual(hits, {})
+
+    def test_the_planted_pack_is_caught_by_the_oracle_and_by_validate(self):
+        pack_dir, registry, gate_id = _extra_pack(self)
+        rows, _skipped = _channel_rows(pack_dir, registry, host={"span_mm": 50.0})
+        self.assertEqual(rows[gate_id], (("probe",), ()))
+        problems = packs_mod.validate(pack_dir)
+        self.assertTrue(any(p.startswith(f"{gate_id}:") and "channel" in p for p in problems),
+                        problems)
+
+    def test_a_same_channel_known_good_is_caught_by_its_outcomes(self):
+        pack_dir, registry, gate_id = _extra_pack(self, good="same_channel")
+        rows, _skipped = _channel_rows(pack_dir, registry, host={"span_mm": 50.0})
+        self.assertEqual(rows[gate_id], (("probe",), ("probe",)))
+        problems = packs_mod.validate(pack_dir)
+        self.assertTrue(any(p.startswith(f"{gate_id}:") and "known-good" in p
+                            for p in problems), problems)
+
+
+def _projects_pack_gates(pack: str) -> list:
+    registry = gates_mod.Registry()
+    packs_mod.load_gates(pack, registry, root=REPO, include_env=False, include_user=False)
+    return registry.specs()
+
+
 class ControlsAreIsolated(unittest.TestCase):
     """Invariant 5's neighbour (P2.2-D12's second test, D13): a dependent's
     known-bad control must leave its prerequisites passing, or the guard

@@ -163,6 +163,20 @@ class _SiteCase(unittest.TestCase):
             registry.register(spec, lambda ctx: Verdict(gate="x", passed=True))
         return registry
 
+    def _qualified(self, registry, *gate_ids):
+        """A forged whole qualification for each of ``gate_ids`` (R-6, P2.3):
+        an evaluator never qualified reads not yet qualified — its row the
+        unqualified one, its claim Gap — so a test about how a STALE entry
+        renders plants a qualified evaluator first, as before P2.3 it had no
+        need to."""
+        from atompipe import verdicts as verdicts_mod
+        for gid in gate_ids:
+            spec, fn = registry.get(gid)
+            verdicts_mod.record_control(
+                self.root, spec, fn, bad="fail", detail="planted by a renderer test",
+                good="pass", mutation=() if verdicts_mod._mutation_applies(fn, self.root)
+                else None)
+
     def _spec(self, gid, claims=("C1",), **kw):
         from atompipe.models import GateSpec
         return GateSpec(
@@ -511,8 +525,9 @@ class StateIsJson(_SiteCase):
                         data={"rows": [{"id": "r1", "part": "M3 screw"}]})],
         )
         ledger = store_mod.load(self.root)
-        payload = site_mod.state(self.root, ledger, self._registry(self._spec("g.one")),
-                                 now="2026-01-01T00:00:00Z")
+        registry = self._registry(self._spec("g.one"))
+        self._qualified(registry, "g.one")
+        payload = site_mod.state(self.root, ledger, registry, now="2026-01-01T00:00:00Z")
 
         # No `default=` encoder: a stray dataclass or enum must raise here rather
         # than be silently stringified into something the page cannot read back.
@@ -547,8 +562,9 @@ class StateIsJson(_SiteCase):
         self._ledger(claims=[self._claim("C1")],
                      verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
                                        measured=0.31, limit=0.5, units="mm")])
-        payload = site_mod.state(self.root, store_mod.load(self.root),
-                                 self._registry(self._spec("g.one")),
+        registry = self._registry(self._spec("g.one"))
+        self._qualified(registry, "g.one")
+        payload = site_mod.state(self.root, store_mod.load(self.root), registry,
                                  now="2026-01-01T00:00:00Z")
         digest = payload["meta"]["judgement_digest"]
         self.assertEqual(site_mod.judgement_digest(payload), digest,
@@ -616,7 +632,7 @@ class HonestyOnThePage(_SiteCase):
         the build.
 
         With `controls`, every registered gate with a verdict also gets a
-        FORGED fired control: `record_control(bad="fail")` with no fixture run
+        FORGED fired control: `record_control(bad="fail", good="pass")` with no fixture run
         behind it. That is a forged admission, legitimate only in a renderer
         test — it forges the inner loop, and R-9's re-execution at every money
         boundary (`check --force` in CI, P2's `export`) is what a hand-placed
@@ -642,8 +658,13 @@ class HonestyOnThePage(_SiteCase):
                 verdicts_mod.remember(self.root, verdict.gate, verdict, input_rho="",
                                       kind=kind, when="2026-01-01T00:00:00Z")
             if controls and spec is not None:
-                verdicts_mod.record_control(self.root, spec, fn, bad="fail",
-                                            detail="planted by a renderer test")
+                # R-6 (P2.3): a whole qualification forged — the known-good
+                # half passed and, where the walk applies, a walk that made
+                # none — or the entry is incomplete and nothing counts (D19).
+                verdicts_mod.record_control(
+                    self.root, spec, fn, bad="fail", detail="planted by a renderer test",
+                    good="pass", mutation=() if verdicts_mod._mutation_applies(fn, self.root)
+                    else None)
         site_mod.scaffold(self.root)
         site_mod.build(self.root, store_mod.load(self.root), registry,
                        site_mod.ViewRegistry(), now="2026-01-01T00:10:00Z")
@@ -672,8 +693,9 @@ class HonestyOnThePage(_SiteCase):
     def test_an_undemonstrated_gate_does_not_read_pass_on_the_page(self):
         """The same build without the forged control. The verdict is Fresh and
         it passed — and the gate was never shown to fail, so its pass is not
-        proof (invariant 9, the reject half): not PASS on the page, and the row
-        says why."""
+        proof (invariant 9): not PASS on the page, and the row says why. R-6
+        (P2.3): never qualified, it reads not yet qualified — the row
+        ``unqualified``, the claim Gap — where P2.2 read it Stale."""
         state = self._built_state(
             claims=[self._claim("C1", gates=["g.one"])],
             verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
@@ -685,8 +707,10 @@ class HonestyOnThePage(_SiteCase):
                             "a PASS from a gate never shown to fail reached the page")
         verdict = state["verdicts"][0]
         self.assertFalse(verdict["fresh"])
-        self.assertIn("control not demonstrated", verdict["stale_reason"])
-        self.assertTrue(state["meta"]["stale"])
+        self.assertEqual(verdict["status"], "unqualified")
+        self.assertEqual(verdict["qualification"]["token"], "qualification:not-yet|0")
+        self.assertIn("not yet qualified at this version", verdict["qualification"]["reason"])
+        self.assertEqual(state["claims"][0]["status"], "unclaimed")
         self.assertFalse(state["readiness"]["ready"])
 
     def test_a_claim_covered_only_by_a_skipped_gate_is_not_proven(self):

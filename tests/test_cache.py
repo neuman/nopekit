@@ -61,8 +61,8 @@ READS_KEYS = ["params", "files", "dirs", "ledger", "model", "opaque"]
 VERDICT_KEYS = ["passed", "measured", "limit", "units", "detail", "evidence",
                 "locators", "claims", "tier", "pack"]
 CONTROL_KEYS = ["schema", "kind", "gate", "rho", "static", "static_parts", "host",
-                "fixture", "reads", "bad", "good", "admitted", "detail", "measured",
-                "limit", "units", "digest"]
+                "fixture", "reads", "bad", "bad_extra", "good", "mutation", "admitted",
+                "detail", "measured", "limit", "units", "digest"]
 CONTROL_READS_KEYS = ["params", "files", "dirs", "ledger", "host", "opaque"]
 
 
@@ -710,8 +710,11 @@ class ControlEntries(_env.EnvCase):
         static, parts = verdicts.control_static(spec, fn, root, digests=FileDigests())
         self.assertEqual(body["static"], static)
         self.assertEqual(body["static_parts"], parts)
+        # R-6 (P2.3-D11): the static part's `nc` gains the declared known-good
+        # fixture (none here) and whether the mutation pass applies (a project
+        # gate: it does) — a promotion into the bundled packs re-qualifies.
         self.assertEqual(parts["nc"], {"fixture": "selftest/bad.py:make", "expect": "fail",
-                                       "note": ""})
+                                       "note": "", "good": "", "mutation": True})
         self.assertEqual(body["reads"]["params"], [[["x"], verdicts.digest_value(5.0), 5.0]])
         [entry] = verdicts.read_controls(root, "t.g")
         self.assertEqual((entry.bad, entry.admitted, entry.rho), ("fail", "reject-only", body["rho"]))
@@ -803,6 +806,96 @@ class ControlEntries(_env.EnvCase):
                          [[["x"], verdicts.digest_value(3.0)]])
         self.assertEqual(results["known-good"]["reads"]["host"], [])
         self.assertNotEqual(results["live"]["rho"], results["known-good"]["rho"])
+
+
+# --------------------------------------------------------------------------- #
+class PairedEntries(_env.EnvCase):
+    """(V8) The control entry that carries a whole qualification — the known-bad
+    half, the known-good half, the channels each handed its gate, the mutation
+    pass — and the strict reader that re-derives `admitted` from those facts
+    alone (a valid digest is only what its writer wrote, R-9)."""
+
+    def _paired(self) -> tuple[str, dict, str]:
+        root = _project(self)
+        _write(root, "selftest/bad.py", ControlEntries._BAD)
+        _write(root, "gates/g.py", _gate_source("t.g", '''
+            x = float(ctx.params["x"])
+            return Verdict(gate="t.g", passed=x <= 1.0, measured=x, limit=1.0, units="mm")
+        '''))
+        spec, fn = _registry(root).get("t.g")
+        wrote = verdicts.record_control(root, spec, fn, bad="fail", good="pass", mutation=(),
+                                        detail="forged, paired")
+        return root, _load_json(wrote.path), wrote.path
+
+    def _refused(self, data: dict, why: str) -> None:
+        problem = verdicts._problem_in_control(data)
+        self.assertTrue(problem, f"accepted: {why}")
+        self.assertIn(why, problem)
+
+    def test_a_paired_entry_round_trips(self):
+        root, data, path = self._paired()
+        self.assertEqual(list(data), CONTROL_KEYS)
+        self.assertEqual((data["bad"], data["good"]["outcome"], data["admitted"]),
+                         ("fail", "pass", "paired"))
+        self.assertEqual(verdicts._problem_in_control(data), "")
+        [entry] = verdicts.read_controls(root, "t.g")
+        with open(path, "rb") as fh:
+            before = fh.read()
+        again = verdicts.write_control(root, dataclasses.replace(entry, path=""))
+        self.assertEqual(again.path, path)
+        with open(path, "rb") as fh:
+            self.assertEqual(fh.read(), before, "byte-identical")
+
+    def test_the_strict_reader_refuses_what_does_not_follow(self):
+        _root, data, _path = self._paired()
+        reads = dict(data["good"]["reads"], params=[[["x"], verdicts.digest_value(0.5)]])
+        data = dict(data, good=dict(data["good"], reads=reads))
+        self.assertEqual(verdicts._problem_in_control(data), "")
+        self._refused(dict(data, good=dict(data["good"], outcome="maybe")), "good.outcome")
+        self._refused(dict(data, good=dict(data["good"], outcome="fail")), "did not hold")
+        self._refused(dict(data, mutation=None, good=dict(data["good"], outcome="fail")),
+                      "does not follow")
+        walk = {"runs": 3, "boundary": "", "results": [
+            {"key": ["x"], "before": 0.5, "after": 1.2, "outcome": "pass", "measured": 1.2,
+             "limit": 1.0}], "inconclusive": [], "not_mutated": []}
+        self._refused(dict(data, mutation=walk), "does not follow")
+        self.assertEqual(verdicts._problem_in_control(dict(data, mutation=dict(walk, results=[
+            dict(walk["results"][0], outcome="fail")]))), "", "a conclusive fail is paired")
+        self._refused(dict(data, mutation=dict(walk, results=[dict(
+            walk["results"][0], outcome="errored")])), "outcome")
+        self._refused(dict(data, mutation=dict(walk, results=[dict(
+            walk["results"][0], outcome="fail", after="x")])), "after")
+        self._refused(dict(data, mutation=dict(walk, fails=1, results=[dict(
+            walk["results"][0], outcome="fail")])), "mutation")
+        self._refused(dict(data, bad="pass", admitted="no", mutation=dict(walk, results=[])),
+                      "mutation")
+        self._refused(dict(data, bad_extra=["meshes"]), "does not follow")
+
+    def test_a_result_key_outside_the_good_reads_is_refused(self):
+        _root, data, _path = self._paired()
+        walk = {"runs": 3, "boundary": "", "results": [
+            {"key": ["never_read"], "before": 0.5, "after": 1.2, "outcome": "fail",
+             "measured": 1.2, "limit": 1.0}], "inconclusive": [], "not_mutated": []}
+        self._refused(dict(data, mutation=walk), "never_read")
+
+    def test_the_p22_shape_reads_as_reject_only(self):
+        _root, data, _path = self._paired()
+        legacy = {k: v for k, v in data.items() if k not in ("bad_extra", "mutation")}
+        legacy["good"] = None
+        legacy["admitted"] = "reject-only"
+        self.assertEqual(verdicts._problem_in_control(legacy), "")
+
+    def test_two_entries_differing_only_in_the_good_half_are_two_outcomes(self):
+        root, data, path = self._paired()
+        [entry] = verdicts.read_controls(root, "t.g")
+        other = dataclasses.replace(entry, path="", good=dict(entry.good, measured=0.75))
+        wrote = verdicts.write_control(root, other)
+        self.assertNotEqual(wrote.path, path, "the good half is part of the outcome")
+        self.assertTrue(any("two control outcomes recorded for identical inputs" in w
+                            for w in wrote.warnings), wrote.warnings)
+        pool = verdicts.read_controls(root, "t.g")
+        self.assertEqual(len(pool), 2)
+        self.assertTrue(verdicts._disagree(pool).startswith("two-outcomes|"))
 
 
 # --------------------------------------------------------------------------- #

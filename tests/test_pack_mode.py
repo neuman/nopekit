@@ -41,8 +41,11 @@ PACKS_DIR = os.path.join(_env.REPO, "packs")
 #: The summary line both modes print (spec §3.13), as the fresh-clone transcript
 #: matches it. `\S+` for the duration: `human_duration` renders one token below a
 #: minute, and the bundled packs demonstrate in seconds.
-SUMMARY = re.compile(r"^(\d+) control\(s\) in \S+: (\d+) fired, (\d+) BROKEN, "
-                     r"(\d+) skipped \(tooling\)$")
+#: The summary, in qualification's words from P2.3 (R-6, words only — `N
+#: control(s) in T: F fired, B BROKEN, S skipped (tooling)` before): evaluators,
+#: qualified, unqualified, skipped, the groups in the order they had.
+SUMMARY = re.compile(r"^(\d+) evaluators? in \S+: (\d+) qualified, (\d+) unqualified, "
+                     r"(\d+) skipped$")
 
 #: The message that stops `--junit` eating the argument after it (cli:H7).
 XML_RULE = "--junit takes a path ending in .xml; put gate ids before it"
@@ -170,13 +173,16 @@ class PackModeSelftest(_env.EnvCase):
         junit = os.path.join(self.tmp(), "selftest.xml")
         proc = self._run("--pack", pack, "--junit", junit)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        # R-6 (P2.3-D18, words): its qualification line names it, where a
+        # `[FAIL]` row did — `known-bad pass`, the first fact that does not hold.
         flagged = [line for line in proc.stdout.splitlines()
-                   if line.startswith("[FAIL]") and "beam.deflection" in line]
+                   if line.startswith("beam.deflection : ") and "known-bad pass" in line
+                   and line.endswith("→ unqualified")]
         self.assertTrue(flagged, proc.stdout)
         summary = [SUMMARY.match(line) for line in proc.stdout.splitlines()]
         summary = [m for m in summary if m]
         self.assertEqual(len(summary), 1, proc.stdout)
-        self.assertEqual(summary[0].group(3), "1", proc.stdout)      # one BROKEN
+        self.assertEqual(summary[0].group(3), "1", proc.stdout)      # one unqualified
 
         root = ET.parse(junit).getroot()
         self.assertEqual(_red(_suite(root, "controls")), {"beam.deflection": "failure"})
@@ -196,7 +202,11 @@ class PackModeSelftest(_env.EnvCase):
                             for line in proc.stdout.splitlines()), proc.stdout)
         root = ET.parse(junit).getroot()
         self.assertEqual(_red(_suite(root, "baselines")), {"beam.deflection": "failure"})
-        self.assertEqual(_red(_suite(root, "controls")), {})
+        # R-6 (P2.3, a strengthening): the `controls` suite is one row per
+        # evaluator, green iff qualified — and an evaluator that fails its
+        # known-good control is not, so the baseline run is no longer the only
+        # one that can see it.
+        self.assertEqual(_red(_suite(root, "controls")), {"beam.deflection": "failure"})
 
     def test_the_unplanted_copy_passes(self):
         """The positive control for the two above: the same copy, nothing
@@ -234,11 +244,11 @@ class PackModeSelftest(_env.EnvCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         match = SUMMARY.match(proc.stdout.splitlines()[-1])
         self.assertIsNotNone(match, proc.stdout)
-        controls, fired, broken, skipped = (int(g) for g in match.groups())
-        self.assertEqual(broken, 0, proc.stdout)
+        evaluators, qualified, unqualified, skipped = (int(g) for g in match.groups())
+        self.assertEqual(unqualified, 0, proc.stdout)
         # Not vacuous: the stdlib-only packs run with nothing installed.
-        self.assertGreater(fired, 0, proc.stdout)
-        self.assertEqual(controls, fired + broken + skipped, proc.stdout)
+        self.assertGreater(qualified, 0, proc.stdout)
+        self.assertEqual(evaluators, qualified + unqualified + skipped, proc.stdout)
         self.assertEqual(_changed(before, _snapshot(PACKS_DIR)), [],
                          "pack-mode selftest wrote into packs/")
 

@@ -338,7 +338,12 @@ class _Project:
         return verdict, wrote
 
     def demonstrate(self, gate_id, projection=None):
-        """Run ``gate_id``'s control and record it, as the sweep will."""
+        """Run ``gate_id``'s control and record it, as the sweep will — its
+        known-bad half run, its known-good half planted as passed and, where
+        that control held, a walk that made none (``good="pass"``,
+        ``mutation=()``: R-6, P2.3 — the half these tests are not about; without
+        it every entry is incomplete, D19, and a walk is recorded only where
+        both controls held)."""
         spec, fn = self.pair(gate_id)
         trace = GateTrace(kind="control", anchors=self.anchors)
         result = gates.selftest(spec, fn, self.ctx(projection or _projection()), trace=trace,
@@ -346,7 +351,8 @@ class _Project:
                                                      spec.id))
         return result, verdicts.record_control(self.root, spec, fn, result=result, trace=trace,
                                                anchors=self.anchors, digests=FileDigests(),
-                                               when="2026-09-27T10:00:00Z")
+                                               when="2026-09-27T10:00:00Z", good="pass",
+                                               mutation=() if result.passed else None)
 
     def freshness(self, projection, ledger=None, **kw):
         return verdicts.freshness(self.root, self.registry, projection,
@@ -547,6 +553,9 @@ class Freshness(_env.EnvCase):
     def test_more_than_three_reasons_are_counted(self):
         p = _Project(self)
         p.record("t.many", _PROJECTION)
+        # R-6 (P2.3): qualified, so the stale row is the entry's and not "not
+        # yet qualified" — an evaluator never qualified reads Gap, stale or not.
+        p.demonstrate("t.many")
         state = p.freshness(_projection(a=2.0, b=2.0, c=2.0, d=2.0, e=2.0))["t.many"]
         self.assertEqual(verdicts.MAX_STALE_REASONS, 3)
         self.assertEqual(state.reasons, ("config.a 1.0 -> 2.0", "config.b 1.0 -> 2.0",
@@ -673,7 +682,12 @@ class Resolve(_env.EnvCase):
         verdicts.record_verdict(p.root, None, None,
                                 Verdict(gate="a.gone", claims=["bed-fit"], passed=False))
         resolution = p.resolve(_PROJECTION)
-        self.assertEqual([v.gate for v in resolution.verdicts], ["t.defl", "a.gone", "z.gone"])
+        # R-6 (P2.3): every registered gate never run reads not yet qualified
+        # (an unqualified verdict, its claim Gap: critique of the P2.3 design);
+        # the order this test pins is of the gates that have something.
+        self.assertEqual([v.gate for v in resolution.verdicts
+                          if v.unqualified != "qualification:not-yet|0"],
+                         ["t.defl", "a.gone", "z.gone"])
         for gate_id in ("a.gone", "z.gone"):
             self.assertIn(gate_id, resolution.stale_gates)
             self.assertEqual(resolution.rows[gate_id].stale_reason,
@@ -794,8 +808,13 @@ class Resolve(_env.EnvCase):
         self.assertEqual(status["C1"], ClaimStatus.BLOCKED)
         # P2.1 (R-6, a V1 row): a remembered crash reads Skipped, errored.
         self.assertEqual(status["C2"], ClaimStatus.BLOCKED)
-        self.assertEqual(status["C3"], ClaimStatus.PENDING, "a gate with nothing is PENDING")
-        self.assertNotIn("t.many", resolution.rows)
+        # P2.3 (R-6): a gate with nothing was never qualified, and reads not yet
+        # qualified — its claim Gap, where P2.2 read it PENDING (Open). Still
+        # nothing of a run: no entry, state never.
+        self.assertEqual(status["C3"], ClaimStatus.UNCLAIMED, "a gate with nothing is Gap")
+        self.assertEqual((resolution.rows["t.many"].state, resolution.rows["t.many"].entry,
+                          resolution.rows["t.many"].admission.reason),
+                         ("never", None, "qualification:not-yet|0"))
 
     def test_a_remembered_availability_skip_shows_only_while_the_tool_is_missing(self):
         p = _Project(self)
@@ -803,7 +822,11 @@ class Resolve(_env.EnvCase):
                           Verdict(gate="t.defl", claims=["stiffness"], skipped=True,
                                   skip_reason="requires python trimesh (not importable)"),
                           input_rho="", kind="availability", when="")
-        self.assertNotIn("t.defl", p.resolve(_PROJECTION).rows,
+        # R-6 (P2.3): the row of a gate never run is "not yet qualified" now,
+        # never the skip — nothing ran, and nothing of it shows.
+        here = p.resolve(_PROJECTION).rows["t.defl"]
+        self.assertEqual((here.state, here.entry, here.admission.reason),
+                         ("never", None, "qualification:not-yet|0"),
                          "the tool is here now: nothing ran, nothing to show")
         missing = p.resolve(_PROJECTION, availability=_MISSING)
         self.assertEqual(_row_verdict(missing, "t.defl").skip_reason,
@@ -857,7 +880,10 @@ class Resolve(_env.EnvCase):
         with open(wrote.path, "w", encoding="utf-8") as fh:
             fh.write(text.replace('"measured": 0.3', '"measured": 0.1'))
         resolution = p.resolve(_PROJECTION)
-        self.assertNotIn("t.defl", resolution.rows, "a hand-edited entry is not evidence")
+        # R-6 (P2.3): a gate with nothing has a row now — not yet qualified —
+        # and the hand-edited entry is still not in it.
+        self.assertIsNone(resolution.rows["t.defl"].entry, "a hand-edited entry is not evidence")
+        self.assertEqual(resolution.rows["t.defl"].state, "never")
         self.assertTrue(any("hand-edited entry" in note for note in resolution.notes),
                         resolution.notes)
 
@@ -893,18 +919,23 @@ class AdmissionInResolution(_env.EnvCase):
     demonstrated at its current version. Admission never makes a FAIL go away."""
 
     def test_an_undemonstrated_pass_is_stale(self):
+        # R-6 (P2.3): undemonstrated is an evaluator qualified at SOME version
+        # and not at this one — the pass Stale (P2.1-D6), what this test pins,
+        # now asked after a qualification and a selftest edit. Never qualified
+        # at all, the evaluator is not Stale but unqualified, not yet qualified,
+        # and its claim Gap (GLOSSARY §3: Gap if none is qualified; critique of
+        # the P2.3 design: read Open or Stale until the first check run, a claim
+        # left Gap before any control had run).
         p = _Project(self)
         p.record("t.defl", _PROJECTION)
         spec, fn = p.pair("t.defl")
         state = verdicts.admission_state(p.root, spec, fn, projection=_PROJECTION,
                                          digests=FileDigests(), anchors=p.anchors)
-        self.assertEqual(state.state, "undemonstrated")
+        self.assertEqual((state.state, state.reason), ("not-admitted", "qualification:not-yet|0"))
         resolution = p.resolve(_PROJECTION)
-        self.assertEqual(_row_verdict(resolution, "t.defl").outcome, "pass")
-        self.assertIn("t.defl", resolution.stale_gates)
-        self.assertEqual(resolution.rows["t.defl"].stale_reason,
-                         "control not demonstrated at this version — run atompipe check")
-        self.assertEqual(p.statuses(resolution)["C1"], ClaimStatus.STALE)
+        self.assertEqual(_row_verdict(resolution, "t.defl").unqualified,
+                         "qualification:not-yet|0")
+        self.assertEqual(p.statuses(resolution)["C1"], ClaimStatus.UNCLAIMED)
 
         # demonstrated, it counts
         result, _w = p.demonstrate("t.defl")
@@ -914,6 +945,18 @@ class AdmissionInResolution(_env.EnvCase):
         self.assertEqual(counted.rows["t.defl"].admission.state, "admitted")
         self.assertTrue(counted.rows["t.defl"].fresh)
         self.assertEqual(p.statuses(counted)["C1"], ClaimStatus.PASS)
+
+        # undemonstrated at the version after it, the pass is stale
+        _write(p.root, "selftest/notes.txt", "a new control input\n")
+        state = verdicts.admission_state(p.root, spec, fn, projection=_PROJECTION,
+                                         digests=FileDigests(), anchors=p.anchors)
+        self.assertEqual(state.state, "undemonstrated")
+        resolution = p.resolve(_PROJECTION)
+        self.assertEqual(_row_verdict(resolution, "t.defl").outcome, "pass")
+        self.assertIn("t.defl", resolution.stale_gates)
+        self.assertEqual(resolution.rows["t.defl"].stale_reason,
+                         "not yet qualified at this version — the next check run qualifies it")
+        self.assertEqual(p.statuses(resolution)["C1"], ClaimStatus.STALE)
 
     def test_a_pass_whose_control_passed_its_known_bad_is_not_admitted(self):
         p = _Project(self)
@@ -927,8 +970,8 @@ class AdmissionInResolution(_env.EnvCase):
         resolution = p.resolve(_PROJECTION)
         verdict = _row_verdict(resolution, "t.defl")
         self.assertEqual(verdict.outcome, "error")
-        self.assertTrue(verdict.error.startswith("not admitted: "), verdict.error)
-        self.assertIn("PASSED its own known-bad", verdict.error)
+        self.assertTrue(verdict.error.startswith("unqualified: "), verdict.error)
+        self.assertIn("known-bad:pass", verdict.error)
         self.assertEqual(resolution.rows["t.defl"].admission.state, "not-admitted")
         # P2.1 (R-6, a V1 row): a refused evaluator reads Gap, `unqualified`,
         # never FAIL — and the spine marks the verdict so.
@@ -936,9 +979,17 @@ class AdmissionInResolution(_env.EnvCase):
         self.assertEqual(p.statuses(resolution)["C1"], ClaimStatus.UNCLAIMED)
 
     def test_an_undemonstrated_fail_stays_fail(self):
-        # It blocks either way; admission gates what may COUNT as a pass.
+        # It blocks either way; admission gates what may COUNT as a pass. R-6
+        # (P2.3): undemonstrated is qualified at an earlier version (a control
+        # entry, then a selftest edit); never qualified, a FAIL reads Gap like a
+        # pass — GLOSSARY §3's Failing needs a qualified evaluator.
         p = _Project(self)
         p.record("t.defl", _projection(derived={"deflection": 0.9}))
+        never = p.resolve(_projection(derived={"deflection": 0.9}))
+        self.assertEqual(_row_verdict(never, "t.defl").unqualified, "qualification:not-yet|0")
+        self.assertEqual(p.statuses(never)["C1"], ClaimStatus.UNCLAIMED)
+        p.demonstrate("t.defl")
+        _write(p.root, "selftest/notes.txt", "a new control input\n")
         resolution = p.resolve(_projection(derived={"deflection": 0.9}))
         verdict = _row_verdict(resolution, "t.defl")
         self.assertEqual(verdict.outcome, "fail")
@@ -954,7 +1005,7 @@ class AdmissionInResolution(_env.EnvCase):
         p.demonstrate("t.defl")
         verdict = _row_verdict(p.resolve(_projection(derived={"deflection": 0.9})), "t.defl")
         self.assertEqual(verdict.outcome, "error")
-        self.assertTrue(verdict.error.startswith("not admitted: "), verdict.error)
+        self.assertTrue(verdict.error.startswith("unqualified: "), verdict.error)
 
     def test_a_moved_fixture_closure_is_pending_and_counts(self):
         # The E4 consequence (§3.8): an edit to a file the fixture imports but
@@ -974,15 +1025,18 @@ class AdmissionInResolution(_env.EnvCase):
         state = verdicts.admission_state(p.root, spec, fn, projection=_PROJECTION,
                                          digests=FileDigests(), anchors=p.anchors)
         self.assertEqual(state.state, "pending")
-        self.assertEqual(state.reason,
-                         "control inputs moved (model/helper.py); the next check re-verifies")
+        # D18 (R-6): what moved is structured (`Admission.moved`), and the words
+        # are report.HUMAN's, where P2.2 put spine prose in the reason.
+        self.assertEqual((state.reason, state.moved), ("", ("model/helper.py",)))
+        words = ("due to re-qualify — model/helper.py moved; the next check run "
+                 "re-qualifies it")
         self.assertFalse(state.executed)
         resolution = p.resolve(_PROJECTION)
         self.assertEqual(_row_verdict(resolution, "t.defl").outcome, "pass")
         self.assertNotIn("t.defl", resolution.stale_gates)
         self.assertEqual(resolution.rows["t.defl"].admission.state, "pending")
-        self.assertIn(state.reason, resolution.rows["t.defl"].notes)
-        self.assertTrue(any(state.reason in note for note in resolution.notes),
+        self.assertIn(words, resolution.rows["t.defl"].notes)
+        self.assertTrue(any(words in note for note in resolution.notes),
                         resolution.notes)
         self.assertEqual(p.statuses(resolution)["C1"], ClaimStatus.PASS)
 
@@ -1012,10 +1066,10 @@ class AdmissionInResolution(_env.EnvCase):
         state = verdicts.admission_state(p.root, spec, fn, projection=_PROJECTION,
                                          digests=FileDigests(), anchors=p.anchors)
         self.assertEqual(state.state, "not-admitted")
-        self.assertTrue(state.reason.startswith("control error: "), state.reason)
+        self.assertTrue(state.reason.startswith("known-bad:errored|"), state.reason)
         verdict = _row_verdict(p.resolve(_PROJECTION), "t.flaky")
         self.assertEqual(verdict.outcome, "error")
-        self.assertTrue(verdict.error.startswith("not admitted: control error: "),
+        self.assertTrue(verdict.error.startswith("unqualified: known-bad:errored|"),
                         verdict.error)
 
         # at another static (the fixture file edited) the memory no longer applies

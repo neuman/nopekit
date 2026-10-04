@@ -661,13 +661,17 @@ _PLAN_OUTPUT = {
                          "REJECTED (1)\n"
                          "  4.0 mm — 3.75 mm deflection, 7.5x the limit   "
                          "(model/bracket.py PARAMS)\n"),
+    # P2.3 (R-6, D18's words): `qualification:` and its detail rows, and pack
+    # mode's summary in qualification's words.
     "gate-show-last-selftest": (0, "bracket.deflection — tip deflection at rated load\n"
                                    "  last verdict: [FAIL] bracket.deflection : 0.700 mm\n"
-                                   "  last selftest: [ok  ] fired at this version "
-                                   "(control 0123456789ab)\n"),
-    "pack-mode-selftest": (0, "[ok  ] beam-analytic (bundled) : 6 fired\n"
-                              "54 control(s) in 7.5s: 43 fired, 0 BROKEN, "
-                              "11 skipped (tooling)\n"),
+                                   "  qualification: known-good pass · known-bad fail · "
+                                   "mutation 1/1 fail → qualified (control 0123456789ab)\n"
+                                   "    known-good   selftest/known_good.py — 0.4688 mm "
+                                   "(limit 0.5 mm)\n"),
+    "pack-mode-selftest": (0, "beam-analytic (bundled) : 8 qualified\n"
+                              "54 evaluators in 7.5s: 43 qualified, 0 unqualified, "
+                              "11 skipped\n"),
     "check-junit": (1, f"{_CACHED_FAIL}\n"),
     "revert": (0, ""),
     "no-bytecode-shown": (0, ""),

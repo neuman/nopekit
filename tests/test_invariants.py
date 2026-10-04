@@ -916,9 +916,14 @@ class UnqualifiedIsTheSpinesWord(unittest.TestCase):
 
     def test_a_gate_that_marks_itself_reads_as_a_crash(self):
         errored = (ClaimStatus.BLOCKED, claims_mod.ClaimCause.ERRORED, "")
+        # P2.3 (V15): the spine's text became `unqualified: <token>`, and the new
+        # text is the new disguise — a gate wording its crash so still crashed.
         for returned in (Verdict(gate="g.strict", unqualified="x"),
                          {"pass": True, "unqualified": "x"},
-                         Verdict(gate="g.strict", error="not admitted: x")):
+                         Verdict(gate="g.strict", error="not admitted: x"),
+                         Verdict(gate="g.strict", error="unqualified: known-good:fail"),
+                         {"pass": False, "error": "unqualified: known-good:not-run",
+                          "unqualified": "known-good:not-run"}):
             with self.subTest(returned=repr(returned)[:60]):
                 verdict = self._ran(returned)
                 self.assertEqual(verdict.outcome, "error")

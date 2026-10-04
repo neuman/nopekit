@@ -94,6 +94,7 @@ import json
 import os
 import re
 import tempfile
+import types
 import unittest
 import xml.etree.ElementTree as ET
 from typing import Any, Callable, NamedTuple
@@ -1119,7 +1120,7 @@ _SHARED: list[_Run] = []
 
 def _check_the_fixture(run: _Run) -> None:
     """The fixture's precondition: the skip is a skip, each crash is a crash (not
-    a refusal of qualification, whose error starts `not admitted:`), C4 is
+    a refusal of qualification, whose error starts `unqualified:`), C4 is
     Stale. A rotted fixture fails HERE, naming the evaluator, instead of passing
     every property on nothing."""
     for key, proc in run.out.items():
@@ -1130,7 +1131,7 @@ def _check_the_fixture(run: _Run) -> None:
     rows = {row["gate"]: row for row in json.loads(run.out["check.json"].stdout)["verdicts"]}
     for gate in ERRORED_GATES:
         row = rows.get(gate) or {}
-        if row.get("outcome") != "error" or str(row.get("error", "")).startswith("not admitted:"):
+        if row.get("outcome") != "error" or str(row.get("error", "")).startswith("unqualified:"):
             raise AssertionError(f"fixture rotted: {gate} is not a crash any more — {row}")
         if EXCEPTION[gate] not in str(row.get("error")):
             raise AssertionError(f"fixture rotted: {gate} errored with {row.get('error')!r}")
@@ -1706,3 +1707,112 @@ class WorstIsTheMostUrgent(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --------------------------------------------------------------------------- #
+# V11 (invariant 2): an unqualified evaluator never wears a crash's tag or word
+# --------------------------------------------------------------------------- #
+#: An always-False evaluator planted into a bracket copy, with a claim of its
+#: own: it fails its known-bad control and its known-good one, so it is
+#: unqualified — a refusal of qualification that crashed nothing.
+NEVER_GATE = "bracket.never"
+NEVER_SOURCE = f'''\
+"""Planted by tests/test_louder.py: an evaluator that fails everything (S-04)."""
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+
+@gate(id="{NEVER_GATE}", claims=["never-probe"],
+      negative_control=NegativeControl(fixture="selftest/bad_configs.py:quarter_thickness"))
+def never(ctx):
+    d = float(ctx.params["deflection"])
+    return Verdict(gate="{NEVER_GATE}", passed=False, measured=round(d, 4), limit=0.5,
+                   units="mm", detail=f"{{d:.3f}} mm")
+'''
+NEVER_CLAIM = {"statement": "the never probe holds", "kind": "measurable",
+               "tags": ["never-probe"],
+               "acceptance": {"quantity": "q", "comparator": "<=", "limit": 0.5, "units": "mm"}}
+
+#: What an unqualified evaluator must never read as, on any channel: a crash.
+CRASH_WORDS = re.compile(r"\[ERR \]|\berrored\b|not admitted")
+
+
+def _never_project(case: unittest.TestCase) -> str:
+    tmp = tempfile.mkdtemp(prefix="atompipe-unqualified-")
+    case.addCleanup(_env._rmtree, tmp)
+    root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
+    with open(os.path.join(root, "gates", "zz_never.py"), "w", encoding="utf-8") as fh:
+        fh.write(NEVER_SOURCE)
+    with open(os.path.join(root, "claims", "C9.json"), "w", encoding="utf-8") as fh:
+        json.dump(NEVER_CLAIM, fh, indent=2)
+    return root
+
+
+class UnqualifiedNeverWearsAnOutcome(_env.EnvCase):
+    """(V11, invariant 2 read the other way) An unqualified evaluator is not a
+    crash: no channel tags it `[ERR ]`, words it *errored* or *not admitted*, or
+    counts it errored. What slipped through P2.1's review: the count was fixed
+    and the row was not — `check` streamed `[ERR ] <gate> : not admitted: …`
+    and the page's verdict row read *errored*, a crash's loudness on something
+    that crashed nothing."""
+
+    def test_no_channel_reads_an_unqualified_evaluator_as_a_crash(self):
+        root = _never_project(self)
+        check = _env.atompipe(["check", "--junit"], cwd=root)
+        self.assertEqual(check.returncode, 1, check.stderr)
+        mine = [ln for ln in check.stdout.splitlines() if NEVER_GATE in ln]
+        self.assertIn(f"{NEVER_GATE} : known-good fail · known-bad fail → unqualified", mine)
+        for line in mine:
+            self.assertIsNone(CRASH_WORDS.search(line), line)
+        summary = next(ln for ln in check.stdout.splitlines() if " gates: " in ln
+                       or " evaluators: " in ln)
+        self.assertNotIn("errored", summary)
+        doc = json.loads(_env.atompipe(["check", "--json"], cwd=root).stdout)
+        self.assertEqual(doc["counts"]["errored"], 0, doc["counts"])
+        self.assertEqual(doc["counts"]["unqualified"], 1, doc["counts"])
+        status = _env.atompipe(["status"], cwd=root).stdout
+        row = next(ln for ln in status.splitlines() if re.match(r"^\[.{5}\] C9 ", ln))
+        self.assertTrue(row.startswith("[gap  ] C9 "), row)
+        self.assertTrue(row.endswith(f"unqualified: {NEVER_GATE} : known-good fail"), row)
+        show = _env.atompipe(["gate", "show", NEVER_GATE], cwd=root).stdout
+        for line in show.splitlines():
+            self.assertIsNone(CRASH_WORDS.search(line), line)
+        self.assertIn(f"  qualification: known-good fail · known-bad fail → unqualified", show)
+        shown = json.loads(_env.atompipe(["gate", "show", NEVER_GATE, "--json"],
+                                         cwd=root).stdout)
+        self.assertEqual(shown["last_selftest"]["outcome"], "unqualified", shown)
+        self.assertEqual(shown["qualification"]["line"],
+                         f"{NEVER_GATE} : known-good fail · known-bad fail → unqualified")
+        with open(os.path.join(root, report_mod.JUNIT_DEFAULT), encoding="utf-8") as fh:
+            junit = ET.fromstring(fh.read())
+        case = next(tc for tc in junit.iter("testcase") if tc.get("name", "").startswith("C9"))
+        self.assertIsNone(case.find("error"), ET.tostring(case))
+        self.assertIsNotNone(case.find("failure"), ET.tostring(case))
+        with open(os.path.join(root, ".atompipe", "cache", "last_check.json"),
+                  encoding="utf-8") as fh:
+            last = json.load(fh)
+        self.assertNotIn("C9", json.dumps(last.get("errored", [])))
+        md = _env.atompipe(["report"], cwd=root).stdout
+        for line in md.splitlines():
+            if "C9" in line or NEVER_GATE in line:
+                self.assertIsNone(CRASH_WORDS.search(line), line)
+        _env.atompipe(["site", "init"], cwd=root)
+        _env.atompipe(["site", "build"], cwd=root)
+        with open(os.path.join(root, "site", "data", "state.json"), encoding="utf-8") as fh:
+            state = json.load(fh)
+        rows = [v for v in state["verdicts"] if v.get("gate") == NEVER_GATE]
+        self.assertEqual([v["status"] for v in rows], ["unqualified"], rows)
+
+    def test_the_planted_stream_row_is_caught(self):
+        """P2.2's `_check_row_line`: the refusal streamed as its verdict."""
+        verdict = Verdict(gate=NEVER_GATE, passed=False, unqualified="known-good:fail")
+        row = types.SimpleNamespace(verdict=verdict, cached=False, admission=None)
+        self.assertIsNotNone(CRASH_WORDS.search(verdict.render()),
+                             "the planted row: the verdict's own render is a crash's")
+        line = report_mod.verdict_line(verdict)
+        self.assertIsNone(CRASH_WORDS.search(line or ""), line)
+        del row
+
+    def test_a_crash_in_a_qualified_evaluators_live_run_still_reads_errored(self):
+        verdict = Verdict(gate="g.x", passed=False, error="ZeroDivisionError: boom")
+        self.assertTrue(report_mod.verdict_line(verdict).startswith("[ERR ] g.x"))

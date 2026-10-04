@@ -1,0 +1,129 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.deflection",
+  "rho": "1f9ebec169f0860bfa359fde7f5a9ac3e15bacb77869badda29a89c7aed5ba74",
+  "static": "af12fbccce009cf086ac2c029b30cd6b189eb33a61713a9c5a5f030c62db9162",
+  "static_parts": {
+    "spine": "3109c9cb7f0ef8191c2fdaa245d9c0f2eac06512fdb16bf010d463692a161a1b",
+    "code": {
+      "digest": "a6cb9c41a01870db0288839c5de0cca828fc245c66f12452d11d7a7cd33801cc",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "93e7a7d5612e1a02659a423e8814cabf0f3a5a3000ed51605a2efe0f7517562c",
+      "files": {
+        "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
+        "selftest/known_good.py": "8726c3c77520abcd5b143ca16306470a7db73bf912399affcf60af5ab100ed78"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:quarter_thickness",
+      "expect": "fail",
+      "note": "same bracket at 1/4 thickness; deflection goes as 1/t^3 so this is ~64x worse and nothing else about the part changes",
+      "good": "",
+      "mutation": true
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "693071eb3ecc9b9b0a7e75bc396bea21cfc1e7c56598d1057e565962ac2fb5db",
+    "files": {
+      "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
+      "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
+      "selftest/known_good.py": "8726c3c77520abcd5b143ca16306470a7db73bf912399affcf60af5ab100ed78"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "config",
+          "load_n"
+        ],
+        "ebba79ab141196dc837e68076acefab0008dd922d4303bcbc512ac3d0c2290c3",
+        15.0
+      ],
+      [
+        [
+          "deflection"
+        ],
+        "29f486a7d930faba58031c91f95fe984bf7b1c69ef871c4859b4eadc4d44325f",
+        30.0
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "bad_extra": [],
+  "good": {
+    "outcome": "pass",
+    "reads": {
+      "params": [
+        [
+          [
+            "config",
+            "load_n"
+          ],
+          "ebba79ab141196dc837e68076acefab0008dd922d4303bcbc512ac3d0c2290c3",
+          15.0
+        ],
+        [
+          [
+            "deflection"
+          ],
+          "49c7c757b4e9e5dc0a513ac5905c108dc4560cefebabe892f6b10c2b3a2fd5a1",
+          0.46875
+        ]
+      ],
+      "files": {},
+      "dirs": {},
+      "ledger": {},
+      "host": [],
+      "opaque": []
+    },
+    "extra": [],
+    "measured": 0.4688,
+    "limit": 0.5,
+    "units": "mm",
+    "detail": "0.469 mm at 15 N (limit 0.5 mm)"
+  },
+  "mutation": {
+    "runs": 38,
+    "boundary": "",
+    "results": [
+      {
+        "key": [
+          "deflection"
+        ],
+        "before": 0.46875,
+        "after": 0.575,
+        "outcome": "fail",
+        "measured": 0.575,
+        "limit": 0.5
+      }
+    ],
+    "inconclusive": [],
+    "not_mutated": [
+      {
+        "key": [
+          "config",
+          "load_n"
+        ],
+        "why": "never-lands"
+      }
+    ]
+  },
+  "admitted": "paired",
+  "detail": "correctly failed on selftest/bad_configs.py:quarter_thickness (same bracket at 1/4 thickness; deflection goes as 1/t^3 so this is ~64x worse and nothing else about the part changes): 30.000 mm at 15 N (limit 0.5 mm)",
+  "measured": 30.0,
+  "limit": 0.5,
+  "units": "mm",
+  "digest": "f4acf003dba9c892403df9177d9bd1fd3379328f749d8742bd079d176202d214"
+}

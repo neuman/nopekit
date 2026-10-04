@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Projects built for a test: the bracket copied, and a pack's baseline wrapped.
 
-Not a test module (no ``test_`` prefix, so discovery never collects it). Two
+Not a test module (no ``test_`` prefix, so discovery never collects it). Three
 builders, each written once so every later test that needs a planted project
 gets the same one:
 
@@ -17,6 +17,9 @@ gets the same one:
   ``selftest/baseline.json``: the pack's known-good design, run through
   ``check`` the way a user's project would run it, with one claim per gate so
   every verdict lands on a claim.
+* :func:`write_known_good` — a planted project's ``selftest/known_good.py``,
+  the design stated in full (P2.3: a project evaluator with no known-good
+  control is unqualified, and its claim reads Gap).
 
 What slipped through before these existed: the E4 rows for a multi-module pack
 needed a wrapped fdm-print project from a unit in the same wave (judge J1), and
@@ -268,6 +271,114 @@ def bracket_copy(dest: str, *, thickness: float | None = None, git: bool = False
                    else f"a copy of examples/bracket at thickness {float(thickness)!r}")
         _commit_all(dest, message)
     return dest
+
+
+# --------------------------------------------------------------------------- #
+# a planted project's known-good design
+# --------------------------------------------------------------------------- #
+_KNOWN_GOOD_MODULE = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""This planted project's known-good design: the one every control is one change away from.
+
+Written by tests/_projects.write_known_good. Every value is stated here, as a
+literal (D-27's pattern): nothing is read from the host it is handed, and it is
+never ``return ctx`` — a known-good design that is the live one passes whatever
+the live design is, until it does not (S-07, in the good direction). ``ROOT`` is
+where the design's files live, or ``None`` when it has none of its own and keeps
+the root it is handed; ``LIMITS`` are the claim limits it states, as a claim
+record would carry them.
+"""
+from __future__ import annotations
+
+import copy
+import dataclasses
+import os
+
+from atompipe.models import Acceptance, Claim, Ledger
+
+PARAMS = {params}
+
+ROOT = {root}
+
+LIMITS = {limits}
+
+
+def context(ctx):
+    """``ctx`` with this design in place of whatever it carried: the params, the
+    stated claim limits as its only ledger, no ``extra`` — and its own files."""
+    ledger = Ledger(claims=[Claim(id=cid, statement=f"{{cid}}, as the known-good design states it",
+                                  acceptance=Acceptance(limit=limit))
+                            for cid, limit in LIMITS.items()])
+    root = ctx.root if ROOT is None else ROOT
+    return dataclasses.replace(ctx, params=copy.deepcopy(PARAMS), ledger=ledger, extra={{}},
+                               root=root)
+'''
+
+#: Where :func:`write_known_good` puts the known-good design's own files,
+#: project-relative. Under ``selftest/`` because that is where a project's
+#: controls live, and a file there is part of every control's recorded version.
+KNOWN_GOOD_FILES = "selftest/good"
+
+
+def write_known_good(root: str, params: dict[str, Any], *,
+                     files: dict[str, str | bytes] | None = None,
+                     limits: dict[str, float] | None = None) -> str:
+    """Give the project at ``root`` a ``selftest/known_good.py``; return its path.
+
+    P2.3: a project evaluator is qualified only when it passes a known-good
+    control as well as failing its known-bad one, and a project's known-good
+    control is ``selftest/known_good.py``'s ``context(ctx)``. A synthetic
+    project whose claims a test expects Checked must state one, or every such
+    claim reads Gap (§7.3 of the P2.3 design). ``params`` is the design, stated
+    in full and written as a literal — never derived from the host at run time.
+
+    ``files`` (project-relative path -> text or bytes) are the design's own
+    files: written under ``KNOWN_GOOD_FILES`` and the context's root pointed
+    there, so a gate that reads ``data/x.txt`` reads the KNOWN-GOOD copy, and a
+    test's edit to the live ``data/x.txt`` moves the real run alone. What would
+    slip through without them: a known-good context that kept the project root
+    read the live data files, so an edit meant to make the real run fail made
+    the known-good control fail too, and the claim read Gap where the test
+    meant Not met. ``limits`` (claim id -> limit) are the claim limits the
+    design states, for a gate that reads its limit off a claim.
+    """
+    base = os.path.abspath(root)
+    good_root = "None"
+    if files is not None:
+        for rel, body in files.items():
+            target = os.path.join(base, *KNOWN_GOOD_FILES.split("/"), *rel.split("/"))
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            mode, kw = ("wb", {}) if isinstance(body, bytes) else ("w", {"encoding": "utf-8",
+                                                                       "newline": ""})
+            with open(target, mode, **kw) as fh:
+                fh.write(body)
+        # abspath, never resolve(): the spine compares absolute paths, and a
+        # symlinked temp directory resolved here would put the files outside it.
+        good_root = ("os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, "
+                     + ", ".join(repr(part) for part in KNOWN_GOOD_FILES.split("/")) + ")")
+        good_root = f"os.path.normpath({good_root})"
+    path = os.path.join(base, "selftest", "known_good.py")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(_KNOWN_GOOD_MODULE.format(
+            params=pprint.pformat(params, indent=1, width=88, sort_dicts=True),
+            root=good_root,
+            limits=pprint.pformat(dict(limits or {}), indent=1, width=88, sort_dicts=True)))
+    return path
+
+
+def tree_files(root: str, rel: str) -> dict[str, bytes]:
+    """Every file under ``<root>/<rel>``, as ``{project-relative path: bytes}`` —
+    what :func:`write_known_good` copies as a design's files."""
+    base = os.path.abspath(root)
+    found: dict[str, bytes] = {}
+    for dirpath, dirnames, filenames in os.walk(os.path.join(base, *rel.split("/"))):
+        dirnames.sort()
+        for name in sorted(filenames):
+            full = os.path.join(dirpath, name)
+            with open(full, "rb") as fh:
+                found[os.path.relpath(full, base).replace(os.sep, "/")] = fh.read()
+    return found
 
 
 # --------------------------------------------------------------------------- #

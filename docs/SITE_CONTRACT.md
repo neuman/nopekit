@@ -325,14 +325,20 @@ an agent can read the site's state without a browser.
   a verdict for an unregistered gate still reaches the page, as a stale row.
 - A verdict row's `ok` is the only predicate the page may paint green; `status` is
   `pass`, `fail`, `skipped` or `errored`, from `Verdict.outcome` (P2.1: it read the
-  flags, so a junk truthy `passed` showed `pass` beside `ok: false`). `unanchored` says out loud that a failure
+  flags, so a junk truthy `passed` showed `pass` beside `ok: false`) — or, from P2.3,
+  `unqualified` for an evaluator not qualified at its version, beside a
+  `qualification: {token, reason}` (the judge's token, and `report.qualification_reason`'s
+  words): never `errored`, a crash's word for something that crashed nothing, and Gap's
+  tone on the page (`lib/format.js`'s `VERDICT_STATUS`). A gate never run reads so too
+  (`not yet qualified at this version`), its row with no entry behind it. `unanchored` says out loud that a failure
   carries no locator, instead of leaving an overlay that looks broken.
 - How the resolver reached each row, said on the row: `cached` — it is a cache
   entry's verdict as recorded (its `tier` and `pack` are the ones it ran under);
   `fresh` — and it is current and counts (its inputs, code and control are the ones
   it was measured with); `stale_reason` — why it is not current, in the resolver's
-  words (`config.bed_xy 220.0 -> 250.0`, `control not demonstrated at this version —
-  run atompipe check`, or `… check --tier 2` for a costlier path's entry, `gate not
+  words (`config.bed_xy 220.0 -> 250.0`, `not yet qualified at this version — the next
+  check run qualifies it`, or `… atompipe check --tier 2 qualifies it` for a costlier
+  path's entry, `gate not
   registered in this project`, or — from P2.2 — `prerequisite <root> invalidated: …`
   / `prerequisite <root> unrun` for a verdict kept under a prerequisite that is not
   current), `""` when it is. A

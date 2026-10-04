@@ -596,6 +596,11 @@ class GateTrace:
     anchors: Any = None
     tier: Any = None
     sources: list = field(default_factory=list)
+    #: The ``ctx.extra`` keys the context a control built handed its gate, the
+    #: spine's own removed (``_extra_keys``), or ``None`` when no control built
+    #: one on this trace: set by ``gates.selftest`` and the known-good half, read
+    #: by channel parity (P2.3-D5). Not a read: what the fixture handed.
+    handed_extra: Any = None
     _read_set: set = field(default_factory=set, init=False, repr=False)
     _source_set: set = field(default_factory=set, init=False, repr=False)
     _existed: dict = field(default_factory=dict, init=False, repr=False)
@@ -2945,11 +2950,44 @@ _TIER_READ = "tier"
 _VERDICT_FIELDS = ("passed", "measured", "limit", "units", "detail", "evidence",
                    "locators", "claims", "tier", "pack")
 
+#: A control entry's fields, in file order (P2.3-D1, D26): the known-bad half
+#: (`bad`, and `bad_extra`, the `ctx.extra` keys its fixture handed the gate),
+#: the known-good half (`good`), the mutation pass (`mutation`) and `admitted`,
+#: which the strict reader re-derives from those facts alone. *Rejected:*
+#: `SCHEMA = 2` — it would re-key every verdict entry, whose shape did not
+#: change; a P2.2 spine refuses this shape ("keys are …"), ignores it, and reads
+#: the evaluator undemonstrated — degrade-closed (R-2).
 _CONTROL_FIELDS = ("schema", "kind", "gate", "rho", "static", "static_parts", "host",
-                   "fixture", "reads", "bad", "good", "admitted", "detail", "measured",
-                   "limit", "units", "digest")
+                   "fixture", "reads", "bad", "bad_extra", "good", "mutation", "admitted",
+                   "detail", "measured", "limit", "units", "digest")
+#: The shape a P2.2 spine wrote: the known-bad half alone. Read as reject-only
+#: at its own static part — never current, since the spine that wrote it is not
+#: this one (D19) — so `doctor` does not name every historical file.
+_LEGACY_CONTROL_FIELDS = ("schema", "kind", "gate", "rho", "static", "static_parts", "host",
+                          "fixture", "reads", "bad", "good", "admitted", "detail",
+                          "measured", "limit", "units", "digest")
+#: The known-good half's fields: its outcome — `pass` or `fail`, or `not-run`
+#: when no known-good control exists for the evaluator (known-bad shown) — what
+#: its run read (every mutated run's reads folded in at their known-good
+#: digests), the `ctx.extra` keys it was handed, and its numbers.
+_GOOD_FIELDS = ("outcome", "reads", "extra", "measured", "limit", "units", "detail")
+_GOOD_OUTCOMES = ("pass", "fail", "not-run")
+#: The mutation pass's fields (`gates.mutation_walk`), and each record's.
+_WALK_FIELDS = ("runs", "boundary", "results", "inconclusive", "not_mutated")
+_RESULT_FIELDS = ("key", "before", "after", "outcome", "measured", "limit")
+_INCONCLUSIVE_FIELDS = ("key", "after", "outcome", "why")
+_NOT_MUTATED_FIELDS = ("key", "why")
+_NOT_MUTATED_WHY = ("never-lands", "word", "zero", "none", "not-finite", "other", "budget")
+_BOUNDARY = re.compile(r"^(?:|no-limit|at-limit|budget|tier:\d+)$")
+_ADMITTED = ("paired", "reject-only", "no")
 _STATIC_PARTS = ("spine", "code", "selftest", "nc")
 _HOSTS = ("live", "known-good")
+
+#: The `ctx.extra` keys the spine itself puts on a context — `gates._fixture_root`
+#: reads them to find a pack's `selftest/` — and so never a channel a control
+#: hands its gate (P2.3-D5). *Rejected:* the `load_file` memo (it is not in
+#: `extra`: `GateContext.memo`).
+SPINE_EXTRA = ("pack_dir", "pack_dirs")
 
 #: The words ``gates.selftest`` uses for the two control outcomes that are not
 #: plain "fired": the gate PASSING its known-bad input (a measurement — the gate
@@ -3787,16 +3825,24 @@ def rho(gate_id: str, spine: str, code: Any, reads: Any) -> str:
                        "code": code_digest_, **keyed})
 
 
-def rho_control(gate_id: str, static: str, reads: Any) -> str:
-    """The content address of a control: sha256 of canonical JSON of
+def rho_control(gate_id: str, static: str, reads: Any, good_reads: Any = None) -> str:
+    """The content address of a qualification: sha256 of canonical JSON of
     ``{"schema", "gate", "static", "reads"}`` — the static part (spine, code,
     the owner's ``selftest/`` walk, the NegativeControl fields) and what the
-    fixture and the gate read on the control (display values dropped). The
-    fixture's code closure is NOT in it: that is a lookup hint, so re-verifying
-    a control after the model moved writes no new file when the values did not
-    move (§3.8)."""
-    return _digest_of({"schema": SCHEMA, "gate": gate_id, "static": static or "",
-                       "reads": _as_reads(reads).keyed(control=True)})
+    known-bad fixture and the gate read on the control (display values dropped)
+    — plus ``"good_reads"``, what the known-good half read, every mutated run's
+    reads folded in at their known-good digests, when there is a known-good
+    half (P2.3-D11). The fixture's code closure is NOT in it: that is a lookup
+    hint, so re-qualifying after the model moved writes no new file when the
+    values did not move (§3.8). *Rejected:* the known-good reads out of rho — a
+    re-run whose known-good outcome moved while the known-bad reads stood would
+    share the old name and read "two outcomes for identical inputs",
+    unqualified for a misleading reason."""
+    form = {"schema": SCHEMA, "gate": gate_id, "static": static or "",
+            "reads": _as_reads(reads).keyed(control=True)}
+    if good_reads is not None:
+        form["good_reads"] = _as_reads(good_reads).keyed(control=True)
+    return _digest_of(form)
 
 
 def _outcome_form(passed: Any, measured: Any, limit: Any, units: Any) -> list:
@@ -3817,8 +3863,26 @@ def out8(verdict: Any) -> str:
     return _digest_of(form)[:OUT_CHARS]
 
 
-def _control_out8(bad: str, measured: Any, limit: Any, units: Any) -> str:
-    return _digest_of(_outcome_form(bad, measured, limit, units))[:OUT_CHARS]
+def _control_out8(bad: str, measured: Any, limit: Any, units: Any, *, good: Any = None,
+                  mutation: Any = None) -> str:
+    """The control's outcome digest. With no known-good half and no walk —
+    P2.2's shape, the forged reject-only form — the known-bad half's tuple as
+    before; otherwise also the known-good half's outcome and numbers and the
+    walk's tally — conclusive fails, conclusive, inconclusive, its boundary —
+    so two runs at one `rho_control` that differ in either half are two
+    outcomes (P2.3-D11). Never an `after` value: float drift at a bisection's
+    edge across platforms would mint two outcomes for one input; a detail-only
+    difference keeps the first file and warns (D-05)."""
+    if good is None and mutation is None:
+        return _digest_of(_outcome_form(bad, measured, limit, units))[:OUT_CHARS]
+    good = good or {}
+    walk = mutation or {}
+    results = list(walk.get("results") or ())
+    tally = None if mutation is None else [
+        sum(1 for r in results if r.get("outcome") == "fail"), len(results),
+        len(walk.get("inconclusive") or ()), walk.get("boundary") or ""]
+    return _digest_of(_clean([bad, measured, limit, units or "", good.get("outcome"),
+                              good.get("measured"), good.get("limit"), tally]))[:OUT_CHARS]
 
 
 # --------------------------------------------------------------------------- #
@@ -4430,9 +4494,42 @@ def _static(spec: Any, fn: Any, root: str, *, digests: FileDigests | None,
         "code": {"digest": code.digest, "files": list(code.files)},
         "selftest": {"digest": _digest_of(files), "files": files},
         "nc": None if nc is None else {"fixture": nc.fixture, "expect": nc.expect,
-                                       "note": nc.note},
+                                       "note": nc.note, "good": getattr(nc, "good", "") or "",
+                                       "mutation": _mutation_applies(fn, root)},
     })
     return _digest_of({"schema": SCHEMA, **parts}), parts, code, owner
+
+
+def _mutation_applies(fn: Any, root: str) -> bool:
+    """Does the mutation pass apply to this evaluator (P2.3-D6)? To every one
+    not loaded from the packs that ship with the spine (``packs.BUNDLED_PACKS``):
+    a project's own ``gates/``, a project-local pack under ``.atompipe/packs``, a
+    user pack under ``~/.atompipe/packs`` and one on ``$ATOMPIPE_PACK_PATH`` —
+    the origins PLAN D-32 calls the session's, wherever they sit. Part of the
+    static part (``nc.mutation``): a pack that moves between a bundled and a
+    session origin is re-qualified, never re-read under the other rule
+    (critique of the P2.3 design: the same bytes promoted into ``packs/`` kept a
+    recorded passing mutation and read Checked, the bit decided at read time).
+
+    The stated limit: a bundled pack edited in place in a checkout reads
+    bundled — its origin is read from where it sits, which D-32 rejects as a
+    rule the proposer chooses. D-32's own rule, a content digest against a
+    shipped release, needs a digest manifest the release bundle would carry
+    (P3's bundle); a git-clean check was weighed and *rejected*: whoever holds
+    the shell stages or commits as easily as it writes, so "clean against HEAD"
+    is the location rule by another name, and it makes a suite's outcome turn
+    on the checkout's staging state. On the check-in list.
+    *Rejected:* project ``gates/`` only (a pack born under ``.atompipe/packs``,
+    EXTENSION_PROTOCOL's path, escapes by one directory); every evaluator (§1.5
+    places the pass on the evaluator the generator wrote; ~12 s per upgrade for
+    54 lines nobody reads)."""
+    pack_dir = _pack_dir_of(fn)
+    if not pack_dir:
+        return True
+    from . import packs as _packs                  # packs imports gates, which imports this
+    bundled = os.path.realpath(_packs.BUNDLED_PACKS)
+    here = os.path.realpath(pack_dir)
+    return not (here == bundled or here.startswith(bundled.rstrip(os.sep) + os.sep))
 
 
 def control_static(spec: Any, fn: Any, root: str, *, digests: FileDigests | None = None,
@@ -4453,18 +4550,25 @@ def control_static(spec: Any, fn: Any, root: str, *, digests: FileDigests | None
 
 @dataclass
 class ControlEntry:
-    """One demonstration: ``.atompipe/verdicts/<gate>/control-<rhoC16>-<out8>.json``.
+    """One qualification: ``.atompipe/verdicts/<gate>/control-<rhoC16>-<out8>.json``.
 
-    ``rho`` is ``rho_control``; ``static``/``static_parts`` the static part;
-    ``host`` ``"known-good"`` or ``"live"`` — which context the fixture got;
-    ``fixture`` ``{"digest", "files"}`` — the fixture's recorded code closure, a
-    lookup HINT, not an input; ``reads`` — what the fixture and the gate read on
-    the control (``host`` keyed only when the host was live); ``bad`` —
-    ``"fail"`` (the gate rejected its known-bad input: fired) or ``"pass"``
-    (it did not: a logger); ``good`` — ``None`` until P2 runs the known-good
-    half; ``admitted`` — ``"reject-only"`` or ``"no"``; ``detail``,
-    ``measured``, ``limit``, ``units`` from the run; ``digest`` as for an
-    ``Entry``.
+    ``rho`` is ``rho_control`` over both halves' reads; ``static``/
+    ``static_parts`` the static part; ``host`` ``"known-good"`` or ``"live"`` —
+    which context the known-bad fixture got; ``fixture`` ``{"digest", "files"}``
+    — the recorded code closure of both halves' builders, a lookup HINT, not an
+    input; ``reads`` — what the known-bad fixture and the gate read on it
+    (``host`` keyed only when the host was live); ``bad`` — ``"fail"`` (the gate
+    rejected its known-bad input, as declared) or ``"pass"`` (it did not);
+    ``bad_extra`` — the ``ctx.extra`` keys that fixture handed the gate;
+    ``good`` — the known-good half (``_GOOD_FIELDS``: ``pass``, ``fail``, or
+    ``not-run`` when no known-good control exists), or ``None`` from a writer
+    that ran no known-good half — P2.2's shape and the forged form, which every
+    reader treats as incomplete at the current version (D19); ``mutation`` — the
+    walk (``_WALK_FIELDS``), or ``None`` where it does not apply or a control did
+    not hold; ``admitted`` — ``"paired"``, ``"reject-only"`` or ``"no"``, derived
+    from those facts (``_admitted_from``); ``detail``, ``measured``, ``limit``,
+    ``units`` from the known-bad run; ``digest`` as for an ``Entry``.
+    ``legacy`` — read from a P2.2 file (its name and digest follow that shape).
     """
 
     gate: str
@@ -4483,29 +4587,155 @@ class ControlEntry:
     units: str = ""
     digest: str = ""
     path: str = field(default="", compare=False, repr=False)
+    bad_extra: list = field(default_factory=list)
+    mutation: Any = None
+    legacy: bool = field(default=False, compare=False, repr=False)
 
     @property
     def name(self) -> str:
         """``control-<rhoC16>-<out8>``: the file name without ``.json``."""
-        return (f"{_CONTROL_PREFIX}{self.rho[:RHO_CHARS]}-"
-                f"{_control_out8(self.bad, self.measured, self.limit, self.units)}")
+        out = (_control_out8(self.bad, self.measured, self.limit, self.units)
+               if self.legacy else
+               _control_out8(self.bad, self.measured, self.limit, self.units,
+                             good=self.good, mutation=self.mutation))
+        return f"{_CONTROL_PREFIX}{self.rho[:RHO_CHARS]}-{out}"
 
     def body(self) -> dict:
         """Every field but ``digest``, in file order."""
+        if self.legacy:
+            return {"schema": SCHEMA, "kind": "control", "gate": self.gate, "rho": self.rho,
+                    "static": self.static, "static_parts": self.static_parts,
+                    "host": self.host, "fixture": self.fixture, "reads": self.reads,
+                    "bad": self.bad, "good": self.good, "admitted": self.admitted,
+                    "detail": self.detail, "measured": self.measured, "limit": self.limit,
+                    "units": self.units}
         return {"schema": SCHEMA, "kind": "control", "gate": self.gate, "rho": self.rho,
                 "static": self.static, "static_parts": self.static_parts, "host": self.host,
                 "fixture": self.fixture, "reads": self.reads, "bad": self.bad,
-                "good": self.good, "admitted": self.admitted, "detail": self.detail,
+                "bad_extra": list(self.bad_extra or ()), "good": self.good,
+                "mutation": self.mutation, "admitted": self.admitted, "detail": self.detail,
                 "measured": self.measured, "limit": self.limit, "units": self.units}
 
     def read_set(self) -> Reads:
         return Reads.from_dict(self.reads)
 
 
+def _a_number(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _mutable_value(value: Any) -> bool:
+    """What a walk record's ``before``/``after`` may hold: a JSON number, a flag,
+    or a list of numbers."""
+    return (isinstance(value, bool) or _a_number(value)
+            or (isinstance(value, list) and all(_a_number(x) for x in value)))
+
+
+def _problem_in_good(good: Any) -> str:
+    if not isinstance(good, dict) or list(good) != list(_GOOD_FIELDS):
+        return f"good must be null or an object with keys {list(_GOOD_FIELDS)}"
+    if good["outcome"] not in _GOOD_OUTCOMES:
+        return f"good.outcome must be one of {list(_GOOD_OUTCOMES)}, not {good['outcome']!r}"
+    why = _problem_in_reads(good["reads"], control=True)
+    if why:
+        return f"good.{why}"
+    extra = good["extra"]
+    if not isinstance(extra, list) or not all(isinstance(k, str) for k in extra) \
+            or extra != sorted(set(extra)):
+        return "good.extra must be a sorted list of distinct keys"
+    for what in ("measured", "limit"):
+        if good[what] is not None and not _a_number(good[what]):
+            return f"good.{what} must be a number or null, not {good[what]!r}"
+    if not isinstance(good["units"], str) or not isinstance(good["detail"], str):
+        return "good.units and good.detail must be strings"
+    if good["outcome"] == "not-run" and (good["extra"] or any(good["reads"].get(k)
+                                                             for k in _CONTROL_READ_FIELDS)):
+        return "good.outcome 'not-run' recorded reads: a control that never ran read nothing"
+    return ""
+
+
+def _problem_in_walk(walk: Any, good: Any) -> str:
+    """The strict reader's walk half: shapes, outcomes, and every result's key a
+    param the known-good half read, or a leaf under a level it read whole (a walk
+    changes "the parameters its run read", PLAN-v0.14 §1.5 — a key outside them
+    is a result for nothing). What slipped through the first cut, which matched
+    the key exactly: a gate reading ``json.loads(json.dumps(ctx.params))`` keys
+    the level ``[]`` whole, the walk changed the leaf ``x`` under it — what
+    ``gates._read_leaves`` walks — and the entry was refused at write. Counts
+    are never stored: a tally is derived, so a stored one is refused."""
+    if not isinstance(walk, dict) or list(walk) != list(_WALK_FIELDS):
+        return f"mutation must be null or an object with keys {list(_WALK_FIELDS)}"
+    if not isinstance(walk["runs"], int) or isinstance(walk["runs"], bool) or walk["runs"] < 0:
+        return "mutation.runs must be a count"
+    if not isinstance(walk["boundary"], str) or not _BOUNDARY.match(walk["boundary"]):
+        return f"mutation.boundary {walk['boundary']!r} is not one the walk records"
+    read = {_canonical_json(row[0]) for row in ((good or {}).get("reads") or {}).get("params")
+            or ()}
+    for name, fields in (("results", _RESULT_FIELDS), ("inconclusive", _INCONCLUSIVE_FIELDS),
+                         ("not_mutated", _NOT_MUTATED_FIELDS)):
+        rows = walk[name]
+        if not isinstance(rows, list):
+            return f"mutation.{name} must be a list"
+        for row in rows:
+            if not isinstance(row, dict) or list(row) != list(fields):
+                return f"mutation.{name} rows must have keys {list(fields)}"
+            if not isinstance(row["key"], list) or not row["key"] \
+                    or not all(isinstance(p, str) for p in row["key"]):
+                return f"mutation.{name} key must be a param path"
+            if name != "not_mutated" and not any(
+                    _canonical_json(row["key"][:i]) in read for i in range(len(row["key"]) + 1)):
+                return (f"mutation.{name} key {row['key']!r} is not a param its known-good "
+                        f"half read")
+            if name == "results":
+                if row["outcome"] not in ("pass", "fail"):
+                    return f"mutation.results outcome {row['outcome']!r} is not pass or fail"
+                for what in ("before", "after"):
+                    if not _mutable_value(row[what]):
+                        return f"mutation.results {what} {row[what]!r} is not a number, flag " \
+                               f"or list of numbers"
+                for what in ("measured", "limit"):
+                    if row[what] is not None and not _a_number(row[what]):
+                        return f"mutation.results {what} must be a number or null"
+            elif name == "inconclusive":
+                if row["outcome"] not in ("errored", "skipped"):
+                    return f"mutation.inconclusive outcome {row['outcome']!r} is not errored " \
+                           f"or skipped"
+                if not _mutable_value(row["after"]) or not isinstance(row["why"], str):
+                    return "mutation.inconclusive after must be a number, flag or list of " \
+                           "numbers and why a string"
+            elif row["why"] not in _NOT_MUTATED_WHY:
+                return f"mutation.not_mutated why {row['why']!r} is not one the walk names"
+    return ""
+
+
+def _admitted_from(data: Mapping[str, Any]) -> str:
+    """What ``admitted`` must say, from an entry's recorded facts alone — the one
+    judge (``_qualification``) over ``_entry_facts``. The strict reader refuses a
+    file where it says anything else: a valid digest is only what its writer
+    wrote (R-9)."""
+    entry = ControlEntry(gate=str(data.get("gate") or ""), rho="", static="",
+                         static_parts=data.get("static_parts") or {}, host="", fixture={},
+                         reads={}, bad=data.get("bad"), good=data.get("good"),
+                         bad_extra=list(data.get("bad_extra") or ()),
+                         mutation=data.get("mutation"))
+    return _state_of(_qualification(_entry_facts(entry)))
+
+
+def _admitted_problem(data: Mapping[str, Any]) -> str:
+    """``""`` when ``admitted`` follows from the facts, else why not."""
+    want = _admitted_from(data)
+    if data["admitted"] != want:
+        return (f"admitted {data['admitted']!r} does not follow from its recorded facts "
+                f"(they say {want!r})")
+    return ""
+
+
 def _problem_in_control(data: Any) -> str:
     if not isinstance(data, dict):
         return "not a JSON object"
-    if list(data) != list(_CONTROL_FIELDS):
+    legacy = list(data) == list(_LEGACY_CONTROL_FIELDS)
+    if not legacy and list(data) != list(_CONTROL_FIELDS):
         return f"keys are {list(data)}, not {list(_CONTROL_FIELDS)}"
     if data["schema"] != SCHEMA or isinstance(data["schema"], bool):
         return f"schema {data['schema']!r} is not {SCHEMA}: written by another spine"
@@ -4528,10 +4758,6 @@ def _problem_in_control(data: Any) -> str:
         return why
     if data["bad"] not in ("fail", "pass"):
         return f"bad must be 'fail' or 'pass', not {data['bad']!r}"
-    if data["good"] is not None:
-        return "good must be null until the known-good half exists (P2)"
-    if data["admitted"] != ("reject-only" if data["bad"] == "fail" else "no"):
-        return f"admitted {data['admitted']!r} does not follow from bad {data['bad']!r}"
     for what in ("measured", "limit"):
         value = data[what]
         if value is not None and (isinstance(value, bool) or not isinstance(value, (int, float))
@@ -4539,7 +4765,51 @@ def _problem_in_control(data: Any) -> str:
             return f"{what} must be a number or null, not {value!r}"
     if not isinstance(data["detail"], str) or not isinstance(data["units"], str):
         return "detail and units must be strings"
-    return ""
+    if legacy:
+        # P2.2's shape (D19): the known-bad half alone.
+        if data["good"] is not None:
+            return "good must be null in an entry written before the known-good half"
+        if data["admitted"] != ("reject-only" if data["bad"] == "fail" else "no"):
+            return f"admitted {data['admitted']!r} does not follow from bad {data['bad']!r}"
+        return ""
+    extra = data["bad_extra"]
+    if not isinstance(extra, list) or not all(isinstance(k, str) for k in extra) \
+            or extra != sorted(set(extra)):
+        return "bad_extra must be a sorted list of distinct keys"
+    if data["good"] is not None:
+        why = _problem_in_good(data["good"])
+        if why:
+            return why
+    walk = data["mutation"]
+    if walk is not None:
+        held = (data["bad"] == "fail" and isinstance(data["good"], dict)
+                and data["good"]["outcome"] == "pass")
+        if not held:
+            return "mutation is recorded where a control did not hold: nothing is walked then"
+        nc = parts.get("nc") if isinstance(parts.get("nc"), dict) else {}
+        if not nc.get("mutation"):
+            return "mutation is recorded for an evaluator the walk does not apply to"
+        why = _problem_in_walk(walk, data["good"])
+        if why:
+            return why
+    elif _walk_applies(data):
+        return ("mutation is null where the walk applies and both controls held: an "
+                "entry missing its walk is not a qualification")
+    if data["admitted"] not in _ADMITTED:
+        return f"admitted must be one of {list(_ADMITTED)}, not {data['admitted']!r}"
+    return _admitted_problem(data)
+
+
+def _walk_applies(data: Mapping[str, Any]) -> bool:
+    """Would the walk have run for this entry: it applies (``nc.mutation``), the
+    known-bad control failed, the known-good one passed, and the two handed the
+    gate the same channel, none of it ``ctx.extra``?"""
+    parts = data.get("static_parts") or {}
+    nc = parts.get("nc") if isinstance(parts.get("nc"), dict) else {}
+    good = data.get("good")
+    return bool(nc.get("mutation")) and data.get("bad") == "fail" \
+        and isinstance(good, dict) and good.get("outcome") == "pass" \
+        and not data.get("bad_extra") and not good.get("extra")
 
 
 def _load_control(path: str, gate_id: str | None) -> tuple[ControlEntry | None, str]:
@@ -4555,11 +4825,13 @@ def _load_control(path: str, gate_id: str | None) -> tuple[ControlEntry | None, 
         return None, why
     if not isinstance(data["gate"], str) or (gate_id is not None and data["gate"] != gate_id):
         return None, f"gate {data['gate']!r} is not the directory's {gate_id!r}"
-    body = {key: data[key] for key in _CONTROL_FIELDS if key != "digest"}
+    fields = _CONTROL_FIELDS if "bad_extra" in data else _LEGACY_CONTROL_FIELDS
+    body = {key: data[key] for key in fields if key != "digest"}
     if data["digest"] != _digest_of(body):
         return None, "hand-edited entry: its digest does not match its content"
-    entry = ControlEntry(**{key: data[key] for key in _CONTROL_FIELDS
-                            if key not in ("schema", "kind")}, path=path)
+    entry = ControlEntry(**{key: data[key] for key in fields
+                            if key not in ("schema", "kind")}, path=path,
+                         legacy=fields is _LEGACY_CONTROL_FIELDS)
     if os.path.basename(path) != entry.name + ".json":
         return None, f"its name does not match its content (it holds {entry.name}.json)"
     return entry, ""
@@ -4579,8 +4851,7 @@ def write_control(root: str, entry: ControlEntry) -> WriteResult:
         raise AtompipeError(f"{entry.gate}: refusing to write a control entry its reader "
                             f"would refuse: {why}")
     data = _dump({**body, "digest": _digest_of(body)})
-    name = (f"{_CONTROL_PREFIX}{body['rho'][:RHO_CHARS]}-"
-            f"{_control_out8(body['bad'], body['measured'], body['limit'], body['units'])}")
+    name = dataclasses.replace(entry, rho=body["rho"]).name
     directory = _gate_dir(root, body["gate"])
     warnings = [f"{body['gate']}: two control outcomes recorded for identical inputs "
                 f"({other.name}, {name})"
@@ -4670,25 +4941,29 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
                    trace: GateTrace | None = None, host: str = "live",
                    bad: str | None = None, detail: str = "",
                    digests: FileDigests | None = None, anchors: Anchors | None = None,
-                   when: str = "") -> WriteResult | None:
+                   when: str = "", good: Any = None, mutation: Any = None) -> WriteResult | None:
     """Record one control run of ``spec`` as a control entry; return what the
     writer did, or ``None`` when the outcome is not a measurement.
 
-    **The sweep's form** passes the ``gates.selftest`` ``result`` and the
-    ``trace`` it ran under. A fired control (the gate rejected its known-bad
-    input) is ``bad: "fail"``, admitted reject-only; a gate that PASSED its
-    known-bad input is ``bad: "pass"``, not admitted — both are measurements and
-    are cached. A crash, an unusable fixture, a self-skip with the tools
-    present, or an availability skip proves nothing about the gate: it is
-    ``remember``-ed under ``control:<gate id>``, keyed by the current static part
-    and the path it failed on — the tier its run read, if it read one
-    (``_control_key``; ``when`` from the caller: this module reads no clock) —
-    and ``None`` is returned.
+    **The known-bad half's form** passes the ``gates.selftest`` ``result`` and
+    the ``trace`` it ran under, and writes what that half shows: a fired control
+    (the gate rejected its known-bad input) is ``bad: "fail"``, a gate that
+    PASSED its known-bad input ``bad: "pass"`` — with no known-good half
+    (``good`` null), which every reader treats as incomplete at this version
+    (D19): only the sweep's ``_run_control`` files a whole qualification. A
+    crash, an unusable fixture, a self-skip with the tools present, or an
+    availability skip proves nothing about the gate: it is ``remember``-ed
+    under ``control:<gate id>``, keyed by the current static part and the path
+    it failed on (``_control_key``; ``when`` from the caller: this module reads
+    no clock), and ``None`` is returned.
 
     **The forged form** passes ``bad="fail"`` (and a ``detail``) with no result
     and no trace: an entry with empty reads, which a renderer test uses to plant
-    an admission. It forges only the inner loop; R-9's re-execution at every
-    money boundary is the defence, not this function.
+    a qualification — ``good="pass"`` (or ``"fail"``, ``"not-run"``) for the
+    known-good half with empty reads, and ``mutation=()`` for a walk that ran and
+    made none (required where the walk applies: the strict reader refuses an
+    entry missing it). It forges only the inner loop; R-9's re-execution at
+    every money boundary is the defence, not this function.
 
     ``host``: ``"known-good"`` (the spine handed a project fixture
     ``selftest/known_good.py``'s context, D-27) or ``"live"``; host-param reads
@@ -4699,8 +4974,13 @@ def record_control(root: str, spec: Any, fn: Any, *, result: Verdict | None = No
     """
     if host not in _HOSTS:
         raise AtompipeError(f"host must be one of {list(_HOSTS)}, not {host!r}")
+    if good is not None and not isinstance(good, (str, _GoodHalf)):
+        raise AtompipeError(f"good must be a known-good outcome or a run, not {good!r}")
+    if isinstance(good, str) and good not in _GOOD_OUTCOMES:
+        raise AtompipeError(f"good must be one of {list(_GOOD_OUTCOMES)}, not {good!r}")
     built = _control_entry(root, spec, fn, result=result, trace=trace, host=host, bad=bad,
-                           detail=detail, digests=digests, anchors=anchors)
+                           detail=detail, digests=digests, anchors=anchors, good=good,
+                           walk=mutation)
     key = f"control:{spec.id}"
     if built.entry is None:
         remember(root, key, built.held, input_rho=built.failure_key, kind=built.kind,
@@ -4745,11 +5025,80 @@ def _held_control(result: Verdict, kind: str) -> Verdict:
                                else f"control {kind}")
 
 
+@dataclass
+class _GoodHalf:
+    """The known-good half of one qualification, as ``_run_control`` ran it:
+    ``outcome`` — ``pass``, ``fail``, ``not-run`` (no known-good control
+    exists), ``errored`` (the control or the gate crashed: ``line``),
+    ``skipped`` (the gate skipped it, its tools present: ``line``), ``live`` (it
+    read the candidate it was handed) or ``availability`` (the tools went
+    missing); ``verdict`` the gate's verdict on it; ``ctx`` the context the
+    gate ran on (the walk's base); ``trace`` its trace (the walk folds into
+    it); ``extra`` the ``ctx.extra`` keys handed (``_extra_keys``); ``closure``
+    the code it was built by (the lookup hint)."""
+
+    outcome: str
+    line: str = ""
+    verdict: Any = None
+    ctx: Any = None
+    trace: Any = None
+    extra: tuple = ()
+    closure: Any = None
+
+
+def _good_record(good: Any, *, anchors: Anchors, digests: FileDigests,
+                 static_files: list[str]) -> tuple[dict | None, Reads | None]:
+    """``(the entry's good block, its reads)`` for a known-good half — a run
+    (``_GoodHalf``), a forged outcome word, or ``None`` (no half: ``(None,
+    None)``)."""
+    if good is None:
+        return None, None
+    if isinstance(good, str):
+        reads = Reads()
+        return {"outcome": good, "reads": reads.to_dict(control=True), "extra": [],
+                "measured": None, "limit": None, "units": "", "detail": ""}, reads
+    if good.outcome == "not-run":
+        reads = Reads()
+        return {"outcome": "not-run", "reads": reads.to_dict(control=True), "extra": [],
+                "measured": None, "limit": None, "units": "", "detail": ""}, reads
+    reads = Reads.from_trace(good.trace, anchors=anchors, digests=digests, static=static_files)
+    # The good half's host is the known-good design, the pack's baseline, or —
+    # handed the live design — a run that read none of it (a `live` half is
+    # never filed). Its host reads are never keyed, as a known-good host's are not.
+    reads = dataclasses.replace(reads, host=[])
+    verdict = good.verdict
+    return {"outcome": good.outcome, "reads": reads.to_dict(control=True),
+            "extra": sorted(good.extra), "measured": _number(verdict.measured, "measured"),
+            "limit": _number(verdict.limit, "limit"), "units": str(verdict.units or ""),
+            "detail": portable(str(verdict.detail or ""), anchors)}, reads
+
+
+def _walk_record(walk: Any) -> dict | None:
+    """The entry's mutation block for a walk (``gates.MutationPass``), ``()`` for
+    the forged form's walk that made none, ``None`` for no walk."""
+    if walk is None:
+        return None
+    if isinstance(walk, tuple) and not walk:
+        return {"runs": 0, "boundary": "", "results": [], "inconclusive": [], "not_mutated": []}
+    return _clean({
+        "runs": int(walk.runs), "boundary": walk.boundary,
+        "results": [{"key": list(r.key), "before": r.before, "after": r.after,
+                     "outcome": r.outcome, "measured": _number(r.measured, "measured"),
+                     "limit": _number(r.limit, "limit")} for r in walk.results],
+        "inconclusive": [{"key": list(r.key), "after": r.after, "outcome": r.outcome,
+                          "why": str(r.why or "")} for r in walk.inconclusive],
+        "not_mutated": [{"key": list(key), "why": why} for key, why in walk.not_mutated],
+    })
+
+
 def _control_entry(root: str, spec: Any, fn: Any, *, result: Verdict | None,
                    trace: GateTrace | None, host: str, bad: str | None, detail: str,
-                   digests: FileDigests | None, anchors: Anchors | None) -> _BuiltControl:
+                   digests: FileDigests | None, anchors: Anchors | None, good: Any = None,
+                   walk: Any = None) -> _BuiltControl:
     """``record_control``'s work up to the write, so the sweep can judge a
-    control run under ``record=False`` exactly as it would file it."""
+    control run under ``record=False`` exactly as it would file it. ``good`` —
+    the known-good half (a ``_GoodHalf``, a forged outcome word, or ``None``);
+    ``walk`` — the mutation pass (a ``gates.MutationPass``, ``()``, or ``None``)."""
     anchors = anchors if anchors is not None else _default_anchors(root, spec, fn)
     digests = digests if digests is not None else FileDigests()
     static, parts, code, owner = _static(spec, fn, root, digests=digests, anchors=anchors)
@@ -4785,13 +5134,21 @@ def _control_entry(root: str, spec: Any, fn: Any, *, result: Verdict | None,
         # kept its params made these the live design's reads, dropped here
         # unkeyed (admission review, round 1).
         reads = dataclasses.replace(reads, host=[])
-    entry = ControlEntry(gate=spec.id, rho=rho_control(spec.id, static, reads),
+    good_block, good_reads = _good_record(good, anchors=anchors, digests=digests,
+                                          static_files=static_files)
+    if good_reads is not None and code.opaque:
+        good_reads = good_reads.with_opaque(f"code: {code.opaque}")
+        good_block["reads"] = good_reads.to_dict(control=True)
+    handed = getattr(trace, "handed_extra", None) if trace is not None else None
+    entry = ControlEntry(gate=spec.id, rho=rho_control(spec.id, static, reads, good_reads),
                          static=static, static_parts=parts, host=host,
                          fixture=_fixture_part(trace, anchors),
-                         reads=reads.to_dict(control=True), bad=bad, good=None,
-                         admitted="reject-only" if bad == "fail" else "no",
+                         reads=reads.to_dict(control=True), bad=bad,
+                         bad_extra=sorted(handed or ()), good=good_block,
+                         mutation=_walk_record(walk),
                          detail=portable(detail, anchors), measured=measured, limit=limit,
                          units=units)
+    entry.admitted = _admitted_from(_clean(entry.body()))
     return _BuiltControl(static, entry=entry, tier=tier)
 
 
@@ -4830,7 +5187,7 @@ def _read_outcomes(root: str) -> dict:
 
 
 def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str,
-             when: str) -> None:
+             when: str, facts: Any = None) -> None:
     """Remember a non-cacheable outcome in ``.atompipe/cache/last_outcomes.json``.
 
     ``key`` is a gate id, or ``control:<gate id>``; ``kind`` ``"error"``,
@@ -4881,6 +5238,11 @@ def remember(root: str, key: str, verdict: Verdict, *, input_rho: str, kind: str
         # model edit per omc gate, for no reader.
         records = {r: rec for r, rec in records.items() if rec["kind"] in _SUPERSEDING_KINDS}
     stored = {k: v for k, v in verdict.to_dict().items() if k not in _NEVER_REMEMBERED}
+    if facts is not None:
+        # A control failure's qualification facts (P2.3): beside the verdict's
+        # fields, under a key `Verdict.from_dict` drops — so an older spine reads
+        # the record as the crash it is, and this one renders the line.
+        stored["qualification"] = facts.to_dict()
     records[input_rho] = {"kind": kind, "verdict": _clean(stored), "when": str(when or "")}
     data[key] = dict(sorted(records.items()))
     atomic_write_json(_outcomes_path(root), data)
@@ -4913,7 +5275,9 @@ def remembered(root: str) -> dict:
                               "verdict": Verdict.from_dict(
                                   {k: v for k, v in rec["verdict"].items()
                                    if k not in _NEVER_REMEMBERED}),
-                              "when": rec["when"]}
+                              "when": rec["when"],
+                              "facts": rec["verdict"].get("qualification")
+                              if key.startswith("control:") else None}
                   for input_rho, rec in sorted(records.items())}
             for key, records in sorted(_read_outcomes(root).items())}
 
@@ -5108,7 +5472,7 @@ MAX_STALE_REASONS = 3
 #: gate's current version (PD-08, X14). A PASS from a gate nobody has shown can
 #: fail is a logger's output: it reads stale — never PASS — until a check runs
 #: the control. Pinned by ``tests/test_freshness.py``.
-_UNDEMONSTRATED = "control not demonstrated at this version — run atompipe check"
+_UNDEMONSTRATED = "not yet qualified at this version — the next check run qualifies it"
 
 #: The other fixed reasons a row reads stale for, in the spec's words (§3.10),
 #: which the transcript and the readers' tests match on: a ledger verdict from
@@ -5134,8 +5498,25 @@ def _undemonstrated(at: int | None) -> str:
     row every time, and ``check --force`` re-proved only the cheap path, so the
     advice was a loop. *Rejected:* the admission's own reason (``no control
     entry at this version``) — it says why, not what settles it, and every
-    reader matches the fixed words."""
-    return f"{_UNDEMONSTRATED} --tier {at}" if at else _UNDEMONSTRATED
+    reader matches the fixed words.
+
+    Worded by ``report.HUMAN["qualification"]`` (P2.3-D16: one table), read at
+    call time — ``_UNDEMONSTRATED`` is its plain form, kept for the readers
+    that match it. What slipped through the first cut of P2.3: the words were
+    typed here a second time, so a reworded table moved ``gate show`` and left
+    every stale reason saying the old thing."""
+    from .report import HUMAN                      # report imports this module
+    q = HUMAN["qualification"]
+    how = q["how"]["tier"].format(tier=at) if at else q["how"]["plain"]
+    return q["reason"]["qualification:not-yet"].format(how=how)
+
+
+def _pending_note(moved: tuple) -> str:
+    """The note a pending admission's row carries — ``report.HUMAN``'s words for
+    due to re-qualify, naming the files that moved (``Admission.moved``)."""
+    from .report import HUMAN                      # report imports this module
+    return HUMAN["qualification"]["pending"].format(
+        moved=", ".join(moved) or "its fixture code")
 
 
 # --------------------------------------------------------------------------- #
@@ -5774,6 +6155,223 @@ def freshness(root: str, registry: Any, projection: Any, ledger: Any, *,
 # --------------------------------------------------------------------------- #
 # admission, outside check: read, never run
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# qualification: the facts, and the one judge (P2.3-D2)
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class QualificationFacts:
+    """What is recorded about one qualification, and nothing worded: the facts
+    ``_qualification`` judges and ``report.qualification_line`` renders.
+
+    ``known_bad`` — the known-bad control's outcome: ``fail`` (rejected —
+    or errored, as an ``expect="error"`` control declares; ``expect`` says
+    which), ``pass``, ``errored``, ``skipped`` (itself, its tools present);
+    ``known_good`` — ``pass``, ``fail``, ``errored``, ``skipped``, ``not-run``
+    (no known-good control exists: known-bad shown) or ``live`` (it read the
+    candidate it was handed); ``bad_line``/``good_line`` — the first line of a
+    crash or self-skip; ``channels`` — ``()`` when both controls handed the
+    gate the same ``ctx.extra`` keys, else ``(known-bad keys, known-good
+    keys)``; ``check_channel`` — the same pair when they agree with each other
+    and the walk applies but either is not empty (a check run hands
+    ``extra={}``: both controls take a path the live run never takes);
+    ``mutation`` — ``(conclusive fails, conclusive, inconclusive)``, or ``None``
+    for no mutation segment (not walked: it does not apply, or a control did
+    not hold); ``boundary`` — why nothing, or not everything, was walked;
+    ``walk`` — ``could-not-run|<why>`` or ``errored|<line>`` (a crash a re-run
+    did not repeat); ``blocker`` — a control-level fact over the entries:
+    ``two-outcomes|<names>``, ``tier|<names>``, ``differs|<names>``.
+
+    Named for what it holds, not ``Qualification``: GLOSSARY §8's rename pass
+    gives that name to ``Admission`` (critique of the P2.3 design)."""
+
+    known_bad: str
+    known_good: str
+    bad_line: str = ""
+    good_line: str = ""
+    channels: tuple = ()
+    check_channel: tuple = ()
+    mutation: tuple | None = None
+    boundary: str = ""
+    walk: str = ""
+    blocker: str = ""
+    expect: str = "fail"
+
+    def to_dict(self) -> dict:
+        return {"known_bad": self.known_bad, "known_good": self.known_good,
+                "bad_line": self.bad_line, "good_line": self.good_line,
+                "channels": [list(k) for k in self.channels],
+                "check_channel": [list(k) for k in self.check_channel],
+                "mutation": None if self.mutation is None else list(self.mutation),
+                "boundary": self.boundary, "walk": self.walk, "blocker": self.blocker,
+                "expect": self.expect}
+
+    @classmethod
+    def from_dict(cls, data: Any) -> "QualificationFacts | None":
+        if not isinstance(data, Mapping):
+            return None
+        try:
+            return cls(known_bad=str(data["known_bad"]), known_good=str(data["known_good"]),
+                       bad_line=str(data.get("bad_line") or ""),
+                       good_line=str(data.get("good_line") or ""),
+                       channels=tuple(tuple(k) for k in data.get("channels") or ()),
+                       check_channel=tuple(tuple(k) for k in data.get("check_channel") or ()),
+                       mutation=(None if data.get("mutation") is None
+                                 else tuple(int(x) for x in data["mutation"])),
+                       boundary=str(data.get("boundary") or ""),
+                       walk=str(data.get("walk") or ""),
+                       blocker=str(data.get("blocker") or ""),
+                       expect=str(data.get("expect") or "fail"))
+        except (KeyError, TypeError, ValueError):
+            return None
+
+
+def _keys(found: tuple) -> str:
+    return ",".join(str(k) for k in found)
+
+
+def _qualification(facts: QualificationFacts) -> str:
+    """THE judge (P2.3-D2, §3's rule as one table): ``""`` when the facts make
+    the evaluator qualified, else the token (``Verdict.unqualified``,
+    ``parse_token``) naming the FIRST fact that does not hold, in the rule's
+    order (D15). Every reader and every writer asks this — the writer fills
+    ``admitted`` from it, the strict reader re-derives it, the sweep and every
+    resolution decide by it — so nothing qualifies on half the rule. What
+    slipped through when each caller decided for itself: P1 and P2.0 drifted
+    at every copy (``_crash_applies``, ``_outranked``, S-68), and P2.1's
+    ``_decide`` and ``_admission`` both read ``bad`` alone, so an evaluator that
+    failed everything (S-04) — failing its known-bad control by construction —
+    counted, its claim Failing on a design nothing had shown it could pass.
+
+    1. A control-level blocker: two outcomes for identical inputs, a
+       qualification that differs by tier, a forced run that contradicts its
+       cached entry.
+    2. The known-bad control: crashed or skipped itself (unless it errored as
+       an ``expect="error"`` control declares), or passed.
+    3. The known-good control: crashed, skipped itself, read the candidate it
+       was handed, failed, or does not exist (known-bad shown).
+    4. The channels: the two controls hand the gate different ``ctx.extra``
+       keys (D-26), or — where the walk applies — keys a check run never hands.
+    5. The walk: it could not run, or crashed and did not repeat it; a
+       conclusive mutation passed; the budget ran out with a value that moves
+       the evaluator's value unwalked.
+    Otherwise qualified: every conclusive mutation failed, or none was
+    conclusive (PLAN-v0.14 §1.5's panel default: qualified on the controls,
+    the line saying ``mutation 0 conclusive``)."""
+    if facts.blocker:
+        return f"control:{facts.blocker}"
+    bad = facts.known_bad
+    if bad in ("errored", "skipped") and not (bad == "errored" and facts.expect == "error"):
+        return f"known-bad:{bad}|{facts.bad_line}"
+    if bad == "pass":
+        return "known-bad:pass"
+    good = facts.known_good
+    if good in ("errored", "skipped"):
+        return f"known-good:{good}|{facts.good_line}"
+    if good in ("live", "fail", "not-run"):
+        return f"known-good:{good}"
+    if good != "pass":
+        return f"known-good:errored|{good}"
+    if facts.channels:
+        return f"channels:differ|{_keys(facts.channels[0])}/{_keys(facts.channels[1])}"
+    if facts.check_channel:
+        return (f"channels:check|{_keys(facts.check_channel[0])}/"
+                f"{_keys(facts.check_channel[1])}")
+    if facts.walk:
+        return f"mutation:{facts.walk}"
+    if facts.mutation is not None:
+        fails, conclusive, _inconclusive = facts.mutation
+        if fails < conclusive:
+            return f"mutation:pass|{fails}/{conclusive}"
+        if facts.boundary == "budget":
+            from . import gates as _gates           # gates imports this module
+            return f"mutation:could-not-finish|{_gates.MUTATION_RUNS_MAX}"
+    return ""
+
+
+def _state_of(token: str) -> str:
+    """The record value ``admitted`` holds for a judge's token (D23: record
+    values keep their names until the rename pass)."""
+    if not token:
+        return "paired"
+    return "reject-only" if token == "known-good:not-run" else "no"
+
+
+def parse_token(token: Any) -> tuple[str, str]:
+    """``(kind, text)`` of a ``Verdict.unqualified`` token: split on the first
+    ``|`` — the text after it may be a gate's own words (a crash's first line),
+    so nothing splits it again. The one inverse of the tokens ``_qualification``
+    mints; ``report`` words the kind and never splits the string itself."""
+    head, _sep, text = str(token or "").partition("|")
+    return head, text
+
+
+#: The token kind of an evaluator not yet qualified at any version (``_not_yet``).
+NOT_YET = "qualification:not-yet"
+
+
+def not_yet(verdict: Any) -> bool:
+    """Whether ``verdict`` is "not yet qualified": the evaluator was never
+    qualified at any version, and the next check run qualifies it. Not a
+    refusal of the evaluator — nothing it did was judged — so the prerequisite
+    rule reads it as an unrun root, never a negative one (``gates.prerequisite_root``)."""
+    return parse_token(getattr(verdict, "unqualified", "") or "")[0] == NOT_YET
+
+
+def never_run(verdict: Any) -> bool:
+    """Whether ``verdict`` is the resolver's word for a gate with nothing
+    recorded at all: not yet qualified, and no entry behind it (no ``rho``). A
+    reader that asks "has anything been evaluated" counts no such verdict."""
+    return not_yet(verdict) and not getattr(verdict, "rho", "")
+
+
+def _extra_keys(ctx: Any) -> tuple:
+    """The ``ctx.extra`` keys a context hands its gate, the spine's own removed
+    (``SPINE_EXTRA``): every PRESENT key, not the keys a fixture added — a
+    known-bad fixture that passes a host key through while the known-good
+    control lacks it differs in channel and added nothing (critique of the
+    P2.3 designs: parity on keys added missed exactly that)."""
+    extra = getattr(ctx, "extra", None)
+    return tuple(sorted(str(k) for k in (extra or {}) if str(k) not in SPINE_EXTRA))
+
+
+def _entry_facts(entry: Any, *, blocker: str = "") -> QualificationFacts:
+    """The facts a control entry records, for the judge. A good half of
+    ``None`` reads ``not-run`` here; a reader asks ``_incomplete`` first."""
+    parts = entry.static_parts if isinstance(entry.static_parts, Mapping) else {}
+    nc = parts.get("nc") if isinstance(parts.get("nc"), Mapping) else {}
+    applies = bool(nc.get("mutation"))
+    good = entry.good if isinstance(entry.good, Mapping) else None
+    bad_extra = tuple(entry.bad_extra or ())
+    good_extra = tuple((good or {}).get("extra") or ())
+    measured = good is not None and good.get("outcome") in ("pass", "fail")
+    channels = (bad_extra, good_extra) if measured and bad_extra != good_extra else ()
+    check = ((bad_extra, good_extra) if measured and applies and not channels
+             and (bad_extra or good_extra) else ())
+    walk = entry.mutation if isinstance(entry.mutation, Mapping) else None
+    mutation = None
+    boundary = ""
+    if walk is not None:
+        results = list(walk.get("results") or ())
+        mutation = (sum(1 for r in results if r.get("outcome") == "fail"), len(results),
+                    len(walk.get("inconclusive") or ()))
+        boundary = str(walk.get("boundary") or "")
+    return QualificationFacts(
+        known_bad=str(entry.bad), known_good=(good or {}).get("outcome") or "not-run",
+        channels=channels, check_channel=check, mutation=mutation, boundary=boundary,
+        blocker=blocker, expect=str(nc.get("expect") or "fail"))
+
+
+def _incomplete(entry: Any) -> bool:
+    """D19: an entry no reader may qualify on at the current version — one whose
+    writer ran no known-good half (``good`` null: P2.2's shape, never current, or
+    the forged form). Read as not yet qualified, and a miss for ``check``, which
+    runs the whole qualification. What slipped through without it: a forged
+    reject-only entry stood until ``--force``, its claim a Gap for a false
+    reason. (A walk that applies and is missing is refused outright by the
+    strict reader.)"""
+    return not isinstance(entry.good, Mapping)
+
+
 @dataclass(frozen=True)
 class Admission:
     """Whether a gate's control is demonstrated at its current version.
@@ -5797,16 +6395,49 @@ class Admission:
     reason: str = ""
     executed: bool = False
     reverified: bool = False
+    qualification: Any = None
+    """The ``QualificationFacts`` the state was decided on — an entry's, a
+    remembered failure's, or this run's — or ``None`` where nothing was
+    recorded (undemonstrated). ``reason`` is the judge's token when the state
+    is ``not-admitted``. The LAST two fields (R-2)."""
+    moved: tuple = ()
+    """``pending``: the files of the fixture closure that moved since the
+    control was qualified, structured (P2.3-D18: ``cli`` parsed them out of
+    spine prose)."""
 
 
-def _control_failure(record: Mapping[str, Any]) -> str:
-    """``control <kind>: <why>`` for a remembered control that proved nothing."""
+#: The token kinds a remembered control failure carries: a half that crashed,
+#: skipped itself or was unusable, a walk that could not run or crashed and did
+#: not repeat it. Remembered, never cached (P2.3-D12).
+_HELD_KINDS = ("known-bad:errored", "known-bad:skipped", "known-good:errored",
+               "known-good:skipped", "known-good:live", "mutation:could-not-run",
+               "mutation:errored")
+
+
+def _held_token(record: Mapping[str, Any]) -> tuple[str, Any]:
+    """``(token, QualificationFacts | None)`` of a remembered control failure.
+    A record this spine wrote carries its facts (``remember(facts=)``) and its
+    token in ``error``; one an older spine wrote — ``control error: …``, a
+    fixture's ``AtompipeError`` text — reads as the known-bad half's crash or
+    self-skip, which is what it was."""
+    facts = QualificationFacts.from_dict(record.get("facts"))
+    if facts is not None:
+        return _qualification(facts), facts
     verdict = record["verdict"]
     text = (verdict.error or verdict.skip_reason or verdict.detail or "").strip()
     text = text.splitlines()[0] if text else ""
-    if text.startswith("control "):
-        return text
-    return f"control {record['kind']}: {text}" if text else f"control {record['kind']}"
+    head = parse_token(text.removeprefix("unqualified: "))[0]
+    if head in _HELD_KINDS:
+        return text.removeprefix("unqualified: "), None
+    for prefix in ("control error: ", "control self-skip: "):
+        text = text.removeprefix(prefix)
+    kind = "skipped" if record.get("kind") == "self-skip" else "errored"
+    return f"known-bad:{kind}|{text}", None
+
+
+def _control_failure(record: Mapping[str, Any]) -> str:
+    """The token of a remembered control that proved nothing (``_held_token``)."""
+    return _held_token(record)[0]
 
 
 def _control_moved(control: ControlEntry, now: _Now) -> str:
@@ -5957,16 +6588,29 @@ def _at_tier(controls: Iterable[ControlEntry], at: int | None) -> bool:
 
 
 def _disagree(pool: list[ControlEntry]) -> str:
-    """Why controls in ``pool`` that disagree are not admitted: two answers to
-    one question, or — when they were run at different tiers — a gate that
-    fires on its known-bad input on one tier's path and passes it on another's.
-    A gate that can pass a known-bad design is a logger at every tier: nothing
-    a claim reads says which path its verdict took."""
+    """The control-level blocker over ``pool`` — every current entry a reader or
+    the sweep counts, whatever tier it ran at — or ``""``: ``two-outcomes|…``
+    when two entries at one ``rho_control`` hold different outcomes (either
+    half, or the walk's tally), ``tier|…`` when entries shown on different
+    tiers' paths reach different qualifications, ``two-outcomes|…`` when
+    entries at one tier do. ONE predicate — the judge's token per entry — for
+    every caller (critique of the P2.3 design: P2.1's copies compared ``bad``
+    alone, so a tier-0 entry whose mutation passed sat beside a tier-99 paired
+    one, and the later read admitted)."""
+    if len(pool) < 2:
+        return ""
     names = ", ".join(sorted(c.name for c in pool))
+    by_rho: dict[str, set] = {}
+    for control in pool:
+        by_rho.setdefault(control.rho, set()).add(control.name)
+    if any(len(found) > 1 for found in by_rho.values()):
+        return f"two-outcomes|{names}"
+    tokens = {_qualification(_entry_facts(c)) for c in pool}
+    if len(tokens) <= 1:
+        return ""
     if len({_read_tier(c.reads) for c in pool}) > 1:
-        return (f"control outcomes differ by ctx.tier ({names}): on one tier's path it "
-                f"passes its own known-bad input")
-    return f"two control outcomes recorded for identical inputs ({names})"
+        return f"tier|{names}"
+    return f"two-outcomes|{names}"
 
 
 def _control_order(root: str, gate_id: str) -> Callable[[ControlEntry], tuple]:
@@ -6007,15 +6651,15 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
     # control failures by tier).
     failures = _control_failures(held, spec.id, static, at)
     if failures:
-        return Admission("not-admitted", None, _control_failure(failures[0][1]))
+        token, facts = _held_token(failures[0][1])
+        return Admission("not-admitted", None, token, qualification=facts)
     try:
         controls = read_controls(now.root, spec.id, problems=notes)
     except AtompipeError as exc:
         return Admission("undemonstrated", None, str(exc))
     candidates = [c for c in controls if c.static == static]
     if not candidates:
-        elsewhere = f" ({len(controls)} recorded at other versions)" if controls else ""
-        return Admission("undemonstrated", None, f"no control entry at this version{elsewhere}")
+        return _not_yet(spec, controls, "no control entry at this version")
     order = _control_order(now.root, spec.id)
     current: list[ControlEntry] = []
     moved: list[str] = []
@@ -6026,33 +6670,58 @@ def _admission(now: _Now, spec: Any, fn: Any, held: Mapping[str, Any],
         else:
             current.append(control)
     if not current:
-        return Admission("undemonstrated", max(candidates, key=order),
-                         f"control inputs moved: {moved[0]}")
+        return _not_yet(spec, controls, f"control inputs moved: {moved[0]}",
+                        entry=max(candidates, key=order))
     if not _at_tier(current, at):
-        return Admission("undemonstrated", max(current, key=order),
-                         f"no control shown on the path ctx.tier {at} picks — run "
-                         f"atompipe check --tier {at}")
+        return _not_yet(spec, controls,
+                        f"no control shown on the path ctx.tier {at} picks — run atompipe "
+                        f"check --tier {at}", entry=max(current, key=order))
+    # D19: an entry whose writer ran no known-good half is no qualification at
+    # this version — never served, and a miss for `check`.
+    complete = [c for c in current if not _incomplete(c)]
+    if not complete:
+        return _not_yet(spec, controls, "its control entry at this version is incomplete",
+                        entry=max(current, key=order))
+    current = complete
     # The fixture closure is a HINT (§3.8): an entry whose fixture code is
     # unchanged — or that a sweep re-verified against the code as it is now —
     # was demonstrated on exactly this; one whose fixture code moved may still
-    # be (early cutoff), but only re-running the fixture can say, and nothing
-    # here runs. Among hint matches, disagreement is the control analogue of two
-    # outcomes; without one, every current candidate decides.
+    # be (early cutoff), but only re-running the fixtures can say, and nothing
+    # here runs. The pool the decision is over is every current entry the hint
+    # holds for (else every current one), whatever its tier — one predicate,
+    # the judge's token, over all of it.
     hinted = [c for c in current if _hint_holds(c, now, mine)]
     if not _at_tier(hinted, at):
         hinted = []                  # none shown on `at`'s path is unmoved: pending, as below
     pool = hinted or current
     chosen = max(pool, key=order)
-    if len({c.bad for c in pool}) > 1:
-        return Admission("not-admitted", chosen, _disagree(pool))
-    if chosen.bad == "pass":
-        fixture = getattr(spec.negative_control, "fixture", "") or "its fixture"
-        return Admission("not-admitted", chosen, f"PASSED its own known-bad fixture {fixture}")
+    facts = _entry_facts(chosen, blocker=_disagree(pool))
+    token = _qualification(facts)
+    if token:
+        # Never pending: a qualification that does not hold does not count while
+        # its fixture code moves either (critique of the P2.3 design: the
+        # pending branch counted any entry whose `bad` was fail).
+        return Admission("not-admitted", chosen, token, qualification=facts)
     if hinted:
-        return Admission("admitted", chosen)
-    files = sorted({path for c in pool for path in _fixture_moved(c, now)})
-    return Admission("pending", chosen,
-                     f"control inputs moved ({', '.join(files)}); the next check re-verifies")
+        return Admission("admitted", chosen, "", qualification=facts)
+    files = tuple(sorted({path for c in pool for path in _fixture_moved(c, now)}))
+    return Admission("pending", chosen, "", qualification=facts, moved=files)
+
+
+def _not_yet(spec: Any, controls: list, why: str, *, entry: Any = None) -> Admission:
+    """No complete current qualification. Undemonstrated — a reader reads the
+    evaluator's pass Stale (P2.1-D6) — when the evaluator was qualified at some
+    version (a paired entry exists at another static part, or this one); else
+    not yet qualified at all, and unqualified: GLOSSARY §3 composes a claim
+    with no qualified evaluator as Gap, and W7 and the walkthrough keep it Gap
+    "until all three pass" (critique of the P2.3 design: reading it Open or
+    Stale until the first check run let a claim leave Gap before any control
+    had run). *Rejected:* Gap after any spine edit (P2.1-D6's own rejection —
+    every claim Gap until `check`): only an evaluator NEVER qualified reads so."""
+    if any(c.admitted == "paired" for c in controls):
+        return Admission("undemonstrated", entry, why)
+    token = f"{NOT_YET}|{int(getattr(spec, 'tier', 0) or 0)}"
+    return Admission("not-admitted", entry, token)
 
 
 def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
@@ -6156,16 +6825,20 @@ def _synthesized(spec: Any, **fields: Any) -> Verdict:
                    pack=spec.pack or "", passed=False, **fields)
 
 
-def _unqualified(spec: Any, reason: str, *, rho: str = "") -> Verdict:
-    """The verdict of an evaluator refused at its version: ``unqualified`` set to
-    the refusal's reason, beside ``error="not admitted: <reason>"``. Every
-    refusal is minted here — ``resolve`` (a Fresh entry, a stale one, none) and
-    the sweep (``_sweep_one``, ``_outranked``) — so ``Verdict.unqualified``, the
-    one mark ``claims.compose`` reads as Gap, has one producer. The text is
-    unchanged in P2.1: P2.0's fixtures and planted violators key on it, and
-    P2.3 rewords it with the qualification words. *Rejected:* the text as the
-    mark (a second predicate; a gate could word its own crash into it)."""
-    return _synthesized(spec, error=f"not admitted: {reason}", unqualified=str(reason or ""),
+def _unqualified(spec: Any, token: str, *, rho: str = "") -> Verdict:
+    """The verdict of an evaluator unqualified at its version: ``unqualified``
+    set to the judge's TOKEN (``_qualification``; ``parse_token`` reads it,
+    ``report.HUMAN["qualification"]`` words it), beside ``error="unqualified:
+    <token>"`` — R-2's fallback, which an older reader shows as the crash it
+    falls back to, never as a pass. Every refusal is minted here — ``resolve``
+    (a Fresh entry, a stale one, none) and the sweep (``_sweep_one``,
+    ``_outranked``) — so ``Verdict.unqualified``, the one mark
+    ``claims.compose`` reads as Gap, has one producer (P2.1-D4). What P2.3
+    replaced: ``error="not admitted: <the spine's own prose>"``, which minted a
+    human channel's words in the spine and froze them inside a verdict that
+    travels (P2.3-D13). *Rejected:* the text as the mark (a second predicate;
+    a gate could word its own crash into it)."""
+    return _synthesized(spec, error=f"unqualified: {token}", unqualified=str(token or ""),
                         rho=rho)
 
 
@@ -6340,7 +7013,7 @@ def _resolve_gate(here: _Now, spec: Any, fn: Any, state: Any, *, held: Mapping[s
             return (verdict, Row(gid, state.state, cached=True,
                                  stale_reason=_undemonstrated(at), entry=entry,
                                  admission=admission, when=when, notes=row_notes))
-        pending = (admission.reason,) if admission.state == "pending" else ()
+        pending = ((_pending_note(admission.moved),) if admission.state == "pending" else ())
         notes.extend(f"{gid} — {note}" for note in pending)
         return (verdict, Row(gid, state.state, cached=True, fresh=True, entry=entry,
                              admission=admission, when=when, notes=row_notes + pending))
@@ -6409,12 +7082,15 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
        entry at all (``_standing``: the newest when several do). Invariant 2: a
        crash proves nothing, and neither does the PASS it followed.
     3. A **Fresh** entry, then admission (PD-08, X14): a PASS counts when its
-       control is admitted or pending; undemonstrated, it reads stale
-       (``control not demonstrated at this version — run atompipe check``, with
-       ``--tier <t>`` for an entry that took a costlier tier's path:
-       ``_undemonstrated``); not admitted, the refusal (``_unqualified``:
-       ``Verdict.unqualified`` set, ``error`` ``not admitted: <why>``). A FAIL
-       stays FAIL unless not admitted (then that refusal; it blocks either way).
+       evaluator is qualified (admitted) or due to re-qualify (pending);
+       undemonstrated — qualified at an earlier version — it reads stale
+       (``not yet qualified at this version — the next check run qualifies
+       it``, naming ``atompipe check --tier <t>`` for an entry that took a
+       costlier tier's path: ``_undemonstrated``); not admitted — unqualified,
+       or never qualified at any version (P2.3-D27) — the refusal
+       (``_unqualified``: ``Verdict.unqualified`` the judge's token, ``error``
+       ``unqualified: <token>``). A FAIL stays FAIL unless not admitted (then
+       that refusal; it blocks either way).
     4. Otherwise the **latest entry**, stale with its reasons (Unknown with its
        reason; ``model_error`` joins the "model does not load" one) — unless its
        evaluator is not admitted at the entry's tier, then the refusal (P2.1-D5:
@@ -6426,9 +7102,10 @@ def resolve(root: str, registry: Any, projection: Any, ledger: Any, *,
        every legacy verdict (D-09), so only a ``Ledger`` a caller built in memory
        still carries one; the rung stays so that one can never read current.
     6. Nothing: the refusal, a ``never`` row, when the evaluator is not admitted
-       (admission at no tier — a control entry that PASSED its known-bad input,
-       or a remembered control crash); otherwise no row, and the claim reads
-       Open. What slipped through (P2.0 review): only rung 3 asked, a gate
+       (admission at no tier — a control entry that does not qualify, a
+       remembered control crash, or no qualification at any version: not yet
+       qualified, its claim Gap, P2.3-D27); otherwise no row, and the claim
+       reads Open. What slipped through (P2.0 review): only rung 3 asked, a gate
        refused at its first check has no entry, and every reader after that
        check read it never run and the pass beside it as pass.
 
@@ -6587,6 +7264,12 @@ def _under_rule(spec: Any, own: Verdict | None, unmet: Any) -> Verdict:
                 == (ruled.skip_reason, list(ruled.blocked_by), str(ruled.blocked_kind)))
         return own if same else ruled
     refused = bool(getattr(own, "unqualified", ""))
+    if refused and not_yet(own):
+        # Not a refusal of its own: an evaluator never qualified because the
+        # rule never let its qualification run. Read standing, it promised "the
+        # next check run qualifies it" while the next check run, under the same
+        # root, would prune it again (P2.3).
+        return ruled
     if own.outcome == "error" and not refused:
         return own
     if str(unmet.kind) == PrerequisiteKind.ERRORED:
@@ -7042,22 +7725,16 @@ def _session(root: str, host_ctx: Any, *, projection: Any, anchors: Anchors,
                     when=when, out_dir=out_dir)
 
 
-def _passed_known_bad(spec: Any) -> str:
-    fixture = getattr(spec.negative_control, "fixture", "") or "its fixture"
-    return f"{_PASSED_ITS_KNOWN_BAD} {fixture}"
-
-
 def _decide(pool: list, spec: Any, order: Callable[[ControlEntry], tuple],
             **flags: bool) -> Admission:
-    """The demonstrations in ``pool`` settle it: they disagree — not admitted
-    (the control analogue of two outcomes, §3.7); the latest PASSED its
-    known-bad input — not admitted; else admitted, reject-only."""
+    """The qualifications in ``pool`` settle it, through the one judge: the
+    latest entry's facts, with any control-level blocker over the pool
+    (``_disagree``). Admitted only on ``""`` (P2.3-D2)."""
     chosen = max(pool, key=order)
-    if len({c.bad for c in pool}) > 1:
-        return Admission("not-admitted", chosen, _disagree(pool), **flags)
-    if chosen.bad == "pass":
-        return Admission("not-admitted", chosen, _passed_known_bad(spec), **flags)
-    return Admission("admitted", chosen, "", **flags)
+    facts = _entry_facts(chosen, blocker=_disagree(pool))
+    token = _qualification(facts)
+    return Admission("not-admitted" if token else "admitted", chosen, token,
+                     qualification=facts, **flags)
 
 
 def _ledger_now(ledger: Any, key: str) -> str | None:
@@ -7289,7 +7966,8 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
     entries = memo_entries(getattr(handed, "memo", None))
     memo_was = dict(dict.items(entries)) if entries is not None else None
     try:
-        built = _gates.run_fixture(spec, fn, handed, trace=trace, out_dir=out_dir)
+        built = _gates.run_fixture(spec, fn, handed, trace=trace, out_dir=out_dir,
+                                   fixture_root=s.root)
     except AtompipeError:
         return None
     _add_closure(trace, closure)
@@ -7306,6 +7984,28 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
                if _values_match(c, built, fixture_reads, s.anchors, host=host, trace=trace)]
     if not matches:
         return None
+    # The known-good half, built alone, compared with what each candidate's
+    # good half read — every mutated run's reads included (P2.3-D10). What
+    # slipped through comparing the known-bad half alone (V1i): a model edit
+    # that moved the known-good deflection past its limit left the known-bad
+    # values equal, and the evaluator stayed qualified on a known-good control
+    # it now fails.
+    good_trace = GateTrace(kind="control", anchors=s.anchors)
+    good_out = _fresh_good_dir(s.root, spec.id, s.out_dir)
+    try:
+        good_built, label = _good_context(s.root, spec, fn, host_ctx, good_trace, good_out)
+    except AtompipeError:
+        return None
+    good_reads = Reads.from_trace(good_trace, anchors=s.anchors, digests=s.digests,
+                                  static=static_files)
+    if good_reads.opaque or good_trace.model_used:
+        return None
+    matches = [c for c in matches
+               if _good_values_match(c, good_built, good_reads, s.anchors, host=label,
+                                     trace=good_trace)]
+    if not matches:
+        return None
+    _add_closure(trace, good_trace.fixture_code)
     if s.record:
         snapshot = _fixture_part(trace, s.anchors)
         for control in matches:
@@ -7314,15 +8014,65 @@ def _reverify(s: _Session, spec: Any, fn: Any, host_ctx: Any, current: list,
     return _decide(matches, spec, order, reverified=True)
 
 
+def _good_values_match(control: ControlEntry, built: Any, good_reads: Reads,
+                       anchors: Anchors, *, host: str, trace: GateTrace) -> bool:
+    """§3.8 step 4 for the known-good half (P2.3-D10): does the known-good
+    context built alone now hand the gate what ``control``'s good half recorded
+    it read — every param by digest (``ABSENT`` for a miss), every ledger read,
+    the same ``ctx.extra`` keys — while its builder read no file the entry does
+    not key? The walk's reads are among those params, each at its known-good
+    digest, so the walk stands or falls with the half it ran on. A good fixture
+    handed the LIVE design must read none of it — its own reads, or its gate's
+    through what it handed back (``_host_reads_with_gate``, the identity
+    fixture's shape: r3i in the good direction)."""
+    good = control.good if isinstance(control.good, Mapping) else None
+    if good is None:
+        return False
+    if good.get("outcome") == "not-run":
+        return built is None
+    if built is None:
+        return False
+    recorded = good.get("reads") or {}
+    if not set(good_reads.files) <= set(recorded.get("files") or {}):
+        return False
+    if not set(good_reads.dirs) <= set(recorded.get("dirs") or {}):
+        return False
+    recorded_tier = _read_tier(recorded)
+    if good_reads.tier is not None and good_reads.tier != recorded_tier:
+        return False
+    if recorded_tier is not None and recorded_tier != _plain_tier(getattr(built, "tier", None)):
+        return False
+    params = getattr(built, "params", None)
+    for row in recorded.get("params") or ():
+        digest, _value = _param_at(params, tuple(row[0]), row[1], anchors)
+        if digest != row[1]:
+            return False
+    ledger = getattr(built, "ledger", None)
+    for key, digest in (recorded.get("ledger") or {}).items():
+        if _ledger_now(ledger, key) != digest:
+            return False
+    if _extra_keys(built) != tuple(good.get("extra") or ()):
+        return False
+    if host == "live":
+        reads = _host_reads_with_gate(built, recorded.get("params") or (), trace)
+        if reads is None or reads:
+            return False
+    return True
+
+
 def _hold_control_failure(s: _Session, gate_id: str, key: str, verdict: Verdict,
-                          kind: str) -> None:
+                          kind: str, facts: Any = None) -> None:
     """Remember a failed control run at ``key`` (``_control_key``) — on disk
     unless ``record=False`` — and in the session's ``held``, so what the rest
-    of the sweep reads (``_outranked``, a note) is what the next reader will."""
+    of the sweep reads (``_outranked``, a note) is what the next reader will.
+    ``facts``: the qualification as this run found it (P2.3), so a reader
+    renders the line and judges it as the run did."""
     if s.record:
-        remember(s.root, f"control:{gate_id}", verdict, input_rho=key, kind=kind, when=s.when)
+        remember(s.root, f"control:{gate_id}", verdict, input_rho=key, kind=kind, when=s.when,
+                 facts=facts)
     s.held.setdefault(f"control:{gate_id}", {})[key] = {
-        "input_rho": key, "kind": kind, "verdict": verdict, "when": str(s.when or "")}
+        "input_rho": key, "kind": kind, "verdict": verdict, "when": str(s.when or ""),
+        "facts": facts.to_dict() if facts is not None else None}
 
 
 def _release_control_failures(s: _Session, gate_id: str, keys: Iterable[str]) -> None:
@@ -7339,55 +8089,226 @@ def _release_control_failures(s: _Session, gate_id: str, keys: Iterable[str]) ->
             del s.held[f"control:{gate_id}"]
 
 
+def _prepared_host(host_ctx: Any, trace: GateTrace) -> Any:
+    """``host_ctx`` as a control's builder is handed it: a memo of its own and
+    the sweep's tier as a ``TierRead`` on ``trace`` (``_control_host``'s rule)."""
+    names = {f.name for f in dataclasses.fields(host_ctx)}
+    if "memo" in names:
+        host_ctx = dataclasses.replace(host_ctx, memo=SweepMemo())
+    tier = getattr(host_ctx, "tier", None)
+    if ("tier" in names and type(tier) is not TierRead
+            and isinstance(tier, int) and not isinstance(tier, bool)):
+        host_ctx = dataclasses.replace(host_ctx, tier=TierRead(tier, trace))
+    return host_ctx
+
+
+def _good_context(root: str, spec: Any, fn: Any, host_ctx: Any, trace: GateTrace,
+                  out_dir: str) -> tuple[Any, str]:
+    """``(the known-good context, what a good= fixture was handed)`` — built, never
+    run (P2.3-D4), first match: the declared ``NegativeControl.good`` fixture,
+    handed exactly what the known-bad fixture is handed (``"known-good"`` for a
+    project gate whose project has a known-good design, else ``"live"``); else,
+    for a pack's gate, the pack's ``selftest/baseline.json`` (its sealed
+    known-good design, at the sweep's tier, in the control's out dir); else, for
+    a project's, ``selftest/known_good.py``'s ``context(ctx)``; else ``(None,
+    "")``: no known-good control exists, and the evaluator is known-bad shown.
+    The code each was built by lands on ``trace.fixture_code`` (the lookup
+    hint). Raises ``AtompipeError`` when the control is unusable. *Rejected:*
+    falling back to the live design when nothing resolves — S-07 in the good
+    direction: ``return ctx`` passes whatever the live design is, until it does
+    not."""
+    from . import gates as _gates                  # gates imports this module
+    prepared = _prepared_host(host_ctx, trace)
+    nc = spec.negative_control
+    ref = (getattr(nc, "good", "") or "").strip()
+    pack_dir = _pack_dir_of(fn)
+    if ref:
+        handed, label, closure = prepared, "live", None
+        if not pack_dir:
+            found = _known_good(root, prepared, trace)
+            if found is not None:
+                handed, label, closure = found[0], "known-good", found[1]
+        built = _gates.run_good_fixture(spec, fn, handed, trace=trace, out_dir=out_dir,
+                                        fixture_root=root)
+        _add_closure(trace, closure)
+        trace.handed_extra = _extra_keys(built)
+        return built, label
+    if pack_dir:
+        from . import packs as _packs              # packs imports gates, which imports this
+        built = _packs.baseline_context(pack_dir, out_dir=out_dir)
+        names = {f.name for f in dataclasses.fields(built)}
+        built = dataclasses.replace(built, **{k: v for k, v in (
+            ("tier", getattr(prepared, "tier", built.tier)), ("memo", SweepMemo())) if k in names})
+        trace.handed_extra = _extra_keys(built)
+        return built, ""
+    found = _known_good(root, prepared, trace)
+    if found is None:
+        return None, ""
+    trace.fixture_code = found[1]
+    trace.handed_extra = _extra_keys(found[0])
+    return found[0], ""
+
+
+def _fresh_good_dir(root: str, gate_id: str, sweep_out: str = "") -> str:
+    """The known-good half's emptied out dir, beside the known-bad half's: a
+    sibling, never inside it, so neither run reads the other's files."""
+    path = _fresh_control_dir(root, gate_id, sweep_out) + ".good"
+    shutil.rmtree(path, ignore_errors=True)
+    return path
+
+
+def _first(text: Any) -> str:
+    return (str(text or "").strip().splitlines() or [""])[0]
+
+
+def _good_half(s: _Session, spec: Any, fn: Any, host_ctx: Any) -> _GoodHalf:
+    """Run ``spec``'s known-good half: build its context (``_good_context``), run
+    the gate on it, traced, and say what happened (``_GoodHalf``). A good
+    fixture handed the LIVE design that the run read — the fixture's own reads,
+    or the gate's through a context the fixture handed back (the literal
+    identity ``return ctx``) — makes the candidate the known-good design: S-07
+    in the good direction, ``live`` (critique of the P2.3 design: the check was
+    worded on the fixture's own reads alone)."""
+    from . import gates as _gates
+    trace = GateTrace(kind="control", anchors=s.anchors)
+    out_dir = _fresh_good_dir(s.root, spec.id, s.out_dir)
+    try:
+        built, label = _good_context(s.root, spec, fn, host_ctx, trace, out_dir)
+    except AtompipeError as exc:
+        return _GoodHalf("errored", line=_first(exc), trace=trace, closure=trace.fixture_code)
+    if built is None:
+        return _GoodHalf("not-run", trace=trace)
+    ctx = dataclasses.replace(built, out_dir=out_dir)
+    verdict = _gates.run_gate(spec, fn, ctx, trace=trace)
+    half = dict(trace=trace, closure=trace.fixture_code, verdict=verdict, ctx=ctx,
+                extra=tuple(trace.handed_extra or ()))
+    if verdict.outcome == "skipped":
+        if not _gates.availability(spec)[0]:
+            return _GoodHalf("availability", line=verdict.skip_reason, **half)
+        return _GoodHalf("skipped", line=_first(verdict.skip_reason or verdict.detail), **half)
+    if verdict.outcome == "error":
+        return _GoodHalf("errored", line=_first(verdict.error), **half)
+    if label == "live" and trace.host_reads:
+        return _GoodHalf("live", **half)
+    return _GoodHalf(verdict.outcome, **half)
+
+
+def _walk_roots(s: _Session) -> list[str]:
+    """Where a walk's scratch may never land: the project and every directory
+    a pack can be found in (``packs.search_paths``)."""
+    from . import packs as _packs
+    return [s.root, *_packs.search_paths(s.root, existing_only=False)]
+
+
 def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool) -> Admission:
-    """§3.8 steps 5-6: run the control — fixture and gate, traced, in its own
-    emptied ``out_dir`` — and file it: a measurement as a control entry, a
-    crash, an unusable fixture or a self-skip remembered under
-    ``control:<gate>``, on the path it failed on (``_control_key``). Under
-    ``record=False`` it is judged exactly as it would be filed, and nothing is
-    written. A control entry answers the failures on the path it ran — this
-    sweep's tier, whether or not it read it — and on the shared one, and no
-    other (``_answered_controls``)."""
+    """§3.8 steps 5-6, P2.3: run the whole qualification — the known-bad control
+    (fixture and gate, traced, in its own emptied ``out_dir``), the known-good
+    control (``_good_half``), the channel check, and, where it applies and both
+    controls held, the mutation pass on the known-good control
+    (``gates.mutation_walk``, every run folded into the known-good half's trace)
+    — and judge it (``_qualification``). Both halves always run, so the line
+    shows both (P2.3-D12). Filed as ONE control entry when both halves measured
+    (a pass or a fail each); remembered under ``control:<gate>``, on the path it
+    failed on (``_control_key``), when either half crashed, skipped itself, was
+    unusable or read the candidate, or the walk could not run or crashed and did
+    not repeat it — never a tracked entry an environmental failure decided.
+    Under ``record=False`` it is judged exactly as it would be filed, and
+    nothing is written. A control entry answers the failures on the path it ran
+    — this sweep's tier, whether or not it read it — and on the shared one, and
+    no other (``_answered_controls``)."""
     from . import gates as _gates
     gid = spec.id
+    static_digest = s.now.static(spec, fn)[0]
+    nc = spec.negative_control
+    expect = (getattr(nc, "expect", "fail") or "fail").strip().lower()
     out_dir = _fresh_control_dir(s.root, gid, s.out_dir)
     # Opened before the known-good design is built: `context` runs inside it.
     trace = GateTrace(kind="control", anchors=s.anchors)
     try:
         handed, host, closure = _control_host(s.root, spec, fn, host_ctx, trace)
     except AtompipeError as exc:
-        held = Verdict(gate=f"{gid}#selftest", passed=False, tier=Tier(int(spec.tier)),
-                       pack=spec.pack or "", error=str(exc).splitlines()[0] if str(exc) else
-                       "negative control unusable")
-        _hold_control_failure(s, gid, _control_key(s.now.static(spec, fn)[0],
-                                                   _trace_tier(trace)), held, "error")
-        return Admission("not-admitted", None, _control_failure({"verdict": held,
-                                                                 "kind": "error"}),
-                         executed=True)
-    result = _gates.selftest(spec, fn, handed, trace=trace, out_dir=out_dir)
+        # The project's known-good design would not build: both halves stand on
+        # it, so the known-good control is the one that is broken.
+        facts = QualificationFacts(known_bad="errored", known_good="errored",
+                                   bad_line=_first(exc), good_line=_first(exc), expect=expect)
+        return _hold(s, spec, fn, static_digest, _trace_tier(trace), facts, executed=True)
+    result = _gates.selftest(spec, fn, handed, trace=trace, out_dir=out_dir,
+                             fixture_root=s.root)
     _add_closure(trace, closure)
+    bad, kind = _control_outcome(spec, result)
+    if bad is None and kind == "availability":
+        # The tools went missing while it ran: a skip proves nothing either
+        # way, and the gate reads skipped (BLOCKED), never not admitted.
+        return Admission("undemonstrated", None,
+                         result.skip_reason or "its tooling is not available", executed=True)
+    good = _good_half(s, spec, fn, host_ctx)
+    if good.outcome == "availability":
+        return Admission("undemonstrated", None, good.line or "its tooling is not available",
+                         executed=True)
+    _add_closure(trace, good.closure)
+    bad_extra = tuple(getattr(trace, "handed_extra", None) or ())
+    held_bad = _held_control(result, kind) if bad is None else None
+    measured = bad is not None and good.outcome in ("pass", "fail")
+    channels = (bad_extra, good.extra) if measured and bad_extra != good.extra else ()
+    applies = _mutation_applies(fn, s.root)
+    check = ((bad_extra, good.extra) if measured and applies and not channels
+             and (bad_extra or good.extra) else ())
+    walk = None
+    walk_token = ""
+    if applies and bad == "fail" and good.outcome == "pass" and not channels and not check:
+        try:
+            walk = _gates.mutation_walk(spec, fn, good.ctx, good.verdict, trace=good.trace,
+                                        roots=_walk_roots(s))
+        except _gates.MutationCannotRun as exc:
+            walk_token = f"could-not-run|{_first(exc)}"
+        else:
+            if walk.flaky:
+                walk_token = f"errored|{walk.flaky}"
+    facts = QualificationFacts(
+        known_bad=bad if bad is not None else ("skipped" if kind == "self-skip"
+                                                else "errored"),
+        known_good=good.outcome,
+        bad_line=_first(held_bad.error if held_bad is not None else "").removeprefix(
+            "control error: ").removeprefix("control self-skip: "),
+        good_line=good.line, channels=channels, check_channel=check,
+        mutation=(None if walk is None or walk_token else
+                  (sum(1 for r in walk.results if r.outcome == "fail"), len(walk.results),
+                   len(walk.inconclusive))),
+        boundary=walk.boundary if walk is not None and not walk_token else "",
+        walk=walk_token, expect=expect)
+    token = _qualification(facts)
+    tier = _trace_tier(trace)
+    if s.record:
+        cost = result.duration_s + float(getattr(good.verdict, "duration_s", 0.0) or 0.0)
+        cpu = result.cpu_s + float(getattr(good.verdict, "cpu_s", 0.0) or 0.0)
+    # Filed when both halves gave an answer a cache may keep: a pass or a fail
+    # each — or no known-good control at all (known-bad shown, `not-run`: a fact
+    # about the project, not a crash).
+    filed = bad is not None and good.outcome in ("pass", "fail", "not-run")
+    if not filed or walk_token or parse_token(token)[0] in _HELD_KINDS:
+        if s.record:
+            record_obs(s.root, gid, entry="", when=s.when, duration_s=cost, cpu_s=cpu,
+                       control=True)
+        if token and parse_token(token)[0] in _HELD_KINDS:
+            refusal = (held_bad.detail if held_bad is not None
+                       else getattr(good.verdict, "detail", "") or good.line or "")
+            return _hold(s, spec, fn, static_digest, tier, facts, executed=True,
+                         detail=refusal)
+        # Only a planted judge reads a crashed half as qualified: nothing to file.
+        return Admission("not-admitted" if token else "admitted", None, token,
+                         qualification=facts, executed=True)
     built = _control_entry(s.root, spec, fn, result=result, trace=trace, host=host, bad=None,
-                           detail="", digests=s.digests, anchors=s.anchors)
+                           detail="", digests=s.digests, anchors=s.anchors, good=good,
+                           walk=walk)
     entry = built.entry
     if s.record:
-        record_obs(s.root, gid, entry=entry.name if entry is not None else "", when=s.when,
-                   duration_s=result.duration_s, cpu_s=result.cpu_s, control=True)
-    if entry is None:
-        if built.kind == "availability":
-            # The tools went missing while it ran: a skip proves nothing either
-            # way, and the gate reads skipped (BLOCKED), never not admitted.
-            return Admission("undemonstrated", None,
-                             result.skip_reason or "its tooling is not available",
-                             executed=True)
-        _hold_control_failure(s, gid, built.failure_key, built.held, built.kind)
-        return Admission("not-admitted", None,
-                         _control_failure({"verdict": built.held, "kind": built.kind}),
-                         executed=True)
+        record_obs(s.root, gid, entry=entry.name, when=s.when, duration_s=cost, cpu_s=cpu,
+                   control=True)
     try:
         existing = read_controls(s.root, gid)
     except AtompipeError:
         existing = []
-    clash = sorted(c.name for c in existing if c.rho == entry.rho and c.bad != entry.bad)
+    clash = sorted(c.name for c in existing if c.rho == entry.rho and c.name != entry.name)
     if s.record:
         wrote = write_control(s.root, entry)
         s.notes.extend(wrote.warnings)
@@ -7396,16 +8317,34 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
     if s.record:
         # The entry on disk keeps the fixture hint it was FIRST written with
         # (same inputs, same outcome: "exists"); the closure it was just
-        # demonstrated under is remembered beside it.
+        # qualified under is remembered beside it.
         s.verified_out.setdefault(gid, {})[entry.name] = _vouched(entry.fixture, entry, s.now)
     if clash:
-        reason = (f"control outcome differs from its cached entry ({', '.join(clash)})"
-                  if force else f"two control outcomes recorded for identical inputs "
-                                f"({', '.join(clash + [entry.name])})")
-        return Admission("not-admitted", entry, reason, executed=True)
-    if entry.bad == "pass":
-        return Admission("not-admitted", entry, _passed_known_bad(spec), executed=True)
-    return Admission("admitted", entry, "", executed=True)
+        blocker = (f"differs|{', '.join(clash)}" if force
+                   else f"two-outcomes|{', '.join(clash + [entry.name])}")
+        facts = dataclasses.replace(facts, blocker=blocker)
+        token = _qualification(facts)
+    return Admission("not-admitted" if token else "admitted", entry, token,
+                     qualification=facts, executed=True)
+
+
+def _hold(s: _Session, spec: Any, fn: Any, static: str, tier: int | None,
+          facts: QualificationFacts, *, executed: bool, detail: str = "") -> Admission:
+    """Remember a qualification that proved nothing — a half that crashed,
+    skipped itself, was unusable or read the candidate; a walk that could not
+    run or crashed and did not repeat it — under ``control:<gate>``, never
+    cached (P2.3-D12), and say so. ``detail`` is the refusal itself, kept on
+    the remembered verdict: the token names the class of failure, and what
+    slipped through the first cut was a held verdict with neither the
+    fixture's refusal (``ctx.memo is the sweep's file memo …``) nor the
+    crash's text — a reader of ``remembered()`` saw only "unusable"."""
+    token = _qualification(facts)
+    kind = "self-skip" if parse_token(token)[0].endswith(":skipped") else "error"
+    held = Verdict(gate=f"{spec.id}#selftest", passed=False, tier=Tier(int(spec.tier)),
+                   pack=spec.pack or "", error=f"unqualified: {token}" if token else "control",
+                   detail=str(detail or ""))
+    _hold_control_failure(s, spec.id, _control_key(static, tier), held, kind, facts=facts)
+    return Admission("not-admitted", None, token, qualification=facts, executed=executed)
 
 
 def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
@@ -7436,7 +8375,10 @@ def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
         if not force:
             s.notes.append(f"{gid}: {exc}")
         controls = []
-    current = [c for c in controls if c.static == static and not _control_moved(c, s.now)]
+    # An incomplete entry (D19: its writer ran no known-good half) is no
+    # qualification: a miss, so the whole qualification runs.
+    current = [c for c in controls if c.static == static and not _control_moved(c, s.now)
+               and not _incomplete(c)]
     failures = _control_failures(s.held, gid, static, at)
     # A failure on a path this sweep does not run — only at `at=None`, a served
     # verdict that never read the tier, against which every path's failure
@@ -7452,7 +8394,8 @@ def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
                        f"path stands, and a check at tier {s.now.tier} does not run that "
                        f"path — run atompipe check --tier {tier}")
         if not force:
-            return Admission("not-admitted", None, _control_failure(failures[0][1]))
+            token, facts = _held_token(failures[0][1])
+            return Admission("not-admitted", None, token, qualification=facts)
     if not force:
         # A control that failed at this static, on this path or the shared one,
         # supersedes whatever entry it followed, like a gate's crash (§3.9): run
@@ -7475,29 +8418,37 @@ def _admit(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool,
     found = _other_tiers(_run_control(s, spec, fn, host_ctx, force=force), current, s, spec)
     if beyond and found.state != "not-admitted":
         # `--force` ran it on this sweep's path, which answers only that path.
-        return Admission("not-admitted", found.entry, _control_failure(beyond[0][1]),
+        token, facts = _held_token(beyond[0][1])
+        return Admission("not-admitted", found.entry, token, qualification=facts,
                          executed=found.executed, reverified=found.reverified)
     return found
 
 
 def _other_tiers(found: Admission, current: list, s: _Session, spec: Any) -> Admission:
-    """``found``, unless a current control shown on ANOTHER tier's path
+    """``found``, unless a current qualification shown on ANOTHER tier's path
     disagrees with it — then not admitted, as a reader will judge the same
-    pool (``_admission``: every hinted control counts, whatever its tier).
+    pool (``_admission``: every hinted control counts, whatever its tier),
+    through the same predicate (``_disagree``: the judge's token per entry).
     What would slip through otherwise: a tier-0 control that fired kept a
     gate whose tier-2 path passes its known-bad input admitted in the sweep
-    that found it, while ``status`` refused it."""
+    that found it, while ``status`` refused it; and (critique of the P2.3
+    design) a tier-99 paired entry filed by `gate selftest` beside a tier-0
+    one whose mutation passed read admitted, the costlier path's answer
+    standing for the cheap one's."""
     entry = found.entry
     if found.state != "admitted" or entry is None:
         return found
     mine = s.verified.get(spec.id) or {}
     others = [c for c in current
               if c.name != entry.name and _read_tier(c.reads) != _read_tier(entry.reads)
+              and not _incomplete(c)
               and not _ledger_moved(c, s.now, mine) and _hint_holds(c, s.now, mine)]
-    pool = [entry, *others]
-    if len({c.bad for c in pool}) > 1:
-        return Admission("not-admitted", entry, _disagree(pool), executed=found.executed,
-                         reverified=found.reverified)
+    blocker = _disagree([entry, *others])
+    if blocker:
+        facts = dataclasses.replace(found.qualification or _entry_facts(entry),
+                                    blocker=blocker)
+        return Admission("not-admitted", entry, _qualification(facts), qualification=facts,
+                         executed=found.executed, reverified=found.reverified)
     return found
 
 
@@ -7530,17 +8481,20 @@ def admission(root: str, spec: Any, fn: Any, host_ctx: Any, *, may_run: bool = T
        is how a model edit that moves every fixture's code, but no control
        value, costs one fixture run per gate and nothing else — and how one that
        DOES move a value (S-19's model-code half) misses.
-    5. **Miss.** The control runs — fixture and gate — and is filed (unless
-       ``record=False``): ``bad: "fail"`` admitted reject-only; ``bad: "pass"``
-       not admitted (``PASSED its own known-bad fixture <ref>``). A crash, an
-       unusable fixture or a self-skip with the tools present is remembered
+    5. **Miss.** The whole qualification runs — both controls, and the walk
+       where it applies — and is filed (unless ``record=False``) with
+       ``admitted`` as the judge decides it: ``paired`` when qualified,
+       ``reject-only`` for known-bad shown, ``no`` otherwise, the token naming
+       the first fact that does not hold (``known-bad:pass``,
+       ``known-good:fail``, ``mutation:1/2``, …). A crash, an unusable fixture
+       or a self-skip with the tools present in either half is remembered
        under ``control:<gate>`` at the current static and the path it failed on
-       (``_control_key``) and not admitted (``control <kind>: <why>``); a
+       (``_control_key``) and not admitted (``known-bad:errored|<why>``, …); a
        remembered one at this static, on this path or the shared one, is
        re-run, never served.
-    6. **``force``** skips 1-4: the control always runs, and an outcome that
-       differs from a cached control entry at the same ``rho_control`` is not
-       admitted (``control outcome differs from its cached entry``, R-9).
+    6. **``force``** skips 1-4: the qualification always runs, and an outcome
+       that differs from a cached control entry at the same ``rho_control`` is
+       not admitted (``control:differs|<names>``, R-9).
 
     A PROJECT control's fixture is handed ``known_good_context``'s design
     (``host: "known-good"``); a pack's gets the live host. With the gate's tools
@@ -7721,7 +8675,7 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
         return None
     shown = _as_spec(served.to_verdict(), spec)
     stands = shown.outcome.upper() + {"undemonstrated": ", not current",
-                                      "not-admitted": ", not admitted"}.get(admitted.state, "")
+                                      "not-admitted": ", unqualified"}.get(admitted.state, "")
     s.notes.append(f"{ran}; the tier-{tier} entry {served.name} at these inputs is the "
                    f"more thorough answer, and it stands ({stands})"
                    if above else
@@ -8007,12 +8961,12 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
        sweep's own tier (``here``): the row is that crash, as ``resolve`` reads
        it, and a note names the path and ``run atompipe check --tier <t>`` —
        nothing runs, since no run at this tier answers it.
-    2. **Admission** (``admission``'s steps; ``force`` re-runs the control). Not
-       admitted: ``error="not admitted: <why>"``, ``fn`` never called. A Fresh
-       entry of a costlier tier is judged at ITS tier by the records alone;
-       undemonstrated there, it is served as ``resolve`` serves it — its
-       verdict, cached, stale ``control not demonstrated at this version — run
-       atompipe check --tier <t>`` — never a skip.
+    2. **Admission** (``admission``'s steps; ``force`` re-runs the
+       qualification). Not admitted: ``error="unqualified: <token>"``, ``fn``
+       never called. A Fresh entry of a costlier tier is judged at ITS tier by
+       the records alone; undemonstrated there, it is served as ``resolve``
+       serves it — its verdict, cached, stale ``not yet qualified at this
+       version — atompipe check --tier <t> qualifies it`` — never a skip.
     3. Unless ``force``, a **Fresh** entry is served — unless a remembered crash
        or self-skip at a rho current now on its path superseded it (§3.9: a crash
        proves nothing, and neither does the PASS it followed), which re-runs the

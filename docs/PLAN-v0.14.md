@@ -147,13 +147,13 @@ moves only in words — unless the mutation pass leaves a bracket gate unqualifi
 | # | Paper (§) | On `0474f5c` | Made true by |
 |---|---|---|---|
 | C1 | "six packs … 46 evaluators" (§8) | 7 packs, 54 gates; the six named hold exactly 46, and openmodelica's 8 are left out | **paper feedback F1** — the repo does not drop a pack to match a sentence |
-| C2 | "Evaluator qualification … implemented" (§8) | known-bad half enforced at use; known-good half for packs only; every project gate admitted reject-only | P2 |
+| C2 | "Evaluator qualification … implemented" (§8) | known-bad half enforced at use; known-good half for packs only; every project gate admitted reject-only | P2 — true from P2.3: both halves at use, for every evaluator, and the mutation pass for every one not from a bundled pack (`test_admission.QualificationIsPaired`, `EveryConclusiveMutationMustFail`) |
 | C3 | read-set staleness implemented | true (per-gate ρ, `freshness()`) | — |
 | C4 | ledger rendering implemented | true | — |
 | C5 | sequencing "under development" | declined | this amendment, then P4 |
 | C6 | cross-project confidence "under development" | not planned | per-evaluator record in P2; beyond that deferred, said so in §3 |
 | C7 | the ledger "records where judgment must remain with a named human or institution" (§1, present tense) | false | P2 records it (`terminal` + `authority`, set through the signing channel); P3 enforces it (W9's permission rule) |
-| C8 | a claim with no qualified evaluator remains a gap (§7) | false (→ FAIL) | P2 — the not-admitted half true from P2.1 (an evaluator refused at its version reads Gap, beside a pass too); the known-bad-shown half (reject-only still counts, `test_status_table.RejectOnlyStillCounts`) in P2.3 |
+| C8 | a claim with no qualified evaluator remains a gap (§7) | false (→ FAIL) | P2 — the not-admitted half true from P2.1 (an evaluator refused at its version reads Gap, beside a pass too); the known-bad-shown half true from P2.3 (`test_status_table.KnownBadShownIsAGap`, which replaced `RejectOnlyStillCounts` in the open) |
 | C9 | a model may propose "reviews" (§8) | no review record exists | paper feedback F5, or a review record later |
 | C10 | a ledger row shows its ρ (Fig. 9) | ρ per verdict; not printed on every row | P3 |
 

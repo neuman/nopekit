@@ -5,9 +5,10 @@ Thickness 8.0 mm, every other Config field at the model's defaults as they stood
 when this file was written. Tip deflection comes out at 0.469 mm against the
 0.5 mm limit, and all six of the bracket's gates pass on it, whatever the live
 design or the host project looks like — `tests/test_fixture_hygiene.py`
-(`KnownGoodPassesEverything`) holds both. P2.3 reuses this module as the good half
-of every control: a gate must pass here AND fail on its fixture, or it has only
-shown that it refuses everything.
+(`KnownGoodPassesEverything`) holds both. It is the known-good control of every
+bracket gate (P2.3): a gate must pass here AND fail on its fixture — and fail every
+conclusive mutation of this design, each value it read pushed 15% past its limit —
+or it is unqualified, and has only shown that it refuses everything.
 
 Why it exists (S-07, D-27). `bad_configs._with` used to rebuild each known-bad
 input from the HOST's `ctx.params["config"]`, which in `gate selftest` is the live

@@ -80,13 +80,21 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     7: "test_staleness.StaleIsNotCurrent",
     8: ["test_records.IndexNeverDisagreesWithRecords",
         "test_records.NoCommandWritesARecord"],
-    9: "test_admission.AdmissionIsDemonstrated",
+    # 9 is the paired rule from P2.3: both controls (QualificationIsPaired), and
+    # every conclusive mutation a fail for an evaluator outside the bundled packs
+    # (EveryConclusiveMutationMustFail); the known-bad half's guards stay where
+    # they were written (AdmissionIsDemonstrated).
+    9: ["test_admission.AdmissionIsDemonstrated", "test_admission.QualificationIsPaired",
+        "test_admission.EveryConclusiveMutationMustFail"],
     # 10 (P2.2): the rule in the run loop, the resolver and the composition; a
     # cached pass behind a failed guard, end to end in process; and the graph
     # the rule walks — a cycle or an inversion refused at registration.
     10: ["test_prerequisites.PrerequisiteFailureIsNeverAPass",
          "test_prerequisites.ACachedPassNeverSurvivesAFailedPrerequisite",
          "test_prerequisites.NeedsCycleRefused", "test_prerequisites.TierInversionRefused"],
+    # 15 (P2.3): the mutation pass's seal, over the real walk and every planted
+    # runner — moved here from PLANNED_INVARIANT_CLASSES with CLAUDE.md's item.
+    15: "test_mutation.MutationIsSealed",
 }
 
 #: Classes a later checkpoint will make invariants, guarded against skips from
@@ -96,14 +104,14 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
 #: INVARIANT_CLASSES when CLAUDE.md numbered them (checkpoint 1.2), and 8 with the
 #: records layout (1.3), each the day its number landed.
 #:
-#: 15 is PLAN §4.0.1's mutation half (PLAN-v0.14 §4.1: "the mutation half lands
-#: in P2 as MutationIsSealed, in P2.0"). It is planned, not mapped, because
-#: CLAUDE.md states 1-10 and `EveryInvariantHasItsTest` refuses a mapped number
-#: CLAUDE.md does not state; it moves to INVARIANT_CLASSES, with CLAUDE.md's new
-#: item, in the checkpoint that makes mutation mechanical (P2.3) — PLAN §4.0.1:
-#: "each is added to CLAUDE.md in the phase that makes it mechanical".
-#: *Rejected:* keeping it planned past P2 — mutation would ship inside
-#: qualification with its seal stated nowhere a reader of CLAUDE.md looks.
+#: 15 was PLAN §4.0.1's mutation half (PLAN-v0.14 §4.1: "the mutation half lands
+#: in P2 as MutationIsSealed, in P2.0"), planned here — not mapped, because
+#: CLAUDE.md stated 1-10 and `EveryInvariantHasItsTest` refuses a mapped number
+#: CLAUDE.md does not state — until P2.3 made mutation mechanical and moved it to
+#: INVARIANT_CLASSES with CLAUDE.md's item (PLAN §4.0.1: "each is added to
+#: CLAUDE.md in the phase that makes it mechanical"). *Rejected:* keeping it
+#: planned past P2 — mutation would ship inside qualification with its seal
+#: stated nowhere a reader of CLAUDE.md looks.
 #:
 #: 11 is PLAN §4.0.1's first half — a human or physical terminal is satisfied
 #: only through a channel the proposer cannot author — from its first line
@@ -111,7 +119,6 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
 #: moves to INVARIANT_CLASSES with CLAUDE.md's 11 when the signing channel lands.
 PLANNED_INVARIANT_CLASSES: dict[int, str | list[str]] = {
     11: "test_owner.AnOwnerWrittenByHandNeverCounts",
-    15: "test_mutation.MutationIsSealed",
 }
 
 

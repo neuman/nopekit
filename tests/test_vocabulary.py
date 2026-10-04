@@ -184,9 +184,14 @@ def table_problems(text: str, human: Any = None) -> list[str]:
     if sorted(human["outcome"].values()) != sorted(["pass", "fail", "skipped", "errored"]):
         out.append(f"HUMAN's outcome words {sorted(human['outcome'].values())}")
     hint = human["status"][ClaimStatus.PASS].hint
-    for overclaim in ("qualified", "built from"):
-        if overclaim in hint:
-            out.append(f"Checked's hint says {overclaim!r}: {hint!r}")
+    # Flipped in the open by P2.3 (R-6, with V3): until qualification was both
+    # controls — and the mutation pass for a project evaluator — "qualified" in
+    # Checked's hint was an overclaim, refused here; from P2.3 it is what
+    # Checked stands on, and a hint without it says less than the rule does.
+    if "qualified" not in hint:
+        out.append(f"Checked's hint does not say 'qualified': {hint!r}")
+    if "built from" in hint:
+        out.append(f"Checked's hint says 'built from': {hint!r}")
     return out
 
 
@@ -227,7 +232,7 @@ class StatusWordsAreTheGlossarys(unittest.TestCase):
         planted = MappingProxyType(dict(report_mod.HUMAN, status=MappingProxyType(rows)))
         self.assertTrue(any("not GLOSSARY's" in p for p in table_problems(glossary, planted)))
         rows[ClaimStatus.PASS] = rows[ClaimStatus.PASS]._replace(
-            term="Checked", hint="every evaluator is qualified and passed")
+            term="Checked", hint="every evaluator passed")
         planted = MappingProxyType(dict(report_mod.HUMAN, status=MappingProxyType(rows)))
         self.assertTrue(any("'qualified'" in p for p in table_problems(glossary, planted)))
 
@@ -1137,3 +1142,157 @@ class ReadyMeansEveryRequiredClaimChecked(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# --------------------------------------------------------------------------- #
+# V4 (P2.3): qualification's words, from one table, on every channel
+# --------------------------------------------------------------------------- #
+#: GLOSSARY §2's qualification Never-says, and its mutation and known-bad
+#: control rows' (non-italic, plus the italic ones a scanner can still read on
+#: these channels: *fired*, *flip*, *BROKEN*), parsed where they parse and
+#: typed where §2's italics put them out of the parser's reach.
+QUALIFICATION_NEVER = re.compile(
+    r"(?i)(?<![\w-])(?:admitted|admission|undemonstrated|selftest passed|re-verif\w*"
+    r"|negative control|known-bad input|mutants?|killed|survived|flip\w*|perturb\w*"
+    r"|fired|broken)(?![\w-])")
+
+#: Qualification's own words: none may reach a channel except through
+#: `HUMAN["qualification"]`.
+_QUALIFICATION_WORDS = re.compile(
+    r"(?<![\w-])(?:known-good|known-bad|mutation|qualified|unqualified|conclusive|"
+    r"inconclusive)(?![\w-])")
+
+
+def _zz(text: str) -> str:
+    """Every word of a template prefixed `zz`, its `{fields}` untouched."""
+    out = []
+    for part in re.split(r"(\{[^}]*\})", text):
+        out.append(part if part.startswith("{") else
+                   re.sub(r"(?<![\w-])([A-Za-z][\w-]*)", r"zz\1", part))
+    return "".join(out)
+
+
+def _sentinel(value: Any) -> Any:
+    if isinstance(value, str):
+        return _zz(value)
+    if isinstance(value, (dict, MappingProxyType)):
+        return MappingProxyType({k: _sentinel(v) for k, v in value.items()})
+    return value
+
+
+def qualification_sentinel() -> Any:
+    """``HUMAN`` with its qualification words prefixed ``zz``: the
+    ``qualification`` section, and the one word another section holds — the
+    ``unqualified`` lead of a Gap reason (``HUMAN["lead"]``), which the check
+    summary, ``status``'s counts and the report's verdict rows say too."""
+    human = report_mod.HUMAN
+    lead = dict(human["lead"])
+    lead[claims_mod.ClaimCause.UNQUALIFIED] = _zz(lead[claims_mod.ClaimCause.UNQUALIFIED])
+    return MappingProxyType(dict(human, qualification=_sentinel(human["qualification"]),
+                                 lead=MappingProxyType(lead)))
+
+
+#: An always-False evaluator in a bracket copy, with a claim of its own.
+_NEVER = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+
+@gate(id="bracket.never", claims=["never-probe"],
+      negative_control=NegativeControl(fixture="selftest/bad_configs.py:quarter_thickness"))
+def never(ctx):
+    d = float(ctx.params["deflection"])
+    return Verdict(gate="bracket.never", passed=False, measured=round(d, 4), limit=0.5)
+'''
+
+
+def _never_bracket() -> str:
+    root = _projects.bracket_copy(os.path.join(_tmp("atompipe-vocab-q-"), "bracket"),
+                                  migrated=True)
+    with open(os.path.join(root, "gates", "zz_never.py"), "w", encoding="utf-8") as fh:
+        fh.write(_NEVER)
+    with open(os.path.join(root, "claims", "C9.json"), "w", encoding="utf-8") as fh:
+        json.dump({"statement": "the never probe holds", "kind": "measurable",
+                   "tags": ["never-probe"]}, fh)
+    return root
+
+
+def _qualification_channels(root: str) -> dict[str, list[str]]:
+    """Every channel that shows a qualification, captured in process: `check`,
+    `status`, `gate show`, `gate selftest` (project mode), `report`, `doctor`,
+    and the help of the two commands that run controls."""
+    out: dict[str, list[str]] = {}
+    for key, argv in (("check", ["check"]), ("status", ["status"]),
+                      ("gate.show", ["gate", "show", "bracket.never"]),
+                      ("gate.show.ok", ["gate", "show", "bracket.deflection"]),
+                      ("gate.selftest", ["gate", "selftest"]), ("report", ["report"]),
+                      ("doctor", ["doctor"])):
+        out[key] = _captured([*argv, "-C", root]).splitlines()
+    for key, argv in (("help.selftest", ["gate", "selftest", "--help"]),
+                      ("help.check", ["check", "--help"])):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                cli_mod.main(argv)
+            except SystemExit:
+                pass
+        out[key] = buf.getvalue().splitlines()
+    return out
+
+
+class QualificationWordsComeFromOneTable(unittest.TestCase):
+    """(V4, D-16) Patching `HUMAN["qualification"]` moves every channel that
+    shows a qualification, and none of them says a word GLOSSARY §2 forbids —
+    `admitted`, `re-verified`, `negative control`, `fired`, `BROKEN` and the
+    rest. What slipped through before P2.3: a qualification was worded in four
+    places (`gate show`'s `last selftest`, `gate selftest`'s `fired`/`BROKEN`,
+    `check`'s `re-verified`, the refusal text `not admitted: …`), and the spine
+    minted the reason a claim row printed."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.root = _never_bracket()
+        with mock.patch.object(report_mod, "HUMAN", qualification_sentinel()):
+            cls.patched = _qualification_channels(cls.root)
+        cls.real = _qualification_channels(cls.root)
+
+    def test_every_qualification_word_comes_from_the_table(self):
+        problems = []
+        seen = 0
+        for channel, lines in self.patched.items():
+            if channel.startswith("help."):
+                continue
+            for line in lines:
+                if "zz" in line:
+                    seen += 1
+                for word in _QUALIFICATION_WORDS.findall(line):
+                    problems.append(f"{channel}: {word!r} not from HUMAN: {line[:100]}")
+        self.assertEqual(problems, [])
+        self.assertGreaterEqual(seen, 10, "a floor: the sentinel reached the channels")
+
+    def test_no_channel_says_a_never_say(self):
+        problems = []
+        scanned = 0
+        for channel, lines in self.real.items():
+            for line in lines:
+                scanned += 1
+                hit = QUALIFICATION_NEVER.search(line)
+                if hit:
+                    problems.append(f"{channel}: {hit.group(0)!r}: {line[:100]}")
+        self.assertEqual(problems, [])
+        self.assertGreater(scanned, 60, "a floor on lines scanned")
+
+    def test_the_planted_renderers_are_caught(self):
+        real = report_mod.qualification_line
+
+        def own_literal(gate_id, facts):
+            return real(gate_id, facts).rsplit(" → ", 1)[0] + " → qualified"
+
+        with mock.patch.object(report_mod, "HUMAN", qualification_sentinel()), \
+                mock.patch.object(report_mod, "qualification_line", own_literal):
+            lines = _captured(["gate", "selftest", "-C", self.root]).splitlines()
+        self.assertTrue(any(_QUALIFICATION_WORDS.search(ln) for ln in lines),
+                        "a renderer with its own `qualified` literal is seen under the sentinel")
+        self.assertIsNotNone(QUALIFICATION_NEVER.search(
+            "[ERR ] bracket.never : not admitted: known-good fail"),
+            "a `not admitted:` in a rendered row is a Never-say")

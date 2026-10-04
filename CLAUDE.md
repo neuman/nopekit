@@ -104,14 +104,24 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    sweep's memory, and `gap`, which reads like a query, filed every gap it found as
    a record nobody wrote.)
 
-9. **A verdict counts only from a gate admitted at its current version.** Its negative
-   control must have been run, and must have failed, at the gate's current code,
-   fixture inputs and spine; `check` runs it whenever that is not on record. A PASS
-   from an undemonstrated gate reads stale, and a gate whose control passed its own
-   known-bad input is not admitted at all. This is the reject half: it shows the gate
-   can refuse, not yet that it accepts a known-good design. (Observed: a gate that
-   returned `True` with a declared control produced PROVEN rows, because nothing ever
-   ran the control.)
+9. **A verdict counts only from an evaluator qualified at its current version.** Its
+   known-good control must pass and its known-bad control must fail — both run at its
+   current code, control inputs and spine, both retained and rerunnable (a pack's
+   `selftest/baseline.json` or the gate's `good` fixture, and its `fixture`; a
+   project's `selftest/known_good.py` and its fixture), and both reaching it through
+   the same channel. An evaluator not from a bundled pack must also fail every
+   conclusive mutation of its known-good control: one value it read, pushed until its
+   own value lands 15% past its own limit. `check` runs whatever of that is not on
+   record; until then a pass from an evaluator qualified at an earlier version reads
+   Stale, and one never qualified reads Gap. An evaluator that is not qualified reads
+   Gap — `unqualified: <evaluator> : <what does not hold>`, beside a passing one too —
+   and one with no known-good control is *known-bad shown*, not qualified (`known-good
+   not run`). Qualified means it can fail, and nothing more. (What slipped through: a
+   gate that returned `True` with a declared control produced Checked rows, because
+   nothing ran the control; then every project gate counted on its known-bad half
+   alone, so a gate that failed everything (S-04) was let through, and one keyed to its
+   own control — failing the one input that control changes, passing everything else —
+   read Checked.)
 
 One more came with checkpoint P2.2, when gates gained prerequisites — a dependent
 verdict is a new place to show a pass nothing earned. Enforced in
@@ -130,6 +140,22 @@ verdict is a new place to show a pass nothing earned. Enforced in
     (What slipped through: a validity guard protected nothing — a claim tagged only
     `deflection` read Checked on a beam whose guard reported Euler-Bernoulli omitting
     32% of the deflection.)
+
+One more came with checkpoint P2.3, numbered as PLAN §4.0.1 numbers it (11–14 land with
+their mechanisms). Enforced in `tests/test_mutation.py`, over every mutation entry point
+in `src/`:
+
+15. **A mutation pass writes nothing, changes nothing it was handed, and never says more
+    than it ran.** It runs in process on a copy of the known-good control: nothing is
+    written under the project or a pack directory, and the known-good design is as it
+    was afterwards. A mutation counts only when it is conclusive — its key was read and
+    the run passed or failed — and one that skipped or errored is printed as
+    inconclusive, never as a fail; with none conclusive the line says `mutation 0
+    conclusive`. (What slipped through the harness before the code existed: a plan
+    that set every key to None made every mutation inconclusive, and the line read
+    `mutation 0 conclusive` over every evaluator; a runner that drew up its plan after
+    seeing which mutations passed printed `mutation 1/1 fail` over an evaluator one of
+    two had passed.)
 
 ## House rules
 

@@ -12,7 +12,7 @@
 | **C3** Fastener bearing stress within the design allowable | bearing stress <= 15.0 MPa | 0.195 MPa | `bracket.bearing` | *none written* |
 | **C4** Prints on a 220 mm bed without supports | bed fit <= 204.0 mm | 73.5 mm; 7 mm | `bracket.bed_fit`, `bracket.min_wall` | *none written* |
 
-Every row above is checked: each of its evaluators ran and passed against the inputs, code and control it has now. A skipped, errored, unqualified, invalidated or unrun evaluator puts its claim in another section with the reason, never here — and checked does not mean true.
+Every row above is checked: each of its evaluators ran and passed against the inputs, code and controls it has now. A skipped, errored, unqualified, invalidated or unrun evaluator puts its claim in another section with the reason, never here — and checked does not mean true.
 
 ## Pending build
 
@@ -71,11 +71,12 @@ atompipe check --only bracket.bed_fit          # manufacturability, fdm, bed-fit
 atompipe check --only bracket.min_wall         # manufacturability, fdm, wall-thickness, min-wall — gates/structural.py
 ```
 
-And show the gates above can actually fail, which is the only reason their passes mean anything:
+And show the gates above can tell a good design from a bad one, which is the only reason their passes mean anything:
 
 ```sh
-atompipe gate selftest           # runs every negative control; a gate that passes its
-                                 # own known-bad fixture is a logger, not a gate
+atompipe gate selftest           # run each evaluator's known-good and known-bad controls, and
+                                 # the mutation pass for one not from a bundled pack; exits 1
+                                 # on any unqualified evaluator
 ```
 
 ---

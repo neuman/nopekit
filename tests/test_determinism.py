@@ -343,15 +343,28 @@ class TwoOutcomes(_env.EnvCase):
         gates_py = os.path.join(project, "gates", "structural.py")
         with open(gates_py, encoding="utf-8", newline="") as fh:
             text = fh.read()
+        # The flip refuses the live design only — its usable bed 205 mm (a 221 mm
+        # bed, below), never the known-good design's 204 (220): from P2.3 the
+        # known-good control runs the gate too, and a flip of every answer
+        # failed it as well, so `--force` read the gate unqualified, never
+        # called it on the live design, and wrote no second outcome to warn
+        # about (R-6: the flip narrowed, on a value the gate already reads, so
+        # its read set — and the rho the two outcomes share — is unchanged).
         for old, new in (("from __future__ import annotations\n",
                           "from __future__ import annotations\n\nimport os\n\n"
                           f"_FLIPPED = bool(os.environ.get({_FLIP!r}))\n"),
                          ("        passed=big <= usable,\n",
-                          "        passed=big <= usable and not _FLIPPED,\n")):
+                          "        passed=big <= usable and not (_FLIPPED and usable > 204.5),\n")):
             self.assertEqual(text.count(old), 1, f"{gates_py}: the plant needs one {old!r}")
             text = text.replace(old, new)
         with open(gates_py, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
+        model_py = os.path.join(project, "model", "bracket.py")
+        with open(model_py, encoding="utf-8", newline="") as fh:
+            model = fh.read()
+        self.assertEqual(model.count("bed_xy: float = 220.0"), 1, model_py)
+        with open(model_py, "w", encoding="utf-8", newline="") as fh:
+            fh.write(model.replace("bed_xy: float = 220.0", "bed_xy: float = 221.0"))
         # C7 (first mode) has no gate on the bracket: UNCLAIMED blocks, and the
         # exit code could not show the laundered C4 while it stands. C6 neither,
         # from P2.1: an assumption reads Gap until its owner records it (R-6).

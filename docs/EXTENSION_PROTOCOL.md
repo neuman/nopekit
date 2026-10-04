@@ -131,15 +131,19 @@ what it claims.
 Then actually run it: `atompipe gate selftest --only <id>`. A gate that passes its
 own known-bad fixture is reported as broken, loudly.
 
-`atompipe check` holds you to it as well. A gate's verdicts count only while its
-control has been seen to fail at the gate's current code, fixtures and spine, and
-`check` runs the control itself whenever that is not on record; a gate whose control
-passed is not admitted, and its function is never called (the "Admission" section of
-[`PACK_FORMAT.md`](PACK_FORMAT.md)). For a gate that lives in the project, write
-`selftest/known_good.py` first — a `context(ctx)` returning a design that passes
-every gate, every field stated — and build each fixture from it with one thing
-changed: the fixture is handed that design, never the live one, so it stays
-diagnostic even while the live design already fails. Commit what `check` records
+`atompipe check` holds you to it as well. A gate's verdicts count only while it is
+*qualified* at its current code, fixtures and spine: its known-good control passed,
+its known-bad control failed, both through the same channel, and — for a gate of your
+own — every conclusive mutation of its known-good control failed (each value it read,
+pushed until its own value lands 15% past its own limit). `check` runs whatever of
+that is not on record; an unqualified gate's function is never called and its claim
+reads Gap (the "Qualification" section of [`PACK_FORMAT.md`](PACK_FORMAT.md)). For a
+gate that lives in the project, write `selftest/known_good.py` first — a
+`context(ctx)` returning a design that passes every gate, every field stated (and,
+for a gate that reads files, its own copy of them) — and build each fixture from it
+with one thing changed: it is the known-good control, and the fixture is handed that
+design, never the live one, so it stays diagnostic even while the live design already
+fails. Without it every gate of the project reads `known-good not run`. Commit what `check` records
 under `.atompipe/verdicts/` with the gate; the next clone reads the verdict and its
 control from there instead of running them again.
 
@@ -168,8 +172,8 @@ atompipe pack validate <name>                            # the same checks CI ru
 atompipe gate selftest --pack <name> --junit <file>.xml  # every tier's control
 ```
 
-The JUnit file is the proof that each gate fails its negative control: it goes with
-the pack's PR. A pack whose gates have never demonstrated failure does not get
+The JUnit file is the proof that each gate is qualified — it passes its known-good
+control and fails its known-bad one: it goes with the pack's PR. A pack whose gates have never demonstrated failure does not get
 merged.
 
 ---

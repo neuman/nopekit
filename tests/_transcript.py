@@ -103,19 +103,23 @@ ROW = re.compile(r"^\[(?P<tag>.{4})\] (?P<gate>\S+)(?: : (?P<body>.*))?$")
 #: terminal); a changed tag (breaks every grep for `[FAIL]`).
 CACHED_ROW = re.compile(r"^(?P<row>\[(?P<tag>.{4})\] (?P<gate>\S+) : (?P<body>.*?))\s+cached$")
 
-#: `check`'s summary. `, F FAIL`, `, S skipped` and `, R errored` appear only
-#: when non-zero (the spec prints the bracket's case; today's summary omits a
-#: zero FAIL count, and nothing asks for that to change). Time and the model
-#: hash left this line in 1.2.
+#: `check`'s summary. `, F FAIL`, `, S skipped`, `, R errored` and `, U
+#: unqualified` appear only when non-zero (the spec prints the bracket's case;
+#: today's summary omits a zero FAIL count, and nothing asks for that to
+#: change). Time and the model hash left this line in 1.2; `unqualified`
+#: joined it in P2.1's review, and this shape in P2.3 (R-6: it is counted).
 CHECK_SUMMARY = re.compile(
     r"^(?P<gates>\d+) gates: (?P<executed>\d+) executed, (?P<cached>\d+) cached"
     r" — (?P<ok>\d+) ok(?:, (?P<failed>\d+) FAIL)?(?:, (?P<skipped>\d+) skipped)?"
-    r"(?:, (?P<errored>\d+) errored)? — tier (?P<tier>\d+)$")
+    r"(?:, (?P<errored>\d+) errored)?(?:, (?P<unqualified>\d+) unqualified)?"
+    r" — tier (?P<tier>\d+)$")
 
-#: `check`'s controls line, printed only when a control executed or was re-verified.
+#: `check`'s controls line, printed only when a control ran or was re-qualified
+#: by its values — in GLOSSARY §9's words from P2.3 (R-6, words only: `N
+#: executed, N cached, N re-verified` before).
 CONTROLS_SUMMARY = re.compile(
-    r"^controls: (?P<executed>\d+) executed, (?P<cached>\d+) cached, "
-    r"(?P<reverified>\d+) re-verified$")
+    r"^controls: (?P<run>\d+) run, (?P<preserved>\d+) preserved, "
+    r"(?P<requalified>\d+) re-qualified$")
 
 #: The head of `check`'s blocking list.
 BLOCKING_HEAD = re.compile(
@@ -162,26 +166,51 @@ NOTE_PENDING = re.compile(
 #: `status` when the model entry does not load.
 MODEL_BROKEN = re.compile(r"^model: (?P<entry>\S+) DOES NOT LOAD — (?P<error>.+)$")
 
-#: `gate show`'s last line, one pattern per state (spec §3.13), and the four together.
-LAST_SELFTEST_FIRED = re.compile(
-    r"^  last selftest: \[ok  \] fired at this version \(control (?P<control>[0-9a-f]{12})\)$")
-LAST_SELFTEST_BROKEN = re.compile(
-    r"^  last selftest: \[FAIL\] PASSED its own known-bad at this version "
-    r"\(control (?P<control>[0-9a-f]{12})\)$")
-LAST_SELFTEST_NONE = re.compile(r"^  last selftest: not demonstrated at this version$")
-LAST_SELFTEST_PENDING = re.compile(
-    r"^  last selftest: pending — control inputs moved; the next check re-verifies "
-    r"\(control (?P<control>[0-9a-f]{12})\)$")
-LAST_SELFTEST = re.compile("|".join(
-    f"(?:{p.pattern})" for p in (LAST_SELFTEST_FIRED, LAST_SELFTEST_BROKEN,
-                                  LAST_SELFTEST_NONE, LAST_SELFTEST_PENDING)
-).replace("(?P<control>", "(?:"))
 
-#: `gate selftest`'s summary, both modes. `\S+` for the time: `human_duration`
-#: renders one token below a minute.
-SELFTEST_SUMMARY = re.compile(
-    r"^(?P<controls>\d+) control\(s\) in (?P<time>\S+): (?P<fired>\d+) fired, "
-    r"(?P<broken>\d+) BROKEN, (?P<skipped>\d+) skipped \(tooling\)$")
+#: One evaluator's qualification line (P2.3, GLOSSARY §6 *reject*): each
+#: control's outcome in outcome words — `not run` for a known-good control that
+#: does not exist, `reads the candidate` for one handed the live design — then,
+#: for an evaluator walked by the mutation pass, its tally or why it made none,
+#: then a control-level fact, then the decision. Its own negative control lives
+#: in `test_shapes` (a line missing `→ …`, `0/0`, the walkthrough's `ok`,
+#: `rejected`, `flipped`, a fourth segment, an outcome tag before the id).
+QUALIFICATION_LINE = re.compile(
+    r"^(?P<id>[^\s\[]\S*) : known-good (?P<good>pass|fail|skipped|errored|not run|reads the candidate)"
+    r" · known-bad (?P<bad>pass|fail|skipped|errored)"
+    r"(?: · channels differ)?"
+    r"(?: · mutation (?:(?P<fails>\d+)/(?P<conclusive>[1-9]\d*) fail|0 conclusive)"
+    r"(?: \((?P<inconclusive>\d+) inconclusive\)| \(none made: [^()]+\))?"
+    r"| · mutation could not (?:run|finish)| · mutation errored)?"
+    r"(?: · two outcomes| · outcomes differ by tier| · outcome differs from its cached entry)?"
+    r" → (?P<verdict>qualified|unqualified)$")
+
+#: `gate show`'s `qualification:` row (it replaced `last selftest:`), one shape
+#: per state: the line without its id (with the control entry's rho to 12
+#: places where there is one), due to re-qualify, or not yet qualified.
+QUALIFICATION_SHOW = re.compile(
+    r"^  qualification: (?:(?P<line>known-good .+ → (?:qualified|unqualified))"
+    r"(?: \(control (?P<control>[0-9a-f]{12})\))?"
+    r"|due to re-qualify — .+ moved; the next check run re-qualifies it"
+    r"|not yet qualified at this version — .+)$")
+
+#: `gate show`'s detail rows under `qualification:`.
+QUALIFICATION_DETAIL = re.compile(
+    r"^    (?P<what>known-good|known-bad|mutation|not mutated) +(?P<body>\S.*)$")
+
+#: `gate selftest`'s summary, both modes, in qualification's words (P2.3; R-6,
+#: words only: `N control(s) in T: F fired, B BROKEN, S skipped (tooling)`
+#: before). `\S+` for the time: `human_duration` renders one token below a minute.
+QUALIFIED_SUMMARY = re.compile(
+    r"^(?P<evaluators>\d+) evaluators? in (?P<time>\S+): (?P<qualified>\d+) qualified, "
+    r"(?P<unqualified>\d+) unqualified, (?P<skipped>\d+) skipped$")
+
+#: Pack mode's row per pack.
+PACK_ROW = re.compile(
+    r"^(?P<pack>\S+) \((?P<origin>project|user|path|bundled)\) : (?P<qualified>\d+) qualified"
+    r"(?:, (?P<unqualified>\d+) unqualified)?(?:, (?P<skipped>\d+) skipped)?$")
+
+#: `check`'s controls line, in GLOSSARY §9's words (P2.3): ``CONTROLS_SUMMARY``.
+QUALIFIED_CONTROLS = CONTROLS_SUMMARY
 
 #: Pack mode's head of the failed-baseline rows.
 BASELINES_FAILED = re.compile(r"^(?P<count>\d+) baseline\(s\) failed:$")
@@ -208,10 +237,10 @@ SHAPES = {
     "BLOCKING_ROW": BLOCKING_ROW, "STALE_LINE": STALE_LINE, "STALE_MORE": STALE_MORE,
     "STALE_NONE": STALE_NONE, "LAST_CHECK": LAST_CHECK,
     "NOTE_INSTRUMENT": NOTE_INSTRUMENT, "NOTE_PENDING": NOTE_PENDING,
-    "MODEL_BROKEN": MODEL_BROKEN, "LAST_SELFTEST": LAST_SELFTEST,
-    "LAST_SELFTEST_FIRED": LAST_SELFTEST_FIRED, "LAST_SELFTEST_BROKEN": LAST_SELFTEST_BROKEN,
-    "LAST_SELFTEST_NONE": LAST_SELFTEST_NONE, "LAST_SELFTEST_PENDING": LAST_SELFTEST_PENDING,
-    "SELFTEST_SUMMARY": SELFTEST_SUMMARY, "BASELINES_FAILED": BASELINES_FAILED,
+    "MODEL_BROKEN": MODEL_BROKEN, "BASELINES_FAILED": BASELINES_FAILED,
+    "QUALIFICATION_LINE": QUALIFICATION_LINE, "QUALIFICATION_SHOW": QUALIFICATION_SHOW,
+    "QUALIFICATION_DETAIL": QUALIFICATION_DETAIL, "QUALIFIED_SUMMARY": QUALIFIED_SUMMARY,
+    "PACK_ROW": PACK_ROW, "QUALIFIED_CONTROLS": QUALIFIED_CONTROLS,
     "WHY_PARAM": WHY_PARAM, "WHY_REJECTED_HEAD": WHY_REJECTED_HEAD,
     "WHY_REJECTED_ROW": WHY_REJECTED_ROW, "ENTRY_PATH": ENTRY_PATH,
     "CONTROL_ENTRY_PATH": CONTROL_ENTRY_PATH, "PORCELAIN_LINE": PORCELAIN_LINE,
@@ -418,13 +447,16 @@ STEPS: Tuple[Step, ...] = (
                  r"^  4\.0 mm — 3\.75 mm deflection, 7\.5x the limit   "
                  r"\(model/bracket\.py PARAMS\)$"),
     )),
+    # P2.3 (R-6, D18's words; the ids kept, D23): `qualification:` replaced
+    # `last selftest:` and its detail rows follow it, and pack mode's summary
+    # counts evaluators qualified — every one of them, or it exits 1.
     Step("gate-show-last-selftest", (1, 2), Atompipe(("gate", "show", "bracket.deflection")), (
-        last_line(r"^  last selftest: \[ok  \] fired at this version "
-                  r"\(control [0-9a-f]{12}\)$"),
+        line(r"^  qualification: known-good pass · known-bad fail · mutation 1/1 fail "
+             r"→ qualified \(control [0-9a-f]{12}\)$"),
     )),
     Step("pack-mode-selftest", (1, 1), Atompipe(("gate", "selftest"), where="empty"), (
         exit_code(0),
-        last_line(r"^\d+ control\(s\) in \S+: \d+ fired, 0 BROKEN, \d+ skipped \(tooling\)$"),
+        last_line(r"^\d+ evaluators in \S+: \d+ qualified, 0 unqualified, \d+ skipped$"),
     )),
     Step("check-junit", (1, 1), Atompipe(("check", "--junit")), (
         exit_code(1),

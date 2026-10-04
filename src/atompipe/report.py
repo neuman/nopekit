@@ -154,13 +154,18 @@ def _status_row(status: ClaimStatus, word: str, term: str, plural: str, tag: str
 # no tone reader sees); `chkd ` and `check` for Checked (an abbreviation nobody
 # says, and the verb `atompipe check`).
 #
-# Hints never say "qualified" or "built from them" for Checked while a
-# known-bad-shown evaluator still counts (P2.3) and no article binds a physical
-# pass: saying so would be the overclaim in words the P2.1 design rejected
-# (critique: the hint reaches the page's chip title).
+# From P2.3 Checked's hint says *qualified*: a pass counts only from an
+# evaluator qualified at its version — known-good pass, known-bad fail, and for
+# an evaluator not from a bundled pack every conclusive mutation a fail — so
+# the word is now what Table 1 says Checked rests on. Until P2.3 it never said
+# so: a known-bad-shown evaluator still counted, and saying it would have been
+# the overclaim the P2.1 design rejected. It still never says "built from
+# them": no article binds a physical pass yet (critique: the hint reaches the
+# page's chip title).
 _CHECKED = _status_row(
     ClaimStatus.PASS, "checked", "Checked", "checked", "ok   ",
-    "every evaluator passed on the current inputs — checked does not mean true")
+    "every evaluator is qualified and passed on the current inputs — checked does not "
+    "mean true")
 _FAILING = _status_row(
     ClaimStatus.FAIL, "failing", "Failing", "failing", "FAIL ",
     "an evaluator failed the current candidate, or a physical result failed")
@@ -284,17 +289,115 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "failing": "## Failing, stale, skipped or open",
         "reproduce": "## Reproduce",
     }),
-    # An unqualified evaluator's refusal, as admission words it, in GLOSSARY §2's
-    # words until P2.3 rewords the source: (admission's phrase, the glossary's).
-    # Ordered: the first match per phrase wins. What slipped through the design
-    # (review): the reason line carried "not admitted" and "known-bad fixture",
-    # two §2 Never-says, on a claim's status row.
-    "refusal": (
-        ("PASSED its own known-bad fixture", "passed its own known-bad control"),
-        ("its own known-bad input", "its own known-bad control"),
-        ("control error:", "its known-bad control errored:"),
-        ("control self-skip:", "its known-bad control skipped itself:"),
-    ),
+    # Qualification (GLOSSARY §2, P2.3-D13, D14): every word of the line, the
+    # reasons a claim's Gap row gives, `gate show`'s rows, `gate selftest`'s
+    # summary and pack rows, `check`'s controls line and `doctor`'s rows. The
+    # spine records facts and mints tokens (`verdicts.QualificationFacts`,
+    # `Verdict.unqualified`); only this table words them. What it replaced:
+    # four vocabularies for one fact — `last selftest: fired`, `6 fired, 0
+    # BROKEN`, `re-verified`, and the refusal text the spine minted (`not
+    # admitted: PASSED its own known-bad fixture`), reworded here by string
+    # surgery until P2.3 rewrote the source.
+    "qualification": MappingProxyType({
+        "known_good": "known-good",
+        "known_bad": "known-bad",
+        # A control's outcome on the line: GLOSSARY §1's outcome words, `not
+        # run` for a known-good control that does not exist (§2's own reason
+        # for known-bad shown), `reads the candidate` for one handed the live
+        # design (GLOSSARY §1: the current configuration is a *candidate*).
+        "outcome": MappingProxyType({"pass": "pass", "fail": "fail", "errored": "errored",
+                                     "skipped": "skipped", "not-run": "not run",
+                                     "live": "reads the candidate"}),
+        "sep": " · ",
+        "id_sep": " : ",
+        "mutation": "mutation {fails}/{conclusive} fail",
+        "none": "mutation 0 conclusive",
+        "inconclusive": " ({k} inconclusive)",
+        "none_made": " (none made: {why})",
+        "why": MappingProxyType({"no-limit": "no value against a limit",
+                                 "at-limit": "its value is at its limit",
+                                 "tier": "tier {tier}"}),
+        "could_not_run": "mutation could not run",
+        "could_not_finish": "mutation could not finish",
+        "walk_errored": "mutation errored",
+        "channels": "channels differ",
+        "blocker": MappingProxyType({"two-outcomes": "two outcomes",
+                                     "tier": "outcomes differ by tier",
+                                     "differs": "outcome differs from its cached entry"}),
+        "qualified": "→ qualified",
+        "unqualified": "→ unqualified",
+        # The reason after `unqualified: <evaluator> : ` — the FIRST fact that
+        # does not hold, in the rule's order (P2.3-D15), by the token's kind.
+        "reason": MappingProxyType({
+            "known-bad:pass": "known-bad pass",
+            "known-bad:errored": "known-bad errored: {text}",
+            "known-bad:skipped": "known-bad skipped itself: {text}",
+            "known-good:fail": "known-good fail",
+            "known-good:errored": "known-good errored: {text}",
+            "known-good:skipped": "known-good skipped itself: {text}",
+            "known-good:not-run": "known-good not run",
+            "known-good:live": "known-good control reads the candidate",
+            "channels:differ": "known-good and known-bad reach it through different channels "
+                               "(ctx.extra: known-bad {{{bad}}}, known-good {{{good}}})",
+            "channels:check": "its controls reach it through ctx.extra, which a check run never "
+                              "hands it (known-bad {{{bad}}}, known-good {{{good}}})",
+            "mutation:pass": "mutation {text} fail",
+            "mutation:could-not-run": "mutation pass could not run: {text}",
+            "mutation:could-not-finish": "mutation pass could not finish: the values that move "
+                                         "its value need more than {text} runs",
+            "mutation:errored": "mutation pass errored and did not repeat it: {text}",
+            "control:two-outcomes": "two control outcomes recorded for identical inputs "
+                                    "({text})",
+            "control:tier": "qualification differs by ctx.tier ({text}): unqualified on one "
+                            "tier's path",
+            "control:differs": "control outcome differs from its cached entry ({text})",
+            "qualification:not-yet": "not yet qualified at this version — {how}",
+        }),
+        "how": MappingProxyType({"plain": "the next check run qualifies it",
+                                 "tier": "atompipe check --tier {tier} qualifies it"}),
+        # `gate show`'s `qualification:` row, for the states with no line.
+        "pending": "due to re-qualify — {moved} moved; the next check run re-qualifies it",
+        "undemonstrated": "not yet qualified at this version — the next check run qualifies it",
+        "last": "(last: {line})",
+        # `gate show`'s detail rows under it.
+        "detail": MappingProxyType({
+            "known_good": "known-good", "known_bad": "known-bad", "mutation": "mutation",
+            "not_mutated": "not mutated",
+            "none": "none: no known-good control exists for it (a pack's "
+                    "selftest/baseline.json, a project's selftest/known_good.py, or a "
+                    "good= fixture)",
+            "baseline": "selftest/baseline.json", "known_good_py": "selftest/known_good.py",
+            "value": "{measured} (limit {limit})",
+            "result": "{key} {before} -> {after}: {outcome}",
+            "inconclusive": "{key} -> {after}: {outcome} ({why})",
+            "no-limit": "none: it reports no value against a limit",
+            "at-limit": "none: its value is exactly at its limit",
+            "tier": "none: the walk runs at tier 0, and this evaluator is tier {tier}",
+            "budget": "it could not finish: the values that move its value need more runs",
+            "never-lands": "from x0.001 to x1000 its value never landed 15% past its limit",
+            "word": "a word: not walked", "zero": "zero: not walked", "none_value": "None: "
+            "not walked", "not-finite": "not a finite number: not walked",
+            "other": "not a number, a flag or a list of numbers: not walked",
+            "budget_key": "the walk's budget ran out before it",
+        }),
+        "selftest_summary": "{n} evaluators in {t}: {q} qualified, {u} unqualified, "
+                            "{s} skipped",
+        "pack_row": "{pack} ({origin}) : {q} qualified",
+        "pack_unqualified": ", {u} unqualified",
+        "pack_skipped": ", {s} skipped",
+        "controls": "controls: {run} run, {preserved} preserved, {requalified} re-qualified",
+        "doctor": MappingProxyType({
+            "ok": "every evaluator qualified at its version",
+            "unqualified": "{n} evaluator(s) unqualified: {list}",
+            "known_good_ok": "every project evaluator has a known-good control",
+            "known_good": "no selftest/known_good.py: every project evaluator reads "
+                          "\"known-good not run\", so its claims read Gap; write "
+                          "context(ctx) returning the design every control is one change "
+                          "from",
+        }),
+        "help": "run each evaluator's known-good and known-bad controls, and the mutation "
+                "pass for one not from a bundled pack; exits 1 on any unqualified evaluator",
+    }),
 })
 
 
@@ -467,12 +570,159 @@ def count_line(composed: Mapping[str, Any]) -> str:
                        *(bit["label"] for bit in count_bits(composed))])
 
 
-def _refusal_words(text: str) -> str:
-    """An unqualified evaluator's refusal in GLOSSARY §2's words (`HUMAN["refusal"]`)."""
-    for old, new in HUMAN["refusal"]:
-        if old in text:
-            text = text.replace(old, new)
-    return text
+# --------------------------------------------------------------------------- #
+# qualification, in words (P2.3-D13, D14): facts in, the table's words out
+# --------------------------------------------------------------------------- #
+def _bad_word(facts: Any) -> str:
+    words = HUMAN["qualification"]["outcome"]
+    if facts.known_bad == "fail" and facts.expect == "error":
+        return words["errored"]          # rejected as its control declares: by raising
+    return words.get(facts.known_bad, facts.known_bad)
+
+
+def mutation_words(fails: int, conclusive: int, inconclusive: int, boundary: str = "") -> str:
+    """The mutation segment of the line: `mutation n/m fail`, or `mutation 0
+    conclusive` with none conclusive (PLAN-v0.14 §1.5) — never `0/0` — then `(k
+    inconclusive)` when the walk saw any, or `(none made: <why>)` when nothing
+    was walked; `mutation could not finish` when the budget ran out."""
+    q = HUMAN["qualification"]
+    if boundary == "budget":
+        return q["could_not_finish"]
+    head = (q["mutation"].format(fails=fails, conclusive=conclusive) if conclusive
+            else q["none"])
+    if inconclusive:
+        return head + q["inconclusive"].format(k=inconclusive)
+    kind, _sep, tier = boundary.partition(":")
+    if kind in ("no-limit", "at-limit", "tier"):
+        return head + q["none_made"].format(why=q["why"][kind].format(tier=tier))
+    return head
+
+
+def qualification_line(gate_id: str, facts: Any) -> str:
+    """One evaluator's qualification, as one line (P2.3-D14): `<id> : known-good
+    <o> · known-bad <o>[ · <channel, walk or mutation segment>][ · <control
+    fact>] → qualified | unqualified`. Each control's outcome in outcome words
+    (GLOSSARY §6, *reject*: the walkthrough's `ok` and `rejected` are an
+    evaluator's Never-says); the mutation segment only where the walk applies
+    and both controls held; the ending is the one judge's
+    (``verdicts._qualification``), never this function's (invariant 12, V5).
+    Rendered from the facts, never stored. *Rejected:* `→ unqualified: <reason>`
+    (the claim row and `gate show` carry the reason); an outcome tag before the
+    id (a qualification is not an outcome, GLOSSARY §1); ` · k inconclusive`
+    (reads as a fourth control)."""
+    q = HUMAN["qualification"]
+    words = q["outcome"]
+    parts = [f"{gate_id}{q['id_sep']}{q['known_good']} "
+             f"{words.get(facts.known_good, facts.known_good)}",
+             f"{q['known_bad']} {_bad_word(facts)}"]
+    if facts.channels or facts.check_channel:
+        parts.append(q["channels"])
+    elif facts.walk:
+        kind = verdict_logic.parse_token(facts.walk)[0]
+        parts.append(q["could_not_run"] if kind == "could-not-run" else q["walk_errored"])
+    elif facts.mutation is not None:
+        parts.append(mutation_words(*facts.mutation, boundary=facts.boundary))
+    if facts.blocker:
+        kind = verdict_logic.parse_token(facts.blocker)[0]
+        parts.append(q["blocker"].get(kind, kind))
+    token = verdict_logic._qualification(facts)
+    return q["sep"].join(parts) + " " + (q["unqualified"] if token else q["qualified"])
+
+
+def qualification_reason(token: Any) -> str:
+    """A token's words (``verdicts.parse_token`` reads it; nothing here splits
+    the string itself): what follows `unqualified: <evaluator> : ` on a claim's
+    row — the first fact that does not hold (P2.3-D15). ``""`` for no token."""
+    kind, text = verdict_logic.parse_token(token)
+    if not kind:
+        return ""
+    q = HUMAN["qualification"]
+    template = q["reason"].get(kind)
+    if template is None:
+        return f"{kind}: {text}" if text else kind
+    if kind.startswith("channels:"):
+        bad, _sep, good = text.partition("/")
+        return template.format(bad=", ".join(k for k in bad.split(",") if k),
+                               good=", ".join(k for k in good.split(",") if k))
+    if kind == "qualification:not-yet":
+        how = (q["how"]["tier"].format(tier=text) if text and text != "0"
+               else q["how"]["plain"])
+        return template.format(how=how)
+    return template.format(text=text)
+
+
+def verdict_line(verdict: Verdict, qualification: Any = None) -> str:
+    """How one verdict streams in `check`: its own row (`Verdict.render`), unless
+    the evaluator is unqualified — then its qualification line, or with no facts
+    the reason in the table's words. Never `[ERR ]` and never *errored* for an
+    unqualified evaluator: a crash's tag on something that crashed nothing
+    (P2.3-D17; the slip P2.1's review closed in the count and left in the row)."""
+    token = getattr(verdict, "unqualified", "") or ""
+    if not token:
+        return verdict.render()
+    if qualification is not None:
+        return qualification_line(verdict.gate, qualification)
+    q = HUMAN["qualification"]
+    return (f"{verdict.gate}{q['id_sep']}{HUMAN['lead'][ClaimCause.UNQUALIFIED]}: "
+            f"{qualification_reason(token)}")
+
+
+def _value_words(measured: Any, limit: Any, units: str) -> str:
+    unit = f" {units}" if units else ""
+    if measured is None:
+        return ""
+    if limit is None:
+        return f"{_num(measured)}{unit}"
+    return HUMAN["qualification"]["detail"]["value"].format(
+        measured=f"{_num(measured)}{unit}", limit=f"{_num(limit)}{unit}")
+
+
+def qualification_detail(entry: Any, spec: Any, *, facts: Any = None) -> list[str]:
+    """`gate show`'s rows under `qualification:`, read off the control entry —
+    which known-good and known-bad controls, with their values; each mutation
+    with its value before and after; every read value not mutated, and why."""
+    d = HUMAN["qualification"]["detail"]
+    rows: list[str] = []
+
+    def row(head: str, body: str) -> None:
+        rows.append(f"    {head:<12} {body}")
+
+    nc = getattr(spec, "negative_control", None)
+    good_ref = (getattr(nc, "good", "") or "").strip() if nc is not None else ""
+    good = getattr(entry, "good", None) if entry is not None else None
+    if entry is not None or facts is not None:
+        if isinstance(good, Mapping) and good.get("outcome") != "not-run":
+            source = good_ref or (d["baseline"] if getattr(spec, "pack", "") else d["known_good_py"])
+            value = _value_words(good.get("measured"), good.get("limit"), good.get("units") or "")
+            row(d["known_good"], source + (f" — {value}" if value else ""))
+        elif (isinstance(good, Mapping) and good.get("outcome") == "not-run") or \
+                (facts is not None and facts.known_good == "not-run"):
+            row(d["known_good"], d["none"])
+    if entry is not None:
+        value = _value_words(entry.measured, entry.limit, entry.units or "")
+        fixture = getattr(nc, "fixture", "") if nc is not None else ""
+        row(d["known_bad"], fixture + (f" — {value}" if value else ""))
+        walk = entry.mutation if isinstance(entry.mutation, Mapping) else None
+        if walk is not None:
+            kind, _sep, tier = (walk.get("boundary") or "").partition(":")
+            if kind in ("no-limit", "at-limit", "tier", "budget"):
+                row(d["mutation"], d[kind].format(tier=tier))
+            for r in walk.get("results") or ():
+                key = ".".join(str(p) for p in r["key"])
+                body = d["result"].format(key=key, before=_num(r["before"]),
+                                          after=_num(r["after"]), outcome=r["outcome"])
+                value = _value_words(r.get("measured"), r.get("limit"), entry.units or "")
+                row(d["mutation"], body + (f" — {value}" if value else ""))
+            for r in walk.get("inconclusive") or ():
+                key = ".".join(str(p) for p in r["key"])
+                row(d["mutation"], d["inconclusive"].format(key=key, after=_num(r["after"]),
+                                                            outcome=r["outcome"],
+                                                            why=r.get("why") or ""))
+            for r in walk.get("not_mutated") or ():
+                key = ".".join(str(p) for p in r["key"])
+                why = {"none": "none_value", "budget": "budget_key"}.get(r["why"], r["why"])
+                row(d["not_mutated"], f"{key} — {d.get(why, r['why'])}")
+    return rows
 
 
 def _verdict_body(verdict: Verdict) -> str:
@@ -542,7 +792,8 @@ def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
     if cause in (ClaimCause.ERRORED, ClaimCause.SKIPPED, ClaimCause.UNQUALIFIED) \
             and verdict is not None:
         if cause is ClaimCause.UNQUALIFIED:
-            body = _refusal_words(str(verdict.unqualified or _verdict_body(verdict)))
+            body = (qualification_reason(verdict.unqualified) if verdict.unqualified
+                    else _verdict_body(verdict))
         else:
             body = _verdict_body(verdict)
         return f"{lead}: {verdict.gate} : {cut_(body, 56)}" if body \
@@ -631,7 +882,10 @@ def outcome_words() -> dict[str, str]:
     one table)."""
     said = HUMAN["outcome"]
     return {"pass": said["pass"], "fail": said["fail"], "skipped": said["skipped"],
-            "errored": said["error"]}
+            "errored": said["error"],
+            # An unqualified evaluator's verdict row (P2.3-D17): never a crash's
+            # word; Gap's tone on the page.
+            "unqualified": HUMAN["lead"][ClaimCause.UNQUALIFIED]}
 
 
 def words_table() -> dict[str, dict[str, str]]:
@@ -889,7 +1143,7 @@ def _unproven_for(claim_id: str, cover: dict[str, list[str]],
             out.append((gid, lead[ClaimCause.UNRUN]))
         elif getattr(verdict, "unqualified", ""):
             out.append((gid, f"{lead[ClaimCause.UNQUALIFIED]}: "
-                             f"{_refusal_words(verdict.unqualified)}"))
+                             f"{qualification_reason(verdict.unqualified)}"))
         elif not verdict.ok:
             body = _verdict_body(verdict)
             head = {"error": lead[ClaimCause.ERRORED], "skipped": lead[ClaimCause.SKIPPED]
@@ -1040,7 +1294,11 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
     # NB: "never evaluated" keys off whether any VERDICT exists, not off run
     # metadata. The sweep record this used to consult was bookkeeping a caller
     # could legitimately not have written; verdicts are the evidence.
-    if not ledger.verdicts:
+    # A gate with nothing recorded reads "not yet qualified" from P2.3 — a
+    # verdict the resolver words, of no run (`verdicts.never_run`): it is not an
+    # evaluation, and a project whose only verdicts are those has never been
+    # evaluated. What slipped through the first cut: the branch went dead.
+    if not [v for v in ledger.verdicts if not verdict_logic.never_run(v)]:
         verdict = (f"{rev} has never been evaluated" if found["ready"]
                    else f"{rev} is NOT ready and has never been evaluated")
         parts.append(bold(f"{verdict}: no verdict of any kind is"
@@ -1146,9 +1404,12 @@ def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
         out.append("|---|---|---|---|---|")
         out.extend(rows)
         out.append("")
+        lead = HUMAN["lead"]
         out.append(f"Every row above is {checked}: each of its evaluators ran and passed "
-                   f"against the inputs, code and control it has now. A skipped, errored, "
-                   f"unqualified, invalidated or unrun evaluator puts its claim in another "
+                   f"against the inputs, code and controls it has now. A "
+                   f"{lead[ClaimCause.SKIPPED]}, {lead[ClaimCause.ERRORED]}, "
+                   f"{lead[ClaimCause.UNQUALIFIED]}, {lead[ClaimCause.INVALIDATED]} or "
+                   f"{lead[ClaimCause.UNRUN]} evaluator puts its claim in another "
                    f"section with the reason, never here — and {checked} does not mean "
                    f"true.")
     elif not ledger.claims:
@@ -1157,7 +1418,7 @@ def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
         out.append(f"**Nothing.** Every verdict is marked invalidated, so no claim reads "
                    f"{words(ClaimStatus.PASS).term} now. Passing yesterday is not "
                    f"{checked} today. Re-run `atompipe check`.")
-    elif not ledger.verdicts:
+    elif not [v for v in ledger.verdicts if not verdict_logic.never_run(v)]:
         out.append("**Nothing.** No evaluator has ever run in this project.")
     else:
         out.append(f"**Nothing.** No claim reads {words(ClaimStatus.PASS).term} now. "
@@ -1564,7 +1825,9 @@ def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
             verdicts = sorted(_claim_verdicts(ledger, claim), key=_bullet_rank)
             for v in verdicts:
                 cited.add(v.gate)
-                out.append(f"- `{v.render()}`")
+                # An unqualified evaluator in its qualification's words, never
+                # a crash's tag (P2.3-D17, invariant 2 read the other way).
+                out.append(f"- `{verdict_line(v)}`")
                 if v.evidence:
                     out.append("  - evidence: "
                                + ", ".join(_code(p) for p in v.evidence[:3]))
@@ -1600,9 +1863,9 @@ def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
         out.append("### Gates with no verdict that counts")
         out.append("")
         for v in sorted(loose, key=_bullet_rank):
-            why = ("unqualified" if getattr(v, "unqualified", "")
+            why = (HUMAN["lead"][ClaimCause.UNQUALIFIED] if getattr(v, "unqualified", "")
                    else HUMAN["outcome"].get(v.outcome, v.outcome))
-            out.append(f"- `{v.render()}`  *({why}; claims: "
+            out.append(f"- `{verdict_line(v)}`  *({why}; claims: "
                        f"{', '.join(v.claims) or 'none linked'})*")
         for spec in unrun_specs:
             covers = ", ".join(spec.claims) if spec.claims else "nothing recorded"
@@ -1696,13 +1959,24 @@ def _section_reproduce(ledger: Ledger, registry: Any, *, root: str = "") -> list
         out.append("```")
         out.append("")
 
-    out.append("And show the gates above can actually fail, which is the only "
-               "reason their passes mean anything:")
+    # The comment is `gate selftest`'s own help, from the one table (P2.3-D16):
+    # the lines it replaced said "negative control" and named the known-bad
+    # half alone — a GLOSSARY §2 Never-say, and half of what qualifies a gate.
+    out.append("And show the gates above can tell a good design from a bad one, which "
+               "is the only reason their passes mean anything:")
     out.append("")
     out.append("```sh")
-    out.append("atompipe gate selftest"
-               "           # runs every negative control; a gate that passes its")
-    out.append("                                 # own known-bad fixture is a logger, not a gate")
+    words = HUMAN["qualification"]["help"].split()
+    lines, line = [], ""
+    for word in words:
+        if line and len(line) + 1 + len(word) > 60:
+            lines.append(line)
+            line = word
+        else:
+            line = f"{line} {word}" if line else word
+    lines.append(line)
+    out.append("atompipe gate selftest".ljust(33) + "# " + lines[0])
+    out.extend(" " * 33 + "# " + rest for rest in lines[1:])
     out.append("```")
     out.append("")
     return out
@@ -2076,7 +2350,7 @@ def _junit_outcome(case: Any, verdict: Verdict) -> None:
     A refused evaluator's error is `type="not-admitted"`, keyed on the spine's
     mark (`Verdict.unqualified`) and never on its text: "the instrument is not
     trusted" and "the instrument crashed" send a reader to different places,
-    and a gate whose own crash reads "not admitted: …" is still a crash.
+    and a gate whose own crash reads "unqualified: …" is still a crash.
     """
     outcome = verdict.outcome
     if outcome == "pass":

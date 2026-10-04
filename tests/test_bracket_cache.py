@@ -213,6 +213,55 @@ def check_problems(data: dict, gates: tuple[str, ...] = BRACKET_GATES) -> list[s
     return problems
 
 
+#: The bracket's six as P2.3 qualifies them (V9): each control entry paired,
+#: with its mutation pass's tally — conclusive fails / conclusive — and the
+#: aimed values, measured for the P2.3 design before the walk existed
+#: (scratch probe `aimwalk16`) and again on the walk as it landed: deflection
+#: lands at 0.575 against 0.5, utilisation 1.15 against 1.0, bearing stress 17.3
+#: against 15.0 and the design stress at 0.147, slenderness 4.25 against 5.0,
+#: the bounding box at 235 against 204 and the usable bed at 63.9, the thickness
+#: at 1.02 against a 1.2 wall and the minimum wall at 9.42.
+#: Each lands exactly 15% past its limit where the outward rounding allows:
+#: 0.575 = 0.5 x 1.15, 1.15 = 1.0 x 1.15 — values one float step short of the
+#: margin in binary (2.3 - 2.0 is 0.29999999999999982), which land because the
+#: walk reads "past" within ``gates._LAND_TOLERANCE``. Without it they read
+#: 0.576 and 1.16: a rounding step past what the margin asks.
+BRACKET_MUTATIONS = {
+    "bracket.deflection": {("deflection",): 0.575},
+    "bracket.bending_stress": {("utilisation",): 1.15},
+    "bracket.bearing": {("bearing_stress",): 17.3, ("design_stress",): 0.147},
+    "bracket.model_validity": {("slenderness",): 4.25},
+    "bracket.bed_fit": {("bbox_max",): 235.0, ("usable_bed",): 63.9},
+    "bracket.min_wall": {("config", "thickness"): 1.02, ("min_wall",): 9.42},
+}
+
+
+def qualification_problems(entries: dict[str, dict]) -> list[str]:
+    """Each committed control entry carries the whole qualification: paired, its
+    known-good half passed, every conclusive mutation a fail at the aimed value,
+    and `config.load_n` (read only for the detail line) never mutated."""
+    problems: list[str] = []
+    for rel, data in sorted(entries.items()):
+        if data.get("kind") != "control":
+            continue
+        gate = data.get("gate")
+        if data.get("admitted") != "paired":
+            problems.append(f"{rel}: admitted {data.get('admitted')!r}, not paired")
+        if (data.get("good") or {}).get("outcome") != "pass":
+            problems.append(f"{rel}: its known-good half did not pass")
+        walk = data.get("mutation") or {}
+        got = {tuple(r["key"]): (r["after"], r["outcome"]) for r in walk.get("results") or ()}
+        want = {key: (after, "fail") for key, after in BRACKET_MUTATIONS.get(gate, {}).items()}
+        if got != want:
+            problems.append(f"{rel}: mutations {got}, expected {want}")
+        if walk.get("inconclusive"):
+            problems.append(f"{rel}: inconclusive {walk['inconclusive']}")
+        for row in walk.get("not_mutated") or ():
+            if tuple(row["key"]) == ("config", "load_n") and row.get("why") != "never-lands":
+                problems.append(f"{rel}: config.load_n not mutated for {row.get('why')!r}")
+    return problems
+
+
 def _json(proc) -> dict:
     try:
         return json.loads(proc.stdout)
@@ -262,6 +311,30 @@ class BracketCacheIsCurrent(_env.EnvCase):
         if written:
             problems.append(f"check wrote new entries: {', '.join(written)}")
         self.fail_with(problems)
+
+
+class BracketIsQualified(_env.EnvCase):
+    """(V9, G4/G5) The six committed control entries are paired with the walk's
+    aimed mutations, and `gate selftest` on a fresh copy files nothing new."""
+
+    def test_every_committed_control_is_paired_with_its_mutations(self):
+        problems = qualification_problems(committed_entries())
+        if problems:
+            self.fail("\n".join(problems) + "\n" + fix_message())
+
+    def test_a_reject_only_entry_is_named(self):
+        entries = {"x/control-a.json": {"kind": "control", "gate": "bracket.deflection",
+                                        "admitted": "reject-only", "good": None,
+                                        "mutation": None}}
+        self.assertTrue(qualification_problems(entries))
+
+    def test_selftest_on_a_fresh_copy_files_nothing_new(self):
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        before = _listing(project, T.VERDICTS_DIR)
+        proc = _env.atompipe(["gate", "selftest"], cwd=project)
+        self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
+        self.assertEqual(sorted(set(_listing(project, T.VERDICTS_DIR)) - set(before)), [],
+                         fix_message())
 
 
 class CacheCheckersRefuse(_env.EnvCase):

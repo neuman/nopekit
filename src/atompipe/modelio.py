@@ -2118,6 +2118,43 @@ def _closure_modules(obj: Any) -> list[types.ModuleType]:
     return list(found.values())
 
 
+#: The open ``closure_scope``s, innermost last: each maps ``(id(obj),
+#: len(sys.modules))`` to ``(obj, its _closure_modules)``.
+_CLOSURE_SCOPES: list[dict] = []
+
+
+@contextlib.contextmanager
+def closure_scope() -> Iterator[None]:
+    """While open, ``clear_caches`` finds the modules ``obj`` runs once per object
+    and per size of ``sys.modules``, and still empties every memo in them on
+    every call. For the mutation pass (P2.3), which runs ONE gate up to 1,024
+    times: the scan behind ``_closure_modules`` walks every loaded module, and
+    it was 3 of the 4 seconds the walks of a 60-gate project cost (measured
+    on ``test_staleness``'s first sweep). Keyed by ``len(sys.modules)``, so a
+    module a run imports for the first time is found by the next run's scan.
+    *Rejected:* skipping the memo clear between walk runs — a memo keyed by a
+    path would serve one run's file read to the next, unkeyed; caching the
+    modules for the life of the process — a module loaded later would never
+    be cleared."""
+    _CLOSURE_SCOPES.append({})
+    try:
+        yield
+    finally:
+        _CLOSURE_SCOPES.pop()
+
+
+def _closure_modules_scoped(obj: Any) -> list[types.ModuleType]:
+    if not _CLOSURE_SCOPES:
+        return _closure_modules(obj)
+    memo = _CLOSURE_SCOPES[-1]
+    key = (id(obj), len(sys.modules))
+    hit = memo.get(key)
+    if hit is None or hit[0] is not obj:
+        hit = (obj, _closure_modules(obj))
+        memo[key] = hit
+    return hit[1]
+
+
 def _memo_clearer(value: Any) -> Any:
     """`value.cache_clear` when `value` — or what it wraps, `_UNWRAP_DEPTH` deep
     — is a memo that knows how to empty itself, else None. functools' wrapper by
@@ -2194,7 +2231,7 @@ def clear_caches(obj: Any) -> tuple[str, ...]:
     `__getattr__` would run code the gate never called).
     """
     cleared: list[str] = []
-    for module in _closure_modules(obj):
+    for module in _closure_modules_scoped(obj):
         for name, clear in _memos_in(module):
             clear()
             cleared.append(name)

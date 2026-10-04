@@ -164,6 +164,67 @@ over `plan()`, `SweepResult.order`, measured latency and cost (S-56). P5 — eva
 lanes from `needs`/`needed_by`. thermal-analytic — the Biot half of `time_constant` as
 its own guard, then `steady_state_temp -> <guard>`.
 
+#### P2.3's decision rows (`P2.3-Dn`)
+
+Checkpoint 2.3 as it landed (PLAN-v0.14 §1.4, §1.5, §2 rows W3/W7/W8/W11-W13, §3 row
+P2; GLOSSARY §2). Where it disagrees with the checkpoint text below, these rows win:
+admission is *qualification*, known-bad shown is a Gap (never a warning), the bracket's
+control is not recalibrated, and the mutation pass is part of the rule for every
+evaluator not from the bundled packs. Rows the design's critique moved say so.
+
+| Id | Decision | Rejected |
+|---|---|---|
+| D1 | one control entry carries the whole qualification: `bad`, `bad_extra`, `good` (`{outcome, reads, extra, measured, limit, units, detail}`), `mutation` (`{runs, boundary, results, inconclusive, not_mutated}`, tallies derived), `admitted` re-derived by the strict reader. **Moved by the build:** no known-good control is `good.outcome: "not-run"` — known-bad shown is a fact about the project, filed — and `null` means only "the writer ran no good half" (D19) | an entry kind per half (nine readers would each qualify on half the rule); `good` as a flat word (no home for its reads); results in untracked `obs/` |
+| D2 | one judge, `verdicts._qualification(QualificationFacts) -> token` (`""` = qualified): writer, strict reader, `_decide`, `_admission`, `_run_control`, `_disagree` and `_other_tiers` (**moved by the critique**: those last two compared `bad` alone) | deciding in each caller; trusting `admitted` from the file |
+| D3 | known-bad shown is unqualified: Gap, `known-good not run`, beside a pass too; `RejectOnlyStillCounts` became `KnownBadShownIsAGap` in the open | a warning in every phase; Stale; a fifth `Admission.state` |
+| D4 | which known-good control, first match: `NegativeControl.good` (the LAST field, handed what the known-bad fixture is handed); a pack's `selftest/baseline.json`; a project's `selftest/known_good.py`; else known-bad shown. A `good` fixture that reads the live design it was handed — itself, or the gate through a context it handed back — is `known-good control reads the candidate` | `known_good` as the field name; falling back to the live design |
+| D5 | channel parity over the present `ctx.extra` keys, the spine's removed; both sets recorded. R-4 inside the checkpoint: C6 read exactly 13 (cad-solid 6, sourcing 7), then `good=` fixtures for those 13 (`selftest/good_meshes.py:baseline_meshes`, absolute paths so a host project loads them; `selftest/good_boms.py:baseline_bom`, its own `_control` note), then 0 hits. **Added by the critique:** an evaluator the walk applies to whose controls reach it through `extra` at all is unqualified (`channels:check`) — a check run hands `extra={}`, so both controls tested a path `check` never takes | keys each builder added; moving the 13 to params (on the check-in list) |
+| D6 | mutation applies by LOCATION: every evaluator whose pack directory is not under the bundled `packs/` (project `gates/`, `.atompipe/packs/`, user and path packs). **Moved by the critique:** applicability is recorded in the static part (`nc.mutation`), so a promotion into `packs/` re-qualifies | project `gates/` only; every evaluator; a git-clean content check (critique: a bundled copy edited in place would escape it, and the check needs git — on the check-in list) |
+| D7 | the walk, aimed (§4 of the design): ladder `MUTATION_RUNGS`, x then ÷, nearest first, until the evaluator's OWN value lands `MUTATION_MARGIN` past its OWN limit — never the pass flag — then 16 halvings in log-factor and outward rounding to 3 significant figures. **Moved by the measurement:** "past" within `_LAND_TOLERANCE` (1e-9) — 2.3 − 2.0 is 0.29999999999999982 in binary, and the bracket's 0.575 mutation read 0.576 | straight-through only; every read key changed; the ladder unaimed; stopping at the first fail |
+| D8 | conclusive is GLOSSARY §2's: a pass or a fail. Skip and error are inconclusive, `(k inconclusive)`. None conclusive is qualified on the controls, its line saying why: `(none made: tier 1)`, `(none made: no value against a limit)` (**moved by the critique**: one word for two facts) | unqualified when none is conclusive (critique 8, rejected: §1.5's panel default, and 17 bundled gates could never qualify); `0/0` |
+| D9 | where it runs: in process after both controls held, tier 0, `MUTATION_RUNS_MAX` 1024 runs, one influence probe per key (a value equal to the reported one first); keys the budget does not reach are *not mutated* (**critique**: not inconclusive) and, where one still moves the value, the walk could not finish — unqualified; a crash while aiming makes that key inconclusive, never "does not land" (**critique**); a crash that does not repeat holds the walk (`mutation:errored`); scratch in one temp dir outside the project and every pack, else `mutation:could-not-run`; every run's reads folded into the known-good trace at known-good digests | a temp worktree; scratch under `.atompipe/out`; a throwaway trace (V1j); a clock budget; no budget |
+| D10 | re-qualify by values, both halves; the good half's host reads included, the gate's on what a `good` fixture handed back too (**critique**) | the known-bad half alone (V1i) |
+| D11 | `rho_control` over both halves' reads and every walk run's; `out8` over the outcomes, numbers and tallies, never an `after` | known-good params out of rho; `after` in `out8` |
+| D12 | a half that crashed, skipped itself, was unusable or read the candidate is remembered under `control:<gate>` with its facts and the refusal's own detail (**moved by the build**: the held verdict first kept only the token) | caching a half's crash |
+| D13 | facts in the spine, words in `report.HUMAN["qualification"]`; `Verdict.unqualified` holds a token, `verdicts.parse_token` its inverse; `HUMAN["refusal"]` and `_refusal_words` gone; the spine's stale and pending reasons are worded from the same table at call time | the reason minted into the mark |
+| D14 | the line `<id> : known-good <o> · known-bad <o>[ · mutation n/m fail …] → qualified|unqualified`, with a segment for each control-level fact (**critique**: channels differ, could not run/finish, errored, two outcomes, outcomes differ by tier, outcome differs from its cached entry) | `→ unqualified: <reason>`; ` · k inconclusive` |
+| D15 | the Gap reason names the first fact that does not hold | the whole line |
+| D16 | `check` prints a line for every unqualified evaluator, and for every walked one whose qualification ran; `controls: N run, N preserved, N re-qualified` | a line per qualification run |
+| D17 | an unqualified evaluator never wears `[ERR ]` or *errored*; the page's row reads `unqualified` in Gap's tone | — |
+| D18 | channels: `check`, `gate show` (`qualification:` and its rows), `gate selftest` (lines, summary, exit 1 on any unqualified; pack mode's rows, `-v` for every line, `qualifications` in JSON — **critique**), `doctor` (`qualification`, `known-good`), `pack validate`, the stale and pending reasons, the Checked hint, help text from the table (**critique**), `last_selftest.outcome` `"unqualified"` (**critique**: not `"error"`); `Admission.moved` replaces the parse of spine text, and pending never applies to an unqualified entry (**critique**) | moving every GLOSSARY §9 row now |
+| D19 | an incomplete entry reads not yet qualified, and is a miss for `check` | refusing or upgrading the old shape; serving it |
+| D20 | project-edge isolation is a note under the line in `gate selftest` | inside the line |
+| D21 | S-17 closes through the aimed mutation (0.575 mm against 0.5), not by recalibrating `quarter_thickness` (critique 18: rejected again; the fixture's comment names the walk as the at-the-limit test) | recalibrating the fixture |
+| D22 | CLAUDE.md 9 reworded, 15 added; `INVARIANT_CLASSES[9]` gains `QualificationIsPaired`, `EveryConclusiveMutationMustFail`, `[15]` is `MutationIsSealed` | folding the seal into 9 |
+| D23 | identifiers keep their names until the rename pass (`Admission`, `admitted`, `paired`/`reject-only`/`no`, `NegativeControl`) | renaming record values now |
+| D24 | `gates.selftest`'s outcome text stays spine-internal | a structured `ControlRun` |
+| D25 | R-8 on the corpus; the visible change: a project with project evaluators and no known-good control reads them Gap, and so does one passing a conclusive mutation | a grace period |
+| D26 | `SCHEMA` stays 1 | `SCHEMA = 2` |
+| D27 | **Added by the critique (10): an evaluator never qualified at any version reads Gap** — not yet qualified, `qualification:not-yet|<tier>` — no pass of it counts; one qualified at an earlier version reads Stale. A gate with nothing recorded reads so too, and the prerequisite rule reads it as an UNRUN root, never a negative one (**moved by the build**: read as unqualified, a never-checked project read every guarded claim Skipped). *Moves Q5's default* (Open/Stale until the first check run) | Q5's default (a claim left Gap before any control had run); Gap after any spine edit (P2.1-D6's own rejection) |
+| D28 | a project's relative fixture ref resolves against the project root the sweep names (`fixture_root=`), never the context's: a `known_good.py` may point its root at the design's own files (**found by the build**: every control of such a project was unusable) | resolving against whatever root the known-good design returned |
+
+**Check-in batch (P2.3):** Q5 moved by D27 (the panel's default was Open/Stale);
+`good.outcome: "not-run"` where the design said pass/fail (D1); the git-clean
+applicability rule rejected (D6) and D-32's residual — a bundled copy edited in place
+under `packs/` is never walked; critique 8's "0 conclusive is unqualified" rejected
+(D8); the wider scope of mutation than GLOSSARY §2's wording ("an evaluator the
+generator wrote in a groundspace": here every evaluator not from the bundled packs,
+D6) — a GLOSSARY edit for the panel; the selftest summary's departure from the
+design's words and *candidate* for "live design" (GLOSSARY §1); `doctor`'s tag column
+(`[problem]`/`[ok]`, §9's pass); S-17's teaching half (`slipped.md`: the walk, not the
+fixture, is the at-the-limit evidence); moving the 13 `extra` fixtures to the params
+channel (D5); test_mutation's stated relaxation — a read that never lands is no longer
+required to change (V12's trade); file-location parity — fdm's known-bad fixtures
+reach their gates by path, the channel `check` takes, so D5's key check holds them, and
+a check of file-location parity is not built (critique 19: deferred).
+
+**Hand-offs:** P2.4 — the claim's acceptance as the walk's limit once goalposts live
+in one place. P2.5 — `export` refuses a critical claim resting on an unqualified
+evaluator with no new code. P3 — `init` scaffolds a `known_good.py` stub that
+`doctor` flags until it passes; `ask --next` ranks "write selftest/known_good.py".
+The rename pass — `Admission` → qualification, `NegativeControl` → `KnownBadControl`
+with `good` → `known_good` beside it, record values to `qualified`/`known-bad-shown`.
+
 #### Checkpoint 2.2: the refusal graph
 
 ```python

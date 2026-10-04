@@ -154,6 +154,14 @@ fires in one repository and passes in another. No fixture hardcodes a magnitude
 either; each reads the limit it has to beat out of the baseline the gate reads it
 from. Run them: `atompipe gate selftest sourcing`.
 
+Each gate also declares its **known-good** control, `selftest/good_boms.py:baseline_bom`:
+the baseline BOM, unchanged, handed through `ctx.extra["bom"]` — the channel every
+fixture above uses. The baseline alone reaches the gates through `params["bom"]`, and a
+pair that reaches a gate through two channels shows nothing (`channels differ`): a gate
+that read `extra` and `params` differently could pass one and fail the other. A gate
+qualifies when it passes its known-good control and fails its known-bad one (GLOSSARY
+§2).
+
 ### Prerequisites
 
 `bom.complete` is the prerequisite (`needs`) of `bom.cost` and `bom.moq`: an unpriced or

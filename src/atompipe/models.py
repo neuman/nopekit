@@ -510,14 +510,20 @@ class Verdict(Record):
     declared; 0.0 for a skip, which did no work. Both new fields are last (PLAN
     R-2), so positional construction still means what it meant."""
     unqualified: str = ""
-    """Why the evaluator is not qualified at its version — its refusal's reason
-    (``admission.reason``) — or ``""``. **Set by the spine only**: the resolver
-    and the sweep set it, through ``verdicts._unqualified``, beside
-    ``error="not admitted: <reason>"``; ``gates.run_gate`` clears it on whatever a
-    gate returns, as it clears ``rho``; no stored verdict carries it (an entry is
-    built from an explicit field list, and the remembered-outcome reader drops
-    it). ``claims.compose`` reads a claim with an unqualified evaluator as Gap,
-    ``unqualified:`` (PLAN-v0.14 §1.4), and never as errored (P2.0 D-8).
+    """Why the evaluator is not qualified at its version — a spine TOKEN
+    (``verdicts.parse_token`` reads it; ``report.HUMAN["qualification"]`` words
+    it: ``known-good:fail``, ``known-good:not-run``, ``known-bad:errored|<line>``
+    …), never prose — or ``""``. **Set by the spine only**: the resolver and the
+    sweep set it, through ``verdicts._unqualified``, beside ``error="unqualified:
+    <token>"``; ``gates.run_gate`` clears it on whatever a gate returns, as it
+    clears ``rho``; no stored verdict carries it (an entry is built from an
+    explicit field list, and the remembered-outcome reader drops it).
+    ``claims.compose`` reads a claim with an unqualified evaluator as Gap,
+    ``unqualified:`` (PLAN-v0.14 §1.4), and never as errored (P2.0 D-8). Why a
+    token and not the reason's words (P2.3-D13): the words would be frozen at
+    mint time inside a verdict that travels — sweep rows, held verdicts — and
+    the spine would hold a human channel; the error text an older reader shows
+    is the token, and reads as the crash it falls back to (degrade-closed).
 
     What it replaced: the ``not admitted:`` prefix of ``error`` as the predicate.
     *Rejected,* because a gate could then make its own crash read the quieter
@@ -558,7 +564,7 @@ class Verdict(Record):
         # Degrade-closed (R-2): a verdict marked unqualified with no error would
         # read `outcome` from its pass flag, and a refusal must never be a pass.
         if self.unqualified and not self.error:
-            self.error = f"not admitted: {self.unqualified}"
+            self.error = f"unqualified: {self.unqualified}"
         # The same for a prerequisite skip: the flags say "skipped, not passed"
         # wherever the mark is set, so a reader that knows nothing of it still
         # reads the not-pass it means.
@@ -646,6 +652,22 @@ class NegativeControl(Record):
     fixture: str                       # "selftest/holed_mesh.py" or "pack.mod:make_brick"
     expect: str = "fail"               # the gate must NOT pass on this input
     note: str = ""
+    good: str = ""
+    """The KNOWN-GOOD control (GLOSSARY §2), when the default is not it: a
+    fixture reference spelled like ``fixture`` and handed exactly what the
+    known-bad fixture is handed, returning the input the gate must PASS. Empty
+    (the default) resolves to the pack's ``selftest/baseline.json`` for a pack's
+    gate and to the project's ``selftest/known_good.py`` ``context(ctx)`` for a
+    project's (``verdicts._good_host``); a project gate with neither is
+    *known-bad shown*, not qualified. Declare one when the known-bad input
+    reaches the gate through ``ctx.extra`` (cad-solid's meshes, sourcing's
+    BOM): the two controls must hand the gate the same channel (PLAN D-26), or a
+    gate that fails exactly when ``extra`` is not empty passes the baseline and
+    fails its fixture and has shown nothing. What slipped through before it:
+    only the known-bad half was ever run for a project gate, so one that failed
+    everything (S-04) qualified by failing its own known-bad control. An older
+    spine that drops the field reads the gate's entries as written by another
+    version — undemonstrated, never a pass (R-2). The LAST field."""
 
 
 @dataclass

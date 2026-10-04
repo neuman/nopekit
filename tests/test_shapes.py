@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import tempfile
 import unittest
 from typing import Callable
@@ -112,17 +113,14 @@ SHOW_PREREQUISITE_OF = re.compile(r"^  prerequisite of: \S+(?:, \S+)*$")
 SHOW_CONTROL = re.compile(r"^  control: (?:\S+ \(must \w+\)|NONE — .+)$")
 SHOW_NOTE = re.compile(r"^           \S.*$")
 SHOW_VERDICT = re.compile(r"^  last verdict: (?:\[.{4}\] \S+.*|\(never run\))$")
-#: The fifth state `gate show` can print, beside §3.13's four: a control that is
-#: not admitted for a reason other than passing its known-bad input (a crash, two
-#: disagreeing controls). Pinned so the matcher accepts every line the CLI prints.
-SHOW_NOT_ADMITTED = re.compile(
-    r"^  last selftest: \[FAIL\] not admitted at this version — .+$")
 
-#: `gate selftest` (project mode): one row per control, then the summary; a
-#: broken control adds the refusal head and one line per broken gate.
-SELFTEST_ROW = re.compile(r"^\[(?P<tag>.{4})\] (?P<gate>\S+)#selftest(?: : (?P<body>.*))?$")
-SELFTEST_BROKEN_HEAD = re.compile(r"^these gates cannot be trusted — .+:$")
-SELFTEST_BROKEN_ROW = re.compile(r"^\[FAIL\] (?P<gate>\S+)#selftest — .+$")
+#: `gate selftest` (project mode, P2.3): one qualification line per evaluator
+#: (``T.QUALIFICATION_LINE``), or its skip — `<id> : skipped: <why>` — each
+#: line followed by the isolation notes it has (P2.3-D20); then the summary.
+#: (R-6, D18's words: a `[tag] <gate>#selftest` row per control, the refusal
+#: head and one line per broken gate before.)
+SELFTEST_SKIP = re.compile(r"^(?P<gate>\S+) : skipped: .+$")
+SELFTEST_NOTE = re.compile(r"^note: \S+: control not isolated — .+$")
 SELFTEST_EMPTY = re.compile(r"^(?:note: )?no control ran \(.+\).*$")
 
 
@@ -175,6 +173,10 @@ def check_problems(stdout: str) -> list[str]:
     at += 1
     if at < len(lines) and T.CONTROLS_SUMMARY.fullmatch(lines[at]):
         at += 1
+    # P2.3-D16: a qualification line per unqualified evaluator, and per walked
+    # one whose qualification ran in this check run.
+    while at < len(lines) and T.QUALIFICATION_LINE.fullmatch(lines[at]):
+        at += 1
     while at < len(lines) and (SKIP_GROUP.fullmatch(lines[at]) or SKIP_ONE.fullmatch(lines[at])):
         at += 1
         while at < len(lines) and WRAPPED.fullmatch(lines[at]):
@@ -209,7 +211,8 @@ def check_problems(stdout: str) -> list[str]:
     for line in cached_rows:
         if T.CACHED_ROW.fullmatch(line).group("tag") == "ok  ":
             problems.append(f"check: a cached pass is printed: {line!r}")
-    total = sum(int(summary.group(k) or 0) for k in ("ok", "failed", "skipped", "errored"))
+    total = sum(int(summary.group(k) or 0)
+                for k in ("ok", "failed", "skipped", "errored", "unqualified"))
     if total != int(summary.group("gates")):
         problems.append(f"check: {summary.group(0)!r} does not add up")
     return problems
@@ -257,8 +260,9 @@ def status_problems(stdout: str) -> list[str]:
 
 def gate_show_problems(stdout: str) -> list[str]:
     """`gate show` text: `describe`'s line, the description, tier/pack/entry,
-    claims, runnable, the control (and its note), the last verdict, and the last
-    selftest as the LAST line (spec §3.13)."""
+    claims, runnable, the control (and its note), the last verdict, then the
+    qualification and its detail rows, last (spec §3.13; P2.3-D18 — R-6, words:
+    the last line was `last selftest:` before)."""
     lines = stdout.splitlines()
     problems: list[str] = []
     if not lines or not DESCRIBE.fullmatch(lines[0]):
@@ -276,12 +280,18 @@ def gate_show_problems(stdout: str) -> list[str]:
             ("control", SHOW_CONTROL, 1, 1),
             ("control note", SHOW_NOTE, 0, 1), ("last verdict", SHOW_VERDICT, 1, 1))
     at = _grammar(lines, at, body, problems, "gate show")
-    if at < len(lines) and (T.LAST_SELFTEST.fullmatch(lines[at])
-                            or SHOW_NOT_ADMITTED.fullmatch(lines[at])):
+    shown = T.QUALIFICATION_SHOW.fullmatch(lines[at]) if at < len(lines) else None
+    if shown:
+        # A qualified evaluator stands on a control entry, and the row names it.
+        if shown.group("line") and shown.group("line").endswith("→ qualified") \
+                and not shown.group("control"):
+            problems.append("gate show: a qualified evaluator's row names no control entry")
         at += 1
+        while at < len(lines) and T.QUALIFICATION_DETAIL.fullmatch(lines[at]):
+            at += 1
     else:
         got = repr(lines[at]) if at < len(lines) else "the end of the output"
-        problems.append(f"gate show: expected `last selftest:` at line {at + 1}, got {got}")
+        problems.append(f"gate show: expected `qualification:` at line {at + 1}, got {got}")
     _trailing(lines, at, problems, "gate show")
     return problems
 
@@ -366,67 +376,74 @@ def why_problems(stdout: str) -> list[str]:
 
 
 def selftest_problems(stdout: str) -> list[str]:
-    """`gate selftest` text (project mode): one row per control, the summary
-    (spec §3.13), then — only when something needs saying — why nothing ran, or
-    the refusal and one line per broken control. The counts must be the rows'."""
+    """`gate selftest` text (project mode): one qualification line or skip per
+    evaluator, each with its isolation notes, the summary (P2.3-D18), then —
+    only when nothing ran — why. The counts must be the lines'."""
     lines = stdout.splitlines()
     problems: list[str] = []
     at = 0
-    rows = []
-    while at < len(lines) and SELFTEST_ROW.fullmatch(lines[at]):
-        rows.append(SELFTEST_ROW.fullmatch(lines[at]))
+    rows: list[str] = []
+    while at < len(lines) and (T.QUALIFICATION_LINE.fullmatch(lines[at])
+                               or SELFTEST_SKIP.fullmatch(lines[at])):
+        rows.append(lines[at])
         at += 1
-    if at == len(lines) or not T.SELFTEST_SUMMARY.fullmatch(lines[at]):
+        while at < len(lines) and SELFTEST_NOTE.fullmatch(lines[at]):
+            at += 1
+    if at == len(lines) or not T.QUALIFIED_SUMMARY.fullmatch(lines[at]):
         got = repr(lines[at]) if at < len(lines) else "the end of the output"
-        return [f"selftest: expected the summary after {len(rows)} row(s), got {got}"]
-    summary = T.SELFTEST_SUMMARY.fullmatch(lines[at])
+        return [f"selftest: expected the summary after {len(rows)} line(s), got {got}"]
+    summary = T.QUALIFIED_SUMMARY.fullmatch(lines[at])
     at += 1
-    controls, fired = int(summary.group("controls")), int(summary.group("fired"))
-    broken, skipped = int(summary.group("broken")), int(summary.group("skipped"))
-    if controls != len(rows):
-        problems.append(f"selftest: the summary counts {controls} control(s), "
-                        f"{len(rows)} row(s) printed")
-    if fired + broken + skipped != controls:
+    evaluators = int(summary.group("evaluators"))
+    qualified, unqualified = int(summary.group("qualified")), int(summary.group("unqualified"))
+    skipped = int(summary.group("skipped"))
+    if evaluators != len(rows):
+        problems.append(f"selftest: the summary counts {evaluators} evaluator(s), "
+                        f"{len(rows)} line(s) printed")
+    if qualified + unqualified + skipped != evaluators:
         problems.append(f"selftest: {summary.group(0)!r} does not add up")
-    if fired != sum(1 for row in rows if row.group("tag") == "ok  "):
-        problems.append("selftest: the fired count is not the [ok  ] rows")
-    if fired + broken == 0:
+    lines_say = [T.QUALIFICATION_LINE.fullmatch(row) for row in rows]
+    if qualified != sum(1 for m in lines_say if m and m.group("verdict") == "qualified"):
+        problems.append("selftest: the qualified count is not the `→ qualified` lines")
+    if unqualified != sum(1 for m in lines_say if m and m.group("verdict") == "unqualified"):
+        problems.append("selftest: the unqualified count is not the `→ unqualified` lines")
+    if qualified + unqualified == 0:
         at = _grammar(lines, at, (("why nothing ran", SELFTEST_EMPTY, 1, 1),),
-                      problems, "selftest")
-    if broken:
-        at = _grammar(lines, at, (("the refusal", SELFTEST_BROKEN_HEAD, 1, 1),
-                                  ("a broken control", SELFTEST_BROKEN_ROW, broken, broken)),
                       problems, "selftest")
     _trailing(lines, at, problems, "selftest")
     return problems
 
 
-#: Pack mode's per-pack line (`cli._pack_line`): the tag, the pack and where it
-#: came from, then its counts — or why it ran nothing.
-PACK_ROW = re.compile(r"^\[(?P<tag>.{4})\] (?P<pack>\S+) \((?P<origin>[^()]+)\) : (?P<body>.+)$")
+#: Pack mode's per-pack line (`cli._pack_line`, P2.3-D18): the pack and where it
+#: came from, then its counts — or why it ran nothing. No outcome tag (R-6,
+#: words: `[ok  ] <pack> (<origin>) : N fired` before).
+PACK_ROW = re.compile(r"^(?P<pack>\S+) \((?P<origin>[^()]+)\) : (?P<body>.+)$")
 PACK_COUNTS = re.compile(
-    r"^(?P<fired>\d+) fired(?:, (?P<broken>\d+) BROKEN)?"
-    r"(?:, (?P<skipped>\d+) skipped \(tooling\))?(?:, (?P<failed>\d+) baseline\(s\) failed)?$")
+    r"^(?P<qualified>\d+) qualified(?:, (?P<unqualified>\d+) unqualified)?"
+    r"(?:, (?P<skipped>\d+) skipped)?$")
 PACK_NOTHING = re.compile(r"^no gates?(?: at or below tier \d+)?$")
 #: A tooling note pack mode prints before its rows (what did not run here, and why).
 PACK_NOTE = re.compile(r"^note: .+$")
-#: One broken control or failed baseline under pack mode's refusal heads.
-PACK_FAILED_ROW = re.compile(r"^\[FAIL\] \S+.* — .+$")
+#: A pack defect under its row: `problem: <gate>: <why>`.
+PACK_PROBLEM = re.compile(r"^problem: .+$")
 
 
 def pack_selftest_problems(stdout: str) -> list[str]:
     """`gate selftest` in pack mode (no project here; spec §3.13, U08): tooling
-    notes, one row per pack, the summary — then, only when something failed, the
-    refusal and its rows. The summary's counts must be the rows' sums, so a pack
-    row that lost a control cannot hide under a summary that kept it."""
+    notes, one row per pack — each followed by the lines of its unqualified
+    evaluators (every one under `-v`) and its problems — then the summary, whose
+    counts must be the rows' sums, so a pack row that lost an evaluator cannot
+    hide under a summary that kept it."""
     lines = stdout.splitlines()
     problems: list[str] = []
     at = 0
     while at < len(lines) and PACK_NOTE.fullmatch(lines[at]):
         at += 1
-    sums = {"fired": 0, "broken": 0, "skipped": 0, "failed": 0}
+    sums = {"qualified": 0, "unqualified": 0, "skipped": 0}
     rows = 0
-    while at < len(lines) and PACK_ROW.fullmatch(lines[at]):
+    unqualified_lines = 0
+    while at < len(lines) and PACK_ROW.fullmatch(lines[at]) \
+            and not T.QUALIFIED_SUMMARY.fullmatch(lines[at]):
         body = PACK_ROW.fullmatch(lines[at]).group("body")
         counts = PACK_COUNTS.fullmatch(body)
         if counts:
@@ -436,29 +453,29 @@ def pack_selftest_problems(stdout: str) -> list[str]:
             problems.append(f"pack selftest: line {at + 1} is not a pack's counts: {body!r}")
         rows += 1
         at += 1
+        while at < len(lines) and (T.QUALIFICATION_LINE.fullmatch(lines[at])
+                                   or PACK_PROBLEM.fullmatch(lines[at])):
+            match = T.QUALIFICATION_LINE.fullmatch(lines[at])
+            if match and match.group("verdict") == "unqualified":
+                unqualified_lines += 1
+            at += 1
     if not rows:
         problems.append("pack selftest: no pack row")
-    if at == len(lines) or not T.SELFTEST_SUMMARY.fullmatch(lines[at]):
+    if at == len(lines) or not T.QUALIFIED_SUMMARY.fullmatch(lines[at]):
         got = repr(lines[at]) if at < len(lines) else "the end of the output"
         return problems + [f"pack selftest: expected the summary after {rows} pack row(s), "
                            f"got {got}"]
-    summary = T.SELFTEST_SUMMARY.fullmatch(lines[at])
+    summary = T.QUALIFIED_SUMMARY.fullmatch(lines[at])
     at += 1
-    for key, group in (("fired", "fired"), ("broken", "broken"), ("skipped", "skipped")):
-        if int(summary.group(group)) != sums[key]:
-            problems.append(f"pack selftest: the summary says {summary.group(group)} {key}, "
+    for key in sums:
+        if int(summary.group(key)) != sums[key]:
+            problems.append(f"pack selftest: the summary says {summary.group(key)} {key}, "
                             f"the pack rows {sums[key]}")
-    if int(summary.group("controls")) != sums["fired"] + sums["broken"] + sums["skipped"]:
+    if int(summary.group("evaluators")) != sum(sums.values()):
         problems.append(f"pack selftest: {summary.group(0)!r} does not add up")
-    if sums["broken"]:
-        at = _grammar(lines, at, (("the refusal", SELFTEST_BROKEN_HEAD, 1, 1),
-                                  ("a broken control", PACK_FAILED_ROW,
-                                   sums["broken"], sums["broken"])),
-                      problems, "pack selftest")
-    if sums["failed"]:
-        at = _grammar(lines, at, (("the failed-baseline head", T.BASELINES_FAILED, 1, 1),
-                                  ("a failed baseline", PACK_FAILED_ROW, 1, None)),
-                      problems, "pack selftest")
+    if unqualified_lines != sums["unqualified"]:
+        problems.append(f"pack selftest: {sums['unqualified']} unqualified, "
+                        f"{unqualified_lines} line(s) say which")
     _trailing(lines, at, problems, "pack selftest")
     return problems
 
@@ -661,7 +678,8 @@ class GateShowShape(_ShapeCase):
     def test_the_real_transcript_matches(self):
         text = self.out("gate-show", 0)
         self.accepts(text)
-        self.assertTrue(T.LAST_SELFTEST_FIRED.fullmatch(text.splitlines()[-1]), text)
+        shown = [T.QUALIFICATION_SHOW.fullmatch(line) for line in text.splitlines()]
+        self.assertTrue(any(m and m.group("control") for m in shown), text)
 
     def test_a_line_added_is_refused(self):
         text = self.out("gate-show", 0)
@@ -669,7 +687,7 @@ class GateShowShape(_ShapeCase):
                              ("after the last verdict", SHOW_VERDICT.fullmatch)):
             with self.subTest(where=where):
                 self.refuses(add_line(text, after), f"prose {where}")
-        self.refuses(text + PROSE + "\n", "prose after the last selftest")
+        self.refuses(text + PROSE + "\n", "prose after the qualification")
 
     def test_the_prerequisite_lines_are_where_they_belong(self):
         """P2.2: `bracket.deflection` shows its prerequisite, after `runnable`
@@ -684,8 +702,8 @@ class GateShowShape(_ShapeCase):
 
     def test_the_control_removed_is_refused(self):
         text = self.out("gate-show", 0)
-        self.refuses(sub_line(text, T.LAST_SELFTEST_FIRED, r" \(control [0-9a-f]{12}\)$", ""),
-                     "a last selftest that names no control entry")
+        self.refuses(sub_line(text, T.QUALIFICATION_SHOW, r" \(control [0-9a-f]{12}\)$", ""),
+                     "a qualification that names no control entry")
 
 
 class WhyShape(_ShapeCase):
@@ -736,16 +754,17 @@ class SelftestShape(_ShapeCase):
     def test_the_real_transcript_matches(self):
         text = self.out("selftest", 0)
         self.accepts(text)
-        self.assertEqual(sum(1 for line in text.splitlines() if SELFTEST_ROW.fullmatch(line)), 6)
+        self.assertEqual(sum(1 for line in text.splitlines()
+                             if T.QUALIFICATION_LINE.fullmatch(line)), 6)
 
     def test_a_line_added_is_refused(self):
         text = self.out("selftest", 0)
-        self.refuses(add_line(text, SELFTEST_ROW.fullmatch), "prose between the rows")
+        self.refuses(add_line(text, T.QUALIFICATION_LINE.fullmatch), "prose between the rows")
         self.refuses(text + PROSE + "\n", "prose after the summary")
 
     def test_the_time_removed_is_refused(self):
         text = self.out("selftest", 0)
-        self.refuses(sub_line(text, T.SELFTEST_SUMMARY, r" in \S+:", ":"),
+        self.refuses(sub_line(text, T.QUALIFIED_SUMMARY, r" in \S+:", ":"),
                      "a summary without its time")
 
     def test_a_row_dropped_is_refused(self):
@@ -784,7 +803,7 @@ CHECK_AFTER_EDIT = (
     ("the one executed row", r"^\[ok  \] bracket\.bed_fit : 74 x 30 x 7 mm vs 234 mm usable "
                              r"\(250 bed - 2x8 brim\)$"),
     ("the summary", r"^6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0$"),
-    ("the controls line", r"^controls: 0 executed, 0 cached, 6 re-verified$"),
+    ("the controls line", r"^controls: 0 run, 0 preserved, 6 re-qualified$"),
     *_BLOCKING_LINES,
 )
 
@@ -873,7 +892,7 @@ class TranscriptShapes(unittest.TestCase):
                 ("a cached pass printed", add_line(text, T.CACHED_ROW.fullmatch).replace(
                     PROSE, f"{'[ok  ] bracket.bed_fit : 74 x 30 x 7 mm':<77} cached")),
                 ("a controls line", add_line(text, T.CHECK_SUMMARY.fullmatch).replace(
-                    PROSE, "controls: 6 executed, 0 cached, 0 re-verified"))):
+                    PROSE, "controls: 6 run, 0 preserved, 0 re-qualified"))):
             with self.subTest(label):
                 self.assertTrue(exact_problems(mutant, FIRST_CHECK, "first check"),
                                 f"accepted {label}:\n{mutant}")
@@ -895,8 +914,8 @@ class TranscriptShapes(unittest.TestCase):
         self.holds(check_problems(text), text)
         for label, mutant in (
                 ("a control executed", sub_line(text, T.CONTROLS_SUMMARY,
-                                                r"^controls: 0 executed, 0 cached, 6",
-                                                "controls: 1 executed, 0 cached, 5")),
+                                                r"^controls: 0 run, 0 preserved, 6",
+                                                "controls: 1 run, 0 preserved, 5")),
                 ("the controls line dropped", "\n".join(
                     line for line in text.splitlines()
                     if not T.CONTROLS_SUMMARY.fullmatch(line)) + "\n"),
@@ -923,18 +942,18 @@ class TranscriptShapes(unittest.TestCase):
     def test_pack_mode_selftest_ends_on_its_summary(self):
         text = self.out("pack-selftest", 0)
         self.holds(pack_selftest_problems(text), text)
-        summary = T.SELFTEST_SUMMARY.fullmatch(text.splitlines()[-1])
+        summary = T.QUALIFIED_SUMMARY.fullmatch(text.splitlines()[-1])
         self.assertIsNotNone(summary, "the summary is not the last line")
-        self.assertEqual(summary.group("broken"), "0")
+        self.assertEqual(summary.group("unqualified"), "0")
         row = next(line for line in text.splitlines() if PACK_ROW.fullmatch(line))
         for label, mutant in (
-                ("the time removed", sub_line(text, T.SELFTEST_SUMMARY, r" in \S+:", ":")),
+                ("the time removed", sub_line(text, T.QUALIFIED_SUMMARY, r" in \S+:", ":")),
                 ("prose after the summary", text + PROSE + "\n"),
                 ("a pack row the summary disagrees with", text.replace(
-                    row, re.sub(r"(\d+) fired", lambda m: f"{int(m.group(1)) + 1} fired", row),
-                    1)),
-                ("a BROKEN count with no refusal", sub_line(text, T.SELFTEST_SUMMARY,
-                                                            r", 0 BROKEN", ", 1 BROKEN")),
+                    row, re.sub(r"(\d+) qualified",
+                                lambda m: f"{int(m.group(1)) + 1} qualified", row), 1)),
+                ("an unqualified count no line explains", sub_line(
+                    text, T.QUALIFIED_SUMMARY, r", 0 unqualified", ", 1 unqualified")),
                 ("no pack row", "\n".join(line for line in text.splitlines()
                                           if not PACK_ROW.fullmatch(line)) + "\n")):
             with self.subTest(label):
@@ -951,3 +970,74 @@ class TranscriptShapes(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QualificationLineShape(unittest.TestCase):
+    """(V10, R-11) The qualification line's shape, with its own negative control:
+    every form the spine prints matches, and every near miss — the
+    walkthrough's words GLOSSARY replaced, a ratio over nothing, a fourth
+    segment, an outcome tag — is refused."""
+
+    GOOD = (
+        "bracket.deflection : known-good pass · known-bad fail · mutation 1/1 fail → qualified",
+        "q.never : known-good fail · known-bad fail → unqualified",
+        "q.parser : known-good pass · known-bad errored · mutation 0 conclusive "
+        "(1 inconclusive) → qualified",
+        "q.slow1 : known-good pass · known-bad fail · mutation 0 conclusive (none made: tier 1) "
+        "→ qualified",
+        "beam.deflection : known-good pass · known-bad fail → qualified",
+        "q.honest : known-good not run · known-bad fail → unqualified",
+        "qpack.span : known-good reads the candidate · known-bad fail → unqualified",
+        "q.extra : known-good pass · known-bad fail · channels differ → unqualified",
+        "q.honest : known-good pass · known-bad fail · mutation could not run → unqualified",
+        "q.tiered : known-good pass · known-bad fail · mutation 0/1 fail · outcomes differ by "
+        "tier → unqualified",
+    )
+    BAD = (
+        "bracket.deflection : known-good pass · known-bad fail · mutation 1/1 fail",
+        "bracket.deflection : known-good pass · known-bad fail · mutation 0/0 fail → qualified",
+        "bracket.deflection : known-good ok · known-bad fail → qualified",
+        "bracket.deflection : known-good pass · known-bad rejected → qualified",
+        "bracket.deflection : known-good pass · known-bad fail · mutation 4/4 flipped → qualified",
+        "bracket.deflection : known-good pass · known-bad fail · mutation 1/1 fail · extra "
+        "→ qualified",
+        "[ok  ] bracket.deflection : known-good pass · known-bad fail → qualified",
+        "gate bracket.deflection: known-good pass · known-bad fail → qualified",
+    )
+
+    def test_every_printed_form_matches(self):
+        for line in self.GOOD:
+            with self.subTest(line=line):
+                self.assertRegex(line, T.QUALIFICATION_LINE)
+
+    def test_every_near_miss_is_refused(self):
+        for line in self.BAD:
+            with self.subTest(line=line):
+                self.assertIsNone(T.QUALIFICATION_LINE.fullmatch(line), line)
+
+    def test_the_selftest_summary_pack_row_and_controls_line(self):
+        self.assertRegex("6 evaluators in 0.6s: 6 qualified, 0 unqualified, 0 skipped",
+                         T.QUALIFIED_SUMMARY)
+        self.assertIsNone(T.QUALIFIED_SUMMARY.fullmatch(
+            "6 control(s) in 0.6s: 6 fired, 0 BROKEN, 0 skipped (tooling)"))
+        self.assertRegex("beam-analytic (bundled) : 8 qualified", T.PACK_ROW)
+        self.assertIsNone(T.PACK_ROW.fullmatch("[ok  ] beam-analytic (bundled) : 8 fired"))
+        self.assertRegex("controls: 6 run, 0 preserved, 0 re-qualified", T.QUALIFIED_CONTROLS)
+        self.assertIsNone(T.QUALIFIED_CONTROLS.fullmatch(
+            "controls: 6 executed, 0 cached, 0 re-verified"))
+        self.assertRegex("  qualification: known-good pass · known-bad fail · mutation 1/1 "
+                         "fail → qualified (control 75cbd091db21)", T.QUALIFICATION_SHOW)
+        self.assertRegex("    not mutated  config.load_n — never lands 15% past its limit",
+                         T.QUALIFICATION_DETAIL)
+        self.assertIsNone(T.QUALIFICATION_SHOW.fullmatch(
+            "  last selftest: [ok  ] fired at this version (control 75cbd091db21)"))
+
+    def test_the_bracket_selftest_prints_six_lines_and_the_summary(self):
+        root = _projects.bracket_copy(os.path.join(tempfile.mkdtemp(prefix="atompipe-shape-"),
+                                                   "bracket"), migrated=True)
+        self.addCleanup(shutil.rmtree, os.path.dirname(root), ignore_errors=True)
+        out = _env.atompipe(["gate", "selftest"], cwd=root).stdout.splitlines()
+        lines = [ln for ln in out if T.QUALIFICATION_LINE.fullmatch(ln)]
+        self.assertEqual(len(lines), 6, out)
+        self.assertTrue(all(ln.endswith("→ qualified") for ln in lines), lines)
+        self.assertRegex(out[-1], T.QUALIFIED_SUMMARY)

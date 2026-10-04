@@ -876,15 +876,20 @@ FLAGS = {{}}
 CALLS = []
 LIMIT = 2.0
 BAD = 9.0
+#: The known-good design's value (selftest/known_good.py). A flag crashes or
+#: skips the gate on every value between it and the known-bad one — the live
+#: design, never its known-good control (P2.3 runs the gate there too; until
+#: then a flag on every value below BAD planted nothing in the controls).
+KNOWN_GOOD = 0.5
 
 
 def _judge(gate_id, key, ctx):
     value = float(ctx.params[key])
     CALLS.append((gate_id, value))
     name = gate_id.split(".")[1]
-    if value < BAD and FLAGS.get(name + ":crash"):
+    if KNOWN_GOOD < value < BAD and FLAGS.get(name + ":crash"):
         raise RuntimeError("planted crash in " + gate_id)
-    if value < BAD and FLAGS.get(name + ":self-skip"):
+    if KNOWN_GOOD < value < BAD and FLAGS.get(name + ":self-skip"):
         return Verdict(gate=gate_id, skipped=True, skip_reason="planted self-skip")
     passed = True if FLAGS.get(name + ":lenient") else value <= LIMIT
     return Verdict(gate=gate_id, passed=passed, measured=value, limit=LIMIT, units="u",
@@ -911,7 +916,10 @@ import dataclasses
 
 from atompipe.models import Ledger
 
-CONFIG = {"p_guard": 1.0, "p_dep": 1.0}
+#: 0.5, not the live design's 1.0 (R-6, P2.3): the flags above crash the live
+#: design and not this one, so a planted crash is the gate's, never its
+#: known-good control's.
+CONFIG = {"p_guard": 0.5, "p_dep": 0.5}
 
 
 def params(config=None):
@@ -2076,3 +2084,54 @@ class BracketHeaderNamesItsGates(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------- #
+# V14 (P2.2-D13's hand-off to P2.3): project edges, a diagnostic beside the line
+# --------------------------------------------------------------------------- #
+#: A dependent of the bracket's guard whose known-bad control shortens the arm:
+#: `bracket.model_validity` fails that control too, so wherever both run the
+#: guard pre-empts it and the control shows nothing about what the dependent
+#: judges.
+NOT_ISOLATED = '''\
+from atompipe.gates import gate
+from atompipe.models import NegativeControl, Verdict
+
+
+@gate(id="bracket.short_arm", claims=["short-arm"], needs=["bracket.model_validity"],
+      negative_control=NegativeControl(fixture="selftest/bad_configs.py:stubby"))
+def short_arm(ctx):
+    """Reach: the arm must be at least 40 mm — so its own control, a 20 mm arm,
+    fails it, and fails the slenderness guard too."""
+    arm = float(ctx.params["arm_length"])
+    return Verdict(gate="bracket.short_arm", passed=arm >= 40.0, measured=arm, limit=40.0,
+                   units="mm")
+'''
+
+
+class ProjectEdgesAreIsolated(_env.EnvCase):
+    """(V14, D20) A project dependent's known-bad control passes its prerequisite
+    — the bracket's two edges are isolated: `bracket.model_validity` passes
+    `quarter_thickness` and `overloaded` — and one that is not reads a `note:`
+    under its line in `gate selftest`, which changes neither the line nor the
+    qualification (P2.2-D13: the line and *qualified* stay GLOSSARY §2's)."""
+
+    def test_the_brackets_edges_are_isolated(self):
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        out = _env.atompipe(["gate", "selftest"], cwd=root).stdout
+        self.assertNotIn("control not isolated", out, out)
+
+    def test_a_dependent_whose_control_trips_its_guard_reads_a_note(self):
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        with open(os.path.join(root, "gates", "zz_short.py"), "w", encoding="utf-8") as fh:
+            fh.write(NOT_ISOLATED)
+        out = _env.atompipe(["gate", "selftest"], cwd=root).stdout.splitlines()
+        at = next(i for i, ln in enumerate(out) if ln.startswith("bracket.short_arm : "))
+        self.assertTrue(out[at].endswith("→ qualified"), out[at])
+        self.assertTrue(out[at + 1].startswith(
+            "note: bracket.short_arm: control not isolated — its prerequisite "
+            "bracket.model_validity does not pass bracket.short_arm's known-bad control "
+            "(fail: "), out[at + 1])
+        status = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)
+        self.assertNotEqual(status["freshness"]["bracket.short_arm"]["admission"],
+                            "not-admitted", "isolation is never part of qualification")

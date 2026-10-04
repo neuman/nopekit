@@ -127,10 +127,12 @@ import importlib
 import importlib.machinery
 import importlib.util
 import numbers
+import copy
 import os
 import reprlib
 import shutil
 import sys
+import tempfile
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -139,8 +141,8 @@ from typing import Any, Callable, Iterable, NamedTuple
 from . import modelio
 from .models import GateSpec, Ledger, NegativeControl, PrerequisiteKind, Tier, Verdict
 from .util import AtompipeError, ensure_dir, rel, short_hash
-from .verdicts import (GateTrace, ParamTrace, SweepMemo, memo_entries, replay, sweep_memo,
-                       traced_context, tracing)
+from .verdicts import (GateTrace, ParamTrace, SweepMemo, memo_entries, not_yet, replay,
+                       sweep_memo, traced_context, tracing)
 
 __all__ = [
     "SCOPE_SEP",
@@ -156,6 +158,15 @@ __all__ = [
     "run_all",
     "selftest",
     "run_fixture",
+    "run_good_fixture",
+    "mutation_walk",
+    "MutationPass",
+    "MutationResult",
+    "MUTATION_MARGIN",
+    "MUTATION_RUNGS",
+    "MUTATION_BISECT",
+    "MUTATION_RUNS_MAX",
+    "MUTATION_TIER_MAX",
     "load_fixture",
     "load_project_gates",
     "describe",
@@ -1013,6 +1024,16 @@ class Registry:
                 f"declaration at all. Set fixture=\"selftest/<file>.py\" (a make(ctx) "
                 f"function) or \"module:function\"."
             )
+        good = getattr(nc, "good", "")
+        if not isinstance(good, str) or (good and not good.strip()):
+            # R-10: only the new declaration is refused, and only when it is
+            # declared and unusable — "" is the default and resolves elsewhere.
+            raise AtompipeError(
+                f"gate {gate_id!r}: negative_control.good must be a fixture reference "
+                f"spelled like fixture (\"selftest/<file>.py:<function>\" or "
+                f"\"module:function\"), or left empty for the pack's baseline or the "
+                f"project's selftest/known_good.py — not {good!r}"
+            )
 
         existing = self._gates.get(gate_id)
         if existing is not None and not replace and existing[1] is not fn:
@@ -1604,8 +1625,9 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
     Gap. A gate that could set it could make its own crash read Gap instead of
     errored — quieter than a missing tool, against invariant 2. So whatever a
     gate returns is read on its flags alone, and a gate's own
-    ``error="not admitted: …"`` (or the error ``Verdict.__post_init__`` writes
-    for a mark it set) is a crash like any other.
+    ``error="unqualified: …"`` (or the error ``Verdict.__post_init__`` writes
+    for a mark it set — the same words since P2.3, so the same disguise) is a
+    crash like any other.
 
     ``blocked_by`` and ``blocked_kind`` are cleared on the same terms (P2.2-D9):
     the prerequisite mark is the spine's, set only by :func:`blocked`. A gate
@@ -2145,7 +2167,8 @@ def prerequisite_root(spec: GateSpec, readings: dict[str, Reading],
       ``skipped``; a fail, current or not (D-08: an invalidated fail is still a
       fail) -> ``failed``;
     * a pass marked through its own prerequisite -> that root and kind; a pass
-      not current -> ``invalidated``; no verdict -> ``unrun``.
+      not current -> ``invalidated``; no verdict, or one not yet qualified at
+      any version (``verdicts.not_yet``, P2.3) -> ``unrun``.
 
     The negative class wins over the not-current one; within a class
     ``PrerequisiteKind``'s rank order, then ``needs`` order. *Rejected:* passes
@@ -2163,7 +2186,12 @@ def prerequisite_root(spec: GateSpec, readings: dict[str, Reading],
             continue
         reading = readings.get(need)
         verdict = reading.verdict if reading is not None else None
-        if verdict is None:
+        # Not yet qualified is unrun, never a refusal: the next check run
+        # qualifies it. What slipped through the first cut of P2.3, which read
+        # it `unqualified`: on a project never checked every guard was
+        # negative, and each claim it guards read Skipped, "prerequisite not
+        # established", where nothing had run at all.
+        if verdict is None or not_yet(verdict):
             stale.append((_KIND_RANK[PrerequisiteKind.UNRUN], index, PrerequisiteKind.UNRUN,
                           need, ""))
             continue
@@ -2646,7 +2674,8 @@ def _import_fixture_module(name: str, root: str) -> Any:
         ) from exc
 
 
-def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | None = None) -> str:
+def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | None = None,
+                  root: str | None = None) -> str:
     """Where a relative fixture path is resolved from, most specific first.
 
     A pack's fixture is written ``selftest/steep_cone.py`` and lives in the PACK
@@ -2664,8 +2693,13 @@ def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | Non
        factory in the pack's helper made is defined in a module no pack
        loaded, and its fixture was looked for in the project (Phase 1 review,
        ``p4`` — ``verdicts._pack_dir_of`` answers the same way).
-    4. ``ctx.root`` — a project's own gates, whose ``selftest/`` sits beside the
-       model.
+    4. ``root`` when the caller names one, else ``ctx.root`` — a project's own
+       gates, whose ``selftest/`` sits beside the model. The sweep names the
+       project root (P2.3): the context a control's fixture is handed is the
+       project's known-good design, and a ``selftest/known_good.py`` that points
+       its root at the design's own files (``selftest/good/``, say) moved where
+       ``selftest/bad.py`` was looked for — "does not exist, looked in
+       selftest/good/selftest/bad.py", every project control unusable.
 
     A fixture that resolves to nothing produces "does not exist, looked in
     <path>" from :func:`load_fixture` — naming the path it tried, because the
@@ -2684,11 +2718,12 @@ def _fixture_root(spec: GateSpec, ctx: GateContext, fn: Callable[..., Any] | Non
             pack_dir = getattr(owner, "PACK_DIR", "") if owner is not None else ""
             if isinstance(pack_dir, str) and pack_dir:
                 return pack_dir
-    return ctx.root or os.curdir
+    return root or ctx.root or os.curdir
 
 
 def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
-                   trace: GateTrace, out_dir: str | None
+                   trace: GateTrace, out_dir: str | None, ref: str | None = None,
+                   fixture_root: str | None = None
                    ) -> tuple[GateContext | None, dict[str, str] | None]:
     """Run ``spec``'s fixture: ``(the known-bad context, None)``, or ``(None,
     {"error", "detail"})`` saying why the control is unusable.
@@ -2716,12 +2751,22 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
     A fixture that builds its own context keeps it as built: cad-solid's fixtures
     assign params on contexts they made from the pack baseline (packs:H15), and
     those are theirs to edit. A dict is merged into the copy's ``extra``.
+
+    ``ref`` is the fixture to build, when it is not the known-bad one: the
+    declared known-good control (``NegativeControl.good``, P2.3), built by the
+    same code under every same guard — a writable traced copy, the out dir
+    replaced, its closure recorded, an exit caught — so the two halves of a
+    qualification differ in their input and nothing else (D4).
+
+    ``fixture_root`` is where a project's relative fixture ref resolves when
+    ``ctx.root`` may not be the project's (``_fixture_root``, step 4).
     """
     nc = spec.negative_control
+    ref = nc.fixture if ref is None else ref
     host = traced_context(dataclasses.replace(ctx, out_dir=out_dir) if out_dir else ctx,
                           trace, readonly=False)
     try:
-        make, module = _load_fixture(nc.fixture, _fixture_root(spec, ctx, fn))
+        make, module = _load_fixture(ref, _fixture_root(spec, ctx, fn, fixture_root))
         trace.fixture_code = modelio.code_closure(module)
         # The fixture's module-level memos too: re-verification runs a fixture
         # and a miss then runs it again, in one process, and a hit on the second
@@ -2740,7 +2785,7 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
         return None, {
             "error": f"fixture called sys.exit({code!r})" if isinstance(exc, SystemExit)
                      else "fixture raised GeneratorExit",
-            "detail": f"{nc.fixture} must build known-bad input and return it, not exit "
+            "detail": f"{ref} must build its input and return it, not exit "
                       f"the process — the control is unusable, so {spec.id} is unproven",
         }
     except Exception as exc:                     # noqa: BLE001 - user's fixture code
@@ -2756,16 +2801,17 @@ def _build_control(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateCo
     if built is None:
         return None, {
             "error": "fixture returned None",
-            "detail": f"{nc.fixture} must return a GateContext or a dict to merge into "
-                      f"ctx.extra; returning nothing means the gate ran against the GOOD "
-                      f"input and any result is meaningless",
+            "detail": f"{ref} must return a GateContext or a dict to merge into "
+                      f"ctx.extra; returning nothing means the gate ran against whatever "
+                      f"it was handed and any result is meaningless",
         }
     return None, {"error": f"fixture returned {type(built).__name__}",
-                  "detail": f"{nc.fixture} must return a GateContext or a dict for ctx.extra"}
+                  "detail": f"{ref} must return a GateContext or a dict for ctx.extra"}
 
 
 def run_fixture(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
-                trace: GateTrace | None, out_dir: str | None) -> GateContext:
+                trace: GateTrace | None, out_dir: str | None,
+                fixture_root: str | None = None) -> GateContext:
     """Build ``spec``'s known-bad context, traced — and do NOT run the gate on it.
 
     The fixture half of :func:`selftest`, on the same terms: a writable traced
@@ -2788,14 +2834,47 @@ def run_fixture(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateConte
             f"{spec.id} declares no negative control, so there is no fixture to run")
     if trace is None:
         trace = GateTrace(kind="control")
-    bad_ctx, problem = _build_control(spec, fn, ctx, trace=trace, out_dir=out_dir)
+    bad_ctx, problem = _build_control(spec, fn, ctx, trace=trace, out_dir=out_dir,
+                                      fixture_root=fixture_root)
     if problem is not None:
         raise AtompipeError(f"{spec.id}: {problem['error']} — {problem['detail']}")
     return bad_ctx
 
 
+def run_good_fixture(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
+                     trace: GateTrace | None, out_dir: str | None,
+                     fixture_root: str | None = None) -> GateContext:
+    """Build ``spec``'s DECLARED known-good context (``NegativeControl.good``),
+    traced — and do NOT run the gate on it. :func:`run_fixture`'s twin for the
+    good half: the same builder, the same guards, the fixture handed exactly
+    what the known-bad one is handed (P2.3-D4). Re-qualifying by values builds
+    it alone and compares what it built with what the control entry recorded,
+    so it must never call ``fn``.
+
+    Raises ``AtompipeError`` when the gate declares no known-good fixture, or
+    the fixture is unusable (missing, broken, exited, raised, returned neither
+    a context nor a dict), naming why. A gate that declares none has its
+    known-good control elsewhere — its pack's baseline, its project's
+    ``selftest/known_good.py`` — and the caller builds that.
+    """
+    nc = spec.negative_control
+    ref = (getattr(nc, "good", "") or "").strip() if nc is not None else ""
+    if not ref:
+        raise AtompipeError(
+            f"{spec.id} declares no known-good fixture (negative_control.good), so there "
+            f"is none to run")
+    if trace is None:
+        trace = GateTrace(kind="control")
+    good_ctx, problem = _build_control(spec, fn, ctx, trace=trace, out_dir=out_dir, ref=ref,
+                                       fixture_root=fixture_root)
+    if problem is not None:
+        raise AtompipeError(f"{spec.id}: {problem['error']} — {problem['detail']}")
+    return good_ctx
+
+
 def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext, *,
-             trace: GateTrace | None = None, out_dir: str | None = None) -> Verdict:
+             trace: GateTrace | None = None, out_dir: str | None = None,
+             fixture_root: str | None = None) -> Verdict:
     """Run the gate against its own known-bad input. The verdict is on the GATE.
 
     ``passed=True`` here means *the gate correctly failed on input that is known
@@ -2882,11 +2961,16 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
     if trace is None:
         trace = GateTrace(kind="control")
     clock = _Clock()
-    bad_ctx, problem = _build_control(spec, fn, ctx, trace=trace, out_dir=out_dir)
+    bad_ctx, problem = _build_control(spec, fn, ctx, trace=trace, out_dir=out_dir,
+                                      fixture_root=fixture_root)
     if problem is not None:
         elapsed, cpu = clock.spent()
         return verdict(passed=False, duration_s=round(elapsed, 6), cpu_s=round(cpu, 6),
                        **problem)
+    # What the control hands its gate through `ctx.extra` — channel parity's
+    # input (P2.3-D5, D-26): the known-good control must hand the same keys.
+    from . import verdicts as _verdicts
+    trace.handed_extra = _verdicts._extra_keys(bad_ctx)
 
     inner = run_gate(spec, fn, bad_ctx, trace=trace)
     elapsed, cpu = clock.spent()
@@ -2961,6 +3045,564 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
                + (f": {inner.detail}" if inner.detail else ""),
         **shared,
     )
+
+
+# --------------------------------------------------------------------------- #
+# the mutation pass (P2.3): one read value at a time, pushed past the
+# evaluator's own limit, on its known-good control
+# --------------------------------------------------------------------------- #
+#: How far past its OWN limit an evaluator's OWN value must sit for a change to
+#: count as a mutation it must fail: 15% of the limit (of the known-good value
+#: when the limit is 0). Why 15%: beam-analytic's ``_MARGIN``
+#: (`packs/beam-analytic/selftest/bad_beams.py`) — "15% past fires only if the
+#: limit is where the pack says it is" — and clear of verdict rounding (the
+#: bracket rounds its values to 3-4 places). *Rejected:* 1% and 2% (inside one
+#: printed step of a one-decimal limit; old 5.1's prototype saw false results
+#: there, S-18); strictly past (ties at the rounding); 100% (a limit drifted
+#: 0.5 -> 0.6 still fails at 1.0: `WideMargin` in `tests/test_mutation.py`).
+MUTATION_MARGIN = 0.15
+
+#: The ladder a read value is pushed along, each factor tried x then ÷, nearest
+#: first; the first rung that lands, either way, ends it. First rung at the
+#: margin; roughly half-decades, so a landing is bracketed quickly; three
+#: decades each way — past that a crossing is a unit slip, not a push.
+#: *Rejected:* a x10 ceiling (bracket.bearing's margin is 88x: it would read
+#: `mutation 0 conclusive`, measured); x2^k to x1024 (equivalent reach, more
+#: probes before x10); x2 and -x (P2.0's operators: a change in the safe
+#: direction survives an honest evaluator — bracket.deflection read 1/4 on them).
+MUTATION_RUNGS = (1.15, 1.5, 2.0, 3.0, 5.0, 10.0, 30.0, 100.0, 1000.0)
+
+#: Halvings, in log-factor, between the last rung that did not land and the one
+#: that did: the aim. 16 gives the same planned value as 20, 24 and 32 on all 60
+#: evaluators measured (the bracket's six and the 54 bundled); 12 differs on two
+#: (`beam.shear_stress` `load_n` 7340 vs 7330, `bom.availability`
+#: `build_quantity` 12004 vs 12001 — the landing point within one rounding step).
+#: *Rejected:* 24 (eight more runs per landing key, no value changes); 40 (old
+#: 5.1's prototype); 0 — the walk unaimed, where the first landing rung
+#: overshoots by up to the rung gap and a 3x hidden limit at a x120 margin
+#: qualifies (measured: `Unaimed`, and V2c's planted gate).
+MUTATION_BISECT = 16
+
+#: Runs per walk, the influence probes and the bisection included. The widest
+#: aimed walk measured is 291 runs (`fdm.print_time_est`), the bracket's 107
+#: (`bed_fit`): 3.5x headroom for a project evaluator that reads more. Spent on
+#: the values that move the evaluator's value first (`_walk_order`), so a
+#: budget an evaluator's junk reads exhaust leaves the junk unwalked, not the
+#: judged value. *Rejected:* 512 (set for an unaimed walk, whose widest was
+#: 148); unbounded (a 600-value evaluator walks ~10^4 runs inside `check`); a
+#: clock (two machines, two outcomes for one control's inputs — D-29's lesson).
+MUTATION_RUNS_MAX = 1024
+
+#: The costliest declared tier the walk runs at: a tier-0 run is under ~2 s by
+#: declaration, and a walk is up to ~300 runs (the widest measured); at tier 1
+#: (seconds to minutes a run) that is hours per qualification. An evaluator
+#: above it reads `mutation 0 conclusive (none made: tier <n>)` and is
+#: qualified on its controls (PLAN-v0.14 §1.5's panel default, on the check-in
+#: list as a reading of it). *Rejected:* every tier (panel Q1).
+MUTATION_TIER_MAX = Tier.INSTANT
+
+#: Two decimal values one float step apart read as equal when the walk asks how
+#: far past a limit a value sits: 2.3 - 2.0 is 0.29999999999999982 in binary,
+#: and "15% past 2.0" must hold for the 2.3 a person reads. *Rejected:* exact
+#: comparison (the aim then overshoots to 2.31, past what anyone can see as the
+#: margin); decimal arithmetic (values arrive as floats a gate already rounded).
+_LAND_TOLERANCE = 1e-9
+
+#: A read value within this of the reported one is the reported value straight
+#: through, and is walked first: bracket.deflection reads `deflection` and
+#: reports it. 0.5%: the bracket rounds its values to 3-4 places.
+_STRAIGHT_THROUGH = 0.005
+
+
+@dataclass(frozen=True)
+class MutationResult:
+    """One mutation the walk made: the read value at ``key`` (a tuple path)
+    moved from ``before`` to ``after``, and the run's ``outcome`` — ``pass`` or
+    ``fail`` (conclusive: it landed, so it measured), or ``errored`` /
+    ``skipped`` (inconclusive: counted neither way, ``why`` its first line) —
+    with the ``measured`` value and ``limit`` it reported."""
+
+    key: tuple
+    before: Any
+    after: Any
+    outcome: str
+    measured: Any = None
+    limit: Any = None
+    why: str = ""
+
+
+@dataclass(frozen=True)
+class MutationPass:
+    """What one walk did. ``results`` — the conclusive mutations; ``inconclusive``
+    — a read value whose walk never landed and saw a skip or a crash (its first
+    such value), or whose aim crashed; ``not_mutated`` — ``(key, why)`` for every
+    read value in no mutation: ``never-lands``, ``word``, ``zero``, ``none``,
+    ``not-finite``, ``other``, or ``budget`` (the budget ran out before it);
+    ``boundary`` — why nothing, or not everything, was walked: ``no-limit`` (no
+    finite value against a finite limit), ``at-limit`` (the value is exactly at
+    its limit: no side to push past), ``tier:<n>`` (above ``MUTATION_TIER_MAX``),
+    ``budget`` (the budget ran out with a value that moves the evaluator's value
+    unwalked); ``runs``; ``errors`` — ``(key, value, outcome, line)`` for every
+    skipped or crashed run the walk saw; ``flaky`` — the first line of a crash
+    that did not repeat when run again, ``""`` when every one did (the caller
+    then holds the walk as it holds a crashed control, never as a tracked
+    entry)."""
+
+    results: tuple = ()
+    inconclusive: tuple = ()
+    not_mutated: tuple = ()
+    boundary: str = ""
+    runs: int = 0
+    errors: tuple = ()
+    flaky: str = ""
+
+
+class _Budget(Exception):
+    """The walk's run budget is spent."""
+
+
+class MutationCannotRun(AtompipeError):
+    """The walk could not run at all — its scratch would have landed inside a
+    project or a pack directory. Never a silent write, never a quiet skip: the
+    caller reads the evaluator unqualified, `mutation could not run`."""
+
+
+def _finite_number(value: Any) -> bool:
+    return (isinstance(value, numbers.Real) and not isinstance(value, bool)
+            and math.isfinite(float(value)))
+
+
+def _orderable(value: Any) -> bool:
+    """What a ladder can push: a finite non-zero number (never a flag), a flag,
+    a non-empty list of finite numbers not all zero."""
+    if isinstance(value, bool):
+        return True
+    if _finite_number(value):
+        return value != 0
+    return (isinstance(value, (list, tuple)) and bool(value)
+            and all(_finite_number(x) for x in value) and any(value))
+
+
+def _unwalked(value: Any) -> str:
+    """Why a read value is not walked, as `not_mutated` names it."""
+    if isinstance(value, str):
+        return "word"
+    if value is None:
+        return "none"
+    if isinstance(value, numbers.Real) and not isinstance(value, bool):
+        return "zero" if value == 0 else "not-finite"
+    return "other"
+
+
+def _scaled(value: Any, factor: float) -> Any:
+    """``value`` x ``factor``: an int rounded and kept an int, a list element-wise,
+    a flag its other value."""
+    if isinstance(value, bool):
+        return not value
+    if isinstance(value, (list, tuple)):
+        return type(value)(int(round(x * factor)) if isinstance(x, int) else x * factor
+                           for x in value)
+    return int(round(value * factor)) if isinstance(value, int) else value * factor
+
+
+def _outward(x: float, origin: Any) -> Any:
+    """``x`` rounded AWAY from ``origin`` to 3 significant figures — an int to the
+    next integer away, at least one step — so an entry and a line read `0.575`,
+    never `0.5750000000003`, and rounding only pushes further past. *Rejected:*
+    nearest rounding, which can round back inside the margin."""
+    if isinstance(origin, int) and not isinstance(origin, bool):
+        r = math.ceil(x) if x > origin else math.floor(x)
+        return r if r != origin else origin + (1 if x > origin else -1)
+    if x == 0 or not math.isfinite(x):
+        return x
+    q = 10.0 ** (math.floor(math.log10(abs(x))) - 2)
+    return float(f"{(math.ceil(x / q) if x > origin else math.floor(x / q)) * q:.3g}")
+
+
+def _aimed_value(x0: Any, factor: float) -> Any:
+    if isinstance(x0, (list, tuple)):
+        return type(x0)(_outward(e * factor, e) if e else e for e in x0)
+    return _outward(x0 * factor, x0)
+
+
+def _lands(verdict: Verdict, side: int, m0: float) -> bool:
+    """Does ``verdict``'s OWN value sit ``MUTATION_MARGIN`` past its OWN limit,
+    on the side opposite the known-good value (``side``)? Read off the value
+    and the limit — never the pass flag: a walk that stopped at the first FAIL
+    reads `1/1 fail` over an evaluator keyed to its own control
+    (`StopsAtFirstFail`). A run that measured nothing finite never lands."""
+    if verdict.outcome not in ("pass", "fail"):
+        return False
+    m, limit = verdict.measured, verdict.limit
+    if not (_finite_number(m) and _finite_number(limit)):
+        return False
+    scale = abs(float(limit)) if limit else abs(float(m0))
+    return side * (float(m) - float(limit)) >= \
+        MUTATION_MARGIN * scale * (1 - _LAND_TOLERANCE)
+
+
+def _path_get(params: Any, key: tuple) -> Any:
+    for part in key:
+        params = params[part]
+    return params
+
+
+def _path_set(params: dict, key: tuple, value: Any) -> None:
+    for part in key[:-1]:
+        params = params[part]
+    params[key[-1]] = value
+
+
+def _leaves(params: Any, prefix: tuple = ()) -> list[tuple]:
+    if isinstance(params, dict):
+        out: list[tuple] = []
+        for k, v in params.items():
+            out += _leaves(v, prefix + (k,))
+        return out
+    return [prefix] if prefix else []
+
+
+def _read_leaves(trace: GateTrace, params: dict) -> list[tuple]:
+    """The leaves of ``params`` the known-good run read: a path its trace keyed,
+    or one under a level it read whole (a scoped pack read keeps its scoped
+    path). The ones a mutation may change: "the parameters its run read"
+    (PLAN-v0.14 §1.5)."""
+    whole = set(trace.whole)
+    keyed = set(trace.params)
+    return [leaf for leaf in _leaves(params)
+            if leaf in keyed or any(leaf[:i] in whole for i in range(len(leaf)))]
+
+
+def _fold_reads(into: GateTrace, run: GateTrace, known_good: dict) -> None:
+    """Fold one walk run's reads into the known-good half's trace, each param at
+    its KNOWN-GOOD digest: a value only a mutated run reads is an input of the
+    qualification — moved, it re-runs the walk (P2.3-D9). What slipped through
+    the design that walked on a throwaway trace (V1j): a gate reading
+    `override` only past its limit, the known-good design gaining `override =
+    true`, and the cached walk served — `mutation 1/1 fail` over a gate that now
+    passes the same mutation. Keyed at the known-good value, never the mutated
+    one: a level the walk read whole with a mutated leaf inside would otherwise
+    key the qualification on a design that never existed, and never match."""
+    from . import verdicts as _verdicts           # this module imports from verdicts
+    anchors = getattr(into, "anchors", None) or _verdicts.Anchors()
+    for path, digest in run.params.items():
+        if path in into.params:
+            continue
+        known, value = _verdicts._param_at(known_good, path, digest, anchors)
+        into.params[path] = known
+        if path in run.values and value is not _verdicts._MISSING:
+            small, shown = _verdicts.small_value(value, anchors)
+            if small:
+                into.values[path] = shown
+    into.whole |= set(run.whole)
+    for key, digest in run.ledger.items():
+        into.ledger.setdefault(key, digest)
+    for path in run.files_read:
+        into._note_read(path)
+    for path in getattr(run, "sources", ()):
+        into._note_source(path)
+    for path in run.stats:
+        into._note_stat(path, run.stat_existed(path))
+    into.dirs |= set(run.dirs)
+    into.files_written |= set(run.files_written)
+    into.opaque |= set(run.opaque)
+    into.model_used = into.model_used or run.model_used
+    for path, digest in run.host_reads.items():
+        into.host_reads.setdefault(path, digest)
+
+
+def _walk_order(keys: list[tuple], *, influence: dict, straight: set) -> list[tuple]:
+    """The order the walk spends its budget in: a read value that IS the reported
+    value first, then by how far it moved the evaluator's value at the first
+    rung (most first; a run that crashed counts as moving it most), then by
+    path. What slipped through ordering by path alone (critique of the P2.3
+    design): an evaluator whose judged value sorts after 600 junk reads never
+    had it walked — the budget ran out on the junk."""
+    def rank(key: tuple) -> tuple:
+        return (key not in straight, -influence.get(key, math.inf), repr(key))
+    return sorted(keys, key=rank)
+
+
+def _probe_value(x0: Any) -> Any:
+    """The influence probe: the first ladder value that differs from ``x0`` — x1.15
+    for most, the other value of a flag, the first rung that moves an int.
+    ONE run per value, and the ladder reuses it: an evaluator reading 600
+    values is probed in 600 runs, inside the budget, with its judged value
+    among them. *Rejected:* both directions of the first rung (1,200 runs for
+    those 600 — the budget gone before the judged value is probed)."""
+    if isinstance(x0, bool):
+        return not x0
+    for f in MUTATION_RUNGS:
+        for g in (f, 1.0 / f):
+            value = _scaled(x0, g)
+            if value != x0:
+                return value
+    return x0
+
+
+def _walk_key(key: tuple, x0: Any, run: Callable[[tuple, Any], Verdict], side: int,
+              m0: float) -> tuple[str, Any]:
+    """One read value's walk: ``("lands", MutationResult)``,
+    ``("inconclusive", MutationResult)`` or ``("never-lands", None)``.
+
+    The ladder, x then ÷ per rung, nearest first; a rung equal to the known-good
+    value or one already tried is skipped; the first rung that lands ends it.
+    Then the aim: ``MUTATION_BISECT`` halvings in log-factor between the last
+    rung that did not land that way and the one that did, the smallest landing
+    factor rounded outward; a rounded value that does not land (a non-monotone
+    evaluator) falls back to the rung's. A skip or a crash during the aim stops
+    it, and the value is inconclusive — never a bisection that read a crash as
+    "does not land" and aimed further out (critique of the P2.3 design: a
+    transient error there walked a x120-margin gate back to its x1000 rung)."""
+    tried: set = set()
+    prev = {+1: 1.0, -1: 1.0}
+    found = None
+    first_error: tuple | None = None
+    factors = (MUTATION_RUNGS[0],) if isinstance(x0, bool) else MUTATION_RUNGS
+    for f in factors:
+        for d, g in ((+1, f), (-1, 1.0 / f)):
+            value = _scaled(x0, g)
+            if value == x0 or repr(value) in tried:
+                continue
+            tried.add(repr(value))
+            verdict = run(key, value)
+            if verdict.outcome in ("error", "skipped") and first_error is None:
+                first_error = (value, verdict)
+            if _lands(verdict, side, m0):
+                found = (prev[d], g, value, verdict)
+                break
+            prev[d] = g
+        if found:
+            break
+    if found is None:
+        if first_error is None:
+            return "never-lands", None
+        value, verdict = first_error
+        return "inconclusive", _inconclusive(key, x0, value, verdict)
+    lo, hi, rung_value, rung_verdict = found
+    if isinstance(x0, bool):
+        return "lands", _result(key, x0, rung_value, rung_verdict)
+    for _ in range(MUTATION_BISECT):
+        mid = math.exp((math.log(lo) + math.log(hi)) / 2)
+        value = _scaled(x0, mid)
+        verdict = run(key, value)
+        if verdict.outcome in ("error", "skipped"):
+            return "inconclusive", _inconclusive(key, x0, value, verdict, aiming=True)
+        if _lands(verdict, side, m0):
+            hi = mid
+        else:
+            lo = mid
+    after = _aimed_value(x0, hi)
+    verdict = run(key, after)
+    if verdict.outcome in ("error", "skipped"):
+        return "inconclusive", _inconclusive(key, x0, after, verdict, aiming=True)
+    if not _lands(verdict, side, m0):
+        after, verdict = rung_value, rung_verdict
+    return "lands", _result(key, x0, after, verdict)
+
+
+def _first_line(verdict: Verdict) -> str:
+    text = verdict.error if verdict.outcome == "error" else (verdict.skip_reason
+                                                            or verdict.detail)
+    return (str(text or "").splitlines() or [""])[0]
+
+
+def _result(key: tuple, x0: Any, after: Any, verdict: Verdict) -> MutationResult:
+    return MutationResult(key=key, before=x0, after=after, outcome=verdict.outcome,
+                          measured=verdict.measured, limit=verdict.limit)
+
+
+def _inconclusive(key: tuple, x0: Any, after: Any, verdict: Verdict, *,
+                  aiming: bool = False) -> MutationResult:
+    outcome = "errored" if verdict.outcome == "error" else "skipped"
+    line = _first_line(verdict)
+    return MutationResult(key=key, before=x0, after=after, outcome=outcome,
+                          why=f"while aiming: {line}" if aiming else line)
+
+
+def _inside(path: str, roots: Iterable[str]) -> str:
+    """The root ``path`` lies in, or ``""``."""
+    real = os.path.realpath(path)
+    for root in roots:
+        if not root:
+            continue
+        base = os.path.realpath(root)
+        if real == base or real.startswith(base.rstrip(os.sep) + os.sep):
+            return root
+    return ""
+
+
+def mutation_walk(spec: GateSpec, fn: Callable[[GateContext], Any], good_ctx: GateContext,
+                  good_verdict: Verdict, *, trace: GateTrace | None = None,
+                  roots: Iterable[str] = ()) -> MutationPass:
+    """The mutation pass on ``spec``'s known-good control (PLAN-v0.14 §1.5):
+    every value its known-good run read, pushed along ``MUTATION_RUNGS`` until
+    the evaluator's OWN value lands ``MUTATION_MARGIN`` past its OWN limit, on
+    the side opposite its known-good value — read off the value, never the pass
+    flag — then aimed by bisection at the smallest change that lands; that
+    change is the value's mutation, and its run must fail. A value that never
+    lands is not mutated (named, never counted): an honest evaluator passes a
+    change to what it only prints, and §6.3 asks non-vacuity, not verification.
+
+    ``good_verdict`` is the known-good run's verdict and ``trace`` its trace:
+    which values it read, and where every walk run's reads are folded, each at
+    its known-good digest (``_fold_reads``). Nothing is walked — ``boundary``
+    says why — above ``MUTATION_TIER_MAX``, or unless the known-good run passed
+    with a finite value against a finite limit it is not exactly at. The values
+    are walked in ``_walk_order``, at most ``MUTATION_RUNS_MAX`` runs; a value
+    that moves the evaluator's value and is left unwalked makes the boundary
+    ``budget``.
+
+    **Sealed** (invariant 15): every run is ``run_gate`` on a deep copy of the
+    known-good params with one value changed, a fresh ``SweepMemo`` and an out
+    dir from ``tempfile`` that is emptied between runs and removed at the end,
+    with ``sys.dont_write_bytecode`` set for the pass. That dir must lie outside
+    ``roots`` (the project and every pack directory) and the known-good
+    context's root, or nothing runs: ``MutationCannotRun``, which the caller
+    reads as unqualified, loudly — never a scratch dir under the project
+    (evidence from a design that never existed, beside real evidence). The
+    known-good design is never touched. Deterministic: no clock and no
+    randomness, so the same inputs give the same runs and the same bytes.
+
+    A crash a re-run does not repeat is ``flaky``: the caller holds the walk as
+    it holds a crashed control (remembered, untracked, re-run next check) —
+    never a tracked entry an environmental failure decided.
+    """
+    if int(spec.tier) > int(MUTATION_TIER_MAX):
+        return MutationPass(boundary=f"tier:{int(spec.tier)}")
+    m0, limit0 = good_verdict.measured, good_verdict.limit
+    if good_verdict.outcome != "pass" or not (_finite_number(m0) and _finite_number(limit0)):
+        return MutationPass(boundary="no-limit")
+    if float(m0) == float(limit0):
+        return MutationPass(boundary="at-limit")
+    m0 = float(m0)
+    side = 1 if m0 < float(limit0) else -1
+    trace = trace if trace is not None else GateTrace(kind="control")
+    known_good = copy.deepcopy(dict(good_ctx.params or {}))
+    keys = _read_leaves(trace, known_good)
+
+    base = tempfile.gettempdir()
+    clash = _inside(base, [*roots, getattr(good_ctx, "root", "") or ""])
+    if clash:
+        raise MutationCannotRun(
+            f"its temp directory {base} is inside {clash}: a mutated run's scratch would "
+            f"land in the tree it may not write (set TMPDIR outside the project)")
+
+    not_mutated: list[tuple] = []
+    walkable: list[tuple] = []
+    for key in keys:
+        value = _path_get(known_good, key)
+        if _orderable(value):
+            walkable.append(key)
+        else:
+            not_mutated.append((key, _unwalked(value)))
+
+    errors: list[tuple] = []
+    cache: dict[tuple, Verdict] = {}
+    spent = [0]
+    out_dir = tempfile.mkdtemp(prefix="atompipe-mutation-")
+    bytecode = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
+    # One gate, run hundreds of times: its module closure found once per size
+    # of sys.modules, its memos still emptied before every run.
+    scope = modelio.closure_scope()
+    scope.__enter__()
+
+    def run(key: tuple, value: Any) -> Verdict:
+        slot = (key, repr(value))
+        if slot in cache:
+            return cache[slot]
+        if spent[0] >= MUTATION_RUNS_MAX:
+            raise _Budget()
+        spent[0] += 1
+        verdict = _mutated_run(spec, fn, good_ctx, known_good, key, value, out_dir, trace)
+        cache[slot] = verdict
+        if verdict.outcome in ("error", "skipped"):
+            errors.append((key, value, verdict.outcome, _first_line(verdict)))
+        return verdict
+
+    results: list[MutationResult] = []
+    inconclusive: list[MutationResult] = []
+    boundary = ""
+    try:
+        influence: dict[tuple, float] = {}
+        straight = {key for key in walkable
+                    if _finite_number(_path_get(known_good, key))
+                    and abs(float(_path_get(known_good, key)) - m0)
+                    <= _STRAIGHT_THROUGH * abs(m0)}
+        probed: list[tuple] = []
+        try:
+            for key in sorted(walkable, key=repr):
+                verdict = run(key, _probe_value(_path_get(known_good, key)))
+                if verdict.outcome in ("error", "skipped"):
+                    influence[key] = math.inf
+                elif _finite_number(verdict.measured):
+                    influence[key] = abs(float(verdict.measured) - m0)
+                else:
+                    influence[key] = math.inf       # it stopped measuring: it moved
+                probed.append(key)
+        except _Budget:
+            pass
+        order = _walk_order(probed, influence=influence, straight=straight)
+        order += [key for key in sorted(walkable, key=repr) if key not in set(probed)]
+        for index, key in enumerate(order):
+            x0 = _path_get(known_good, key)
+            try:
+                kind, result = _walk_key(key, x0, run, side, m0)
+            except _Budget:
+                left = order[index:]
+                not_mutated += [(k, "budget") for k in left]
+                if any(influence.get(k, math.inf) > 0 or k in straight for k in left):
+                    boundary = "budget"
+                break
+            if kind == "lands":
+                results.append(result)
+            elif kind == "inconclusive":
+                inconclusive.append(result)
+            else:
+                not_mutated.append((key, "never-lands"))
+        flaky = ""
+        for key, value, outcome, line in errors:
+            if outcome != "error":
+                continue
+            again = _mutated_run(spec, fn, good_ctx, known_good, key, value, out_dir, trace)
+            if again.outcome != "error":
+                flaky = line or "a crash that did not repeat"
+                break
+    finally:
+        scope.__exit__(None, None, None)
+        sys.dont_write_bytecode = bytecode
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return MutationPass(results=tuple(results), inconclusive=tuple(inconclusive),
+                        not_mutated=tuple(sorted(not_mutated, key=lambda kw: repr(kw[0]))),
+                        boundary=boundary, runs=spent[0], errors=tuple(errors), flaky=flaky)
+
+
+def _mutated_run(spec: GateSpec, fn: Callable[[GateContext], Any], good_ctx: GateContext,
+                 known_good: dict, key: tuple, value: Any, out_dir: str,
+                 trace: GateTrace) -> Verdict:
+    """One walk run: ``run_gate`` on a deep copy of the known-good params with
+    ``key`` set to ``value``, a fresh memo, the walk's emptied out dir — traced
+    on a trace of its own and folded into ``trace`` (``_fold_reads``)."""
+    from . import verdicts as _verdicts
+    params = copy.deepcopy(known_good)
+    _path_set(params, key, value)
+    for name in os.listdir(out_dir):
+        target = os.path.join(out_dir, name)
+        if os.path.isdir(target) and not os.path.islink(target):
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            with contextlib.suppress(OSError):
+                os.remove(target)
+    names = {f.name for f in dataclasses.fields(good_ctx)}
+    changes: dict[str, Any] = {"params": params, "out_dir": out_dir}
+    if "memo" in names:
+        changes["memo"] = _verdicts.SweepMemo()
+    own = GateTrace(kind=getattr(trace, "kind", "control"),
+                    anchors=getattr(trace, "anchors", None))
+    verdict = run_gate(spec, fn, dataclasses.replace(good_ctx, **changes), trace=own)
+    _fold_reads(trace, own, known_good)
+    return verdict
 
 
 # --------------------------------------------------------------------------- #

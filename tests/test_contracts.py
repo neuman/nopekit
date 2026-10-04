@@ -1611,5 +1611,49 @@ class SiteMetaKeysAreDocumented(unittest.TestCase):
                                     "SITE_CONTRACT's ### `meta` section"])
 
 
+#: P2.3's surface beyond what the generic checkers reach (V7, R-14): the control
+#: entry's new fields, the facts and the two `Admission` fields, and the walk in
+#: SPINE_CONTRACT; the verdict row's `unqualified` status and its
+#: `qualification` in SITE_CONTRACT. Each a name a fresh context window greps
+#: for before it edits the qualification. ``(document, name, why)``.
+QUALIFICATION_NAMES = (
+    (SPINE_CONTRACT, "bad_extra", "the entry's known-bad channel"),
+    (SPINE_CONTRACT, "mutation: dict | None", "the entry's walk"),
+    (SPINE_CONTRACT, "QualificationFacts", "the judge's facts"),
+    (SPINE_CONTRACT, "qualification: QualificationFacts | None", "Admission.qualification"),
+    (SPINE_CONTRACT, "moved: tuple", "Admission.moved"),
+    (SPINE_CONTRACT, "mutation_walk(", "the walk"),
+    (SPINE_CONTRACT, "MUTATION_MARGIN", "the walk's margin"),
+    (SITE_CONTRACT, "`unqualified`", "the verdict row's status"),
+    (SITE_CONTRACT, "qualification: {token, reason}", "the verdict row's qualification"),
+    (PACK_FORMAT, "good: str = \"\"", "NegativeControl.good"),
+)
+
+
+def qualification_doc_problems(texts: dict) -> list:
+    """Every ``QUALIFICATION_NAMES`` entry its document does not say."""
+    return [f"{os.path.basename(doc)} does not document {name!r} ({why})"
+            for doc, name, why in QUALIFICATION_NAMES if name not in texts[doc]]
+
+
+class QualificationIsDocumented(unittest.TestCase):
+    """(V7) The qualification's surface is in the contracts an agent reads first."""
+
+    def _texts(self) -> dict:
+        return {doc: _read(doc) for doc in {d for d, _n, _w in QUALIFICATION_NAMES}}
+
+    def test_every_name_is_documented(self):
+        problems = qualification_doc_problems(self._texts())
+        self.assertEqual(problems, [], "\n".join(problems))
+
+    def test_a_document_that_drops_one_is_caught(self):
+        texts = self._texts()
+        texts[SITE_CONTRACT] = texts[SITE_CONTRACT].replace(
+            "qualification: {token, reason}", "")
+        self.assertEqual(qualification_doc_problems(texts),
+                         ["SITE_CONTRACT.md does not document 'qualification: {token, reason}' "
+                          "(the verdict row's qualification)"])
+
+
 if __name__ == "__main__":
     unittest.main()

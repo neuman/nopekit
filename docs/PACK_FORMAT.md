@@ -20,7 +20,7 @@ packs/<name>/
   lenses.md          # adversarial review dimensions for this domain
   sourcing.md        # real-world procurement and process constraints (optional)
   scaffold/          # starter model + claims for a new project in this domain (optional)
-  selftest/          # baseline.json + the known-bad fixtures gates must fail on
+  selftest/          # baseline.json (the known-good design) + the known-bad fixtures
 ```
 
 ## Three-tier progressive disclosure
@@ -278,6 +278,8 @@ class NegativeControl:
     fixture: str                       # "selftest/steep_cone.py" or "module:function"; blank is refused
     expect: str = "fail"               # "fail" (must not pass) or "error" (must crash); else not ok
     note: str = ""                     # what is wrong with the fixture, and nothing else
+    good: str = ""                     # the known-good control's fixture, spelled like `fixture`;
+                                       #   "" = the pack's selftest/baseline.json (P2.3)
 
 @dataclass
 class Verdict:                         # what a gate returns (or a (bool, detail) tuple, or a dict)
@@ -337,13 +339,14 @@ class GateContext:                     # a gate's one argument — a traced view
 ```
 
 **`Verdict.unqualified` is the spine's, never a gate's** (P2.1). The resolver and
-the sweep set it — with `error="not admitted: <why>"` — when a gate's known-bad
-control PASSED at its current version (or its control crashed), and a claim with
-such an evaluator reads Gap, `unqualified: <gate> : <why>`, even beside a pass.
+the sweep set it — the reason as a token, with `error="unqualified: <token>"` — when
+a gate is not qualified at its current version (a control that did not hold, a
+mutation that passed, P2.3), and a claim with such an evaluator reads Gap,
+`unqualified: <gate> : <why>`, even beside a pass.
 `run_gate` clears it on whatever your gate returns, as it clears `rho`: a gate
 that could set it could make its own crash read Gap, quieter than a missing tool.
 So a gate that returns `unqualified="…"`, or wraps its own exception as
-`error="not admitted: …"`, reads as the crash it is (Skipped, `errored:`), never
+`error="unqualified: …"`, reads as the crash it is (Skipped, `errored:`), never
 as a refusal. Raise, or return `error=`, when your gate cannot evaluate; never
 claim a qualification state.
 
@@ -419,8 +422,8 @@ by exactly those reads (`rho`). So:
   costlier path's answer, the highest first), and re-runs one recorded below. (What
   slipped through: nothing recorded the read, and a PASS from the tier-0 path was
   served Fresh to `check --tier 2`, whose path failed the design.) Your control is
-  keyed the same way — one shown on the tier-0 path does not admit the tier-2 path,
-  and a gate that passes its known-bad input on either path is not admitted on any.
+  keyed the same way — one shown on the tier-0 path does not qualify the tier-2 path,
+  and a gate that passes its known-bad input on either path is qualified on none.
   A crash is remembered on its own path too: a tier-2 solver that crashes supersedes
   the tier-2 PASS — a plain `check` shows the crash and says `run atompipe check --tier
   2` — and a PASS on the cheap path never clears it; only a run on that path that
@@ -599,7 +602,7 @@ a package's `__init__` or an installed module records none, and its control re-r
 its fixture on every `check` (admission review, round 1, C: the form once
 recorded nothing, and a fixture edited into a no-op stayed admitted). A file a fixture
 module reads at import — `selftest/baseline.json`, a table outside `selftest/` — is
-recorded with its closure too, so an edit to it re-verifies the control (round 1, D:
+recorded with its closure too, so an edit to it re-qualifies the gate (round 1, D:
 a known-bad span read from `inputs/` at import was keyed nowhere). What a module only
 asks about (`os.path.exists`), lists, or takes from the environment at import is not:
 do that in `make`, inside the control's trace window.
@@ -692,43 +695,67 @@ while its tools are present fails.
 `atompipe gate selftest` runs every control and **fails any gate that passes its own
 known-bad input**.
 
-### Admission: a control counts at the gate's current version
+### Qualification: both controls, at the gate's current version
 
 Declaring a control is what the registry checks. Whether the gate's verdicts COUNT
-is decided in the project, every `check`, from the control having been run and seen
-to fail **at the gate's current version** (invariant 9):
+is decided in the project, every `check`, from the gate being **qualified at its
+current version** (invariant 9, GLOSSARY §2): its known-good control passed and its
+known-bad control failed, both run at that version, and — for a gate not loaded from
+the bundled packs — every conclusive mutation of its known-good control failed.
 
-- **The version is everything the control's outcome could depend on**: the spine,
-  the gate's own code (its module and every helper it loaded, by bytes), every source
-  file under the owner's `selftest/` — the pack's, or the project's — the
-  `NegativeControl` fields, and whatever the fixture and the gate read on the control
-  input (a `baseline.json` value, a known-bad mesh, a `.mo` under `assets/`). Each
-  control run is recorded beside the gate's verdicts, as
-  `.atompipe/verdicts/<gate id>/control-<rhoC16>-<out8>.json`, tracked and never
-  rewritten.
-- **`check` runs the control whenever none is on record at that version** — a fresh
-  clone of a project that committed its entries runs none; editing the gate, a
-  fixture or a known-bad asset runs it again. A gate named explicitly above the tier
-  ceiling runs its control too. When only the fixture's own code moved (the bracket's
-  fixtures build through the project's model, so any model edit moves them), the
-  fixture alone is re-run and what it builds is compared with what the recorded
-  control fed its gate: equal values re-verify it with no gate call and no new file.
-  On the live host a pack control gets, that also needs every read of the live
-  design — the fixture's, and its gate's through whatever the fixture passed through —
-  to be one the recorded control keyed; a sealed fixture reads none, so this costs a
-  sealed pack nothing. A fixture that swaps `ctx.model` or `ctx.memo` is never
-  re-verified: the control runs.
-- **Not admitted is an error, not a fail.** A gate whose control PASSED its own
-  known-bad input, or whose control crashed, returned an unusable context or skipped
-  itself with its tools present, gets `error="not admitted: <why>"` and its function
-  is never called. A PASS whose control is not on record at the current version
-  reads stale — `control not demonstrated at this version — run atompipe check`, with
-  `--tier <t>` when the verdict took the path a costlier `ctx.tier` picks — and
-  never under PROVEN, in `check` as in every reader. A missing tool is a skip, never a failed admission.
-- **This is the reject half.** It shows the gate can refuse. It does not yet show
-  that the gate accepts a known-good design: Phase 2 adds that half. A pack's
-  `selftest/baseline.json` already carries it for pack gates — `pack validate` and
-  `gate selftest --pack` require every gate to pass it.
+- **The known-good control** is, first match: the fixture named by
+  `NegativeControl.good`, handed exactly what the known-bad fixture is handed; else,
+  for a pack's gate, the pack's own `selftest/baseline.json`; else, for a project's,
+  `selftest/known_good.py`'s `context(ctx)`. A gate with none is *known-bad shown*,
+  never qualified (`known-good not run`). A `good` fixture that reads the live design
+  it is handed is unusable (`known-good control reads the candidate`), and in a pack
+  it is a seal finding too (invariant 5).
+- **Both controls reach the gate through the same channel**: the `ctx.extra` keys
+  each hands its gate (the spine's `pack_dir`, `pack_dirs` removed) must be equal,
+  else the gate is unqualified (`channels differ`). A gate that answered `extra` and
+  `params` differently could pass one half and fail the other while showing nothing
+  — so a pack whose known-bad fixtures hand their input through `ctx.extra` declares
+  `good=` fixtures that hand the baseline through `extra` too (cad-solid's
+  `selftest/good_meshes.py`, sourcing's `selftest/good_boms.py`). And a check run
+  never hands a gate `ctx.extra`, so a gate not from a bundled pack whose controls
+  reach it through `extra` is unqualified as well: its controls test a path `check`
+  never takes.
+- **The mutation pass** (gates outside the bundled packs: a project's own, and a pack
+  under `.atompipe/packs/`, `~/.atompipe/packs` or `$ATOMPIPE_PACK_PATH`): each value
+  the known-good run read is pushed along a fixed ladder until the gate's own
+  measured value lands 15% past its own limit, the push then aimed at the smallest
+  change that lands; that run must fail. A run that skips or errors is
+  *inconclusive*, counted neither way; a value that never lands is not mutated. It
+  runs in process, at tier 0 only, on copies, with its scratch outside the project
+  and every pack, and it writes nothing.
+- **The version is everything the outcome could depend on**: the spine, the gate's
+  own code (its module and every helper it loaded, by bytes), every source file
+  under the owner's `selftest/` — the pack's, or the project's — the
+  `NegativeControl` fields, and whatever either control's fixture and the gate read
+  on its input, every mutation run's included. Each qualification is recorded beside
+  the gate's verdicts, as `.atompipe/verdicts/<gate id>/control-<rhoC16>-<out8>.json`
+  — the known-bad half, the known-good half (`good`), the walk (`mutation`) and
+  `admitted` (`paired`, `reject-only`, `no`), which the reader re-derives from the
+  recorded facts — tracked and never rewritten.
+- **`check` runs the qualification whenever none is on record at that version** — a
+  fresh clone of a project that committed its entries runs none; editing the gate, a
+  fixture or a known-bad asset runs it again. When only a fixture's own code moved
+  (the bracket's fixtures build through the project's model, so any model edit moves
+  them), both builders alone are re-run and what each builds is compared with what
+  its recorded control fed the gate: equal values re-qualify it with no gate call and
+  no new file. A fixture that swaps `ctx.model` or `ctx.memo` is never re-qualified
+  that way: the qualification runs.
+- **Unqualified is a Gap, not a fail.** The gate's function is never called, its
+  verdict carries the spine's mark (`Verdict.unqualified`, the reason as a token —
+  `known-bad:pass`, `known-good:fail`, `mutation:1/2` — which `report.HUMAN` words),
+  and its claim reads Gap: `unqualified: <gate> : <what does not hold>`, beside a
+  passing gate too. A gate qualified at an earlier version and not at this one reads
+  Stale — `not yet qualified at this version — the next check run qualifies it`,
+  naming `atompipe check --tier <t>` when its verdict took a costlier path — and
+  one never qualified at all reads Gap until a check run qualifies it. A missing
+  tool is a skip, never an unqualified gate.
+- **Qualified means it can fail, and nothing more.** The line says which facts held:
+  `<gate> : known-good pass · known-bad fail · mutation 2/2 fail → qualified`.
 
 **A project fixture is handed the known-good design, not the live one.** When the
 project has `selftest/known_good.py` defining `context(ctx)` — the design every
@@ -737,14 +764,17 @@ receives that context, and builds its known-bad input from a design that passes.
 What slipped through before (S-07): handed the live design, which in the reference
 project fails on purpose, the identity fixture `return ctx` was reported "correctly
 failed … ~64x worse" and certified nothing; on the known-good design it passes its
-own known-bad input and is not admitted. `context` is handed the host with no
+own known-bad input and is unqualified. P2.3 runs the gate on the same context as its
+known-good control: it must pass there. `context` is handed the host with no
 params, an empty ledger, no `extra` and no model — `root`, `out_dir` and `tier` are
 kept, and a read of the tier keys every control built on it — so it must state its design itself (the bracket's states every Config field),
 and a file it reads is keyed as an input of every control built on it. What slipped
 through before: it was handed a copy of the live host, and a `context` that kept
 `ctx.params` passed the live design through unkeyed, so the identity fixture was
 admitted on a design that later passed. A project with no `known_good.py` hands its
-fixtures the live host, and the control entry says so (`"host": "live"`). **Pack
+fixtures the live host, and the control entry says so (`"host": "live"`) — and, with
+no known-good control unless a gate declares a `good` fixture, its gates are known-bad
+shown and their claims read Gap. **Pack
 fixtures always get the live host** — they must be SEALED (above), which the seal
 detector checks by running them; a clean host is never substituted for a leaky
 fixture.
@@ -882,8 +912,10 @@ checks that the manifest parses and matches its directory, `PACK.md` exists and 
 substantive, every declared gate actually registers, every gate has a negative
 control, `max_tier` matches the gates, the description is one line, and every
 file-based fixture exists — and then **demonstrates** the pack at tiers 0–1, gate by
-gate, with the pack loaded alone: its own `selftest/baseline.json` passes, its
-control fires, the control still fires against an empty host (the seal probe), it
+gate, with the pack loaded alone: its known-good control passes (its own
+`selftest/baseline.json`, or the `good` fixture it declares), its known-bad control
+fails, both reach the gate through the same `ctx.extra` keys, the control still
+fires against an empty host (the seal probe), it
 read nothing of its host's `ctx.params` on the way (the seal, read off the trace), and
 every prerequisite in its `needs` closure passes that same known-bad control
 (isolation: `<gate>: control not isolated — its prerequisite <id> does not pass
@@ -899,13 +931,16 @@ solver, so this stays seconds long; the rest waits for
 atompipe gate selftest --pack <name> --junit <file>.xml
 ```
 
-which runs the same three checks at **every** tier and writes them as JUnit XML:
-suite `controls` (childless only where the control fired) and suite `baselines`.
+which runs the same checks at **every** tier and writes them as JUnit XML: suite
+`controls` (childless only where the gate is qualified) and suite `baselines` (the
+known-good half). It prints a row per pack (`beam-analytic (bundled) : 8 qualified`),
+the line of every unqualified gate (every gate's under `-v`), and the summary
+(`54 evaluators in 9.2s: 54 qualified, 0 unqualified, 0 skipped`).
 `--pack` takes a pack name or a directory; a pack being written inside a project
 (`.atompipe/packs/<name>/`) is found by name there. Outside a project,
 `atompipe gate selftest` with no `--pack` demonstrates every bundled pack. Either
-way nothing is recorded, a run in which no control ran exits 1 (`--allow-empty`
-accepts that), and `--user-packs` is needed before `$ATOMPIPE_PACK_PATH` or
+way nothing is recorded, a run with any unqualified gate exits 1, as does one in
+which no control ran (`--allow-empty` accepts that), and `--user-packs` is needed before `$ATOMPIPE_PACK_PATH` or
 `~/.atompipe/packs` are searched — the machine does not get to choose which copy is
 tested.
 

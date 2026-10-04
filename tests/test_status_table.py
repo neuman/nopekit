@@ -14,7 +14,7 @@ row that changed.
 
 * **StatusTable** (C1) — `claims.resolve_status` for an automated claim over
   every multiset of zero to two covering outcomes from pass, fail, skipped,
-  errored and **not admitted** (an error that starts `not admitted:`, today an
+  errored and **not admitted** (an error that starts `unqualified:`, today an
   error like any other, from P2 a Gap), each with and without a known gate
   that has not run, and with the passing gate stale or not; plus the physical
   and assumption rows. What slipped through without it: `StatusPrecedence` and
@@ -79,10 +79,10 @@ from atompipe.models import (
 #: The five covering outcomes a claim's verdicts can carry, as the table names them.
 KINDS = ("pass", "fail", "skipped", "error", "unadmitted")
 
-#: The refusal's reason, and the text an admission refusal carries beside it
-#: (`verdicts._unqualified` sets both; P2.3 rewords the text).
-REFUSAL = "its known-bad control passed at this version"
-NOT_ADMITTED = f"not admitted: {REFUSAL}"
+#: The refusal's reason — the judge's token (P2.3) — and the text an admission
+#: refusal carries beside it (`verdicts._unqualified` sets both).
+REFUSAL = "known-bad:pass"
+NOT_ADMITTED = f"unqualified: {REFUSAL}"
 
 
 def _verdict(kind: str, index: int) -> Verdict:
@@ -666,27 +666,98 @@ class BlockingMembers(unittest.TestCase):
                                  [("C1", status)] if status.value in self.WANT else [])
 
 
-class RejectOnlyStillCounts(_env.EnvCase):
-    """(C) A project evaluator admitted reject-only — its known-bad control fails
-    at its version, its known-good control has never run — still counts in P2.1:
-    its pass reads `pass`. GLOSSARY §2 calls it *known-bad shown* and says it is
-    not qualified, so its claim reads Gap, `unqualified: known-good not run`; that
-    lands with the known-good half (P2.3), which flips this test in the open.
-    Every project gate is reject-only today, so flipping it here would turn every
-    bracket claim into a Gap and move it twice (P2.1-D7)."""
+class KnownBadShownIsAGap(_env.EnvCase):
+    """(V3, PLAN-v0.14 §1.6 C8; flips `RejectOnlyStillCounts` in the open, R-6)
+    A project evaluator whose known-bad control fails at its version and which
+    has no known-good control — *known-bad shown*, GLOSSARY §2 — is not
+    qualified: its claim reads Gap, `unqualified: <evaluator> : known-good not
+    run`, beside a pass too. Until P2.3 it counted (P2.1-D7) and the bracket's C2
+    read pass on controls only ever shown to fail. The bracket here has its
+    `known_good.context` renamed away, the fixtures still building from the
+    known-good design (removing the file would crash every fixture instead)."""
 
-    def test_the_bracket_passes_on_reject_only_controls(self):
+    def _shown(self) -> str:
         root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
-        statuses = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)["claims"]
-        self.assertEqual(statuses.get("C2"), "pass", statuses)
+        for rel, old, new in (("selftest/known_good.py", "def context(ctx):",
+                               "def _context(ctx):"),
+                              ("selftest/bad_configs.py", "known_good.context(ctx)",
+                               "known_good._context(ctx)")):
+            path = os.path.join(root, *rel.split("/"))
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
+            self.assertEqual(text.count(old), 1, (rel, old))
+            with open(path, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(text.replace(old, new))
+        return root
+
+    def test_the_bracket_reads_gap_on_known_bad_shown_controls(self):
+        root = self._shown()
+        check = _env.atompipe(["check", "--json"], cwd=root)
+        self.assertEqual(check.returncode, 1, check.stderr)
+        status = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)
+        # C4 (bed fit), not C2: C2's evaluators sit behind the slenderness guard
+        # (P2.2), itself known-bad shown, so the rule never runs them — the
+        # claim reads the louder Skipped, `prerequisite not established`.
+        self.assertEqual(status["claims"].get("C4"), "unclaimed", status["claims"])
+        self.assertEqual(status["statuses"]["C4"]["cause"], "unqualified")
+        self.assertTrue(status["statuses"]["C4"]["reason"].endswith("known-good not run"),
+                        status["statuses"]["C4"])
+        self.assertEqual(status["claims"].get("C2"), "blocked", status["claims"])
         admitted = set()
-        for gate in C2_PASSING:
+        for gate in ("bracket.bed_fit", "bracket.min_wall", "bracket.model_validity"):
             directory = os.path.join(root, ".atompipe", "verdicts", gate)
             for name in os.listdir(directory):
                 if name.startswith("control-"):
                     with open(os.path.join(directory, name), encoding="utf-8") as fh:
-                        admitted.add(json.load(fh)["admitted"])
+                        data = json.load(fh)
+                    # Known-bad shown is a fact about the project, filed: its
+                    # good half "not-run" (no known-good control exists), never
+                    # null — null is an entry whose writer ran no good half (D19).
+                    if (data.get("good") or {}).get("outcome") == "not-run":
+                        admitted.add(data["admitted"])
         self.assertEqual(admitted, {"reject-only"})
+
+    def test_a_resolver_counting_reject_only_reads_it_checked(self):
+        """The planted violator, in process: a composition that drops the
+        known-bad-shown mark reads the pass beside it as Checked."""
+        claim = _claim(["g.0pass", "g.1shown"])
+        passing = _verdict("pass", 0)
+        shown = Verdict(gate="g.1shown", claims=["C1"], passed=False,
+                        unqualified="known-good:not-run")
+        self.assertEqual(claims_mod.compose(claim, [passing, shown]).status,
+                         ClaimStatus.UNCLAIMED)
+        counted = dataclasses.replace(shown, unqualified="", error="")
+        self.assertNotEqual(claims_mod.compose(claim, [passing, counted]).status,
+                            ClaimStatus.UNCLAIMED)
+
+
+class UndemonstratedReadsStale(_env.EnvCase):
+    """(C11, P2.1-D6) A static-part change with no check run since — a control's
+    `note` edited on a bracket copy, which moves its static part — leaves every
+    claim that read Checked reading Stale, and none Gap: `check` re-qualifies, a
+    reader only says so. (From P2.3 the rule's other half: an evaluator never
+    qualified at any version reads Gap, `not yet qualified`; the bracket's six
+    were qualified at the version before the edit.)"""
+
+    NOTE = 'note="the same bracket with a 400 mm arm: nothing wrong but the footprint"'
+
+    def test_a_note_edit_reads_stale_not_gap(self):
+        root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        before = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)["claims"]
+        checked = sorted(cid for cid, status in before.items() if status == "pass")
+        self.assertEqual(checked, ["C2", "C3", "C4"], before)
+        path = os.path.join(root, "gates", "structural.py")
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count(self.NOTE), 1)
+        with open(path, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text.replace(self.NOTE, self.NOTE.replace("footprint", "size")))
+        after = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)["claims"]
+        moved = {cid: after[cid] for cid in checked}
+        self.assertNotIn("unclaimed", set(moved.values()), after)
+        self.assertEqual(moved["C4"], "stale", after)
+        for cid in checked:
+            self.assertIn(after[cid], ("pass", "stale"), (cid, after))
 
 
 class ReportSectionOrder(unittest.TestCase):
@@ -888,7 +959,7 @@ def _check_the_refusal(run: _Refused) -> None:
              for case in root.iterfind("testsuite[@name='gates']/testcase")}
     refusal = gates.get(LOGGER) or []
     if not (refusal and refusal[0].tag == "error"
-            and "not admitted:" in (refusal[0].get("message") or "")):
+            and "unqualified:" in (refusal[0].get("message") or "")):
         raise AssertionError(f"fixture rotted: {LOGGER} was not refused — {refusal}")
     for gate in C2_PASSING:
         if gates.get(gate) != []:
@@ -981,7 +1052,7 @@ class UnqualifiedBesideAPassIsNeverChecked(unittest.TestCase):
 
         def drops_the_unadmitted(claim, verdicts, **kw):
             verdicts = list(verdicts)
-            refused = {v.gate for v in verdicts if str(v.error).startswith("not admitted:")}
+            refused = {v.gate for v in verdicts if str(v.error).startswith("unqualified:")}
             claim = dataclasses.replace(claim, gates=[g for g in claim.gates
                                                       if g not in refused])
             return real(claim, [v for v in verdicts if v.gate not in refused], **kw)
@@ -1251,7 +1322,7 @@ def _outlived_project() -> dict:
         fh.write(BED_FIXTURE.format(xy="300.0"))
     second = _env.atompipe(["check", "--json"], cwd=root, home=home)
     rows = {r["gate"]: r for r in json.loads(second.stdout)["verdicts"]}
-    if not str(rows.get(BED_PROBE, {}).get("error", "")).startswith("not admitted:"):
+    if not str(rows.get(BED_PROBE, {}).get("error", "")).startswith("unqualified:"):
         raise AssertionError(f"fixture rotted: {BED_PROBE} was not refused — "
                              f"{rows.get(BED_PROBE)}")
     model = os.path.join(root, "model", "bracket.py")

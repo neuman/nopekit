@@ -660,7 +660,8 @@ class SelftestFilesItsControls(_env.EnvCase):
 
         ran = _run(project, "gate", "selftest")
         self.assertEqual(ran.returncode, 0, ran.stdout + ran.stderr)
-        self.assertTrue(_transcript.SELFTEST_SUMMARY.fullmatch(ran.stdout.splitlines()[-1]),
+        # R-6 (P2.3-D18, words): the summary in qualification's words.
+        self.assertTrue(_transcript.QUALIFIED_SUMMARY.fullmatch(ran.stdout.splitlines()[-1]),
                         ran.stdout)
         verdicts, controls = _entries(project)
         self.assertEqual((len(verdicts), len(controls)), (0, 6), (verdicts, controls))
@@ -675,8 +676,12 @@ class SelftestFilesItsControls(_env.EnvCase):
         with open(os.path.join(project, *mine[0].split("/")), encoding="utf-8") as fh:
             self.assertEqual(last["control"], json.load(fh)["rho"])
         text = _run(project, "gate", "show", "bracket.deflection")
-        self.assertTrue(_transcript.LAST_SELFTEST_FIRED.fullmatch(text.stdout.splitlines()[-1]),
-                        text.stdout)
+        # R-6 (P2.3-D18, words): `qualification:` replaced `last selftest:`, its
+        # detail rows under it, naming the control entry it was read off.
+        shown = [m for line in text.stdout.splitlines()
+                 if (m := _transcript.QUALIFICATION_SHOW.fullmatch(line))]
+        self.assertEqual([m.group("control") for m in shown], [last["control"][:12]],
+                         text.stdout)
 
         again = _run(project, "gate", "selftest")
         self.assertEqual(again.returncode, 0, again.stdout + again.stderr)

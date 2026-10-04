@@ -1882,8 +1882,18 @@ def state(
         # What slipped through (P2.1 design): this read `passed`, so a junk
         # truthy pass flag (`"yes"`) rendered `pass` on a row whose `ok` was
         # False, and a skipped-and-errored verdict rendered by its first flag.
-        row["status"] = {"error": "errored", "skipped": "skipped", "pass": "pass",
-                         "fail": "fail"}[verdict.outcome]
+        # An unqualified evaluator's row reads `unqualified` (P2.3-D17), never
+        # `errored`: its verdict says `error` only so that it is never ok (R-2),
+        # and the page painted a crash's word on something that crashed nothing.
+        row["status"] = ("unqualified" if getattr(verdict, "unqualified", "") else
+                         {"error": "errored", "skipped": "skipped", "pass": "pass",
+                          "fail": "fail"}[verdict.outcome])
+        if getattr(verdict, "unqualified", ""):
+            # The reason in the table's words (`report.HUMAN`), the token kept
+            # for a machine reader; the page owns neither.
+            row["qualification"] = {
+                "token": verdict.unqualified,
+                "reason": report_logic.qualification_reason(verdict.unqualified)}
         row["views"] = sorted({(loc.view or "") for loc in (verdict.locators or [])
                                if (loc.view or "")})
         if not verdict.locators and not verdict.ok:
