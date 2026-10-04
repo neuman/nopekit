@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import modelio, store
-from .models import Claim, Decision, Ledger, Param, Rejected, Verdict, slugify
+from .models import Claim, ClaimKind, Decision, Ledger, Param, Rejected, Verdict, slugify
 from .util import AtompipeError, atomic_write_text, ensure_dir, iter_suffix_unique
 
 __all__ = ["add", "changed_in", "render_log", "write_log", "why"]
@@ -861,12 +861,22 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
     out: list[str] = [f"claim  {claim.id}  [{' · '.join(flags)}]"]
     out += _wrap(claim.statement)
 
+    # With none written, by what settles the claim instead (review of P2.5a: a
+    # physical claim's note — its written test, P2.5a-D9 — and an expert
+    # judgment, which takes none, were both told "without a threshold this is a
+    # wish", in a Never-say of the acceptance condition).
     acceptance = claim.acceptance.render() if claim.acceptance else ""
-    out += _wrap(
-        f"acceptance: {acceptance}" if acceptance
-        else "acceptance: NONE — without a threshold this is a wish, not a claim",
-        indent="  ",
-    )
+    said = report.HUMAN["acceptance"]
+    if acceptance:
+        line = f"acceptance: {acceptance}"
+    elif report._judgment(claim):
+        line = said["why_judgment"].format(
+            authority=report._one(getattr(claim, "authority", "")) or "its authority")
+    elif claim.kind == ClaimKind.PHYSICAL and str(claim.note or "").strip():
+        line = said["why_note"]
+    else:
+        line = said["why_none"]
+    out += _wrap(line, indent="  ")
     if claim.source:
         out += _wrap(f"source: {claim.source}", indent="  ")
     if claim.tags:
@@ -901,7 +911,10 @@ def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
         # Every recorded physical result, oldest first, each with whether it
         # counts now and why not (P2.5a-D20) — so a reader who recorded one
         # learns from the claim itself why it settles nothing.
-        _section(out, f"PHYSICAL RESULTS ({len(results)}, oldest first)")
+        # A judgment heads as one (review of P2.5a: GLOSSARY §1's physical
+        # result is a physical evaluator's verdict on an article).
+        head = "judgments_head" if report._judgment(claim) else "results_head"
+        _section(out, report.HUMAN["physical"][head].format(n=len(results)))
         for entry in results:
             out += _wrap(_result_line(claim, entry), indent="  ", hanging="    ")
 
@@ -928,7 +941,9 @@ def _result_line(claim: Claim, entry: Any) -> str:
     said = report.HUMAN["physical"]
     facts = report.result_facts(claim, entry)
     outcome = report.HUMAN["outcome"]["pass" if entry.passed is True else "fail"]
-    article = report.article12(getattr(entry, "article", None) or {})
+    # A judgment names no article: a person judged it, nothing was printed.
+    article = "" if report._judgment(claim) else report.article12(
+        getattr(entry, "article", None) or {})
     text = (f"{outcome}" + (f" on article {article}" if article else "")
             + f" ({report.recorded_words(entry)}, {entry.when or 'date not recorded'})")
     if getattr(entry, "measured", None) is not None:

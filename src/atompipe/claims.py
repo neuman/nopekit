@@ -507,12 +507,23 @@ def terminal_of(claim: Claim) -> str:
     return {ClaimKind.PHYSICAL: "measurement", ClaimKind.ASSUMPTION: "none"}.get(kind, "")
 
 
+def name_of(value: Any) -> str:
+    """A name as every comparison reads it — an owner, an authority, an
+    attribution's ``name``, a result's ``authority`` — with the whitespace
+    around it gone: the ONE place a name is normalised. What slipped through
+    (review of P2.5a): the writers stripped the claim file's ``"owner": "Dana
+    Reviewer "`` and the readers did not, so Dana's own ``assume`` was recorded
+    and never counted, and the reason told her to run the command she had just
+    run."""
+    return str(value if value is not None else "").strip()
+
+
 def identity_matches(who: Any, name: Any) -> bool:
     """Whether the git identity ``who`` (``Name <email>``) IS the person ``name``
     names: the whole identity, or its name part, exactly. Exact on purpose (R13
-    of the P2.5a design): prefix or case-folded matching would let ``Sam`` stand
-    for ``Samantha``, and the refusal names both spellings and the fix."""
-    who, name = str(who or "").strip(), str(name or "").strip()
+    of the P2.5a design): prefix or case-folded matching would let ``Dan`` stand
+    for ``Dana``, and the refusal names both spellings and the fix."""
+    who, name = name_of(who), name_of(name)
     return bool(name) and (who == name or who.split("<", 1)[0].strip() == name)
 
 
@@ -554,13 +565,22 @@ def _attributed(claim: Claim, role: str) -> list[Any]:
 
 
 def _owners_of(claim: Claim) -> dict[str, Attribution]:
-    """``{claim id: Attribution}`` from the newest owner attribution the channel
-    recorded — what ``compose`` reads when no ``owners`` is passed (P2.5a-D11).
-    Bound by value exactly as before (P2.1-D8): to the owner and the reason."""
+    """``{claim id: Attribution}`` from the owner attributions the channel
+    recorded — what ``compose`` reads when no ``owners`` is passed (P2.5a-D11):
+    the newest whose name and reason match the claim as it reads now, else the
+    newest (which then reads unattributed). Bound by value exactly as before
+    (P2.1-D8): to the owner and the reason. What slipped through (review of
+    P2.5a): only the newest was read, so an owner changed to Bob and back to
+    Dana read Gap though Dana's attribution, for this owner and this reason,
+    was still sealed in the file — where a reverted article reads Checked again
+    and an authority is matched against any attribution recorded."""
     found = _attributed(claim, "owner")
     if not found:
         return {}
-    return {claim.id: Attribution(str(found[0].name), str(found[0].reason or ""))}
+    owner, reason = name_of(getattr(claim, "owner", "")), assumption_reason(claim)
+    chosen = next((record for record in found if name_of(record.name) == owner
+                   and str(record.reason or "") == reason), found[0])
+    return {claim.id: Attribution(name_of(chosen.name), str(chosen.reason or ""))}
 
 
 def _authority_attributed(claim: Claim) -> bool:
@@ -570,11 +590,11 @@ def _authority_attributed(claim: Claim) -> bool:
     Never the file's ``authority`` alone: D17's laundering — an edit adding
     ``"terminal": "human", "authority": "<anyone>"`` would turn a Gap into a
     passing ``check``."""
-    authority = str(getattr(claim, "authority", "") or "").strip()
+    authority = name_of(getattr(claim, "authority", ""))
     if not authority:
         return False
     digest = claim_digest(claim)
-    return any(str(record.name) == authority and str(record.claim_digest or "") == digest
+    return any(name_of(record.name) == authority and str(record.claim_digest or "") == digest
                for record in _attributed(claim, "authority"))
 
 
@@ -582,14 +602,14 @@ def _ownership(claim: Claim, owners: Mapping[str, Any] | None) -> ClaimCause | N
     """Why an assumption is not Assumed — no owner named, no reason, or an owner
     the channel never attributed — or None when it is (P2.1-D8). From P2.4 the
     reason is ``assumption_reason`` (a non-assumption's ``fallback``)."""
-    owner = str(getattr(claim, "owner", "") or "").strip()
+    owner = name_of(getattr(claim, "owner", ""))
     reason = assumption_reason(claim)
     if not owner:
         return ClaimCause.NO_OWNER
     if not reason.strip():
         return ClaimCause.NO_REASON
     found = (owners or {}).get(claim.id)
-    if (found is None or str(getattr(found, "owner", "")) != claim.owner
+    if (found is None or name_of(getattr(found, "owner", "")) != owner
             or str(getattr(found, "reason", "")) != reason):
         return ClaimCause.OWNER_UNATTRIBUTED
     return None
@@ -735,8 +755,8 @@ def compose(
                                  if isinstance(item, dict) and item.get("inside") is True)
         if contradicted and not judgment:
             return Composed(ClaimStatus.REFUTED, ClaimCause.CONTRADICTION, tuple(contradicted))
-        if (judgment and str(getattr(result, "authority", "") or "")
-                == str(getattr(claim, "authority", "") or "")
+        if (judgment and name_of(getattr(result, "authority", ""))
+                == name_of(getattr(claim, "authority", ""))
                 and identity_matches(result.who, claim.authority)):
             return Composed(ClaimStatus.REFUTED, ClaimCause.JUDGED_FAIL)
         return Composed(ClaimStatus.REFUTED, ClaimCause.PHYSICAL_FAIL)
@@ -787,10 +807,12 @@ def compose(
         if unowned is not None:
             return Composed(ClaimStatus.UNCLAIMED, unowned)
     # An expert-judgment claim (P2.5a-D17): Gap until its authority records it
-    # — unless the authority's judgment counts, or went stale (rungs 5 and 8).
+    # — unless the authority's judgment counts, or went stale on the article
+    # (rungs 5 and 8). A judgment of other words is no judgment of these: when
+    # the claim moved, the claim reads as one written fresh (`_JUDGED_STATES`).
     judged = state in _JUDGED_STATES
     if judgment and not judged:
-        if not str(getattr(claim, "authority", "") or "").strip():
+        if not name_of(getattr(claim, "authority", "")):
             return Composed(ClaimStatus.UNCLAIMED, ClaimCause.NO_AUTHORITY)
         if not _authority_attributed(claim):
             return Composed(ClaimStatus.UNCLAIMED, ClaimCause.AUTHORITY_UNATTRIBUTED)
@@ -817,8 +839,8 @@ def compose(
         beyond = {v.gate for v in outside}
         moved = [g for g in moved if g not in beyond]
     first = next((v for v in mine if moved and v.gate == moved[0]), None)
-    if state in _PERSON_STATES and terminal in (Terminal.MEASUREMENT.value,
-                                                Terminal.HUMAN.value):
+    if state in _PERSON_STATES and (terminal == Terminal.MEASUREMENT.value
+                                    or (judgment and judged)):
         return Composed(ClaimStatus.STALE, _PERSON_STATES[state], tuple(moved), first)
     if moved:
         return Composed(ClaimStatus.STALE, ClaimCause.INVALIDATED, tuple(moved), first)
@@ -857,8 +879,19 @@ _PERSON_STATES: Mapping[str, ClaimCause] = MappingProxyType({
     "article-unjudged": ClaimCause.ARTICLE_UNJUDGED})
 
 #: The standings under which an expert-judgment claim's judgment exists — it
-#: counts, or went stale — so rung 3 lets the ladder reach rung 5 or 8.
-_JUDGED_STATES = frozenset({"current", *_PERSON_STATES})
+#: counts, or went stale on the design it judged — so rung 3 lets the ladder
+#: reach rung 5 or 8. Not ``claim-moved``: what slipped through (review of
+#: P2.5a), a judged claim whose statement was rewritten read Stale
+#: `claim-moved`, which never stops `check` (P2.5a-D27), while the identical
+#: claim written fresh read Gap and did — so any once-judged claim could carry
+#: any new statement past `check`, D17's laundering by another route. A moved
+#: claim reads as one written fresh: Gap until its authority records the claim
+#: as it reads now, Assumed until they judge it. D27's reason does not reach it:
+#: judging again needs no new article. *Rejected:* keeping Stale and taking
+#: `claim-moved` out of ``AWAITS_A_PERSON`` (Stale would block where a fresh
+#: claim's Assumed does not, and still read "test it again" for a judgment).
+_JUDGED_STATES = frozenset({"current", "article-moved", "judgment-moved",
+                            "article-unjudged"})
 
 
 def resolve_status(
@@ -1743,7 +1776,10 @@ def next_claim_id(ledger: Ledger, prefix: str = "C") -> str:
         )
 
     highest = 0
-    for claim in ledger.claims:
+    # A claim whose file is gone and whose results file stays (`Ledger.removed`)
+    # holds its id: a result is sealed to it, so a new claim under it would
+    # inherit another claim's fail.
+    for claim in [*ledger.claims, *(getattr(ledger, "removed", ()) or ())]:
         cid = claim.id or ""
         if not cid.startswith(prefix):
             continue

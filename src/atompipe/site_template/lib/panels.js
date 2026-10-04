@@ -147,15 +147,23 @@ export function locatorProblems(state) {
  *  order (`state.json`), and the page keeps it. */
 export function claimsPanel(state, app) {
   const claims = state.claims || [];
-  const groups = ["measurable", "physical", "assumption"];
+  // An expert judgment (`terminal: human`, whatever its kind) has a group of its
+  // own, worded by state.json's phrases. What slipped through (review of
+  // P2.5a): it sat under the assumptions' blurb — "with a reason and an
+  // owner", *owner* being authority's Never-say — and nothing on the page said
+  // whose judgment it waits on.
+  const groups = ["measurable", "physical", "assumption", "judgment"];
+  const groupOf = (c) => (c.terminal === "human" ? "judgment" : (c.kind || "measurable"));
   const seen = new Set();
   const sections = [];
 
   for (const kind of groups) {
-    const rows = claims.filter((c) => (c.kind || "measurable") === kind);
+    const rows = claims.filter((c) => groupOf(c) === kind);
     rows.forEach((c) => seen.add(c.id));
     if (!rows.length) continue;
-    const info = claimKind(kind);
+    const info = kind === "judgment"
+      ? { title: phrase("judgment_title"), blurb: phrase("judgment_blurb") }
+      : claimKind(kind);
     sections.push(el("div", { class: `claim-group group-${kind}` },
       el("h3", { class: "group-head" },
         el("span", { text: info.title }),
@@ -240,6 +248,9 @@ function claimRow(claim, state, app) {
     claim.disagree ? tag("status and evidence disagree", { tone: "bad",
       title: phrase("disagree") }) : null,
     claim.critical === false ? tag("not required", { tone: "muted" }) : null,
+    // Whose judgment it is (state.json's `terminal_word`, report.HUMAN's).
+    claim.terminal === "human" && claim.terminal_word
+      ? tag(claim.terminal_word, { tone: "muted" }) : null,
     // Beside it, the CLAIM's limit (`claim.limit_text`, written by site.state),
     // never the verdict's: a compared pair is the one kind whose two limits can
     // part. What slipped through (review of P2.4): Failing C3 summarised as
@@ -268,7 +279,8 @@ function physicalResult(result) {
   const counts = result.counts === true;
   const tone = !pass ? "tone-bad" : counts ? "tone-ok" : "tone-muted";
   return el("div", { class: `physical-result ${tone}` },
-    el("b", { text: `${phrase("result_recorded")} ${outcomeWord(pass ? "pass" : "fail")} — ` +
+    el("b", { text: `${result.heading || phrase("result_recorded")} ` +
+                    `${outcomeWord(pass ? "pass" : "fail")} — ` +
                     `${phrase(counts ? "result_counts" : "result_not_counted")}. ` }),
     el("span", { text: result.detail || "" }),
     !counts && result.why ? el("p", { class: "claim-reason", text: result.why }) : null,

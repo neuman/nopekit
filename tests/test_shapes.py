@@ -1254,6 +1254,15 @@ PROMPT = (
     ("recorded by", re.compile(r"^  recorded by: .+ <.+>$"), 1, 1),
     ("type", re.compile(r"^type C\d+ to record it \(anything else records nothing\): $"), 1, 1),
 )
+#: `assume`'s prompt (stderr): the claim, how it reads, who is recorded as what
+#: and for which reason, who records it, the typed-id line — the review of
+#: P2.5a's addition: neither `assume`'s prompt nor an authority's judgment
+#: prompt was pinned (R-11), so either could gain, lose or reword a row unseen.
+ASSUME_PROMPT = (
+    PROMPT[0], PROMPT[1],
+    ("assume", re.compile(r"^  you record: .+ as C\d+'s (?:owner|authority) — .+$"), 1, 1),
+    PROMPT[-2], PROMPT[-1],
+)
 RECORDED = re.compile(r"^recorded C\d+ (?:pass|fail) in results/C\d+\.json \(entry \d+\)"
                       r"(?: — from (?:an agent session|a pipe or a script): .+)?$")
 RECORDED_ASSUME = re.compile(r"^recorded C\d+'s (?:owner|authority) .+ in results/C\d+\.json "
@@ -1276,6 +1285,11 @@ TRACK = re.compile(r"^  track record: \d+ contradictions? at this version, \d+ a
 CLAIM_LIST = re.compile(r"^\[.{5}\] C\d+\s+.+  \[(?:automated|measurement|assumption|expert "
                         r"judgment: .+)\] .+$")
 RESULTS_HEAD = re.compile(r"^PHYSICAL RESULTS \(\d+, oldest first\)$")
+JUDGMENTS_HEAD = re.compile(r"^JUDGMENTS \(\d+, oldest first\)$")
+#: `why`'s acceptance line when the claim writes none (review of P2.5a: "NONE —
+#: without a threshold this is a wish", for a note's test and a judgment alike).
+ACCEPTANCE_NONE = re.compile(r"^  acceptance: (?:no acceptance condition|none — the test is "
+                             r"its note|none — settled only by .+'s judgment)$")
 RESULT_ROW = re.compile(r"^  (?:pass|fail)(?: on article [0-9a-f]{12})? \(recorded .+$")
 
 
@@ -1286,6 +1300,16 @@ def prompt_problems(stderr: str) -> list[str]:
     at = _grammar(lines, 0, PROMPT, problems, "prompt")
     if at != len(lines):
         problems.append(f"prompt: {len(lines) - at} line(s) after the typed-id line")
+    return problems
+
+
+def assume_prompt_problems(stderr: str) -> list[str]:
+    """`assume`'s prompt rows in order, once each, then the typed-id line last."""
+    lines = stderr.splitlines()
+    problems: list[str] = []
+    at = _grammar(lines, 0, ASSUME_PROMPT, problems, "assume prompt")
+    if at != len(lines):
+        problems.append(f"assume prompt: {len(lines) - at} line(s) after the typed-id line")
     return problems
 
 
@@ -1307,9 +1331,13 @@ def physical_shape_problems(found: dict) -> list[str]:
     its shape."""
     out = [f"tty.pass {p}" for p in prompt_problems(found["tty.pass"].stderr)]
     out += [f"contradiction {p}" for p in prompt_problems(found["contradiction"].stderr)]
-    for key in ("tty.pass", "agent.pass", "agent.fail", "contradiction"):
+    out += [f"judgment {p}" for p in prompt_problems(found["judgment"].stderr)]
+    for key in ("assume", "assume.authority"):
+        out += [f"{key} {p}" for p in assume_prompt_problems(found[key].stderr)]
+    for key in ("tty.pass", "agent.pass", "agent.fail", "contradiction", "judgment"):
         out += [f"{key} {p}" for p in recorded_problems(found[key].stdout)]
-    out += [f"assume {p}" for p in recorded_problems(found["assume"].stdout, assume=True)]
+    for key in ("assume", "assume.authority"):
+        out += [f"{key} {p}" for p in recorded_problems(found[key].stdout, assume=True)]
     if not any(CONTRADICTS.match(ln) for ln in found["contradiction"].stdout.splitlines()):
         out.append("contradiction: no contradicts: line")
     for key, pattern in REFUSALS.items():
@@ -1338,6 +1366,16 @@ def physical_shape_problems(found: dict) -> list[str]:
     if len(heads) != 1 or not RESULT_ROW.match(lines[heads[0] + 1] if heads and
                                                heads[0] + 1 < len(lines) else ""):
         out.append(f"why results: {[lines[i] for i in heads]}")
+    lines = found["why.C8"].stdout.splitlines()
+    heads = [i for i, ln in enumerate(lines) if JUDGMENTS_HEAD.match(ln)]
+    if (len(heads) != 1 or any(RESULTS_HEAD.match(ln) for ln in lines)
+            or not RESULT_ROW.match(lines[heads[0] + 1] if heads and heads[0] + 1 < len(lines)
+                                    else "")):
+        out.append(f"why judgments: {[lines[i] for i in heads]}")
+    for key in ("why.C5", "why.C8"):
+        rows = [ln for ln in found[key].stdout.splitlines() if ln.startswith("  acceptance:")]
+        if len(rows) != 1 or not ACCEPTANCE_NONE.match(rows[0]):
+            out.append(f"{key} acceptance: {rows}")
     return out
 
 
@@ -1381,6 +1419,20 @@ class PhysicalLinesShape(unittest.TestCase):
                 "[measurement]", "[physical]"))),
             "why without its results head": ("why.C1", _Out(f["why.C1"].stdout.replace(
                 "PHYSICAL RESULTS", "RESULTS"))),
+            "assume's prompt with a row added": ("assume", _Out(
+                f["assume"].stdout, "  a friendly note\n" + f["assume"].stderr)),
+            "assume's prompt without its reason": ("assume.authority", _Out(
+                f["assume.authority"].stdout,
+                re.sub(r"(?m)^(  you record: .+?) — .+$", r"\1", f["assume.authority"].stderr))),
+            "a judgment's prompt without its article": ("judgment", _Out(
+                f["judgment"].stdout, re.sub(r"on article [0-9a-f]{12}", "on the article",
+                                             f["judgment"].stderr))),
+            "a judgment headed as a physical result": ("why.C8", _Out(
+                f["why.C8"].stdout.replace("JUDGMENTS", "PHYSICAL RESULTS"))),
+            "the acceptance line in a threshold's words": ("why.C5", _Out(re.sub(
+                r"(?m)^  acceptance: .*$",
+                "  acceptance: NONE — without a threshold this is a wish, not a claim",
+                f["why.C5"].stdout))),
         }
         for name, (key, mutated) in mutations.items():
             with self.subTest(name):

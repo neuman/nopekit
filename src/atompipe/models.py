@@ -1368,6 +1368,26 @@ class Ledger(Record):
     # `.atompipe/cache/last_check.json`, untracked. `from_dict` ignores the old
     # key, so a ledger an older spine wrote still loads (R-2), and the next save
     # simply does not carry it.
+    removed: tuple = ()
+    """In memory only, never written (``to_dict`` drops it): a ``Claim`` per
+    ``results/<id>.json`` that no ``claims/<id>.json`` holds — assembled by
+    ``store`` with the file's results, ``kind`` physical, required, and no
+    statement. ``verdicts.view`` puts each one holding a fail among the claims
+    every reader composes, so its fail reads Failing and stops ``check`` (R-3:
+    a fail counts across every edit, a claim file's rename or deletion
+    included); ``verdicts.track_record`` and ``doctor`` read every one. What
+    slipped through (review of P2.5a): a claim file renamed away from its
+    results left a sealed fail no reader looked at — the claim stopped failing,
+    ``check`` passed, and the evaluator's track record lost its contradiction.
+    *Rejected:* a claim synthesized into ``claims`` by ``store`` (``save``
+    would write it back as a claim file nobody wrote); refusing every command
+    (a dropped requirement is an ordinary edit, and the fail it leaves is a
+    fact to show, not a file to repair)."""
+
+    def to_dict(self) -> dict[str, Any]:
+        out = super().to_dict()
+        out.pop("removed", None)
+        return out
 
     # -- lookups ---------------------------------------------------------- #
     def claim(self, cid: str) -> Claim | None:

@@ -73,10 +73,11 @@ violate it (`tests/test_invariants.py`):
    limit it computed read Checked at a value its claim's own condition rejected
    (S-35) — `claims.cross_check`, P2.4; and, in review of P2.4, the reference gate
    repeated `acc.units` back, so C1 restated in `um` read Checked at 700 um against
-   600.) A physical or expert-judgment claim is listed Checked only on a physical
-   result that counts — a pass on its current article, or its authority's judgment
-   — and one the resolver calls Checked without it is listed loud, as status and
-   evidence disagreeing (P2.5a; `tests/test_physical.py`).
+   600.) A physical claim is listed Checked only on a physical result that counts —
+   a pass on its current article — and an expert-judgment claim only on its
+   authority's own judgment of the claim as it reads now; one the resolver calls
+   Checked without either is listed loud, as status and evidence disagreeing (P2.5a;
+   `tests/test_physical.py`).
 
 Two more, learned the hard way and enforced in `tests/test_packs.py`:
 
@@ -193,9 +194,12 @@ earned. Enforced in `tests/test_signing.py`, `tests/test_physical.py` and
     its article — the design it was recorded on — and to the claim as the person
     read it, with its evidence's bytes unchanged; when the article's design moves it
     reads Stale and the rebuild prediction names that article. A fail counts across
-    every edit. An owner, and an expert-judgment claim's authority, count only as
-    that person recorded them, as themselves: the claim is Gap until then, and an
-    expert judgment Assumed under its authority's name until they judge it. A fail
+    every edit — a claim file renamed or deleted included: a results file no claim
+    file holds keeps its fail counting, and on its evaluator's track record. An
+    owner, and an expert-judgment claim's authority, count only as that person
+    recorded them, as themselves: the claim is Gap until then, and an expert
+    judgment Assumed under its authority's name until they judge it — and Gap again
+    when the claim is edited after. A fail
     on a claim an automated evaluator had passed — qualified and current — is a
     contradiction, kept on that evaluator's track record at its version. (What
     slipped through: `claim physical --who` took a name the agent typed and
@@ -203,7 +207,10 @@ earned. Enforced in `tests/test_signing.py`, `tests/test_physical.py` and
     (review of P2.1); a pass survived any change to the design it was tested on
     (S-50); an owner was whatever a file said; and, in review of the P2.5a design,
     an authority was whoever typed its name, and a hand-written `terminal: human`
-    dropped a physical claim's evidence.) What the seal does not stop — a process
+    dropped a physical claim's evidence; in its review, a judged claim's rewritten
+    statement read Stale and passed `check`, a claim file renamed away from its fail
+    stopped it failing, and a fail flipped to a pass was left out of the refusal's
+    advice, whose checkout then erased it.) What the seal does not stop — a process
     that recomputes it, or opens a pty with the agent markers unset — is in
     `docs/SPINE_CONTRACT.md`'s limits; P3's permission rule closes it.
 

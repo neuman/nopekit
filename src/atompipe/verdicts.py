@@ -166,7 +166,7 @@ __all__ = [
     "ACCEPTANCE_KEY", "SHAPE_KEY", "AcceptanceRead", "claims_named", "acceptance_of",
     "moving_limits", "moved_goalposts",
     # P2.5a: the article a physical result is bound to, the judge, the one view
-    "article_of", "judge_results", "Contradiction", "track_record", "view",
+    "article_of", "judge_results", "Contradiction", "track_record", "view", "REMOVED",
 ]
 
 
@@ -7311,10 +7311,15 @@ def admission_state(root: str, spec: Any, fn: Any, *, projection: Any,
 # --------------------------------------------------------------------------- #
 # physical results: the article, and the judge (P2.5a)
 # --------------------------------------------------------------------------- #
-#: The longest path-valued parameter ``article_of`` follows to a file. A design
-#: names its files by short project-relative paths (``build/part.stl``); a
-#: longer string is prose, never a path anyone typed. *Rejected:* every string
-#: (a statement-length value stat-ed on every read for nothing).
+#: The longest path-valued parameter ``article_of`` follows to a file. Why 260:
+#: Windows' ``MAX_PATH``, the longest path a design shared with a Windows
+#: machine can name at all — a design names its files by short project-relative
+#: paths (``build/part.stl``), so a longer string is prose, never a path anyone
+#: typed. *Rejected:* every string (a statement-length value stat-ed on every
+#: read for nothing); POSIX ``PATH_MAX``, 4096 (a paragraph-long value would be
+#: stat-ed as a path, and no shared design names one that long); a smaller cap
+#: (a deep ``build/<part>/<variant>/…`` path is legitimate, and a path skipped
+#: is a file the article leaves out — the slip critique 1 closed).
 _ARTICLE_PATH_MAX = 260
 
 
@@ -7360,13 +7365,19 @@ def _named_files(root: str, values: Iterable[Any]) -> list[str]:
 
 
 def _read_files(root: str, resolution: Any, anchors: Anchors) -> list[str]:
-    """The project files the current verdicts' traced read sets name — a file a
-    gate read while it judged the design is part of the design (critique 1)."""
+    """The project files the registered gates' newest verdicts' traced read sets
+    name — a file a gate read while it judged the design is part of the design
+    (critique 1). A gate this project no longer registers (``orphan``) or a
+    pre-cache ledger verdict (``legacy``) names none: its entry outlives it only
+    until the cache is cleared, and an article must not name different files
+    for one design on either side of that (review of P2.5a)."""
     base = os.path.abspath(root)
     state = os.path.join(base, _STATE_DIR)
     places = _places_of(anchors)
     found: list[str] = []
     for row in (getattr(resolution, "rows", None) or {}).values():
+        if getattr(row, "state", "") in ("orphan", "legacy"):
+            continue
         entry = getattr(row, "entry", None)
         for spelled in ((getattr(entry, "reads", None) or {}).get("files") or {}):
             where = _locate(spelled, base, places)
@@ -7572,8 +7583,8 @@ def _fact_authority(entry: Any, claim: Any, terminal: str) -> str:
     if terminal != "human":
         return ""
     from . import claims as _claims                # a reader's module: never at import
-    authority = str(getattr(claim, "authority", "") or "")
-    if (authority and str(getattr(entry, "authority", "") or "") == authority
+    authority = _claims.name_of(getattr(claim, "authority", ""))
+    if (authority and _claims.name_of(getattr(entry, "authority", "")) == authority
             and _claims.identity_matches(getattr(entry, "who", ""), authority)):
         return ""
     return "authority"
@@ -7631,7 +7642,23 @@ def _judge_entry(index: int, entry: Any, claim: Any, terminal: str, digest_now: 
     # The terminal first: beside an automated evaluator a pass settles nothing
     # whoever typed it, and that is the reason to give.
     why = (_fact_terminal(terminal) or _fact_channel(entry) or _fact_who(entry)
-           or _fact_authority(entry, claim, terminal) or _fact_measured(entry, claim))
+           or _fact_authority(entry, claim, terminal))
+    claim_moved = _fact_claim(entry, digest_now)
+    if not why and terminal == "human" and claim_moved:
+        # A judgment of other words is no judgment of these, whatever else moved
+        # (review of P2.5a): read first, so a rewritten statement beside a
+        # nudged input reads as the claim it now is (`claims._JUDGED_STATES`),
+        # never as a judgment on other inputs, which does not stop `check`.
+        why = claim_moved
+    if not why and not claim_moved:
+        # The value against the acceptance condition it was recorded against —
+        # the claim's own, while the claim has not moved (review of P2.5a: run
+        # first, against the CURRENT condition, a tightened limit read the pass
+        # "not counted" — Pending build, which never stops `check` — where an
+        # edited claim reads Stale `claim-moved`, "test it again", and a
+        # loosened one did). A recomputed seal over an inconsistent entry is
+        # still caught here.
+        why = _fact_measured(entry, claim)
     if not why:
         # The article before the claim before the evidence (critique 7 of the
         # P2.5a design): a moved article reads Stale and is named for rebuild
@@ -7641,7 +7668,7 @@ def _judge_entry(index: int, entry: Any, claim: Any, terminal: str, digest_now: 
         elif state != "current":
             why = "article-unjudged"
         else:
-            why = _fact_claim(entry, digest_now)
+            why = claim_moved
         if not why and _kind_of(claim) == "physical":
             why = _fact_evidence(entry, here.root, here.digests)
     return EntryStanding(index, True, not why, why, article_hash, state, moved)
@@ -7720,6 +7747,9 @@ class Contradiction(NamedTuple):
     value: Any
     measured: Any
     units: str
+    removed: bool = False
+    """The claim's file is gone and its results file is not (``Ledger.removed``):
+    the contradiction stays, under the id the fail is sealed to."""
 
 
 def track_record(ledger: Any) -> dict[str, tuple]:
@@ -7728,9 +7758,17 @@ def track_record(ledger: Any) -> dict[str, tuple]:
     read, never a file of its own (``rm -rf .atompipe/verdicts`` must not erase
     it). A pass outside its operating context (``inside: false``) is in no
     count. It changes no status and no qualification (P2.5a-D14: one print
-    defect would otherwise Gap every claim the evaluator settles)."""
+    defect would otherwise Gap every claim the evaluator settles).
+
+    EVERY results file, keyed by the claim id its fail is sealed to — the
+    claims' and ``Ledger.removed``'s. What slipped through (review of P2.5a):
+    it read ``ledger.claims`` alone, so deleting or renaming a claim's file —
+    "dropping a requirement" — erased the evaluator's contradiction while the
+    sealed fail stayed in ``results/``, and ``gate show`` read 0."""
     out: dict[str, list] = {}
-    for claim in getattr(ledger, "claims", None) or ():
+    removed = {id(claim) for claim in getattr(ledger, "removed", None) or ()}
+    for claim in [*(getattr(ledger, "claims", None) or ()),
+                  *(getattr(ledger, "removed", None) or ())]:
         for entry in getattr(claim, "results", ()) or ():
             if getattr(entry, "passed", None) is True:
                 continue
@@ -7743,7 +7781,8 @@ def track_record(ledger: Any) -> dict[str, tuple]:
                     str(article.get("hash") or "") if isinstance(article, Mapping) else "",
                     str(entry.when or ""), str(entry.who or ""),
                     str(getattr(entry, "channel", "") or ""), item.get("value"),
-                    getattr(entry, "measured", None), str(item.get("units") or "")))
+                    getattr(entry, "measured", None), str(item.get("units") or ""),
+                    id(claim) in removed))
     return {gate: tuple(found) for gate, found in sorted(out.items())}
 
 
@@ -7762,10 +7801,26 @@ def view(ledger: Any, resolution: Resolution) -> Ledger:
         # A resolution that carries none (a test's stand-in, a caller's own):
         # no claim is judged, so every pass reads Pending build (R-2).
         standings = {}
+    # A results file holding a fail that no claim file holds (`Ledger.removed`,
+    # review of P2.5a): composed beside the claims, so its fail reads Failing on
+    # every channel and stops `check` — never judged (a pass there settles
+    # nothing), its standing `removed` for the words that say what to restore.
+    # Once, whatever a caller hands in: a view built over a view adds none twice.
+    held = {claim.id for claim in ledger.claims}
+    removed = [dataclasses.replace(claim, standing=Standing(REMOVED))
+               for claim in getattr(ledger, "removed", None) or ()
+               if claim.id not in held and any(
+                   getattr(entry, "passed", None) is not True
+                   for entry in getattr(claim, "results", ()) or ())]
     return dataclasses.replace(
         ledger, verdicts=list(resolution.verdicts),
-        claims=[dataclasses.replace(claim, standing=standings.get(claim.id))
-                for claim in ledger.claims])
+        claims=[*(dataclasses.replace(claim, standing=standings.get(claim.id))
+                  for claim in ledger.claims), *removed])
+
+
+#: ``Standing.state`` of a claim whose file is gone and whose results file holds
+#: a fail (``view``, ``Ledger.removed``).
+REMOVED = "removed"
 
 
 # --------------------------------------------------------------------------- #

@@ -84,8 +84,15 @@ CHANNEL_ROWS: tuple = (
     ("a session id", False, {"CLAUDE_CODE_SESSION_ID": "s1"}, None, "agent-session s1"),
     ("a child session", False, {"CLAUDE_CODE_CHILD_SESSION": "1"}, None,
      "agent-session unknown"),
-    ("a future CLAUDE_CODE_ marker", False, {"CLAUDE_CODE_X": "1"}, None,
-     "agent-session unknown"),
+    ("an entry point", False, {"CLAUDE_CODE_ENTRYPOINT": "cli"}, None, "agent-session unknown"),
+    # R-6 (review of P2.5a): "a future CLAUDE_CODE_ marker" asserted the prefix
+    # rule this review moved — Claude Code's user-set configuration lives under
+    # that prefix — and each observed marker is a row of its own above. A
+    # person's own exported setting is a person's shell.
+    ("a terminal, a person's own CLAUDE_CODE_USE_BEDROCK", True,
+     {"CLAUDE_CODE_USE_BEDROCK": "1"}, "C5", "interactive"),
+    ("a terminal, a person's own CLAUDE_CODE_MAX_OUTPUT_TOKENS", True,
+     {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000"}, "C5", "interactive"),
     ("a pipe, no marker", False, {}, None, "non-interactive"),
     ("a marker beside an ATOMPIPE_CHANNEL a generator set", False,
      {"CLAUDECODE": "1", "ATOMPIPE_CHANNEL": "interactive"}, None, "agent-session unknown"),
@@ -140,11 +147,46 @@ class HumanChannelOnly(_env.EnvCase):
         def any_line(tty, environ, answer, claim_id):
             return real(tty, environ, claim_id if tty else answer, claim_id)
 
+        def the_whole_prefix(tty, environ, answer, claim_id):
+            # P2.5a's rule: every CLAUDE_CODE_ name a marker (review of P2.5a).
+            if any(k.startswith("CLAUDE_CODE_") for k in environ):
+                return "agent-session unknown"
+            return real(tty, environ, answer, claim_id)
+
         planted = {"reads ATOMPIPE_CHANNEL": reads_a_variable, "trusts isatty": trusts_the_tty,
-                   "markers only": reads_markers_only, "accepts any line": any_line}
+                   "markers only": reads_markers_only, "accepts any line": any_line,
+                   "the whole CLAUDE_CODE_ prefix": the_whole_prefix}
         for name, fn in planted.items():
             with self.subTest(name):
                 self.assertNotEqual(channel_problems(fn), [], f"{name} was not caught")
+
+    def test_the_marker_is_named(self):
+        """(review of P2.5a) A shell read as an agent's says which variable made it
+        one — the first of ``AGENT_MARKERS`` it sets — in the recorded line and in
+        the refusal of ``assume``; a person's own setting is no marker."""
+        marker = _need(cli, "_agent_marker")
+        self.assertEqual(marker({"CLAUDE_CODE_USE_BEDROCK": "1", "CLAUDECODE": "1"}),
+                         "CLAUDECODE")
+        self.assertEqual(marker({"CLAUDE_CODE_USE_BEDROCK": "1",
+                                 "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1"}), "")
+        said = __import__("atompipe.report", fromlist=["report"]).HUMAN["signing"]
+        self.assertIn("{marker}", said["agent_pass"])
+        self.assertIn("{why}", said["assume_channel"])
+
+    def test_the_marker_is_named_end_to_end(self):
+        root = P.project(os.path.join(self.tmp(), "b"))
+        proc = P.run(root, "claim", "physical", "C5", "fail", "--detail", "cracked",
+                     agent=True, code=0)
+        self.assertIn("(CLAUDECODE is set in this shell", proc.stdout)
+        P.edit_claim(root, "C6", owner=P.NAME)
+        proc = P.run(root, "claim", "physical", "C6", "assume", agent=True, code=2)
+        self.assertIn("(CLAUDECODE is set in this shell", proc.stderr)
+        proc = P.run(root, "claim", "physical", "C6", "assume", code=2)
+        self.assertIn("(stdin is not a terminal)", proc.stderr)
+        # A person's own Claude Code setting leaves their shell theirs.
+        proc = P.tty(root, "claim", "physical", "C6", "assume", answer="C6",
+                     env={"CLAUDE_CODE_USE_BEDROCK": "1"}, code=0)
+        self.assertEqual(P.results(root, "C6")["attributions"][-1]["channel"], "interactive")
 
     def test_no_flag_sets_the_channel(self):
         parser = cli.build_parser()
@@ -243,6 +285,10 @@ class WhoAndWhenAreNeverTyped(_env.EnvCase):
         self.assertNotIn("--who", proc.stdout)
         self.assertNotIn("--when", proc.stdout)
         self.assertNotIn("real-world", proc.stdout)
+        # (review of P2.5a) The flags' help from `HUMAN`, and never "(what the
+        # report prints)" — the report prints the positional `pass|fail`.
+        self.assertNotIn("what the report prints", proc.stdout)
+        self.assertIn("same as the positional `pass`", " ".join(proc.stdout.split()))
         refused = _need(cli, "REFUSED_FLAGS")
         self.assertIn("--who", refused)
         self.assertIn("--when", refused)
@@ -270,6 +316,54 @@ class WhoAndWhenAreNeverTyped(_env.EnvCase):
         P.run(root, "claim", "physical", "C5", "fail", "--detail", "cracked", code=0)
         self.assertEqual(P.results(root, "C5")["results"][-1]["who"], P.WHO)
 
+    def test_the_act_and_its_flag_never_disagree(self):
+        """(review of P2.5a) ``fail --pass`` recorded and counted a PASS, ``pass
+        --fail`` a fail nothing can supersede, ``assume --fail`` an attribution:
+        the flag won, silently. Each disagreement is refused, nothing written.
+        Planted: P2.5a's reading, the flag first."""
+        self.assertEqual(act_problems(_need(cli, "_act")), [])
+
+        def flag_wins(result, passed, measured, claim_id="C9"):
+            typed = passed if passed is not None else (
+                (result == "pass") if result in ("pass", "fail") else None)
+            return (result or (("pass" if typed else "fail") if typed is not None else None),
+                    typed if result != "assume" else None)
+
+        self.assertNotEqual(act_problems(flag_wins), [], "the flag winning was not caught")
+
+    def test_the_act_and_its_flag_end_to_end(self):
+        root = P.project(os.path.join(self.tmp(), "b"), planted=("C9",))
+        before = _tree(root)
+        for args in (("C9", "fail", "--pass", "--evidence", P.EVIDENCE),
+                     ("C9", "pass", "--fail"), ("C6", "assume", "--fail"),
+                     ("C6", "assume", "--measured", "3")):
+            with self.subTest(args=args):
+                proc = P.run(root, "claim", "physical", *args, "--detail", "creep", code=2)
+                self.assertIn("Nothing was written", proc.stderr)
+                self.assertEqual(_tree(root), before)
+        doc = json.loads(P.run(root, "claim", "physical", "C1", "--measured", "0.62",
+                               "--detail", "ruler", "--json", code=0).stdout)
+        self.assertEqual(doc["recorded"]["act"], "fail")
+
+    def test_a_value_that_is_not_text_is_refused(self):
+        """(review of P2.5a) An argument that is not UTF-8 reached the writer and
+        printed a traceback, exit 1. It is refused, naming its flag, exit 2; and
+        the writer itself never raises past an AtompipeError."""
+        root = P.project(os.path.join(self.tmp(), "b"))
+        before = _tree(root)
+        for flag in ("--detail", "--evidence", "--authority"):
+            err = io.StringIO()
+            with self.subTest(flag=flag), mock.patch.dict(os.environ, _env.IDENTITY), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+                code = cli.main(["-C", root, "claim", "physical", "C2", "fail",
+                                 flag, "bad\udcffbyte"])
+                self.assertEqual(code, 2, err.getvalue())
+                self.assertIn(f"{flag} holds bytes that are not text", err.getvalue())
+                self.assertEqual(_tree(root), before)
+        with self.assertRaises(AtompipeError) as caught:
+            store._dumps({"detail": "bad\udcffbyte"}, "results/C2.json")
+        self.assertIn("results/C2.json", str(caught.exception))
+
     def test_a_parser_that_accepts_who_is_caught(self):
         """Planted: the refused-flag list emptied — `--who` parsed and ignored. A
         result is written, and the nothing-written check sees it."""
@@ -286,6 +380,32 @@ class WhoAndWhenAreNeverTyped(_env.EnvCase):
                              "--who", "Sam"])
         self.assertEqual(code, 0)
         self.assertNotEqual(_tree(root), before, "the planted parser wrote nothing")
+
+
+#: (positional act, --pass/--fail, --measured, (act, typed) or None for refused).
+ACT_ROWS: tuple = (
+    ("pass", None, None, ("pass", True)), ("fail", None, None, ("fail", False)),
+    (None, True, None, ("pass", True)), (None, False, None, ("fail", False)),
+    ("pass", True, None, ("pass", True)), ("fail", False, None, ("fail", False)),
+    ("fail", True, None, None), ("pass", False, None, None),
+    ("assume", None, None, ("assume", None)), ("assume", False, None, None),
+    ("assume", True, None, None), ("assume", None, 3.0, None),
+    (None, None, 0.62, (None, None)), ("fail", None, 0.62, ("fail", False)),
+)
+
+
+def act_problems(act: Callable[..., Any]) -> list[str]:
+    """Every ``ACT_ROWS`` row ``act`` gets wrong."""
+    out: list[str] = []
+    for result, passed, measured, want in ACT_ROWS:
+        try:
+            got = act(result, passed, measured, "C9")
+        except AtompipeError:
+            got = None
+        if got != want:
+            out.append(f"{result} --pass={passed} --measured={measured}: {got!r}, not "
+                       f"{want!r}")
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -482,6 +602,57 @@ class TheResultsFileIsSealedAndChained(_env.EnvCase):
         self.assertIn("sagged 0.9 mm", proc.stderr)
         self.assertIn("atompipe claim physical C1 fail", proc.stderr)
 
+    def test_every_entry_a_restore_discards_is_named(self):
+        """(review of P2.5a) In process, against a real git history: every entry
+        the restore's version does not hold is named — a flipped fail as
+        unverifiable, never skipped as a pass; a removed one said; a sealed fail
+        with the command that records it again, carrying its measured value and
+        evidence and never an edited detail; and a committed hand edit pointed at
+        the newest commit that verifies, never at a checkout that changes
+        nothing."""
+        self.assertEqual(advice_problems(self.tmp), [])
+
+    def test_planted_advice_is_caught(self):
+        """Planted: P2.5a's advice — the fails by their `passed` flag, and HEAD
+        alone as what a restore brings back."""
+        real = _need(store, "_discarded")
+
+        def by_passed(claim_id, data, source, holder):
+            held = {store.canonical_json(e) for e in (source or {}).get("results") or ()}
+            fails = [e for e in data.get("results") or () if e.get("passed") is not True
+                     and store.canonical_json(e) not in held]
+            return [f"discards {len(fails)} fail(s)"] if fails else []
+
+        with mock.patch.object(store, "_discarded", by_passed):
+            found = advice_problems(self.tmp)
+        self.assertTrue(any(p.startswith("an uncommitted fail flipped to a pass") for p in found),
+                        found)
+        self.assertTrue(callable(real))
+        with mock.patch.object(store, "_restore_source",
+                               lambda claim_id, rel: ("head", None)):
+            found = advice_problems(self.tmp)
+        self.assertTrue(any(p.startswith("a committed hand edit") for p in found), found)
+
+    def test_a_committed_hand_edit_is_restored_by_the_advice(self):
+        """(review of P2.5a) A fail flipped to a pass and COMMITTED: the advice
+        names the commit before the edit, and following it brings the fail back."""
+        root = P.project(os.path.join(self.tmp(), "b"), git=True)
+        P.run(root, "claim", "physical", "C2", "fail", "--detail", "cracked at the bolt",
+              code=0)
+        _commit(root, "the fail")
+        path = os.path.join(root, "results", "C2.json")
+        data = json.load(open(path, encoding="utf-8"))
+        data["results"][0]["passed"] = True
+        _write(path, data)
+        _commit(root, "tidied")
+        proc = P.run(root, "status", code=2)
+        self.assertIn("the last commit holds results/C2.json broken too", proc.stderr)
+        found = re.search(r"git checkout ([0-9a-f]{12}) -- results/C2\.json", proc.stderr)
+        self.assertIsNotNone(found, proc.stderr)
+        _env.git(["checkout", found.group(1), "--", "results/C2.json"], cwd=root)
+        doc = json.loads(P.run(root, "status", "--json", code=0).stdout)
+        self.assertEqual(doc["claims"]["C2"], "refuted")
+
     def test_planted_readers_are_caught(self):
         """Planted: a reader that skips verification (every tampering reads),
         and a seal that leaves out the claim id (a copied entry verifies)."""
@@ -537,6 +708,92 @@ def tamper_problems(tmp: Callable[[], str]) -> list[str]:
         out.append("an entry copied to another claim")
     except AtompipeError:
         pass
+    return out
+
+
+def _commit(root: str, message: str) -> str:
+    """``git add -A`` and a commit in ``root`` (initialised if it is not a
+    repository yet), with the test identity; the new commit's id."""
+    if not os.path.isdir(os.path.join(root, ".git")):
+        _env.git(["-c", "init.defaultBranch=main", "init", "-q"], cwd=root)
+    for argv, identity in ((["add", "-A"], False), (["commit", "-q", "-m", message], True)):
+        proc = _env.git(argv, cwd=root, identity=identity)
+        if proc.returncode != 0:
+            raise AssertionError(f"git {argv} failed: {proc.stderr}")
+    return _env.git(["rev-parse", "HEAD"], cwd=root).stdout.strip()
+
+
+def _result(passed: bool, detail: str, **changes: Any) -> dict:
+    entry = {"passed": passed, "when": "2026-10-04T10:00:00Z", "who": P.WHO,
+             "detail": detail, "evidence": [], "channel": "interactive", "authority": "",
+             "measured": None, "units": "", "article": {}, "claim_digest": "c" * 64,
+             "rho": "", "evidence_sha256": {}, "contradicts": [], "contradiction_check": ""}
+    entry.update(changes)
+    return entry
+
+
+def _advised(path: str) -> str:
+    try:
+        store.read_record(path, "results")
+    except AtompipeError as exc:
+        return str(exc)
+    return ""
+
+
+def advice_problems(tmp: Callable[[], str]) -> list[str]:
+    """Each row of the restore advice that does not say what it must, or says
+    what it must not (review of P2.5a). Every row: a pass committed, then two
+    fails recorded and not committed — the first with a measured value and
+    evidence — then one tampering."""
+    def base() -> tuple[str, str, str]:
+        root = tmp()
+        os.makedirs(os.path.join(root, "results"), exist_ok=True)
+        path = os.path.join(root, "results", "C5.json")
+        store.append_signed(root, "C5", "results", _result(True, "fine after two winters"))
+        first = _commit(root, "the pass")
+        store.append_signed(root, "C5", "results", _result(
+            False, "cracked at the root", measured=0.9, units="mm",
+            evidence=["photos/a.jpg"]))
+        store.append_signed(root, "C5", "results", _result(False, "cracked again"))
+        return root, path, first
+
+    def edited(d: dict, root: str) -> None:
+        d["results"][2]["detail"] = "tidied"
+
+    def flipped(d: dict, root: str) -> None:
+        d["results"][1]["passed"] = True
+
+    def removed(d: dict, root: str) -> None:
+        del d["results"][1]
+
+    rows: dict[str, tuple] = {
+        "an uncommitted fail's detail edited": (edited, False, (
+            "git checkout -- results/C5.json", "results[1], a fail recorded",
+            "--measured 0.9", "--evidence photos/a.jpg", "'cracked at the root'",
+            "results[2], whose seal does not hold"), ("--detail tidied",)),
+        "an uncommitted fail flipped to a pass": (flipped, False, (
+            "results[1], whose seal does not hold", "it reads as a pass now",
+            "results[2], a fail recorded"), ()),
+        "an uncommitted fail removed": (removed, False, (
+            "results[1], a fail recorded", "cracked again",
+            "The entries before results[1] are not as they were recorded"), ()),
+        "a committed hand edit": (flipped, True, (
+            "the last commit holds results/C5.json broken too",
+            "results[1], whose seal does not hold"), ("git checkout -- results/C5.json,",)),
+    }
+    out: list[str] = []
+    for name, (edit, commit_first, wanted, unwanted) in rows.items():
+        root, path, first = base()
+        before = _commit(root, "the fails") if commit_first else first
+        data = json.load(open(path, encoding="utf-8"))
+        edit(data, root)
+        _write(path, data)
+        if commit_first:
+            _commit(root, "tidied")
+            wanted = (*wanted, f"git checkout {before[:12]} -- results/C5.json")
+        text = _advised(path)
+        out += [f"{name}: does not say {w!r}" for w in wanted if w not in text]
+        out += [f"{name}: says {w!r}" for w in unwanted if w in text]
     return out
 
 
@@ -596,6 +853,52 @@ class AnOwnerOnlyThroughTheChannel(_env.EnvCase):
         self.assertEqual([a.get("role") for a in attributions], ["owner"])
         self.assertEqual(attributions[0].get("reason"),
                          "the sag is linear well past the range it was qualified on")
+
+    def test_a_name_with_spaces_around_it_is_the_name(self):
+        """(review of P2.5a) ``"owner": "Dana Reviewer "``: the writers stripped
+        it and the readers did not, so Dana's own ``assume`` never counted. One
+        normaliser (``claims.name_of``) on every side; planted: a ``name_of``
+        that keeps the spaces."""
+        from atompipe.models import AttributionRecord, Claim, ClaimKind
+        record = AttributionRecord(role="owner", name=P.NAME, reason="r", who=P.WHO,
+                                   channel="interactive")
+        claim = Claim(id="C6", statement="s", kind=ClaimKind.ASSUMPTION, rationale="r",
+                      owner=P.NAME + " ", attributions=(record,))
+        self.assertEqual(claims.compose(claim, []).cause.value, "owned")
+        _need(claims, "name_of")
+        with mock.patch.object(claims, "name_of", lambda v: str(v if v is not None else "")):
+            self.assertNotEqual(claims.compose(claim, []).cause.value, "owned",
+                                "a reader comparing the raw name was not caught")
+
+    def test_a_name_with_spaces_around_it_end_to_end(self):
+        root = P.project(os.path.join(self.tmp(), "b"))
+        P.edit_claim(root, "C6", owner=P.NAME + " ")
+        P.tty(root, "claim", "physical", "C6", "assume", answer="C6", code=0)
+        found = json.loads(P.run(root, "status", "--json", code=0).stdout)
+        self.assertEqual(found["statuses"]["C6"]["cause"], "owned")
+
+    def test_an_owner_changed_back_reads_assumed_again(self):
+        """(review of P2.5a) Dana records C6, the owner moves to Pat, who records
+        it, and back to Dana: Dana's attribution, for this owner and this reason,
+        still counts — as a reverted article reads Checked again. Planted: the
+        newest attribution alone."""
+        from atompipe.models import AttributionRecord, Claim, ClaimKind
+        dana = AttributionRecord(role="owner", name=P.NAME, reason="r", who=P.WHO,
+                                 channel="interactive")
+        pat = AttributionRecord(role="owner", name="Pat Other", reason="r",
+                                who="Pat Other <pat@example.invalid>", channel="interactive")
+        claim = Claim(id="C6", statement="s", kind=ClaimKind.ASSUMPTION, rationale="r",
+                      owner=P.NAME, attributions=(pat, dana))
+        self.assertEqual(claims.compose(claim, []).cause.value, "owned")
+
+        def newest(claim_):
+            found = claims._attributed(claim_, "owner")
+            return {claim_.id: claims.Attribution(found[0].name, found[0].reason)} if found \
+                else {}
+
+        with mock.patch.object(claims, "_owners_of", newest):
+            self.assertEqual(claims.compose(claim, []).cause.value, "owner-unattributed",
+                             "the newest-only reading was not caught")
 
     def test_no_spine_module_passes_owners(self):
         self.assertEqual(owners_callers(_spine_sources()), [])

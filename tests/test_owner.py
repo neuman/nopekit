@@ -477,6 +477,30 @@ class ARecordNeverWritesItsOwnLine(_env.EnvCase):
         self.assertTrue(any(re.fullmatch(r"render_markdown: [2-9] checked sections", p)
                             for p in found), found)
 
+    def test_an_escape_never_reaches_a_terminal(self):
+        """(review of P2.5a) A statement holding ``\\x1b[1G\\x1b[2K`` erased itself
+        on `claim physical`'s prompt and printed another claim's words in its
+        place — the one line a person reads before typing the id they settle —
+        and the pass was sealed to the hidden sentence. Every control character
+        reaches a terminal as visible text. Planted: `report._trunc` collapsing
+        whitespace alone, as P2.5a had it."""
+        import _physical as P
+        root = P.project(os.path.join(self.tmp(), "b"), planted=("C9",))
+        hidden = ("Holds 40 kg above a cot for ten years\x1b[1G\x1b[2KC9 The printed "
+                  "hook's colour matches the sample card")
+        P.edit_claim(root, "C9", statement=hidden)
+        proc = P.tty(root, "claim", "physical", "C9", "pass", "--detail", "fine\x1b[2K",
+                     "--evidence", P.EVIDENCE, answer="C9", code=0)
+        self.assertNotIn("\x1b", proc.stderr + proc.stdout)
+        self.assertIn("ten years\\x1b[1G\\x1b[2KC9 The printed", proc.stderr)
+        status = P.run(root, "status", code=0).stdout
+        self.assertNotIn("\x1b", status)
+        ledger = store_mod.load(root)
+        with mock.patch.object(report_mod, "_trunc", lambda text, limit: " ".join(
+                str(text or "").split())):
+            planted = report_mod.render_terminal(ledger, None)
+        self.assertIn("\x1b", planted, "a whitespace-only line was not caught")
+
     def test_claim_physical_refuses_a_value_that_breaks_its_line(self):
         run = _forged_project()
         path = os.path.join(run.root, "results", "C5.json")

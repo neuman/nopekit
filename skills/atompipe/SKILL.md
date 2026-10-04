@@ -143,7 +143,7 @@ Classify each one honestly:
 | Kind | Meaning | Where its evidence bottoms out |
 |---|---|---|
 | `measurable` | An automated evaluator settles it from the model — the only kind one settles. | *automated* |
-| `physical` | Only an article settles it. Watertightness, feel, RF range, taste. | *measurement*, or *expert judgment: <authority>* |
+| `physical` | An article, or its authority's judgment, settles it. Watertightness, feel, RF range, taste. | *measurement*, or *expert judgment: <authority>* |
 | `assumption` | Accepted provisionally, with a reason and an owner. Recorded so it stays visible. | *assumption*, or *expert judgment: <authority>* |
 
 `claim list` prints that last column. A claim may declare it with `"terminal"` in its
@@ -170,7 +170,8 @@ recorded. A pass counts only on the article it was recorded on — the design as
 was then — so when the design moves, the claim reads **Stale** and `check` and
 `status` name the article to rebuild (`rebuild: article <hash> (C5) — …`): a check run
 cannot restore it, a new article can. A fail keeps counting through every later pass
-and every edit, until a later checkpoint records a pass on a new build. `--measured
+and every edit — renaming or deleting the claim's file included: a result is sealed to
+its claim's id, and a fail whose claim file is gone still stops `check`. `--measured
 <value>` records the value in the claim's units, and decides pass or fail where the
 claim has a limit. A result is recordable on an automated claim too: a fail there,
 beside an evaluator that passed, is a **contradiction** on that evaluator's track
@@ -180,19 +181,21 @@ record (`gate show`); a pass there settles nothing.
 (`"owner": "<name>"`, as git names them), and the owner runs `atompipe claim physical
 C6 assume` in their own shell. An owner you write into the file counts for nothing on
 its own: until the owner records it, C6 reads Gap, and `check` exits 1 for it if it is
-required. Say it as it is: *"C6 is a gap until Sam records its owner: ask Sam to run
+required. Say it as it is: *"C6 is a gap until Dana records its owner: ask Dana to run
 `atompipe claim physical C6 assume`."* Editing the owner or the rationale after it was
 recorded un-records it. Never edit an owner in to clear a gap, and never make a claim
 not required to get `check` to pass — whether it is required is the user's call.
 
-**Some claims end in a person's judgment** — "safe to run near people". Write
+**Some claims end in a person's judgment** — "meets the venue's fire-safety rules". Write
 `"terminal": "human"` and `"authority": "<name>"` into its file. It reads Gap until
 that person records it with `atompipe claim physical <id> assume --authority
 "<name>"`, Assumed under their name until they judge it with `atompipe claim physical
 <id> pass --authority "<name>"` (or `fail`), each in their own shell, as themselves.
 Only the authority settles it; you never record it, and a physical claim judged this
-way still needs its test written down and its evidence. `results/<id>.json` records
-each person's git name and email beside what they recorded.
+way still needs its test written down and its evidence. Editing the claim after it was
+judged un-records the judgment: it reads Gap again until the authority records the claim
+as it now reads. `results/<id>.json` records each person's git name and email beside
+what they recorded.
 
 ### 3. Reach first light fast
 

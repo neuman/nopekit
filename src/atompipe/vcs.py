@@ -56,6 +56,7 @@ __all__ = [
     "ls_files",
     "ident",
     "show",
+    "history",
     "model_dirty",
     "commit_times",
 ]
@@ -229,20 +230,46 @@ def ident(root: str | os.PathLike[str]) -> str | None:
     return who if "<" in who else None
 
 
-def show(root: str | os.PathLike[str], relpath: str) -> bytes | None:
-    """The bytes the last commit holds at ``relpath`` (``git show HEAD:<path>``),
-    or ``None`` — outside a repository, before a first commit, or a path the
+def show(root: str | os.PathLike[str], relpath: str, rev: str = "HEAD") -> bytes | None:
+    """The bytes commit ``rev`` (``HEAD``, or a full object id from
+    :func:`history`) holds at ``relpath`` (``git show <rev>:<path>``), or
+    ``None`` — outside a repository, before a first commit, or a path the
     commit does not hold. Read-only.
 
     For the strict results reader's refusal (P2.5a, critique 6 of its design):
     "git checkout -- results/C1.json" discards whatever the commit does not
     hold, and a fail recorded since is exactly that — so the refusal compares
     the two and names each fail the restore would drop. A path with a ``:`` or
-    a leading ``-`` is refused as no answer rather than handed to git as syntax."""
+    a leading ``-``, or a ``rev`` that is neither ``HEAD`` nor an object id, is
+    refused as no answer rather than handed to git as syntax."""
     rel = _normal(os.fspath(relpath))
     if not rel or rel.startswith("-") or ":" in rel:
         return None
-    return _git(root, ["show", f"HEAD:./{rel}"])
+    if rev != "HEAD" and not _HEX_OID.match(str(rev)):
+        return None
+    return _git(root, ["show", f"{rev}:./{rel}"])
+
+
+def history(root: str | os.PathLike[str], relpath: str, limit: int) -> list[str]:
+    """The full object ids of the commits that changed ``relpath``, newest
+    first, at most ``limit`` — ``[]`` outside a repository, for a path no commit
+    holds, or on any failure. Read-only.
+
+    For the results reader's refusal (review of P2.5a): a hand edit that was
+    COMMITTED leaves ``HEAD`` holding the same broken bytes, so "git checkout
+    -- results/C2.json" changed nothing and every command refused again; the
+    refusal walks these back to the newest version that verifies. Pinned
+    against the user's log config as ``commit_times`` is (``log.follow`` would
+    walk a rename into another claim's file)."""
+    rel = _normal(os.fspath(relpath))
+    if not rel or rel.startswith("-") or limit < 1:
+        return []
+    out = _text(_git(root, ["-c", "log.follow=false", "-c", "log.showSignature=false",
+                            "log", f"-n{int(limit)}", "--no-renames", "--format=%H", "--",
+                            rel], literal_pathspecs=True))
+    if not out:
+        return []
+    return [line for line in out.splitlines() if _HEX_OID.match(line)]
 
 
 def model_dirty(root: str | os.PathLike[str], relpaths: Iterable[str]) -> bool | None:

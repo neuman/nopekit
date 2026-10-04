@@ -332,6 +332,44 @@ class SignedMeansSomething(_env.EnvCase):
         with mock.patch.object(verdicts, "_fact_measured", lambda *a, **k: ""):
             self.assertEqual(self._reads("C9")[:2], ("verified", "on-article"))
 
+    def test_k_a_limit_edited_after_a_measured_pass(self):
+        """(review of P2.5a) A measured pass, then its limit tightened: the claim
+        moved — Stale `claim-moved`, "test it again" — as it reads when the limit
+        is loosened. What slipped through: the value was judged against the
+        CURRENT limit first, so a tightened one read the pass "not counted",
+        Pending build, which never stops `check`. Planted: P2.5a's order, the
+        value before the claim."""
+        acceptance = {"quantity": "hook sag", "comparator": "<=", "limit": 0.5, "units": "mm"}
+        self._record(self._entry("C9", measured=0.4, units="mm"), cid="C9")
+        try:
+            self.assertEqual(self._reads("C9")[:2], ("verified", "on-article"))
+            for limit in (0.3, 0.8):
+                with self.subTest(limit=limit):
+                    P.edit_claim(self.root, "C9", acceptance=dict(acceptance, limit=limit))
+                    status, cause, reason = self._reads("C9")
+                    self.assertEqual((status, cause), ("stale", "claim-moved"), reason)
+            P.edit_claim(self.root, "C9", acceptance=dict(acceptance, limit=0.3))
+            from atompipe.models import EntryStanding
+
+            def measured_first(index, entry, claim, terminal, digest_now, here):
+                article = getattr(entry, "article", None) or {}
+                found = str(article.get("hash") or "")
+                state, moved = verdicts._article_moves(article, here) if found else ("", ())
+                why = (verdicts._fact_terminal(terminal) or verdicts._fact_channel(entry)
+                       or verdicts._fact_who(entry)
+                       or verdicts._fact_authority(entry, claim, terminal)
+                       or verdicts._fact_measured(entry, claim))
+                if not why:
+                    why = ("article-moved" if state == "moved" else "article-unjudged"
+                           if state != "current" else verdicts._fact_claim(entry, digest_now))
+                return EntryStanding(index, True, not why, why, found, state, moved)
+
+            with mock.patch.object(verdicts, "_judge_entry", measured_first):
+                self.assertEqual(self._reads("C9")[:2], ("unverified", "physical-pass"),
+                                 "the value-first judge was not caught")
+        finally:
+            P.edit_claim(self.root, "C9", acceptance=acceptance)
+
     def test_end_to_end_a_typed_pass_reads_checked_everywhere(self):
         root = P.project(os.path.join(self.tmp(), "b"))
         _pass(root, "C5")
@@ -380,6 +418,70 @@ class APhysicalFailNeverLosesItsPowerToFail(_env.EnvCase):
                           standing=counted)
         self.assertNotEqual(claims.compose(claim, []).status, ClaimStatus.REFUTED,
                             "the latest-result violator was not caught")
+
+    def test_in_process_a_fail_outlives_its_claim_file(self):
+        """(review of P2.5a, R-3) A claim file renamed away from its sealed fail:
+        the results file still holds it, so the fail is composed beside the
+        claims — Failing, required, blocking. Planted: a view of the claim files
+        alone (P2.5a's), which drops it."""
+        root = P.project(os.path.join(self.tmp(), "b"))
+        store.append_signed(root, "C5", "results", {
+            "passed": False, "when": "2026-10-04T10:00:00Z", "who": P.WHO,
+            "detail": "UV embrittlement at month 14", "evidence": [],
+            "channel": "interactive", "authority": "", "measured": None, "units": "",
+            "article": {}, "claim_digest": "c" * 64, "rho": "", "evidence_sha256": {},
+            "contradicts": [], "contradiction_check": ""})
+        os.rename(os.path.join(root, "claims", "C5.json"),
+                  os.path.join(root, "claims", "C15.json"))
+        view, resolution = P.resolved(root)
+        claim = view.claim("C5")
+        self.assertIsNotNone(claim, "the fail's claim left the view")
+        found = claims.compose(claim, view.verdicts, stale_gates=resolution.stale_gates)
+        self.assertEqual(found.status, ClaimStatus.REFUTED)
+        self.assertIn("C5", [c.id for c, _s in claims.blocking(
+            view, None, stale_gates=resolution.stale_gates)])
+        self.assertIn("restore claims/C5.json", report.reason(found, view, claim, full=True))
+        self.assertEqual(claims.next_claim_id(store.load(root)), "C16")
+
+        def claims_only(ledger, resolution_):
+            return dataclasses.replace(ledger, verdicts=list(resolution_.verdicts),
+                                       claims=[dataclasses.replace(
+                                           c, standing=resolution_.standings.get(c.id))
+                                           for c in ledger.claims])
+
+        with mock.patch.object(verdicts, "view", claims_only):
+            view, _res = P.resolved(root)
+        self.assertIsNone(view.claim("C5"), "a view of the claim files alone was not caught")
+
+    def test_a_fail_outlives_its_claim_file_end_to_end(self):
+        root = P.project(os.path.join(self.tmp(), "b"))
+        _fail(root, "C5")
+        os.rename(os.path.join(root, "claims", "C5.json"),
+                  os.path.join(root, "claims", "C15.json"))
+        check = P.run(root, "check", "--junit", "--json", code=1)
+        self.assertIn("C5", [row["claim"] for row in json.loads(check.stdout)["blocking"]])
+        status = json.loads(P.run(root, "status", "--json", code=0).stdout)
+        self.assertEqual(status["claims"]["C5"], "refuted")
+        self.assertIn("restore claims/C5.json", status["statuses"]["C5"]["reason"])
+        doctor = P.run(root, "doctor", code=1)
+        self.assertRegex(doctor.stdout, r"(?m)^\[FAIL.*results/C5\.json holds 1 fail")
+        tree = ET.parse(os.path.join(root, ".atompipe", "out", "junit.xml")).getroot()
+        case = next(c for c in tree.iter("testcase") if c.get("name") == "C5"
+                    and (c.get("classname") or "").startswith("claims"))
+        self.assertEqual([k.tag for k in case], ["failure"])
+
+    def test_a_fails_changed_evidence_is_worded_as_a_fail(self):
+        """(review of P2.5a) `doctor` told a fail whose photo changed "its pass
+        does not count" — inviting a second fail; a fail counts whatever happens
+        to its photo (R-3)."""
+        root = P.project(os.path.join(self.tmp(), "b"))
+        _fail(root, "C2", "--evidence", P.EVIDENCE)
+        with open(os.path.join(root, P.EVIDENCE), "wb") as fh:
+            fh.write(b"another photo")
+        doctor = P.run(root, "doctor").stdout
+        row = next(ln for ln in doctor.splitlines() if "evidence C2" in ln)
+        self.assertIn("the fail still counts", row)
+        self.assertNotIn("its pass does not count", row)
 
     def test_every_channel_and_every_edit(self):
         edits = {
@@ -606,6 +708,42 @@ class AMovedArticleReadsStale(_env.EnvCase):
         found = claims.compose(view.claim("C5"), view.verdicts, stale=True)
         self.assertEqual(found.status, ClaimStatus.STALE)
 
+    def test_in_process_an_unregistered_gates_files_are_no_part_of_the_article(self):
+        """(review of P2.5a) The files an article names come from the registered
+        evaluators' newest entries only: an unregistered gate's entry outlives
+        it until the cache is cleared, and one design must not name different
+        files on either side of that."""
+        from types import SimpleNamespace
+        root = self.tmp()
+        os.makedirs(os.path.join(root, "inputs"))
+        with open(os.path.join(root, "inputs", "spec.txt"), "w", encoding="utf-8") as fh:
+            fh.write("a spec\n")
+        entry = SimpleNamespace(reads={"files": {"<root>/inputs/spec.txt": "x"}})
+        anchors = verdicts.Anchors(root=root)
+        for state, want in (("fresh", ["inputs/spec.txt"]), ("stale", ["inputs/spec.txt"]),
+                            ("orphan", []), ("legacy", [])):
+            with self.subTest(state=state):
+                found = SimpleNamespace(rows={"g": verdicts.Row("g", state, entry=entry)})
+                self.assertEqual(verdicts._read_files(root, found, anchors), want)
+
+    def test_a_pass_waits_until_every_evaluator_has_run(self):
+        """(review of P2.5a) A pass recorded before an evaluator's first check run
+        got an article without the files it reads — one design, two article ids.
+        A pass is refused until each has run here (a fail never is); after
+        `check` it is recorded."""
+        root = P.project(os.path.join(self.tmp(), "b"))
+        _env._rmtree(os.path.join(root, ".atompipe", "verdicts"))
+        before = P.results(root, "C5")
+        proc = P.tty(root, "claim", "physical", "C5", "pass", "--detail", "no cracking",
+                     "--evidence", P.EVIDENCE, answer="C5", code=2)
+        self.assertIn("never ran here", proc.stderr)
+        self.assertIn("atompipe check", proc.stderr)
+        self.assertEqual(P.results(root, "C5"), before)
+        _fail(root, "C2")
+        P.run(root, "check")
+        _pass(root, "C5")
+        self.assertEqual(_status(root, "C5")[:2], ("verified", "on-article"))
+
     def test_planted_judges_are_caught(self):
         """Planted: an article compared with itself (the nudge reads Checked),
         and a judge that leaves out the files the design names (critique 1: a
@@ -765,6 +903,17 @@ class TheCheckedSectionHoldsOnlyBoundResults(_env.EnvCase):
         self.assertNotIn("**C9**", proven)
         planted = claims.Composed(ClaimStatus.VERIFIED, claims.ClaimCause.ON_ARTICLE)
         self.assertTrue(report._disagreement(ledger, ledger.claim("C9"), planted, {}))
+        # (review of P2.5a) The readiness tally counts a claim Checked on an
+        # article: it read PASS alone, under a count line saying otherwise.
+        evaluated = dataclasses.replace(ledger, verdicts=[Verdict(gate="g", passed=True,
+                                                                  claims=["C7"])])
+        sentence = report._verdict_sentence(evaluated, claims.compositions(evaluated), None,
+                                            stale=False, markdown=False)
+        self.assertIn("1 of 2 claims is checked against the current inputs.", sentence)
+        # (review of P2.5a) The Stale advice is a sentence of its own, never a
+        # clause run into a capitalised one ("*now* — A new article is needed").
+        self.assertIn("Nothing here is checked *now*. A new article is needed", markdown)
+        self.assertNotRegex(markdown, r"\*now\* — [A-Z]")
 
     def test_checked_rows_and_exactly_one_section(self):
         root = P.project(os.path.join(self.tmp(), "b"), planted=("C8", "C9"))
@@ -897,6 +1046,33 @@ class AContradictionGoesOnTheEvaluatorsTrackRecord(_env.EnvCase):
         self.assertEqual(entry["contradicts"], [])
         self.assertTrue(entry["contradiction_check"])
 
+    def test_in_process_a_contradiction_outlives_its_claim_file(self):
+        """(review of P2.5a) The track record is every results file's: a fail
+        whose claim file was deleted keeps its contradiction, under the id it is
+        sealed to, marked removed. Planted: the claim files alone (P2.5a's)."""
+        fail = PhysicalResult(passed=False, who=P.WHO, channel="interactive", detail="sag",
+                              contradicts=[{"gate": "g", "code": "c" * 64, "rho": "",
+                                            "value": 0.47, "units": "mm", "inside": True}])
+        gone = Claim(id="C1", statement="", kind=ClaimKind.PHYSICAL, results=(fail,),
+                     physical_result=fail)
+        ledger = Ledger(removed=(gone,))
+        found = _need(verdicts, "track_record")(ledger)
+        self.assertEqual([(c.claim, c.removed) for c in found.get("g", ())], [("C1", True)])
+        self.assertIn("its claim file removed",
+                      report.track_words("g", found["g"], "c" * 64))
+        planted = verdicts.track_record(dataclasses.replace(ledger, removed=()))
+        self.assertEqual(planted, {}, "a record of the claim files alone was not caught")
+
+    def test_a_contradiction_outlives_its_claim_file_end_to_end(self):
+        root = self._checked_c1()
+        P.run(root, "claim", "physical", "C1", "--measured", "0.62", "--detail", "ruler",
+              code=0)
+        os.remove(os.path.join(root, "claims", "C1.json"))
+        doc = json.loads(P.run(root, "gate", "show", "bracket.deflection", "--json",
+                               code=0).stdout)
+        self.assertEqual([(row["claim"], row["removed"]) for row in doc["track_record"]],
+                         [("C1", True)])
+
     def test_in_process_only_a_counted_current_pass_is_contradicted(self):
         contradicted_by = _need(claims, "contradicted_by")
         claim = Claim(id="C1", statement="s", acceptance=Acceptance(
@@ -977,6 +1153,112 @@ class AnExpertJudgmentStaysWithItsAuthority(_env.EnvCase):
                 self.assertEqual(claims.compose(claim, []).cause.value, cause)
         self.assertTrue(claims.blocks(claims.compose(base, [])),
                         "an authority named in the file only must stop check")
+
+    def test_in_process_a_rewritten_judgment_is_no_judgment(self):
+        """(review of P2.5a) A judged claim whose statement is rewritten reads as
+        the claim written fresh — Gap until its authority records it as it now
+        reads, which stops `check` — never Stale `claim-moved`, which does not:
+        any once-judged claim could have carried any new statement past `check`
+        (D17's laundering by another route). Planted: P2.5a's judged states."""
+        from atompipe.models import AttributionRecord, EntryStanding, Standing
+        base = Claim(id="C8", statement="Safe above a bed", kind=ClaimKind.ASSUMPTION,
+                     rationale="a safety call", terminal="human", authority="Dana")
+        record = AttributionRecord(role="authority", name="Dana", reason="a safety call",
+                                   claim_digest=claims.claim_digest(base), who="Dana <d@x>",
+                                   channel="interactive")
+        moved = Standing("claim-moved", 0, "a" * 64, (), (EntryStanding(
+            0, True, False, "claim-moved", "a" * 64, "current"),))
+        rewritten = dataclasses.replace(base, statement="Safe to hang heavy books above a bed",
+                                        attributions=(record,), standing=moved)
+        found = claims.compose(rewritten, [])
+        self.assertEqual((found.status, found.cause.value),
+                         (ClaimStatus.UNCLAIMED, "authority-unattributed"))
+        self.assertTrue(claims.blocks(found))
+        self.assertIn("changed since Dana judged it", report.reason(found, Ledger(), rewritten,
+                                                                  full=True))
+        again = dataclasses.replace(rewritten, attributions=(dataclasses.replace(
+            record, claim_digest=claims.claim_digest(rewritten)), record))
+        self.assertEqual(claims.compose(again, []).cause.value, "awaiting-judgment")
+        with mock.patch.object(claims, "_JUDGED_STATES",
+                               frozenset({"current", "article-moved", "judgment-moved",
+                                          "article-unjudged", "claim-moved"})):
+            planted = claims.compose(rewritten, [])
+        self.assertFalse(claims.blocks(planted), "P2.5a's judged states were not caught")
+
+    def test_a_rewritten_judgment_stops_check(self):
+        root = self._c8()
+        P.tty(root, "claim", "physical", "C8", "assume", "--authority", P.NAME, answer="C8",
+              code=0)
+        P.tty(root, "claim", "physical", "C8", "pass", "--authority", P.NAME, "--detail",
+              "safe", answer="C8", code=0)
+        self.assertEqual(_status(root, "C8")[:2], ("verified", "judged"))
+        for nudge in (None, 7.5):
+            with self.subTest(nudge=nudge):
+                P.edit_claim(root, "C8", statement="Safe to hang heavy books above a bed")
+                if nudge:
+                    _projects.set_thickness(root, nudge)
+                self.assertEqual(_status(root, "C8")[:2], ("unclaimed", "authority-unattributed"))
+                check = json.loads(P.run(root, "check", "--json").stdout)
+                self.assertIn("C8", [row["claim"] for row in check["blocking"]])
+                P.edit_claim(root, "C8", statement=P.PLANTED["C8"]["statement"])
+                _projects.set_thickness(root, 7.0)
+
+    def test_in_process_a_judgments_fail_names_no_article(self):
+        """(review of P2.5a) A fail on an expert-judgment claim whose design moved
+        said "a new article is needed" while the rebuild prediction, rightly,
+        left a judgment out. Planted: the judgment test answering no."""
+        from atompipe.models import EntryStanding, Standing
+        fail = PhysicalResult(passed=False, who="Pat Other <p@x>", channel="agent-session s1",
+                              detail="too heavy", article={"hash": "a" * 64})
+        standing = Standing("", None, "", (), (EntryStanding(
+            0, False, False, "", "a" * 64, "moved", ("config.thickness 7.0 -> 7.5",)),))
+        claim = Claim(id="C8", statement="s", kind=ClaimKind.ASSUMPTION, rationale="r",
+                      terminal="human", authority="Dana", results=(fail,),
+                      physical_result=fail, standing=standing)
+        found = claims.compose(claim, [])
+        text = report.reason(found, Ledger(), claim, full=True)
+        self.assertNotIn("article", text)
+        with mock.patch.object(report, "_judgment", lambda claim_: False):
+            self.assertIn("a new article is needed",
+                          report.reason(found, Ledger(), claim, full=True))
+
+    def test_a_judgment_is_worded_as_one(self):
+        """(review of P2.5a) Every channel words a judgment as one: `why`'s block
+        heads JUDGMENTS, the page's says "A judgment was recorded", a model that
+        does not load says the judgment cannot be compared with the design, and
+        an authority named with spaces around it is the authority."""
+        root = self._c8()
+        P.edit_claim(root, "C8", authority=P.NAME + " ")
+        P.tty(root, "claim", "physical", "C8", "assume", "--authority", P.NAME, answer="C8",
+              code=0)
+        P.tty(root, "claim", "physical", "C8", "pass", "--authority", P.NAME, "--detail",
+              "safe", answer="C8", code=0)
+        self.assertEqual(_status(root, "C8")[:2], ("verified", "judged"))
+        why = P.run(root, "why", "C8", code=0).stdout
+        self.assertIn("JUDGMENTS (1, oldest first)", why)
+        self.assertNotIn("PHYSICAL RESULTS", why)
+        self.assertIn(f"settled only by {P.NAME}'s judgment", why)
+        self.assertNotIn("threshold", why)
+        found = P.channels(root, "C8")
+        self.assertEqual(found["state.row"]["physical_result"]["heading"],
+                         "A judgment was recorded:")
+        text = _model_text(root)
+        _break_model(root)
+        status, cause, reason = _status(root, "C8")
+        self.assertEqual((status, cause), ("stale", "article-unjudged"))
+        self.assertIn(f"{P.NAME}'s judgment cannot be compared with the design", reason)
+        self.assertIn(f"Fix the model so {P.NAME}'s judgment can be compared",
+                      P.run(root, "report", code=0).stdout)
+        # A fail on it whose design then moves names no article and no rebuild.
+        _restore_model(root, text)
+        P.run(root, "claim", "physical", "C8", "fail", "--detail", "too heavy", agent=True,
+              code=0)
+        _projects.set_thickness(root, 7.5)
+        status, cause, reason = _status(root, "C8")
+        self.assertEqual((status, cause), ("refuted", "physical-fail"))
+        self.assertNotIn("article", reason)
+        doc = json.loads(P.run(root, "status", "--json", code=0).stdout)
+        self.assertEqual(doc.get("rebuild"), [])
 
     def test_the_rows(self):
         root = self._c8()
@@ -1284,6 +1566,27 @@ class RenderersAgreeOnPhysicalClaims(_env.EnvCase):
         case = next(c for c in junit.iter("testcase") if c.get("name") == "C9")
         self.assertEqual([(k.tag, k.get("type")) for k in case],
                          [("failure", "status-and-evidence-disagree")])
+
+    def test_the_page_groups_an_expert_judgment_apart(self):
+        """(review of P2.5a) The page grouped an expert judgment under the
+        assumptions' blurb — "an owner", authority's Never-say — and never showed
+        whose judgment it waits on. Its group and blurb are state.json's
+        phrases, its tag its `terminal_word`, its result's heading a
+        judgment's."""
+        said = report.page_phrases()
+        self.assertTrue(said.get("judgment_title"))
+        self.assertNotIn("owner", said.get("judgment_blurb", "owner"))
+        claim = Claim(id="C8", statement="s", kind=ClaimKind.ASSUMPTION, rationale="r",
+                      terminal="human", authority="Dana")
+        result = PhysicalResult(passed=True, who="Dana <d@x>", channel="interactive")
+        self.assertEqual(report.result_facts(claim, result)["heading"],
+                         "A judgment was recorded:")
+        with open(os.path.join(_env.REPO, "src", "atompipe", "site_template", "lib",
+                               "panels.js"), encoding="utf-8") as fh:
+            panels = fh.read()
+        self.assertIn('c.terminal === "human" ? "judgment"', panels)
+        self.assertIn("claim.terminal_word", panels)
+        self.assertIn("result.heading", panels)
 
     def test_no_view_builder_skips_the_judge(self):
         self.assertEqual(view_builders(_sources()), [])

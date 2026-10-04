@@ -2243,17 +2243,32 @@ def cmd_claim_show(args: argparse.Namespace) -> int:
     return 0
 
 
-#: The environment variables an agent's shell carries, by exact name — and every
-#: name starting ``AGENT_PREFIX``. Provenance: observed in this harness on
-#: 2026-10-04 (P2.5a §1): ``CLAUDECODE``, ``AI_AGENT``, ``CLAUDE_CODE_SESSION_ID``,
-#: ``CLAUDE_CODE_CHILD_SESSION``, ``CLAUDE_CODE_ENTRYPOINT`` and more
-#: ``CLAUDE_CODE_*``; ``tests/_env.py`` strips them, so every test child reads
-#: ``non-interactive`` unless it sets one. *Rejected:* ``CLAUDE_CODE_CHILD_SESSION``
-#: alone (the parent session sets ``CLAUDECODE`` without it); the whole ``CLAUDE``
-#: prefix (a person's own ``CLAUDE_API_KEY`` would read every entry they make as an
-#: agent's); a flag or an ``ATOMPIPE_CHANNEL`` variable (the generator fills it).
-AGENT_MARKERS: tuple[str, ...] = ("CLAUDECODE", "AI_AGENT")
-AGENT_PREFIX = "CLAUDE_CODE_"
+#: The environment variables an agent's shell carries, by exact name: the ones a
+#: Claude Code session sets for the commands it runs, never one a person sets.
+#: Provenance: observed in this harness's Bash tool on 2026-10-04 (P2.5a §1, and
+#: again in its review) — ``CLAUDECODE``, ``AI_AGENT``, ``CLAUDE_CODE_SESSION_ID``,
+#: ``CLAUDE_CODE_CHILD_SESSION``, ``CLAUDE_CODE_ENTRYPOINT``,
+#: ``CLAUDE_CODE_EXECPATH``, ``CLAUDE_CODE_SESSION_ATTENDED``,
+#: ``CLAUDE_CODE_MESSAGING_SOCKET``, ``CLAUDE_CODE_MESSAGING_TOKEN`` and
+#: ``CLAUDE_PID``; ``tests/_env.py`` strips every ``CLAUDE*``, so every test child
+#: reads ``non-interactive`` unless it sets one. *Rejected:*
+#: ``CLAUDE_CODE_CHILD_SESSION`` alone (the parent session sets ``CLAUDECODE``
+#: without it); the whole ``CLAUDE`` prefix (a person's own ``CLAUDE_API_KEY``
+#: would read every entry they make as an agent's); the whole ``CLAUDE_CODE_``
+#: prefix, P2.5a's — what slipped through its review: Claude Code's own
+#: user-set configuration lives there (``CLAUDE_CODE_USE_BEDROCK``,
+#: ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, …), so a person who exports one in their
+#: shell profile had every pass they typed counted for nothing, every ``assume``
+#: refused with the advice to ask themselves, and every fail written with no
+#: typed id — and nothing said which variable did it (``_agent_marker`` now
+#: names it); a flag or an ``ATOMPIPE_CHANNEL`` variable (the generator fills
+#: it). The cost, said: a future session marker under a new name reads a
+#: person's shell until it is added here — the seal is drift's catch, and P3's
+#: permission rule the lock (D-13).
+AGENT_MARKERS: tuple[str, ...] = (
+    "CLAUDECODE", "AI_AGENT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID")
 
 #: Flags `claim physical` still parses only to refuse — any value, before the
 #: project is read — each with what it names instead (P2.5a-D5; A-14 asks to
@@ -2267,12 +2282,22 @@ AGENT_PREFIX = "CLAUDE_CODE_"
 REFUSED_FLAGS: dict[str, str] = {"--who": "who", "--when": "when"}
 
 #: The longest agent session id a channel value keeps (`agent-session <id>`):
-#: an id is a key to find the session, not prose; a longer one is cut.
+#: an id is a key to find the session, not prose; a longer one is cut. Why 64:
+#: the id observed here (``CLAUDE_CODE_SESSION_ID``, 2026-10-04) is a
+#: 36-character UUID, and 64 keeps whole any id up to a hex SHA-256 — the
+#: longest an opaque session key plausibly grows — while the channel value,
+#: sealed into every entry, never carries a paragraph an agent's environment
+#: filled. *Rejected:* no cap (the variable is the agent's to fill); the UUID's
+#: own 36 (a longer id format would be cut, and two sessions could share the
+#: cut prefix).
 _SESSION_ID_MAX = 64
 
 
-def _agent_marker(environ: Mapping[str, str]) -> bool:
-    return any(name in AGENT_MARKERS or name.startswith(AGENT_PREFIX) for name in environ)
+def _agent_marker(environ: Mapping[str, str]) -> str:
+    """The first ``AGENT_MARKERS`` name ``environ`` sets, or ``""`` — named in the
+    refusal and the recorded line, so a person whose shell reads as an agent's
+    learns which variable says so."""
+    return next((name for name in AGENT_MARKERS if name in environ), "")
 
 
 def _channel(stdin_isatty: bool, environ: Mapping[str, str], answer: str | None,
@@ -2281,7 +2306,7 @@ def _channel(stdin_isatty: bool, environ: Mapping[str, str], answer: str | None,
     test drives it with an injected TTY, environment and typed line:
 
     * ``agent-session <CLAUDE_CODE_SESSION_ID or unknown>`` when an agent marker
-      is set (``AGENT_MARKERS``, any ``AGENT_PREFIX`` name) — the marker wins over
+      is set (``AGENT_MARKERS``, by exact name) — the marker wins over
       a TTY: an agent can open a pty;
     * ``non-interactive`` with no TTY on stdin (a pipe, CI, a script);
     * ``interactive`` from a TTY with no marker, once the person typed the
@@ -2339,7 +2364,7 @@ def _measured_outcome(acceptance: Any, measured: float | None, typed: bool | Non
         holds = acceptance.holds(float(measured))
         if typed is not None and typed is not holds:
             raise AtompipeError(said["measured_disagrees"].format(
-                value=report._num(measured), verdict="meets" if holds else "fails",
+                value=report._num(measured), verdict=said["meets" if holds else "fails"],
                 condition=acceptance.render(), act="pass" if typed else "fail"))
         return holds
     if typed is None:
@@ -2373,7 +2398,8 @@ def _evidence(root: str, paths: Iterable[str], *, required: bool, claim_id: str
             problem = "there is no such file"
         if problem:
             if required:
-                raise AtompipeError(said["bad_evidence"].format(path=raw, why=problem))
+                raise AtompipeError(said["bad_evidence"].format(path=report._one(raw),
+                                                                why=problem))
             listed.append(rel)
             continue
         listed.append(rel)
@@ -2391,6 +2417,43 @@ def _design_values(projection: Any, limit: int = 3) -> str:
     shown = [f"config.{key} {value!r}" for key, value in list(config.items())[:limit]]
     more = len(config) - len(shown)
     return ", ".join(shown) + (f", +{more} more" if more > 0 else "")
+
+
+def _act(result: str | None, passed: bool | None, measured: float | None,
+         claim_id: str = "the claim") -> tuple[str | None, bool | None]:
+    """``(act, typed)`` from the positional act and the outcome flags — refused
+    where they disagree, and an outcome's flag or a value with ``assume``,
+    nothing written (review of P2.5a: ``fail --pass`` recorded and counted a
+    PASS, its ``--json`` saying ``act: fail``; ``pass --fail`` wrote a fail that
+    P2.5a cannot supersede; ``assume --fail`` recorded an attribution; each
+    flag and the act were read in turn and the flag won, silently).
+    *Rejected:* letting either win (whichever it is, one word the person typed
+    is ignored on a record that cannot be taken back)."""
+    said = report.HUMAN["signing"]
+    if result == "assume":
+        flag = ("--pass" if passed else "--fail") if passed is not None else (
+            "--measured" if measured is not None else "")
+        if flag:
+            raise AtompipeError(said["assume_flags"].format(id=claim_id, flag=flag))
+        return "assume", None
+    if result in ("pass", "fail") and passed is not None and passed is not (result == "pass"):
+        raise AtompipeError(said["act_disagrees"].format(
+            act=result, flag="--pass" if passed else "--fail"))
+    typed = passed if passed is not None else (
+        (result == "pass") if result in ("pass", "fail") else None)
+    act = result if result is not None else (
+        ("pass" if typed else "fail") if typed is not None else None)
+    return act, typed
+
+
+def _not_text(value: Any) -> bool:
+    """Whether ``value`` holds a lone surrogate — an argument whose bytes were not
+    UTF-8 — which no record can store as text."""
+    try:
+        str(value).encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
 
 
 def cmd_claim_physical(args: argparse.Namespace) -> int:
@@ -2423,12 +2486,14 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
     for flag, key in REFUSED_FLAGS.items():
         if getattr(args, key, None) is not None:
             raise AtompipeError(said[key])
-    typed: bool | None = args.passed
-    act = args.result
-    if typed is None and act in ("pass", "fail"):
-        typed = act == "pass"
-    if act is None and typed is not None:
-        act = "pass" if typed else "fail"
+    act, typed = _act(args.result, args.passed, args.measured, args.id)
+    # A value that is not text is refused here, naming its flag, before the
+    # project is read (review of P2.5a: `--detail $'bad\xffbyte'` reached the
+    # writer and printed a traceback, exit 1 — the code for a gate-level stop).
+    for flag, values in (("--detail", [args.detail]), ("--evidence", list(args.evidence)),
+                         ("--authority", [args.authority])):
+        if any(value is not None and _not_text(value) for value in values):
+            raise AtompipeError(said["not_text"].format(flag=flag))
     measured = args.measured
     if measured is not None and not math.isfinite(measured):
         raise AtompipeError(said["measured_bad"].format(value=measured))
@@ -2459,21 +2524,25 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
                                                     required=required,
                                                     status=report.word(reads.status,
                                                                        errored=reads.errored))]
-        person = not _agent_marker(environ) and isatty
+        marker = _agent_marker(environ)
+        person = not marker and isatty
         if act == "assume":
             if not person:
-                name = claim.authority if terminal == "human" else claim.owner
-                flag = f' --authority "{claim.authority}"' if terminal == "human" else ""
+                authority = claims.name_of(claim.authority)
+                name = authority if terminal == "human" else claims.name_of(claim.owner)
+                flag = f' --authority "{report._one(authority)}"' if terminal == "human" else ""
+                why = (said["marker"].format(marker=marker) if marker
+                       else said["assume_pipe"])
                 raise AtompipeError(said["assume_channel"].format(
-                    id=claim.id, name=report._one(name) or "its owner", flag=flag))
+                    id=claim.id, name=report._one(name) or "its owner", flag=flag, why=why))
             list_name = "attributions"
             entry, rows = _attribution_entry(args, claim, terminal, who, now)
         else:
             list_name = "results"
             entry, rows = _result_entry(args, root, claim, current, terminal, typed, measured,
                                         who, now, view, resolution, registry, model,
-                                        projection, model_error)
-        rows = head + rows + ["  " + said["recorded_by"].format(who=who)]
+                                        projection, model_error, person=person)
+        rows = head + rows + ["  " + said["recorded_by"].format(who=report._one(who))]
         answer = _confirm(claim.id, rows) if person else None
         entry["channel"] = _channel(isatty, environ, answer, claim.id)
         store.append_signed(root, claim.id, list_name, entry)
@@ -2498,8 +2567,12 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
     contradicts = [item for item in entry.get("contradicts") or ()
                    if item.get("inside") is True]
     if args.json:
+        # The act as WRITTEN, never as typed (review of P2.5a: `fail --pass`
+        # printed act "fail" over a pass in the file).
+        written = "assume" if list_name == "attributions" else (
+            "pass" if entry.get("passed") is True else "fail")
         _dump(dict(report.claim_json(claim, composed=found), status=str(found.status),
-                   recorded={"act": act or ("pass" if entry.get("passed") else "fail"),
+                   recorded={"act": written,
                              "channel": entry["channel"], "who": who,
                              "article": (entry.get("article") or {}).get("hash", ""),
                              "contradicts": [item["gate"] for item in contradicts]},
@@ -2517,7 +2590,8 @@ def cmd_claim_physical(args: argparse.Namespace) -> int:
             # it — the fact to give, as the judge gives it (`_fact_terminal`).
             line += said["beside"]
         elif channel.startswith("agent-session"):
-            line += said["agent_pass" if passed else "agent_fail"]
+            line += said["agent_pass" if passed else "agent_fail"].format(
+                marker=said["marker"].format(marker=marker) if marker else "")
         elif channel == "non-interactive":
             line += said["pipe_pass" if passed else "pipe_fail"]
     _say(line)
@@ -2544,7 +2618,7 @@ def _attribution_entry(args: argparse.Namespace, claim: Claim, terminal: str, wh
         given = args.authority
         if given is None:
             raise AtompipeError(said["authority_flag"].format(id=claim.id, authority=name))
-        if given != name:
+        if claims.name_of(given) != name:
             raise AtompipeError(said["authority_other"].format(given=given, id=claim.id,
                                                                authority=name))
         reason = str(claim.rationale or "")
@@ -2574,10 +2648,11 @@ def _attribution_entry(args: argparse.Namespace, claim: Claim, terminal: str, wh
 def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Claim,
                   terminal: str, typed: bool | None, measured: float | None, who: str,
                   now: str, view: Ledger, resolution: verdicts.Resolution,
-                  registry: Any, model: Any, projection: Any, model_error: str
-                  ) -> tuple[dict, list[str]]:
+                  registry: Any, model: Any, projection: Any, model_error: str, *,
+                  person: bool = True) -> tuple[dict, list[str]]:
     """The physical result `pass`/`fail` records, and its prompt rows
-    (P2.5a-D9, D10, D14, D15)."""
+    (P2.5a-D9, D10, D14, D15). ``person``: the shell is a person's own (a TTY,
+    no agent marker) — only there can a pass count."""
     said = report.HUMAN["signing"]
     if measured is not None and typed is None and not isinstance(
             getattr(claim.acceptance, "limit", None), (int, float)):
@@ -2585,9 +2660,9 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
             id=claim.id, value=report._num(measured)))
     passed = _measured_outcome(claim.acceptance, measured, typed)
     kind = claim.kind if isinstance(claim.kind, ClaimKind) else ClaimKind(claim.kind)
-    authority = str(claim.authority or "").strip()
+    authority = claims.name_of(claim.authority)
     if terminal == "human":
-        if args.authority is not None and args.authority != authority:
+        if args.authority is not None and claims.name_of(args.authority) != authority:
             raise AtompipeError(said["authority_other"].format(
                 given=args.authority, id=claim.id, authority=authority))
         if passed:
@@ -2617,6 +2692,26 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
     if passed and terminal in ("measurement", "human") and not article:
         raise AtompipeError(said["no_model"].format(
             error=report._trunc(model_error or "its code was not recorded", 160)))
+    if passed and person and terminal in ("measurement", "human"):
+        # An article names the files the registered evaluators read on the
+        # design (`verdicts.article_of`), so a pass waits until each has run
+        # here at least once. What slipped through (review of P2.5a): a pass
+        # recorded before a file-reading evaluator's first check run got an
+        # article without that file — one design, two article ids — and an
+        # edit of the file left that pass Checked. Only `never`: a stale entry
+        # names the files its evaluator read, and an evaluator a prerequisite
+        # keeps from running (`not run:`) cannot run before the print is
+        # tested; that one's files join the article from its first run on (a
+        # limit, SPINE_CONTRACT's). A fail is never refused: it counts on any
+        # article (R-3); nor a pass from an agent session or a pipe, which
+        # counts for nothing on any article.
+        unread = [gid for gid, row in sorted(resolution.rows.items())
+                  if row.state == "never" and not any(
+                      str(note).startswith(verdicts._PRUNED_NOTE) for note in row.notes)]
+        if unread:
+            shown = ", ".join(unread[:3]) + (f", +{len(unread) - 3} more"
+                                              if len(unread) > 3 else "")
+            raise AtompipeError(said["unread"].format(gates=shown, id=claim.id))
     contradicts: list[dict] = []
     check = ""
     if not passed and terminal != "human":
@@ -2652,7 +2747,7 @@ def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Cl
         what = said["you_record"].format(act=act, detail=report._one(args.detail)
                                          or said["no_detail"])
     if listed:
-        what += " [" + ", ".join(listed) + "]"
+        what += " [" + ", ".join(report._one(path) for path in listed) + "]"
     rows = ["  " + what]
     if article:
         rows.append("  " + said["article"].format(article=report.article12(article),
@@ -5723,15 +5818,26 @@ def _doctor_records_rows(results: list[dict], root: str, ledger: Ledger) -> None
 
 
 def _doctor_results_rows(results: list[dict], root: str, ledger: Ledger) -> None:
-    """`doctor`'s `results` rows (P2.5a-D21): physical results recorded before
-    they were bound to articles — their passes count for nothing until recorded
-    again in a person's own shell — and evidence files changed or missing since
-    they were recorded. One ok row when there is nothing to say. (A results file
-    whose seal or chain is broken is refused by the strict reader, and named in
-    the records rows with its fix.)"""
+    """`doctor`'s `results` rows (P2.5a-D21), over EVERY results file — the
+    claims' and those no claim file holds (`Ledger.removed`): physical results
+    recorded before they were bound to articles — their passes count for
+    nothing until recorded again in a person's own shell — evidence files
+    changed or missing since they were recorded, each worded for what it does
+    to its entry, and a fail no claim file holds, a problem. One ok row when
+    there is nothing to say. (A results file whose seal or chain is broken is
+    refused by the strict reader, and named in the records rows with its fix.)
+
+    What slipped through (review of P2.5a): the rows looped over the claims, so
+    a claim file renamed away from its sealed fail left `doctor` printing
+    "every physical result is sealed" beside a fail no reader looked at; and a
+    fail's changed photo was told "its pass does not count", inviting a second
+    fail — a fail counts whatever happens to its photo (R-3)."""
+    said = report.HUMAN["physical"]
     legacy: list[str] = []
     moved: list[str] = []
-    for claim in ledger.claims:
+    orphaned: list[str] = []
+    removed = list(getattr(ledger, "removed", ()) or ())
+    for claim in [*ledger.claims, *removed]:
         for entry in getattr(claim, "results", ()) or ():
             if not entry.channel and entry.passed is True:
                 legacy.append(claim.id)
@@ -5739,8 +5845,20 @@ def _doctor_results_rows(results: list[dict], root: str, ledger: Ledger) -> None
                 full = os.path.join(root, *str(rel_path).split("/"))
                 now = sha256_file(full) if os.path.isfile(full) else None
                 if now != digest:
-                    moved.append(f"{claim.id}: {rel_path} "
-                                 f"{'is missing' if now is None else 'changed'}")
+                    moved.append(said["doctor_evidence"].format(
+                        id=claim.id, path=report._one(rel_path),
+                        how="is missing" if now is None else "changed",
+                        then=said["doctor_evidence_pass" if entry.passed is True
+                                  else "doctor_evidence_fail"]))
+    for claim in removed:
+        fails = [entry for entry in claim.results if entry.passed is not True]
+        if fails:
+            orphaned.append(said["doctor_removed"].format(
+                id=claim.id, n=len(fails), detail=report._trunc(fails[-1].detail or
+                                                                "no detail recorded", 80)))
+        else:
+            _check(results, "results", "warn", said["doctor_removed_passes"].format(
+                id=claim.id))
     if legacy:
         ids = ", ".join(dict.fromkeys(legacy))
         _check(results, "results", "warn",
@@ -5748,9 +5866,10 @@ def _doctor_results_rows(results: list[dict], root: str, ledger: Ledger) -> None
                f"({ids}): they count for nothing until the person who tested each "
                f"records it again in their own shell")
     for line in moved:
-        _check(results, "results", "warn", f"evidence {line} since it was recorded — its "
-                                           f"pass does not count until recorded again")
-    if not legacy and not moved:
+        _check(results, "results", "warn", line)
+    for line in orphaned:
+        _check(results, "results", "FAIL", line)
+    if not legacy and not moved and not removed:
         _check(results, "results", "ok",
                "every physical result is sealed and its evidence is as recorded")
 
@@ -6206,9 +6325,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help=said["act_help"])
     outcome = p.add_mutually_exclusive_group()
     outcome.add_argument("--pass", dest="passed", action="store_const", const=True,
-                         help="same as the positional `pass` (what the report prints)")
+                         help=said["pass_help"])
     outcome.add_argument("--fail", dest="passed", action="store_const", const=False,
-                         help="same as the positional `fail`")
+                         help=said["fail_help"])
     p.set_defaults(passed=None)
     # Refused flags (REFUSED_FLAGS): parsed so a pasted older command meets its
     # reason, never argparse's bare "unrecognized arguments"; never in --help.

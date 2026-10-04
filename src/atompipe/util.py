@@ -45,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import stat
 import sys
@@ -67,6 +68,7 @@ __all__ = [
     "canonical_json",
     "seal",
     "FileDigests",
+    "printable",
     "human_bytes",
     "human_duration",
     "rel",
@@ -627,6 +629,35 @@ class FileDigests:
 # --------------------------------------------------------------------------- #
 # human-readable rendering
 # --------------------------------------------------------------------------- #
+#: What ``printable`` escapes after it collapses whitespace: every C0 control,
+#: DEL and every C1 control (``\x1b`` above all — a CSI sequence moves a
+#: terminal's cursor and erases what was printed), and the bidirectional
+#: overrides and isolates, which reorder what a terminal shows without moving
+#: a byte. What slipped through (review of P2.5a): a claim's statement holding
+#: ``\x1b[1G\x1b[2K`` erased itself on `claim physical`'s prompt and printed
+#: another claim's words in its place — the one line the person reads before
+#: typing the id they settle — and the pass was sealed to the hidden sentence.
+#: *Rejected:* refusing such text in the strict reader alone (a record a
+#: project already holds would refuse every command, R-10, and the commit
+#: message, an evidence path or git's own identity reach a terminal too);
+#: stripping the bytes (the reader would never learn the text holds them).
+_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+
+
+def printable(text: Any) -> str:
+    """``text`` as ONE terminal line that says what it holds: whitespace runs,
+    newlines included, collapsed to one space, and every remaining control
+    character escaped as visible ``\\xNN`` (``\\uNNNN`` past ``\\xff``) —
+    never interpreted by the terminal that prints it."""
+    joined = " ".join(str(text if text is not None else "").split())
+
+    def escaped(match: "re.Match[str]") -> str:
+        point = ord(match.group(0))
+        return f"\\x{point:02x}" if point <= 0xFF else f"\\u{point:04x}"
+
+    return _UNPRINTABLE.sub(escaped, joined)
+
+
 def human_bytes(n: int | float) -> str:
     """Render a byte count: ``947 B``, ``12.4 KiB``, ``3.1 MiB``.
 

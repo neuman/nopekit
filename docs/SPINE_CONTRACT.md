@@ -194,6 +194,8 @@ class Ledger(Record):           # the whole project, in memory (store.load assem
     inputs: list[InputArtifact]; needs: list[Need]; decisions: list[Decision]
     verdicts: list[Verdict]                                              # latest per gate
     views: list[View]
+    removed: tuple[Claim, ...]   # review of P2.5a, in memory only: a results file no claim
+                                 # file holds, as a claim (to_dict drops it; view composes it)
     def claim(cid) | param(name) | artifact(aid) | need(nid) | verdict(gate_id) -> record | None
     def verdicts_for(cid) -> list[Verdict];  def upsert_verdict(verdict) -> None
 ```
@@ -308,6 +310,7 @@ def sha256_text(text: str) -> str
 def canonical_json(value) -> str             # P2.5a: THE canonical form: sorted, compact, no NaN
 def seal(form) -> str                        # sha256 of canonical_json(form): a result's seal
 def short_hash(text: str, n: int = 12) -> str
+def printable(text) -> str           # review of P2.5a: one line, every control escaped as \xNN
 def human_bytes(n: int) -> str
 def human_duration(seconds: float) -> str
 def rel(path, root) -> str                   # repo-relative posix path, for stable records
@@ -354,7 +357,8 @@ def is_repo(path) -> bool
 def git_head(root) -> str | None                     # HEAD's sha; None outside git
 def ls_files(root, relpaths, *, others=True) -> list[str] | None   # -z; relative to root
 def ident(root) -> str | None                        # author identity, timestamp dropped
-def show(root, relpath) -> bytes | None              # P2.5a: the bytes HEAD holds at relpath
+def show(root, relpath, rev="HEAD") -> bytes | None  # P2.5a: the bytes a commit holds at relpath
+def history(root, relpath, limit) -> list[str]      # P2.5a review: commits that changed it, newest first
 def model_dirty(root, relpaths) -> bool | None       # P2.5a: any of them differs from HEAD
 def commit_times(root, relpaths) -> dict[str, str]   # path -> its last commit's time
 ```
@@ -1530,9 +1534,11 @@ def article_of(root, projection, model, *, anchors=None, digests=None,
                resolution=None) -> dict          # {} when the model does not load
 def judge_results(ledger, here) -> dict[str, Standing]   # resolve's rung 8, never cached
 class Contradiction(NamedTuple): gate; code; claim; article; when; who; channel; value;
-                                 measured; units
-def track_record(ledger) -> dict[str, tuple[Contradiction, ...]]   # from every fail's contradicts
-def view(ledger, resolution) -> Ledger    # THE view builder: verdicts + each claim's standing
+                                 measured; units; removed   # removed: review of P2.5a
+def track_record(ledger) -> dict[str, tuple[Contradiction, ...]]   # every results file's fails' contradicts
+def view(ledger, resolution) -> Ledger    # THE view builder: verdicts + each claim's standing,
+                                          # + each Ledger.removed claim holding a fail
+REMOVED = "removed"                       # the Standing.state of such a claim
 ```
 **`apply_prerequisites`** (P2.2-D7, D8) is `resolve`'s last rung and `check`'s again over
 the view it merges with its sweep (`cli._swept`). It walks `gates.plan`'s order over
@@ -2571,7 +2577,7 @@ def status_view(composed, ledger, claim, *, stale_reasons=None) -> dict  # {key,
 def words_table() -> dict;  def outcome_words() -> dict;  def need_word(status) -> str
 def page_phrases() -> dict                   # state.json `phrases`: {invalidated, need, outcome_hint}
 def limit_words(acceptance) -> str            # a claim's limit beside a value: "0.5 mm", "0.2..0.8 mm", ""
-def recorded_by(who) -> str                  # "recorded by sam" | "recorded, unattributed" — one line
+def recorded_by(who) -> str                  # "recorded by dana" | "recorded, unattributed" — one line
 def prerequisite_phrase(verdict) -> str      # "prerequisite failed: <root>" | "… not established:
                                              #   <root> (<kind>)", from HUMAN and the spine's mark
 def readiness(ledger, composed) -> dict      # {required, unresolved, unbound, ready}
@@ -3432,8 +3438,8 @@ digest moved (models, verdicts); every entry re-keys once. Decision rows: `P2.5a
 in `docs/plan/phase-2.md`.
 
 - **The channel** (`cli._channel`, `claim physical <id> pass|fail|assume`):
-  `interactive` from a TTY with no agent marker (`cli.AGENT_MARKERS`, any
-  `CLAUDE_CODE_*`) once the person typed the claim's id; `agent-session <id>` under a
+  `interactive` from a TTY with no agent marker (`cli.AGENT_MARKERS`, by exact name —
+  the review of P2.5a dropped "any `CLAUDE_CODE_*`") once the person typed the claim's id; `agent-session <id>` under a
   marker; `non-interactive` from a pipe. Only `interactive` makes a pass count or an
   attribution exist; `assume` is refused off it. `who` is `vcs.ident`, `when` the clock;
   `--who`/`--when` are refused before the project is read (`cli.REFUSED_FLAGS`). With
@@ -3484,6 +3490,42 @@ in `docs/plan/phase-2.md`.
   `recorded`. The page's "contradict" title is `phrases.disagree`, and a result's tone
   keys on `counts`.
 
+## What the review of P2.5a moved
+
+Each a slip a refuter reproduced; decision rows `P2.5a-Rn` in `docs/plan/phase-2.md`.
+
+- **The restore advice** (`store._restore_advice`): what a restore brings back is the
+  last commit's version when it verifies, else the newest commit's that does
+  (`vcs.history`, `vcs.show(..., rev)`); against it, EVERY entry it does not hold is
+  named — a broken seal as unverifiable, whatever its `passed` says, a sealed fail with
+  the command that records it again carrying its measured value, evidence and
+  authority — and an entry removed that nobody holds is said.
+- **A results file no claim file holds** (`Ledger.removed`): kept, composed by
+  `verdicts.view` beside the claims when it holds a fail (standing `removed`), so the
+  fail reads Failing, stops `check` and is a JUnit failure; `track_record` reads it
+  (`Contradiction.removed`); `doctor` names it as a problem; `next_claim_id` never
+  reissues its id.
+- **The judge** (`verdicts._judge_entry`): the value is compared with the acceptance
+  condition only while the claim has not moved — a moved claim reads `claim-moved`
+  whichever way its limit went; a judgment of other words reads `claim-moved` before
+  any moved article, and `claims._JUDGED_STATES` leaves `claim-moved` out: such a
+  claim reads as one written fresh — Gap until its authority records it, Assumed after.
+- **Names** (`claims.name_of`): an owner, an authority, an attribution's name and a
+  result's authority are compared with the whitespace around them gone. An owner's
+  attribution counts if any recorded one matches the claim's owner and reason now.
+- **The channel**: the agent markers by exact name, the one matched named in the
+  recorded line and the refusal; a positional act and `--pass`/`--fail` that disagree,
+  or an outcome's flag with `assume`, refused; `--json`'s `recorded.act` the act
+  written; a value that is not UTF-8 refused naming its flag (`store._dumps` refuses it
+  too); a pass refused while a registered evaluator has never run here.
+- **The article's files** (`verdicts._read_files`): a registered evaluator's newest
+  entry only — never an unregistered gate's or a legacy verdict's.
+- **Words**: every value printed to a terminal through `util.printable` (`report._trunc`):
+  controls escaped as `\xNN`. A judgment is worded as one (`JUDGMENTS` in `why`, "A
+  judgment was recorded" on the page, its own Stale and fail lines, no article, its
+  own page group). The readiness tally counts Checked on an article; the Stale advice
+  is its own sentence.
+
 ## Limits: what the spine cannot see, named
 
 - **A re-sealed forgery counts (P2.5a).** A seal is a plain sha256: a process that
@@ -3498,6 +3540,14 @@ in `docs/plan/phase-2.md`.
   design; the prompt shows the revision and any uncommitted model edits for that reason.
   And it is the whole design: any value change moves every recorded article (the
   rebuild prediction over-predicts). P2.5b's `export` records build-time articles.
+- **An evaluator a prerequisite keeps from running (review of P2.5a).** A pass waits
+  until every registered evaluator has run here once, so the files each reads are in
+  its article — except one pruned behind a prerequisite that is not established: it
+  cannot run before the print is tested, and the files only it reads join an article
+  recorded from its first run on.
+- **A new agent marker (review of P2.5a).** The markers are matched by exact name;
+  a session marker a later Claude Code adds under a new name reads as a person's
+  shell until it is added to `cli.AGENT_MARKERS`.
 - **An institution as an authority (P2.5a).** The authority's git identity must be
   theirs; an institution with no person's identity cannot record its judgment until
   named delegates exist (on the check-in batch).

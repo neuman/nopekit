@@ -253,7 +253,8 @@ was the one a reader of the contract would never look for.
                   "article": "", "standing": "", "contradicts": [ ],          // P2.5a
                   "physical_result": { "passed": true, …, "counts": false,
                                        "why": "a pass recorded from an agent session does not count",
-                                       "recorded": "recorded by Sam, from an agent session" },
+                                       "recorded": "recorded by Dana, from an agent session",
+                                       "heading": "A physical result was recorded:" },
                   … } ],
   "verdicts": [ { "gate": …, "passed": …, "ok": false, "status": "fail", "detail": …,
                   "measured": …, "limit": …, "comparator": "<=", "settles": "tip deflection",
@@ -288,6 +289,7 @@ was the one a reader of the contract would never look for.
   "phrases":  { "invalidated": "invalidated",
                 "disagree": "the resolver and the verdicts disagree — a defect to report",
                 "result_recorded": …, "result_counts": …, "result_not_counted": …,
+                "judgment_title": "Expert judgments", "judgment_blurb": …,
                 "need": { "open": "identified", "proposed": "proposed", … },
                 "outcome_hint": { "pass": "the evaluator ran and passed", … } }
 }
@@ -325,13 +327,19 @@ an agent can read the site's state without a browser.
   and `standing` (the judge's: `current`, `article-moved`, `not-counted:<why>` …) and
   `contradicts` (the evaluators a Failing contradiction names). `physical_result`
   carries `counts` — the judge counted it (a pass on its current article, or any
-  fail) — `why` in words when it does not, and `recorded` (who, and from where): the
+  fail) — `why` in words when it does not, `recorded` (who, and from where) and
+  `heading` (the block's first words: a physical result's, or a judgment's): the
   page paints a result's ok tone ONLY on `counts` and a pass, never on `passed` (what
   slipped through, critique 3 of the P2.5a design: an agent's pass on a Pending build
   claim read green on the page alone). `rebuild` is the rebuild prediction
   (`claims.rebuild`). `phrases.disagree` is the title of a claim whose status its
   evidence does not back — the page's own "contradict" was a second sense for the
-  ledger's *contradiction*.
+  ledger's *contradiction*. A claim whose `terminal` is `human` is grouped apart,
+  under `phrases.judgment_title` and `judgment_blurb`, and tagged with its
+  `terminal_word` (review of P2.5a: it sat under the assumptions' "owner" blurb with
+  no word naming its authority). A claim whose file is gone and whose results file
+  holds a fail is a row too (`standing: "removed"`, `store`'s `Ledger.removed`): its
+  fail still counts.
 - **No `partial` (P2.1).** Under GLOSSARY §3's composition a Checked claim has no
   covering evaluator that did not pass, so PARTIAL went. `unproven` names each
   covering gate that produced no pass that counts, its reason led by the fact

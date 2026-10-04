@@ -13,7 +13,11 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
-The budget is 90 s as ONE process on an otherwise idle machine. P2.5a paid back
+The budget is 90 s as ONE process on an otherwise idle machine. The review of
+P2.5a added fifteen in-process rows (~2 s: its laundering paths, each with its
+planted violator) and moved nothing out: measured 2026-10-04, 86.7 s wall (62.3 s
+user) for 713 tests — under the budget, so the next change that adds pays for
+itself. P2.5a paid back
 what P2.3 left over it, as its rule required: measured 2026-10-04, 83.7 s wall
 (59.9 s user, load average 0.9) for 698 tests, against 107.2 s wall (79.5 s
 user) for d23ff8e's 710 the same morning. What P2.5a added: its invariant
@@ -567,6 +571,29 @@ FAST: list[str] = [
     "test_physical.AMovedArticleReadsStale.test_in_process_a_nudge_moves_the_article",
     "test_physical.RenderersAgreeOnPhysicalClaims.test_no_view_builder_skips_the_judge",
     "test_physical.RenderersAgreeOnPhysicalClaims.test_a_planted_view_builder_is_caught",
+    # The review of P2.5a's laundering paths, each in process with its planted
+    # violator (~2 s together, measured 2026-10-04 one by one, 0.1-0.4 s each with
+    # the interpreter): the markers by exact name, the act and its flag, a value
+    # that is not text, every entry a restore discards (against a real git
+    # history), a name with spaces around it, an owner changed back, a limit
+    # edited after a measured pass, a fail and a contradiction outliving their
+    # claim file, an unregistered gate's files, a rewritten judgment, a
+    # judgment's fail, the page's judgment group.
+    "test_signing.HumanChannelOnly.test_the_marker_is_named",
+    "test_signing.WhoAndWhenAreNeverTyped.test_the_act_and_its_flag_never_disagree",
+    "test_signing.WhoAndWhenAreNeverTyped.test_a_value_that_is_not_text_is_refused",
+    "test_signing.TheResultsFileIsSealedAndChained.test_every_entry_a_restore_discards_is_named",
+    "test_signing.TheResultsFileIsSealedAndChained.test_planted_advice_is_caught",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_a_name_with_spaces_around_it_is_the_name",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_an_owner_changed_back_reads_assumed_again",
+    "test_physical.SignedMeansSomething.test_k_a_limit_edited_after_a_measured_pass",
+    "test_physical.APhysicalFailNeverLosesItsPowerToFail.test_in_process_a_fail_outlives_its_claim_file",
+    "test_physical.AMovedArticleReadsStale.test_in_process_an_unregistered_gates_files_are_no_part_of_the_article",
+    "test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord.test_in_process_a_contradiction_outlives_its_claim_file",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_in_process_a_rewritten_judgment_is_no_judgment",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_in_process_a_judgments_fail_names_no_article",
+    "test_physical.RenderersAgreeOnPhysicalClaims.test_the_page_groups_an_expert_judgment_apart",
+    "test_priors.ShippedTextCarriesNoScenarioPrior.test_planted_terms_are_found",
 ]
 
 
@@ -657,6 +684,25 @@ LEFT_FOR_THE_GATE: list[str] = [
     "test_physical.AMovedArticleReadsStale.test_the_article_leads_an_invalidated_evaluator",
     "test_physical.AMovedArticleReadsStale.test_the_claim_moved_and_the_model_not_loading",
     "test_physical.AMovedArticleReadsStale.test_what_the_article_was_not_built_from_moves_nothing",
+    # The review of P2.5a's end-to-end rows (3-30 s each, the bracket through
+    # the commands): each rule is held in process in FAST above, with its
+    # planted violator — the named marker on the recorded line and the refusal,
+    # the act and its flag refused by the command, a committed hand edit
+    # restored by the advice, an owner's and an authority's name with spaces, a
+    # fail and a contradiction outliving their claim file through check, JUnit
+    # and doctor, a fail's changed photo in doctor's words, a pass refused
+    # until every evaluator has run, a rewritten judgment stopping check, a
+    # judgment worded as one on every channel.
+    "test_signing.HumanChannelOnly.test_the_marker_is_named_end_to_end",
+    "test_signing.WhoAndWhenAreNeverTyped.test_the_act_and_its_flag_end_to_end",
+    "test_signing.TheResultsFileIsSealedAndChained.test_a_committed_hand_edit_is_restored_by_the_advice",
+    "test_signing.AnOwnerOnlyThroughTheChannel.test_a_name_with_spaces_around_it_end_to_end",
+    "test_physical.APhysicalFailNeverLosesItsPowerToFail.test_a_fail_outlives_its_claim_file_end_to_end",
+    "test_physical.APhysicalFailNeverLosesItsPowerToFail.test_a_fails_changed_evidence_is_worded_as_a_fail",
+    "test_physical.AMovedArticleReadsStale.test_a_pass_waits_until_every_evaluator_has_run",
+    "test_physical.AContradictionGoesOnTheEvaluatorsTrackRecord.test_a_contradiction_outlives_its_claim_file_end_to_end",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_a_rewritten_judgment_stops_check",
+    "test_physical.AnExpertJudgmentStaysWithItsAuthority.test_a_judgment_is_worded_as_one",
     # Planned 12 (P2.5a): one copy holding every standing, read on every channel
     # (~25 s to build); its AST scans run above.
     "test_physical.RenderersAgreeOnPhysicalClaims.test_every_channel_reads_the_composition",

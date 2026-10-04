@@ -73,6 +73,7 @@ import math
 import os
 import posixpath
 import re
+import shlex
 import sys
 import types
 import typing
@@ -100,7 +101,7 @@ from .models import (
     View,
 )
 from .util import (AtompipeError, FileDigests, atomic_write_json, atomic_write_text,
-                   canonical_json, ensure_dir, seal)
+                   canonical_json, ensure_dir, printable, seal)
 
 # --------------------------------------------------------------------------- #
 # layout constants
@@ -575,7 +576,19 @@ def _dumps(obj: Any, label: str) -> bytes:
             f"measured is not a number ({exc})") from None
     except TypeError as exc:
         raise AtompipeError(f"{label}: not JSON ({exc})") from None
-    return (text + "\n").encode("utf-8")
+    try:
+        return (text + "\n").encode("utf-8")
+    except UnicodeEncodeError as exc:
+        # A lone surrogate: Python decodes an argument or a file name that is
+        # not UTF-8 with `surrogateescape`, and it cannot be written back as
+        # text. What slipped through (review of P2.5a): `claim physical
+        # --detail $'bad\xffbyte'` printed a traceback and exited 1 — the code
+        # that says a gate-level verdict says stop — with nothing written.
+        shown = printable(repr(exc.object[max(0, exc.start - 16):exc.end + 16]))
+        raise AtompipeError(
+            f"{label}: refusing to write text that is not UTF-8 — a value holds bytes "
+            f"that are not text ({shown}); type it again as text. Nothing was "
+            f"written.") from None
 
 
 # --------------------------------------------------------------------------- #
@@ -1151,44 +1164,204 @@ def _verify_chain(label: str, entries: list[dict], claim_id: str, list_name: str
 
 
 def _entry_words(entry: dict) -> str:
-    when = str(entry.get("when") or "an unknown date")
-    who = str(entry.get("who") or "nobody named")
-    detail = " ".join(str(entry.get("detail") or "").split())
-    return f"recorded {when} by {who}" + (f" ({detail})" if detail else "")
+    """`recorded <when> by <who> ("<detail>")` — every value as one printable
+    line (`util.printable`): a refusal prints what the file says, and the file
+    is exactly what nobody can vouch for."""
+    when = printable(entry.get("when") or "on an unknown date")
+    who = printable(entry.get("who") or "nobody named")
+    detail = printable(entry.get("detail") or "")
+    return f"recorded {when} by {who}" + (f' ("{detail}")' if detail else "")
+
+
+def _again(claim_id: str, entry: dict) -> str:
+    """The command that records a sealed fail again after a restore, with every
+    value the seal vouches for: its measured value, its evidence, its authority
+    and its detail. What slipped through (review of P2.5a): the advice carried
+    the detail alone, taken from the TAMPERED copy, so following it re-sealed
+    the edited text and dropped `--measured`, and a contradiction's row lost
+    its number."""
+    argv = ["atompipe", "claim", "physical", claim_id, "fail"]
+    measured = entry.get("measured")
+    if (isinstance(measured, (int, float)) and not isinstance(measured, bool)
+            and math.isfinite(measured)):
+        argv += ["--measured", repr(float(measured))]
+    for path in entry.get("evidence") or ():
+        argv += ["--evidence", printable(path)]
+    if str(entry.get("authority") or "").strip():
+        argv += ["--authority", printable(entry["authority"])]
+    argv += ["--detail", printable(entry.get("detail") or "...")]
+    return " ".join(shlex.quote(arg) for arg in argv)
+
+
+#: How many commits that changed a results file `_restore_advice` walks back,
+#: newest first, for a version the strict reader verifies (review of P2.5a). Why
+#: 50: a results file changes once per result or attribution recorded — a
+#: handful per article — so fifty commits is months of recording on one claim;
+#: past them the advice names `git log -p` instead of walking on. It runs only
+#: on a refusal, one `git show` a step. *Rejected:* HEAD alone (what slipped
+#: through: a COMMITTED hand edit left HEAD holding the same broken bytes, and
+#: the advice was a checkout that changed nothing, refused again on every
+#: command); the whole history (a long-lived claim's refusal would cost one git
+#: call per commit on every command until it is fixed).
+_RESTORE_WALK = 50
+
+#: Set while `_restore_advice` reads a commit's version through the strict
+#: reader: that version's own refusal is a yes or a no, never advice of its own
+#: (a refusal inside the advice would walk git again, once per broken commit).
+_ADVISING: list[bool] = []
+
+
+def _commit_version(root: str, rel: str, claim_id: str, rev: str = "HEAD"
+                    ) -> tuple[bool, dict | None]:
+    """``(held, data)`` for ``rel`` at commit ``rev``: ``held`` — the commit
+    holds the file; ``data`` — its content when the strict reader verifies it
+    (every seal and link), else ``None``."""
+    raw = vcs.show(root, rel, rev)
+    if raw is None:
+        return False, None
+    _ADVISING.append(True)
+    try:
+        _parse_record(rel, "results", claim_id, raw)
+        data = json.loads(raw.decode("utf-8"))
+    except (AtompipeError, UnicodeDecodeError, ValueError):
+        return True, None
+    finally:
+        _ADVISING.pop()
+    return True, data if isinstance(data, dict) else None
+
+
+def _restore_source(claim_id: str, rel: str) -> tuple[str, dict | None]:
+    """What a restore brings back: ``("head", data)`` when the last commit's
+    version verifies; ``("<sha>", data)`` for the newest commit whose version
+    does when HEAD's does not, or no longer holds the file; ``("broken", None)``
+    when git holds versions and none in the walk verifies; ``("none", None)``
+    when git holds none — no repository, or never committed."""
+    root = _CURRENT_ROOT[-1] if _CURRENT_ROOT else None
+    if root is None:
+        return "none", None
+    held, data = _commit_version(root, rel, claim_id)
+    if data is not None:
+        return "head", data
+    walked = vcs.history(root, rel, _RESTORE_WALK)
+    for sha in walked:
+        older_held, older = _commit_version(root, rel, claim_id, sha)
+        held = held or older_held
+        if older is not None:
+            return sha, older
+    return ("broken" if held else "none"), None
+
+
+def _seal_holds(claim_id: str, list_name: str, entry: dict) -> bool | None:
+    """Whether a sealed entry's seal holds; ``None`` for an unsealed (legacy) one."""
+    if "digest" not in entry:
+        return None
+    try:
+        return seal(_seal_form(claim_id, list_name, entry)) == entry.get("digest")
+    except (TypeError, ValueError):
+        return False
+
+
+def _chain_digests(claim_id: str, list_name: str, entries: list) -> set[str]:
+    """Every link value ``entries`` can be followed by: each sealed entry's
+    digest and each legacy entry's virtual digest, in their order."""
+    out: set[str] = set()
+    prev = ""
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        prev = str(entry.get("digest") or "") if "digest" in entry else _virtual_digest(
+            claim_id, list_name, entry, prev)
+        out.add(prev)
+    return out
+
+
+def _discarded(claim_id: str, data: dict, source: dict | None, holder: str) -> list[str]:
+    """What a restore to ``source`` throws away of ``data``, in words: each
+    entry ``source`` does not hold — WHATEVER its `passed` says (review of
+    P2.5a: a fail flipped to a pass was left out, read as a pass, and the
+    checkout the advice printed erased the fail with nothing said) — a sealed
+    fail with the command that records it again, an entry whose seal does not
+    hold as unverifiable, and an entry removed from the file that the source
+    does not hold either."""
+    held = {name: {canonical_json(e) for e in ((source or {}).get(name) or ())
+                   if isinstance(e, dict)} for name in RESULTS_LISTS}
+    named: list[str] = []
+    passes, people, gone = 0, 0, ""
+    for name in RESULTS_LISTS:
+        entries = [e for e in (data.get(name) or ()) if isinstance(e, dict)] \
+            if isinstance(data.get(name), list) else []
+        links = {""} | _chain_digests(claim_id, name, entries) | _chain_digests(
+            claim_id, name, list((source or {}).get(name) or ()))
+        for i, entry in enumerate(entries):
+            where = f"{name}[{i}]"
+            holds = _seal_holds(claim_id, name, entry)
+            if holds and not gone and str(entry.get("prev") or "") not in links:
+                gone = (f"The entries before {where} are not as they were recorded — one "
+                        f"was removed, or an unsealed one edited — and {holder} does not "
+                        f"hold what it said: it cannot be read back, and if it was a fail, "
+                        f"the person who recorded it records it again")
+            if canonical_json(entry) in held[name]:
+                continue
+            if holds is False:
+                reads = ("an attribution" if name == "attributions" else
+                         "a pass" if entry.get("passed") is True else "a fail")
+                named.append(f"{where}, whose seal does not hold — it reads as {reads} now, "
+                             f"and what it said when it was recorded cannot be read back: if "
+                             f"it was a fail, the person who recorded it records it again")
+            elif name == "attributions":
+                people += 1
+            elif entry.get("passed") is True:
+                passes += 1
+            else:
+                named.append(f"{where}, a fail {_entry_words(entry)} — record it again "
+                             f"after the restore: {_again(claim_id, entry)}")
+    out = [f"A restore discards each entry {holder} does not hold: " + "; ".join(named)] \
+        if named else []
+    if passes:
+        out.append(f"It also discards {passes} pass(es) {holder} does not hold, which the "
+                   f"person who tested each records again in their own shell")
+    if people:
+        out.append(f"It also discards {people} owner or authority attribution(s), which "
+                   f"each records again in their own shell: atompipe claim physical "
+                   f"{claim_id} assume")
+    if gone:
+        out.append(gone)
+    return out
 
 
 def _restore_advice(label: str, claim_id: str, data: dict) -> str:
-    """The fix a refused results file needs, and every fail that fix would
+    """The fix a refused results file needs, and everything that fix would
     discard (critique 6 of the P2.5a design: "git checkout" alone undid an
     uncommitted fail, and the claim read Checked again with nothing saying so).
-    Compares the working file with the committed one (``vcs.show``, read-only);
-    a fail the commit does not hold is named, with the command that records it
-    again after the restore."""
+
+    The version to restore is the last commit's when it verifies, else the
+    newest commit's that does (``_restore_source``: a committed hand edit makes
+    HEAD's checkout a no-op). Against it, every entry of the working file it
+    does not hold is named — an entry is untrusted once any seal or link of the
+    file is broken, whatever its `passed` says, so a flipped fail is named as
+    unverifiable rather than skipped as a pass; a sealed fail comes with the
+    command that records it again, carrying what the seal vouches for."""
     rel = f"results/{claim_id}.json"
-    head = vcs.show(_CURRENT_ROOT[-1], rel) if _CURRENT_ROOT else None
-    committed: set[str] = set()
-    if head is not None:
-        try:
-            old = json.loads(head.decode("utf-8"))
-            for name in RESULTS_LISTS:
-                for entry in (old.get(name) or ()) if isinstance(old, dict) else ():
-                    committed.add(canonical_json(entry))
-        except (UnicodeDecodeError, ValueError, TypeError):
-            committed = set()
-    fails = [entry for entry in (data.get("results") or ()) if isinstance(entry, dict)
-             and entry.get("passed") is not True and canonical_json(entry) not in committed]
-    if head is None:
+    how, source = _restore_source(claim_id, rel)
+    if how == "head":
+        fix = f"git checkout -- {rel}, then record again what it discards"
+        holder = "the last commit"
+    elif how == "broken":
+        fix = (f"no commit among the last {_RESTORE_WALK} that changed {rel} holds a version "
+               f"whose seals hold, so a checkout restores nothing — `git log -p -- {rel}` shows "
+               f"each version: restore the newest that `atompipe claim physical` wrote, or "
+               f"the file from where it was copied")
+        holder = "git"
+    elif how == "none":
         fix = (f"restore {rel} from where it was copied, or from git if it was ever "
                f"committed — nothing can verify it as it is")
+        holder = "git"
     else:
-        fix = f"git checkout -- {rel}, then record again"
-    if fails:
-        named = "; ".join(_entry_words(entry) for entry in fails)
-        detail = " ".join(str(fails[0].get("detail") or "...").split())
-        fix += (f". That discards {len(fails)} fail(s) git does not hold — {named} — "
-                f"so record each again after the restore: atompipe claim physical "
-                f"{claim_id} fail --detail \"{detail}\"")
-    return fix
+        fix = (f"the last commit holds {rel} broken too, so `git checkout -- {rel}` changes "
+               f"nothing — the newest commit whose {rel} has its seals whole is {how[:12]}: git "
+               f"checkout {how[:12]} -- {rel}")
+        holder = f"commit {how[:12]}"
+    return ". ".join([fix, *_discarded(claim_id, data, source, holder)])
 
 
 #: The project root a results file is being read under, for `_restore_advice`
@@ -1198,6 +1371,8 @@ _CURRENT_ROOT: list[str] = []
 
 
 def _broken(label: str, where: str, what: str, claim_id: str, data: dict) -> None:
+    if _ADVISING:
+        raise AtompipeError(f"{label}: {where} — {what}")
     raise AtompipeError(
         f"{label}: {where} — {what}. Every command refuses this file until it is "
         f"restored: {_restore_advice(label, claim_id, data)}")
@@ -1484,9 +1659,22 @@ def _assemble(root: str, meta: ProjectMeta, parsed: dict[str, list[tuple[str, An
     # sorted by slug is in no order anyone reads).
     decisions = sorted(ordered["decisions"], key=lambda d: _natural(d.id))
     decisions.sort(key=lambda d: d.when or "", reverse=True)
+    # A results file no claim file holds (review of P2.5a): its fails still
+    # count — R-3 across every edit, a claim file renamed or deleted included —
+    # so it is kept, as a claim with no statement, for the view to compose.
+    held = {claim.id for claim in claims}
+    removed = tuple(
+        Claim(id=cid, statement=f"(no claims/{cid}.json holds this claim; "
+                                f"results/{cid}.json does)",
+              kind=ClaimKind.PHYSICAL, critical=True,
+              physical_result=_counting_result(found), results=tuple(found),
+              attributions=tuple(record for record in getattr(found, "attributions", ())
+                                 or () if record.channel == "interactive"))
+        for cid, found in sorted(results.items(), key=lambda pair: _natural(pair[0]))
+        if cid not in held)
     return Ledger(meta=meta, claims=claims, params=ordered["params"],
                   inputs=ordered["inputs"], needs=ordered["needs"], decisions=decisions,
-                  verdicts=[], views=ordered["views"])
+                  verdicts=[], views=ordered["views"], removed=removed)
 
 
 # --------------------------------------------------------------------------- #

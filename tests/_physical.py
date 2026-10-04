@@ -262,6 +262,12 @@ def transcript() -> dict[str, Any]:
     out["refuse.typed"] = tty(root, "claim", "physical", "C5", "fail", "--detail", "x",
                               answer="C4", code=2)
     out["refuse.assume"] = run(root, "claim", "physical", "C6", "assume", agent=True, code=2)
+    # An authority's own acts (review of P2.5a: neither prompt was pinned, R-11).
+    out["assume.authority"] = tty(root, "claim", "physical", "C8", "assume", "--authority",
+                                  NAME, answer="C8", code=0)
+    out["judgment"] = tty(root, "claim", "physical", "C8", "pass", "--authority", NAME,
+                          "--detail", "safe above a bed", answer="C8", code=0)
+    out["why.C8"] = run(root, "why", "C8", code=0)
     _projects.set_thickness(root, 7.5)
     out["status"] = run(root, "status", code=0)
     out["check"] = run(root, "check")

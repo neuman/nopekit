@@ -104,7 +104,7 @@ from .models import (
     Tier,
     Verdict,
 )
-from .util import atomic_write_text, ensure_dir
+from .util import atomic_write_text, ensure_dir, printable
 
 # --------------------------------------------------------------------------- #
 # vocabulary: `HUMAN`, the one table every human word for a status comes from
@@ -324,6 +324,23 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
                          "pass or fail where the claim has a limit",
         "authority_help": "the authority the claim file names, typed as a confirmation (an "
                           "expert-judgment claim)",
+        # The flags' help (review of P2.5a: "(what the report prints)" stopped
+        # being true when the report moved to the positional `pass|fail`).
+        "pass_help": "same as the positional `pass`",
+        "fail_help": "same as the positional `fail`",
+        # A positional act and a flag that disagree, and `assume` with an
+        # outcome's flag (review of P2.5a: `fail --pass` recorded and counted a
+        # PASS, reported in --json as act "fail"; `assume --fail` recorded an
+        # attribution).
+        "act_disagrees": "you typed {act} and {flag} — say one outcome. Nothing was written.",
+        "assume_flags": "assume records an owner or an authority accepting {id}; it takes no "
+                        "{flag}. Nothing was written.",
+        "meets": "meets",
+        "fails": "fails",
+        # Which agent marker made this shell an agent session (review of P2.5a:
+        # a person's own exported Claude Code setting made their shell read as an
+        # agent's, and nothing said which variable did it).
+        "marker": " ({marker} is set in this shell, as in an agent session)",
         "who": "--who is not accepted: who recorded a result is read from git's identity "
                "(git config user.name and user.email), never typed. Nothing was written.",
         "when": "--when is not accepted: a result is dated when it is recorded — say when "
@@ -334,8 +351,9 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
                   "with --detail saying what was observed. Nothing was written.",
         "typed": "you typed {typed}, not {id} — nothing was recorded",
         "assume_channel": "assume records a person accepting {id}; it is typed in their own "
-                          "shell, never from an agent session or a script. Nothing was "
+                          "shell, never from an agent session or a script{why}. Nothing was "
                           "written. Ask {name} to run: atompipe claim physical {id} assume{flag}",
+        "assume_pipe": " (stdin is not a terminal)",
         "assume_nothing": "{id} has nothing to assume: an owner records an assumption or a "
                           "fallback (\"owner\" and \"fallback\" in claims/{id}.json), an "
                           "authority an expert-judgment claim. Nothing was written.",
@@ -362,8 +380,13 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "no_evidence": "a pass on {id} needs --evidence <file>: a photo, a log or a "
                        "measurement file under the project. Nothing was written.",
         "bad_evidence": "--evidence {path}: {why}. Nothing was written.",
+        "not_text": "{flag} holds bytes that are not text (not UTF-8) — type it again as "
+                    "text. Nothing was written.",
         "no_model": "the model does not load, so there is no article to bind a pass to: "
                     "{error}. Nothing was written.",
+        "unread": "{gates} never ran here, so the files the design's evaluators read are "
+                  "not known and the article would leave them out — run atompipe check, "
+                  "then record the pass on {id}. Nothing was written.",
         "measured_bad": "--measured {value} is not a finite number. Nothing was written.",
         "measured_disagrees": "--measured {value} {verdict} {condition}, and you typed "
                               "{act}. Nothing was written.",
@@ -387,8 +410,9 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "recorded_assume": "recorded {id}'s {role} {name} in results/{id}.json "
                            "(attribution {n})",
         "agent_pass": " — from an agent session: a pass recorded here does not count; the "
-                      "person who tested it records it in their own shell",
-        "agent_fail": " — from an agent session: a fail counts wherever it is recorded",
+                      "person who tested it records it in their own shell{marker}",
+        "agent_fail": " — from an agent session: a fail counts wherever it is recorded"
+                      "{marker}",
         "pipe_pass": " — from a pipe or a script: a pass recorded here does not count; the "
                      "person who tested it records it in their own shell",
         "pipe_fail": " — from a pipe or a script: a fail counts wherever it is recorded",
@@ -434,6 +458,43 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "contradiction_of": "a contradiction of {gate} (version {code}), which gave {value}",
         "checked_article": "Checked on an article",
         "checked_judgment": "Checked by expert judgment",
+        # An expert judgment in its own words (review of P2.5a): it read as an
+        # article test — "C8 changed since article … was tested — test it
+        # again", "a new article is needed", a `PHYSICAL RESULTS` block, "A
+        # physical result was recorded" — where GLOSSARY §1's physical result
+        # is a physical evaluator's verdict on one article, `contradicted_by`
+        # says "an expert judgment is not a physical result", and D18 gives a
+        # judgment its own words ("<authority> judges it again").
+        "failed_judgment": "a fail was recorded",
+        "judgment_claim_moved": "{id} changed since {authority} judged it — {authority} "
+                                "judges it again",
+        "judgment_unjudged": "{authority}'s judgment cannot be compared with the design: "
+                             "the model does not load",
+        "judgment_unjudged_tail": "fix the model; the judgment is compared again on the next "
+                                  "read",
+        "results_head": "PHYSICAL RESULTS ({n}, oldest first)",
+        "judgments_head": "JUDGMENTS ({n}, oldest first)",
+        "result_recorded": "A physical result was recorded:",
+        "judgment_recorded": "A judgment was recorded:",
+        "failed_row": "- Physical result: failed {when}{on}, {recorded} — {detail}",
+        "judgment_failed_row": "- Judgment recorded: fail, {when}, {recorded} — {detail}",
+        # A results file no claim file holds (`Ledger.removed`, review of P2.5a:
+        # a claim file renamed away from its sealed fail stopped failing).
+        "removed_tail": "— no claims/{id}.json holds it: restore claims/{id}.json — a result "
+                        "is sealed to its claim's id, and a fail counts across every edit",
+        "removed_tag": "its claim file removed",
+        # `doctor`'s results rows (P2.5a-D21; review of P2.5a: a fail's changed
+        # photo was told "its pass does not count").
+        "doctor_evidence": "evidence {id}: {path} {how} since it was recorded — {then}",
+        "doctor_evidence_pass": "its pass does not count until recorded again",
+        "doctor_evidence_fail": "the fail still counts (a fail counts whatever happens to its "
+                                "evidence); the file no longer shows what was recorded",
+        "doctor_removed": "results/{id}.json holds {n} fail(s) on {id} — the latest: {detail} — "
+                          "and no claims/{id}.json holds that claim: the fail still counts and "
+                          "stops check. Restore claims/{id}.json: a result is sealed to its "
+                          "claim's id, so a renamed claim leaves its results behind",
+        "doctor_removed_passes": "results/{id}.json holds results on {id}, and no "
+                                 "claims/{id}.json holds that claim — its passes settle nothing",
         "unbound": "{ids} {has} a pass that does not count",
         # Each Stale cause's advice in the failing section (critique 9 of the
         # P2.5a design: a moved article was told `atompipe check` re-runs what
@@ -444,6 +505,8 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
             "claim-moved": "Test it again on an article — a check run cannot restore it.",
             "judgment-moved": "{authority} judges it again — a check run cannot restore it.",
             "article-unjudged": "Fix the model so the article can be judged.",
+            "judgment-unjudged": "Fix the model so {authority}'s judgment can be compared "
+                                 "with the design.",
         }),
     }),
     # An evaluator's operating context (P2.4, GLOSSARY §2): the words after
@@ -501,6 +564,14 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "closing_more": "or one outside its operating context, or a value its claim's "
                         "acceptance condition does not admit",
         "doctor_ok": "every compared evaluator judges against its claim's own limit",
+        # `why`'s acceptance line with none written (review of P2.5a: it said
+        # "NONE — without a threshold this is a wish, not a claim" for a physical
+        # claim whose note is its written test, which P2.5a-D9 accepts, and for an
+        # expert judgment, which takes none by design; *threshold* is the
+        # acceptance condition's Never-say).
+        "why_none": "acceptance: no acceptance condition",
+        "why_note": "acceptance: none — the test is its note",
+        "why_judgment": "acceptance: none — settled only by {authority}'s judgment",
         "doctor_warn": "{n} evaluator limit(s) part from their claim's: {list}",
     }),
     # Who entered a physical result (GLOSSARY §1, *recorded by*): named, or the
@@ -1336,7 +1407,7 @@ def _one(text: Any) -> str:
 
 
 def recorded_by(who: Any) -> str:
-    """`recorded by sam`, or `recorded, unattributed` with no one named
+    """`recorded by dana`, or `recorded, unattributed` with no one named
     (`HUMAN["recorded"]`; GLOSSARY §1, *recorded by*) — the one place a
     physical result's recorder is worded, on one line."""
     name = _one(who)
@@ -1367,7 +1438,7 @@ def _entry(claim: Claim, index: Any) -> Any:
 
 def recorded_words(entry: Any) -> str:
     """Who recorded a physical result, and from where when that is not their own
-    shell — `recorded by Sam`, `recorded by Sam, from an agent session`, `…,
+    shell — `recorded by Dana`, `recorded by Dana, from an agent session`, `…,
     from a pipe or a script` (P2.5a-D18; GLOSSARY *recorded by*). A legacy
     entry, recorded before results carried a channel, reads as P2.1 worded it."""
     if entry is None:
@@ -1416,30 +1487,49 @@ def _moves(standing: Any, limit: int | None = None) -> str:
     return verdict_logic._stale_text(moved) if moved else "the design moved"
 
 
+def _judgment(claim: Claim) -> bool:
+    """Whether ``claim`` ends in an expert judgment (terminal ``human``) — the
+    one test every judgment-worded line asks (review of P2.5a)."""
+    try:
+        return claim_logic.terminal_of(claim) == "human"
+    except Exception:                                      # noqa: BLE001 — an unknown value
+        return False
+
+
 def _fail_reason(cause: Any, claim: Claim, cut_: Callable[[str, int], str]) -> str:
     """A physical fail's reason: `failed on article <a>: <detail> (<recorded>)`
     — led by `contradiction:` and ended by the evaluator it contradicts when it
     carries one; the authority's own no in a judgment's words; and, when its
     article moved, `(invalidated: …)` — a fail keeps its power to fail across
-    every change (R-3), and the reader learns which print the fix needs."""
+    every change (R-3), and the reader learns which print the fix needs.
+
+    A fail on an expert-judgment claim names no article and never "a new
+    article is needed" (review of P2.5a: the row said a rebuild was needed for
+    C8 while the rebuild prediction, rightly, left a judgment out — a person
+    settles it, not a print). A fail whose claim file is gone says what to
+    restore (`Ledger.removed`)."""
     result = claim.physical_result
     said = HUMAN["physical"]
     lead = HUMAN["lead"][cause]
     detail = cut_(result.detail if result and result.detail else "no detail recorded", 60)
     article = article12(getattr(result, "article", None) or {})
+    standing = getattr(claim, "standing", None)
+    removed = (" " + said["removed_tail"].format(id=claim.id)
+               if getattr(standing, "state", "") == verdict_logic.REMOVED else "")
     if cause is ClaimCause.JUDGED_FAIL:
         return (f"{lead.format(authority=_one(claim.authority))}: {detail} "
-                f"({_one(getattr(result, 'when', ''))})")
-    head = said["failed_on"].format(article=article) if article else said["failed"]
+                f"({_one(getattr(result, 'when', ''))})") + removed
+    judgment = _judgment(claim)
+    head = (said["failed_judgment"] if judgment
+            else said["failed_on"].format(article=article) if article else said["failed"])
     text = f"{head}: {detail} ({recorded_words(result)})"
-    standing = getattr(claim, "standing", None)
     entry = None
     if standing is not None and result is not None:
         results = list(getattr(claim, "results", ()) or ())
         index = max((i for i, item in enumerate(results) if item == result), default=None)
         entry = next((e for e in getattr(standing, "entries", ()) or ()
                       if e.index == index), None)
-    if entry is not None and entry.article_state == "moved":
+    if entry is not None and entry.article_state == "moved" and not judgment:
         text += " " + said["fail_moved"].format(
             article=article, moves=verdict_logic._stale_text(entry.moved))
     if cause is ClaimCause.CONTRADICTION:
@@ -1450,7 +1540,7 @@ def _fail_reason(cause: Any, claim: Claim, cut_: Callable[[str, int], str]) -> s
                 bits.append(said["had_passed"].format(
                     gate=item.get("gate"), value=f"{_num(item.get('value'))}{unit}"))
         text = f"{lead}: {text}" + (f" — {'; '.join(bits)}" if bits else "")
-    return text
+    return text + removed
 
 
 def _physical_reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool,
@@ -1493,6 +1583,8 @@ def _physical_reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool,
     if cause is ClaimCause.ARTICLE_MOVED:
         return (f"{lead}: " + said["moved_tail"].format(article=article,
                                                         moves=_moves(standing)) + cited)
+    if cause is ClaimCause.CLAIM_MOVED and _judgment(claim):
+        return said["judgment_claim_moved"].format(id=claim.id, authority=authority) + cited
     if cause is ClaimCause.CLAIM_MOVED:
         return (f"{lead.format(id=claim.id, article=article)} — "
                 f"{said['claim_moved_tail']}" + cited)
@@ -1500,6 +1592,9 @@ def _physical_reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool,
         return (f"{lead.format(authority=authority)}: "
                 + said["judgment_moved_tail"].format(moves=_moves(standing),
                                                      authority=authority) + cited)
+    if cause is ClaimCause.ARTICLE_UNJUDGED and _judgment(claim):
+        return (f"{said['judgment_unjudged'].format(authority=authority)} — "
+                f"{said['judgment_unjudged_tail']}" + cited)
     if cause is ClaimCause.ARTICLE_UNJUDGED:
         return f"{lead.format(article=article)} — {said['unjudged_tail']}" + cited
     return lead
@@ -1510,6 +1605,11 @@ def _uncounted_tail(claim: Claim, standing: Any) -> str:
     unsettled judgment — said, so a reader who recorded one learns why it
     settles nothing (V-11 row g)."""
     state = str(getattr(standing, "state", "") or "")
+    if state == "claim-moved" and _judgment(claim):
+        # A judgment of earlier words (review of P2.5a): the claim reads as one
+        # written fresh, and says why its judgment no longer counts.
+        return " — " + HUMAN["physical"]["judgment_claim_moved"].format(
+            id=claim.id, authority=_one(getattr(claim, "authority", "")))
     if not state.startswith("not-counted:"):
         return ""
     return " — " + _not_counted(claim, state[len("not-counted:"):])
@@ -1538,8 +1638,10 @@ def track_words(gate_id: str, contradictions: Iterable[Any], code_now: str) -> s
     newest = (now or earlier)[-1] if found else None
     if newest is not None:
         unit = f" {newest.units}" if newest.units else ""
+        claim = newest.claim + (f" ({said['removed_tag']})"
+                                if getattr(newest, "removed", False) else "")
         text += " — " + said["track_one"].format(
-            claim=newest.claim, article=article12(newest.article),
+            claim=claim, article=article12(newest.article),
             when=_one(newest.when)[:10], recorded=recorded_words(newest),
             measured=(f"{_num(newest.measured)}{unit}" if newest.measured is not None
                       else "a fail"),
@@ -1588,7 +1690,11 @@ def result_facts(claim: Claim, entry: Any) -> dict[str, Any]:
     else:
         counts = bool(found.counts)
         why = "" if counts else _why_words(claim, found)
-    return {"counts": counts, "why": why, "recorded": recorded_words(entry)}
+    said = HUMAN["physical"]
+    return {"counts": counts, "why": why, "recorded": recorded_words(entry),
+            # The block's heading in the page's words (review of P2.5a: a
+            # judgment read "A physical result was recorded").
+            "heading": said["judgment_recorded" if _judgment(claim) else "result_recorded"]}
 
 
 def _why_words(claim: Claim, found: Any) -> str:
@@ -1600,10 +1706,16 @@ def _why_words(claim: Claim, found: Any) -> str:
     if why == "judgment-moved":
         return HUMAN["lead"][ClaimCause.JUDGMENT_MOVED].format(
             authority=_one(getattr(claim, "authority", "")))
+    authority = _one(getattr(claim, "authority", ""))
+    if why == "claim-moved" and _judgment(claim):
+        return HUMAN["physical"]["judgment_claim_moved"].format(id=claim.id,
+                                                                authority=authority)
     if why == "claim-moved":
         return (HUMAN["lead"][ClaimCause.CLAIM_MOVED].format(
             id=claim.id, article=article12(found.article)) + " — "
                 + HUMAN["physical"]["claim_moved_tail"])
+    if why == "article-unjudged" and _judgment(claim):
+        return HUMAN["physical"]["judgment_unjudged"].format(authority=authority)
     if why == "article-unjudged":
         return HUMAN["lead"][ClaimCause.ARTICLE_UNJUDGED].format(
             article=article12(found.article))
@@ -1669,7 +1781,14 @@ def page_phrases() -> dict[str, Any]:
             # A recorded physical result's block (critique 3 of the P2.5a
             # design): the page paints the ok tone only on a pass the judge
             # counted (`result_facts`), and says so in these words.
-            "result_recorded": "A physical result was recorded:",
+            "result_recorded": HUMAN["physical"]["result_recorded"],
+            # An expert judgment's group (review of P2.5a: it sat under the
+            # assumptions' blurb — "with a reason and an owner", where *owner*
+            # is authority's Never-say — with no word saying whose judgment).
+            "judgment_title": "Expert judgments",
+            "judgment_blurb": "Each stays with the person or institution it names, who "
+                              "settles it in their own shell — no evaluator here does. Each "
+                              "row says whether its authority has recorded it.",
             "result_counts": "it counts",
             "result_not_counted": "it does not count",
             "need": {str(status.value): said for status, said in HUMAN["need"].items()},
@@ -1718,8 +1837,13 @@ def _num(value: Any) -> str:
 
 
 def _trunc(text: str, limit: int | None) -> str:
-    """One line of `text`, cut to `limit` characters; `None` normalises and never cuts."""
-    text = " ".join((text or "").split())
+    """One line of `text`, cut to `limit` characters; `None` normalises and never
+    cuts. Every control character left after the whitespace is collapsed is
+    escaped as visible text (`util.printable`): what slipped through (review of
+    P2.5a) — a claim statement holding `\x1b[1G\x1b[2K` erased itself on `claim
+    physical`'s prompt and showed another claim's words, so a person typed the
+    id of a claim they had not read."""
+    text = printable(text or "")
     return text if limit is None or len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
@@ -2081,7 +2205,11 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
 
     found = readiness(ledger, composed)
     status_of = {cid: c.status for cid, c in composed.items()}
-    n_checked = sum(1 for s in status_of.values() if s is ClaimStatus.PASS)
+    # Checked on an article counts as Checked (review of P2.5a: the tally read
+    # PASS alone, so "3 of 7 claims are checked" sat above "7 claims · 4
+    # checked" and a report listing C5 under the checked section).
+    n_checked = sum(1 for s in status_of.values()
+                    if s in (ClaimStatus.PASS, ClaimStatus.VERIFIED))
     tally = (f"{n_checked} of {total} {_plural(total, 'claim')} "
              f"{_plural(n_checked, 'is', 'are')} {checked} against the current inputs.")
 
@@ -2750,16 +2878,24 @@ def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
             if found.status is ClaimStatus.STALE:
                 advice = HUMAN["physical"]["stale_advice"].get(
                     found.cause.value, HUMAN["physical"]["stale_advice"]["invalidated"])
+                key = found.cause.value
+                if key == "article-unjudged" and _judgment(claim):
+                    key = "judgment-unjudged"
+                advice = HUMAN["physical"]["stale_advice"].get(key, advice)
+                # Two sentences, never a clause run into a capitalised one
+                # (review of P2.5a: "… *now* — A new article is needed — …").
                 out.append("- Passed, but not against the current inputs"
                            + _stale_suffix(claim, cover, stale_gates)
-                           + f". Nothing here is {word(ClaimStatus.PASS)} *now* — "
+                           + f". Nothing here is {word(ClaimStatus.PASS)} *now*. "
                            + advice.format(authority=_one(getattr(claim, "authority", ""))))
             if claim.physical_result and claim.physical_result.passed is not True:
                 res = claim.physical_result
                 article = article12(getattr(res, "article", None) or {})
                 on = f" on article `{article}`" if article else ""
-                out.append(f"- Physical result: failed {_one(res.when)}{on}, "
-                           f"{recorded_words(res)} — {_trunc(res.detail, 200)}")
+                row = "judgment_failed_row" if _judgment(claim) else "failed_row"
+                out.append(HUMAN["physical"][row].format(
+                    when=_one(res.when), on=on, recorded=recorded_words(res),
+                    detail=_trunc(res.detail, 200)))
                 if found.cause is ClaimCause.CONTRADICTION:
                     for item in getattr(res, "contradicts", None) or ():
                         if not (isinstance(item, Mapping) and item.get("inside") is True):
