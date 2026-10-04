@@ -183,8 +183,12 @@ export function claimsPanel(state, app) {
 function claimRow(claim, state, app) {
   const status = claimStatus(claim.status, { errored: !!claim.errored });
   const verdicts = (claim.verdicts || []).map((g) => app.index.verdictByGate.get(g)).filter(Boolean);
-  const proving = verdicts.filter((v) => v.ok);
-  const headline = proving.length ? proving[0] : verdicts[0];
+  // The claim's own value: the first verdict state.json says is compared with
+  // its acceptance condition (`claim.compared`, P2.4) — never one this page
+  // picks. What slipped through: the first passing verdict was the headline,
+  // so failing C1 showed its guard's passing L/h. None compared, none shown.
+  const compared = (claim.compared || []).map((g) => app.index.verdictByGate.get(g)).filter(Boolean);
+  const headline = compared.length ? compared[0] : null;
 
   const body = el("div", { class: "claim-detail" },
     el("dl", { class: "kv" },

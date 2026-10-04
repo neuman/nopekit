@@ -1899,6 +1899,14 @@ def state(
                 "token": verdict.unqualified,
                 "reason": report_logic.qualification_reason(verdict.unqualified),
                 "text": report_logic.unqualified_text(verdict.unqualified)}
+        # The margin (D-17, P2.4-D8): `claims.margin`, the one function, or
+        # why there is none — on every row, never computed by the page (the
+        # site renders the ledger; it never computes truth). `margin` null and
+        # `margin_why` "" are the two that do not apply to each other.
+        found = claim_logic.margin(verdict)
+        row["margin"] = (None if found.fraction is None
+                         else float(f"{found.fraction:.6g}"))
+        row["margin_why"] = found.why
         row["views"] = sorted({(loc.view or "") for loc in (verdict.locators or [])
                                if (loc.view or "")})
         if not verdict.locators and not verdict.ok:
@@ -1911,6 +1919,8 @@ def state(
         verdict_rows.append(row)
 
     claim_rows: list[dict] = []
+    needs = {spec.id: list(getattr(spec, "needs", None) or ())
+             for spec in report_logic._specs(registry)}
     # In severity order (P2.1-D16): what slipped through (P2.0 F-5), the page
     # listed claims in record order, a skip above the crash it should sit under.
     for claim in report_logic.in_severity(view, composed):
@@ -1938,6 +1948,15 @@ def state(
         # would have reached the page as a clean Checked chip).
         row["unproven"] = [{"gate": gid, "why": why} for gid, why in unproven]
         row["disagree"] = bool(report_logic._disagreement(view, claim, found, cover))
+        # Which values are the claim's (P2.4, critique 10 of its design): the
+        # evaluators whose value is compared with its acceptance condition, and
+        # the passes whose value is not (another quantity or units) — computed
+        # here by `claims`, so the page reads which value to show and never
+        # chooses one. What slipped through: the page headlined the first
+        # passing verdict, a guard's `8.57 L/h` on failing C1.
+        row["compared"] = claim_logic.compared_gates(claim, view.verdicts)
+        row["not_compared"] = [gid for gid, _why in claim_logic.not_compared(
+            claim, view.verdicts, needs)]
         claim_rows.append(row)
 
     views = [v.to_dict() for v in view.views]

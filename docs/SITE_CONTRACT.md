@@ -247,9 +247,11 @@ was the one a reader of the contract would never look for.
                   "acceptance_render": "tip deflection <= 0.5 mm",
                   "gates": ["bracket.deflection"], "grounded_by": ["sk"],
                   "verdicts": [ … ], "evidence": [ … ],
-                  "unproven": [ { "gate": …, "why": "fail: 0.700 mm …" } ], … } ],
+                  "unproven": [ { "gate": …, "why": "fail: 0.700 mm …" } ],
+                  "compared": ["bracket.deflection"], "not_compared": [ ], … } ],
   "verdicts": [ { "gate": …, "passed": …, "ok": false, "status": "fail", "detail": …,
-                  "measured": …, "limit": …, "locators": [ … ], "views": [ … ],
+                  "measured": …, "limit": …, "comparator": "<=", "settles": "tip deflection",
+                  "margin": -0.3994, "margin_why": "", "locators": [ … ], "views": [ … ],
                   "unanchored": true, "evidence": [ … ], "rho": …,
                   "cached": true, "fresh": true, "stale_reason": "",
                   "when": "2026-09-27T14:02:11Z", "age_s": 412, … } ],
@@ -320,6 +322,20 @@ an agent can read the site's state without a browser.
   crash counted apart, `7 skipped (6 errored)`); `by_key` and `errored` are the same
   counts by token; `unresolved` the required claims not Checked; `n_gaps` counts gap
   records, not claims reading Gap (`by_key.gap` is those).
+- **Which value is the claim's (P2.4).** A claim row's `compared` lists the
+  evaluators whose value is compared with its acceptance condition
+  (`claims.compared_gates`: the verdict measures the claim's quantity, in its units),
+  and `not_compared` the passes whose value measures something else
+  (`claims.not_compared`, a guard of another of its evaluators left out). The page
+  shows the first of `compared` as the claim's value, and none when it is empty: it
+  never picks one itself. What slipped through: it headlined the first passing
+  verdict, so failing C1 showed its guard's passing `8.57 L/h`.
+- **The margin (P2.4, D-17).** Every verdict row carries `margin` — `claims.margin`,
+  a signed fraction of the limit, > 0 inside and < 0 past, 6 significant figures — and
+  `margin_why`, why there is none (`no-value`, `no-limit`, `no-comparator`, `band`,
+  `no-side`, `zero-limit`, `disagrees`, `no-verdict`); `margin` is null exactly when
+  `margin_why` is not empty. `comparator` (which side of `limit` passes) and `settles`
+  (the quantity) sit beside them. The page draws the margin and computes none.
 - `verdicts` holds one row per gate the resolver has a verdict for — registered
   gates in registration order, then gates this project does not register, by id — so
   a verdict for an unregistered gate still reaches the page, as a stale row.

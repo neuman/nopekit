@@ -1524,14 +1524,19 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(status_json(self, project)["claims"]["C1"], "fail",
                          "the precondition: the live design fails C1")
         before = control_names(project)
-        edit(project, "gates/structural.py", "passed=d <= DEFLECTION_LIMIT_MM,", "passed=True,")
+        # The gate reads its goalpost from C1 since P2.4 (R-6: the anchor moved
+        # with the code). A pass the goalpost it read rejects is errored at run
+        # time, so its known-bad control — passed at 30 mm against C1's 0.5 —
+        # errors, louder than the known-bad PASS this read before P2.4, and the
+        # evaluator is refused as it was.
+        edit(project, "gates/structural.py", "passed=acc.holds(measured),", "passed=True,")
         for attempt in ("first", "again"):
             with self.subTest(check=attempt):
                 code, data = check_json(self, project)
                 self.assertEqual(code, 1)
                 got = verdict_row(data, "bracket.deflection")
                 self.assertEqual(got["outcome"], "error", got)
-                self.assertIn("unqualified: known-bad:pass", got["error"])
+                self.assertIn("unqualified: known-bad:errored|passed at 30", got["error"])
                 self.assertEqual(blocking_ids(data).get("C1"), "unclaimed", data["blocking"])
                 if attempt == "first":
                     # structural.py is every bracket gate's code: all six re-key,
@@ -1540,17 +1545,26 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                     self.assertEqual(data["counts"]["controls"]["executed"],
                                      len(BRACKET_GATES))
                 else:
+                    # P2.4 (R-6, D4's consequence): an errored known-bad half is
+                    # a held kind — remembered, never cached (P2.3-D12) — so the
+                    # control runs again on every check, and is refused again;
+                    # before P2.4 the known-bad PASS was a filed entry, reused.
                     self.assertEqual(data["counts"]["executed"], 0)
-                    self.assertEqual(data["counts"]["controls"]["executed"], 0,
-                                     "the refusal is a recorded control entry, reused")
+                    self.assertEqual(data["counts"]["controls"]["executed"], 1,
+                                     "a held refusal runs again, and only it")
                 status = status_json(self, project)
                 self.assertEqual(status["claims"]["C1"], "unclaimed")
                 self.assertNotEqual(status["freshness"]["bracket.deflection"]["state"],
                                     "fresh", "a PASS from the logger was never recorded")
                 self.assertNotIn("**C1**", proven_section(self, project))
-        [name] = control_names(project)["bracket.deflection"] - before["bracket.deflection"]
-        entry = read_control(project, "bracket.deflection", name)
-        self.assertEqual((entry["bad"], entry["admitted"]), ("pass", "no"))
+        self.assertEqual(control_names(project)["bracket.deflection"],
+                         before["bracket.deflection"],
+                         "half a measurement files no control entry")
+        held = [rec["verdict"] for rec in
+                verdicts.remembered(project).get("control:bracket.deflection", {}).values()]
+        self.assertTrue(held, "the refusal is remembered")
+        self.assertTrue(all(v.error.startswith("unqualified: known-bad:errored|passed at 30")
+                            for v in held), [v.error for v in held])
 
     def test_cli_a_logger_with_no_honest_past_is_refused_by_check(self):
         # The same logger on a project that never ran the gate honestly: there
@@ -4033,8 +4047,10 @@ class AHeldQualificationSaysWhy(_env.EnvCase):
 
     def test_gate_show_and_selftest_say_why_and_json_keeps_its_keys(self):
         root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
+        # P2.4 (R-6, the anchor only): `context` hands the design's own
+        # claims now, `ledger=ledger`; the planted raise is the same.
         edit(root, "selftest/known_good.py",
-             "    return dataclasses.replace(ctx, params=params(), ledger=Ledger(), extra={})",
+             "    return dataclasses.replace(ctx, params=params(), ledger=ledger, extra={})",
              "    raise RuntimeError('planted: no known-good design today')")
         cli(root, "check")
         shown = cli(root, "gate", "show", "bracket.bearing").stdout

@@ -676,6 +676,10 @@ _PLAN_OUTPUT = {
                             "(250 bed - 2x8 brim)\n"
                             f"{_CACHED_FAIL}\n"
                             "6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0\n"
+                            # P2.4 (S-35): the edit parts bed_fit's limit from C4's.
+                            "warning: bracket.bed_fit : its limit 234 mm is not C4's "
+                            "acceptance condition (bed fit <= 204.0 mm) — one number in "
+                            "two places\n"
                             + _BLOCKING),
     "porcelain-after-edit": (0, " M model/bracket.py\n"
                                 "?? .atompipe/verdicts/bracket.bed_fit/"

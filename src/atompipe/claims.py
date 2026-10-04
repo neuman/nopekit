@@ -21,7 +21,16 @@ somebody does the work.
 From P2.1 a claim's status is GLOSSARY §3's composition, one ladder for every
 kind (`compose`): Failing, Skipped (errored first), Gap, Open, Stale, Pending
 build, Assumed, Checked — first match wins, and `compose` returns the fact that
-set it (`ClaimCause`) beside the status. What slipped through the ladder it
+set it (`ClaimCause`) beside the status. From P2.4 a value is compared with the
+claim it is evidence for (`cross_check`): a covering evaluator's pass whose
+value — same quantity, same units — does not meet the claim's acceptance
+condition reads Failing (`acceptance`), and a pass outside its evaluator's
+operating context does not count (Gap, `outside-context`, or Assumed under an
+owned fallback). What slipped through without them (S-35, S-46): C3's
+evaluator judged 0.195 MPa against a limit it computed while the claim said
+0.1 MPa, and read Checked; the report put a guard's `8.57 L/h` in C2's value
+cell, implying it had been compared with the claim. The margin of every verdict
+is one function here (`margin`, D-17), so no renderer computes its own. What slipped through the ladder it
 replaced: a pass beside a skip or an unrun evaluator read PASS (S-03), so did a
 pass beside an evaluator `check` had just refused at its version, and a crash
 read FAIL; a physical claim ignored a failing modelled half (S-49); and an
@@ -51,6 +60,8 @@ Three structural notes:
 """
 from __future__ import annotations
 
+import math
+import numbers
 import re
 from collections.abc import Iterable as _IterableABC
 from dataclasses import dataclass, replace
@@ -59,6 +70,7 @@ from typing import Any, Collection, Iterable, Mapping, NamedTuple
 
 from .models import (
     BLOCKING_STATUSES,
+    CONTEXT_OUTSIDE,
     Claim,
     ClaimKind,
     ClaimStatus,
@@ -97,6 +109,16 @@ __all__ = [
     "blocking",
     "summarise",
     "next_claim_id",
+    "Margin",
+    "margin",
+    "Compared",
+    "cross_check",
+    "compared_gates",
+    "not_compared",
+    "LimitDisagreement",
+    "limit_disagreements",
+    "outside_context",
+    "assumption_reason",
 ]
 
 
@@ -203,6 +225,16 @@ class ClaimCause(StrEnum):
     so a cause added here would re-key every verdict cache entry in every
     project, as P2.2's two did not. The words for each are `report.HUMAN`'s.
 
+    P2.4 adds three. `acceptance` — Failing: a counted evaluator's pass whose
+    value, of the claim's quantity and in its units, does not meet the claim's
+    acceptance condition (`cross_check`); what slipped through without it
+    (S-35): an evaluator judging against a limit it computes read Checked at a
+    value the claim's own condition rejects. `outside-context` — Gap: an
+    evaluator's pass on inputs outside its declared operating context
+    (`verdicts._contexted`'s token), and no owned fallback. `fallback` —
+    Assumed: the same, carried by an owned fallback (`Claim.fallback`, its
+    owner attributed through the signing channel — nothing can be until P2.5).
+
     `prerequisite` (P2.2-D10): Skipped because a prerequisite of the claim's
     evaluator is not established — the evaluator was not run. Its own cause,
     because "skipped" had come to mean "install a tool" everywhere (S-54), and
@@ -234,6 +266,9 @@ class ClaimCause(StrEnum):
     OWNED = "owned"
     PHYSICAL_PASS = "physical-pass"
     CHECKED = "checked"
+    ACCEPTANCE = "acceptance"
+    OUTSIDE_CONTEXT = "outside-context"
+    FALLBACK = "fallback"
 
 
 class Attribution(NamedTuple):
@@ -246,7 +281,10 @@ class Attribution(NamedTuple):
     `rationale`, so an edit to either after the attribution un-attributes it.
     Sealing it to the claim's digest is the signing channel's (D-13). Nothing
     in P2.1 produces one: every caller passes no `owners`, and every assumption
-    reads Gap until the channel lands.
+    reads Gap until the channel lands. From P2.4 `reason` is
+    `assumption_reason(claim)` — the rationale for an assumption, the
+    `fallback` for a claim carried outside an evaluator's operating context —
+    so an attribution over one reason never counts for the other.
     """
 
     owner: str
@@ -325,8 +363,10 @@ KEY_ORDER: tuple[str, ...] = ("checked", *(key for key in SEVERITY_ORDER
 #: as a crash: P2.0 D-8), an unrun one, and what passed — `compose`'s rungs 1-3
 #: in its own order. Outcome words are `Verdict.outcome`'s values;
 #: `prerequisite-errored` and `prerequisite` name a skip the rule made
-#: (`Verdict.blocked_by`, by its `blocked_kind`), `unqualified` and `unrun`
-#: what is not an outcome. What slipped through (review of P2.2): `compose`
+#: (`Verdict.blocked_by`, by its `blocked_kind`), `unqualified`, `outside-context`
+#: (P2.4: a pass outside its evaluator's operating context, after an evaluator
+#: unqualified at its version — the refuse-everything evaluator is the bigger
+#: fact) and `unrun` what is not an outcome. What slipped through (review of P2.2): `compose`
 #: ranked a skip behind a crashed prerequisite above a plain skip and this did
 #: not, so `last_check.json`'s `worst` cited a missing tool's gate and words
 #: beside the cause `prerequisite-errored`, and the report's bullets listed the
@@ -337,7 +377,7 @@ KEY_ORDER: tuple[str, ...] = ("checked", *(key for key in SEVERITY_ORDER
 #: crash (a tie, broken by record order, would cite it before the crash
 #: `compose` cites).
 OUTCOME_ORDER: tuple[str, ...] = ("fail", "error", "prerequisite-errored", "prerequisite",
-                                  "skipped", "unqualified", "unrun", "pass")
+                                  "skipped", "unqualified", "outside-context", "unrun", "pass")
 
 
 def severity(composed: "Composed") -> int:
@@ -355,6 +395,8 @@ def outcome_rank(verdict: Verdict | None) -> int:
     root's kind (`Verdict.blocked_by`, `blocked_kind`, the spine's marks)."""
     if verdict is None:
         key = "unrun"
+    elif outside_context(verdict):
+        key = "outside-context"
     elif getattr(verdict, "unqualified", ""):
         key = "unqualified"
     elif getattr(verdict, "blocked_by", None):
@@ -370,18 +412,38 @@ def _distinct(ids: Iterable[str]) -> list[str]:
     return list(dict.fromkeys(i for i in ids if i))
 
 
+def outside_context(verdict: Any) -> bool:
+    """Whether ``verdict`` is a pass the spine marked outside its evaluator's
+    operating context (``models.CONTEXT_OUTSIDE``, P2.4-D15) — a token kind of
+    ``Verdict.unqualified``, read here by its kind and nowhere by its text."""
+    token = str(getattr(verdict, "unqualified", "") or "")
+    return token.partition("|")[0] == CONTEXT_OUTSIDE
+
+
+def assumption_reason(claim: Claim) -> str:
+    """The reason an owner attributes for ``claim`` (P2.4-D18): its
+    ``rationale`` for an assumption — why it is carried — and its ``fallback``
+    for any other claim — why it may be carried while its evaluators' passes
+    lie outside their operating contexts. An ``Attribution`` is bound by value
+    to the owner and THIS reason, so editing either after it un-attributes it."""
+    if _kind(claim) is ClaimKind.ASSUMPTION:
+        return str(claim.rationale or "")
+    return str(getattr(claim, "fallback", "") or "")
+
+
 def _ownership(claim: Claim, owners: Mapping[str, Any] | None) -> ClaimCause | None:
     """Why an assumption is not Assumed — no owner named, no reason, or an owner
-    the channel never attributed — or None when it is (P2.1-D8)."""
+    the channel never attributed — or None when it is (P2.1-D8). From P2.4 the
+    reason is ``assumption_reason`` (a non-assumption's ``fallback``)."""
     owner = str(getattr(claim, "owner", "") or "").strip()
-    reason = str(claim.rationale or "").strip()
+    reason = assumption_reason(claim)
     if not owner:
         return ClaimCause.NO_OWNER
-    if not reason:
+    if not reason.strip():
         return ClaimCause.NO_REASON
     found = (owners or {}).get(claim.id)
     if (found is None or str(getattr(found, "owner", "")) != claim.owner
-            or str(getattr(found, "reason", "")) != claim.rationale):
+            or str(getattr(found, "reason", "")) != reason):
         return ClaimCause.OWNER_UNATTRIBUTED
     return None
 
@@ -411,7 +473,13 @@ def compose(
        the result that counts, `store`'s: the latest fail when any failed); any
        covering verdict FAILED, from an evaluator that is not unqualified
        (`fail`), whatever the kind and whether or not it is stale (D-08; R-3: a
-       result never loses its power to fail).
+       result never loses its power to fail); any covering PASS, from an
+       evaluator that counts, whose value does not meet the claim's acceptance
+       condition — of the claim's quantity, in its units (`cross_check`) —
+       stale or not (`acceptance`, P2.4-D9). It only ever fails. A pass
+       outside its evaluator's operating context is not compared: it does not
+       count (critique 7 of the P2.4 design; GLOSSARY §2: outside, a pass reads
+       Gap or Assumed, never a verdict on the design).
     2. **Skipped** — any covering evaluator ERRORED (cause `errored`, louder:
        invariant 2); else any not run behind a prerequisite that crashed
        (`prerequisite-errored`, as loud: `Verdict.blocked_kind`); else any
@@ -420,15 +488,22 @@ def compose(
        of P2.2); else any SKIPPED, even beside a pass (`skipped`). P2.2-D10;
        `OUTCOME_ORDER` holds the same order for `explaining_verdict`.
     3. **Gap** — any covering evaluator unqualified (`unqualified`), even
-       beside a pass; a measurable claim with no evaluator (`no-evaluator`); an
-       assumption with no owner named, no reason, or an owner the channel did
-       not attribute (`no-owner`, `no-reason`, `owner-unattributed`).
+       beside a pass; then any covering pass outside its evaluator's operating
+       context (`outside-context`, P2.4) — unless the claim carries an owned
+       fallback (`Claim.fallback`, attributed through `owners`), which lets the
+       ladder go on and reads Assumed at rung 7; a measurable claim with no
+       evaluator (`no-evaluator`); an assumption with no owner named, no
+       reason, or an owner the channel did not attribute (`no-owner`,
+       `no-reason`, `owner-unattributed`).
     4. **Open** — a covering gate unrun (`unrun`), even beside a pass.
     5. **Stale** — `stale`, or a covering gate in `stale_gates` (`invalidated`).
     6. **Pending build** — a physical claim no article settles: no result
        (`no-article`), or a pass recorded that no article binds to the current
        inputs (`physical-pass`) — every recorded pass, until article binding.
-    7. **Assumed** — an attributed, reasoned assumption (`owned`).
+    7. **Assumed** — an attributed, reasoned assumption (`owned`); a pass
+       outside an operating context carried by an owned fallback (`fallback`).
+       *Rejected:* Assumed at rung 3 (an owned fallback would hide an unrun or
+       invalidated evaluator beside it).
     8. **Checked** — every covering evaluator ran, passed and is current
        (`pass`). A physical claim reaches it only on a pass bound to an article
        built from the current inputs (`verified`), which nothing records yet.
@@ -467,6 +542,8 @@ def compose(
     unrun = [g for g in known if g not in ran]
     refused = [v for v in mine if getattr(v, "unqualified", "")]
     counted = [v for v in mine if not getattr(v, "unqualified", "")]
+    outside = [v for v in refused if outside_context(v)]
+    unqualified = [v for v in refused if not outside_context(v)]
     failed = [v for v in counted if v.outcome == "fail"]
     errored = [v for v in counted if v.outcome == "error"]
     skipped = [v for v in counted if v.outcome == "skipped"]
@@ -482,6 +559,13 @@ def compose(
         return Composed(ClaimStatus.REFUTED, ClaimCause.PHYSICAL_FAIL)
     if failed:
         return Composed(ClaimStatus.FAIL, ClaimCause.FAILED, gates_of(failed), failed[0])
+    # The claim's own acceptance condition, compared with every counted pass of
+    # its quantity (P2.4-D9): an evaluator judging against a limit of its own
+    # (C3's 15 MPa) is fine against it, and the design misses the claim's.
+    missed = [v for v in counted
+              if v.outcome == "pass" and cross_check(claim, v).state == "fails"]
+    if missed:
+        return Composed(ClaimStatus.FAIL, ClaimCause.ACCEPTANCE, gates_of(missed), missed[0])
     # 2. Skipped: errored first, in the status and in what it cites — a crash
     # behind a prerequisite as loud as one in the evaluator (P2.2)
     if errored:
@@ -503,10 +587,16 @@ def compose(
                         gates_of(behind, skipped), behind[0])
     if skipped:
         return Composed(ClaimStatus.BLOCKED, ClaimCause.SKIPPED, gates_of(skipped), skipped[0])
-    # 3. Gap
-    if refused:
-        return Composed(ClaimStatus.UNCLAIMED, ClaimCause.UNQUALIFIED, gates_of(refused),
-                        refused[0])
+    # 3. Gap — an evaluator unqualified at its version first (the bigger fact),
+    # then a pass outside an operating context, unless an owned fallback
+    # carries it (then the ladder goes on, and rung 7 reads it Assumed).
+    if unqualified:
+        return Composed(ClaimStatus.UNCLAIMED, ClaimCause.UNQUALIFIED, gates_of(unqualified),
+                        unqualified[0])
+    carried = bool(outside) and _ownership(claim, owners) is None
+    if outside and not carried:
+        return Composed(ClaimStatus.UNCLAIMED, ClaimCause.OUTSIDE_CONTEXT, gates_of(outside),
+                        outside[0])
     if kind is ClaimKind.MEASURABLE and not mine and not known:
         return Composed(ClaimStatus.UNCLAIMED, ClaimCause.NO_EVALUATOR)
     if kind is ClaimKind.ASSUMPTION:
@@ -530,9 +620,13 @@ def compose(
         if result is None:
             return Composed(ClaimStatus.UNVERIFIED, ClaimCause.NO_ARTICLE)
         return Composed(ClaimStatus.UNVERIFIED, ClaimCause.PHYSICAL_PASS, gates_of(mine))
-    # 7. Assumed
+    # 7. Assumed — an assumption by its own ownership (its reason IS its
+    # fallback: `assumption_reason`), any other claim by an owned fallback.
     if kind is ClaimKind.ASSUMPTION:
         return Composed(ClaimStatus.ASSERTED, ClaimCause.OWNED)
+    if carried:
+        return Composed(ClaimStatus.ASSERTED, ClaimCause.FALLBACK, gates_of(outside),
+                        outside[0])
     # 8. Checked
     return Composed(ClaimStatus.PASS, ClaimCause.CHECKED, gates_of(mine))
 
@@ -560,7 +654,7 @@ def resolve_status(
 #: behind a crashed prerequisite as loud; a skip behind a prerequisite names
 #: the root to fix before a plain skip; a skip explains before a refusal
 #: (Skipped ranks above Gap); a pass explains nothing.
-_EXPLAINS = OUTCOME_ORDER[:OUTCOME_ORDER.index("unqualified") + 1]
+_EXPLAINS = OUTCOME_ORDER[:OUTCOME_ORDER.index("outside-context") + 1]
 
 
 def _explains_as(verdict: Verdict) -> str:
@@ -591,7 +685,211 @@ def explaining_verdict(claim: Claim, verdicts: Iterable[Verdict]) -> Verdict | N
         for verdict in mine:
             if _explains_as(verdict) == wanted:
                 return verdict
+        if wanted == "fail":
+            # A pass whose value misses the claim's acceptance condition explains
+            # a Failing claim right after an evaluator's own fail (P2.4,
+            # `compose` rung 1's order). What slipped through without it
+            # (critique 5 of the P2.4 design): `last_check.json`'s `worst` named
+            # no gate for such a claim — `{claim: C3, gate: null}` — while
+            # `check` and the report named `bracket.bearing`.
+            for verdict in mine:
+                if verdict.ok and cross_check(claim, verdict).state == "fails":
+                    return verdict
     return None
+
+
+# --------------------------------------------------------------------------- #
+# the margin, and the comparison of a value with its claim (P2.4, D-17)
+# --------------------------------------------------------------------------- #
+class Margin(NamedTuple):
+    """One verdict's margin (D-17): ``fraction`` — signed, a fraction of the
+    limit's size, > 0 inside and < 0 past — or ``None`` with ``why`` there is
+    none: ``no-verdict`` (skipped, errored, or unqualified at its version),
+    ``no-value``, ``no-limit``, ``no-comparator``, ``band`` (``between``: the
+    verdict carries no upper bound), ``no-side`` (``==``, ``!=``),
+    ``zero-limit``, or ``disagrees`` — its side contradicts the pass flag, and
+    the verdict wins (S-18: a FAIL rounded to its limit drew as inside)."""
+
+    fraction: float | None
+    why: str = ""
+
+
+def margin(verdict: Verdict | None) -> Margin:
+    """THE margin of a verdict (D-17, P2.4-D8), by its OWN comparator and limit
+    — the bar the evaluator judged; the claim's own limit is drawn from the
+    claim. LE/LT ``(limit - value) / |limit|``, GE/GT ``(value - limit) /
+    |limit|``. A pass marked outside its operating context is judged as the
+    pass it is (its value is real; only its counting is refused). Carried on
+    every JSON verdict row beside its value (``cli._verdict_row``,
+    ``site.state``), so no renderer computes one — one function, so the
+    ``next:`` line (P3) and the page's bullet bar (P5) cannot disagree.
+    *Rejected:* in a spine module (retuning it would re-key every cache); a
+    ``Verdict`` property (the same); inferring the side from ``(passed,
+    measured, limit)`` (a guess, generous at equality)."""
+    if verdict is None:
+        return Margin(None, "no-verdict")
+    if outside_context(verdict):
+        passed = True
+    elif getattr(verdict, "unqualified", "") or verdict.outcome in ("error", "skipped"):
+        return Margin(None, "no-verdict")
+    else:
+        passed = verdict.outcome == "pass"
+    value, limit = verdict.measured, verdict.limit
+    if not _finite_real(value):
+        return Margin(None, "no-value")
+    if not _finite_real(limit):
+        return Margin(None, "no-limit")
+    comparator = str(getattr(verdict, "comparator", "") or "")
+    if not comparator:
+        return Margin(None, "no-comparator")
+    if comparator == "between":
+        return Margin(None, "band")
+    if comparator in ("==", "!="):
+        return Margin(None, "no-side")
+    if float(limit) == 0:
+        return Margin(None, "zero-limit")
+    if comparator in ("<=", "<"):
+        fraction = (float(limit) - float(value)) / abs(float(limit))
+    elif comparator in (">=", ">"):
+        fraction = (float(value) - float(limit)) / abs(float(limit))
+    else:
+        return Margin(None, "no-comparator")
+    strict = comparator in ("<", ">")
+    if passed and (fraction < 0 or (strict and fraction == 0)):
+        return Margin(None, "disagrees")
+    if not passed and (fraction > 0 or (not strict and fraction == 0)):
+        return Margin(None, "disagrees")
+    return Margin(fraction, "")
+
+
+def _finite_real(value: Any) -> bool:
+    return (isinstance(value, numbers.Real) and not isinstance(value, bool)
+            and math.isfinite(float(value)))
+
+
+def _quantity(text: Any) -> str:
+    """A quantity as the comparison matches it: casefolded, ``-`` and ``_`` read
+    as spaces, whitespace collapsed — "Tip-Deflection" is "tip deflection"."""
+    return " ".join(str(text or "").casefold().replace("-", " ").replace("_", " ").split())
+
+
+class Compared(NamedTuple):
+    """``cross_check``'s answer: ``state`` — ``holds``, ``fails`` or
+    ``not-compared`` — and, when not compared, ``why``: ``quantity``,
+    ``units``, ``no-limit`` or ``no-value``."""
+
+    state: str
+    why: str = ""
+
+
+def cross_check(claim: Claim, verdict: Verdict) -> Compared:
+    """Is ``verdict``'s value evidence about ``claim``'s acceptance condition,
+    and does it meet it? (P2.4-D9.) Compared only when the verdict measures the
+    claim's quantity — ``settles`` against ``acceptance.quantity``, normalised
+    (``_quantity``) — in its units (equal after ``strip``, case kept: an
+    ``mPa`` is not an ``MPa``), the claim has a finite limit and the verdict a
+    finite value; then ``Acceptance.holds`` decides. A pure function of
+    ``(claim, verdict)``: ``settles`` travels on the verdict (D6), so a reader
+    with no registry compares exactly as one with (invariant 12). It only ever
+    fails a claim (``compose`` rung 1); a value not compared is listed
+    (``not_compared``), never implied compared. *Rejected:* every covering
+    verdict, whatever it measures (C4 would compare a 7 mm wall with a 204 mm
+    bed fit, Q2.6); units casefolded; a status of its own."""
+    acceptance = claim.acceptance
+    quantity = _quantity(getattr(acceptance, "quantity", ""))
+    if not quantity or _quantity(getattr(verdict, "settles", "")) != quantity:
+        return Compared("not-compared", "quantity")
+    if str(verdict.units or "").strip() != str(getattr(acceptance, "units", "") or "").strip():
+        return Compared("not-compared", "units")
+    if not _finite_real(getattr(acceptance, "limit", None)):
+        return Compared("not-compared", "no-limit")
+    if not _finite_real(verdict.measured):
+        return Compared("not-compared", "no-value")
+    return Compared("holds" if acceptance.holds(float(verdict.measured)) else "fails")
+
+
+def compared_gates(claim: Claim, verdicts: Iterable[Verdict]) -> list[str]:
+    """The covering evaluators whose value is compared with ``claim``'s
+    acceptance condition (``cross_check`` holds or fails), in order — what a
+    renderer shows as the claim's value, so it never chooses one itself
+    (critique 10 of the P2.4 design: the page headlined the first passing
+    verdict, a guard's `8.57 L/h` on failing C1)."""
+    return _distinct(v.gate for v in covering_verdicts(claim, verdicts)
+                     if v.outcome in ("pass", "fail") and not getattr(v, "unqualified", "")
+                     and cross_check(claim, v).state in ("holds", "fails"))
+
+
+def not_compared(claim: Claim, verdicts: Iterable[Verdict],
+                 prerequisites: Mapping[str, Iterable[str]] | None = None
+                 ) -> list[tuple[str, str]]:
+    """``[(gate, why)]`` — the covering passes with a value that is NOT compared
+    with ``claim``'s acceptance condition because they measure another quantity
+    or in other units (P2.4-D10), a prerequisite of another covering evaluator
+    of the claim left out (P5.1's graph rule: a guard's value is about the
+    guarded analysis, not the claim). Empty for a claim with no limit, which
+    nothing could be compared with. Listed in the report under the checked
+    table and in ``summarise()["not_compared"]`` — never a status: most bundled
+    evaluators measure quantities a project's claims phrase otherwise, and a
+    blocking rule would stop every pack project."""
+    if not _finite_real(getattr(claim.acceptance, "limit", None)):
+        return []
+    covering = covering_verdicts(claim, verdicts)
+    # A prerequisite of ANY covering evaluator, whatever that one's outcome: a
+    # guard's value is about the analysis it guards, failing or not (C1's
+    # guard beside its failing deflection is no more C1's value than C2's).
+    needed = {need for v in covering for need in (prerequisites or {}).get(v.gate, ()) or ()}
+    mine = [v for v in covering if v.ok and _finite_real(v.measured)]
+    out: list[tuple[str, str]] = []
+    for verdict in mine:
+        if verdict.gate in needed:
+            continue
+        found = cross_check(claim, verdict)
+        if found.state == "not-compared" and found.why in ("quantity", "units"):
+            out.append((verdict.gate, found.why))
+    return out
+
+
+class LimitDisagreement(NamedTuple):
+    """A compared pair whose two limits part (P2.4-D13, S-35): the evaluator
+    ``gate`` judged against ``limit`` (``units``), and ``claim``'s acceptance
+    condition (``acceptance``, rendered) says another — one number in two
+    places."""
+
+    claim: str
+    gate: str
+    limit: float
+    units: str
+    acceptance: str
+
+
+def limit_disagreements(ledger: Ledger, verdicts: Iterable[Verdict] | None = None
+                        ) -> list[LimitDisagreement]:
+    """Every compared pair — a counted pass or fail whose value ``cross_check``
+    compares with its claim — whose two finite limits differ (``math.isclose``,
+    relative 1e-9: a limit the gate rounded to its reporting precision still
+    agrees). In claim order, then verdict order. A ``check`` warning, a
+    ``doctor`` row and a JSON key; never a status: the comparison already fails
+    the generous case, and a claim looser than its evaluator is over-strict,
+    not a lie. What slipped through before it (S-35): C3's and C4's limits
+    were snapshots of what their evaluators compute, and a ``bed_xy`` edit
+    moved the gate's 204 to 234 with nothing saying the claim still said 204."""
+    out: list[LimitDisagreement] = []
+    for claim in ledger.claims:
+        limit = getattr(claim.acceptance, "limit", None)
+        if not _finite_real(limit):
+            continue
+        for verdict in covering_verdicts(claim, ledger.verdicts if verdicts is None
+                                         else verdicts):
+            if verdict.outcome not in ("pass", "fail") or getattr(verdict, "unqualified", ""):
+                continue
+            if cross_check(claim, verdict).state not in ("holds", "fails"):
+                continue
+            if not _finite_real(verdict.limit) or math.isclose(
+                    float(verdict.limit), float(limit), rel_tol=1e-9, abs_tol=0.0):
+                continue
+            out.append(LimitDisagreement(claim.id, verdict.gate, float(verdict.limit),
+                                         str(verdict.units or ""), claim.acceptance.render()))
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -918,7 +1216,11 @@ def summarise(
       key says which of those already hold a result;
     * `all_required_checked` — *ready* (GLOSSARY §4, W3): at least one required
       claim, and every one reads Checked — `unresolved_ids` empty. Zero required
-      claims is not ready.
+      claims is not ready;
+    * `not_compared` (P2.4-D10, critique 10) — `{claim id: [evaluator ids]}`,
+      every claim whatever its status with a covering pass whose value measures
+      another quantity or units than its acceptance condition (`not_compared`),
+      claims with none left out.
 
     `ready` keeps its meaning — `n_blocking == 0`, nothing stops `check` — for
     every reader that has it (`status --json`, the private bench, a page
@@ -956,6 +1258,9 @@ def summarise(
         by_kind[_kind(claim).value] += 1
 
     covering_specs = {s.id for s in specs if any(covers(s, c) for c in ledger.claims)}
+    needs = {s.id: list(getattr(s, "needs", None) or ()) for s in specs}
+    unlisted = {claim.id: [gate for gate, _why in not_compared(claim, ledger.verdicts, needs)]
+                for claim in ledger.claims}
     required = [c for c in ledger.claims if c.critical]
     unresolved = [c.id for c in required
                   if resolved.get(c.id) not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
@@ -982,6 +1287,7 @@ def summarise(
         "all_required_checked": bool(required) and not unresolved,
         "stale": bool(stale) or bool(stale_gates),
         "ready": not blockers,
+        "not_compared": {cid: gates for cid, gates in unlisted.items() if gates},
     }
 
 

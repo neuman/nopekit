@@ -1,15 +1,15 @@
 {
   "schema": 1,
   "gate": "bracket.min_wall",
-  "rho": "f5f0cce4d99d918d1bd054888da497539ff23a1635439c19bb20474cef08b3d5",
+  "rho": "44fd50564eab505eb9d7fd6fcaccb3756d8b67a8f4b4e5d3d1841684c620a20d",
   "code": {
-    "digest": "a52d9c706a230f68c0529638f1b33d8d67fd2c9614c42a410e8dcb25b60a2419",
+    "digest": "69cccc184e06649c4af0a2f8915edb2ae53baf6ad47d8fcfc7a9a8fef276de33",
     "files": [
       "gates/structural.py"
     ],
     "fallback": ""
   },
-  "spine": "327b03e5d394c749cae3c25c80227f1f72c0742db10380072aeaef1b6b452f46",
+  "spine": "71f45240af6180d5bd456f588c766edd4ab9fddf0f34afbb6b215f31b8254857",
   "reads": {
     "params": [
       [
@@ -48,6 +48,8 @@
     "measured": 7.0,
     "limit": 1.2,
     "units": "mm",
+    "comparator": ">=",
+    "settles": "wall thickness",
     "detail": "thinnest section 7.0 mm vs 1.2 mm minimum (3 perimeters at a 0.4 mm nozzle)",
     "evidence": [],
     "locators": [],
@@ -60,5 +62,5 @@
     "tier": 0,
     "pack": ""
   },
-  "digest": "048e54870a55357a24a9369c3063f9f3f8ccd53610227f841721029cad65ef16"
+  "digest": "4e2f0161c56cd300fd496cf52b181c075541895d650625cb5591acb4d0389283"
 }

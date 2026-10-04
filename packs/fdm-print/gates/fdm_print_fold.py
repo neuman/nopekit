@@ -232,13 +232,13 @@ def fold(gate_id: str, outcomes: Sequence[PartOutcome], *, source: str, units: s
                   + (f". {measured_clause}" if measured_clause else "")
                   + skip_clause)
         return Verdict(gate=gate_id, passed=False, measured=float(len(defects)),
-                       limit=0.0, units="parts that are not solids",
+                       limit=0.0, comparator="<=", units="parts that are not solids",
                        detail=_with(detail, extra_detail), evidence=list(evidence),
                        locators=locators)
 
     if past:
         return Verdict(gate=gate_id, passed=False,
-                       measured=best.measured, limit=best.limit, units=units,
+                       measured=best.measured, limit=best.limit, comparator="<=", units=units,
                        detail=_with(measured_clause + skip_clause, extra_detail),
                        evidence=list(evidence), locators=locators)
 
@@ -265,7 +265,7 @@ def fold(gate_id: str, outcomes: Sequence[PartOutcome], *, source: str, units: s
             evidence=list(evidence))
 
     return Verdict(gate=gate_id, passed=True, measured=best.measured,
-                   limit=best.limit, units=units,
+                   limit=best.limit, comparator="<=", units=units,
                    detail=_with(measured_clause, extra_detail),
                    evidence=list(evidence))
 

@@ -81,6 +81,8 @@ BLOCKING_STATUSES: frozenset[ClaimStatus]     # FAIL STALE UNCLAIMED BLOCKED PEN
 class Tier(enum.IntEnum): INSTANT = 0 | BUILD = 1 | SOLVE = 2 | EXTERNAL = 3
 class PrerequisiteKind(StrEnum): ERRORED | FAILED | SKIPPED | UNQUALIFIED | NOT_REGISTERED
                                  | INVALIDATED | UNRUN   # why a prerequisite is not established, rank order
+CONTEXT_OUTSIDE = "context:outside"           # P2.4: the Verdict.unqualified token kind of a
+                                              #   pass outside its evaluator's operating context
 class ViewKind(StrEnum): MODEL3D | IMAGE | CHART | TABLE | FIELD | DIAGRAM
 class ArtifactKind(StrEnum): SKETCH | REFERENCE | CAD | SCREENSHOT | DATASHEET | SPEC
                              | MEASUREMENT | STANDARD | DATA | LINK | OTHER
@@ -118,6 +120,8 @@ class Claim(Record):            # something that must be true for the design to 
     rationale: str = ""; source: str = ""; grounded_by: list[str]; gates: list[str]
     tags: list[str]; critical: bool = True; physical_result: PhysicalResult | None = None
     note: str = ""; owner: str = ""   # P2.1: a NOMINEE for an assumption, never an attribution
+    fallback: str = ""                # P2.4: why it may be carried outside an operating
+                                      #   context; counts only through an attribution
 class Need(Record):             # a claim with no gate: the extension protocol's trigger
     id: str; claim_ids: list[str]; quantity: str = ""; claim_class: str = ""
     status: NeedStatus = OPEN; candidates: list[ToolCandidate]; chosen: str = ""
@@ -217,6 +221,19 @@ is never ok. `claims.compose` reads a claim with a marked evaluator as Gap; the 
 alone reads as a crash (degrade-closed). `Verdict.render()`'s body follows the
 outcome: an error's first line, a skip's reason, a pass's or a fail's detail — never a
 crash's traceback (P2.0 F-1), never a crash in its skip reason's words (F-10).
+
+**P2.4's fields.** `Verdict.comparator` and `Verdict.settles` are Verdict's last two:
+which side of its limit the gate passes (the gate's own, one of `<= < >= > == !=
+between`, normalised and refused otherwise by `gates._stamp`) and the quantity it
+measured (stamped from `GateSpec.settles` by the spine, never the gate's). Both are in
+an entry's verdict block, so a cached verdict compares (`claims.cross_check`) and draws
+(`claims.margin`) exactly as the run that wrote it; neither is in `out8`. An older spine
+drops both and compares nothing: quieter, never a pass. `GateSpec.operating_context`
+is GateSpec's last field: `{key: (lo, hi)}`, refused at registration when malformed,
+not part of rho. `Claim.fallback` is Claim's last: the reason an owner attributes for a
+claim carried outside an operating context (`claims.assumption_reason`). A
+`context:outside` token on anything that is not a pass is dropped by
+`Verdict.__post_init__` before it writes `error` (D16): the mark never launders a fail.
 
 **The prerequisite mark (P2.2-D9).** `Verdict.blocked_by` — the roots, found
 transitively, of the prerequisites that were not established when a gate was not run
@@ -841,7 +858,8 @@ class GateTrace:
     params: dict[tuple, str]           # path -> ABSENT | PRESENT | value digest | whole-level digest
     values: dict[tuple, Any]           # path -> small display value of a leaf read
     whole: set[tuple]                  # paths read in bulk; () is the top level
-    ledger: dict[str, str]             # "claim:<id>" | "claims" | "params" | "meta" | ... -> digest
+    ledger: dict[str, str]             # "claim:<id>" | "claims" | "params" | "meta" | ... -> digest;
+                                       #   P2.4: "acceptance:<key>", "acceptance-shape:<key>"
     files_read: list[str]              # absolute, first-read order, never this window's own output
     files_written: set[str]
     dirs: set[str]                     # directories listed
@@ -854,6 +872,8 @@ class GateTrace:
     tier: int | None                   # the value read through ctx.tier (a TierRead); None: never
     sources: list[str]                 # module sources the STOCK import system read while no load
                                        #   was recorded; keyed under the project or a pack only
+    acceptances: dict[str, Acceptance] # P2.4: what each ctx.acceptance(key) returned — in memory
+                                       #   only: run_gate holds a pass to it
     def self_modified(self) -> list[str]   # read, THEN written, in this window
     def stat_existed(self, path) -> bool | None   # what the first question found; None: cannot say
 
@@ -861,6 +881,12 @@ class ParamTrace(dict):
     def __init__(self, data=None, trace=None, *, path=(), readonly=True, host=False)
 class LedgerView(Ledger):
     def __init__(self, ledger=None, trace=None, **fields)   # **fields: dataclasses.replace's path
+    def acceptance(self, key) -> Acceptance     # P2.4: records acceptance:/acceptance-shape:, raises
+ACCEPTANCE_KEY = "acceptance:"                  # P2.4: a goalpost read's ledger key (the condition)
+SHAPE_KEY = "acceptance-shape:"                 # ... and its shape (claims, quantity, comparator, units)
+class AcceptanceRead(NamedTuple): condition; digest; shape; ids=(); problem=""
+def claims_named(claims, key) -> list           # the claim whose id is key, else those tagged key
+def acceptance_of(claims, key) -> AcceptanceRead   # THE goalpost rule: the read and every re-read
 class ModelProxy:
     def __init__(self, target, trace)
 class TierRead:                                 # ctx.tier in a gate's view; NOT an int subclass
@@ -1821,6 +1847,8 @@ class GateContext:                                      # the full surface: docs
     def first_pack_param(self, names, default=None) -> Any
     def first_pack_param_named(self, names, default=None) -> tuple[Any, str]
     def require_param(self, name) -> Any                # raises rather than compare with None
+    def acceptance(self, claim) -> Acceptance           # P2.4: the goalpost of the claim an id or tag
+                                                        #   names; recorded `acceptance:<claim>`
     def out_path(self, *parts) -> str                   # an evidence path under out_dir, dir created
     def with_extra(self, extra) -> GateContext          # a copy with `extra` merged over
     def load_file(self, path, loader=None) -> Any       # once per sweep; it and all the loader opened: reads of THIS gate, hit or miss
@@ -1845,7 +1873,7 @@ def use_registry(registry)                              # context manager: `@gat
 def gate(*, id, claims=(), tier=Tier.INSTANT, settles="", requires_tools=(),
          requires_python=(), requires_one_of=(), negative_control=None, title="",
          description="", pack="", entry="", registry=None,
-         needs=())                                      # decorator -> registers, returns fn
+         needs=(), operating_context=None)              # decorator -> registers, returns fn
 def availability(spec) -> tuple[bool, str]              # (ok, "requires openfoam (not on PATH)")
 def run_gate(spec, fn, ctx, *, trace=None) -> Verdict   # a traced, read-only view; times it (wall, CPU);
                                                         #   catches exceptions -> error verdict
@@ -1878,6 +1906,14 @@ MUTATION_RUNS_MAX = 1024                                # runs per walk, probes 
 MUTATION_TIER_MAX = Tier.INSTANT                        # the costliest tier walked
 class MutationResult: key, before, after, outcome, measured, limit, why
 class MutationPass: results, inconclusive, not_mutated, boundary, runs, errors, flaky
+COMPARATORS: tuple[str, ...]                            # P2.4: <= < >= > == != between (Comparator's values)
+class ContextBreach(NamedTuple): key; value; lo; hi; why   # outside | absent | not-a-number | unread
+def context_breach(spec, params, *, read=None) -> ContextBreach | None   # pure; on the spellings read
+def context_token(breach) -> str                        # "context:outside|<canonical json>"
+def context_of(token) -> ContextBreach | None           # its inverse
+GOALPOST_FACTORS = (0.5, 2.0)                           # where the known-good control's goalposts move
+class GoalpostRun: key, limit, outcome, measured, units
+def goalpost_runs(spec, fn, good_ctx, good_verdict, *, trace=None) -> tuple[GoalpostRun, ...]
 def load_fixture(ref: str, root: str) -> Any            # "mod:fn" or "path/to/file.py"
 def load_project_gates(root, registry) -> list[str]     # <root>/gates/*.py; the ids they register
 def describe(spec) -> str                               # one dense line for `atompipe gate list`
@@ -2089,6 +2125,7 @@ class ClaimCause(StrEnum): FAILED | PHYSICAL_FAIL | ERRORED | PREREQUISITE_ERROR
                          | SKIPPED | PREREQUISITE | UNQUALIFIED
                          | NO_EVALUATOR | NO_OWNER | OWNER_UNATTRIBUTED | NO_REASON
                          | UNRUN | INVALIDATED | NO_ARTICLE | OWNED | PHYSICAL_PASS | CHECKED
+                         | ACCEPTANCE | OUTSIDE_CONTEXT | FALLBACK      # P2.4
 class Attribution(NamedTuple): owner: str; reason: str     # the signing channel's record of an owner
 @dataclass(frozen=True)
 class Composed: status: ClaimStatus; cause: ClaimCause; cites: tuple; verdict: Verdict | None
@@ -2096,7 +2133,7 @@ class Composed: status: ClaimStatus; cause: ClaimCause; cites: tuple; verdict: V
 STATUS_KEY: Mapping[ClaimStatus, str]                        # pass -> "checked", unverified -> "pending_build", ...
 SEVERITY_ORDER: tuple[str, ...]                              # tokens + "errored", most urgent first
 KEY_ORDER: tuple[str, ...]                                   # the eight tokens, count order
-OUTCOME_ORDER: tuple[str, ...]                               # fail, error, prerequisite-errored, prerequisite, skipped, unqualified, unrun, pass
+OUTCOME_ORDER: tuple[str, ...]                               # fail, error, prerequisite-errored, prerequisite, skipped, unqualified, outside-context, unrun, pass
 def severity(composed) -> int                                # its place in SEVERITY_ORDER
 def outcome_rank(verdict) -> int                             # its place in OUTCOME_ORDER; None = unrun
 def covers(spec, claim) -> bool                              # claim id OR any claim tag in spec.claims
@@ -2113,6 +2150,17 @@ def find_gaps(ledger, registry) -> list[Need]                # MEASURABLE claims
 def blocking(ledger, registry, *, stale=False, stale_gates=(), owners=None) -> list[tuple[Claim, ClaimStatus]]
 def summarise(ledger, registry, *, stale=False, stale_gates=(), owners=None) -> dict   # counts, for the CLI
 def next_claim_id(ledger, prefix="C") -> str                 # C1, C2, ...
+# P2.4: the margin, the comparison of a value with its claim, the context mark
+class Margin(NamedTuple): fraction: float | None; why: str = ""
+def margin(verdict) -> Margin                                # D-17: > 0 inside, < 0 past, or why none
+class Compared(NamedTuple): state: str; why: str = ""        # holds | fails | not-compared
+def cross_check(claim, verdict) -> Compared                  # settles == quantity, units equal, both finite
+def compared_gates(claim, verdicts) -> list[str]             # the evaluators whose value IS the claim's
+def not_compared(claim, verdicts, prerequisites=None) -> list[tuple[str, str]]   # (gate, quantity|units)
+class LimitDisagreement(NamedTuple): claim; gate; limit; units; acceptance
+def limit_disagreements(ledger, verdicts=None) -> list[LimitDisagreement]
+def outside_context(verdict) -> bool                         # its unqualified token is CONTEXT_OUTSIDE's
+def assumption_reason(claim) -> str                          # rationale (assumption) | fallback (otherwise)
 ```
 `covers` binds by id **or** by tag, and an empty `spec.claims` covers nothing, never
 everything: a wildcard would let one misregistered gate mark a project proven.
@@ -2128,11 +2176,12 @@ without it:
 |---|---|---|---|
 | 1 | Failing | a physical result failed (`refuted`), whatever the claim's kind and whatever was recorded after it; any covering verdict failed (`fail`), any kind, stale or not (D-08, R-3) | `physical-fail`, `failed` |
 | 2 | Skipped (`blocked`) | any errored, else any not run behind a prerequisite that crashed (`blocked_kind` `errored`: as loud), else any not run behind any other prerequisite (`blocked_by`; ahead of a plain skip), else any skipped — beside a pass or not | `errored`, `prerequisite-errored`, `prerequisite`, `skipped` |
-| 3 | Gap (`unclaimed`) | any unqualified, beside a pass or not; a measurable claim with no evaluator; an assumption with no owner named, no reason, or an owner `owners` does not attribute | `unqualified`, `no-evaluator`, `no-owner`, `no-reason`, `owner-unattributed` |
+| 1′ | Failing (P2.4) | any counted covering PASS whose value, of the claim's quantity and in its units, does not meet the claim's acceptance condition (`cross_check`), stale or not | `acceptance` |
+| 3 | Gap (`unclaimed`) | any unqualified, beside a pass or not; then (P2.4) any pass outside its evaluator's operating context, unless an owned fallback carries it; a measurable claim with no evaluator; an assumption with no owner named, no reason, or an owner `owners` does not attribute | `unqualified`, `outside-context`, `no-evaluator`, `no-owner`, `no-reason`, `owner-unattributed` |
 | 4 | Open (`pending`) | any covering gate unrun | `unrun` |
 | 5 | Stale | `stale`, or a covering gate in `stale_gates` | `invalidated` |
 | 6 | Pending build (`unverified`) | a physical claim with no result; or a pass recorded that no article binds to the current inputs (every pass, until article binding) | `no-article`, `physical-pass` |
-| 7 | Assumed (`asserted`) | an attributed, reasoned assumption | `owned` |
+| 7 | Assumed (`asserted`) | an attributed, reasoned assumption; (P2.4) a pass outside an operating context carried by an owned fallback | `owned`, `fallback` |
 | 8 | Checked | every covering evaluator ran, passed and is current (`pass`); a physical claim only on a pass bound to an article (`verified`), which nothing records yet | `checked` |
 
 **The result that counts** is `Claim.physical_result`, as `store` assembles it from
@@ -3232,7 +3281,63 @@ one under `-v`) and its `problem:` lines. `doctor` gains `qualification` and
 `qualifications` and `counts.qualified`/`unqualified`; `state.json` verdict rows read
 `status: "unqualified"` with `qualification: {token, reason, text}`.
 
+## What P2.4 moved
+
+A goalpost lives in one place, a pass meets the goalpost it read, a value is compared
+with the claim it is evidence for, and a pass counts only inside its evaluator's
+operating context. The spine digest moved; every project entry and control re-keys
+once (a P2.3-shaped verdict block is read, so it reads Stale for the spine that moved,
+never "ignored").
+
+- **`GateContext.acceptance(claim)`** returns the acceptance condition of the claim an
+  id or a tag names and records `acceptance:<key>` (the condition alone) and
+  `acceptance-shape:<key>` (its claims, quantity, comparator and units);
+  `verdicts.acceptance_of` is the one rule, shared with `_ledger_now`. A pass that read
+  one is held to it by `run_gate` — no value, other units, or a value it rejects is
+  **errored**. `bracket.deflection` reads C1's; `DEFLECTION_LIMIT_MM` is gone (S-35).
+- **Controls read their own goalposts.** A project's `selftest/known_good.py` states
+  `CLAIMS` (the bracket's C1 as calibrated). `_ledger_unseen` exempts `acceptance:` keys
+  — and only them — from `channels:ledger`, because the qualification moves each goalpost
+  the known-good control read (`gates.goalpost_runs`, x0.5 and x2) and requires its
+  value and units unmoved (`goalpost:moves|<key>` otherwise), and an entry that read a
+  goalpost and moved none is refused by the strict reader; the shape key stays under
+  `channels:ledger` (critique 1 of the design: a gate keyed to its calibrated goalpost,
+  or to whether its claim exists, read Checked under a blanket exemption).
+- **`Verdict.comparator`** is set by every bundled gate with a finite limit (R-4: the
+  detector over every bundled gate on both controls and the bracket's six — zero
+  without one, and every margin on its pass flag's side but `bom.availability`'s
+  end-of-life known-bad, named). **`claims.margin`** is carried on every JSON verdict
+  row (`margin` or `margin_why`), and on every `state.json` verdict row.
+- **The comparison** (`claims.cross_check`): a counted pass whose value, of the claim's
+  quantity in its units, misses the claim's acceptance condition reads **Failing**
+  (`acceptance condition not met`); a value of another quantity is listed as not
+  compared (the report's note under the checked table, `summary.not_compared`,
+  `state.json`'s `compared`/`not_compared`), never a status. Two limits that part are a
+  `check` warning line, a `doctor` `limits` row and `check --json`'s
+  `limit_disagreements` (S-35). The report's column is *Value* and its evaluator column
+  *Evaluator* (GLOSSARY §9, S-46).
+- **Operating context** (`GateSpec.operating_context`): a pass whose run did not read a
+  declared key is errored; outside the range a pass carries the `context:outside` token
+  (`verdicts._contexted`, in `_resolve_gate` and the sweep) and its claim reads **Gap**
+  (`outside-context`) or **Assumed** under an owned `Claim.fallback`; a fail still
+  counts. A known-good control outside the range is `known-good:outside`. A mutation
+  counts wherever it lands (critique 2 of the design).
+- **Visible changes for a third party**: a claim whose acceptance quantity and units
+  equal a covering evaluator's `settles` and units, that evaluator passing at a value the
+  claim's condition rejects, now reads Failing (it read Checked); the checked table
+  drops values of other quantities into a note; `check` may print limit warnings.
+  Nothing else moves without a new declaration (`ctx.acceptance`,
+  `operating_context`, `Claim.fallback`).
+
 ## Limits: what the spine cannot see, named
+
+- **A goalpost one exact value no run reads (P2.4).** The qualification moves each
+  goalpost the known-good control read to half and double its limit and requires the
+  gate's value unmoved; a gate that lies only at one exact goalpost — the live one,
+  say, and nowhere else — passes both runs and the walk, as a gate keyed to one exact
+  parameter value the walk never visits does. No tool catches a lying value but an
+  independent evaluator. *Rejected:* substituting the live goalpost into the known-good
+  design (a record per live value, and a control that re-keys on every goalpost edit).
 
 A verdict is keyed by what its gate was SEEN to read (rho), a control counts only when
 it was SEEN to fail, and a record is read strictly from its file. Each of those has an

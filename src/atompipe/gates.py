@@ -106,6 +106,37 @@ And a sixth, because a validity guard that guards nothing is a logger one level 
    of seven packs broke (S-52): ``_gate_files`` loads alphabetically, so beam's
    guard ran last.
 
+And two more with P2.4, because a pass is only as good as the goalpost it was
+judged against and the range it was qualified on:
+
+7. **A goalpost lives in claims/, and a pass meets the one it read.** A gate
+   reads its limit with :meth:`GateContext.acceptance` — the acceptance
+   condition of the claim an id or a tag names, recorded as ``acceptance:<key>``
+   (the condition alone, never the claim record) — and :func:`run_gate` errors a
+   pass that contradicts it: no value, other units, or a value the condition
+   rejects. A fail needs nothing (R-3). What slipped through before it (S-35):
+   ``bracket.deflection`` judged against a constant of its own beside C1's
+   identical number, and C3's and C4's evaluators against limits they compute —
+   two homes for one number, compared by nothing. The claim side of that is
+   ``claims.cross_check``; a disagreement between the two limits is a ``check``
+   warning. And the qualification moves each goalpost the known-good control
+   read (:func:`goalpost_runs`): its value must not move with it, or a gate
+   keyed to its calibrated goalpost would read Checked wherever the live one
+   was moved (critique 1 of the P2.4 design).
+
+8. **An evaluator's operating context.** A gate may declare the range of its
+   read set it was qualified on (``GateSpec.operating_context``). Every pass must
+   read each declared key (:func:`run_gate` errors one that never did: the
+   context is part of the read set), and the spine judges the CURRENT values a
+   pass read against it (:func:`context_breach`, ``verdicts._contexted``):
+   outside, the pass does not count — its claim reads Gap, or Assumed under an
+   owned fallback — and a fail still does, because a result never loses its
+   power to fail (R-3). A mutation counts wherever it lands: the walk reads the
+   evaluator's flag against its OWN value past its OWN limit, a property of its
+   code, not of the regime (critique 2 of the design, which would have filed a
+   passing landing outside the context as inconclusive and so qualified a gate
+   keyed to its own control behind a narrow context).
+
 The gate function itself stays an ordinary function: :func:`gate` registers it
 and returns it **unchanged**, so it is directly callable and directly testable
 without the registry in the way.
@@ -139,10 +170,12 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable, NamedTuple
 
 from . import modelio
-from .models import GateSpec, Ledger, NegativeControl, PrerequisiteKind, Tier, Verdict
+from .models import (CONTEXT_OUTSIDE, Acceptance, Comparator, GateSpec, Ledger, NegativeControl,
+                     PrerequisiteKind, Tier, Verdict)
 from .util import AtompipeError, ensure_dir, rel, short_hash
-from .verdicts import (GateTrace, ParamTrace, SweepMemo, _pack_dir_of, memo_entries, not_yet,
-                       replay, sweep_memo, traced_context, tracing)
+from .verdicts import (GateTrace, LedgerView, ParamTrace, SweepMemo, _pack_dir_of, acceptance_of,
+                       claims_named, memo_entries, not_yet, replay, sweep_memo, traced_context,
+                       tracing)
 
 __all__ = [
     "SCOPE_SEP",
@@ -181,6 +214,14 @@ __all__ = [
     "PREREQUISITE_NOT_ESTABLISHED",
     "NEGATIVE_KINDS",
     "NOT_CURRENT_KINDS",
+    "COMPARATORS",
+    "ContextBreach",
+    "context_breach",
+    "context_token",
+    "context_of",
+    "GOALPOST_FACTORS",
+    "GoalpostRun",
+    "goalpost_runs",
 ]
 
 
@@ -585,6 +626,49 @@ class GateContext:
             )
         return value
 
+    # -- goalposts ---------------------------------------------------------- #
+    def acceptance(self, claim: str) -> Acceptance:
+        """The acceptance condition — quantity, comparator, limit, units — of the
+        claim ``claim`` names: an exact claim id first, else the claims carrying
+        it as a tag (one condition among them). A copy: editing it moves nothing.
+
+        **A goalpost lives in claims/, never in a gate** (P2.4-D1, D-10). Read it
+        here and report it as your limit::
+
+            acc = ctx.acceptance("C1")
+            measured = round(deflection, 4)          # compare what you report
+            return Verdict(gate=..., passed=acc.holds(measured), measured=measured,
+                           limit=acc.limit, units=acc.units,
+                           comparator=acc.comparator.value)
+
+        The read is recorded as ``acceptance:<claim>`` — the condition alone, so
+        moving the limit re-keys this gate and editing the statement re-keys
+        nothing — and a pass is then held to it (:func:`run_gate`: a finite
+        value, in its units, that it admits; else the run is errored). On a
+        control the condition is the known-good design's own (a project's
+        ``selftest/known_good.py`` states ``CLAIMS``), so moving the live claim
+        never changes a control's severity; a pack's baseline states none, so a
+        pack gate that reads one errors on its control, loudly. Raises
+        ``AtompipeError`` — the gate errors, honestly — when no claim is named or
+        tagged so, when the claims a tag names carry different conditions, or
+        when the condition has no limit; the read is recorded first.
+
+        What slipped through before it (S-35): ``bracket.deflection`` judged
+        against a constant beside C1's identical number, and nothing compared
+        the two; relaxing the claim moved nothing. *Rejected:*
+        ``ctx.ledger.claim(id).acceptance`` (the whole record is then the read:
+        a statement edit re-keys the gate, and every goalpost edit reads as a
+        ledger no qualification run saw); the spine deciding the pass from the
+        condition (a second judge beside the gate's own flag).
+        """
+        view = self.ledger
+        if isinstance(view, LedgerView):
+            return view.acceptance(claim)
+        found = acceptance_of(getattr(view, "claims", None) or (), claim)
+        if found.problem:
+            raise AtompipeError(found.problem)
+        return copy.deepcopy(found.condition)
+
     # -- evidence ---------------------------------------------------------- #
     def out_path(self, *parts: str) -> str:
         """Path under ``out_dir`` for an evidence file, with the dir created.
@@ -832,7 +916,61 @@ def _own_copy(spec: GateSpec) -> GateSpec:
         requires_one_of=list(spec.requires_one_of or []),
         needs=list(spec.needs or []),
         negative_control=dataclasses.replace(nc) if isinstance(nc, NegativeControl) else nc,
+        operating_context=_context_copy(getattr(spec, "operating_context", None)),
     )
+
+
+def _context_copy(context: Any) -> dict:
+    """An operating context as the registry holds it: its own dict, each bound a
+    float (or None), each pair a tuple — so ``spec.operating_context["k"] =``
+    on a copy handed out changes nothing stored, and a declaration in ints
+    compares equal to its JSON round trip. A malformed one (refused at
+    registration) is copied as it is."""
+    if not isinstance(context, dict):
+        return {} if context is None else context
+    out: dict = {}
+    for key, pair in context.items():
+        if isinstance(pair, (tuple, list)) and len(pair) == 2 and all(
+                b is None or (isinstance(b, numbers.Real) and not isinstance(b, bool))
+                for b in pair):
+            out[key] = tuple(None if b is None else float(b) for b in pair)
+        else:
+            out[key] = copy.deepcopy(pair)
+    return out
+
+
+def _context_problem(spec: GateSpec) -> str:
+    """Why ``spec.operating_context`` cannot be judged, or ``""`` (P2.4-D14).
+    Refused at registration, on the new field only (R-10): a non-mapping, an
+    empty or non-string key, a pair that is not two items, a bound that is a
+    bool or not a finite real, both ends open, ``lo > hi``. *Rejected:*
+    ``inf`` as an open end (``None`` says it, and an infinity would digest and
+    print as a number)."""
+    context = getattr(spec, "operating_context", None)
+    if context is None or context == {}:
+        return ""
+    if not isinstance(context, dict):
+        return (f"operating_context must be a mapping {{key: (lo, hi)}}, not "
+                f"{type(context).__name__}")
+    for key, pair in context.items():
+        if not isinstance(key, str) or not key.strip():
+            return f"operating_context key {key!r} is not a parameter name"
+        if not isinstance(pair, (tuple, list)) or len(pair) != 2:
+            return f"operating_context[{key!r}] must be a pair (lo, hi), not {pair!r}"
+        for bound in pair:
+            if bound is None:
+                continue
+            if (isinstance(bound, bool) or not isinstance(bound, numbers.Real)
+                    or not _finite(bound)):
+                return (f"operating_context[{key!r}] bound {bound!r} is not a finite number "
+                        f"or None (None leaves that end open)")
+        lo, hi = pair
+        if lo is None and hi is None:
+            return (f"operating_context[{key!r}] is open at both ends, so it qualifies "
+                    f"nothing — drop the key")
+        if lo is not None and hi is not None and float(lo) > float(hi):
+            return f"operating_context[{key!r}] has lo {lo} above hi {hi}"
+    return ""
 
 
 def _control_gap(spec: GateSpec) -> str:
@@ -1052,6 +1190,10 @@ class Registry:
                 f"(ids are pack-prefixed for exactly this reason)."
             )
 
+        problem = _context_problem(spec)
+        if problem:
+            # R-10: only the new declaration is refused (P2.4-D14).
+            raise AtompipeError(f"gate {gate_id!r}: {problem}")
         fresh = _own_copy(spec)
         if existing is not None and not replace:              # idempotent re-import
             old_spec, _old_fn = existing
@@ -1319,6 +1461,7 @@ def gate(
     registry: Registry | None = None,
     requires_one_of: Iterable[str] = (),
     needs: Iterable[str] = (),
+    operating_context: dict | None = None,
 ) -> Callable[[Callable[[GateContext], Any]], Callable[[GateContext], Any]]:
     """Declare a gate: build its :class:`~atompipe.models.GateSpec` and register it.
 
@@ -1363,7 +1506,13 @@ def gate(
 
     ``needs`` names this gate's **prerequisites** — exact ids of gates that must
     be established before its verdict counts (``GateSpec.needs``): a validity
-    guard before the analyses it guards. The last keyword, like the field.
+    guard before the analyses it guards.
+
+    ``operating_context`` declares the range of its read set this gate was
+    qualified on (``GateSpec.operating_context``, P2.4): ``{"load_n": (0.0,
+    40.0)}``, ``None`` for an open end. Every passing run must read each key,
+    and outside the range a pass does not count while a fail still does. The
+    last keyword, like the field.
 
     ``fn.gate_spec`` is this declaration, not the record the registry holds —
     the registry keeps its own copy.
@@ -1407,6 +1556,9 @@ def gate(
             entry=entry or f"{getattr(fn, '__module__', '?')}:{getattr(fn, '__qualname__', getattr(fn, '__name__', '?'))}",
             requires_one_of=[str(r) for r in (requires_one_of or ())],
             needs=list(needs or ()),
+            operating_context=(operating_context if operating_context is None
+                               or not isinstance(operating_context, dict)
+                               else dict(operating_context)) or {},
         )
         # Resolved at DECORATION time, not when `gate()` was called: the
         # ambient registry is whatever loader is importing this module right now.
@@ -1655,9 +1807,19 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
 
     The stored values are builtins — ``bool`` flags, ``int``/``float``
     measurements — because whatever lands here is written to JSON next.
+
+    ``settles`` is the spec's, like ``claims`` (P2.4-D6): the quantity a
+    verdict measured is the registration's word, never the gate's, so the
+    claim comparison (``claims.cross_check``) cannot be steered by a verdict.
+    ``comparator`` is the gate's own — which side of ITS limit passes — kept
+    when it is one of ``COMPARATORS`` (a ``Comparator`` normalised to its
+    value); anything else on a pass or a fail is an error naming the seven, the
+    junk removed (P2.4-D5), as a non-bool pass flag is. A skip or a crash just
+    drops it: it is already not a pass, and its own reading is louder.
     """
     error = verdict.error
     detail = verdict.detail
+    comparator, bad_comparator = _comparator_value(getattr(verdict, "comparator", ""))
     if verdict.skipped or error:
         passed = False
     else:
@@ -1666,12 +1828,18 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
             error = _pass_value_error(verdict.passed)
             detail = (f"{detail} | " if detail else "") + _PASS_VALUE_WHY
             passed = False
+        elif bad_comparator:
+            error = (f"gate reported comparator={_show(verdict.comparator)}; a comparator "
+                     f"is one of {', '.join(COMPARATORS)}")
+            passed = False
     return dataclasses.replace(
         verdict,
         gate=spec.id,
         tier=Tier(int(spec.tier)),
         pack=spec.pack,
         claims=list(spec.claims or []),
+        settles=str(spec.settles or ""),
+        comparator=comparator,
         duration_s=round(max(0.0, float(duration)), 6),
         cpu_s=round(max(0.0, float(cpu)), 6),
         rho="",
@@ -1686,6 +1854,90 @@ def _stamp(verdict: Verdict, spec: GateSpec, duration: float, cpu: float = 0.0) 
         skip_reason=_one_line(verdict.skip_reason, 200),
         error=_one_line(error, 200),
     )
+
+
+#: The comparators a verdict may carry (``Verdict.comparator``, P2.4-D5): the
+#: six one-sided and equality readings of ``models.Comparator``, and
+#: ``between`` — a band, whose upper bound a verdict does not carry, so its
+#: margin is ``band`` (critique 9 of the P2.4 design: refusing it would have
+#: errored a modelica band binding that read Checked). From the enum, so a
+#: comparator the type contract grows is one a verdict may say.
+COMPARATORS: tuple[str, ...] = tuple(c.value for c in Comparator)
+
+
+def _comparator_value(value: Any) -> tuple[str, bool]:
+    """``(the comparator as stored, whether it was junk)``: a ``Comparator`` is
+    its value, a known string itself, ``""``/``None`` nothing; anything else is
+    junk, stored as ``""``."""
+    if value is None or value == "":
+        return "", False
+    if isinstance(value, Comparator):
+        return value.value, False
+    if isinstance(value, str) and value in COMPARATORS:
+        return value, False
+    return "", True
+
+
+def _held_to_acceptances(verdict: Verdict, trace: Any) -> Verdict:
+    """A pass held to every acceptance condition its run read (P2.4-D4): it
+    needs a finite value, in that condition's units (exact after ``strip``: an
+    ``mPa`` is not an ``MPa``), that the condition admits — else the run is
+    ERRORED, naming the claim and the condition. A fail needs nothing (R-3: it
+    keeps its power to fail whatever it reported). It binds only a gate that
+    read one (R-10: no gate before P2.4 calls ``ctx.acceptance``).
+
+    What it closes: a gate that read C1's ``<= 0.5 mm`` and reported a pass at
+    0.7, or reported a looser limit of its own beside it, or no value at all —
+    each a pass the goalpost it read rejects. *Rejected:* not counting it (Gap:
+    a malformed answer is crash-class, the precedent of a non-bool pass flag
+    and a non-finite value); Failing (it blames the design for an evaluator
+    contradicting itself)."""
+    if verdict.outcome != "pass" or trace is None:
+        return verdict
+    for key, acceptance in sorted((getattr(trace, "acceptances", None) or {}).items()):
+        condition = f"{key}: {acceptance.render()}"
+        measured = verdict.measured
+        unit = f" {verdict.units}" if verdict.units else ""
+        if not _finite_number(measured):
+            why = (f"passed with no value to compare with the acceptance condition it read "
+                   f"({condition})")
+        elif str(verdict.units or "").strip() != str(acceptance.units or "").strip():
+            why = (f"reported its value in {str(verdict.units or '')!r}, and the acceptance "
+                   f"condition it read is in {str(acceptance.units or '')!r} ({condition})")
+        elif not acceptance.holds(float(measured)):
+            why = (f"passed at {measured}{unit}, which does not meet the acceptance condition "
+                   f"it read ({condition})")
+        else:
+            continue
+        return dataclasses.replace(
+            verdict, passed=False, error=why,
+            detail=(f"{verdict.detail} | " if verdict.detail else "")
+            + "a pass must meet the goalpost it read: report the value you compared, in its "
+              "units, and pass only when the condition holds (acc.holds(value))")
+    return verdict
+
+
+def _held_to_context(verdict: Verdict, spec: GateSpec, trace: Any) -> Verdict:
+    """A pass of a gate with an operating context must have READ every key it
+    declares (P2.4, critique 3 of its design) — else the run is errored. The
+    context is part of the read set: a key never read never re-keys the
+    verdict, so a change inside the range would not read Stale, and with the
+    model failing to load such a pass would stay Fresh and counted while
+    ``check``, handed no params, read it Gap — the reader more generous than
+    the sweep. A fail needs nothing (R-3)."""
+    context = getattr(spec, "operating_context", None) or {}
+    if verdict.outcome != "pass" or not context or trace is None:
+        return verdict
+    recorded = set(getattr(trace, "params", None) or ()) | set(getattr(trace, "whole", ()) or ())
+    unread = [key for key in sorted(context) if not _read_spellings(spec, key, recorded)]
+    if not unread:
+        return verdict
+    return dataclasses.replace(
+        verdict, passed=False,
+        error=(f"declared an operating context on {', '.join(unread)} and never read it"),
+        detail=(f"{verdict.detail} | " if verdict.detail else "")
+        + f"the operating context is part of the read set: read {unread[0]} through "
+          f"ctx.params, or drop it from operating_context")
 
 
 def _normalise(result: Any, spec: GateSpec) -> Verdict:
@@ -1906,8 +2158,15 @@ def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
     design, and collapsing the two would invite someone to "fix" a broken import
     by changing a wall thickness. The two stay distinguishable in the record
     (``error`` set, ``passed`` forced False, ``Verdict.ok`` False either way) so
-    that a skip can resolve its claim to BLOCKED, a crash to FAIL, and neither
-    can ever be mistaken for the gate having measured something.
+    that a skip resolves its claim to Skipped and a crash to Skipped, louder
+    (invariant 2: its reason leads ``errored:``), and neither can ever be
+    mistaken for the gate having measured something. (This said "a crash to
+    FAIL" until P2.4, stale since P2.1 moved a crash off Failing.)
+
+    A pass is then held to what it read (P2.4): to every acceptance condition
+    (:func:`_held_to_acceptances`) and to its operating context's keys
+    (:func:`_held_to_context`) — a pass that contradicts the goalpost it read,
+    or never read a key it declared a context on, is errored.
 
     **The gate never sees ``ctx`` itself** (rule 5 in the module docstring). In
     order: availability, with no trace — a skip never calls ``fn`` and reads
@@ -2016,7 +2275,11 @@ def run_gate(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
         )
     elapsed, cpu = clock.spent()
     _replay_reads(ctx.params, trace)
-    return _stamp(_reject_non_finite(_normalise(result, spec), spec), spec, elapsed, cpu)
+    verdict = _reject_non_finite(_normalise(result, spec), spec)
+    # The pass flag is still the gate's here (its junk refused by `_stamp`
+    # below), so each rule reads `outcome`, which needs `passed is True`.
+    verdict = _held_to_context(_held_to_acceptances(verdict, trace), spec, trace)
+    return _stamp(verdict, spec, elapsed, cpu)
 
 
 def _replay_reads(source: Any, trace: GateTrace) -> None:
@@ -2249,7 +2512,8 @@ def blocked(spec: GateSpec, unmet: Unmet) -> Verdict:
                   f"({_KIND_WORDS[PrerequisiteKind(str(unmet.kind))]})")
     return Verdict(gate=spec.id, claims=list(spec.claims or ()), tier=Tier(int(spec.tier)),
                    pack=spec.pack or "", passed=False, skipped=True, skip_reason=reason,
-                   blocked_by=list(unmet.roots), blocked_kind=str(unmet.kind))
+                   blocked_by=list(unmet.roots), blocked_kind=str(unmet.kind),
+                   settles=str(getattr(spec, "settles", "") or ""))
 
 
 def mark_reason(unmet: Unmet) -> str:
@@ -3092,6 +3356,155 @@ def selftest(spec: GateSpec, fn: Callable[[GateContext], Any], ctx: GateContext,
 
 
 # --------------------------------------------------------------------------- #
+# operating contexts (P2.4): where an evaluator's qualification holds
+# --------------------------------------------------------------------------- #
+class ContextBreach(NamedTuple):
+    """Why a pass lies outside its evaluator's operating context: the declared
+    ``key``, the ``value`` judged (``None`` when there is none), the range
+    ``lo``/``hi`` (``None`` an open end), and ``why`` — ``outside``,
+    ``absent`` (no spelling of the key holds a value now), ``not-a-number``
+    (a bool, a word, a non-finite number) or ``unread`` (the run that made the
+    pass read no spelling of the key: a verdict from before the rule, a legacy
+    one — never judged inside)."""
+
+    key: str
+    value: Any
+    lo: float | None
+    hi: float | None
+    why: str
+
+
+def _spellings(spec: GateSpec, key: str) -> list[tuple]:
+    """Every param path a gate reading ``key`` through :meth:`GateContext.param`
+    may have read, in its resolution order: each of its scopes' flat
+    ``<scope>.<key>`` and nested ``[<scope>][<key>]``, then the bare key and
+    its nested split at the first dot, then the last dotted segment. The gate's
+    scopes are what :func:`run_gate` stamps — its id's head, then its pack."""
+    scopes: list[str] = []
+    for candidate in (scope_of(spec.id), getattr(spec, "pack", "") or ""):
+        text = str(candidate).strip()
+        if text and text not in scopes:
+            scopes.append(text)
+    out: list[tuple] = []
+    for scope in scopes:
+        out += [(f"{scope}{SCOPE_SEP}{key}",), (scope, key)]
+    out.append((key,))
+    head, sep, tail = key.partition(SCOPE_SEP)
+    if sep:
+        out.append((head, tail))
+        out.append((key.rsplit(SCOPE_SEP, 1)[-1],))
+    return list(dict.fromkeys(out))
+
+
+def _read_spellings(spec: GateSpec, key: str, recorded: Iterable[Any]) -> list[tuple]:
+    """The spellings of ``key`` a run read: those in ``recorded`` (its trace's
+    param paths, or an entry's), or under a level it read whole."""
+    paths = {tuple(p) for p in recorded}
+    return [s for s in _spellings(spec, key)
+            if any(s[:i] in paths for i in range(len(s) + 1))]
+
+
+def _at(params: Any, path: tuple) -> Any:
+    """The value at ``path`` in ``params``, walked through dicts by ``dict``'s
+    own methods (a ``ParamTrace`` records nothing), or ``_UNSET``."""
+    node = params
+    for part in path:
+        if not isinstance(node, dict):
+            return _UNSET
+        try:
+            if not dict.__contains__(node, part):
+                return _UNSET
+        except TypeError:
+            return _UNSET
+        node = dict.__getitem__(node, part)
+    return node
+
+
+def _a_real(value: Any) -> bool:
+    return (isinstance(value, numbers.Real) and not isinstance(value, bool)
+            and _finite(value))
+
+
+def context_breach(spec: GateSpec, params: Any, *, read: Iterable[Any] | None = None
+                   ) -> ContextBreach | None:
+    """Whether a pass of ``spec`` on ``params`` lies outside its operating
+    context: the first key (in sorted order) that breaches, or ``None`` — pure.
+
+    ``read`` — the param paths the run that made the pass read (its trace, an
+    entry's recorded reads) — judges each key on the spellings the run READ
+    (critique 4 of the P2.4 design: a scope override or a direct index read the
+    bare ``load_n`` at 60 while the scoped ``t.load_n`` said 20, and judged on
+    the scoped one the pass counted). Every spelling read that holds a value now
+    is judged, so one outside is a breach; none read is ``unread``; none holding
+    a value is ``absent``. Without ``read`` (a run in hand that has not been
+    traced: the known-good control's own judgement passes its trace), the key
+    resolves as :meth:`GateContext.param` resolves it — scoped first, then bare,
+    then the last dotted segment. Closed intervals; an open end is ``None``.
+    *Rejected:* the exact flat key alone (a pack gate reading ``fdm.bbox_mm``
+    through ``bbox_mm`` would be judged on a key it never read); judging the
+    recorded values (a stale pass outside would read Stale, "rerun", where a
+    rerun's pass will not count)."""
+    context = getattr(spec, "operating_context", None) or {}
+    for key in sorted(context):
+        lo, hi = context[key]
+        if read is None:
+            values = []
+            for spelled in _spellings(spec, key):
+                found = _at(params, spelled)
+                if found is not _UNSET:
+                    values = [found]
+                    break
+        else:
+            spelled = _read_spellings(spec, key, read)
+            if not spelled:
+                return ContextBreach(key, None, lo, hi, "unread")
+            values = [v for v in (_at(params, s) for s in spelled) if v is not _UNSET]
+        if not values:
+            return ContextBreach(key, None, lo, hi, "absent")
+        for value in values:
+            if not _a_real(value):
+                return ContextBreach(key, _context_value(value), lo, hi, "not-a-number")
+            if (lo is not None and float(value) < lo) or (hi is not None and float(value) > hi):
+                return ContextBreach(key, _context_value(value), lo, hi, "outside")
+    return None
+
+
+def _context_value(value: Any) -> Any:
+    """``value`` as the token carries it: a finite number as itself, anything
+    else as a short repr — the token is canonical JSON."""
+    if _a_real(value):
+        return int(value) if isinstance(value, numbers.Integral) else float(value)
+    return _show(value)[:40]
+
+
+def context_token(breach: ContextBreach) -> str:
+    """The ``Verdict.unqualified`` token for ``breach``:
+    ``context:outside|<canonical json of hi, key, lo, value, why>``
+    (``models.CONTEXT_OUTSIDE``). ``verdicts.parse_token`` splits it;
+    :func:`context_of` is its inverse."""
+    import json as _json
+    body = _json.dumps({"hi": breach.hi, "key": breach.key, "lo": breach.lo,
+                        "value": breach.value, "why": breach.why},
+                       sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return f"{CONTEXT_OUTSIDE}|{body}"
+
+
+def context_of(token: Any) -> ContextBreach | None:
+    """The breach a ``context:outside`` token names, or ``None`` for any other
+    token (or one that does not parse — a reader then words the kind alone)."""
+    import json as _json
+    head, sep, text = str(token or "").partition("|")
+    if head != CONTEXT_OUTSIDE or not sep:
+        return None
+    try:
+        data = _json.loads(text)
+        return ContextBreach(str(data["key"]), data.get("value"), data.get("lo"),
+                             data.get("hi"), str(data.get("why") or "outside"))
+    except (ValueError, KeyError, TypeError):
+        return None
+
+
+# --------------------------------------------------------------------------- #
 # the mutation pass (P2.3): one read value at a time, pushed past the
 # evaluator's own limit, on its known-good control
 # --------------------------------------------------------------------------- #
@@ -3676,6 +4089,109 @@ def _mutated_run(spec: GateSpec, fn: Callable[[GateContext], Any], good_ctx: Gat
     verdict = run_gate(spec, fn, dataclasses.replace(good_ctx, **changes), trace=own)
     _fold_reads(trace, own, known_good)
     return verdict
+
+
+# --------------------------------------------------------------------------- #
+# the goalpost runs (P2.4, critique 1): the known-good control with each goalpost
+# it read moved — its value must not move with it
+# --------------------------------------------------------------------------- #
+#: Where each goalpost the known-good control read is moved to: its limit (and
+#: a band's upper bound) halved and doubled — a zero limit moved to -0.5 and to
+#: 1.0. Why two runs, one each side: a gate keyed to "my goalpost is above X"
+#: shows only on the side that crosses X. Why x0.5 and x2: far enough that a
+#: limit typed to one significant figure moves (0.5 -> 0.25, 1.0), near enough
+#: to stay the same order of magnitude a gate's own arithmetic expects; the
+#: value must not move at all, so how far is not a margin. What it closes
+#: (critique 1 of the P2.4 design): ``if acc.limit != 0.5: report 0.9 *
+#: acc.limit`` passed both controls and the walk on the calibrated goalpost,
+#: and read Checked at whatever the live goalpost was moved to. *Rejected:* the
+#: live goalpost substituted into the known-good design (one record per live
+#: value, and a control that re-keys on every goalpost edit — D2's coupling by
+#: another field); no run at all (the P2.4 design's D25: D4 checks only that a
+#: reported value meets the condition read, which a keyed gate arranges);
+#: moving the known-good acceptance until the known-good value lands past it
+#: and reading the pass flag (a control's severity consulted, and the flag of
+#: a gate keyed to its goalpost is what it chooses). Named residual: a gate
+#: keyed to one exact goalpost no run reads — the walk's own residual for a
+#: value it never visits.
+GOALPOST_FACTORS = (0.5, 2.0)
+
+
+@dataclass(frozen=True)
+class GoalpostRun:
+    """One goalpost run: the goalpost ``key``, the moved ``limit``, and what the
+    gate said there — ``outcome``, ``measured``, ``units``."""
+
+    key: str
+    limit: Any
+    outcome: str
+    measured: Any = None
+    units: str = ""
+
+
+def _moved_limit(limit: Any, factor: float) -> Any:
+    if limit is None:
+        return None
+    return float(limit) * factor if float(limit) else factor - 1.0
+
+
+def goalpost_runs(spec: GateSpec, fn: Callable[[GateContext], Any], good_ctx: GateContext,
+                  good_verdict: Verdict, *, trace: GateTrace | None = None
+                  ) -> tuple[GoalpostRun, ...]:
+    """The known-good control re-run with each acceptance condition its run read
+    (``trace.acceptances``) moved by ``GOALPOST_FACTORS`` — the claims that
+    goalpost names, in the known-good design's own ledger, their limits moved
+    and nothing else — one run per goalpost per factor. Each run's reads are
+    folded into ``trace`` at the known-good digests (a goalpost key keeps the
+    calibrated one: ``_fold_reads`` never overwrites a recorded ledger key), so
+    a file only the moved-goalpost path reads is keyed into the qualification.
+    The caller compares each run's value and units with the known-good run's:
+    they must not move (``verdicts._goalpost_fact``). Nothing runs unless the
+    known-good run passed. Sealed as the walk is: a deep copy of the known-good
+    params and ledger, a fresh memo, a temp out dir removed after, no write
+    under the project or a pack."""
+    acceptances = dict(getattr(trace, "acceptances", None) or {})
+    if not acceptances or good_verdict.outcome != "pass":
+        return ()
+    known_good = copy.deepcopy(dict(good_ctx.params or {}))
+    ledger = getattr(good_ctx, "ledger", None)
+    claims = list(getattr(ledger, "claims", None) or ())
+    out_dir = tempfile.mkdtemp(prefix="atompipe-goalpost-")
+    names = {f.name for f in dataclasses.fields(good_ctx)}
+    runs: list[GoalpostRun] = []
+    try:
+        for key in sorted(acceptances):
+            named = {c.id for c in claims_named(claims, key)}
+            for factor in GOALPOST_FACTORS:
+                moved_claims = []
+                moved_limit = None
+                for claim in claims:
+                    claim = copy.deepcopy(claim)
+                    if claim.id in named:
+                        acc = claim.acceptance
+                        moved_limit = _moved_limit(acc.limit, factor)
+                        claim.acceptance = dataclasses.replace(
+                            acc, limit=moved_limit, limit_hi=_moved_limit(acc.limit_hi, factor))
+                    moved_claims.append(claim)
+                moved = dataclasses.replace(ledger if isinstance(ledger, Ledger) else Ledger(),
+                                            claims=moved_claims)
+                changes: dict[str, Any] = {"params": copy.deepcopy(known_good),
+                                           "ledger": moved, "out_dir": out_dir}
+                if "memo" in names:
+                    from . import verdicts as _verdicts
+                    changes["memo"] = _verdicts.SweepMemo()
+                own = GateTrace(kind=getattr(trace, "kind", "control"),
+                                anchors=getattr(trace, "anchors", None))
+                verdict = run_gate(spec, fn, dataclasses.replace(good_ctx, **changes),
+                                   trace=own)
+                if trace is not None:
+                    _fold_reads(trace, own, known_good)
+                runs.append(GoalpostRun(key=key, limit=moved_limit, outcome=verdict.outcome,
+                                        measured=_plain_number(verdict.measured),
+                                        units=str(verdict.units or "")))
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    return tuple(runs)
 
 
 # --------------------------------------------------------------------------- #

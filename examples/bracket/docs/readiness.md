@@ -6,13 +6,16 @@
 
 ## What is PROVEN (checked: every evaluator passed on the current inputs — checked does not mean true)
 
-| Claim | Acceptance | Measured | Gate | Evidence |
+| Claim | Acceptance | Value | Evaluator | Evidence |
 |---|---|---|---|---|
-| **C2** Root bending stress stays within half of yield | utilisation <= 1.0 | 0.245 utilisation; 8.57 L/h | `bracket.bending_stress`, `bracket.model_validity` | *none written* |
+| **C2** Root bending stress stays within half of yield | bending stress <= 1.0 utilisation | 0.245 utilisation | `bracket.bending_stress`, `bracket.model_validity` | *none written* |
 | **C3** Fastener bearing stress within the design allowable | bearing stress <= 15.0 MPa | 0.195 MPa | `bracket.bearing` | *none written* |
-| **C4** Prints on a 220 mm bed without supports | bed fit <= 204.0 mm | 73.5 mm; 7 mm | `bracket.bed_fit`, `bracket.min_wall` | *none written* |
+| **C4** Prints on a 220 mm bed without supports | bed fit <= 204.0 mm | 73.5 mm | `bracket.bed_fit`, `bracket.min_wall` | *none written* |
 
-Every row above is checked: each of its evaluators ran and passed against the inputs, code and controls it has now. A skipped, errored, unqualified, invalidated or unrun evaluator puts its claim in another section with the reason, never here — and checked does not mean true.
+Not compared with its claim's acceptance condition — each of these values is judged against its evaluator's own limit only:
+- **C4** `bracket.min_wall` : 7 mm (wall thickness, not bed fit)
+
+Every row above is checked: each of its evaluators ran and passed against the inputs, code and controls it has now, inside its operating context, and every value compared with the claim's acceptance condition meets it. A skipped, errored, unqualified, invalidated or unrun evaluator — or one outside its operating context, or a value its claim's acceptance condition does not admit — puts its claim in another section with the reason, never here. And checked does not mean true.
 
 ## Pending build
 

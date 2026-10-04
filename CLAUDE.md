@@ -59,12 +59,18 @@ violate it (`tests/test_invariants.py`):
    proof.
 4. **The report never lists a claim as Checked — in its checked section
    (`report.SECTION_PROVEN`), a status row or a JUnit pass — while any of its gates
-   is unrun, skipped, errored or unqualified;** that claim reads under its own status
-   (Open, Skipped, Gap), naming the gate and the reason. (What slipped through: a
-   pass beside a skipped or unrun gate read PASS and was printed under PROVEN marked
-   PARTIAL (S-03); and a gate `check` refused at its first run had no cached verdict,
-   so every reader after it read the gate "never run" and the claim beside it
-   PROVEN, `ready: true`. GLOSSARY §3's composition, `claims.compose`, closes both.)
+   is unrun, skipped, errored or unqualified, or while a value one of its evaluators
+   passed does not meet the claim's acceptance condition;** that claim reads under
+   its own status (Open, Skipped, Gap, Failing), naming the gate and the reason. A
+   pass is held to the goalpost it read, too: a gate that read an acceptance
+   condition (`ctx.acceptance`) and passed at a value it rejects, in other units, or
+   with no value is errored. (What slipped through: a pass beside a skipped or unrun
+   gate read PASS and was printed under PROVEN marked PARTIAL (S-03); a gate `check`
+   refused at its first run had no cached verdict, so every reader after it read the
+   gate "never run" and the claim beside it PROVEN, `ready: true` — GLOSSARY §3's
+   composition, `claims.compose`, closes both; and an evaluator judging against a
+   limit it computed read Checked at a value its claim's own condition rejected
+   (S-35) — `claims.cross_check`, P2.4.)
 
 Two more, learned the hard way and enforced in `tests/test_packs.py`:
 
@@ -82,8 +88,10 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
 `tests/test_admission.py`:
 
 7. **A stale verdict is never served as current.** A verdict is keyed by the hash of
-   what its gate actually read — parameters, files, claim records, its own code, the
-   spine. When any of those moves, its pass reads Stale until the gate runs again.
+   what its gate actually read — parameters, files, claim records, the acceptance
+   conditions it read as goalposts, its own code, the spine. When any of those moves,
+   its pass reads Stale until the gate runs again — and a goalpost edit re-keys exactly
+   the gates that read that goalpost, and a statement edit none.
    (Observed before this: one hash of the whole model decided every gate, and a model
    that failed to import compared equal, so three claims read Checked for a design that
    could not be built.)
@@ -113,8 +121,14 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    conclusive mutation of its known-good control: one value it read, pushed until its
    own value lands 15% past its own limit — and its check run is handed nothing its
    qualification runs were not: no model, and a verdict that read a ledger value no
-   qualification run read does not count. Where its code lives decides which it is,
-   never a `PACK_DIR` it sets itself. `check` runs whatever of that is not on
+   qualification run read does not count — except a goalpost's limit, which is meant to
+   differ between calibration and use, and only because its qualification moved each
+   goalpost its known-good control read and its value did not move (the goalpost's
+   claims, quantity, comparator and units stay held). Where its code lives decides
+   which it is, never a `PACK_DIR` it sets itself. And it counts only on inputs inside
+   the operating context it declares: outside, a pass does not count — the claim reads
+   Gap, or Assumed under an owned fallback — and a fail still does; its known-good
+   control must lie inside that context, and a mutation counts wherever it lands. `check` runs whatever of that is not on
    record; until then a pass from an evaluator qualified at an earlier version reads
    Stale, and one never qualified reads Gap. An evaluator that is not qualified reads
    Gap — `unqualified: <evaluator> : <what does not hold>`, beside a passing one too —
@@ -126,7 +140,9 @@ earned. Enforced in `tests/test_staleness.py`, `tests/test_records.py` and
    own control — failing the one input that control changes, passing everything else —
    read Checked; then, in review of P2.3, such an evaluator read Checked again by claiming a
    bundled pack's `PACK_DIR` on one line, or by passing whenever it was handed a model
-   or a ledger with a claim in it — channels no control or mutation had.)
+   or a ledger with a claim in it — channels no control or mutation had; then, in the
+   design of P2.4, by lying whenever its goalpost was not the calibrated one, or by a
+   context ending short of its own mutation's landing.)
 
 One more came with checkpoint P2.2, when gates gained prerequisites — a dependent
 verdict is a new place to show a pass nothing earned. Enforced in

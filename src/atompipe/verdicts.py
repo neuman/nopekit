@@ -132,7 +132,7 @@ import tempfile
 import threading
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Any, Callable, ClassVar, Collection, Iterable, Mapping
+from typing import Any, Callable, ClassVar, Collection, Iterable, Mapping, NamedTuple
 
 from . import modelio, store, vcs
 from .models import Ledger, Locator, Tier, Verdict
@@ -160,6 +160,8 @@ __all__ = [
     # part four: admission at its current version, the sweep, last_check (U20)
     "CONTROLS_CACHE", "WATCHED", "known_good_context", "admission", "SweepRow",
     "SweepResult", "sweep", "write_last_check", "watched_paths", "fingerprint",
+    # P2.4: the goalpost read (`GateContext.acceptance`) and its two ledger keys
+    "ACCEPTANCE_KEY", "SHAPE_KEY", "AcceptanceRead", "claims_named", "acceptance_of",
 ]
 
 
@@ -607,6 +609,12 @@ class GateTrace:
     #: it (review of P2.3: the reason read `known-bad errored: <gate> CRASHED on
     #: … instead of failing`, *crashed* an outcome Never-say). Not a read.
     gate_said: Any = None
+    #: ``{key: Acceptance}`` — the acceptance condition each ``ctx.acceptance(key)``
+    #: on this trace returned (``LedgerView.acceptance``), in memory only, never
+    #: an entry field: ``gates.run_gate`` holds a pass to every one of them
+    #: (P2.4-D4) and the qualification moves each one (``gates.goalpost_runs``).
+    #: Not a read either — the read is the ledger key it recorded.
+    acceptances: dict = field(default_factory=dict)
     _read_set: set = field(default_factory=set, init=False, repr=False)
     _source_set: set = field(default_factory=set, init=False, repr=False)
     _existed: dict = field(default_factory=dict, init=False, repr=False)
@@ -1088,10 +1096,11 @@ _IN_MEMORY_FIELDS = {"claims": ("gates", "physical_result"), "params": ("gates",
 
 
 #: Fields a gate's read of a record leaves out of the digest while they hold
-#: their default: ``Claim.owner`` (P2.1), so a claim no file names an owner for
-#: digests exactly as it did before the field existed, and only an edit that
-#: names one moves the gates that read the claim.
-_ABSENT_WHEN_EMPTY = frozenset({"owner"})
+#: their default: ``Claim.owner`` (P2.1) and ``Claim.fallback`` (P2.4), so a
+#: claim no file names an owner or a fallback for digests exactly as it did
+#: before the field existed, and only an edit that names one moves the gates
+#: that read the claim.
+_ABSENT_WHEN_EMPTY = frozenset({"owner", "fallback"})
 
 
 def _record_form(item: Any, strip: tuple = ()) -> Any:
@@ -1120,6 +1129,83 @@ def _peek(ledger: Any, name: str) -> Any:
     if isinstance(ledger, LedgerView):
         return ledger._lv_value(name)
     return getattr(ledger, name)
+
+
+#: The two ledger keys a goalpost read records (P2.4-D1, and critique 1 of its
+#: design). ``acceptance:<key>`` — the digest of the sorted ``[id, acceptance
+#: condition]`` pairs ``<key>`` names: the condition ALONE, never the claim
+#: record, so moving a limit re-keys exactly the gates that read it and editing
+#: a statement re-keys none (measured on ``f2d4754``: through
+#: ``ctx.ledger.claim`` every goalpost edit re-keyed the whole record and read
+#: ``channels:ledger``). ``acceptance-shape:<key>`` — the same pairs with the
+#: limits left out: which claims, their quantity, comparator and units. A
+#: goalpost is MEANT to differ between calibration and use, so only the first is
+#: exempt from ``channels:ledger`` (``_ledger_unseen``); the shape must be one a
+#: qualification run read, or a gate keyed to whether its claim exists — its
+#: controls see none — would count (critique 1's presence variant).
+ACCEPTANCE_KEY = "acceptance:"
+SHAPE_KEY = "acceptance-shape:"
+
+
+class AcceptanceRead(NamedTuple):
+    """One goalpost read: the ``condition`` it returns (``None`` when it cannot
+    return one), the two digests it records (``digest``, ``shape``: ``ABSENT``
+    when nothing is named), the claim ids it named, and the ``problem`` a gate
+    is told when it cannot settle (``""`` when it can)."""
+
+    condition: Any
+    digest: str
+    shape: str
+    ids: tuple = ()
+    problem: str = ""
+
+
+def claims_named(claims: Iterable[Any], key: str) -> list:
+    """The claims ``key`` names, as ``GateContext.acceptance`` reads it: the claim
+    whose id is ``key``, else every claim carrying ``key`` as a tag (the binding
+    rule ``claims.covers`` uses for a gate). Record order."""
+    claims = list(claims or ())
+    exact = [c for c in claims if getattr(c, "id", None) == key]
+    if exact:
+        return exact
+    return [c for c in claims if key in (getattr(c, "tags", None) or ())]
+
+
+def _acceptance_form(acceptance: Any) -> dict:
+    form = acceptance.to_dict() if hasattr(acceptance, "to_dict") else dict(acceptance or {})
+    return {k: form.get(k) for k in ("quantity", "comparator", "limit", "limit_hi", "units")}
+
+
+def acceptance_of(claims: Iterable[Any], key: str) -> AcceptanceRead:
+    """THE goalpost rule (P2.4-D1), shared by ``LedgerView.acceptance`` — which
+    records it — and ``_ledger_now`` — which re-reads it — so a gate's read and
+    a reader's re-read cannot disagree. Membership is part of both digests: a
+    claim that gains ``key`` as a tag re-keys every gate that read it. No claim,
+    two different conditions under one key, or a condition with no limit is a
+    ``problem``: the gate cannot settle without one goalpost, and errors —
+    honestly — rather than judging against a guess."""
+    named = sorted(claims_named(claims, key), key=lambda c: str(getattr(c, "id", "")))
+    if not named:
+        return AcceptanceRead(None, ABSENT, ABSENT, (), (
+            f"no claim is named or tagged {key!r}: a goalpost lives in claims/ — read it "
+            f"by a claim's id or a tag it carries"))
+    forms = [[str(c.id), _acceptance_form(c.acceptance)] for c in named]
+    digest = digest_value(forms)
+    shape = digest_value([[cid, {k: v for k, v in form.items() if k not in ("limit", "limit_hi")}]
+                          for cid, form in forms])
+    ids = tuple(cid for cid, _form in forms)
+    distinct = {_canonical_json(form): cid for cid, form in forms}
+    if len(distinct) > 1:
+        said = " and ".join(f"{c.id} ({c.acceptance.render()})" for c in named)
+        return AcceptanceRead(None, digest, shape, ids,
+                              f"{key!r} names {said}: read one claim by its id")
+    acceptance = named[0].acceptance
+    if getattr(acceptance, "limit", None) is None:
+        who = ", ".join(ids)
+        return AcceptanceRead(None, digest, shape, ids,
+                              f"{who}'s acceptance condition has no limit to judge against "
+                              f"({key!r}): state one in claims/")
+    return AcceptanceRead(copy.deepcopy(acceptance), digest, shape, ids, "")
 
 
 class LedgerView(Ledger):
@@ -1190,6 +1276,25 @@ class LedgerView(Ledger):
         self._lv_record(f"claim:{cid}", lambda: _claim_digest(
             next((c for c in _peek(source, "claims") if c.id == cid), None)))
         return next((c for c in self._lv_value("claims") if c.id == cid), None)
+
+    def acceptance(self, key: str) -> Any:
+        """The acceptance condition ``key`` names (``acceptance_of``), a copy,
+        recorded as ``acceptance:<key>`` and ``acceptance-shape:<key>`` BEFORE a
+        problem is raised — as a file's absence is a read, so is a goalpost's —
+        and kept on the trace (``GateTrace.acceptances``) for the run's rule
+        (P2.4-D4). Raises ``AtompipeError`` naming the problem."""
+        source = object.__getattribute__(self, "_lv_source")
+        claims = (_peek(source, "claims") if source is not None
+                  else self._lv_value("claims")) or ()
+        found = acceptance_of(claims, key)
+        self._lv_record(f"{ACCEPTANCE_KEY}{key}", lambda: found.digest)
+        self._lv_record(f"{SHAPE_KEY}{key}", lambda: found.shape)
+        if found.problem:
+            raise AtompipeError(found.problem)
+        trace = object.__getattribute__(self, "_lv_trace")
+        if trace is not None and isinstance(getattr(trace, "acceptances", None), dict):
+            trace.acceptances.setdefault(key, copy.deepcopy(found.condition))
+        return copy.deepcopy(found.condition)
 
     def _plain_ledger(self, memo: dict | None = None) -> Ledger:
         values = {name: getattr(self, name) for name in _LEDGER_FIELDS}
@@ -2952,9 +3057,21 @@ _TIER_READ = "tier"
 #: ``rho`` (the entry's own, one level up); ``skipped``, ``skip_reason``,
 #: ``error`` (never cached — see ``record_verdict``); ``gate`` (one level up).
 #: A field added to ``Verdict`` later is left out until someone decides it
-#: belongs in a tracked file — never by default.
-_VERDICT_FIELDS = ("passed", "measured", "limit", "units", "detail", "evidence",
-                   "locators", "claims", "tier", "pack")
+#: belongs in a tracked file — never by default. P2.4 decided two (D7):
+#: ``comparator`` (which side of its limit the gate passes — the margin's input)
+#: and ``settles`` (the quantity, stamped from the spec — the claim comparison's
+#: input), both beside the numbers they describe, so a cached verdict compares
+#: and draws exactly as the run that wrote it. Neither is in ``out8`` (D-05
+#: stands: a different comparator is different code, so a different rho).
+_VERDICT_FIELDS = ("passed", "measured", "limit", "units", "comparator", "settles",
+                   "detail", "evidence", "locators", "claims", "tier", "pack")
+#: The block a P2.3 spine wrote: read too (its comparator and settles empty),
+#: so an entry from before the upgrade reads Stale for the spine that moved —
+#: never "ignored (hand-edited)", the note every project's cache would otherwise
+#: print once per entry. Written never. *Rejected:* exact shape only (that
+#: note, per entry, after every upgrade); ``SCHEMA = 2`` (P2.3-D26's argument).
+_LEGACY_VERDICT_FIELDS = ("passed", "measured", "limit", "units", "detail", "evidence",
+                          "locators", "claims", "tier", "pack")
 
 #: A control entry's fields, in file order (P2.3-D1, D26): the known-bad half
 #: (`bad`, and `bad_extra`, the `ctx.extra` keys its fixture handed the gate),
@@ -2972,12 +3089,21 @@ _CONTROL_FIELDS = ("schema", "kind", "gate", "rho", "static", "static_parts", "h
 _LEGACY_CONTROL_FIELDS = ("schema", "kind", "gate", "rho", "static", "static_parts", "host",
                           "fixture", "reads", "bad", "good", "admitted", "detail",
                           "measured", "limit", "units", "digest")
-#: The known-good half's fields: its outcome — `pass` or `fail`, or `not-run`
-#: when no known-good control exists for the evaluator (known-bad shown) — what
+#: The known-good half's fields: its outcome — `pass` or `fail`, `not-run`
+#: when no known-good control exists for the evaluator (known-bad shown), or
+#: `outside` when it passed outside its own operating context (P2.4-D19) — what
 #: its run read (every mutated run's reads folded in at their known-good
-#: digests), the `ctx.extra` keys it was handed, and its numbers.
-_GOOD_FIELDS = ("outcome", "reads", "extra", "measured", "limit", "units", "detail")
-_GOOD_OUTCOMES = ("pass", "fail", "not-run")
+#: digests), the `ctx.extra` keys it was handed, its numbers, and — P2.4 — the
+#: goalpost runs (`gates.goalpost_runs`: each goalpost it read moved, and what
+#: the gate said there; empty where the walk does not apply or none was read).
+_GOOD_FIELDS = ("outcome", "reads", "extra", "measured", "limit", "units", "detail",
+                "goalpost")
+#: The good block a P2.3 spine wrote (no goalpost runs): read, never written —
+#: such an entry is never current (its static part names another spine), and
+#: refusing it would name every historical file in `doctor`.
+_LEGACY_GOOD_FIELDS = ("outcome", "reads", "extra", "measured", "limit", "units", "detail")
+_GOOD_OUTCOMES = ("pass", "fail", "not-run", "outside")
+_GOALPOST_FIELDS = ("key", "limit", "outcome", "measured", "units")
 #: The mutation pass's fields (`gates.mutation_walk`), and each record's.
 _WALK_FIELDS = ("runs", "boundary", "results", "inconclusive", "not_mutated")
 _RESULT_FIELDS = ("key", "before", "after", "outcome", "measured", "limit")
@@ -3949,6 +4075,8 @@ def _verdict_block(verdict: Verdict, anchors: Anchors | None) -> dict:
         "measured": _number(verdict.measured, "measured"),
         "limit": _number(verdict.limit, "limit"),
         "units": str(verdict.units or ""),
+        "comparator": str(getattr(verdict, "comparator", "") or ""),
+        "settles": str(getattr(verdict, "settles", "") or ""),
         "detail": portable(str(verdict.detail or ""), anchors),
         "evidence": anchors.evidence(evidence) if anchors is not None else evidence,
         "locators": [_locator_form(loc, anchors) for loc in verdict.locators or ()],
@@ -3962,9 +4090,16 @@ def _problem_in_block(block: Any) -> str:
     """Why a ``verdict`` block cannot be read as one, or ``""``."""
     if not isinstance(block, dict):
         return "verdict is not an object"
-    if list(block) != list(_VERDICT_FIELDS):
+    if list(block) not in (list(_VERDICT_FIELDS), list(_LEGACY_VERDICT_FIELDS)):
         return (f"verdict keys are {list(block)}, not the whitelist "
                 f"{list(_VERDICT_FIELDS)}")
+    if "comparator" in block:
+        from .gates import COMPARATORS               # gates imports this module
+        if block["comparator"] not in ("", *COMPARATORS):
+            return (f"verdict.comparator must be one of {['', *COMPARATORS]}, not "
+                    f"{block['comparator']!r}")
+        if not isinstance(block["settles"], str):
+            return "verdict.settles must be a string"
     if not isinstance(block["passed"], bool):
         return f"verdict.passed must be true or false, not {block['passed']!r}"
     for what in ("measured", "limit"):
@@ -4065,7 +4200,9 @@ class Entry:
                        detail=v.get("detail") or "", evidence=list(v.get("evidence") or []),
                        tier=Tier(int(v.get("tier") or 0)), pack=v.get("pack") or "",
                        locators=[Locator.from_dict(loc) for loc in v.get("locators") or []],
-                       rho=self.rho, duration_s=0.0, cpu_s=0.0)
+                       rho=self.rho, duration_s=0.0, cpu_s=0.0,
+                       comparator=str(v.get("comparator") or ""),
+                       settles=str(v.get("settles") or ""))
 
     def read_set(self) -> Reads:
         return Reads.from_dict(self.reads)
@@ -4677,8 +4814,20 @@ def _mutable_value(value: Any) -> bool:
 
 
 def _problem_in_good(good: Any) -> str:
-    if not isinstance(good, dict) or list(good) != list(_GOOD_FIELDS):
+    if not isinstance(good, dict) or list(good) not in (list(_GOOD_FIELDS),
+                                                        list(_LEGACY_GOOD_FIELDS)):
         return f"good must be null or an object with keys {list(_GOOD_FIELDS)}"
+    for row in good.get("goalpost") or ():
+        if not isinstance(row, dict) or list(row) != list(_GOALPOST_FIELDS):
+            return f"good.goalpost rows must have keys {list(_GOALPOST_FIELDS)}"
+        if not isinstance(row["key"], str) or not isinstance(row["units"], str) \
+                or row["outcome"] not in ("pass", "fail", "error", "skipped"):
+            return "good.goalpost rows hold a key, an outcome word and units"
+        for what in ("limit", "measured"):
+            if row[what] is not None and not _a_number(row[what]):
+                return f"good.goalpost {what} must be a number or null"
+    if not isinstance(good.get("goalpost", []), list):
+        return "good.goalpost must be a list"
     if good["outcome"] not in _GOOD_OUTCOMES:
         return f"good.outcome must be one of {list(_GOOD_OUTCOMES)}, not {good['outcome']!r}"
     why = _problem_in_reads(good["reads"], control=True)
@@ -4839,6 +4988,21 @@ def _problem_in_control(data: Any) -> str:
     elif _walk_applies(data):
         return ("mutation is null where the walk applies and both controls held: an "
                 "entry missing its walk is not a qualification")
+    if _walk_applies(data):
+        # P2.4: a goalpost the known-good control read present must have been
+        # moved (`gates.goalpost_runs`) — `_ledger_unseen` exempts a check run's
+        # moved goalpost on that evidence alone, so an entry without it (hand
+        # placed, or an older spine's) is not a qualification.
+        from .gates import GOALPOST_FACTORS            # gates imports this module
+        read = {str(k)[len(ACCEPTANCE_KEY):]
+                for k, digest in ((data["good"].get("reads") or {}).get("ledger") or {}).items()
+                if str(k).startswith(ACCEPTANCE_KEY) and digest != ABSENT}
+        rows = data["good"].get("goalpost") or []
+        for key in sorted(read):
+            if sum(1 for row in rows if row.get("key") == key) != len(GOALPOST_FACTORS):
+                return (f"good.goalpost does not move the goalpost {key!r} its known-good "
+                        f"half read: an entry missing its goalpost runs is not a "
+                        f"qualification")
     if data["admitted"] not in _ADMITTED:
         return f"admitted must be one of {list(_ADMITTED)}, not {data['admitted']!r}"
     return _admitted_problem(data)
@@ -5088,6 +5252,7 @@ class _GoodHalf:
     trace: Any = None
     extra: tuple = ()
     closure: Any = None
+    goalpost: tuple = ()
 
 
 def _good_record(good: Any, *, anchors: Anchors, digests: FileDigests,
@@ -5100,11 +5265,13 @@ def _good_record(good: Any, *, anchors: Anchors, digests: FileDigests,
     if isinstance(good, str):
         reads = Reads()
         return {"outcome": good, "reads": reads.to_dict(control=True), "extra": [],
-                "measured": None, "limit": None, "units": "", "detail": ""}, reads
+                "measured": None, "limit": None, "units": "", "detail": "",
+                "goalpost": []}, reads
     if good.outcome == "not-run":
         reads = Reads()
         return {"outcome": "not-run", "reads": reads.to_dict(control=True), "extra": [],
-                "measured": None, "limit": None, "units": "", "detail": ""}, reads
+                "measured": None, "limit": None, "units": "", "detail": "",
+                "goalpost": []}, reads
     reads = Reads.from_trace(good.trace, anchors=anchors, digests=digests, static=static_files)
     # The good half's host is the known-good design, the pack's baseline, or —
     # handed the live design — a run that read none of it (a `live` half is
@@ -5114,7 +5281,12 @@ def _good_record(good: Any, *, anchors: Anchors, digests: FileDigests,
     return {"outcome": good.outcome, "reads": reads.to_dict(control=True),
             "extra": sorted(good.extra), "measured": _number(verdict.measured, "measured"),
             "limit": _number(verdict.limit, "limit"), "units": str(verdict.units or ""),
-            "detail": portable(str(verdict.detail or ""), anchors)}, reads
+            "detail": portable(str(verdict.detail or ""), anchors),
+            "goalpost": [{"key": str(run.key), "limit": _number(run.limit, "limit"),
+                          "outcome": str(run.outcome),
+                          "measured": _number(run.measured, "measured"),
+                          "units": str(run.units or "")}
+                         for run in getattr(good, "goalpost", ()) or ()]}, reads
 
 
 def _walk_record(walk: Any) -> dict | None:
@@ -5904,10 +6076,21 @@ def _reasons(entry: Entry, reads_now: Reads, code: CodeRef, now: _Now) -> tuple:
         reasons.append(f"ctx.tier {recorded_tier} -> {reads_now.tier}")
     if reads.get("model") != reads_now.model:
         reasons.append("model changed")
-    for key, digest in sorted((reads.get("ledger") or {}).items()):
-        if reads_now.ledger.get(key) != digest:
-            reasons.append(f"claim {key[len('claim:'):]} changed" if key.startswith("claim:")
-                           else f"ledger {key} changed")
+    recorded_ledger = reads.get("ledger") or {}
+    for key, digest in sorted(recorded_ledger.items()):
+        if reads_now.ledger.get(key) == digest:
+            continue
+        if key.startswith(SHAPE_KEY):
+            name = key[len(SHAPE_KEY):]
+            if f"{ACCEPTANCE_KEY}{name}" in recorded_ledger:
+                continue                 # the condition's own line says it once
+            reasons.append(f"acceptance condition of {name} changed")
+        elif key.startswith(ACCEPTANCE_KEY):
+            reasons.append(f"acceptance condition of {key[len(ACCEPTANCE_KEY):]} changed")
+        elif key.startswith("claim:"):
+            reasons.append(f"claim {key[len('claim:'):]} changed")
+        else:
+            reasons.append(f"ledger {key} changed")
     for kind, table, table_now in (("", reads.get("files") or {}, reads_now.files),
                                    ("listing of ", reads.get("dirs") or {}, reads_now.dirs)):
         for key, digest in sorted(table.items()):
@@ -6227,7 +6410,9 @@ class QualificationFacts:
     ``ledger`` — the ledger keys the counted verdict read at a value no
     qualification run read (``_ledger_unseen``), ``()`` when it read none or
     the walk does not apply: a fact of the verdict beside the qualification,
-    judged in the channels' place.
+    judged in the channels' place; ``goalpost`` — ``moves|<key>`` when the
+    known-good control's value or units moved with a goalpost it read (P2.4,
+    ``gates.goalpost_runs``), ``""`` when none moved or none was read.
 
     Named for what it holds, not ``Qualification``: GLOSSARY §8's rename pass
     gives that name to ``Admission`` (critique of the P2.3 design)."""
@@ -6244,6 +6429,7 @@ class QualificationFacts:
     blocker: str = ""
     expect: str = "fail"
     ledger: tuple = ()
+    goalpost: str = ""
 
     def to_dict(self) -> dict:
         return {"known_bad": self.known_bad, "known_good": self.known_good,
@@ -6252,7 +6438,8 @@ class QualificationFacts:
                 "check_channel": [list(k) for k in self.check_channel],
                 "mutation": None if self.mutation is None else list(self.mutation),
                 "boundary": self.boundary, "walk": self.walk, "blocker": self.blocker,
-                "expect": self.expect, "ledger": list(self.ledger)}
+                "expect": self.expect, "ledger": list(self.ledger),
+                "goalpost": self.goalpost}
 
     @classmethod
     def from_dict(cls, data: Any) -> "QualificationFacts | None":
@@ -6270,7 +6457,8 @@ class QualificationFacts:
                        walk=str(data.get("walk") or ""),
                        blocker=str(data.get("blocker") or ""),
                        expect=str(data.get("expect") or "fail"),
-                       ledger=tuple(str(k) for k in data.get("ledger") or ()))
+                       ledger=tuple(str(k) for k in data.get("ledger") or ()),
+                       goalpost=str(data.get("goalpost") or ""))
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -6298,10 +6486,13 @@ def _qualification(facts: QualificationFacts) -> str:
     2. The known-bad control: crashed or skipped itself (unless it errored as
        an ``expect="error"`` control declares), or passed.
     3. The known-good control: crashed, skipped itself, read the candidate it
-       was handed, failed, or does not exist (known-bad shown).
+       was handed, failed, does not exist (known-bad shown), or passed outside
+       the evaluator's own operating context (P2.4-D19: never shown to pass
+       inside the range it claims).
     4. The channels: the two controls hand the gate different ``ctx.extra``
        keys (D-26), or — where the walk applies — keys a check run never hands,
-       or a counted verdict read ledger values no qualification run read.
+       or a counted verdict read ledger values no qualification run read; and
+       (P2.4) the known-good value moved with a goalpost it read.
     5. The walk: it could not run, or crashed and did not repeat it; a
        conclusive mutation passed; the budget ran out with a value that moves
        the evaluator's value unwalked.
@@ -6318,7 +6509,7 @@ def _qualification(facts: QualificationFacts) -> str:
     good = facts.known_good
     if good in ("errored", "skipped"):
         return f"known-good:{good}|{facts.good_line}"
-    if good in ("live", "fail", "not-run"):
+    if good in ("live", "fail", "not-run", "outside"):
         return f"known-good:{good}"
     if good != "pass":
         return f"known-good:errored|{good}"
@@ -6329,6 +6520,8 @@ def _qualification(facts: QualificationFacts) -> str:
                 f"{_keys(facts.check_channel[1])}")
     if facts.ledger:
         return f"channels:ledger|{_keys(facts.ledger)}"
+    if getattr(facts, "goalpost", ""):
+        return f"goalpost:{facts.goalpost}"
     if facts.walk:
         return f"mutation:{facts.walk}"
     if facts.mutation is not None:
@@ -6396,7 +6589,7 @@ def _entry_facts(entry: Any, *, blocker: str = "") -> QualificationFacts:
     good = entry.good if isinstance(entry.good, Mapping) else None
     bad_extra = tuple(entry.bad_extra or ())
     good_extra = tuple((good or {}).get("extra") or ())
-    measured = good is not None and good.get("outcome") in ("pass", "fail")
+    measured = good is not None and good.get("outcome") in ("pass", "fail", "outside")
     channels = (bad_extra, good_extra) if measured and bad_extra != good_extra else ()
     check = ((bad_extra, good_extra) if measured and applies and not channels
              and (bad_extra or good_extra) else ())
@@ -6411,7 +6604,24 @@ def _entry_facts(entry: Any, *, blocker: str = "") -> QualificationFacts:
     return QualificationFacts(
         known_bad=str(entry.bad), known_good=(good or {}).get("outcome") or "not-run",
         channels=channels, check_channel=check, mutation=mutation, boundary=boundary,
-        blocker=blocker, expect=str(nc.get("expect") or "fail"))
+        blocker=blocker, expect=str(nc.get("expect") or "fail"),
+        goalpost=_goalpost_fact((good or {}).get("measured"), (good or {}).get("units") or "",
+                                (good or {}).get("goalpost") or ()))
+
+
+def _goalpost_fact(measured: Any, units: str, runs: Iterable[Any]) -> str:
+    """``moves|<key>`` for the first goalpost (sorted) whose run reported another
+    value or other units than the known-good run — or measured nothing — else
+    ``""`` (P2.4, critique 1). ``runs`` are ``gates.GoalpostRun`` records or an
+    entry's rows. The pass flag may differ (the goalpost moved, so may the
+    verdict): only the value and its units must not."""
+    moved: list[str] = []
+    for run in runs or ():
+        get = run.get if isinstance(run, Mapping) else (lambda k, r=run: getattr(r, k, None))
+        if (get("outcome") not in ("pass", "fail") or get("measured") != measured
+                or str(get("units") or "") != str(units or "")):
+            moved.append(str(get("key")))
+    return f"moves|{sorted(moved)[0]}" if moved else ""
 
 
 def _incomplete(entry: Any) -> bool:
@@ -6456,7 +6666,16 @@ def _ledger_unseen(reads: Any, control: Any) -> tuple:
     if not isinstance(live, Mapping) or not live:
         return ()
     seen = _good_reads(control).get("ledger") or {}
-    return tuple(sorted(str(k) for k, digest in live.items() if seen.get(k) != digest))
+    # A goalpost's LIMIT is meant to differ between calibration and use
+    # (P2.4-D3, as critique 1 narrowed it): `acceptance:<key>` is exempt, and
+    # only it. Its shape — which claims, quantity, comparator, units — is not:
+    # a check run's goalpost of another shape, or one its known-good control
+    # never had, is a path no qualification run took. And the limit alone is
+    # exempt only because the qualification moved it (`gates.goalpost_runs`,
+    # held by the strict reader: an entry that read a goalpost and moved none
+    # is refused) and the known-good value stayed where it was.
+    return tuple(sorted(str(k) for k, digest in live.items()
+                        if not str(k).startswith(ACCEPTANCE_KEY) and seen.get(k) != digest))
 
 
 def _counted_with(found: "Admission", reads: Any) -> "Admission":
@@ -6996,12 +7215,14 @@ def _as_spec(verdict: Verdict, spec: Any) -> Verdict:
     a gate's claims, tier and pack (``run_gate``'s rule), so a stale verdict
     binds to the claims the gate covers NOW."""
     return dataclasses.replace(verdict, gate=spec.id, claims=list(spec.claims or ()),
-                               tier=Tier(int(spec.tier)), pack=spec.pack or "")
+                               tier=Tier(int(spec.tier)), pack=spec.pack or "",
+                               settles=str(getattr(spec, "settles", "") or ""))
 
 
 def _synthesized(spec: Any, **fields: Any) -> Verdict:
     return Verdict(gate=spec.id, claims=list(spec.claims or ()), tier=Tier(int(spec.tier)),
-                   pack=spec.pack or "", passed=False, **fields)
+                   pack=spec.pack or "", passed=False,
+                   settles=str(getattr(spec, "settles", "") or ""), **fields)
 
 
 def _unqualified(spec: Any, token: str, *, rho: str = "") -> Verdict:
@@ -7138,11 +7359,71 @@ def _orphan_entries(root: str, registered: set, notes: list) -> dict[str, list[E
     return found
 
 
-def _resolve_gate(here: _Now, spec: Any, fn: Any, state: Any, *, held: Mapping[str, Any],
-                  verified: Mapping[str, Any], notes: list,
-                  order: Callable[[Entry], tuple], legacy: Mapping[str, Verdict],
-                  availability: Callable[[Any], tuple], model_error: str = "",
-                  row_notes: tuple = ()) -> tuple[Verdict | None, Row | None]:
+def _read_paths(reads: Any) -> set:
+    """The param paths a verdict's run read, from an entry's ``reads`` block, a
+    ``Reads``, or a ``GateTrace`` — ``set()`` for none (``None``: a verdict with
+    no recorded reads, which then read no context key)."""
+    if reads is None:
+        return set()
+    params = getattr(reads, "params", None)
+    if params is None and isinstance(reads, Mapping):
+        params = reads.get("params")
+    if isinstance(params, Mapping):                          # a trace: {path: digest}
+        found = {tuple(path) for path in params}
+        return found | {tuple(path) for path in getattr(reads, "whole", ()) or ()}
+    return {tuple(row[0]) for row in params or () if isinstance(row, (list, tuple)) and row}
+
+
+def _contexted(flat: Any, spec: Any, verdict: Verdict | None, reads: Any = None
+               ) -> Verdict | None:
+    """``verdict`` marked when it is a pass outside ``spec``'s operating context
+    (P2.4-D15) — ``unqualified`` set to ``gates.context_token``, beside R-2's
+    ``error`` — else ``verdict`` itself. Judged by the spine, on the CURRENT
+    values (``flat``, the projection now) of the spellings the verdict's run
+    read (``reads``: critique 4 of the design), over passes only: a fail, a
+    skip, a crash or a verdict already marked comes back as it went in
+    (idempotent: a marked verdict is not a pass). ``flat`` ``None`` — the model
+    does not load — judges nothing: such a pass read params (the context keys
+    are part of its read set, ``gates._held_to_context``), so it is not current
+    either way, and its stale reason stands. Applied where a verdict becomes a
+    reading — ``_resolve_gate``'s return (``resolve``, ``_pruned_row``) and the
+    sweep's ``before_hook`` — so every reader inherits it: never a pass, never
+    a crash, Gap's tone, the prerequisite rule's ``unqualified`` root.
+    *Rejected:* judging the recorded values (a stale pass outside would read
+    Stale, "rerun", when a rerun's pass will not count); a set handed to
+    ``compose`` like ``stale_gates`` (a reader keyed on ``ok`` would count the
+    pass, and the prerequisite rule would read the guard established)."""
+    if verdict is None or flat is None or not getattr(spec, "operating_context", None):
+        return verdict
+    if not verdict.ok:
+        return verdict
+    from . import gates as _gates                  # gates imports this module
+    breach = _gates.context_breach(spec, flat, read=_read_paths(reads))
+    if breach is None:
+        return verdict
+    token = _gates.context_token(breach)
+    return dataclasses.replace(verdict, unqualified=token, error=f"unqualified: {token}")
+
+
+def _resolve_gate(here: _Now, spec: Any, fn: Any, state: Any, **kw: Any
+                  ) -> tuple[Verdict | None, Row | None]:
+    """``_judged_gate``'s reading, with the operating context judged over it
+    (``_contexted``, on the reads of the entry it stands on) — the ONE place a
+    reader's verdict meets the context, so ``resolve`` and the sweep's pruned
+    rows inherit it together."""
+    verdict, row = _judged_gate(here, spec, fn, state, **kw)
+    if verdict is not None:
+        entry = getattr(row, "entry", None) if row is not None else None
+        verdict = _contexted(here.flat, spec, verdict,
+                             getattr(entry, "reads", None) if entry is not None else None)
+    return verdict, row
+
+
+def _judged_gate(here: _Now, spec: Any, fn: Any, state: Any, *, held: Mapping[str, Any],
+                 verified: Mapping[str, Any], notes: list,
+                 order: Callable[[Entry], tuple], legacy: Mapping[str, Verdict],
+                 availability: Callable[[Any], tuple], model_error: str = "",
+                 row_notes: tuple = ()) -> tuple[Verdict | None, Row | None]:
     """``resolve``'s rungs 1-6 for ONE registered gate: ``(verdict, row)``, or
     ``(None, None)`` when nothing applies and the claim reads Open. Extracted
     from ``resolve``'s loop unchanged (P2.2-D8), so the sweep can ask what
@@ -7949,6 +8230,10 @@ def _ledger_now(ledger: Any, key: str) -> str | None:
         cid = key[len("claim:"):]
         return _claim_digest(next((c for c in (_peek(ledger, "claims") or ())
                                    if getattr(c, "id", None) == cid), None))
+    if key.startswith(ACCEPTANCE_KEY):
+        return acceptance_of(_peek(ledger, "claims") or (), key[len(ACCEPTANCE_KEY):]).digest
+    if key.startswith(SHAPE_KEY):
+        return acceptance_of(_peek(ledger, "claims") or (), key[len(SHAPE_KEY):]).shape
     if key in _LEDGER_WHOLE and key in _LEDGER_FIELD_SET:
         return _ledger_digest(key, _peek(ledger, key))
     return None
@@ -8397,6 +8682,16 @@ def _good_half(s: _Session, spec: Any, fn: Any, host_ctx: Any) -> _GoodHalf:
         return _GoodHalf("errored", line=_first(verdict.error), **half)
     if label == "live" and trace.host_reads:
         return _GoodHalf("live", **half)
+    if verdict.outcome == "pass" and _gates.context_breach(spec, ctx.params,
+                                                          read=trace.params) is not None:
+        # P2.4-D19: the known-good control must lie inside the evaluator's own
+        # operating context — judged on the spellings its run read, as a check
+        # run's pass is. Outside, the evaluator was never shown to pass where it
+        # claims to hold, and it is unqualified. *Rejected:* a warning (an
+        # evaluator never shown to pass inside its range would count there);
+        # judging the known-bad control too (its design is the protective
+        # element removed, often outside the range, and a fail outside counts).
+        return _GoodHalf("outside", **half)
     return _GoodHalf(verdict.outcome, **half)
 
 
@@ -8472,7 +8767,7 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
     _add_closure(trace, good.closure)
     bad_extra = tuple(getattr(trace, "handed_extra", None) or ())
     held_bad = _held_control(result, kind) if bad is None else None
-    measured = bad is not None and good.outcome in ("pass", "fail")
+    measured = bad is not None and good.outcome in ("pass", "fail", "outside")
     channels = (bad_extra, good.extra) if measured and bad_extra != good.extra else ()
     applies = _mutation_applies(fn, s.root)
     check = ((bad_extra, good.extra) if measured and applies and not channels
@@ -8480,6 +8775,11 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
     walk = None
     walk_token = ""
     if applies and bad == "fail" and good.outcome == "pass" and not channels and not check:
+        # P2.4 (critique 1): each goalpost the known-good run read, moved —
+        # before the walk, so the walk's folded reads leave its recorded
+        # goalposts at their calibrated digests either way.
+        good = dataclasses.replace(good, goalpost=_gates.goalpost_runs(
+            spec, fn, good.ctx, good.verdict, trace=good.trace))
         try:
             walk = _gates.mutation_walk(spec, fn, good.ctx, good.verdict, trace=good.trace,
                                         roots=_walk_roots(s))
@@ -8498,7 +8798,10 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
                   (sum(1 for r in walk.results if r.outcome == "fail"), len(walk.results),
                    len(walk.inconclusive))),
         boundary=walk.boundary if walk is not None and not walk_token else "",
-        walk=walk_token, expect=expect)
+        walk=walk_token, expect=expect,
+        goalpost=(_goalpost_fact(_number(good.verdict.measured, "measured"),
+                                 str(good.verdict.units or ""), good.goalpost)
+                  if good.goalpost else ""))
     token = _qualification(facts)
     # The path a failure is held on, and an entry answers: either half's tier
     # (`_entry_tier`) — a known-good crash on the tier-1 path, behind a
@@ -8510,7 +8813,7 @@ def _run_control(s: _Session, spec: Any, fn: Any, host_ctx: Any, *, force: bool)
     # Filed when both halves gave an answer a cache may keep: a pass or a fail
     # each — or no known-good control at all (known-bad shown, `not-run`: a fact
     # about the project, not a crash).
-    filed = bad is not None and good.outcome in ("pass", "fail", "not-run")
+    filed = bad is not None and good.outcome in ("pass", "fail", "not-run", "outside")
     if not filed or walk_token or parse_token(token)[0] in _HELD_KINDS:
         if s.record:
             record_obs(s.root, gid, entry="", when=s.when, duration_s=cost, cpu_s=cpu,
@@ -8772,6 +9075,11 @@ class SweepRow:
     stale_reason: str = ""
     rho: str = ""
     admission: Any = None
+    reads: Any = None
+    """What the row's verdict was computed from — the served entry's ``reads``
+    or the run's ``Reads`` — where it can be a pass, so the sweep judges its
+    operating context on the spellings it read (P2.4, ``_contexted``); ``None``
+    elsewhere. In memory only."""
 
 
 @dataclass
@@ -8921,7 +9229,7 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
         # stale until `check --tier <tier>` runs that path's control.
         return SweepRow(dataclasses.replace(shown, **cost), executed=True,
                         stale_reason=_undemonstrated(tier), rho=served.rho,
-                        admission=admitted)
+                        admission=admitted, reads=served.reads)
     if admitted.state == "undemonstrated":
         return SweepRow(dataclasses.replace(
             _synthesized(spec, skipped=True, skip_reason=admitted.reason), **cost),
@@ -8931,7 +9239,7 @@ def _outranked(s: _Session, spec: Any, fn: Any, run_ctx: Any, code: CodeRef, ent
         return SweepRow(dataclasses.replace(refused, **cost), executed=True, rho=served.rho,
                         admission=admitted)
     return SweepRow(dataclasses.replace(shown, **cost), executed=True, fresh=True,
-                    rho=served.rho, admission=admitted)
+                    rho=served.rho, admission=admitted, reads=served.reads)
 
 
 def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
@@ -9004,7 +9312,7 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
         # the minutes-long one.
         return SweepRow(_as_spec(state.entry.to_verdict(), spec), cached=True,
                         stale_reason=_undemonstrated(at), rho=state.entry.rho,
-                        admission=judged)
+                        admission=judged, reads=state.entry.reads)
     if judged.state == "undemonstrated":
         # A control whose tools went missing while it ran: a skip, BLOCKED.
         return SweepRow(_synthesized(spec, skipped=True, skip_reason=judged.reason),
@@ -9042,7 +9350,7 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
             and _standing(s.held.get(gid), state) is None:
         if isinstance(state, Fresh):
             return SweepRow(_as_spec(state.entry.to_verdict(), spec), cached=True, fresh=True,
-                            rho=state.entry.rho, admission=judged)
+                            rho=state.entry.rho, admission=judged, reads=state.entry.reads)
         if state.conflict and TWO_OUTCOMES_IS_ERROR:
             return SweepRow(_synthesized(spec, error=state.reasons[0], rho=state.rho),
                             rho=state.rho, admission=judged)
@@ -9117,7 +9425,8 @@ def _sweep_one(s: _Session, spec: Any, fn: Any, state: Any, run_ctx: Any, *,
                                held=held)
         if outranked is not None:
             return outranked
-    return SweepRow(verdict, executed=True, fresh=measured, rho=keyed.rho, admission=judged)
+    return SweepRow(verdict, executed=True, fresh=measured, rho=keyed.rho, admission=judged,
+                    reads=keyed.reads)
 
 
 def _reader_state(s: _Session, spec: Any, fn: Any) -> tuple:
@@ -9174,7 +9483,7 @@ def _pruned_row(s: _Session, spec: Any, fn: Any, state: Any, unmet: Any) -> Swee
     ruled = _under_rule(spec, own, unmet)
     if ruled is own and own is not None and row is not None:
         return SweepRow(own, cached=row.cached, fresh=row.fresh, stale_reason=row.stale_reason,
-                        rho=own.rho)
+                        rho=own.rho, reads=getattr(row.entry, "reads", None))
     return SweepRow(ruled)
 
 
@@ -9278,6 +9587,12 @@ def sweep(root: str, registry: Any, ctx: Any, *, projection: Any, ledger: Any,
 
     def before_hook(spec: Any, fn: Any) -> Verdict:
         found = _sweep_one(s, spec, fn, before.get(spec.id) or Never(), run_ctx, force=force)
+        # The operating context, judged on this sweep's values (P2.4-D15) before
+        # the prerequisite rule reads the row for a dependent: a guard passing
+        # outside its context establishes nothing (D21).
+        marked = _contexted(s.now.flat, spec, found.verdict, found.reads)
+        if marked is not found.verdict:
+            found = dataclasses.replace(found, verdict=marked, fresh=False)
         rows[spec.id] = found
         return found.verdict
 

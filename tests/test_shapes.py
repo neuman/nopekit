@@ -110,6 +110,11 @@ SHOW_RUNNABLE = re.compile(r"^  runnable here: (?:yes|NO — .+)$")
 #: a gate with no edge prints neither and keeps the shape it had.
 SHOW_PREREQUISITES = re.compile(r"^  prerequisites: \S+(?:, \S+)*(?: \(.+ not registered\))?$")
 SHOW_PREREQUISITE_OF = re.compile(r"^  prerequisite of: \S+(?:, \S+)*$")
+#: P2.4: a declared operating context, only when there is one — each key and its
+#: range, then what it means.
+SHOW_CONTEXT = re.compile(
+    r"^  operating context: \S+ in [\[(]\S+, \S+[\])](?:, \S+ in [\[(]\S+, \S+[\])])* — "
+    r"outside it a pass does not count; a fail still does$")
 SHOW_CONTROL = re.compile(r"^  control: (?:\S+ \(must \w+\)|NONE — .+)$")
 SHOW_NOTE = re.compile(r"^           \S.*$")
 SHOW_VERDICT = re.compile(r"^  last verdict: (?:\[.{4}\] \S+.*|\(never run\))$")
@@ -174,8 +179,13 @@ def check_problems(stdout: str) -> list[str]:
     if at < len(lines) and T.CONTROLS_SUMMARY.fullmatch(lines[at]):
         at += 1
     # P2.3-D16: a qualification line per unqualified evaluator, and per walked
-    # one whose qualification ran in this check run.
-    while at < len(lines) and T.QUALIFICATION_LINE.fullmatch(lines[at]):
+    # one whose qualification ran in this check run; P2.4: interleaved with the
+    # line of a pass outside its evaluator's operating context, then the limit
+    # warnings (one number in two places, S-35).
+    while at < len(lines) and (T.QUALIFICATION_LINE.fullmatch(lines[at])
+                               or T.CONTEXT_LINE.fullmatch(lines[at])):
+        at += 1
+    while at < len(lines) and T.LIMIT_WARNING.fullmatch(lines[at]):
         at += 1
     while at < len(lines) and (SKIP_GROUP.fullmatch(lines[at]) or SKIP_ONE.fullmatch(lines[at])):
         at += 1
@@ -203,7 +213,10 @@ def check_problems(stdout: str) -> list[str]:
     fresh_rows = [line for line in rows if not T.CACHED_ROW.fullmatch(line)]
     executed, cached = int(summary.group("executed")), int(summary.group("cached"))
     skipped = int(summary.group("skipped") or 0)
-    if not executed - skipped <= len(fresh_rows) <= executed:
+    # A pass outside its operating context ran and streams no row: its line
+    # follows the summary (P2.4), as an unqualified evaluator's does.
+    outside = int(summary.group("outside") or 0)
+    if not executed - skipped - outside <= len(fresh_rows) <= executed:
         problems.append(f"check: the summary says {executed} executed ({skipped} skipped) "
                         f"but {len(fresh_rows)} row(s) print as executed")
     if len(cached_rows) > cached:
@@ -212,7 +225,7 @@ def check_problems(stdout: str) -> list[str]:
         if T.CACHED_ROW.fullmatch(line).group("tag") == "ok  ":
             problems.append(f"check: a cached pass is printed: {line!r}")
     total = sum(int(summary.group(k) or 0)
-                for k in ("ok", "failed", "skipped", "errored", "unqualified"))
+                for k in ("ok", "failed", "skipped", "errored", "unqualified", "outside"))
     if total != int(summary.group("gates")):
         problems.append(f"check: {summary.group(0)!r} does not add up")
     return problems
@@ -277,6 +290,7 @@ def gate_show_problems(stdout: str) -> list[str]:
             ("runnable", SHOW_RUNNABLE, 1, 1),
             ("prerequisites", SHOW_PREREQUISITES, 0, 1),
             ("prerequisite of", SHOW_PREREQUISITE_OF, 0, 1),
+            ("operating context", SHOW_CONTEXT, 0, 1),
             ("control", SHOW_CONTROL, 1, 1),
             ("control note", SHOW_NOTE, 0, 1), ("last verdict", SHOW_VERDICT, 1, 1))
     at = _grammar(lines, at, body, problems, "gate show")
@@ -794,6 +808,17 @@ FIRST_CHECK = (
     *_BLOCKING_LINES,
 )
 
+#: `check --junit`, replayed after the `bed_xy` edit and before the revert: the
+#: first check's lines with the limit warning the edit left behind (P2.4, S-35 —
+#: R-6: a line the state now prints, pinned where it sits, after the summary).
+CHECK_JUNIT = (
+    *FIRST_CHECK[:2],
+    ("the limit warning", r"^warning: bracket\.bed_fit : its limit 234 mm is not C4's "
+                          r"acceptance condition \(bed fit <= 204\.0 mm\) — one number in "
+                          r"two places$"),
+    *FIRST_CHECK[2:],
+)
+
 #: `check` after the `bed_xy` edit: rows in registration order (the plan's
 #: transcript lists the executed row first; the CLI streams rows as the gates
 #: come), one gate executed, and the six controls re-verified by their fixtures
@@ -804,6 +829,11 @@ CHECK_AFTER_EDIT = (
                              r"\(250 bed - 2x8 brim\)$"),
     ("the summary", r"^6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0$"),
     ("the controls line", r"^controls: 0 run, 0 preserved, 6 re-qualified$"),
+    # P2.4 (S-35, R-6: a line the edit now prints, pinned): bed_fit's computed
+    # limit is 234 while C4 still says 204.
+    ("the limit warning", r"^warning: bracket\.bed_fit : its limit 234 mm is not C4's "
+                          r"acceptance condition \(bed fit <= 204\.0 mm\) — one number in "
+                          r"two places$"),
     *_BLOCKING_LINES,
 )
 
@@ -919,6 +949,11 @@ class TranscriptShapes(unittest.TestCase):
                 ("the controls line dropped", "\n".join(
                     line for line in text.splitlines()
                     if not T.CONTROLS_SUMMARY.fullmatch(line)) + "\n"),
+                ("the limit warning dropped", "\n".join(
+                    line for line in text.splitlines()
+                    if not T.LIMIT_WARNING.fullmatch(line)) + "\n"),
+                ("the warning naming another limit", text.replace("its limit 234 mm",
+                                                                  "its limit 204 mm")),
                 ("prose after BLOCKING", text + PROSE + "\n")):
             with self.subTest(label):
                 self.assertTrue(exact_problems(mutant, CHECK_AFTER_EDIT, "check after the edit"),
@@ -961,7 +996,7 @@ class TranscriptShapes(unittest.TestCase):
 
     def test_check_junit_prints_the_check_and_writes_the_xml(self):
         text = self.out("check-junit", 1)
-        self.holds(exact_problems(text, FIRST_CHECK, "check --junit"), text)
+        self.holds(exact_problems(text, CHECK_JUNIT, "check --junit"), text)
         result = T.Result("atompipe check --junit", 1, text, "", self.steps["project"])
         self.assertIsNone(T.problem(T.junit(), result))
         self.assertIsNotNone(T.problem(T.junit(), result._replace(
@@ -1068,3 +1103,96 @@ class QualificationLineShape(unittest.TestCase):
         self.assertEqual(len(lines), 6, out)
         self.assertTrue(all(ln.endswith("→ qualified") for ln in lines), lines)
         self.assertRegex(out[-1], T.QUALIFIED_SUMMARY)
+
+
+class GoalpostAndContextLinesShape(unittest.TestCase):
+    """(R-11, P2.4) Every line P2.4 adds to a human channel has a shape, each held
+    with its own negative control: `check`'s tally of passes outside an operating
+    context, the context line and the limit warning after the qualification lines,
+    the qualification line's two new facts, `gate show`'s operating-context row,
+    and its goalpost detail rows. A near miss — the line in the wrong place, the
+    wrong words, a count that does not add up — is refused (critique 6 of the
+    P2.4 design: the bracket's transcript printed a warning nothing pinned)."""
+
+    CHECK = "\n".join([
+        "1 gates: 1 executed, 0 cached — 0 ok, 1 outside operating context — tier 0",
+        "controls: 1 run, 0 preserved, 0 re-qualified",
+        "t.span : known-good pass · known-bad fail · mutation 1/1 fail → qualified",
+        "t.span : outside operating context: load_n = 60, qualified on [0, 40]",
+        "warning: t.other : its limit 234 mm is not c4's acceptance condition (bed fit <= "
+        "204.0 mm) — one number in two places",
+        "BLOCKING — 1 critical claim(s) must not be spent against:",
+        "[gap  ] c1 Sag stays under 0.5 mm — outside operating context: t.span : load_n = 60, "
+        "qualified on [0, 40]",
+    ]) + "\n"
+
+    def test_the_check_lines_hold(self):
+        self.assertEqual(check_problems(self.CHECK), [])
+
+    def test_each_near_miss_is_refused(self):
+        lines = self.CHECK.splitlines()
+        for label, mutant in (
+                ("the context line before the summary", "\n".join(
+                    [lines[3]] + lines[:3] + lines[4:])),
+                ("the warning after BLOCKING", "\n".join(
+                    lines[:4] + lines[5:] + [lines[4]])),
+                ("the tally counted unqualified", self.CHECK.replace(
+                    "1 outside operating context", "1 unqualified, 1 outside operating context")),
+                ("the context line in other words", self.CHECK.replace(
+                    "qualified on [0, 40]\nwarning", "valid on [0, 40]\nwarning")),
+                ("the warning in other words", self.CHECK.replace(
+                    "one number in two places", "limits differ"))):
+            with self.subTest(label):
+                self.assertTrue(check_problems(mutant + "\n"), f"accepted {label}")
+
+    def test_the_context_line_and_warning_shapes(self):
+        for good in ("t.span : outside operating context: load_n = 60, qualified on [0, 40]",
+                     "t.span : outside operating context: load_n absent, qualified on [0, 40]",
+                     "t.span : outside operating context: load_n = 'x' (not a number), "
+                     "qualified on (−∞, 40]",
+                     "t.span : outside operating context: load_n not read by the run that "
+                     "passed, qualified on [0, ∞)"):
+            with self.subTest(good=good):
+                self.assertRegex(good, T.CONTEXT_LINE)
+        for bad in ("[ERR ] t.span : unqualified: context:outside|{}",
+                    "t.span : unqualified: outside operating context: load_n = 60",
+                    "t.span : outside operating context: load_n = 60, qualified on 0..40"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(T.CONTEXT_LINE.fullmatch(bad))
+        self.assertIsNone(T.LIMIT_WARNING.fullmatch(
+            "bracket.bed_fit : its limit 234 mm is not C4's acceptance condition (bed fit <= "
+            "204.0 mm) — one number in two places"), "the warning without its lead")
+
+    def test_the_qualification_line_gains_two_facts(self):
+        for good in ("t.span : known-good outside its operating context · known-bad fail "
+                     "→ unqualified",
+                     "t.keyed : known-good pass · known-bad fail · mutation 1/1 fail · value "
+                     "moves with its goalpost → unqualified"):
+            with self.subTest(good=good):
+                self.assertRegex(good, T.QUALIFICATION_LINE)
+        for bad in ("t.span : known-good outside · known-bad fail → unqualified",
+                    "t.keyed : known-good pass · known-bad fail · value moves with its "
+                    "goalpost · mutation 1/1 fail → unqualified"):
+            with self.subTest(bad=bad):
+                self.assertIsNone(T.QUALIFICATION_LINE.fullmatch(bad))
+
+    def test_gate_show_places_the_operating_context(self):
+        body = "\n".join([
+            "t.span  [t0]  sag  claims: c1",
+            "  tier 0  pack (project)  entry gates.g:span",
+            "  claims: c1",
+            "  runnable here: yes",
+            "  operating context: load_n in [0, 40] — outside it a pass does not count; a fail "
+            "still does",
+            "  control: selftest/bad.py:soft (must fail)",
+            "  last verdict: [ok  ] t.span : 0.250 mm (limit 0.5 mm)",
+            "  qualification: known-good pass · known-bad fail · mutation 1/1 fail → qualified "
+            "(control 0123456789ab)",
+            "    goalpost     c1 limit -> 0.25: fail, 0.4395 mm",
+        ]) + "\n"
+        self.assertEqual(gate_show_problems(body), [])
+        lines = body.splitlines()
+        moved = "\n".join(lines[:4] + lines[5:6] + [lines[4]] + lines[6:]) + "\n"
+        self.assertTrue(gate_show_problems(moved), "the context row after the control")
+        worded = body.replace("a fail still does", "fails still count")
+        self.assertTrue(gate_show_problems(worded), "the context row in other words")

@@ -530,6 +530,10 @@ CAUSE_STATUS: dict[str, set[str]] = {
     "owner-unattributed": {"unclaimed"}, "no-reason": {"unclaimed"},
     "unrun": {"pending"}, "invalidated": {"stale"}, "no-article": {"unverified"},
     "owned": {"asserted"}, "physical-pass": {"unverified"}, "checked": {"pass"},
+    # P2.4: a pass that misses its claim's acceptance condition fails it; one
+    # outside its evaluator's operating context is a Gap, or Assumed where an
+    # owned fallback carries it.
+    "acceptance": {"fail"}, "outside-context": {"unclaimed"}, "fallback": {"asserted"},
 }
 
 #: The causes a moved row may name, by what the row holds (P2.1-D20): an error
@@ -550,6 +554,12 @@ COMPONENT_CAUSES: dict[str, set[str]] = {
 #: the kind (`physical-fail`, R-3). Added in P2.1's review.
 PHRASE_CAUSES: dict[str, set[str]] = {
     "a pass recorded": {"physical-pass"}, "a fail recorded": {"physical-fail"},
+    # P2.4 — by the phrase, since "pass" alone holds neither: the value compared
+    # and missed (`acceptance`), the pass outside its context (`outside-context`;
+    # with an owned fallback, `fallback`). Written again, never shared, in
+    # `tests/oracle/r8_statuses.py` (`_held`).
+    "a pass past its claim's acceptance": {"acceptance"},
+    "a pass outside its operating context": {"outside-context", "fallback"},
 }
 
 
@@ -633,6 +643,33 @@ class StatusesMoveOnlyTowardUnresolved(unittest.TestCase):
         self.assertIn("assumption: asserted -> verified moves toward resolved", found)
         self.assertTrue(any(p.startswith("assumption: asserted -> verified for") for p in found),
                         found)
+
+    def test_p24s_causes_move_only_the_rows_that_hold_them(self):
+        """P2.4's three causes (spec §6.2): a pass past its claim's acceptance
+        may move to Failing for `acceptance`, a pass outside its operating
+        context to Gap for `outside-context` or Assumed for `fallback` — and
+        each is refused on a row that does not hold it, or with a status its
+        cause does not admit. No row of the 860ffa6 table holds one; the corpus
+        moves none (the oracle, `--toward-unresolved`)."""
+        past = "automated, a pass past its claim's acceptance"
+        outside = "automated, a pass outside its operating context"
+        owned = "automated, a pass outside its operating context, a fallback owned"
+        before = {past: "pass", outside: "pass", owned: "pass"}
+        self.assertEqual(move_problems(before, {past: "fail", outside: "unclaimed",
+                                                owned: "asserted"},
+                                       {past: "acceptance", outside: "outside-context",
+                                        owned: "fallback"}), [])
+        plain = "automated, its covering gate passed"
+        found = move_problems({plain: "pass", outside: "pass"},
+                              {plain: "fail", outside: "fail"},
+                              {plain: "acceptance", outside: "acceptance"})
+        self.assertIn(f"{plain}: pass -> fail for 'acceptance', which the row does not hold",
+                      found)
+        self.assertIn(f"{outside}: pass -> fail for 'acceptance', which the row does not hold",
+                      found)
+        self.assertIn(f"{owned}: reads unclaimed with cause 'fallback' (status and cause "
+                      f"disagree)", move_problems({owned: "pass"}, {owned: "unclaimed"},
+                                                  {owned: "fallback"}))
 
     def test_a_status_its_cause_does_not_admit_is_caught(self):
         """Planted: pass beside a skip reads stale, named by its skip."""

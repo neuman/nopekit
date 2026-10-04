@@ -2,21 +2,21 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.deflection",
-  "rho": "0da37122cd143eb8efead7199c577e221c9b12ac5c4ab27a888c445e726842d9",
-  "static": "f683c3d26eb960de97f2c7de12f4d06f43d32c8acb86417eec7fbf613c01cfc1",
+  "rho": "dad770938cf892354d59aaab51e8f4f0d23b413998193c7e4004a38a1c354512",
+  "static": "ab452ea4c96b57b4dab715795ac9ecd507d5d0ad6df834727f4b49862879547b",
   "static_parts": {
-    "spine": "327b03e5d394c749cae3c25c80227f1f72c0742db10380072aeaef1b6b452f46",
+    "spine": "71f45240af6180d5bd456f588c766edd4ab9fddf0f34afbb6b215f31b8254857",
     "code": {
-      "digest": "a6cb9c41a01870db0288839c5de0cca828fc245c66f12452d11d7a7cd33801cc",
+      "digest": "6f70e779536d71339a31dd23f791e6093eca29d608722f4640f06819b11be2e4",
       "files": [
         "gates/structural.py"
       ]
     },
     "selftest": {
-      "digest": "93e7a7d5612e1a02659a423e8814cabf0f3a5a3000ed51605a2efe0f7517562c",
+      "digest": "d189dfd49d6e13f7aee32b7fe0b285cfd4e29c5dd8474582582af9460da0499a",
       "files": {
         "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-        "selftest/known_good.py": "8726c3c77520abcd5b143ca16306470a7db73bf912399affcf60af5ab100ed78"
+        "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
       }
     },
     "nc": {
@@ -29,11 +29,11 @@
   },
   "host": "known-good",
   "fixture": {
-    "digest": "693071eb3ecc9b9b0a7e75bc396bea21cfc1e7c56598d1057e565962ac2fb5db",
+    "digest": "3645413f71d05619f92c2a1b5e8e5385fdfbd05b0b0bcf779cb6c4871c71b220",
     "files": {
       "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
       "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-      "selftest/known_good.py": "8726c3c77520abcd5b143ca16306470a7db73bf912399affcf60af5ab100ed78"
+      "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
     }
   },
   "reads": {
@@ -56,7 +56,10 @@
     ],
     "files": {},
     "dirs": {},
-    "ledger": {},
+    "ledger": {
+      "acceptance-shape:C1": "d05bbce618eec99c78d3ef96f6b57b877a2fef2b44539f09fa46c7cf0d9e77d3",
+      "acceptance:C1": "61f55d0f08419b115da9741b71408cd4965bc9f930ac41ddeb70310a5323b572"
+    },
     "host": [],
     "opaque": []
   },
@@ -84,7 +87,10 @@
       ],
       "files": {},
       "dirs": {},
-      "ledger": {},
+      "ledger": {
+        "acceptance-shape:C1": "d05bbce618eec99c78d3ef96f6b57b877a2fef2b44539f09fa46c7cf0d9e77d3",
+        "acceptance:C1": "61f55d0f08419b115da9741b71408cd4965bc9f930ac41ddeb70310a5323b572"
+      },
       "host": [],
       "opaque": []
     },
@@ -92,7 +98,23 @@
     "measured": 0.4688,
     "limit": 0.5,
     "units": "mm",
-    "detail": "0.469 mm at 15 N (limit 0.5 mm)"
+    "detail": "0.469 mm at 15 N (limit 0.5 mm)",
+    "goalpost": [
+      {
+        "key": "C1",
+        "limit": 0.25,
+        "outcome": "fail",
+        "measured": 0.4688,
+        "units": "mm"
+      },
+      {
+        "key": "C1",
+        "limit": 1.0,
+        "outcome": "pass",
+        "measured": 0.4688,
+        "units": "mm"
+      }
+    ]
   },
   "mutation": {
     "runs": 38,
@@ -125,5 +147,5 @@
   "measured": 30.0,
   "limit": 0.5,
   "units": "mm",
-  "digest": "969c29e209e4deecfdc9402867f797bd500442dc49d6f46fb180adb66db12c3e"
+  "digest": "55d76d73cea68f084deb3934382aeb361aed5e7959cd4d1be67c06a996833404"
 }

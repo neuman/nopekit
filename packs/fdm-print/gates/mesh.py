@@ -348,7 +348,7 @@ def _load_mesh(ctx: GateContext, gate_id: str):
     if defect is not None:
         return None, None, Verdict(
             gate=gate_id, passed=False, measured=round(float(mesh.volume), 1),
-            limit=0.0, units="mm^3 signed volume", detail=defect,
+            limit=0.0, comparator=">", units="mm^3 signed volume", detail=defect,
         )
     return mesh, resolved, None
 
@@ -559,7 +559,7 @@ def overhang(ctx: GateContext) -> Verdict:
         gate="fdm.overhang",
         passed=m["frac"] <= allow,
         measured=round(m["frac"], 5),
-        limit=round(allow, 5),
+        limit=round(allow, 5), comparator="<=",
         units="area fraction",
         detail=_overhang_note(m, limit, allow, ceiling_deg),
         evidence=[report],
@@ -583,7 +583,7 @@ def _inert_overhang(limit: float, ceiling_deg: float) -> Verdict:
     """
     return Verdict(
         gate="fdm.overhang", passed=False, measured=round(limit, 1),
-        limit=round(ceiling_deg, 1), units="deg",
+        limit=round(ceiling_deg, 1), comparator="<", units="deg",
         detail=f"INERT CONFIGURATION: overhang_limit_deg {limit:.0f} is at or past "
                f"bridge_ceiling_deg {ceiling_deg:.0f}, so every face this gate could "
                f"fail on is already excluded as a ceiling and no geometry can ever "
@@ -875,7 +875,7 @@ def bridge_span(ctx: GateContext) -> Verdict:
     m = _bridge_measure(mesh, axis, limit, cantilever_limit, ceiling_deg)
     if m["n_sel"] == 0:
         return Verdict(
-            gate="fdm.bridge_span", passed=True, measured=0.0, limit=round(limit, 2),
+            gate="fdm.bridge_span", passed=True, measured=0.0, limit=round(limit, 2), comparator="<=",
             units="mm",
             detail=f"no ceiling faces at or past {ceiling_deg:.0f} deg off the bed — "
                    f"nothing to bridge ({m['n_faces']} faces checked)",
@@ -887,7 +887,7 @@ def bridge_span(ctx: GateContext) -> Verdict:
         gate="fdm.bridge_span",
         passed=m["worst_ratio"] <= 1.0,
         measured=round(m["worst_span"], 2),
-        limit=round(m["worst_limit"], 2),
+        limit=round(m["worst_limit"], 2), comparator="<=",
         units="mm",
         detail=_bridge_note(m, limit, cantilever_limit),
         evidence=[report],

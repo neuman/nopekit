@@ -14,7 +14,11 @@ resolved (``pass``, ``verified``), 1 unresolved but not stopping ``check``
 verdict that errored (``errored``), was refused (``unqualified``), skipped
 (``skipped``) or failed (``failed``); a covering gate never run (``unrun``) or
 invalidated (``invalidated``); an assumption's owner (``no-owner``,
-``owner-unattributed``, ``no-reason``). Exit codes may go 0 -> 1, never 1 -> 0; a
+``owner-unattributed``, ``no-reason``); from P2.4, a covering pass outside its
+evaluator's operating context (``outside-context``, or ``fallback`` — rank 1 —
+where an owned fallback carries it) and a covering pass whose value settles the
+claim's quantity, in its units, and misses its acceptance condition
+(``acceptance``, re-typed here: ``_misses``). Exit codes may go 0 -> 1, never 1 -> 0; a
 BLOCKING list may only grow. Every move is printed with its cause — the list the
 phase commit carries. The rule is written here AND in
 ``test_status_table.StatusesMoveOnlyTowardUnresolved``, never shared: an oracle that
@@ -33,7 +37,9 @@ precisely so this comparison stays exact.
 its own fresh copy of every project: the bracket at thickness 7.0 (C1 fails on
 purpose) and at 8.0 (it passes), and each of the seven bundled pack baselines
 wrapped as a **legacy** project — the layout the old spine reads natively and the
-new one reads or migrates, so the same bytes go to both.
+new one reads or migrates, so the same bytes go to both — save the bracket's
+evaluators and controls, which each spine takes from its own tree, as it takes
+its bundled packs (``BRACKET_CODE``, P2.4).
 
 **Per project and per spine:** ``check --tier 3 --json``, then ``status --json``.
 Compared:
@@ -85,6 +91,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -150,6 +157,7 @@ class Side(NamedTuple):
     seconds: float
     causes: dict = {}    # claim id -> cause, from `status --json` `statuses` (P2.1 on)
     never: tuple = ()    # gates `status --json` reads never run, with no refusal
+    acceptances: dict = {}  # claim id -> its acceptance record, as swept (P2.4)
 
 
 class Difference(NamedTuple):
@@ -206,9 +214,45 @@ def _json(proc: Any, what: str) -> dict:
     return data
 
 
+#: The bracket's directories that call the spine's API — its evaluators and
+#: their controls — taken from the swept spine's own tree (P2.4). What slipped
+#: through: P2.4's bracket reads its goalpost (`ctx.acceptance`) and names each
+#: comparator (`Verdict(comparator=…)`), so the old spine, handed this
+#: checkout's bracket, errored on every evaluator — C2, C3, C4 "blocked ->
+#: pass", all of it the old spine crashing on code it never had. A bundled pack
+#: already travels with its spine; the bracket's code now does too. The design
+#: (`model/`) and the records stay the same bytes on both sides.
+#: *Rejected:* the base tree's whole bracket (its claims would differ from the
+#: new side's, and R-8 compares one project's statuses); skipping the bracket
+#: (the corpus's one project with a failing claim).
+BRACKET_CODE = ("gates", "selftest")
+
+
+def _own_bracket_code(spine_src: str, dest: str) -> None:
+    """Overlay ``dest``'s bracket code with the files of the spine's own tree."""
+    code = os.path.join(os.path.dirname(os.path.abspath(spine_src)), "examples", "bracket")
+    if not (os.path.isfile(os.path.join(dest, "gates", "structural.py"))
+            and os.path.isfile(os.path.join(code, "gates", "structural.py"))):
+        return
+    for part in BRACKET_CODE:
+        theirs = os.path.join(code, part)
+        for here, _dirs, files in os.walk(theirs):
+            if "__pycache__" in here.split(os.sep):
+                continue
+            for name in files:
+                if name.endswith(".pyc"):
+                    continue
+                src = os.path.join(here, name)
+                target = os.path.join(dest, part, os.path.relpath(src, theirs))
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                shutil.copy2(src, target)
+
+
 def sweep(spine_src: str, pristine: str, dest: str, *, thickness: float | None = None) -> Side:
-    """A fresh copy of ``pristine`` at ``dest``, swept by the spine at ``spine_src``."""
+    """A fresh copy of ``pristine`` at ``dest``, swept by the spine at ``spine_src``
+    — with the bracket's code from that spine's own tree (``BRACKET_CODE``)."""
     shutil.copytree(pristine, dest, symlinks=True)
+    _own_bracket_code(spine_src, dest)
     if thickness is not None:
         _projects.set_thickness(dest, thickness)
     env = {"PYTHONPATH": _pythonpath(spine_src)}
@@ -237,7 +281,7 @@ def sweep(spine_src: str, pristine: str, dest: str, *, thickness: float | None =
                 blocking={b["claim"]: b["status"] for b in checked["blocking"]},
                 status=dict(status["claims"]), stale=stale,
                 rows={row["gate"]: row for row in checked["verdicts"]}, seconds=seconds,
-                causes=causes, never=never)
+                causes=causes, never=never, acceptances=claim_acceptances(dest))
 
 
 # --------------------------------------------------------------------------- #
@@ -269,6 +313,25 @@ def claim_kinds(project: str) -> dict[str, str]:
                 with open(os.path.join(directory, name), encoding="utf-8") as fh:
                     rows.append({"id": name[:-5], **json.load(fh)})
     return {str(row["id"]): str(row.get("kind") or "measurable") for row in rows}
+
+
+def claim_acceptances(project: str) -> dict[str, dict]:
+    """``{claim id: acceptance record}`` for every claim that carries one, read
+    from the records as ``claim_kinds`` reads them (P2.4: the goalpost a
+    covering pass is compared with, ``_misses``)."""
+    ledger = os.path.join(project, ".atompipe", "ledger.json")
+    rows: list = []
+    if os.path.isfile(ledger):
+        with open(ledger, encoding="utf-8") as fh:
+            rows = list(json.load(fh).get("claims") or ())
+    else:
+        directory = os.path.join(project, "claims")
+        for name in sorted(os.listdir(directory)) if os.path.isdir(directory) else ():
+            if name.endswith(".json"):
+                with open(os.path.join(directory, name), encoding="utf-8") as fh:
+                    rows.append({"id": name[:-5], **json.load(fh)})
+    return {str(row["id"]): dict(row["acceptance"]) for row in rows
+            if isinstance(row.get("acceptance"), dict)}
 
 
 def claim_tags(project: str) -> dict[str, set]:
@@ -327,6 +390,39 @@ RANK = {"pass": 0, "verified": 0, "asserted": 1, "unverified": 1}
 #: The causes an assumption may move to (an owner nobody recorded, P2.1-D8).
 OWNER_CAUSES = ("no-owner", "owner-unattributed", "no-reason")
 
+#: GLOSSARY's comparators, typed here (never `models.Comparator`: an oracle that
+#: imports the module under test relaxes with it, P2.1-D20). P2.4.
+COMPARE = {"<=": lambda v, lo, hi: v <= lo, "<": lambda v, lo, hi: v < lo,
+           ">=": lambda v, lo, hi: v >= lo, ">": lambda v, lo, hi: v > lo,
+           "==": lambda v, lo, hi: v == lo, "!=": lambda v, lo, hi: v != lo,
+           "between": lambda v, lo, hi: lo <= v <= (lo if hi is None else hi)}
+
+
+def _real(value: Any) -> bool:
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value))
+
+
+def _words(text: Any) -> str:
+    """A quantity as P2.4 matches one: casefolded, `-` and `_` as spaces."""
+    return " ".join(str(text or "").casefold().replace("-", " ").replace("_", " ").split())
+
+
+def _misses(row: dict, acceptance: dict) -> bool:
+    """A covering pass whose value is evidence about the claim's goalpost —
+    it ``settles`` the claim's quantity, in its units — and does not meet it:
+    the fact a move to ``acceptance`` (Failing) must hold (P2.4-D9)."""
+    quantity = _words(acceptance.get("quantity"))
+    limit = acceptance.get("limit")
+    compare = COMPARE.get(str(acceptance.get("comparator") or "<="))
+    if not quantity or _words(row.get("settles")) != quantity or compare is None:
+        return False
+    if str(row.get("units") or "").strip() != str(acceptance.get("units") or "").strip():
+        return False
+    if not (_real(limit) and _real(row.get("measured"))):
+        return False
+    return not compare(float(row["measured"]), float(limit), acceptance.get("limit_hi"))
+
 
 def _held(claim: str, binds: set, kind: str, side: Side, *, stale: bool) -> set[str]:
     """The causes ``claim`` holds on ``side``: what its covering verdicts did, a
@@ -342,6 +438,12 @@ def _held(claim: str, binds: set, kind: str, side: Side, *, stale: bool) -> set[
             held.add("skipped")
         elif outcome == "fail":
             held.add("failed")
+        elif outcome == "outside-context":
+            # P2.4: a pass outside its evaluator's operating context — Gap, or
+            # Assumed where an owned fallback carries it (rank 1, never 0).
+            held.update(("outside-context", "fallback"))
+        elif outcome == "pass" and _misses(row, side.acceptances.get(claim) or {}):
+            held.add("acceptance")
         if stale and gate in side.stale:
             held.add("invalidated")
         if gate in side.never:

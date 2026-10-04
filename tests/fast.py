@@ -14,7 +14,19 @@ that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
 The budget is 90 s as ONE process on an otherwise idle machine — and P2.3 is
-OVER it, said here rather than hidden. The review of P2.3 added its laundering
+OVER it, said here rather than hidden. P2.4 paid back what it added and no
+more: 104.7 s wall (79.0 s user) for 697 tests, against 104.9 s (77.6 s user)
+for `f2d4754`'s list (660 tests) on the same machine within the same four minutes (load
+average 0.3-1.9), measured 2026-10-03 — 107.1 s wall (80.6 s user) before the
+pay-back. What P2.4 added: its in-process classes (~0.7 s: a pass held to the
+goalpost it read, the comparison in `compose`, the breach rule and its mark,
+the malformed contexts refused) and the goalpost runs in every control of a
+gate that reads one — two more known-good runs of `bracket.deflection` per
+control run, in every CLI test that runs the bracket's controls (+1.5-2 s
+spread). Moved out to pay it: test_status_table's three bracket copies of
+their own (~2.5 s; named below, with the rule each reads and where it runs in
+process). Still over 90 s, so the rule stands: the next change that touches the
+fast tier pays the rest back first. The review of P2.3 added its laundering
 paths' in-process tests (~2 s: the PACK_DIR line, a known-good-only file and tier
 read, a held known-bad pass, the words of an unusable control,
 TheCheckRunTakesTheQualifiedPath) and pack mode and JUnit to
@@ -104,7 +116,14 @@ out below are the channels that code carries:
 * a renderer's code — `report.py`, `Verdict.render`, `cmd_check`,
   `cmd_status`, `cmd_doctor`, `claim list`/`show`, `decisions.why`,
   `site.state` or the site template — -> `test_louder` is in this tier; also
-  run `test_renderers`, `test_junit`, `test_shapes` and `test_site` whole.
+  run `test_renderers`, `test_junit`, `test_shapes` and `test_site` whole;
+* a goalpost or an operating context (P2.4) — `GateContext.acceptance`,
+  `gates._held_to_acceptances`/`_held_to_context`/`context_breach`/
+  `goalpost_runs`, `verdicts._contexted` and the `acceptance:` ledger keys,
+  `claims.cross_check`/`margin` and `compose`'s rungs 1, 3 and 7, a pack's
+  `comparator=` — -> `test_goalposts` and `test_context` whole (their bracket
+  copies run through the commands are left out below), and `test_packs` for a
+  pack's.
 
 Run:  PYTHONPATH=src python3 -m tests.fast        (or: python3 -m unittest tests.fast)
 """
@@ -165,7 +184,18 @@ FAST: list[str] = [
     # over a pass beside an evaluator that is not admitted — in process, and
     # end to end on a gate refused at its first check (eight commands, the
     # time: ~2.5 s), with the ratchet of what today's readers overclaim there.
-    "test_status_table",
+    # P2.4's pay-back took this module apart (it was listed whole): its three
+    # bracket copies of their own are left to the gate (below, named).
+    "test_status_table.StatusTable",
+    "test_status_table.StatusesMoveOnlyTowardUnresolved",
+    "test_status_table.BlockingMembers",
+    "test_status_table.ReportSectionOrder",
+    "test_status_table.UnqualifiedBesideAPassIsNeverChecked",
+    "test_status_table.UnqualifiedReadsGap.test_resolve_says_a_refusal_with_no_entry",
+    "test_status_table.UnqualifiedReadsGap.test_the_refusal_checks_refuse_today",
+    "test_status_table.UnqualifiedReadsGap.test_an_unqualified_claim_never_reads_errored",
+    "test_status_table.UnqualifiedReadsGap.test_the_tallies_that_called_it_errored_or_unrun_are_caught",
+    "test_status_table.UnqualifiedReadsGap.test_a_compose_that_reads_the_mark_as_a_crash_is_caught",
     # P2.1's vocabulary and JSON: GLOSSARY §3's words from one table on every
     # channel (the louder and refused worlds shared with the two modules above,
     # one process; a bracket, an empty project and an unevaluated one of its
@@ -370,6 +400,41 @@ FAST: list[str] = [
     "test_prerequisites.PlanIsStable.test_needs_order_is_dfs_postorder",
     "test_prerequisites.PlanIsStable.test_a_plan_that_does_not_expand_is_caught",
 
+    # -- P2.4: goalposts, the comparison, operating contexts (4, 7, 9) ----- #
+    # In process, under a second together (measured 2026-10-03: 0.7 s): a pass
+    # held to the goalpost it read (run_gate); a value outside its claim's
+    # condition never Checked (compose, no registry); a goalpost edit
+    # invalidating exactly the gate that read it (a bracket copy resolved in
+    # process) and no limit left in a bracket gate; a goalpost never a key (the
+    # limit-keyed and presence-keyed planted gates); the operating context's
+    # breach rule, its mark, a guard outside it, a key never read, a fail never
+    # laundered, a mutation counting wherever it lands. The bracket copies run
+    # through the commands are left to the gate (below).
+    "test_goalposts.APassMustMeetTheAcceptanceItRead",
+    "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked.test_a_pass_outside_the_claims_condition_reads_failing",
+    "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked.test_what_is_not_compared_and_what_is",
+    "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked.test_a_stale_pass_counts_and_an_unqualified_one_never",
+    "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked.test_a_pass_outside_its_operating_context_is_not_compared",
+    "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked.test_no_registry_is_needed",
+    "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked.test_a_composition_that_skips_the_comparison_reads_checked",
+    "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked.test_the_explaining_verdict_is_the_one_compared",
+    "test_goalposts.TheGoalpostLivesInClaims.test_no_limit_lives_in_a_bracket_gate_and_deflection_reads_c1",
+    "test_goalposts.TheGoalpostLivesInClaims.test_only_a_limit_edit_invalidates_and_only_the_gate_that_reads_it",
+    "test_goalposts.AGoalpostIsNeverAKey",
+    "test_goalposts.Margins",
+    "test_goalposts.AClaimReadIsTheWholeRecord",
+    "test_context.OutsideTheContextAPassDoesNotCount.test_the_composition_reads_gap",
+    "test_context.OutsideTheContextAPassDoesNotCount.test_the_breach_rule",
+    "test_context.OutsideTheContextAPassDoesNotCount.test_the_mark_is_on_passes_alone_and_idempotent",
+    "test_context.OutsideTheContextAPassDoesNotCount.test_a_declared_key_its_run_never_reads_is_an_error",
+    "test_context.OutsideTheContextAPassDoesNotCount.test_a_guard_outside_its_context_establishes_nothing",
+    "test_context.AFailOutsideStillCounts.test_the_mark_never_launders_a_fail",
+    "test_context.KnownGoodOutsideIsUnqualified.test_the_judge_reads_known_good_outside",
+    "test_context.AMutationPassingOutsideStillCounts",
+    "test_context.AnOwnedFallbackReadsAssumed",
+    "test_context.MalformedContextsAreRefused",
+    "test_context.NoContextMovesNothing",
+
     # -- invariant 8: records are the source, the index an output --------- #
     # The whole class, the index-agrees test among it: a hand-edited index
     # loses, every record change reaches it, and every command run after a
@@ -501,10 +566,44 @@ LEFT_FOR_THE_GATE: list[str] = [
     "test_records.NoCommandWritesARecord.test_no_command_writes_a_record_on_a_legacy_project",
     "test_records.NoCommandWritesARecord.test_check_on_a_legacy_project_writes_only_the_migration",
     "test_records.NoCommandWritesARecord.test_a_shim_on_a_legacy_project_writes_the_migration_and_its_record",
+    # P2.4's channels on bracket copies and planted projects, through the
+    # commands (~1-3 s each): a goalpost moved and tightened (and its coupled
+    # and whole-record violators), the control entry unmoved, every channel
+    # Failing on C3 tightened, every channel Gap outside a context and Checked
+    # with it removed, a model that does not load, a fail outside invalidated,
+    # a known-good outside the context. The rule each holds is held in process
+    # above; what these add is each command's rendering of it, which is
+    # renderer code: an iteration touching `report.py`, `cli.py` or `site.py`
+    # runs test_goalposts and test_context whole (module docstring).
+    "test_goalposts.TheGoalpostLivesInClaims.test_a_relaxed_goalpost_reads_checked_and_runs_no_control",
+    "test_goalposts.TheGoalpostLivesInClaims.test_a_tightened_goalpost_fails_and_stays_qualified",
+    "test_goalposts.TheGoalpostLivesInClaims.test_the_control_entry_does_not_move_with_the_goalpost",
+    "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked.test_every_channel_reads_failing_on_the_bracket",
+    "test_context.OutsideTheContextAPassDoesNotCount.test_every_channel_reads_gap_and_without_the_context_checked",
+    "test_context.OutsideTheContextAPassDoesNotCount.test_a_model_that_does_not_load_reads_stale",
+    "test_context.AFailOutsideStillCounts.test_a_fail_outside_is_failing_and_stays_so_when_invalidated",
+    "test_context.KnownGoodOutsideIsUnqualified.test_a_known_good_outside_is_unqualified_and_inside_qualified",
+    # Invariant 5 (P2.4, C2): every bundled control under host claims at 1e9,
+    # each selftest run twice (~8 s, as its sibling with an empty host). A
+    # characterization — green before P2.4 — of a seal pack fixtures already
+    # keep; an iteration touching a pack's fixtures or `GateContext.acceptance`
+    # runs test_packs whole (module docstring).
+    "test_packs.ControlsAreSealed.test_host_claims_never_reach_a_pack_control",
 ]
 
 # Left out, carrying no invariant class; seconds as measured with eight modules
 # running at once. The full suite runs every one of them before every commit.
+#   P2.4's pay-back (one process, idle machine, 2026-10-03): test_status_table's
+#   three bracket copies of their own — UnqualifiedReadsGap's
+#   test_a_refusal_outlives_a_model_edit 1.2 (rung 4 through a model edit and a
+#   crashed control), KnownBadShownIsAGap 0.7 (known-bad shown reads Gap, the
+#   bracket with its known-good context renamed away) and
+#   UndemonstratedReadsStale 0.6 (a control's note edited reads Stale, never
+#   Gap). The composition each reads is StatusTable's and
+#   UnqualifiedBesideAPassIsNeverChecked's, run here in process; what they add
+#   is one command's reading on a bracket, which the iteration that touches the
+#   resolver or the sweep runs whole (module docstring: test_admission's
+#   neighbours) and the full suite runs always.
 #   test_determinism 97 (whole checks rerun and compared byte for byte) and
 #   test_fresh_clone 47 (the fresh-clone transcript replayed): end-to-end
 #   replays of what the tests above hold piece by piece.

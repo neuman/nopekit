@@ -249,7 +249,7 @@ def drag(ctx: GateContext) -> Verdict:
         gate="fluid.drag",
         passed=force <= float(budget),
         measured=round(force, 4),
-        limit=round(float(budget), 4),
+        limit=round(float(budget), 4), comparator="<=",
         units="N",
         detail=f"drag {force:.2f} N at {v:.2f} m/s vs {float(budget):.2f} N budget "
                f"(Cd {cd:.2f}, A {area:.4f} m2, rho {rho:.0f}); Re {eng(re)} "
@@ -410,7 +410,7 @@ def pipe_pressure_drop(ctx: GateContext) -> Verdict:
         gate="fluid.pipe_pressure_drop",
         passed=dp <= float(budget),
         measured=round(dp, 3),
-        limit=round(float(budget), 3),
+        limit=round(float(budget), 3), comparator="<=",
         units="Pa",
         detail=f"dp {dp / 1000:.2f} kPa = major {dp_major / 1000:.2f} + minor "
                f"{dp_minor / 1000:.2f}, vs {float(budget) / 1000:.2f} kPa budget"
@@ -486,6 +486,7 @@ def flow_regime(ctx: GateContext) -> Verdict:
     notes: list[str] = []
     measured: float | None = None
     limit: float | None = None
+    side = ""
     #: What `measured` currently is. Three different quantities can be the thing
     #: that failed here, and a verdict that reported a relative roughness under
     #: the label "Re" would be a unit lie in the guard gate of all places.
@@ -503,7 +504,9 @@ def flow_regime(ctx: GateContext) -> Verdict:
             # a guard that disagreed with the name it prints at one exact value is a
             # bug report waiting to happen.
             if RE_LAMINAR_MAX <= re_i < RE_TURBULENT_MIN:
-                limit = RE_TURBULENT_MIN
+                # the edge offended is the turbulent floor, from below: clearing
+                # it is ">=" (P2.4-D5 — each failing branch names its side)
+                limit, side = RE_TURBULENT_MIN, ">="
                 failures.append(
                     f"internal Re {eng(re_i)} is in the {RE_LAMINAR_MAX:.0f}-"
                     f"{RE_TURBULENT_MIN:.0f} transition gap where neither 64/Re nor "
@@ -520,6 +523,7 @@ def flow_regime(ctx: GateContext) -> Verdict:
                 rel = eps / d
                 if rel > REL_ROUGHNESS_MAX:
                     limit, measured, units = REL_ROUGHNESS_MAX, rel, "e/D"
+                    side = "<="
                     failures.append(
                         f"relative roughness e/D {rel:.2e} is past the {REL_ROUGHNESS_MAX} "
                         f"ceiling of the Moody chart and of Colebrook-White ({eps:.3e} m "
@@ -530,6 +534,7 @@ def flow_regime(ctx: GateContext) -> Verdict:
                     f_t, law, _trace = friction_factor(re_i, rel)
                     if not (F_TURBULENT_MIN <= f_t <= F_TURBULENT_MAX):
                         limit = F_TURBULENT_MAX if f_t > F_TURBULENT_MAX else F_TURBULENT_MIN
+                        side = "<=" if f_t > F_TURBULENT_MAX else ">="
                         measured, units = f_t, "Darcy f"
                         failures.append(
                             f"turbulent friction factor {f_t:.4f} ({law}) is outside the "
@@ -552,6 +557,7 @@ def flow_regime(ctx: GateContext) -> Verdict:
             cd, re_lo, re_hi, _ref, _note = DRAG_TABLE[shape]
             if not (re_lo <= re_e <= re_hi):
                 limit = re_hi if re_e > re_hi else re_lo
+                side = "<=" if re_e > re_hi else ">="
                 failures.append(
                     f"external Re {eng(re_e)} is outside the Re {eng(re_lo)}-{eng(re_hi)} "
                     f"band that Cd {cd} for {shape!r} was measured over")
@@ -580,6 +586,9 @@ def flow_regime(ctx: GateContext) -> Verdict:
         # applies the usual measured <= limit convention. On a FAIL the limit is
         # the edge that was actually offended, which is the number to act on.
         limit=round(float(limit), 4) if (limit is not None and failures) else None,
+        # Which side of that edge passes (P2.4-D5): set beside the limit in each
+        # failing branch, and nothing on a pass, which reports no limit.
+        comparator=side if (limit is not None and failures) else "",
         units=units,
         detail=(("REGIME INVALID: " if failures else "regimes valid: ") + body
                 + (f" | also {'; '.join(notes)}" if failures and notes else "")

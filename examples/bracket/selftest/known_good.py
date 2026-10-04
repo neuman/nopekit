@@ -49,6 +49,20 @@ two copies would pass for that reason alone (packs:H4). A path-salted name is on
 module per file, content-keyed, and — loaded while the spine records a fixture —
 part of that fixture's recorded code.
 
+Why `CLAIMS` (P2.4). `bracket.deflection` reads its goalpost from C1
+(`ctx.acceptance`), and a control reads the goalpost the design was calibrated
+against — this file's, never the live `claims/C1.json`. Measured before it
+landed: a known-good design handed the LIVE claim read `known-good fail` the
+moment C1 was tightened to 0.4 (0.469 > 0.4), where 0.700 > 0.4 is plain
+Failing — moving a goalpost changed a control's severity, invariant 5's failure
+for a project gate; and one handed no claim errored on every control. Moving
+the live C1 to 0.75 re-runs `bracket.deflection` against it and no control. The
+spine holds the two to one shape — the claim, its quantity, comparator and units
+— and lets only the limit differ, after moving this C1's limit both ways and
+finding the gate's value unmoved (`gates.goalpost_runs`). *Rejected:* reading
+`claims/C1.json` here (the coupling above, by a file read); a spine-supplied
+goalpost on a control (the same coupling one level down).
+
 `ctx.model` is left as it was handed. On a control the spine hands `context` no model,
 no params, an empty ledger and no `extra` — only where the run lives — so nothing here
 can take the live design by keeping a field (admission review, round 1: a `context`
@@ -57,11 +71,12 @@ admitted, unkeyed, once the design passed). No bracket gate reads `ctx.model`.
 """
 from __future__ import annotations
 
+import copy
 import dataclasses
 import os
 
 from atompipe.modelio import flat_params, load_path
-from atompipe.models import Ledger
+from atompipe.models import Claim, Ledger
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -91,6 +106,20 @@ CONFIG: dict = {
 }
 
 
+#: The claims this design was calibrated against, as claim records: C1's goalpost,
+#: which `bracket.deflection` reads. Its limit is the one the design passes
+#: (0.469 <= 0.5); a live C1 moved anywhere leaves it, and every control, where
+#: it is.
+CLAIMS: list = [
+    {"id": "C1",
+     "statement": "Tip sags no more than 0.5 mm at rated load",
+     "kind": "measurable",
+     "acceptance": {"quantity": "tip deflection", "comparator": "<=", "limit": 0.5,
+                    "units": "mm"},
+     "tags": ["stiffness"]},
+]
+
+
 def params(config: dict | None = None) -> dict:
     """`config` (default: CONFIG) built and flattened exactly as `check` flattens
     a projection. A fresh dict every call, so no caller can edit the design.
@@ -112,8 +141,10 @@ def context(ctx):
 
     `root`, `out_dir`, `tier` and the rest are kept, so relative paths still
     resolve and scratch still lands where the caller said. `params`, `ledger`
-    and `extra` are replaced: the design, an empty ledger (no host claim or
-    verdict reaches a gate on a control) and an empty `extra`. Nothing of the
-    host's params is read — not even whether it has any.
+    and `extra` are replaced: the design, a ledger of the claims it states
+    (`CLAIMS` — no host claim or verdict reaches a gate on a control) and an
+    empty `extra`. Nothing of the host's params is read — not even whether it
+    has any.
     """
-    return dataclasses.replace(ctx, params=params(), ledger=Ledger(), extra={})
+    ledger = Ledger(claims=[Claim.from_dict(copy.deepcopy(row)) for row in CLAIMS])
+    return dataclasses.replace(ctx, params=params(), ledger=ledger, extra={})

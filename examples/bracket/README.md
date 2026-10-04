@@ -127,6 +127,17 @@ There is no `params/` directory: a parameter record holds only what the model ca
 (where a number came from), and every value, rationale and rejected alternative here
 lives in `model/bracket.py`.
 
+## Move a goalpost in the claim, never in the gate
+
+C1's limit lives in `claims/C1.json`, and `bracket.deflection` reads it
+(`ctx.acceptance("C1")`). Change the limit there and `atompipe check` re-runs that
+gate alone, against the new number — no control runs, because the known-good design
+states the C1 it was calibrated against (`selftest/known_good.py`'s `CLAIMS`). C3's
+15 MPa and C4's 204 mm are numbers their evaluators also compute from the model
+(`design_stress`, `usable_bed`); each value is compared with its claim's own condition,
+and `check` prints a warning when the two limits part — set `bed_xy` to 250 and watch
+it name `bracket.bed_fit`.
+
 ## The committed cache
 
 The twelve files under `.atompipe/verdicts/` are what make a fresh clone's first

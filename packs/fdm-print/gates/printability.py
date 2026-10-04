@@ -455,7 +455,7 @@ def bed_fit(ctx: GateContext) -> Verdict:
         gate="fdm.bed_fit",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{fx:.0f}x{fy:.0f}x{fz:.0f} mm vs {usable_x:.0f}x{usable_y:.0f} usable "
                f"({bed_x:.0f}x{bed_y:.0f} bed - 2x{brim:.1f} brim) x {bed_z:.0f} Z; "
@@ -491,7 +491,7 @@ def _usable(bed_x: float, bed_y: float, brim: float):
     if usable_x <= 0 or usable_y <= 0:
         return Verdict(
             gate="fdm.bed_fit", passed=False, measured=round(brim, 2),
-            limit=round(min(bed_x, bed_y) / 2.0, 2), units="mm",
+            limit=round(min(bed_x, bed_y) / 2.0, 2), comparator="<", units="mm",
             detail=f"brim allowance {brim:.1f} mm per side consumes the whole "
                    f"{bed_x:.0f}x{bed_y:.0f} mm bed — check brim_mm",
         )
@@ -648,7 +648,7 @@ def min_wall(ctx: GateContext) -> Verdict:
         gate="fdm.min_wall",
         passed=thin >= limit,
         measured=round(thin, 3),
-        limit=round(limit, 3),
+        limit=round(limit, 3), comparator=">=",
         units="mm",
         detail=f"thinnest section {thin:.2f} mm = {perims:.1f} beads vs "
                f"{limit:.2f} mm minimum ({source})",
@@ -796,7 +796,7 @@ def layer_alignment(ctx: GateContext) -> Verdict:
             gate="fdm.layer_alignment",
             passed=phi <= ADVERSE_LAYER_ANGLE_DEG,
             measured=round(phi, 1),
-            limit=ADVERSE_LAYER_ANGLE_DEG,
+            limit=ADVERSE_LAYER_ANGLE_DEG, comparator="<=",
             units="deg from layer plane",
             detail=f"load at {phi:.0f} deg to the layer plane ({build_note}), "
                    f"knockdown {knock:.2f}x; ANGLE ONLY — no 'utilisation' in the "
@@ -809,7 +809,7 @@ def layer_alignment(ctx: GateContext) -> Verdict:
         gate="fdm.layer_alignment",
         passed=derated <= 1.0,
         measured=round(derated, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="derated utilisation",
         detail=f"load at {phi:.0f} deg to the layer plane ({build_note}): "
                f"{kind} utilisation {util:.2f} ({util_key}) / knockdown {knock:.2f} "
@@ -916,7 +916,7 @@ def print_time_est(ctx: GateContext) -> Verdict:
         gate="fdm.print_time_est",
         passed=max(time_frac, mass_frac) <= 1.0,
         measured=round(max(time_frac, mass_frac), 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="of limit",
         detail=f"ESTIMATE ~{hours:.1f} h of {limit_h:.0f} h, ~{mass_g:.0f} g of "
                f"{limit_g:.0f} g ({extruded_mm3 / 1000.0:.1f} cm^3 at {infill:.0%} "
@@ -1158,7 +1158,7 @@ def process_model_valid(ctx: GateContext) -> Verdict:
         gate="fdm.process_model_valid",
         passed=not problems,
         measured=float(len(problems)),
-        limit=0.0,
+        limit=0.0, comparator="<=",
         units="problems",
         detail=("; ".join(problems) if problems
                 else f"process model applies — {checked}"),

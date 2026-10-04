@@ -106,7 +106,7 @@ def buoyancy(ctx: GateContext) -> Verdict:
         gate="fluid.buoyancy",
         passed=fraction <= limit,
         measured=round(fraction, 4),
-        limit=round(float(limit), 4),
+        limit=round(float(limit), 4), comparator="<=",
         units="V_displaced/V_hull",
         detail=f"{verdict_word}: {h.mass:.1f} kg needs {h.v_req:.4f} m3 of the "
                f"{h.v_hull:.4f} m3 watertight volume at rho {h.rho:.0f} kg/m3 -> volume "
@@ -168,7 +168,7 @@ def freeboard(ctx: GateContext) -> Verdict:
         gate="fluid.freeboard",
         passed=fb >= limit,
         measured=round(fb, 4),
-        limit=round(limit, 4),
+        limit=round(limit, 4), comparator=">=",
         units="m",
         detail=f"freeboard {fb:.3f} m = depth {h.depth:.3f} - draft {h.draft:.3f} at "
                f"{h.mass:.1f} kg, vs {limit:.3f} m minimum [{basis}] {h.tag}".strip(),
@@ -225,7 +225,7 @@ def metacentric(ctx: GateContext) -> Verdict:
         gate="fluid.metacentric",
         passed=gm_m >= limit and gm_m > 0.0,
         measured=round(gm_m, 4),
-        limit=round(limit, 4),
+        limit=round(limit, 4), comparator=">=",
         units="m",
         detail=f"GM {gm_m:.3f} m = BM {bm:.3f} - BG {bg:.3f}, vs {limit:.3f} m "
                f"[{basis}]; positive GM is necessary NOT sufficient - it is the slope at "
@@ -314,7 +314,7 @@ def righting_arm(ctx: GateContext) -> Verdict:
         gate="fluid.righting_arm",
         passed=gz >= limit,
         measured=round(gz, 4),
-        limit=round(limit, 4),
+        limit=round(limit, 4), comparator=">=",
         units="m",
         detail=f"GZ {gz:.4f} m at {heel:.1f} deg (GM {gm_m:.3f}, BM {bm:.3f}), righting "
                f"moment {righting_moment:.0f} N.m vs demand {limit * weight:.0f} N.m; "

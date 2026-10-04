@@ -119,7 +119,27 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
   baseline and its own control on a machine with trimesh and no boolean engine, while
   availability said it could run.
 - **Read claims through `ctx.ledger.claim(id)`**; the ledger a gate gets has no
-  verdicts in it.
+  verdicts in it. **Read a goalpost through `ctx.acceptance(claim)`** — a claim id or
+  a tag — never a number in the gate: it returns the claim's acceptance condition,
+  re-runs your gate when the limit moves (and only then), and holds your pass to it — a
+  pass with no value, in other units, or at a value the condition rejects is errored.
+  Report its limit and side as yours: `limit=acc.limit, comparator=acc.comparator.value,
+  passed=acc.holds(value)`. A pack's baseline states no claims, so a pack gate that
+  reads one errors on its own control; a project gate's controls read the claims its
+  `selftest/known_good.py` states (`CLAIMS`), never the live files.
+- **Say which side of your limit passes: `comparator`.** Every verdict that reports a
+  finite `limit` sets `comparator` (`"<="`, `">="`, …, `"between"`) on that branch; a
+  branch with no one-sided reading reports no limit. The spine derives the verdict's
+  margin from it and from nothing else, and stamps `settles` on the verdict from your
+  spec — the quantity a claim's acceptance condition is compared by, so name it as a
+  claim author would. **Compare what you report**: round the value, then judge it, or
+  a FAIL reads `0.5 mm (limit 0.5 mm)`.
+- **Declare an `operating_context` where your correlation has a fitted range**
+  (`operating_context={"load_n": (0.0, 40.0)}`, `None` for an open end), on keys the
+  gate READS — every pass must read every declared key, or it is errored. Outside the
+  range a pass does not count (its claim reads Gap) and a fail still does; your
+  baseline must sit inside it. A range on an intermediate quantity the gate computes is
+  a guard gate of its own, or a range on that quantity's inputs.
 - **`os.path.isfile` is a read.** A path under the project or your pack that the gate
   asks about (`exists`, `isdir`, `getsize`, `pathlib`, a literal `glob`) is an input,
   missing or not: a named file that appears later stales the verdict. `os.stat` raises

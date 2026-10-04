@@ -547,3 +547,109 @@ def wrap_pack_baseline(pack: str, dest: str, *, legacy: bool = True,
         fh.write(json.dumps(ledger, indent=2, sort_keys=True, ensure_ascii=False,
                             allow_nan=False) + "\n")
     return dest
+
+
+# --------------------------------------------------------------------------- #
+# a planted project: a model, gates, fixtures, claims and a known-good design
+# --------------------------------------------------------------------------- #
+#: The marker a planted project carries: the records layout's
+#: ``.atompipe/project.json``, naming the model every planted project keeps at
+#: ``model/m.py``. Spelled here as a literal, never written through ``store``
+#: (the module docstring's rule: a fixture written by the spine under test moves
+#: with it).
+_PLANTED_MARKER = {"schema": 2, "name": "planted", "summary": "a planted project",
+                   "created": WRAP_CREATED, "revision": "v0.1",
+                   "model_entry": "model/m.py", "packs": [],
+                   "spine_version": WRAP_SPINE_VERSION}
+
+
+def plant_project(root: str, files: dict[str, str], *, claims: dict[str, dict],
+                  known_good_params: dict[str, Any] | None = None,
+                  known_good_claims: list[dict] | None = None) -> str:
+    """Make ``root`` a project the commands run on; return its absolute path.
+
+    ``files`` (project-relative path -> text) are its model (``model/m.py``),
+    gates and fixtures; ``claims`` (id -> record, as a claim file holds it) are
+    written one file each under ``claims/``; ``known_good_params`` and
+    ``known_good_claims``, when given, are its ``selftest/known_good.py``
+    (:func:`write_known_good`: the design stated as a literal, and the claim
+    records its controls read their goalposts from — P2.4, a control never
+    reads the live claim). P2.4's goalpost and operating-context tests plant
+    their neutral projects here, so a CLI test and an in-process one
+    (:class:`Planted`) read the same files.
+    """
+    base = os.path.abspath(root)
+    os.makedirs(os.path.join(base, ".atompipe"), exist_ok=True)
+    with open(os.path.join(base, ".atompipe", "project.json"), "w", encoding="utf-8",
+              newline="\n") as fh:
+        fh.write(json.dumps(_PLANTED_MARKER, indent=2) + "\n")
+    for rel, text in files.items():
+        target = os.path.join(base, *rel.split("/"))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text)
+    write_claims(base, claims)
+    if known_good_params is not None:
+        write_known_good(base, known_good_params, claims=known_good_claims)
+    return base
+
+
+def write_claims(root: str, claims: dict[str, dict]) -> None:
+    """``claims/<id>.json`` for each record of ``claims`` (id -> record), replaced."""
+    for cid, record in claims.items():
+        target = os.path.join(os.path.abspath(root), "claims", f"{cid}.json")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(json.dumps(record, indent=2, sort_keys=True) + "\n")
+
+
+class Planted:
+    """A planted project (:func:`plant_project`) loaded in THIS process: its
+    gates in a fresh ``Registry`` (never ``gates.REGISTRY``), its model's
+    projection, and a ledger of ``claims`` — the records, as ``Claim``\\s — that
+    a test may edit between sweeps. One instance per project: a test that edits
+    a gate's code builds a new project, since a module loaded here stays loaded."""
+
+    def __init__(self, root: str, claims: dict[str, dict], *, now: str = WRAP_CREATED) -> None:
+        from atompipe import modelio
+        from atompipe.models import Claim, Ledger
+        self.root = os.path.abspath(root)
+        self.now = now
+        self.registry = gates.Registry()
+        gates.load_project_gates(self.root, self.registry)
+        self.ledger = Ledger(claims=[Claim.from_dict({"id": cid, **record})
+                                     for cid, record in claims.items()])
+        self.projection = modelio.project(modelio.load_model(self.root, "model/m.py"))
+
+    def ctx(self) -> Any:
+        from atompipe import modelio, store
+        flat, _conflicts = modelio.flat_params(self.projection)
+        return gates.GateContext(root=self.root, ledger=self.ledger, model=None, params=flat,
+                                 out_dir=store.out_dir(self.root), tier=0, extra={})
+
+    def sweep(self, **kw: Any) -> Any:
+        from atompipe import verdicts
+        kw.setdefault("max_tier", 0)
+        kw.setdefault("now", self.now)
+        return verdicts.sweep(self.root, self.registry, self.ctx(),
+                              projection=self.projection, ledger=self.ledger, **kw)
+
+    def resolve(self) -> Any:
+        from atompipe import verdicts
+        return verdicts.resolve(self.root, self.registry, self.projection, self.ledger,
+                                now=self.now)
+
+    def composed(self, resolution: Any = None) -> dict:
+        """``{claim id: Composed}`` as every reader composes it: the resolution's
+        verdicts over the ledger, with the registry and its stale gates."""
+        import dataclasses
+        from atompipe import claims as claim_logic
+        resolution = resolution if resolution is not None else self.resolve()
+        view = dataclasses.replace(self.ledger, verdicts=list(resolution.verdicts))
+        return claim_logic.compositions(view, registry=self.registry,
+                                        stale_gates=resolution.stale_gates)
+
+    def row(self, result: Any, gate_id: str) -> Any:
+        found = [r for r in result.rows if r.verdict.gate == gate_id]
+        assert len(found) == 1, (gate_id, [r.verdict.gate for r in result.rows])
+        return found[0]

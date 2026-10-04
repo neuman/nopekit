@@ -162,27 +162,36 @@ def _status_row(status: ClaimStatus, word: str, term: str, plural: str, tag: str
 # the overclaim the P2.1 design rejected. It still never says "built from
 # them": no article binds a physical pass yet (critique: the hint reaches the
 # page's chip title).
+#
+# P2.4 widened four hints with the facts the composition gained (critique 11 of
+# its design: "every evaluator qualified and passed" no longer implied Checked):
+# a value compared with the claim's acceptance condition must meet it, and a
+# pass counts only inside its evaluator's operating context.
 _CHECKED = _status_row(
     ClaimStatus.PASS, "checked", "Checked", "checked", "ok   ",
-    "every evaluator is qualified and passed on the current inputs — checked does not "
-    "mean true")
+    "every evaluator is qualified and passed on the current inputs, inside its operating "
+    "context, and every value compared with the acceptance condition meets it — checked "
+    "does not mean true")
 _FAILING = _status_row(
     ClaimStatus.FAIL, "failing", "Failing", "failing", "FAIL ",
-    "an evaluator failed the current candidate, or a physical result failed")
+    "an evaluator failed the current candidate, a physical result failed, or an "
+    "evaluator's value does not meet the claim's acceptance condition")
 _STALE = _status_row(
     ClaimStatus.STALE, "stale", "Stale", "stale", "STALE",
     "a pass whose read set has changed since, or whose prerequisite is invalidated or "
     "unrun: nothing is checked now")
 _ASSUMED = _status_row(
     ClaimStatus.ASSERTED, "assumed", "Assumed", "assumed", "assum",
-    "accepted provisionally, with a reason and an owner — unresolved")
+    "accepted provisionally, with a reason and an owner — an assumption, or a claim carried "
+    "outside an evaluator's operating context — unresolved")
 _PENDING_BUILD = _status_row(
     ClaimStatus.UNVERIFIED, "pending build", "Pending build", "pending build", "build",
     "waits on an article: no physical result yet, or a pass no article binds to the "
     "current inputs")
 _GAP = _status_row(
     ClaimStatus.UNCLAIMED, "gap", "Gap", "gaps", "gap  ",
-    "no evaluator, none qualified, or one unqualified; or an assumption nobody owns")
+    "no evaluator, none qualified, one unqualified, or one outside its operating context; "
+    "or an assumption nobody owns")
 # Skipped's hint and the skipped chip name all three causes of a skip (S-54):
 # "skipped" had come to mean "install a tool" everywhere — the hints, and the
 # skill's "install the tool, and re-run" — while packs skip themselves for a
@@ -235,6 +244,54 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         ClaimCause.OWNED: "assumed by {owner}",
         ClaimCause.PHYSICAL_PASS: "a pass {recorded}, not bound to an article",
         ClaimCause.CHECKED: "—",
+        # P2.4: a value outside the claim's condition (D9), a pass outside its
+        # evaluator's operating context (D15), and one an owned fallback carries.
+        ClaimCause.ACCEPTANCE: "acceptance condition not met",
+        ClaimCause.OUTSIDE_CONTEXT: "outside operating context",
+        ClaimCause.FALLBACK: "assumed by {owner} outside operating context",
+    }),
+    # An evaluator's operating context (P2.4, GLOSSARY §2): the words after
+    # `outside operating context: <evaluator> : `, by the breach's kind; the
+    # declaration as `gate show` prints it; `check`'s and `status`'s tally word;
+    # and the long reason's hints — split by what the claim file already says
+    # (critique 12 of the design: an owner who had named themselves and a
+    # fallback was told to go and name them).
+    "context": MappingProxyType({
+        "outside": "{key} = {value}, qualified on {interval}",
+        "absent": "{key} absent, qualified on {interval}",
+        "not-a-number": "{key} = {value} (not a number), qualified on {interval}",
+        "unread": "{key} not read by the run that passed, qualified on {interval}",
+        "declared": "operating context: {ranges} — outside it a pass does not count; a fail "
+                    "still does",
+        "range": "{key} in {interval}",
+        "tally": "outside operating context",
+        "fallback_hint": "an owned assumption would carry it as Assumed: name its owner and a "
+                         "fallback reason in claims/{id}.json (owner, fallback) — nothing can "
+                         "record the owner yet",
+        "fallback_unattributed": "{owner} is named with a fallback in claims/{id}.json and "
+                                 "has not recorded it — nothing can record it yet",
+    }),
+    # The claim comparison and the goalposts (P2.4-D9-D13): the Failing
+    # reason's body, the checked table's columns (GLOSSARY §9: the value column
+    # is *Value*, the evaluator column *Evaluator* — critique 13 of the design:
+    # `Gate`, a Never-say, beside the word it moved), the not-compared note and
+    # the limit-disagreement warning.
+    "acceptance": MappingProxyType({
+        "reason": "{gate} : {value} against {claim}'s {condition} (its own limit {limit})",
+        "reason_no_limit": "{gate} : {value} against {claim}'s {condition}",
+        "columns": ("Claim", "Acceptance", "Value", "Evaluator", "Evidence"),
+        "no_value": "(no value compared with it)",
+        "not_compared_head": "Not compared with its claim's acceptance condition — each of "
+                             "these values is judged against its evaluator's own limit only:",
+        "not_compared_row": "- **{claim}** `{gate}` : {value} ({settles}, not {quantity})",
+        "not_compared_units": "- **{claim}** `{gate}` : {value} (in {units}, not {wanted})",
+        "limits": "{gate} : its limit {limit} is not {claim}'s acceptance condition "
+                  "({condition}) — one number in two places",
+        "warning": "warning: {line}",
+        "closing_more": "or one outside its operating context, or a value its claim's "
+                        "acceptance condition does not admit",
+        "doctor_ok": "every compared evaluator judges against its claim's own limit",
+        "doctor_warn": "{n} evaluator limit(s) part from their claim's: {list}",
     }),
     # Who entered a physical result (GLOSSARY §1, *recorded by*): named, or the
     # unattributed form. What slipped through (review of P2.1): one template for
@@ -288,6 +345,7 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "assumed": "## Assumed",
         "failing": "## Failing, stale, skipped or open",
         "reproduce": "## Reproduce",
+        "gaps_context": "### Outside an evaluator's operating context",
     }),
     # Qualification (GLOSSARY §2, P2.3-D13, D14): every word of the line, the
     # reasons a claim's Gap row gives, `gate show`'s rows, `gate selftest`'s
@@ -307,7 +365,10 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         # design (GLOSSARY §1: the current configuration is a *candidate*).
         "outcome": MappingProxyType({"pass": "pass", "fail": "fail", "errored": "errored",
                                      "skipped": "skipped", "not-run": "not run",
-                                     "live": "reads the candidate"}),
+                                     "live": "reads the candidate",
+                                     # P2.4-D19: it passed outside its own
+                                     # operating context.
+                                     "outside": "outside its operating context"}),
         # A known-bad control declared `expect="error"` that raised, as declared.
         "raised": "fail (raised, as declared)",
         "sep": " · ",
@@ -329,6 +390,8 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
         "channels": "channels differ",
         "check_channel": "known-good and known-bad via ctx.extra",
         "ledger": "check run reads another ledger",
+        # P2.4 (critique 1): the known-good value moved with a goalpost it read.
+        "goalpost": "value moves with its goalpost",
         "blocker": MappingProxyType({"two-outcomes": "two outcomes",
                                      "tier": "outcomes differ by tier",
                                      "differs": "outcome differs from its cached entry"}),
@@ -345,6 +408,10 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
             "known-good:skipped": "known-good skipped itself: {text}",
             "known-good:not-run": "known-good not run",
             "known-good:live": "known-good control reads the candidate",
+            "known-good:outside": "known-good outside its operating context",
+            "goalpost:moves": "its known-good value moves when the acceptance condition it "
+                              "reads ({text}) moves: a value is measured, never chosen by its "
+                              "goalpost",
             "channels:differ": "known-good and known-bad reach it through different channels "
                                "(ctx.extra: known-bad {{{bad}}}, known-good {{{good}}})",
             "channels:check": "its controls reach it through ctx.extra, which a check run never "
@@ -415,6 +482,8 @@ HUMAN: Mapping[str, Any] = MappingProxyType({
             "not walked", "not-finite": "not a finite number: not walked",
             "other": "not a number, a flag or a list of numbers: not walked",
             "budget_key": "the walk's budget ran out before it",
+            "goalpost": "goalpost",
+            "goalpost_row": "{key} limit -> {limit}: {outcome}, {value}",
         }),
         "selftest_summary": "{n} evaluators in {t}: {q} qualified, {u} unqualified, "
                             "{s} skipped",
@@ -668,6 +737,8 @@ def qualification_line(gate_id: str, facts: Any) -> str:
         parts.append(mutation_words(*facts.mutation, boundary=facts.boundary))
     if getattr(facts, "ledger", ()):
         parts.append(q["ledger"])
+    if getattr(facts, "goalpost", ""):
+        parts.append(q["goalpost"])
     if facts.blocker:
         kind = verdict_logic.parse_token(facts.blocker)[0]
         parts.append(q["blocker"].get(kind, kind))
@@ -685,12 +756,16 @@ def qualification_reason(token: Any, *, pruned_by: str = "") -> str:
     kind, text = verdict_logic.parse_token(token)
     if not kind:
         return ""
+    if kind == "context:outside":
+        return context_words(token)
     q = HUMAN["qualification"]
     template = q["reason"].get(kind)
     if template is None:
         return f"{kind}: {text}" if text else kind
     if kind == "channels:ledger":
         return template.format(keys=", ".join(k for k in text.split(",") if k))
+    if kind == "goalpost:moves":
+        return template.format(text=text)
     if kind.startswith("channels:"):
         bad, _sep, good = text.partition("/")
         return template.format(bad=", ".join(k for k in bad.split(",") if k),
@@ -710,8 +785,51 @@ def unqualified_text(token: Any) -> str:
     P2.3): the page rendered `v.error` and JUnit `verdict.error`, which carry
     R-2's fallback `unqualified: <token>`, so a person read
     `unqualified: qualification:not-yet|0` — the spine's token on a human
-    channel P2.3-D13 says only `HUMAN` words."""
+    channel P2.3-D13 says only `HUMAN` words. A pass outside its evaluator's
+    operating context leads with its own fact (P2.4-D22): it is no refusal of
+    the evaluator — GLOSSARY §2: *qualified* is "at its current version", and
+    outside its context the evaluator still is."""
+    if is_outside(token):
+        return f"{HUMAN['lead'][ClaimCause.OUTSIDE_CONTEXT]}: {context_words(token)}"
     return f"{HUMAN['lead'][ClaimCause.UNQUALIFIED]}: {qualification_reason(token)}"
+
+
+def is_outside(token: Any) -> bool:
+    """Whether a ``Verdict.unqualified`` token is the operating-context mark."""
+    return verdict_logic.parse_token(token)[0] == "context:outside"
+
+
+def _interval(lo: Any, hi: Any) -> str:
+    """``[a, b]``, ``[a, ∞)`` or ``(−∞, b]`` — closed where bounded."""
+    left = f"[{_num(lo)}" if lo is not None else "(−∞"
+    right = f"{_num(hi)}]" if hi is not None else "∞)"
+    return f"{left}, {right}"
+
+
+def context_words(token: Any) -> str:
+    """A ``context:outside`` token's words (``HUMAN["context"]``): `load_n = 60,
+    qualified on [0, 40]` — the key, what it holds now, and the range. ``""``
+    for any other token."""
+    from . import gates as _gates                  # not at import: report stays light
+    breach = _gates.context_of(token)
+    if breach is None:
+        return ""
+    said = HUMAN["context"]
+    template = said.get(breach.why) or said["outside"]
+    value = breach.value
+    shown = _num(value) if isinstance(value, (int, float)) and not isinstance(value, bool) \
+        else str(value)
+    return template.format(key=breach.key, value=shown,
+                           interval=_interval(breach.lo, breach.hi))
+
+
+def context_declared(context: Mapping[str, Any]) -> str:
+    """``gate show``'s row for a declared operating context: `operating context:
+    load_n in [0, 40] — outside it a pass does not count; a fail still does`."""
+    said = HUMAN["context"]
+    ranges = ", ".join(said["range"].format(key=key, interval=_interval(*context[key]))
+                       for key in sorted(context))
+    return said["declared"].format(ranges=ranges)
 
 
 def verdict_line(verdict: Verdict, qualification: Any = None) -> str:
@@ -723,6 +841,10 @@ def verdict_line(verdict: Verdict, qualification: Any = None) -> str:
     token = getattr(verdict, "unqualified", "") or ""
     if not token:
         return verdict.render()
+    if is_outside(token):
+        # Its qualification holds (its facts say qualified): what does not is
+        # this pass's inputs (P2.4-D22).
+        return f"{verdict.gate}{HUMAN['qualification']['id_sep']}{unqualified_text(token)}"
     if qualification is not None:
         return qualification_line(verdict.gate, qualification)
     q = HUMAN["qualification"]
@@ -761,6 +883,11 @@ def qualification_detail(entry: Any, spec: Any, *, facts: Any = None) -> list[st
         elif (isinstance(good, Mapping) and good.get("outcome") == "not-run") or \
                 (facts is not None and facts.known_good == "not-run"):
             row(d["known_good"], d["none"])
+    if isinstance(good, Mapping):
+        for r in good.get("goalpost") or ():
+            row(d["goalpost"], d["goalpost_row"].format(
+                key=r.get("key"), limit=_num(r.get("limit")), outcome=r.get("outcome"),
+                value=_value_words(r.get("measured"), None, r.get("units") or "") or "no value"))
     if entry is not None:
         value = _value_words(entry.measured, entry.limit, entry.units or "")
         fixture = getattr(nc, "fixture", "") if nc is not None else ""
@@ -851,6 +978,26 @@ def reason(composed: Any, ledger: Ledger, claim: Claim, *, full: bool = False,
     lead = HUMAN["lead"][cause]
     verdict = composed.verdict
     stale_reasons = stale_reasons or {}
+    if cause is ClaimCause.ACCEPTANCE and verdict is not None:
+        said = HUMAN["acceptance"]
+        unit = f" {verdict.units}" if verdict.units else ""
+        body = (said["reason"] if verdict.limit is not None else said["reason_no_limit"]).format(
+            gate=verdict.gate, value=f"{_num(verdict.measured)}{unit}", claim=claim.id,
+            condition=claim.acceptance.render(), limit=f"{_num(verdict.limit)}{unit}")
+        return f"{lead}: {body}"
+    if cause in (ClaimCause.OUTSIDE_CONTEXT, ClaimCause.FALLBACK) and verdict is not None:
+        words_ = context_words(verdict.unqualified)
+        if cause is ClaimCause.FALLBACK:
+            return f"{lead.format(owner=_one(claim.owner))}: {verdict.gate} : {words_}"
+        text = f"{lead}: {verdict.gate} : {words_}"
+        if not full:
+            return text
+        said = HUMAN["context"]
+        owner = str(getattr(claim, "owner", "") or "").strip()
+        fallback = str(getattr(claim, "fallback", "") or "").strip()
+        hint = (said["fallback_unattributed"].format(owner=_one(owner), id=claim.id)
+                if owner and fallback else said["fallback_hint"].format(id=claim.id))
+        return f"{text} — {hint}"
     if cause is ClaimCause.FAILED and verdict is not None:
         body = _verdict_body(verdict)
         text = f"{verdict.gate} : {cut_(body, 56)}" if body else f"{verdict.gate} did not pass"
@@ -1220,8 +1367,7 @@ def _unproven_for(claim_id: str, cover: dict[str, list[str]],
         if verdict is None:
             out.append((gid, lead[ClaimCause.UNRUN]))
         elif getattr(verdict, "unqualified", ""):
-            out.append((gid, f"{lead[ClaimCause.UNQUALIFIED]}: "
-                             f"{qualification_reason(verdict.unqualified)}"))
+            out.append((gid, unqualified_text(verdict.unqualified)))
         elif not verdict.ok:
             body = _verdict_body(verdict)
             head = {"error": lead[ClaimCause.ERRORED], "skipped": lead[ClaimCause.SKIPPED]
@@ -1428,7 +1574,8 @@ def _verdict_sentence(ledger: Ledger, composed: Mapping[str, Any], registry: Any
 # markdown sections
 # --------------------------------------------------------------------------- #
 def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
-                    cover: dict[str, list[str]], *, stale: bool) -> list[str]:
+                    cover: dict[str, list[str]], *, stale: bool,
+                    registry: Any = None) -> list[str]:
     """The checked table. Every row cites a gate that ran and the file it wrote.
 
     The heading starts with `SECTION_PROVEN`, never a literal: invariant 4's tests
@@ -1436,10 +1583,23 @@ def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
     that reads Checked (`pass`) on its evidence is here: one whose evaluators
     contradict the status is listed loudly in the failing section instead
     (`_disagreement`, D18).
+
+    The *Value* column (GLOSSARY §9; P2.4-D11) holds the values compared with
+    the claim's acceptance condition (`claims.cross_check`), and the detail of
+    a pass with no value; a value of another quantity or units is listed under
+    the table as not compared (`claims.not_compared`), and a guard's — a
+    prerequisite of another of the claim's evaluators — leaves the cell (its
+    evaluator is still named). What slipped through (S-46): the column read
+    `Measured`, and C2's cell held the guard's `8.57 L/h` and C4's
+    `min_wall`'s 7 mm beside its bed fit — values never compared with the
+    claim, printed as if they had been.
     """
     out = [f"{SECTION_PROVEN} {_proven_qualifier()}", ""]
     rows: list[str] = []
+    notes: list[str] = []
     checked = word(ClaimStatus.PASS)
+    said = HUMAN["acceptance"]
+    needs = {s.id: list(getattr(s, "needs", None) or ()) for s in _specs(registry)}
 
     for claim in ledger.claims:
         if composed[claim.id].status is not ClaimStatus.PASS:
@@ -1448,18 +1608,32 @@ def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
             continue
         verdicts = _ok_verdicts(ledger, claim)
         gates = ", ".join(_code(v.gate) for v in verdicts)
+        unlisted = dict(claim_logic.not_compared(claim, verdicts, needs))
         measured_bits = []
         evidence: list[str] = []
         for v in verdicts:
-            if v.measured is not None:
+            compared = claim_logic.cross_check(claim, v).state in ("holds", "fails")
+            if compared:
                 measured_bits.append(f"{_num(v.measured)} {v.units}".strip())
-            elif v.detail:
+            elif v.measured is None and v.detail:
                 # A boolean gate ("watertight: yes") has no number, and an
-                # empty Measured cell reads as missing evidence rather than as
+                # empty value cell reads as missing evidence rather than as
                 # a pass with no scalar. Show the gate's one-line detail.
                 measured_bits.append(_trunc(v.detail, 56))
+            if v.gate in unlisted:
+                value = f"{_num(v.measured)} {v.units}".strip()
+                if unlisted[v.gate] == "units":
+                    notes.append(said["not_compared_units"].format(
+                        claim=_cell(claim.id), gate=v.gate, value=value,
+                        units=v.units or "no units",
+                        wanted=claim.acceptance.units or "no units"))
+                else:
+                    notes.append(said["not_compared_row"].format(
+                        claim=_cell(claim.id), gate=v.gate, value=value,
+                        settles=getattr(v, "settles", "") or "another quantity",
+                        quantity=claim.acceptance.quantity or "its quantity"))
             evidence.extend(v.evidence or [])
-        measured = "; ".join(measured_bits) or "(no value reported)"
+        measured = "; ".join(measured_bits) or said["no_value"]
 
         if evidence:
             shown = evidence[:3]
@@ -1478,18 +1652,25 @@ def _section_proven(ledger: Ledger, composed: Mapping[str, Any],
         ]) + " |")
 
     if rows:
-        out.append("| Claim | Acceptance | Measured | Gate | Evidence |")
-        out.append("|---|---|---|---|---|")
+        columns = said["columns"]
+        out.append("| " + " | ".join(columns) + " |")
+        out.append("|" + "---|" * len(columns))
         out.extend(rows)
         out.append("")
+        if notes:
+            out.append(said["not_compared_head"])
+            out.extend(notes)
+            out.append("")
         lead = HUMAN["lead"]
         out.append(f"Every row above is {checked}: each of its evaluators ran and passed "
-                   f"against the inputs, code and controls it has now. A "
+                   f"against the inputs, code and controls it has now, inside its "
+                   f"operating context, and every value compared with the claim's "
+                   f"acceptance condition meets it. A "
                    f"{lead[ClaimCause.SKIPPED]}, {lead[ClaimCause.ERRORED]}, "
                    f"{lead[ClaimCause.UNQUALIFIED]}, {lead[ClaimCause.INVALIDATED]} or "
-                   f"{lead[ClaimCause.UNRUN]} evaluator puts its claim in another "
-                   f"section with the reason, never here — and {checked} does not mean "
-                   f"true.")
+                   f"{lead[ClaimCause.UNRUN]} evaluator — {said['closing_more']} — puts its "
+                   f"claim in another section with the reason, never here. And {checked} "
+                   f"does not mean true.")
     elif not ledger.claims:
         out.append("Nothing — there are no claims.")
     elif stale:
@@ -1612,6 +1793,7 @@ def _section_gaps(ledger: Ledger, composed: Mapping[str, Any], registry: Any, *,
     unowned = (by_cause[ClaimCause.NO_OWNER] + by_cause[ClaimCause.OWNER_UNATTRIBUTED]
                + by_cause[ClaimCause.NO_REASON])
     no_evaluator = by_cause[ClaimCause.NO_EVALUATOR]
+    outside = by_cause[ClaimCause.OUTSIDE_CONTEXT]
 
     if not gaps and not needs:
         if not ledger.claims:
@@ -1693,6 +1875,21 @@ def _section_gaps(ledger: Ledger, composed: Mapping[str, Any], registry: Any, *,
                    f"is a {word(gap)} until it qualifies, whatever passed beside it.")
         out.append("")
         for claim in unqualified:
+            why = reason(composed[claim.id], ledger, claim, full=True,
+                         stale_reasons=stale_reasons)
+            out.append(f"- **{claim.id}** {_claim_text(claim)} — {why}")
+        out.append("")
+
+    if outside:
+        # P2.4 (P2.1-D19: every unresolved claim in exactly one section): a pass
+        # outside its evaluator's operating context counts nowhere.
+        out.append(HUMAN["heading"]["gaps_context"])
+        out.append("")
+        out.append(f"An evaluator was qualified on a range of its inputs; outside it a pass "
+                   f"does not count, so its claim is a {word(gap)} — and a fail outside it "
+                   f"still does.")
+        out.append("")
+        for claim in outside:
             why = reason(composed[claim.id], ledger, claim, full=True,
                          stale_reasons=stale_reasons)
             out.append(f"- **{claim.id}** {_claim_text(claim)} — {why}")
@@ -1941,7 +2138,9 @@ def _section_failing(ledger: Ledger, composed: Mapping[str, Any],
         out.append("### Gates with no verdict that counts")
         out.append("")
         for v in sorted(loose, key=_bullet_rank):
-            why = (HUMAN["lead"][ClaimCause.UNQUALIFIED] if getattr(v, "unqualified", "")
+            token = getattr(v, "unqualified", "") or ""
+            why = ((HUMAN["context"]["tally"] if is_outside(token)
+                    else HUMAN["lead"][ClaimCause.UNQUALIFIED]) if token
                    else HUMAN["outcome"].get(v.outcome, v.outcome))
             out.append(f"- `{verdict_line(v)}`  *({why}; claims: "
                        f"{', '.join(v.claims) or 'none linked'})*")
@@ -2128,7 +2327,7 @@ def render_markdown(ledger: Ledger, registry: Any, *, stale: bool = False,
         out.append(f"> {_trunc(ledger.meta.summary, 400)}")
         out.append("")
 
-    out += _section_proven(ledger, composed, cover, stale=stale)
+    out += _section_proven(ledger, composed, cover, stale=stale, registry=registry)
     out += _section_pending_build(ledger, composed)
     out += _section_gaps(ledger, composed, registry, stale_reasons=stale_reasons)
     out += _section_assumed(ledger, composed, params, model_error)
@@ -2226,7 +2425,9 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
     # `skipped` and `error` separately, so a verdict that said both was counted
     # as a skip AND a crash. `unrun` is the number that matters and the one
     # nothing else prints: gates that exist, cost nothing to run, and did not.
-    refused = [v for v in ledger.verdicts if getattr(v, "unqualified", "")]
+    marked = [v for v in ledger.verdicts if getattr(v, "unqualified", "")]
+    refused = [v for v in marked if not is_outside(v.unqualified)]
+    outside = [v for v in marked if is_outside(v.unqualified)]
     counted = [v for v in ledger.verdicts if not getattr(v, "unqualified", "")]
     ran = [v for v in counted if v.outcome in ("pass", "fail")]
     skipped = [v for v in counted if v.outcome == "skipped"]
@@ -2242,6 +2443,8 @@ def render_terminal(ledger: Ledger, registry: Any, *, stale: bool = False,
         gate_bits.append(f"{len(errored)} {HUMAN['outcome']['error']}")
     if refused:
         gate_bits.append(f"{len(refused)} {HUMAN['lead'][ClaimCause.UNQUALIFIED]}")
+    if outside:
+        gate_bits.append(f"{len(outside)} {HUMAN['context']['tally']}")
     if unrun:
         shown = ", ".join(s.id for s in unrun[:3])
         extra = f", +{len(unrun) - 3}" if len(unrun) > 3 else ""
@@ -2439,7 +2642,8 @@ def _junit_outcome(case: Any, verdict: Verdict) -> None:
         _xml_text(child, _junit_measured(verdict))
     elif outcome == "error":
         token = getattr(verdict, "unqualified", "") or ""
-        child = _xml_sub(case, "error", type="not-admitted" if token else "error",
+        kind = ("outside-context" if is_outside(token) else "not-admitted") if token else "error"
+        child = _xml_sub(case, "error", type=kind,
                          message=unqualified_text(token) if token else str(verdict.error))
         _xml_text(child, verdict.detail)
     else:

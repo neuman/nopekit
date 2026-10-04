@@ -122,6 +122,14 @@ def _known_good(root: str):
     return modelio.load_path(os.path.join(root, "selftest", "known_good.py"))
 
 
+def _own_claims(known_good) -> list:
+    """The claims the known-good design carries for its gates to read (P2.4):
+    built from its own `CLAIMS` records, so a host's claim is never among them."""
+    claims = [Claim.from_dict(dict(row)) for row in known_good.CLAIMS]
+    assert claims and "C99" not in [c.id for c in claims], "a vacuous seal check"
+    return claims
+
+
 def _model(root: str):
     return modelio.load_path(os.path.join(root, "model", "bracket.py"))
 
@@ -196,7 +204,14 @@ class KnownGoodPassesEverything(_BracketCase):
         for name, host in self.hosts.items():
             ctx = known_good.context(host)
             self.assertEqual(ctx.root, self.root)
-            self.assertEqual(ctx.ledger.claims, [], f"{name}: the host's ledger leaked")
+            # P2.4 (R-6): the ledger was empty; it is now the design's OWN claim
+            # records (C1's goalpost, read by deflection) — the same under every
+            # host, and never one of the host's claims or verdicts.
+            self.assertEqual(ctx.ledger.claims, _own_claims(known_good),
+                             f"{name}: the ledger is not the design's own claims")
+            self.assertNotIn("C99", [c.id for c in ctx.ledger.claims],
+                             f"{name}: the host's ledger leaked")
+            self.assertEqual(ctx.ledger.verdicts, [], f"{name}: the host's verdicts leaked")
             self.assertEqual(ctx.extra, {}, f"{name}: the host's extra leaked")
             for gate_id in BRACKET_GATES:
                 verdict = gates.run_gate(*self.pair(gate_id), ctx)
@@ -265,7 +280,12 @@ class BracketControlsAreSealed(_BracketCase):
                              f"{gate_id}'s control read its host: {sorted(trace.host_reads)}")
             self.assertTrue(trace.params, f"{gate_id}: the trace saw no gate reads at all, "
                                           f"so the empty host-read set proves nothing")
-            self.assertEqual(control.ledger.claims, [], f"{gate_id}: host ledger in the control")
+            # P2.4 (R-6): a control's ledger is the known-good design's own
+            # claim records (was: empty) — never the host's C99 or its verdicts.
+            self.assertEqual(control.ledger.claims, _own_claims(_known_good(self.root)),
+                             f"{gate_id}: host ledger in the control")
+            self.assertEqual(control.ledger.verdicts, [],
+                             f"{gate_id}: host verdicts in the control")
             self.assertEqual(control.extra, {}, f"{gate_id}: host extra in the control")
             self.assertEqual(control.root, self.root)
 

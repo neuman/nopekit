@@ -238,6 +238,74 @@ evaluator with no new code. P3 — `init` scaffolds a `known_good.py` stub that
 The rename pass — `Admission` → qualification, `NegativeControl` → `KnownBadControl`
 with `good` → `known_good` beside it, record values to `qualified`/`known-bad-shown`.
 
+#### P2.4's decision rows (`P2.4-Dn`)
+
+Checkpoint 2.4 as it landed (PLAN-v0.14 §1.4, §1.5 rows *Operating context*,
+*Qualification*; §3 row P2; GLOSSARY §1-§3, §9). Where it disagrees with checkpoint
+2.4's text below, these rows win: the C8 split is rejected (D11), coverage S is
+deferred (D24), and `between` is accepted on a verdict. Rows the design's critique
+moved say so (the critique's numbers in parentheses).
+
+| Id | Decision | Rejected |
+|---|---|---|
+| D1 | `GateContext.acceptance(claim)` returns a copy of the acceptance condition of the claim an exact id names, else the claims carrying it as a tag; records `acceptance:<key>` (digest of the sorted `[id, condition]` pairs, membership included) and **`acceptance-shape:<key>`** (the same, limits left out — **moved by the critique (1)**); raises — the gate errors — on no claim, two conditions, or no limit, the read recorded first. `verdicts.acceptance_of` is the one rule | the whole claim record as the read (a statement edit re-keys; every goalpost edit read `channels:ledger`, measured); a pointer from a claim into the projection; the spine deciding the pass from the condition |
+| D2 | controls read their own goalposts: a project's `selftest/known_good.py` states `CLAIMS` and hands them; a pack's baseline holds none (a pack gate reading one errors on its control) | the live claim on controls (measured: C1 at 0.4 read `known-good fail`, Gap where 0.70 > 0.4 is Failing); a spine-supplied goalpost |
+| D3 | **moved by the critique (1):** `_ledger_unseen` exempts `acceptance:` keys only — the limit — while `acceptance-shape:` stays under `channels:ledger`, and the exemption stands on the goalpost runs (D25) | every acceptance read exempt (the design: a gate keyed to its calibrated goalpost, or to whether its claim exists, read Checked); exempting every ledger read |
+| D4 | a pass that read an acceptance condition needs a finite value, in its units (exact after strip), that it admits — else **errored** (`run_gate`, `_held_to_acceptances`); a fail needs nothing | not counting it (a malformed answer is crash-class); Failing |
+| D5 | `Verdict.comparator` (after `blocked_kind`), the gate's own: `<= < >= > == !=` and — **moved by the critique (9)** — `between` (margin `band`); anything else on a pass or fail is errored by `_stamp`. Every bundled gate with a finite limit sets it (R-4: 117 limit-bearing verdicts inspected, zero without; one planted hit) | refusing `between` (a modelica band binding would error where it read Checked); `Verdict.limit_hi` now (no consumer before P5's bullet bar); `GateSpec.comparator`; inferring the side |
+| D6 | `Verdict.settles` stamped from the spec (`_stamp`, `blocked`, `_as_spec`, `_synthesized`), so the comparison is a pure function of `(claim, verdict)` | a `{gate: settles}` map to `compose` (a registry-less reader would skip the comparison) |
+| D7 | the entry's verdict block gains `comparator` and `settles`; the reader accepts the P2.3 block too (it reads Stale for the spine, never "ignored"); `out8` unchanged | exact shape only; `SCHEMA = 2` |
+| D8 | `claims.margin(verdict) -> Margin(fraction, why)` by the verdict's own comparator and limit; carried on every JSON verdict row — **moved by the critique (15):** `margin_why` on every row without a margin, `no-value` included, and on every `state.json` row | the margin in a spine module; words now (P3, P5); omitting `margin_why` |
+| D9 | the comparison (`cross_check`): normalised `settles` = normalised quantity, units equal (case kept), both finite → `holds`/`fails`; a counted pass that `fails` → **Failing**, cause `acceptance`, after a fail — **moved by the critique (7):** a pass outside its operating context is never compared (outside, a pass does not count) | comparing outside passes (a reader would change the design over a number the evaluator was never qualified to produce); Gap or errored for a miss; every covering verdict regardless of quantity |
+| D10 | not compared is listed, never a status: `claims.not_compared`, a prerequisite of ANY covering evaluator excluded (**found by the build**: a guard beside a failing analysis was listed); `summarise()["not_compared"]` over every claim, and — **moved by the critique (10)** — `state.json` claim rows carry `compared` and `not_compared`, and the page headlines `compared[0]` | blocking on it; the page choosing its headline (it showed the guard's L/h on failing C1) |
+| D11 | the checked table's columns from `HUMAN`: *Value* and — **moved by the critique (13)** — *Evaluator*; a guard's value leaves the cell, another quantity's goes to the note | the C8 split (moves every pinned count); keeping "Measured" or "Gate" (Never-says) |
+| D12 | bracket data: C2 `bending stress <= 1.0 utilisation`; C3, C4 rationales naming where their limits come from | `settles="utilisation"` on the gate |
+| D13 | limit disagreement: a compared pair whose finite limits part (`isclose`, rel 1e-9) → a `check` warning line on stdout, a `doctor` `limits` warn row, `check --json` `limit_disagreements`; never a status | a status; stderr |
+| D14 | `GateSpec.operating_context` (LAST), `@gate(operating_context=…)`; refused at registration when malformed (R-10); deep-copied; not in rho; **moved by the critique (3):** every pass must READ each declared key (`run_gate` errors one that never did: the context is part of the read set) | categorical contexts; a context derived from the walk; `inf` bounds; a key the gate never reads (a model that does not load left it Fresh and counted while `check` read Gap) |
+| D15 | judged on current values, over passes, by the spine (`gates.context_breach`, `verdicts._contexted` in `_resolve_gate` and the sweep's `before_hook`) — **moved by the critique (4):** on the spellings the run READ (an entry's reads, the run's trace), every one holding a value judged; a pass outside → the `context:outside\|<json>` token of `Verdict.unqualified` | judging recorded values; the gate's default-scope spelling (a scope override read bare 60 while 20 was judged); a new Verdict field; a set to `compose` |
+| D16 | the mark never launders a fail: `Verdict.__post_init__` drops it on anything that is not a pass (its own R-2 error aside) | trusting the producer |
+| D17 | `compose`: rung 1 gains `acceptance`; rung 3 unqualified first, then `outside-context` unless an owned fallback carries it (then rung 7 `fallback`); `OUTCOME_ORDER` gains `outside-context`; — **moved by the critique (5):** `explaining_verdict` ranks a pass that misses the comparison right after a fail, so `last_check.json`'s `worst` names it | Assumed at rung 3; outside-context ahead of unqualified |
+| D18 | `Claim.fallback` (LAST); owner `Claim.owner`; counts only through `owners`, bound to `assumption_reason(claim)` | `rationale` as the fallback; a pointer to an assumption claim |
+| D19 | the known-good control must lie inside the context: `good.outcome "outside"`, token `known-good:outside` | a warning; judging the known-bad control |
+| D20 | **moved by the critique (2, 8):** the walk is unchanged — a passing landing is a conclusive pass wherever it lands | filing a passing landing outside the context inconclusive (the design: a context ending short of the landing qualified a gate keyed to its own control, and narrowing a declaration by one unit turned an unqualified evaluator qualified) |
+| D21 | a guard outside its context is a negative prerequisite root of kind `unqualified` | a sixth `PrerequisiteKind` |
+| D22 | words only in `report.HUMAN` (`context`, `acceptance`, the leads, the qualification table's `outside`, `goalpost:moves`); `check`'s tally and `--json` count `outside-context` apart; `status`'s gates line too | counting it `unqualified` |
+| D23 | CLAUDE.md invariants 4, 7, 9 extended; `test_meta.INVARIANT_CLASSES` gains `APassMustMeetTheAcceptanceItRead`, `AValueOutsideTheAcceptanceIsNeverChecked` (4), `TheGoalpostLivesInClaims` (7), `OutsideTheContextAPassDoesNotCount`, `AFailOutsideStillCounts`, `KnownGoodOutsideIsUnqualified`, `AMutationPassingOutsideStillCounts`, `AGoalpostIsNeverAKey` (9) | a new invariant number |
+| D24 | coverage S deferred to P5 with M18.4, on GLOSSARY §5's definition (a property of an evaluator, not of a claim) — **moved by the critique (16):** named on the check-in batch as a P5 scope addition | landing it now |
+| D25 | **moved by the critique (1):** the goalpost runs — the known-good control re-run with each goalpost it read halved and doubled (`gates.goalpost_runs`, `GOALPOST_FACTORS`), its value and units required unmoved (`goalpost:moves\|<key>`), recorded in the control entry's `good.goalpost` and required by the strict reader | no run (the design: D4 checks only that a reported value meets the condition read, which a keyed gate arranges); the live goalpost substituted (a record per live value; a control re-keyed on every goalpost edit) |
+| D26 | `SCHEMA` stays 1; `out8` unchanged; D-05 stands | — |
+| D27 | R-8's two copies (`StatusesMoveOnlyTowardUnresolved`, `tests/oracle/r8_statuses.py --toward-unresolved`) admit P2.4's causes on the new side, each only where its fact is held: `acceptance` (rank 2) on a covering pass that settles the claim's quantity in its units and misses its condition — re-typed in the oracle (`_misses`), never imported; `outside-context` (rank 2) and `fallback` (rank 1) on a covering pass outside its context. On the corpus no claim moves | admitting a cause on any row; the oracle calling `claims.cross_check` (it would relax with the module under test, P2.1-D20) |
+| D28 | **found by the build:** a gate that passes whatever it measures now errors on its known-bad input (D4: 30 mm against the 0.5 it read), so its control is held — `known-bad:errored`, remembered, never cached (P2.3-D12) — and runs again on every check, where the known-bad PASS before P2.4 was a filed entry, reused. Louder and refused as before; one control run per check for a broken evaluator | reading a D4 error on a known-bad half as `known-bad:pass` (a text predicate on `error`, P2.1-D4's rejection); filing an errored half |
+
+**Check-in batch (P2.4):** GLOSSARY §3's Means for Checked, Failing, Gap and Assumed,
+and its composition paragraph, gain the comparison and the operating context (applied
+as additions; critique 11); §2's *operating context* has its *Code today*; §9's
+"Measured" → "Value" and "Gate" → "Evaluator" applied in the checked table. D-10
+amended: the goalpost read is the acceptance condition alone, a channel of its own
+whose LIMIT alone is exempt from `channels:ledger` on the evidence of the goalpost
+runs, and controls read the known-good design's `CLAIMS`. D-17 amended: margin carried
+on every JSON row with a `why`; `between` accepted on a verdict, its margin `band`
+(`Verdict.limit_hi` to P5 with the bullet bar, its first consumer). Old 2.4: the C8
+split rejected (D11); coverage S deferred to P5 — **a P5 scope addition** beside
+PLAN-v0.14 §3's "old 4.1-4.4; W16" — on GLOSSARY §5's per-evaluator definition; the
+critique's conclusive-mutation reading kept as GLOSSARY §2 states it (D20 rejected,
+so no definition moves). `modelica.result_claim`'s detail now words its margin as
+inside or past the limit (critique 14).
+
+**Hand-offs:** P2.5 — the signing channel produces `owners` for `fallback` as for an
+assumption (`Attribution(owner, assumption_reason(claim))`); `export` refuses a
+required claim Assumed by fallback with no new code; the track record keys a
+contradiction by the evaluator's code digest and whether its inputs were inside its
+operating context. P3 — `status --short`'s closest margin from `last_check.json`;
+`next:` for an outside context. P5 — the bullet bar from `margin`, never from
+`measured - limit`; `Verdict.limit_hi` and a band's margin; `chart.js`'s `marginText`
+judged by invariant 14's scan; coverage S. Packs — declare operating contexts on the
+inputs a correlation was fitted over (thermal convection's temperatures and length,
+fluids' Reynolds inputs) or keep the guard gates, each with provenance; a baseline's
+`claims` key so a pack gate can read `ctx.acceptance` on its controls;
+`modelica.result_claim` moving to `ctx.acceptance`. The rename pass — `rationale`
+(for an assumption) and `fallback` fold into GLOSSARY §8's `assumed: {reason, owner}`.
+
 #### Checkpoint 2.2: the refusal graph
 
 ```python

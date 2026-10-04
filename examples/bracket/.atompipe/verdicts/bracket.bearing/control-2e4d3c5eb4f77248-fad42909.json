@@ -2,21 +2,21 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.bearing",
-  "rho": "8baf926c2091453bd4aacf7137032766507f20669f58fc6ddad831b0ffbf1dc3",
-  "static": "949f373f7b4bc74128948c996ac56852b547b96b0a6263dd863d2c5809e6ba8b",
+  "rho": "2e4d3c5eb4f77248213ece61085321e5ba1297c9a35afd34d9b4d6efb80d7f87",
+  "static": "ce1ecf0f66932bea50c597ad3e57a934807c7932c7e4c9a0420f6fda68b7cd27",
   "static_parts": {
-    "spine": "327b03e5d394c749cae3c25c80227f1f72c0742db10380072aeaef1b6b452f46",
+    "spine": "71f45240af6180d5bd456f588c766edd4ab9fddf0f34afbb6b215f31b8254857",
     "code": {
-      "digest": "9d3567074829302f66938b15753722f3eca685ba93dc721b1b5a9abeb912010a",
+      "digest": "6d6ed7efaaf84b7aaeb08a5276a25bfd9cf296ad2a1c958b4fff70016259a508",
       "files": [
         "gates/structural.py"
       ]
     },
     "selftest": {
-      "digest": "93e7a7d5612e1a02659a423e8814cabf0f3a5a3000ed51605a2efe0f7517562c",
+      "digest": "d189dfd49d6e13f7aee32b7fe0b285cfd4e29c5dd8474582582af9460da0499a",
       "files": {
         "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-        "selftest/known_good.py": "8726c3c77520abcd5b143ca16306470a7db73bf912399affcf60af5ab100ed78"
+        "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
       }
     },
     "nc": {
@@ -29,11 +29,11 @@
   },
   "host": "known-good",
   "fixture": {
-    "digest": "693071eb3ecc9b9b0a7e75bc396bea21cfc1e7c56598d1057e565962ac2fb5db",
+    "digest": "3645413f71d05619f92c2a1b5e8e5385fdfbd05b0b0bcf779cb6c4871c71b220",
     "files": {
       "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
       "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-      "selftest/known_good.py": "8726c3c77520abcd5b143ca16306470a7db73bf912399affcf60af5ab100ed78"
+      "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
     }
   },
   "reads": {
@@ -120,7 +120,8 @@
     "measured": 0.17,
     "limit": 15.0,
     "units": "MPa",
-    "detail": "0.17 MPa on 88 mm^2 across 2 bolt(s), allowable 15.0 MPa"
+    "detail": "0.17 MPa on 88 mm^2 across 2 bolt(s), allowable 15.0 MPa",
+    "goalpost": []
   },
   "mutation": {
     "runs": 97,
@@ -169,5 +170,5 @@
   "measured": 26.667,
   "limit": 15.0,
   "units": "MPa",
-  "digest": "719ac953201fa0caee13f3cb181eec5d8e9107df1d4e365a0d5d570ad1ae0f4e"
+  "digest": "10cd3214c3f9344ce32154cc5b27a664cf3c59ccd7dba3abc5d9f0af048f7243"
 }

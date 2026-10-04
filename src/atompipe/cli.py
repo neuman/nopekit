@@ -784,15 +784,27 @@ def _verdict_row(verdict: Verdict, *, cached: bool | None = None, fresh: bool | 
     `executed`: a cached row replaying the cost of the run that wrote it would be
     a measurement of nothing, and a latency reader would average it in
     (cli:H12, `CostIsKept`) — the cost lives in obs.
+
+    From P2.4 every row carries its margin (D-17, P2.4-D8): `margin` —
+    `claims.margin`, the one function, to 6 significant figures — or
+    `margin_why`, why there is none (`no-value` included: critique 15 of the
+    design — a row that said nothing left the reason to the renderer). A
+    renderer draws it; none computes it. `comparator` and `settles` join the
+    drop-if-empty keys.
     """
     row = verdict.to_dict()
     for key in ("detail", "error", "evidence", "skip_reason", "units", "rho", "unqualified",
-                "blocked_by", "blocked_kind"):
+                "blocked_by", "blocked_kind", "comparator", "settles"):
         if not row.get(key):
             row.pop(key, None)
     for key in ("measured", "limit"):
         if row.get(key) is None:
             row.pop(key, None)
+    found = claims.margin(verdict)
+    if found.fraction is not None:
+        row["margin"] = float(f"{found.fraction:.6g}")
+    else:
+        row["margin_why"] = found.why
     if executed:
         # 4dp is ~0.1 ms. A tier-0 gate reports `1.6689300537109375e-05` otherwise,
         # which is 22 characters saying "instant" in the least readable way available.
@@ -1402,8 +1414,14 @@ def _row_outcome(verdict: Verdict) -> str:
     """A sweep row's outcome for `check`'s tallies: `Verdict.outcome`, with an
     evaluator refused at its version counted as `unqualified` — never errored.
     GLOSSARY §2: a qualification is not an outcome; the refusal's verdict says
-    `error` only so that it is never ok (R-2)."""
-    return "unqualified" if getattr(verdict, "unqualified", "") else verdict.outcome
+    `error` only so that it is never ok (R-2). A pass outside its evaluator's
+    operating context is `outside-context` (P2.4-D22): not the evaluator's
+    refusal — qualified is "at its version", and outside its context it still
+    is — so never counted `unqualified` either."""
+    token = getattr(verdict, "unqualified", "") or ""
+    if token:
+        return "outside-context" if claims.outside_context(verdict) else "unqualified"
+    return verdict.outcome
 
 
 def _qualification_lines(rows: list[verdicts.SweepRow]) -> list[str]:
@@ -1418,10 +1436,32 @@ def _qualification_lines(rows: list[verdicts.SweepRow]) -> list[str]:
     for row in rows:
         admission = row.admission
         facts = getattr(admission, "qualification", None) if admission is not None else None
+        outside = claims.outside_context(row.verdict)
+        if outside and facts is not None and admission.executed \
+                and facts.mutation is not None:
+            # A walked evaluator qualified in this run, whose pass lies outside
+            # its operating context: its qualification line, then the fact
+            # that keeps this pass from counting (P2.4).
+            out.append(report.qualification_line(row.verdict.gate, facts))
         if getattr(row.verdict, "unqualified", ""):
             out.append(report.verdict_line(row.verdict, facts))
         elif facts is not None and admission.executed and facts.mutation is not None:
             out.append(report.qualification_line(row.verdict.gate, facts))
+    return out
+
+
+def _limit_lines(view: Ledger) -> list[str]:
+    """`check`'s warning lines (P2.4-D13, S-35): one per compared pair whose
+    evaluator judged against a limit of its own that is not its claim's — one
+    number in two places. On stdout, after the qualification lines: a warning
+    on stderr is one nobody reads in a captured run. Never a status."""
+    said = report.HUMAN["acceptance"]
+    out = []
+    for found in claims.limit_disagreements(view):
+        unit = f" {found.units}" if found.units else ""
+        out.append(said["warning"].format(line=said["limits"].format(
+            gate=found.gate, limit=f"{report._num(found.limit)}{unit}", claim=found.claim,
+            condition=found.acceptance)))
     return out
 
 
@@ -1450,7 +1490,8 @@ def _check_summary(rows: list[verdicts.SweepRow], counts: Mapping[str, int], tie
     line = (f"{len(rows)} gates: {counts.get('executed', 0)} executed, "
             f"{counts.get('cached', 0)} cached — {outcomes.count('pass')} ok")
     for outcome, word in (("fail", "FAIL"), ("skipped", "skipped"), ("error", "errored"),
-                          ("unqualified", report.HUMAN["lead"][claims.ClaimCause.UNQUALIFIED])):
+                          ("unqualified", report.HUMAN["lead"][claims.ClaimCause.UNQUALIFIED]),
+                          ("outside-context", report.HUMAN["context"]["tally"])):
         if outcomes.count(outcome):
             line += f", {outcomes.count(outcome)} {word}"
     return f"{line} — tier {tier}"
@@ -1596,6 +1637,8 @@ def cmd_check(args: argparse.Namespace) -> int:
         "skipped": sum(1 for row in rows if row.verdict.outcome == "skipped"),
         "errored": sum(1 for row in rows if _row_outcome(row.verdict) == "error"),
         "unqualified": sum(1 for row in rows if _row_outcome(row.verdict) == "unqualified"),
+        "outside_context": sum(1 for row in rows
+                               if _row_outcome(row.verdict) == "outside-context"),
         "executed": int(result.counts.get("executed", 0)),
         "cached": int(result.counts.get("cached", 0)),
         "controls": {key: int(result.controls.get(key, 0))
@@ -1663,6 +1706,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             "spine": spine,
             "junit": written,
             "notes": notes,
+            # Additive (P2.4-D13): the compared pairs whose two limits part.
+            "limit_disagreements": [found._asdict()
+                                    for found in claims.limit_disagreements(view)],
             # Additive (P2.1-D12): each evaluator's qualification as this check
             # judged it — the line in words, the judge's token, and the state.
             "qualifications": [
@@ -1680,6 +1726,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     if counts["controls"]["executed"] or counts["controls"]["reverified"]:
         _say(_controls_line(counts["controls"]))
     for line in _qualification_lines(rows):
+        _say(line)
+    for line in _limit_lines(view):
         _say(line)
     for note in notes:
         _say(f"note: {note}")
@@ -2358,6 +2406,10 @@ def _gate_row(spec: Any, registry: gates.Registry | None = None) -> dict[str, An
     # lays evaluators in lanes by them, and an absent key would read "unknown".
     row["needs"] = list(spec.needs or [])
     row["needed_by"] = registry.needed_by(spec.id) if registry is not None else []
+    # The operating context (P2.4), always present — an empty object when none
+    # is declared: a reader that finds no key must not guess "unbounded".
+    row["operating_context"] = {key: list(pair) for key, pair in
+                                (getattr(spec, "operating_context", None) or {}).items()}
     return row
 
 
@@ -2575,6 +2627,8 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
              + (f" ({', '.join(missing)} not registered)" if missing else ""))
     if needed_by:
         _say(f"  prerequisite of: {', '.join(needed_by)}")
+    if getattr(spec, "operating_context", None):
+        _say(f"  {report.context_declared(spec.operating_context)}")
     if spec.negative_control:
         _say(f"  control: {spec.negative_control.fixture} "
              f"(must {spec.negative_control.expect})")
@@ -5516,6 +5570,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _doctor_cache_rows(results, root, registry, resolution)
     _doctor_qualification_rows(results, root, registry, resolution, projection=projection,
                                ledger=ledger)
+    # P2.4-D13: an evaluator judging against a limit of its own that is not its
+    # claim's — a warning, never a status; the row only when one parts (S-35).
+    parted = _limit_lines(view)
+    if parted:
+        said = report.HUMAN["acceptance"]
+        _check(results, "limits", "warn", said["doctor_warn"].format(
+            n=len(parted), list="; ".join(line.split(": ", 1)[1] for line in parted)))
     _doctor_seal_row(results, registry,
                      _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
 

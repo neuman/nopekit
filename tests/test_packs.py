@@ -637,6 +637,50 @@ class ControlsAreSealed(unittest.TestCase):
                         f"this pack in a different project can silently defuse it "
                         f"({bare.skip_reason or bare.detail})")
 
+    def test_host_claims_never_reach_a_pack_control(self):
+        """(C2, P2.4) A goalpost is a claim, and a pack's control must not take
+        one from the host: every host claim the gate covers given limit 1e9 —
+        claims C1..C3, as openmodelica's baseline names its bindings (packs:H20),
+        each tagged with the gate's claims and stating its quantity — and every
+        bundled control still fires. Characterization: green before P2.4 (a
+        pack's fixtures hand their own ledger, or none), and after it, where a
+        gate reads its goalpost through ``ctx.acceptance`` — a host whose claim
+        reached a control would defuse it in one project and not the next."""
+        exercised = 0
+        for path in _pack_dirs():
+            name = os.path.basename(path)
+            registry = gates_mod.Registry()
+            packs_mod.load_gates(name, registry, root=REPO)
+            with open(os.path.join(path, "selftest", "baseline.json"), "r",
+                      encoding="utf-8") as fh:
+                baseline = json.load(fh)
+            from atompipe.models import Acceptance, Claim, Comparator
+
+            def ctx_with(ledger):
+                return gates_mod.GateContext(root=path, ledger=ledger, model=None,
+                                             params=dict(baseline), out_dir=_scratch_out(),
+                                             tier=3, log=lambda _m: None, extra={})
+
+            for spec in registry.specs():
+                _spec, fn = registry.get(spec.id)
+                host = Ledger(meta=ProjectMeta(name="host"), claims=[
+                    Claim(id=f"C{n}", statement=f"a host claim {n}", tags=list(spec.claims),
+                          acceptance=Acceptance(quantity=spec.settles or spec.id,
+                                                comparator=Comparator.LE, limit=1e9))
+                    for n in (1, 2, 3)])
+                with self.subTest(gate=spec.id):
+                    plain = gates_mod.selftest(spec, fn, ctx_with(Ledger(
+                        meta=ProjectMeta(name="sealed"))))
+                    if not plain.passed:
+                        continue          # covered by the other suite
+                    claimed = gates_mod.selftest(spec, fn, ctx_with(host))
+                    exercised += 1
+                    self.assertTrue(claimed.passed and not claimed.skipped,
+                                    f"{spec.id}: its control fires on an empty ledger and "
+                                    f"not under the host's claims at 1e9 — a host goalpost "
+                                    f"reached the control ({claimed.detail or claimed.error})")
+        self.assertGreater(exercised, 40, "the probe exercised the bundled controls")
+
     # -- the trace sees what the probe cannot (R-4: the measurement first) --- #
     def test_no_bundled_fixture_reads_host_params(self):
         """Every bundled control, against a RICH host — its pack's own baseline,

@@ -477,6 +477,11 @@ _HEAD_WORD = {"fail": "failing", "refuted": "failing", "stale": "stale", "blocke
               "pending": "open"}
 
 
+#: The operating-context mark (P2.4), as the spine mints it.
+_OUTSIDE = ('context:outside|{"hi":40.0,"key":"load_n","lo":0.0,"value":60,'
+            '"why":"outside"}')
+
+
 def _every_status_ledger() -> tuple[Ledger, _Reg, dict, frozenset]:
     """A ledger reaching every (status, cause) `compose` can give, one claim
     each, with the registry, the attributions and the stale gates it needs."""
@@ -497,6 +502,11 @@ def _every_status_ledger() -> tuple[Ledger, _Reg, dict, frozenset]:
         c("K15", assume, owner="Ana", rationale="carried on purpose"),
         # P2.2: not run behind a prerequisite that failed, and one that crashed
         c("K16", gates=["g.k16"]), c("K17", gates=["g.k17"]),
+        # P2.4: a pass whose value misses the claim's acceptance condition, a
+        # pass outside its evaluator's operating context, and one an owned
+        # fallback carries (R-6: three more causes the report must place)
+        c("K18", gates=["g.k18"]), c("K19", gates=["g.k19"]),
+        c("K20", gates=["g.k20"], owner="Bo", fallback="linear past the range"),
     ]
     verdicts = [
         Verdict(gate="g.k1", claims=["K1"], passed=True),
@@ -510,10 +520,15 @@ def _every_status_ledger() -> tuple[Ledger, _Reg, dict, frozenset]:
         Verdict(gate="g.k17", claims=["K17"], skipped=True, blocked_by=["g.k4"],
                 blocked_kind="errored",
                 skip_reason="prerequisite not established: g.k4 (errored)"),
+        Verdict(gate="g.k18", claims=["K18"], passed=True, measured=0.7, limit=1.0,
+                units="mm", comparator="<=", settles="deflection"),
+        Verdict(gate="g.k19", claims=["K19"], passed=True, unqualified=_OUTSIDE),
+        Verdict(gate="g.k20", claims=["K20"], passed=True, unqualified=_OUTSIDE),
     ]
     reg = _Reg([gate(g) for g in ("g.k1", "g.k2", "g.k4", "g.k5", "g.k7", "g.k11", "g.k12",
-                                  "g.k16", "g.k17")])
-    owners = {"K15": claims_mod.Attribution("Ana", "carried on purpose")}
+                                  "g.k16", "g.k17", "g.k18", "g.k19", "g.k20")])
+    owners = {"K15": claims_mod.Attribution("Ana", "carried on purpose"),
+              "K20": claims_mod.Attribution("Bo", "linear past the range")}
     return _ledger(*claims, verdicts=verdicts), reg, owners, frozenset({"g.k12"})
 
 
@@ -592,7 +607,7 @@ class EveryUnresolvedClaimIsListed(unittest.TestCase):
 
         md, composed = self._md(gaps=needs_only)
         missing = {p.split(" ", 1)[0] for p in listing_problems(md, composed)}
-        self.assertEqual(missing, {"K7", "K8", "K9", "K10"})
+        self.assertEqual(missing, {"K7", "K8", "K9", "K10", "K19"})
 
 
 class RequiredIsSaidAsABool(unittest.TestCase):
@@ -924,6 +939,21 @@ class UnqualifiedIsTheSpinesWord(unittest.TestCase):
                          Verdict(gate="g.strict", error="unqualified: known-good:fail"),
                          {"pass": False, "error": "unqualified: known-good:not-run",
                           "unqualified": "known-good:not-run"}):
+            with self.subTest(returned=repr(returned)[:60]):
+                verdict = self._ran(returned)
+                self.assertEqual(verdict.outcome, "error")
+                self.assertEqual(self._reads_errored(verdict), errored)
+
+    def test_a_gate_that_marks_itself_outside_its_context_reads_as_a_crash(self):
+        """(V16, P2.4) The operating-context mark is the spine's too: a gate that
+        returns a pass carrying `context:outside|…` reads errored — `_stamp`
+        clears the mark, and `Verdict.__post_init__` wrote the error when the gate
+        built it — never the quieter Gap."""
+        token = ('context:outside|{"hi":40.0,"key":"load_n","lo":0.0,"value":60,'
+                 '"why":"outside"}')
+        errored = (ClaimStatus.BLOCKED, claims_mod.ClaimCause.ERRORED, "")
+        for returned in (Verdict(gate="g.strict", passed=True, unqualified=token),
+                         {"pass": True, "unqualified": token}):
             with self.subTest(returned=repr(returned)[:60]):
                 verdict = self._ran(returned)
                 self.assertEqual(verdict.outcome, "error")

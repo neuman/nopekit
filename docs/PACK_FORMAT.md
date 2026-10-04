@@ -248,6 +248,98 @@ need that names the gate itself, a glob or a duplicate. `Verdict.blocked_by` and
 `blocked_kind` are the spine's mark for a gate not run behind a prerequisite;
 `run_gate` clears both on whatever a gate returns.
 
+### Which side of the limit passes (`comparator`)
+
+```python
+return Verdict(gate="fdm.min_wall", passed=thin >= limit, measured=thin, limit=limit,
+               comparator=">=", units="mm", detail=...)
+```
+
+Every verdict that reports a finite `limit` says which side of it passes:
+`comparator` is one of `<=`, `<`, `>=`, `>`, `==`, `!=`, or `between` (a band, whose
+upper bound a verdict does not carry). Set it where you set the limit, on every branch
+that reports one; a branch with no one-sided reading reports no limit. `run_gate`
+keeps a known one (a `Comparator` is normalised to its value) and turns any other on a
+pass or a fail into an error naming the seven. It is the input of the verdict's
+margin — `claims.margin`, a signed fraction of the limit, carried on every JSON row
+beside the value — which nothing else computes; without one the margin is
+`no-comparator`, never a guess (a pass and a fail read from `(passed, measured,
+limit)` alone differ only in the generous direction at equality). Every bundled gate
+sets it (`tests/test_goalposts.EveryLimitNamesItsSide`). **Compare what you
+report**: round the value first, then judge it, or a verdict reads `0.5 mm (limit 0.5
+mm)` beside a FAIL.
+
+`settles` is the registration's word for the quantity a gate measures, and the spine
+stamps it on every verdict. A claim whose acceptance condition names that quantity,
+in the verdict's units, is **compared** with the verdict's value: a pass whose value
+does not meet the claim's condition reads Failing (`acceptance condition not met`),
+whatever limit the gate judged against. Name `settles` as a claim author would name
+the quantity, and report the units a claim would state.
+
+### Goalposts (`ctx.acceptance`)
+
+```python
+@gate(id="bracket.deflection", claims=["stiffness"], settles="tip deflection", ...)
+def deflection(ctx):
+    acc = ctx.acceptance("C1")           # the claim's acceptance condition: its goalpost
+    measured = round(float(ctx.params["deflection"]), 4)
+    return Verdict(gate="bracket.deflection", passed=acc.holds(measured),
+                   measured=measured, limit=acc.limit, units=acc.units,
+                   comparator=acc.comparator.value)
+```
+
+**A goalpost lives in `claims/`, never in a gate.** `ctx.acceptance(claim)` returns
+the acceptance condition — quantity, comparator, limit, units — of the claim an exact
+id names, else of the claims carrying it as a tag (one condition among them), as a
+copy. The read is recorded as `acceptance:<claim>` — the condition alone, never the
+claim record: moving the limit re-runs exactly the gates that read it, and editing the
+statement re-runs none. It raises — the gate errors, honestly — when nothing is named
+or tagged so, when a tag's claims carry different conditions, or when the condition
+has no limit. A pass is then **held to the goalpost it read**: it needs a finite value,
+in that condition's units, that the condition admits, or `run_gate` errors it
+(`passed at 0.7 mm, which does not meet the acceptance condition it read (C1: tip
+deflection <= 0.5 mm)`). A fail needs nothing.
+
+On a control the goalpost is the known-good design's own. A project's
+`selftest/known_good.py` states the claims it was calibrated against as `CLAIMS` and
+hands them as its ledger, so moving the live claim never changes a control's severity
+(invariant 5's failure, for a project gate) and re-runs no control. Between the two,
+only the **limit** may differ: the claims a goalpost names, their quantity, comparator
+and units must be ones a qualification run read (`acceptance-shape:<claim>`), and the
+qualification moves each goalpost the known-good control read (halved, doubled) and
+requires the gate's value and units unmoved — a value is measured, never chosen by the
+goalpost it is judged against (`its known-good value moves when the acceptance
+condition it reads moves`). A pack's `selftest/baseline.json` states no claims, so a
+pack gate that reads one errors on its control: read goalposts in a project's gates,
+or wait for a baseline's `claims` key.
+
+### Operating context
+
+```python
+@gate(id="t.span", claims=["c1"], settles="sag",
+      operating_context={"load_n": (0.0, 40.0)},      # closed; None leaves an end open
+      negative_control=...)
+```
+
+An evaluator may declare the **range of its read set it was qualified on**: a
+correlation fitted between two Reynolds numbers, a model valid below a load. Each key
+is spelled as the gate reads it (`ctx.param`'s rule, scoped first), and **every pass
+must read every key** — `run_gate` errors one that never did: the context is part of
+the read set. The spine judges the current value of each spelling the run read
+against the range: **outside it a pass does not count** — its claim reads Gap,
+`outside operating context: t.span : load_n = 60, qualified on [0, 40]`, or Assumed
+when the claim carries an owned fallback (`Claim.fallback`, attributed through the
+signing channel) — **and a fail still does** (Failing: a result never loses its power
+to fail). Inside the range nothing changes: a moved input reads Stale until a check
+run. The known-good control must lie inside the range, or the gate is unqualified
+(`known-good outside its operating context`). A mutation counts wherever it lands —
+the walk reads the gate's own value against its own limit, which no regime changes.
+Registration refuses a malformed context (not a mapping, an empty key, a pair that is
+not two finite numbers or `None`, both ends open, `lo > hi`). Declare a range on what
+the gate READS: a fitted range on an intermediate quantity it computes (a Rayleigh
+number from temperatures and a length) is a guard gate of its own, or a range on its
+inputs.
+
 ## The surface a gate sees
 
 Everything a pack can set, read or call, in one place. `tests/test_contracts.py`
@@ -272,6 +364,8 @@ class GateSpec:                        # what @gate(...) builds and registers fo
     requires_one_of: list[str]         # AT LEAST ONE "python:<module>" / "tool:<exe>"
     needs: list[str]                   # PREREQUISITES: exact ids of this pack's gates that
                                        #   must be established first (see "Prerequisites")
+    operating_context: dict            # {key: (lo, hi)}: the range of its read set it was
+                                       #   qualified on; outside, a pass does not count
 
 @dataclass
 class NegativeControl:
@@ -307,6 +401,9 @@ class Verdict:                         # what a gate returns (or a (bool, detail
                                        #   established; run_gate clears whatever a gate sets
     blocked_kind: str = ""             # the spine's too: the first root's kind ("failed",
                                        #   "errored", "skipped", "unqualified", "not-registered")
+    comparator: str = ""               # which side of `limit` passes: <= < >= > == != between
+    settles: str = ""                  # stamped from the spec: the quantity, for the claim's
+                                       #   comparison
     outcome -> str                     # property: "error" | "skipped" | "pass" | "fail"
     ok -> bool                         # property: outcome == "pass"; a skip is never ok
     def render(self) -> str            # "[FAIL] fdm.overhang : worst face 63.2deg vs 50deg limit"
@@ -331,6 +428,8 @@ class GateContext:                     # a gate's one argument — a traced view
     def first_pack_param(self, names, default=None) -> Any
     def first_pack_param_named(self, names, default=None) -> tuple[Any, str]
     def require_param(self, name) -> Any          # raises rather than compare with None
+    def acceptance(self, claim) -> Acceptance     # the goalpost of the claim an id or tag
+                                                  #   names; recorded; a pass is held to it
     def out_path(self, *parts) -> str             # an evidence path under out_dir, dir created
     def with_extra(self, extra) -> GateContext    # a copy with `extra` merged over
     def load_file(self, path, loader=None) -> Any # a file several gates read: loaded once per
@@ -775,7 +874,10 @@ kept, and a read of the tier keys every control built on it — so it must state
 and a file it reads is keyed as an input of every control built on it. What slipped
 through before: it was handed a copy of the live host, and a `context` that kept
 `ctx.params` passed the live design through unkeyed, so the identity fixture was
-admitted on a design that later passed. A project with no `known_good.py` hands its
+admitted on a design that later passed. A gate that reads a goalpost
+(`ctx.acceptance`) reads the claims `context` hands as its ledger: state them in the
+module (`CLAIMS`, as the bracket's does) — the claims the design was calibrated
+against, never the live `claims/` files. A project with no `known_good.py` hands its
 fixtures the live host, and the control entry says so (`"host": "live"`) — and, with
 no known-good control unless a gate declares a `good` fixture, its gates are known-bad
 shown and their claims read Gap. **Pack

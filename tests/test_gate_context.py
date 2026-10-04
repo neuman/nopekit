@@ -576,12 +576,14 @@ class CostIsMeasured(_env.EnvCase):
         self.assertTrue(v.skipped)
         self.assertEqual((v.duration_s, v.cpu_s, v.rho), (0.0, 0.0, ""))
         names = [f.name for f in dataclasses.fields(Verdict)]
-        # P2.1 put `unqualified` after them, on the end too, and P2.2
-        # `blocked_by` and `blocked_kind` after that (R-6: the window widened,
-        # the order it pins unchanged).
-        self.assertEqual(names[-5:], ["rho", "cpu_s", "unqualified", "blocked_by",
-                                      "blocked_kind"],
+        # P2.1 put `unqualified` after them, on the end too, P2.2
+        # `blocked_by` and `blocked_kind` after that, and P2.4 `comparator` and
+        # `settles` (R-6: the window widened, the order it pins unchanged).
+        self.assertEqual(names[-7:], ["rho", "cpu_s", "unqualified", "blocked_by",
+                                      "blocked_kind", "comparator", "settles"],
                          "R-2: new fields go on the end")
+        self.assertEqual((v.comparator, v.settles), ("", ""),
+                         "a skip compares nothing and its spec settles nothing")
         self.assertEqual(v.unqualified, "", "a skip carries no refusal mark")
         self.assertEqual((v.blocked_by, v.blocked_kind), ([], ""),
                          "a missing tool is not a prerequisite's mark")

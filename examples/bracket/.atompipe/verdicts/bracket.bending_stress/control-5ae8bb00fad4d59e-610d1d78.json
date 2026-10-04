@@ -2,21 +2,21 @@
   "schema": 1,
   "kind": "control",
   "gate": "bracket.bending_stress",
-  "rho": "3eac135676caf02c8928e0e9f359644bef1c904a3fd350fc329281bb39526ee4",
-  "static": "e39420abde244da4e0c16b7d4bb01279e0c7c0e3b661fb235daac4a0b92e24e4",
+  "rho": "5ae8bb00fad4d59e26ad36aa9fb248576650d98dfd12c2adde6d8f32a0397d33",
+  "static": "dc9e5bdd17046aafd77b3a34be8fb22e7ae811db667177e4032d146ba14f775d",
   "static_parts": {
-    "spine": "327b03e5d394c749cae3c25c80227f1f72c0742db10380072aeaef1b6b452f46",
+    "spine": "71f45240af6180d5bd456f588c766edd4ab9fddf0f34afbb6b215f31b8254857",
     "code": {
-      "digest": "611d5895986ffc8e70166f3d0a7effaefeeafade26bee1fbfd2a2cc5947a162a",
+      "digest": "7dc66ecf8b0ad544940cccf6b8ca8514694a95b54da4d140fb306bf1e9e48161",
       "files": [
         "gates/structural.py"
       ]
     },
     "selftest": {
-      "digest": "93e7a7d5612e1a02659a423e8814cabf0f3a5a3000ed51605a2efe0f7517562c",
+      "digest": "d189dfd49d6e13f7aee32b7fe0b285cfd4e29c5dd8474582582af9460da0499a",
       "files": {
         "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-        "selftest/known_good.py": "8726c3c77520abcd5b143ca16306470a7db73bf912399affcf60af5ab100ed78"
+        "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
       }
     },
     "nc": {
@@ -29,11 +29,11 @@
   },
   "host": "known-good",
   "fixture": {
-    "digest": "693071eb3ecc9b9b0a7e75bc396bea21cfc1e7c56598d1057e565962ac2fb5db",
+    "digest": "3645413f71d05619f92c2a1b5e8e5385fdfbd05b0b0bcf779cb6c4871c71b220",
     "files": {
       "model/bracket.py": "30cca82085fc61e8acb74eadd28c53f5aaef5bcfceb615ec82ce322a898c67c7",
       "selftest/bad_configs.py": "5e9e8a76c297db2527dc3625892efa70ded8a4a4cf958e92e78f3cca0d02c79e",
-      "selftest/known_good.py": "8726c3c77520abcd5b143ca16306470a7db73bf912399affcf60af5ab100ed78"
+      "selftest/known_good.py": "2277f463b3781817ccffc4164a82a7a9e0cb2a6be9796ddbc8c6dd646c9e90c8"
     }
   },
   "reads": {
@@ -118,7 +118,8 @@
     "measured": 0.188,
     "limit": 1.0,
     "units": "utilisation",
-    "detail": "2.8 MPa vs 15.0 MPa allowable (util 0.19, petg)"
+    "detail": "2.8 MPa vs 15.0 MPa allowable (util 0.19, petg)",
+    "goalpost": []
   },
   "mutation": {
     "runs": 64,
@@ -162,5 +163,5 @@
   "measured": 3.75,
   "limit": 1.0,
   "units": "utilisation",
-  "digest": "0ad409dd17b32fa317634cdea2d6196193364976a26bd087e9d428f863be2bbc"
+  "digest": "2a111f9371567302a95f6d4e3c8780687101fb0882b86ed75c4fb0c55095d5e2"
 }

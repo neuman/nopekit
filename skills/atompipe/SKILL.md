@@ -285,6 +285,25 @@ What you must not do is leave the claim Skipped and move on as though the design
 checked. A claim Skipped by a crash (its reason starts `errored:`, its tag is
 `[SKIP ]`) is louder still — the evaluator, or a prerequisite of it, is broken.
 
+**Never move a goalpost in a gate.** A limit is a claim's acceptance condition, in
+`claims/<id>.json`; a gate reads it with `ctx.acceptance("<id>")` and reports it as
+its limit. Move the limit in the claim — the gates that read it re-run, nothing else
+does — and never edit a gate's number to make a claim pass. Two readings follow from it:
+
+- `acceptance condition not met: <gate> : <value> against <claim>'s <condition> (its
+  own limit <l>)` — Failing. The evaluator passed against a limit of its own, and its
+  value misses the claim's condition. The design misses the claim: change the design,
+  or — if the claim's number is wrong — the claim, said why in its `rationale`. A
+  `warning: <gate> : its limit … is not <claim>'s acceptance condition` line from
+  `check` is the same number in two places, the claim's and the evaluator's; it moves
+  no status, and it means one of the two is stale.
+- `outside operating context: <gate> : <key> = <v>, qualified on [a, b]` — Gap. The
+  evaluator was qualified on that range of its inputs, and this design is outside it:
+  its pass counts nothing here (a fail outside would). Bring the input inside, find an
+  evaluator qualified where the design is, or — the human's call, never yours —
+  carry the claim on an owned fallback (`owner` and `fallback` in its claim file,
+  recorded through the signing channel).
+
 **Never simulate a physical claim.** No CFD run makes a printed seam watertight.
 
 ## When a claim has no gate

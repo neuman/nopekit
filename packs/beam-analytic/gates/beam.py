@@ -162,7 +162,7 @@ def deflection(ctx: GateContext) -> Verdict:
         gate="beam.deflection",
         passed=d <= limit,
         measured=round(d, 4),
-        limit=round(limit, 4),
+        limit=round(limit, 4), comparator="<=",
         units="mm",
         detail=f"{case}{' [pack default]' if case_default else ''}: {d:.3f} mm at "
                f"{P:g} N over {L:g} mm ({sec['desc']}, E {E:.0f} MPa [{e_src}]) "
@@ -232,7 +232,7 @@ def deflection_ratio(ctx: GateContext) -> Verdict:
         gate="beam.deflection_ratio",
         passed=ratio >= denom,
         measured=round(ratio, 1) if math.isfinite(ratio) else None,
-        limit=round(denom, 1),
+        limit=round(denom, 1), comparator=">=",
         units="span/deflection",
         detail=f"{case}: {d:.3f} mm over {L:g} mm = L/{shown} vs L/{denom:g} limit"
                f"{' [pack default]' if denom_default else ''}",
@@ -301,7 +301,7 @@ def bending_stress(ctx: GateContext) -> Verdict:
         gate="beam.bending_stress",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{case}{' [pack default]' if case_default else ''}: {sigma:.1f} MPa vs "
                f"{allow:.1f} MPa allowable ({allow_src}{sf_note}) — util {util:.2f}; "
@@ -428,7 +428,7 @@ def shear_stress(ctx: GateContext) -> Verdict:
         gate="beam.shear_stress",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{case}: V {V:g} N -> tau {tau:.2f} MPa vs {allow:.2f} MPa allowable "
                f"({allow_src}{sf_note}) — util {util:.2f} at L/h {slender:.1f}",
@@ -556,7 +556,7 @@ def buckling(ctx: GateContext) -> Verdict:
         gate="beam.buckling",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{regime}: lambda {lam:.0f} (transition {lam_1:.0f}), K {K:g} [{k_src}], "
                f"L {Lc:g} mm [{lc_src}]{i_min_note} -> P_cr {p_cr:.0f} N vs "
@@ -652,7 +652,7 @@ def bearing(ctx: GateContext) -> Verdict:
         gate="beam.bearing",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{sigma:.1f} MPa on {area:.1f} mm^2 ({n:g} x dia {d:g} x {t:g} mm"
                f"{' [n_bolts pack default]' if n_default else ''}) from {P:g} N "
@@ -789,7 +789,7 @@ def model_validity(ctx: GateContext) -> Verdict:
         gate="beam.model_validity",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"L/h {slender:.1f} vs {limit:g} min"
                f"{' [pack default]' if limit_default else ''}; Euler-Bernoulli omits "
@@ -949,7 +949,7 @@ def input_sanity(ctx: GateContext) -> Verdict:
         gate="beam.input_sanity",
         passed=not faults,
         measured=len(faults),
-        limit=0,
+        limit=0, comparator="<=",
         units="faults",
         detail=(f"{len(checked)} quantities checked, clean ({', '.join(checked)})"
                 if not faults else

@@ -58,8 +58,10 @@ PACKS_DIR = os.path.join(REPO, "packs")
 ENTRY_KEYS = ["schema", "gate", "rho", "code", "spine", "reads", "instruments",
               "verdict", "digest"]
 READS_KEYS = ["params", "files", "dirs", "ledger", "model", "opaque"]
-VERDICT_KEYS = ["passed", "measured", "limit", "units", "detail", "evidence",
-                "locators", "claims", "tier", "pack"]
+#: P2.4-D7: `comparator` and `settles` after `units` (R-6: the shape the writer
+#: writes, widened; the P2.3 shape is still read, never written).
+VERDICT_KEYS = ["passed", "measured", "limit", "units", "comparator", "settles", "detail",
+                "evidence", "locators", "claims", "tier", "pack"]
 CONTROL_KEYS = ["schema", "kind", "gate", "rho", "static", "static_parts", "host",
                 "fixture", "reads", "bad", "bad_extra", "good", "mutation", "admitted",
                 "detail", "measured", "limit", "units", "digest"]
@@ -474,7 +476,9 @@ class Portability(_env.EnvCase):
         anchors = _anchors(root, registry)
         loaded = modelio.load_model(root, "model/bracket.py")
         params, _ = modelio.flat_params(modelio.project(loaded))
-        ctx = _ctx(root, params)
+        # P2.4 (D1): deflection reads its goalpost from C1 — the project's own
+        # ledger, as `check` hands it; an empty one is a missing claim, an error.
+        ctx = _ctx(root, params, ledger=store.load(root))
         for spec in registry.specs():
             spec, fn = registry.get(spec.id)
             verdict, trace = _run(registry, spec.id, ctx, anchors)

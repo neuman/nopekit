@@ -30,7 +30,7 @@ closes it.
 | S-15 | The invariant-4 tests are latently vacuous: `_proven_section` returns `""` when the heading is missing, so `assertNotIn` passes on an empty string. | `tests/test_invariants.py:238-239` | read | 1.0 |
 | S-16 | Errored verdicts fold into FAIL and no API separates "refuted" from "crashed": right for blocking, wrong for anything that derives "infeasible". | `claims.py:241-244` | read | 3.1 |
 | S-17 | The reference project teaches the fixture margin a shipped pack records as REJECTED: the bracket's control sits 89.6× past its limit, so a limit 10× too loose is still admitted. | `examples/bracket/gates/structural.py:51` vs `packs/beam-analytic/selftest/bad_beams.py:63-65` | run | 2.3 |
-| S-18 | A rounded `measured` can contradict `passed` at the boundary: a FAIL carrying measured == limit. | `examples/bracket/gates/structural.py:65` `round(d, 4)` | run | 2.4 (margin), 5 (mutation) |
+| S-18 | A rounded `measured` can contradict `passed` at the boundary: a FAIL carrying measured == limit. | `examples/bracket/gates/structural.py:65` `round(d, 4)` | run | 2.4 (margin) — closed in P2.4 (`claims.margin`: a side that contradicts the pass flag is `disagrees`, the verdict wins; `bracket.deflection` judges the value it reports; `test_goalposts.Margins`), 5 (mutation) |
 | S-19 | Project controls rebuild through the proposer's own model, so a model bug can defuse them: 11 of 348 control runs stopped firing under formula mutants. | `examples/bracket/selftest/bad_configs.py:18-31` | run | 1.2, 5 |
 
 ### Staleness and ρ
@@ -57,7 +57,7 @@ closes it.
 
 | # | What slipped through | Evidence | Seen | Ph |
 |---|---|---|---|---|
-| S-35 | A claim's limit and its gate's limit are two copies nothing compares: `DEFLECTION_LIMIT_MM` duplicates C1; C3 and C4 are snapshots of derived values. With `bed_xy` at 250 the report printed "≤ 204.0 mm" beside a gate that used 234, and `doctor` showed 0 warnings. | `examples/bracket/gates/structural.py:34-38`; `claims.py:241-248` | run | 2.4 |
+| S-35 | A claim's limit and its gate's limit are two copies nothing compares: `DEFLECTION_LIMIT_MM` duplicates C1; C3 and C4 are snapshots of derived values. With `bed_xy` at 250 the report printed "≤ 204.0 mm" beside a gate that used 234, and `doctor` showed 0 warnings. | `examples/bracket/gates/structural.py:34-38`; `claims.py:241-248` | run | 2.4 — closed in P2.4 (`ctx.acceptance`: deflection reads C1, `DEFLECTION_LIMIT_MM` gone; `claims.cross_check` fails a value outside its claim's condition; a limit that parts is a `check` warning and a `doctor` row; `TheGoalpostLivesInClaims`, `AValueOutsideTheAcceptanceIsNeverChecked`, `LimitsLiveInOnePlace`) |
 | S-36 | Deleting an extraction leaves its grounding forever: `why arm_length` says "GROUNDED BY arm" while `inputs` says arm was "NEVER READ". | `cli.py:436-470` | run | 1.3 |
 | S-37 | `claim edit --gates X` binds nothing, and the next `check`'s `_refresh_coverage` silently reverts it. | `cli.py:473-491`; `claims.py:114-134` | run | 1.3 |
 | S-38 | A `rejected` entry added to the model's PARAMS after the param exists never reaches the ledger: rule 3's highest-value field dropped silently. | `modelio.py:846-856` | run | 1.3 |
@@ -68,7 +68,7 @@ closes it.
 | S-43 | `atompipe gap`, which reads like a query, rewrites the ledger on every run. | `cli.py:1536-1547` | read | 1.3 |
 | S-44 | `decide --when` backdates a decision, and the log renders in storage order. | `cli.py:3430`; `decisions.py:260` | read | 1.3, 3.2 |
 | S-45 | Ingested evidence bytes are never re-verified; after tampering, `doctor` still said `[ok] staleness unchanged`. | `artifacts.py:402-405, 645-660` | run | 1.3, 2.5 |
-| S-46 | C2's quantity ("utilisation") does not match its gate's `settles` ("bending stress"); C4's PROVEN row mixes in `min_wall`'s unrelated 7 mm. | the bracket ledger C2, C4; `structural.py` `settles=` | read | 2.4 |
+| S-46 | C2's quantity ("utilisation") does not match its gate's `settles` ("bending stress"); C4's PROVEN row mixes in `min_wall`'s unrelated 7 mm. | the bracket ledger C2, C4; `structural.py` `settles=` | read | 2.4 — closed in P2.4 (C2 speaks `bending stress` in `utilisation`; the checked table's *Value* holds only compared values and lists `min_wall`'s 7 mm as not compared; `ValuesAreComparedWithTheirClaim`) |
 | S-47 | NaN and Infinity reach `state.json` and `ledger.json` through `atomic_write_json`'s default; `JSON.parse` rejects the file and the page advises `site build`, which cannot fix it. | `util.py:227` | run | 1.0 |
 
 ### The refusal graph, terminals, the report

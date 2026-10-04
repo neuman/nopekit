@@ -74,10 +74,15 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     # KNOWN_OVERCLAIMS, emptied and gone).
     4: ["test_invariants.ReportNeverOverclaims",
         "test_status_table.UnqualifiedBesideAPassIsNeverChecked",
-        "test_invariants.CheckedMeansEveryEvaluatorPassed"],
+        "test_invariants.CheckedMeansEveryEvaluatorPassed",
+        # P2.4: a pass must meet the goalpost it read, and a value outside its
+        # claim's acceptance condition is never Checked (D-23 of its design).
+        "test_goalposts.APassMustMeetTheAcceptanceItRead",
+        "test_goalposts.AValueOutsideTheAcceptanceIsNeverChecked"],
     5: "test_packs.ControlsAreSealed",
     6: "test_packs.NegativeControlsFire",
-    7: "test_staleness.StaleIsNotCurrent",
+    # 7, and P2.4: a goalpost edit re-keys exactly the gates that read it.
+    7: ["test_staleness.StaleIsNotCurrent", "test_goalposts.TheGoalpostLivesInClaims"],
     8: ["test_records.IndexNeverDisagreesWithRecords",
         "test_records.NoCommandWritesARecord"],
     # 9 is the paired rule from P2.3: both controls (QualificationIsPaired), and
@@ -88,7 +93,15 @@ INVARIANT_CLASSES: dict[int, str | list[str]] = {
     # review of P2.3).
     9: ["test_admission.AdmissionIsDemonstrated", "test_admission.QualificationIsPaired",
         "test_admission.EveryConclusiveMutationMustFail",
-        "test_admission.TheCheckRunTakesTheQualifiedPath"],
+        "test_admission.TheCheckRunTakesTheQualifiedPath",
+        # P2.4: only inside its operating context does a pass count, and a fail
+        # outside still does; the known-good control lies inside it; a mutation
+        # counts wherever it lands; and a goalpost is never a key (critiques 1-2).
+        "test_context.OutsideTheContextAPassDoesNotCount",
+        "test_context.AFailOutsideStillCounts",
+        "test_context.KnownGoodOutsideIsUnqualified",
+        "test_context.AMutationPassingOutsideStillCounts",
+        "test_goalposts.AGoalpostIsNeverAKey"],
     # 10 (P2.2): the rule in the run loop, the resolver and the composition; a
     # cached pass behind a failed guard, end to end in process; and the graph
     # the rule walks — a cycle or an inversion refused at registration.

@@ -119,7 +119,7 @@ def complete(ctx: GateContext) -> Verdict:
 
     rows = bomlib.lines(doc)
     if not rows:
-        return Verdict(gate="bom.complete", passed=False, measured=0.0, limit=0.0,
+        return Verdict(gate="bom.complete", passed=False, measured=0.0, limit=0.0, comparator="<=",
                        units="lines", detail="the BOM has no lines — nothing to buy "
                                              "and nothing proven")
 
@@ -149,7 +149,7 @@ def complete(ctx: GateContext) -> Verdict:
     worst = ", ".join(p["ref"] for p in problems[:4]) + ("..." if len(problems) > 4 else "")
     return Verdict(
         gate="bom.complete", passed=not problems,
-        measured=float(len(problems)), limit=0.0, units="lines",
+        measured=float(len(problems)), limit=0.0, comparator="<=", units="lines",
         detail=f"{len(problems)} of {len(rows)} lines not orderable (limit 0)"
                + (f": {worst}" if problems else " — every line has a part number, "
                                                 "a quantity and a usable price"),
@@ -248,7 +248,7 @@ def cost(ctx: GateContext) -> Verdict:
         detail += (f"; {len(unmatched)} order_minimums entry(s) placed on nothing: {named}")
     return Verdict(
         gate="bom.cost", passed=measured <= limit and not unmatched,
-        measured=round(measured, 2), limit=round(limit, 2), units=units,
+        measured=round(measured, 2), limit=round(limit, 2), comparator="<=", units=units,
         detail=detail, evidence=evidence,
     )
 
@@ -424,6 +424,10 @@ def availability(ctx: GateContext) -> Verdict:
         # None, not 0.0: every line's lead being unknown is not "no wait".
         measured=(None if longest is None else round(longest, 2)),
         limit=(round(float(budget), 2) if budget is not None else None),
+        # The lead-time reading's side; a fail for an EOL or undated line is
+        # another fact, and its margin then says the side does not explain it
+        # (`disagrees`: the verdict wins, D-17).
+        comparator="<=",
         units="weeks", detail="; ".join(bits), evidence=evidence,
         locators=locators[:_MAX_LOCATORS],
     )
@@ -563,7 +567,7 @@ def moq(ctx: GateContext) -> Verdict:
                     + (" — OVER" if over_line else ""))
     return Verdict(
         gate="bom.moq", passed=total_idle <= limit and not over_line,
-        measured=round(total_idle, 2), limit=round(limit, 2),
+        measured=round(total_idle, 2), limit=round(limit, 2), comparator="<=",
         units=cur or "currency", detail="; ".join(bits), evidence=evidence,
     )
 
@@ -625,7 +629,7 @@ def process_rules(ctx: GateContext) -> Verdict:
                       for v in violations[:3])
     return Verdict(
         gate="bom.process_rules", passed=not violations,
-        measured=float(len(violations)), limit=0.0, units="violations",
+        measured=float(len(violations)), limit=0.0, comparator="<=", units="violations",
         detail=f"{len(violations)} violation(s) of {len(rules)} project-supplied rule(s) "
                f"(limit 0)" + (f": {first}" if violations else " — design is inside every "
                                                               "stated capability"),
@@ -748,7 +752,7 @@ def single_source(ctx: GateContext) -> Verdict:
 
     return Verdict(
         gate="bom.single_source", passed=float(len(unrecorded)) <= limit,
-        measured=float(len(unrecorded)), limit=limit, units="lines",
+        measured=float(len(unrecorded)), limit=limit, comparator="<=", units="lines",
         detail=detail, evidence=evidence, locators=locators,
     )
 
@@ -842,6 +846,6 @@ def currency(ctx: GateContext) -> Verdict:
                       else "every line quoted in the base currency"))
     return Verdict(
         gate="bom.currency", passed=not bad,
-        measured=float(len(bad)), limit=0.0, units="lines",
+        measured=float(len(bad)), limit=0.0, comparator="<=", units="lines",
         detail=detail, evidence=evidence,
     )

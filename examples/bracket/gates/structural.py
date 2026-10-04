@@ -25,6 +25,19 @@ also the PREREQUISITE of the two gates whose numbers are Euler-Bernoulli's
 to them reads Skipped naming it, where it used to read their confident pass. The
 broad binding is kept beside the edge, so no claim it covers today moves.
 
+**A goalpost lives in claims/, never in a gate.** `bracket.deflection` reads its
+limit from C1 (`ctx.acceptance("C1")`) and reports that limit: move the goalpost
+in `claims/C1.json`, and only this gate re-runs. It used to read
+`DEFLECTION_LIMIT_MM = 0.5` from this file beside C1's identical 0.5 — two homes
+for one number that nothing compared, so relaxing the claim moved nothing (S-35).
+Its controls read the C1 the known-good design was calibrated against
+(`selftest/known_good.py`'s `CLAIMS`), never the live one, so moving the claim
+never changes a control's severity. `bending_stress`, `bearing` and `bed_fit`
+still judge against limits the model computes (1.0 utilisation, `design_stress`,
+`usable_bed`); the composition compares each value with its claim's own
+acceptance condition, and `check` warns when the two limits part. Every gate
+says which side of its limit passes (`comparator`).
+
 Every gate declares a negative control, because the registry will not accept one
 without it (rule 5). The fixtures live in `../selftest/bad_configs.py` and each one
 changes exactly ONE physically meaningful thing, in the direction that gate cares
@@ -35,11 +48,9 @@ from __future__ import annotations
 from atompipe.gates import gate, GateContext
 from atompipe.models import NegativeControl, Tier, Verdict
 
-# Design limits that are properties of THIS PROJECT, not of the domain. A pack would
-# carry the domain rules (minimum wall vs nozzle); a project carries its own targets.
-DEFLECTION_LIMIT_MM = 0.5     # the arm may sag this much at rated load, no more.
-                              # Set by feel, not by physics: past ~0.5mm on a 60mm
-                              # arm the droop is visible against a level shelf edge.
+# A property of the domain's model, not a goalpost: the guard's floor. (The
+# deflection goalpost, 0.5 mm "set by feel ... visible against a level shelf
+# edge", is C1's acceptance condition and its rationale, in claims/C1.json.)
 MIN_SLENDERNESS = 5.0         # L/h below which Euler-Bernoulli under-predicts,
                               # because shear deflection stops being negligible.
 
@@ -61,20 +72,25 @@ MIN_SLENDERNESS = 5.0         # L/h below which Euler-Bernoulli under-predicts,
     ),
 )
 def deflection(ctx: GateContext) -> Verdict:
-    """Cantilever tip deflection against the project limit.
+    """Cantilever tip deflection against C1's acceptance condition.
 
-    F*L^3 / (3*E*I). The limit is a product decision, not a physics one — see
-    DEFLECTION_LIMIT_MM.
+    F*L^3 / (3*E*I). The limit is a product decision, not a physics one, so it
+    lives in the claim (`claims/C1.json`) and is read from there. The pass is
+    judged on the value reported — rounded first, then compared — so the verdict
+    never reads `0.5 mm (limit 0.5 mm)` beside a FAIL (S-18).
     """
+    acc = ctx.acceptance("C1")
     d = float(ctx.params["deflection"])
+    measured = round(d, 4)
     return Verdict(
         gate="bracket.deflection",
-        passed=d <= DEFLECTION_LIMIT_MM,
-        measured=round(d, 4),
-        limit=DEFLECTION_LIMIT_MM,
-        units="mm",
+        passed=acc.holds(measured),
+        measured=measured,
+        limit=acc.limit,
+        units=acc.units,
+        comparator=acc.comparator.value,
         detail=f"{d:.3f} mm at {ctx.params['config']['load_n']:.0f} N "
-               f"(limit {DEFLECTION_LIMIT_MM} mm)",
+               f"(limit {acc.limit} {acc.units})",
     )
 
 
@@ -108,6 +124,7 @@ def bending_stress(ctx: GateContext) -> Verdict:
         measured=round(u, 3),
         limit=1.0,
         units="utilisation",
+        comparator="<=",
         detail=f"{s:.1f} MPa vs {allow:.1f} MPa allowable "
                f"(util {u:.2f}, {ctx.params['material']})",
     )
@@ -138,6 +155,7 @@ def bearing(ctx: GateContext) -> Verdict:
         measured=round(b, 3),
         limit=round(allow, 3),
         units="MPa",
+        comparator="<=",
         detail=f"{b:.2f} MPa on {ctx.params['bearing_area']:.0f} mm^2 across "
                f"{ctx.params['config']['n_bolts']} bolt(s), allowable {allow:.1f} MPa",
     )
@@ -177,6 +195,7 @@ def model_validity(ctx: GateContext) -> Verdict:
         measured=round(s, 2),
         limit=MIN_SLENDERNESS,
         units="L/h",
+        comparator=">=",
         detail=f"slenderness {s:.1f} (>= {MIN_SLENDERNESS} for Euler-Bernoulli; "
                f"below this the deflection gate under-predicts)",
     )
@@ -208,6 +227,7 @@ def bed_fit(ctx: GateContext) -> Verdict:
         measured=round(big, 1),
         limit=round(usable, 1),
         units="mm",
+        comparator="<=",
         detail=f"{bbox[0]:.0f} x {bbox[1]:.0f} x {bbox[2]:.0f} mm vs {usable:.0f} mm "
                f"usable ({ctx.params['config']['bed_xy']:.0f} bed - 2x"
                f"{ctx.params['config']['brim_mm']:.0f} brim)",
@@ -240,6 +260,7 @@ def min_wall(ctx: GateContext) -> Verdict:
         measured=round(t, 2),
         limit=round(m, 2),
         units="mm",
+        comparator=">=",
         detail=f"thinnest section {t:.1f} mm vs {m:.1f} mm minimum "
                f"(3 perimeters at a {ctx.params['config']['nozzle_d']} mm nozzle)",
     )

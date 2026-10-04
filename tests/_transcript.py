@@ -103,16 +103,34 @@ ROW = re.compile(r"^\[(?P<tag>.{4})\] (?P<gate>\S+)(?: : (?P<body>.*))?$")
 #: terminal); a changed tag (breaks every grep for `[FAIL]`).
 CACHED_ROW = re.compile(r"^(?P<row>\[(?P<tag>.{4})\] (?P<gate>\S+) : (?P<body>.*?))\s+cached$")
 
-#: `check`'s summary. `, F FAIL`, `, S skipped`, `, R errored` and `, U
-#: unqualified` appear only when non-zero (the spec prints the bracket's case;
-#: today's summary omits a zero FAIL count, and nothing asks for that to
-#: change). Time and the model hash left this line in 1.2; `unqualified`
-#: joined it in P2.1's review, and this shape in P2.3 (R-6: it is counted).
+#: `check`'s summary. `, F FAIL`, `, S skipped`, `, R errored`, `, U
+#: unqualified` and `, O outside operating context` appear only when non-zero
+#: (the spec prints the bracket's case; today's summary omits a zero FAIL count,
+#: and nothing asks for that to change). Time and the model hash left this line
+#: in 1.2; `unqualified` joined it in P2.1's review, and this shape in P2.3 (R-6:
+#: it is counted); `outside operating context` in P2.4 (R-6 again: a pass outside
+#: its evaluator's operating context is counted apart, never `unqualified`).
 CHECK_SUMMARY = re.compile(
     r"^(?P<gates>\d+) gates: (?P<executed>\d+) executed, (?P<cached>\d+) cached"
     r" — (?P<ok>\d+) ok(?:, (?P<failed>\d+) FAIL)?(?:, (?P<skipped>\d+) skipped)?"
     r"(?:, (?P<errored>\d+) errored)?(?:, (?P<unqualified>\d+) unqualified)?"
+    r"(?:, (?P<outside>\d+) outside operating context)?"
     r" — tier (?P<tier>\d+)$")
+
+#: `check`'s line for a pass outside its evaluator's operating context (P2.4),
+#: after the qualification lines: the evaluator, the key, what it holds now and
+#: the range it was qualified on.
+CONTEXT_LINE = re.compile(
+    r"^(?P<gate>[^\s\[]\S*) : outside operating context: (?P<key>\S+) "
+    r"(?:= \S+(?: \(not a number\))?|absent|not read by the run that passed), "
+    r"qualified on (?P<interval>[\[(]\S+, \S+[\])])$")
+
+#: `check`'s warning for an evaluator whose own limit is not its claim's (P2.4,
+#: S-35): one line per compared pair, after the qualification lines.
+LIMIT_WARNING = re.compile(
+    r"^warning: (?P<gate>\S+) : its limit (?P<limit>\S+(?: \S+)?) is not "
+    r"(?P<claim>\S+)'s acceptance condition \((?P<condition>.+)\) — one number in two "
+    r"places$")
 
 #: `check`'s controls line, printed only when a control ran or was re-qualified
 #: by its values — in GLOSSARY §9's words from P2.3 (R-6, words only: `N
@@ -175,13 +193,15 @@ MODEL_BROKEN = re.compile(r"^model: (?P<entry>\S+) DOES NOT LOAD — (?P<error>.
 #: in `test_shapes` (a line missing `→ …`, `0/0`, the walkthrough's `ok`,
 #: `rejected`, `flipped`, a fourth segment, an outcome tag before the id).
 QUALIFICATION_LINE = re.compile(
-    r"^(?P<id>[^\s\[]\S*) : known-good (?P<good>pass|fail|skipped|errored|not run|reads the candidate)"
+    r"^(?P<id>[^\s\[]\S*) : known-good (?P<good>pass|fail|skipped|errored|not run|reads the candidate"
+    r"|outside its operating context)"
     r" · known-bad (?P<bad>pass|fail(?: \(raised, as declared\))?|skipped|errored)"
     r"(?: · channels differ| · known-good and known-bad via ctx\.extra)?"
     r"(?: · mutation (?:(?P<fails>\d+)/(?P<conclusive>[1-9]\d*) fail|0 conclusive)"
     r"(?: \((?P<inconclusive>\d+) inconclusive\)| \(none made: [^()]+\))?"
     r"| · mutation could not (?:run|finish)| · mutation errored)?"
     r"(?: · check run reads another ledger)?"
+    r"(?: · value moves with its goalpost)?"
     r"(?: · two outcomes| · outcomes differ by tier| · outcome differs from its cached entry)?"
     r" → (?P<verdict>qualified|unqualified)$")
 
@@ -196,7 +216,7 @@ QUALIFICATION_SHOW = re.compile(
 
 #: `gate show`'s detail rows under `qualification:`.
 QUALIFICATION_DETAIL = re.compile(
-    r"^    (?P<what>known-good|known-bad|mutation|not mutated|why) +(?P<body>\S.*)$")
+    r"^    (?P<what>known-good|known-bad|mutation|not mutated|why|goalpost) +(?P<body>\S.*)$")
 
 #: `gate selftest`'s summary, both modes, in qualification's words (P2.3; R-6,
 #: words only: `N control(s) in T: F fired, B BROKEN, S skipped (tooling)`
@@ -437,6 +457,10 @@ STEPS: Tuple[Step, ...] = (
         line(r"^\[ok  \] bracket\.bed_fit : 74 x 30 x 7 mm vs 234 mm usable "
              r"\(250 bed - 2x8 brim\)$"),
         line(r"^6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0$"),
+        # P2.4 (S-35): the evaluator now judges 234 mm while C4 still says 204 —
+        # one number in two places, said once, and C4 stays Checked (73.5 <= 204).
+        line(r"^warning: bracket\.bed_fit : its limit 234 mm is not C4's acceptance "
+             r"condition \(bed fit <= 204\.0 mm\) — one number in two places$"),
     )),
     Step("porcelain-after-edit", (1, 3), PORCELAIN, (
         exactly(r"^ M model/bracket\.py$",

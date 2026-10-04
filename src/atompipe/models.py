@@ -145,6 +145,19 @@ class PrerequisiteKind(StrEnum):
     UNRUN = "unrun"
 
 
+#: The kind of the ``Verdict.unqualified`` token the spine marks a pass with when
+#: it lies outside its evaluator's declared operating context (P2.4-D15): a token
+#: of its own kind, ``context:outside|<canonical json>``, so every reader that
+#: already refuses an unqualified evaluator refuses this pass too — never a
+#: pass, never a crash, Gap's tone — and only the words differ (``report``).
+#: Here, in the type contract, because ``Verdict.__post_init__`` reads it (a mark
+#: on a fail is dropped, D16) and ``claims``, ``gates``, ``report`` and ``site``
+#: must read the same identifier. *Rejected:* a new ``Verdict`` field (P2.3 grew
+#: some twenty readers of ``unqualified``; each would need a twin, and a missed
+#: one would read a crash or a pass).
+CONTEXT_OUTSIDE = "context:outside"
+
+
 class ArtifactKind(StrEnum):
     """What a piece of ingested evidence IS.
 
@@ -445,6 +458,24 @@ class Claim(Record):
     nothing but a hand edit writes this field: no command writes it (V7), so a
     project an older atompipe still reads never holds it unless someone typed
     it."""
+    fallback: str = ""
+    """Why this claim may be carried, untested, when the passes of its
+    evaluators lie outside their operating contexts (P2.4-D18, PLAN-v0.14 §1.5:
+    "the claim reads Assumed when it has an owned fallback assumption,
+    otherwise Gap"). Its owner is ``owner`` — the one nominee field — and it
+    counts only through ``owners``: an ``Attribution`` bound by value to the
+    owner and to THIS reason (``claims.assumption_reason``), which nothing
+    produces until the signing channel (P2.5). So in P2.4 every such claim
+    reads Gap, with the hint that names what would carry it. What it is NOT:
+    an attribution (a hand or agent edit names a reason; it never records an
+    owner), and not ``rationale`` (that says why the claim matters, not why it
+    may be carried untested — an owner would sign the wrong sentence).
+    *Rejected:* a pointer to an assumption claim (two records for one
+    judgement, and a status that depends on another claim's status); GLOSSARY
+    §8's ``assumed: {reason, owner}`` now (a second owner field before the
+    rename pass, which folds both). A spine before P2.4 refuses a claim file
+    carrying it (as P2.1's ``owner``); no command writes it, and an empty one
+    digests as before (``verdicts._ABSENT_WHEN_EMPTY``). The LAST field (R-2)."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Claim":
@@ -558,9 +589,50 @@ class Verdict(Record):
     reasoning that the kind can be derived from the root's reading — but a
     claim's composition sees the verdicts that cover it, and the root's does
     not cover a narrowly tagged claim. An older spine that drops it reads a
-    plain skip: quieter, never a pass. The LAST field."""
+    plain skip: quieter, never a pass."""
+    comparator: str = ""
+    """Which side of ``limit`` passes, as the gate judged it: one of ``<=``,
+    ``<``, ``>=``, ``>``, ``==``, ``!=`` or ``between`` (a band, whose upper
+    bound the verdict does not carry), or ``""`` (P2.4-D5). The gate's own,
+    written where it writes the limit — every bundled gate with a finite limit
+    sets it (R-4: ``test_goalposts.EveryLimitNamesItsSide``), and a branch with
+    no one-sided reading reports no limit. ``gates._stamp`` keeps a known one
+    (an enum normalised to its value) and refuses anything else as an error
+    naming the seven. Read by ``claims.margin`` (D-17): what slipped through
+    before it, a margin inferred from ``(passed, measured, limit)`` guesses
+    generously at equality, and ``min_wall``'s 7 mm against its 1.2 mm read
+    -483% where it is 483% inside. Not a refusal for a third party's gate: with
+    none the margin is ``no-comparator`` (R-10). *Rejected:* a
+    ``GateSpec.comparator`` (two homes, and flow_regime's branches judge
+    different limits); refusing ``between`` (a band binding of a modelica
+    result would error where it read Checked — critique 9). An older spine drops
+    it and reads a verdict with no margin: quieter, never a pass."""
+    settles: str = ""
+    """The quantity the gate measures, stamped from ``GateSpec.settles`` by the
+    spine (``gates._stamp``, ``gates.blocked``, ``verdicts._as_spec``) like
+    ``claims``, ``tier`` and ``pack`` — never the gate's own word. It makes the
+    claim comparison a pure function of ``(claim, verdict)``
+    (``claims.cross_check``, P2.4-D6): what slipped through the alternative, a
+    ``{gate: settles}`` map handed to ``compose``, is a renderer with no
+    registry skipping the comparison — more generous than one with a registry
+    (invariant 12). An older spine drops it and compares nothing: never a
+    pass it would not have read before. With ``comparator``, the LAST fields."""
 
     def __post_init__(self) -> None:
+        # The operating-context mark never launders a fail (P2.4-D16): a token
+        # of that kind on anything that is not a pass is dropped HERE, before
+        # the line below writes `error` — whoever built the verdict (an older
+        # path, a hand-built one, a test). A fail outside the context still
+        # counts (R-3), and a skip or a crash keeps its own, louder, reading.
+        # The mark's own R-2 error (written below, or by the spine beside it)
+        # is not a crash of the verdict's.
+        if self.unqualified and str(self.unqualified).startswith(CONTEXT_OUTSIDE):
+            own = f"unqualified: {self.unqualified}"
+            crashed = bool(self.error) and self.error != own
+            if self.passed is not True or self.skipped or crashed or self.blocked_by:
+                self.unqualified = ""
+                if self.error == own:
+                    self.error = ""
         # Degrade-closed (R-2): a verdict marked unqualified with no error would
         # read `outcome` from its pass flag, and a refusal must never be a pass.
         if self.unqualified and not self.error:
@@ -722,8 +794,28 @@ class GateSpec(Record):
     NOT part of rho (``verdicts.SPEC_FIELDS_IN_RHO``, D-04): the measurement is
     a function of its own inputs, so a guard that recovers re-runs nothing.
     *Rejected:* a separate edges file (two homes for one fact); ``after=``
-    (sequencing's word — P4 reorders; a prerequisite is semantic). The LAST
-    field."""
+    (sequencing's word — P4 reorders; a prerequisite is semantic)."""
+    operating_context: dict = field(default_factory=dict)
+    """The range of its read set this evaluator was qualified on (PLAN-v0.14
+    §1.5, GLOSSARY §2 *operating context*; P2.4-D14): ``{key: (lo, hi)}``,
+    closed intervals, ``None`` for an open end, declared
+    ``@gate(operating_context={"load_n": (0.0, 40.0)})``. A key is spelled as
+    the gate reads it — ``GateContext.param``'s rule, scoped first — and must
+    be READ by every passing run (``gates.run_gate`` errors a pass that never
+    read one: the context is part of the read set, so a change inside the range
+    re-keys the verdict, critique 3 of the design). Judged by the spine on the
+    CURRENT values, over passes only (``gates.context_breach``,
+    ``verdicts._contexted``), on the spelling the run read (critique 4):
+    outside it a pass does not count — its claim reads Gap, or Assumed under
+    an owned ``Claim.fallback`` — and a fail still does (R-3). Its known-good
+    control must lie inside it, or the evaluator is unqualified (D19).
+    Registration refuses a malformed one (R-10: the new field only). NOT part
+    of rho (``verdicts.SPEC_FIELDS_IN_RHO``, P2.2-D1's argument for ``needs``):
+    it decides whether a verdict counts, not what was measured; an edit re-keys
+    the declaring file once through its code digest. *Rejected:* categorical
+    contexts (no bundled need); a context derived from the walk (the paper's
+    word is *declared*); per-claim contexts (the range is the evaluator's);
+    ``inf`` as a bound (``None`` says it). The LAST field."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GateSpec":
@@ -733,6 +825,13 @@ class GateSpec(Record):
             kw["tier"] = Tier(int(kw["tier"]))
         nc = kw.get("negative_control")
         kw["negative_control"] = NegativeControl.from_dict(nc) if isinstance(nc, dict) else nc
+        context = kw.get("operating_context")
+        if isinstance(context, dict):
+            # JSON carries a pair as a list; in memory it is the tuple the
+            # registry stores, so a round trip compares equal.
+            kw["operating_context"] = {
+                str(k): tuple(None if b is None else float(b) for b in v)
+                if isinstance(v, (list, tuple)) else v for k, v in context.items()}
         return cls(**kw)
 
 
@@ -1197,7 +1296,7 @@ __all__ = [
     "ArtifactKind", "EXT_KIND_HINTS", "NeedStatus", "Comparator",
     "Record", "slugify", "sha256_file",
     "Rejected", "Param", "Acceptance", "PhysicalResult", "Claim",
-    "Verdict", "NegativeControl", "GateSpec", "PrerequisiteKind",
+    "Verdict", "NegativeControl", "GateSpec", "PrerequisiteKind", "CONTEXT_OUTSIDE",
     "ToolCandidate", "Need", "Extraction", "InputArtifact", "Decision",
     "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta", "Ledger",
     "RECORD_KINDS", "FORBIDDEN_KEYS", "ALWAYS_WRITTEN",

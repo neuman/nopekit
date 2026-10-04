@@ -377,7 +377,7 @@ def source_hygiene(ctx: GateContext) -> Verdict:
     worst = ", ".join(f"{c.owner.split('.')[-1]}.{c.name} ({f})"
                       for _n, c, f in offenders[:3])
     return Verdict(
-        gate=gid, passed=measured <= limit, measured=measured, limit=limit,
+        gate=gid, passed=measured <= limit, measured=measured, limit=limit, comparator="<=",
         units="parameters",
         detail=(f"{measured}/{len(parameters)} parameter(s) undefendable across "
                 f"{len(files)} file(s): {len(undescribed)} with no description, "
@@ -499,7 +499,7 @@ def claims_addressable(ctx: GateContext) -> Verdict:
 
     measured = len(dead) + len(problems)
     return Verdict(
-        gate=gid, passed=measured == 0, measured=measured, limit=0,
+        gate=gid, passed=measured == 0, measured=measured, limit=0, comparator="<=",
         units="variables",
         detail=(f"{len(found)}/{len(wanted)} claim variable(s) addressable "
                 f"({len(columns)} result columns, {len(model.class_list)} scanned "
@@ -703,7 +703,7 @@ def solution_valid(ctx: GateContext) -> Verdict:
                 f"{len(scan.columns)} variables")
     return Verdict(
         gate=gid, passed=not failures,
-        measured=round(reached, 9), limit=round(stop_time, 9), units="s",
+        measured=round(reached, 9), limit=round(stop_time, 9), comparator=">=", units="s",
         detail=(f"{headline}; " + ("; ".join(failures[:3]) if failures
                                    else "; ".join(notes) or "all checks clean")),
         evidence=evidence,
@@ -833,9 +833,15 @@ def result_claim(ctx: GateContext) -> Verdict:
     detail = (f"{len(usable) - len(failed) - len(unusable)}/{len(usable)} bound "
               f"claim(s) met from {os.path.basename(path)}")
     if worst is not None:
+        # The distance in words, by the sign `atompipe.claims.margin` uses — inside
+        # or past the limit — never a signed percentage with this loop's own
+        # sign, which is positive PAST the limit: the row's JSON `margin` (D-17,
+        # P2.4) and its detail read opposite signs on the same verdict until P2.4
+        # (critique 14 of its design).
         detail += (f"; worst {worst.label}: {worst.variable} = {worst_value:.6g} "
                    f"{worst.units} vs {worst.comparator.value} {worst.limit:g} "
-                   f"({worst_margin * 100:+.1f}% of limit)")
+                   f"({abs(worst_margin) * 100:.1f}% "
+                   f"{'past' if worst_margin > 0 else 'inside'} its limit)")
     if failed:
         detail += f"; FAILED: {', '.join(failed[:2])}"
     if unusable:
@@ -847,6 +853,10 @@ def result_claim(ctx: GateContext) -> Verdict:
         gate=gid, passed=passed,
         measured=(None if worst_value is None else round(float(worst_value), 9)),
         limit=(None if worst is None else round(float(worst.limit), 9)),
+        # The binding's own comparator — the claim's, `between` included: a band
+        # has no one side, and its margin says so (`band`), never an error
+        # (critique 9 of the P2.4 design).
+        comparator=("" if worst is None else worst.comparator.value),
         units=(worst.units if worst is not None else ""),
         detail=detail, evidence=evidence,
     )
@@ -1022,7 +1032,7 @@ def mirror_agrees(ctx: GateContext) -> Verdict:
 
     passed = worst_ratio <= 1.0 and not refused
     return Verdict(
-        gate=gid, passed=passed, measured=round(worst_ratio, 6), limit=1.0,
+        gate=gid, passed=passed, measured=round(worst_ratio, 6), limit=1.0, comparator="<=",
         units="x tolerance",
         detail=(f"{compared} sample(s), {len(tolerances)} variable(s) vs {source}; "
                 f"worst {worst_variable or '-'} at {worst_ratio * 100:.1f}% of its "
@@ -1206,7 +1216,7 @@ def checks(ctx: GateContext) -> Verdict:
     dirty = M.error_is_real(errors)
     return Verdict(
         gate=gid, passed=balanced and not dirty,
-        measured=equations, limit=variables, units="equations",
+        measured=equations, limit=variables, comparator="==", units="equations",
         detail=(f"checkModel({class_name}): {equations} equation(s), "
                 f"{variables} variable(s)"
                 + ("" if balanced else
@@ -1444,7 +1454,7 @@ def simulates(ctx: GateContext) -> Verdict:
     return Verdict(
         gate=gid, passed=not failures,
         measured=(None if reached is None else round(float(reached), 9)),
-        limit=round(stop_time, 9), units="s",
+        limit=round(stop_time, 9), comparator=">=", units="s",
         # No run time here either (D-29): see `compiles`.
         detail=(f"simulate({class_name}) reached t="
                 f"{'?' if reached is None else f'{reached:g}'}/{stop_time:g} s"
