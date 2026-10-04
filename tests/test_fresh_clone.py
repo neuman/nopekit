@@ -74,14 +74,27 @@ BRACKET = os.path.join(_env.REPO, *BRACKET_REL.split("/"))
 #: holds (what slipped through: the U32 checkout's index and legacy ledger rode
 #: into every `--dir` "fresh clone", so its first command read a stranger's
 #: index before rewriting it).
+#: `*.lock` and `*.tmp` anywhere under `.atompipe/` (P2.3's gate): a LIVE
+#: run's state, which `.atompipe/.gitignore` ignores at any depth — the build
+#: lock (`cli.LOCK_NAME`) and `util.atomic_write_text`'s `.<name>.<random>.tmp`.
+#: What slipped through: a `check` running in the checkout's bracket while the
+#: suite copied it put `build.lock` into the copy, naming a pid that was alive
+#: on this host, so the copy's own `check` refused to start ("another atompipe
+#: run ... holds") and exited 2 — a red test that no code change caused. Under
+#: `.atompipe/` only: the bracket's own ignore file says nothing of a `*.lock`
+#: elsewhere, so a clone keeps one.
 #: *Rejected:* parsing the `.gitignore` files — a second, partial
 #: implementation of git's ignore rules, wrong in the cases that matter;
 #: *rejected:* `shutil.copytree` of everything, which is how a developer's
-#: `.atompipe/out` would ride into a "fresh" clone.
+#: `.atompipe/out` — and a running `check`'s lock — would ride into a "fresh"
+#: clone (`test_fixture_hygiene.TheBracketIsCopiedAsAClone` refuses it in every
+#: test).
 WALK_PRUNE_NAMES = frozenset({"__pycache__"})
 WALK_PRUNE_PATHS = frozenset({".atompipe/out", ".atompipe/cache", ".atompipe/obs"})
 WALK_SKIP_PATHS = frozenset({".atompipe/ledger.json", ".atompipe/ledger.legacy.json"})
 WALK_SKIP_SUFFIXES = (".pyc",)
+WALK_STATE_DIR = ".atompipe/"
+WALK_STATE_SKIP_SUFFIXES = (".lock", ".tmp")
 
 #: The message of the copy's single commit.
 COMMIT_MESSAGE = "a fresh clone of examples/bracket"
@@ -117,8 +130,9 @@ def git_listing(repo: str = _env.REPO, rel: str = BRACKET_REL) -> list[str] | No
 
 def walk_listing(root: str) -> list[str]:
     """Every file under ``root`` a clone would carry, relative to it, `/`-separated:
-    no `__pycache__`, no `*.pyc`, none of `.atompipe/{out,cache,obs}`, and not
-    the ignored index or legacy ledger."""
+    no `__pycache__`, no `*.pyc`, none of `.atompipe/{out,cache,obs}`, not
+    the ignored index or legacy ledger, and no live run's lock or temp file
+    under `.atompipe/`."""
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
@@ -126,8 +140,11 @@ def walk_listing(root: str) -> list[str]:
         dirnames[:] = sorted(d for d in dirnames
                              if d not in WALK_PRUNE_NAMES
                              and rel_dir + d not in WALK_PRUNE_PATHS)
+        state = rel_dir.startswith(WALK_STATE_DIR)
         for filename in sorted(filenames):
             if filename.endswith(WALK_SKIP_SUFFIXES) or rel_dir + filename in WALK_SKIP_PATHS:
+                continue
+            if state and filename.endswith(WALK_STATE_SKIP_SUFFIXES):
                 continue
             out.append(rel_dir + filename)
     return sorted(out)
@@ -484,11 +501,17 @@ class CopyListsWhatACloneHolds(_env.EnvCase):
         kept = ["model/bracket.py", ".atompipe/project.json", ".atompipe/.gitignore",
                 ".atompipe/runs/0001-aaaaaaaa.json", "selftest/bad_configs.py",
                 "outputs/kept.txt", "model/out/kept.txt", ".atompipe/verdicts/g/x.json",
-                "claims/C1.json", "ledger.json", "model/ledger.legacy.json"]
+                "claims/C1.json", "ledger.json", "model/ledger.legacy.json",
+                # a lock or a temp file outside `.atompipe/` is the user's (P2.3's gate)
+                "inputs/vendor.lock", "model/notes.tmp"]
         dropped = ["model/__pycache__/bracket.cpython-312.pyc", "gates/stray.pyc",
                    ".atompipe/out/junit.xml", ".atompipe/cache/last_check.json",
                    ".atompipe/obs/g.jsonl", "selftest/__pycache__/deep/x.txt",
-                   ".atompipe/ledger.json", ".atompipe/ledger.legacy.json"]
+                   ".atompipe/ledger.json", ".atompipe/ledger.legacy.json",
+                   # a running `check`'s lock and its writers' temp files, at the
+                   # top of `.atompipe/` and inside the tracked cache (P2.3's gate)
+                   ".atompipe/build.lock", ".atompipe/.ledger.json.k3x9a1.tmp",
+                   ".atompipe/verdicts/g/.0123abcd-4567.json.q8w2e4.tmp"]
         for rel in kept + dropped:
             self._write(root, rel)
         self.assertEqual(walk_listing(root), sorted(kept))

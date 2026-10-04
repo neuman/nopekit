@@ -79,6 +79,8 @@ import unittest
 from atompipe import cli as cli_mod
 from atompipe import gates as gates_mod
 
+import _projects
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SPINE_SRC = os.path.join(REPO, "src", "atompipe")
 TESTS_DIR = os.path.join(REPO, "tests")
@@ -87,7 +89,6 @@ SPINE_CONTRACT = os.path.join(DOCS_DIR, "SPINE_CONTRACT.md")
 PACK_FORMAT = os.path.join(DOCS_DIR, "PACK_FORMAT.md")
 SITE_CONTRACT = os.path.join(DOCS_DIR, "SITE_CONTRACT.md")
 PLAN = os.path.join(DOCS_DIR, "PLAN.md")
-BRACKET = os.path.join(REPO, "examples", "bracket")
 
 #: Modules that carry no public surface of their own: the package marker and the
 #: `python -m atompipe` shim. Everything else under src/atompipe/ is a spine
@@ -1282,9 +1283,11 @@ class SiteStateKeysAreDocumented(unittest.TestCase):
     def setUp(self) -> None:
         tmp = tempfile.mkdtemp(prefix="atompipe-contracts-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
-        self.root = os.path.join(tmp, "bracket")
-        shutil.copytree(BRACKET, self.root,
-                        ignore=shutil.ignore_patterns("__pycache__", "site"))
+        # As a clone holds it, never the checkout's tree (a running `check`'s
+        # build.lock rode a copytree, P2.3's gate) — and without a `site/` an
+        # earlier `site init` left untracked there, which `site init` here would meet.
+        self.root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
+        shutil.rmtree(os.path.join(self.root, "site"), ignore_errors=True)
         saved = gates_mod.REGISTRY
         gates_mod.REGISTRY = gates_mod.Registry()
         self.addCleanup(setattr, gates_mod, "REGISTRY", saved)

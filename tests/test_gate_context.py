@@ -47,10 +47,10 @@ from atompipe.util import AtompipeError
 from atompipe.verdicts import ABSENT, GateInputWriteError, GateTrace, ParamTrace, digest_value
 
 import _env
+import _projects
 
 REPO = _env.REPO
 PACKS_DIR = os.path.join(REPO, "packs")
-BRACKET = os.path.join(REPO, "examples", "bracket")
 
 #: The bundled corpus the R-4 measurements run over, as floors rather than exact
 #: pins: 54 pack gates and the bracket's 6 when this was written. A floor keeps a
@@ -621,8 +621,7 @@ class GateIdsAreDirectoryNames(_env.EnvCase):
                 registry.register(spec, fn)
         # The bracket's gates through the CLI in a copy, so this measurement does
         # not depend on which module owns the project-gate loader.
-        project = os.path.join(self.tmp(), "bracket")
-        shutil.copytree(BRACKET, project, ignore=shutil.ignore_patterns("__pycache__", "out"))
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         proc = _env.atompipe(["gate", "list", "--json"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = json.loads(proc.stdout)["gates"]
@@ -1140,8 +1139,7 @@ class ReadsStillAttributed(_env.EnvCase):
     bracket's failing claim turns on."""
 
     def test_why_names_the_gate_that_read_the_param(self):
-        project = os.path.join(self.tmp(), "bracket")
-        shutil.copytree(BRACKET, project, ignore=shutil.ignore_patterns("__pycache__", "out"))
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         checked = _env.atompipe(["check"], cwd=project)
         self.assertIn(checked.returncode, (0, 1), checked.stderr)
         proc = _env.atompipe(["why", "thickness", "--json"], cwd=project)

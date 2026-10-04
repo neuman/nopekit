@@ -25,13 +25,11 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import unittest
 import xml.etree.ElementTree as ET
 
 import _env
-
-BRACKET = os.path.join(_env.REPO, "examples", "bracket")
+import _projects
 
 #: `report.JUNIT_DEFAULT`, spelled as a path under the project root.
 DEFAULT = os.path.join(".atompipe", "out", "junit.xml")
@@ -69,9 +67,10 @@ def _property(root: ET.Element, name: str) -> str | None:
 
 class JUnitAtTheEdge(_env.EnvCase):
     def setUp(self):
-        self.project = os.path.join(self.tmp(), "bracket")
-        shutil.copytree(BRACKET, self.project,
-                        ignore=shutil.ignore_patterns("__pycache__", "out"))
+        # As a clone holds it, never the checkout's tree: a `check` running in
+        # the bracket put its live build.lock into a copytree (P2.3's gate).
+        self.project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"),
+                                              migrated=True)
 
     def _stale(self, path: str) -> str:
         os.makedirs(os.path.dirname(path), exist_ok=True)

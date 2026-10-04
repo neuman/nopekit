@@ -31,6 +31,11 @@ class here pins one of them shut:
   later checkpoints' tests need (E4's pack rows, the R-8 oracle): a bracket copy
   and a pack baseline wrapped as a legacy project. A builder is a fixture, and a
   fixture nobody checked is where a vacuous test hides.
+* **TheBracketIsCopiedAsAClone** — a test copies the bracket as a clone holds
+  it (``_projects.bracket_copy``), never by ``copytree`` of the checkout. What
+  slipped through (P2.3's gate): a ``check`` running in the bracket while the
+  suite ran put its live ``build.lock`` into a test's copy, and the copy's own
+  ``check`` refused to start. The scan has planted violators it must catch.
 
 Every in-process test works on a TEMP COPY of the bracket, never the tracked
 tree: loading a fixture through the stock import system writes ``__pycache__``
@@ -47,11 +52,13 @@ import json
 import os
 import re
 import shutil
+import socket
 import textwrap
 import unittest
 
 import _env
 import _projects
+import test_fresh_clone
 from atompipe import gates, modelio, packs, verdicts
 from atompipe.models import Acceptance, Claim, Ledger, Verdict
 
@@ -616,6 +623,227 @@ class ProjectsHelpers(_env.EnvCase):
         with self.assertRaises(NotImplementedError):
             _projects.wrap_pack_baseline("beam-analytic", os.path.join(self.tmp(), "w"),
                                          legacy=False)
+
+
+# --------------------------------------------------------------------------- #
+# TheBracketIsCopiedAsAClone
+# --------------------------------------------------------------------------- #
+#: Callables that copy a whole directory tree. ``copy_tree`` is distutils' and
+#: setuptools' spelling of the same thing.
+_TREE_COPIERS = frozenset({"copytree", "copy_tree"})
+
+#: The module-level name every test file gives the checkout's bracket
+#: (``test_fresh_clone.BRACKET``, ``_projects.BRACKET``, and each file's own).
+#: Exact, so ``LEGACY_BRACKET`` (``tests/bracket_legacy``, frozen fixtures that
+#: no run ever writes into) is not it.
+_BRACKET_NAME = "BRACKET"
+
+#: How many tree copies the scan must recognise across tests/ before its silence
+#: means anything. 15 when it landed (2026-10-03: the pack copies, the scratch
+#: projects, the spine copy, the R-8 oracle's pristine copy); 10 leaves room for
+#: a few to be folded into helpers, and is far above the 0 a scan that stopped
+#: recognising `shutil.copytree` would see. Rejected: `> 0`, which one surviving
+#: call would satisfy.
+_MIN_TREE_COPIES = 10
+
+
+def _path_parts(node: ast.AST) -> list[ast.AST]:
+    """The operands of a path spelled as ``os.path.join(...)`` or ``a / b / c``,
+    in order; ``[node]`` for anything else."""
+    if isinstance(node, ast.Call) and node.args:
+        func = node.func
+        called = (func.id if isinstance(func, ast.Name)
+                  else func.attr if isinstance(func, ast.Attribute) else "")
+        if called in {"join", "joinpath", "Path", "PurePath"}:
+            out: list[ast.AST] = []
+            for arg in node.args:
+                out += _path_parts(arg)
+            return out
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Div, ast.Add)):
+        return _path_parts(node.left) + _path_parts(node.right)
+    return [node]
+
+
+def _names_the_bracket(node: ast.AST, aliases: frozenset[str]) -> bool:
+    """Whether ``node`` — or anything inside it — spells the checkout's bracket:
+    its ``BRACKET`` name, a local alias of it, ``"examples/bracket"`` in one
+    string, or ``"examples"`` then ``"bracket"`` in one joined path."""
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Name) and (sub.id == _BRACKET_NAME or sub.id in aliases):
+            return True
+        if isinstance(sub, ast.Attribute) and sub.attr == _BRACKET_NAME:
+            return True
+        if (isinstance(sub, ast.Constant) and isinstance(sub.value, str)
+                and "examples/bracket" in sub.value.replace("\\", "/")):
+            return True
+        words = [part.value.strip("/\\") for part in _path_parts(sub)
+                 if isinstance(part, ast.Constant) and isinstance(part.value, str)]
+        if any(a == "examples" and b == "bracket" for a, b in zip(words, words[1:])):
+            return True
+    return False
+
+
+def _tree_copy_findings(source: str, filename: str = "<planted>") -> tuple[list[str], int]:
+    """``(findings, tree copies seen)``: every whole-tree copy in ``source`` whose
+    source is the checkout's bracket, and how many tree copies there were at all."""
+    tree = ast.parse(source, filename)
+    aliases: set[str] = set()
+    while True:                 # a name bound to the bracket, or to such a name, is it too
+        grown = set(aliases)
+        for node in ast.walk(tree):
+            value = getattr(node, "value", None)
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and value is not None:
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if _names_the_bracket(value, frozenset(grown)):
+                    grown |= {t.id for t in targets if isinstance(t, ast.Name)}
+        if grown == aliases:
+            break
+        aliases = grown
+    findings: list[str] = []
+    seen = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        called = (func.id if isinstance(func, ast.Name)
+                  else func.attr if isinstance(func, ast.Attribute) else "")
+        if called not in _TREE_COPIERS:
+            continue
+        seen += 1
+        src = node.args[0] if node.args else next(
+            (kw.value for kw in node.keywords if kw.arg == "src"), None)
+        if src is not None and _names_the_bracket(src, frozenset(aliases)):
+            findings.append(f"{filename}:{node.lineno}: {called}({ast.unparse(src)}, ...)")
+    return findings, seen
+
+
+def _write_lock(project: str) -> str:
+    """A build lock in ``project`` as a live `check` on this host leaves it: the pid
+    is this test's own process, alive for as long as the test runs, and to the
+    copy's `check` — another process — a running build it must not steal from."""
+    path = os.path.join(project, ".atompipe", "build.lock")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump({"pid": os.getpid(), "host": socket.gethostname(),
+                   "when": "2026-10-03T00:00:00Z", "command": "-m atompipe check"}, fh)
+    return path
+
+
+class TheBracketIsCopiedAsAClone(_env.EnvCase):
+    """A test that needs the bracket copies it as a clone holds it —
+    ``_projects.bracket_copy``, the one listing ``test_fresh_clone`` defines —
+    never by copying the checkout's tree.
+
+    What slipped through (P2.3's gate): six tests made their bracket with
+    ``shutil.copytree(examples/bracket)``, which carries the checkout's
+    untracked state too. The gate ran ``atompipe check`` in the bracket while
+    the suite ran; ``test_ci_config``'s "tracked design, unchanged" copied
+    ``.atompipe/build.lock`` mid-run, naming a pid alive on this host, and the
+    copy's own ``check`` refused to start and exited 2 — red, with no code
+    change behind it, and green again on a quiet machine. The same copy carries
+    a developer's cache, observations and a stale `out/`: a test whose answer
+    depends on what last ran in the checkout is invariant 5's host dependence,
+    in the suite. The walk's listing (verify.sh ``--dir``) left the lock in too.
+    """
+
+    def test_no_test_copies_the_checkouts_bracket(self):
+        findings: list[str] = []
+        seen = 0
+        for dirpath, dirnames, filenames in os.walk(os.path.join(REPO, "tests")):
+            dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
+            for filename in sorted(filenames):
+                if not filename.endswith(".py"):
+                    continue
+                path = os.path.join(dirpath, filename)
+                with open(path, encoding="utf-8") as fh:
+                    found, count = _tree_copy_findings(fh.read(), os.path.relpath(path, REPO))
+                findings += found
+                seen += count
+        self.assertGreaterEqual(seen, _MIN_TREE_COPIES,
+                                "the scan recognised too few tree copies to mean anything")
+        self.assertEqual(
+            findings, [],
+            "a tree copy of examples/bracket carries whatever last ran there — a live "
+            "check's build.lock, its cache and observations, a stale out/ — so the "
+            "copy's answer depends on the checkout; use "
+            "_projects.bracket_copy(dest, migrated=True): " + "; ".join(findings))
+
+    def test_planted_copies_are_caught(self):
+        planted = [
+            'shutil.copytree(BRACKET, p, ignore=shutil.ignore_patterns("__pycache__", "out"))\n',
+            'shutil.copytree(os.path.join(_env.REPO, "examples", "bracket"), p)\n',
+            "from shutil import copytree\ncopytree(_projects.BRACKET, p)\n",
+            "import shutil as sh\nsh.copytree(src=test_fresh_clone.BRACKET, dst=p)\n",
+            'src = os.path.join(REPO, "examples", "bracket")\nshutil.copytree(src, p)\n',
+            'a = os.path.join(REPO, "examples", "bracket")\nb = a\nshutil.copytree(b, p)\n',
+            'shutil.copytree(pathlib.Path(REPO) / "examples" / "bracket", p)\n',
+            'shutil.copytree(REPO + "/examples/bracket", p)\n',
+            'shutil.copytree(os.path.join(BRACKET, ".atompipe"), p)\n',
+            "class C:\n    def setUp(self):\n        shutil.copytree(BRACKET, self.p)\n",
+            "from distutils.dir_util import copy_tree\ncopy_tree(BRACKET, p)\n",
+        ]
+        for source in planted:
+            with self.subTest(source=source):
+                findings, seen = _tree_copy_findings(source)
+                self.assertEqual(seen, 1, source)
+                self.assertTrue(findings, f"not caught: {source!r}")
+
+    def test_the_sanctioned_routes_are_clean(self):
+        clean = [
+            '_projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True)\n',
+            "shutil.copytree(self.project, dest)\n",
+            'shutil.copytree(os.path.join(PACKS_DIR, "beam-analytic"), d)\n',
+            'shutil.copytree(os.path.join(_projects.LEGACY_BRACKET, "x"), d)\n',
+            'shutil.copy2(os.path.join(BRACKET, "model", "bracket.py"), d)\n',
+            'open(os.path.join(BRACKET, "model", "bracket.py"))\n',
+            'shutil.copytree(os.path.join(REPO, "examples", "other"), d)\n',
+        ]
+        for source in clean:
+            with self.subTest(source=source):
+                self.assertEqual(_tree_copy_findings(source)[0], [], source)
+
+    def test_a_live_lock_never_rides_into_a_copy(self):
+        """The hazard, and both listings holding it out. A repository with the
+        bracket at ``examples/bracket``, committed, then a live run's lock and a
+        writer's temp file planted in it as a running `check` leaves them."""
+        repo = self.tmp()
+        rel = test_fresh_clone.BRACKET_REL
+        root = _projects.bracket_copy(os.path.join(repo, *rel.split("/")), migrated=True)
+        for argv, identity in ((["-c", "init.defaultBranch=main", "init", "-q"], False),
+                               (["add", "-A"], False),
+                               (["commit", "-q", "-m", "the bracket"], True)):
+            proc = _env.git(argv, cwd=repo, identity=identity)
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        _write_lock(root)
+        entries = os.path.join(root, ".atompipe", "verdicts", "bracket.deflection")
+        with open(os.path.join(entries, ".0123abcd-4567.json.q8w2e4.tmp"), "w",
+                  encoding="utf-8") as fh:
+            fh.write('{"half": ')
+        planted = {".atompipe/build.lock",
+                   ".atompipe/verdicts/bracket.deflection/.0123abcd-4567.json.q8w2e4.tmp"}
+
+        # The violator: a copy of the whole tree, as the six tests made theirs.
+        carried = os.path.join(self.tmp(), "carried")
+        shutil.copytree(root, carried, ignore=shutil.ignore_patterns("__pycache__", "out"))
+        refused = _env.atompipe(["check"], cwd=carried)
+        self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
+        self.assertIn("another atompipe run", refused.stderr)
+
+        # Both listings leave the run's state out, and a copy of either checks
+        # as the bracket does: its one intended failure, exit 1.
+        listings = {"git": test_fresh_clone.git_listing(repo, rel),
+                    "walk": test_fresh_clone.walk_listing(root)}
+        for source, files in listings.items():
+            with self.subTest(listing=source):
+                self.assertIsNotNone(files)
+                self.assertEqual(sorted(planted & set(files)), [], source)
+                self.assertIn("model/bracket.py", files)
+                dest = os.path.join(self.tmp(), source)
+                for name in files:
+                    target = os.path.join(dest, *name.split("/"))
+                    os.makedirs(os.path.dirname(target), exist_ok=True)
+                    shutil.copy2(os.path.join(root, *name.split("/")), target)
+                checked = _env.atompipe(["check"], cwd=dest)
+                self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
 
 
 if __name__ == "__main__":

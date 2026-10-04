@@ -36,15 +36,14 @@ import json
 import os
 import re
 import shlex
-import shutil
 import sys
 import textwrap
 import unittest
 
 import _env
+import _projects
 
 CI = os.path.join(_env.REPO, ".github", "workflows", "ci.yml")
-BRACKET = os.path.join(_env.REPO, "examples", "bracket")
 SIGNATURE = os.path.join(_env.REPO, "tests", "oracle", "bracket_signature.py")
 EXPECTED = os.path.join(_env.REPO, "tests", "expected_bracket.json")
 
@@ -555,8 +554,10 @@ class SignatureDetectsAMissingFailure(_env.EnvCase):
     def _run(self, thickness: str | None):
         self.assertTrue(os.path.isfile(SIGNATURE), f"{SIGNATURE} does not exist")
         self.assertTrue(os.path.isfile(EXPECTED), f"{EXPECTED} does not exist")
-        project = os.path.join(self.tmp(), "bracket")
-        shutil.copytree(BRACKET, project, ignore=shutil.ignore_patterns("__pycache__", "out"))
+        # "The tracked design" as a clone holds it — what CI checks out — never
+        # the checkout's tree: a `check` running in the bracket put its live
+        # build.lock into a copytree, and this copy's `check` exited 2 (P2.3's gate).
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         if thickness is not None:
             model = os.path.join(project, "model", "bracket.py")
             source = _read(model)

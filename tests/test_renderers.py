@@ -25,11 +25,11 @@ import itertools
 import json
 import os
 import re
-import shutil
 import unittest
 import xml.etree.ElementTree as ET
 
 import _env
+import _projects
 from atompipe import claims as claims_mod
 from atompipe import cli as cli_mod
 from atompipe import report as report_mod
@@ -309,9 +309,7 @@ class BlockingTagIsStatusTag(_env.EnvCase):
         """The helper is what `check` prints: every line under BLOCKING in a real
         run starts with `status_tag` of the status `check --json` reports for that
         claim. A copy of the bracket, so the tracked example is never written."""
-        project = os.path.join(self.tmp(), "bracket")
-        shutil.copytree(os.path.join(_env.REPO, "examples", "bracket"), project,
-                        ignore=shutil.ignore_patterns("__pycache__"))
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         text = _env.atompipe(["check", "--no-record"], cwd=project)
         data = _env.atompipe(["check", "--json", "--no-record"], cwd=project)
         self.assertEqual((text.returncode, data.returncode), (1, 1),
