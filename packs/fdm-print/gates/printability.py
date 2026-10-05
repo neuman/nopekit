@@ -21,50 +21,38 @@ model says otherwise via ``build_axis``. Every length in and out is mm.
 """
 from __future__ import annotations
 
-import importlib.util as _importlib_util
 import math
 import os as _os
-import sys as _sys
 from typing import Any, Iterable, Sequence
 
 from atompipe.gates import gate, GateContext, SCOPE_SEP
+from atompipe.modelio import load_path as _load_path
 from atompipe.models import Locator, NegativeControl, Tier, Verdict
 
+# Shared helpers, loaded BY PATH through the spine's loader rather than imported
+# by name: ``packs.load_gates`` puts the pack directory on ``sys.path`` only
+# while gate modules load, so a by-name import works at load time and not at
+# fixture time, and ``selftest/bad_params.py`` has to load the same helper — the
+# gate and its control must read ONE copy of the arithmetic, not two that can
+# drift (rule 2). ``load_path`` names each module after its absolute path: the
+# gate and the fixture asking for one file get one module, and a second copy of
+# this pack in the same process gets its own. What slipped through when the
+# name was fixed (``atompipe_pack_fdm_print__process_model``) and whatever
+# ``sys.modules`` held under it was served: a twin of this pack computed its
+# print time with the FIRST copy's model, and never ran an edit to its own
+# (S-26, packs:H4).
+_HERE = _os.path.dirname(_os.path.abspath(__file__))
 
-def _sibling_module(name: str, filename: str):
-    """Load a shared helper that sits next to this file, by path.
-
-    ``packs.load_gates`` puts the pack directory on ``sys.path`` while it imports
-    gate modules and takes it off again afterwards, so an ordinary ``import`` of
-    a sibling works at load time and not at fixture time. Resolving by path works
-    in both, which matters because ``selftest/bad_params.py`` loads the same
-    helper the same way — the gate and its control have to be reading one copy of
-    the arithmetic, not two that can drift (rule 2).
-    """
-    cached = _sys.modules.get(name)
-    if cached is not None:
-        return cached
-    path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), filename)
-    spec = _importlib_util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:             # pragma: no cover - packaging bug
-        raise ImportError(f"cannot load {path}")
-    module = _importlib_util.module_from_spec(spec)
-    _sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_pm = _sibling_module("atompipe_pack_fdm_print__process_model", "_process_model.py")
+_pm = _load_path(_os.path.join(_HERE, "_process_model.py"))
 
 # What the part is called once ``views/part.py`` has drawn it. Loaded the same way
 # and for the same reason as the arithmetic above: the node name a locator carries
-# is an interface, and an interface in two copies drifts.
-_PARTS = _sibling_module("atompipe_pack_fdm_print__parts",
-                         _os.path.join(_os.pardir, "fdm_print_parts.py"))
+# is an interface, and an interface in two copies drifts. ``gates/mesh.py`` loads
+# the same file and gets this same module.
+_PARTS = _load_path(_os.path.join(_os.path.dirname(_HERE), "fdm_print_parts.py"))
 
-# One verdict over a set of parts. Loaded the same way, under the same module
-# name ``gates/mesh.py`` uses, so both gate modules share one copy of the fold.
-_FOLD = _sibling_module("atompipe_pack_fdm_print__fold", "fdm_print_fold.py")
+# One verdict over a set of parts, the same module ``gates/mesh.py`` holds.
+_FOLD = _load_path(_os.path.join(_HERE, "fdm_print_fold.py"))
 
 # --------------------------------------------------------------------------- #
 # domain constants — properties of the process, not of any project
@@ -376,6 +364,12 @@ def _direction_problem(name: str, value: Any) -> str:
     claims=["manufacturability", "fdm", "additive", "printability"],
     tier=Tier.INSTANT,
     settles="bed fit",
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_params.py:brim_overflow",
         note="a footprint sized halfway between the bed minus its brim and the "
@@ -461,7 +455,7 @@ def bed_fit(ctx: GateContext) -> Verdict:
         gate="fdm.bed_fit",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{fx:.0f}x{fy:.0f}x{fz:.0f} mm vs {usable_x:.0f}x{usable_y:.0f} usable "
                f"({bed_x:.0f}x{bed_y:.0f} bed - 2x{brim:.1f} brim) x {bed_z:.0f} Z; "
@@ -497,7 +491,7 @@ def _usable(bed_x: float, bed_y: float, brim: float):
     if usable_x <= 0 or usable_y <= 0:
         return Verdict(
             gate="fdm.bed_fit", passed=False, measured=round(brim, 2),
-            limit=round(min(bed_x, bed_y) / 2.0, 2), units="mm",
+            limit=round(min(bed_x, bed_y) / 2.0, 2), comparator="<", units="mm",
             detail=f"brim allowance {brim:.1f} mm per side consumes the whole "
                    f"{bed_x:.0f}x{bed_y:.0f} mm bed — check brim_mm",
         )
@@ -592,6 +586,12 @@ def _bed_fit_over_set(ctx: GateContext, parts) -> Verdict:
     claims=["manufacturability", "fdm", "additive", "printability"],
     tier=Tier.INSTANT,
     settles="wall thickness",
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_params.py:two_perimeter_wall",
         note="the same part with its thinnest section cut to two beads of the "
@@ -648,7 +648,7 @@ def min_wall(ctx: GateContext) -> Verdict:
         gate="fdm.min_wall",
         passed=thin >= limit,
         measured=round(thin, 3),
-        limit=round(limit, 3),
+        limit=round(limit, 3), comparator=">=",
         units="mm",
         detail=f"thinnest section {thin:.2f} mm = {perims:.1f} beads vs "
                f"{limit:.2f} mm minimum ({source})",
@@ -664,6 +664,12 @@ def min_wall(ctx: GateContext) -> Verdict:
     claims=["manufacturability", "fdm", "additive", "structural", "printability"],
     tier=Tier.INSTANT,
     settles="layer-normal load alignment",
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_params.py:load_across_layers",
         note="the same part rotated so the load runs along the build axis, with "
@@ -790,7 +796,7 @@ def layer_alignment(ctx: GateContext) -> Verdict:
             gate="fdm.layer_alignment",
             passed=phi <= ADVERSE_LAYER_ANGLE_DEG,
             measured=round(phi, 1),
-            limit=ADVERSE_LAYER_ANGLE_DEG,
+            limit=ADVERSE_LAYER_ANGLE_DEG, comparator="<=",
             units="deg from layer plane",
             detail=f"load at {phi:.0f} deg to the layer plane ({build_note}), "
                    f"knockdown {knock:.2f}x; ANGLE ONLY — no 'utilisation' in the "
@@ -803,7 +809,7 @@ def layer_alignment(ctx: GateContext) -> Verdict:
         gate="fdm.layer_alignment",
         passed=derated <= 1.0,
         measured=round(derated, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="derated utilisation",
         detail=f"load at {phi:.0f} deg to the layer plane ({build_note}): "
                f"{kind} utilisation {util:.2f} ({util_key}) / knockdown {knock:.2f} "
@@ -820,6 +826,12 @@ def layer_alignment(ctx: GateContext) -> Verdict:
     claims=["manufacturability", "fdm", "additive", "cost", "printability"],
     tier=Tier.INSTANT,
     settles="print time",
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_params.py:crawling_speed",
         note="the same part at the speed that puts it 15% past the project's own "
@@ -904,7 +916,7 @@ def print_time_est(ctx: GateContext) -> Verdict:
         gate="fdm.print_time_est",
         passed=max(time_frac, mass_frac) <= 1.0,
         measured=round(max(time_frac, mass_frac), 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="of limit",
         detail=f"ESTIMATE ~{hours:.1f} h of {limit_h:.0f} h, ~{mass_g:.0f} g of "
                f"{limit_g:.0f} g ({extruded_mm3 / 1000.0:.1f} cm^3 at {infill:.0%} "
@@ -1146,7 +1158,7 @@ def process_model_valid(ctx: GateContext) -> Verdict:
         gate="fdm.process_model_valid",
         passed=not problems,
         measured=float(len(problems)),
-        limit=0.0,
+        limit=0.0, comparator="<=",
         units="problems",
         detail=("; ".join(problems) if problems
                 else f"process model applies — {checked}"),

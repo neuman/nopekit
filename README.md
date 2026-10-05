@@ -19,8 +19,8 @@ claims  ->  gates  ->  packs  ->  readiness report
 
 A **claim** is something that must be true for the design to work. A **gate** is an
 executable that settles a claim *and is capable of failing*. A **pack** supplies gates
-for one physical domain. The **readiness report** is the ledger rendered: what is
-proven, what is not, and why.
+for one physical domain. The **readiness report** is the claims and their verdicts
+rendered: what is proven, what is not, and why.
 
 ## Install
 
@@ -45,18 +45,20 @@ Try it immediately on the reference project, which has zero dependencies:
 
 ```sh
 cd examples/bracket
-atompipe status         # 7 claims: 3 proven, 1 failing, 1 gap, 1 physical, 1 assumed
+atompipe status         # 7 claims · 3 checked · 1 failing · 2 gaps · 1 pending build
 atompipe check          # 6 gates; one fails on purpose — fix `thickness` 7.0 -> 8.0
 atompipe gate selftest  # every gate proves it can fail on known-bad input
 atompipe why thickness  # one parameter's full history, including what was rejected
 ```
 
-It ships with its claims and its ledger, because the ledger *is* a source of truth —
-not a build artifact.
+It ships with its records and its verdicts, because those *are* sources of truth —
+not build artifacts: each claim is a file under `claims/`, and every gate's verdict
+is committed under `.atompipe/verdicts/`, so a fresh clone's first `check` is served
+from the cache and reads the same answer the author saw.
 
 Nothing heavy installs until a claim needs it and you have said yes. The two packs
-that want `trimesh` report their claims as **BLOCKED** — visibly — when it is absent,
-rather than quietly skipping.
+that want `trimesh` report their claims as **Skipped** — visibly — when it is absent,
+rather than quietly passing.
 
 ## What using it looks like
 
@@ -73,8 +75,8 @@ C4  Runtime >=20 min at cruise on one pack               [measurable]
 C5  Watertight at the hatch seam                         [physical only]
 ```
 
-C5 cannot be validated by any tool. It stays UNVERIFIED, visibly, until you build one
-and record a result. Everything else gets gated:
+No evaluator here can settle C5. It stays **pending build**, visibly, until you build
+one and record a result. Everything else gets gated:
 
 ```
 $ atompipe check
@@ -104,21 +106,51 @@ whole thing as a pack so nobody has to do it again.
 
 ## Why you should believe the output
 
-Because of what it refuses to claim. Every row in the PROVEN table cites the gate that
-proved it and the evidence file it wrote. Everything else is listed as physical,
-blocked, stale or assumed, with the reason.
+Because of what it refuses to claim. Every row in the report's checked section cites
+the gate that passed it and the evidence file it wrote, and a claim is listed there
+only when every gate covering it ran and passed — *checked*, which does not mean true.
+Everything else is listed under its own status, with the reason: failing, skipped, a
+gap, open, stale, pending build or assumed.
 
-Three statuses never blur into "pass":
+None of these ever blurs into a pass, even beside a gate that passed:
 
-- **skipped** — the gate did not run. Its tool is missing. Nothing was proven.
-- **errored** — the gate crashed. Nothing was proven.
-- **stale** — it passed, but inputs have changed since. Nothing is proven *now*.
+- **Skipped** — a gate skipped: its tool is missing here. Nothing was evaluated.
+- **Skipped, errored** — a gate crashed. Nothing was evaluated, and it reads louder
+  than a missing tool: the gate itself is broken.
+- **Open** — a gate exists and is unrun on the current inputs.
+- **Gap** — no gate covers the claim, or one has not shown it can fail; or an
+  assumption nobody owns.
+- **Stale** — it passed, but inputs have changed since. Nothing is checked *now*.
 
 And every gate must declare a **negative control**: known-bad input it has been shown
 to fail on. The registry refuses to register a gate without one. This is not
 bureaucracy — an agent that writes plausible code will write plausible validators,
 and plausible validators are worse than none, because they launder assumption into
 apparent proof.
+
+## Where the facts live
+
+Records are files — one fact, one file, in the project, under git:
+
+```
+my-project/
+  model/bracket.py          the model: each parameter's value, why, and what lost (PARAMS)
+  gates/   selftest/        the project's own gates, and the known-bad inputs they must fail on
+  claims/C1.json            one claim per file: what must be true, and its limit
+  params/  decisions/  needs/  inputs/  results/  views/     one record per file
+  .atompipe/project.json    the project: its name, its model entry, its live packs
+  .atompipe/verdicts/       every gate's verdict, keyed by the hash of what it read (tracked)
+  .atompipe/ledger.json     an index of every record, generated (ignored: never edit it)
+  .atompipe/cache/  obs/  out/     the last check's statuses, what runs cost, scratch (ignored)
+```
+
+You — or the agent — edit a record the way you edit code, and `atompipe check`
+validates it: a misspelled key in `claims/C1.json` is refused with a suggestion, never
+silently dropped. A verdict goes stale when something its gate was seen to read
+changes — a parameter, a file, a claim, its own code — so an edit to one parameter
+re-runs only the gates that read it; what the tracer cannot see is named in
+[`docs/SPINE_CONTRACT.md`](docs/SPINE_CONTRACT.md)'s limits. There is no run history
+to keep: git and the verdict cache are the history.
 
 ## The method
 
@@ -170,9 +202,9 @@ atompipe site build     # run the viewgens, write site/data/ and site/assets/
 atompipe site serve     # python3 -m http.server. No build step, no npm, ever.
 ```
 
-`site build` never runs gates. It renders the verdicts already in the ledger and
-stamps each with its own age, because a page that re-ran the cheap gates and not the
-expensive ones would show a mixed-age picture under one timestamp. It also reports
+`site build` never runs gates. It renders the verdicts already in the verdict
+cache and stamps each with its own age, because a page that re-ran the cheap gates
+and not the expensive ones would show a mixed-age picture under one timestamp. It also reports
 every locator naming a view or a part that does not exist — a gate that thinks it is
 highlighting something and is not looks exactly like a gate that found nothing.
 
@@ -194,7 +226,8 @@ atompipe check [--tier N]      run gates; exits non-zero while anything critical
 atompipe gap [--propose]       claims with no gate, and packs that might cover them
 atompipe why <param|claim>     one thing's full history, instead of the whole log
 atompipe gate selftest         every negative control; fails any gate that can't fail
-atompipe report [--write]      the readiness report
+atompipe report [--write]      the readiness report (--write: REPORT.md, an ignored output)
+atompipe export <milestone>    the spend: re-runs what it requires, then builds out/<milestone>/
 atompipe site build|serve      the project site: the ledger, rendered and clickable
 atompipe doctor                run this first when something is confusing
 ```
@@ -203,6 +236,15 @@ atompipe doctor                run this first when something is confusing
 
 Early. The spine and the first extracted packs work; the interfaces will move. It is
 Apache 2.0 — use it, fork it, or take the ten rules and ignore the code.
+
+**Do not run an older atompipe on a project in this layout.** A version from before
+records became files reads `.atompipe/ledger.json` as the project's records, and may
+rewrite it; nothing a newer version writes can stop it, because the older one
+predates every guard. (A project whose `.atompipe/project.json` says a newer `schema`
+than your atompipe knows is refused — that check runs only from this layout forward.)
+A project still in the old one-file layout migrates itself the first time `check`, or
+a command that writes a record, runs: its `ledger.json` becomes one file per record and
+is renamed `ledger.legacy.json`, never deleted.
 
 ## Licence
 

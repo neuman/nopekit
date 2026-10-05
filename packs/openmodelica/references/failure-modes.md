@@ -235,6 +235,58 @@ commit that changes the model, and never hand-edit a result file.
 
 ---
 
+## 13. A library omc cannot see
+
+**What it is.** The model uses the Modelica Standard Library, or another
+library, and the omc running the gates has no copy of it. This is the default
+state of the `-minimal` docker image and of a fresh compiler-only install.
+
+**On the terminal.**
+```
+loadModel(Modelica) = false
+Error: Failed to open file for writing: //.openmodelica/libraries/index.json.tmp1
+Error: Failed to load package Modelica (default) using MODELICAPATH //.openmodelica/libraries/.
+```
+
+**Gate.** `modelica.checks`, `modelica.compiles` and `modelica.simulates`.
+**Verdict.** If the library is listed in `modelica_load_libraries`, the gates
+SKIP: `library not loaded, nothing checked: loadModel(Modelica) = false; omc:
+Failed to load package Modelica ...`. The claim reads BLOCKED. If it is not
+listed, the gates FAIL on `Class Modelica.… not found in scope`, which cannot be
+told apart from a misspelt class. So list every library the model uses.
+
+**Note.** The pack's own selftest never exercises this. Its fixtures load no
+library, so they pass on an omc that has none. `references/installing.md` has
+the install and the check.
+
+---
+
+## 14. A directory omc cannot see
+
+**What it is.** omc runs behind a wrapper (docker, a sandbox) that does not
+mount the directory the gate runs it from, or a model opens a file by absolute
+path that the wrapper does not mount. The gates copy every source entry into
+the directory they run omc from (`references/driving-omc.md`), so only a
+wrapper that fails to mount `$PWD` at the same path can hide a source.
+
+**On the terminal.**
+```
+loadFile(ThermalTank.mo) = false
+```
+with an **empty** error string after it. omc 1.22 says nothing about a file it
+cannot open. A file it opened and could not parse always comes with an error.
+
+**Gate.** `modelica.checks`, `modelica.compiles` and `modelica.simulates` read
+FAIL ("the sources did not load"), and their controls would fire on it too, so
+`gate selftest` reports the pack failing its own baseline. Fix the wrapper
+(`references/installing.md`, "Paths"), not the model.
+
+**Note.** Before the gates copied their sources this was the normal state of a
+`$HOME`-mounting wrapper under a test suite that sets a temp `HOME`: the pack's
+own good baseline read FAIL wherever the checkout was not under `/tmp`.
+
+---
+
 ## Quick triage
 
 | Symptom | Look at |
@@ -250,3 +302,5 @@ commit that changes the model, and never hand-edit a result file.
 | a claim has been BLOCKED for weeks | §10 |
 | two documents disagree about one number | §11 |
 | everything is green and nobody believes it | §12 |
+| `loadModel(...) = false`, or tier-2 BLOCKED with omc installed | §13 |
+| `loadFile(...) = false` with an empty error string | §14 |

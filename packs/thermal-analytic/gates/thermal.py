@@ -164,7 +164,7 @@ def conduction(ctx: GateContext) -> Verdict:
                       f"{rows}\n{r_total:9.4f} m2K/W   TOTAL  ->  U = {u:.4f} W/m2K\n")
     films = "films included" if film_r else "NO surface films declared"
     return Verdict(
-        gate=gid, passed=u <= limit, measured=round(u, 4), limit=round(limit, 4),
+        gate=gid, passed=u <= limit, measured=round(u, 4), limit=round(limit, 4), comparator="<=",
         units="W/m2K",
         detail=f"U={u:.3f} W/m2K vs {limit:.3f} limit (R={r_total:.2f} m2K/W, "
                f"{len(layers)} layers, {films}; {loss_per_k:.2f} W/K over {area:.2f} m2)",
@@ -181,6 +181,9 @@ def conduction(ctx: GateContext) -> Verdict:
     claims=["convection", "heat-transfer-coefficient", "airflow"],
     tier=Tier.INSTANT,
     settles="convective heat transfer coefficient",
+    # No edge to thermal.h_agreement: it compares representations rather than
+    # guarding validity, and this gate's own control, fan_stopped, fails it
+    # (17.7 vs 5.6 W/m^2K).
     negative_control=NegativeControl(
         fixture="selftest/bad_thermal.py:fan_stopped",
         note="the agency driving the convection collapses — forced: the velocity falls "
@@ -233,7 +236,7 @@ def convection(ctx: GateContext) -> Verdict:
     if not props["in_range"]:
         return Verdict(
             gate=gid, passed=False, measured=round(film_k, 1),
-            limit=round(props["table_hi_k"], 1), units="K",
+            limit=round(props["table_hi_k"], 1), comparator="<=", units="K",
             detail=f"film temperature {film_k:.1f} K is outside the tabulated {fluid} "
                    f"properties ({props['table_lo_k']:.0f}-{props['table_hi_k']:.0f} K) — "
                    f"h here would be extrapolated, not measured",
@@ -280,7 +283,7 @@ def convection(ctx: GateContext) -> Verdict:
         )
 
     return Verdict(
-        gate=gid, passed=h >= h_req, measured=round(h, 3), limit=round(h_req, 3),
+        gate=gid, passed=h >= h_req, measured=round(h, 3), limit=round(h_req, 3), comparator=">=",
         units="W/m2K",
         detail=f"h={h:.1f} W/m2K vs {h_req:.1f} required ({mode} {geometry}; "
                f"Nu={corr['nu']:.1f}; {common})" + (f"; {swap}" if swap else ""),
@@ -353,7 +356,7 @@ def radiation(ctx: GateContext) -> Verdict:
     passed = (q <= limit) if sense == "max" else (q >= limit)
     enclosure = "large surround (eps2=1)" if eps2 >= 1.0 else f"eps2={eps2:g} over {area2} m2"
     return Verdict(
-        gate=gid, passed=passed, measured=round(q, 2), limit=round(limit, 2), units="W",
+        gate=gid, passed=passed, measured=round(q, 2), limit=round(limit, 2), comparator=("<=" if sense == "max" else ">="), units="W",
         detail=f"{q:.1f} W net radiant ({'<=' if sense == 'max' else '>='} {limit:.1f} W) "
                f"from {area:.3f} m2 at {P.k_to_c(t1):.1f}C to {P.k_to_c(t2):.1f}C, "
                f"eps={eps1:g} F={view:g}, {enclosure}; h_rad={result['h_rad']:.2f} W/m2K",
@@ -419,7 +422,7 @@ def fin_efficiency(ctx: GateContext) -> Verdict:
     else:
         verdict_note = f"eta={fin['efficiency'] * 100:.0f}%, mL={fin['mL']:.2f}"
     return Verdict(
-        gate=gid, passed=eps >= limit, measured=round(eps, 3), limit=round(limit, 3),
+        gate=gid, passed=eps >= limit, measured=round(eps, 3), limit=round(limit, 3), comparator=">=",
         units="effectiveness",
         detail=f"effectiveness {eps:.2f} vs {limit:g} minimum (ceiling {ceiling:.2f}); "
                f"{verdict_note}; q={fin['q_fin_w_per_k']:.3f} W/K per fin",
@@ -435,6 +438,11 @@ def fin_efficiency(ctx: GateContext) -> Verdict:
     claims=["steady-state-temperature", "component-temperature", "cooling"],
     tier=Tier.INSTANT,
     settles="steady-state temperature",
+    # No edge to thermal.time_constant (P2.2-D12, "a guard that also
+    # measures"): it also fails on tau over time_constant_limit_s, which says
+    # nothing about the steady-state node, so a fail there would hide this
+    # measurement. It can land once the Biot half of time_constant is its own
+    # evaluator.
     negative_control=NegativeControl(
         fixture="selftest/bad_thermal.py:dry_joint",
         note="the thermal interface material is omitted and the part is bolted dry: the "
@@ -494,7 +502,7 @@ def steady_state_temp(ctx: GateContext) -> Verdict:
                       + f"{power:.2f} W -> {rise:.1f} K rise over {ambient:.1f} C\n"
                       ) if rows else []
     return Verdict(
-        gate=gid, passed=temp <= limit, measured=round(temp, 2), limit=round(limit, 2),
+        gate=gid, passed=temp <= limit, measured=round(temp, 2), limit=round(limit, 2), comparator="<=",
         units="degC",
         detail=f"{temp:.1f} C vs {limit:.1f} C limit ({power:.2f} W x {r_total:.2f} K/W "
                f"= {rise:.1f} K rise over {ambient:.1f} C ambient{dominant})",
@@ -602,7 +610,7 @@ def time_constant(ctx: GateContext) -> Verdict:
     else:
         measured, limit, units = round(bi, 5), bi_limit, "Biot"
     return Verdict(
-        gate=gid, passed=lumped_ok and tau_ok, measured=measured, limit=limit,
+        gate=gid, passed=lumped_ok and tau_ok, measured=measured, limit=limit, comparator="<=",
         units=units,
         detail=reason,
     )
@@ -696,7 +704,7 @@ def collector_output(ctx: GateContext) -> Verdict:
 
     return Verdict(
         gate=gid, passed=q >= q_min, measured=round(q, 1),
-        limit=round(q_min, 1), units="W",
+        limit=round(q_min, 1), comparator=">=", units="W",
         detail=f"{q:.0f} W useful vs {q_min:.0f} W required (eta={col['efficiency']:.3f}); "
                f"G={g:.0f} W/m2, dT={col['dt_k']:.0f} K, zero output below "
                f"G={col['critical_irradiance_w_m2']:.0f} W/m2; stagnation would be "
@@ -769,7 +777,7 @@ def stagnation(ctx: GateContext) -> Verdict:
     stag = amb + ta * g / u_l
     headroom = limit - stag
     return Verdict(
-        gate=gid, passed=stag <= limit, measured=round(stag, 1), limit=round(limit, 1),
+        gate=gid, passed=stag <= limit, measured=round(stag, 1), limit=round(limit, 1), comparator="<=",
         units="degC",
         detail=f"stagnation {stag:.0f} C vs {limit:.0f} C survivable ({headroom:+.0f} K "
                f"headroom) = {amb:.0f} C air + {ta:g}*{g:.0f}/{u_l:g}; independent of area "
@@ -868,7 +876,7 @@ def irradiance(ctx: GateContext) -> Verdict:
                   f"{sky['incidence_deg']:.1f} deg, AM {sky['air_mass']:.2f}; "
                   f"ASHRAE clear-day +-10%, {albedo_note}")
     return Verdict(
-        gate=gid, passed=poa >= limit, measured=round(poa, 1), limit=round(limit, 1),
+        gate=gid, passed=poa >= limit, measured=round(poa, 1), limit=round(limit, 1), comparator=">=",
         units="W/m2", detail=detail, evidence=evidence,
     )
 
@@ -986,7 +994,7 @@ def h_agreement(ctx: GateContext) -> Verdict:
     band = "" if corr["valid"] else (" — note the correlation is OUTSIDE its band here, "
                                      "so thermal.convection is also refusing this case")
     return Verdict(
-        gate=gid, passed=drift <= tol, measured=round(drift, 4), limit=round(tol, 4),
+        gate=gid, passed=drift <= tol, measured=round(drift, 4), limit=round(tol, 4), comparator="<=",
         units="relative drift",
         detail=f"body_h_w_m2k={declared:.1f} vs {computed:.1f} W/m2K from "
                f"{corr['correlation']} ({mode} {geometry}, L={length:.3f} m, "

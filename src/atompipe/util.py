@@ -5,7 +5,7 @@ This module imports nothing from atompipe. It is the bottom of the dependency
 graph and the one file that must never fail to import, so: standard library
 only, no optional extras, no import-time work beyond defining names.
 
-Four things here exist because of specific, expensive failures, not because a
+Five things here exist because of specific, expensive failures, not because a
 utility module is traditional:
 
 * ``atomic_write_text`` — a crash (or a full disk) partway through rewriting
@@ -26,6 +26,14 @@ utility module is traditional:
 * ``iter_suffix_unique`` — two claims slugged to the same id once, and the
   second silently overwrote the first in a dict keyed by id. Dedup is a shared
   rule, so it lives in one place.
+* ``FileDigests`` — a limit file changed under a project gate and the claim
+  still read PASS, where a re-run failed 19.6 g against a 1 g limit (S-22):
+  staleness hashed the digests STORED at ingest, never the bytes, and tampered
+  evidence left ``doctor`` saying "staleness unchanged" (S-45). Every file digest
+  the spine takes is now of the bytes on disk, behind a stat cache that re-reads
+  them whenever the stat cannot rule a change out. It lives here, below
+  ``store`` and ``verdicts``, because both need it and ``store`` must not import
+  ``verdicts``.
 
 Time policy: spine *logic* never reads the clock (rule 3 of the contract —
 callers pass timestamps in). ``utcnow_iso`` is for the CLI edge, and FileLock
@@ -37,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import socket
 import stat
 import sys
@@ -44,7 +53,7 @@ import tempfile
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Any, Iterable
+from typing import Any, Iterable, NamedTuple
 
 
 __all__ = [
@@ -56,6 +65,10 @@ __all__ = [
     "read_json",
     "sha256_text",
     "short_hash",
+    "canonical_json",
+    "seal",
+    "FileDigests",
+    "printable",
     "human_bytes",
     "human_duration",
     "rel",
@@ -222,10 +235,40 @@ def atomic_write_json(path: str | os.PathLike[str], obj: Any) -> None:
     encode dataclasses and enums; a permissive fallback here would let a model
     and its projection drift apart silently, which is exactly what
     ``modelio.project`` is written to prevent.
+
+    ``allow_nan=False``, and the refusal names the path. Python's default writes
+    ``NaN`` and ``Infinity`` as bare tokens that no JSON parser accepts. That is
+    how a could-not-measure number reached ``state.json``: ``JSON.parse``
+    refused the whole file, and the page advised ``atompipe site build``, which
+    wrote the same NaN again (S-47). Every JSON file the spine writes passes
+    through here, so this is where "a number that could not be measured is not
+    a number" is enforced for all of them. Rejected: writing ``null`` in its
+    place — a value that silently becomes "no value" is the NaN problem in a
+    quieter shape, and the gate layer already refuses the number upstream.
     """
     try:
-        payload = json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False)
-    except (TypeError, ValueError) as exc:
+        payload = json.dumps(obj, sort_keys=True, indent=2, ensure_ascii=False,
+                             allow_nan=False)
+    except ValueError as exc:
+        # json raises ValueError for a non-finite float AND for a circular
+        # reference; telling them apart by message text would tie this to one
+        # Python's wording (the CI matrix runs three). The permissive encoder does
+        # not mind a NaN, so if IT succeeds, a NaN or an Infinity was the only
+        # fault. It runs only on the failure path.
+        try:
+            json.dumps(obj, sort_keys=True, allow_nan=True)
+        except (TypeError, ValueError):
+            pass
+        else:
+            raise AtompipeError(
+                f"{os.fspath(path)}: refusing to write NaN or Infinity; a number "
+                f"that could not be measured is not a number"
+            ) from exc
+        raise AtompipeError(
+            f"cannot write {os.fspath(path)}: value is not JSON-serialisable ({exc}); "
+            f"encode records with .to_dict() before saving"
+        ) from exc
+    except TypeError as exc:
         raise AtompipeError(
             f"cannot write {os.fspath(path)}: value is not JSON-serialisable ({exc}); "
             f"encode records with .to_dict() before saving"
@@ -284,6 +327,33 @@ def sha256_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def canonical_json(value: Any) -> str:
+    """THE canonical JSON form: sorted keys, compact separators, UTF-8 as itself
+    (``ensure_ascii=False``), and NaN or Infinity refused (``allow_nan=False``).
+
+    One rule for every digest the spine takes over a JSON value: the verdict
+    cache's (``verdicts._canonical_json`` delegates here, byte for byte, so every
+    pinned digest holds — ``test_digests``, ``test_spine_digest``) and a physical
+    result's seal (``seal``, P2.5a-D6). A float is written as ``repr`` writes it,
+    which every CPython since 3.1 writes identically, so a seal made on one
+    machine verifies on another (R12 of the P2.5a design). *Rejected:* a second
+    canonical form for seals (two forms drift, and one of them would be the
+    one a reviewer never reads); ``sort_keys`` alone (``", "`` and ``": "`` move
+    with a json default nobody pinned)."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
+                      allow_nan=False)
+
+
+def seal(form: Any) -> str:
+    """sha256 hex of ``canonical_json(form)`` — the seal of a physical result or
+    an attribution (``store.append_signed``, P2.5a-D6). What a seal is: tamper
+    EVIDENCE against drift and a helpful agent's shortcut — a hand edit of a
+    recorded result breaks it, and every command then refuses the file. What it
+    is not: a lock. Anyone who can write the file can recompute it (D-13's
+    stated limit; P3's permission rule on ``results/`` is the lock)."""
+    return hashlib.sha256(canonical_json(form).encode("utf-8", "surrogatepass")).hexdigest()
+
+
 def short_hash(text: str, n: int = 12) -> str:
     """First ``n`` hex chars of ``sha256_text(text)``.
 
@@ -300,8 +370,294 @@ def short_hash(text: str, n: int = 12) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# file digests
+# --------------------------------------------------------------------------- #
+#: Bytes per read while hashing. 1 MiB: a mesh of a few hundred MB is hashed in
+#: bounded memory, and past about 64 KiB the chunk size stops mattering to
+#: sha256's throughput. Rejected: reading the whole file (a 300 MB STL held in
+#: memory to learn 32 bytes about it).
+_DIGEST_CHUNK = 1 << 20
+
+#: The cache file's shape. Any other value — or a file that does not parse — is
+#: ignored and rebuilt: the cache is a speed-up, never a record, so there is
+#: nothing in it to migrate.
+_DIGESTS_SCHEMA = 1
+
+_SHA256_HEX = frozenset("0123456789abcdef")
+
+
+class _Digested(NamedTuple):
+    key: tuple[int, int, int, int, int]   # (size, mtime_ns, ctime_ns, ino, dev)
+    sha: str
+    ref: int | None     # the write time the racy rule compares against; None: no reference yet
+    fresh: bool         # hashed by this process since the last save
+
+
+def _stat_key(st: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (st.st_size, st.st_mtime_ns, st.st_ctime_ns, st.st_ino, st.st_dev)
+
+
+def _racy(entry: _Digested) -> bool:
+    """Could the file have changed after it was hashed without its stat moving?
+
+    Yes when it was last touched no earlier than the reference write: in that
+    tick a same-size edit keeps size, mtime and ctime, so the key cannot see it.
+    """
+    if entry.ref is None:
+        return True
+    _size, mtime_ns, ctime_ns, _ino, _dev = entry.key
+    return max(mtime_ns, ctime_ns) >= entry.ref
+
+
+def _hash_file(path: str) -> tuple[str | None, tuple[int, int, int, int, int] | None]:
+    """``(sha256, the stat key after reading)``, or ``(None, None)``.
+
+    Opened non-blocking and checked with ``fstat``: a path that became a FIFO
+    between the caller's ``stat`` and this ``open`` must not hang a sweep on a
+    read that never returns.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return None, None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None, None
+        hasher = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, _DIGEST_CHUNK)
+            if not chunk:
+                break
+            hasher.update(chunk)
+        return hasher.hexdigest(), _stat_key(os.fstat(fd))
+    except OSError:
+        return None, None
+    finally:
+        os.close(fd)
+
+
+class FileDigests:
+    """sha256 of a file's bytes, behind a stat cache that re-reads them whenever
+    the stat cannot rule a change out.
+
+    What slipped through before this existed (S-22, S-45): staleness hashed the
+    digest RECORDED when a file was ingested, so a limit file edited under a gate,
+    or evidence tampered with after ingest, left every key unchanged and the old
+    PASS current. A digest here is always of the bytes on disk; the cache only
+    decides when re-reading them can be skipped.
+
+    ``digest(path)`` returns the hex sha256, or ``None`` when there are no bytes
+    to read: the path is missing, is not a regular file (a directory, a FIFO —
+    never opened, so never hung on), or cannot be read. A relative path resolves
+    against the current directory.
+
+    **The key** is ``(size, mtime_ns, ctime_ns, ino, dev)``. Size and mtime alone
+    are what an editor that restores timestamps defeats: a same-size edit
+    followed by ``os.utime`` back to the old mtime looks untouched to them.
+    ``utime`` cannot set ctime, and a write-and-rename (how most editors save)
+    changes the inode, so either half catches it.
+
+    **The racy-clean rule**, git's own (Documentation/technical/racy-git.txt),
+    against the cache file's mtime rather than its index's: an entry is trusted
+    only when its file was last touched strictly before ``written_ns``, the cache
+    file's own mtime after its last write. In the tick the cache is written, a
+    same-size edit leaves size, mtime and ctime exactly as recorded, and only the
+    timestamp comparison can see that the bytes might have moved. There is no
+    fixed window: *rejected*, a 2 s window, which an earlier draft attributed to
+    git and git does not use — too long on a filesystem with nanosecond stamps
+    (every file edited in the last two seconds re-hashed on every call) and still
+    arbitrary on one with coarse stamps.
+
+    Two refinements, each a hole in the rule as first written:
+
+    * **ctime counts, not only mtime** (``max(mtime_ns, ctime_ns) >=
+      written_ns``). An edit whose mtime was restored to the past, landing in
+      the tick the cache was written, keeps a key whose mtime is old and whose
+      ctime IS that tick; mtime alone calls it clean. Costs nothing on a normal
+      tree, where ctime is the file's last write or checkout.
+    * **A racy entry is never re-saved under a newer write time.** What slipped
+      through while writing this: a process that loads a racy entry and never
+      asks for that file would write it back, and the next load would judge it
+      against the NEW, later mtime and trust it — the stale digest laundered by
+      one idle save. ``save`` keeps only entries hashed in this process or still
+      clean against their own reference (git smudges racily clean entries on
+      index write for the same reason).
+
+    Entries hashed in this process are judged against the last write this
+    process knows of (the loaded cache's, or its own last ``save``) — a time
+    before the hash, so a same-tick edit after hashing is still caught. With no
+    cache file yet, nothing hashed in this process is trusted until the first
+    ``save``: correct first, fast from the second run on.
+
+    ``save()`` is best-effort and returns whether it wrote: a read-only checkout
+    or a full disk costs the next run some hashing, never a result. The file is
+    untracked (``.atompipe/cache/digests.json``) and machine-specific — inode
+    numbers mean nothing on another machine — so it holds absolute paths.
+
+    Named residuals, both git's too. An edit landing in the same timestamp tick
+    as the HASH, with the cache then written in a later tick, leaves a key the
+    next process trusts: only a concurrent writer can do that (a gate's reads are
+    digested after it returns, and the key is re-checked after reading), and until
+    its next save this process judges it against the earlier reference and
+    re-hashes it. And a cache file
+    whose mtime is in the future (a skewed clock) trusts everything older than
+    that future.
+    """
+
+    def __init__(self, cache_path: str | os.PathLike[str] | None = None) -> None:
+        self.cache_path = None if cache_path is None else os.path.abspath(os.fspath(cache_path))
+        self._entries: dict[str, _Digested] = {}
+        self._written_ns: int | None = None
+        self._dirty = False
+        if self.cache_path is not None:
+            self._load()
+
+    def __repr__(self) -> str:          # pragma: no cover - diagnostics only
+        return f"FileDigests({self.cache_path!r}, entries={len(self._entries)})"
+
+    # -- the one question ------------------------------------------------- #
+    def digest(self, path: str | os.PathLike[str]) -> str | None:
+        """The sha256 of ``path``'s bytes now, or ``None`` when it has none."""
+        target = os.path.abspath(os.fspath(path))
+        try:
+            st = os.stat(target)
+        except (OSError, ValueError):       # missing; or a NUL byte, which no file has
+            self._forget(target)
+            return None
+        if not stat.S_ISREG(st.st_mode):
+            self._forget(target)
+            return None
+        key = _stat_key(st)
+        entry = self._entries.get(target)
+        if entry is not None and entry.key == key and not _racy(entry):
+            return entry.sha
+        sha, after = _hash_file(target)
+        if sha is None:
+            self._forget(target)
+            return None
+        if after == key:
+            self._entries[target] = _Digested(key, sha, self._written_ns, True)
+            self._dirty = True
+        else:
+            # The file moved while it was read: these bytes may be torn, so they
+            # are an answer for this call and never a cache entry.
+            self._forget(target)
+        return sha
+
+    # -- persistence ------------------------------------------------------ #
+    def save(self) -> bool:
+        """Write the cache if anything changed; ``True`` when it was written.
+
+        Best-effort: every failure returns ``False`` and leaves the in-memory
+        entries as they were.
+        """
+        if self.cache_path is None or not self._dirty:
+            return False
+        keep = {path: entry for path, entry in self._entries.items()
+                if entry.fresh or not _racy(entry)}
+        payload = {
+            "schema": _DIGESTS_SCHEMA,
+            "files": {path: [*entry.key, entry.sha] for path, entry in sorted(keep.items())},
+        }
+        try:
+            # Compact on purpose: untracked and never reviewed as a diff, and
+            # atomic_write_json's indent would put every integer on its own line.
+            atomic_write_text(self.cache_path,
+                              json.dumps(payload, separators=(",", ":"), allow_nan=False))
+            written = os.stat(self.cache_path).st_mtime_ns
+        except (AtompipeError, OSError, ValueError):
+            return False
+        self._entries = {path: entry._replace(ref=written, fresh=False)
+                         for path, entry in keep.items()}
+        self._written_ns = written
+        self._dirty = False
+        return True
+
+    def _forget(self, target: str) -> None:
+        if self._entries.pop(target, None) is not None:
+            self._dirty = True
+
+    def _load(self) -> None:
+        """Read the cache; anything unreadable is simply not cached.
+
+        ``written_ns`` comes from ``fstat`` on the descriptor the entries are read
+        through, so a save racing this load cannot pair these entries with the
+        other file's (later) write time.
+        """
+        try:
+            fd = os.open(str(self.cache_path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        except OSError:
+            return
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return
+            chunks = []
+            while True:
+                chunk = os.read(fd, _DIGEST_CHUNK)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except OSError:
+            return
+        finally:
+            os.close(fd)
+        # The file exists and was written at st_mtime_ns, which is before
+        # anything this process will hash: a valid reference even when its
+        # content turns out to be unusable.
+        self._written_ns = st.st_mtime_ns
+        try:
+            data = json.loads(b"".join(chunks).decode("utf-8"),
+                              parse_constant=lambda token: None)
+        except (ValueError, UnicodeDecodeError):
+            return
+        if not isinstance(data, dict) or data.get("schema") != _DIGESTS_SCHEMA:
+            return
+        files = data.get("files")
+        if not isinstance(files, dict):
+            return
+        for path, row in files.items():
+            if not (isinstance(row, list) and len(row) == 6
+                    and all(type(v) is int for v in row[:5])
+                    and isinstance(row[5], str) and len(row[5]) == 64
+                    and set(row[5]) <= _SHA256_HEX):
+                continue
+            self._entries[path] = _Digested(tuple(row[:5]), row[5], st.st_mtime_ns, False)
+
+
+# --------------------------------------------------------------------------- #
 # human-readable rendering
 # --------------------------------------------------------------------------- #
+#: What ``printable`` escapes after it collapses whitespace: every C0 control,
+#: DEL and every C1 control (``\x1b`` above all — a CSI sequence moves a
+#: terminal's cursor and erases what was printed), and the bidirectional
+#: overrides and isolates, which reorder what a terminal shows without moving
+#: a byte. What slipped through (review of P2.5a): a claim's statement holding
+#: ``\x1b[1G\x1b[2K`` erased itself on `claim physical`'s prompt and printed
+#: another claim's words in its place — the one line the person reads before
+#: typing the id they settle — and the pass was sealed to the hidden sentence.
+#: *Rejected:* refusing such text in the strict reader alone (a record a
+#: project already holds would refuse every command, R-10, and the commit
+#: message, an evidence path or git's own identity reach a terminal too);
+#: stripping the bytes (the reader would never learn the text holds them).
+_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+
+
+def printable(text: Any) -> str:
+    """``text`` as ONE terminal line that says what it holds: whitespace runs,
+    newlines included, collapsed to one space, and every remaining control
+    character escaped as visible ``\\xNN`` (``\\uNNNN`` past ``\\xff``) —
+    never interpreted by the terminal that prints it."""
+    joined = " ".join(str(text if text is not None else "").split())
+
+    def escaped(match: "re.Match[str]") -> str:
+        point = ord(match.group(0))
+        return f"\\x{point:02x}" if point <= 0xFF else f"\\u{point:04x}"
+
+    return _UNPRINTABLE.sub(escaped, joined)
+
+
 def human_bytes(n: int | float) -> str:
     """Render a byte count: ``947 B``, ``12.4 KiB``, ``3.1 MiB``.
 

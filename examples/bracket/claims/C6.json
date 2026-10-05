@@ -1,0 +1,5 @@
+{
+  "statement": "The load is static and centred on the arm",
+  "kind": "assumption",
+  "rationale": "this model has no fatigue, impact or eccentricity term — a claim that said otherwise would be lying"
+}

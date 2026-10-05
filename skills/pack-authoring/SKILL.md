@@ -23,11 +23,14 @@ would recognise? If not, split.
 
 ## Procedure
 
-### 1. Scaffold
+### 1. Lay out the directory
 
-```
-atompipe pack new <name>
-```
+No command creates a pack: it is an ordinary directory. Make the layout in
+`docs/PACK_FORMAT.md` — `pack.json`, `PACK.md`, `gates/`, `selftest/`, `references/` —
+under `.atompipe/packs/<name>/` in the project that needs it (or `packs/<name>/` in
+the atompipe repository). `pack validate` and `gate selftest --pack` find it there by
+name before it is published anywhere; `atompipe packs add <name>` opts the project
+into it, so its gates also run in `check` and in a project's `gate selftest`.
 
 Names are lowercase, hyphenated, and say the domain and the tool when the tool
 matters: `cfd-openfoam`, `fea-calculix`, `fdm-print`, `pcb-kicad`, `solar-thermal`.
@@ -53,6 +56,100 @@ becomes the sanity check on your solver gate later.
 If you genuinely cannot find a tier-0 bound for the domain, say so in `PACK.md`
 under "what this pack cannot settle" — but look hard first. Almost every physical
 claim has an order-of-magnitude answer sitting in a textbook.
+
+### 3b. Write the gate for the context it actually gets
+
+A gate never sees the sweep's context. It gets a traced view of its own, and every
+read it makes — a parameter, a claim, a file, a question about a path — is recorded,
+because the verdict cache keys each verdict by exactly what it read. Write for that:
+
+- **Name the gate like a directory.** `<scope>.<what>` — `fdm.overhang`. Its cached
+  verdicts live in `.atompipe/verdicts/<gate id>/`, so the registry refuses `/`, `\`,
+  `..` and `:` in an id, and an id that differs from another only in case.
+- **Never write `ctx.params`.** It is read-only: an assignment, `update` or `pop`
+  raises `GateInputWriteError` and the gate reads as an error. It used to be one dict
+  shared by every gate in the sweep, so one gate's write was the next gate's input.
+  Need a variant? `ctx.params.copy()` is a plain dict you own.
+- **`ctx.extra` is yours alone.** Nothing you put there reaches the next gate. To share
+  a file between gates — a mesh several gates measure — use
+  `ctx.load_file(path, loader=trimesh.load_mesh)`: loaded once per sweep, recorded for
+  every gate that asks, hit or miss — with every file the loader opened (a `.gltf`'s
+  `.bin` buffers). Pass a module-level function as the loader, and
+  copy the result before changing it (every caller gets the same object). A cache on
+  `extra` once made the second gate's read of a part invisible.
+- **`ctx.memo` and `ctx.trace` are the sweep's, not yours.** `ctx.memo` is
+  `load_file`'s handle on the sweep's file memo: `ctx.memo[k]`, `.get`, a write, `in`
+  or `dict(ctx.memo)` raises `GateMemoError` and the gate reads as an error, because a
+  value one gate left there was the next gate's read of a file it never opened.
+  `ctx.memo is None` (a hand-run script, outside a sweep) is the one question to ask
+  of it. `ctx.trace` is what your reads are recorded into; never touch it.
+- **Keep no memo of your own.** An `lru_cache` at module level is emptied before every
+  run, so it saves nothing across gates; a module-level dict you fill from a function
+  is never emptied, and the second gate to ask gets a value whose file it never opened
+  — no verdict keys it (`atompipe doctor` names it under `memos`). `ctx.load_file` is
+  the one shared cache that records the file for every caller.
+- **Load helpers by path with `atompipe.modelio.load_path(path)`**, never with
+  `spec_from_file_location` under a fixed name: it runs the bytes on disk, never a
+  stale `.pyc`, keeps two copies of your pack from sharing one helper, and keys the
+  helper, so editing it re-runs the gate. At module level it joins the gate's code;
+  called inside a gate, a fixture or `known_good.context`, its code and what it read
+  at import are reads of that run, served or not. A helper imported by name from a
+  `shared/` beside the pack is the gate's code too; only an installed library
+  (site-packages) is a third-party instrument.
+- **Import a module at run time by a string literal** (`importlib.import_module("rules")`),
+  or with `load_path`. A name held in a variable is keyed only by the first run in a
+  process to load it; `atompipe doctor` names each under `dynamic-imports`.
+- **Leave `rho`, `cpu_s`, `unqualified`, `blocked_by` and `blocked_kind` alone.** `run_gate` measures `cpu_s`
+  (child processes included: a solver subprocess is not free) and `duration_s`, and
+  the sweep sets `rho`. Anything a gate puts in them is overwritten. `unqualified` is
+  the spine's mark for an evaluator refused at its version — its known-bad control
+  passed — and a claim with one reads Gap; `run_gate` clears it on whatever you
+  return, so a gate that sets it, or wraps its own exception as `error="not admitted:
+  …"`, reads as the crash it is (Skipped, `errored:`), never as a refusal. The
+  prerequisite mark is the spine's on the same terms (step 4's validity guard).
+- **Return `passed=True` or `passed=False`, and read a verdict by its `outcome`.**
+  Any other pass value (`"false"`, `1`, `None`) is an error naming its type: `"false"`
+  once read `[ok]`. `Verdict.outcome` — `"error"`, `"skipped"`, `"pass"` or `"fail"`,
+  in that precedence — is the one derivation every renderer calls; a helper or a check
+  script that re-derives it from the three flags is the fourth copy that drifts.
+- **When any one of several back-ends will do, declare `requires_one_of`**
+  (`["python:manifold3d", "tool:openscad"]`) next to `requires_python` and
+  `requires_tools`, and never probe for the engine inside the gate and skip there.
+  `availability` cannot see a skip decided in the body: `cad.clash` once skipped its own
+  baseline and its own control on a machine with trimesh and no boolean engine, while
+  availability said it could run.
+- **Read claims through `ctx.ledger.claim(id)`**; the ledger a gate gets has no
+  verdicts in it. **Read a claim's limit through `ctx.acceptance(claim)`** — a claim id
+  or a tag — never a number in the gate: it returns the claim's acceptance condition,
+  re-runs your gate when the limit moves (and only then), and holds your pass to it — a
+  pass with no value, in other units, or at a value the condition rejects is errored.
+  Report its limit and side as yours: `limit=acc.limit, comparator=acc.comparator.value,
+  passed=acc.holds(value)` — and the units YOUR arithmetic computes in (`units="mm"`),
+  never `acc.units`: a gate that repeats the claim's units back agrees with any claim,
+  and the units check never fires. Never key anything on the limit itself: the
+  qualification re-runs your known-good design with each limit moved (x0.1, x0.5, x2,
+  x10) and your value must not move. A pack's baseline states no claims, so a pack
+  gate that reads one errors on its own control; a project gate's controls read the
+  claims its `selftest/known_good.py` states (`CLAIMS`), never the live files.
+- **Say which side of your limit passes: `comparator`.** Every verdict that reports a
+  finite `limit` sets `comparator` (`"<="`, `">="`, …, `"between"`) on that branch; a
+  branch with no one-sided reading reports no limit. The spine derives the verdict's
+  margin from it and from nothing else, and stamps `settles` on the verdict from your
+  spec — the quantity a claim's acceptance condition is compared by, so name it as a
+  claim author would. **Compare what you report**: round the value, then judge it, or
+  a FAIL reads `0.5 mm (limit 0.5 mm)`.
+- **Declare an `operating_context` where your correlation has a fitted range**
+  (`operating_context={"load_n": (0.0, 40.0)}`, `None` for an open end), on keys the
+  gate READS — every pass must read every declared key, or it is errored. Outside the
+  range a pass does not count (its claim reads Gap) and a fail still does; your
+  baseline must sit inside it. A range on an intermediate quantity the gate computes is
+  a guard gate of its own, or a range on that quantity's inputs.
+- **`os.path.isfile` is a read.** A path under the project or your pack that the gate
+  asks about (`exists`, `isdir`, `getsize`, `pathlib`, a literal `glob`) is an input,
+  missing or not: a named file that appears later stales the verdict. `os.stat` raises
+  no audit event, so this once recorded nothing, and `modelica.source_hygiene` kept a
+  Fresh PASS after a `.mo` it had skipped appeared. Never decide on an mtime, or on a
+  path outside the project: neither is keyed.
 
 ### 4. Build the negative control, and run it
 
@@ -80,7 +177,10 @@ waterplane inertia, and the gate passed its own known-bad input. A control whose
 severity depends on the host project is one that passes in some repositories and
 fails in others.
 
-Use the pack's own `selftest/baseline.json` as the base:
+Use the pack's own `selftest/baseline.json` as the base, and **return a context you
+built** — never edit the one you were handed. It is a traced copy of the host's: your
+writes to it never reach the project's sweep, and every host value you read is
+recorded against the seal.
 
 ```python
 return dataclasses.replace(ctx, params={**_baseline(), "kg_m": 0.62})
@@ -96,6 +196,33 @@ atompipe gate selftest --only <gate-id>
 If the gate passes its known-bad fixture, it is broken. Do not proceed. Do not
 rationalise. This is the moment the whole system either earns its credibility or
 quietly loses it.
+
+**And it must pass a known-good one.** A gate is *qualified* only when it passes its
+known-good control and fails its known-bad one (GLOSSARY §2): a gate that refuses
+everything fails its fixture too, and shows nothing. For a pack the known-good
+control is your `selftest/baseline.json` — unless the known-bad fixture hands the
+gate its input through `ctx.extra` (a dict, or `extra=` on the context it returns).
+Then declare `good=` on the `NegativeControl` — a fixture spelled like `fixture`,
+sealed the same way — that hands the baseline through the **same** `ctx.extra` keys
+(`cad-solid/selftest/good_meshes.py`, `sourcing/selftest/good_boms.py`): two halves
+that reach the gate through different channels prove nothing, and the gate reads
+unqualified (`channels differ`). The line says which facts held:
+
+```
+cad.watertight : known-good pass · known-bad fail → qualified
+```
+
+A pack loaded from outside the bundled `packs/` — under `.atompipe/packs/` while you
+write it, or `~/.atompipe/packs` — reads its controls through `ctx.extra` at its peril
+(`known-good and known-bad via ctx.extra`: a check run never hands `extra`), is handed
+no `ctx.model` on any run, and a verdict that read a ledger value its baseline never
+handed it does not count (`check run reads another ledger`). It also faces the
+**mutation pass**: each value its
+known-good run read is pushed until the gate's own value lands 15% past its own
+limit, and that run must fail (`mutation 2/2 fail`). A gate keyed to its own control
+— failing the one value the fixture changes, passing every other — reads
+`mutation 1/2 fail → unqualified`. Report the value your gate judges as `measured`
+against `limit`, and the pass has something to land on.
 
 ### 4b. Draw what the gate measured, and point at it
 
@@ -166,6 +293,28 @@ beam theory, Biot for lumped capacitance, Reynolds for a correlation). When it
 trips, dragging every claim in the domain down with it is correct behaviour, and it
 is usually the most valuable gate you will write.
 
+Then make it the **prerequisite** of the gates it guards: `needs=["beam.model_validity"]`
+on each (`GateSpec.needs`, exact ids of your own pack's gates). A broad binding reaches
+only the claims that share its tags; a claim tagged only `deflection` once read Checked
+on a beam whose guard reported Euler-Bernoulli omitting 32% of the deflection. With the
+edge, a dependent whose guard fails is not run and reads Skipped, `prerequisite failed:
+<guard>`. Declare an edge only when all four hold, and say why at the decorator:
+
+1. the prerequisite is a validity guard — every way it fails means the dependent's
+   number does not apply (an analysis that fails is not one: its fail would hide the
+   dependent's measurement; nor is a guard that also fails on an input the dependent
+   never reads — `bom.complete` fails on any unpriced line, which says nothing about
+   a ship date, and as `bom.availability`'s prerequisite it hid a real end-of-life
+   fail behind one blank price cell);
+2. it is **isolated** — it passes the dependent's own known-bad control, or it would
+   pre-empt the control (`pack validate` checks this);
+3. its tier is no costlier than the dependent's (the registry refuses the inversion);
+4. both gates are in your pack.
+
+The registry refuses a cycle, a glob, a duplicate and a gate needing itself.
+`Verdict.blocked_by` and `Verdict.blocked_kind` are the spine's mark for a gate not run
+behind a prerequisite — leave them alone, as `unqualified`: `run_gate` clears both.
+
 ### 5. Write `PACK.md`
 
 ~150 lines, tier 2. The section people skip and shouldn't is **"what this pack
@@ -207,16 +356,23 @@ contact type, stock volatility, assembly tiers, regional availability. This is w
 makes a design orderable rather than merely correct, and it is almost never in a
 datasheet.
 
-### 9. Validate and export
+### 9. Validate, and produce the evidence
 
 ```
 atompipe pack validate <name>
-atompipe gate selftest
-atompipe pack export <name>
+atompipe gate selftest --pack <name> --junit <file>.xml
 ```
 
-Export produces a PR-ready directory with the selftest evidence attached. A pack
-whose gates have never demonstrated failure does not get merged.
+`pack validate` checks the layout and demonstrates tiers 0–1: each gate passes its
+known-good control (the pack's own baseline, or its `good` fixture), its known-bad
+control fails, both reach it through the same `ctx.extra` keys, the control still
+fires against an empty host (the seal probe), and it read nothing of its host's
+`ctx.params` on the way (the seal, read off the trace). `gate selftest --pack` runs
+the same checks at every tier and writes them as JUnit XML — that file is the
+qualification evidence, and it goes with the PR; `-v` prints every gate's line. A control that could not run for want of a tool is reported as a skip, never as
+fired; say so in the PR rather than letting the file speak for it. The directory
+itself is the contribution: there is no export step. A pack whose gates have never
+demonstrated failure does not get merged.
 
 ## Extracting a pack from an existing project
 

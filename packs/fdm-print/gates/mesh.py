@@ -43,52 +43,37 @@ pack's negative controls exercise, and "a set of one" would have moved it.
 """
 from __future__ import annotations
 
-import importlib.util as _importlib_util
 import math
 import os
-import sys
 from typing import Any, Iterable, Sequence
 
 from atompipe.gates import gate, GateContext
+from atompipe.modelio import load_path as _load_path
 from atompipe.models import Locator, NegativeControl, Tier, Verdict
+
+# The helpers below are loaded BY PATH, through the spine's loader. ``load_path``
+# names a module after its absolute path, so this module and
+# ``gates/printability.py``, asking for one file, get one module — and a second
+# copy of this pack in the same process (a project's shadow, a user pack) gets
+# its own. What slipped through before: the fold was loaded under a fixed name
+# (``atompipe_pack_fdm_print__fold``) and the part set by a bare ``import`` off
+# ``sys.path``, and both were served out of ``sys.modules`` by that name. A twin
+# of this pack ran the first copy's fold and part set while every message named
+# the twin, and never ran an edit to its own (S-26, packs:H4). The loader also
+# compiles the bytes on disk and reuses a module only while those bytes are
+# unchanged, and needs no ``sys.path`` entry at load time or at fixture time.
+_HERE = os.path.dirname(os.path.abspath(__file__))
 
 # What the part is called once ``views/part.py`` has drawn it, and where its mesh
 # is. Shared rather than restated: the node name a locator carries is an INTERFACE
-# between this file and that one. The pack directory is already on sys.path under
-# ``packs.load_gates``; the guard is for a fixture or a test importing this
-# module directly.
-_PACK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _PACK_DIR not in sys.path:
-    sys.path.insert(0, _PACK_DIR)
+# between this file and that one.
+PARTS = _load_path(os.path.join(os.path.dirname(_HERE), "fdm_print_parts.py"))
 
-import fdm_print_parts as PARTS  # noqa: E402
-
-
-def _sibling_module(name: str, filename: str):
-    """Load a helper that sits next to this file, by path and under ONE name.
-
-    The same loader ``gates/printability.py`` uses, spelled the same way and
-    registering the same module name, so the two gate modules share one copy of
-    the fold. Two copies would each carry their own ``MAX_PART_LOCATORS`` and
-    their own idea of what a ``PartOutcome`` is, and the drift would be silent
-    (rule 2).
-    """
-    cached = sys.modules.get(name)
-    if cached is not None:
-        return cached
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
-    spec = _importlib_util.spec_from_file_location(name, path)
-    if spec is None or spec.loader is None:            # pragma: no cover - packaging bug
-        raise ImportError(f"cannot load {path}")
-    module = _importlib_util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-# One verdict over a set of parts, and the sweep's mesh cache. See its docstring
-# for why the single-part path below is left exactly as it was.
-FOLD = _sibling_module("atompipe_pack_fdm_print__fold", "fdm_print_fold.py")
+# One verdict over a set of parts. See its docstring for why the single-part path
+# below is left exactly as it was. ``gates/printability.py`` gets this same
+# module: two copies would each carry their own ``MAX_PART_LOCATORS`` and their
+# own idea of what a ``PartOutcome`` is, and the drift would be silent (rule 2).
+FOLD = _load_path(os.path.join(_HERE, "fdm_print_fold.py"))
 
 #: How many faces get a pin before the gate stops drawing them. A part that needs
 #: support usually has thousands of faces past the limit; pinning them all paints
@@ -253,10 +238,40 @@ def _build_axis(ctx: GateContext):
     return tuple(c / n for c in vec)
 
 
+def _parse_mesh(path: str):
+    """``(mesh, defect, empty)`` for the file at ``path``, or None when there is none.
+
+    The loader :func:`_read_mesh` hands the spine's memo, so it runs once per
+    file per sweep and every gate that asks after that gets the same answer.
+    ``defect`` is decided here, with the parse, because it is a property of the
+    file and both gates want it. ``empty`` is the reason when the file parsed to
+    no faces at all; ``mesh`` and ``defect`` are None then.
+
+    Module-level on purpose: the memo is keyed on the loader's identity, and a
+    function defined inside a gate body is a new object on every call, so it
+    would never hit. A missing file comes back as None rather than raising: its
+    absence is what the gate decides on, and asking through the memo is what
+    records the path as this gate's input either way.
+    """
+    if not os.path.isfile(path):
+        return None
+    import trimesh                                    # noqa: PLC0415 - lazy on purpose
+
+    loaded = trimesh.load_mesh(path, process=True)
+    if isinstance(loaded, trimesh.Scene):
+        try:
+            loaded = loaded.dump(concatenate=True)
+        except TypeError:                              # older trimesh
+            loaded = trimesh.util.concatenate(loaded.dump())
+    if getattr(loaded, "faces", None) is None or len(loaded.faces) == 0:
+        return None, None, f"{os.path.basename(path)} loaded with no faces"
+    return loaded, _solid_defect(loaded, os.path.basename(path)), None
+
+
 def _read_mesh(ctx: GateContext, raw: str, label: str):
     """``(mesh, path, unreadable, defect)`` for one stated mesh path.
 
-    The one place in this pack that opens a file, so both gates and both modes —
+    The one place in this pack that reads a mesh, so both gates and both modes —
     one part or thirteen — agree on what "unreadable" and "not a solid" mean.
     ``label`` is how the reason names the source of the path: ``mesh_path`` for
     the single-part projection, the part's own name for a member of a set.
@@ -271,41 +286,39 @@ def _read_mesh(ctx: GateContext, raw: str, label: str):
     mesh comes back anyway, because the caller reports its signed volume as the
     measured quantity — that number is exactly what shows the winding is inverted.
 
-    **The loaded mesh is cached on the context for the length of the sweep**, so
-    thirteen parts cost thirteen loads rather than twenty-six: ``fdm.overhang``
-    and ``fdm.bridge_span`` read the same files back to back, and a tier-1 sweep
-    that takes forty seconds is a sweep somebody runs less often (rule 10). The
-    key carries the file's mtime and size, so a re-export between two gates in one
-    sweep is a miss and never a stale hit.
-    """
-    import trimesh                                    # noqa: PLC0415 - lazy on purpose
+    **Each file is parsed once per sweep**, through ``ctx.load_file`` — the
+    spine's per-sweep memo — so thirteen parts through both mesh gates cost
+    thirteen parses rather than twenty-six: ``fdm.overhang`` and
+    ``fdm.bridge_span`` read the same files back to back, and a tier-1 sweep that
+    takes forty seconds is a sweep somebody runs less often (rule 10). The memo
+    re-parses a file whose bytes moved between two gates, and it records the file
+    as an input of EVERY gate that asks, hit or miss. What slipped through before
+    it: this pack kept its own cache on the shared ``ctx.extra``, keyed on
+    ``os.stat``, and a hit opened nothing — ``os.stat`` raises no audit event — so
+    ``fdm.bridge_span``'s verdict named no file among its inputs at all (S-27).
+    The old cache was capped at 64 meshes because the context it lived on could
+    outlive its sweep; the memo cannot — ``run_all`` makes one per sweep and
+    drops it — so there is no cap to carry over. The mesh a hit returns is
+    shared: nothing here may change it in place.
 
+    A context no sweep made — a hand-run script, a test, an older spine — carries
+    no memo, and then the file is simply parsed here.
+    """
     path = str(raw)
     if not os.path.isabs(path):
         path = os.path.join(ctx.root or os.curdir, path)
-    if not os.path.isfile(path):
+    if getattr(ctx, "memo", None) is None:
+        parsed = _parse_mesh(os.path.abspath(path))
+    else:
+        parsed = ctx.load_file(path, loader=_parse_mesh)
+    if parsed is None:
         return None, path, (f"no file at {raw}",
                             f"{label} points at {path}, which does not exist — "
                             f"nothing was measured"), None
-
-    hit = FOLD.cached(ctx, path)
-    if hit is not None:
-        mesh, defect = hit
-        return mesh, path, None, defect
-
-    loaded = trimesh.load_mesh(path, process=True)
-    if isinstance(loaded, trimesh.Scene):
-        try:
-            loaded = loaded.dump(concatenate=True)
-        except TypeError:                              # older trimesh
-            loaded = trimesh.util.concatenate(loaded.dump())
-    if getattr(loaded, "faces", None) is None or len(loaded.faces) == 0:
-        empty = f"{os.path.basename(path)} loaded with no faces"
+    mesh, defect, empty = parsed
+    if empty is not None:
         return None, path, (empty, empty), None
-
-    defect = _solid_defect(loaded, os.path.basename(path))
-    FOLD.remember(ctx, path, loaded, defect)
-    return loaded, path, None, defect
+    return mesh, path, None, defect
 
 
 def _load_mesh(ctx: GateContext, gate_id: str):
@@ -335,7 +348,7 @@ def _load_mesh(ctx: GateContext, gate_id: str):
     if defect is not None:
         return None, None, Verdict(
             gate=gate_id, passed=False, measured=round(float(mesh.volume), 1),
-            limit=0.0, units="mm^3 signed volume", detail=defect,
+            limit=0.0, comparator=">", units="mm^3 signed volume", detail=defect,
         )
     return mesh, resolved, None
 
@@ -444,6 +457,12 @@ def _on_bed(mesh, axis):
     tier=Tier.BUILD,
     settles="overhang angle",
     requires_python=["trimesh", "numpy"],
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:steep_cone",
         note="a cone stood on its apex with a 70-degree half angle: every side "
@@ -540,7 +559,7 @@ def overhang(ctx: GateContext) -> Verdict:
         gate="fdm.overhang",
         passed=m["frac"] <= allow,
         measured=round(m["frac"], 5),
-        limit=round(allow, 5),
+        limit=round(allow, 5), comparator="<=",
         units="area fraction",
         detail=_overhang_note(m, limit, allow, ceiling_deg),
         evidence=[report],
@@ -564,7 +583,7 @@ def _inert_overhang(limit: float, ceiling_deg: float) -> Verdict:
     """
     return Verdict(
         gate="fdm.overhang", passed=False, measured=round(limit, 1),
-        limit=round(ceiling_deg, 1), units="deg",
+        limit=round(ceiling_deg, 1), comparator="<", units="deg",
         detail=f"INERT CONFIGURATION: overhang_limit_deg {limit:.0f} is at or past "
                f"bridge_ceiling_deg {ceiling_deg:.0f}, so every face this gate could "
                f"fail on is already excluded as a ceiling and no geometry can ever "
@@ -771,6 +790,12 @@ def _overhang_over_set(ctx: GateContext, parts, axis, limit: float, allow: float
     tier=Tier.BUILD,
     settles="bridge span",   # and the cantilever case, which is the same measurement
     requires_python=["trimesh", "numpy"],
+    # Prerequisite fdm.process_model_valid (P2.2-D12): it checks the units and the process
+    #    envelope this gate's arithmetic assumes; a part described in metres reads
+    #    as a confident answer here about a different object.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["fdm.process_model_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:long_bridge",
         note="a PLATE of three parts whose middle one is an arch: its flat "
@@ -850,7 +875,7 @@ def bridge_span(ctx: GateContext) -> Verdict:
     m = _bridge_measure(mesh, axis, limit, cantilever_limit, ceiling_deg)
     if m["n_sel"] == 0:
         return Verdict(
-            gate="fdm.bridge_span", passed=True, measured=0.0, limit=round(limit, 2),
+            gate="fdm.bridge_span", passed=True, measured=0.0, limit=round(limit, 2), comparator="<=",
             units="mm",
             detail=f"no ceiling faces at or past {ceiling_deg:.0f} deg off the bed — "
                    f"nothing to bridge ({m['n_faces']} faces checked)",
@@ -862,7 +887,7 @@ def bridge_span(ctx: GateContext) -> Verdict:
         gate="fdm.bridge_span",
         passed=m["worst_ratio"] <= 1.0,
         measured=round(m["worst_span"], 2),
-        limit=round(m["worst_limit"], 2),
+        limit=round(m["worst_limit"], 2), comparator="<=",
         units="mm",
         detail=_bridge_note(m, limit, cantilever_limit),
         evidence=[report],

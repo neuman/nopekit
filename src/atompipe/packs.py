@@ -26,24 +26,28 @@ stranger's; what the user needs is a sentence naming the pack and the file. Ever
 import here is wrapped for exactly that reason: a broken pack must never look
 like a spine bug.
 
-Dependencies: models, util, store. ``gates`` is imported *lazily*, inside the two
-functions that need a Registry, so that importing this module stays free and so
-that a pack's gate file (which imports ``atompipe.gates``) can never create a
-cycle at spine import time.
+Dependencies: models, util, store. ``gates`` is imported *lazily*, inside the
+functions that need a Registry or run a gate, so that importing this module stays
+free and so that a pack's gate file (which imports ``atompipe.gates``) can never
+create a cycle at spine import time.
 """
 from __future__ import annotations
 
 import dataclasses
-import importlib.util
 import json
 import os
 import re
+import shutil
 import sys
-from typing import Any, Iterable, Sequence
+import tempfile
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 from .models import GateSpec, KeyCollision, Ledger, Need, PackManifest, Tier
 from .store import ATOMPIPE_DIR, PACKS_NAME, find_root
 from .util import AtompipeError, read_json
+
+if TYPE_CHECKING:                          # annotations only; see the module docstring
+    from .gates import GateContext
 
 
 __all__ = [
@@ -70,6 +74,11 @@ __all__ = [
     "reference_doc",
     "references",
     "validate",
+    "Demonstration",
+    "baseline_context",
+    "demonstrate",
+    "SealFinding",
+    "seal_findings",
     "match",
     "score",
     "installed",
@@ -175,13 +184,25 @@ MAX_DESCRIPTION_CHARS = 200
 # --------------------------------------------------------------------------- #
 # search paths
 # --------------------------------------------------------------------------- #
-def search_paths(root: str | None = None, *, existing_only: bool = True) -> list[str]:
+def search_paths(root: str | None = None, *, existing_only: bool = True,
+                 include_env: bool = True, include_user: bool = True) -> list[str]:
     """Directories searched for packs, **in precedence order — first wins**.
 
         1. ``$ATOMPIPE_PACK_PATH`` entries (os.pathsep-separated)
         2. ``<root>/.atompipe/packs``   — this project's own packs
         3. ``~/.atompipe/packs``        — the user's packs
         4. the bundled ``packs/`` directory shipped with the spine
+
+    ``include_env=False`` drops entry 1 and ``include_user=False`` drops entry 3.
+    Both exist for the callers that must not be answered by the machine they
+    happen to run on: those two entries belong to the machine, not to any
+    checkout or project, and both outrank the bundled packs. What slipped
+    through without them: a same-named pack in ``~/.atompipe/packs`` would have
+    been the copy every in-process pack test and a repo-root selftest exercised,
+    while each report named the bundled one (S-87; latent, never observed).
+    Rejected: a single ``bundled_only`` flag — a project's own
+    ``.atompipe/packs`` is part of the project, and pack mode inside a project
+    must still see it.
 
     Precedence is the point. A project that has grown its own ``cfd-openfoam``
     pack through the extension protocol must shadow the bundled one, or the
@@ -201,7 +222,7 @@ def search_paths(root: str | None = None, *, existing_only: bool = True) -> list
     """
     candidates: list[str] = []
 
-    env = os.environ.get(PACK_PATH_ENV, "")
+    env = os.environ.get(PACK_PATH_ENV, "") if include_env else ""
     for entry in env.split(os.pathsep):
         entry = entry.strip()
         if entry:
@@ -211,7 +232,7 @@ def search_paths(root: str | None = None, *, existing_only: bool = True) -> list
     if project:
         candidates.append(os.path.abspath(os.path.join(project, ATOMPIPE_DIR, PACKS_NAME)))
 
-    home = os.path.expanduser("~")
+    home = os.path.expanduser("~") if include_user else ""
     if home and home != "~":
         candidates.append(os.path.abspath(os.path.join(home, ATOMPIPE_DIR, PACKS_NAME)))
 
@@ -366,7 +387,8 @@ def discover(root: str | None = None) -> list[PackManifest]:
     return [manifest for _dir, manifest in discover_dirs(root)]
 
 
-def find(name: str, root: str | None = None) -> str | None:
+def find(name: str, root: str | None = None, *, include_env: bool = True,
+         include_user: bool = True) -> str | None:
     """Absolute directory of pack ``name``, or None. First search path wins.
 
     A directory only counts as a pack if it contains ``pack.json`` — otherwise a
@@ -376,6 +398,8 @@ def find(name: str, root: str | None = None) -> str | None:
     Raises ``AtompipeError`` on a name containing a path separator or ``..``.
     This is the one place a user-supplied string is joined onto a filesystem
     path, so it is the one place that has to refuse ``../../etc``.
+
+    ``include_env`` / ``include_user`` are passed to :func:`search_paths`.
     """
     clean = (name or "").strip()
     if not clean or not _LOOKUP_NAME_RE.match(clean) or ".." in clean:
@@ -383,24 +407,26 @@ def find(name: str, root: str | None = None) -> str | None:
             f"invalid pack name {name!r}: names are like `fdm-print` — "
             f"letters, digits, dots, dashes and underscores, no path separators"
         )
-    for base in search_paths(root):
+    for base in search_paths(root, include_env=include_env, include_user=include_user):
         candidate = os.path.join(base, clean)
         if os.path.isfile(os.path.join(candidate, MANIFEST_NAME)):
             return os.path.abspath(candidate)
     return None
 
 
-def _require_dir(name: str, root: str | None = None) -> str:
+def _require_dir(name: str, root: str | None = None, *, include_env: bool = True,
+                 include_user: bool = True) -> str:
     """``find`` or an error that says where we looked.
 
     "pack not found" with no list of searched directories is the single most
     annoying error a plugin system can produce, because the fix is always "put it
     somewhere else" and the user cannot see where.
     """
-    pack_dir = find(name, root)
+    pack_dir = find(name, root, include_env=include_env, include_user=include_user)
     if pack_dir:
         return pack_dir
-    looked = search_paths(root, existing_only=False)
+    looked = search_paths(root, existing_only=False, include_env=include_env,
+                          include_user=include_user)
     where = "\n  ".join(looked) if looked else "(no search paths)"
     raise AtompipeError(
         f"no pack named {name!r} — searched:\n  {where}\n"
@@ -606,7 +632,8 @@ def _owned_by(spec: GateSpec, pack: str, module_names: set[str]) -> bool:
     return entry_module in module_names or (bool(spec.pack) and spec.pack == pack)
 
 
-def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSpec]:
+def load_gates(name: str, registry: Any, root: str | None = None, *,
+               include_env: bool = True, include_user: bool = True) -> list[GateSpec]:
     """Import pack ``name``'s ``gates/*.py`` into ``registry``; return what it added.
 
     This is the tier boundary being crossed on purpose: discovery is free,
@@ -618,14 +645,20 @@ def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSp
       imports resolve against this pack's directory, which produces a wrong
       answer rather than an error.
     * Each file imports under a pack-namespaced module name (see
-      ``_module_name``), so two packs may both ship ``gates/geometry.py``. A
-      module already in ``sys.modules`` is REUSED, not re-executed — ordinary
-      import semantics, and the reason loading one pack into two registries
-      does not blow up on "gate already registered".
-    * ``PACK = "<name>"`` is set on the module object *before* execution, so a
-      gate module can read it at import time (the contract documents that
-      global) — ``module_from_spec`` hands us the module before the loader runs
-      it, which is the whole reason that ordering is possible.
+      ``_module_name``), so two packs may both ship ``gates/geometry.py``.
+    * Each file loads through ``modelio.load_source_module``: compiled from the
+      bytes on disk (never a ``.pyc``), its code closure recorded, and a module
+      already in ``sys.modules`` REUSED only while every file it ran still hashes
+      the same — otherwise it runs again. A reused module re-adopts the gates it
+      registered into ``registry``, which is what lets one pack load into two
+      registries without "gate already registered", and a fresh registry come
+      back full. What slipped through when reuse was unconditional: an in-process
+      edit to a gate module or its helper ran the old code under the new bytes
+      (S-26).
+    * ``PACK = "<name>"`` and ``PACK_DIR`` are set on the module object *before*
+      execution, so a gate module can read them at import time (the contract
+      documents those globals).
+    * ``registry.pack_dirs[name]`` records the directory the gates came from.
     * Any exception becomes an ``AtompipeError`` naming the pack and the file.
       A pack is somebody else's code; a stranger's ImportError with a spine
       traceback reads as a spine bug and gets reported as one.
@@ -638,8 +671,21 @@ def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSp
     because a spec that lies about its pack makes a failing verdict
     unattributable, and an unattributable verdict is one nobody owns and nobody
     fixes.
+
+    ``include_env`` / ``include_user`` are passed to :func:`search_paths`.
     """
-    pack_dir = _require_dir(name, root)
+    pack_dir = _require_dir(name, root, include_env=include_env, include_user=include_user)
+    return _load_dir(name, pack_dir, registry)
+
+
+def _load_dir(name: str, pack_dir: str, registry: Any) -> list[GateSpec]:
+    """:func:`load_gates` after the name has been resolved to ``pack_dir``.
+
+    Split out so :func:`demonstrate` can load the exact directory it was handed
+    through the same code the real run uses: resolving by name there would let
+    ``$ATOMPIPE_PACK_PATH`` or ``~/.atompipe/packs`` answer for a copy nobody
+    asked about (S-87).
+    """
     gates_dir = os.path.join(pack_dir, GATES_DIR)
     files = _gate_files(gates_dir)
     if not files:
@@ -647,6 +693,16 @@ def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSp
         # whether a pack that *declares* gates and ships none is a problem;
         # loading is not the place to have that opinion.
         return []
+
+    from . import gates as _gates          # local import: see _fresh_registry
+    from . import modelio as _modelio      # local import: packs stays free to import
+
+    # Where this pack's gates came from, on the registry that now holds them: a
+    # verdict entry spells a path under the pack as `<pack:NAME>/...` so it reads
+    # the same in every checkout, and only the load knows the directory.
+    pack_dirs = getattr(registry, "pack_dirs", None)
+    if isinstance(pack_dirs, dict):
+        pack_dirs[name] = pack_dir
 
     default = _default_registry()
     pools: list[Any] = [registry]
@@ -664,14 +720,12 @@ def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSp
             rel_path = os.path.join(GATES_DIR, os.path.basename(path))
             existing = sys.modules.get(mod_name)
             if existing is not None:
-                # Already imported: do NOT run it twice — that is ordinary import
-                # semantics and it is what lets one pack be loaded into two
-                # registries. But module names are keyed on the pack NAME, so a
-                # second directory carrying the same name would silently reuse
-                # the first one's code while every message said otherwise. That
-                # is the shadowing case, and it gets an error rather than a
-                # quietly wrong answer: only one copy can win at check time, so
-                # the user has to be told there are two.
+                # Module names are keyed on the pack NAME, so a second directory
+                # carrying the same name would silently reuse — or now, replace —
+                # the first one's code while every message said otherwise. That is
+                # the shadowing case, and it gets an error rather than a quietly
+                # wrong answer: only one copy can win at check time, so the user has
+                # to be told there are two.
                 seen_dir = getattr(existing, "PACK_DIR", None)
                 if seen_dir and os.path.normcase(seen_dir) != os.path.normcase(pack_dir):
                     raise AtompipeError(
@@ -679,30 +733,32 @@ def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSp
                         f"refusing to load a second copy from {pack_dir} under the same name "
                         f"(one of them is shadowed — remove it or rename it)"
                     )
-                continue
-            spec = importlib.util.spec_from_file_location(mod_name, path)
-            if spec is None or spec.loader is None:       # pragma: no cover - defensive
-                raise AtompipeError(
-                    f"pack {name!r}: cannot load {rel_path} (no import machinery accepted it)"
-                )
-            module = importlib.util.module_from_spec(spec)
-            module.PACK = name                            # readable at module import time
-            module.PACK_DIR = pack_dir
-            sys.modules[mod_name] = module                # before exec: self-imports, dataclasses
+            # Fresh bytes, a recorded closure, and a content-keyed cache
+            # (`modelio.load_source_module`). What slipped through with the stock
+            # loader: a module already in `sys.modules` was reused however its file
+            # had changed, and a stale `__pycache__` that validated by mtime and
+            # size ran the old bytecode after a same-size edit inside one second —
+            # the source said 8.0, the verdict came from 7.0 (S-26). A module still
+            # current is served from the cache and re-adopts the gates it
+            # registered into THIS registry; one that moved runs again. `PACK` and
+            # `PACK_DIR` are set before it runs, readable at import time, and are
+            # part of the cache key. `use_registry` makes `registry` the target of
+            # the module's `@gate`s, which is what lets the load record them.
             try:
-                spec.loader.exec_module(module)
+                with _gates.use_registry(registry):
+                    _modelio.load_source_module(
+                        path, name=mod_name, roots=[pack_dir], registry=registry,
+                        attrs={"PACK": name, "PACK_DIR": pack_dir})
             except AtompipeError as exc:
                 # The registry rejecting a gate (no negative control) lands here
                 # already phrased for a human; keep the phrasing, add the location.
-                sys.modules.pop(mod_name, None)
                 raise AtompipeError(f"pack {name!r}: {rel_path}: {exc}") from exc
             except KeyboardInterrupt:
                 # Ctrl-C is the user talking, not the pack failing. Dressing it up
                 # as "pack X failed to import" blames a stranger's file for a
                 # decision the user just made, and makes a slow pack load
                 # un-interruptable in practice because the message reads as a bug
-                # to go and fix. Clean up the half-executed module and get out.
-                sys.modules.pop(mod_name, None)
+                # to go and fix. The loader already dropped the half-run module.
                 raise
             except BaseException as exc:
                 # BaseException on purpose: a gate module calling sys.exit() at
@@ -710,7 +766,6 @@ def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSp
                 # able to take `atompipe check` down with its own exit code —
                 # a pack that exits the process is a broken pack, and it is named
                 # as one.
-                sys.modules.pop(mod_name, None)
                 raise AtompipeError(
                     f"pack {name!r}: {rel_path} failed to import: "
                     f"{type(exc).__name__}: {exc}"
@@ -730,20 +785,46 @@ def load_gates(name: str, registry: Any, root: str | None = None) -> list[GateSp
             if spec_obj.id in pool_before and not _owned_by(spec_obj, name, module_names):
                 continue
             claimed.add(spec_obj.id)
-            live = spec_obj
+            # A blank pack is stamped THROUGH the registry. This used to assign
+            # to the spec `get()` returned, which reached the stored record only
+            # because `get()` handed the stored record out — the same door that
+            # let `specs()[0].claims.append(...)` widen what a verdict settles.
+            # Every exit now returns a copy, so an assignment here would stamp a
+            # copy and throw the pack name away; `set_pack` is the one edit a
+            # registry accepts, and no spec object is ever written to.
+            setter = getattr(pool, "set_pack", None)
+            if not (spec_obj.pack or "").strip() and callable(setter):
+                setter(spec_obj.id, name)
             getter = getattr(pool, "get", None)
             entry = getter(spec_obj.id) if callable(getter) else None
-            if entry:
-                # Prefer the registry's own object: if `specs()` ever returns
-                # copies, stamping the copy would throw the pack name away.
-                live = entry[0]
-            if not live.pack:
-                live.pack = name
-            spec_obj.pack = live.pack
+            live = entry[0] if entry else spec_obj
+            if not (live.pack or "").strip():
+                # A pool that cannot be stamped: the caller still gets the pack
+                # name on what this function returns, on a new object.
+                live = dataclasses.replace(live, pack=name)
             if pool is not registry:
-                _adopt(registry, live, entry[1] if entry else None, name)
+                fn = entry[1] if entry else None
+                if fn is not None and not _current(fn):
+                    # A function an earlier run of an edited module left in the
+                    # default pool. The module ran again and this is not its gate
+                    # any more; adopting it would sweep the old code.
+                    claimed.discard(spec_obj.id)
+                    continue
+                _adopt(registry, live, fn, name)
             added.append(live)
     return added
+
+
+def _current(fn: Any) -> bool:
+    """Is ``fn`` still what its module says it is?
+
+    The module ``fn`` came from, as ``sys.modules`` holds it now, still binds
+    ``fn`` under its own name. False for a function left behind by an earlier
+    run of a module that has since run again: same name, different object.
+    """
+    module = sys.modules.get(getattr(fn, "__module__", "") or "")
+    name = getattr(fn, "__name__", "")
+    return module is not None and bool(name) and vars(module).get(name) is fn
 
 
 def _adopt(registry: Any, spec: GateSpec, fn: Any, pack: str) -> None:
@@ -870,7 +951,8 @@ def _alias_problems(baseline: dict[str, Any]) -> list[str]:
     return problems
 
 
-def validate(pack_dir: str) -> list[str]:
+def validate(pack_dir: str, *, tier: int = Tier.BUILD,
+             notes: list[str] | None = None) -> list[str]:
     """Every problem with a pack, as specific strings. Empty list = publishable.
 
     This is what ``atompipe pack validate`` prints and what CI gates a pull
@@ -902,10 +984,24 @@ def validate(pack_dir: str) -> list[str]:
     * **gate ids are dotted**, so two packs cannot collide on ``geometry``.
     * **gate requirements appear in the manifest**, so tier 1 can tell the truth
       about what a pack will cost to run before anybody imports it.
+    * **every gate at or below ``tier`` demonstrates** (:func:`demonstrate`): it
+      passes the pack's own baseline, its control fires, the control still
+      fires against an empty host, and it reads nothing of its host's
+      ``ctx.params`` (:func:`seal_findings`). Everything above was static, and static
+      certified a planted ``return True`` as publishable (S-09): a gate whose
+      control is declared, exists and has never once fired reads exactly like one
+      that works.
 
     Returns problems rather than raising: a validator that stops at the first
     problem turns one fix-and-rerun cycle into six. The one thing that does stop
     the run is a directory that is not a pack at all.
+
+    ``notes``, when given, collects what is true but not wrong: a gate whose tools
+    are absent here was not demonstrated, and a gate above ``tier`` was not run.
+    Neither is ever a returned problem. What that separation protects: CI has no
+    omc and no trimesh, so a validator that counted a tooling skip as a problem
+    would be red on every runner, and one that stayed silent would let a skip
+    pass for a demonstration (tests:H8).
     """
     problems: list[str] = []
     pack_dir = os.path.abspath(pack_dir)
@@ -1018,6 +1114,7 @@ def validate(pack_dir: str) -> list[str]:
     # for an unrelated missing dependency. The baseline is what makes `atompipe
     # gate selftest` mean something in CI.
     baseline = os.path.join(pack_dir, SELFTEST_DIR, BASELINE_NAME)
+    baseline_usable = False
     if not os.path.isfile(baseline):
         problems.append(
             f"{SELFTEST_DIR}/{BASELINE_NAME} is missing — without a plausible "
@@ -1039,6 +1136,7 @@ def validate(pack_dir: str) -> list[str]:
                     f"metadata keys"
                 )
             else:
+                baseline_usable = True
                 problems.extend(_alias_problems(loaded))
         except (OSError, ValueError) as exc:
             problems.append(f"{SELFTEST_DIR}/{BASELINE_NAME} does not parse: {exc}")
@@ -1094,6 +1192,12 @@ def validate(pack_dir: str) -> list[str]:
                 os.environ[PACK_PATH_ENV] = prev_env
 
     registered = {spec.id for spec in specs}
+    # Gates whose control cannot even be built, already a static problem below.
+    # Their demonstration would only restate it ("control did not fire: fixture
+    # ... does not exist"), and a derived message beside its root cause is one
+    # more line to skim past. Not a fixture outside the pack: that one may exist
+    # and run, and what it does when it runs is news.
+    unusable_control: set[str] = set()
     # Only cross-check the manifest against the registry when the gates actually
     # loaded. After an import failure "nothing registered it" is true but
     # useless: it points the author at the @gate id when the real problem is the
@@ -1135,6 +1239,19 @@ def validate(pack_dir: str) -> list[str]:
                 f"gate {spec.id!r} has an empty `settles` — that string is what turns "
                 f"'no gate covers C2' into 'this gate might'"
             )
+        # P2.2-D14: a pack's prerequisites are its own gates. Its controls and
+        # baseline are sealed to the pack (invariant 5); a prerequisite in
+        # another pack would make the isolation `demonstrate` checks depend on
+        # that pack's version, and a missing pack would Skip this one's gates
+        # in every project that installs it alone. A project's `gates/` may
+        # name any id: there it is the project's choice, and `doctor` names one
+        # nothing registers.
+        for need in spec.needs or ():
+            if need not in registered:
+                problems.append(
+                    f"{spec.id}: prerequisite {need} is not in this pack — a pack's "
+                    f"prerequisites are its own gates (its controls and baseline are "
+                    f"sealed to it); declare the edge in the project instead, or drop it")
 
         nc = spec.negative_control
         if nc is None:
@@ -1149,12 +1266,27 @@ def validate(pack_dir: str) -> list[str]:
                     f"gate {spec.id!r}: negative_control fixture {nc.fixture!r} points outside the pack"
                 )
             elif not os.path.isfile(fixture_path):
+                unusable_control.add(spec.id)
                 problems.append(
                     f"gate {spec.id!r}: negative_control fixture {nc.fixture!r} does not exist — "
                     f"this gate's ability to fail has never been shown"
                 )
         elif not nc.fixture.strip():
+            unusable_control.add(spec.id)
             problems.append(f"gate {spec.id!r}: negative_control has an empty fixture")
+        good_ref = (getattr(nc, "good", "") or "").strip() if nc is not None else ""
+        if good_ref and _is_file_fixture(good_ref):
+            # The known-good fixture (P2.3), checked as the known-bad one is:
+            # inside the pack, and there.
+            good_path = os.path.abspath(os.path.join(pack_dir, good_ref))
+            if not _inside(pack_dir, good_path):
+                problems.append(f"gate {spec.id!r}: negative_control good fixture "
+                                f"{good_ref!r} points outside the pack")
+            elif not os.path.isfile(good_path):
+                unusable_control.add(spec.id)
+                problems.append(f"gate {spec.id!r}: negative_control good fixture "
+                                f"{good_ref!r} does not exist — this gate was never shown "
+                                f"to pass its known-good control")
 
         for tool in spec.requires_tools:
             if tool not in manifest.requires_tools:
@@ -1201,7 +1333,674 @@ def validate(pack_dir: str) -> list[str]:
                 f"expensive gates has not finished its job — find the analytic bound first"
             )
 
+    # -- demonstration: the gate on the gates, actually run --------------- #
+    # Only once the gates loaded and the baseline is an object with parameters:
+    # before that, every gate would "fail" for the one reason already stated.
+    if loaded and specs and baseline_usable:
+        from . import report as _report    # the one word table (D-16); not at import
+        shown = demonstrate(pack_dir, tier=tier)
+        # A demonstration line that restates the static problem: the control
+        # that could not be built, in the table's words for either half.
+        q = _report.HUMAN["qualification"]
+        restating = (_CONTROL_PREFIX, *(f"{_report.unqualified_text('')}{q[half]} "
+                                        f"{q['outcome']['errored']}"
+                                        for half in ("known_bad", "known_good")))
+        for line in shown.problems:
+            gate_id, _, why = line.partition(": ")
+            if gate_id in unusable_control and why.startswith(restating):
+                continue
+            problems.append(line)
+        if notes is not None:
+            notes.extend(f"not demonstrated here, its tools are absent: {entry}"
+                         for entry in shown.skipped)
+            notes.extend(shown.unchecked)
+            above = sorted(spec.id for spec in specs if int(spec.tier) > int(tier))
+            if above:
+                notes.append(
+                    f"not demonstrated at tier <= {int(tier)}: {len(above)} gate(s) above it "
+                    f"({', '.join(above)})")
+
     return problems
+
+
+# --------------------------------------------------------------------------- #
+# demonstration:  the gate on the gates, as the spine's code
+# --------------------------------------------------------------------------- #
+#: Every demonstration problem about a gate's CONTROL starts with this, after
+#: ``"<gate id>: "`` — how ``validate`` recognises the ones that restate a static
+#: fixture problem it has already reported.
+_CONTROL_PREFIX = "control "
+
+
+@dataclasses.dataclass
+class Demonstration:
+    """What :func:`demonstrate` found in one pack.
+
+    ``problems``  one line per defect, ``"<gate id>: <why>"``; a defect of the
+                  pack as a whole (no baseline, gates that would not load) names
+                  the file instead. Empty means every gate in scope was shown to
+                  accept its pack's good design AND to refuse its known-bad one.
+    ``skipped``   ``"<gate id> (<reason>)"`` for each gate in scope whose tools are
+                  absent here. Not demonstrated, and never a problem — reported so
+                  it cannot hide (S-12).
+    ``ran``       how many gates in scope ran their control. Zero problems with
+                  zero controls run is "nothing was tried", not "nothing failed",
+                  and this is the field that tells the two apart.
+    ``unchecked`` ``"<gate id>: isolation not checked — its prerequisite <id> is
+                  skipped here (<why>)"`` for each prerequisite step 5 could not
+                  run here, its tools absent. Not a problem, and never silent: a
+                  skipped isolation check is as unrun as a skipped control.
+                  What slipped through (review of P2.2): it was dropped without
+                  a trace, so ``pack validate`` passed a non-isolated edge on a
+                  machine without the guard's tool. Its own list, not
+                  ``skipped``: that one is the gates whose own control did not
+                  run, and ``gate selftest --pack`` counts it.
+    """
+
+    problems: list[str] = dataclasses.field(default_factory=list)
+    skipped: list[str] = dataclasses.field(default_factory=list)
+    ran: int = 0
+    unchecked: list[str] = dataclasses.field(default_factory=list)
+    qualifications: dict = dataclasses.field(default_factory=dict)
+    """``{gate id: verdicts.QualificationFacts}`` for each gate in scope whose
+    controls ran: what pack mode prints its lines and counts from (P2.3) — one
+    producer, `verdicts._qualification` judging them. A gate whose tools are
+    absent here is in ``skipped`` and not here."""
+
+
+def baseline_context(pack_dir: str, *, out_dir: str) -> "GateContext":
+    """The one sealed context a pack's gates are demonstrated against.
+
+    * ``params`` — ``selftest/baseline.json`` exactly as it parses, ``_notes`` and
+      ``_aliases`` included. That is how the suite's own oracle builds it
+      (``tests/test_packs.py``, core:§5.12), and ``DemonstrateAgrees`` compares
+      the two: stripping keys here would hold the copy to a different input.
+    * ``root`` — the pack directory, so a relative asset path in the baseline
+      resolves inside the pack.
+    * ``ledger`` — EMPTY. What slipped through otherwise: openmodelica binds its
+      baseline's variables to claims C1 and C2 and prefers the ledger's limit, so
+      inside a project whose own C1 reads "≤ 0.5 mm" the pack judged 342.8 K
+      against 0.5 and failed its own baseline (packs:H20). A pack's good design
+      is good against the pack's limits, not the host's.
+    * ``extra`` — empty. ``tier`` — EXTERNAL, the oracle's ``tier=3``: which gates
+      run is the caller's ceiling, but a gate that reads ``ctx.tier`` to choose a
+      cheaper path must take the path it takes under the oracle.
+    * ``out_dir`` — the caller's, and required: every default lands inside
+      somebody's tree, and a pack directory is somebody else's (packs:H16).
+
+    Read fresh on every call, so a gate that mutates its params cannot hand the
+    change to the next gate. Raises ``AtompipeError`` when the baseline is
+    missing, does not parse, or is not a JSON object.
+    """
+    from . import gates as _gates          # local import: see _fresh_registry
+
+    pack_dir = os.path.abspath(pack_dir)
+    path = os.path.join(pack_dir, SELFTEST_DIR, BASELINE_NAME)
+    where = f"{SELFTEST_DIR}/{BASELINE_NAME}"
+    if not os.path.isfile(path):
+        raise AtompipeError(
+            f"{where} is missing — without a plausible projection the gates skip "
+            f"and their negative controls never fire")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            params = json.load(handle)
+    except (OSError, ValueError) as exc:
+        raise AtompipeError(f"{where} does not parse: {exc}") from exc
+    if not isinstance(params, dict):
+        raise AtompipeError(
+            f"{where} must be a JSON object (a model projection), not a "
+            f"{type(params).__name__}")
+    return _gates.GateContext(
+        root=pack_dir, ledger=Ledger(), model=None, params=params,
+        out_dir=out_dir, tier=int(Tier.EXTERNAL), extra={})
+
+
+def _run_dir(base: str, gate_id: str, run: str) -> str:
+    """``<base>/<gate id>/<run>``, emptied: one directory per gate per run, so no
+    run can read a file another left behind (packs:H5) — including a previous
+    demonstration into the same caller's ``out_dir``. Not created: ``ctx.out_path``
+    makes it if the gate writes anything."""
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", gate_id).strip("._") or "gate"
+    path = os.path.join(base, safe, run)
+    shutil.rmtree(path, ignore_errors=True)
+    return path
+
+
+def _why(verdict: Any) -> str:
+    """Everything a verdict says about itself, on one line: the error, then the
+    detail or skip reason. Either alone can be useless — ``negative control
+    unusable`` names no file, and a detail can omit the rule that tripped."""
+    parts = [part for part in (verdict.error, verdict.detail or verdict.skip_reason) if part]
+    return ": ".join(parts) or "no reason given"
+
+
+def demonstrate(pack_dir: str, *, tier: int = Tier.BUILD,
+                out_dir: str | None = None) -> Demonstration:
+    """Run a pack's gates against their own good and known-bad inputs.
+
+    The gate on the gates, as the spine's code rather than only a test's. Per
+    gate at or below ``tier``, each run on a fresh :func:`baseline_context`:
+
+    1. **the baseline must pass.** A gate that fails the pack's own good design
+       makes its control meaningless — it was failing before the fixture touched
+       anything. An always-False gate passed ``gate selftest`` for exactly that
+       reason: only the reject half was ever tested (S-04).
+    2. **the control must fire** (:func:`gates.selftest`). A gate that passes its
+       known-bad input is a logger.
+    3. **the seal probe**: the control must also fire against an empty host —
+       ``params={}``, ``extra={}``, an empty ledger. A fixture that layers its
+       known-bad values over the host's projection instead of stating everything
+       its gate reads fires in the pack's CI and can be defused by any project
+       that happens to state the key it forgot (invariant 5, SEALED).
+    4. **the seal, read off the trace**: the control of step 2 must read nothing
+       of its host's ``ctx.params`` (:func:`seal_findings`, one line per gate).
+       Step 3 sees only what an EMPTY host changes; a fixture that layers the
+       whole baseline over the host fires the same both ways and passed it.
+    5. **isolation** (P2.2-D13): every prerequisite in the gate's ``needs``
+       closure must pass the gate's own known-bad control. One that fails it
+       pre-empts the control wherever both run, and the dependent's admission
+       then shows nothing about the inputs it judges (:func:`_isolation_problems`;
+       ``tests/test_packs.ControlsAreIsolated`` holds its own copy, D-25). A
+       prerequisite whose tools are absent here is not checked, and not a
+       problem — but it goes to ``unchecked``, so the unrun check is seen.
+
+    A skip is honest only when :func:`gates.availability` says the gate's tools
+    are absent; it goes to ``skipped``. A skip with the tools present is a
+    problem: the gate decided for itself that the input does not apply (S-12).
+
+    The pack is loaded ALONE, from ``pack_dir`` itself, into a fresh registry —
+    no lookup by name, so neither ``$ATOMPIPE_PACK_PATH`` nor
+    ``~/.atompipe/packs`` can put another copy in its place (S-87).
+
+    ``tier`` defaults to BUILD (1): tiers 0 and 1 call no external solver, so
+    ``pack validate`` stays seconds long. Rejected: every tier — publishing a pack
+    would wait on omc, and on a machine without it would demonstrate nothing
+    more. ``gate selftest`` in pack mode passes EXTERNAL.
+
+    ``out_dir`` None: a temp directory made here and removed before returning —
+    nothing is persisted (Q1.8). Given: ``<out_dir>/<gate id>/{baseline,control,
+    sealed}``, each emptied before its run and left afterwards for the caller.
+
+    ``tests/test_packs.py`` keeps its own copy of these rules as an independent
+    oracle and ``DemonstrateAgrees`` holds this one to it (D-25). Rejected: the
+    tests delegating to this function — a test that calls the code it guards is
+    relaxed by relaxing that code, with no test file touched.
+    """
+    from . import gates as _gates          # local import: see _fresh_registry
+    from . import report as _report        # the one word table (D-16); not at import
+    from . import verdicts as _verdicts    # local: the same edge, the same reason
+    from .verdicts import GateTrace
+
+    shown = Demonstration()
+    pack_dir = os.path.abspath(pack_dir)
+    if not os.path.isfile(os.path.join(pack_dir, MANIFEST_NAME)):
+        shown.problems.append(f"{MANIFEST_NAME}: missing — {pack_dir} is not a pack")
+        return shown
+
+    # The directory name, as `find` would resolve it at check time and as
+    # `validate` loads it; a manifest name that disagrees is validate's to report.
+    name = os.path.basename(pack_dir.rstrip(os.sep))
+    registry = _fresh_registry()
+    try:
+        files = _gate_files(os.path.join(pack_dir, GATES_DIR))
+        if files:
+            _load_dir(name, pack_dir, registry)
+    except AtompipeError as exc:
+        shown.problems.append(f"{GATES_DIR}/: {exc}")
+        return shown
+    if files and not registry.specs():
+        # Loading "succeeded" and nothing registered: in this process the modules
+        # were already imported into a registry nobody can see. Zero gates must
+        # not demonstrate as zero problems.
+        shown.problems.append(
+            f"{GATES_DIR}/: {len(files)} gate file(s) loaded and registered no gate — "
+            f"nothing here could be demonstrated")
+        return shown
+
+    in_scope = [spec for spec in registry.specs() if int(spec.tier) <= int(tier)]
+    if not in_scope:
+        return shown
+
+    base = out_dir if out_dir is not None else tempfile.mkdtemp(prefix="atompipe-demonstrate-")
+    try:
+        try:
+            baseline_context(pack_dir, out_dir=base)
+        except AtompipeError as exc:
+            shown.problems.append(str(exc))
+            return shown
+
+        walked = _walked_origin(pack_dir)
+        for spec in in_scope:
+            entry = registry.get(spec.id)
+            if entry is None:                       # pragma: no cover - defensive
+                shown.problems.append(f"{spec.id}: vanished from the registry")
+                continue
+            _spec, fn = entry
+            nc = spec.negative_control
+            expect = (getattr(nc, "expect", "fail") or "fail").strip().lower()
+
+            # 1. the known-good control: the pack's baseline, or the `good`
+            #    fixture the gate declares, built over it (P2.3-D4) — traced, so
+            #    the fixture's seal (1b) and its channel (2b) are read off it
+            good_trace = GateTrace(kind="control")
+            good_ref = (getattr(nc, "good", "") or "").strip()
+            good_ctx = baseline_context(pack_dir, out_dir=_run_dir(base, spec.id, "baseline"))
+            good_line = ""
+            if good_ref:
+                try:
+                    good_ctx = _gates.run_good_fixture(spec, fn, good_ctx, trace=good_trace,
+                                                       out_dir=good_ctx.out_dir)
+                except AtompipeError as exc:
+                    good_ctx = None
+                    good_line = str(exc).splitlines()[0] if str(exc) else "unusable"
+            if good_ctx is None:
+                # Said once, by the judge, with the rest of its facts (`settle`).
+                verdict = None
+                outcome = "errored"
+            else:
+                verdict = _gates.run_gate(spec, fn, good_ctx, trace=good_trace)
+                outcome = verdict.outcome
+            good_extra = _verdicts._extra_keys(good_ctx) if good_ctx is not None else ()
+            if outcome == "skipped":
+                available, missing = _gates.availability(spec)
+                if not available:
+                    # Its control would skip for the same reason: selftest asks
+                    # availability before it builds anything.
+                    shown.skipped.append(f"{spec.id} ({missing or 'not available here'})")
+                    continue
+                good_line = verdict.skip_reason or "no reason given"
+                if not good_ref:
+                    shown.problems.append(
+                        f"{spec.id}: skips its own baseline while its tools are present "
+                        f"({good_line}) — a gate never shown to accept a good design is not "
+                        f"shown to measure anything; state what it reads in "
+                        f"{SELFTEST_DIR}/{BASELINE_NAME}")
+            elif outcome == "error":
+                good_line = (str(verdict.error).splitlines() or [""])[0]
+                if not good_ref:
+                    shown.problems.append(
+                        f"{spec.id}: fails its own baseline — it errored: {_why(verdict)}")
+            elif outcome == "fail" and good_ref:
+                pass                    # the judge's, with the rest of its facts (`settle`)
+            elif outcome == "fail":
+                shown.problems.append(
+                    f"{spec.id}: fails its own baseline: {_why(verdict)} — the baseline "
+                    f"is not good or the gate is wrong, and its control proves nothing "
+                    f"until one of them is fixed")
+            known_good = {"pass": "pass", "fail": "fail", "skipped": "skipped"}.get(
+                outcome, "errored")
+            if known_good == "pass" and _gates.context_breach(
+                    spec, good_ctx.params, read=good_trace.params) is not None:
+                # P2.4-D19, judged here as `check` and `gate selftest` judge it
+                # (`verdicts._good_half`): a known-good control outside the
+                # evaluator's own operating context never showed it passing where
+                # it claims to hold. What slipped through (review of P2.4): a pack
+                # whose baseline sat outside a declared range validated
+                # `publishable` while `gate selftest` and `check` held it unqualified.
+                known_good = "outside"
+            # 1b. the good fixture's seal: like the known-bad fixture's, it builds
+            #     from the pack's own baseline, never from its host's params.
+            if good_ref:
+                unsealed_good = _seal_problem(_seal_finding(spec, good_trace))
+                if unsealed_good:
+                    shown.problems.append(unsealed_good.replace(
+                        f"{_CONTROL_PREFIX}reads",
+                        f"{_report.HUMAN['qualification']['known_good']} {_CONTROL_PREFIX}reads",
+                        1))
+
+            # 2. the known-bad input, over the pack's baseline — traced, so the
+            #    seal detector (4.) reads what the control took from its host
+            trace = GateTrace(kind="control")
+            control = _gates.selftest(
+                spec, fn, baseline_context(pack_dir, out_dir=_run_dir(base, spec.id, "control")),
+                trace=trace)
+            if control.outcome == "skipped":
+                # gates.selftest turns a skip with the tools present into an
+                # error, so a skip here is availability's — asked again anyway.
+                available, missing = _gates.availability(spec)
+                if not available:
+                    shown.skipped.append(f"{spec.id} ({missing or 'not available here'})")
+                    continue
+            shown.ran += 1
+            bad_extra = tuple(trace.handed_extra or ())
+            if control.outcome == "pass":
+                known_bad, bad_line = "fail", ""          # rejected, as declared
+            elif control.outcome == "error":
+                known_bad = ("skipped" if str(control.error).startswith("skipped on its own")
+                             else "errored")
+                bad_line = trace.gate_said or _verdicts._bad_line(trace, control)
+            elif "PASSED its own known-bad" in (control.detail or ""):
+                known_bad, bad_line = "pass", ""
+            else:
+                # It crashed on its fixture: the gate's own first line, never the
+                # selftest's prose about it (review of P2.3).
+                known_bad, bad_line = "errored", (trace.gate_said or "no reason given")
+            facts = _verdicts.QualificationFacts(known_bad=known_bad, known_good=known_good,
+                                                 bad_line=bad_line, good_line=good_line,
+                                                 expect=expect)
+            def settle(judged: Any) -> None:
+                """The qualification, judged once, and its one problem — a known-good
+                fact the baseline's own problem above already said excepted
+                (invariant 6's words, which name the baseline)."""
+                said = _unqualified_problem(spec.id, judged)
+                kind = _verdicts.parse_token(_verdicts._qualification(judged))[0]
+                if said and (good_ref or kind not in _BASELINE_SAID):
+                    shown.problems.append(said)
+                shown.qualifications[spec.id] = judged
+
+            # After what the control DID, never before: the qualification's own
+            # problem is the louder news.
+            unsealed = _seal_problem(_seal_finding(spec, trace))
+            if control.outcome != "pass":
+                settle(facts)
+                if unsealed:
+                    shown.problems.append(unsealed)
+                continue
+
+            # 2b. channel parity (D-26, P2.3-D5): both controls hand the gate the
+            #     same `ctx.extra` keys — or a gate that fails exactly when
+            #     `extra` is not empty passes its baseline, fails its fixture, and
+            #     has shown nothing.
+            if known_good == "pass" and bad_extra != good_extra:
+                facts = dataclasses.replace(facts, channels=(bad_extra, good_extra))
+
+            # 3. the same known-bad input with nothing to inherit from
+            bare = dataclasses.replace(
+                baseline_context(pack_dir, out_dir=_run_dir(base, spec.id, "sealed")),
+                params={}, extra={}, ledger=Ledger())
+            sealed = _gates.selftest(spec, fn, bare)
+            if sealed.outcome != "pass":
+                how = "skips" if sealed.outcome == "skipped" else "does not fire"
+                shown.problems.append(
+                    f"{spec.id}: {_CONTROL_PREFIX}fires only with the baseline as host — "
+                    f"against an empty host it {how} ({_why(sealed)}); the fixture "
+                    f"inherits from the host instead of stating everything its gate "
+                    f"reads, so installing this pack in another project can defuse it")
+
+            # 4. the seal, read off step 2's trace: what the probe cannot see
+            if unsealed:
+                shown.problems.append(unsealed)
+
+            # 5. isolation (P2.2-D13): every prerequisite in this gate's closure
+            #    must PASS the known-bad control this gate just failed. If one
+            #    fails it too, the guard pre-empts the control wherever both
+            #    run: the dependent is pruned before its own judgement, and
+            #    the control shows nothing about the inputs it actually judges.
+            found, unchecked = _isolation_problems(pack_dir, registry, spec, fn,
+                                                   _run_dir(base, spec.id, "isolation"))
+            shown.problems.extend(found)
+            shown.unchecked.extend(unchecked)
+
+            # 6. the mutation pass, for a pack whose origin is the session's — a
+            #    project-local, user or path pack (P2.3-D6) — on the known-good
+            #    run, as `check` runs it there: every conclusive mutation must
+            #    fail, and its controls must reach it as a check run does (no
+            #    `ctx.extra` channel).
+            if walked and known_good == "pass" and not facts.channels:
+                if bad_extra or good_extra:
+                    facts = dataclasses.replace(facts, check_channel=(bad_extra, good_extra))
+                else:
+                    try:
+                        walk = _gates.mutation_walk(spec, fn, good_ctx, verdict,
+                                                    trace=good_trace, roots=[pack_dir])
+                    except _gates.MutationCannotRun as exc:
+                        facts = dataclasses.replace(
+                            facts, walk=f"could-not-run|{str(exc).splitlines()[0]}")
+                    else:
+                        facts = dataclasses.replace(
+                            facts, walk=f"errored|{walk.flaky}" if walk.flaky else "",
+                            mutation=(sum(1 for r in walk.results if r.outcome == "fail"),
+                                      len(walk.results), len(walk.inconclusive)),
+                            boundary=walk.boundary)
+            settle(facts)
+    finally:
+        if out_dir is None:
+            shutil.rmtree(base, ignore_errors=True)
+    return shown
+
+
+#: The known-good facts whose problem the baseline's own line already says
+#: (step 1: "fails its own baseline", "skips its own baseline"), so the judge's
+#: is not said twice. `known-good:outside` is not one: nothing above says it.
+_BASELINE_SAID = ("known-good:fail", "known-good:errored", "known-good:skipped")
+
+
+def _unqualified_problem(gate_id: str, facts: Any) -> str:
+    """``"<gate>: unqualified: <the first fact that does not hold>[ — <what to
+    do>]"`` for a judged qualification, or ``""`` when it holds — in the
+    table's words alone (``report.qualification_reason``, the remedy from
+    ``HUMAN["qualification"]["remedy"]``). The one problem a qualification
+    adds to a pack's list, whatever fact failed. What slipped through (review
+    of P2.3): each fact had its own string typed here — `control did not fire:
+    … PASSED its own known-bad fixture … the gate is a logger` printed under
+    the line that already said `known-bad pass → unqualified`, the
+    channels:differ reason a second copy of the table's, `fails its known-good
+    control …` and `its known-good control … is unusable` beside it — so a
+    reworded table moved `check` and left every pack-mode problem saying the
+    old thing (D-16)."""
+    from . import report as _report        # the one word table (D-16); not at import
+    from . import verdicts as _verdicts
+    token = _verdicts._qualification(facts)
+    if not token:
+        return ""
+    kind = _verdicts.parse_token(token)[0]
+    remedy = _report.HUMAN["qualification"]["remedy"].get(kind, "")
+    return f"{gate_id}: {_report.unqualified_text(token)}" + (f" — {remedy}" if remedy else "")
+
+
+def _walked_origin(pack_dir: str) -> bool:
+    """Does the mutation pass apply to this pack's gates — is it NOT one of the
+    packs that ship with the spine (``BUNDLED_PACKS``)? The rule
+    ``verdicts._mutation_applies`` reads for ``check`` (P2.3-D6)."""
+    bundled = os.path.realpath(BUNDLED_PACKS)
+    here = os.path.realpath(pack_dir)
+    return not (here == bundled or here.startswith(bundled.rstrip(os.sep) + os.sep))
+
+
+def _isolation_problems(pack_dir: str, registry: Any, spec: GateSpec, fn: Any,
+                        out_dir: str) -> tuple[list[str], list[str]]:
+    """``(problems, unchecked)``: ``"<gate>: control not isolated — …"`` for
+    each prerequisite in ``spec``'s closure that does not PASS ``spec``'s
+    known-bad control, built over the pack's baseline as step 2 built it, and
+    ``"<gate>: isolation not checked — …"`` for each one whose tools are absent
+    here (``Demonstration.unchecked``). Worded in GLOSSARY §2's words (critique
+    of the P2.2 design: the first draft said "known-bad input", a §2 Never-say
+    on a `pack validate` line), and the guard's verdict in §1's: its outcome
+    word from ``report.HUMAN`` and one line — a crash's first, never its
+    traceback (review of P2.2: the line printed the raw token ``error`` and a
+    whole flattened stack, P2.1-D15)."""
+    from . import gates as _gates          # local import: see _fresh_registry
+    from . import report as _report        # the one word table (D-16); not at import
+
+    closure = [s for s in _gates.plan(registry, [spec]) if s.id != spec.id]
+    if not closure:
+        return [], []
+    out: list[str] = []
+    unchecked: list[str] = []
+    for need in closure:
+        entry = registry.get(need.id)
+        if entry is None:
+            continue
+        available, why = _gates.availability(need)
+        if not available:
+            unchecked.append(f"{spec.id}: isolation not checked — its prerequisite "
+                             f"{need.id} is skipped here ({why or 'not available here'})")
+            continue
+        need_spec, need_fn = entry
+        try:
+            bad = _gates.run_fixture(spec, fn, baseline_context(pack_dir, out_dir=out_dir),
+                                     trace=None, out_dir=out_dir)
+        except AtompipeError as exc:
+            out.append(f"{spec.id}: control not isolated — its known-bad control could not be "
+                       f"rebuilt to run {need.id} on: {exc}")
+            return out, unchecked
+        verdict = _gates.run_gate(need_spec, need_fn, bad)
+        if verdict.outcome != "pass":
+            q = _report.HUMAN["qualification"]
+            word = _report.HUMAN["outcome"].get(verdict.outcome, verdict.outcome)
+            out.append(f"{spec.id}: "
+                       + q["isolation"].format(need=need.id, gate=spec.id, word=word,
+                                               body=_one_line_of(verdict))
+                       + q["isolation_fix"].format(gate=spec.id))
+    return out, unchecked
+
+
+def _one_line_of(verdict: Any) -> str:
+    """What explains ``verdict`` in one line, by its outcome — a crash's first
+    line, a skip's reason, a fail's detail — as ``Verdict.render`` reads it;
+    never the traceback ``run_gate`` keeps in a crash's ``detail``."""
+    if verdict.outcome == "error":
+        return (str(verdict.error).splitlines() or [""])[0] or "no reason given"
+    if verdict.outcome == "skipped":
+        return verdict.skip_reason or verdict.detail or "no reason given"
+    return verdict.detail or "no reason given"
+
+
+# --------------------------------------------------------------------------- #
+# the seal, read off the trace:  invariant 5 at runtime
+# --------------------------------------------------------------------------- #
+@dataclasses.dataclass(frozen=True)
+class SealFinding:
+    """One pack control that read its HOST's ``ctx.params`` (invariant 5, SEALED).
+
+    ``gate``        the gate whose control it is.
+    ``fixture``     the negative-control reference, as the gate declares it.
+    ``host_paths``  every host-param path the control read, sorted and dotted;
+                    ``"(all params)"`` is the whole top level (``dict(ctx.params)``,
+                    ``{**ctx.params}``, ``len``, ``bool`` ...). A key the host did
+                    not have is a read too: in a host that states it, the value
+                    arrives.
+    """
+
+    gate: str
+    fixture: str
+    host_paths: tuple[str, ...]
+
+
+#: How many host paths a seal problem line names before ``(+n more)``. Why 3: the
+#: same budget a stale reason gets (``verdicts.MAX_STALE_REASONS``), for the same
+#: reason — one line an author reads to the end. Rejected: every path (an identity
+#: fixture hands the gate the host itself, and a gate that probes synonym families
+#: then reads dozens of absent keys through it); one (it cannot say whether the
+#: fixture read one key or copied the whole projection — "(all params)" sorts
+#: first, so it is always among the three when it happened).
+_SEAL_PATHS_SHOWN = 3
+
+
+def _host_path(path: tuple) -> str:
+    """A host-read path, dotted as a stale reason spells a param."""
+    return ".".join(str(part) for part in path) or "(all params)"
+
+
+def _seal_finding(spec: GateSpec, trace: Any) -> SealFinding | None:
+    """The finding in one control's trace, or ``None`` when it read nothing of the
+    host's params.
+
+    ``trace.host_reads`` is filled by the host view ``gates.selftest`` hands the
+    fixture (``verdicts.ParamTrace(host=True)``), so it holds reads of the host's
+    ``ctx.params`` and nothing else: the fixture's own, and the gate's through a
+    context the fixture handed back unchanged. The spine's own ``_fixture_root``
+    lookups (``extra["pack_dirs"]``, ``extra["pack_dir"]``) — the only host reads
+    the P1 probe found on the bundled packs (packs:§2) — read the caller's
+    untraced ``extra`` and never reach it.
+    """
+    paths = tuple(sorted({_host_path(path) for path in (getattr(trace, "host_reads", None) or {})}))
+    if not paths:
+        return None
+    nc = spec.negative_control
+    return SealFinding(gate=spec.id, fixture=(nc.fixture if nc else "") or "", host_paths=paths)
+
+
+def _seal_problem(finding: SealFinding | None) -> str:
+    """A finding as :func:`demonstrate` reports it, or ``""`` for none.
+
+    ``"<gate id>: control reads the host's ctx.params: a, b, c (+n more) — ..."``:
+    the ``control`` prefix (``_CONTROL_PREFIX``) files it with the control, so
+    `gate selftest --pack` counts the control BROKEN rather than the baseline
+    failed (``cli._read_back``).
+    """
+    if finding is None:
+        return ""
+    paths = ", ".join(finding.host_paths[:_SEAL_PATHS_SHOWN])
+    more = len(finding.host_paths) - _SEAL_PATHS_SHOWN
+    if more > 0:
+        paths += f" (+{more} more)"
+    return (f"{finding.gate}: {_CONTROL_PREFIX}reads the host's ctx.params: "
+            f"{paths} — {finding.fixture or 'its fixture'} builds its "
+            f"known-bad input over the host project's params instead of only the "
+            f"pack's own {SELFTEST_DIR}/{BASELINE_NAME}, so a project that states a key "
+            f"it does not can defuse it (invariant 5, SEALED)")
+
+
+def seal_findings(registry: Any, host_ctx: "GateContext", *, tier: int = Tier.EXTERNAL,
+                  out_dir: str | None = None) -> list[SealFinding]:
+    """Every pack control in ``registry`` that reads its host's ``ctx.params``.
+
+    Each pack gate at or below ``tier`` runs its control (:func:`gates.selftest`)
+    with ``host_ctx`` as the host and a trace of its own; a control whose trace
+    recorded any host-param read is a finding. A SEALED fixture builds its
+    known-bad context from the pack's own ``selftest/baseline.json`` and reads
+    nothing of the host (docs/PACK_FORMAT.md, "Fixtures must be SEALED").
+
+    What slipped through without it: SEALED was checked only by outcome — the
+    control run again over an empty host must still fire (the seal probe in
+    :func:`demonstrate` and ``tests/test_packs.py``). A fixture that layers the
+    pack's WHOLE baseline over the host (``{**ctx.params, **BASELINE, <bad>}``)
+    fires identically over both, so the probe passed it, and `pack validate`
+    certified it publishable — while any key the host states beyond the
+    baseline (a synonym, a derived quantity: the waterplane inertia that defused
+    a hull control) still reaches the gate. An identity fixture over a host that
+    is itself bad "fires" for the host's reason; the trace names it anyway. The
+    outcome of a control over one host cannot show what another host would do;
+    what the control READ can.
+
+    * **Pack gates only** (``spec.pack`` set). A project's fixture deriving from
+      its own model is correct there; the rule is for packs, which ship to
+      strangers (CLAUDE.md, invariant 5).
+    * **Host reads only.** Pass a RICH host — a project's live context, or the
+      pack's own baseline as ``ControlsAreSealed`` does: a read of a key the host
+      lacks is recorded too, but a fixture that reads nothing of a host stating
+      every key its gate reads cannot be reading anything a stranger's project
+      could change. Reads of the host's ``extra`` and ``ledger`` are not
+      host reads here: the trace does not tell a fixture's from its gate's on
+      those channels, and cad-solid's ``_sealed`` merges ``extra`` by design
+      (channel parity is P2.3, D-26).
+    * A gate whose tools are absent is not run and reads nothing: ``selftest``
+      asks :func:`gates.availability` before it builds anything.
+    * ``out_dir`` None: a temp directory made here and removed before returning,
+      so nothing lands in a pack (packs:H16). Given: ``<out_dir>/<gate id>/seal``,
+      emptied before its run.
+
+    Never raises for a pack's fault: ``selftest`` turns a broken fixture or a
+    crashing gate into a verdict, and a control that crashed after reading the
+    host has still read it. :func:`demonstrate` makes every finding a problem,
+    so `pack validate` and `gate selftest --pack` refuse on it.
+    """
+    from . import gates as _gates          # local import: see _fresh_registry
+    from .verdicts import GateTrace        # local: the same edge, the same reason
+
+    in_scope = [spec for spec in registry.specs()
+                if (spec.pack or "").strip() and int(spec.tier) <= int(tier)]
+    findings: list[SealFinding] = []
+    if not in_scope:
+        return findings
+    base = out_dir if out_dir is not None else tempfile.mkdtemp(prefix="atompipe-seal-")
+    try:
+        for spec in in_scope:
+            entry = registry.get(spec.id)
+            if entry is None:                       # pragma: no cover - defensive
+                continue
+            _spec, fn = entry
+            trace = GateTrace(kind="control")
+            _gates.selftest(spec, fn, host_ctx, trace=trace,
+                            out_dir=_run_dir(base, spec.id, "seal"))
+            finding = _seal_finding(spec, trace)
+            if finding is not None:
+                findings.append(finding)
+    finally:
+        if out_dir is None:
+            shutil.rmtree(base, ignore_errors=True)
+    return findings
 
 
 # --------------------------------------------------------------------------- #
@@ -1338,22 +2137,32 @@ def match(need: Need, manifests: Sequence[PackManifest]) -> list[PackManifest]:
 # installed vs available
 # --------------------------------------------------------------------------- #
 def installed(root: str, *, ledger: Ledger | None = None) -> list[str]:
-    """Pack names this project has opted into — ``ledger.meta.packs``, in order.
+    """Pack names this project has opted into — ``packs`` in
+    ``.atompipe/project.json``, in order, read through ``store.load(root).meta``.
 
     Installed is a *project* fact, not a filesystem fact. A pack sitting in
     ``~/.atompipe/packs`` is available to every project on the machine; it only
-    becomes part of this one when the ledger says so. Keeping the two concepts
-    apart is what stops a gate sweep from silently changing because somebody
-    cloned a pack into their home directory last week.
+    becomes part of this one when ``project.json`` says so (``atompipe packs
+    add``, or an edit of that file — there is no ``packs remove``). Keeping the
+    two concepts apart is what stops a gate sweep from silently changing because
+    somebody cloned a pack into their home directory last week. On a legacy
+    project ``store.load`` reads the same list out of its ``ledger.json``, in
+    memory, so the answer does not change when the project migrates. The
+    generated index is never read for it: it is an output.
 
     Order is preserved (it is gate-id precedence for ``load_all_gates``) and
     duplicates are dropped. Pass ``ledger`` when you already have one loaded —
-    the CLI usually does, and re-reading the ledger to answer a listing question
-    is a wasted file read on every command.
+    the CLI usually does, and re-reading the records to answer a listing
+    question is a wasted walk on every command.
     """
     from . import store                      # local: keeps module import cost flat
+    from . import modelio as _modelio        # local: the same edge, the same reason
 
-    led = ledger if ledger is not None else store.load(root)
+    # With the reader `check` migrates with: on a legacy project `load` is the
+    # migration's plan, and a plan made without it refuses what `check` does
+    # not (store.load's docstring has the D/d case).
+    led = ledger if ledger is not None else store.load(
+        root, model_prose=_modelio.static_param_prose)
     out: list[str] = []
     seen: set[str] = set()
     for name in led.meta.packs or []:

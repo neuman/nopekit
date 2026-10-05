@@ -33,7 +33,7 @@ https://build.openmodelica.org/apt $(lsb_release -cs) release" \
   | sudo tee /etc/apt/sources.list.d/openmodelica.list
 
 sudo apt update
-sudo apt install -y omc                 # compiler only — this is all these gates need
+sudo apt install -y omc                 # the compiler; MSL is a separate install, below
 # sudo apt install -y openmodelica      # ...or the metapackage, with OMEdit and everything
 ```
 
@@ -52,25 +52,104 @@ between two runs cannot gate anything.
 ## Docker — the reproducible option, and the one to prefer in CI
 
 ```bash
-docker pull openmodelica/openmodelica:v1.22.1-minimal      # ~1 GB, no GUI
-docker run --rm openmodelica/openmodelica:v1.22.1-minimal omc --version
+docker pull openmodelica/openmodelica:v1.22.0-minimal      # ~1.1 GB, no GUI
+docker run --rm openmodelica/openmodelica:v1.22.0-minimal omc --version
 ```
 
-To let the gates use it, put a two-line `omc` on PATH that forwards into the
-container. It must mount the project at the **same absolute path inside the
-container**, because the `.mos` scripts these gates generate carry absolute paths
-into `loadFile`:
+Every command on this page was run against that tag. Pin a different one if you
+like, then rerun the smoke test and `msl-check.mos` (below) on it.
+
+**`-minimal` is the compiler with no Modelica libraries.** There is no
+`package.mo` anywhere in the `v1.22.0-minimal` image, and `loadModel(Modelica)`
+returns `false`. omc then tries to download the library and cannot, because a
+container run as `-u "$(id -u):$(id -g)"` has `HOME=/`, and that user cannot
+write there:
+
+```
+Error: Failed to open file for writing: //.openmodelica/libraries/index.json.tmp1
+Error: Failed to download package index https://libraries.openmodelica.org/index/v1/index.json to file //.openmodelica/libraries/index.json.
+Error: Failed to load package Modelica (default) using MODELICAPATH //.openmodelica/libraries/.
+```
+
+A model that uses nothing from the library runs on the bare image. The pack's own
+fixtures are written that way. A model that touches `Modelica.*` cannot be
+checked, built or simulated until the library is installed, and that needs a
+`HOME` the container can write and that outlives `--rm`: a named volume.
+
+Once, before anything else:
 
 ```bash
-#!/bin/sh
-# ~/bin/omc — omc-in-docker, pinned
-exec docker run --rm -u "$(id -u):$(id -g)" \
-  -v "$PWD:$PWD" -w "$PWD" \
-  openmodelica/openmodelica:v1.22.1-minimal omc "$@"
+docker volume create omc-home
+# A fresh volume's root belongs to root. Hand it to yourself, or omc cannot write it.
+docker run --rm -v omc-home:/omhome openmodelica/openmodelica:v1.22.0-minimal \
+  chown "$(id -u):$(id -g)" /omhome
 ```
 
-Tag suffixes: `-minimal` (compiler and libraries), `-ompython` (adds the Python
-bindings this pack deliberately does not use), `-gui` (adds OMEdit, much larger).
+To let the gates use it, put an `omc` on PATH that forwards into the container.
+It has to get two things right:
+
+1. **Paths.** The gates write their `.mos` under `<out_dir>/omc` (by default
+   `<project>/.atompipe/out/omc`, and a temp directory under `gate selftest`),
+   copy the sources beside it (`.sources/<script>/`), and run omc from there.
+   So mount `$PWD` at the **same path** inside the container and start omc in
+   it; the gates hand omc no other path of yours. The one exception is a model
+   that opens a file by absolute path (a table, an external C library): mount
+   that tree too, because nothing here can see such a read.
+2. **Libraries.** Point `HOME` at the volume. Then `installPackage` has somewhere
+   to write, and every later run finds what it wrote.
+
+```bash
+#!/usr/bin/env bash
+# ~/bin/omc — omc-in-docker, pinned, with its libraries in the omc-home volume
+set -euo pipefail
+IMAGE=openmodelica/openmodelica:v1.22.0-minimal
+exec docker run --rm -u "$(id -u):$(id -g)" -v omc-home:/omhome -e HOME=/omhome \
+  -v "$PWD:$PWD" -w "$PWD" "$IMAGE" omc "$@"
+```
+
+Until the gates copied their sources, they handed `loadFile` absolute paths
+into the project, and this page told the wrapper to mount `$HOME` and the temp
+directory as well. A wrapper that guessed wrong saw nothing: under a test
+suite's temp `HOME`, a checkout under the real home was invisible, omc answered
+`loadFile(...) = false` with **no error at all**, and the gates FAILed a model
+nobody read. If you see that line with an empty error string, the wrapper is not
+mounting the directory omc runs in.
+
+Then install the library once. This is the only step that needs the network:
+
+```bash
+cat > install-msl.mos <<'EOF'
+installPackage(Modelica, "4.0.0+maint.om", exactMatch=true);
+getErrorString();
+EOF
+omc install-msl.mos
+```
+
+It prints `true`, then three `Package installed successfully` notifications
+(ModelicaServices, Complex, Modelica). That is about 74 MB in the volume and ten
+seconds. Check it by version:
+
+```bash
+cat > msl-check.mos <<'EOF'
+loadModel(Modelica, {"4.0.0"});
+getErrorString();
+getVersion(Modelica);
+EOF
+omc msl-check.mos                       # true, then "", then "4.0.0"
+```
+
+For a stronger check, add `--network none` to the wrapper's `docker run` for one
+run. The same three lines show that nothing reaches for the network any more.
+
+*Rejected:* `-e HOME="$HOME"` (the container writing into your real home). It
+also gives omc a writable home, but it puts the container's libraries in the
+`~/.openmodelica` that a native omc of another version reads too. The volume
+keeps the libraries next to the image they were installed for.
+
+The tag suffixes: `-minimal` is the compiler with no libraries (above).
+`-ompython` adds the Python bindings, which this pack deliberately does not use.
+`-gui` adds OMEdit and is much larger. Don't assume from a tag's name that it
+bundles MSL. Run `msl-check.mos` to find out.
 
 ## macOS
 
@@ -90,22 +169,47 @@ paths and `omc.exe` will not resolve them.
 
 ## The Modelica Standard Library
 
-The compiler ships without libraries on some builds. Install the one you pin
-against:
+Assume omc has no libraries until `msl-check.mos` (above) says otherwise. The
+`-minimal` docker image has none, and the `omc` package is the compiler.
+omc's package manager installs into `$HOME/.openmodelica/libraries`, so the user
+omc runs as needs a writable `HOME`. Under docker, that is what the `omc-home`
+volume is for. A native install uses the same two scripts as the docker
+section: `install-msl.mos` once, then `msl-check.mos`.
 
-```bash
-omc <<'EOF'
-updatePackageIndex();
-installPackage(Modelica, "4.0.0+maint.om", exactMatch=true);
-getAvailablePackageVersions(Modelica, "");
-EOF
-```
+omc reads a script from a **file**, not from stdin. `omc <<'EOF' ... EOF`
+prints omc's usage and does nothing, and this page used to recommend exactly
+that. `getAvailablePackageVersions(Modelica, "")` lists what the package
+*index* offers, installed or not, so it does not tell you what is installed.
 
 The MSL version is a **constant with provenance** exactly like a material
 property. MSL 3.2.3 and 4.0.0 differ in package names (`Modelica.SIunits` became
 `Modelica.Units.SI`), in several component parameterisations, and in a few
-default values. Record which one the model was validated against, in the model's
-own provenance, and put it in `modelica_load_libraries`.
+default values. Record in the model's own provenance which one the model was
+written and checked against. `modelica_load_libraries` takes the library *name*
+(`["Modelica"]`), so install only the version you pinned.
+
+### What a missing library looks like to the gates
+
+When a library listed in `modelica_load_libraries` does not load, the three
+tier-2 gates **SKIP** and their claims read BLOCKED, the same as for a missing
+omc. The reason names the library and omc's own message:
+
+```
+library not loaded, nothing checked: loadModel(Modelica) = false; omc: Failed to load package Modelica (default) using MODELICAPATH //.openmodelica/libraries/. (references/installing.md)
+```
+
+In two cases the gates cannot tell a missing library from a defect in the model,
+and they read FAIL:
+
+- **The model uses `Modelica.*` but doesn't list it.** omc tries to load the
+  library automatically, fails, and reports `Class Modelica.… not found in
+  scope`. A misspelt class gives the same message.
+- **The model has a `uses(Modelica(...))` annotation but no list entry.** The
+  failed load reports errors after `loadFile(...) = true`, and the gate reads
+  "the sources did not load".
+
+**List every library the model uses.** The list is what lets the gate tell an
+incomplete machine from a broken model.
 
 ## The smoke test — run this before any project data
 
@@ -155,3 +259,12 @@ atompipe gate selftest modelica.checks    # the control must now FIRE, not skip
 That second command is the one that matters. Until it reports the gate correctly
 failing on `selftest/assets/bad/UnbalancedTank.mo`, the tier-2 half of this pack
 is installed but unproven.
+
+**A green selftest does not mean MSL is installed.** The pack's fixtures declare
+their own SI types and load no library (`modelica_load_libraries: []` in
+`selftest/baseline.json`). That is deliberate: it lets the controls run, and fail
+as they must, on a bare omc. It also means `gate selftest` passes on an omc that has no MSL at all,
+which is why nothing objected while this page said `-minimal` shipped "compiler
+and libraries". The selftest checks the compiler, and `msl-check.mos` checks the
+library. Run both.
+

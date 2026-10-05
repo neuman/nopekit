@@ -35,13 +35,15 @@ but something went unmeasured, the verdict is SKIPPED rather than passed: the se
 was not proven, and an unproven set resolving its claim to BLOCKED is the honest
 outcome (rule 4, and invariant 1 in CLAUDE.md — a skipped gate is never a pass).
 
-This module holds no thresholds and makes no measurement. Each gate measures its
-own quantity per part and states the score; all the arithmetic here is counting
-and choosing a maximum.
+This module holds no thresholds, makes no measurement and keeps no state. Each
+gate measures its own quantity per part and states the score; all the arithmetic
+here is counting and choosing a maximum. The sweep's mesh cache used to live here
+too, on ``ctx.extra``; it is the spine's memo now (``gates/mesh.py``,
+``_read_mesh``), because a hit on a cache the spine cannot see opened nothing, and
+the gate that got it was keyed as if it had read no file at all (S-27).
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
@@ -230,13 +232,13 @@ def fold(gate_id: str, outcomes: Sequence[PartOutcome], *, source: str, units: s
                   + (f". {measured_clause}" if measured_clause else "")
                   + skip_clause)
         return Verdict(gate=gate_id, passed=False, measured=float(len(defects)),
-                       limit=0.0, units="parts that are not solids",
+                       limit=0.0, comparator="<=", units="parts that are not solids",
                        detail=_with(detail, extra_detail), evidence=list(evidence),
                        locators=locators)
 
     if past:
         return Verdict(gate=gate_id, passed=False,
-                       measured=best.measured, limit=best.limit, units=units,
+                       measured=best.measured, limit=best.limit, comparator="<=", units=units,
                        detail=_with(measured_clause + skip_clause, extra_detail),
                        evidence=list(evidence), locators=locators)
 
@@ -263,7 +265,7 @@ def fold(gate_id: str, outcomes: Sequence[PartOutcome], *, source: str, units: s
             evidence=list(evidence))
 
     return Verdict(gate=gate_id, passed=True, measured=best.measured,
-                   limit=best.limit, units=units,
+                   limit=best.limit, comparator="<=", units=units,
                    detail=_with(measured_clause, extra_detail),
                    evidence=list(evidence))
 
@@ -271,61 +273,3 @@ def fold(gate_id: str, outcomes: Sequence[PartOutcome], *, source: str, units: s
 def _with(detail: str, extra: str) -> str:
     return f"{detail}; {extra}" if extra else detail
 
-
-# --------------------------------------------------------------------------- #
-# one load per mesh per sweep
-# --------------------------------------------------------------------------- #
-#: Where the loaded meshes live on the shared context. ``GateContext.extra`` is
-#: the one channel a sweep's gates have in common — ``run_all`` hands every gate
-#: the same context object — so a cache put here is a cache both mesh gates see.
-_CACHE_KEY = "_fdm_print_mesh_cache"
-
-#: Meshes kept before the oldest is dropped. Bounded because the context outlives
-#: the sweep in a long-running process, and an unbounded cache of triangle arrays
-#: is a leak with a polite name.
-CACHE_MAX = 64
-
-
-def cached(ctx: Any, path: str):
-    """``(mesh, defect)`` for ``path`` if it has been loaded already, else None.
-
-    Keyed on ``(path, mtime_ns, size)``, so a re-export between two gates in one
-    sweep is a miss and not a stale hit. That is not hypothetical — the whole
-    reason a project re-runs a sweep is that it just rebuilt its meshes.
-    """
-    store = _store(ctx)
-    if store is None:
-        return None
-    return store.get(_key(path))
-
-
-def remember(ctx: Any, path: str, mesh: Any, defect: str | None) -> None:
-    """Put a loaded mesh in the sweep's cache."""
-    store = _store(ctx)
-    if store is None:
-        return
-    key = _key(path)
-    if key is None:
-        return
-    if len(store) >= CACHE_MAX:
-        store.pop(next(iter(store)), None)
-    store[key] = (mesh, defect)
-
-
-def _store(ctx: Any) -> dict | None:
-    extra = getattr(ctx, "extra", None)
-    if not isinstance(extra, dict):
-        return None
-    store = extra.get(_CACHE_KEY)
-    if not isinstance(store, dict):
-        store = {}
-        extra[_CACHE_KEY] = store
-    return store
-
-
-def _key(path: str):
-    try:
-        stat = os.stat(path)
-    except OSError:
-        return None
-    return (os.path.abspath(path), stat.st_mtime_ns, stat.st_size)

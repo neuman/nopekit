@@ -48,6 +48,7 @@ import dataclasses
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -614,6 +615,14 @@ def gather_mo_files(entries: Iterable[str], root: str = "") -> list[str]:
     the order ``package.mo`` first: that is how omc loads a structured package
     and loading the leaves first produces "class X not found" for a class that is
     in the very next file.
+
+    An entry that is neither a file nor a directory yet is skipped — and that
+    absence is an input of the calling gate: the spine records the
+    ``os.path.isfile``/``isdir`` questions below, so the verdict goes stale when
+    the file appears. What slipped through before it did (review round 1): with
+    ``[model/A.mo, model/B.mo]`` named and only A present, ``source_hygiene``
+    recorded ``{model/A.mo}`` and kept a Fresh PASS after B.mo appeared with an
+    undocumented, unitless parameter.
     """
     out: list[str] = []
     for entry in entries:
@@ -1151,8 +1160,175 @@ def mos_preamble(sources: Sequence[str], libraries: Sequence[str] = ()) -> list[
     return lines
 
 
+#: Where a script's sources are copied, under the directory omc runs in:
+#: ``<work_dir>/.sources/<script name>/<entry index>/<entry basename>``.
+#: The dot is load-bearing: :func:`gather_mo_files`, and so every gate in this
+#: pack, skips dot-directories, so a work directory that sits inside a source
+#: entry never offers the copies back as sources. One tree per script, so
+#: ``check.mos``, ``build.mos`` and ``simulate.mos`` each still reproduce against
+#: the copies they loaded after the next gate has run. One directory per entry,
+#: because two entries can share a basename (``a/model``, ``b/model``).
+#: *Rejected:* ``sources/`` without the dot — with an out directory inside a
+#: source entry, every run would read the previous run's copies as the
+#: project's own sources.
+STAGE_DIR = ".sources"
+
+
+def stage_sources(entries: Iterable[str], root: str, work_dir: str,
+                  name: str) -> list[tuple[str, str]]:
+    """Copy every source entry under ``work_dir``; ``[(original, copy)]`` per entry.
+
+    omc is run from ``work_dir``, and that directory is the one place an omc
+    behind a wrapper is sure to see: the wrapper has to mount it, because omc
+    writes its build there. Anything else is the wrapper's guess. So the gates
+    hand omc copies under ``work_dir`` and never a path into the project.
+
+    What slipped through: the gates handed ``loadFile`` absolute paths into the
+    project — or, under ``gate selftest``, into the pack's own
+    ``selftest/assets``. The wrapper ``references/installing.md`` gave mounts
+    ``$PWD``, ``$HOME`` and the temp directory; the test suite runs every child
+    under a temp ``HOME``, so a checkout under the real home was invisible to
+    omc. omc 1.22 answered ``loadFile(ThermalTank.mo) = false`` with an EMPTY
+    error string, and all three tier-2 gates read FAIL — "the sources did not
+    load" — on the pack's own good baseline, while their controls were counted
+    as fired on the same invisibility. The suite was green only where the
+    checkout happened to sit under ``/tmp``.
+
+    A file entry is copied as itself; a directory entry as its whole tree under
+    its own name, which omc requires of a ``package.mo``, with ``package.order``
+    and ``Resources/`` beside it, because a ``modelica://`` URI resolves
+    against the package's directory. Dot-directories are left out, as
+    :func:`gather_mo_files` leaves them out, and so is ``work_dir`` itself when
+    an entry contains it. The tree is rebuilt on every run: a copy left from
+    the last one is a file the user deleted, still where ``package.mo``'s
+    directory load would find it.
+
+    *Rejected:* stating what the wrapper must mount (installing.md did) — the
+    gates' verdicts then depend on a file outside the project that nothing
+    checks, and a temp ``HOME`` is enough to break it. *Rejected:* symlinks into
+    ``work_dir`` — a container resolves them in its own mount namespace, where
+    the target does not exist. *Rejected:* hard links — they fail across
+    filesystems (``/tmp`` often is another one) and an editor that saves by
+    rename silently unlinks them. *Rejected:* copying only the ``.mo`` files —
+    a model that reads a table through ``modelica://Pkg/Resources/...`` would
+    fail at simulate time, a FAIL about a model that is fine. *Rejected:*
+    probing omc's view first (``regularFileExists``) and skipping — honest, but
+    an installed omc that cannot run here is still a gate that cannot run, and
+    reading omc's error text instead is no better: 1.22 prints nothing at all
+    for a file it cannot open. A model that opens a file by absolute path still
+    needs that path mounted; nothing here can see such a read.
+    """
+    stage = os.path.join(work_dir, STAGE_DIR, name)
+    if os.path.lexists(stage):
+        shutil.rmtree(stage)
+    os.makedirs(stage)
+    skip = {os.path.realpath(work_dir)}
+
+    def leave_out(directory: str, names: list[str]) -> list[str]:
+        out = []
+        for entry_name in names:
+            full = os.path.join(directory, entry_name)
+            if entry_name.startswith(".") and os.path.isdir(full):
+                out.append(entry_name)
+            elif os.path.realpath(full) in skip:
+                out.append(entry_name)
+        return out
+
+    placed: list[tuple[str, str]] = []
+    for index, entry in enumerate(entries):
+        original = os.path.abspath(resolve_path(root, str(entry)))
+        copy = os.path.join(stage, str(index), os.path.basename(original) or "root")
+        if os.path.isfile(original):
+            os.makedirs(os.path.dirname(copy))
+            shutil.copy2(original, copy)
+        elif os.path.isdir(original) and os.path.realpath(original) not in skip:
+            shutil.copytree(original, copy, ignore=leave_out,
+                            ignore_dangling_symlinks=True)
+        else:
+            continue
+        placed.append((original, copy))
+    return placed
+
+
+def staged_path(source: str, placed: Sequence[tuple[str, str]]) -> str:
+    """Where :func:`stage_sources` put ``source`` (a path :func:`gather_mo_files`
+    returned); ``source`` itself when no staged entry holds it."""
+    for original, copy in placed:
+        if source == original:
+            return copy
+        prefix = original.rstrip(os.sep) + os.sep
+        if source.startswith(prefix):
+            return os.path.join(copy, source[len(prefix):])
+    return source
+
+
+def unstage(text: str, placed: Sequence[tuple[str, str]]) -> str:
+    """``text`` with every staged path put back to the user's.
+
+    omc names the file it loaded in every error (``[<path>:3:1-3:1:writable]
+    Error: ...``), and the file it loaded is a copy the next run overwrites. A
+    verdict that cites the copy sends its reader to edit it, and the edit is
+    gone on the next run. Longest copy first, so no copy's path is rewritten
+    inside a longer one's.
+    """
+    text = text or ""
+    for original, copy in sorted(placed, key=lambda pair: len(pair[1]), reverse=True):
+        text = text.replace(copy, original)
+    return text
+
+
+def clear_objects(work_dir: str) -> list[str]:
+    """Delete every ``*.o`` directly under ``work_dir``; return the names removed.
+
+    omc's generated makefile marks the numbered ``<Class>_NN.c`` files ``.PHONY``,
+    so make always rebuilds those, but it rebuilds the MAIN object
+    ``<Class>.o`` only when ``<Class>.c`` has a later mtime. The main file is
+    where omc writes the model GUID, fresh on every translation, and the
+    executable refuses an ``_init.xml`` whose GUID it was not compiled with.
+
+    What slipped through: on a WSL2 machine the wall clock stepped back by more
+    than 0.1 s between ``modelica.compiles`` and ``modelica.simulates``, which
+    build the same class in the same directory one after the other. The
+    regenerated ``ThermalTank.TankRun.c`` was stamped EARLIER than the object
+    the previous build had left, make kept that object, and the pack's own good
+    baseline read FAIL with "the GUID ... from input data file ... does not
+    match the GUID compiled in the model". It hit about one full test run in
+    three, never on the same test twice, and looked like the unrelated
+    two-processes-one-out_dir race until the mtimes were recorded. A stale
+    object is a build-system artefact, not evidence about the model; a gate
+    that fails on it sends someone to edit equations that are fine.
+
+    Every run translates anyway, so deleting the objects costs one compile of
+    the main file and nothing else. *Rejected:* ``MAKEFLAGS=-B`` in omc's
+    environment, which works only while omc invokes GNU make with the inherited
+    environment and no makefile resets it — the fix would live in someone
+    else's build system. *Rejected:* a fresh work directory per run, which
+    moves the evidence paths every run and still leaves the next build of the
+    same class trusting whatever is on disk.
+    """
+    removed: list[str] = []
+    try:
+        names = sorted(os.listdir(work_dir))
+    except OSError:
+        return removed
+    for fname in names:
+        if not fname.endswith(".o"):
+            continue
+        path = os.path.join(work_dir, fname)
+        try:
+            if os.path.isfile(path):
+                os.remove(path)
+                removed.append(fname)
+        except OSError:
+            # Left in place, make may trust it again; the GUID check at run time
+            # still refuses the mismatch, so the worst case is today's behaviour.
+            continue
+    return removed
+
+
 def run_mos(lines: Sequence[str], work_dir: str, name: str,
-            timeout_s: float = 300.0, omc: str = "omc") -> OmcRun:
+            timeout_s: float = 300.0, omc: str = "omc",
+            staged: Sequence[tuple[str, str]] = ()) -> OmcRun:
     """Write ``lines`` to ``<work_dir>/<name>.mos`` and run ``omc`` on it.
 
     The script file and its captured output both stay on disk under ``out_dir``
@@ -1164,10 +1340,19 @@ def run_mos(lines: Sequence[str], work_dir: str, name: str,
     it into a SKIP — a model that did not finish inside the budget has not been
     shown to be wrong, and filing it as a FAIL would send someone to edit
     equations when the honest fix is a bigger budget or a smaller model.
+
+    Every object file already in ``work_dir`` is deleted first
+    (:func:`clear_objects`), so each run builds from the source it just generated.
+
+    ``staged`` is what :func:`stage_sources` copied for this script. The log
+    names each copy beside its original and keeps omc's output as omc printed
+    it; the ``OmcRun`` the gates read has every copy's path put back to the
+    user's (:func:`unstage`).
     """
     import time as _time
 
     os.makedirs(work_dir, exist_ok=True)
+    clear_objects(work_dir)
     script_path = os.path.join(work_dir, f"{name}.mos")
     log_path = os.path.join(work_dir, f"{name}.omc.log")
     body = "\n".join(lines) + "\n"
@@ -1199,12 +1384,16 @@ def run_mos(lines: Sequence[str], work_dir: str, name: str,
     try:
         with open(log_path, "w", encoding="utf-8") as handle:
             handle.write(f"$ {omc} {script_path}\n(cwd {work_dir})\n")
+            for original, copy in staged:
+                handle.write(f"(staged {original} as {copy})\n")
             handle.write(f"--- script ---\n{body}")
             handle.write(f"--- returncode {run.returncode} "
                          f"timed_out={run.timed_out} {run.duration_s:.2f}s ---\n")
             handle.write(f"--- stdout ---\n{run.stdout}\n--- stderr ---\n{run.stderr}\n")
     except OSError:
         run.log_path = ""
+    run.stdout = unstage(run.stdout, staged)
+    run.stderr = unstage(run.stderr, staged)
     return run
 
 

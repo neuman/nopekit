@@ -89,6 +89,9 @@ def _load(ctx: GateContext, gate_id: str):
     settles="bill of materials completeness",
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:unpriced_line",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line's unit_price blanked out — the single most common real BOM "
              "defect. Nothing else about the part changes, and the roll-up that "
              "silently treats it as free is exactly what this gate refuses",
@@ -116,7 +119,7 @@ def complete(ctx: GateContext) -> Verdict:
 
     rows = bomlib.lines(doc)
     if not rows:
-        return Verdict(gate="bom.complete", passed=False, measured=0.0, limit=0.0,
+        return Verdict(gate="bom.complete", passed=False, measured=0.0, limit=0.0, comparator="<=",
                        units="lines", detail="the BOM has no lines — nothing to buy "
                                              "and nothing proven")
 
@@ -132,25 +135,7 @@ def complete(ctx: GateContext) -> Verdict:
         # an order minimum, and bom.single_source reports its supplier as "(none)".
         if not bomlib.sources_of(line):
             missing.append("no vendor and no sources")
-        qty = bomlib.num(line.get("qty_per_unit"))
-        if qty is None or isinstance(qty, bool):
-            missing.append("no qty_per_unit")
-        elif float(qty) <= 0:
-            missing.append(f"qty_per_unit {float(qty):g}")
-        _spares, spares_problem = bomlib.spares_fraction(line)
-        if spares_problem:
-            missing.append(spares_problem)
-        # An uncoercible moq or order_multiple is read downstream as "no minimum"
-        # and "no rounding", which quietly makes the order SMALLER and the run
-        # CHEAPER than the vendor will actually sell it — the same permissive
-        # direction as the spares typo above, and just as invisible.
-        for field in ("moq", "order_multiple"):
-            raw = line.get(field)
-            if raw is None or raw == "":
-                continue
-            value = bomlib.num(raw)
-            if value is None or isinstance(value, bool) or float(value) < 0:
-                missing.append(f"{field} {raw!r} is not a quantity")
+        missing.extend(bomlib.quantity_problems(line))
         price, why = bomlib.unit_price(line, doc)
         if price is None:
             missing.append(why)
@@ -164,7 +149,7 @@ def complete(ctx: GateContext) -> Verdict:
     worst = ", ".join(p["ref"] for p in problems[:4]) + ("..." if len(problems) > 4 else "")
     return Verdict(
         gate="bom.complete", passed=not problems,
-        measured=float(len(problems)), limit=0.0, units="lines",
+        measured=float(len(problems)), limit=0.0, comparator="<=", units="lines",
         detail=f"{len(problems)} of {len(rows)} lines not orderable (limit 0)"
                + (f": {worst}" if problems else " — every line has a part number, "
                                                 "a quantity and a usable price"),
@@ -179,8 +164,17 @@ def complete(ctx: GateContext) -> Verdict:
     claims=["cost", "build-cost", "budget", "unit-cost"],
     tier=Tier.INSTANT,
     settles="build cost per unit",
+    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
+    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
+    #    this gate's arithmetic over the BOM a work of fiction.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:price_shock",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line repriced so that part alone costs ten times the whole per-unit "
              "budget — the re-quote that arrives the week you order. One number "
              "moves; quantities, vendors and charges are untouched",
@@ -254,7 +248,7 @@ def cost(ctx: GateContext) -> Verdict:
         detail += (f"; {len(unmatched)} order_minimums entry(s) placed on nothing: {named}")
     return Verdict(
         gate="bom.cost", passed=measured <= limit and not unmatched,
-        measured=round(measured, 2), limit=round(limit, 2), units=units,
+        measured=round(measured, 2), limit=round(limit, 2), comparator="<=", units=units,
         detail=detail, evidence=evidence,
     )
 
@@ -266,8 +260,21 @@ def cost(ctx: GateContext) -> Verdict:
     claims=["availability", "lead-time", "ship-date", "stock"],
     tier=Tier.INSTANT,
     settles="longest lead time",
+    # No edge to bom.complete (review of P2.2: P2.2-D12's first test, "every
+    #    fail of the prerequisite means the number does not apply", does not
+    #    hold): a lead time, a lifecycle and a stock figure do not depend on
+    #    another line's price, and bom.complete fails on any unpriced line — so
+    #    with the edge one blank price cell turned a real end-of-life FAIL into
+    #    a skip naming the wrong root, in every channel, until the unrelated
+    #    price was filled in. The one input this gate shares with the guard is
+    #    a line's quantity (stock covers a need), and the body refuses that
+    #    itself: a line whose quantity cannot be read is never covered by stock.
+    #    The edge can land once bom.complete's quantity half is its own guard.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:end_of_life",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line's lifecycle moved to 'eol' — the notice that arrives by email "
              "and gets filed. Price, quantity and vendor are unchanged; only the "
              "part's future is",
@@ -323,7 +330,16 @@ def availability(ctx: GateContext) -> Verdict:
         stock, stock_problem = bomlib.stock_qty(line)
         lead, lead_problem = bomlib.lead_weeks(line)
         lifecycle = str(line.get("lifecycle") or "unknown").strip().lower()
-        covered = stock is not None and stock >= buy
+        # A line whose quantity cannot be read is never covered by stock: with
+        # no usable need, purchase_qty reads 0 and any shelf "covers" it. This
+        # was bom.complete's to refuse while it was this gate's prerequisite;
+        # the edge is gone (see the decorator), so the gate refuses it itself,
+        # in the direction that leaves a ship date unknown, never known.
+        qty_problems = bomlib.quantity_problems(line)
+        covered = not qty_problems and stock is not None and stock >= buy
+        if qty_problems and stock is not None and not stock_problem:
+            stock_problem = (f"stock {stock:g} against an unknown quantity "
+                             f"({'; '.join(qty_problems)})")
 
         if lifecycle in bomlib.DEAD:
             dead.append(ref)
@@ -408,6 +424,10 @@ def availability(ctx: GateContext) -> Verdict:
         # None, not 0.0: every line's lead being unknown is not "no wait".
         measured=(None if longest is None else round(longest, 2)),
         limit=(round(float(budget), 2) if budget is not None else None),
+        # The lead-time reading's side; a fail for an EOL or undated line is
+        # another fact, and its margin then says the side does not explain it
+        # (`disagrees`: the verdict wins, D-17).
+        comparator="<=",
         units="weeks", detail="; ".join(bits), evidence=evidence,
         locators=locators[:_MAX_LOCATORS],
     )
@@ -420,8 +440,17 @@ def availability(ctx: GateContext) -> Verdict:
     claims=["moq", "minimum-order", "overbuy", "inventory"],
     tier=Tier.INSTANT,
     settles="minimum order quantity overbuy",
+    # Prerequisite bom.complete (P2.2-D12): it is the input-validity guard —
+    #    an unpriced or unorderable line, or a spares fraction outside [0, 1], makes
+    #    this gate's arithmetic over the BOM a work of fiction.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["bom.complete"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:brutal_moq",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line's MOQ raised far past what the build needs, on the line whose "
              "price makes the overbuy real money. The part, the price, the order "
              "multiple and the design are unchanged — only the smallest quantity the "
@@ -538,7 +567,7 @@ def moq(ctx: GateContext) -> Verdict:
                     + (" — OVER" if over_line else ""))
     return Verdict(
         gate="bom.moq", passed=total_idle <= limit and not over_line,
-        measured=round(total_idle, 2), limit=round(limit, 2),
+        measured=round(total_idle, 2), limit=round(limit, 2), comparator="<=",
         units=cur or "currency", detail="; ".join(bits), evidence=evidence,
     )
 
@@ -550,8 +579,16 @@ def moq(ctx: GateContext) -> Verdict:
     claims=["process-rules", "vendor-capability", "manufacturability", "dfm"],
     tier=Tier.INSTANT,
     settles="vendor process capability",
+    # No edge to bom.complete (review of P2.2: P2.2-D12's first test does not
+    #    hold): a vendor's capability set is checked against the design's
+    #    declared attributes, none of which a price, a quantity or a part
+    #    number moves — with the edge, one blank price cell hid a real
+    #    capability violation behind a skip naming the wrong root.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:outside_capability",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one declared process attribute moved outside the vendor's stated set — "
              "a finish the quoted line does not offer, or a tolerance ten times "
              "tighter than the process holds — written everywhere the document "
@@ -592,7 +629,7 @@ def process_rules(ctx: GateContext) -> Verdict:
                       for v in violations[:3])
     return Verdict(
         gate="bom.process_rules", passed=not violations,
-        measured=float(len(violations)), limit=0.0, units="violations",
+        measured=float(len(violations)), limit=0.0, comparator="<=", units="violations",
         detail=f"{len(violations)} violation(s) of {len(rules)} project-supplied rule(s) "
                f"(limit 0)" + (f": {first}" if violations else " — design is inside every "
                                                               "stated capability"),
@@ -607,8 +644,17 @@ def process_rules(ctx: GateContext) -> Verdict:
     claims=["single-source", "supply-risk", "second-source", "supply-chain-risk"],
     tier=Tier.INSTANT,
     settles="single source count",
+    # No edge to bom.complete (review of P2.2: P2.2-D12's first test does not
+    #    hold): the count reads who makes and who sells each line, and an
+    #    unpriced line, a missing quantity or a spares typo moves none of it —
+    #    with the edge, one blank price cell hid an unrecorded single source
+    #    behind a skip naming the wrong root. A line with no source at all is
+    #    counted here as no second source (the conservative direction).
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:lost_second_source",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="the second source goes away, with nothing written down — expressed on "
              "each line in the terms that line records: the lines that name a "
              "MANUFACTURER keep both distributors and lose the qualified alternate "
@@ -706,7 +752,7 @@ def single_source(ctx: GateContext) -> Verdict:
 
     return Verdict(
         gate="bom.single_source", passed=float(len(unrecorded)) <= limit,
-        measured=float(len(unrecorded)), limit=limit, units="lines",
+        measured=float(len(unrecorded)), limit=limit, comparator="<=", units="lines",
         detail=detail, evidence=evidence, locators=locators,
     )
 
@@ -718,8 +764,13 @@ def single_source(ctx: GateContext) -> Verdict:
     claims=["currency", "fx", "price-currency", "cost"],
     tier=Tier.INSTANT,
     settles="price currency coherence",
+    # No edge to bom.complete: this gate's own control fails it (1 of 10 lines
+    # not orderable), so the guard would pre-empt the control.
     negative_control=NegativeControl(
         fixture="selftest/bad_boms.py:foreign_quote",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_boms.py says why (P2.3-D5)
+        good="selftest/good_boms.py:baseline_bom",
         note="one line re-quoted in a currency the document holds no fx rate for — "
              "the vendor who sends the second quote on their own price list. The "
              "part, the quantity, the vendor and the number itself are unchanged; "
@@ -795,6 +846,6 @@ def currency(ctx: GateContext) -> Verdict:
                       else "every line quoted in the base currency"))
     return Verdict(
         gate="bom.currency", passed=not bad,
-        measured=float(len(bad)), limit=0.0, units="lines",
+        measured=float(len(bad)), limit=0.0, comparator="<=", units="lines",
         detail=detail, evidence=evidence,
     )

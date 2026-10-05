@@ -107,6 +107,12 @@ def _sf(ctx: GateContext) -> tuple[float, str]:
     claims=["structural", "stiffness", "deflection"],
     tier=Tier.INSTANT,
     settles="tip deflection",
+    # Prerequisite beam.model_validity (P2.2-D12): this number is Euler-Bernoulli's,
+    #    and every way the guard fails — L/h under its floor, or the shear share
+    #    the theory omits past its limit — is a beam where it does not apply.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["beam.model_validity"],
     negative_control=NegativeControl(
         fixture="selftest/bad_beams.py:shallow_section",
         note="the same beam with its section depth derived to land 15% past the "
@@ -156,7 +162,7 @@ def deflection(ctx: GateContext) -> Verdict:
         gate="beam.deflection",
         passed=d <= limit,
         measured=round(d, 4),
-        limit=round(limit, 4),
+        limit=round(limit, 4), comparator="<=",
         units="mm",
         detail=f"{case}{' [pack default]' if case_default else ''}: {d:.3f} mm at "
                f"{P:g} N over {L:g} mm ({sec['desc']}, E {E:.0f} MPa [{e_src}]) "
@@ -174,6 +180,12 @@ def deflection(ctx: GateContext) -> Verdict:
     claims=["structural", "stiffness", "serviceability", "deflection"],
     tier=Tier.INSTANT,
     settles="deflection ratio",
+    # Prerequisite beam.model_validity (P2.2-D12): this number is Euler-Bernoulli's,
+    #    and every way the guard fails — L/h under its floor, or the shear share
+    #    the theory omits past its limit — is a beam where it does not apply.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["beam.model_validity"],
     negative_control=NegativeControl(
         fixture="selftest/bad_beams.py:long_span",
         note="the same beam, load and section on the span that puts the deflection "
@@ -220,7 +232,7 @@ def deflection_ratio(ctx: GateContext) -> Verdict:
         gate="beam.deflection_ratio",
         passed=ratio >= denom,
         measured=round(ratio, 1) if math.isfinite(ratio) else None,
-        limit=round(denom, 1),
+        limit=round(denom, 1), comparator=">=",
         units="span/deflection",
         detail=f"{case}: {d:.3f} mm over {L:g} mm = L/{shown} vs L/{denom:g} limit"
                f"{' [pack default]' if denom_default else ''}",
@@ -237,6 +249,12 @@ def deflection_ratio(ctx: GateContext) -> Verdict:
     claims=["structural", "strength", "stress"],
     tier=Tier.INSTANT,
     settles="bending stress",
+    # Prerequisite beam.model_validity (P2.2-D12): this number is Euler-Bernoulli's,
+    #    and every way the guard fails — L/h under its floor, or the shear share
+    #    the theory omits past its limit — is a beam where it does not apply.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["beam.model_validity"],
     negative_control=NegativeControl(
         fixture="selftest/bad_beams.py:overloaded",
         note="the same beam at the load that puts bending stress 15% past the "
@@ -283,7 +301,7 @@ def bending_stress(ctx: GateContext) -> Verdict:
         gate="beam.bending_stress",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{case}{' [pack default]' if case_default else ''}: {sigma:.1f} MPa vs "
                f"{allow:.1f} MPa allowable ({allow_src}{sf_note}) — util {util:.2f}; "
@@ -301,6 +319,16 @@ def bending_stress(ctx: GateContext) -> Verdict:
     claims=["structural", "strength", "shear"],
     tier=Tier.INSTANT,
     settles="transverse shear stress",
+    # Prerequisite beam.input_sanity (P2.2-D12): a load with the wrong sign or a
+    #    length in metres makes this arithmetic meaningless, and the sanity guard
+    #    fails only on exactly those.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["beam.input_sanity"],
+    # No edge to beam.model_validity: this gate's own control, shear_governed
+    # (L/h 6.0, about 32% of the deflection omitted), fails the slenderness guard,
+    # which would pre-empt the control wherever both run; and VQ/Ib does not rest
+    # on Euler-Bernoulli's no-shear assumption.
     negative_control=NegativeControl(
         fixture="selftest/bad_beams.py:shear_governed",
         note="the same member in plywood under a distributed load — the regime where "
@@ -400,7 +428,7 @@ def shear_stress(ctx: GateContext) -> Verdict:
         gate="beam.shear_stress",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{case}: V {V:g} N -> tau {tau:.2f} MPa vs {allow:.2f} MPa allowable "
                f"({allow_src}{sf_note}) — util {util:.2f} at L/h {slender:.1f}",
@@ -417,6 +445,12 @@ def shear_stress(ctx: GateContext) -> Verdict:
     claims=["structural", "stability", "buckling"],
     tier=Tier.INSTANT,
     settles="critical buckling load",
+    # Prerequisite beam.model_validity (P2.2-D12): this number is Euler-Bernoulli's,
+    #    and every way the guard fails — L/h under its floor, or the shear share
+    #    the theory omits past its limit — is a beam where it does not apply.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["beam.model_validity"],
     negative_control=NegativeControl(
         fixture="selftest/bad_beams.py:slender_strut",
         note="the identical strut at the unbraced length that puts the factored axial "
@@ -522,7 +556,7 @@ def buckling(ctx: GateContext) -> Verdict:
         gate="beam.buckling",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{regime}: lambda {lam:.0f} (transition {lam_1:.0f}), K {K:g} [{k_src}], "
                f"L {Lc:g} mm [{lc_src}]{i_min_note} -> P_cr {p_cr:.0f} N vs "
@@ -540,6 +574,14 @@ def buckling(ctx: GateContext) -> Verdict:
     claims=["structural", "fastener", "joint"],
     tier=Tier.INSTANT,
     settles="bearing stress",
+    # Prerequisite beam.input_sanity (P2.2-D12): a load with the wrong sign or a
+    #    length in metres makes this arithmetic meaningless, and the sanity guard
+    #    fails only on exactly those.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["beam.input_sanity"],
+    # No edge to beam.model_validity: bearing stress is F/(d*t*n) and does not
+    # depend on the beam model.
     negative_control=NegativeControl(
         fixture="selftest/bad_beams.py:thin_flange",
         note="the same bolt and load through the bearing thickness that puts hole-wall "
@@ -610,7 +652,7 @@ def bearing(ctx: GateContext) -> Verdict:
         gate="beam.bearing",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"{sigma:.1f} MPa on {area:.1f} mm^2 ({n:g} x dia {d:g} x {t:g} mm"
                f"{' [n_bolts pack default]' if n_default else ''}) from {P:g} N "
@@ -628,6 +670,12 @@ def bearing(ctx: GateContext) -> Verdict:
     claims=["structural", "stiffness", "strength", "model-validity"],
     tier=Tier.INSTANT,
     settles="beam model validity",
+    # Prerequisite beam.input_sanity (P2.2-D12): the guard's own L/h and shear share
+    #    are computed from the same lengths and loads; in the wrong units or signs
+    #    its verdict is about a different beam.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["beam.input_sanity"],
     negative_control=NegativeControl(
         fixture="selftest/bad_beams.py:stubby",
         note="the same section on the span that puts L/h 15% below the pack's own "
@@ -741,7 +789,7 @@ def model_validity(ctx: GateContext) -> Verdict:
         gate="beam.model_validity",
         passed=util <= 1.0,
         measured=round(util, 3),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail=f"L/h {slender:.1f} vs {limit:g} min"
                f"{' [pack default]' if limit_default else ''}; Euler-Bernoulli omits "
@@ -901,7 +949,7 @@ def input_sanity(ctx: GateContext) -> Verdict:
         gate="beam.input_sanity",
         passed=not faults,
         measured=len(faults),
-        limit=0,
+        limit=0, comparator="<=",
         units="faults",
         detail=(f"{len(checked)} quantities checked, clean ({', '.join(checked)})"
                 if not faults else

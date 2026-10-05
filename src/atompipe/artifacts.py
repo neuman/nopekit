@@ -339,13 +339,21 @@ def ingest(
     licence: str = "",
     note: str = "",
 ) -> InputArtifact:
-    """Take a real file into the project: copy, hash, register. Mutates `ledger`.
+    """Take a real file into the project: copy, hash, and return its RECORD.
+
+    Returns the `InputArtifact` the caller writes as `inputs/<id>.json` — the
+    one record an ingest touches (the `ingest` shim, `store.write_record`). The
+    in-memory `ledger` is updated too, so several files ingested by one command
+    dedupe against each other; nothing here writes a record or saves a ledger.
+    What slipped through before records were files: the CLI saved the whole
+    ledger after every ingest, rewriting every claim and parameter to add one
+    artifact.
 
     The copy is the point. A record that says `/home/eric/Downloads/pump.pdf` is
     a record that stops resolving the first time someone clears their Downloads
     folder or opens the project on another machine, and the evidence for a
     decision has to outlive the browser session that produced it. So by default
-    the bytes move into `inputs/<bucket>/` and the ledger stores a repo-relative
+    the bytes move into `inputs/<bucket>/` and the record stores a repo-relative
     path.
 
     Three behaviours worth knowing:
@@ -361,15 +369,21 @@ def ingest(
       and the directory they chose has already spoken (see `kind_for`) — we do
       not move it to "correct" the bucket. The one exception is `.atompipe/`:
       that tree is gate scratch and rebuildable output, so evidence found there
-      is copied out before something deletes it.
+      is copied out before something deletes it. A file where a RECORD goes (a
+      top-level `inputs/*.json`, `claims/*.json`, …) is refused: `load` reads
+      it as a record, and recorded in place it would be both.
     * **Same sha256 already ingested** -> the existing record comes back
       untouched, nothing is copied, nothing is appended. See `find_by_hash` for
-      why that is not signalled in the return value.
+      why that is not signalled in the return value. Unless its bytes are gone
+      from its `path`: then they moved, and the same record — id, extractions
+      and all — comes back pointing where they are now (copied into the bucket
+      of the record's kind when that is outside the project), never a second
+      record and never the stale path.
     * **Same path, new bytes** (an in-place file the user edited) -> the existing
-      record's digest and size are refreshed and its id is KEPT. Minting a fresh
-      id would orphan every `grounded_by` and every `Extraction` pointing at the
-      old one, which is the same as deleting the provenance — and the digest
-      change is exactly what `inputs_hash` needs to see so the gates go stale.
+      record's digest is refreshed and its id is KEPT. Minting a fresh id would
+      orphan every `grounded_by` and every `Extraction` pointing at the old one,
+      which is the same as deleting the provenance — and the new pin is what
+      clears the index's `drift` for bytes the user meant to change.
 
     `when` is the caller's ISO timestamp (spine rule 3: no function stamps its
     own clock). `copy=False` records an outside file where it lies, absolute
@@ -417,8 +431,16 @@ def ingest(
         )
 
     existing = find_by_hash(ledger, sha)
-    if existing is not None:
+    if existing is not None and not _bytes_gone(root, existing):
         return existing
+    if existing is not None:
+        # The bytes a record pinned are gone from its `path` and arrive from
+        # somewhere else: they MOVED, and they are filed as what the record says
+        # they are. What slipped through: this returned the record untouched, so
+        # a person who moved `inputs/Bench Loads.json` into a bucket and
+        # ingested it — the refusal's own hint — kept a record naming bytes that
+        # were not there, MISSING, under "1 artifact(s) registered".
+        resolved = existing.kind
 
     # `.atompipe/` is excluded deliberately: it is declared rebuildable and
     # git-ignored by `store.init`, so a record pointing into it is a record
@@ -456,6 +478,22 @@ def ingest(
                 ) from exc
 
     recorded = rel(dest, root)
+    slot = store._record_slot(recorded)
+    if slot:
+        # Recorded in place, a file there would be evidence where `load` reads a
+        # record, and the record written beside it would pin a record's bytes.
+        # A copy always lands in a bucket, never here, so nothing was copied.
+        raise AtompipeError(
+            f"cannot ingest {slot}: it is where a record goes, not evidence — every "
+            f"top-level {slot.split('/', 1)[0]}/*.json is read as a record; move it into "
+            f"a bucket ({store.INPUTS_NAME}/{bucket_for(resolved)}/) and ingest it there")
+
+    if existing is not None:
+        if any(a is not existing and a.path == recorded for a in ledger.inputs):
+            return existing         # another record names that file: never two
+        existing.path = recorded
+        existing.bytes = size
+        return existing
 
     prior = next((a for a in ledger.inputs if a.path and a.path == recorded), None)
     if prior is not None:
@@ -503,7 +541,11 @@ def ingest_link(
     kind: ArtifactKind | str = ArtifactKind.LINK,
     when: str = "",
 ) -> InputArtifact:
-    """Register a URL as evidence. No file, no fetch. Mutates `ledger`.
+    """Register a URL as evidence. No file, no fetch. Returns its record.
+
+    Like `ingest`: the `InputArtifact` comes back for the caller to write as
+    `inputs/<id>.json`, and the in-memory `ledger` is updated so a second call in
+    the same command dedupes against it.
 
     The spine never goes to the network — it is stdlib-only, it runs offline, and
     a gate sweep that silently depends on a vendor's CDN being up is not a gate
@@ -560,7 +602,12 @@ def ingest_link(
 # extraction:  what was actually read out of the evidence
 # --------------------------------------------------------------------------- #
 def add_extraction(ledger: Ledger, artifact_id: str, extraction: Extraction) -> InputArtifact:
-    """Record what was read out of an artifact. Returns the artifact. Mutates `ledger`.
+    """Record what was read out of an artifact; return the artifact's RECORD.
+
+    The extraction is appended to the artifact (in `ledger`, in memory), and the
+    artifact comes back for the caller to write as `inputs/<id>.json` — the ONE
+    file an extraction touches. It writes no back-reference into the parameter
+    or claim it grounds: `grounding` derives that edge on read (S-36).
 
     This is the step that converts a photograph into provenance. A generated
     layout that carries the sentence *"digitised from inputs/sketches/panel.png,
@@ -614,6 +661,14 @@ def grounding(ledger: Ledger, *, include_declared: bool = True) -> dict[str, lis
     gets the strict inversion of extractions alone, for a caller auditing the
     extraction records themselves.
 
+    **Derived, never stored.** The edge an extraction implies lives in the
+    extraction and nowhere else; this inverts it every time it is read. What
+    slipped through (S-36): the CLI used to COPY it into the grounded parameter's
+    `grounded_by` (`_link_grounding`), so deleting the extraction left its
+    grounding behind forever — `why arm_length` said "GROUNDED BY arm" while
+    `inputs` said `arm` was "NEVER READ". A `grounded_by` in a record is now only
+    what a human declared there by hand.
+
     Artifact ids are de-duplicated and keep first-seen order, so the output is
     stable enough to diff between runs.
     """
@@ -645,8 +700,10 @@ def grounding(ledger: Ledger, *, include_declared: bool = True) -> dict[str, lis
 def inputs_hash(ledger: Ledger) -> str:
     """Stable digest over every ingested artifact's (id, sha256).
 
-    `RunMeta.inputs_hash` is half of the staleness test: a verdict recorded
-    against one set of evidence is not a verdict about a different set. Sorted by
+    A display id (`ingest --json`). It was half of the staleness test until 1.2 —
+    recorded with each sweep, compared against the next — and ingesting one
+    unread datasheet staled every measurable claim through it (S-33); a verdict
+    is keyed by the files its own gate read now (`verdicts.freshness`). Sorted by
     id so the value does not depend on ingest order, and folding in the id as
     well as the digest so that re-filing the same bytes under a new artifact
     (which changes what the extractions hang off) still moves the hash.
@@ -777,6 +834,16 @@ def _within(path: str, directory: str) -> bool:
     except ValueError:
         # Different drives on Windows: no common path exists, so it is not inside.
         return False
+
+
+def _bytes_gone(root: str, artifact: InputArtifact) -> bool:
+    """True when the record names a file and no file is there — the index's
+    MISSING. A link names none, and drifted bytes are still there: neither moved."""
+    if not artifact.path:
+        return False
+    path = artifact.path.replace("\\", "/")
+    full = path if os.path.isabs(path) else os.path.join(root, *path.split("/"))
+    return not os.path.isfile(full)
 
 
 def _dest_for(directory: str, filename: str, sha: str) -> tuple[str, bool]:

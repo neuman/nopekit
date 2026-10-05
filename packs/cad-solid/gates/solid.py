@@ -489,7 +489,7 @@ def bounding(ctx: GateContext) -> Verdict:
         gate="cad.bounding",
         passed=worst <= 1.0,
         measured=round(worst, 4),
-        limit=1.0,
+        limit=1.0, comparator="<=",
         units="utilisation",
         detail="; ".join(parts),
     )
@@ -507,6 +507,9 @@ def bounding(ctx: GateContext) -> Verdict:
     requires_python=["trimesh", "numpy"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:holed_box",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="a box with the two triangles of its +Z facet deleted: 4 open edges, "
              "winding and every other facet untouched",
     ),
@@ -565,7 +568,7 @@ def watertight(ctx: GateContext) -> Verdict:
         gate="cad.watertight",
         passed=total == 0,
         measured=float(total),
-        limit=0.0,
+        limit=0.0, comparator="<=",
         units="edges",
         detail=f"{total} bad edge(s) across {len(rows)} part(s), limit 0 — worst "
                f"{worst['part']}: {worst['open_edges']} open, "
@@ -585,6 +588,9 @@ def watertight(ctx: GateContext) -> Verdict:
     requires_python=["trimesh", "numpy"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:flipped_facet",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="a closed box with one triangle's winding reversed: still watertight, "
              "no longer a volume — the case cad.watertight cannot see",
     ),
@@ -653,7 +659,7 @@ def is_volume(ctx: GateContext) -> Verdict:
         gate="cad.is_volume",
         passed=bad == 0,
         measured=float(bad),
-        limit=0.0,
+        limit=0.0, comparator="<=",
         units="parts",
         detail=detail,
         evidence=evidence,
@@ -724,8 +730,14 @@ def _weld_and_drop(mesh: Any, digits: int, area_eps: float, max_passes: int = 8)
     tier=Tier.BUILD,
     settles="degenerate faces",
     requires_python=["trimesh", "numpy"],
+    # No edge to cad.watertight: this gate's own control, split_corner_box, is
+    # open and inconsistently wound too, so it fails both guards — they would
+    # pre-empt it wherever both run.
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:sliver_pair",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="one corner of a closed box emitted twice 1e-6 mm apart with a subset "
              "of its faces repointed at the copy: adjacency splits on a surface "
              "that is still geometrically closed, and the face spanning the two "
@@ -783,7 +795,7 @@ def degenerate_faces(ctx: GateContext) -> Verdict:
         gate="cad.degenerate_faces",
         passed=total == 0,
         measured=float(total),
-        limit=0.0,
+        limit=0.0, comparator="<=",
         units="repairs",
         detail=f"{total} repair(s) needed across {len(rows)} part(s), limit 0 — worst "
                f"{worst['part']}: welded {worst['welded_vertices']} vertex/vertices at "
@@ -910,8 +922,16 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
     tier=Tier.BUILD,
     settles="minimum wall thickness",
     requires_python=["trimesh", "numpy"],
+    # Prerequisite cad.watertight (P2.2-D12): ray casting through an open mesh
+    #    leaks out of the hole and reports a thickness that is not there.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["cad.watertight"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:thin_plate",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="a plate at a quarter of the project's own minimum wall; the same "
              "footprint, watertight, a valid volume, and too thin",
     ),
@@ -1076,7 +1096,7 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         gate="cad.wall_thickness",
         passed=worst_value >= limit,
         measured=round(worst_value, 4),
-        limit=round(limit, 4),
+        limit=round(limit, 4), comparator=">=",
         units="mm",
         detail=f"thinnest wall {worst_value:.3f} mm on {worst_part} at "
                f"({', '.join(f'{c:g}' for c in worst_point)}) vs {limit:.3f} mm minimum "
@@ -1104,12 +1124,13 @@ _BOOLEAN_ENGINES = (
 def _boolean_engines() -> list[str]:
     """Human names of the boolean back-ends actually usable on this machine.
 
-    This cannot be expressed as ``requires_python`` or ``requires_tools``: the gate
-    needs ANY ONE of three unrelated things, and the availability mechanism ands
-    its requirements together. So the disjunction is probed here, once, before the
-    pair loop — and an empty result is a SKIP, never a verdict about the design.
-    Probed and not imported where possible: the answer has to be obtainable on the
-    machine where the answer is "none of them".
+    The gate needs ANY ONE of three unrelated things, and ``requires_python`` and
+    ``requires_tools`` are ANDed, so the disjunction is DECLARED on the gate as
+    ``requires_one_of`` — that is what makes ``availability`` skip the gate on a
+    machine with no engine, before its body runs. This probe is the second line:
+    it runs once before the pair loop, and an empty result is still a SKIP, never
+    a verdict about the design. Probed and not imported where possible: the answer
+    has to be obtainable on the machine where the answer is "none of them".
     """
     found: list[str] = []
     try:
@@ -1278,8 +1299,29 @@ def _read_bonded(ctx: GateContext, sliding: set[tuple[str, str]],
     tier=Tier.BUILD,
     settles="part interference",
     requires_python=["trimesh", "numpy"],
+    # ANY ONE boolean engine, declared so `availability` can see the disjunction.
+    # What slipped through while it lived only in the body (`_boolean_engines`):
+    # on a machine with trimesh and numpy but no engine, availability said the
+    # tooling was present, and this gate skipped its own baseline AND its own
+    # negative control — a control that never fired, which the pack tests filed
+    # as "honestly blocked" and `gate selftest` counted as a tooling skip. Green
+    # here (manifold3d installed) and in CI (no trimesh, so availability fails
+    # first); wrong only on the machine in between.
+    # *Rejected:* telling a tooling skip from any other by its `skip_reason`
+    # text — that lets the gate decide for itself that its own skip is about
+    # tooling. Declared, the answer is availability's alone. The in-body probe
+    # stays as defence in depth for an engine that is found but will not load.
+    requires_one_of=["python:manifold3d", "tool:blender", "tool:openscad"],
+    # Prerequisite cad.is_volume (P2.2-D12): a boolean against a mesh that is not
+    #    a volume returns garbage or nothing, and nothing reads as no clash.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["cad.is_volume"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:overlapping_pair",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="two valid 20 mm boxes placed 18 mm apart: 800 mm^3 of shared material, "
              "nothing else about either part changed and no allowlist entry",
     ),
@@ -1597,7 +1639,7 @@ def clash(ctx: GateContext) -> Verdict:
         # parts named in a refused entry would light up two parts that may fit
         # perfectly. An unlocatable failure carries none and the site says so.
         return Verdict(gate="cad.clash", passed=False, measured=float(len(refusals)),
-                       limit=0.0, units="refused entries", detail=detail, evidence=evidence)
+                       limit=0.0, comparator="<=", units="refused entries", detail=detail, evidence=evidence)
 
     if clashes:
         first = clashes[0]
@@ -1648,7 +1690,7 @@ def clash(ctx: GateContext) -> Verdict:
                              f"{row['why'][:60]}")
                 locators.append(_locate(movers, near, label=label, value=volume))
         return Verdict(gate="cad.clash", passed=False, measured=float(len(clashes)),
-                       limit=0.0, units="pairs", detail=detail, evidence=evidence,
+                       limit=0.0, comparator="<=", units="pairs", detail=detail, evidence=evidence,
                        locators=locators)
 
     deepest = max((r["depth_mm"] for r in rows
@@ -1668,7 +1710,7 @@ def clash(ctx: GateContext) -> Verdict:
               + (f"; {len(allowed)} intended contact(s) allowlisted" if allowed else "")
               + (f"; {len(bonded)} bonded joint(s) held to "
                  f"{BONDED_CONTACT_DEPTH_TOL_MM:g} mm of penetration" if bonded else ""))
-    return Verdict(gate="cad.clash", passed=True, measured=0.0, limit=0.0,
+    return Verdict(gate="cad.clash", passed=True, measured=0.0, limit=0.0, comparator="<=",
                    units="pairs", detail=detail, evidence=evidence)
 
 
@@ -2912,8 +2954,16 @@ def _gap_text(gap: Any) -> str:
     tier=Tier.BUILD,
     settles="assembly connectivity",
     requires_python=["trimesh", "numpy"],
+    # Prerequisite cad.is_volume (P2.2-D12): contact between parts is a boolean
+    #    question, and booleans need volumes.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["cad.is_volume"],
     negative_control=NegativeControl(
         fixture="selftest/bad_meshes.py:broken_chain",
+        # the known-good control on the channel this fixture uses
+        # (ctx.extra): selftest/good_meshes.py says why (P2.3-D5)
+        good="selftest/good_meshes.py:baseline_meshes",
         note="the baseline assembly with the cover lifted 3 mm off the housing rim "
              "it is declared to seat on — a lid that is not on the box. One member "
              "of one declared chain moved, in the direction this gate measures, and "
@@ -2992,7 +3042,7 @@ def assembly_connected(ctx: GateContext) -> Verdict:
         # may be perfectly assembled. The same choice cad.clash makes.
         return Verdict(
             gate="cad.assembly_connected", passed=False, measured=float(len(items)),
-            limit=0.0, units="refused entries",
+            limit=0.0, comparator="<=", units="refused entries",
             detail=f"{len(items)} connectivity declaration(s) refused, so the list this "
                    f"gate would check is not trustworthy: {items[0]}"
                    + (f" (+{len(items) - 1} more)" if len(items) > 1 else ""),
@@ -3342,7 +3392,7 @@ def assembly_connected(ctx: GateContext) -> Verdict:
                     locators.append(_locate(movers, near, label=label, value=gap))
         return Verdict(
             gate="cad.assembly_connected", passed=False,
-            measured=headline["measured_mm"], limit=headline["limit_mm"],
+            measured=headline["measured_mm"], limit=headline["limit_mm"], comparator="<=",
             units="mm", detail=detail, evidence=evidence, locators=locators)
 
     # -- 4. a pass ---------------------------------------------------------- #
@@ -3385,5 +3435,5 @@ def assembly_connected(ctx: GateContext) -> Verdict:
               + _welded_note(welded))
     return Verdict(
         gate="cad.assembly_connected", passed=True,
-        measured=headline["measured_mm"], limit=headline["limit_mm"],
+        measured=headline["measured_mm"], limit=headline["limit_mm"], comparator="<=",
         units="mm", detail=detail, evidence=evidence)

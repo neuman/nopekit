@@ -39,16 +39,18 @@ landed.
 from __future__ import annotations
 
 import difflib
+import math
 import os
 import textwrap
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
-from . import store
-from .models import Claim, Decision, Ledger, Param, Rejected, Verdict, slugify
+from . import modelio, store
+from .models import Claim, ClaimKind, Decision, Ledger, Param, Rejected, Verdict, slugify
 from .util import AtompipeError, atomic_write_text, ensure_dir, iter_suffix_unique
 
-__all__ = ["add", "render_log", "write_log", "why"]
+__all__ = ["add", "changed_in", "render_log", "write_log", "why"]
 
 
 #: Render width for `why`. 78 keeps the block inside an 80-column terminal and
@@ -197,12 +199,13 @@ def add(
     and `summary` are required too: a decision with no summary is a timestamp,
     and the log is read by people who will not open `body`.
 
-    Side effect worth knowing about: every named param that exists in the ledger
-    gets `changed_in` set to this decision's id, so a parameter carries a
-    pointer back to the move that last touched it. Nothing else in the spine
-    writes that field, and `why` does not depend on it — it scans the decisions
-    themselves, so the pointer being lost (e.g. when `modelio` refreshes params
-    from the model) degrades a convenience, never the provenance.
+    No side effect on the parameters it names. It used to set each one's
+    `changed_in` to this decision's id — a second record written by a command
+    that was asked to write one, and a pointer that `modelio` refreshing params
+    from the model quietly lost. From 1.3 a decision is one file
+    (`decisions/<id>.json`), a param record may not carry `changed_in` at all
+    (the strict reader names it derived), and `changed_in(ledger, name)` reads
+    the pointer off the log whenever it is wanted, so it cannot fall behind.
 
     Does not save. Call `store.save(root, ledger)` when the whole command
     succeeded; a decision recorded for a change that then failed to land is a
@@ -237,11 +240,30 @@ def add(
     )
 
     ledger.decisions.insert(0, decision)
-    for name in decision.params_changed:
-        param = ledger.param(name)
-        if param is not None:
-            param.changed_in = decision.id
     return decision
+
+
+def changed_in(ledger: Ledger, name: str) -> str:
+    """The id of the newest decision that moved parameter `name`, else `""`.
+
+    Derived, never stored (see `add`). Newest by `when`, and among decisions of
+    the same `when` the first in storage order — `add` prepends, so that is the
+    later one. `when` decides first because once decisions are files there is
+    no storage order a writer controls: a directory listing is sorted by name,
+    and a slug says nothing about time. ISO stamps compare as text, and a bare
+    date sorts before a timestamp on the same day; an undated decision is the
+    oldest.
+    """
+    wanted = (name or "").strip()
+    best: tuple[str, int] | None = None
+    found = ""
+    for index, decision in enumerate(ledger.decisions):
+        if wanted not in (decision.params_changed or ()):
+            continue
+        key = (_one_line(decision.when), -index)
+        if best is None or key > best:
+            best, found = key, decision.id
+    return found
 
 
 # --------------------------------------------------------------------------- #
@@ -428,13 +450,74 @@ def _split_verdict(verdict: Verdict) -> tuple[str, str]:
 
     A verdict with no body renders as `[tag] gate` with no `" : "`, in which case
     the whole line is the head and the body is empty.
+
+    A verdict that carries the spine's mark (`Verdict.unqualified`) has no tag:
+    its head is empty and its body `report.unqualified_text` — `unqualified:
+    <what does not hold>` or `outside operating context: <key> = <v>, qualified
+    on [a, b]` — so its line reads `<gate> : <body>`, as `check` and `gate show`
+    print it (`report.verdict_line`). What slipped through (review of P2.4): `why`
+    and `claim show` printed `[ERR ] bracket.bearing : unqualified:
+    context:outside|{…}` — a crash's tag and the spine's token on a human
+    channel — for a pass outside its operating context.
     """
+    token = getattr(verdict, "unqualified", "") or ""
+    if token:
+        from . import report                       # a reader's module: not at import
+        return "", report.unqualified_text(token)
     rendered = verdict.render()
     head, sep, body = rendered.partition(f" {verdict.gate} : ")
     return (head, body) if sep else (rendered, "")
 
 
-def _gate_lines(ledger: Ledger, gate_ids: Sequence[str]) -> list[str]:
+@dataclass(frozen=True)
+class _Evidence:
+    """What the caller knows that the ledger's stored copies do not.
+
+    Each field left `None` means "use the ledger's own", which is today's
+    behaviour and what a caller with no registry and no cache gets:
+
+    * `coverage` — `{claim id: [gate ids]}`, registry coverage
+      (`claims.effective_gates`), in place of `Claim.gates`;
+    * `read_sets` — `{gate id: {param path, ...}}`, what each gate read when it
+      last executed (`verdicts.last_read_sets`), in place of `Param.gates`;
+    * `verdicts` — gate id to its effective verdict (`verdicts.resolve`), in
+      place of `ledger.verdict`.
+
+    Why `why` takes them rather than a ledger with the copies filled in: from
+    1.3 a param the model owns entirely has no record to fill, and a record may
+    not carry `gates` at all — the copies are gone, not stale.
+    """
+
+    coverage: Mapping[str, Sequence[str]] | None = None
+    read_sets: Mapping[str, Iterable[Any]] | None = None
+    verdicts: Mapping[str, Verdict] | None = None
+
+    def verdict(self, ledger: Ledger, gate_id: str) -> Verdict | None:
+        if self.verdicts is not None:
+            return self.verdicts.get(gate_id)
+        return ledger.verdict(gate_id)
+
+    def claim_gates(self, claim: Claim) -> list[str]:
+        if self.coverage is not None:
+            return list(self.coverage.get(claim.id) or ())
+        return list(claim.gates or ())
+
+    def param_gates(self, name: str, stored: Sequence[str]) -> list[str]:
+        if self.read_sets is not None:
+            return _readers(name, self.read_sets)
+        return list(stored or ())
+
+
+def _readers(name: str, read_sets: Mapping[str, Iterable[Any]]) -> list[str]:
+    """The gates whose recorded reads name parameter `name`, sorted by id —
+    `modelio.param_readers`, the one copy of the rule. It was spelled here and
+    again in `cli._param_gates` until the page and the report moved to the
+    parameter view and would have needed a third (review, checkpoint 1.3)."""
+    return modelio.param_readers(name, read_sets)
+
+
+def _gate_lines(ledger: Ledger, gate_ids: Sequence[str],
+                evidence: _Evidence | None = None) -> list[str]:
     """Gates that protect this item, each with how it LAST ran, deduped by reason.
 
     "Protected by pcb.drc" is reassuring and can be a lie — the gate may never
@@ -452,30 +535,46 @@ def _gate_lines(ledger: Ledger, gate_ids: Sequence[str]) -> list[str]:
     the same failure as a log nobody opens.
 
     Grouping never shortens a reason — the reason is wrapped, not truncated, and
-    every gate id still appears. First-appearance order is kept so two runs over
-    an unchanged ledger print identical text.
+    every gate id still appears. The groups are in outcome order — fail,
+    errored, skipped, unqualified, unrun, pass (P2.1-D16) — and within one, in
+    first-appearance order, so two runs over an unchanged ledger print identical
+    text. What slipped through (P2.0 F-3): they were in gate-id order, so
+    `[skip]` sat above `[ERR ]` and a reader read the dull line first.
     """
+    from . import claims as claim_logic, report    # readers' modules: not at import
+    from .claims import ClaimCause
     groups: dict[tuple[str, str], list[str]] = {}
+    ranks: dict[tuple[str, str], int] = {}
     for gid in gate_ids:
-        verdict = ledger.verdict(gid)
+        verdict = evidence.verdict(ledger, gid) if evidence else ledger.verdict(gid)
         if verdict is None:
-            # Never run is an outcome like any other, and gates that never ran
-            # group together the same way.
-            key = ("[ -- ]", "never run")
+            # An unrun gate is shown like any outcome (GLOSSARY §6: an evaluator
+            # is *unrun*, never "never run", which is Open's Never-say), and gates
+            # that are unrun group together the same way. The word is HUMAN's
+            # (review of P2.1: it was a literal here, outside the one table).
+            key = ("[ -- ]", report.HUMAN["lead"][ClaimCause.UNRUN])
         else:
             key = _split_verdict(verdict)
+        # `claims.OUTCOME_ORDER` — fail, errored, not run behind a crashed
+        # prerequisite, behind any other, skipped, unqualified (by the spine's
+        # mark, never as a crash), unrun, pass — the one table the
+        # report's bullets and `explaining_verdict` read too (review of P2.1:
+        # this kept its own copy, and two inline ranks beside it).
+        rank = claim_logic.outcome_rank(verdict)
         groups.setdefault(key, []).append(gid)
+        ranks.setdefault(key, rank)
 
     lines: list[str] = []
-    for (head, body), ids in groups.items():
+    for (head, body), ids in sorted(groups.items(), key=lambda item: ranks[item[0]]):
+        lead = f"{head} " if head else ""          # an untagged row: the spine's mark
         if len(ids) == 1:
             # One gate, one line: the dense `[skip] gate.id : reason` form, which
             # is strictly better than a two-line form when there is nothing to
             # share the reason with.
-            one = f"{head} {ids[0]}" + (f" : {body}" if body else "")
+            one = f"{lead}{ids[0]}" + (f" : {body}" if body else "")
             lines += _wrap(one, indent="  ", hanging="         ", collapse=False)
             continue
-        lines += _wrap(f"{head} " + ", ".join(ids), indent="  ",
+        lines += _wrap(lead + ", ".join(ids), indent="  ",
                        hanging="         ", collapse=False)
         if body:
             # Indented to the same column the single-gate form wraps to, so the
@@ -553,7 +652,8 @@ def _render_value(param: Param) -> str:
     return f"{shown} {param.units}".strip()
 
 
-def _why_param(ledger: Ledger, param: Param) -> str:
+def _why_param(ledger: Ledger, param: Param, evidence: _Evidence) -> str:
+    """Today's block, from the ledger's record alone: the no-view path."""
     names = {param.name}
     out: list[str] = [f"param  {param.name} = {_render_value(param)}"]
 
@@ -571,8 +671,9 @@ def _why_param(ledger: Ledger, param: Param) -> str:
         out += _wrap("feeds: " + ", ".join(feeds), indent="  ")
     if param.source:
         out += _wrap(f"source: {param.source}", indent="  ")
-    if param.changed_in:
-        out += _wrap(f"last moved in: {param.changed_in}", indent="  ")
+    moved_in = param.changed_in or changed_in(ledger, param.name)
+    if moved_in:
+        out += _wrap(f"last moved in: {moved_in}", indent="  ")
     if param.tags:
         out += _wrap("tags: " + ", ".join(param.tags), indent="  ")
 
@@ -585,8 +686,9 @@ def _why_param(ledger: Ledger, param: Param) -> str:
         "(none recorded — nothing here stops this being re-litigated)"
     )
 
-    _section(out, f"GATES ({len(param.gates)})")
-    out += _gate_lines(ledger, param.gates) if param.gates else _wrap(
+    protecting = evidence.param_gates(param.name, param.gates)
+    _section(out, f"GATES ({len(protecting)})")
+    out += _gate_lines(ledger, protecting, evidence) if protecting else _wrap(
         "(none — no gate would notice if this value went wrong)"
     )
 
@@ -604,33 +706,193 @@ def _why_param(ledger: Ledger, param: Param) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def _why_claim(ledger: Ledger, claim: Claim) -> str:
+# --------------------------------------------------------------------------- #
+# why, from a param view: the model's number, and what lost from both homes
+# --------------------------------------------------------------------------- #
+#: Where a decision lives once records are files, as a rejection's origin tag.
+#: A tag is the file a reader opens, the way a PARAMS row names the model file.
+_DECISION_HOME = "decisions/{id}.json"
+
+
+def _view_value(value: Any, units: str) -> str:
+    """A view's value with its units. A float stays visibly a float — `7.0 mm`,
+    not `7 mm`: `status` prints `config.bed_xy 220.0 -> 250.0`, and one number
+    spelt two ways in two commands reads as two numbers. Otherwise as
+    `_render_value`: 12 significant digits, never a quietly shortened number."""
+    if isinstance(value, float):
+        shown = f"{value:.12g}"
+        if math.isfinite(value) and not any(c in shown for c in ".e"):
+            shown += ".0"
+    elif isinstance(value, bool) or value is None:
+        shown = str(value)
+    elif isinstance(value, (list, tuple, dict)):
+        shown = _one_line(str(value))
+    else:
+        shown = str(value)
+    return f"{shown} {units}".strip()
+
+
+def _view_head(view: Any) -> str:
+    """`param thickness = 7.0 mm   (model/bracket.py Config.thickness)`.
+
+    The value line names where the value LIVES, three spaces from it — the
+    shape `tests/_transcript.py` greps (`WHY_PARAM`). A view the model does not
+    hold (it did not load, or the record outlived its field) prints no `=` at
+    all: no number where the model should answer, and the record's path so the
+    reader knows what is left.
+    """
+    if view.home:
+        return f"param {view.name} = {_view_value(view.value, view.units)}   ({view.home})"
+    return f"param {view.name}" + (f"   ({view.record})" if view.record else "")
+
+
+def _tagged_rejections(ledger: Ledger, view: Any) -> list[tuple[Rejected, str]]:
+    """The view's losers (the model's PARAMS, then the record's), then those of
+    every decision that moved the param — each tagged with its home, each once.
+    Deduped on (value, why) case-folded, as `_collect_rejected` does: a decision
+    usually repeats the rejection it also wrote where the param lives."""
+    rows = list(view.rejected or ())
+    for decision in _decisions_touching(ledger, {view.name}):
+        origin = _DECISION_HOME.format(id=decision.id)
+        rows += [(item, origin) for item in decision.rejected or ()]
+    seen: set[tuple[str, str]] = set()
+    unique: list[tuple[Rejected, str]] = []
+    for item, origin in rows:
+        key = (_one_line(item.value).casefold(), _one_line(item.why).casefold())
+        if key not in seen:
+            seen.add(key)
+            unique.append((item, origin))
+    return unique
+
+
+def _tagged_lines(rows: Sequence[tuple[Rejected, str]]) -> list[str]:
+    """`  4.0 mm — 3.75 mm deflection, 7.5x the limit   (model/bracket.py PARAMS)`.
+
+    One loser, one line, never wrapped: the row is a shape (`WHY_REJECTED_ROW`),
+    and wrapping it would put the value on one line and the file it lives in on
+    another, where no grep for either finds both. Evidence, when there is any,
+    goes on the line after, indented past the row.
+    """
+    lines: list[str] = []
+    for item, origin in rows:
+        lines.append(f"  {_one_line(item.value)} — {_one_line(item.why)}   ({origin})")
+        if item.evidence:
+            lines.append(f"      evidence: {_one_line(item.evidence)}")
+    return lines
+
+
+def _why_view(ledger: Ledger, view: Any, views: Sequence[Any], evidence: _Evidence) -> str:
+    """One parameter from its view: the value from the model, never the record.
+
+    What slipped through before (S-39): `why` rendered `ledger.params`, whose
+    `value` was a copy the last `check` wrote — "thickness = 7" after the model
+    said 8.0, and whatever a stale ledger said on a machine whose model did not
+    load. Here the value line is the model's or it is absent.
+    """
+    names = {view.name}
+    record = ledger.param(view.name)
+    out: list[str] = [_view_head(view)]
+
+    if view.model_error:
+        # One line, unwrapped, like `status`'s "DOES NOT LOAD" line: the error is
+        # a tool's fact, and a wrap would split the one phrase a reader greps for.
+        out.append(f"  model does not load: {_one_line(view.model_error)}")
+    elif not view.home:
+        out += _wrap(
+            f"the model does not define {view.name}: this record outlived its field — "
+            f"retire it with a decision, or restore the field", indent="  ", hanging="    ")
+    elif view.derived_from:
+        out += _wrap("derived from: " + ", ".join(view.derived_from), indent="  ")
+        out += _wrap(
+            "(a derived value is not edited directly — change what it derives from)",
+            indent="  ",
+        )
+    else:
+        out += _wrap("free parameter (not derived)", indent="  ")
+
+    feeds = [v.name for v in views if view.name in (v.derived_from or ())]
+    if feeds:
+        out += _wrap("feeds: " + ", ".join(feeds), indent="  ")
+    if view.source:
+        out += _wrap(f"source: {view.source}", indent="  ")
+    moved_in = changed_in(ledger, view.name)
+    if moved_in:
+        out += _wrap(f"last moved in: {moved_in}", indent="  ")
+    if view.tags:
+        out += _wrap("tags: " + ", ".join(view.tags), indent="  ")
+
+    _section(out, "WHY")
+    out += _wrap(view.rationale or "(no rationale recorded — this number is unexplained)")
+
+    rejected = _tagged_rejections(ledger, view)
+    _section(out, f"REJECTED ({len(rejected)})")
+    out += _tagged_lines(rejected) if rejected else _wrap(
+        "(none recorded — nothing here stops this being re-litigated)"
+    )
+
+    protecting = evidence.param_gates(view.name, record.gates if record else ())
+    _section(out, f"GATES ({len(protecting)})")
+    out += _gate_lines(ledger, protecting, evidence) if protecting else _wrap(
+        "(none — no gate would notice if this value went wrong)"
+    )
+
+    grounded = list(view.grounded_by or ())
+    _section(out, f"GROUNDED BY ({len(grounded)})")
+    out += _grounding_lines(ledger, grounded, names) if grounded else _wrap(
+        "(nothing — this value is asserted, not evidenced)"
+    )
+
+    moved = _decisions_touching(ledger, names)
+    _section(out, f"DECISIONS ({len(moved)}, newest first)")
+    out += _decision_lines(moved) if moved else _wrap(
+        "(none — this value has never been revisited)"
+    )
+
+    return "\n".join(out).rstrip() + "\n"
+
+
+def _why_claim(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
+    from . import report                             # a reader's module: not at import
     names = {claim.id}
-    flags = [str(claim.kind)]
-    flags.append("critical" if claim.critical else "nice-to-have")
-    out: list[str] = [f"claim  {claim.id}  [{', '.join(flags)}]"]
+    # Where the claim's evidence bottoms out, in its display word, and
+    # *required* (P2.5a-D20; GLOSSARY §8: the kind's code word was a raw enum
+    # leak, and "critical" is *required*'s Never-say).
+    flags = [report.terminal_word(claim), "required" if claim.critical else "not required"]
+    out: list[str] = [f"claim  {claim.id}  [{' · '.join(flags)}]"]
     out += _wrap(claim.statement)
 
+    # With none written, by what settles the claim instead (review of P2.5a: a
+    # physical claim's note — its written test, P2.5a-D9 — and an expert
+    # judgment, which takes none, were both told "without a threshold this is a
+    # wish", in a Never-say of the acceptance condition).
     acceptance = claim.acceptance.render() if claim.acceptance else ""
-    out += _wrap(
-        f"acceptance: {acceptance}" if acceptance
-        else "acceptance: NONE — without a threshold this is a wish, not a claim",
-        indent="  ",
-    )
+    said = report.HUMAN["acceptance"]
+    if acceptance:
+        line = f"acceptance: {acceptance}"
+    elif report._judgment(claim):
+        line = said["why_judgment"].format(
+            authority=report._one(getattr(claim, "authority", "")) or "its authority")
+    elif claim.kind == ClaimKind.PHYSICAL and str(claim.note or "").strip():
+        line = said["why_note"]
+    else:
+        line = said["why_none"]
+    out += _wrap(line, indent="  ")
     if claim.source:
         out += _wrap(f"source: {claim.source}", indent="  ")
     if claim.tags:
         out += _wrap("tags: " + ", ".join(claim.tags), indent="  ")
-    if claim.physical_result is not None:
-        result = claim.physical_result
-        verdict = "PASSED" if result.passed else "FAILED"
-        stamp = " ".join(x for x in (result.when, result.who) if x)
-        out += _wrap(
-            f"real-world result: {verdict}" + (f" ({stamp})" if stamp else "")
-            + (f" — {result.detail}" if result.detail else ""),
-            indent="  ",
-            hanging="    ",
-        )
+    if str(getattr(claim, "authority", "") or "").strip():
+        out += _wrap(f"authority: {claim.authority}", indent="  ")
+    # P2.5b-D19: a measurement's latency, declared until an article an export
+    # built measures it — only where there is one to say.
+    from . import claims as claim_logic              # a reader's module: not at import
+    exports = tuple(getattr(ledger, "exports", None) or ())
+    if claim_logic.latency(claim, exports).source != "none":
+        out += _wrap(report.HUMAN["latency"]["row"].format(
+            words=report.latency_words(claim, exports)), indent="  ")
+    for record in getattr(claim, "attributions", ()) or ():
+        out += _wrap(f"{record.role} recorded: {record.name} ({record.when}, "
+                     f"{report.recorded_words(record)})", indent="  ", hanging="    ")
 
     _section(out, "WHY")
     out += _wrap(claim.rationale or "(no rationale recorded — what breaks if this is false?)")
@@ -643,10 +905,25 @@ def _why_claim(ledger: Ledger, claim: Claim) -> str:
     _section(out, f"REJECTED ({len(rejected)})")
     out += _rejected_lines(rejected) if rejected else _wrap("(none recorded)")
 
-    _section(out, f"GATES ({len(claim.gates)})")
-    out += _gate_lines(ledger, claim.gates) if claim.gates else _wrap(
-        "(none — this claim is UNCLAIMED: no gate can settle it)"
+    covering = evidence.claim_gates(claim)
+    _section(out, f"GATES ({len(covering)})")
+    out += _gate_lines(ledger, covering, evidence) if covering else _wrap(
+        f"(none — {_no_evaluator(ledger, claim, evidence)})"
     )
+
+    results = list(getattr(claim, "results", ()) or ())
+    if not results and claim.physical_result is not None:
+        results = [claim.physical_result]
+    if results:
+        # Every recorded physical result, oldest first, each with whether it
+        # counts now and why not (P2.5a-D20) — so a reader who recorded one
+        # learns from the claim itself why it settles nothing.
+        # A judgment heads as one (review of P2.5a: GLOSSARY §1's physical
+        # result is a physical evaluator's verdict on an article).
+        head = "judgments_head" if report._judgment(claim) else "results_head"
+        _section(out, report.HUMAN["physical"][head].format(n=len(results)))
+        for entry in results:
+            out += _wrap(_result_line(claim, entry), indent="  ", hanging="    ")
 
     _section(out, f"GROUNDED BY ({len(claim.grounded_by)})")
     out += _grounding_lines(ledger, claim.grounded_by, names) if claim.grounded_by else _wrap(
@@ -660,6 +937,58 @@ def _why_claim(ledger: Ledger, claim: Claim) -> str:
     )
 
     return "\n".join(out).rstrip() + "\n"
+
+
+def _result_line(claim: Claim, entry: Any) -> str:
+    """One physical result in `why`: its outcome, article, who recorded it and
+    from where, when, what was observed and measured, whether it counts now
+    (`report.result_facts`), and the evaluators a fail contradicts — every word
+    `report.HUMAN`'s (D-16)."""
+    from . import report                             # a reader's module: not at import
+    said = report.HUMAN["physical"]
+    facts = report.result_facts(claim, entry)
+    outcome = report.HUMAN["outcome"]["pass" if entry.passed is True else "fail"]
+    # A judgment names no article: a person judged it, nothing was printed.
+    article = "" if report._judgment(claim) else report.article12(
+        getattr(entry, "article", None) or {})
+    text = (f"{outcome}" + (f" on article {article}" if article else "")
+            + f" ({report.recorded_words(entry)}, {entry.when or 'date not recorded'})")
+    if getattr(entry, "measured", None) is not None:
+        text += f": {report._num(entry.measured)} {entry.units or ''}".rstrip()
+    if entry.detail:
+        text += f" — {entry.detail}"
+    text += " — " + (said["counts"] if facts["counts"]
+                     else said["does_not_count"].format(why=facts["why"]))
+    for item in getattr(entry, "contradicts", None) or ():
+        if isinstance(item, dict) and item.get("inside") is True:
+            unit = f" {item.get('units')}" if item.get("units") else ""
+            text += " — " + said["contradiction_of"].format(
+                gate=item.get("gate"), code=report.article12(item.get("code")),
+                value=f"{report._num(item.get('value'))}{unit}")
+    return text
+
+
+def _no_evaluator(ledger: Ledger, claim: Claim, evidence: _Evidence) -> str:
+    """Why nothing evaluates `claim`, by its kind and in its status's word —
+    `report`'s, through `claims.compose`, never a status spelled here. What
+    slipped through (P2.1): this said "this claim is UNCLAIMED: no gate can
+    settle it" for every claim with no evaluator, an assumption included, so
+    `why C6` told its owner to go find a gate."""
+    from . import claims as claim_logic, report     # readers' modules: not at import
+    from .models import ClaimKind
+    verdicts = list((evidence.verdicts or {}).values()) if evidence.verdicts is not None \
+        else list(ledger.verdicts)
+    found = claim_logic.compose(claim, verdicts)
+    status = report.word(found.status, errored=found.errored)
+    if getattr(claim, "terminal", "") == "human":
+        return (f"settled by expert judgment: {status}, "
+                f"{report.reason(found, ledger, claim)}")
+    if claim.kind == ClaimKind.ASSUMPTION:
+        return (f"an assumption is carried by its owner, not settled by an evaluator: "
+                f"{status}, {report.reason(found, ledger, claim)}")
+    if claim.kind == ClaimKind.PHYSICAL:
+        return f"settled on an article: {status}"
+    return f"no evaluator covers this claim: {status}"
 
 
 def _why_decision_only(ledger: Ledger, name: str, close: Sequence[str]) -> str:
@@ -688,7 +1017,31 @@ def _why_decision_only(ledger: Ledger, name: str, close: Sequence[str]) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
-def why(ledger: Ledger, name: str) -> str:
+def _as_views(view: Any) -> list[Any] | None:
+    """`view` as a list: None stays None; one view is a list of one."""
+    if view is None:
+        return None
+    if isinstance(view, (list, tuple)):
+        return list(view)
+    if hasattr(view, "name") and hasattr(view, "home"):
+        return [view]
+    return list(view)
+
+
+def _first_by_gate(verdicts: Iterable[Verdict] | None) -> dict[str, Verdict] | None:
+    """`{gate: verdict}`, the first per gate — what `Ledger.verdict` returns."""
+    if verdicts is None:
+        return None
+    out: dict[str, Verdict] = {}
+    for verdict in verdicts:
+        out.setdefault(verdict.gate, verdict)
+    return out
+
+
+def why(ledger: Ledger, name: str, *, view: Any = None,
+        coverage: Mapping[str, Sequence[str]] | None = None,
+        read_sets: Mapping[str, Iterable[Any]] | None = None,
+        verdicts: Iterable[Verdict] | None = None) -> str:
     """Everything known about one parameter or claim, as one dense plain-text block.
 
     This is the context-window win and the reason this module exists. An agent
@@ -697,6 +1050,24 @@ def why(ledger: Ledger, name: str) -> str:
     concrete reason each lost, which gates protect it and how they last ran,
     which input artifacts ground it, and the decisions that moved it — instead
     of reading a 1,672-line log and a ledger to reconstruct the same thing.
+
+    `view` is `modelio.param_view`'s output (the list, or one `ParamView`). With
+    it, the parameters ARE the views — `param_view` has already folded every
+    record in — and the block opens with the model's value and where it lives:
+
+        param thickness = 7.0 mm   (model/bracket.py Config.thickness)
+        ...
+        REJECTED (1)
+          4.0 mm — 3.75 mm deflection, 7.5x the limit   (model/bracket.py PARAMS)
+
+    each loser on one line, tagged with the file it lives in; a model that does
+    not load prints `model does not load: …` and no number. Without it, the
+    block is today's, rendered from `ledger.params` alone (the stored value).
+    `coverage` (`{claim: [gates]}`), `read_sets` (`{gate: {param path}}`, a
+    parameter counting as read by its first two keys) and `verdicts` (the
+    effective ones) replace, one by one, `Claim.gates`, `Param.gates` and
+    `ledger.verdict`; each left `None` keeps the stored copy. The CLI passes all
+    four from 1.3 (U29); until then `cmd_why` passes none and gets today's text.
 
     Resolution order: exact param name, exact claim id, then the same two
     case-insensitively, then a name the decision log mentions but no record
@@ -715,22 +1086,35 @@ def why(ledger: Ledger, name: str) -> str:
     if not wanted:
         raise AtompipeError("why needs a parameter name or a claim id")
 
-    param = ledger.param(wanted)
-    if param is not None:
-        return _why_param(ledger, param)
+    evidence = _Evidence(coverage=coverage, read_sets=read_sets,
+                         verdicts=_first_by_gate(verdicts))
+    views = _as_views(view)
+
+    def param_named(match) -> str | None:
+        if views is not None:
+            found = next((v for v in views if match(v.name)), None)
+            return _why_view(ledger, found, views, evidence) if found is not None else None
+        found = next((p for p in ledger.params if match(p.name)), None)
+        return _why_param(ledger, found, evidence) if found is not None else None
+
+    text = param_named(lambda candidate: candidate == wanted)
+    if text is not None:
+        return text
     claim = ledger.claim(wanted)
     if claim is not None:
-        return _why_claim(ledger, claim)
+        return _why_claim(ledger, claim, evidence)
 
     folded = wanted.casefold()
-    for candidate in ledger.params:
-        if candidate.name.casefold() == folded:
-            return _why_param(ledger, candidate)
+    text = param_named(lambda candidate: candidate.casefold() == folded)
+    if text is not None:
+        return text
     for candidate in ledger.claims:
         if candidate.id.casefold() == folded:
-            return _why_claim(ledger, candidate)
+            return _why_claim(ledger, candidate, evidence)
 
-    known = [p.name for p in ledger.params] + [c.id for c in ledger.claims]
+    param_names = ([v.name for v in views] if views is not None
+                   else [p.name for p in ledger.params])
+    known = param_names + [c.id for c in ledger.claims]
     close = difflib.get_close_matches(wanted, known, n=_SUGGESTIONS, cutoff=0.6)
 
     in_decisions = any(

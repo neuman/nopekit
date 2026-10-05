@@ -14,7 +14,7 @@ Four conventions hold across every command:
 * **Terse and greppable by default.** One line per verdict, one line per claim,
   one line per gate. `[ok  ] beam.deflection : 0.700 mm at 15 N` is a line you
   can `grep FAIL` and a line an agent can hold fifty of. Anything longer is
-  behind `--json` or in `docs/readiness.md`.
+  behind `--json` or in `REPORT.md`.
 * **`--json` on every read command.** Not a pretty-printer switch: the JSON is
   the same data the human output renders, so an agent never has to parse
   columns. When `--json` is given, nothing but JSON goes to stdout.
@@ -30,10 +30,11 @@ CI:
 
     0   fine
     1   a gate-level verdict says stop  — `check` with a blocking critical claim,
-        `gate selftest` with a control that did not fire, `doctor` with a
-        hard failure. This is what makes `atompipe check` usable as a pre-spend
-        gate: it exits non-zero *while anything critical is unproven*, not only
-        when something failed.
+        `gate selftest` with a control that did not fire, a pack gate that
+        failed its own baseline, or no control exercised at all (unless
+        `--allow-empty`), `doctor` with a hard failure. This is what makes
+        `atompipe check` usable as a pre-spend gate: it exits non-zero *while
+        anything critical is unproven*, not only when something failed.
     2   the user did something the tool cannot act on (AtompipeError, bad args)
     130 interrupted
 
@@ -48,42 +49,49 @@ never write the first one.
 from __future__ import annotations
 
 import argparse
+import ast
+import dataclasses
 import importlib.util
 import json
+import math
 import os
 import platform
 import posixpath
+import re
 import shutil
 import sys
 import tempfile
 import textwrap
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping
 
 from . import __version__
-from . import artifacts, claims, decisions, gates, modelio, packs, report, site, store
+from . import (artifacts, claims, decisions, gates, milestones, modelio, packs, report, site,
+               store, vcs, verdicts)
 from .models import (
-    Acceptance,
     ArtifactKind,
     Claim,
     ClaimKind,
     ClaimStatus,
-    Comparator,
     Extraction,
     Ledger,
     PhysicalResult,
     ProjectMeta,
-    RunMeta,
+    Tier,
     Verdict,
+    sha256_file,
 )
 from .util import (
     AtompipeError,
+    FileDigests,
     FileLock,
+    atomic_write_text,
     human_bytes,
     human_duration,
     read_json,
     rel,
+    seal,
     short_hash,
     utcnow_iso,
 )
@@ -211,8 +219,10 @@ def _root(args: argparse.Namespace) -> str:
     """The project root for this invocation, or an AtompipeError saying there is none.
 
     `-C/--dir` sets where the search STARTS, not where it ends: like git, the
-    walk goes up until it finds `.atompipe/`, so running from `model/` or
-    `inputs/cad/` hits the same project.
+    walk goes up until it finds a project marker (`.atompipe/project.json`, or a
+    legacy `.atompipe/ledger.json`) and stops at the repository's `.git`, so
+    running from `model/` or `inputs/cad/` hits the same project (S-64: any
+    `.atompipe/` used to count, and `~/.atompipe/packs/` made all of `~` one).
     """
     return store.require_root(getattr(args, "dir", None))
 
@@ -227,99 +237,37 @@ def _lock(root: str) -> FileLock:
     return FileLock(os.path.join(store.atompipe_dir(root), LOCK_NAME))
 
 
-def _load_project_gates(root: str, registry: gates.Registry) -> list[Any]:
-    """Import `<root>/gates/*.py` into `registry`; return the specs they added.
-
-    The project's own gates, loaded the same way a pack's are and for the same
-    reasons — the pack directory equivalent is the project root, so a gate can
-    `import selftest.bad_configs` or share a `_geom.py` helper with the model.
-
-    Three details are copied deliberately from `packs.load_gates`, because the
-    two must behave identically or a gate would work in a project and break the
-    moment it was extracted into a pack:
-
-    * the root goes on `sys.path[0]` and comes off in a `finally`; a leaked entry
-      makes the *next* import resolve against this project
-    * module names are salted with a hash of the file's absolute path, so two
-      projects in one process cannot silently share a `gates/structural.py`
-    * `PACK_DIR` is NOT set, so `gates._fixture_root` falls through to `ctx.root`
-      and `selftest/bad_configs.py` resolves beside the model, where it lives
-
-    Files starting with `_` are skipped (helpers, not gates). Any failure becomes
-    an AtompipeError naming the file: a gate module that will not import is a
-    user's Python problem, and a spine traceback would read as a spine bug.
-    """
-    directory = os.path.join(root, PROJECT_GATES_DIR)
-    if not os.path.isdir(directory):
-        return []
-
-    try:
-        names = sorted(os.listdir(directory))
-    except OSError as exc:
-        raise AtompipeError(f"cannot read {rel(directory, root)}: {exc}") from exc
-    files = [os.path.join(directory, n) for n in names
-             if n.endswith(".py") and not n.startswith("_")]
-    if not files:
-        return []
-
-    before = {spec.id for spec in registry.specs()}
-    sys.path.insert(0, root)
-    try:
-        with gates.use_registry(registry):
-            for path in files:
-                stem = os.path.splitext(os.path.basename(path))[0]
-                module_name = f"atompipe_project_{stem}_{short_hash(os.path.abspath(path), 8)}"
-                if module_name in sys.modules:
-                    continue          # ordinary import semantics: already executed
-                spec = importlib.util.spec_from_file_location(module_name, path)
-                if spec is None or spec.loader is None:     # pragma: no cover
-                    raise AtompipeError(
-                        f"{rel(path, root)}: no import machinery accepted this file")
-                module = importlib.util.module_from_spec(spec)
-                sys.modules[module_name] = module
-                try:
-                    spec.loader.exec_module(module)
-                except AtompipeError as exc:
-                    # A registry refusal (no negative control) is already phrased
-                    # for a human. Keep the phrasing, add the location.
-                    sys.modules.pop(module_name, None)
-                    raise AtompipeError(f"{rel(path, root)}: {exc}") from exc
-                except BaseException as exc:
-                    sys.modules.pop(module_name, None)
-                    raise AtompipeError(
-                        f"{rel(path, root)} failed to import: "
-                        f"{type(exc).__name__}: {exc}"
-                    ) from exc
-    finally:
-        try:
-            sys.path.remove(root)
-        except ValueError:            # pragma: no cover - a gate mangled sys.path
-            pass
-    return [spec for spec in registry.specs() if spec.id not in before]
-
-
 def _registry(root: str, ledger: Ledger, *,
               strict: bool = True) -> tuple[gates.Registry, list[str]]:
     """Load every gate this project can see. Returns `(registry, problems)`.
 
     Packs first (in `meta.packs` order, which is gate-id precedence), then the
-    project's own `gates/`. The module-level `gates.REGISTRY` is the target
-    because a CLI process serves exactly one project and a private registry would
-    buy nothing but a layer.
+    project's own `gates/`.
+
+    **A fresh `gates.Registry` per command** (spec §3.5, cli:H6). This used to
+    load into the module-level `gates.REGISTRY` on the argument that "a CLI
+    process serves exactly one project" — which stopped being true the first
+    time a test, a `site build` after a `check`, or an agent called `main` twice
+    in one process: the second load found the first one's gates already
+    registered and refused them ("already registered"), or handed the second
+    project the first one's. The loaders serve a module whose bytes have not
+    moved from their content-keyed cache and re-adopt its gates into whichever
+    registry asks, so a fresh one costs a lookup, not a re-import.
+    `gates.REGISTRY` stays what `@gate` decorates into outside a load.
 
     `strict=False` turns a broken pack into a *reported* problem instead of an
-    exception, and only `status` and `doctor` use it. The distinction matters:
-    `doctor` exists to tell you your pack is broken, so it must survive a broken
-    pack; `check` must not, because a sweep that silently ran two packs out of
-    three would publish an UNCLAIMED section that is an artefact of an import
-    error rather than a statement about the design.
+    exception, and only the readers use it. The distinction matters: `doctor`
+    exists to tell you your pack is broken, so it must survive a broken pack;
+    `check` must not, because a sweep that silently ran two packs out of three
+    would publish an UNCLAIMED section that is an artefact of an import error
+    rather than a statement about the design.
     """
-    registry = gates.REGISTRY
+    registry = gates.Registry()
     problems: list[str] = []
     for label, load in (
         ("packs", lambda: packs.load_all_gates(packs.installed(root, ledger=ledger),
                                                registry, root)),
-        ("project gates", lambda: _load_project_gates(root, registry)),
+        ("project gates", lambda: gates.load_project_gates(root, registry)),
     ):
         try:
             load()
@@ -347,6 +295,28 @@ def _projection(root: str, ledger: Ledger, *, entry: str | None = None) -> tuple
     return model, modelio.project(model)
 
 
+def _entry_edit(root: str) -> str:
+    """Where a project's model entry is recorded, as the file edit that records it.
+
+    `.atompipe/project.json` owns it (checkpoint 1.3); a legacy project keeps it
+    in its ledger's `meta` until a check or a shim migrates it. What slipped
+    through: four messages — `init`'s next step, `check`'s warning, `model`'s
+    refusal, `doctor`'s row — named `model --set-entry`, a flag PLAN A-8
+    removed: a command whose only job was to write one key of one record, which
+    the human and the agent edit as a file like every other record.
+    """
+    if store.is_legacy(root):
+        return (f'"model_entry" under "meta" in {store.ATOMPIPE_DIR}/{store.LEDGER_NAME} '
+                f"(the legacy layout, until a check migrates it)")
+    return f'"model_entry" in {store.ATOMPIPE_DIR}/{store.PROJECT_NAME}'
+
+
+def _no_entry(root: str) -> str:
+    """The one sentence every command says when no model entry is recorded."""
+    return (f'no model entry recorded — set {_entry_edit(root)} to the model file, '
+            f'e.g. "model/<thing>.py"')
+
+
 def _projection_safe(root: str, ledger: Ledger) -> tuple[Any, dict | None, str]:
     """`_projection`, with the failure returned instead of raised.
 
@@ -360,262 +330,347 @@ def _projection_safe(root: str, ledger: Ledger) -> tuple[Any, dict | None, str]:
     return model, projection, ""
 
 
-def _flat_params(projection: dict | None) -> tuple[dict[str, Any], list[str]]:
-    """Flatten a projection to `{name: value}` for `GateContext.params`, with conflicts.
+# --------------------------------------------------------------------------- #
+# the one resolver, at the edge
+# --------------------------------------------------------------------------- #
+#: What slipped through before this section existed (S-28, cli:H3): the CLI kept
+#: its own copy of "is this verdict current?" — one hash of the whole projection
+#: against the last sweep's, in `_staleness` — and its own `_flat_params`, each
+#: "kept byte-for-byte in sync" with a twin in `site.py` by a comment. Nine
+#: readers then took `ledger.verdicts` as the truth, so a verdict was as current
+#: as the last `check` had left the ledger, `--only` could freeze a PASS forever
+#: (S-20), and `--no-record` read a fresh pass as STALE (S-32). Now there is one
+#: judgement, `verdicts.resolve`, one flattening, `modelio.flat_params`, and one
+#: place every command meets them: `_resolved`.
 
-    Derived values first, then config over the top, so an INPUT always wins a
-    name collision. `build()` returning a key that shares a config field's name
-    is common and harmless when the values agree (the reference model echoes
-    `material` straight back); when they do NOT agree, one of the two numbers a
-    gate could read is not the model's input, and which one it got would depend
-    on dict ordering. So the input wins, and the disagreement is returned to be
-    reported rather than resolved silently — that is rule 6, cross-representation
-    agreement, applied at the cheapest place it can be applied.
+
+def _param_gates(ledger: Ledger, read_sets: Mapping[str, Iterable[tuple]],
+                 registry: gates.Registry | None) -> dict[str, list[str]]:
+    """`{param name: [gate ids]}` — which registered gates read each parameter
+    when they last executed (`verdicts.last_read_sets`). Feeds `Param.gates` and
+    `why`, never rho.
+
+    Why the field is filled at all: `Param.gates` — "which gate protects this
+    number", the fourth thing rule 3 asks a constant to carry — was declared and
+    never assigned, so `atompipe why <param>` told every reader "GATES (0) —
+    none: no gate would notice if this value went wrong" about parameters three
+    gates read on every sweep; an agent that believed it went off to write a gate
+    the project already had.
+
+    A parameter counts as read when its name is one of the first two keys of a
+    recorded path: `ctx.params["thickness"]` and `ctx.params["config"]
+    ["thickness"]` are the two spellings gates use (the reference project uses
+    the second for seven of its reads). Deeper keys are not followed: a sourcing
+    gate walking a BOM would otherwise attribute itself to every line item that
+    shares a parameter's name — a false positive in the generous direction.
+    Names that are not ledger parameters are dropped: a gate asking for
+    `span_mm` on a model with no such field says the gate wants it, not that the
+    project has it.
+
+    What slipped through before (S-30): the attribution was recorded by a wrapper
+    on the sweep's `ctx.params`, so a gate that did not execute — its tool
+    missing here — recorded nothing, and every full sweep erased the parameters
+    it protects. A read set comes from the gate's last EXECUTED entry now, and a
+    skip leaves it where it was. Only registered gates are named: a gate this
+    project cannot load protects nothing here.
+
+    The honest limit, stated because the field reads stronger than it is: this is
+    a DIRECT read. `bracket.deflection` reads the derived `deflection`, which
+    protects `arm_length` in physical fact, but a read set names the key read,
+    not what `build()` computed it from — so `arm_length` lists no gate. An empty
+    `Param.gates` means "no gate reads this value by name", weaker than "nothing
+    would notice if it changed" (which gates go stale when it moves is what
+    `status` says, from rho).
     """
-    if not projection:
-        return {}, []
-    config = dict(projection.get("config") or {})
-    derived = dict(projection.get("derived") or {})
-    conflicts = [
-        f"{name}: config {config[name]!r} vs build() {derived[name]!r}"
-        for name in sorted(set(config) & set(derived))
-        if config[name] != derived[name]
-    ]
-    flat = dict(derived)
-    flat.update(config)
-    return flat, conflicts
+    reads = _registered_reads(read_sets, registry)
+    found: dict[str, list[str]] = {}
+    for name in sorted({param.name for param in ledger.params}):
+        gates_of = modelio.param_readers(name, reads)
+        if gates_of:
+            found[name] = gates_of
+    return found
 
 
-def _staleness(ledger: Ledger, projection: dict | None) -> tuple[bool, str]:
-    """Have the model or the inputs moved since the last recorded sweep?
+def _registered_reads(read_sets: Mapping[str, Iterable[tuple]],
+                      registry: gates.Registry | None) -> dict[str, Iterable[tuple]]:
+    """`read_sets` for the gates `registry` registers (all of them with no
+    registry): a gate this project cannot load protects nothing here. The
+    attribution itself is `modelio.param_readers`, the one copy of the rule."""
+    registered = set(registry.ids()) if registry is not None else set(read_sets)
+    return {gate: paths for gate, paths in read_sets.items() if gate in registered}
 
-    This is the one comparison that stops a green report from being a lie about a
-    design nobody has re-checked. It is computed here, at the edge, and passed
-    into `claims`/`report` as a flag, because those modules must resolve the same
-    ledger identically on two machines and a resolver that read the model could
-    not (see `claims.resolve_status`).
 
-    Judged against `RunMeta`, not against the verdicts, because a `Verdict` has
-    nowhere to record which model it measured. The consequence is honest but
-    coarse, and `check` compensates: a `--only` sweep deliberately does not
-    advance `last_run`, so the verdicts it did not refresh keep reading stale.
+def _swept(resolution: verdicts.Resolution, result: verdicts.SweepResult,
+           registry: gates.Registry) -> verdicts.Resolution:
+    """`resolution` with this sweep's rows standing in for the gates it selected.
+
+    A row the sweep produced is current by construction — it ran, was served
+    from a Fresh entry, or was refused — while `resolve` after the sweep would
+    re-judge it from disk: under `--no-record` nothing reached disk, so the run's
+    own results would be invisible, and an entry with an opaque channel (omc's
+    subprocess) reads Unknown the instant it is written. So `check` judges what
+    it just did from what it did, and every gate it did not select — above the
+    ceiling, outside `--only` — from the resolver, stale or not (S-20: those can
+    go stale now, because nothing but their inputs decides it).
+
+    The one exception is a row the sweep itself served stale
+    (`SweepRow.stale_reason`: a costlier tier's entry whose path no current
+    control shows, which this sweep's ceiling cannot demonstrate, or a
+    dependent marked under such a prerequisite). It stays in `stale_gates` with
+    the sweep's reason on its resolution row, `fresh` False. What slipped through (review,
+    `repro_undemonstrated`): the sweep served that gate as a skip and this
+    dropped it from the stale set, so `check --junit` exited 0 ready while
+    `status` read the claim STALE.
+
+    Then the prerequisite rule again, over the merged view
+    (`verdicts.apply_prerequisites`, P2.2-D8). `resolve` applied it to what it
+    read from disk; the sweep may have learned more — a guard it just refused
+    or saw fail, under `--no-record` (nothing reached disk), or an entry with an
+    opaque channel that reads Unknown the moment it is written. Without this an
+    unselected dependent — above the ceiling, outside `--only` — reads Checked
+    beside a guard this same command found not established: exit 0, JUnit
+    green, and `status` stricter than `check` (critique of the P2.2 design;
+    `UnselectedDependentFollowsTheSweep`). The rule is monotone, so it only
+    ever downgrades here. Its two under-generous corners, each stricter than
+    `status` and never more generous: a dependent `resolve` already pruned
+    stays pruned in this view when the sweep's reading of its root passes (a
+    `--no-record --only <root>` after a fix); and an opaque root reads Unknown
+    once written, so its dependents read Stale here — as `status` shows them.
     """
-    run = ledger.last_run
-    if not run.when:
-        return False, "no sweep recorded yet"
-    reasons: list[str] = []
-    if projection is not None and run.model_hash:
-        current = modelio.model_hash(projection)
-        if current != run.model_hash:
-            reasons.append(f"model {run.model_hash} -> {current}")
-    current_inputs = artifacts.inputs_hash(ledger)
-    if run.inputs_hash and current_inputs != run.inputs_hash:
-        reasons.append(f"inputs {run.inputs_hash} -> {current_inputs}")
-    return bool(reasons), "; ".join(reasons) or "unchanged since the last sweep"
+    rows = {row.verdict.gate: row for row in result.rows}
+    resolved = {verdict.gate: verdict for verdict in resolution.verdicts}
+    order = [spec.id for spec in registry.specs()]
+    merged: list[Verdict] = []
+    for gate_id in order:
+        if gate_id in rows:
+            merged.append(rows[gate_id].verdict)
+        elif gate_id in resolved:
+            merged.append(resolved[gate_id])
+    registered = set(order)
+    merged += [v for v in resolution.verdicts if v.gate not in registered]
+    served_stale = {gid: row for gid, row in rows.items() if row.stale_reason}
+    by_gate = dict(resolution.rows)
+    for gate_id, row in served_stale.items():
+        held = by_gate.get(gate_id) or verdicts.Row(gate_id, "fresh", cached=row.cached)
+        by_gate[gate_id] = dataclasses.replace(held, fresh=False,
+                                               stale_reason=row.stale_reason)
+    merged_view = dataclasses.replace(
+        resolution, verdicts=merged, rows=by_gate,
+        stale_gates=frozenset([*(g for g in resolution.stale_gates if g not in rows),
+                               *served_stale]))
+    return verdicts.apply_prerequisites(merged_view, registry)
 
 
-#: Parameter sync lives in `modelio.sync_params` and NOWHERE ELSE.
-#:
-#: There used to be a second implementation right here, and `cmd_check` called
-#: both of them twelve lines apart. This one rebuilt `ledger.params` from the
-#: model and carried over only `grounded_by`, `gates`, `tags` and `changed_in`,
-#: so every `atompipe check` silently deleted `Param.rejected` — the record of
-#: what was TRIED AND LOST, which rule 3 calls the highest-value field in the
-#: system — and `Param.source` along with it. A project could accumulate a year
-#: of rejected alternatives in the ledger and have the inner-loop command wipe
-#: them on the next run, with nothing printed and nothing to diff against.
-#:
-#: `modelio.sync_params` merges the other way round — it keeps the ledger's
-#: whole record and replaces only value/units/rationale/derived_from, the four
-#: fields the model actually owns — so it is the only one that survives. If a
-#: merge is ever needed again, extend that function; do not write a second one
-#: here, because two merges in one process will disagree and the destructive one
-#: always runs last.
+def _resolved(root: str, ledger: Ledger, registry: gates.Registry | None,
+              projection: dict | None, model_error: str, *, now: str,
+              model: Any = None, sweep: verdicts.SweepResult | None = None
+              ) -> tuple[Ledger, verdicts.Resolution]:
+    """`(view, resolution)`: the ledger as every reader must show it.
 
+    `resolution` is `verdicts.resolve`'s — the ONE effective-verdict producer
+    (R-5): per registered gate its effective verdict (served from a Fresh,
+    admitted entry; skipped where its tool is missing; errored where a crash
+    superseded it; stale with its reasons otherwise), then orphans. It never runs
+    a gate or a fixture. `sweep`, from `check` only, lays that sweep's own rows
+    over the gates it selected (`_swept`).
 
-def _link_grounding(ledger: Ledger) -> list[str]:
-    """Write the back-reference an extraction implies. Returns names that match nothing.
+    `view` is `ledger` with three in-memory fields filled, and nothing else:
+    `verdicts` from the resolution; `Claim.gates` from `claims.effective_gates`
+    (registry coverage over the records' cached opinion, so `claim show` stops
+    reading UNCLAIMED for a claim three gates cover, cli:H5); `Param.gates` from
+    `last_read_sets` (S-30). `claims`, `report`, `site` and `decisions` stay pure
+    functions of a `Ledger`, and every reader — `status`, `claim list/show`,
+    `report`, `site build`, `gate show`, `why`, `doctor`, `check` and its JUnit —
+    renders this one.
 
-    `Extraction.grounds` points outward ("this photo grounds `hull_beam`"), and
-    `artifacts.grounding` inverts that on demand — but `Param.grounded_by` and
-    `Claim.grounded_by` are the *stored* form of the same edge, and
-    `decisions.why` reads only the stored one. Without this, an agent that
-    ingested a datasheet, extracted the figure and grounded a parameter on it
-    would still be told by `atompipe why` that the parameter is "asserted, not
-    evidenced" — the exact opposite of what happened.
-
-    Idempotent (ids are added once) and additive only: an edge a human declared
-    by hand is never removed here, because this function cannot tell a
-    hand-declared edge from a stale one and guessing wrong deletes provenance.
-
-    Names that match no parameter and no claim are returned rather than dropped.
-    They are usually an ordering artefact — the extraction was recorded before
-    the model declared the parameter — and they resolve themselves on the next
-    `check`. A typo looks the same from here, so the caller says so out loud.
+    **The view is never saved.** It holds cache verdicts, and coverage and read
+    sets the records do not own; a whole-ledger save of it would write them into
+    the tracked ledger (cli:H3). `tests/test_check_cache.py` walks this file's AST
+    and refuses any `store.save(` argument that flows from here. `model_error`
+    joins the resolver's "the model does not load" reason; `now` is the
+    command's one clock stamp.
     """
-    from_extractions = artifacts.grounding(ledger, include_declared=False)
-    unmatched: list[str] = []
-    for name, artifact_ids in from_extractions.items():
-        param = ledger.param(name)
-        claim = ledger.claim(name)
-        target = param or claim
-        if target is None:
-            unmatched.append(name)
-            continue
-        current = list(target.grounded_by or [])
-        for artifact_id in artifact_ids:
-            if artifact_id not in current:
-                current.append(artifact_id)
-        target.grounded_by = current
-    return sorted(unmatched)
+    resolution = verdicts.resolve(root, registry, projection, ledger,
+                                  model_error=model_error, now=now, model=model)
+    if sweep is not None and registry is not None:
+        resolution = _swept(resolution, sweep, registry)
+    cover = claims.effective_gates(ledger, registry)
+    reads = _param_gates(ledger, resolution.read_sets, registry)
+    # `verdicts.view` lays the verdicts and each claim's standing (P2.5a-D13);
+    # then this command's coverage and read sets.
+    judged = verdicts.view(ledger, resolution)
+    view = dataclasses.replace(
+        judged,
+        claims=[dataclasses.replace(claim, gates=list(cover.get(claim.id, [])))
+                for claim in judged.claims],
+        params=[dataclasses.replace(param, gates=list(reads.get(param.name, [])))
+                for param in judged.params],
+    )
+    return view, resolution
 
 
-def _refresh_coverage(ledger: Ledger, registry: gates.Registry) -> None:
-    """Write live gate coverage into `claim.gates`. Only `check` may call this.
+def _stale_summary(resolution: verdicts.Resolution) -> str:
+    """`gate: reason; gate: reason` for every stale gate, in the resolution's
+    order — the `stale_reason` a JSON reader gets beside `stale_gates`. `""` when
+    nothing is stale: what it replaced said "unchanged since the last sweep",
+    which was one project-wide hash's opinion, not a fact about any gate."""
+    named = [(gid, row.stale_reason) for gid, row in resolution.rows.items()
+             if gid in resolution.stale_gates]
+    named += [(gid, "") for gid in sorted(resolution.stale_gates - {g for g, _ in named})]
+    return "; ".join(f"{gid}: {why}" if why else gid for gid, why in named)
 
-    `claim.gates` is a cache of a fact the registry owns, and `claims.py` says so
-    in as many words. The cache still has to exist, because the things that read
-    a ledger WITHOUT a registry — `decisions.why` above all — otherwise report
-    "no gate can settle it" for a claim three gates are covering. An agent that
-    trusts that sentence goes off to install a solver the project already has.
 
-    Refreshed only in `check`, and refreshed by REPLACEMENT rather than union,
-    because `check` is the one command that has loaded every pack the ledger
-    declares (`_registry(strict=True)` refuses to proceed otherwise). So the
-    coverage it computes is the project's complete gate set at that moment, and
-    a stale id left over from a pack that was removed should disappear rather
-    than keep a dead gate's name on a claim forever.
+def _stale_gate_list(resolution: verdicts.Resolution) -> list[str]:
+    """The stale gates, in the resolution's order (then any without a row)."""
+    listed = [gid for gid in resolution.rows if gid in resolution.stale_gates]
+    return listed + sorted(resolution.stale_gates - set(listed))
+
+
+def _seconds_between(earlier: str, later: str) -> float | None:
+    """Seconds from one atompipe timestamp to another, or None if either does
+    not parse — an age nobody can compute is unknown, never 0."""
+    try:
+        a = datetime.strptime(earlier, "%Y-%m-%dT%H:%M:%SZ")
+        b = datetime.strptime(later, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return None
+    return (b - a).total_seconds()
+
+
+def _last_check(root: str) -> dict:
+    """`.atompipe/cache/last_check.json` as `verdicts.write_last_check` left it,
+    or `{}` when there is none or it cannot be read. For `status`'s `last check:`
+    line only: `check` never reads it (it would be trusting its own summary of a
+    previous run), and nothing decides a verdict from it. The path is spelled
+    from the writer's own constants, so the two can never disagree about where
+    the file lives."""
+    path = os.path.join(store.atompipe_dir(root), verdicts._CACHE_DIR, verdicts._LAST_CHECK)
+    try:
+        data = read_json(path, None)
+    except AtompipeError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+# --------------------------------------------------------------------------- #
+# the records, at the edge: migrate once, write one, keep the index current
+# --------------------------------------------------------------------------- #
+#: What slipped through before checkpoint 1.3: every writing command loaded the
+#: WHOLE project and saved the whole project. `decide` asked to record one
+#: decision rewrote every claim and parameter beside it; `check`, a sweep, rewrote
+#: the records on every run — parameters re-synced from the model, grounding
+#: back-references written by `_link_grounding`, coverage written into
+#: `claim.gates` by `_refresh_coverage` — so a claim a human edited between two
+#: commands was put back by the second from its in-memory copy, `claim edit
+#: --gates X` was silently reverted by the next check (S-37), and a deleted
+#: extraction's grounding lived on in the parameter it had been copied into
+#: (S-36). A record is a file now and a command writes the ONE record it was asked
+#: to (`store.write_record`, `store.write_project`); coverage and grounding are
+#: derived where they are read; `tests/test_shims.py` walks this file's AST and
+#: refuses any reference to `store.save`, the whole-ledger writer, which stays for
+#: tests and the migration only.
+
+
+def _migrate(root: str, *, apply: bool, now: str) -> Ledger:
+    """The project's records, migrating a legacy `ledger.json` first. Under the lock.
+
+    `check` and the shims are the migration's triggers (spec Q1.5): with `apply`
+    a legacy project becomes record files here, once, and the one notice —
+    ending in the `git rm --cached .atompipe/ledger.json` line, because the spine
+    runs no git — goes to stderr, never into `--json`'s stdout. Without `apply`
+    (`check --no-record`) the same pure function runs in memory, writes nothing,
+    and says the project will migrate on the next check. On a migrated project it
+    is `store.load`, silently.
+
+    What the model STATES is read statically (`modelio.static_param_prose`: it
+    parses the entry and never imports or runs it), so a migration can drop a
+    param record's rationale or units only where the model already says them —
+    and a model that does not load cannot wedge the migration.
     """
-    live = claims.coverage(ledger, registry)
-    for claim in ledger.claims:
-        claim.gates = live.get(claim.id, [])
+    plan = store.migrate_legacy(root, apply=apply, when=now,
+                                model_prose=modelio.static_param_prose)
+    if plan.notice:
+        _warn(plan.notice)
+    return plan.ledger
 
 
-class _ParamReads(dict):
-    """`ctx.params`, but it remembers which keys a gate actually looked up.
+def _load(root: str) -> Ledger:
+    """The project's records for every command that does not migrate them:
+    `store.load`, with the reader `_migrate` migrates with, so a legacy project
+    reads as the very plan its next `check` will write — the same refusals, and
+    no others.
 
-    `Param.gates` — "which gate protects this number", the fourth item rule 3
-    asks every constant to carry — was declared on the dataclass and then never
-    assigned by anything. The visible consequence was that `atompipe why
-    <param>` told every reader "GATES (0) — none: no gate would notice if this
-    value went wrong" about parameters that three gates were reading on every
-    sweep. That sentence is worse than no sentence: an agent that believes it
-    goes off to write a gate the project already has, or edits the number
-    thinking nothing measures it.
+    What slipped through: every reader called `store.load(root)`, which planned
+    the migration with no `model_prose`, while `check` planned it with the
+    static reader. On a model stating `D` and `d`, `status`, `why`, `report`
+    and the rest refused with "rename one" — a case collision between two
+    files `check` never writes — and `check` migrated cleanly; after a
+    migration killed half way, they blamed a `params/thickness.json` that was
+    byte for byte what `check` would write, and told the user to move it aside.
+    *Rejected:* `_migrate(apply=False)` here (it prints the "will migrate"
+    notice on every read); keeping the calls and fixing the store's default (the
+    store must not import `modelio`, spec §3.1)."""
+    return store.load(root, model_prose=modelio.static_param_prose)
 
-    The linkage is not stored anywhere, but it is observable: a gate reads its
-    inputs out of `ctx.params`, so the keys it touches ARE the parameters it
-    protects. This subclasses `dict` rather than wrapping it in a `Mapping` so
-    that a gate doing anything else with the object — `.items()`, `len()`,
-    `dict(ctx.params)`, a `**` splat — behaves exactly as before; only the three
-    single-key accessors are intercepted.
 
-    **One level of nesting is followed.** The projection is
-    `{"config": {...}, "derived": {...}}` and `_flat_params` merges those two,
-    so a gate reading a config field spells it either `ctx.params["thickness"]`
-    or `ctx.params["config"]["thickness"]` — the reference project's gates use
-    the second spelling for seven of their reads. Recording only the top level
-    caught `config` and attributed nothing. Deeper than one level is NOT
-    followed on purpose: a sourcing gate walking a BOM document would start
-    attributing itself to every line-item key that happens to share a parameter
-    name, which is a false positive in the generous direction.
+#: Commands after which the index is NOT rebuilt. `doctor` reports on the
+#: project and never writes a byte of it (it compares the index with the records
+#: instead). `init` never writes a `ledger.json` (spec §3.15): a new project's
+#: first index comes from its first command, like every later one.
+_INDEX_UNTOUCHED = frozenset({"doctor", "init"})
 
-    Bulk iteration is deliberately NOT recorded either. A gate that does `for
-    name in ctx.params` has not shown interest in any particular parameter, and
-    attributing all twelve to it would put a gate id on every param.
+#: How many times `_touch_index` rebuilds when the records move underneath it.
+#: The rebuild takes no lock — `status` must stay usable while a tier-2 `check`
+#: holds the build lock for an hour — so a shim that writes a record between this
+#: command's build and its write would leave an index one record behind, written
+#: AFTER the shim's own correct one. Re-reading `records_digest` catches that; three
+#: rounds is the writers racing twice in a row. *Rejected:* taking the build lock
+#: (a read command blocked by a sweep); one round (the race above lands silently).
+_INDEX_ROUNDS = 3
 
-    Cost is one `set.add` per lookup and one wrapper per nested dict per sweep,
-    which is what keeps it usable in the inner loop (rule 10).
+
+def _touch_index(root: str, *, quiet: bool = False) -> None:
+    """Rebuild `.atompipe/ledger.json` from the records, best-effort.
+
+    Run at the end of every command on a MIGRATED project (`main`, minus
+    `_INDEX_UNTOUCHED`, and never under `--no-record`), so an agent reading the
+    one generated file after any command reads what the record files say —
+    including an edit a human made by hand since the last command (invariant 8:
+    the index never disagrees with the records). Never on a legacy project, where
+    `ledger.json` IS the records until `check` or a shim migrates it. Rewritten
+    only when its bytes change (`store.write_index`), so a read command that finds
+    it current writes nothing.
+
+    Best-effort: a record that does not read, or a read-only checkout, leaves the
+    index as it was with one stderr line (none when `quiet`: the command already
+    failed and said why), and never changes the command's exit code — the records
+    are the truth, and a command whose own work succeeded must not fail on its
+    output's output.
     """
-
-    def __init__(self, params: dict[str, Any], *,
-                 seen: set[str] | None = None, nested: bool = False) -> None:
-        super().__init__(params)
-        #: Shared by reference with every nested wrapper, which is why `take()`
-        #: clears this set in place instead of rebinding it. Rebinding left the
-        #: children writing into a set nobody read again.
-        self.seen: set[str] = set() if seen is None else seen
-        self._nested = nested
-        self._children: dict[Any, "_ParamReads"] = {}
-
-    def _seen(self, key: Any) -> None:
-        if isinstance(key, str):
-            self.seen.add(key)
-
-    def _wrap(self, key: Any, value: Any) -> Any:
-        if self._nested or type(value) is not dict:
-            return value
-        child = self._children.get(key)
-        if child is None:
-            child = _ParamReads(value, seen=self.seen, nested=True)
-            self._children[key] = child
-        return child
-
-    def __getitem__(self, key: Any) -> Any:
-        self._seen(key)
-        return self._wrap(key, super().__getitem__(key))
-
-    def __contains__(self, key: Any) -> bool:
-        # `GateContext.param` asks `name in self.params` before reading it, so a
-        # membership test is a read as far as attribution is concerned.
-        self._seen(key)
-        return super().__contains__(key)
-
-    def get(self, key: Any, default: Any = None) -> Any:
-        self._seen(key)
-        if not super().__contains__(key):
-            return default
-        return self._wrap(key, super().__getitem__(key))
-
-    def take(self) -> set[str]:
-        """Hand back the keys read since the last `take()`, and start fresh."""
-        seen = set(self.seen)
-        self.seen.clear()
-        return seen
+    try:
+        if store.is_legacy(root) or not os.path.isfile(store.project_paths(root)["project"]):
+            return
+        for _ in range(_INDEX_ROUNDS):
+            before = store.records_digest(root)
+            store.write_index(root)
+            if store.records_digest(root) == before:
+                return
+    except (AtompipeError, OSError) as exc:
+        if not quiet:
+            _warn(f"warning: the index {store.ATOMPIPE_DIR}/{store.LEDGER_NAME} was not "
+                  f"rebuilt ({exc}); the records are unchanged and are still the truth")
 
 
-def _refresh_param_gates(ledger: Ledger, reads: dict[str, set[str]], *,
-                         replace: bool) -> None:
-    """Write "which gates read this parameter" into `Param.gates`.
-
-    `reads` is `{gate id: names it looked up}`, collected by `_ParamReads` while
-    the sweep ran. Names that are not ledger parameters are dropped: a gate
-    asking for `span_mm` on a model that has no such field is telling us the
-    gate wants it, not that the project has it, and inventing a Param row from a
-    failed lookup would put phantom numbers in the ledger.
-
-    A gate that SKIPPED still counts. It read the parameter, found it missing or
-    found its tool absent, and would have measured it — which is exactly the
-    question `atompipe why` is answering. What it must never do is imply the
-    value was checked; that is `Verdict`'s job and a skip is never a pass.
-
-    `replace=False` for a `--only` sweep, for the same reason such a sweep does
-    not advance `last_run`: it saw a subset of the gates, so overwriting the
-    full picture with the subset would quietly retire every gate it did not run.
-
-    The honest limit, stated because the field will be read as stronger than it
-    is: this records a DIRECT read. A gate that reads the derived `deflection`
-    protects `arm_length` in physical fact, but nothing in the projection says
-    which inputs that derived value came from, so `arm_length` still ends up
-    with an empty list. An empty `Param.gates` therefore means "no gate reads
-    this value by name", which is weaker than "nothing would notice if it
-    changed" — and the fix for a parameter that deserves better is to name it in
-    a gate, which is the right outcome anyway.
-    """
-    known = {param.name for param in ledger.params}
-    by_param: dict[str, list[str]] = {}
-    for gate_id in sorted(reads):
-        for name in sorted(reads[gate_id]):
-            if isinstance(name, str) and name in known:
-                by_param.setdefault(name, []).append(gate_id)
-    for param in ledger.params:
-        found = by_param.get(param.name, [])
-        if replace:
-            param.gates = found
-        else:
-            merged = list(param.gates or [])
-            merged.extend(gate_id for gate_id in found if gate_id not in merged)
-            param.gates = merged
+def _after(args: argparse.Namespace, *, quiet: bool = False) -> None:
+    """`_touch_index` for the project this command ran in, when it should run."""
+    if getattr(args, "command", None) in _INDEX_UNTOUCHED or getattr(args, "no_record", False):
+        return
+    try:
+        root = store.find_root(getattr(args, "dir", None))
+    except (AtompipeError, OSError):
+        return
+    if root is not None:
+        _touch_index(root, quiet=quiet)
 
 
 def _skip_digest(skipped: list[Verdict], *, width: int = 96) -> list[str]:
@@ -670,8 +725,15 @@ def _context(root: str, ledger: Ledger, model: Any, projection: dict | None,
     `log` goes to stderr so a gate's progress chatter never lands inside `--json`
     output, and is silenced entirely under `--json` because a caller parsing
     stdout is usually not reading stderr either.
+
+    `params` is `modelio.flat_params(projection)` — the one flattening, the same
+    one `verdicts.freshness` recomputes a gate's reads against, so a value is
+    compared in exactly the shape a gate was handed it (S-28). A plain dict:
+    `gates.run_gate` hands each gate its own traced, read-only view of it, and
+    that trace — not a wrapper here — is what records which parameters a gate
+    read. `extra` starts empty; each gate gets its own copy.
     """
-    params, conflicts = _flat_params(projection)
+    params, conflicts = modelio.flat_params(projection)
     for conflict in conflicts:
         _warn(f"warning: model and build() disagree on {conflict} — "
               f"gates read the config value")
@@ -698,7 +760,8 @@ def _context(root: str, ledger: Ledger, model: Any, projection: dict | None,
     )
 
 
-def _verdict_row(verdict: Verdict) -> dict[str, Any]:
+def _verdict_row(verdict: Verdict, *, cached: bool | None = None, fresh: bool | None = None,
+                 stale_reason: str = "", executed: bool = True) -> dict[str, Any]:
     """One verdict as JSON. `ok` is included because `passed` alone is not the answer.
 
     `passed` is True on a verdict that was skipped or errored only if a gate set
@@ -719,26 +782,180 @@ def _verdict_row(verdict: Verdict) -> dict[str, Any]:
     that row would turn a real reading into "this gate reported no number" —
     the generous-direction misread this file spends most of its comments
     refusing.
+
+    From 1.2 a row says where it came from (spec §3.13): `cached` (a cache
+    entry's verdict, as recorded) and `fresh` (a pass or fail keyed at the
+    current inputs) when the caller knows, `stale_reason` when it is not
+    current, `rho` when the verdict has one. `duration_s` and `cpu_s` only when
+    `executed`: a cached row replaying the cost of the run that wrote it would be
+    a measurement of nothing, and a latency reader would average it in
+    (cli:H12, `CostIsKept`) — the cost lives in obs.
+
+    From P2.4 every row carries its margin (D-17, P2.4-D8): `margin` —
+    `claims.margin`, the one function, to 6 significant figures — or
+    `margin_why`, why there is none (`no-value` included: critique 15 of the
+    design — a row that said nothing left the reason to the renderer). A
+    renderer draws it; none computes it. `comparator` and `settles` join the
+    drop-if-empty keys.
     """
     row = verdict.to_dict()
-    for key in ("detail", "error", "evidence", "skip_reason", "units"):
+    for key in ("detail", "error", "evidence", "skip_reason", "units", "rho", "unqualified",
+                "blocked_by", "blocked_kind", "comparator", "settles"):
         if not row.get(key):
             row.pop(key, None)
     for key in ("measured", "limit"):
         if row.get(key) is None:
             row.pop(key, None)
-    # 4dp is ~0.1 ms. A tier-0 gate reports `1.6689300537109375e-05` otherwise,
-    # which is 22 characters saying "instant" in the least readable way available.
-    row["duration_s"] = round(float(row.get("duration_s") or 0.0), 4)
+    found = claims.margin(verdict)
+    if found.fraction is not None:
+        row["margin"] = float(f"{found.fraction:.6g}")
+    else:
+        row["margin_why"] = found.why
+    if executed:
+        # 4dp is ~0.1 ms. A tier-0 gate reports `1.6689300537109375e-05` otherwise,
+        # which is 22 characters saying "instant" in the least readable way available.
+        row["duration_s"] = round(float(row.get("duration_s") or 0.0), 4)
+        row["cpu_s"] = round(float(row.get("cpu_s") or 0.0), 4)
+    else:
+        row.pop("duration_s", None)
+        row.pop("cpu_s", None)
+    if cached is not None:
+        row["cached"] = bool(cached)
+    if fresh is not None:
+        row["fresh"] = bool(fresh)
+    if stale_reason:
+        row["stale_reason"] = stale_reason
     row["ok"] = verdict.ok
+    # Set by hand, like `ok`: `to_dict` serialises dataclass fields and `outcome`
+    # is a property, so without this line it is silently missing. It is the one
+    # four-way answer — "pass" | "fail" | "error" | "skipped" — that the tag and
+    # the claim status are read from, so a consumer never re-derives it from the
+    # three flags and gets the precedence wrong (PLAN R-5).
+    row["outcome"] = verdict.outcome
     return row
+
+
+def _resolved_row(verdict: Verdict, resolution: verdicts.Resolution) -> dict[str, Any]:
+    """A reader's row: `_verdict_row` with the resolution's `cached`, `fresh`
+    and `stale_reason` for that gate. A reader executed nothing, so no row it
+    prints carries a duration."""
+    found = resolution.rows.get(verdict.gate)
+    return _verdict_row(verdict, cached=bool(found and found.cached),
+                        fresh=bool(found and found.fresh),
+                        stale_reason=found.stale_reason if found else "", executed=False)
+
+
+# --------------------------------------------------------------------------- #
+# parameters and grounding, read where they are shown
+# --------------------------------------------------------------------------- #
+def _param_views(root: str, ledger: Ledger, model: Any, model_error: str, *,
+                 read_sets: Mapping[str, Iterable[tuple]] | None = None
+                 ) -> list[modelio.ParamView]:
+    """`modelio.param_view`, plus — when the model does not load — one bare view
+    per parameter the model's TEXT states and no record holds. `read_sets`
+    (registered gates only) fills each view's `gates`; without it they are `()`.
+
+    Why the second half: from checkpoint 1.3 a parameter the model states
+    entirely has no record (`check` stopped copying the model into the records,
+    and the migration writes a param record only for what the model cannot
+    hold), so with the model mid-edit `param_view` knew nothing of `thickness`,
+    and `why thickness` answered "no parameter named thickness" about the
+    number the bracket's failing claim turns on. The names come from
+    `modelio.static_param_prose` — the entry parsed, never imported or run —
+    and each view says why it has no number (`model_error`), never a cached one
+    (S-39)."""
+    views = modelio.param_view(ledger, model, model_error=model_error, read_sets=read_sets)
+    if model is None and model_error:
+        held = {view.name for view in views}
+        error = " ".join(model_error.split())
+        stated = modelio.static_param_prose(root, ledger.meta.model_entry)
+        views += [modelio.ParamView(
+                      name=name, model_error=error,
+                      gates=tuple(modelio.param_readers(name, read_sets or {})))
+                  for name in stated if name not in held]
+    return views
+
+
+def _shown_params(root: str, ledger: Ledger, model: Any, model_error: str,
+                  resolution: verdicts.Resolution,
+                  registry: gates.Registry | None) -> list[modelio.ParamView]:
+    """The parameters as `status`, `report`, the page and `doctor` show them:
+    `_param_views` with each view's gates read off the resolution's read sets.
+
+    What slipped through (review, checkpoint 1.3): those four took a parameter's
+    value and rationale from `ledger.params` — the records, which from 1.3 the
+    model owns and which hold only what it cannot. The migrated bracket's page
+    showed no parameter; a record holding only `"source"` made `status` and the
+    report call `thickness` undefended (the report at value `None`) while
+    `doctor`, reading the model alone, said every parameter carried a rationale;
+    and a field nobody explained was flagged by `doctor` and nothing else. One
+    view, one rule (`modelio.undefended_params`), every reader. `site build`
+    and the page-staleness judgement (`_site_judgement`) both take theirs from
+    here, so a page built from it reads current against it."""
+    return _param_views(root, ledger, model, model_error,
+                        read_sets=_registered_reads(resolution.read_sets, registry))
+
+
+def _grounding(ledger: Ledger, views: Iterable[modelio.ParamView]) -> dict[str, list[str]]:
+    """`{parameter or claim: [artifact ids]}`, derived on every read: the
+    extractions' `grounds`, then what a record declares by hand
+    (`artifacts.grounding`), then what the model's `PARAMS` declares (each
+    view's `grounded_by`) — first-seen order, each id once.
+
+    `why` and `inputs` both read THIS map, so they cannot disagree (S-36). What
+    slipped through: the edge an extraction implies was copied into the
+    parameter it grounds, so deleting the extraction left `why arm_length`
+    saying "GROUNDED BY arm" while `inputs` said `arm` was "NEVER READ"; and once
+    the copy was gone, with nothing derived in its place, the two disagreed the
+    other way round — `inputs` said `arm` grounds `arm_length`, `why` said
+    nothing did."""
+    found = {name: list(ids) for name, ids in artifacts.grounding(ledger).items()}
+    for view in views:
+        bucket = found.setdefault(view.name, [])
+        bucket += [aid for aid in view.grounded_by if aid not in bucket]
+    return {name: ids for name, ids in found.items() if ids}
+
+
+def _why_text(root: str, ledger: Ledger, registry: gates.Registry, model: Any,
+              model_error: str, view: Ledger, resolution: verdicts.Resolution,
+              name: str) -> str:
+    """`decisions.why` with all four of its inputs from where they live now
+    (spec §3.10, U29): each parameter from `param_view` (the model's value, and
+    what lost in both homes); a claim's gates from registry coverage
+    (`claims.effective_gates`); a parameter's gates from what each gate read when
+    it last executed (`verdicts.last_read_sets`, registered gates only); every gate
+    line from the resolver's effective verdicts; and grounding from the
+    extractions (`_grounding`). Nothing here is a stored copy: a record may no
+    longer hold `gates`, `value` or a grounding back-reference at all."""
+    registered = set(registry.ids())
+    read_sets = {gate: reads for gate, reads in verdicts.last_read_sets(root).items()
+                 if gate in registered}
+    views = _param_views(root, ledger, model, model_error)
+    grounds = _grounding(ledger, views)
+    views = [dataclasses.replace(v, grounded_by=tuple(grounds.get(v.name, ())))
+             for v in views]
+    shown = dataclasses.replace(
+        view, claims=[dataclasses.replace(claim, grounded_by=list(grounds.get(claim.id, ())))
+                      for claim in view.claims])
+    return decisions.why(shown, name, view=views,
+                         coverage=claims.effective_gates(ledger, registry),
+                         read_sets=read_sets, verdicts=resolution.verdicts)
 
 
 # --------------------------------------------------------------------------- #
 # init
 # --------------------------------------------------------------------------- #
 def cmd_init(args: argparse.Namespace) -> int:
-    """Create the project layout, the starter ledger, and the next three steps.
+    """Create the records layout, and print the next three steps.
+
+    Born migrated (checkpoint 1.3): `store.init` writes `.atompipe/project.json`
+    LAST, the empty record directories, the input buckets, and the three marked
+    ignore/attribute blocks — and no `ledger.json`. What slipped through before:
+    `init` wrote the whole project into a `ledger.json`, the layout 1.3 migrates
+    away from, so every new project was a legacy one, migrated by its first
+    `check` with a `git rm --cached` notice about a file git had never tracked
+    (phase-1.md's V row: `init` then `status` prints no notice). The index is a
+    command's output, never `init`'s (`_INDEX_UNTOUCHED`).
 
     The last part is not decoration. `init` that prints "initialised." leaves a
     new user staring at eight empty directories with no idea which one is theirs,
@@ -746,7 +963,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     evidence is gathered — which is how numbers arrive with no provenance and
     stay that way. The three steps are printed in the order that produces a
     project with grounds: ask for evidence, write the claims it supports, then
-    the model.
+    the model. The third names the file edit that records the model's entry — it
+    named `model --set-entry` until PLAN A-8 removed the flag, and
+    `project.json` is the one home of the entry.
     """
     root = os.path.abspath(getattr(args, "dir", None) or os.getcwd())
     name = (args.name or os.path.basename(root.rstrip(os.sep)) or "project").strip()
@@ -760,81 +979,255 @@ def cmd_init(args: argparse.Namespace) -> int:
         spine_version=__version__,
     )
     ledger = store.init(root, meta)
-    paths = store.project_paths(root)
+    project = rel(store.project_paths(root)["project"], root)
+    # Every groundspace opens its own site from the editor (site.ensure_launch). Written
+    # only when absent, so `init` in an existing repo leaves the person's own untouched.
+    launch = site.ensure_launch(root, name)
+    entry = ledger.meta.model_entry
+    model_step = (f"write {entry} — a dataclass CONFIG plus build(config) -> dict — "
+                  f"then: atompipe check" if entry else
+                  f"write model/<thing>.py — a dataclass CONFIG plus build(config) -> dict "
+                  f"— then record it as \"model_entry\": \"model/<thing>.py\" in {project}, "
+                  f"and: atompipe check")
 
     if args.json:
         _dump({
             "root": root,
-            "ledger": rel(paths["ledger"], root),
+            "project": project,
             "meta": ledger.meta.to_dict(),
+            "launch": launch,
             "next": [
                 "atompipe ask",
-                "atompipe claim add --statement ... --quantity ... --cmp '<=' --limit ...",
-                "atompipe model --set-entry model/<thing>.py",
+                "write claims/C1.json: {\"statement\": ..., \"acceptance\": "
+                "{\"quantity\": ..., \"comparator\": \"<=\", \"limit\": ...}}",
+                model_step,
             ],
         })
         return 0
 
     _say(f"initialised atompipe project {name!r} at {root}")
-    _say(f"  {rel(paths['ledger'], root):<24} the whole project state — claims, evidence,"
-         f" decisions")
-    _say(f"  {'inputs/':<24} evidence you put in by hand ({len(store.INPUT_BUCKETS)} buckets)")
+    _say(f"  {project:<24} the project: its name, model entry and packs")
+    _say(f"  {'claims/':<24} one file per claim — what must be true")
+    _say(f"  {'inputs/':<24} evidence you put in by hand ({len(store.INPUT_BUCKETS)} buckets),"
+         f" one record per artifact")
     _say(f"  {'model/':<24} the parametric model: the only source of truth")
     _say(f"  {'docs/':<24} generated readiness report and decision log")
+    if launch:
+        _say(f"  {launch:<24} Run and Debug: builds and opens this project's site")
     _say("")
     _say("next, in this order:")
     _say("  1. atompipe ask                 — what evidence to ask for, then")
     _say("     atompipe ingest <files> --kind sketch --desc '...'")
     _say("     atompipe extract <id> --what '...' --grounds <param>   (an artifact with")
     _say("     no extraction is decoration)")
-    _say("  2. atompipe claim add --statement 'floats with the full payload at <=60% draft' \\")
-    _say("       --quantity 'draft fraction' --cmp '<=' --limit 0.6 --units ''")
-    _say("  3. write model/<thing>.py — a dataclass CONFIG plus build(config) -> dict —")
-    _say("     then: atompipe model --set-entry model/<thing>.py && atompipe check")
+    _say("  2. write claims/C1.json — one claim per file, what must be true:")
+    _say('       {"statement": "floats with the full payload at <=60% draft",')
+    _say('        "acceptance": {"quantity": "draft fraction", "comparator": "<=", "limit": 0.6}}')
+    if entry:
+        _say(f"  3. write {entry} — a dataclass CONFIG plus build(config) -> dict —")
+        _say("     then: atompipe check")
+    else:
+        _say("  3. write model/<thing>.py — a dataclass CONFIG plus build(config) -> dict —")
+        _say(f'     then record it as "model_entry": "model/<thing>.py" in {project},')
+        _say("     and: atompipe check")
     return 0
 
 
 # --------------------------------------------------------------------------- #
 # status
 # --------------------------------------------------------------------------- #
+#: An instrument note as `verdicts.resolve` words it (`<gate> — recorded under
+#: <module> <a>; here <b>`): the one kind of resolution note `status` prints one
+#: line each. The others — opaque channels, defining-file digests, hand-edited
+#: entries — are `doctor`'s rows, where each says what to do about it.
+_INSTRUMENT_NOTE = re.compile(r"^\S+ — recorded under \S+ \S+; here \S+$")
+
+def _never_run(resolution: verdicts.Resolution, registry: gates.Registry | None) -> list[str]:
+    """Registered gates with nothing to show — *unrun*: no row, or only an
+    availability skip over no entry. A remembered crash is not unrun (S-68),
+    and neither is an evaluator refused at its version: `resolve` says that
+    refusal (`unqualified`, its claim a Gap), so it has something to show.
+    What slipped through (review of P2.1, whose D5 said it closed this): a gate
+    refused at its first check has a `never` row, and this asked only `state`,
+    so `status` printed `gates: 6 ran, 1 unqualified` and two lines below
+    `(6 verdicts current, 1 unrun)` — one evaluator, two words."""
+    ids = registry.ids() if registry is not None else []
+    out = []
+    for gate_id in ids:
+        row = resolution.rows.get(gate_id)
+        if row is not None and row.admission is not None \
+                and row.admission.state == "not-admitted":
+            continue
+        if row is None or (row.state == "never" and not any(
+                str(note).startswith("remembered ") for note in row.notes)):
+            out.append(gate_id)
+    return out
+
+
+def _stale_lines(resolution: verdicts.Resolution, registry: gates.Registry | None, *,
+                 model_error: str = "") -> list[str]:
+    """`status`'s `invalidated:` block (spec §3.13): one line per gate whose
+    verdict is not current, with its reasons, continuation lines indented under
+    the head, and the counts on the last — `(N verdicts current[, n unrun])`, a
+    verdict being current when it is a Fresh entry whose control is admitted or
+    pending. `invalidated: none` with the counts when nothing moved.
+
+    In GLOSSARY §6's words from P2.1: a verdict whose read set moved is
+    *invalidated* (§6.2's operation) and only its claim reads *Stale*; a gate
+    with no verdict is *unrun* and its claim *Open*. What slipped through: the
+    block was headed `stale:`, counted `checks current` and `never run`, three
+    status words one screen below the claim rows they were not about.
+
+    One line per gate, always. What slipped through while wiring it: with the
+    model broken, the resolver's reason for every gate that reads it carries the
+    whole import traceback (`the model does not load: <error>`), and the block
+    printed it once per gate — twenty lines of the same traceback between the
+    reader and the counts. The error is `model:`'s line, printed once below."""
+    current = sum(1 for row in resolution.rows.values() if row.fresh)
+    never = _never_run(resolution, registry)
+    counts = (f"   ({current} verdicts current"
+              + (f", {len(never)} unrun" if never else "") + ")")
+    stale = _stale_gate_list(resolution)
+    if not stale:
+        return [f"invalidated: none{counts}"]
+    lines = []
+    for index, gate_id in enumerate(stale):
+        row = resolution.rows.get(gate_id)
+        why = (row.stale_reason if row is not None else "") or "invalidated"
+        if model_error:
+            why = why.replace(f": {model_error}", "")
+        why = (why.splitlines() or ["invalidated"])[0]
+        lines.append(f"{'invalidated: ' if index == 0 else '             '}{gate_id} — {why}")
+    lines[-1] += counts
+    return lines
+
+
+def _pending(resolution: verdicts.Resolution) -> tuple[list[str], str]:
+    """`(gates, moved)`: the gates whose control is pending re-verification, and
+    the files that moved under their fixtures, merged — one sentence for all of
+    them, which `status`'s note and `doctor`'s row both print."""
+    pending = [row.gate for row in resolution.rows.values()
+               if row.admission is not None and row.admission.state == "pending"]
+    files: list[str] = []
+    for gate_id in pending:
+        # Structured (P2.3-D18): what `_PENDING_REASON` parsed back out of the
+        # spine's prose, the admission now carries.
+        for name in resolution.rows[gate_id].admission.moved:
+            if name and name not in files:
+                files.append(name)
+    return pending, ", ".join(sorted(files)) or "fixture code"
+
+
+def _pending_sentence(count: int, moved: str) -> str:
+    """GLOSSARY §9's words for controls whose fixture code moved: they count, and
+    the next check run re-qualifies their evaluators. What slipped through: it
+    said "N control(s) pending" on `status`'s screen, the Open status's
+    Never-say beside the claim rows (review of the P2.1 design)."""
+    return (f"{count} evaluator(s) to re-qualify — control inputs moved ({moved}); "
+            f"the next check run re-qualifies them")
+
+
+def _note_lines(resolution: verdicts.Resolution) -> list[str]:
+    """`status`'s `note:` lines: one per instrument mismatch, then at most one
+    for every control pending re-verification, its moved files merged."""
+    lines = [f"note: {note}" for note in resolution.notes if _INSTRUMENT_NOTE.fullmatch(note)]
+    pending, moved = _pending(resolution)
+    if pending:
+        lines.append(f"note: {_pending_sentence(len(pending), moved)}")
+    return lines
+
+
+def _freshness_rows(resolution: verdicts.Resolution,
+                    registry: gates.Registry | None) -> dict[str, dict[str, Any]]:
+    """`status --json`'s `freshness`: per registered gate (then any orphan with a
+    row), its cache state, why it is not current, how its control stands and the
+    resolver's notes. `state` is `"never"` for a gate with no row."""
+    out: dict[str, dict[str, Any]] = {}
+    ids = list(registry.ids()) if registry is not None else []
+    ids += [gid for gid in resolution.rows if gid not in set(ids)]
+    for gate_id in ids:
+        row = resolution.rows.get(gate_id)
+        if row is None:
+            out[gate_id] = {"state": "never", "reasons": [], "admission": None, "notes": []}
+            continue
+        out[gate_id] = {
+            "state": row.state,
+            "reasons": [row.stale_reason] if row.stale_reason else [],
+            "admission": row.admission.state if row.admission is not None else None,
+            "notes": [str(note) for note in row.notes],
+        }
+    return out
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     """The one-screen answer to "where is this project".
 
-    `report.render_terminal` does the claim/gap/gate half. Everything appended
-    here is a fact that lives outside the readiness report and that someone
-    reading it needs anyway: which packs are in play, whether the model still
-    matches the last sweep, how old that sweep is, and the NAMES (not counts) of
-    the artifacts nobody read and the parameters nobody defended. The report
-    counts those; a count tells you there is work and not where it is.
+    `report.render_terminal` does the claim/gap/gate half, from `_resolved`'s
+    view. Then, in a fixed order (spec §3.13), the facts that live outside the
+    readiness report, each with its source:
+
+    * `invalidated:` — each gate whose verdict is not current, with what moved
+      (`config.bed_xy 220.0 -> 250.0`), and on the last line how many verdicts
+      are current and how many gates are unrun; `invalidated: none` when nothing
+      moved. What it replaced said "model <hash> -> <hash>": that SOMETHING
+      moved, never which check it touched (M11.7). (Headed `stale:` until P2.1.)
+    * `last check run:` — when `check` last swept the whole project
+      (`last_check.json`), with its age; `never` before the first.
+    * `note:` — an entry recorded under another library version (provenance,
+      never staleness, Q1.3), and at most one line for controls whose fixture
+      code moved since they were demonstrated (they count; the next check run
+      re-qualifies their evaluators).
+    * `model:` — only when the model does not load, because then no verdict
+      that reads it is current and the reader must know why first.
+
+    Then the packs, the site, the names (not counts) of unread evidence and
+    undefended parameters, and load problems. It never runs a gate or a fixture,
+    and never writes: it reads the cache (M11.11).
 
     Never fails on a broken pack or an unloadable model — both are reported as
     lines. `status` is what you run when something is wrong.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, problems = _registry(root, ledger, strict=False)
     model, projection, model_error = _projection_safe(root, ledger)
-    stale, stale_why = _staleness(ledger, projection)
+    now = utcnow_iso()
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=now, model=model)
+    stale_gates = resolution.stale_gates
 
     installed = packs.installed(root, ledger=ledger)
     available = packs.available(root)
-    unread = artifacts.unextracted(ledger)
-    undefended = [p.name for p in ledger.params if not (p.rationale or "").strip()]
-    summary = claims.summarise(ledger, registry, stale=stale)
-    resolved = claims.statuses(ledger, stale=stale, registry=registry)
-    site_info = _site_state(root)
+    unread = artifacts.unextracted(view)
+    params = _shown_params(root, ledger, model, model_error, resolution, registry)
+    undefended = modelio.undefended_params(params)
+    summary = claims.summarise(view, registry, stale_gates=stale_gates)
+    composed = claims.compositions(view, registry=registry, stale_gates=stale_gates)
+    resolved = {cid: c.status for cid, c in composed.items()}
+    stale_reasons = _stale_reasons(resolution)
+    site_info = _site_state(root, resolved=(view, registry, resolution, params))
+    last = _last_check(root)
+    last_when = str(last.get("when") or "")
+    last_age = _seconds_between(last_when, now) if last_when else None
 
     if args.json:
         _dump({
             "root": root,
-            "meta": ledger.meta.to_dict(),
+            "meta": view.meta.to_dict(),
             "summary": summary,
+            # `claims` keeps the enum values (P2.1-D12: JSON values move only in
+            # the rename pass, GLOSSARY §7); the words are under `statuses`.
             "claims": {cid: str(status) for cid, status in resolved.items()},
-            "gaps": [need.to_dict() for need in claims.find_gaps(ledger, registry)],
-            "stale": stale,
-            "stale_reason": stale_why,
+            "statuses": _status_views(view, composed, stale_reasons),
+            "errored": [cid for cid, c in composed.items() if c.errored],
+            "gaps": [need.to_dict() for need in claims.find_gaps(view, registry)],
+            "stale": bool(stale_gates),
+            "stale_reason": _stale_summary(resolution),
+            "stale_gates": _stale_gate_list(resolution),
+            "freshness": _freshness_rows(resolution, registry),
+            "last_check": {"when": last_when or None, "age_s": last_age},
             "model": {
-                "entry": ledger.meta.model_entry,
+                "entry": view.meta.model_entry,
                 "loaded": projection is not None,
                 "error": model_error,
                 "hash": modelio.model_hash(projection) if projection else "",
@@ -842,25 +1235,40 @@ def cmd_status(args: argparse.Namespace) -> int:
             },
             "packs": {"installed": installed, "available": available},
             "inputs": {
-                "total": len(ledger.inputs),
+                "total": len(view.inputs),
                 "unextracted": [a.id for a in unread],
             },
-            "last_run": ledger.last_run.to_dict(),
-            "last_run_age": _age(ledger.last_run.when),
             "site": _site_brief(site_info),
             "problems": problems,
+            # P2.5a-D16: the rebuild prediction, additive (P2.1-D12).
+            "rebuild": summary["rebuild"],
         })
         return 0
 
-    sys.stdout.write(report.render_terminal(ledger, registry, stale=stale))
-
-    entry = ledger.meta.model_entry or "(none recorded)"
-    if model_error:
-        _say(f"model: {entry} — DOES NOT LOAD: {model_error.splitlines()[0]}")
-    elif projection is not None:
-        _say(f"model: {entry} — hash {modelio.model_hash(projection)} ({stale_why})")
+    sys.stdout.write(report.render_terminal(view, registry, stale_gates=stale_gates,
+                                            params=params, stale_reasons=stale_reasons))
+    if view.milestones:
+        # Each milestone's line, as last evaluated (D17; review of P2.5b,
+        # finding 5: SPINE_CONTRACT and the skill said `status` listed them, and
+        # it printed none).
+        _say(report.HUMAN["milestone"]["report_head"])
+        for milestone_ in view.milestones:
+            _say("  " + report.milestone_line(view, composed, milestone_))
+    for line in _stale_lines(resolution, registry, model_error=model_error):
+        _say(line)
+    # "last check run" (GLOSSARY §6: one invocation of `check` is a check run):
+    # `last check:` read as a noun for an evaluator one line under the claims.
+    if last_when:
+        age = (f" ({human_duration(last_age)} ago)" if last_age is not None and last_age >= 0
+               else " (in the future)" if last_age is not None else "")
+        _say(f"last check run: {last_when}{age}")
     else:
-        _say(f"model: {entry} — set one with `atompipe model --set-entry model/<thing>.py`")
+        _say("last check run: never")
+    for line in _note_lines(resolution):
+        _say(line)
+    if model_error:
+        entry = view.meta.model_entry or "(none recorded)"
+        _say(f"model: {entry} DOES NOT LOAD — {model_error.splitlines()[0]}")
 
     if installed:
         _say(f"packs: {', '.join(installed)} "
@@ -868,13 +1276,6 @@ def cmd_status(args: argparse.Namespace) -> int:
     elif available:
         _say(f"packs: none installed; {len(available)} available "
              f"({', '.join(available[:6])}) — `atompipe packs add <name>`")
-
-    if ledger.last_run.when:
-        age = _age(ledger.last_run.when)
-        _say(f"last sweep: {ledger.last_run.when} ({age}), tier {ledger.last_run.tier}, "
-             f"{human_duration(ledger.last_run.duration_s)}")
-    else:
-        _say("last sweep: never — `atompipe check`")
 
     # Mentioned only when the project has one: a line telling every project
     # without a site that it does not have a site is noise in the one command
@@ -896,217 +1297,1129 @@ def cmd_status(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------- #
+# --junit: unlinked first, written last
+# --------------------------------------------------------------------------- #
+class _JUnitDefault(str):
+    """`--junit` given with no PATH: `report.JUNIT_DEFAULT`, under the project root.
+
+    A `str` subclass so argparse can store it as the flag's `const` and the
+    command can still tell it from a PATH the user typed, which resolves against
+    the directory the command started in (`-C`, else the cwd) like any path
+    typed at a shell — git's `-C` rule. *Rejected:* comparing the value to
+    `JUNIT_DEFAULT` — a user who typed that exact string from a subdirectory
+    meant the subdirectory; a second `--junit-path` flag (spec §3.14) — two flags
+    for one file, and the bare one would still swallow a gate id.
+    """
+
+
+_JUNIT_DEFAULT = _JUnitDefault(report.JUNIT_DEFAULT)
+
+#: The suffix every `--junit PATH` must carry, and the message when it does not.
+#: What slipped through while designing the flag (cli:H7): `--junit` takes an
+#: OPTIONAL value and `gate selftest` takes gate ids positionally, so
+#: `gate selftest --junit bracket.deflection` parsed the gate id as the report's
+#: path, ran every control instead of the one named, and wrote XML to a file
+#: called `bracket.deflection`. No gate id ends in `.xml`; every JUnit consumer
+#: expects it to. *Rejected:* `--junit=PATH` only (argparse cannot require the
+#: `=`); a separate flag for the path (above).
+_JUNIT_SUFFIX = ".xml"
+_JUNIT_RULE = "--junit takes a path ending in .xml; put gate ids before it"
+
+
+def _junit_arg(args: argparse.Namespace) -> str | None:
+    """The `--junit` value, refused unless it ends in `.xml`. Called FIRST.
+
+    First, before anything reads the project: a refused value must stop the
+    command before it has run a gate or removed a file.
+    """
+    value = getattr(args, "junit", None)
+    if value is None:
+        return None
+    if not str(value).endswith(_JUNIT_SUFFIX):
+        raise AtompipeError(_JUNIT_RULE)
+    return value
+
+
+def _start(args: argparse.Namespace) -> str:
+    """The directory this command started in: `-C`, else the cwd."""
+    return os.path.abspath(getattr(args, "dir", None) or os.getcwd())
+
+
+def _junit_unlink(args: argparse.Namespace, value: str | None, *,
+                  root: str | None) -> str | None:
+    """Resolve the `--junit` target and remove whatever is there. Returns its path.
+
+    Called at the TOP of the command, before `_registry` and `_projection`, both
+    of which exit 2 on a broken pack or model. What slipped through while
+    designing this (cli:H7): "unlinked when the sweep starts" put the unlink after
+    them, so a crash left the previous run's all-green `junit.xml` on disk beside
+    a job that exited 2 — and a CI system renders the file, not the exit code. A
+    run that ends early now leaves no report at all, which every JUnit consumer
+    reads as missing, never as green.
+
+    The default resolves against `root` (the project, when there is one), an
+    explicit PATH against `_start`. Something at the path that cannot be removed
+    — a directory, a read-only parent — is refused before anything runs, rather
+    than discovered after the sweep, beside results nobody can then read.
+    """
+    if value is None:
+        return None
+    base = (root or _start(args)) if isinstance(value, _JUnitDefault) else _start(args)
+    path = os.path.abspath(os.path.join(base, value))
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise AtompipeError(
+            f"--junit {value}: cannot remove what is at {path} "
+            f"({exc.strerror or exc}); a report that cannot be replaced would be "
+            f"read as this run's") from exc
+    return path
+
+
+def _junit_write(path: str | None, render: Callable[[], str]) -> str | None:
+    """Write the report at the command's single exit; returns the path written.
+
+    `render` is called here, after the exit code exists, so the XML can only be
+    made from the code the command returns (spec §3.14: one exit code, one write).
+    Atomic (`atomic_write_text`): a reader never sees half a file.
+    """
+    if path is None:
+        return None
+    atomic_write_text(path, render())
+    return path
+
+
+# --------------------------------------------------------------------------- #
 # check
 # --------------------------------------------------------------------------- #
-def cmd_check(args: argparse.Namespace) -> int:
-    """Run the gates, record the run, and exit non-zero while anything critical blocks.
+#: Where a cached row's `cached` mark starts: `f"{line:<77} cached"` puts it at
+#: column 79, the transcript's column (spec §7). Readable in 80 columns, and the
+#: shape test pins `\s+cached$`, never the padding, so a row longer than the
+#: column still reads as cached. *Rejected:* a tab (renders per terminal); a
+#: changed tag such as `[fail]` for a cached FAIL (breaks every grep for `[FAIL]`).
+_CACHED_COLUMN = 77
 
-    The whole loop lives in this function: load the model, project it, load the
-    gates, sweep them at the requested tier, stream one line each as they land,
-    write the verdicts into the ledger, append the run to the history, then ask
-    `claims.blocking` whether a spend would be reckless.
+
+def _check_row_line(row: verdicts.SweepRow) -> str | None:
+    """How one sweep row streams, or None when it does not.
+
+    An executed row and a cached row that did not pass each print — an
+    unqualified evaluator's row does not: its qualification line follows the
+    summary (P2.3-D17); a cached pass does not — the inner loop is for what moved
+    or what is wrong, and five unchanged `[ok  ]` lines between you and the FAIL
+    you came for is the wall `_skip_digest` exists to collapse. Skips are that
+    digest's, after the summary — keyed on `Verdict.outcome`, never the flag:
+    what slipped through (P2.0 F-10), a verdict that said skipped AND errored
+    went to the digest under the quiet `[skip]` tag, with its skip reason, below
+    the plain skip; it is a crash, and streams as one.
+    """
+    verdict = row.verdict
+    if verdict.outcome == "skipped":
+        return None
+    if getattr(verdict, "unqualified", ""):
+        # Its qualification line follows the summary (`_qualification_lines`):
+        # an unqualified evaluator crashed nothing, and `[ERR ]` is a crash's
+        # tag (P2.3-D17). What slipped through P2.1's review: the count was
+        # fixed and this row was not — `[ERR ] <gate> : not admitted: …`.
+        return None
+    if row.cached:
+        if verdict.ok:
+            return None
+        return f"{verdict.render():<{_CACHED_COLUMN}} cached"
+    return verdict.render()
+
+
+def _row_outcome(verdict: Verdict) -> str:
+    """A sweep row's outcome for `check`'s tallies: `Verdict.outcome`, with an
+    evaluator refused at its version counted as `unqualified` — never errored.
+    GLOSSARY §2: a qualification is not an outcome; the refusal's verdict says
+    `error` only so that it is never ok (R-2). A pass outside its evaluator's
+    operating context is `outside-context` (P2.4-D22): not the evaluator's
+    refusal — qualified is "at its version", and outside its context it still
+    is — so never counted `unqualified` either."""
+    token = getattr(verdict, "unqualified", "") or ""
+    if token:
+        return "outside-context" if claims.outside_context(verdict) else "unqualified"
+    return verdict.outcome
+
+
+def _qualification_lines(rows: list[verdicts.SweepRow]) -> list[str]:
+    """`check`'s qualification lines (P2.3-D16): one for every unqualified
+    evaluator, on every check run, and one for every evaluator walked by the
+    mutation pass — not from a bundled pack — whose qualification ran in this
+    one. A bundled evaluator that qualified is counted in the `controls:` line
+    and printed nowhere here: up to 54 lines after an upgrade, none a person
+    acts on. *Rejected:* a line per qualification run; no lines (W7: the
+    walkthrough's moment in prose)."""
+    out = []
+    for row in rows:
+        admission = row.admission
+        facts = getattr(admission, "qualification", None) if admission is not None else None
+        outside = claims.outside_context(row.verdict)
+        if outside and facts is not None and admission.executed \
+                and facts.mutation is not None:
+            # A walked evaluator qualified in this run, whose pass lies outside
+            # its operating context: its qualification line, then the fact
+            # that keeps this pass from counting (P2.4).
+            out.append(report.qualification_line(row.verdict.gate, facts))
+        if getattr(row.verdict, "unqualified", ""):
+            out.append(report.verdict_line(row.verdict, facts))
+        elif facts is not None and admission.executed and facts.mutation is not None:
+            out.append(report.qualification_line(row.verdict.gate, facts))
+    return out
+
+
+def _limit_lines(view: Ledger, stale_gates: Iterable[str] = ()) -> list[str]:
+    """`check`'s warning lines (P2.4-D13, S-35): one per compared pair whose
+    evaluator judged against a limit of its own that is not its claim's — one
+    number in two places. On stdout, after the qualification lines: a warning
+    on stderr is one nobody reads in a captured run. Never a status. Current
+    verdicts only (`stale_gates` left out): a stale one's limit is its old
+    inputs', and the next check run settles it."""
+    said = report.HUMAN["acceptance"]
+    out = []
+    for found in claims.limit_disagreements(view, stale_gates=stale_gates):
+        unit = f" {found.units}" if found.units else ""
+        out.append(said["warning"].format(line=said["limits"].format(
+            gate=found.gate, limit=f"{report._num(found.limit)}{unit}", claim=found.claim,
+            condition=found.acceptance)))
+    return out
+
+
+def _controls_line(controls: Mapping[str, int]) -> str:
+    """`controls: N run, N preserved, N re-qualified` (GLOSSARY §9): run —
+    fixtures and gate ran; preserved — the records settled it; re-qualified —
+    the fixtures alone ran and every value held. The JSON keeps
+    `executed`/`cached`/`reverified` (P2.1-D12)."""
+    return report.HUMAN["qualification"]["controls"].format(
+        run=controls["executed"], preserved=controls["cached"],
+        requalified=controls["reverified"])
+
+
+def _check_summary(rows: list[verdicts.SweepRow], counts: Mapping[str, int], tier: int) -> str:
+    """`6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0` (spec §3.13).
+
+    What left the line, and why: the elapsed time (a mostly-cached sweep takes
+    no time worth reading, and `--json` keeps `duration_s`), and the model hash
+    (one hash of the projection said THAT something moved; which check it
+    touched is `status`'s `stale:` line now). FAIL, skipped, errored and
+    unqualified appear only when non-zero. What slipped through (review of
+    P2.1): an evaluator refused at its version was counted `errored` here and
+    in `--json` while `status` said `1 unqualified` — invariant 2's loud count
+    inflated by something that crashed nothing."""
+    outcomes = [_row_outcome(row.verdict) for row in rows]
+    line = (f"{len(rows)} gates: {counts.get('executed', 0)} executed, "
+            f"{counts.get('cached', 0)} cached — {outcomes.count('pass')} ok")
+    for outcome, word in (("fail", "FAIL"), ("skipped", "skipped"), ("error", "errored"),
+                          ("unqualified", report.HUMAN["lead"][claims.ClaimCause.UNQUALIFIED]),
+                          ("outside-context", report.HUMAN["context"]["tally"])):
+        if outcomes.count(outcome):
+            line += f", {outcomes.count(outcome)} {word}"
+    return f"{line} — tier {tier}"
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Run what moved, serve what did not, and exit non-zero while anything critical blocks.
+
+    **Affected-only** (D-05). `verdicts.sweep` is the loop: per selected gate,
+    in plan order (each gate after its prerequisites, `gates.plan`; `--only`
+    runs the named gates' prerequisites too), first the prerequisite rule — a
+    gate whose prerequisite is not established is not run and reads the
+    prerequisite skip, or its own crash, refusal or missing tool — then
+    availability, then admission (the gate's negative
+    control, run on a control-entry miss — S-05: a logger with a declared
+    control produced PROVEN rows because nothing here ever ran a control), then
+    the verdict cache (a Fresh entry is served, unless a crash at its inputs
+    superseded it; two outcomes at its inputs are served as `status`'s error and
+    never re-run — a run agrees with one of the two and settles nothing), then
+    the run. The sweep's notes (the writer's warnings) print as `note:` lines,
+    and are `notes` in `--json`. Every selected gate gets a row — executed,
+    cached, or refused — so `check --json` still lists `bracket.deflection` on a
+    fresh clone whose first check is all cache hits (cli:H1).
 
     Exit 1 on a blocking critical claim is the point of the command. It is not
     "exit 1 if a gate failed" — an UNCLAIMED, PENDING or BLOCKED critical claim
     blocks too, because none of them is evidence and all of them are routinely
     read as "no news is good news". That is what makes this usable as a pre-spend
-    gate and in CI.
+    gate and in CI. The claims are judged from `_resolved`'s view with this
+    sweep's rows laid over the gates it selected (`_swept`).
 
-    `--only` deliberately does NOT advance `last_run`. A filtered sweep leaves
-    most verdicts untouched, and advancing the recorded model hash would launder
-    every one of those older verdicts into "current" — the exact staleness lie
-    the hash exists to catch. So a filtered run records its history file, updates
-    the verdicts it actually produced, and leaves the staleness clock where it
-    was.
+    Flags, and what each writes:
+
+    * `--force` re-runs every selected gate AND its control, cache or no cache
+      (R-9): the inner loop may trust the committed cache, a money boundary
+      re-proves it, and CI runs the bracket this way. A forced run's row is what
+      the records resolve to with its entry filed: at tier 0 it re-proves the
+      cheap path, and never lays that PASS over a costlier tier's FAIL at the
+      same inputs (`verdicts._outranked`).
+    * `--no-record` is a dry sweep: nothing under `.atompipe/` but gate scratch in
+      `out/` — no cache or control entry, no obs, no remembered outcome, no
+      `last_check.json`, no index, and a legacy ledger migrates in memory only
+      (S-32: it used to write the ledger anyway and read its own fresh passes as
+      STALE, because the one global clock had not moved; there is no global
+      clock now).
+    * `--only` and `--tier` select as they always did; a filtered sweep writes
+      its entries but no `last_check.json` — a partial sweep's summary would
+      stand for the whole project's.
+    * Otherwise, after the sweep: `verdicts.write_last_check`, and the index is
+      rebuilt from the records. No run history (S-89: every recorded check
+      rewrote the tracked ledger and appended a tracked run file).
+
+    **`check` writes no record** (checkpoint 1.3). It used to re-sync every
+    parameter from the model, copy grounding back-references into parameters
+    and coverage into claims, and save the whole ledger — so a sweep rewrote
+    what humans edit (S-36, S-37; see `_migrate`'s section). The one record
+    write it may make is the one-time migration of a legacy `ledger.json`, under
+    the held lock and before anything reads the project (`_migrate`): the
+    records, the ignore blocks, `project.json` last, the legacy file renamed,
+    one stderr notice. A second check finds a migrated project and writes only
+    verdict entries and ignored scratch.
+
+    The clock is stamped ONCE (`now`): obs, remembered outcomes,
+    `last_check.json`, the migration's notice and the JUnit report carry the
+    same instant.
+
+    `--junit [PATH]` writes the same judgement as JUnit XML (`report.render_junit`).
+    The target is removed before anything can fail and written at the one exit,
+    from the one exit code. What slipped through while designing it (cli:H7):
+    this function returned from four places, and a report written at one of them
+    carries a judgement the others never made — so the code is computed once,
+    below, and every path out prints from it.
     """
+    junit_arg = _junit_arg(args)
+    junit = _junit_unlink(args, junit_arg,
+                          root=store.find_root(getattr(args, "dir", None)))
     root = _root(args)
     tier = int(args.tier)
     only = list(args.only) if args.only else None
+    record = not args.no_record
+    force = bool(getattr(args, "force", False))
+    now = utcnow_iso()
 
     with _lock(root):
-        ledger = store.load(root)
+        # First, under the lock and before anything reads the project: a legacy
+        # ledger migrates here, once (in memory under `--no-record`).
+        ledger = _migrate(root, apply=record, now=now)
         registry, _ = _registry(root, ledger, strict=True)
         model, projection = _projection(root, ledger)
-        # Refresh the ledger's parameter records from the model before sweeping.
-        # The model owns every value; the ledger owns the provenance accumulated
-        # around it (rejected alternatives, grounding, which gates protect it).
-        # Without this the ledger's params stay empty forever and `atompipe why`
-        # — the whole point of recording provenance — can never find anything.
-        # ONE call, to `modelio.sync_params`: see the note above `_link_grounding`
-        # for the second implementation that used to run here and the field it ate.
-        if model is not None:
-            modelio.sync_params(ledger, model)
-        # After the sync, not before: a parameter that only just appeared in the
-        # ledger is exactly the one whose evidence has been waiting to attach.
-        _link_grounding(ledger)
-        _refresh_coverage(ledger, registry)
         ctx = _context(root, ledger, model, projection, tier, quiet=args.json)
 
         if projection is None and registry.specs():
-            _warn("warning: no model entry recorded — gates that read ctx.params "
-                  "will error. `atompipe model --set-entry model/<thing>.py`")
+            _warn(f"warning: {_no_entry(root)} — until then, gates that read "
+                  f"ctx.params will error")
 
-        # Record which parameters each gate reads, so `Param.gates` stops being a
-        # field nothing ever assigned. `run_all` may `dataclasses.replace` the
-        # context to reconcile its tier; that copies the field by reference, so
-        # the same recorder survives the swap.
-        reads = _ParamReads(ctx.params)
-        ctx.params = reads
-        param_reads: dict[str, set[str]] = {}
-
-        def _landed(verdict: Verdict) -> None:
-            # `run_all` calls this the instant a gate returns, before the next one
-            # starts, which is the whole reason the attribution is per-gate and
-            # not one undifferentiated pile of keys at the end of the sweep.
-            param_reads[verdict.gate] = reads.take()
-            # Only verdicts that RAN stream. Skips are collapsed by reason after
-            # the sweep (see `_skip_digest`) — they are the rows that used to bury
-            # the one FAIL the command was run for.
-            if not args.json and not verdict.skipped:
-                _say(verdict.render())
+        def _landed(row: verdicts.SweepRow) -> None:
+            # `sweep` calls this the instant a gate's row exists, before the next
+            # gate starts: a tier-2 sweep streams, it does not go quiet for minutes.
+            line = None if args.json else _check_row_line(row)
+            if line is not None:
+                _say(line)
 
         started = time.perf_counter()
-        verdicts = gates.run_all(registry, ctx, max_tier=tier, only=only,
-                                 on_verdict=_landed)
+        result = verdicts.sweep(root, registry, ctx, projection=projection, ledger=ledger,
+                                max_tier=tier, only=only, force=force, record=record,
+                                now=now, on_row=_landed)
         elapsed = time.perf_counter() - started
 
-        swept = {verdict.gate for verdict in verdicts}
-        for verdict in verdicts:
-            ledger.upsert_verdict(verdict)
-        _refresh_param_gates(ledger, param_reads, replace=only is None)
+        view, resolution = _resolved(root, ledger, registry, projection, "", now=now,
+                                     model=model, sweep=result)
+        if record:
+            # `params` is the parameter view (1.3): the model's value and where it
+            # lives, and what lost in both homes — beside the statuses, so the
+            # agent's second read has the numbers `why` would print. It was `{}`
+            # from 1.2 until the view existed.
+            views = modelio.param_view(
+                ledger, model, read_sets=_registered_reads(resolution.read_sets, registry))
+            verdicts.write_last_check(root, result, resolution, now=now,
+                                      params={view.name: view.to_dict() for view in views})
+            # The index, still under the lock, so the sweep that just migrated a
+            # legacy project leaves it indexed before any reader can look.
+            # `main` touches it again after the command; unchanged, that writes
+            # nothing.
+            _touch_index(root)
 
-        run_meta = RunMeta(
-            when=utcnow_iso(),
-            tier=tier,
-            model_hash=modelio.model_hash(projection) if projection else "",
-            inputs_hash=artifacts.inputs_hash(ledger),
-            spine_version=__version__,
-            duration_s=round(elapsed, 4),
-        )
-        run_path = ""
-        if not args.no_record:
-            run_path = store.record_run(root, verdicts, run_meta)
-            if only is None:
-                ledger.last_run = run_meta
-            store.save(root, ledger)
+        stale_gates = resolution.stale_gates
+        blockers = claims.blocking(view, registry, stale_gates=stale_gates)
+        summary = claims.summarise(view, registry, stale_gates=stale_gates)
+        composed = claims.compositions(view, registry=registry, stale_gates=stale_gates)
 
-        stale, stale_why = _staleness(ledger, projection)
-        blockers = claims.blocking(ledger, registry, stale=stale)
-        summary = claims.summarise(ledger, registry, stale=stale)
-
-    ran = [v for v in verdicts if v.ok]
-    failed = [v for v in verdicts if not v.ok and not v.skipped and not v.error]
-    skipped = [v for v in verdicts if v.skipped]
-    errored = [v for v in verdicts if v.error]
-    carried = [v for v in ledger.verdicts if v.gate not in swept]
+    rows = list(result.rows)
+    selected = {row.verdict.gate for row in rows}
+    # Registered gates this sweep did not select (above the ceiling, outside
+    # `--only`) that still have an effective verdict. An unregistered gate's row
+    # is not "carried over" by anything: it is an orphan, stale by definition,
+    # and `doctor` names it.
+    registered = set(registry.ids())
+    carried = [v for v in view.verdicts if v.gate not in selected and v.gate in registered]
+    stale_reasons = _stale_reasons(resolution)
+    counts = {
+        "ran": sum(1 for row in rows if row.verdict.ok),
+        "failed": sum(1 for row in rows if row.verdict.outcome == "fail"),
+        "skipped": sum(1 for row in rows if row.verdict.outcome == "skipped"),
+        "errored": sum(1 for row in rows if _row_outcome(row.verdict) == "error"),
+        "unqualified": sum(1 for row in rows if _row_outcome(row.verdict) == "unqualified"),
+        "outside_context": sum(1 for row in rows
+                               if _row_outcome(row.verdict) == "outside-context"),
+        "executed": int(result.counts.get("executed", 0)),
+        "cached": int(result.counts.get("cached", 0)),
+        "controls": {key: int(result.controls.get(key, 0))
+                     for key in ("executed", "cached", "reverified")},
+    }
 
     # A project with no claims has proven nothing, and this command's exit code is
     # the only part of it CI reads. It used to print "an empty ledger is not a
     # clean bill of health" and then return 0 — a message and a return code
     # disagreeing, with the machine believing the one that laundered. Zero
     # blocking claims out of zero claims is not readiness, so it is not a zero.
-    ready = bool(ledger.claims) and not blockers
+    ready = bool(view.claims) and not blockers
+    # THE exit code. Every line below prints from it and the JUnit report is
+    # rendered from it; nothing after this point decides anything.
+    code = 0 if ready else 1
+
+    # The sweep's own notes — the writer's warnings, entries it ignored. They
+    # were collected and printed nowhere: a forced run that wrote a FAIL beside
+    # its PASS at one rho said nothing, and `doctor` was the first to know (the
+    # review). Each once, in the order they arose.
+    notes = [str(note) for note in dict.fromkeys(result.notes)]
+
+    spine = verdicts.spine_digest()
+    written = _junit_write(junit, lambda: report.render_junit(
+        view, [row.verdict for row in rows], registry, tier=tier, ready=ready,
+        exit_code=code, when=now, not_run=result.not_run,
+        cached={row.verdict.gate for row in rows if row.cached}, spine=spine,
+        stale_gates=stale_gates, stale_reasons=stale_reasons))
 
     if args.json:
         _dump({
             "tier": tier,
             "only": only,
-            "verdicts": [_verdict_row(v) for v in verdicts],
-            "counts": {"ran": len(ran), "failed": len(failed),
-                       "skipped": len(skipped), "errored": len(errored)},
-            "carried_over": [v.gate for v in carried],
+            "verdicts": [_verdict_row(row.verdict, cached=row.cached, fresh=row.fresh,
+                                      stale_reason=row.stale_reason, executed=row.executed)
+                         for row in rows],
+            "counts": counts,
+            "carried_over": [_resolved_row(v, resolution) for v in carried],
             "summary": summary,
+            # Record order, as before (machine, diff-stable); each row gains the
+            # words beside its kept enum `status` (P2.1-D12).
             "blocking": [{"claim": claim.id, "status": str(status),
-                          "statement": claim.statement} for claim, status in blockers],
+                          "statement": claim.statement,
+                          **report.status_view(composed[claim.id], view, claim,
+                                               stale_reasons=stale_reasons)}
+                         for claim, status in blockers],
+            # `ready` keeps its meaning — nothing stops this check run — and
+            # `all_required_checked` is *ready* in GLOSSARY §4's sense, beside
+            # it (critique of the P2.1 design: a reader of `ready` alone read a
+            # project waiting for an article as ready).
             "ready": ready,
-            "claims_recorded": len(ledger.claims),
-            "stale": stale,
-            "stale_reason": stale_why,
-            "run": rel(run_path, root) if run_path else "",
-            "model_hash": run_meta.model_hash,
-            "duration_s": run_meta.duration_s,
+            "all_required_checked": bool(summary["all_required_checked"]),
+            "claims_recorded": len(view.claims),
+            # Stale BEFORE the sweep (cli:H19): after a recorded full sweep
+            # everything it touched is current by construction, so "stale" read
+            # afterwards could only ever say False.
+            "stale": bool(result.stale_before),
+            "stale_reason": "; ".join(f"{gid}: {why}"
+                                      for gid, why in result.stale_before.items()),
+            # No run history to point at (S-89); kept as null so a reader that
+            # looked for the key finds it, and finds nothing there (SF PD-13).
+            "run": None,
+            "model_hash": modelio.model_hash(projection) if projection else "",
+            "duration_s": round(elapsed, 4),
+            "spine": spine,
+            "junit": written,
+            "notes": notes,
+            # Additive (P2.4-D13): the compared pairs whose two limits part.
+            "limit_disagreements": [found._asdict()
+                                    for found in claims.limit_disagreements(
+                                        view, stale_gates=stale_gates)],
+            # Additive (P2.1-D12): each evaluator's qualification as this check
+            # judged it — the line in words, the judge's token, and the state.
+            # The token is the QUALIFICATION's alone: a pass outside its
+            # operating context carries `context:outside` on the verdict, a fact
+            # about this pass's inputs, and its evaluator is qualified (review of
+            # P2.4: the row read `state: admitted`, its line `→ qualified`, and a
+            # non-empty token a reader took for a refusal). The context fact is
+            # the verdict row's `unqualified` and `counts.outside_context`.
+            "qualifications": [
+                {"gate": row.verdict.gate,
+                 "line": report.qualification_line(row.verdict.gate,
+                                                   row.admission.qualification),
+                 "token": ("" if claims.outside_context(row.verdict)
+                           else row.verdict.unqualified or ""),
+                 "state": row.admission.state}
+                for row in rows
+                if row.admission is not None and row.admission.qualification is not None],
+            # P2.5a-D16: the rebuild prediction, additive.
+            "rebuild": summary["rebuild"],
         })
-        return 0 if ready else 1
+        return code
 
-    bits = [f"{len(verdicts)} gates", f"{len(ran)} ok"]
-    if failed:
-        bits.append(f"{len(failed)} FAIL")
-    if skipped:
-        bits.append(f"{len(skipped)} skipped")
-    if errored:
-        bits.append(f"{len(errored)} errored")
-    _say(f"{', '.join(bits)} in {human_duration(elapsed)} — tier {tier}"
-         + (f", model {run_meta.model_hash}" if run_meta.model_hash else ""))
+    _say(_check_summary(rows, result.counts, tier))
+    if counts["controls"]["executed"] or counts["controls"]["reverified"]:
+        _say(_controls_line(counts["controls"]))
+    for line in _qualification_lines(rows):
+        _say(line)
+    for line in _limit_lines(view, stale_gates):
+        _say(line)
+    for note in notes:
+        _say(f"note: {note}")
 
     # The skips, one line per distinct reason instead of one per gate. They come
     # after the summary and before the blockers on purpose: the summary already
     # carries the count, and the thing you must act on has to stay at the bottom
     # of the screen where the eye lands.
-    for line in _skip_digest(skipped):
+    for line in _skip_digest([row.verdict for row in rows
+                              if row.verdict.outcome == "skipped"]):
         _say(line)
 
     if carried:
         shown = ", ".join(v.gate for v in carried[:4])
         more = f", +{len(carried) - 4}" if len(carried) > 4 else ""
-        _say(f"note: {len(carried)} verdict(s) predate this sweep ({shown}{more}) — "
-             f"they were not re-run")
+        stale_n = sum(1 for v in carried if v.gate in stale_gates)
+        _say(f"note: {len(carried)} gate(s) outside this sweep keep their last verdict "
+             f"({shown}{more})" + (f" — {stale_n} of them invalidated" if stale_n else ""))
 
-    if not ledger.claims:
+    if not view.claims:
         # "ready" on a project that has never stated what must be true is the
         # laundering this whole tool exists to refuse: zero blocking claims
         # out of zero claims is not evidence of anything. Non-zero, so that the
         # exit code says the same thing this line says.
-        _say("no claims recorded, so nothing was checked — an empty ledger is not a "
-             "clean bill of health. `atompipe claim add --statement ...`")
-        return 1
+        _say("no claims recorded, so nothing was evaluated — a project with no claims "
+             "is not ready. Write the first as claims/C1.json: a statement and an "
+             "acceptance")
+    elif not blockers:
+        # `ready:` only when every required claim reads Checked (GLOSSARY §4);
+        # otherwise what stands between the project and it. What slipped through:
+        # `ready: no critical claim is blocking` printed while a claim waited
+        # for an article and an assumption had no owner.
+        _say(report.not_ready_line(view, composed))
+    else:
+        # In severity order (P2.1-D16): what slipped through (P2.0 F-2), record
+        # order put a missing tool's `[skip ]` above a crash's row.
+        _say(f"BLOCKING — {len(blockers)} critical claim(s) must not be spent against:")
+        for claim in report.in_severity(view, composed, [c for c, _ in blockers]):
+            found = composed[claim.id]
+            _say(_blocking_line(claim, found.status,
+                                _blocking_reason(view, claim, found.status,
+                                                 stale=stale_reasons),
+                                errored=found.errored))
+    # The rebuild prediction (P2.5a-D16), after the claim rows: one line per
+    # article whose design moved — a prediction, never a refusal.
+    for found in claims.rebuild(view):
+        _say(report.rebuild_line(found))
+    return code
 
-    if not blockers:
-        _say("ready: no critical claim is blocking "
-             "(physical and assumed claims are still listed in `atompipe report`)")
-        return 0
 
-    _say(f"BLOCKING — {len(blockers)} critical claim(s) must not be spent against:")
-    for claim, status in blockers:
-        reason = _blocking_reason(ledger, claim, status)
-        _say(f"{_tag(str(status)[:4])} {claim.id} {claim.statement} — {reason}")
-    return 1
+def _blocking_line(claim: Claim, status: ClaimStatus, reason: str, *,
+                   errored: bool = False) -> str:
+    """`[FAIL ] C1 <statement> — <reason>`: one blocking claim, as `check` prints it.
+
+    The tag is `report.status_tag`, the one spelling `status`, `claim list` and the
+    readiness report already use. What slipped through (S-69): this line built its
+    tag from the first four letters of the status, so the same claim read
+    `[fail]` here and `[FAIL ]` in `status`, and a claim with no gate read `[uncl]`
+    here and `[gap  ]` there — two vocabularies one screen apart, and a reader who
+    had to learn that they meant the same thing. *Rejected:* keeping `_tag`'s
+    four-wide field so `check`'s lines align with its verdict lines above them:
+    those are GATE outcomes (four states, `Verdict.render`), these are CLAIM
+    statuses (ten), and squeezing ten into four is how `uncl` got invented.
+    `errored` is the claim's crash mark: its tag is `[SKIP ]`, Failing's tone
+    (invariant 2, P2.1).
+    """
+    return (f"{report.status_tag(status, errored=errored)} {claim.id} "
+            f"{report._one(claim.statement)} — {reason}")
 
 
-def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus) -> str:
-    """The shortest true sentence about why one claim blocks.
+def _blocking_reason(ledger: Ledger, claim: Claim, status: ClaimStatus, *,
+                     stale: Mapping[str, str] | None = None) -> str:
+    """The shortest true sentence about why one claim blocks: `report.reason`,
+    in full, for the claim composed over `ledger` — the one producer every
+    channel's reason comes from (P2.1-D15; `ReasonsAgree` holds this and
+    `report._terminal_reason` equal).
 
     A failing gate's own detail beats any phrasing invented here: it carries the
     measured value and the limit, which is what the reader is about to go and
-    change. Only when no verdict speaks does this fall back to naming the status.
+    change. THE REASON MUST MATCH THE STATUS: several gates can cover one claim,
+    and the first non-passing one is not necessarily the one that set it — a
+    claim covered by a gate that FAILED and a pack gate that SKIPPED for a
+    missing parameter cites the measured fail (`claims.explaining_verdict`'s
+    ranking, which `compose` shares). That ranking used to live here, privately,
+    and the fix never reached `status` (S-68); and the fallback words were the
+    STATUS's, so a crash moved to Skipped alone would have read "its gates could
+    not run here (missing tooling)" (P2.0 F-8). `status` must be what `compose`
+    says for the claim; the words are `reason`'s.
 
-    THE REASON MUST MATCH THE STATUS. Several gates can cover one claim, and the
-    first non-passing one is not necessarily the one that set the status: a claim
-    covered by a project gate that FAILED and a pack gate that SKIPPED for a
-    missing parameter was reporting `[fail] C1 ... — pack.gate: the projection
-    does not provide ...`, which sends the reader to look for a missing parameter
-    when the real answer is that their part sags 0.7 mm. So a FAIL cites a gate
-    that actually ran and failed, in preference to one that skipped or errored.
+    `stale` is `{gate: why}` for the gates whose verdict is not current (the
+    resolution's). A FAIL whose inputs moved stays FAIL (D-08) and says so —
+    `gate : body (invalidated: why)` — and a Stale claim names its moved gate
+    with what moved.
     """
-    covering = list(claims.covering_verdicts(claim, ledger.verdicts))
-    # Real measurements first: a gate that RAN and failed explains a FAIL. Then
-    # errors (a crash is louder than a missing tool), then skips.
-    ranked = (
-        [v for v in covering if not v.ok and not v.skipped and not v.error]
-        + [v for v in covering if v.error]
-        + [v for v in covering if v.skipped]
-    )
-    for verdict in ranked:
-        body = verdict.detail or verdict.error or verdict.skip_reason
-        return f"{verdict.gate}: {body}" if body else f"{verdict.gate} did not pass"
-    if status is ClaimStatus.UNCLAIMED:
-        return "no gate covers it — `atompipe gap --propose`"
-    if status is ClaimStatus.PENDING:
-        return "its gates have never run"
-    if status is ClaimStatus.BLOCKED:
-        return "its gates could not run here (missing tooling)"
-    if status is ClaimStatus.STALE:
-        return "it passed against a model that has since moved"
-    return str(status)
+    stale = dict(stale or {})
+    found = claims.compose(claim, ledger.verdicts, stale_gates=set(stale))
+    return report.reason(found, ledger, claim, cut=False, stale_reasons=stale)
+
+
+def _status_views(view: Ledger, composed: Mapping[str, Any],
+                  stale_reasons: Mapping[str, str]) -> dict[str, dict[str, Any]]:
+    """`{claim id: {key, word, cause, reason, errored}}` — the words beside the
+    kept enum map (P2.1-D12), one `report.status_view` per claim."""
+    by_id = {claim.id: claim for claim in view.claims}
+    return {cid: report.status_view(found, view, by_id[cid], stale_reasons=stale_reasons)
+            for cid, found in composed.items()}
+
+
+def _stale_reasons(resolution: verdicts.Resolution) -> dict[str, str]:
+    """`{gate: why}` for every gate the resolution calls not current — the words
+    `report.reason` puts after `invalidated:` (`config.bed_xy 220.0 -> 250.0`)."""
+    return {gid: (resolution.rows[gid].stale_reason if gid in resolution.rows else "")
+            for gid in resolution.stale_gates}
+
+
+# --------------------------------------------------------------------------- #
+# export: the boundary that spends (P2.5b)
+# --------------------------------------------------------------------------- #
+def _load_generator(root: str, ref: str) -> Callable[..., Any]:
+    """The function a milestone's ``generator`` names, loaded as a project gate
+    module is (``modelio.load_source_module``, the project root on ``sys.path``
+    for the load): the bytes on disk are the bytes that run, and its code
+    closure is recorded — the article's code half (P2.5b-D12)."""
+    path, name = store.generator_parts(ref)
+    full = os.path.join(root, *path.split("/"))
+    if not os.path.isfile(full):
+        raise AtompipeError(f"{path} does not exist")
+    salt = short_hash(os.path.abspath(full))
+    stem = re.sub(r"\W", "_", os.path.splitext(os.path.basename(full))[0]) or "generator"
+    sys.path.insert(0, root)
+    try:
+        module = modelio.load_source_module(full, name=f"atompipe_generator_{stem}_{salt}",
+                                            roots=[root])
+    except Exception as exc:                              # noqa: BLE001 - project code
+        first = (str(exc).strip().splitlines() or [type(exc).__name__])[0]
+        raise AtompipeError(f"{path}: {first}") from None
+    finally:
+        try:
+            sys.path.remove(root)
+        except ValueError:
+            pass
+    fn = getattr(module, name, None)
+    if not callable(fn):
+        raise AtompipeError(f"{path} has no function {name}")
+    return fn
+
+
+def _export_list(root: str, ledger: Ledger, *, as_json: bool) -> int:
+    """`atompipe export`: every milestone's line, as last evaluated — the cache's
+    view, nothing re-run (critique 17 of the P2.5b design: the head says so, and
+    `export <m> --dry-run` is the boundary's)."""
+    registry, _problems = _registry(root, ledger, strict=False)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    composed = claims.compositions(view, registry=registry,
+                                   stale_gates=resolution.stale_gates)
+    said = report.HUMAN["milestone"]
+    declared = list(view.milestones)
+    if as_json:
+        summary = claims.summarise(view, registry, stale_gates=resolution.stale_gates)
+        _dump({"milestones": summary["milestones"]})
+        return 0
+    if not declared:
+        _say(said["none"])
+        return 0
+    _say(said["list_head"].format(n=len(declared),
+                                  milestones=_plural_word(len(declared), "milestone")))
+    for milestone in declared:
+        line = report.milestone_line(view, composed, milestone)
+        mine = [e for e in view.exports if e.milestone == milestone.id]
+        if mine:
+            last = mine[-1]
+            line += said["last_export"].format(
+                article=report.article12(last.article), who=report._one(last.who),
+                when=str(last.when)[:10])
+        _say(f"  {line}")
+    return 0
+
+
+def _plural_word(n: int, one: str) -> str:
+    return one if n == 1 else one + "s"
+
+
+def _proceed_refusal(name: str, marker: str, isatty: bool) -> str:
+    said = report.HUMAN["export"]
+    why = (said["proceed_agent"].format(marker=marker) if marker
+           else said["proceed_pipe"] if not isatty else "")
+    return said["proceed_shell"].format(m=name, why=why)
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    """`atompipe export [<milestone>] [--dry-run] [--proceed --why TEXT]` — the
+    boundary that spends (P2.5b; METHOD rule 4; R-9). One code path for both
+    modes (D-15: `--dry-run` is `/ready`), in order:
+
+    0. Refused before anything runs: `--proceed` with `--dry-run`; `--proceed`
+       from an agent session or a pipe, or with no `--why` (exit 2). Written:
+       no git identity, a legacy project (exit 2); under `--dry-run` each is a
+       refusal it says it would make (critique 21 of the design).
+    1. Load; the milestone (exit 2 naming the declared ones when absent).
+    2. Under the build lock, the re-run: `check --force --only <closure>`'s
+       sweep at the top tier (`verdicts.sweep(force=True, max_tier=3)`), every
+       evaluator a required claim rests on with its prerequisites and both
+       controls; filed as `check --force` files it, except under `--dry-run`.
+    3. Judged on the RE-EXECUTED view (`_resolved(sweep=…)`, the view `check`
+       builds): *ready* (`claims.unresolved`) and the disagreements (D7).
+    4. Only with no refusal — or only unresolved ones and `--proceed`: the
+       generator, traced (`verdicts.export_article`), the package built aside,
+       and the inputs held: an input the judgment stood on that moved while the
+       package was built refuses it (critique 4).
+    5. `--dry-run`: print, remove the scratch, exit. Written: the person's
+       decision typed (`--proceed`), the package swapped in, the export record
+       appended (`store.append_sealed`), sealed and chained.
+
+    Exit 0 written or would write (or the list); 1 refused or would refuse; 2
+    a usage or record error. What slipped through without it: one implicit
+    spend, so the page said ready whenever nothing stopped `check` (S-60), and
+    a forged cache entry was served Checked at the one place it costs money."""
+    root = _root(args)
+    said = report.HUMAN["export"]
+    name = getattr(args, "milestone", None)
+    if not name:
+        return _export_list(root, _load(root), as_json=args.json)
+    dry = bool(args.dry_run)
+    proceed = bool(args.proceed)
+    environ = dict(os.environ)
+    isatty = bool(sys.stdin and sys.stdin.isatty())
+    marker = _agent_marker(environ)
+    if proceed and dry:
+        raise AtompipeError(said["proceed_dry"])
+    if proceed and (marker or not isatty):
+        raise AtompipeError(_proceed_refusal(name, marker, isatty))
+    if proceed and not str(args.why or "").strip():
+        raise AtompipeError(said["proceed_why"])
+    now = utcnow_iso()
+    preconditions: list[milestones.Refusal] = []
+    legacy = store.is_legacy(root)
+    who = vcs.ident(root)
+    if legacy:
+        if not dry:
+            raise AtompipeError(said["legacy"])
+        preconditions.append(milestones.Refusal("precondition", "legacy", said["legacy"]))
+    if not who:
+        if not dry:
+            raise AtompipeError(said["identity"])
+        preconditions.append(milestones.Refusal("precondition", "identity", said["identity"]))
+    ledger = _load(root)
+    milestone = ledger.milestone(name)
+    if milestone is None:
+        declared = [m.id for m in ledger.milestones]
+        raise AtompipeError(said["no_milestone"].format(
+            name=name, declared=said["declared"].format(names=", ".join(declared))
+            if declared else said["none_declared"]))
+    if not dry:
+        # The marked ignore lines first (D17): `out/` is ignored before a byte
+        # of a package lands in it, on a project migrated before P2.5b too.
+        store.ensure_ignore_blocks(root)
+
+    # The scratch is created, and removed, only under the lock: a run refused
+    # by the lock never touches it. What slipped through (review of P2.5b,
+    # finding 8): the `finally` that removed it wrapped the lock, so a dry run
+    # the lock refused deleted the running one's package half way, and that one
+    # refused with a false "generator errored".
+    with _lock(root):
+        scratch = milestones.scratch_dir(root, name, dry)
+        try:
+            return _export_locked(args, root, ledger, milestone, now=now, dry=dry,
+                                  proceed=proceed, who=who, isatty=isatty, marker=marker,
+                                  environ=environ, scratch=scratch,
+                                  preconditions=preconditions)
+        finally:
+            if os.path.exists(scratch):
+                shutil.rmtree(scratch, ignore_errors=True)
+
+
+def _export_locked(args: argparse.Namespace, root: str, ledger: Ledger, milestone: Any, *,
+                   now: str, dry: bool, proceed: bool, who: str, isatty: bool, marker: str,
+                   environ: Mapping[str, str], scratch: str,
+                   preconditions: list) -> int:
+    said = report.HUMAN["export"]
+    name = milestone.id
+    records_before = store.records_digest(root)
+    registry, _problems = _registry(root, ledger, strict=True)
+    model, projection, model_error = _projection_safe(root, ledger)
+    before = verdicts.resolve(root, registry, projection, ledger, model_error=model_error,
+                              now=now, model=model)
+    closure = milestones.closure(ledger, registry, milestone)
+    result = None
+    if closure and projection is not None:
+        ctx = _context(root, ledger, model, projection, int(Tier.EXTERNAL), quiet=True)
+        result = verdicts.sweep(root, registry, ctx, projection=projection, ledger=ledger,
+                                max_tier=int(Tier.EXTERNAL), only=closure, force=True,
+                                record=not dry, now=now)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error, now=now,
+                                 model=model, sweep=result)
+    composed = claims.compositions(view, registry=registry,
+                                   stale_gates=resolution.stale_gates)
+    found = milestones.disagreements(before, result, set(closure)) if result is not None \
+        else []
+    extra = list(preconditions)
+    if closure and projection is None:
+        # Nothing could re-run: say why, as a refusal no decision covers
+        # (review of P2.5b, finding 11: the boundary said "no evaluator settles
+        # a claim" and refused on the cache's statuses, which `--proceed`
+        # covers — a spend over evaluators that never ran).
+        extra.append(milestones.Refusal("model", "model", said["model_broken"].format(
+            n=len(closure), m=name,
+            why=report._trunc(report._one(model_error or "no model entry"), 160))))
+    judged = milestones.judge(view, composed, milestone, disagreements=found, extra=extra,
+                              decided=proceed)
+    unresolved_ = [r for r in judged.refusals if r.kind == "unresolved"]
+
+    # 4. the generator and the package — only where the export may write.
+    article: dict = {}
+    package = None
+    carried: dict = {}
+    if judged.writes:
+        built = _export_build(root, ledger, milestone, view, registry, composed, projection,
+                              model, model_error, resolution, scratch, now=now)
+        if isinstance(built, milestones.Refusal):
+            extra.append(built)
+        else:
+            article, package, carried = built
+            moved = _inputs_moved(root, records_before, registry, projection, ledger, model,
+                                  result, article)
+            if moved:
+                extra.append(milestones.Refusal("package", "inputs", said["package_moved"].format(
+                    what=moved, m=name)))
+        if not isinstance(built, milestones.Refusal):
+            for kind, rel_path in milestones.package_problems(root, name, ledger.exports):
+                key = "package_foreign" if kind == "foreign" else "package_edited"
+                newest = [e for e in ledger.exports if e.milestone == name]
+                extra.append(milestones.Refusal("package", rel_path, said[key].format(
+                    m=name, file=rel_path,
+                    package=report.article12((newest[-1].package or {}).get("hash", ""))
+                    if newest else "")))
+        judged = milestones.judge(view, composed, milestone, disagreements=found,
+                                  extra=extra, decided=proceed)
+        if not judged.writes:
+            article, package = {}, None
+
+    lines = _export_lines(view, composed, milestone, result, found, judged,
+                          unrunnable=len(closure) if closure and projection is None else 0)
+    decision = None
+    decided_line = ""
+    if judged.writes and proceed:
+        if unresolved_:
+            groups = report._groups(view, composed, [view.claim(r.subject)
+                                                     for r in unresolved_])
+            if dry:
+                pass
+            else:
+                answer = _ask(said["proceed_prompt"].format(groups=groups, m=name), lines)
+                if answer is None or answer.strip() != name:
+                    typed = "nothing" if not (answer or "").strip() else repr(answer.strip())
+                    raise AtompipeError(said["typed"].format(typed=typed, m=name))
+                decision = {"claims": [{"id": r.subject,
+                                        "status": str(composed[r.subject].status),
+                                        "cause": str(composed[r.subject].cause.value)}
+                                       for r in unresolved_],
+                            "why": str(args.why)}
+                decided_line = said["decided"].format(who=report._one(who), groups=groups,
+                                                      why=report._one(args.why))
+        else:
+            decided_line = said["proceed_nothing"]
+    written = False
+    if judged.writes and package is not None and not dry:
+        channel = (_channel(isatty, environ, name if decision is not None else None, name)
+                   if (marker or not isatty or decision is not None) else "interactive")
+        entry = _export_entry(view, composed, milestone, result, registry, resolution,
+                              article, package, decision, now=now, who=who, channel=channel)
+        # The record is appended inside the swap, which takes the new package
+        # back out if the append raises (review of P2.5b, finding 9).
+        milestones.swap_package(root, name, scratch, record=lambda: store.append_sealed(
+            root, "exports", name, "exports", entry))
+        written = True
+
+    reasons = "; ".join(r.reason for r in judged.refusals
+                        if r.kind not in milestones.COVERED or not (proceed and judged.writes))
+    if judged.writes and package is not None:
+        args_out = dict(path=f"{store.PACKAGES_NAME}/{name}", article=report.article12(article),
+                        package=report.article12(package.hash), n=len(package.files),
+                        files=_plural_word(len(package.files), "file"), m=name)
+        outcome = said["written" if written else "would_write"].format(**args_out)
+    else:
+        outcome = said["would_refuse" if dry else "refused"].format(reasons=reasons)
+    card = (milestones.test_card(view, composed, milestone, article.get("hash", ""),
+                                 view.exports) if article else [])
+    if args.json:
+        _dump(_export_json(view, composed, milestone, judged, result, found, article, package,
+                           decision, dry=dry, written=written, card=card,
+                           exports=view.exports))
+    else:
+        for line in lines:
+            _say(line)
+        if decided_line:
+            _say(decided_line)
+        _say(outcome)
+        for line in card:
+            _say(line)
+    return 0 if judged.writes and package is not None else 1
+
+
+def _ask(prompt: str, rows: Iterable[str]) -> str | None:
+    """The go-ahead's prompt, on stderr — after the lines the person reads —
+    and the line they typed, or ``None`` at end of input."""
+    for row in rows:
+        print(row, file=sys.stderr)
+    sys.stderr.write(prompt)
+    sys.stderr.flush()
+    try:
+        line = sys.stdin.readline()
+    except OSError:
+        return None
+    return line.rstrip("\r\n") if line else None
+
+
+def _export_build(root: str, ledger: Ledger, milestone: Any, view: Ledger, registry: Any,
+                  composed: Mapping[str, Any], projection: Any, model: Any, model_error: str,
+                  resolution: Any, scratch: str, *, now: str) -> Any:
+    """Run the generator traced into ``scratch`` and build the package there:
+    ``(article, package, carried)``, or the ``generator`` refusal."""
+    said = report.HUMAN["export"]
+    name = milestone.id
+    if os.path.exists(scratch):
+        shutil.rmtree(scratch)
+    os.makedirs(scratch)
+    if projection is None:
+        return milestones.Refusal("generator", milestone.generator or name,
+                                  said["generator_model"].format(
+                                      why=report._trunc(model_error or "no model entry", 120)))
+    anchors = verdicts.anchors_for(root, registry, out_dir=store.out_dir(root))
+    digests = FileDigests()
+    if milestone.generator:
+        try:
+            fn = _load_generator(root, milestone.generator)
+        except AtompipeError as exc:
+            return milestones.Refusal("generator", milestone.generator,
+                                      said["generator_load"].format(why=str(exc)))
+    else:
+        fn = (lambda ctx: None)
+    built = verdicts.export_article(root, projection, fn, out_dir=scratch, anchors=anchors,
+                                    digests=digests, model=model, milestone=name, when=now,
+                                    resolution=resolution)
+    if built.outside:
+        return milestones.Refusal("generator", built.outside[0], said["generator_outside"]
+                                  .format(path=", ".join(built.outside)))
+    if built.error:
+        return milestones.Refusal("generator", milestone.generator, said["generator_errored"]
+                                  .format(first=report._trunc(built.error, 160)))
+    if milestone.generator and not built.written:
+        return milestones.Refusal("generator", milestone.generator, said["generator_none"])
+    if built.linked:
+        # Review of P2.5b (finding 2): a link into the project is no package —
+        # a symlink hands the builder whatever the project holds when it is
+        # followed, a hard link the bytes the project's next in-place edit makes.
+        return milestones.Refusal("generator", built.linked[0], said["generator_linked"]
+                                  .format(path=", ".join(built.linked)))
+    clashing = [rel_path for rel_path in built.written if rel_path in milestones.SPINE_FILES]
+    if clashing:
+        return milestones.Refusal("generator", clashing[0], said["generator_outside"].format(
+            path=clashing[0]))
+    # Rendered as `report --milestone` renders it (V-7): the same parameter
+    # view and model error, over the boundary's re-executed view — and as the
+    # boundary's: its sentence plain, each result recorded on this article, the
+    # test card under the head (review of P2.5b, findings 3 and 16).
+    params = _shown_params(root, ledger, model, model_error, resolution, registry)
+    card = milestones.test_card(view, composed, milestone, built.article["hash"],
+                                view.exports)
+    report_md = report.render_markdown(view, registry, stale_gates=resolution.stale_gates,
+                                       model_error=model_error, root=root, params=params,
+                                       milestone=milestone,
+                                       stale_reasons=_stale_reasons(resolution),
+                                       boundary=True, article=built.article["hash"],
+                                       test_card=card)
+    required = claims.required_ids(view, milestone)
+    manifest = {"milestone": name, "revision": built.article.get("revision", ""),
+                "records_digest": store.records_digest(root, exclude=("exports",)),
+                "spine": verdicts.spine_digest(), "article": built.article["hash"],
+                "traced": built.article["traced"],
+                "claims": {cid: str(composed[cid].status) for cid in required
+                           if cid in composed}}
+    package = milestones.build_package(scratch, report_md=report_md, carried=built.params,
+                                       manifest=manifest)
+    return built.article, package, built.params
+
+
+def _inputs_moved(root: str, records_before: str, registry: Any, projection: Any,
+                  ledger: Ledger, model: Any, result: Any, article: Mapping[str, Any]) -> str:
+    """What moved between the judgment and the swap, in words, or ``""``
+    (critique 4 of the P2.5b design): the records, the article's read set, or a
+    file a re-run evaluator read. Nothing is run: the design is re-read and each
+    read set digested now. What it catches: an editor saving a file a required
+    evaluator read while a tier-3 re-run took minutes — the package would ship
+    bytes no evaluator saw, under a record that said ready."""
+    if store.records_digest(root) != records_before:
+        return "the records"
+    try:
+        model_now, projection_now, _error = _projection_safe(root, ledger)
+    except AtompipeError as exc:
+        return str(exc)
+    anchors = verdicts.anchors_for(root, registry, out_dir=store.out_dir(root))
+    here = verdicts._Now(root, projection_now, ledger, anchors=anchors, digests=FileDigests(),
+                         model=model_now)
+    state, moved = verdicts._article_moves(article, here)
+    if state != "current":
+        return verdicts._stale_text(moved) if moved else "the article's design"
+    pairs = {spec.id: (spec, fn) for spec, fn in registry.pairs()} \
+        if registry is not None else {}
+    for row in getattr(result, "rows", None) or ():
+        if not row.executed or not row.rho or row.reads is None:
+            continue
+        gid = row.verdict.gate
+        reads = row.reads.to_dict() if hasattr(row.reads, "to_dict") else dict(row.reads)
+        now_reads, _why = verdicts._reads_now(reads, here)
+        if now_reads is None or gid not in pairs:
+            continue
+        spec, fn = pairs[gid]
+        rho_now = verdicts.rho(gid, here.spine, verdicts.code_digest(spec, fn, anchors=anchors),
+                               now_reads)
+        if rho_now != row.rho:
+            return f"what {gid} read"
+    return ""
+
+
+def _export_lines(view: Ledger, composed: Mapping[str, Any], milestone: Any, result: Any,
+                  found: list, judged: Any, *, unrunnable: int = 0) -> list[str]:
+    """`export <m>`'s lines up to its outcome (P2.5b §2.2), every word
+    `report.HUMAN`'s. ``unrunnable``: the evaluators the milestone requires that
+    could not run because the model does not load — said apart from "none
+    settles a claim" (review of P2.5b, finding 11)."""
+    said = report.HUMAN["export"]
+    name = milestone.id
+    lines = [said["head"].format(name=name, description=report._one(milestone.description))
+             if milestone.description else name]
+    lines.append(report.milestone_line(view, composed, milestone))
+    for claim in report.in_severity(view, composed, judged.found.unresolved):
+        status = composed[claim.id]
+        lines.append(f"{report.status_tag(status.status, errored=status.errored)} {claim.id} "
+                     f"{report._one(claim.statement)} — "
+                     f"{report.reason(status, view, claim, stale_reasons=None)}")
+    requires = set(claims.required_ids(view, milestone))
+    others = [c for c in view.claims if c.id not in requires and c.id in composed
+              and composed[c.id].status not in (ClaimStatus.PASS, ClaimStatus.VERIFIED)]
+    if others:
+        lines.append(said["not_required"].format(m=name,
+                                                 groups=report._groups(view, composed, others)))
+    rows = list(getattr(result, "rows", None) or ())
+    if rows:
+        how = (said["differ"].format(k=len(found), differs="differs" if len(found) == 1
+                                     else "differ")
+               if found else said["as_recorded"])
+        lines.append(said["rerun"].format(n=len(rows),
+                                          evaluators=_plural_word(len(rows), "evaluator"),
+                                          tier=int(Tier.EXTERNAL), how=how))
+    elif unrunnable:
+        lines.append(said["rerun_model"].format(
+            n=unrunnable, evaluators=_plural_word(unrunnable, "evaluator"), m=name))
+    else:
+        lines.append(said["rerun_none"].format(m=name))
+    lines += [found_.line for found_ in found]
+    lines.append(report._verdict_sentence(view, composed, None, stale=False, markdown=False,
+                                          milestone=milestone, boundary=True))
+    lines.append(report.limits_line(view))
+    return lines
+
+
+def _rerun_rows(result: Any, found: list) -> list[dict]:
+    differing = {d.gate for d in found}
+    out = []
+    for row in getattr(result, "rows", None) or ():
+        verdict = row.verdict
+        admission = row.admission
+        out.append({"gate": verdict.gate, "rho": row.rho, "outcome": verdict.outcome,
+                    "out8": verdicts.out8(verdict) if verdict.outcome in ("pass", "fail")
+                    else "",
+                    "qualified": bool(admission is not None
+                                      and admission.state in ("admitted", "pending")),
+                    "agrees": verdict.gate not in differing, "executed": bool(row.executed),
+                    "cached": bool(row.cached),
+                    "control_executed": bool(admission is not None and admission.executed),
+                    "tier": int(getattr(result, "max_tier", 0))})
+    return out
+
+
+def _export_entry(view: Ledger, composed: Mapping[str, Any], milestone: Any, result: Any,
+                  registry: Any, resolution: Any, article: dict, package: Any,
+                  decision: Any, *, now: str, who: str, channel: str) -> dict:
+    """The export record's entry (P2.5b-D9, D26): what was required, what each
+    claim read and whether it was re-run, what was re-run, what counted on the
+    article's inputs, the article, the package and the decision."""
+    reran = {row.verdict.gate for row in getattr(result, "rows", None) or () if row.executed}
+    rows = []
+    pairs = dict((spec.id, (spec, fn)) for spec, fn in registry.pairs()) \
+        if registry is not None else {}
+    for row in getattr(result, "rows", None) or ():
+        verdict = row.verdict
+        spec_fn = pairs.get(verdict.gate)
+        code = (verdicts.code_digest(spec_fn[0], spec_fn[1], anchors=resolution.anchors).digest
+                if spec_fn is not None else "")
+        rows.append({"gate": verdict.gate, "rho": row.rho,
+                     "out8": verdicts.out8(verdict) if verdict.outcome in ("pass", "fail")
+                     else "", "code": code, "outcome": verdict.outcome,
+                     "qualified": bool(row.admission is not None
+                                       and row.admission.state in ("admitted", "pending"))})
+    claim_rows = {}
+    for claim in view.claims:
+        found = composed.get(claim.id)
+        if found is None:
+            continue
+        gates_ = list(claim.gates or ())
+        claim_rows[claim.id] = {"status": str(found.status), "cause": str(found.cause.value),
+                                "reran": bool(gates_) and all(g in reran for g in gates_)}
+    return {"milestone": milestone.id, "when": now, "who": who, "channel": channel,
+            "revision": article.get("revision", ""), "dirty": bool(article.get("dirty")),
+            "requires": list(milestone.requires), "claims": claim_rows, "reran": rows,
+            "counted": milestones.counted_on(view, composed, milestone, registry, resolution),
+            "article": article,
+            "package": {"hash": package.hash, "files": dict(package.files),
+                        "manifest": package.manifest},
+            "proceed": decision}
+
+
+def _export_json(view: Ledger, composed: Mapping[str, Any], milestone: Any, judged: Any,
+                 result: Any, found: list, article: dict, package: Any, decision: Any, *,
+                 dry: bool, written: bool, card: list, exports: Iterable[Any]) -> dict:
+    """`export <m> --json` (P2.5b §2.6): additive, keys not a channel."""
+    requires = claims.required_ids(view, milestone)
+    unresolved_ = judged.found.unresolved
+    requires_set = set(requires)
+    test = []
+    for claim in view.claims:
+        if any(line.startswith(f"  {claim.id} ") for line in card):
+            test.append({"id": claim.id, "test": claim.note or claim.acceptance.render(),
+                         "latency": report.latency_words(claim, exports)})
+    return {
+        "milestone": milestone.id, "description": milestone.description, "dry_run": dry,
+        "ready": judged.ready, "required": requires,
+        "checked": [c.id for c in judged.found.required if c not in unresolved_],
+        "unresolved": [{"id": c.id, "status": str(composed[c.id].status),
+                        "cause": str(composed[c.id].cause.value),
+                        "reason": report.reason(composed[c.id], view, c, full=True)}
+                       for c in unresolved_],
+        "missing": list(judged.found.missing),
+        "not_required": [{"id": c.id, "status": str(composed[c.id].status),
+                          "cause": str(composed[c.id].cause.value)}
+                         for c in view.claims if c.id not in requires_set and c.id in composed
+                         and composed[c.id].status not in (ClaimStatus.PASS,
+                                                           ClaimStatus.VERIFIED)],
+        "reran": _rerun_rows(result, found),
+        "refusals": [r.to_dict() for r in judged.refusals],
+        "proceed": decision,
+        "article": {"hash": article["hash"], "traced": article["traced"]} if article else None,
+        "package": ({"hash": package.hash, "files": len(package.files)}
+                    if package is not None else None),
+        "written": written,
+        "test_card": test,
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -1126,7 +2439,7 @@ def cmd_ask(args: argparse.Namespace) -> int:
     for the agent, not for the person being asked.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     if args.kind:
         pairs = [(args.kind, prompt) for prompt in artifacts.prompts_for(args.kind)]
     else:
@@ -1168,25 +2481,31 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     half they drop is `extract`, and an artifact with no extraction grounds
     nothing, proves nothing, and makes the project *look* evidenced in the file
     listing while not one parameter traces back to it.
+
+    A shim, and a permanent one (spec §3.15): under the lock, with the clock read
+    here, it migrates a legacy ledger first, then per path copies the bytes into
+    `inputs/<bucket>/` (the payload, not a record) and writes exactly one record,
+    `inputs/<id>.json`, pinning the sha256. Bytes already ingested come back as
+    their existing record and rewrite nothing.
     """
     root = _root(args)
-    when = utcnow_iso()
+    now = utcnow_iso()
     landed: list[Any] = []
 
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         for source in args.paths:
             if source.startswith(("http://", "https://")):
                 artifact = artifacts.ingest_link(
                     root, ledger, source, description=args.desc,
-                    kind=args.kind or ArtifactKind.LINK, when=when)
+                    kind=args.kind or ArtifactKind.LINK, when=now)
             else:
                 artifact = artifacts.ingest(
                     root, ledger, source, kind=args.kind, description=args.desc,
-                    when=when, copy=not args.no_copy, licence=args.licence,
+                    when=now, copy=not args.no_copy, licence=args.licence,
                     note=args.note)
+            store.write_record(root, "inputs", artifact)
             landed.append(artifact)
-        store.save(root, ledger)
 
     if args.json:
         _dump({"ingested": [a.to_dict() for a in landed],
@@ -1204,24 +2523,62 @@ def cmd_ingest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _input_bytes(root: str, artifact: Any, digests: FileDigests) -> dict[str, Any]:
+    """What an artifact's record says about its bytes, beside what the bytes say
+    now: `record` (its file), `sha256` (the digest of the bytes NOW, `None` when
+    they are missing), `pinned` (the digest the record pinned at ingest),
+    `drift` and `exists` (`None` for a link, which has no bytes) — the keys, and
+    the rule, of the index's input rows (`store.build_index`), so `inputs` and
+    `.atompipe/ledger.json` never disagree about a file. What slipped through
+    before (S-45): evidence was hashed at ingest and never again, and nothing a
+    human ran said that tampered bytes had moved."""
+    pinned = artifact.sha256 or ""
+    facts: dict[str, Any] = {"record": f"{store.INPUTS_NAME}/{artifact.id}.json",
+                             "sha256": None, "pinned": pinned, "drift": False,
+                             "exists": None}
+    if artifact.path:
+        path = artifact.path.replace("\\", "/")
+        full = path if os.path.isabs(path) else os.path.join(root, *path.split("/"))
+        computed = digests.digest(full)
+        facts.update(sha256=computed, exists=computed is not None,
+                     drift=bool(pinned) and computed is not None and computed != pinned)
+    return facts
+
+
 def cmd_inputs(args: argparse.Namespace) -> int:
     """List ingested evidence; `--unextracted` lists only the decorations.
 
     The `[!]` marker on an unread artifact is the whole reason this listing
     exists as its own command rather than a line in `status`: a project with
     twelve files and two extractions looks grounded from the outside and is not.
+
+    Each row carries its record (`inputs/<id>.json`), the digest of its bytes
+    now against the one pinned at ingest — `DRIFT` when they differ, `MISSING`
+    when the bytes are gone (`_input_bytes`) — and what it grounds, from the
+    same derived map `why` reads (`_grounding`, S-36). A READ: no lock, no
+    record, and the digest cache is consulted, never saved.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
+    model, _projection_unused, model_error = _projection_safe(root, ledger)
+    grounds = _grounding(ledger, _param_views(root, ledger, model, model_error))
+    grounded: dict[str, list[str]] = {}
+    for target, ids in grounds.items():
+        for aid in ids:
+            grounded.setdefault(aid, []).append(target)
+    digests = FileDigests(os.path.join(store.atompipe_dir(root), store.CACHE_NAME,
+                                       store._DIGESTS_NAME))
     rows = artifacts.unextracted(ledger) if args.unextracted else list(ledger.inputs)
     if args.kind:
         rows = [a for a in rows if str(a.kind) == args.kind]
+    facts = {a.id: _input_bytes(root, a, digests) for a in rows}
 
     if args.json:
-        _dump({"inputs": [a.to_dict() for a in rows],
+        _dump({"inputs": [dict(a.to_dict(), **facts[a.id], grounds=grounded.get(a.id, []))
+                          for a in rows],
                "total": len(ledger.inputs),
                "unextracted": len(artifacts.unextracted(ledger)),
-               "grounding": artifacts.grounding(ledger)})
+               "grounding": grounds})
         return 0
 
     if not rows:
@@ -1234,6 +2591,15 @@ def cmd_inputs(args: argparse.Namespace) -> int:
         where = artifact.path or artifact.url
         note = (f"{len(artifact.extractions)} extraction(s)" if artifact.extractions
                 else "NEVER READ")
+        targets = grounded.get(artifact.id, [])
+        if targets:
+            note += f" — grounds {', '.join(targets)}"
+        row = facts[artifact.id]
+        if row["exists"] is False:
+            note += f" — MISSING: {row['record']} names bytes that are not there"
+        elif row["drift"]:
+            note += (f" — DRIFT: changed since it was ingested (pinned "
+                     f"{row['pinned'][:12]}, now {row['sha256'][:12]})")
         _say(f"{mark} {artifact.id:<20} {str(artifact.kind):<12} {where:<40} {note}")
     unread = [a for a in rows if not a.extractions]
     if unread:
@@ -1242,16 +2608,37 @@ def cmd_inputs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _unmatched_grounds(root: str, ledger: Ledger, names: Iterable[str]) -> tuple[list[str], str]:
+    """`(names, model_error)`: the grounds that name no claim, no parameter record
+    and no parameter the model defines. Only for a warning — grounding is derived
+    from the extraction on read (`artifacts.grounding`), so a name that matches
+    nothing today links the moment the model or a claim gains it."""
+    known = {claim.id for claim in ledger.claims} | {param.name for param in ledger.params}
+    model, _, model_error = _projection_safe(root, ledger)
+    if model is not None:
+        known |= {param.name for param in model.params}
+    return [name for name in names if name not in known], model_error
+
+
 def cmd_extract(args: argparse.Namespace) -> int:
     """Record what was actually read out of an artifact, and what that grounds.
 
     This is the step that converts a photograph into provenance: after it,
     `atompipe why <param>` can answer "what is this number standing on?" with a
     file, a sentence and a confidence, instead of silence.
+
+    A shim (spec §3.15): under the lock it migrates a legacy ledger first, then
+    rewrites exactly one record, the artifact's `inputs/<id>.json`. It no longer
+    copies the edge into the parameter or claim it grounds. What slipped through
+    (S-36): that copy (`_link_grounding`) was a second home for one fact, so
+    deleting the extraction left `why arm_length` saying "GROUNDED BY arm" while
+    `inputs` said `arm` was "NEVER READ" — forever. The extraction is the one
+    home; grounding is derived from it where it is read.
     """
     root = _root(args)
+    now = utcnow_iso()
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         extraction = Extraction(
             what=args.what,
             grounds=_collect(args.grounds),
@@ -1259,8 +2646,8 @@ def cmd_extract(args: argparse.Namespace) -> int:
             note=args.note or "",
         )
         artifact = artifacts.add_extraction(ledger, args.artifact, extraction)
-        unmatched = _link_grounding(ledger)
-        store.save(root, ledger)
+        store.write_record(root, "inputs", artifact)
+    unmatched, model_error = _unmatched_grounds(root, ledger, extraction.grounds)
 
     if args.json:
         _dump(dict(artifact.to_dict(), unmatched_grounds=unmatched))
@@ -1268,11 +2655,12 @@ def cmd_extract(args: argparse.Namespace) -> int:
     _say(f"{artifact.id}: {extraction.what}  [{extraction.confidence}]")
     if extraction.grounds:
         _say(f"  grounds: {', '.join(extraction.grounds)}")
-        pending = [name for name in extraction.grounds if name in unmatched]
-        if pending:
-            _warn(f"warning: nothing in the ledger is named {', '.join(pending)} yet — "
-                  f"if that is a model parameter it links on the next `atompipe check`; "
-                  f"if it is a typo, nothing will ever stand on this evidence")
+        if unmatched:
+            unsure = (" (the model did not load, so its parameters were not checked)"
+                      if model_error else "")
+            _warn(f"warning: no claim or parameter is named {', '.join(unmatched)}"
+                  f"{unsure} — if the model or a claim gains that name, this evidence "
+                  f"grounds it from then on; if it is a typo, nothing ever will")
     else:
         _say("  grounds nothing yet — `--grounds <param-or-claim>` is what makes this "
              "traceable from the other end")
@@ -1282,73 +2670,15 @@ def cmd_extract(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # claims
 # --------------------------------------------------------------------------- #
-def _acceptance_from(args: argparse.Namespace, existing: Acceptance | None = None) -> Acceptance:
-    """Build (or patch) an `Acceptance` from the threshold flags.
-
-    Patching rather than replacing so `claim edit --limit 0.4` does not silently
-    wipe the quantity and units someone wrote last week.
-    """
-    base = existing or Acceptance()
-    comparator = base.comparator
-    if getattr(args, "cmp", None):
-        comparator = Comparator(args.cmp)
-    return Acceptance(
-        quantity=args.quantity if args.quantity is not None else base.quantity,
-        comparator=comparator,
-        limit=args.limit if args.limit is not None else base.limit,
-        limit_hi=args.limit_hi if args.limit_hi is not None else base.limit_hi,
-        units=args.units if args.units is not None else base.units,
-    )
-
-
-def cmd_claim_add(args: argparse.Namespace) -> int:
-    """Add one claim. Warns — loudly — when it has no machine-checkable threshold.
-
-    The warning rather than a refusal is deliberate. "A claim without an
-    acceptance is a wish" (models.Acceptance), and a wish must not be allowed to
-    look settled — but claims are captured during intake, often before anyone
-    knows the number, and a CLI that refuses the first half of the thought gets
-    replaced by a text file. So it is recorded, and it nags every time it is
-    printed.
-    """
-    root = _root(args)
-    with _lock(root):
-        ledger = store.load(root)
-        claim_id = (args.id or "").strip() or claims.next_claim_id(ledger, args.prefix)
-        if ledger.claim(claim_id):
-            raise AtompipeError(
-                f"claim {claim_id!r} already exists — use `atompipe claim edit {claim_id}`")
-        claim = Claim(
-            id=claim_id,
-            statement=args.statement.strip(),
-            kind=ClaimKind(args.kind),
-            acceptance=_acceptance_from(args),
-            rationale=args.rationale or "",
-            source=args.source or "",
-            grounded_by=_collect(args.grounds),
-            gates=_collect(args.gates),
-            tags=_collect(args.tags),
-            critical=not args.nice_to_have,
-            note=args.note or "",
-        )
-        ledger.claims.append(claim)
-        store.save(root, ledger)
-
-    if args.json:
-        _dump(claim.to_dict())
-        return 0
-    _say(f"{claim.id}  {claim.statement}  [{claim.kind}]"
-         f"{'' if claim.critical else '  (nice-to-have)'}")
-    rendered = claim.acceptance.render()
-    if rendered:
-        _say(f"  accepts: {rendered}")
-    if claim.acceptance.limit is None and claim.kind is ClaimKind.MEASURABLE:
-        _warn(f"warning: {claim.id} has no acceptance threshold — 'strong enough' is not "
-              f"a claim. Add one: atompipe claim edit {claim.id} "
-              f"--quantity '<what is measured>' --cmp '<=' --limit <number> --units mm")
-    return 0
-
-
+# A claim is a file, `claims/<id>.json`, and it is written by editing it: there
+# is no `claim add` and no `claim edit` (PLAN A-8, removed at checkpoint 1.3). What
+# slipped through while they existed (S-37): `claim edit --gates X` stored a
+# coverage the registry owns, and the next `check` silently put the registry's
+# answer back — a flag that looked like it bound a gate and bound nothing. Two
+# commands that re-typed a record's fields as flags were a second, lossy spelling
+# of a file the strict reader already checks, with a `difflib` suggestion for every
+# typo. `claim physical` stays: it is the signing channel for a real-world result
+# (D-12), and it writes one file.
 def cmd_claim_list(args: argparse.Namespace) -> int:
     """One line per claim: status, id, statement, acceptance.
 
@@ -1357,164 +2687,699 @@ def cmd_claim_list(args: argparse.Namespace) -> int:
     as things pass is unreadable as a diff.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, _ = _registry(root, ledger, strict=False)
-    _model, projection, _err = _projection_safe(root, ledger)
-    stale, _why = _staleness(ledger, projection)
-    resolved = claims.statuses(ledger, stale=stale, registry=registry)
-    cover = claims.coverage(ledger, registry)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    composed = claims.compositions(view, registry=registry,
+                                   stale_gates=resolution.stale_gates)
+    resolved = {cid: c.status for cid, c in composed.items()}
+    cover = claims.coverage(view, registry)
+    stale_reasons = _stale_reasons(resolution)
 
-    rows = list(ledger.claims)
+    rows = list(view.claims)
     if args.status:
-        rows = [c for c in rows if str(resolved.get(c.id)) == args.status]
+        # The enum value, its token or its word, in any case: `--status gap`,
+        # `--status unclaimed` and `--status "pending build"` are one filter.
+        # A spelling none of those holds is refused, naming them: what slipped
+        # through (review of P2.1, which traded argparse's `choices` for this
+        # free filter), `--status failed` for *failing* printed "no claims
+        # match", exit 0 — an agent told that nothing is failing.
+        wanted = args.status.strip().lower().replace("_", " ")
+
+        def spelled(found: Any) -> set[str]:
+            row = report.words(found.status, errored=found.errored)
+            return {str(found.status.value), row.key.replace("_", " "), row.word}
+
+        accepted = {spelling for status in ClaimStatus
+                    for spelling in spelled(claims.Composed(status, claims.ClaimCause.CHECKED))}
+        if wanted not in accepted:
+            words = sorted({report.word(status) for status in ClaimStatus})
+            raise AtompipeError(
+                f"--status {args.status!r} is no status — say one of: "
+                + ", ".join(f'"{w}"' if " " in w else w for w in words)
+                + " (or the enum value `claim list --json` prints)")
+        rows = [c for c in rows if wanted in spelled(composed[c.id])]
     if args.kind:
         rows = [c for c in rows if str(c.kind) == args.kind]
     if args.tag:
         rows = [c for c in rows if args.tag in (c.tags or ())]
 
     if args.json:
-        _dump({"claims": [dict(c.to_dict(), status=str(resolved.get(c.id)),
-                               covered_by=cover.get(c.id, [])) for c in rows],
-               "stale": stale})
+        _dump({"claims": [dict(report.claim_json(c, composed=composed[c.id],
+                                                 exports=view.exports),
+                               status=str(resolved.get(c.id)),
+                               covered_by=cover.get(c.id, []),
+                               **report.status_view(composed[c.id], view, c,
+                                                    stale_reasons=stale_reasons))
+                          for c in rows],
+               "stale": bool(resolution.stale_gates),
+               "stale_gates": _stale_gate_list(resolution)})
         return 0
 
     if not rows:
-        _say("no claims recorded" if not ledger.claims else "no claims match that filter")
+        _say("no claims recorded" if not view.claims else "no claims match that filter")
         return 0
     for claim in rows:
-        status = resolved.get(claim.id, ClaimStatus.UNCLAIMED)
-        accepts = claim.acceptance.render() or "NO THRESHOLD"
-        flag = "" if claim.critical else " (nice-to-have)"
-        _say(f"{report.status_tag(status)} {claim.id:<6} {claim.statement}{flag}"
-             f"  [{claim.kind}] {accepts}")
+        found = composed[claim.id]
+        # The terminal's display word, never the kind's code word (P2.5a-D20;
+        # GLOSSARY §8 names `[{claim.kind}]` a raw enum leak): `[automated]`,
+        # `[measurement]`, `[assumption]`, `[expert judgment: Dana]` — the last
+        # what makes an authority visible (W8).
+        accepts = claim.acceptance.render() or "no acceptance condition"
+        flag = "" if claim.critical else " (not required)"
+        _say(f"{report.status_tag(found.status, errored=found.errored)} {claim.id:<6} "
+             f"{report._one(claim.statement)}{flag}  [{report.terminal_word(claim)}] "
+             f"{report._one(accepts)}")
     return 0
 
 
 def cmd_claim_show(args: argparse.Namespace) -> int:
     """One claim's whole provenance — the same view `atompipe why` gives.
 
-    Routed through `decisions.why` rather than re-rendered here, because two
-    renderings of one claim's history is two places to forget the rejected
-    alternatives.
+    Routed through `_why_text` — `decisions.why` with the same coverage,
+    verdicts and derived grounding `why` passes — rather than re-rendered here,
+    because two renderings of one claim's history is two places to forget the
+    rejected alternatives.
     """
     root = _root(args)
-    ledger = store.load(root)
-    claim = ledger.claim(args.id)
-    if claim is None:
+    ledger = _load(root)
+    if ledger.claim(args.id) is None:
         raise AtompipeError(f"no claim {args.id!r} — `atompipe claim list` shows what exists")
     registry, _ = _registry(root, ledger, strict=False)
-    _model, projection, _err = _projection_safe(root, ledger)
-    stale, _why = _staleness(ledger, projection)
-    status = claims.resolve_status(claim, ledger.verdicts, stale=stale)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    # The view's claim: its `gates` are the registry's coverage over the records'
+    # cached opinion (cli:H5). This command used to resolve the bare record with
+    # no registry at all — `claim list` said PENDING while `claim show` said
+    # UNCLAIMED for the same claim, one command apart.
+    claim = view.claim(args.id)
+    found = claims.compose(claim, view.verdicts, stale_gates=resolution.stale_gates)
+    status = found.status
 
+    why = _why_text(root, ledger, registry, model, model_error, view, resolution, claim.id)
     if args.json:
-        _dump(dict(claim.to_dict(), status=str(status),
-                   covered_by=claims.coverage(ledger, registry).get(claim.id, []),
-                   verdicts=[_verdict_row(v)
-                             for v in claims.covering_verdicts(claim, ledger.verdicts)],
-                   why=decisions.why(ledger, claim.id)))
+        _dump(dict(report.claim_json(claim, composed=found, exports=view.exports),
+                   status=str(status),
+                   covered_by=claims.coverage(view, registry).get(claim.id, []),
+                   verdicts=[_resolved_row(v, resolution)
+                             for v in claims.covering_verdicts(claim, view.verdicts)],
+                   why=why,
+                   **report.status_view(found, view, claim,
+                                        stale_reasons=_stale_reasons(resolution))))
         return 0
-    _say(f"{report.status_tag(status)} {claim.id}")
-    sys.stdout.write(decisions.why(ledger, claim.id))
+    _say(f"{report.status_tag(status, errored=found.errored)} {claim.id}")
+    if found.cause is not claims.ClaimCause.CHECKED:
+        # Why it reads what it reads, under the header — the composition's
+        # reason, as `status` prints it. What slipped through (review of P2.4):
+        # C3 tightened to 0.1 MPa printed `[FAIL ] C3` over one evaluator line,
+        # `[ok  ] bracket.bearing : 0.19 MPa …`, and nothing on the screen said
+        # the acceptance condition was not met.
+        said = report.reason(found, view, claim, full=True,
+                             stale_reasons=_stale_reasons(resolution))
+        _say(f"  {said}")
+    sys.stdout.write(why)
     return 0
 
 
-def cmd_claim_edit(args: argparse.Namespace) -> int:
-    """Change one claim in place. Only the flags you pass are touched.
+#: The environment variables an agent's shell carries, by exact name: the ones a
+#: Claude Code session sets for the commands it runs, never one a person sets.
+#: Provenance: observed in this harness's Bash tool on 2026-10-04 (P2.5a §1, and
+#: again in its review) — ``CLAUDECODE``, ``AI_AGENT``, ``CLAUDE_CODE_SESSION_ID``,
+#: ``CLAUDE_CODE_CHILD_SESSION``, ``CLAUDE_CODE_ENTRYPOINT``,
+#: ``CLAUDE_CODE_EXECPATH``, ``CLAUDE_CODE_SESSION_ATTENDED``,
+#: ``CLAUDE_CODE_MESSAGING_SOCKET``, ``CLAUDE_CODE_MESSAGING_TOKEN`` and
+#: ``CLAUDE_PID``; ``tests/_env.py`` strips every ``CLAUDE*``, so every test child
+#: reads ``non-interactive`` unless it sets one. *Rejected:*
+#: ``CLAUDE_CODE_CHILD_SESSION`` alone (the parent session sets ``CLAUDECODE``
+#: without it); the whole ``CLAUDE`` prefix (a person's own ``CLAUDE_API_KEY``
+#: would read every entry they make as an agent's); the whole ``CLAUDE_CODE_``
+#: prefix, P2.5a's — what slipped through its review: Claude Code's own
+#: user-set configuration lives there (``CLAUDE_CODE_USE_BEDROCK``,
+#: ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``, …), so a person who exports one in their
+#: shell profile had every pass they typed counted for nothing, every ``assume``
+#: refused with the advice to ask themselves, and every fail written with no
+#: typed id — and nothing said which variable did it (``_agent_marker`` now
+#: names it); a flag or an ``ATOMPIPE_CHANNEL`` variable (the generator fills
+#: it). The cost, said: a future session marker under a new name reads a
+#: person's shell until it is added here — the seal is drift's catch, and P3's
+#: permission rule the lock (D-13).
+AGENT_MARKERS: tuple[str, ...] = (
+    "CLAUDECODE", "AI_AGENT", "CLAUDE_CODE_SESSION_ID", "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EXECPATH", "CLAUDE_CODE_SESSION_ATTENDED",
+    "CLAUDE_CODE_MESSAGING_SOCKET", "CLAUDE_CODE_MESSAGING_TOKEN", "CLAUDE_PID")
 
-    Every field is optional and `None` means "leave it": an edit command that
-    reset unmentioned fields to defaults would quietly delete a rationale every
-    time someone retagged a claim.
-    """
-    root = _root(args)
-    with _lock(root):
-        ledger = store.load(root)
-        claim = ledger.claim(args.id)
-        if claim is None:
-            raise AtompipeError(f"no claim {args.id!r}")
-        if args.statement is not None:
-            claim.statement = args.statement.strip()
-        if args.kind is not None:
-            claim.kind = ClaimKind(args.kind)
-        if args.rationale is not None:
-            claim.rationale = args.rationale
-        if args.source is not None:
-            claim.source = args.source
-        if args.note is not None:
-            claim.note = args.note
-        if args.tags is not None:
-            claim.tags = _collect(args.tags)
-        if args.gates is not None:
-            claim.gates = _collect(args.gates)
-        if args.grounds is not None:
-            claim.grounded_by = _collect(args.grounds)
-        if args.critical:
-            claim.critical = True
-        if args.nice_to_have:
-            claim.critical = False
-        claim.acceptance = _acceptance_from(args, claim.acceptance)
-        store.save(root, ledger)
+#: Flags `claim physical` still parses only to refuse — any value, before the
+#: project is read — each with what it names instead (P2.5a-D5; A-14 asks to
+#: delete them). The ONE list: `test_contracts.REMOVED_NAMES` and
+#: `test_docs_commands` read it, so a printed command that passes one is red.
+#: What slipped through (S-48): `--who` took a name the agent typed and
+#: defaulted to nobody, and `--when` dated a result whenever its typist said.
+#: *Rejected:* removing them now (a pasted older command would meet argparse's
+#: bare "unrecognized arguments"); accepting and ignoring (a person who typed
+#: `--who Alex` would believe Alex is on the record).
+REFUSED_FLAGS: dict[str, str] = {"--who": "who", "--when": "when"}
 
-    if args.json:
-        _dump(claim.to_dict())
-        return 0
-    _say(f"{claim.id}  {claim.statement}  [{claim.kind}]  "
-         f"{claim.acceptance.render() or 'NO THRESHOLD'}")
-    return 0
+#: The longest agent session id a channel value keeps (`agent-session <id>`):
+#: an id is a key to find the session, not prose; a longer one is cut. Why 64:
+#: the id observed here (``CLAUDE_CODE_SESSION_ID``, 2026-10-04) is a
+#: 36-character UUID, and 64 keeps whole any id up to a hex SHA-256 — the
+#: longest an opaque session key plausibly grows — while the channel value,
+#: sealed into every entry, never carries a paragraph an agent's environment
+#: filled. *Rejected:* no cap (the variable is the agent's to fill); the UUID's
+#: own 36 (a longer id format would be cut, and two sessions could share the
+#: cut prefix).
+_SESSION_ID_MAX = 64
+
+
+def _agent_marker(environ: Mapping[str, str]) -> str:
+    """The first ``AGENT_MARKERS`` name ``environ`` sets, or ``""`` — named in the
+    refusal and the recorded line, so a person whose shell reads as an agent's
+    learns which variable says so."""
+    return next((name for name in AGENT_MARKERS if name in environ), "")
+
+
+def _channel(stdin_isatty: bool, environ: Mapping[str, str], answer: str | None,
+             claim_id: str) -> str:
+    """How a result or an attribution is being entered (P2.5a-D4) — pure, so a
+    test drives it with an injected TTY, environment and typed line:
+
+    * ``agent-session <CLAUDE_CODE_SESSION_ID or unknown>`` when an agent marker
+      is set (``AGENT_MARKERS``, by exact name) — the marker wins over
+      a TTY: an agent can open a pty;
+    * ``non-interactive`` with no TTY on stdin (a pipe, CI, a script);
+    * ``interactive`` from a TTY with no marker, once the person typed the
+      claim's id at the prompt — anything else (another id, an empty line, end
+      of input) is refused, and nothing is written.
+
+    Only ``interactive`` makes a pass count or an attribution exist. What it is:
+    tamper-evidence against drift and a helpful agent's shortcut — not a lock
+    against a hostile same-user process, which can open a pty with the markers
+    unset (D-13; SPINE_CONTRACT's limits). P3's permission rule (W9) and the
+    ``/tested`` slash channel close what it cannot. *Rejected:* a y/n
+    confirmation (typing the id makes the person read which claim they settle);
+    requiring stdout a TTY too (``… | tee log`` in a person's own shell would be
+    refused for no safety gain)."""
+    if _agent_marker(environ):
+        session = "-".join(str(environ.get("CLAUDE_CODE_SESSION_ID") or "unknown").split())
+        return f"agent-session {session[:_SESSION_ID_MAX] or 'unknown'}"
+    if not stdin_isatty:
+        return "non-interactive"
+    if answer is not None and answer.strip() == claim_id:
+        return "interactive"
+    typed = "nothing" if not (answer or "").strip() else repr(answer.strip())
+    raise AtompipeError(report.HUMAN["signing"]["typed"].format(typed=typed, id=claim_id))
+
+
+def _confirm(claim_id: str, rows: Iterable[str]) -> str | None:
+    """The prompt, on stderr — so ``--json`` keeps stdout to one document — and
+    the line the person typed, or ``None`` at end of input."""
+    for row in rows:
+        print(row, file=sys.stderr)
+    sys.stderr.write(report.HUMAN["signing"]["type"].format(id=claim_id))
+    sys.stderr.flush()
+    try:
+        line = sys.stdin.readline()
+    except OSError:
+        # A terminal closed under the prompt reads EIO on Linux, not end of
+        # input: either way nothing was typed.
+        return None
+    return line.rstrip("\r\n") if line else None
+
+
+def _measured_outcome(acceptance: Any, measured: float | None, typed: bool | None) -> bool:
+    """The outcome a result records (P2.5a-D15, D-13 *consistent*): ``--measured``
+    decides it where the claim has a finite limit, and a typed pass or fail that
+    disagrees is refused; with no limit, the typed outcome, which must be there.
+    What slipped through without it: E4 had no number — "how far off was the
+    evaluator" — and a pass could be recorded at a value its own claim refutes."""
+    said = report.HUMAN["signing"]
+    if measured is None:
+        if typed is None:
+            raise AtompipeError(said["no_act"].format(id="<id>"))
+        return typed
+    limit = getattr(acceptance, "limit", None)
+    if isinstance(limit, (int, float)) and not isinstance(limit, bool):
+        holds = acceptance.holds(float(measured))
+        if typed is not None and typed is not holds:
+            raise AtompipeError(said["measured_disagrees"].format(
+                value=report._num(measured), verdict=said["meets" if holds else "fails"],
+                condition=acceptance.render(), act="pass" if typed else "fail"))
+        return holds
+    if typed is None:
+        raise AtompipeError(said["measured_no_limit"].format(id="this claim",
+                                                             value=report._num(measured)))
+    return typed
+
+
+def _evidence(root: str, paths: Iterable[str], *, required: bool, claim_id: str
+              ) -> tuple[list[str], dict[str, str]]:
+    """``(paths, {path: sha256})`` for ``--evidence``: each a regular file under
+    the project, not under ``.atompipe/`` (scratch nobody tracks), spelled
+    root-relative. A pass needs at least one, and each must exist (D-13
+    *evidenced*); a fail records what it is given and hashes what is there — a
+    missing photo never silences a no."""
+    said = report.HUMAN["signing"]
+    base = os.path.abspath(root)
+    state = os.path.join(base, store.ATOMPIPE_DIR)
+    listed: list[str] = []
+    digests: dict[str, str] = {}
+    for raw in paths:
+        full = os.path.normpath(raw if os.path.isabs(raw) else os.path.join(base, raw))
+        rel = os.path.relpath(full, base).replace(os.sep, "/") \
+            if full.startswith(base + os.sep) else raw
+        problem = ""
+        if not full.startswith(base + os.sep):
+            problem = "it is outside the project"
+        elif full == state or full.startswith(state + os.sep):
+            problem = f"it is under {store.ATOMPIPE_DIR}/, which is scratch nobody tracks"
+        elif not os.path.isfile(full):
+            problem = "there is no such file"
+        if problem:
+            if required:
+                raise AtompipeError(said["bad_evidence"].format(path=report._one(raw),
+                                                                why=problem))
+            listed.append(rel)
+            continue
+        listed.append(rel)
+        digests[rel] = sha256_file(full)
+    if required and not digests:
+        raise AtompipeError(said["no_evidence"].format(id=claim_id))
+    return listed, digests
+
+
+def _design_values(projection: Any, limit: int = 3) -> str:
+    """`config.arm_length 60.0, config.width 30.0, config.thickness 7.0, +9 more` —
+    the first inputs of the design an article is bound to, for the prompt."""
+    config = dict((projection or {}).get("config") or {}) if isinstance(projection, Mapping) \
+        else {}
+    shown = [f"config.{key} {value!r}" for key, value in list(config.items())[:limit]]
+    more = len(config) - len(shown)
+    return ", ".join(shown) + (f", +{more} more" if more > 0 else "")
+
+
+def _act(result: str | None, passed: bool | None, measured: float | None,
+         claim_id: str = "the claim") -> tuple[str | None, bool | None]:
+    """``(act, typed)`` from the positional act and the outcome flags — refused
+    where they disagree, and an outcome's flag or a value with ``assume``,
+    nothing written (review of P2.5a: ``fail --pass`` recorded and counted a
+    PASS, its ``--json`` saying ``act: fail``; ``pass --fail`` wrote a fail that
+    P2.5a cannot supersede; ``assume --fail`` recorded an attribution; each
+    flag and the act were read in turn and the flag won, silently).
+    *Rejected:* letting either win (whichever it is, one word the person typed
+    is ignored on a record that cannot be taken back)."""
+    said = report.HUMAN["signing"]
+    if result == "assume":
+        flag = ("--pass" if passed else "--fail") if passed is not None else (
+            "--measured" if measured is not None else "")
+        if flag:
+            raise AtompipeError(said["assume_flags"].format(id=claim_id, flag=flag))
+        return "assume", None
+    if result in ("pass", "fail") and passed is not None and passed is not (result == "pass"):
+        raise AtompipeError(said["act_disagrees"].format(
+            act=result, flag="--pass" if passed else "--fail"))
+    typed = passed if passed is not None else (
+        (result == "pass") if result in ("pass", "fail") else None)
+    act = result if result is not None else (
+        ("pass" if typed else "fail") if typed is not None else None)
+    return act, typed
+
+
+def _not_text(value: Any) -> bool:
+    """Whether ``value`` holds a lone surrogate — an argument whose bytes were not
+    UTF-8 — which no record can store as text."""
+    try:
+        str(value).encode("utf-8")
+    except UnicodeEncodeError:
+        return True
+    return False
 
 
 def cmd_claim_physical(args: argparse.Namespace) -> int:
-    """Record a real-world result against a PHYSICAL claim.
+    """The one channel a physical result, an owner or an authority enters
+    through (D-12; P2.5a): `claim physical <id> pass|fail|assume`.
 
-    The only way a physical claim ever leaves UNVERIFIED. No simulation launders
-    one into green — "the printed seam is watertight" is settled by water — so
-    this command exists to let the one thing that CAN settle it, a human with the
-    object, say so on the record, with a date, a name and the evidence files.
+    What slipped through before P2.5a: `--who` took a name the agent typed and
+    defaulted to nobody (S-48); a pass typed by the agent counted as one a person
+    made; C5 read "verified" in the same second it was claimed, with nothing
+    written down that a result could fail; a pass survived any change to the
+    design it was tested on (S-50); and an owner was whatever a claim file said.
 
-    Refuses on a MEASURABLE claim on purpose: hand-recording a pass for something
-    a gate is supposed to prove is exactly how a readiness report stops meaning
-    anything.
+    In order, refused with nothing written (P2.5a-D9): a refused flag (before
+    the project is read); the claim; git's identity (`who`); the act fitting
+    the claim — a pass settles a measurement or the authority's judgment,
+    beside an automated evaluator it settles nothing, an assumption takes none;
+    `assume` records an owner or an authority, typed by them in their own shell;
+    for a pass on a physical claim a written test, evidence and a model that
+    loads; `--measured` consistent with the acceptance condition. Then the
+    prompt and the typed id when it is a person's own shell, and one sealed
+    entry appended (`store.append_signed`). From an agent session or a pipe a
+    pass is recorded and counts for nothing, a fail counts (R-3).
+
+    A shim (spec §3.15) under the lock: it migrates a legacy ledger first and
+    writes `results/<claim-id>.json` and nothing else. Then, outside the lock,
+    the status the claim reads NOW as every reader composes it — never one built
+    from the result alone (`860ffa6`'s `[ok-hw]`: R-5).
     """
+    said = report.HUMAN["signing"]
+    for flag, key in REFUSED_FLAGS.items():
+        if getattr(args, key, None) is not None:
+            raise AtompipeError(said[key])
+    act, typed = _act(args.result, args.passed, args.measured, args.id)
+    # A value that is not text is refused here, naming its flag, before the
+    # project is read (review of P2.5a: `--detail $'bad\xffbyte'` reached the
+    # writer and printed a traceback, exit 1 — the code for a gate-level stop).
+    for flag, values in (("--detail", [args.detail]), ("--evidence", list(args.evidence)),
+                         ("--authority", [args.authority])):
+        if any(value is not None and _not_text(value) for value in values):
+            raise AtompipeError(said["not_text"].format(flag=flag))
+    measured = args.measured
+    if measured is not None and not math.isfinite(measured):
+        raise AtompipeError(said["measured_bad"].format(value=measured))
+    if act is None and measured is None:
+        raise AtompipeError(said["no_act"].format(id=args.id))
+    given = getattr(args, "article", None)
+    if given is not None and not re.fullmatch(r"[0-9a-f]{12,64}", str(given).strip()):
+        raise AtompipeError(said["article_short"])
     root = _root(args)
+    now = utcnow_iso()
+    environ = dict(os.environ)
+    isatty = bool(sys.stdin and sys.stdin.isatty())
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         claim = ledger.claim(args.id)
         if claim is None:
-            raise AtompipeError(f"no claim {args.id!r}")
-        if claim.kind is not ClaimKind.PHYSICAL:
-            raise AtompipeError(
-                f"claim {claim.id!r} is {claim.kind}, not physical. A hand-recorded "
-                f"result on a measurable claim is an unchecked assertion wearing a "
-                f"gate's clothes — run the gate, or change the claim's kind on purpose "
-                f"with `atompipe claim edit {claim.id} --kind physical`")
-        # Two spellings because two exist in the wild: `--pass`/`--fail` is what
-        # the generated readiness report tells the user to run, and a bare
-        # `pass`/`fail` is what people type. Accepting only one of them would
-        # make a command this project prints itself fail on paste.
-        passed = args.passed
-        if passed is None:
-            if not args.result:
-                raise AtompipeError(
-                    f"say what happened: `atompipe claim physical {args.id} pass` "
-                    f"or `--fail`, with --detail describing what was actually observed")
-            passed = args.result == "pass"
-        claim.physical_result = PhysicalResult(
-            passed=passed,
-            when=(args.when or utcnow_iso()),
-            who=args.who or "",
-            detail=args.detail or "",
-            evidence=_collect(args.evidence),
-        )
-        store.save(root, ledger)
+            raise AtompipeError(f"no claim {args.id!r} — `atompipe claim list` shows what exists")
+        who = vcs.ident(root)
+        if not who:
+            raise AtompipeError(said["no_identity"])
+        terminal = claims.terminal_of(claim)
+        exported = _exported_article(ledger, given) if given is not None else None
+        registry, _problems = _registry(root, ledger, strict=False)
+        model, projection, model_error = _projection_safe(root, ledger)
+        view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                     now=now, model=model)
+        current = view.claim(claim.id)
+        reads = claims.compose(current, view.verdicts, stale_gates=resolution.stale_gates)
+        required = said["required"] if claim.critical else said["not_required"]
+        head = [f"{claim.id} {report._one(claim.statement)}",
+                "  " + said["prompt_status"].format(terminal=report.terminal_word(claim),
+                                                    required=required,
+                                                    status=report.word(reads.status,
+                                                                       errored=reads.errored))]
+        marker = _agent_marker(environ)
+        person = not marker and isatty
+        if act == "assume":
+            if not person:
+                authority = claims.name_of(claim.authority)
+                name = authority if terminal == "human" else claims.name_of(claim.owner)
+                flag = f' --authority "{report._one(authority)}"' if terminal == "human" else ""
+                why = (said["marker"].format(marker=marker) if marker
+                       else said["assume_pipe"])
+                raise AtompipeError(said["assume_channel"].format(
+                    id=claim.id, name=report._one(name) or "its owner", flag=flag, why=why))
+            list_name = "attributions"
+            entry, rows = _attribution_entry(args, claim, terminal, who, now)
+        else:
+            list_name = "results"
+            entry, rows = _result_entry(args, root, claim, current, terminal, typed, measured,
+                                        who, now, view, resolution, registry, model,
+                                        projection, model_error, person=person,
+                                        exported=exported)
+        rows = head + rows + ["  " + said["recorded_by"].format(who=report._one(who))]
+        answer = _confirm(claim.id, rows) if person else None
+        entry["channel"] = _channel(isatty, environ, answer, claim.id)
+        store.append_signed(root, claim.id, list_name, entry)
+        path = os.path.join(root, "results", f"{claim.id}.json")
+        n = len(store.read_record(path, "results").raw[list_name])
 
-    status = ClaimStatus.VERIFIED if claim.physical_result.passed else ClaimStatus.REFUTED
+    # The status the claim reads NOW, composed as every reader composes it —
+    # never computed here from the result alone. What slipped through (review
+    # of the P2.1 design; P2.0's hand-off): this printed VERIFIED for any pass
+    # and REFUTED for any fail, a second status producer (R-5), so beside a
+    # covering evaluator that fails, crashes or never ran it printed `[ok   ]`
+    # where `status` printed Failing, Skipped or Open — and an agent quotes the
+    # command's own line. Read after the write, outside the lock: a reader.
+    ledger = _load(root)
+    registry, _problems = _registry(root, ledger, strict=False)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=now, model=model)
+    claim = view.claim(args.id)
+    found = claims.compose(claim, view.verdicts, stale_gates=resolution.stale_gates)
+    shown = report.status_view(found, view, claim, stale_reasons=_stale_reasons(resolution))
+    contradicts = [item for item in entry.get("contradicts") or ()
+                   if item.get("inside") is True]
     if args.json:
-        _dump(dict(claim.to_dict(), status=str(status)))
+        # The act as WRITTEN, never as typed (review of P2.5a: `fail --pass`
+        # printed act "fail" over a pass in the file).
+        written = "assume" if list_name == "attributions" else (
+            "pass" if entry.get("passed") is True else "fail")
+        _dump(dict(report.claim_json(claim, composed=found, exports=view.exports),
+                   status=str(found.status),
+                   recorded={"act": written,
+                             "channel": entry["channel"], "who": who,
+                             "article": (entry.get("article") or {}).get("hash", ""),
+                             "contradicts": [item["gate"] for item in contradicts]},
+                   **shown))
         return 0
-    _say(f"{report.status_tag(status)} {claim.id} {claim.statement} — "
-         f"{claim.physical_result.detail or ('pass' if passed else 'fail')} "
-         f"({claim.physical_result.who or 'unattributed'}, {claim.physical_result.when})")
+    if list_name == "attributions":
+        line = said["recorded_assume"].format(id=claim.id, role=entry["role"],
+                                              name=report._one(entry["name"]), n=n)
+    else:
+        passed = entry["passed"] is True
+        line = said["recorded"].format(id=claim.id, act="pass" if passed else "fail", n=n)
+        channel = entry["channel"]
+        if passed and terminal not in ("measurement", "human"):
+            # Beside an automated evaluator a pass settles nothing whoever typed
+            # it — the fact to give, as the judge gives it (`_fact_terminal`).
+            line += said["beside"]
+        elif channel.startswith("agent-session"):
+            line += said["agent_pass" if passed else "agent_fail"].format(
+                marker=said["marker"].format(marker=marker) if marker else "")
+        elif channel == "non-interactive":
+            line += said["pipe_pass" if passed else "pipe_fail"]
+    _say(line)
+    _say(f"{report.status_tag(found.status, errored=found.errored)} {claim.id} "
+         f"{report._one(claim.statement)} — {shown['reason']}")
+    for item in contradicts:
+        _say(report.HUMAN["physical"]["contradicts"].format(
+            gate=item["gate"], code=report.article12(item.get("code"))))
     return 0
+
+
+def _attribution_entry(args: argparse.Namespace, claim: Claim, terminal: str, who: str,
+                       now: str) -> tuple[dict, list[str]]:
+    """The attribution `assume` records, and its prompt rows (P2.5a-D9): an
+    owner — of an assumption, or of a fallback — or, on a claim that ends in
+    expert judgment, its authority; typed by that person, whose git identity
+    must be theirs (critique 10 of the P2.5a design: the authority role is held
+    to the owner's rule — a name typed by anyone settled nothing it named)."""
+    said = report.HUMAN["signing"]
+    if terminal == "human":
+        role, name = "authority", str(claim.authority or "").strip()
+        if not name:
+            raise AtompipeError(said["no_authority"].format(id=claim.id))
+        given = args.authority
+        if given is None:
+            raise AtompipeError(said["authority_flag"].format(id=claim.id, authority=name))
+        if claims.name_of(given) != name:
+            raise AtompipeError(said["authority_other"].format(given=given, id=claim.id,
+                                                               authority=name))
+        reason = str(claim.rationale or "")
+    else:
+        if args.authority is not None:
+            raise AtompipeError(said["authority_not_here"].format(id=claim.id))
+        role, name = "owner", str(claim.owner or "").strip()
+        kind = claim.kind if isinstance(claim.kind, ClaimKind) else ClaimKind(claim.kind)
+        reason = claims.assumption_reason(claim)
+        if not name and not reason.strip():
+            raise AtompipeError(said["assume_nothing"].format(id=claim.id))
+        if not name:
+            raise AtompipeError(said["no_owner"].format(id=claim.id))
+        if not reason.strip():
+            field = "rationale" if kind is ClaimKind.ASSUMPTION else "fallback"
+            raise AtompipeError(said["no_reason"].format(id=claim.id, field=f'"{field}"'))
+    if not claims.identity_matches(who, name):
+        raise AtompipeError(said["not_owner"].format(id=claim.id, role=role, name=name,
+                                                     who=who))
+    entry = {"role": role, "name": name, "reason": reason,
+             "claim_digest": claims.claim_digest(claim), "who": who, "when": now}
+    rows = ["  " + said["assume_row"].format(name=report._one(name), id=claim.id, role=role,
+                                             reason=report._trunc(reason, 80) or "—")]
+    return entry, rows
+
+
+def _exported_article(ledger: Ledger, given: str) -> list:
+    """EVERY export record whose article ``given`` (12 hex or more) names — one
+    article, unique among `exports/`' articles — or an AtompipeError naming why
+    not (P2.5b-D13): no default to the newest export (a guess about which object
+    the person holds), no ``--milestone`` (a milestone has many exports). All of
+    them, never the first (review of P2.5b, findings 7 and 15: two milestones
+    sharing a generator record one article, and the first in name order was
+    kept — its `counted` did not hold the claim, so the fail sealed no
+    contradiction): `milestones.bound_export` picks the one the prompt shows and
+    `milestones.sealed_on` charges what any of them sealed."""
+    said = report.HUMAN["signing"]
+    prefix = str(given).strip()
+    found: dict[str, list] = {}
+    for entry in ledger.exports:
+        digest = str((entry.article or {}).get("hash") or "")
+        if digest.startswith(prefix):
+            found.setdefault(digest, []).append(entry)
+    if not found:
+        raise AtompipeError(said["article_unknown"].format(article=prefix[:12]))
+    if len(found) > 1:
+        names = ", ".join(f"{digest[:14]}…" for digest in sorted(found))
+        raise AtompipeError(said["article_ambiguous"].format(article=prefix, articles=names))
+    return next(iter(found.values()))
+
+
+def _result_entry(args: argparse.Namespace, root: str, claim: Claim, current: Claim,
+                  terminal: str, typed: bool | None, measured: float | None, who: str,
+                  now: str, view: Ledger, resolution: verdicts.Resolution,
+                  registry: Any, model: Any, projection: Any, model_error: str, *,
+                  person: bool = True, exported: Any = None) -> tuple[dict, list[str]]:
+    """The physical result `pass`/`fail` records, and its prompt rows
+    (P2.5a-D9, D10, D14, D15). ``person``: the shell is a person's own (a TTY,
+    no agent marker) — only there can a pass count. ``exported`` (P2.5b-D13,
+    `--article`): every export record of the article the result binds to — the
+    article copied whole from the one `milestones.bound_export` picks, and a
+    fail's contradictions the ones any of them sealed on the article's own
+    inputs (`milestones.sealed_on`), never re-read from the evaluators' verdicts
+    after they moved."""
+    said = report.HUMAN["signing"]
+    if measured is not None and typed is None and not isinstance(
+            getattr(claim.acceptance, "limit", None), (int, float)):
+        raise AtompipeError(said["measured_no_limit"].format(
+            id=claim.id, value=report._num(measured)))
+    passed = _measured_outcome(claim.acceptance, measured, typed)
+    kind = claim.kind if isinstance(claim.kind, ClaimKind) else ClaimKind(claim.kind)
+    authority = claims.name_of(claim.authority)
+    if terminal == "human":
+        if args.authority is not None and claims.name_of(args.authority) != authority:
+            raise AtompipeError(said["authority_other"].format(
+                given=args.authority, id=claim.id, authority=authority))
+        if passed:
+            if not authority:
+                raise AtompipeError(said["no_authority"].format(id=claim.id))
+            if args.authority is None:
+                raise AtompipeError(said["authority_flag"].format(id=claim.id,
+                                                                  authority=authority))
+            if not claims.identity_matches(who, authority):
+                raise AtompipeError(said["not_owner"].format(
+                    id=claim.id, role="authority", name=authority, who=who))
+    elif args.authority is not None:
+        raise AtompipeError(said["authority_not_here"].format(id=claim.id))
+    if passed and terminal == "none":
+        raise AtompipeError(said["none_pass"].format(id=claim.id))
+    physical = kind is ClaimKind.PHYSICAL
+    if passed and physical:
+        # A written test and evidence for ANY pass on a physical claim, its
+        # terminal a measurement or a judgment (critique 5 of the P2.5a design:
+        # a hand-written `terminal: human` would otherwise drop both).
+        if not (str(claim.note or "").strip() or claim.acceptance.render()):
+            raise AtompipeError(said["no_test"].format(id=claim.id))
+    listed, sha = _evidence(root, _collect(args.evidence), required=passed and physical,
+                            claim_id=claim.id)
+    records = list(exported or ())
+    bound = milestones.bound_export(records, claim.id) if records else None
+    if bound is not None:
+        article = dict(bound.article or {})
+    else:
+        article = verdicts.article_of(root, projection, model, anchors=resolution.anchors,
+                                      resolution=resolution)
+    if passed and terminal in ("measurement", "human") and not article:
+        raise AtompipeError(said["no_model"].format(
+            error=report._trunc(model_error or "its code was not recorded", 160)))
+    if passed and person and terminal in ("measurement", "human") and bound is None:
+        # An article names the files the registered evaluators read on the
+        # design (`verdicts.article_of`), so a pass waits until each has run
+        # here at least once. What slipped through (review of P2.5a): a pass
+        # recorded before a file-reading evaluator's first check run got an
+        # article without that file — one design, two article ids — and an
+        # edit of the file left that pass Checked. Only `never`: a stale entry
+        # names the files its evaluator read, and an evaluator a prerequisite
+        # keeps from running (`not run:`) cannot run before the print is
+        # tested; that one's files join the article from its first run on (a
+        # limit, SPINE_CONTRACT's). A fail is never refused: it counts on any
+        # article (R-3); nor a pass from an agent session or a pipe, which
+        # counts for nothing on any article.
+        unread = [gid for gid, row in sorted(resolution.rows.items())
+                  if row.state == "never" and not any(
+                      str(note).startswith(verdicts._PRUNED_NOTE) for note in row.notes)]
+        if unread:
+            shown = ", ".join(unread[:3]) + (f", +{len(unread) - 3} more"
+                                              if len(unread) > 3 else "")
+            raise AtompipeError(said["unread"].format(gates=shown, id=claim.id))
+    contradicts: list[dict] = []
+    check = ""
+    if not passed and terminal != "human" and bound is not None:
+        contradicts = milestones.sealed_on(records, claim.id)
+        if not any(claim.id in (e.counted or {}) for e in records):
+            names = ", ".join(sorted({str(e.milestone) for e in records}))
+            check = (f"its evaluators were not re-run when article "
+                     f"{report.article12(article)} was exported for {names}, "
+                     f"so no verdict on its inputs is sealed to charge")
+    elif not passed and terminal != "human":
+        if not article:
+            check = f"the model does not load: {report._trunc(model_error, 160)}" \
+                if model_error else "the model's code was not recorded"
+        else:
+            needs = {spec.id: list(getattr(spec, "needs", None) or ())
+                     for spec in (registry.specs() if registry is not None else ())}
+            codes = {gid: str(((row.entry.code or {}) if row.entry is not None else {})
+                              .get("digest") or "")
+                     for gid, row in resolution.rows.items()}
+            contradicts = claims.contradicted_by(current, view.verdicts,
+                                                 stale_gates=resolution.stale_gates,
+                                                 needs=needs, codes=codes)
+    digest = claims.claim_digest(claim)
+    units = str(claim.acceptance.units or "") if measured is not None else ""
+    entry = {"passed": bool(passed), "when": now, "who": who,
+             "detail": str(args.detail or ""), "evidence": listed,
+             "authority": authority if terminal == "human" and args.authority else "",
+             "measured": float(measured) if measured is not None else None, "units": units,
+             "article": article, "claim_digest": digest,
+             "rho": seal({"article": article.get("hash", ""), "claim_digest": digest})
+             if article else "",
+             "evidence_sha256": sha, "contradicts": contradicts, "contradiction_check": check}
+    act = "pass" if passed else "fail"
+    if measured is not None:
+        unit = f" {units}" if units else ""
+        what = said["you_record_measured"].format(
+            act=act, measured=f"{report._num(measured)}{unit}",
+            condition=claim.acceptance.render() or "no acceptance condition")
+    else:
+        what = said["you_record"].format(act=act, detail=report._one(args.detail)
+                                         or said["no_detail"])
+    if listed:
+        what += " [" + ", ".join(report._one(path) for path in listed) + "]"
+    rows = ["  " + what]
+    if bound is not None:
+        rows.append("  " + said["article_exported"].format(
+            article=report.article12(article), milestone=bound.milestone,
+            who=report._one(bound.who), when=str(bound.when)[:10],
+            revision=str(article.get("revision") or "")[:12] or "none"))
+    elif article:
+        rows.append("  " + said["article"].format(article=report.article12(article),
+                                                  values=_design_values(projection)))
+        if article.get("revision"):
+            rows.append("  " + said["revision"].format(revision=article["revision"][:12])
+                        + (said["dirty"] if article.get("dirty") else ""))
+    else:
+        rows.append("  " + said["no_article"].format(
+            error=report._trunc(model_error or "its code was not recorded", 80)))
+    for item in contradicts:
+        if item.get("inside") is not True:
+            continue
+        unit = f" {item.get('units')}" if item.get("units") else ""
+        rows.append("  " + said["contradicts"].format(
+            gate=item["gate"], id=claim.id, value=f"{report._num(item.get('value'))}{unit}",
+            code=report.article12(item.get("code"))))
+    return entry, rows
 
 
 # --------------------------------------------------------------------------- #
@@ -1524,27 +3389,22 @@ def cmd_gap(args: argparse.Namespace) -> int:
     """Measurable claims no gate covers — and, with `--propose`, packs that might.
 
     A gap is a growth signal, not a failure: the system is admitting there is a
-    physical quantity it cannot currently check. The Needs are PERSISTED so that
-    the classification and the candidate costs an agent records against one
-    survive to the next session — `find_gaps` matches existing Needs by claim id
-    and keeps everything that was written on them.
+    physical quantity it cannot currently check. `find_gaps` matches the Need
+    records (`needs/<id>.json`) by claim id and keeps everything written on them,
+    so the classification and the candidate costs an agent records against a
+    gap — by editing that file — show here in the next session.
 
-    Needs that are no longer gaps are left in the ledger untouched rather than
-    deleted. A closed gap is a fact about the project's history, and deciding it
-    is `SATISFIED` is a judgement this command is not entitled to make.
+    A READ: no lock, no write. What slipped through (S-43): it persisted every gap
+    it derived, so a command that reads like a query rewrote the whole ledger on
+    every run, and a gap it could re-derive at will became a record nobody wrote.
+    A Need is a record only when someone enriched it (`needs/` is sparse), so
+    there is nothing here to write. Deciding a closed gap is `SATISFIED` is still
+    a judgement this command is not entitled to make.
     """
     root = _root(args)
-    with _lock(root):
-        ledger = store.load(root)
-        registry, _ = _registry(root, ledger, strict=False)
-        gaps = claims.find_gaps(ledger, registry)
-        by_id = {need.id: index for index, need in enumerate(ledger.needs)}
-        for need in gaps:
-            if need.id in by_id:
-                ledger.needs[by_id[need.id]] = need
-            else:
-                ledger.needs.append(need)
-        store.save(root, ledger)
+    ledger = _load(root)
+    registry, _ = _registry(root, ledger, strict=False)
+    gaps = claims.find_gaps(ledger, registry)
 
     manifests = packs.discover(root) if args.propose else []
     proposals: dict[str, list[Any]] = {
@@ -1566,7 +3426,7 @@ def cmd_gap(args: argparse.Namespace) -> int:
     for need in gaps:
         cids = ", ".join(need.claim_ids)
         _say(f"{_tag('gap')} {need.id:<10} {need.quantity or '(unnamed quantity)'} "
-             f"— claims {cids} ({need.status})")
+             f"— claims {cids} ({report.need_word(need.status)})")
         if need.claim_class:
             _say(f"            class: {need.claim_class}")
         for candidate in need.candidates:
@@ -1588,7 +3448,7 @@ def cmd_gap(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # gates
 # --------------------------------------------------------------------------- #
-def _gate_row(spec: Any) -> dict[str, Any]:
+def _gate_row(spec: Any, registry: gates.Registry | None = None) -> dict[str, Any]:
     """One gate as JSON, without its prose. The default shape of `gate list --json`.
 
     Everything here answers a question a caller can act on: what it is, what it
@@ -1616,6 +3476,15 @@ def _gate_row(spec: Any) -> dict[str, Any]:
         row["requires_tools"] = list(spec.requires_tools)
     if spec.requires_python:
         row["requires_python"] = list(spec.requires_python)
+    # The prerequisite edge, both ways (P2.2): what this gate needs established
+    # first, and which gates need it. Always present, as lists: P5's canvas
+    # lays evaluators in lanes by them, and an absent key would read "unknown".
+    row["needs"] = list(spec.needs or [])
+    row["needed_by"] = registry.needed_by(spec.id) if registry is not None else []
+    # The operating context (P2.4), always present — an empty object when none
+    # is declared: a reader that finds no key must not guess "unbounded".
+    row["operating_context"] = {key: list(pair) for key, pair in
+                                (getattr(spec, "operating_context", None) or {}).items()}
     return row
 
 
@@ -1637,12 +3506,13 @@ def cmd_gate_list(args: argparse.Namespace) -> int:
     has always been the way to read one gate's prose.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, problems = _registry(root, ledger, strict=False)
     specs = registry.by_tier(args.tier if args.tier is not None else ALL_TIERS)
 
     if args.json:
-        _dump({"gates": [spec.to_dict() if args.full else _gate_row(spec)
+        _dump({"gates": [dict(spec.to_dict(), needed_by=registry.needed_by(spec.id))
+                         if args.full else _gate_row(spec, registry)
                          for spec in specs],
                "full": bool(args.full),
                "summary": gates.registry_summary(registry),
@@ -1665,24 +3535,167 @@ def cmd_gate_list(args: argparse.Namespace) -> int:
     return 0
 
 
+#: Token kinds a crash or a broken record leaves: `last_selftest.outcome` keeps
+#: calling those `error`, its meaning before P2.3 (P2.1-D12).
+_ERROR_KINDS = frozenset({"known-bad:errored", "known-bad:skipped", "known-good:errored",
+                          "known-good:skipped", "mutation:errored", "mutation:could-not-run",
+                          "control:two-outcomes", "control:differs"})
+
+
+def _last_selftest(admission: verdicts.Admission) -> dict[str, Any] | None:
+    """`gate show --json`'s `last_selftest`, from how the gate's qualification
+    stands at its current version (`verdicts.admission_state`), or None when
+    nothing was ever recorded for it.
+
+    `outcome` keeps the meaning it had for the known-bad half: `"pass"` — its
+    control fired and it is qualified, or due to re-qualify; `"fail"` — it
+    PASSED its own known-bad input; `"error"` — a control crashed, skipped
+    itself or was unusable, the walk crashed or could not run, or two recorded
+    outcomes disagree; and, new with P2.3, `"unqualified"` — every other reason
+    it is not qualified (its known-good control failed or does not exist, the
+    channels differ, a conclusive mutation passed, it is not yet qualified).
+    What slipped through the design (critique of P2.3): an always-False gate, a
+    known-bad-shown one and a gate whose mutation passed all read `"error"`, a
+    crash's word for evaluators that crashed nothing. `qualification` (beside
+    it) is the field to read. `control` is the control entry's rho (the text
+    prints its first 12), `at_this_version` whether that entry is at the gate's
+    current static part, `admission` the state, `detail` the reason or the
+    entry's words.
+
+    What slipped through (S-08): this read a ledger key `<gate>#selftest` that
+    `gate selftest` deliberately never wrote, so every gate read "(never run)"
+    forever, including the six the selftest had just demonstrated.
+    """
+    state, entry = admission.state, admission.entry
+    kind = verdicts.parse_token(admission.reason)[0] if state == "not-admitted" else ""
+    # Not yet qualified with no entry behind it is "nothing was ever recorded"
+    # (P2.3): the reading that was `undemonstrated` with no entry before
+    # critique 10 made a never-qualified evaluator read Gap. What slipped
+    # through: a gate nothing had run showed a last selftest, `unqualified`.
+    if entry is None and (state == "undemonstrated" or kind == verdicts.NOT_YET):
+        return None
+    if state in ("admitted", "pending"):
+        outcome = "pass"
+    elif state == "not-admitted" and kind == "known-bad:pass":
+        outcome = "fail"
+    elif state == "not-admitted":
+        outcome = "error" if kind in _ERROR_KINDS else "unqualified"
+    else:                                     # an entry at another version
+        outcome = "pass" if entry.bad == "fail" else "fail"
+    return {
+        "outcome": outcome,
+        "control": entry.rho if entry is not None else None,
+        "at_this_version": state != "undemonstrated",
+        "admission": state,
+        "detail": (report.qualification_reason(admission.reason) if kind
+                   else admission.reason or (entry.detail if entry is not None else "")),
+    }
+
+
+def _qualification_view(gate_id: str, admission: verdicts.Admission) -> dict[str, Any]:
+    """`gate show --json`'s `qualification`: the state, the judge's token, the
+    line and the reason in words, and the facts (P2.3, additive)."""
+    facts = admission.qualification
+    return {"state": admission.state,
+            "token": admission.reason if admission.state == "not-admitted" else "",
+            "line": report.qualification_line(gate_id, facts) if facts is not None else None,
+            "reason": report.qualification_reason(admission.reason)
+            if admission.state == "not-admitted" else "",
+            "moved": list(admission.moved),
+            "facts": facts.to_dict() if facts is not None else None}
+
+
+def _held_why(admission: verdicts.Admission | None) -> list[str]:
+    """The `why` row under a qualification that was remembered, never filed —
+    a half that crashed, skipped itself, was unusable or read the candidate;
+    a walk that could not run — whose line names each control's outcome and
+    not what happened: the reason in the table's words, the crash's first line
+    included. What slipped through (review of P2.3): with no entry there were
+    no detail rows, so `gate show` and `gate selftest` printed `known-good
+    errored · known-bad errored → unqualified` and nothing of `context()
+    raised RuntimeError …`, which only the claim row carried (P2.3-D14
+    rejected the reason on the line because "the claim row and `gate show`
+    carry it")."""
+    if (admission is None or admission.state != "not-admitted" or admission.entry is not None
+            or admission.qualification is None or not admission.reason):
+        return []
+    d = report.HUMAN["qualification"]["detail"]
+    return [f"    {d['why']:<12} {report.qualification_reason(admission.reason)}"]
+
+
+def _qualification_rows(gate_id: str, spec: Any, admission: verdicts.Admission, *,
+                        pruned_by: str = "") -> list[str]:
+    """`gate show`'s `qualification:` row and the rows under it (P2.3-D18: it
+    replaced `last selftest:`), read off the entry — it runs nothing.
+    ``pruned_by``: the prerequisite root that prunes this evaluator, so a
+    qualification not yet run says it runs once that root is established —
+    never "the next check run", which prunes it again (review of P2.3)."""
+    q = report.HUMAN["qualification"]
+    state, entry, facts = admission.state, admission.entry, admission.qualification
+    control = f" (control {entry.rho[:12]})" if entry is not None else ""
+    prefix = f"{gate_id}{q['id_sep']}"
+
+    def line() -> str:
+        return report.qualification_line(gate_id, facts).removeprefix(prefix)
+
+    if state == "pending" and facts is not None:
+        moved = ", ".join(admission.moved) or "fixture code"
+        rows = [f"  qualification: {q['pending'].format(moved=moved)}",
+                f"                 {q['last'].format(line=line())}"]
+    elif facts is not None:
+        rows = [f"  qualification: {line()}{control}", *_held_why(admission)]
+    elif state == "not-admitted":
+        rows = [f"  qualification: "
+                f"{report.qualification_reason(admission.reason, pruned_by=pruned_by)}"]
+    else:
+        rows = [f"  qualification: "
+                f"{report.qualification_reason(verdicts.NOT_YET, pruned_by=pruned_by)}"]
+    return rows + report.qualification_detail(entry, spec, facts=facts)
+
+
 def cmd_gate_show(args: argparse.Namespace) -> int:
-    """Everything about one gate: what it settles, what it needs, how it last ran."""
+    """Everything about one gate: what it settles, what it needs, how it last ran,
+    and whether its control is demonstrated at this version.
+
+    `last verdict` is the resolver's (`_resolved`), with why it is not current
+    when it is not — an unqualified evaluator's in its qualification's words,
+    never a crash's; `qualification` (and the known-good, known-bad, mutation
+    and not-mutated rows under it) is read off the control entries by
+    `verdicts.admission_state`, which never runs a fixture — `check` and `gate
+    selftest` are the commands that spend that time.
+    """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, _ = _registry(root, ledger, strict=False)
     entry = registry.get(args.id)
     if entry is None:
         known = ", ".join(registry.ids()[:12]) or "(none registered)"
         raise AtompipeError(f"no gate {args.id!r}. Registered: {known}")
-    spec, _fn = entry
+    spec, fn = entry
     ok, reason = gates.availability(spec)
-    verdict = ledger.verdict(spec.id)
-    control = ledger.verdict(f"{spec.id}#selftest")
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    verdict = view.verdict(spec.id)
+    row = resolution.rows.get(spec.id)
+    admission = verdicts.admission_state(root, spec, fn, projection=projection,
+                                         ledger=ledger, anchors=resolution.anchors)
 
+    needed_by = registry.needed_by(spec.id)
+    # The evaluator's track record (P2.5a-D14): the contradictions the physical
+    # results recorded against it, at this version and at earlier ones — keyed
+    # by its code digest, so an edit to the evaluator starts its count again
+    # while the earlier ones stay said.
+    track = list((resolution.track or {}).get(spec.id) or ())
+    code_now = verdicts.code_digest(spec, fn, anchors=resolution.anchors).digest
     if args.json:
-        _dump({"gate": spec.to_dict(), "available": ok, "availability": reason,
-               "last_verdict": _verdict_row(verdict) if verdict else None,
-               "last_selftest": _verdict_row(control) if control else None})
+        _dump({"gate": spec.to_dict(), "needed_by": needed_by, "available": ok,
+               "availability": reason,
+               "last_verdict": _resolved_row(verdict, resolution) if verdict else None,
+               "last_selftest": _last_selftest(admission),
+               "qualification": _qualification_view(spec.id, admission),
+               "track_record": [dict(c._asdict(), this_version=c.code == code_now)
+                                for c in track]})
         return 0
 
     _say(gates.describe(spec))
@@ -1691,6 +3704,14 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
     _say(f"  tier {int(spec.tier)}  pack {spec.pack or '(project)'}  entry {spec.entry}")
     _say(f"  claims: {', '.join(spec.claims) or '(none — this gate settles nothing)'}")
     _say(f"  runnable here: {'yes' if ok else 'NO — ' + reason}")
+    if spec.needs:
+        missing = [need for need in spec.needs if need not in registry]
+        _say(f"  prerequisites: {', '.join(spec.needs)}"
+             + (f" ({', '.join(missing)} not registered)" if missing else ""))
+    if needed_by:
+        _say(f"  prerequisite of: {', '.join(needed_by)}")
+    if getattr(spec, "operating_context", None):
+        _say(f"  {report.context_declared(spec.operating_context)}")
     if spec.negative_control:
         _say(f"  control: {spec.negative_control.fixture} "
              f"(must {spec.negative_control.expect})")
@@ -1698,9 +3719,143 @@ def cmd_gate_show(args: argparse.Namespace) -> int:
             _say(f"           {spec.negative_control.note}")
     else:
         _say("  control: NONE — this gate cannot be shown to fail, so it is a logger")
-    _say(f"  last verdict: {verdict.render() if verdict else '(never run)'}")
-    _say(f"  last selftest: {control.render() if control else '(never run)'}")
+    stale = f" (stale: {row.stale_reason})" if row is not None and row.stale_reason else ""
+    shown = (report.verdict_line(verdict, admission.qualification) if verdict
+             and verdict.unqualified else verdict.render() if verdict else "(never run)")
+    _say(f"  last verdict: {shown + stale if verdict else shown}")
+    pruned_by = (list(verdict.blocked_by or ()) or [""])[0] if verdict else ""
+    for line in _qualification_rows(spec.id, spec, admission, pruned_by=pruned_by):
+        _say(line)
+    _say(f"  {report.track_words(spec.id, track, code_now)}")
     return 0
+
+
+def _selftest_code(*, broken: int, baselines_failed: int, exercised: int,
+                   allow_empty: bool) -> int:
+    """`gate selftest`'s one exit code, in both modes.
+
+    1 on a control that did not fire (or crashed, or is gone), on a pack gate
+    that failed its own baseline, and on a run that exercised no control at all.
+    That last one is `--allow-empty`'s to waive and nobody else's. What slipped
+    through (cli:H8): with nothing registered the text path printed "no controls
+    to run" and returned 0, and the JSON path said `"ok": true` — a selftest that
+    passes by running nothing is a logger, the thing this command exists to
+    catch (PLAN G3). A tooling skip is not exercise: it tested nothing.
+    """
+    if broken or baselines_failed:
+        return 1
+    if exercised == 0 and not allow_empty:
+        return 1
+    return 0
+
+
+def _selftest_summary(evaluators: int, elapsed: float, qualified: int, unqualified: int,
+                      skipped: int) -> str:
+    """`<n> evaluators in <t>: <q> qualified, <u> unqualified, <s> skipped` — one
+    spelling for both modes, and the last line of a clean run (the fresh-clone
+    transcript matches it there). In qualification's words (P2.3-D18): it was
+    `<n> control(s) in <t>: <f> fired, <b> BROKEN, <k> skipped (tooling)`, two
+    Never-says for the known-bad half alone. *Rejected:* GLOSSARY §9's "6 fail
+    as required, 0 pass (unqualified)" — written for the known-bad half alone,
+    before qualification had a known-good half and a mutation pass (on the
+    check-in list as a GLOSSARY edit). A skip is a missing tool's: availability
+    is asked once, before either control."""
+    return report.HUMAN["qualification"]["selftest_summary"].format(
+        n=evaluators, t=human_duration(elapsed), q=qualified, u=unqualified, s=skipped)
+
+
+def _say_empty(allow_empty: bool, why: str) -> None:
+    """The line under a summary that counted zero controls exercised."""
+    if allow_empty:
+        _say(f"note: no control ran ({why}) — allowed by --allow-empty")
+    else:
+        _say(f"no control ran ({why}), so no gate was shown able to fail — a "
+             f"selftest that exercises nothing is not a pass (--allow-empty if "
+             f"nothing is expected here)")
+
+
+def _selftest_one(root: str, spec: Any, fn: Any, ctx: gates.GateContext, *,
+                  projection: dict | None, record: bool, now: str,
+                  anchors: verdicts.Anchors, digests: FileDigests
+                  ) -> tuple[Verdict, verdicts.Admission | None]:
+    """One evaluator qualified as `check` qualifies it, and the row `gate
+    selftest` reports: ``(row, admission)``.
+
+    Where the gate's tools are missing nothing runs and nothing is filed: the
+    row is `gates.selftest`'s own skip, and there is no admission. Otherwise
+    `verdicts.admission` with `force=True` runs both controls and, for an
+    evaluator not from a bundled pack, the mutation pass, and files them
+    (`record`); the row passes exactly when the evaluator is qualified, its
+    detail the qualification line (JUnit's message). Its time is the wall time
+    of that one call.
+    """
+    ok, _why = gates.availability(spec)
+    if not ok:
+        return gates.selftest(spec, fn, ctx), None
+    clock = time.perf_counter()
+    judged = verdicts.admission(root, spec, fn, ctx, force=True, record=record,
+                                projection=projection, digests=digests, anchors=anchors,
+                                when=now)
+    elapsed = round(time.perf_counter() - clock, 6)
+    base: dict[str, Any] = {"gate": f"{spec.id}#selftest", "tier": Tier(int(spec.tier)),
+                            "pack": spec.pack or "", "claims": [], "duration_s": elapsed}
+    entry = judged.entry
+    numbers: dict[str, Any] = ({"measured": entry.measured, "limit": entry.limit,
+                                "units": entry.units} if entry is not None else {})
+    if judged.state == "undemonstrated":
+        return Verdict(passed=False, skipped=True,
+                       skip_reason=judged.reason or "its tooling is not available",
+                       **base), judged
+    line = _selftest_line(spec.id, judged)
+    return Verdict(passed=judged.state == "admitted", detail=line, **numbers, **base), judged
+
+
+def _selftest_line(gate_id: str, judged: verdicts.Admission) -> str:
+    """The evaluator's qualification line, or — with no facts recorded — its
+    reason in the table's words."""
+    if judged.qualification is not None:
+        return report.qualification_line(gate_id, judged.qualification)
+    q = report.HUMAN["qualification"]
+    return (f"{gate_id}{q['id_sep']}{report.qualification_reason(judged.reason)} "
+            f"{q['unqualified']}")
+
+
+def _isolation_notes(root: str, registry: gates.Registry, spec: Any, fn: Any,
+                     ctx: gates.GateContext) -> list[str]:
+    """P2.2-D13's hand-off, for a project's edges (P2.3-D20): every prerequisite
+    of ``spec`` must PASS ``spec``'s known-bad control, built on the host its
+    control gets (the known-good design); one that does not pre-empts the
+    control wherever both run. A diagnostic printed under the line — never part
+    of the qualification, never cached; the words are `pack validate`'s.
+    *Rejected:* inside the line or a condition of *qualified* (the line and the
+    word stay GLOSSARY §2's); in `check` (a third run per dependent per miss)."""
+    closure = [s for s in gates.plan(registry, [spec]) if s.id != spec.id]
+    if not closure:
+        return []
+    out_dir = tempfile.mkdtemp(prefix="atompipe-isolation-")
+    try:
+        host = verdicts.known_good_context(root, ctx) or ctx
+        try:
+            bad = gates.run_fixture(spec, fn, host, trace=None, out_dir=out_dir,
+                                    fixture_root=root)
+        except AtompipeError:
+            return []
+        notes = []
+        for need in closure:
+            entry = registry.get(need.id)
+            if entry is None or not gates.availability(need)[0]:
+                continue
+            verdict = gates.run_gate(entry[0], entry[1], bad)
+            if verdict.outcome != "pass":
+                word = report.HUMAN["outcome"].get(verdict.outcome, verdict.outcome)
+                body = ((verdict.error if verdict.outcome == "error" else
+                         verdict.skip_reason if verdict.outcome == "skipped" else
+                         verdict.detail) or "no reason given").splitlines()[0]
+                notes.append(f"note: {spec.id}: " + report.HUMAN["qualification"][
+                    "isolation"].format(need=need.id, gate=spec.id, word=word, body=body))
+        return notes
+    finally:
+        shutil.rmtree(out_dir, ignore_errors=True)
 
 
 def cmd_gate_selftest(args: argparse.Namespace) -> int:
@@ -1715,74 +3870,535 @@ def cmd_gate_selftest(args: argparse.Namespace) -> int:
     (refusing by exploding is not detecting), and a fixture that is missing or
     broken (the control is gone, so the gate is unproven). A gate whose tooling
     is absent SKIPS and does not fail the command — nothing was tested, and that
-    is already visible as BLOCKED in the readiness report.
+    is already visible as BLOCKED in the readiness report. A run in which no
+    control ran at all exits 1 too, unless `--allow-empty` says that is expected
+    (`_selftest_code`).
 
     Every tier runs by default. Capping the default at tier 0 would leave the
     expensive gates — the ones nobody re-reads — permanently unproven, which is
     the exact shape of the failure this command exists to catch.
 
-    The selftest verdicts are appended to the run history but NOT written into
-    the ledger's verdict list: they are filed under `<gate>#selftest` and carry
-    no claims, and proof that the instrument works must never resolve a claim.
+    **Two modes.** Inside a project this runs the project's controls against the
+    project's model. With no project — the repository root, where `CLAUDE.md`
+    tells a pack author to run it — or with `--pack`, it runs **pack mode**
+    (`_selftest_packs`). What slipped through (S-09): the command needed a
+    project and exited 2 at the root, so the merge check `CLAUDE.md` and
+    `CONTRIBUTING.md` prescribe could not run where they prescribe it, and CI ran
+    it only inside the bracket, which loads no pack at all. The branch comes
+    before `_root`, `_lock`, `_load` and `_projection` (cli:H8): each of them
+    assumes a project, and a broken model must not stop a pack's controls.
+
+    **Project mode files what it demonstrates** (D-07, S-08). Every selected
+    control runs — fixture and gate, never served from the cache — through
+    `verdicts.admission(..., force=True)`, the same code `check` runs a control
+    with, so the entry it files is byte for byte the one `check` would: a
+    project fixture is handed the known-good design (`selftest/known_good.py`,
+    D-27), a pack's the live host; each gets its own emptied scratch under
+    `.atompipe/out/controls/<gate>/`. A measurement becomes a control entry
+    (`.atompipe/verdicts/<gate>/control-<rho16>-<out8>.json`, O_EXCL: an
+    unchanged control re-creates the same name and writes nothing) and a control
+    obs row; a crash or an unusable fixture is remembered and never cached.
+    `--no-record` writes none of it. What slipped through before: the verdicts
+    went to the run history only, so `check` never learned a control had been
+    shown to fire and `gate show` read "(never run)" forever (S-08). The rows
+    carry no claims: proof that the instrument works must never resolve one.
     """
-    root = _root(args)
+    junit_arg = _junit_arg(args)
+    root = store.find_root(getattr(args, "dir", None))
+    junit = _junit_unlink(args, junit_arg, root=root)
+    if root is None or args.pack:
+        return _selftest_packs(args, root, junit)
+
     max_tier = ALL_TIERS if args.tier is None else int(args.tier)
     selection = list(args.gates or []) + list(args.only or [])
+    record = not args.no_record
+    now = utcnow_iso()
 
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _load(root)
         registry, _ = _registry(root, ledger, strict=True)
         model, projection = _projection(root, ledger)
-        ctx = _context(root, ledger, model, projection, max_tier, quiet=args.json)
+        # The context's tier is a real one: `ALL_TIERS` is a selection, not a
+        # tier a gate can read. What slipped through (critique of P2.3): a
+        # project gate that read `ctx.tier` was handed 99, and its control entry
+        # was refused by its own reader (`reads.tier must be one of [0, 1, 2,
+        # 3]`), so `gate selftest` at its default crashed on it.
+        ctx = _context(root, ledger, model, projection, min(max_tier, int(Tier.EXTERNAL)),
+                       quiet=args.json)
         # Private, on purpose: `--only` must mean exactly what it means for
         # `check`, and a second copy of the id/pack/glob matching rule would
         # eventually disagree with the first — always in the permissive
         # direction, which here would silently test fewer controls than asked.
         specs = gates._selected(registry, max_tier, selection or None)
+        # The sweep's anchors, not each control's defaults: an entry spells its
+        # paths against them, and a different spelling is a different
+        # rho_control — `gate selftest` would file a second entry beside the one
+        # `check` filed for the same demonstration.
+        anchors = verdicts.anchors_for(root, registry, out_dir=ctx.out_dir)
+        digests = FileDigests()
 
         started = time.perf_counter()
         results: list[Verdict] = []
+        judged: dict[str, verdicts.Admission] = {}
         for spec in specs:
             pair = registry.get(spec.id)
             if pair is None:                        # pragma: no cover - defensive
                 continue
-            verdict = gates.selftest(spec, pair[1], ctx)
+            verdict, admission = _selftest_one(root, spec, pair[1], ctx,
+                                               projection=projection, record=record, now=now,
+                                               anchors=anchors, digests=digests)
             results.append(verdict)
+            if admission is not None:
+                judged[spec.id] = admission
             if not args.json:
-                _say(verdict.render())
+                if verdict.skipped:
+                    _say(f"{spec.id}{report.HUMAN['qualification']['id_sep']}"
+                         f"{report.HUMAN['outcome']['skipped']}: {verdict.skip_reason}")
+                else:
+                    _say(verdict.detail)
+                    for row in _held_why(admission):
+                        _say(row)
+                    for note in _isolation_notes(root, registry, spec, pair[1], ctx):
+                        _say(note)
         elapsed = time.perf_counter() - started
+        installed = packs.installed(root, ledger=ledger)
 
-        if results and not args.no_record:
-            store.record_run(root, results, RunMeta(
-                when=utcnow_iso(), tier=max_tier,
-                model_hash=modelio.model_hash(projection) if projection else "",
-                inputs_hash=artifacts.inputs_hash(ledger),
-                spine_version=__version__, duration_s=round(elapsed, 4)))
-
-    broken = [v for v in results if not v.ok and not v.skipped]
     skipped = [v for v in results if v.skipped]
+    qualified = [v for v in results if v.ok]
+    unqualified = [v for v in results if not v.ok and not v.skipped]
+    code = _selftest_code(broken=len(unqualified), baselines_failed=0,
+                          exercised=len(qualified) + len(unqualified),
+                          allow_empty=args.allow_empty)
+    written = _junit_write(junit, lambda: report.render_selftest_junit(
+        results, exit_code=code, when=now))
 
     if args.json:
-        _dump({"selftests": [_verdict_row(v) for v in results],
-               "broken": [v.gate for v in broken],
+        _dump({"mode": "project",
+               "packs": [_pack_row(name, root) for name in installed],
+               "selftests": [_verdict_row(v) for v in results],
+               "baselines": None,
+               # `broken`, `skipped` and their counts keep 860ffa6's meaning and
+               # spelling (P2.1-D12): every control row that does not pass —
+               # what fails the run — and every skipped one, by its
+               # `<gate>#selftest` id; `fired` is the rest. What slipped through
+               # (review of P2.3): P2.3 narrowed `broken` to the known-bad half
+               # and bared its ids, so a consumer matching
+               # `bracket.x#selftest` matched nothing, and a gate whose
+               # known-good control failed failed the run while absent from
+               # `broken`. The paired view is the new keys alone.
+               "broken": [v.gate for v in unqualified],
                "skipped": [v.gate for v in skipped],
-               "ok": not broken})
-        return 1 if broken else 0
+               "unqualified": [_bare(v.gate) for v in unqualified],
+               "qualifications": [_qualification_view(gid, a) for gid, a in judged.items()],
+               "counts": {"controls": len(results), "fired": len(qualified),
+                          "broken": len(unqualified), "skipped": len(skipped),
+                          "qualified": len(qualified), "unqualified": len(unqualified)},
+               "allow_empty": bool(args.allow_empty),
+               "junit": written,
+               "ok": code == 0})
+        return code
 
-    if not results:
-        _say("no gates registered, so no controls to run")
-        return 0
-    _say(f"{len(results)} control(s) in {human_duration(elapsed)}: "
-         f"{len(results) - len(broken) - len(skipped)} fired, {len(broken)} BROKEN, "
-         f"{len(skipped)} skipped")
-    if broken:
-        _say("these gates cannot be trusted — each one failed to reject its own "
-             "known-bad input, or lost its control:")
-        for verdict in broken:
-            _say(f"{_tag('FAIL')} {verdict.gate} — "
-                 f"{verdict.detail or verdict.error or 'no detail'}")
-        return 1
-    return 0
+    _say(_selftest_summary(len(results), elapsed, len(qualified), len(unqualified),
+                           len(skipped)))
+    if len(qualified) + len(unqualified) == 0:
+        _say_empty(args.allow_empty,
+                   "no gates registered" if not results else "every control skipped")
+    return code
+
+
+# --------------------------------------------------------------------------- #
+# gate selftest, pack mode:  the gate on the gates, where the packs are
+# --------------------------------------------------------------------------- #
+def _pack_row(name: str, root: str) -> dict[str, str]:
+    """One installed pack as `gate selftest --json` lists it in project mode:
+    its name, where it resolved from, and which search root that was."""
+    pack_dir = packs.find(name, root) or ""
+    return {"name": name, "dir": pack_dir,
+            "origin": packs.origin_of(pack_dir, root) if pack_dir else "missing"}
+
+
+def _packs_under(base: str) -> list[str]:
+    """Pack directories directly inside `base`, sorted — by `packs.discover_dirs`'
+    rules: a `pack.json` makes a directory a pack, and names starting `.` or `_`
+    are never one (`packs/__init__.py` sits beside the bundled packs)."""
+    try:
+        entries = sorted(os.listdir(base))
+    except OSError:
+        return []
+    return [os.path.join(base, entry) for entry in entries
+            if not entry.startswith((".", "_"))
+            and os.path.isfile(os.path.join(base, entry, packs.MANIFEST_NAME))]
+
+
+#: The `skip_reason` prefix of a control `_read_back` could not count: its pack's
+#: demonstration stopped before it, or did not add up. Not a tooling skip, so it
+#: is left out of the `skipped (tooling)` count; the pack's own problem row is
+#: what fails the run.
+_NOT_RUN = "not run: "
+
+
+def _bare(gate_id: str) -> str:
+    """A control's gate id without `gates.selftest`'s `#selftest` suffix."""
+    return gate_id[: -len("#selftest")] if gate_id.endswith("#selftest") else gate_id
+
+
+def _pack_targets(args: argparse.Namespace, root: str | None) -> tuple[list[tuple[str, str]], list[str]]:
+    """`([(name, pack dir)], notes)`: what pack mode demonstrates, in order.
+
+    * `--pack DIR` — that pack, or, for a directory that is not one, every pack
+      directly inside it (`--pack packs/`, `--pack ~/.atompipe/packs`). A
+      directory holding none is a note and zero targets, which the exit code then
+      refuses unless `--allow-empty`.
+    * `--pack NAME` — resolved like a project resolves it, but with
+      `$ATOMPIPE_PACK_PATH` and `~/.atompipe/packs` searched only under
+      `--user-packs`; inside a project its `.atompipe/packs/` is searched too.
+    * neither — every bundled pack, plus the env and user packs under
+      `--user-packs`, first-found-wins by directory name as discovery resolves it.
+
+    What slipped through without the switch (S-87): the env and user entries
+    outrank the bundled packs, so on a pack author's machine a same-named copy in
+    `~/.atompipe/packs` would have been the one demonstrated while every line
+    named the bundled one. The machine does not get to choose what the merge
+    check tests. *Rejected:* refusing to run while a user pack shadows a bundled
+    one — the author's copy is often the point, and `--user-packs` names it.
+    """
+    include = bool(getattr(args, "user_packs", False))
+    project = root or ""          # "" keeps search_paths from finding one itself
+    out: list[tuple[str, str]] = []
+    notes: list[str] = []
+    seen: set[str] = set()
+
+    def add(pack_dir: str) -> None:
+        pack_dir = os.path.abspath(pack_dir)
+        key = os.path.normcase(pack_dir)
+        if key not in seen:
+            seen.add(key)
+            out.append((os.path.basename(pack_dir.rstrip(os.sep)), pack_dir))
+
+    if args.pack:
+        for value in args.pack:
+            if os.path.isdir(value):
+                if os.path.isfile(os.path.join(value, packs.MANIFEST_NAME)):
+                    add(value)
+                    continue
+                inside = _packs_under(value)
+                if not inside:
+                    notes.append(f"{os.path.abspath(value)} holds no pack: no "
+                                 f"{packs.MANIFEST_NAME} in it or directly below it")
+                for pack_dir in inside:
+                    add(pack_dir)
+                continue
+            if os.sep in value or (os.altsep and os.altsep in value):
+                raise AtompipeError(f"--pack {value}: no such directory")
+            found = packs.find(value, project, include_env=include, include_user=include)
+            if found is None:
+                looked = packs.search_paths(project, existing_only=False,
+                                            include_env=include, include_user=include)
+                where = "\n  ".join(looked) or "(no search paths)"
+                extra = "" if include else (
+                    f"\n($ATOMPIPE_PACK_PATH and ~/.atompipe/packs are searched only "
+                    f"with --user-packs)")
+                raise AtompipeError(f"no pack named {value!r} — searched:\n  {where}{extra}")
+            add(found)
+        return out, notes
+
+    claimed: set[str] = set()
+    for base in packs.search_paths(project, include_env=include, include_user=include):
+        for pack_dir in _packs_under(base):
+            name = os.path.normcase(os.path.basename(pack_dir))
+            if name in claimed:
+                continue                  # shadowed, exactly as a project would see it
+            claimed.add(name)
+            add(pack_dir)
+    return out, notes
+
+
+def _selftest_packs(args: argparse.Namespace, root: str | None, junit: str | None) -> int:
+    """`gate selftest` in pack mode: each target through `packs.demonstrate`.
+
+    Per gate, the same three runs `pack validate` makes: the pack's own baseline
+    must pass, the control must fire, and it must still fire against an empty
+    host (the seal probe). `demonstrate` is the one implementation of those rules;
+    this function only picks the packs, reads the result back per gate, and
+    renders it. Every run gets a temp `out_dir` that is removed afterwards, and
+    nothing is recorded — no project, no ledger, no run history (Q1.8).
+
+    The tier ceiling defaults to EXTERNAL: every control, as in a project. A gate
+    named explicitly (positionally or `--only`) runs above an explicit `--tier`,
+    because naming it is the opt-in to its cost — `gates._selected`'s rule, used
+    here per pack so the matching can never disagree with a project's.
+
+    Reading `Demonstration` back per gate needs each pack's gate list, which it
+    does not carry: counts and problem lines only. So each pack is loaded first
+    through `packs._load_dir` — the loader `demonstrate` itself uses, from the
+    same directory — into a registry of its own. A module is executed once per
+    process and reused after that, so the second load costs a lookup and cannot
+    see different code. The counts must then add up: if `demonstrate` ran a
+    different number of controls from the gates it was given, none of that
+    pack's controls is counted as fired. *Rejected:* re-running the baseline and
+    control here per gate — a second copy of the rules, which drifts from
+    `demonstrate` in whichever direction nobody tests (D-25).
+    """
+    ceiling = int(Tier.EXTERNAL) if args.tier is None else int(args.tier)
+    selection = [p for p in list(args.gates or []) + list(args.only or []) if str(p).strip()]
+    targets, notes = _pack_targets(args, root)
+    started = time.perf_counter()
+
+    # Pass 1: what each pack registers, and which of its gates the selection picks.
+    plans: list[dict[str, Any]] = []
+    hit: set[str] = set()
+    every_pack_loaded = True
+    for name, pack_dir in targets:
+        plan: dict[str, Any] = {
+            "name": name, "dir": pack_dir, "origin": packs.origin_of(pack_dir, root or ""),
+            "specs": [], "chosen": [], "problems": [],
+        }
+        plans.append(plan)
+        registry = gates.Registry()
+        try:
+            packs._load_dir(name, pack_dir, registry)
+        except AtompipeError as exc:
+            plan["problems"].append(f"{packs.GATES_DIR}/: {exc}")
+            every_pack_loaded = False
+            continue
+        plan["specs"] = registry.specs()
+        if not selection:
+            plan["chosen"] = [s.id for s in registry.by_tier(ceiling)]
+            continue
+        chosen: set[str] = set()
+        for pattern in selection:
+            try:
+                picked = gates._selected(registry, ceiling, [pattern])
+            except AtompipeError:
+                continue              # no hit in THIS pack; another may have it
+            if picked:
+                hit.add(pattern)
+                chosen.update(s.id for s in picked)
+        plan["chosen"] = [s.id for s in plan["specs"] if s.id in chosen]
+
+    unmatched = [p for p in selection if p not in hit]
+    if unmatched and every_pack_loaded:
+        # A pack that did not load might have held the gate, so only a complete
+        # picture may refuse the name; otherwise the load failure is reported.
+        raise AtompipeError(
+            f"no gate in {', '.join(n for n, _ in targets) or 'no pack'} matches "
+            f"{', '.join(repr(u) for u in unmatched)} — running zero controls and "
+            f"calling it a clean selftest is the failure this command exists to prevent")
+
+    # Pass 2: demonstrate, then read the result back per chosen gate.
+    controls: list[Verdict] = []
+    baselines: list[Verdict] = []
+    failed_rows: list[tuple[str, str]] = []      # (label, why): each pack-level problem
+    with tempfile.TemporaryDirectory(prefix="atompipe-selftest-",
+                                     ignore_cleanup_errors=True) as scratch:
+        for index, plan in enumerate(plans):
+            if plan["chosen"]:
+                # Up to the dearest gate named: naming it opted into its cost.
+                tier = max([ceiling] + [int(s.tier) for s in plan["specs"]
+                                        if s.id in plan["chosen"]])
+                shown = packs.demonstrate(
+                    plan["dir"], tier=tier,
+                    out_dir=os.path.join(scratch, f"{index:03d}-{plan['name']}"))
+                _read_back(plan, shown, tier)
+                # An isolation check its prerequisite's tools left unrun: said,
+                # never dropped (review of P2.2; `Demonstration.unchecked`).
+                notes.extend(entry for entry in shown.unchecked
+                             if entry.partition(": ")[0] in plan["chosen"])
+            for problem in plan["problems"]:
+                failed_rows.append((plan["name"], problem))
+            controls.extend(plan.get("controls", []))
+            baselines.extend(plan.get("baselines", []))
+    elapsed = time.perf_counter() - started
+    now = utcnow_iso()
+
+    qualified = [v for v in controls if v.outcome == "pass"]
+    unqualified = [v for v in controls if v.outcome in ("fail", "error")]
+    skipped = [v for v in controls if v.outcome == "skipped"
+               and not v.skip_reason.startswith(_NOT_RUN)]
+    code = _selftest_code(broken=len(unqualified), baselines_failed=len(failed_rows),
+                          exercised=len(qualified) + len(unqualified),
+                          allow_empty=args.allow_empty)
+    written = _junit_write(junit, lambda: report.render_selftest_junit(
+        controls, exit_code=code, when=now, baselines=baselines))
+
+    if args.json:
+        _dump({"mode": "pack",
+               "tier": ceiling,
+               "packs": [{"name": p["name"], "dir": p["dir"], "origin": p["origin"],
+                          "gates": list(p["chosen"]),
+                          "fired": sum(1 for v in p.get("fired", [])),
+                          "qualified": sum(1 for v in p.get("controls", []) if v.ok),
+                          "broken": [_bare(v.gate) for v in p.get("controls", [])
+                                     if v.outcome in ("fail", "error")],
+                          "skipped": [_bare(v.gate) for v in p.get("controls", [])
+                                      if v.outcome == "skipped"
+                                      and not v.skip_reason.startswith(_NOT_RUN)],
+                          "baselines_failed": [v.gate for v in p.get("baselines", [])
+                                               if v.outcome in ("fail", "error")],
+                          "problems": list(p["problems"])} for p in plans],
+               "notes": notes,
+               "selftests": [_verdict_row(v) for v in controls],
+               "baselines": [_verdict_row(v) for v in baselines],
+               "broken": [_bare(v.gate) for v in unqualified],
+               "skipped": [_bare(v.gate) for v in skipped],
+               "baselines_failed": [v.gate for v in baselines if v.outcome in ("fail", "error")],
+               # Every evaluator's line (critique of the P2.3 design: in pack mode
+               # a qualified evaluator's line was printed nowhere, so "54 read
+               # the line" could not be observed): here, and under `-v` in text.
+               "qualifications": [q for p in plans for q in p.get("qualifications", [])],
+               "counts": {"controls": len(qualified) + len(unqualified) + len(skipped),
+                          "fired": sum(len(p.get("fired", [])) for p in plans),
+                          "broken": len(unqualified), "skipped": len(skipped),
+                          "qualified": len(qualified), "unqualified": len(unqualified),
+                          "baselines_failed": sum(1 for v in baselines
+                                                  if v.outcome in ("fail", "error"))},
+               "allow_empty": bool(args.allow_empty),
+               "junit": written,
+               "ok": code == 0})
+        return code
+
+    for note in notes:
+        _say(f"note: {note}")
+    verbose = bool(getattr(args, "verbose", False))
+    for plan in plans:
+        line = _pack_line(plan, filtered=bool(selection), ceiling=ceiling)
+        if line:
+            _say(line)
+        for q in plan.get("qualifications", []):
+            if verbose or q["token"]:
+                _say(q["line"])
+        # A qualification's own problem restates its line, which is printed.
+        lead = report.unqualified_text("")
+        for problem in plan["problems"]:
+            if not problem.startswith(tuple(f"{q['gate']}: {lead}"
+                                            for q in plan.get("qualifications", []))):
+                _say(f"problem: {problem}")
+    _say(_selftest_summary(len(qualified) + len(unqualified) + len(skipped), elapsed,
+                           len(qualified), len(unqualified), len(skipped)))
+    if not qualified and not unqualified:
+        _say_empty(args.allow_empty, "no pack to demonstrate" if not targets
+                   else "every control skipped" if skipped else "no gate selected")
+    return code
+
+
+def _read_back(plan: dict[str, Any], shown: Any, tier: int) -> None:
+    """Turn one `packs.demonstrate` result into per-gate qualification rows.
+
+    `demonstrate` judges each gate in scope (`Demonstration.qualifications`:
+    its facts, which `verdicts._qualification` decides), lists every defect as
+    `"<gate id>: <why>"` — a qualification that does not hold, an unsealed or
+    unisolated control, a pack-level defect naming no gate — `"<gate id>
+    (<reason>)"` per tooling skip, and a count of controls run. An evaluator is
+    qualified here when the judge says so AND no problem names it (an unsealed
+    control is a pack defect whatever it qualified on). Sets
+    `plan["controls"]` (one row per gate, passing iff qualified, its detail the
+    line), `plan["baselines"]` (the known-good half, for JUnit's suite),
+    `plan["qualifications"]` and `plan["fired"]`, and appends to
+    `plan["problems"]`.
+    """
+    name = plan["name"]
+    in_scope = [s for s in plan["specs"] if int(s.tier) <= tier]
+    ids = {s.id for s in in_scope}
+    named: dict[str, list[str]] = {}
+    for line in shown.problems:
+        gate_id, sep, why = line.partition(": ")
+        if sep and gate_id in ids:
+            named.setdefault(gate_id, []).append(line)
+        plan["problems"].append(line)
+    tooling: dict[str, str] = {}
+    for entry in shown.skipped:
+        gate_id, sep, reason = entry.partition(" (")
+        if sep and gate_id in ids:
+            tooling[gate_id] = reason[:-1] if reason.endswith(")") else reason
+        else:
+            plan["problems"].append(f"skipped an unknown gate: {entry}")
+
+    # The counts must add up before a single evaluator is called qualified.
+    # Every gate in scope either skipped for tooling or ran its controls; a
+    # demonstration that stopped early (no baseline file) or dropped a gate ran
+    # fewer.
+    expected = len(ids) - len(tooling)
+    complete = shown.ran == expected
+    if not complete and not plan["problems"]:
+        plan["problems"].append(
+            f"the demonstration ran {shown.ran} control(s) of the {expected} this "
+            f"pack's gates call for — none of its evaluators is counted as qualified")
+
+    controls: list[Verdict] = []
+    baselines: list[Verdict] = []
+    qualifications: list[dict] = []
+    fired: list[str] = []
+    for spec in in_scope:
+        if spec.id not in plan["chosen"]:
+            continue
+        common = {"pack": spec.pack or name, "tier": Tier(int(spec.tier))}
+        facts = shown.qualifications.get(spec.id)
+        if spec.id in tooling:
+            controls.append(Verdict(gate=f"{spec.id}#selftest", skipped=True,
+                                    skip_reason=tooling[spec.id], **common))
+            baselines.append(Verdict(gate=spec.id, skipped=True, skip_reason=tooling[spec.id],
+                                     **common))
+            continue
+        if facts is None or not complete:
+            reason = f"{_NOT_RUN}{name} could not be demonstrated"
+            controls.append(Verdict(gate=f"{spec.id}#selftest", skipped=True,
+                                    skip_reason=reason, **common))
+            baselines.append(Verdict(gate=spec.id, skipped=True, skip_reason=reason, **common))
+            continue
+        token = verdicts._qualification(facts)
+        line = report.qualification_line(spec.id, facts)
+        ok = not token and not named.get(spec.id)
+        if ok:
+            qualifications.append({"gate": spec.id, "pack": name, "line": line, "token": ""})
+        else:
+            q = report.HUMAN["qualification"]
+            shown_line = line if token else (line.rsplit(" ", 2)[0] + " " + q["unqualified"]
+                                             if line.endswith(q["qualified"]) else line)
+            qualifications.append({"gate": spec.id, "pack": name, "line": shown_line,
+                                   "token": token or "problem"})
+        if facts.known_bad == "fail":
+            fired.append(spec.id)
+        controls.append(Verdict(gate=f"{spec.id}#selftest", passed=ok, detail=line,
+                                **common))
+        # The known-good half in the table's words — never the raw outcome
+        # token (`not-run`, `live`; review of P2.3).
+        q = report.HUMAN["qualification"]
+        baselines.append(Verdict(gate=spec.id, passed=facts.known_good == "pass",
+                                 detail=f"{q['known_good']} "
+                                        f"{q['outcome'].get(facts.known_good, facts.known_good)}",
+                                 **common))
+    plan["controls"] = controls
+    plan["baselines"] = baselines
+    plan["qualifications"] = qualifications
+    plan["fired"] = fired
+
+
+def _pack_line(plan: dict[str, Any], *, filtered: bool, ceiling: int) -> str:
+    """One pack's row: `beam-analytic (bundled) : 8 qualified` (P2.3-D18).
+
+    `(origin)` because a pack that is not the one you are editing looks exactly
+    like one that is (`packs.origin_of`). Nothing for a pack a gate filter left
+    untouched: it was not part of this run. No outcome tag: a qualification is
+    not an outcome (GLOSSARY §1), and `[FAIL]` named three things at once.
+    """
+    controls = plan.get("controls", [])
+    problems = plan["problems"]
+    q = report.HUMAN["qualification"]
+    if not controls and not problems:
+        if filtered:
+            return ""
+        what = "no gates" if not plan["specs"] else f"no gate at or below tier {ceiling}"
+        return f"{plan['name']} ({plan['origin']}) : {what}"
+    qualified = sum(1 for v in controls if v.outcome == "pass")
+    unqualified = sum(1 for v in controls if v.outcome in ("fail", "error"))
+    tooling = sum(1 for v in controls if v.outcome == "skipped"
+                  and not v.skip_reason.startswith(_NOT_RUN))
+    line = q["pack_row"].format(pack=plan["name"], origin=plan["origin"], q=qualified)
+    if unqualified:
+        line += q["pack_unqualified"].format(u=unqualified)
+    if tooling:
+        line += q["pack_skipped"].format(s=tooling)
+    return line
 
 
 # --------------------------------------------------------------------------- #
@@ -1793,8 +4409,16 @@ def cmd_report(args: argparse.Namespace) -> int:
 
     Prints the markdown by default because the markdown IS the deliverable — the
     thing you hand someone before they spend money. `--write` puts it at
-    `docs/readiness.md`; `atompipe status` is the compressed terminal view of the
-    same ledger.
+    `REPORT.md` at the project root — an output git ignores (P2.5b-D17, PLAN
+    D-14; it was the tracked `docs/readiness.md`, which drifted from its ledger,
+    S-41) — writing the root ignore block's `/REPORT.md` first, so a project
+    migrated before P2.5b never shows it untracked; and — whenever a decision
+    exists — regenerates the decision log, `docs/decisions.md`, beside it: from
+    checkpoint 1.3 `decide` writes one record and no generated document, so the
+    log is an output of the command that writes outputs. `--milestone <m>`
+    renders the report for one spend, as last evaluated (the package's REPORT.md
+    is this, rendered from the boundary's re-run). `atompipe status` is the
+    compressed terminal view of the same records.
 
     `strict=False` here is deliberate — a report must render on a machine where
     the packs are not installed — but the *failures it swallows* were being
@@ -1807,31 +4431,75 @@ def cmd_report(args: argparse.Namespace) -> int:
     both failures are now named in a banner directly under the headline.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     registry, problems = _registry(root, ledger, strict=False)
-    _model, projection, model_error = _projection_safe(root, ledger)
-    stale, stale_why = _staleness(ledger, projection)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    stale_gates = resolution.stale_gates
+    stale_reasons = _stale_reasons(resolution)
     banner = _load_failure_banner(problems, model_error)
+    params = _shown_params(root, ledger, model, model_error, resolution, registry)
+    milestone = None
+    if getattr(args, "milestone", None):
+        milestone = view.milestone(args.milestone)
+        if milestone is None:
+            said = report.HUMAN["export"]
+            declared = [m.id for m in view.milestones]
+            raise AtompipeError(said["no_milestone"].format(
+                name=args.milestone,
+                declared=said["declared"].format(names=", ".join(declared))
+                if declared else said["none_declared"]))
+        if args.write:
+            raise AtompipeError(
+                f"--write writes the project's report; the report for {milestone.id} is "
+                f"written into its package by `atompipe export {milestone.id}`")
 
     if args.json:
-        resolved = claims.statuses(ledger, stale=stale, registry=registry)
+        composed = claims.compositions(view, registry=registry, stale_gates=stale_gates)
+        extra: dict[str, Any] = {}
+        if milestone is not None:
+            # The milestone's own predicate (review of P2.5b, finding 10: the
+            # JSON was the project's document — `ready` false beside a page
+            # saying ready for the milestone), as last evaluated.
+            found = claims.unresolved(view, composed, milestone)
+            extra["milestone"] = {
+                "name": milestone.id, "ready": found.ready, "last_evaluated": True,
+                "required": list(claims.required_ids(view, milestone)),
+                "unresolved": [{"id": c.id, "status": str(composed[c.id].status),
+                                "cause": str(composed[c.id].cause.value)}
+                               for c in found.unresolved],
+                "missing": list(found.missing)}
         _dump({
-            "summary": claims.summarise(ledger, registry, stale=stale),
-            "claims": {cid: str(status) for cid, status in resolved.items()},
-            "coverage": claims.coverage(ledger, registry),
-            "gaps": [need.to_dict() for need in claims.find_gaps(ledger, registry)],
-            "verdicts": [_verdict_row(v) for v in ledger.verdicts],
-            "stale": stale,
-            "stale_reason": stale_why,
+            **extra,
+            "summary": claims.summarise(view, registry, stale_gates=stale_gates),
+            "claims": {cid: str(c.status) for cid, c in composed.items()},
+            "statuses": _status_views(view, composed, stale_reasons),
+            "errored": [cid for cid, c in composed.items() if c.errored],
+            "coverage": claims.coverage(view, registry),
+            "gaps": [need.to_dict() for need in claims.find_gaps(view, registry)],
+            "verdicts": [_resolved_row(v, resolution) for v in view.verdicts],
+            "stale": bool(stale_gates),
+            "stale_reason": _stale_summary(resolution),
+            "stale_gates": _stale_gate_list(resolution),
             "problems": problems,
             "model_error": model_error,
             "coverage_understated": bool(banner),
+            # P2.5a-D16: the rebuild prediction, additive.
+            "rebuild": [found.to_dict() for found in claims.rebuild(view)],
         })
         return 0
 
     if args.write:
         with _lock(root):
-            path = report.write_report(root, ledger, registry, stale=stale)
+            # The ignore line before the file (D17): a project migrated before
+            # P2.5b gains `/REPORT.md` and `/out/` inside its marked block.
+            store.ensure_ignore_blocks(root)
+            path = report.write_report(root, view, registry, stale_gates=stale_gates,
+                                       model_error=model_error, params=params,
+                                       stale_reasons=stale_reasons)
+            if view.decisions:
+                decisions.write_log(root, view)
         _say(rel(path, root))
         # To stderr, because the one line on stdout is the path and scripts read
         # it. A caveat that breaks `report --write` as a shell substitution would
@@ -1840,7 +4508,9 @@ def cmd_report(args: argparse.Namespace) -> int:
             _warn(line)
         return 0
     sys.stdout.write(_with_banner(
-        report.render_markdown(ledger, registry, stale=stale), banner))
+        report.render_markdown(view, registry, stale_gates=stale_gates,
+                               model_error=model_error, root=root, params=params,
+                               stale_reasons=stale_reasons, milestone=milestone), banner))
     return 0
 
 
@@ -1857,8 +4527,9 @@ def _load_failure_banner(problems: list[str], model_error: str) -> list[str]:
     lines = ["> **This report is incomplete.** "
              f"{len(problems)} gate source(s) failed to load"
              + (" and the model did not load" if model_error else "")
-             + ", so coverage below is UNDERSTATED: a claim may read UNCLAIMED "
-               "because its gate never registered, not because no gate exists."]
+             + ", so coverage below is UNDERSTATED: a claim may read "
+             + report.words(ClaimStatus.UNCLAIMED).term
+             + " because its gate never registered, not because no gate exists."]
     lines += [f"> - {problem}" for problem in problems]
     if model_error:
         lines.append(f"> - model: {model_error.splitlines()[0]}")
@@ -1887,10 +4558,33 @@ def cmd_why(args: argparse.Namespace) -> int:
     The context-window win: value, what it derives from, the rationale, every
     rejected alternative with the concrete reason it lost, the gates that protect
     it, the evidence that grounds it, and the decisions that moved it.
+
+    Rendered from `_resolved`'s view (cli:H3): the gate lines are the effective
+    verdicts, the claim's gates its registry coverage, a parameter's gates the
+    ones that read it when they last ran. What slipped through before: this
+    loaded the ledger alone — no registry, no cache — so it quoted whatever
+    verdict the last `check` had written into the ledger, current or not.
+
+    A parameter is read from the model (`modelio.param_view`: the value, and
+    where it lives), and the gates that protect it from their last executed
+    runs (`verdicts.last_read_sets`), never from a record. From checkpoint 1.3
+    a parameter the model states entirely HAS no record — `check` stopped
+    copying the model into the records, and the migration writes a param record
+    only for what the model cannot hold — so a `why` that looked for one
+    answered "no parameter named thickness" about the number the bracket's
+    failing claim turns on; with the model mid-edit it still names it, and says
+    the model does not load instead of a number (`_param_views`). What grounds
+    it is derived from the extractions, the map `inputs` reads (`_grounding`,
+    S-36). All of it through `_why_text`, which `claim show` shares.
     """
     root = _root(args)
-    ledger = store.load(root)
-    text = decisions.why(ledger, args.name)
+    ledger = _load(root)
+    registry, _problems = _registry(root, ledger, strict=False)
+    model, projection, model_error = _projection_safe(root, ledger)
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    text = _why_text(root, ledger, registry, model, model_error, view, resolution,
+                     args.name)
     if args.json:
         _dump({"name": args.name, "why": text})
         return 0
@@ -1905,9 +4599,21 @@ def cmd_decide(args: argparse.Namespace) -> int:
     corridor"` is the highest-value thing this whole system stores. Without it
     every fresh context window re-proposes every settled number. A rejection with
     no reason is refused by `decisions.add`, which is why the flag takes a pair.
+
+    A shim (spec §3.15): under the lock it migrates a legacy ledger first, then
+    writes exactly one record, `decisions/<slug>.json`. It no longer regenerates
+    `docs/decisions.md` — a second file per decision, and a generated one; the log
+    is an output of `report --write` whenever a decision exists.
+
+    `when` is the clock read here and nothing else. What slipped through (S-44):
+    a `--when` flag backdated a decision, and since the log renders in storage
+    order a backdated entry sat on top as the newest — the one command whose
+    record says WHEN something was decided let the caller say it. Removed; the
+    one caller-stated time left is `claim physical --when`, a result observed
+    before it was typed in, until the signed result of P2.5 (D-12).
     """
     root = _root(args)
-    when = args.when or utcnow_iso()
+    now = utcnow_iso()
     rejected: list[Any] = []
     for raw in args.rejected or ():
         parts = [piece.strip() for piece in raw.split("|")]
@@ -1917,28 +4623,28 @@ def cmd_decide(args: argparse.Namespace) -> int:
         rejected.append(tuple(parts) if len(parts) >= 2 else raw)
 
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         decision = decisions.add(
             ledger,
             title=args.title,
             summary=args.summary,
-            when=when,
+            when=now,
             rejected=rejected,
             params_changed=_collect(args.param),
             claims_changed=_collect(args.claim),
             body=args.body or "",
             evidence=_collect(args.evidence),
         )
-        store.save(root, ledger)
-        log_path = decisions.write_log(root, ledger)
+        path = store.write_record(root, "decisions", decision) or os.path.join(
+            root, "decisions", f"{decision.id}.json")
 
     if args.json:
-        _dump(dict(decision.to_dict(), log=rel(log_path, root)))
+        _dump(dict(decision.to_dict(), record=rel(path, root)))
         return 0
     _say(f"{decision.id}  {decision.title}  ({decision.when})")
     for item in decision.rejected:
         _say(f"  rejected {item.value}: {item.why}")
-    _say(f"  log: {rel(log_path, root)}")
+    _say(f"  record: {rel(path, root)}")
     return 0
 
 
@@ -1954,7 +4660,7 @@ def cmd_packs_list(args: argparse.Namespace) -> int:
     gate come from" (installed, and shadowed by a copy earlier on the path).
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     installed = packs.installed(root, ledger=ledger)
     found = packs.discover_dirs(root)
 
@@ -2042,77 +4748,68 @@ def cmd_packs_validate(args: argparse.Namespace) -> int:
     pack_dir = target if os.path.isdir(target) else (packs.find(target, root) or "")
     if not pack_dir:
         raise AtompipeError(f"no pack {target!r} on any search path, and no such directory")
-    problems = packs.validate(pack_dir)
+    # What `demonstrate` could not show here, printed rather than dropped: a gate
+    # whose tools are absent was not demonstrated, and one above the tier was not
+    # run. Neither is a problem (CI has no solvers), and neither may pass for a
+    # demonstration either — silence would let it (S-12, tests:H8).
+    notes: list[str] = []
+    problems = packs.validate(pack_dir, notes=notes)
 
     if args.json:
-        _dump({"pack": pack_dir, "problems": problems, "ok": not problems})
+        _dump({"pack": pack_dir, "problems": problems, "notes": notes,
+               "ok": not problems})
         return 1 if problems else 0
+    for problem in problems:
+        _say(f"{_tag('FAIL')} {problem}")
+    for note in notes:
+        _say(f"note: {note}")
     if not problems:
         _say(f"{_tag('ok')} {pack_dir}: publishable")
         return 0
-    for problem in problems:
-        _say(f"{_tag('FAIL')} {problem}")
     _say(f"{len(problems)} problem(s) in {pack_dir}")
     return 1
 
 
 def cmd_packs_add(args: argparse.Namespace) -> int:
-    """Opt this project into a pack: append it to `meta.packs`.
+    """Opt this project into a pack: append it to `project.json`'s `packs`.
 
     Installed is a project decision, not a filesystem accident — a pack sitting
     in `~/.atompipe/packs` is available to every project on the machine and must
-    not start contributing gates to this one until the ledger says so. The pack
-    is loaded immediately so a broken one fails here, where the user is looking,
-    rather than in the middle of the next `check`.
+    not start contributing gates to this one until the project says so. The pack
+    is loaded immediately, into a fresh registry, so a broken one fails here,
+    where the user is looking, rather than in the middle of the next `check` —
+    and before anything is written.
+
+    A shim (spec §3.15): under the lock it migrates a legacy ledger first, then
+    writes exactly one file, `.atompipe/project.json`. There is no `packs remove`
+    (PLAN A-8): opting out is deleting the name from `packs` in that file, which
+    is what the command did, and its verdict entries stay in the cache either way
+    — orphans that never count and that `doctor` names.
     """
     root = _root(args)
+    now = utcnow_iso()
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _migrate(root, apply=True, now=now)
         added: list[str] = []
+        names = list(ledger.meta.packs or [])
         for name in args.names:
             if not packs.find(name, root):
                 looked = "\n  ".join(packs.search_paths(root, existing_only=False))
                 raise AtompipeError(f"no pack {name!r} found. Searched:\n  {looked}")
-            if name in (ledger.meta.packs or []):
+            if name in names:
                 continue
-            ledger.meta.packs = list(ledger.meta.packs or []) + [name]
+            names.append(name)
             added.append(name)
         registry = gates.Registry()
-        specs = packs.load_all_gates(ledger.meta.packs, registry, root)
-        store.save(root, ledger)
+        specs = packs.load_all_gates(names, registry, root)
+        store.write_project(root, dataclasses.replace(ledger.meta, packs=names))
 
     if args.json:
-        _dump({"added": added, "packs": ledger.meta.packs,
+        _dump({"added": added, "packs": names,
                "gates": [spec.id for spec in specs]})
         return 0
-    _say(f"packs: {', '.join(ledger.meta.packs) or '(none)'}")
+    _say(f"packs: {', '.join(names) or '(none)'}")
     _say(f"{len(specs)} gate(s) now available: {', '.join(s.id for s in specs[:8])}")
-    return 0
-
-
-def cmd_packs_remove(args: argparse.Namespace) -> int:
-    """Drop a pack from `meta.packs`. Its past verdicts stay in the ledger.
-
-    Deliberately: a verdict is a record of something that was true when it ran,
-    and deleting the evidence because the tooling was uninstalled would make the
-    history lie. The claims those gates covered simply stop being covered, which
-    `status` will report as UNCLAIMED — the honest answer.
-    """
-    root = _root(args)
-    with _lock(root):
-        ledger = store.load(root)
-        before = list(ledger.meta.packs or [])
-        ledger.meta.packs = [name for name in before if name not in set(args.names)]
-        store.save(root, ledger)
-    dropped = [name for name in before if name not in ledger.meta.packs]
-
-    if args.json:
-        _dump({"removed": dropped, "packs": ledger.meta.packs})
-        return 0
-    _say(f"removed {', '.join(dropped) or '(nothing)'}; "
-         f"packs now: {', '.join(ledger.meta.packs) or '(none)'}")
-    _say("past verdicts from those gates are kept — `atompipe status` will now show "
-         "the claims they covered as uncovered")
     return 0
 
 
@@ -2124,59 +4821,51 @@ def cmd_model(args: argparse.Namespace) -> int:
 
     `--write` produces `.atompipe/model.json`, the diffable view: sorted keys,
     one value per line, so a parameter change reads as `deflection 0.70 -> 0.47`
-    in `git diff` instead of as one enormous line. `--set-entry` records which
-    file is the model — the loader deliberately never guesses, because "the only
-    .py in model/" works right up until there are two.
+    in `git diff` instead of as one enormous line. `--entry` projects another
+    file without recording it. Which file IS the model is recorded in
+    `.atompipe/project.json` (`"model_entry"`) and nowhere else — the loader
+    deliberately never guesses, because "the only .py in model/" works right up
+    until there are two.
+
+    What slipped through, three times over. Plain `model` took the build lock
+    and saved the whole ledger, three lines below a comment promising it did
+    not — so printing the projection while a sweep was in flight contended for
+    the lock, and a `model` in a loop rewrote the ledger forever. `--write`
+    primed the parameter records from the model (`sync_params`): every value,
+    unit and rationale copied into a second home, stale the moment the model
+    moved (S-39). And `--set-entry` was a command whose only job was to write
+    one key of one record (PLAN A-8 removed it: the entry is edited in the file
+    like every other record). Now `model` is a read, `--write` writes the one
+    output it names, and no record is touched.
+
+    Orphans — param records whose field the model no longer defines — are read
+    off the records (`modelio.orphan_params`): a parameter the model owns
+    entirely has no record, and is no orphan.
     """
     root = _root(args)
-
-    if args.set_entry:
-        with _lock(root):
-            ledger = store.load(root)
-            candidate = os.path.join(root, args.set_entry)
-            if not os.path.exists(candidate) and not os.path.isabs(args.set_entry):
-                raise AtompipeError(
-                    f"{args.set_entry} does not exist (looked at {candidate}) — "
-                    f"create the model first, then record it")
-            ledger.meta.model_entry = args.set_entry
-            store.save(root, ledger)
-    ledger = store.load(root)
+    ledger = _load(root)
 
     model, projection = _projection(root, ledger, entry=args.entry)
     if projection is None:
         raise AtompipeError(
-            "no model entry recorded — `atompipe model --set-entry model/<thing>.py` "
-            "(the model is a dataclass CONFIG plus build(config) -> dict)")
+            f"{_no_entry(root)} (the model is a dataclass CONFIG plus build(config) -> "
+            f"dict); `atompipe model --entry <file>` projects one without recording it")
 
     digest = modelio.model_hash(projection)
-    undocumented = modelio.undocumented_params(model)
+    # The nag list every reader prints: over the view, so a record's rationale
+    # for a field the model leaves silent counts (modelio.undefended_params).
+    undocumented = modelio.undefended_params(_param_views(root, ledger, model, ""))
 
-    # Plain `atompipe model` is a READ. It used to take the build lock and save
-    # the ledger unconditionally, three lines below the comment promising it did
-    # not — so printing the projection while a sweep was in flight contended for
-    # the lock, and a `model` in a loop rewrote the ledger's mtime forever. The
-    # write now happens only for the two spellings that are already writes.
-    #
-    # `--set-entry` and `--write` both prime the ledger's parameter table from
-    # the model, so `atompipe why <param>` answers straight after either one
-    # rather than only after the first gate sweep.
     written = ""
-    if args.set_entry or args.write:
+    if args.write:
         with _lock(root):
-            fresh = store.load(root)
-            modelio.sync_params(fresh, model)
-            orphans = modelio.orphan_params(fresh, model)
-            store.save(root, fresh)
-            if args.write:
-                written = modelio.write_projection(root, projection)
-    else:
-        # Lock-free: `orphan_params` only compares two in-memory lists, and the
-        # ledger already in hand is the one we would have re-read anyway.
-        orphans = modelio.orphan_params(ledger, model)
+            written = modelio.write_projection(root, projection)
+    orphans = modelio.orphan_params(ledger, model)
 
     if args.json:
         _dump({"entry": model.entry, "hash": digest, "projection": projection,
                "params": [param.to_dict() for param in model.params],
+               "orphans": orphans,
                "undocumented": undocumented,
                "written": rel(written, root) if written else ""})
         return 0
@@ -2185,12 +4874,12 @@ def cmd_model(args: argparse.Namespace) -> int:
     derived = projection.get("derived") or {}
     _say(f"model: {model.entry}  hash {digest}")
     if orphans:
-        _say(f"  {len(orphans)} ledger param(s) the model no longer defines: "
+        _say(f"  {len(orphans)} param record(s) the model no longer defines: "
              f"{', '.join(orphans[:6])}"
              + ("..." if len(orphans) > 6 else "")
              + "  — renamed, or dropped without a decision entry?")
     _say(f"  {len(config)} config value(s), {len(derived)} derived value(s), "
-         f"{len(model.params)} param record(s)")
+         f"{len(model.params)} param(s)")
     if undocumented:
         _say(f"  no rationale: {', '.join(undocumented)} — a number with no rationale "
              f"gets re-litigated by every fresh reader")
@@ -2206,7 +4895,7 @@ def _load_viewgens(directory: str, registry: Any, *,
                    pack: str, root: str) -> list[Any]:
     """Import `<directory>/*.py` into a ViewRegistry; return the specs it added.
 
-    Deliberately the same shape as `_load_project_gates`, because a viewgen is a
+    Deliberately the same shape as `gates.load_project_gates`, because a viewgen is a
     gate's twin: same directory convention, same `sys.path` handling, same
     `PACK`/`PACK_DIR` globals, same "an exception here is the pack author's
     problem and must not print as a spine traceback". A pack author who has
@@ -2359,19 +5048,41 @@ def _view_registry(root: str, ledger: Ledger, *,
     return registry, problems
 
 
-def _site_state(root: str) -> dict:
-    """What is on disk under `site/`, read-only and running nothing.
+def _site_state(root: str, *, resolved: tuple | None = None) -> dict:
+    """What is on disk under `site/`, read-only, running no gate, fixture or
+    viewgen.
 
     Shared by `site status`, `status` and `doctor` so the three cannot drift
     into three opinions about whether the site is current — which is the
     property the site itself exists to have.
 
-    Staleness here is the SITE's staleness (was the ledger written after
-    `state.json`?), which is a different question from the verdicts' staleness
-    (has the model moved since the sweep?). Both are reported, separately,
+    Staleness here is the SITE's staleness (would a rebuild now show something
+    else?), which is a different question from the verdicts' staleness (did a
+    gate's inputs move since its verdict?). Both are reported, separately,
     because the fixes are different commands: `atompipe site build` for the
     first and `atompipe check` for the second. Collapsing them into one "stale"
     flag sends half the readers to the wrong one.
+
+    The page records what it was built from in two digests, and this compares
+    each with the same computation now. `meta.records_digest` against
+    `store.records_digest` (cli:H16): what it replaced compared the mtimes of
+    `ledger.json` and `state.json`, and from checkpoint 1.3 `ledger.json` is a
+    generated index every command rewrites, so a page built from unchanged
+    records read stale after any `status`, and a record edited by hand — before
+    a command had rebuilt the index — read current. Then `meta.judgement_digest`
+    against `site.state` over `_resolved`'s view now (`_site_judgement`): what
+    slipped through with the records alone (review, `repro_site`) — a check
+    that FAILed C1 moved no record, so all three readers called a page showing
+    C1 PASS and ready "current with the records". A page with either digest
+    missing was built by an older spine and cannot say what it was built from:
+    stale.
+
+    `resolved` — the caller's `(view, registry, resolution, params)`, from
+    `_resolved` with the registry it loaded and `_shown_params` over the model
+    it loaded, so `status` and `doctor` judge the page by the resolution and the
+    parameters they print. Without it this resolves for itself exactly as they
+    do (strict=False, `_projection_safe`): it loads the model and the gates, as
+    `status` does, because only the resolver can say what a rebuild would show.
     """
     site_dir = os.path.join(root, site.SITE_DIR)
     state_path = os.path.join(site_dir, site.DATA_DIR, site.STATE_NAME)
@@ -2448,20 +5159,71 @@ def _site_state(root: str) -> dict:
     info["claims"] = len(payload.get("claims") or [])
     info["verdicts"] = len(payload.get("verdicts") or [])
 
-    # mtime, not the two timestamps: `built` is when the build ran and the
-    # ledger carries no "written at" field at all, so comparing the files
-    # themselves is the only comparison that is a fact rather than an inference.
-    ledger_path = store.ledger_path(root)
+    built_from = str(meta.get("records_digest") or "")
+    judged_from = str(meta.get("judgement_digest") or "")
     try:
-        if os.path.getmtime(ledger_path) > os.path.getmtime(state_path):
-            info["stale"] = True
-            info["stale_reason"] = ("the ledger has changed since the site was built "
-                                    "— `atompipe site build`")
-    except OSError:                     # pragma: no cover - the ledger was just read
-        pass
-    if not info["stale"]:
-        info["stale_reason"] = "current with the ledger"
+        records_now = store.records_digest(root)
+    except (AtompipeError, OSError) as exc:
+        info["stale"] = True
+        info["stale_reason"] = (f"the records cannot be read ({exc}) — fix them, then "
+                                f"`atompipe site build`")
+        return info
+    if not built_from:
+        info["stale"] = True
+        info["stale_reason"] = ("the page does not say which records it was built from "
+                                "(an older build) — `atompipe site build`")
+        return info
+    if built_from != records_now:
+        info["stale"] = True
+        info["stale_reason"] = ("the records have changed since the site was built "
+                                "— `atompipe site build`")
+        return info
+    if not judged_from:
+        info["stale"] = True
+        info["stale_reason"] = ("the page does not say which verdicts it was built from "
+                                "(an older build) — `atompipe site build`")
+        return info
+    try:
+        now = _site_judgement(root, resolved)
+    except (AtompipeError, OSError) as exc:
+        info["stale"] = True
+        info["stale_reason"] = (f"what the page would show now cannot be worked out "
+                                f"({exc}) — fix that, then `atompipe site build`")
+        return info
+    if now["meta"]["judgement_digest"] != judged_from:
+        moved = site.judgement_moved(payload, now)
+        shown = moved[:verdicts.MAX_STALE_REASONS]
+        more = len(moved) - len(shown)
+        named = (f" ({'; '.join(shown)}{f' (+{more} more)' if more > 0 else ''})"
+                 if shown else "")
+        info["stale"] = True
+        info["stale_reason"] = (f"what the page shows has changed since the site was built"
+                                f"{named} — `atompipe site build`")
+        return info
+    info["stale_reason"] = "current with the records and the verdicts"
     return info
+
+
+def _site_judgement(root: str, resolved: tuple | None) -> dict:
+    """The `state.json` a `site build` would write now, less its views: the one
+    producer (`site.state`) over the one resolution (`_resolved`, R-5), handed
+    in by the caller or resolved here the way `status` resolves — the gates
+    loaded with strict=False and the model through `_projection_safe`, because
+    the question is asked by the commands that must survive a broken pack or a
+    model mid-edit. Where `site build` would refuse (it loads both strictly),
+    this judges what the project resolves to now, which is not what the page
+    shows: stale, correctly. No viewgen runs: the views are not judged
+    (`site._UNJUDGED_KEYS`)."""
+    if resolved is None:
+        ledger = _load(root)
+        registry, _problems = _registry(root, ledger, strict=False)
+        model, projection, model_error = _projection_safe(root, ledger)
+        view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                     now="", model=model)
+        params = _shown_params(root, ledger, model, model_error, resolution, registry)
+    else:
+        view, registry, resolution, params = resolved
+    return site.state(root, view, registry, resolution=resolution, params=params)
 
 
 def _site_brief(info: dict) -> dict:
@@ -2491,10 +5253,23 @@ def _site_line(info: dict) -> str:
     if dangling:
         bits.append(f"{dangling} dangling locator(s)")
     if info["stale"]:
-        bits.append("STALE: the ledger has moved — `atompipe site build`")
+        # The reason `_site_state` found, never a fixed sentence: this line said
+        # "the records have moved" for every stale page, and from the verdicts'
+        # digest on (review, `repro_site`) a page goes stale with every record
+        # where it was — sending the reader to diff claim files that never moved.
+        bits.append(f"STALE: {info['stale_reason']}")
     elif info["age"]:
         bits.append(f"built {info['age']}")
     return f"site: {', '.join(bits)}"
+
+
+def _project_name(root: str, ledger: Any = None) -> str:
+    """The name a launch entry shows: the project's own, else its directory's."""
+    try:
+        name = (ledger if ledger is not None else _load(root)).meta.name
+    except Exception:       # noqa: BLE001 - a name for a menu entry is never worth a refusal
+        name = ""
+    return (name or os.path.basename(os.path.abspath(root).rstrip(os.sep)) or "project").strip()
 
 
 def cmd_site_init(args: argparse.Namespace) -> int:
@@ -2511,14 +5286,17 @@ def cmd_site_init(args: argparse.Namespace) -> int:
     root = _root(args)
     with _lock(root):
         written = site.scaffold(root, force=bool(args.force))
+        launch = site.ensure_launch(root, _project_name(root))
 
     if args.json:
-        _dump({"root": root, "site": site.SITE_DIR, "wrote": written,
+        _dump({"root": root, "site": site.SITE_DIR, "wrote": written, "launch": launch,
                "next": ["atompipe site build", "atompipe site serve"]})
         return 0
     _say(f"scaffolded {site.SITE_DIR}/ in {root}")
     for path in written:
         _say(f"  {path}")
+    if launch:
+        _say(f"  {launch}   (Run and Debug: builds and opens this site)")
     _say("")
     _say(f"  {site.SITE_DIR}/index.html is yours — edit it; "
          f"`site init` will not overwrite it again")
@@ -2530,8 +5308,8 @@ def cmd_site_init(args: argparse.Namespace) -> int:
 def cmd_site_build(args: argparse.Namespace) -> int:
     """Run the viewgens, collect the ledger, and write `site/data/` + `site/assets/`.
 
-    **This never runs gates.** It reads the verdicts already recorded and stamps
-    each with its own age. A build that re-ran the cheap gates on the way past
+    **This never runs gates.** It renders the verdict cache as `_resolved`
+    judges it and stamps each verdict with its own age. A build that re-ran the cheap gates on the way past
     would publish a page whose tier-0 numbers are ten seconds old beside tier-2
     numbers from last week, under one "built at" stamp, with nothing on the page
     saying which is which. If the results are stale the honest fix is
@@ -2543,6 +5321,10 @@ def cmd_site_build(args: argparse.Namespace) -> int:
     of an import error rather than a statement about the design — published, in
     the one artifact whose entire job is to be trusted when a gate says
     something is wrong.
+
+    It also refreshes the renderer — every template file but `index.html` —
+    when this atompipe's differs (`site.refresh_renderer`), so a page scaffolded
+    by an older spine never reads new data with old words.
 
     Dangling locators never fail the build and are never silent. A verdict
     addressing a view that does not exist is a gate that believes it is drawing
@@ -2559,12 +5341,23 @@ def cmd_site_build(args: argparse.Namespace) -> int:
     # moment of the build rather than the ones from before a `check` that landed
     # while the viewgens were still importing.
     with _lock(root):
-        ledger = store.load(root)
+        ledger = _load(root)
         registry, _ = _registry(root, ledger)
         view_registry, _ = _view_registry(root, ledger)
         model, projection = _projection(root, ledger)
-        summary = site.build(root, ledger, registry, view_registry,
-                             model=model, projection=projection, now=utcnow_iso())
+        now = utcnow_iso()
+        # The page renders the resolver's answer, the one every other reader
+        # prints (`_resolved`, R-5), handed over rather than recomputed: the page
+        # and `status` built from one resolution cannot disagree about a gate.
+        view, resolution = _resolved(root, ledger, registry, projection, "", now=now,
+                                     model=model)
+        summary = site.build(root, view, registry, view_registry, model=model,
+                             projection=projection, now=now, resolution=resolution,
+                             params=_shown_params(root, ledger, model, "", resolution,
+                                                  registry))
+        # A groundspace made before `init` wrote one gains its launch entry here, the
+        # first time its site is built; an existing file is never touched.
+        summary["launch"] = site.ensure_launch(root, _project_name(root, ledger))
 
     problems = summary.get("locator_problems") or []
     counts = summary.get("counts") or {}
@@ -2600,8 +5393,13 @@ def cmd_site_build(args: argparse.Namespace) -> int:
     _say(f"{counts.get('claims', 0)} claim(s), {counts.get('verdicts', 0)} verdict(s), "
          f"{counts.get('views', 0)} view(s), {counts.get('assets', 0)} asset(s) from "
          f"viewgens")
+    if summary.get("refreshed"):
+        _say(f"refreshed the renderer to this atompipe's template: "
+             f"{', '.join(summary['refreshed'])}")
     _say(f"wrote {len(summary['wrote'])} file(s), removed {len(summary['removed'])} "
          f"stale file(s) -> {summary['state']}")
+    if summary.get("launch"):
+        _say(f"wrote {summary['launch']} — Run and Debug builds and opens this site")
     if problems:
         _say(f"{len(problems)} locator(s) point at something that does not exist. A gate "
              f"that thinks it is drawing and is not looks exactly like a gate that found "
@@ -2698,7 +5496,7 @@ def cmd_site_serve(args: argparse.Namespace) -> int:
         _dump({"url": url, "host": host, "port": port, "root": root,
                "serving": rel(site_dir, root), "built": built})
     else:
-        _say(f"serving {rel(site_dir, root)} at {url}")
+        _say(site.SERVE_READY_LINE.format(served=rel(site_dir, root), url=url))
         if not built:
             _say(f"{_tag('warn')} {rel(state_path, root)} does not exist yet — the page "
                  f"will load with no data. Run `atompipe site build`.")
@@ -2842,7 +5640,7 @@ def cmd_site_status(args: argparse.Namespace) -> int:
     the registration and missing on this machine.
     """
     root = _root(args)
-    ledger = store.load(root)
+    ledger = _load(root)
     info = _site_state(root)
     view_registry, problems = _view_registry(root, ledger, strict=False)
 
@@ -2923,21 +5721,37 @@ def _first_sentence(text: str | None, limit: int = 100) -> str:
     return head if len(head) <= limit else head[:limit - 3].rstrip() + "..."
 
 
+def _tagged_row(name: str, status: str, detail: str) -> dict:
+    """One doctor row, not yet placed (`_check` appends it)."""
+    return {"check": name, "status": status, "detail": detail}
+
+
 def _check(results: list[dict], name: str, status: str, detail: str) -> None:
     """Append one doctor row. `status` is one of ok / warn / FAIL."""
     results.append({"check": name, "status": status, "detail": detail})
 
 
-def _ledger_problems(root: str, ledger: Ledger, registry: gates.Registry) -> list[str]:
-    """Everything structurally wrong with this ledger, as sentences.
+def _ledger_problems(root: str, ledger: Ledger,
+                     registry: gates.Registry) -> tuple[list[str], list[str]]:
+    """`(problems, warnings)`: everything structurally wrong with this ledger,
+    and what is only out of place, as sentences.
 
     Integrity here means "the records still refer to things that exist". Every
-    one of these is a way the project can look fine and be wrong: a duplicate
-    claim id means one of two claims is invisible to every lookup; a verdict for
-    a gate nobody can find is a green tick with no instrument behind it; a
-    missing artifact file is provenance that no longer resolves.
+    problem is a way the project can look fine and be wrong: a duplicate claim
+    id means one of two claims is invisible to every lookup; a missing artifact
+    file is provenance that no longer resolves.
+
+    `ledger` is `_resolved`'s view: its verdicts are the resolver's, so a gate
+    that is not registered here shows up by its cache entries or its remembered
+    outcome, not only by a row the ledger file happened to keep. Those orphans
+    are a WARNING, not a problem: the resolver reads them stale and they never
+    count (tests:H2), and nothing is corrupt — a pack was uninstalled, or a gate
+    renamed. As a FAIL they made `doctor` exit 1 on a project whose only fault
+    was a removed pack's evidence. (The run history this also read, and the
+    `#selftest` rows it skipped, are gone: S-31.)
     """
     problems: list[str] = []
+    warnings: list[str] = []
 
     def duplicates(values: Iterable[str], what: str) -> None:
         seen: set[str] = set()
@@ -2953,18 +5767,15 @@ def _ledger_problems(root: str, ledger: Ledger, registry: gates.Registry) -> lis
     duplicates([d.id for d in ledger.decisions], "decision id")
 
     known_gates = set(registry.ids())
-    orphaned = sorted({v.gate for v in ledger.verdicts
-                       if not v.gate.endswith("#selftest") and v.gate not in known_gates})
+    orphaned = sorted({v.gate for v in ledger.verdicts if v.gate not in known_gates})
     if orphaned and known_gates:
-        # These verdicts still resolve their claims (`claims.covering_verdicts`
-        # matches on the verdict, not on whether the gate still exists), so a
-        # removed pack can leave passes standing that this machine cannot
-        # reproduce. That is a readiness problem, not a tidiness one.
-        problems.append(
+        # They still reach the page and the report as rows nothing here can
+        # re-run: a readiness fact worth a line, not an integrity failure.
+        warnings.append(
             f"{len(orphaned)} verdict(s) from gates that are not registered here "
-            f"({', '.join(orphaned[:4])}{'...' if len(orphaned) > 4 else ''}) — they still "
-            f"resolve their claims but nothing here can re-run them; reinstall the pack "
-            f"or drop the verdicts")
+            f"({', '.join(orphaned[:4])}{'...' if len(orphaned) > 4 else ''}) — they read "
+            f"stale and never count, and nothing here can re-run them; reinstall the "
+            f"pack or remove their entries")
     for claim in ledger.claims:
         for gate_id in claim.gates or ():
             if known_gates and gate_id not in known_gates:
@@ -2977,10 +5788,925 @@ def _ledger_problems(root: str, ledger: Ledger, registry: gates.Registry) -> lis
         for cid in need.claim_ids or ():
             if cid not in claim_ids:
                 problems.append(f"need {need.id} refers to claim {cid!r}, which does not exist")
-    for record in store.load_runs(root, limit=50):
-        if record.get("error"):
-            problems.append(f"run {record.get('path')}: {record['error']}")
+    return problems, warnings
+
+
+# --------------------------------------------------------------------------- #
+# doctor: what rho cannot see
+# --------------------------------------------------------------------------- #
+#: How many items one doctor row names before `(+n more)`. Why 4: the
+#: ledger-integrity row's budget, so every row reads the same way — enough to
+#: tell one planted problem from a pattern. Rejected: every item (one row per
+#: omc gate in an openmodelica project would bury the rest of the screen); one
+#: (cannot say whether a problem is local or everywhere).
+_DOCTOR_SHOWN = 4
+
+#: The resolver's notes, by the doctor row that owns each (`verdicts.resolve`
+#: words them; `read_entries`/`read_controls` word the per-file ones). First match
+#: wins; a note no pattern claims lands in `cache-entries`, so nothing the
+#: resolver said is dropped on the way to the screen.
+_NOTE_ROWS = (
+    ("two-outcomes", re.compile(r"^\S+: two outcomes recorded for identical inputs \(.+\)$")),
+    ("two-controls", re.compile(
+        r"^\S+: two control outcomes recorded for identical inputs \(.+\)$")),
+    ("instruments", re.compile(r"^\S+ — recorded under \S+ \S+; here \S+$"
+                               r"|outcome differs across instruments")),
+    ("opaque-inputs", re.compile(r"^\S+ — opaque inputs: ")),
+    ("code-digest", re.compile(r"^\S+ — code digested as its defining file")),
+    ("pending", re.compile(r"^\S+ — control inputs moved \(")),
+)
+
+#: The names through which gate code reaches the process environment. What
+#: slipped through, as a residual the spec names (§3.17, §8): an environment
+#: read fires no audit event, so no trace recorded it and no entry keyed on
+#: it — a gate whose limit comes from `os.environ` stayed Fresh when the
+#: variable changed (review round 1, `probe.env`). A read inside a window is now
+#: named opaque (`env:<NAME>`, `verdicts._RecordingEnviron`), so such a gate
+#: re-runs on every check; this row still names each one, because that is a
+#: cost, and because a module-level `LIMIT = os.getenv(...)` is read once, at
+#: import, before any window — the likeliest spelling, and seen by nothing
+#: else. `putenv` writes, and is here because a gate that sets a variable is
+#: handing a later gate an input the same way. Rejected: a proxy OBJECT put in
+#: place of `os.environ` during a gate (it changes the environment a gate's
+#: subprocess inherits — the omc gates depend on it; the recorder changes the
+#: class of the same object instead); scanning only the gate function's own
+#: body (the import-time read above).
+_ENV_NAMES = frozenset({"environ", "environb", "getenv", "getenvb", "putenv"})
+
+
+def _listed(items: list[str], sep: str = "; ") -> str:
+    """The first `_DOCTOR_SHOWN` of `items`, then how many more."""
+    shown = sep.join(items[:_DOCTOR_SHOWN])
+    return shown + (f" (+{len(items) - _DOCTOR_SHOWN} more)" if len(items) > _DOCTOR_SHOWN else "")
+
+
+def _source_files(fn: Any) -> list[str]:
+    """The Python files a gate's code is: its recorded closure (`modelio`), or —
+    for a gate registered from Python, with none — the file it was defined in."""
+    closure = modelio.code_closure(fn)
+    if closure is not None:
+        return [path for path, _sha in closure.files]
+    code = getattr(getattr(fn, "__func__", fn), "__code__", None)
+    name = getattr(code, "co_filename", "") or ""
+    if name and not (name.startswith("<") and name.endswith(">")) and os.path.isfile(name):
+        return [os.path.abspath(name)]
+    return []
+
+
+def _parse(path: str, cache: dict[str, Any]) -> Any:
+    """`ast.parse` of `path`, once per command; None when it cannot be read."""
+    if path not in cache:
+        try:
+            with open(path, "rb") as fh:
+                cache[path] = ast.parse(fh.read(), path)
+        except (OSError, SyntaxError, ValueError):
+            cache[path] = None
+    return cache[path]
+
+
+def _top_names(nodes: Iterable[Any]) -> set[str]:
+    """The top-level module names the `Import`/`ImportFrom` nodes among `nodes`
+    bring in. A relative import names a file beside it, never a third party."""
+    names: set[str] = set()
+    for node in nodes:
+        if isinstance(node, ast.Import):
+            names.update(alias.name.partition(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            names.add(node.module.partition(".")[0])
+    return names
+
+
+def _outside_functions(node: Any) -> Iterable[Any]:
+    """Every node under `node` that runs when its module is imported: function
+    and lambda bodies are skipped, class bodies are not."""
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        yield child
+        yield from _outside_functions(child)
+
+
+def _reached_imports(tree: Any, name: str) -> set[str] | None:
+    """The imports inside module-level function `name` and every module-level
+    function or class it names, transitively; None when `name` is not a
+    module-level definition of `tree` (the caller then counts the whole file)."""
+    defs = {node.name: node for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))}
+    if name not in defs:
+        return None
+    seen: set[str] = set()
+    queue = [name]
+    found: set[str] = set()
+    while queue:
+        current = queue.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        for node in ast.walk(defs[current]):
+            if isinstance(node, ast.Name) and node.id in defs and node.id not in seen:
+                queue.append(node.id)
+        found |= _top_names(ast.walk(defs[current]))
+    return found
+
+
+def _gate_imports(fn: Any, cache: dict[str, Any]) -> set[str]:
+    """The top-level names a gate's code imports on its way to a verdict.
+
+    In the file that defines the gate: what the module runs on import, plus what
+    the gate function — and every module-level function or class it names,
+    transitively — imports inside its body. In every other file of its closure:
+    all of it (a helper's lazy import is a dependency of whoever calls the
+    helper, and a static walk cannot say who does). Measured on the bundled
+    corpus, which is why the defining file is read by reach and not whole:
+    `cad.bounding` is the one tier-0 gate of a module whose other gates import
+    trimesh inside their own bodies, and a whole-file rule named it — a warning
+    nobody could act on (declaring trimesh would make the one gate that runs
+    without a mesh library skip where it is missing).
+    """
+    target = getattr(fn, "__func__", fn)
+    code = getattr(target, "__code__", None)
+    home = os.path.abspath(code.co_filename) if code is not None else ""
+    names: set[str] = set()
+    for path in _source_files(fn):
+        tree = _parse(path, cache)
+        if tree is None:
+            continue
+        if os.path.abspath(path) == home:
+            reached = _reached_imports(tree, getattr(code, "co_name", ""))
+            if reached is not None:
+                names |= _top_names(_outside_functions(tree)) | reached
+                continue
+        names |= _top_names(ast.walk(tree))
+    return names
+
+
+def _undeclared_imports(registry: gates.Registry) -> list[str]:
+    """`<gate> imports <module, ...>` for every gate whose code imports a
+    third-party module its spec does not declare (`requires_python`, or a
+    `python:` entry of `requires_one_of`).
+
+    What slipped through without it: availability reads only what a gate
+    DECLARES, so an undeclared import is run where the module is missing and
+    raises — an error (a FAIL, and CI red for a tooling gap, spec §5 risk 5)
+    where a declared one reads SKIPPED, BLOCKED, with its reason. Third party
+    means what the recorded closure says it is (`CodeRef.third_party`: not the
+    standard library, not atompipe, not code — a file under the gate's own
+    roots, or beside them and not installed, is code). Measured on every
+    bundled gate: zero (`test_doctor`).
+    """
+    cache: dict[str, Any] = {}
+    found: list[str] = []
+    for spec, fn in registry.pairs():
+        third = set(verdicts.code_digest(spec, fn).third_party)
+        if not third:
+            continue
+        declared = {str(name).strip().partition(".")[0]
+                    for name in (spec.requires_python or ())}
+        for entry in spec.requires_one_of or ():
+            kind, _, module = str(entry).partition(":")
+            if kind.strip() == "python":
+                declared.add(module.strip().partition(".")[0])
+        missing = sorted((_gate_imports(fn, cache) & third) - declared)
+        if missing:
+            found.append(f"{spec.id} imports {', '.join(missing)}")
+    return found
+
+
+def _env_hits(tree: Any) -> list[tuple[int, str]]:
+    """`(line, "os.<name>")` for every reach into the environment in `tree`:
+    `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins) through any
+    alias of `os`, and a `from os import <name>` of one of them."""
+    aliases = {"os"}
+    hits: set[tuple[int, str]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            aliases.update(alias.asname or "os" for alias in node.names if alias.name == "os")
+        elif isinstance(node, ast.ImportFrom) and node.module == "os" and not node.level:
+            hits.update((node.lineno, f"os.{alias.name}") for alias in node.names
+                        if alias.name in _ENV_NAMES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr in _ENV_NAMES \
+                and isinstance(node.value, ast.Name) and node.value.id in aliases:
+            hits.add((node.lineno, f"os.{node.attr}"))
+    return sorted(hits)
+
+
+def _env_reads(registry: gates.Registry, root: str) -> list[str]:
+    """`<file>:<line> os.<name> (<gates>)` for every environment read in the code
+    of every registered gate — its module and its closure (spec §3.17). Static,
+    because nothing dynamic sees it: see `_ENV_NAMES`. Zero bundled hits."""
+    cache: dict[str, Any] = {}
+    owners: dict[tuple[str, int, str], list[str]] = {}
+    for spec, fn in registry.pairs():
+        for path in _source_files(fn):
+            tree = _parse(path, cache)
+            for line, name in (_env_hits(tree) if tree is not None else ()):
+                owners.setdefault((path, line, name), []).append(spec.id)
+    base = os.path.abspath(root)
+    lines = []
+    for (path, line, name), gate_ids in sorted(owners.items()):
+        shown = os.path.relpath(path, base).replace(os.sep, "/") \
+            if path.startswith(base + os.sep) else path
+        lines.append(f"{shown}:{line} {name} ({', '.join(sorted(set(gate_ids)))})")
+    return lines
+
+
+#: The constructors a module-level memo is spelled with, by the name called
+#: (`dict()`, `collections.OrderedDict()`, `defaultdict(list)` alike). A display
+#: or comprehension counts too. Rejected: every module-level assignment (the
+#: bundled packs keep dozens of constant tables, and a warning on each would be
+#: noise nobody reads); only `{}` (the likeliest spelling, and `defaultdict` is
+#: the next).
+_MEMO_CONTAINERS = frozenset({"dict", "list", "set", "bytearray", "defaultdict", "OrderedDict",
+                              "Counter", "deque", "ChainMap", "WeakValueDictionary",
+                              "WeakKeyDictionary", "WeakSet"})
+
+#: The calls that WRITE into a container. A memo is a container filled from a
+#: function body; one that is only read there is a constant table. `pop`,
+#: `clear` and `remove` are left out: they evict, and a module that only evicts
+#: has nothing to serve.
+_MEMO_WRITES = frozenset({"setdefault", "update", "append", "extend", "insert", "add",
+                          "appendleft", "extendleft", "__setitem__", "__ior__"})
+
+
+def _is_container(node: Any) -> bool:
+    if isinstance(node, (ast.Dict, ast.List, ast.Set, ast.DictComp, ast.ListComp, ast.SetComp)):
+        return True
+    if isinstance(node, ast.Call):
+        func = node.func
+        name = func.id if isinstance(func, ast.Name) else \
+            func.attr if isinstance(func, ast.Attribute) else ""
+        return name in _MEMO_CONTAINERS
+    return False
+
+
+def _module_level(body: list) -> Iterable[Any]:
+    """The statements that run at import in module scope: the module body and
+    the bodies of its `if`/`try`/`with`/`for`/`while`, never a def or a class."""
+    for node in body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        yield node
+        for name in ("body", "orelse", "finalbody"):
+            yield from _module_level(getattr(node, name, None) or [])
+        for handler in getattr(node, "handlers", None) or ():
+            yield from _module_level(handler.body)
+
+
+def _written_into(func: Any, name: str) -> int | None:
+    """The line of the first write into container `name` inside `func` — an item
+    assigned, augmented or deleted, or a `_MEMO_WRITES` call — else None."""
+    for node in ast.walk(func):
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, (ast.Store, ast.Del)) \
+                and isinstance(node.value, ast.Name) and node.value.id == name:
+            return node.lineno
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr in _MEMO_WRITES and isinstance(node.func.value, ast.Name) \
+                and node.func.value.id == name:
+            return node.lineno
+    return None
+
+
+def _memo_hits(tree: Any) -> list[tuple[int, str]]:
+    """`(line, name)` for every module-global memo in `tree` that the spine
+    cannot empty (`modelio.clear_caches` reaches functools' memos only): a
+    module-level container written into from a function body that does not
+    make the name its own; a module global a function rebinds under `global`;
+    a mutable default argument its function writes into. Each lives as long as
+    the process, so the first gate to fill it reads the file and every later
+    one does not."""
+    containers = set()
+    for node in _module_level(tree.body):
+        if isinstance(node, ast.Assign) and _is_container(node.value):
+            containers.update(t.id for t in node.targets if isinstance(t, ast.Name))
+        elif isinstance(node, ast.AnnAssign) and node.value is not None \
+                and _is_container(node.value) and isinstance(node.target, ast.Name):
+            containers.add(node.target.id)
+    hits: set[tuple[int, str]] = set()
+    for func in ast.walk(tree):
+        if not isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        args = func.args
+        params = [a.arg for a in args.posonlyargs + args.args + args.kwonlyargs]
+        params += [a.arg for a in (args.vararg, args.kwarg) if a is not None]
+        declared = {n for node in ast.walk(func) if isinstance(node, ast.Global)
+                    for n in node.names}
+        bound = {node.id for node in ast.walk(func)
+                 if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))}
+        for name in declared & bound:
+            line = next(node.lineno for node in ast.walk(func)
+                        if isinstance(node, ast.Name) and node.id == name
+                        and isinstance(node.ctx, (ast.Store, ast.Del)))
+            hits.add((line, name))
+        for name in containers:
+            if name in params or (name in bound and name not in declared):
+                continue
+            line = _written_into(func, name)
+            if line is not None:
+                hits.add((line, name))
+        positional = args.posonlyargs + args.args
+        defaults = list(zip(positional[len(positional) - len(args.defaults):], args.defaults))
+        defaults += [(a, d) for a, d in zip(args.kwonlyargs, args.kw_defaults) if d is not None]
+        for arg, default in defaults:
+            if _is_container(default):
+                line = _written_into(func, arg.arg)
+                if line is not None:
+                    hits.add((line, arg.arg))
+    return sorted(hits)
+
+
+def _memo_reads(registry: gates.Registry, root: str) -> list[str]:
+    """`<file>:<line> <name> (<gates>)` for every module-global memo the spine
+    cannot empty, in the code of every registered gate — its module and its
+    closure. Static, like `_env_reads`, and for the same reason: a memo hit
+    opens nothing, so no trace sees what it served. Zero bundled hits."""
+    cache: dict[str, Any] = {}
+    owners: dict[tuple[str, int, str], list[str]] = {}
+    for spec, fn in registry.pairs():
+        for path in _source_files(fn):
+            tree = _parse(path, cache)
+            for line, name in (_memo_hits(tree) if tree is not None else ()):
+                owners.setdefault((path, line, name), []).append(spec.id)
+    base = os.path.abspath(root)
+    lines = []
+    for (path, line, name), gate_ids in sorted(owners.items()):
+        shown = os.path.relpath(path, base).replace(os.sep, "/") \
+            if path.startswith(base + os.sep) else path
+        lines.append(f"{shown}:{line} {name} ({', '.join(sorted(set(gate_ids)))})")
+    return lines
+
+
+def _selftest_sources(owner: str) -> list[str]:
+    """Every `*.py` under `owner/selftest/` — the fixtures and the known-good
+    module a gate's control runs — without `__pycache__` or dot-directories."""
+    found: list[str] = []
+    for dirpath, dirnames, filenames in os.walk(os.path.join(owner, "selftest")):
+        dirnames[:] = sorted(d for d in dirnames if d != "__pycache__" and not d.startswith("."))
+        found.extend(os.path.join(dirpath, name) for name in sorted(filenames)
+                     if name.endswith(".py"))
+    return found
+
+
+def _dynamic_imports(registry: gates.Registry, root: str) -> list[str]:
+    """`<file>:<line> <call> (<gates>)` for every import whose module a VALUE
+    names (`modelio.dynamic_imports`: `importlib.import_module(name)`,
+    `__import__(f"...")`) in the code of every registered gate — its module and
+    its closure — and in the `selftest/` of its owner (the fixtures and the
+    known-good module its control runs). Static, like `_env_reads`, and for the
+    same reason: which module such a call loads, only the run knows. The first
+    run of a process that loads it keys its source; a later one is served it
+    from `sys.modules` and keys nothing (admission review, round 2, c: a limit
+    behind `importlib.import_module` moved and the PASS was served cached). A
+    literal name is keyed with the gate's code; `load_path` keys a helper on
+    every run. Zero bundled hits."""
+    cache: dict[str, Any] = {}
+    owners: dict[tuple[str, int, str], list[str]] = {}
+    walked: dict[str, list[str]] = {}
+    for spec, fn in registry.pairs():
+        owner = verdicts._owner_dir(fn, root)
+        if owner not in walked:
+            walked[owner] = _selftest_sources(owner)
+        for path in dict.fromkeys(_source_files(fn) + walked[owner]):
+            tree = _parse(path, cache)
+            for line, call in (modelio.dynamic_imports(tree) if tree is not None else ()):
+                owners.setdefault((path, line, call), []).append(spec.id)
+    base = os.path.abspath(root)
+    lines = []
+    for (path, line, call), gate_ids in sorted(owners.items()):
+        shown = os.path.relpath(path, base).replace(os.sep, "/") \
+            if path.startswith(base + os.sep) else path
+        lines.append(f"{shown}:{line} {call} ({', '.join(sorted(set(gate_ids)))})")
+    return lines
+
+
+def _cache_notes(root: str, resolution: verdicts.Resolution) -> dict[str, list[str]]:
+    """The resolver's notes, sorted into the doctor rows that own them — plus a
+    strict read of every control entry on disk, because the resolver reads a
+    gate's controls only while its verdict is Fresh, and a disagreeing or
+    hand-edited control must not wait for that to be seen."""
+    notes = list(resolution.notes)
+    base = os.path.join(store.atompipe_dir(root), verdicts._VERDICTS_DIR)
+    try:
+        gate_dirs = sorted(name for name in os.listdir(base)
+                           if os.path.isdir(os.path.join(base, name)))
+    except OSError:
+        gate_dirs = []
+    for gate_id in gate_dirs:
+        try:
+            verdicts.read_controls(root, gate_id, problems=notes)
+        except AtompipeError as exc:
+            notes.append(f"{gate_id}: {exc}")
+    sorted_notes: dict[str, list[str]] = {}
+    for note in dict.fromkeys(notes):
+        row = next((name for name, pattern in _NOTE_ROWS if pattern.search(note)),
+                   "cache-entries")
+        sorted_notes.setdefault(row, []).append(note)
+    return sorted_notes
+
+
+def _doctor_cache_rows(results: list[dict], root: str, registry: gates.Registry,
+                       resolution: verdicts.Resolution) -> None:
+    """The rows for what the verdict cache knows and rho cannot key: one row each,
+    `ok` when there is nothing to say, so a clean project shows it looked."""
+    notes = _cache_notes(root, resolution)
+
+    found = notes.get("instruments", [])
+    _check(results, "instruments", "warn" if found else "ok",
+           _listed(found) + " — provenance, never staleness: the entry stays current"
+           if found else "every cached verdict was recorded under the library versions "
+                         "installed here")
+
+    found = notes.get("opaque-inputs", [])
+    _check(results, "opaque-inputs", "warn" if found else "ok",
+           _listed(found) + " — never served from the cache: re-run on every check, "
+                            "stale between checks"
+           if found else "no cached verdict read through a channel the tracer cannot see")
+
+    found = notes.get("cache-entries", [])
+    _check(results, "cache-entries", "warn" if found else "ok",
+           _listed(found) + " — an ignored entry never counts; its gate re-runs"
+           if found else "every cache entry reads back strictly")
+
+    # Two answers for identical inputs. A gate's was a warning while
+    # `TWO_OUTCOMES_IS_ERROR` was staged, and is a failure since U25 flipped it
+    # (spec §3.7, R-4: an error only once EntriesAreDeterministic had proven the
+    # bundled corpus deterministic); read at call time, so the flip was one
+    # constant. A control's always was a failure: its gate is not admitted.
+    outcomes, controls = notes.get("two-outcomes", []), notes.get("two-controls", [])
+    failing = bool(controls) or (bool(outcomes) and verdicts.TWO_OUTCOMES_IS_ERROR)
+    _check(results, "two-outcomes",
+           "FAIL" if failing else "warn" if outcomes else "ok",
+           _listed(controls + outcomes) + " — the same inputs gave two answers: the gate is "
+                                          "not deterministic, and neither answer counts"
+           if controls or outcomes else "no gate recorded two outcomes for identical inputs")
+
+    found = notes.get("code-digest", [])
+    _check(results, "code-digest", "warn" if found else "ok",
+           _listed(found) if found else "every gate's code was recorded as it loaded")
+
+    pending, moved = _pending(resolution)
+    _check(results, "pending-controls", "warn" if pending else "ok",
+           f"{_pending_sentence(len(pending), moved)}: {_listed(pending, ', ')}" if pending
+           else "no evaluator is waiting to re-qualify")
+
+    found = _undeclared_imports(registry)
+    _check(results, "imports", "warn" if found else "ok",
+           _listed(found) + " — undeclared, so where it is missing the gate errors "
+                            "instead of reading SKIPPED; add it to requires_python"
+           if found else "every third-party module a gate imports is declared")
+
+    found = _env_reads(registry, root)
+    _check(results, "env-reads", "warn" if found else "ok",
+           _listed(found) + " — an environment variable is never a cache key: a read "
+                            "while the gate runs makes its entry opaque (re-run on every "
+                            "check), one at import is seen by nothing; pass the value "
+                            "through the model"
+           if found else "no gate's code reads the environment")
+
+    found = _memo_reads(registry, root)
+    _check(results, "memos", "warn" if found else "ok",
+           _listed(found) + " — a module-level memo outlives the gate that filled it: a "
+                            "file read behind it is opened by the first gate to ask and by "
+                            "no later one, so no cache entry keys it; share a file through "
+                            "ctx.load_file, which records it for every caller"
+           if found else "no gate's code keeps a module-level memo the spine cannot empty")
+
+    found = _dynamic_imports(registry, root)
+    _check(results, "dynamic-imports", "warn" if found else "ok",
+           _listed(found) + " — a module a value names is keyed only by the run that "
+                            "first loads it in a process; a later one is served it and "
+                            "keys nothing: name it with a string literal, or load it with "
+                            "atompipe.modelio.load_path"
+           if found else "every module a gate or its control imports is named where it "
+                         "is imported")
+
+
+def _doctor_qualification_rows(results: list[dict], root: str, registry: gates.Registry,
+                               resolution: verdicts.Resolution, *, projection: Any = None,
+                               ledger: Any = None) -> None:
+    """The two rows qualification adds (P2.3, GLOSSARY §2's words).
+
+    `qualification`: every evaluator unqualified at its version, named with the
+    first fact that does not hold — a problem; else every evaluator not yet
+    qualified at its version — never qualified (`not-yet`), or qualified at an
+    earlier version only (undemonstrated: a code edit moved its static part) —
+    a warning, worded apart, never under the unqualified template (GLOSSARY §6
+    keeps *unqualified* for a qualification that does not hold), with how it
+    qualifies: the next check run, or — for a dependent its prerequisite
+    prunes, whose qualification no check run reaches — once that prerequisite
+    is established. A pending re-qualification is the pending-controls row's.
+    What slipped through (review of P2.3, ``b3``): the row read only
+    `not-admitted`, so after a code edit every evaluator was undemonstrated
+    while this said "every evaluator qualified at its version"; and a pruned
+    dependent was promised "the next check run qualifies it" by a check run
+    that would prune it again.
+
+    `known-good`: once per project, the project evaluators with no known-good
+    control — no `selftest/known_good.py` AND no `good=` fixture of their own
+    (D4's resolution order: a declared `good=` comes first) — each reads
+    `known-good not run`, and its claim Gap. What slipped through (review of
+    P2.3, ``p3``): it counted every project gate whenever `known_good.py` was
+    missing, so a project whose one gate declared `good=` — `check` ready,
+    every claim Checked — failed doctor, exit 1, "every project evaluator reads
+    known-good not run". The tag column stays `doctor`'s until GLOSSARY §9's
+    word pass (`[problem]`/`[ok]`, on the check-in list)."""
+    q = report.HUMAN["qualification"]["doctor"]
+    unqualified: list[str] = []
+    waiting: list[str] = []
+    pruned = {v.gate: (list(v.blocked_by or ()) or [""])[0] for v in resolution.verdicts
+              if getattr(v, "blocked_by", None)}
+    for gate_id in registry.ids():
+        row = resolution.rows.get(gate_id)
+        admission = row.admission if row is not None else None
+        if admission is None:
+            # A stale entry's row and a gate with no entry carry none: asked of
+            # the records, as `gate show` asks (it runs nothing).
+            spec, fn = registry.get(gate_id)
+            admission = verdicts.admission_state(root, spec, fn, projection=projection,
+                                                 ledger=ledger, anchors=resolution.anchors)
+        kind = verdicts.parse_token(admission.reason)[0]
+        if admission.state == "undemonstrated" or (admission.state == "not-admitted"
+                                                   and kind == verdicts.NOT_YET):
+            token = admission.reason if kind == verdicts.NOT_YET else verdicts.NOT_YET
+            how = report.qualification_reason(token, pruned_by=pruned.get(gate_id, ""))
+            waiting.append(f"{gate_id} ({how})")
+        elif admission.state == "not-admitted":
+            unqualified.append(f"{gate_id} ({report.qualification_reason(admission.reason)})")
+    if unqualified:
+        text = q["unqualified"].format(n=len(unqualified), list=_listed(unqualified, ", "))
+        if waiting:
+            text += q["also_waiting"].format(n=len(waiting))
+        _check(results, "qualification", "FAIL", text)
+    elif waiting:
+        _check(results, "qualification", "warn",
+               q["not_yet"].format(n=len(waiting), list=_listed(waiting, ", ")))
+    else:
+        _check(results, "qualification", "ok", q["ok"])
+    missing = [] if os.path.isfile(os.path.join(root, "selftest", "known_good.py")) else [
+        spec.id for spec in registry.specs()
+        if not (spec.pack or "").strip()
+        and not (getattr(spec.negative_control, "good", "") or "").strip()]
+    # The row's name is the table's word too (D-16): `known-good` is
+    # qualification's, and a channel that typed it would be a second copy.
+    _check(results, report.HUMAN["qualification"]["known_good"], "FAIL" if missing else "ok",
+           q["known_good"].format(n=len(missing), list=_listed(missing, ", "))
+           if missing else q["known_good_ok"])
+
+
+def _doctor_seal_row(results: list[dict], registry: gates.Registry,
+                     host: gates.GateContext) -> None:
+    """Invariant 5 at runtime: every pack control run against THIS project's
+    params, traced (`packs.seal_findings`). `pack validate` refuses an unsealed
+    fixture before a pack ships; this is where a project finds out that one it
+    installed — from before the detector, or from someone else — reads its host,
+    so that its control fires here and may not fire in the next project. A
+    temp `out_dir`, nothing written to the project."""
+    pack_gates = [spec for spec in registry.specs() if (spec.pack or "").strip()]
+    if not pack_gates:
+        _check(results, "sealed-fixtures", "ok", "no pack gates installed")
+        return
+    try:
+        findings = packs.seal_findings(registry, host)
+    except AtompipeError as exc:
+        _check(results, "sealed-fixtures", "FAIL", f"the seal probe did not run: {exc}")
+        return
+    if findings:
+        shown = [f"{f.gate}: {f.fixture} reads the host's "
+                 f"{', '.join(f.host_paths[:3])}"
+                 + (f" (+{len(f.host_paths) - 3} more)" if len(f.host_paths) > 3 else "")
+                 for f in findings]
+        _check(results, "sealed-fixtures", "FAIL",
+               _listed(shown) + " — a pack control must build its known-bad input from its "
+                                "own selftest/baseline.json (SEALED, invariant 5)")
+        return
+    missing = sum(1 for spec in pack_gates if not gates.availability(spec)[0])
+    _check(results, "sealed-fixtures", "ok",
+           f"{len(pack_gates) - missing} pack control(s) run against this project's params; "
+           f"none reads them" + (f" ({missing} not run: tools missing here)" if missing else ""))
+
+
+#: The legacy run history's directory, `.atompipe/runs/`. Nothing reads it
+#: since checkpoint 1.2 (git and the verdict cache are the history, S-89); the
+#: migration leaves it where it was, and `doctor` names it until it is removed.
+_LEFTOVER_RUNS = "runs"
+
+
+def _record_problems(root: str) -> list[str]:
+    """Every record file the strict reader refuses, one sentence each — the
+    project file first, then each kind's files in order. `[]` on a legacy
+    project, whose one file is the ledger (its refusal is the load's own)."""
+    if store.is_legacy(root):
+        return []
+    try:
+        meta = store.read_project(root)
+    except AtompipeError as exc:
+        return [str(exc)]
+    problems: list[str] = []
+    for kind in store.RECORD_DIRS:
+        try:
+            files = store._record_files(root, kind)
+        except AtompipeError as exc:
+            problems.append(str(exc))
+            continue
+        for _stem, path in files:
+            try:
+                store.read_record(path, kind, model_entry=meta.model_entry)
+            except AtompipeError as exc:
+                problems.append(str(exc))
     return problems
+
+
+def _doctor_records_rows(results: list[dict], root: str, ledger: Ledger) -> None:
+    """The rows about where the project's facts live: `records` (the layout, and
+    what a legacy ledger will become), `run-history` (a leftover `runs/`), and
+    `index` (does `.atompipe/ledger.json` agree with the records?).
+
+    Each one WRITES NOTHING, and that is the design, not a limitation: a doctor
+    that migrated a legacy project, or rebuilt the index it is comparing, would
+    hide the problem from the next run — so a legacy ledger is migrated in
+    memory only (`store.migrate_legacy(apply=False)`, the plan `check` would
+    carry out) and "will migrate on next command" is said, not done. An index
+    behind the records is a warning: it is what a hand edit leaves until the
+    next command rebuilds it, and the records are the truth either way."""
+    legacy = store.is_legacy(root)
+    counts = (f"{len(ledger.claims)} claims, {len(ledger.params)} "
+              f"{'params' if legacy else 'param records'}, "
+              f"{len(ledger.inputs)} artifacts, {len(ledger.needs)} needs, "
+              f"{len(ledger.decisions)} decisions")
+    if legacy:
+        plan = store.migrate_legacy(root, apply=False, when="",
+                                    model_prose=modelio.static_param_prose)
+        kinds: dict[str, int] = {}
+        for rel_path in plan.files:
+            kind = rel_path.split("/", 1)[0]
+            if kind in store.RECORD_DIRS:
+                kinds[kind] = kinds.get(kind, 0) + 1
+        into = ", ".join(f"{kinds[k]} {k}/" for k in store.RECORD_DIRS if kinds.get(k))
+        _check(results, "records", "warn",
+               f"legacy {store.ATOMPIPE_DIR}/{store.LEDGER_NAME} ({counts}), read in "
+               f"memory — it will migrate on next command that writes (check, or a shim: "
+               f"ingest, extract, decide, packs add, claim physical) into "
+               f"{into or 'no record files'} and {store.ATOMPIPE_DIR}/{store.PROJECT_NAME}; "
+               f"doctor writes nothing")
+    else:
+        _check(results, "records", "ok", f"{counts} — every record file reads strictly")
+
+    # The row names the directory and never opens a file in it: a corrupt run
+    # file is no command's problem (`test_status_stale.RunHistoryIsGone` holds
+    # doctor to never naming one), and the directory's name is said as `runs/`
+    # under `.atompipe/` for the same test, which reads any row naming
+    # `.atompipe/runs` as a reader of the history.
+    runs = os.path.join(store.atompipe_dir(root), _LEFTOVER_RUNS)
+    if os.path.isdir(runs):
+        _check(results, "run-history", "warn",
+               f"`{_LEFTOVER_RUNS}/` is left in `{store.ATOMPIPE_DIR}/` from the run "
+               f"history, and nothing reads it any more (git and the verdict cache are "
+               f"the history) — remove it with `git rm -r`, when you are ready")
+
+    if legacy:
+        _check(results, "index", "ok",
+               f"none: on a legacy project {store.ATOMPIPE_DIR}/{store.LEDGER_NAME} is "
+               f"still the records")
+        return
+    if not os.path.isfile(store.ledger_path(root)):
+        _check(results, "index", "ok",
+               f"not written yet — the next command writes {store.ATOMPIPE_DIR}/"
+               f"{store.LEDGER_NAME} from the records")
+        return
+    try:
+        behind = store.agree(root)
+    except (AtompipeError, OSError) as exc:
+        _check(results, "index", "warn", f"could not be compared with the records: {exc}")
+        return
+    _check(results, "index", "warn" if behind else "ok",
+           f"{store.ATOMPIPE_DIR}/{store.LEDGER_NAME} is behind the records: "
+           f"{_listed(behind)} — any command but doctor rebuilds it; the records are "
+           f"the truth" if behind else "agrees with the records")
+
+
+def _doctor_results_rows(results: list[dict], root: str, ledger: Ledger) -> None:
+    """`doctor`'s `results` rows (P2.5a-D21), over EVERY results file — the
+    claims' and those no claim file holds (`Ledger.removed`): physical results
+    recorded before they were bound to articles — their passes count for
+    nothing until recorded again in a person's own shell — evidence files
+    changed or missing since they were recorded, each worded for what it does
+    to its entry, and a fail no claim file holds, a problem. One ok row when
+    there is nothing to say. (A results file whose seal or chain is broken is
+    refused by the strict reader, and named in the records rows with its fix.)
+
+    What slipped through (review of P2.5a): the rows looped over the claims, so
+    a claim file renamed away from its sealed fail left `doctor` printing
+    "every physical result is sealed" beside a fail no reader looked at; and a
+    fail's changed photo was told "its pass does not count", inviting a second
+    fail — a fail counts whatever happens to its photo (R-3)."""
+    said = report.HUMAN["physical"]
+    legacy: list[str] = []
+    moved: list[str] = []
+    orphaned: list[str] = []
+    removed = list(getattr(ledger, "removed", ()) or ())
+    for claim in [*ledger.claims, *removed]:
+        for entry in getattr(claim, "results", ()) or ():
+            if not entry.channel and entry.passed is True:
+                legacy.append(claim.id)
+            for rel_path, digest in sorted((entry.evidence_sha256 or {}).items()):
+                full = os.path.join(root, *str(rel_path).split("/"))
+                now = sha256_file(full) if os.path.isfile(full) else None
+                if now != digest:
+                    moved.append(said["doctor_evidence"].format(
+                        id=claim.id, path=report._one(rel_path),
+                        how="is missing" if now is None else "changed",
+                        then=said["doctor_evidence_pass" if entry.passed is True
+                                  else "doctor_evidence_fail"]))
+    for claim in removed:
+        fails = [entry for entry in claim.results if entry.passed is not True]
+        if fails:
+            orphaned.append(said["doctor_removed"].format(
+                id=claim.id, n=len(fails), detail=report._trunc(fails[-1].detail or
+                                                                "no detail recorded", 80)))
+        else:
+            _check(results, "results", "warn", said["doctor_removed_passes"].format(
+                id=claim.id))
+    if legacy:
+        ids = ", ".join(dict.fromkeys(legacy))
+        _check(results, "results", "warn",
+               f"{len(legacy)} pass(es) recorded before results were bound to articles "
+               f"({ids}): they count for nothing until the person who tested each "
+               f"records it again in their own shell")
+    for line in moved:
+        _check(results, "results", "warn", line)
+    for line in orphaned:
+        _check(results, "results", "FAIL", line)
+    if not legacy and not moved and not removed:
+        _check(results, "results", "ok",
+               "every physical result is sealed and its evidence is as recorded")
+
+
+#: The compound statements whose bodies run at module level when the module does.
+_BLOCKS = tuple(getattr(ast, kind) for kind in ("If", "For", "AsyncFor", "While", "With",
+                                                "AsyncWith", "Try", "TryStar")
+                if hasattr(ast, kind))
+
+
+def _bound_at_module(tree: Any, name: str) -> bool | None:
+    """Whether module ``tree`` binds ``name`` at module level — a ``def`` or an
+    ``async def``, a class, an assignment, an import, at the top or inside a
+    top-level ``if``/``try``/``with``/``for``/``while`` — as `_load_generator`'s
+    ``getattr`` would find it; ``None`` when a star import or a module
+    ``__getattr__`` could bind it unseen. What slipped through (review of P2.5b,
+    finding 14): only a top-level ``def`` counted, so ``print_package =
+    side_profile`` read FAIL "has no function" while `export` loaded and ran
+    it. *Rejected:* importing the module here (`doctor` runs no project code
+    it can avoid; the generator runs at `export`)."""
+    found = False
+    unseen = False
+
+    def names_of(target: Any) -> list[str]:
+        if isinstance(target, ast.Name):
+            return [target.id]
+        if isinstance(target, (ast.Tuple, ast.List)):
+            return [n for item in target.elts for n in names_of(item)]
+        if isinstance(target, ast.Starred):
+            return names_of(target.value)
+        return []
+
+    def visit(body: Iterable[Any]) -> None:
+        nonlocal found, unseen
+        for node in body:
+            bound: list[str] = []
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bound = [node.name]
+                if node.name == "__getattr__":
+                    unseen = True
+            elif isinstance(node, ast.Assign):
+                bound = [n for target in node.targets for n in names_of(target)]
+            elif isinstance(node, (ast.AnnAssign, ast.AugAssign)):
+                bound = names_of(node.target)
+            elif isinstance(node, (ast.Import, ast.ImportFrom)):
+                for alias in node.names:
+                    if alias.name == "*":
+                        unseen = True
+                    else:
+                        bound.append(alias.asname or alias.name.split(".")[0])
+            elif isinstance(node, (ast.For, ast.AsyncFor)):
+                bound = names_of(node.target)
+            if isinstance(node, (ast.With, ast.AsyncWith)):
+                bound += [n for item in node.items if item.optional_vars is not None
+                          for n in names_of(item.optional_vars)]
+            if name in bound:
+                found = True
+            if isinstance(node, _BLOCKS):
+                for field in ("body", "orelse", "finalbody"):
+                    visit(getattr(node, field, None) or ())
+                for handler in getattr(node, "handlers", None) or ():
+                    visit(handler.body)
+
+    visit(getattr(tree, "body", ()) or ())
+    return True if found else (None if unseen else False)
+
+
+def _doctor_milestone_rows(results: list[dict], root: str, ledger: Ledger) -> None:
+    """`doctor`'s P2.5b rows, each writing nothing:
+
+    * `milestones` — a required id no claim file holds (the milestone reads
+      unresolved, `missing`, and no export can write), a generator that does not
+      resolve to a `.py` file and a function in it — problems;
+    * `exports` — a package file in `out/<m>/` edited after its export, or one
+      no export wrote (a problem: the next export refuses to replace it), a
+      leftover `.tmp-`/`.old-` scratch directory (a problem), and — a note —
+      the last export's package not here (`out/` is an ignored output: a fresh
+      clone has none);
+    * `report` — a leftover `docs/readiness.md`, which nothing writes since
+      `REPORT.md` replaced it (S-41): a warning, never deleted (a command
+      removing a tracked file it did not write is invariant 8's failure)."""
+    claim_ids = {c.id for c in ledger.claims}
+    problems = []
+    warnings = []
+    for milestone in ledger.milestones:
+        missing = [cid for cid in milestone.requires if cid not in claim_ids]
+        if missing:
+            problems.append(f"milestones/{milestone.id}.json requires {', '.join(missing)}, "
+                            f"which no claim file holds — {milestone.id} can never be ready")
+        if milestone.generator:
+            try:
+                path, name = store.generator_parts(milestone.generator)
+            except AtompipeError as exc:
+                problems.append(f"milestones/{milestone.id}.json: {exc}")
+                continue
+            full = os.path.join(root, *path.split("/"))
+            if not os.path.isfile(full):
+                problems.append(f"milestones/{milestone.id}.json: its generator {path} does "
+                                f"not exist")
+                continue
+            try:
+                with open(full, encoding="utf-8") as fh:
+                    tree = ast.parse(fh.read())
+            except (OSError, SyntaxError, UnicodeDecodeError) as exc:
+                problems.append(f"milestones/{milestone.id}.json: its generator {path} does "
+                                f"not parse ({exc})")
+                continue
+            bound = _bound_at_module(tree, name)
+            if bound is None:
+                warnings.append(f"milestones/{milestone.id}.json: {path} may bind {name} in a "
+                                f"way doctor cannot see without running it — atompipe "
+                                f"export {milestone.id} --dry-run loads it")
+            elif not bound:
+                problems.append(f"milestones/{milestone.id}.json: {path} has no function "
+                                f"{name}")
+    for problem in problems:
+        _check(results, "milestones", "FAIL", problem)
+    for warning in warnings if not problems else ():
+        _check(results, "milestones", "warn", warning)
+    if not problems and not warnings:
+        n = len(ledger.milestones)
+        _check(results, "milestones", "ok",
+               f"{n} milestone(s), each requiring claims that exist" if n
+               else "none declared — a milestone is milestones/<name>.json")
+
+    base = os.path.join(root, store.PACKAGES_NAME)
+    rows = []
+    notes = []
+    try:
+        leftovers = sorted(name for name in os.listdir(base)
+                           if name.startswith(".") and any(
+                               mark in name for mark in (".tmp-", ".old-", ".new-", ".copy-")))
+    except OSError:
+        leftovers = []
+    for name in leftovers:
+        rows.append(f"{store.PACKAGES_NAME}/{name} is a package an export built or set "
+                    f"aside and did not finish — remove it")
+    for milestone in ledger.milestones:
+        mine = [e for e in ledger.exports if e.milestone == milestone.id]
+        here = os.path.isdir(os.path.join(base, milestone.id))
+        if not mine and not here:
+            continue
+        if not here:
+            notes.append(f"the last export of {milestone.id}'s package is not here "
+                          f"({store.PACKAGES_NAME}/ is an output git ignores) — atompipe "
+                          f"export {milestone.id} writes it again")
+            continue
+        # A package with no export record is judged too (review of P2.5b,
+        # finding 9: `if not mine: continue` read "each package as it was
+        # written" over one the next export refuses whole).
+        for kind, rel_path in milestones.package_problems(root, milestone.id, ledger.exports):
+            rows.append(f"{store.PACKAGES_NAME}/{milestone.id}/{rel_path} "
+                        + ("was edited after its export" if kind == "edited"
+                           else "was not written by an export")
+                        + f" — the next export of {milestone.id} refuses to replace it")
+    for row in rows:
+        _check(results, "exports", "FAIL", row)
+    if not rows:
+        _check(results, "exports", "ok",
+               "; ".join(notes) if notes else
+               f"{len(ledger.exports)} export(s) recorded, each package as it was written")
+
+    leftover = store.project_paths(root)["readiness"]
+    if os.path.isfile(leftover):
+        _check(results, "report", "warn",
+               "docs/readiness.md is no longer written — REPORT.md is, and is ignored: "
+               "git rm docs/readiness.md")
+    else:
+        _check(results, "report", "ok",
+               "REPORT.md is the readiness report, an output (`atompipe report --write`)")
 
 
 def cmd_doctor(args: argparse.Namespace) -> int:
@@ -2989,8 +6715,30 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     This is the first thing anyone runs when confused, so it is diagnostic rather
     than decorative: every row names what was checked, what was found, and — when
     it is wrong — what to do. It survives every failure it reports (a broken
-    pack, a model that will not import, a corrupt run file), because a doctor that
-    dies on the first problem cannot tell you about the second.
+    pack, a model that will not import, a corrupt cache entry), because a doctor
+    that dies on the first problem cannot tell you about the second.
+
+    Since 1.2 it is also where a human learns what the verdict cache cannot key
+    on and the resolver will not say in a status line (spec §4 U23): entries
+    recorded under other library versions, opaque channels, ignored entries, two
+    outcomes for one input, unsealed pack controls, undeclared third-party
+    imports, environment reads, module-level memos, imports of a module a value
+    names, gates keyed by their defining file, controls pending
+    re-verification, and verdicts of gates no longer registered. None of
+    those changes a claim's status by itself, which is exactly why `check` and
+    `status` are the wrong place to hear about them. No staleness row: which
+    gates are current is `status`'s `stale:` block, per gate, from the resolver.
+    It never writes, and it runs no project gate — only pack controls, traced,
+    into a temp directory, to see whether they read their host.
+
+    From checkpoint 1.3 it also says where the project's facts live, and still
+    writes nothing (`_doctor_records_rows`): `records` — the record files, each
+    one the strict reader refuses a FAIL row of its own (the load stops at the
+    first, and a human needs the list), or, on a legacy project, the ledger read
+    in memory and what it "will migrate on next command" into, never migrated
+    here; `run-history` — a leftover `.atompipe/runs/`; `index` — whether
+    `.atompipe/ledger.json` agrees with the records, never rebuilt here (it is
+    the one command `_touch_index` skips).
 
     Exit 1 on any FAIL so it is usable in CI as an environment gate. Warnings do
     not fail: a solver that is not installed here is a real fact about the
@@ -3005,26 +6753,36 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check(results, "spine", "ok",
            f"atompipe {__version__} from {os.path.dirname(os.path.abspath(__file__))}")
 
-    root = store.find_root(getattr(args, "dir", None))
-    if root is None:
-        where = os.path.abspath(getattr(args, "dir", None) or os.getcwd())
-        _check(results, "project", "FAIL",
-               f"no .atompipe/ in {where} or any parent — run `atompipe init`")
+    # `require_root`'s own message, not a second spelling of it. What slipped
+    # through (S-64): this line said "no .atompipe/ in <dir> or any parent" after
+    # the marker became a FILE and the walk began stopping at `.git`, so doctor
+    # told a user standing beside a bare `.atompipe/`, or in a worktree whose
+    # trunk is a project, that the directory it could see was not there.
+    try:
+        root = store.require_root(getattr(args, "dir", None))
+    except AtompipeError as exc:
+        _check(results, "project", "FAIL", str(exc))
         return _doctor_finish(args, results)
     _check(results, "project", "ok", root)
 
     try:
-        ledger = store.load(root)
+        ledger = _load(root)
     except AtompipeError as exc:
-        _check(results, "ledger", "FAIL", str(exc))
+        # One FAIL row per record the strict reader refuses, never an exit 2:
+        # `doctor` is where a human finds out WHICH files, and the load stops at
+        # the first.
+        for problem in _record_problems(root) or [str(exc)]:
+            # A results file refused for a broken seal is its own row (P2.5a-D21):
+            # doctor never crashes on it, and it names the file and the fix.
+            _check(results, "results" if problem.startswith("results/") else "records",
+                   "FAIL", problem)
         return _doctor_finish(args, results)
-    _check(results, "ledger", "ok",
-           f"{len(ledger.claims)} claims, {len(ledger.params)} params, "
-           f"{len(ledger.inputs)} artifacts, {len(ledger.needs)} needs, "
-           f"{len(ledger.decisions)} decisions, {len(ledger.verdicts)} verdicts")
+    _doctor_records_rows(results, root, ledger)
+    _doctor_results_rows(results, root, ledger)
+    _doctor_milestone_rows(results, root, ledger)
 
     paths = store.project_paths(root)
-    missing = [key for key in ("runs", "out", "inputs", "docs", "model")
+    missing = [key for key in ("out", "inputs", "docs", "model")
                if not os.path.isdir(paths[key])]
     _check(results, "layout", "warn" if missing else "ok",
            f"missing: {', '.join(missing)} (recreated on demand)" if missing
@@ -3070,6 +6828,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
            f"{summary['available']} runnable here"
            + (f" — NO NEGATIVE CONTROL: {', '.join(uncontrolled)}" if uncontrolled
               else "" if summary["gates"] else " — nothing can be checked yet"))
+    # A prerequisite nothing registers reads "not registered" at every check and
+    # Skips its dependent (P2.2-D14): name each, with the fix. A problem, not a
+    # warning — every claim the dependent covers is unresolved until it is.
+    for row in summary["unregistered_prerequisites"]:
+        _check(results, "prerequisite", "FAIL",
+               f"{row['gate']}: prerequisite {row['need']} is not registered — install "
+               f"the pack that provides it, or remove the edge")
+    # Where the crash rows go once the resolution is known (below): above every
+    # row about a missing tool (invariant 2).
+    crash_at = len(results)
     for row in summary["unavailable"]:
         _check(results, "gate-tool", "warn", f"{row['gate']}: {row['reason']}")
     for tool in summary["requires_tools"]:
@@ -3079,13 +6847,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     model = None
     projection = None
+    model_error = ""
     if not (ledger.meta.model_entry or "").strip():
-        _check(results, "model", "warn",
-               "no model entry recorded — `atompipe model --set-entry model/<thing>.py`")
+        _check(results, "model", "warn", _no_entry(root))
     else:
         try:
             model, projection = _projection(root, ledger)
         except AtompipeError as exc:
+            model_error = str(exc)
             _check(results, "model", "FAIL", str(exc).replace("\n", " "))
         else:
             _check(results, "model", "ok",
@@ -3099,20 +6868,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             _check(results, "model-determinism", "FAIL", str(exc).replace("\n", " "))
         else:
             _check(results, "model-determinism", "ok" if deterministic else "FAIL", detail)
-        undocumented = modelio.undocumented_params(model)
+        # Over the view `status`, the report and the page judge too — never the
+        # model alone, which called a field a record defends undefended while
+        # `status` read the records alone and disagreed both ways (review, 1.3).
+        undocumented = modelio.undefended_params(
+            _param_views(root, ledger, model, model_error))
         _check(results, "model-provenance", "warn" if undocumented else "ok",
                f"{len(undocumented)} param(s) with no rationale: "
                f"{', '.join(undocumented[:6])}" if undocumented
                else "every param carries a rationale")
-        # Checked against a COPY: doctor never writes, and a diagnostic that
-        # silently repaired what it was diagnosing would hide the problem from
-        # the next run.
-        declared = {param.name for param in (model.params or [])}
-        orphans = [param.name for param in ledger.params if param.name not in declared]
+        # Off the records (`modelio.orphan_params`): a param record whose field
+        # the model no longer defines. A parameter the model owns entirely has
+        # no record, and is no orphan.
+        orphans = modelio.orphan_params(ledger, model)
         _check(results, "model-params", "warn" if orphans else "ok",
-               f"{len(orphans)} ledger param(s) the model no longer declares: "
+               f"{len(orphans)} param record(s) the model no longer defines: "
                f"{', '.join(orphans[:6])} — renamed, or removed and still grounded"
-               if orphans else f"{len(declared)} param(s), all still in the model")
+               if orphans else f"{len(model.params)} param(s); every param record "
+                               f"names one the model defines")
 
     # Two packs, one word, two meanings. The spine knows which packs are installed
     # and what each of them reads, so a collision between their key vocabularies is
@@ -3123,7 +6896,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     # boat measured against a 220 mm printer bed, or an envelope claim that
     # silently went unheld. A warning, not a failure: the collision is latent until
     # the project publishes the bare key, and `live` says when it has.
-    flat_keys, _conflicts = _flat_params(projection)
+    flat_keys, _conflicts = modelio.flat_params(projection)
     for collision in packs.key_collisions(installed, root, projection_keys=flat_keys):
         meanings = "; ".join(
             f"{name}: {_first_sentence(collision.meanings.get(name))}"
@@ -3135,17 +6908,55 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                   " (this project does not publish it yet)")
                + f" — {collision.fix()}. {meanings}")
 
-    stale, why = _staleness(ledger, projection)
-    _check(results, "staleness", "warn" if stale else "ok",
-           why + (" — verdicts describe a model that no longer exists; `atompipe check`"
-                  if stale else ""))
-
-    problems = _ledger_problems(root, ledger, registry)
+    # No global staleness row: one hash of the projection against the last
+    # sweep's said THAT something moved, never which check it touched, and a
+    # model that did not load compared equal (S-21). Which gates are current is
+    # `status`'s `stale:` block now, per gate, from the resolver.
+    view, resolution = _resolved(root, ledger, registry, projection, model_error,
+                                 now=utcnow_iso(), model=model)
+    problems, orphans = _ledger_problems(root, view, registry)
     _check(results, "ledger-integrity", "FAIL" if problems else "ok",
-           "; ".join(problems[:4]) + (f" (+{len(problems) - 4} more)" if len(problems) > 4 else "")
-           if problems else "records all resolve")
+           _listed(problems) if problems else "records all resolve")
+    _check(results, "orphan-entries", "warn" if orphans else "ok",
+           _listed(orphans) if orphans
+           else "every cached verdict belongs to a gate registered here")
+    # Each gate whose effective verdict at its current inputs is a crash, in a
+    # loud row ABOVE the missing-tool rows, from the resolution alone — no gate
+    # runs here. What slipped through (P2.0 F-4): doctor had two rows for a
+    # missing tool and none for a gate that crashes, so the command people run
+    # when confused ranked the dull case above the broken evaluator. `ERR` is
+    # not a FAIL: a crash is a fact about an evaluator, not this environment,
+    # and `doctor` exits 1 only for the environment.
+    registered = set(registry.ids())
+    crashes = [_tagged_row("gate-error", "ERR",
+                           f"{v.gate}: errored at its current inputs — "
+                           f"{(str(v.error).splitlines() or [''])[0]} "
+                           f"(`atompipe gate show {v.gate}`)")
+               for v in resolution.verdicts
+               if v.gate in registered and v.outcome == "error"
+               and not getattr(v, "unqualified", "")]
+    results[crash_at:crash_at] = crashes
+    _doctor_cache_rows(results, root, registry, resolution)
+    _doctor_qualification_rows(results, root, registry, resolution, projection=projection,
+                               ledger=ledger)
+    # P2.4-D13: an evaluator judging against a limit of its own that is not its
+    # claim's — a warning, never a status (S-35) — over current verdicts only.
+    # The row is always there (review of P2.4): it appeared only when it warned,
+    # so a reader could not tell it had run, and the count of diagnostics moved
+    # with the outcome.
+    parted = _limit_lines(view, resolution.stale_gates)
+    said = report.HUMAN["acceptance"]
+    if parted:
+        _check(results, "limits", "warn", said["doctor_warn"].format(
+            n=len(parted), list="; ".join(line.split(": ", 1)[1] for line in parted)))
+    else:
+        _check(results, "limits", "ok", said["doctor_ok"])
+    _doctor_seal_row(results, registry,
+                     _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
 
-    site_info = _site_state(root)
+    site_info = _site_state(root, resolved=(
+        view, registry, resolution,
+        _shown_params(root, ledger, model, model_error, resolution, registry)))
     if site_info["present"]:
         # Only when there is a site. A doctor row about a surface the project
         # never opted into is a row that is always there and never actionable,
@@ -3192,7 +7003,7 @@ def _doctor_finish(args: argparse.Namespace, results: list[dict]) -> int:
         return 1 if failures else 0
     for row in results:
         _say(f"{_tag(row['status'])} {row['check']:<18} {row['detail']}")
-    warnings = [row for row in results if row["status"] == "warn"]
+    warnings = [row for row in results if row["status"] in ("warn", "ERR")]
     _say(f"{len(results)} checks — {len(failures)} failing, {len(warnings)} warning(s)")
     return 1 if failures else 0
 
@@ -3215,6 +7026,19 @@ def _common() -> argparse.ArgumentParser:
     common.add_argument("--json", action="store_true",
                         help="machine-readable output; nothing else goes to stdout")
     return common
+
+
+def _junit_flag(parser: argparse.ArgumentParser, what: str) -> None:
+    """`--junit [PATH]`, the same on `check` and `gate selftest`.
+
+    `nargs="?"` with the default as `const`, so a bare `--junit` writes
+    `report.JUNIT_DEFAULT` under the project. A PATH must end in `.xml`
+    (`_junit_arg`), which is what stops the optional value swallowing a gate id.
+    """
+    parser.add_argument("--junit", nargs="?", const=_JUNIT_DEFAULT, default=None,
+                        metavar="PATH",
+                        help=f"also write {what} as JUnit XML (default "
+                             f"{report.JUNIT_DEFAULT}; a PATH must end in .xml)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -3256,9 +7080,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--tier", type=int, default=0,
                    help="cost ceiling: 0 instant (default), 1 build, 2 solve, 3 external")
     p.add_argument("--only", action="append", metavar="GATE",
-                   help="gate id, pack name or glob (repeatable); runs it above its tier too")
+                   help="gate id, pack name or glob (repeatable); runs it above its tier "
+                        "too, with its prerequisites")
+    p.add_argument("--force", action="store_true",
+                   help="re-run every selected gate and its control, ignoring the "
+                        "verdict cache (what CI runs: a cache is re-proven, not trusted)")
     p.add_argument("--no-record", action="store_true",
-                   help="do not write verdicts or run history (a dry sweep)")
+                   help="a dry sweep: write nothing under .atompipe/ except gate scratch "
+                        "in out/ — no cache or control entry, obs, last_check.json or "
+                        "index; a legacy ledger migrates in memory only")
+    _junit_flag(p, "this run")
     p.set_defaults(func=cmd_check)
 
     # -- ask -------------------------------------------------------------- #
@@ -3303,35 +7134,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_extract)
 
     # -- claim ------------------------------------------------------------ #
-    claim = sub.add_parser("claim", help="add, list, show, edit and settle claims")
+    # No `claim add` and no `claim edit` (PLAN A-8): a claim is the file
+    # `claims/<id>.json`, written and edited as one.
+    claim = sub.add_parser("claim", help="list and show claims, and record a physical result "
+                                         "(a claim itself is the file claims/<id>.json)")
     claim_sub = claim.add_subparsers(dest="claim_command", metavar="<sub>")
     claim.set_defaults(func=lambda args: _needs_subcommand(claim))
 
-    p = claim_sub.add_parser("add", parents=[common], help="add a claim")
-    p.add_argument("--statement", required=True, help="what must be true for this to work")
-    p.add_argument("--kind", default=ClaimKind.MEASURABLE.value,
-                   choices=[k.value for k in ClaimKind])
-    p.add_argument("--id", default="", help="explicit id (default: next free C<n>)")
-    p.add_argument("--prefix", default="C", help="id prefix when generating (default C)")
-    p.add_argument("--quantity", default=None, help='what is measured, e.g. "tip deflection"')
-    p.add_argument("--cmp", default=None, choices=[c.value for c in Comparator],
-                   help="comparator for the threshold")
-    p.add_argument("--limit", type=float, default=None)
-    p.add_argument("--limit-hi", type=float, default=None, help="upper bound for `between`")
-    p.add_argument("--units", default=None)
-    p.add_argument("--rationale", default="", help="why this matters; what breaks if false")
-    p.add_argument("--source", default="")
-    p.add_argument("--tags", action="append", default=[],
-                   help="tags packs bind gates to (comma-separated or repeated)")
-    p.add_argument("--gates", action="append", default=[], help="gate ids that cover it")
-    p.add_argument("--grounds", action="append", default=[], help="artifact ids behind it")
-    p.add_argument("--note", default="")
-    p.add_argument("--nice-to-have", action="store_true",
-                   help="not critical: never blocks a spend")
-    p.set_defaults(func=cmd_claim_add)
-
     p = claim_sub.add_parser("list", parents=[common], help="one line per claim")
-    p.add_argument("--status", choices=[s.value for s in ClaimStatus])
+    p.add_argument("--status", metavar="STATUS",
+                   help="a status by its word, token or value: checked, failing, stale, "
+                        "assumed, \"pending build\", gap, skipped, open")
     p.add_argument("--kind", choices=[k.value for k in ClaimKind])
     p.add_argument("--tag", default="")
     p.set_defaults(func=cmd_claim_list)
@@ -3340,41 +7153,28 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id")
     p.set_defaults(func=cmd_claim_show)
 
-    p = claim_sub.add_parser("edit", parents=[common],
-                             help="change a claim; unmentioned fields are untouched")
+    said = report.HUMAN["signing"]
+    p = claim_sub.add_parser("physical", parents=[common], help=said["help"],
+                             description=said["help"])
     p.add_argument("id")
-    p.add_argument("--statement", default=None)
-    p.add_argument("--kind", default=None, choices=[k.value for k in ClaimKind])
-    p.add_argument("--quantity", default=None)
-    p.add_argument("--cmp", default=None, choices=[c.value for c in Comparator])
-    p.add_argument("--limit", type=float, default=None)
-    p.add_argument("--limit-hi", type=float, default=None)
-    p.add_argument("--units", default=None)
-    p.add_argument("--rationale", default=None)
-    p.add_argument("--source", default=None)
-    p.add_argument("--note", default=None)
-    p.add_argument("--tags", action="append", default=None)
-    p.add_argument("--gates", action="append", default=None)
-    p.add_argument("--grounds", action="append", default=None)
-    p.add_argument("--critical", action="store_true", help="mark critical (blocks a spend)")
-    p.add_argument("--nice-to-have", action="store_true", help="mark non-critical")
-    p.set_defaults(func=cmd_claim_edit)
-
-    p = claim_sub.add_parser("physical", parents=[common],
-                             help="record a real-world result on a physical claim")
-    p.add_argument("id")
-    p.add_argument("result", nargs="?", choices=["pass", "fail"],
-                   help="what happened in the real world")
+    p.add_argument("result", nargs="?", choices=["pass", "fail", "assume"],
+                   help=said["act_help"])
     outcome = p.add_mutually_exclusive_group()
     outcome.add_argument("--pass", dest="passed", action="store_const", const=True,
-                         help="same as the positional `pass` (what the report prints)")
+                         help=said["pass_help"])
     outcome.add_argument("--fail", dest="passed", action="store_const", const=False,
-                         help="same as the positional `fail`")
+                         help=said["fail_help"])
     p.set_defaults(passed=None)
-    p.add_argument("--when", default="", help="ISO date (default: now)")
-    p.add_argument("--who", default="")
-    p.add_argument("--detail", default="", help="what was actually observed")
-    p.add_argument("--evidence", action="append", default=[], help="photo / log paths")
+    # Refused flags (REFUSED_FLAGS): parsed so a pasted older command meets its
+    # reason, never argparse's bare "unrecognized arguments"; never in --help.
+    p.add_argument("--when", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--who", default=None, help=argparse.SUPPRESS)
+    p.add_argument("--detail", default="", help=said["detail_help"])
+    p.add_argument("--evidence", action="append", default=[], help=said["evidence_help"])
+    p.add_argument("--measured", type=float, default=None, metavar="VALUE",
+                   help=said["measured_help"])
+    p.add_argument("--authority", default=None, metavar="NAME", help=said["authority_help"])
+    p.add_argument("--article", default=None, metavar="HEX", help=said["article_help"])
     p.set_defaults(func=cmd_claim_physical)
 
     # -- gap -------------------------------------------------------------- #
@@ -3399,24 +7199,56 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("id")
     p.set_defaults(func=cmd_gate_show)
 
+    # Its help in qualification's words, from the one table (P2.3, GLOSSARY §6
+    # *fail*): "fails any gate that cannot fail" used the outcome word for two
+    # things in one sentence, and "negative control" is a §2 Never-say.
     p = gate_sub.add_parser("selftest", parents=[common],
-                            help="run every negative control; fails any gate that cannot fail")
+                            help=report.HUMAN["qualification"]["help"])
     # The positional form exists because `gates.py` prints `atompipe gate
     # selftest <id>` when it refuses a control-less gate, and a command the tool
     # tells you to run has to work as printed.
     p.add_argument("gates", nargs="*", metavar="GATE",
-                   help="gate ids, pack names or globs; default is every control")
+                   help="gate ids, pack names or globs; default is every evaluator")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="pack mode: print every evaluator's line, not only the "
+                        "unqualified ones")
     p.add_argument("--only", action="append", metavar="GATE",
                    help="same as the positional form (repeatable)")
     p.add_argument("--tier", type=int, default=None,
                    help="cap the cost; the default runs every tier's control")
-    p.add_argument("--no-record", action="store_true", help="do not append to the run history")
+    p.add_argument("--no-record", action="store_true",
+                   help="run every control but file nothing: no control entry, obs or "
+                        "cache under .atompipe/")
+    p.add_argument("--pack", action="append", metavar="NAME|DIR",
+                   help="pack mode: demonstrate this pack, or every pack in this "
+                        "directory (repeatable). Without a project, pack mode runs "
+                        "every bundled pack")
+    p.add_argument("--user-packs", action="store_true",
+                   help="pack mode: also search $ATOMPIPE_PACK_PATH and "
+                        "~/.atompipe/packs (off, so the machine cannot choose the pack)")
+    p.add_argument("--allow-empty", action="store_true",
+                   help="exit 0 when no control ran (otherwise that is a failure)")
+    _junit_flag(p, "the controls (and, in pack mode, the baselines)")
     p.set_defaults(func=cmd_gate_selftest)
 
     # -- report / why / decide -------------------------------------------- #
     p = sub.add_parser("report", parents=[common], help="the readiness report")
-    p.add_argument("--write", action="store_true", help="write docs/readiness.md")
+    p.add_argument("--write", action="store_true",
+                   help="write REPORT.md at the project root (an output git ignores)")
+    p.add_argument("--milestone", default=None, metavar="NAME",
+                   help="the report for one milestone (milestones/<name>.json): what it "
+                        "requires, as last evaluated")
     p.set_defaults(func=cmd_report)
+
+    # -- export (P2.5b; D-24: a top-level command the brief names) ---------- #
+    said_export = report.HUMAN["export"]
+    p = sub.add_parser("export", parents=[common], help=said_export["help"],
+                       description=said_export["help"])
+    p.add_argument("milestone", nargs="?", default=None, help=said_export["milestone_help"])
+    p.add_argument("--dry-run", action="store_true", help=said_export["dry_run_help"])
+    p.add_argument("--proceed", action="store_true", help=said_export["proceed_help"])
+    p.add_argument("--why", default=None, metavar="TEXT", help=said_export["why_help"])
+    p.set_defaults(func=cmd_export)
 
     p = sub.add_parser("why", parents=[common],
                        help="one param or claim's full history, instead of the whole log")
@@ -3427,7 +7259,6 @@ def build_parser() -> argparse.ArgumentParser:
                        help="record a decision, including what LOST and why")
     p.add_argument("--title", required=True)
     p.add_argument("--summary", required=True)
-    p.add_argument("--when", default="", help="ISO timestamp (default: now)")
     p.add_argument("--rejected", action="append", default=[], metavar="VALUE|WHY",
                    help='what lost and the concrete reason: "0.5 mm|the router could not close"')
     p.add_argument("--param", action="append", default=[], help="param names this moved")
@@ -3458,20 +7289,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("name", help="pack name or directory")
     p.set_defaults(func=cmd_packs_validate)
 
+    # No `packs remove` (PLAN A-8): opting out is deleting the name from `packs`
+    # in `.atompipe/project.json`.
     p = pack_sub.add_parser("add", parents=[common], help="opt this project into a pack")
     p.add_argument("names", nargs="+")
     p.set_defaults(func=cmd_packs_add)
 
-    p = pack_sub.add_parser("remove", parents=[common], help="drop a pack from this project")
-    p.add_argument("names", nargs="+")
-    p.set_defaults(func=cmd_packs_remove)
-
     # -- model / doctor --------------------------------------------------- #
+    # No `--set-entry` (PLAN A-8): the entry is `"model_entry"` in
+    # `.atompipe/project.json`, edited as the file it is.
     p = sub.add_parser("model", parents=[common], help="the model, projected")
     p.add_argument("--write", action="store_true", help="write .atompipe/model.json")
     p.add_argument("--entry", default=None, help="project this file instead of the recorded one")
-    p.add_argument("--set-entry", default="", metavar="PATH",
-                   help="record this file as the project's model")
     p.set_defaults(func=cmd_model)
 
     # -- site ------------------------------------------------------------- #
@@ -3523,14 +7352,15 @@ def _tag_subparsers(parser: argparse.ArgumentParser) -> None:
     """Give every subparser a `_parser` default pointing at itself.
 
     So that `main` can hand a bad flag back to the parser the user was actually
-    using. `atompipe check --tierr 1` printed the two-line TOP-LEVEL usage —
-    `usage: atompipe [-h] [--version] [-C DIR] <command> ...` — which lists the
-    subcommands and not one of `check`'s own flags, so the reader learns nothing
-    about the flag they got wrong and has to go and type `--help` separately.
+    using. A typo'd flag on `check` (`--tierr 1`) printed the two-line TOP-LEVEL
+    usage — `usage: atompipe [-h] [--version] [-C DIR] <command> ...` — which
+    lists the subcommands and not one of `check`'s own flags, so the reader
+    learns nothing about the flag they got wrong and has to go and type `--help`
+    separately.
 
     argparse fills defaults from the innermost parser last (each subparser parses
     into a fresh namespace that is then copied outward), so `args._parser` ends
-    up as the deepest one that matched: `claim add`, not `claim`.
+    up as the deepest one that matched: `claim show`, not `claim`.
 
     `_actions` is private, but the alternative is repeating `set_defaults` on
     thirty subparsers, where the thirty-first would be added without it and
@@ -3572,6 +7402,12 @@ def main(argv: list[str] | None = None) -> int:
     is a normal thing to type, and Python's default behaviour there is a
     confusing "Exception ignored" block at interpreter shutdown. stdout is
     redirected to devnull so the flush at exit has somewhere harmless to go.
+
+    After the command — succeeded or refused, never interrupted — the index is
+    rebuilt from the records on a migrated project (`_touch_index`), so the one
+    generated file an agent reads first says what the record files say, a hand
+    edit made since the last command included. Its exit code is never the
+    index's: the rebuild is best-effort.
     """
     parser = build_parser()
     try:
@@ -3593,9 +7429,10 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        return int(handler(args) or 0)
+        code = int(handler(args) or 0)
     except AtompipeError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        _after(args, quiet=True)
         return 2
     except BrokenPipeError:
         devnull = os.open(os.devnull, os.O_WRONLY)
@@ -3604,6 +7441,8 @@ def main(argv: list[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("interrupted", file=sys.stderr)
         return 130
+    _after(args)
+    return code
 
 
 if __name__ == "__main__":              # pragma: no cover - `python -m atompipe.cli`

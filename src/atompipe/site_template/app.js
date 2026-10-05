@@ -21,7 +21,7 @@
 // `view-source` and audited by whoever has to trust it.
 
 import { el, mount, $ } from "./lib/dom.js";
-import { code, stamp, age, isAged } from "./lib/format.js";
+import { code, stamp, age, isAged, useWords, phrase } from "./lib/format.js";
 import {
   headline, staleBanner, locatorProblems, claimsPanel, verdictsPanel,
   paramsPanel, evidencePanel, gapsPanel, decisionsPanel, aboutPanel, cssId,
@@ -73,13 +73,14 @@ async function boot() {
   }
 
   app.state = state;
+  useWords(state.words, state.outcome_words, state.phrases);
   for (const v of state.verdicts || []) app.index.verdictByGate.set(v.gate, v);
   for (const v of state.views || []) app.index.viewById.set(v.id, v);
   for (const c of state.claims || []) app.index.claimById.set(c.id, c);
 
   document.documentElement.toggleAttribute("data-stale", !!(state.meta || {}).stale);
   const name = (state.meta || {}).name || "atompipe project";
-  document.title = `${name} — ${(state.readiness || {}).ready ? "ready" : "not ready"}`;
+  document.title = `${name} — ${(state.readiness || {}).all_required_checked ? "ready" : "not ready"}`;
 
   render(root, state);
 }
@@ -120,7 +121,11 @@ function topbar(state) {
         meta.revision ? el("span", { class: "rev", text: meta.revision }) : null),
       meta.summary ? el("p", { class: "summary", text: meta.summary }) : null),
     el("div", { class: "built" },
-      meta.stale ? el("span", { class: "stale-flag", title: meta.stale_reason || "", text: "≈ STALE" }) : null,
+      // `meta.stale` says a VERDICT is invalidated — not that a claim reads
+      // Stale (an invalidated fail stays Failing, D-08), so the flag says the
+      // ledger's word for the verdict, never the status (review of P2.1).
+      meta.stale ? el("span", { class: "stale-flag", title: meta.stale_reason || "",
+        text: `≈ ${phrase("invalidated")}` }) : null,
       el("span", { class: "muted", text: meta.built ? `built ${stamp(meta.built)}` : "built (unstamped)" }),
       el("button", { class: "btn btn-ghost", type: "button", text: "Keys",
         onclick: () => document.getElementById("key-dialog").showModal() })));
@@ -163,8 +168,8 @@ function mixedAgeBanner(state) {
       el("b", { text: "These results are not all the same age. " }),
       `The oldest is ${age(oldest)}, the newest ${age(newest)}. `,
       el("span", { class: "muted", text:
-        "Building the site does not re-run gates — a sweep that skipped the expensive ones " +
-        "leaves them at their previous answer, and one timestamp over all of it would hide that." }),
+        "Building the site does not re-run gates — a check run that left the expensive ones " +
+        "out leaves them at their previous answer, and one timestamp over all of it would hide that." }),
       el("p", { class: "small" }, "Aged: ",
         ...stale.map((v) => el("button", { class: "linkish mono", type: "button", text: v.gate,
           onclick: () => reveal(`gate-${cssId(v.gate)}`) })))));
@@ -189,7 +194,7 @@ function noState(err) {
           el("pre", { class: "cmd" }, code("atompipe site build")),
           el("p", { class: "small muted" },
             "That runs the viewgens and writes ", code("site/data/state.json"),
-            " from the ledger. It does not run gates — if the results are out of date, ",
+            " from the ledger. It runs no evaluator — if a verdict is invalidated, ",
             code("atompipe check"), " first.")),
     el("p", { class: "small muted", text:
       "The site is an output. Nothing under site/data/ is hand-edited, and nothing here is a " +

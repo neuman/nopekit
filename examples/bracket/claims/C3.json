@@ -1,0 +1,14 @@
+{
+  "statement": "Fastener bearing stress within the design allowable",
+  "kind": "measurable",
+  "acceptance": {
+    "quantity": "bearing stress",
+    "comparator": "<=",
+    "limit": 15.0,
+    "units": "MPa"
+  },
+  "rationale": "15 MPa = PETG design stress, yield 30 MPa at safety factor 2; bracket.bearing computes the same number from the model, and check warns when they differ",
+  "tags": [
+    "bearing"
+  ]
+}

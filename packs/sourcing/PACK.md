@@ -154,6 +154,31 @@ fires in one repository and passes in another. No fixture hardcodes a magnitude
 either; each reads the limit it has to beat out of the baseline the gate reads it
 from. Run them: `atompipe gate selftest sourcing`.
 
+Each gate also declares its **known-good** control, `selftest/good_boms.py:baseline_bom`:
+the baseline BOM, unchanged, handed through `ctx.extra["bom"]` — the channel every
+fixture above uses. The baseline alone reaches the gates through `params["bom"]`, and a
+pair that reaches a gate through two channels shows nothing (`channels differ`): a gate
+that read `extra` and `params` differently could pass one and fail the other. A gate
+qualifies when it passes its known-good control and fails its known-bad one (GLOSSARY
+§2).
+
+### Prerequisites
+
+`bom.complete` is the prerequisite (`needs`) of `bom.cost` and `bom.moq`: an unpriced or
+unorderable line, a price in a currency the document cannot convert, or a quantity,
+spares fraction, MOQ or order multiple that cannot be read makes their arithmetic over
+the BOM a work of fiction. Below it failing they are not run, and a claim tagged only
+`build-cost` or `moq` reads Skipped, `prerequisite failed: bom.complete`.
+
+`bom.availability`, `bom.process_rules` and `bom.single_source` have no prerequisite.
+A ship date, a capability rule and a source count do not depend on another line's
+price, and `bom.complete` fails on any unpriced line: with the edge, one blank price
+cell hid a real end-of-life fail behind a skip that named the wrong root, until the
+unrelated price was filled in. `bom.availability` refuses the one input it shares with
+the guard itself — a line whose quantity cannot be read is never covered by stock.
+`bom.currency` has no prerequisite either: its own control fails `bom.complete` (one
+line not orderable), which would pre-empt it.
+
 ## 4b. The view, and the rows locators land on
 
 | View | Kind | Payload | Addressed by |
@@ -256,8 +281,11 @@ is dominated by parts, and negotiating tooling is wasted effort.
   the whole point: fix `bom.complete` first. A cost gate that treats unknowns as
   zero always errs in the direction that gets the build approved.
 - **`bom.availability` FAILs with "no ship date".** Either no stock figure and no
-  lead time, or stock below what the order needs with no lead time for the rest.
-  Nobody knows when this ships, which is different from it being slow.
+  lead time, stock below what the order needs with no lead time for the rest, or
+  stock against a quantity the line does not state readably (no `qty_per_unit`, a
+  spares fraction out of range, an MOQ that is not a quantity) — stock cannot cover
+  an unknown need. Nobody knows when this ships, which is different from it being
+  slow.
 - **`bom.moq` passes with a 4x overbuy in the detail line.** Intended: 4x on a
   four-cent label is thirty dollars. The ratio names lines, it no longer decides
   what is measured — every line's idle money is counted whether it is past 3x or

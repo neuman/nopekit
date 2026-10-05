@@ -1,0 +1,10 @@
+{
+  "description": "Print the bracket in PETG and hang it for the load test",
+  "requires": [
+    "C1",
+    "C2",
+    "C3",
+    "C4"
+  ],
+  "generator": "generators/profile.py:side_profile"
+}

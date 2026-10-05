@@ -131,6 +131,22 @@ what it claims.
 Then actually run it: `atompipe gate selftest --only <id>`. A gate that passes its
 own known-bad fixture is reported as broken, loudly.
 
+`atompipe check` holds you to it as well. A gate's verdicts count only while it is
+*qualified* at its current code, fixtures and spine: its known-good control passed,
+its known-bad control failed, both through the same channel, and — for a gate of your
+own — every conclusive mutation of its known-good control failed (each value it read,
+pushed until its own value lands 15% past its own limit). `check` runs whatever of
+that is not on record; an unqualified gate's function is never called and its claim
+reads Gap (the "Qualification" section of [`PACK_FORMAT.md`](PACK_FORMAT.md)). For a
+gate that lives in the project, write `selftest/known_good.py` first — a
+`context(ctx)` returning a design that passes every gate, every field stated (and,
+for a gate that reads files, its own copy of them) — and build each fixture from it
+with one thing changed: it is the known-good control, and the fixture is handed that
+design, never the live one, so it stays diagnostic even while the live design already
+fails. Without it every gate of the project reads `known-good not run`. Commit what `check` records
+under `.atompipe/verdicts/` with the gate; the next clone reads the verdict and its
+control from there instead of running them again.
+
 ### 6. Record provenance for every solver setting
 
 Mesh density, turbulence model, timestep, convergence criterion, boundary
@@ -147,16 +163,18 @@ convergence check as a second gate.
 
 ### 7. Emit a pack
 
-Once the gate works, it should never be rebuilt from scratch by anyone again.
+Once the gate works, it should never be rebuilt from scratch by anyone again. Lay it
+out as [`PACK_FORMAT.md`](PACK_FORMAT.md) describes — an ordinary directory; no
+command creates or exports one — then:
 
 ```
-atompipe pack new <name>      # scaffolds the layout
-atompipe pack validate <name> # the same checks CI runs
-atompipe pack export <name>   # PR-ready, with the selftest evidence attached
+atompipe pack validate <name>                            # the same checks CI runs
+atompipe gate selftest --pack <name> --junit <file>.xml  # every tier's control
 ```
 
-The export includes proof that each gate fails its negative control. A pack whose
-gates have never demonstrated failure does not get merged.
+The JUnit file is the proof that each gate is qualified — it passes its known-good
+control and fails its known-bad one: it goes with the pack's PR. A pack whose gates have never demonstrated failure does not get
+merged.
 
 ---
 

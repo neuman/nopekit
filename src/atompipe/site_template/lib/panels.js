@@ -21,8 +21,14 @@
 import { el, mount, field } from "./dom.js";
 import {
   chip, tag, claimStatus, verdictStatus, claimKind,
-  num, quantity, age, isAged, stamp, plural, code,
+  num, quantity, age, isAged, stamp, plural, code, phrase, needWord, outcomeWord,
 } from "./format.js";
+
+/** `invalidated` -> `Invalidated`, for a field label. */
+function capital(text) {
+  const s = String(text || "");
+  return s ? s[0].toUpperCase() + s.slice(1) : s;
+}
 
 // --------------------------------------------------------------------------- //
 // headline
@@ -38,8 +44,12 @@ import {
 export function headline(state, app) {
   const r = state.readiness || {};
   const meta = state.meta || {};
-  const ready = !!r.ready;
-  const counts = r.counts || {};
+  // READY only when every required claim reads Checked (GLOSSARY §4) —
+  // `all_required_checked`, never `ready`, which keeps "nothing stops check"
+  // for older readers. What slipped through: READY over a project whose
+  // claim waited for an article.
+  const ready = !!r.all_required_checked;
+  const tally = r.tally || [];
   const blocking = r.blocking || [];
 
   return el("section", { class: `headline ${ready ? "is-ready" : "is-not-ready"}`, id: "verdict" },
@@ -57,42 +67,45 @@ export function headline(state, app) {
               onclick: () => app.reveal(`claim-${id}`),
             })))
         : null,
+      // The strip is `readiness.tally`: report.count_bits' items, each label
+      // already in HUMAN's words with a crash counted apart ("7 skipped (6
+      // errored)"), toned by its status (a crash's in Failing's).
       el("ul", { class: "counts" },
-        countItem(r.n_claims, "claim", "claims"),
-        counts.pass ? countItem(counts.pass, "proven", "proven", "ok") : null,
-        counts.fail ? countItem(counts.fail, "failing", "failing", "bad") : null,
-        counts.stale ? countItem(counts.stale, "stale", "stale", "warn") : null,
-        counts.blocked ? countItem(counts.blocked, "blocked", "blocked", "warn") : null,
-        counts.pending ? countItem(counts.pending, "not run", "not run", "warn") : null,
-        counts.unclaimed ? countItem(counts.unclaimed, "with no gate", "with no gate", "warn") : null,
-        counts.unverified ? countItem(counts.unverified, "unverified", "unverified", "phys") : null,
-        counts.refuted ? countItem(counts.refuted, "refuted", "refuted", "bad") : null,
-        counts.asserted ? countItem(counts.asserted, "assumed", "assumed", "assum") : null,
-        countItem(r.n_gates, "gate", "gates"),
-        r.n_gaps ? countItem(r.n_gaps, "capability gap", "capability gaps", "warn") : null)));
+        countItem(r.n_claims, r.n_claims === 1 ? "claim" : "claims"),
+        ...tally.map((t) => labelItem(t.label,
+          claimStatus(t.status, { errored: t.errored > 0 }).tone)),
+        countItem(r.n_gates, r.n_gates === 1 ? "gate" : "gates"))));
 }
 
-function countItem(n, one, many, tone = "muted") {
+function countItem(n, noun, tone = "muted") {
   if (n === null || n === undefined) return null;
   return el("li", { class: `count tone-${tone}` },
-    el("b", { class: "mono", text: String(n) }), " ", (n === 1 ? one : many));
+    el("b", { class: "mono", text: String(n) }), " ", noun);
 }
 
-/** The staleness band. Shown ONLY when the ledger says the results describe a
- *  model that has since moved — `meta.stale` is computed against the model hash
- *  in atompipe.site, not guessed here from a clock. The banner is loud on
- *  purpose and the whole page gets `data-stale`, which desaturates the stage and
- *  hatches the header: a stale sweep has to LOOK stale, because the failure mode
- *  is a reader trusting a green page that describes last week's geometry. */
+function labelItem(label, tone) {
+  const [n, ...rest] = String(label).split(" ");
+  return el("li", { class: `count tone-${tone}` },
+    el("b", { class: "mono", text: n }), " ", rest.join(" "));
+}
+
+/** The staleness band. Shown ONLY when the resolver says a verdict is not
+ *  current — `meta.stale` and `meta.stale_reason` are written by atompipe.site
+ *  from `verdicts.resolve`, per gate (an input moved, the code moved, a control
+ *  never shown to fail at this version), never guessed here from a clock. The
+ *  banner is loud on purpose and the whole page gets `data-stale`, which
+ *  desaturates the stage and hatches the header: a stale result has to LOOK
+ *  stale, because the failure mode is a reader trusting a green page that
+ *  describes last week's geometry. */
 export function staleBanner(state) {
   const meta = state.meta || {};
   if (!meta.stale) return null;
   return el("aside", { class: "banner banner-stale", role: "status" },
     el("span", { class: "banner-glyph", "aria-hidden": "true", text: "≈" }),
     el("div", {},
-      el("b", { text: "These results describe an older model." }),
+      el("b", { text: "Some verdicts are invalidated." }),
       " ",
-      el("span", { text: meta.stale_reason || "the model has changed since the last sweep" }),
+      el("span", { text: meta.stale_reason || "a verdict's inputs have moved since it was measured" }),
       el("p", { class: "banner-fix" }, "Re-run ", code("atompipe check"),
         " and then ", code("atompipe site build"), " to settle them against what the model says now.")));
 }
@@ -125,23 +138,32 @@ export function locatorProblems(state) {
 /** Every claim, grouped by kind, each with the gate and measured value that
  *  settled it — or the reason nothing did.
  *
- *  The PARTIAL marker is the load-bearing detail. A claim covered by a cheap
- *  analytic gate AND an uninstalled solver resolves PASS, and printing it as
- *  simply proven deletes the check that mattered from the page. `row.partial`
- *  and `row.unproven` come straight from the readiness report's own coverage
- *  logic, so the marker here and the marker in the document are the same
- *  judgement rendered twice, not two judgements. */
+ *  `row.unproven` is the load-bearing detail: each covering gate that produced
+ *  no pass that counts, with its reason led by the fact (errored, skipped,
+ *  unqualified, unrun), straight from the readiness report's own coverage
+ *  logic. Under GLOSSARY §3's composition a Checked claim has none, so PARTIAL
+ *  went (P2.1); a claim the resolver calls Checked while one exists is a
+ *  contradiction, `row.disagree`, painted loud. The claims arrive in severity
+ *  order (`state.json`), and the page keeps it. */
 export function claimsPanel(state, app) {
   const claims = state.claims || [];
-  const groups = ["measurable", "physical", "assumption"];
+  // An expert judgment (`terminal: human`, whatever its kind) has a group of its
+  // own, worded by state.json's phrases. What slipped through (review of
+  // P2.5a): it sat under the assumptions' blurb — "with a reason and an
+  // owner", *owner* being authority's Never-say — and nothing on the page said
+  // whose judgment it waits on.
+  const groups = ["measurable", "physical", "assumption", "judgment"];
+  const groupOf = (c) => (c.terminal === "human" ? "judgment" : (c.kind || "measurable"));
   const seen = new Set();
   const sections = [];
 
   for (const kind of groups) {
-    const rows = claims.filter((c) => (c.kind || "measurable") === kind);
+    const rows = claims.filter((c) => groupOf(c) === kind);
     rows.forEach((c) => seen.add(c.id));
     if (!rows.length) continue;
-    const info = claimKind(kind);
+    const info = kind === "judgment"
+      ? { title: phrase("judgment_title"), blurb: phrase("judgment_blurb") }
+      : claimKind(kind);
     sections.push(el("div", { class: `claim-group group-${kind}` },
       el("h3", { class: "group-head" },
         el("span", { text: info.title }),
@@ -162,14 +184,19 @@ export function claimsPanel(state, app) {
     panelHead("Claims", plural(claims.length, "claim"),
       "What has to be true for this design to work, and what settled it."),
     ...(sections.length ? sections : [emptyNote("This project has recorded no claims yet. " +
-      "`atompipe claim add` is where a project starts: a design with no claims has nothing to prove.")]));
+      "A claim is a file, `claims/<id>.json`, and it is where a project starts: a design with " +
+      "no claims has nothing to prove.")]));
 }
 
 function claimRow(claim, state, app) {
-  const status = claimStatus(claim.status);
+  const status = claimStatus(claim.status, { errored: !!claim.errored });
   const verdicts = (claim.verdicts || []).map((g) => app.index.verdictByGate.get(g)).filter(Boolean);
-  const proving = verdicts.filter((v) => v.ok);
-  const headline = proving.length ? proving[0] : verdicts[0];
+  // The claim's own value: the first verdict state.json says is compared with
+  // its acceptance condition (`claim.compared`, P2.4) — never one this page
+  // picks. What slipped through: the first passing verdict was the headline,
+  // so failing C1 showed its guard's passing L/h. None compared, none shown.
+  const compared = (claim.compared || []).map((g) => app.index.verdictByGate.get(g)).filter(Boolean);
+  const headline = compared.length ? compared[0] : null;
 
   const body = el("div", { class: "claim-detail" },
     el("dl", { class: "kv" },
@@ -190,13 +217,19 @@ function claimRow(claim, state, app) {
           el("h4", { text: "Gates" }),
           el("ul", { class: "mini-verdicts" },
             ...verdicts.map((v) => miniVerdict(v, app))))
-      : el("p", { class: "muted", text: (claim.gates || []).length
-          ? `Covered by ${claim.gates.join(", ")}, which has produced no verdict yet.`
-          : "No gate covers this claim. Nothing about it has been checked." }),
+      : null,
+    // Why the claim reads what it reads: state.json's `reason`, the ledger's
+    // words (no evaluator, unrun, no owner recorded, needs an article…) — none
+    // here. What slipped through (review of P2.1): with no verdict this panel
+    // said "No gate covers this claim" itself, the old NO GATE meaning, for an
+    // unowned assumption and a claim waiting on an article alike; and a
+    // Checked claim's reason, `—`, rendered as a lone dash.
+    claim.reason && claim.cause !== "checked"
+      ? el("p", { class: "claim-reason", text: claim.reason }) : null,
     (claim.unproven || []).length
-      ? el("div", { class: "partial-note" },
-          el("b", { text: "PARTIAL — " }),
-          "a gate covering this claim produced no proof:",
+      ? el("div", { class: claim.disagree ? "partial-note tone-bad" : "partial-note" },
+          claim.disagree ? el("b", { text: "Status and evidence disagree — " }) : null,
+          "a gate covering this claim produced no verdict that counts:",
           el("ul", {}, ...claim.unproven.map((u) =>
             el("li", {}, code(u.gate), " — ", u.why))))
       : null,
@@ -210,27 +243,49 @@ function claimRow(claim, state, app) {
     chip(status),
     el("span", { class: "claim-id mono", text: claim.id }),
     el("span", { class: "claim-statement", text: claim.statement || "(no statement)" }),
-    claim.partial ? tag("PARTIAL", { tone: "warn", title: "a covering gate produced no proof" }) : null,
-    claim.critical === false ? tag("non-blocking", { tone: "muted" }) : null,
+    // The title is state.json's `phrases.disagree` (P2.5a-D18): the page's own
+    // "contradict" was a second sense for the ledger's *contradiction*.
+    claim.disagree ? tag("status and evidence disagree", { tone: "bad",
+      title: phrase("disagree") }) : null,
+    claim.critical === false ? tag("not required", { tone: "muted" }) : null,
+    // Whose judgment it is (state.json's `terminal_word`, report.HUMAN's).
+    claim.terminal === "human" && claim.terminal_word
+      ? tag(claim.terminal_word, { tone: "muted" }) : null,
+    // Beside it, the CLAIM's limit (`claim.limit_text`, written by site.state),
+    // never the verdict's: a compared pair is the one kind whose two limits can
+    // part. What slipped through (review of P2.4): Failing C3 summarised as
+    // `0.195 MPa / 15 MPa` — its evaluator's own limit — against `<= 0.1 MPa`.
     headline && headline.measured !== null && headline.measured !== undefined
       ? el("span", { class: "claim-measure mono", title: `measured by ${headline.gate}` },
           quantity(headline.measured, headline.units || claim.acceptance?.units || ""),
-          headline.limit !== null && headline.limit !== undefined
-            ? el("span", { class: "muted", text: ` / ${quantity(headline.limit, headline.units || "")}` })
+          claim.limit_text
+            ? el("span", { class: "muted", text: ` / ${claim.limit_text}` })
             : null)
       : null);
 
-  return el("li", { class: `claim tone-${status.tone}`, id: `claim-${claim.id}` },
+  return el("li", { class: `claim tone-${claim.disagree ? "bad" : status.tone}`, id: `claim-${claim.id}` },
     el("details", { class: "disclosure" }, summary, body));
 }
 
+/** One recorded physical result. Its tone is keyed on `result.counts` — the
+ *  judge's word (state.json, `report.result_facts`) — and on `passed` only to
+ *  tell a fail from a pass: a pass that does not count (from an agent session,
+ *  on a moved article, with changed evidence) is never the ok tone, and says
+ *  why. What slipped through (critique 3 of the P2.5a design): this painted any
+ *  `passed` in the ok tone, so an agent's pass on a Pending build claim read
+ *  green on the page alone. */
 function physicalResult(result) {
-  const ok = !!result.passed;
-  return el("div", { class: `physical-result ${ok ? "tone-ok" : "tone-bad"}` },
-    el("b", { text: ok ? "A human recorded a pass. " : "A human recorded a failure. " }),
+  const pass = result.passed === true;
+  const counts = result.counts === true;
+  const tone = !pass ? "tone-bad" : counts ? "tone-ok" : "tone-muted";
+  return el("div", { class: `physical-result ${tone}` },
+    el("b", { text: `${result.heading || phrase("result_recorded")} ` +
+                    `${outcomeWord(pass ? "pass" : "fail")} — ` +
+                    `${phrase(counts ? "result_counts" : "result_not_counted")}. ` }),
     el("span", { text: result.detail || "" }),
+    !counts && result.why ? el("p", { class: "claim-reason", text: result.why }) : null,
     el("p", { class: "muted small" },
-      [result.who, stamp(result.when)].filter(Boolean).join(" · ")),
+      [result.recorded || result.who, stamp(result.when)].filter(Boolean).join(" · ")),
     (result.evidence || []).length
       ? el("ul", { class: "file-list" }, ...result.evidence.map((e) => fileRef(e)))
       : null);
@@ -289,7 +344,10 @@ function verdictRow(v, app) {
   const locators = v.locators || [];
   const anchored = locators.filter((loc) => app.index.viewById.has(loc.view));
 
-  const detail = v.error || v.detail || v.skip_reason || "";
+  // An unqualified evaluator's row says what state.json words for it, never
+  // `error` — R-2's fallback, which carries the spine's token (review of P2.3).
+  const unqualified = v.qualification && v.qualification.text;
+  const detail = unqualified || v.error || v.detail || v.skip_reason || "";
   const measured = v.measured !== null && v.measured !== undefined
     ? el("span", { class: "verdict-measure mono" },
         quantity(v.measured, v.units),
@@ -299,12 +357,16 @@ function verdictRow(v, app) {
     : null;
 
   const body = el("div", { class: "verdict-detail" },
-    detail ? el("p", { class: `verdict-text${v.error ? " mono" : ""}`, text: detail }) : null,
+    detail ? el("p", { class: `verdict-text${v.error && !unqualified ? " mono" : ""}`,
+                       text: detail }) : null,
     el("dl", { class: "kv" },
       ...(v.pack ? field("Pack", code(v.pack)) : []),
       ...field("Tier", `${v.tier} — ${["instant", "build", "solve", "external"][v.tier] || "?"}`),
       ...(v.duration_s ? field("Ran in", `${num(v.duration_s)} s`) : []),
-      ...field("Last run", v.when ? `${stamp(v.when)} · ${age(v.age_s)}` : "no run recorded for this gate"),
+      // `when` is the site's, from the resolver: the run that last wrote or hit
+      // this result, else the commit that brought it. Neither known: said so.
+      ...field("Recorded", v.when ? `${stamp(v.when)} · ${age(v.age_s)}` : "no date recorded for this result"),
+      ...(v.stale_reason ? field(capital(phrase("invalidated")), v.stale_reason) : []),
       ...(v.claims || []).length
         ? field("Settles", ...v.claims.map((c) => el("button", {
             class: "linkish mono", type: "button", text: c,
@@ -344,6 +406,10 @@ function verdictRow(v, app) {
         code(v.gate, "verdict-gate"),
         measured,
         el("span", { class: "verdict-line", text: detail }),
+        v.stale_reason
+          ? el("span", { class: "stale-flag", title: v.stale_reason,
+              text: `≈ ${phrase("invalidated")}` })
+          : null,
         anchored.length
           ? el("span", { class: "pin-count", title: "highlights the geometry this is about" },
               `⌖ ${anchored.length}`)
@@ -400,12 +466,17 @@ function miniVerdict(v, app) {
  *  tried and rejected, and why it lost.
  *
  *  A number with no rationale is flagged `undefended` rather than left looking
- *  the same as a defended one. That flag comes from the ledger (`row.defended`),
- *  and it matters because an undefended constant is the one the next agent
- *  changes — then the one after that changes it back. */
+ *  the same as a defended one. That flag comes from the spine (`row.defended`,
+ *  the list `doctor` and `status` print), and it matters because an undefended
+ *  constant is the one the next agent changes — then the one after that
+ *  changes it back. `defended` is `null` where the model holds no number (it
+ *  does not load, or the record outlived its field): nothing to defend, so the
+ *  row says why there is no value instead. Only `=== false` is undefended —
+ *  what slipped through (review, checkpoint 1.3): `!p.defended` would paint a
+ *  broken model's every parameter "undefended", a claim about text nobody read. */
 export function paramsPanel(state, app) {
   const params = state.params || [];
-  const undefended = params.filter((p) => !p.defended).length;
+  const undefended = params.filter((p) => p.defended === false).length;
 
   return el("section", { class: "panel", id: "params" },
     panelHead("Parameters", plural(params.length, "parameter"),
@@ -426,14 +497,22 @@ function paramRow(p, app) {
         el("span", { class: "param-value mono", text: formatValue(p.value) }),
         p.units ? el("span", { class: "param-units", text: p.units }) : null,
         p.derived ? tag("derived", { tone: "ok", title: `from ${(p.derived_from || []).join(", ")}` }) : null,
-        !p.defended ? tag("undefended", { tone: "warn", title: "no rationale recorded" }) : null,
+        p.defended === false ? tag("undefended", { tone: "warn", title: "no rationale recorded" }) : null,
+        p.model_error ? tag("no value", { tone: "warn", title: `model does not load: ${p.model_error}` })
+          : !p.home ? tag("not in the model", { tone: "muted", title: `only ${p.record || "a record"} holds it` })
+          : null,
         rejected.length ? tag(`${rejected.length} rejected`, { tone: "muted" }) : null),
       el("div", { class: "param-detail" },
         el("dl", { class: "kv" },
+          ...(p.model_error ? field("Value", el("span", { class: "tone-warn",
+                text: `model does not load: ${p.model_error}` })) : []),
+          ...(p.home ? field("Lives in", code(p.home)) : []),
           ...(p.rationale
             ? field("Why this value", p.rationale)
-            : field("Why this value", el("span", { class: "tone-warn",
-                text: "Not recorded. A number nobody can defend is a number the next agent changes." }))),
+            : p.defended === false
+              ? field("Why this value", el("span", { class: "tone-warn",
+                  text: "Not recorded. A number nobody can defend is a number the next agent changes." }))
+              : []),
           ...(p.source ? field("Source", p.source) : []),
           ...(p.derived_from || []).length
             ? field("Derived from", ...p.derived_from.map((d) => el("button", {
@@ -536,13 +615,17 @@ export function gapsPanel(state, app) {
   const gaps = state.gaps || [];
   if (!gaps.length) return null;
   return el("section", { class: "panel", id: "gaps" },
-    panelHead("Capability gaps", plural(gaps.length, "gap"),
-      "Claims nothing can currently settle. Each one names the unvalidated physical " +
-      "quantity, which is where the extension protocol starts."),
+    panelHead("Gap records", plural(gaps.length, "record"),
+      "Claims no evaluator here can settle yet. Each record names the physical " +
+      "quantity nothing measures, which is where the extension protocol starts."),
     el("ul", { class: "gap-list" }, ...gaps.map((g) => el("li", { class: "gap", id: `gap-${cssId(g.id)}` },
       el("details", { class: "disclosure" },
         el("summary", {},
-          tag(g.status || "open", { tone: g.status === "satisfied" ? "ok" : "warn" }),
+          // A record's state, never a claim status word: `open` is Open's alone
+          // (GLOSSARY §6), so a record nobody acted on is *identified* — the
+          // ledger's word, from state.json's `phrases` (review of P2.1: this
+          // held its own copy of `HUMAN["need"]`).
+          tag(needWord(g.status), { tone: g.status === "satisfied" ? "ok" : "warn" }),
           code(g.id),
           el("span", { text: g.quantity || "" }),
           (g.claim_ids || []).length ? el("span", { class: "muted mono", text: g.claim_ids.join(" ") }) : null),
@@ -562,7 +645,7 @@ export function gapsPanel(state, app) {
                 c.why ? el("p", { text: c.why }) : null,
                 c.cost ? el("p", { class: "small muted", text: `cost: ${c.cost}` }) : null,
                 c.install ? el("pre", { class: "install" }, code(c.install)) : null)))
-            : el("p", { class: "muted small", text: "No candidate tooling proposed yet — `atompipe gap --propose`." })))))));
+            : el("p", { class: "muted small", text: "No tool options proposed yet — `atompipe gap --propose`." })))))));
 }
 
 /** The decision log, newest first, each entry naming what lost. */
@@ -602,16 +685,16 @@ export function decisionsPanel(state, app) {
 /** Project identity and the provenance of the page itself. */
 export function aboutPanel(state) {
   const meta = state.meta || {};
-  const run = meta.last_run || {};
   return el("section", { class: "panel", id: "about" },
     panelHead("This page", "", "An output of the ledger, not a source."),
     el("dl", { class: "kv" },
       ...(meta.model_entry ? field("Model", code(meta.model_entry)) : []),
       ...(meta.created ? field("Project created", stamp(meta.created)) : []),
       ...(meta.built ? field("Site built", `${stamp(meta.built)}`) : field("Site built", "unstamped")),
-      ...(run.when ? field("Last gate sweep", `${stamp(run.when)} · tier ${run.tier} · ${num(run.duration_s)} s`) : []),
-      ...(run.model_hash ? field("Model hash", code(run.model_hash)) : []),
-      ...(run.inputs_hash ? field("Inputs hash", code(run.inputs_hash)) : []),
+      // No "last gate sweep" and no model hash: there is no sweep record any
+      // more, and one hash for the whole project said THAT something moved,
+      // never which result. Each verdict carries its own date and, when it is
+      // not current, its own reason.
       ...((meta.packs || []).length ? field("Packs", ...meta.packs.map((p) => tag(p))) : []),
       ...(meta.spine_version ? field("atompipe", meta.spine_version) : [])),
     el("p", { class: "small muted", text: meta.generated ||

@@ -14,12 +14,12 @@ input is reported as broken and its green verdicts are not to be trusted.
 """
 from __future__ import annotations
 
-import importlib.util as _importlib_util
 import json as _json
 import os as _os
-import sys as _sys
 
 import dataclasses
+
+from atompipe.modelio import load_path as _load_path
 
 
 # ---------------------------------------------------------------------------
@@ -74,26 +74,24 @@ def _baseline() -> dict:
     return {k: v for k, v in loaded.items() if not k.startswith("_")}
 
 
-def _helper(name: str, relpath: str):
-    """Load a pack-local helper module by path.
+def _helper(relpath: str):
+    """Load a pack-local helper module by path, relative to this file.
 
     ``crawling_speed`` has to solve the gate's own time model for the speed that
     breaks the project's ceiling, and it must solve the SAME model the gate
     measures with — two copies of that arithmetic would drift and the control
-    would slowly stop controlling anything (rule 2). The helper is imported by
-    path rather than by name because the pack directory is only on ``sys.path``
-    while gates are being loaded, not when a fixture runs.
+    would slowly stop controlling anything (rule 2). By path, through the spine's
+    ``load_path``, because the pack directory is only on ``sys.path`` while
+    gates are being loaded, not when a fixture runs; and ``load_path`` names the
+    module after its absolute path, which is how this fixture gets the module
+    ``gates/printability.py`` holds and not another copy's. What slipped through
+    when the name was fixed (``atompipe_pack_fdm_print__process_model``) and
+    whatever ``sys.modules`` held under it was served: a second copy of this pack
+    in the process got the first copy's model — caught in the gate, where the
+    twin's print time ignored an edit to its own ``_process_model.py`` — and this
+    fixture looked it up the same way (S-26, packs:H4).
     """
-    cached = _sys.modules.get(name)
-    if cached is not None:
-        return cached
-    spec = _importlib_util.spec_from_file_location(name, _os.path.join(_HERE, relpath))
-    if spec is None or spec.loader is None:             # pragma: no cover - packaging bug
-        raise ImportError(f"cannot load {relpath} beside {_HERE}")
-    module = _importlib_util.module_from_spec(spec)
-    _sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    return _load_path(_os.path.join(_HERE, relpath))
 
 
 def _with(ctx, **overrides):
@@ -195,8 +193,7 @@ def crawling_speed(ctx):
     filament buckling in the tube.
     """
     base = _baseline()
-    pm = _helper("atompipe_pack_fdm_print__process_model",
-                 _os.path.join("..", "gates", "_process_model.py"))
+    pm = _helper(_os.path.join(_os.pardir, "gates", "_process_model.py"))
     width = float(base.get("extrusion_width_mm", base.get("nozzle_d_mm", 0.4)))
     layer_h = float(base.get("layer_height_mm", 0.2))
     area = base.get("surface_area_mm2")

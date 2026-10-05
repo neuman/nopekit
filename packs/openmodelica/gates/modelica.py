@@ -377,7 +377,7 @@ def source_hygiene(ctx: GateContext) -> Verdict:
     worst = ", ".join(f"{c.owner.split('.')[-1]}.{c.name} ({f})"
                       for _n, c, f in offenders[:3])
     return Verdict(
-        gate=gid, passed=measured <= limit, measured=measured, limit=limit,
+        gate=gid, passed=measured <= limit, measured=measured, limit=limit, comparator="<=",
         units="parameters",
         detail=(f"{measured}/{len(parameters)} parameter(s) undefendable across "
                 f"{len(files)} file(s): {len(undescribed)} with no description, "
@@ -499,7 +499,7 @@ def claims_addressable(ctx: GateContext) -> Verdict:
 
     measured = len(dead) + len(problems)
     return Verdict(
-        gate=gid, passed=measured == 0, measured=measured, limit=0,
+        gate=gid, passed=measured == 0, measured=measured, limit=0, comparator="<=",
         units="variables",
         detail=(f"{len(found)}/{len(wanted)} claim variable(s) addressable "
                 f"({len(columns)} result columns, {len(model.class_list)} scanned "
@@ -703,7 +703,7 @@ def solution_valid(ctx: GateContext) -> Verdict:
                 f"{len(scan.columns)} variables")
     return Verdict(
         gate=gid, passed=not failures,
-        measured=round(reached, 9), limit=round(stop_time, 9), units="s",
+        measured=round(reached, 9), limit=round(stop_time, 9), comparator=">=", units="s",
         detail=(f"{headline}; " + ("; ".join(failures[:3]) if failures
                                    else "; ".join(notes) or "all checks clean")),
         evidence=evidence,
@@ -719,6 +719,13 @@ def solution_valid(ctx: GateContext) -> Verdict:
     claims=["result-extraction", "simulation-result", "modelica"],
     tier=Tier.INSTANT,
     settles="simulated value against acceptance",
+    # Prerequisite modelica.solution_valid (P2.2-D12): a value read off a run that stopped
+    #    early, diverged or never initialised is a real float from a real file, and
+    #    means nothing. No edge to modelica.simulates: that is tier 2, this tier 0
+    #    (D-28; the registry refuses the inversion).
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["modelica.solution_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_modelica.py:claim_exceeded",
         note="the pack's own result file with the first bound variable shifted so "
@@ -826,9 +833,15 @@ def result_claim(ctx: GateContext) -> Verdict:
     detail = (f"{len(usable) - len(failed) - len(unusable)}/{len(usable)} bound "
               f"claim(s) met from {os.path.basename(path)}")
     if worst is not None:
+        # The distance in words, by the sign `atompipe.claims.margin` uses — inside
+        # or past the limit — never a signed percentage with this loop's own
+        # sign, which is positive PAST the limit: the row's JSON `margin` (D-17,
+        # P2.4) and its detail read opposite signs on the same verdict until P2.4
+        # (critique 14 of its design).
         detail += (f"; worst {worst.label}: {worst.variable} = {worst_value:.6g} "
                    f"{worst.units} vs {worst.comparator.value} {worst.limit:g} "
-                   f"({worst_margin * 100:+.1f}% of limit)")
+                   f"({abs(worst_margin) * 100:.1f}% "
+                   f"{'past' if worst_margin > 0 else 'inside'} its limit)")
     if failed:
         detail += f"; FAILED: {', '.join(failed[:2])}"
     if unusable:
@@ -840,6 +853,10 @@ def result_claim(ctx: GateContext) -> Verdict:
         gate=gid, passed=passed,
         measured=(None if worst_value is None else round(float(worst_value), 9)),
         limit=(None if worst is None else round(float(worst.limit), 9)),
+        # The binding's own comparator — the claim's, `between` included: a band
+        # has no one side, and its margin says so (`band`), never an error
+        # (critique 9 of the P2.4 design).
+        comparator=("" if worst is None else worst.comparator.value),
         units=(worst.units if worst is not None else ""),
         detail=detail, evidence=evidence,
     )
@@ -854,6 +871,11 @@ def result_claim(ctx: GateContext) -> Verdict:
     claims=["cross-representation", "model-agreement", "mirror-agreement"],
     tier=Tier.INSTANT,
     settles="agreement between the model and its mirror",
+    # Prerequisite modelica.solution_valid (P2.2-D12): agreement with a result the run did
+    #    not finish producing settles nothing.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["modelica.solution_valid"],
     negative_control=NegativeControl(
         fixture="selftest/bad_modelica.py:mirror_drifted",
         note="the mirror's first variable is offset by just past the tolerance it "
@@ -1010,7 +1032,7 @@ def mirror_agrees(ctx: GateContext) -> Verdict:
 
     passed = worst_ratio <= 1.0 and not refused
     return Verdict(
-        gate=gid, passed=passed, measured=round(worst_ratio, 6), limit=1.0,
+        gate=gid, passed=passed, measured=round(worst_ratio, 6), limit=1.0, comparator="<=",
         units="x tolerance",
         detail=(f"{compared} sample(s), {len(tolerances)} variable(s) vs {source}; "
                 f"worst {worst_variable or '-'} at {worst_ratio * 100:.1f}% of its "
@@ -1024,7 +1046,7 @@ def mirror_agrees(ctx: GateContext) -> Verdict:
 # tier 2 — omc
 # =========================================================================== #
 def _omc_setup(ctx: GateContext, gid: str):
-    """``(class, sources, libraries, timeout)`` or a SKIP verdict."""
+    """``(class, entries, sources, libraries)`` or a SKIP verdict."""
     values, missing = _need(ctx, "modelica_class", "modelica_sources")
     if missing:
         return _skip_missing(gid, missing,
@@ -1036,24 +1058,75 @@ def _omc_setup(ctx: GateContext, gid: str):
         return _skip(gid, f"modelica_sources names no readable .mo file "
                           f"(looked at {', '.join(entries[:3])} under {ctx.root or '.'})")
     libraries = [str(x) for x in _as_list(ctx.param("modelica_load_libraries", []))]
-    return class_name, sources, libraries
+    return class_name, entries, sources, libraries
 
 
-def _load_failed(run: M.OmcRun) -> str:
-    """Why the sources did not load, or "". Checked before every tier-2 verdict."""
+def _preamble(ctx: GateContext, name: str, entries, sources, libraries):
+    """``(lines, staged)``: the load half of ``<name>.mos``, over copies of the
+    sources staged in the directory omc runs from (:func:`M.stage_sources` says
+    why), and the staging, which :func:`M.run_mos` logs and maps back."""
+    staged = M.stage_sources(entries, ctx.root, ctx.out_path("omc"), name)
+    return M.mos_preamble([M.staged_path(s, staged) for s in sources], libraries), staged
+
+
+def _load_verdict(run: M.OmcRun, gid: str, verb: str, evidence: list[str]):
+    """The verdict when the load step went wrong, or None. Checked before every tier-2 verdict.
+
+    Two failures, two outcomes, in this order:
+
+    * a SOURCE that did not parse (``loadFile(...) = false``) is the model's
+      defect: FAIL, whatever else went wrong;
+    * a LIBRARY that did not load (``loadModel(X) = false``) is the machine's:
+      omc cannot see it, nothing about the model was learned, and the gate
+      SKIPs, so the claim reads BLOCKED exactly as for a missing omc.
+
+    What slipped through: with no MSL installed (the ``-minimal`` docker image
+    ships none), all three gates read FAIL with "the sources did not load" about
+    sources that had loaded. The ``loadModel`` line sits in the ``libraries``
+    segment, which nothing read; only the buffered error string was seen, it was
+    blamed on the sources, and the line naming the missing package was the fifth
+    error of a detail that keeps three. The pack's own selftest never saw it — its
+    fixtures load no library. ``tests/test_openmodelica_library.py`` replays the
+    real transcripts. *Rejected:* reading "Failed to load package" out of the
+    error text, which changes between omc versions; the ``= false`` line is the
+    script's own print and does not.
+    """
     loaded = run.segment("load")
     if "= false" in loaded:
-        failed = [line for line in loaded.splitlines() if "= false" in line]
-        return "; ".join(failed[:3])
+        failed = [line.strip() for line in loaded.splitlines() if "= false" in line]
+        return Verdict(gate=gid, passed=False,
+                       detail=f"the sources did not load, so nothing was {verb}: "
+                              f"{'; '.join(failed[:3])}",
+                       evidence=evidence)
     errors = run.segment("loaderr")
+    missing = [line.strip() for line in run.segment("libraries").splitlines()
+               if "= false" in line]
+    if missing:
+        named = [line.strip() for line in errors.splitlines()
+                 if "failed to load package" in line.lower()]
+        why = named[0] if named else M.first_errors(errors, limit=1)
+        if why.lower().startswith("error:"):
+            why = why[len("error:"):].strip()
+        # Short on purpose: run_gate caps a skip reason at 200 characters, and
+        # the first draft of this line lost its pointer to the remedy to the cap.
+        return Verdict(gate=gid, passed=False, skipped=True,
+                       skip_reason=(f"library not loaded, nothing {verb}: "
+                                    f"{'; '.join(missing[:3])}"
+                                    + (f"; omc: {why}" if why else "")
+                                    + " (references/installing.md)"),
+                       evidence=evidence)
     if M.error_is_real(errors):
-        return M.first_errors(errors)
-    return ""
+        return Verdict(gate=gid, passed=False,
+                       detail=f"the sources did not load, so nothing was {verb}: "
+                              f"{M.first_errors(errors)}",
+                       evidence=evidence)
+    return None
 
 
-def _run_or_skip(ctx: GateContext, gid: str, lines, name: str, timeout: float):
+def _run_or_skip(ctx: GateContext, gid: str, lines, name: str, timeout: float,
+                 staged=()):
     """Run omc; return the OmcRun, or a SKIP verdict when nothing was learned."""
-    run = M.run_mos(lines, ctx.out_path("omc"), name, timeout_s=timeout)
+    run = M.run_mos(lines, ctx.out_path("omc"), name, timeout_s=timeout, staged=staged)
     if run.launch_error:
         return _skip(gid, f"could not launch omc: {run.launch_error}")
     if run.timed_out:
@@ -1108,28 +1181,25 @@ def checks(ctx: GateContext) -> Verdict:
     setup = _omc_setup(ctx, gid)
     if isinstance(setup, Verdict):
         return setup
-    class_name, sources, libraries = setup
+    class_name, entries, sources, libraries = setup
     timeout = _as_float(ctx.param("modelica_omc_timeout_s", DEFAULT_OMC_TIMEOUT_S),
                         DEFAULT_OMC_TIMEOUT_S) or DEFAULT_OMC_TIMEOUT_S
 
-    lines = M.mos_preamble(sources, libraries)
+    lines, staged = _preamble(ctx, "check", entries, sources, libraries)
     lines.append(M.mos_mark("check"))
     lines.append(f'print(checkModel({class_name}) + "\\n");')
     lines.append(M.mos_mark("checkerr"))
     lines.append('print(getErrorString() + "\\n");')
     lines.append(M.mos_mark("end"))
 
-    run = _run_or_skip(ctx, gid, lines, "check", timeout)
+    run = _run_or_skip(ctx, gid, lines, "check", timeout, staged)
     if isinstance(run, Verdict):
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
 
-    load_problem = _load_failed(run)
-    if load_problem:
-        return Verdict(gate=gid, passed=False,
-                       detail=f"the sources did not load, so nothing was checked: "
-                              f"{load_problem}",
-                       evidence=evidence)
+    load_problem = _load_verdict(run, gid, "checked", evidence)
+    if load_problem is not None:
+        return load_problem
 
     check_text = run.segment("check")
     errors = run.segment("checkerr")
@@ -1146,7 +1216,7 @@ def checks(ctx: GateContext) -> Verdict:
     dirty = M.error_is_real(errors)
     return Verdict(
         gate=gid, passed=balanced and not dirty,
-        measured=equations, limit=variables, units="equations",
+        measured=equations, limit=variables, comparator="==", units="equations",
         detail=(f"checkModel({class_name}): {equations} equation(s), "
                 f"{variables} variable(s)"
                 + ("" if balanced else
@@ -1164,6 +1234,8 @@ def checks(ctx: GateContext) -> Verdict:
     tier=Tier.SOLVE,
     settles="model compiles to an executable",
     requires_tools=["omc"],
+    # No edge to modelica.checks: this gate's own control, WillNotCompile, fails
+    # checkModel too, so the guard would pre-empt the control.
     negative_control=NegativeControl(
         fixture="selftest/bad_modelica.py:will_not_compile",
         note="selftest/assets/bad/WillNotCompile.mo — the pack's own tank routing its "
@@ -1198,11 +1270,11 @@ def compiles(ctx: GateContext) -> Verdict:
     setup = _omc_setup(ctx, gid)
     if isinstance(setup, Verdict):
         return setup
-    class_name, sources, libraries = setup
+    class_name, entries, sources, libraries = setup
     timeout = _as_float(ctx.param("modelica_omc_timeout_s", DEFAULT_OMC_TIMEOUT_S),
                         DEFAULT_OMC_TIMEOUT_S) or DEFAULT_OMC_TIMEOUT_S
 
-    lines = M.mos_preamble(sources, libraries)
+    lines, staged = _preamble(ctx, "build", entries, sources, libraries)
     lines.append(M.mos_mark("build"))
     lines.append(f"built := buildModel({class_name});")
     lines.append('print(built[1] + "\\n");')
@@ -1210,17 +1282,14 @@ def compiles(ctx: GateContext) -> Verdict:
     lines.append('print(getErrorString() + "\\n");')
     lines.append(M.mos_mark("end"))
 
-    run = _run_or_skip(ctx, gid, lines, "build", timeout)
+    run = _run_or_skip(ctx, gid, lines, "build", timeout, staged)
     if isinstance(run, Verdict):
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
 
-    load_problem = _load_failed(run)
-    if load_problem:
-        return Verdict(gate=gid, passed=False,
-                       detail=f"the sources did not load, so nothing was built: "
-                              f"{load_problem}",
-                       evidence=evidence)
+    load_problem = _load_verdict(run, gid, "built", evidence)
+    if load_problem is not None:
+        return load_problem
 
     executable = M.printed_value(run.segment("build"))
     # buildModel's first element is the executable, and whether it comes back
@@ -1249,8 +1318,11 @@ def compiles(ctx: GateContext) -> Verdict:
         why = f"built {os.path.basename(executable)}"
     return Verdict(
         gate=gid, passed=passed,
-        detail=(f"{why} in {run.duration_s:.1f}s"
-                + (f"; {M.first_errors(errors)}" if dirty else "")),
+        # No `in {run.duration_s:.1f}s` (D-29, S-34): the detail is part of the bytes
+        # a cache entry is written as, and a wall-clock figure made two runs on
+        # identical inputs two different entries — "in 0.9s" and "in 0.8s" — an
+        # add/add conflict on every branch that ran it. `duration_s` carries the time.
+        detail=(why + (f"; {M.first_errors(errors)}" if dirty else "")),
         evidence=evidence)
 
 
@@ -1261,6 +1333,11 @@ def compiles(ctx: GateContext) -> Verdict:
     tier=Tier.SOLVE,
     settles="simulation runs to completion",
     requires_tools=["omc"],
+    # Prerequisite modelica.compiles (P2.2-D12): nothing simulates without compiling;
+    #    both tier 2.
+    #    Isolated: the guard passes this gate's own known-bad control
+    #    (test_packs.ControlsAreIsolated).
+    needs=["modelica.compiles"],
     negative_control=NegativeControl(
         fixture="selftest/bad_modelica.py:assert_fires",
         note="selftest/assets/bad/AssertFires.mo — the pack's own tank with a ceiling "
@@ -1296,7 +1373,7 @@ def simulates(ctx: GateContext) -> Verdict:
     setup = _omc_setup(ctx, gid)
     if isinstance(setup, Verdict):
         return setup
-    class_name, sources, libraries = setup
+    class_name, entries, sources, libraries = setup
 
     values, missing = _need(ctx, "modelica_stop_time_s")
     if missing:
@@ -1315,7 +1392,7 @@ def simulates(ctx: GateContext) -> Verdict:
                                    DEFAULT_STOP_TIME_TOL_FRAC),
                          DEFAULT_STOP_TIME_TOL_FRAC) or DEFAULT_STOP_TIME_TOL_FRAC
 
-    lines = M.mos_preamble(sources, libraries)
+    lines, staged = _preamble(ctx, "simulate", entries, sources, libraries)
     lines.append(M.mos_mark("simulate"))
     lines.append(f"simulate({class_name}, startTime={start_time!r}, "
                  f"stopTime={stop_time!r}, numberOfIntervals={intervals}, "
@@ -1324,17 +1401,14 @@ def simulates(ctx: GateContext) -> Verdict:
     lines.append('print(getErrorString() + "\\n");')
     lines.append(M.mos_mark("end"))
 
-    run = _run_or_skip(ctx, gid, lines, "simulate", timeout)
+    run = _run_or_skip(ctx, gid, lines, "simulate", timeout, staged)
     if isinstance(run, Verdict):
         return run
     evidence = [p for p in (run.script_path, run.log_path) if p]
 
-    load_problem = _load_failed(run)
-    if load_problem:
-        return Verdict(gate=gid, passed=False,
-                       detail=f"the sources did not load, so nothing was simulated: "
-                              f"{load_problem}",
-                       evidence=evidence)
+    load_problem = _load_verdict(run, gid, "simulated", evidence)
+    if load_problem is not None:
+        return load_problem
 
     echoed = run.segment("simulate")
     file_match = M.RESULT_FILE_RE.search(echoed) or M.RESULT_FILE_RE.search(run.stdout)
@@ -1380,9 +1454,9 @@ def simulates(ctx: GateContext) -> Verdict:
     return Verdict(
         gate=gid, passed=not failures,
         measured=(None if reached is None else round(float(reached), 9)),
-        limit=round(stop_time, 9), units="s",
+        limit=round(stop_time, 9), comparator=">=", units="s",
+        # No run time here either (D-29): see `compiles`.
         detail=(f"simulate({class_name}) reached t="
-                f"{'?' if reached is None else f'{reached:g}'}/{stop_time:g} s in "
-                f"{run.duration_s:.1f}s"
+                f"{'?' if reached is None else f'{reached:g}'}/{stop_time:g} s"
                 + (f"; " + "; ".join(failures[:2]) if failures else "; clean")),
         evidence=evidence)

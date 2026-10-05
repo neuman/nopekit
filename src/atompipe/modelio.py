@@ -40,6 +40,21 @@ traditional:
   model that cannot pass this one has a clock, a `set`, or a `random` in it, and
   every hash-based staleness check downstream is already lying.
 
+* **The code that runs is the code on disk, and it is written down.**
+  `load_source_module` is the one loader for every Python file the spine
+  executes on a project's behalf — gate modules, fixtures, helpers loaded by
+  path, and (through `load_model`) the model and its siblings. It compiles the
+  bytes it read, never a `.pyc`; it records every file under the owning roots
+  that ran, as `(path, sha256)`, on the module (`__atompipe_code__`); and it
+  serves a module from `sys.modules` only while every recorded file still has
+  the recorded digest. What slipped through without it (S-26): only the model
+  entry was fresh-compiled, so a same-size, same-second edit to a gate module
+  or a pack helper ran the stale bytecode — the source said 8.0 and the verdict
+  came from 7.0 — and an in-process reload served the old module with no pyc
+  involved at all. A per-gate verdict keyed on the file's bytes would then have
+  filed the old behaviour under the new digest. `verdicts` digests these
+  closures; this module never imports `verdicts` or `gates`.
+
 Time policy (contract rule 3): nothing here reads the clock. `build()` is
 supposed to be pure, and a model that stamps its own timestamp fails
 `check_determinism` on purpose.
@@ -47,6 +62,10 @@ supposed to be pure, and a model that stamps its own timestamp fails
 from __future__ import annotations
 
 import ast
+import contextlib
+import difflib
+import functools
+import hashlib
 import inspect
 
 import dataclasses
@@ -55,24 +74,46 @@ import importlib.util
 import json
 import math
 import os
+import re
+import site
 import sys
+import sysconfig
+import threading
 import traceback
+import types
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from . import store
-from .models import Param, _enc
+from .models import Param, Rejected, _enc
 from .util import AtompipeError, atomic_write_json, rel, short_hash
 
 __all__ = [
     "LoadedModel",
     "load_model",
     "project",
+    "flat_params",
     "model_hash",
     "write_projection",
     "params_from_model",
-    "undocumented_params",
+    "undefended_params",
     "check_determinism",
+    "CodeClosure",
+    "NO_BYTES",
+    "load_source_module",
+    "load_path",
+    "on_unrecorded_load",
+    "bookkeeping",
+    "recording",
+    "dynamic_imports",
+    "is_code",
+    "registered_by",
+    "code_closure",
+    "clear_caches",
+    "static_param_prose",
+    "ParamView",
+    "param_view",
+    "param_readers",
 ]
 
 #: Loaded model modules are registered in `sys.modules` under this prefix rather
@@ -85,6 +126,47 @@ _MODULE_PREFIX = "atompipe_model_"
 
 #: This file, so user tracebacks can be trimmed of spine frames.
 _THIS_FILE = os.path.abspath(__file__)
+
+#: The installed spine package. Never part of a project's code closure (its
+#: modules reach a verdict through the spine digest or `spine_extras`), even when
+#: a project root happens to contain it — a test tree under the repository does.
+_PKG_DIR = os.path.dirname(_THIS_FILE)
+
+#: Where a module's recorded closure and its gate registrations live: on the
+#: module object itself. A module served from `sys.modules` fires no import
+#: event, so a closure recorded anywhere else is lost to the second importer —
+#: `packs.load_gates` reuses cached modules, and every later registry (validate,
+#: pack mode, a test's fresh `Registry`) would otherwise see a module with no
+#: code at all.
+_CODE_ATTR = "__atompipe_code__"
+_GATES_ATTR = "__atompipe_gates__"
+
+#: Module names for helpers loaded by path are salted with a digest of the
+#: absolute path. fdm-print loaded its helpers under a fixed name
+#: (`atompipe_pack_fdm_print__fold`), so a second copy of the pack in one
+#: process — `test_pack_keys`' `fdm-twin`, a project-local shadow, a user pack —
+#: silently ran the FIRST copy's helper while every message named the second
+#: (packs:H4). 12 hex chars, like every other short digest here: two paths
+#: colliding is not a failure mode worth a longer name. Rejected: the stem alone
+#: (that is the bug), and a counter (a name that depends on load order is a
+#: name two processes disagree about).
+_PATH_PREFIX = "atompipe_path_"
+
+#: The modules `verdicts.SPINE_MODULES` digests into every verdict. Mirrored
+#: here, not imported: `verdicts` imports this module, so the dependency cannot
+#: run the other way. `test_codeload` holds the two equal. An `atompipe.*` import
+#: OUTSIDE this set is recorded per module as a `spine_extras` name, because the
+#: spine digest does not cover it — fdm-print and cad-solid import `atompipe.site`
+#: for the node separator their locators carry (packs:H4).
+_SPINE_MODULE_FILES = frozenset({"models.py", "gates.py", "modelio.py", "verdicts.py"})
+
+#: Top-level names that are never a project's code and never a third-party
+#: instrument. `sys.stdlib_module_names` is 3.10+, the CI floor.
+_STDLIB = frozenset(sys.stdlib_module_names) | frozenset(sys.builtin_module_names)
+
+#: The prefix of a fallback that came from computed source, as opposed to an
+#: import that resolved to something that is not Python source.
+_FALLBACK_COMPUTED = "computed source at "
 
 
 # --------------------------------------------------------------------------- #
@@ -300,7 +382,10 @@ def _resolve_entry(root: str, entry: str | None) -> str:
     and then silently analyses the wrong one.
     """
     if not entry:
-        meta = store.load(root).meta
+        # With the reader `check` migrates with, or a legacy project whose model
+        # states `D` and `d` refuses here as a case collision `check` never
+        # makes (store.load's docstring).
+        meta = store.load(root, model_prose=static_param_prose).meta
         entry = (meta.model_entry or "").strip()
     if not entry:
         candidates = _model_candidates(root)
@@ -351,8 +436,775 @@ def _model_candidates(root: str) -> list[str]:
     ][:8]
 
 
+# --------------------------------------------------------------------------- #
+# the recording loader:  fresh bytes, a recorded closure, a content-keyed cache
+# --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class CodeClosure:
+    """The code one module ran, as recorded while it ran. Stored on the module.
+
+    * `files` — `(absolute path, sha256 of the bytes)` for every Python file
+      that is code (`_code_root`: under the owning roots, or beside them and
+      not installed) that this module executed or depends on: itself,
+      every helper imported by name, through a namespace package or by path,
+      every cached helper it picked up from `sys.modules` (by the helper's own
+      recorded closure), and every local module a function body imports lazily
+      (read statically). Sorted by path.
+    * `fallback` — empty, or why the recording gave up on precision and took
+      every `*.py` under the owning root instead: computed source compiled or
+      executed from a frame in code, or an import of code that resolved to
+      something that is not Python source.
+    * `third_party` — the top-level names the files import, read from their
+      source (module and function level), that are not code — installed
+      (`_installed`), or not importable at all — not the standard library and
+      not `atompipe`. Static on purpose: a list built from
+      import events depends on what an earlier gate happened to import first,
+      and two identical runs would disagree about it (packs:H3).
+    * `spine_extras` — the `atompipe.*` modules the files import that the
+      spine digest does not cover, digested per module by `verdicts`.
+    * `data` — `(absolute path, sha256 of the bytes)` for every file that is
+      not an instrument's (`_code_root`) that code opened to READ while this
+      module, or a helper of its closure, was executing (`_on_open`): what a
+      module decides its globals on at import. `NO_BYTES` for one it found
+      nothing at. Sorted by path. Kept apart from `files`, which stays the
+      Python the module IS (`cli`'s AST scans read `files`).
+
+    A closure whose files or data no longer all have their recorded digest is
+    stale, and `load_source_module` re-executes the module rather than serve it.
+    What slipped through before `data` (admission review, round 1, D): a
+    fixture module read its known-bad span from `inputs/data/bad_span.json` at
+    import. Every module is loaded before any trace window opens, so the read
+    was on no trace; the closure held code only, so the control's fixture hint
+    held; `inputs/` is in no static walk. Defused 400 -> 40 mm, `check` said
+    `0 executed, 1 cached` and exited 0, and `gate selftest` said PASSED its own
+    known-bad fixture — the same for `selftest/known_good.py`, and for a gate
+    module's limit read at import, whose PASS stayed Fresh. *Rejected:* loading
+    the module inside the window — a module is executed once per process and
+    served from `sys.modules` after, so the read would land on the first
+    control's trace only, and rho would depend on module-cache state (the reason
+    a control drops its `selftest/` reads); re-executing it per control to keep
+    the read on every trace re-registers gates and re-runs the model the
+    known-good module loads, per control per check.
+    """
+
+    files: tuple[tuple[str, str], ...] = ()
+    fallback: str = ""
+    third_party: tuple[str, ...] = ()
+    spine_extras: tuple[str, ...] = ()
+    data: tuple[tuple[str, str], ...] = ()
+
+
+#: The digest `CodeClosure.data` records for a file a module opened and found
+#: no bytes at: missing — the `try: open(override) / except FileNotFoundError`
+#: an optional input is read with — a directory, or unreadable. A tagged hash,
+#: never "", because "" is the torn digest (`_Recording.note`): it never
+#: matches, so the module would re-run on every load and every gate keyed by it
+#: be opaque, for an input that has not moved. It moves the moment the file
+#: appears. *Rejected:* not recording such an open (a file that appears would
+#: move nothing: repro D by absence); `verdicts.ABSENT` (a param key asked for
+#: and not there — another question, and `verdicts` imports this module).
+NO_BYTES = hashlib.sha256(b"atompipe:no-bytes\x00").hexdigest()
+
+
+def _norm(path: str) -> str:
+    """The comparison form of a path: absolute and case-folded where the OS folds."""
+    return os.path.normcase(os.path.abspath(path))
+
+
+def _under(path: str, directory: str) -> bool:
+    """Is normalised `path` inside normalised `directory` (or equal to it)?"""
+    if path == directory:
+        return True
+    return path.startswith(directory if directory.endswith(os.sep) else directory + os.sep)
+
+
+#: The interpreter's own trees: never a project's code, even under a root.
+_EXCLUDED: tuple[str, ...] | None = None
+
+
+def _excluded_dirs() -> tuple[str, ...]:
+    """Interpreter prefixes, the stdlib and site dirs, user site, the spine package.
+
+    User site is the one that bites in practice: trimesh and numpy live in
+    `~/.local` on the machine this was written on, which is under no prefix, and
+    a project root that is a home directory would otherwise "own" them. Computed
+    once; `site.getsitepackages` is missing from some embedded interpreters, so
+    every source is optional.
+    """
+    global _EXCLUDED
+    if _EXCLUDED is None:
+        found = {sys.prefix, sys.base_prefix, sys.exec_prefix,
+                 getattr(sys, "base_exec_prefix", ""), _PKG_DIR}
+        with contextlib.suppress(Exception):
+            paths = sysconfig.get_paths()
+            found.update(paths.get(k) or "" for k in ("stdlib", "platstdlib", "purelib", "platlib"))
+        with contextlib.suppress(Exception):
+            found.update(site.getsitepackages())
+        with contextlib.suppress(Exception):
+            found.add(site.getusersitepackages())
+        _EXCLUDED = tuple(sorted({_norm(p) for p in found if p}))
+    return _EXCLUDED
+
+
+def _owning_root(path: str, roots: Iterable[str]) -> str | None:
+    """The (normalised) root that owns `path`, or None when it is under no root.
+
+    The deepest root containing the path wins. An interpreter tree wins over a
+    root only when it sits INSIDE that root — a virtualenv under the project, a
+    test tree under the repository that holds the spine — so a pack installed
+    inside site-packages still owns its own files. None does not yet mean "not
+    code": `_code_root` decides that.
+    """
+    target = _norm(path)
+    best = ""
+    for root in roots:
+        if _under(target, root) and len(root) > len(best):
+            best = root
+    if not best:
+        return None
+    for excluded in _excluded_dirs():
+        if excluded != best and _under(excluded, best) and _under(target, excluded):
+            return None
+    return best
+
+
+#: Directory names that make a tree installed third-party code wherever it sits:
+#: pip, venv, conda and Debian's python all install into one of these, and a
+#: tree put on `sys.path` by hand keeps its name (ROS's
+#: `/opt/ros/<distro>/lib/python3.x/site-packages` on PYTHONPATH is under none of
+#: this interpreter's prefixes). Matched as a whole path component, and only for
+#: a file under no root, so a project's own tree never changes owner by it.
+#: Rejected: distribution metadata as the test — an editable install has
+#: metadata too, and its source is somebody's working copy, the very case that
+#: slipped through; and no name rule at all, which files a second interpreter's
+#: site-packages as the project's code, fresh-compiled and digested file by
+#: file on every load.
+_SITE_DIR_NAMES = frozenset({"site-packages", "dist-packages"})
+
+
+def _installed(target: str) -> bool:
+    """Is normalised `target` installed third-party code: under one of the
+    interpreter's trees (`_excluded_dirs`), the spine included, or under a
+    directory named like a site dir (`_SITE_DIR_NAMES`)?"""
+    if any(_under(target, excluded) for excluded in _excluded_dirs()):
+        return True
+    return any(part in _SITE_DIR_NAMES for part in target.split(os.sep)[:-1])
+
+
+def _code_root(path: str, roots: Iterable[str]) -> str | None:
+    """The (normalised) root that owns `path` as CODE, or None when it is an
+    instrument: installed third-party code, provenance and never rho (Q1.3).
+
+    A root that owns it (`_owning_root`) first. A Python file under no root is
+    still code unless it is installed (`_installed`), and owns itself: its
+    directory is its root, for a message and for a fallback walk. What slipped
+    through with the roots alone (review round 1, the `mono` probe): a
+    monorepo's `shared/beamlib.py`, beside the project and put on `sys.path` by
+    a gate module, was declined by the recording finder, so the stock loader ran
+    it from its `__pycache__`, the closure left it out, and the static pass
+    listed `beamlib` as third-party — an instrument, "unknown". After its
+    allowable went 5.0 -> 0.1 a plain `check` served the PASS as cached and
+    current, where `--force` FAILed it 0.700 vs 0.1; and a same-second edit ran
+    the old bytecode, S-26 again. Rejected: making such a gate opaque (never
+    Fresh, so re-run on every check, and its import still reads the pyc).
+    """
+    root = _owning_root(path, roots)
+    if root is not None:
+        return root
+    target = _norm(path)
+    if _installed(target):
+        return None
+    return os.path.dirname(target)
+
+
+def _roots(roots: Iterable[str] | None, path: str) -> tuple[str, ...]:
+    """Normalise the caller's roots; a loader with none owns the file's own directory."""
+    found = [_norm(r) for r in (roots or ()) if r]
+    if not found:
+        found = [_norm(os.path.dirname(os.path.abspath(path)))]
+    return tuple(dict.fromkeys(found))
+
+
+def _display(path: str, root: str) -> str:
+    """`gates/mesh.py`: a path relative to its root, in posix form, for a message."""
+    try:
+        return os.path.relpath(path, root).replace(os.sep, "/")
+    except ValueError:                            # another drive on Windows
+        return path
+
+
+#: Reads code bytes through the import system's own reader, so the read is
+#: attributed to import machinery — which is what it is — by a trace window's
+#: audit hook. Hashing a helper for its closure is the loader's read, not a
+#: gate's input; filed as a gate read, it would put every helper digest into a
+#: gate's ρ a second time, keyed on whether the helper was cached.
+_READER = importlib.machinery.SourceFileLoader("atompipe_modelio_reader", _THIS_FILE)
+
+#: Set, per thread, while the loader works for its own bookkeeping: `_read`
+#: digesting a file, and `_closure_current` / a fallback walk deciding whether
+#: a closure still holds. `_on_open` attributes a read by the frames that made
+#: it, and a helper served from the cache is re-digested (`_closure_current`)
+#: under whatever frame called `load_path` — a fixture's body, which is code:
+#: the loader checking a digest would be filed as the fixture reading its input.
+#: `verdicts`' hook and stat probes ask `bookkeeping()` and record nothing
+#: while it is set. What slipped through while it guarded `_read` alone, and
+#: only here (admission review, round 2): a load at RUN time purges every stale
+#: module under its roots first (`_purge`), which digests each one's code and
+#: data — so a gate's first `load_path` filed the DATA of unrelated modules as
+#: its own reads (a `.py` was dropped as a module's source; a `.json` was not),
+#: keyed on whether it was the first gate to load anything; and a fallback
+#: closure's walk filed its listing and a `pyvenv.cfg` question. *Rejected:*
+#: ending `_read_by_code`'s walk at any spine frame — a module that loads the
+#: project's own records through the spine at import decides on them.
+_BOOKKEEPING = threading.local()
+
+
+@contextlib.contextmanager
+def _bookkeeping() -> Iterator[None]:
+    """Mark this thread's work as the loader's own until the block ends."""
+    was = getattr(_BOOKKEEPING, "on", False)
+    _BOOKKEEPING.on = True
+    try:
+        yield
+    finally:
+        _BOOKKEEPING.on = was
+
+
+def bookkeeping() -> bool:
+    """Is this thread inside the loader's own bookkeeping (`_BOOKKEEPING`) — a
+    digest it takes, or a check of whether a closure still holds? Nothing it
+    touches then is anybody's input; `verdicts` records none of it."""
+    return bool(getattr(_BOOKKEEPING, "on", False))
+
+
+def recording() -> bool:
+    """Is a module being executed and recorded right now (a load in progress)?
+
+    Then every import of code is this loader's (the recording finder), and
+    whatever the module runs lands in its closure. `verdicts` asks it to tell a
+    module's source read by the import system on behalf of a recorded load —
+    the closure's business — from one read by the STOCK import system while a
+    gate runs, which nothing records but the trace."""
+    return bool(_STACK)
+
+
+def _read(path: str) -> bytes | None:
+    with _bookkeeping():
+        try:
+            return _READER.get_data(path)
+        except OSError:
+            return None
+
+
+def _file_sha(path: str, memo: dict[str, str | None] | None = None) -> str | None:
+    """sha256 of the bytes at `path` now, or None when it cannot be read."""
+    key = _norm(path)
+    if memo is not None and key in memo:
+        return memo[key]
+    data = _read(path)
+    digest = hashlib.sha256(data).hexdigest() if data is not None else None
+    if memo is not None:
+        memo[key] = digest
+    return digest
+
+
+def _module_file(module: Any) -> str | None:
+    """A module's absolute `__file__`, or None (builtins, namespace packages)."""
+    try:
+        where = vars(module).get("__file__")
+    except TypeError:
+        return None
+    return os.path.abspath(where) if isinstance(where, str) and where else None
+
+
+def _own_closure(module: Any) -> CodeClosure | None:
+    """The closure this loader recorded on `module`, read without `__getattr__`.
+
+    A package with a PEP 562 `__getattr__` (the spine's own `atompipe` is one)
+    would otherwise be asked for a name it does not have, and may import
+    something to answer.
+    """
+    try:
+        found = vars(module).get(_CODE_ATTR)
+    except TypeError:
+        return None
+    return found if isinstance(found, CodeClosure) else None
+
+
+def _closure_current(closure: CodeClosure, *, roots: Iterable[str] = (),
+                     memo: dict[str, str | None] | None = None) -> bool:
+    """Does every recorded file still have its recorded digest?
+
+    A fallback closure is also stale when a new `*.py` appears under a root it
+    walked: "every file under the directory" is a statement about the listing,
+    not only about the files that were there. A data file is compared as it
+    was recorded: `NO_BYTES` holds while it still has none.
+    """
+    with _bookkeeping():
+        for path, digest in closure.files:
+            if not digest or _file_sha(path, memo) != digest:
+                return False
+        for path, digest in closure.data:
+            if not digest or (_file_sha(path, memo) or NO_BYTES) != digest:
+                return False
+        if closure.fallback:
+            recorded = {_norm(p) for p, _ in closure.files}
+            for root in roots:
+                if not any(_under(p, root) for p in recorded):
+                    continue
+                if any(_norm(p) not in recorded for p in _py_files_under(root)):
+                    return False
+    return True
+
+
+def _py_files_under(root: str) -> Iterator[str]:
+    """Every `*.py` under `root`, sorted, for a fallback closure.
+
+    Skips `__pycache__`, dot-directories (`.git`, `.venv`, `.atompipe`), any
+    interpreter tree inside the root, and any directory holding a `pyvenv.cfg`:
+    a virtualenv is somebody else's code however it is named, and walking one
+    would make every fallback closure thousands of files long.
+    """
+    for dirpath, dirnames, filenames in os.walk(root):
+        kept = []
+        for name in sorted(dirnames):
+            full = os.path.join(dirpath, name)
+            if name == "__pycache__" or name.startswith("."):
+                continue
+            if os.path.isfile(os.path.join(full, "pyvenv.cfg")):
+                continue
+            if _owning_root(full, (root,)) is None:
+                continue
+            kept.append(name)
+        dirnames[:] = kept
+        for name in sorted(filenames):
+            if name.endswith(".py"):
+                yield os.path.join(dirpath, name)
+
+
+class _Recording:
+    """One module execution's closure while it is being built.
+
+    Nested recordings are the rule, not the exception: a helper imported while a
+    gate module runs gets its own recording (so it carries its own closure for
+    the next importer), and folds into its importer's when it finishes.
+    """
+
+    __slots__ = ("name", "path", "roots", "memo", "files", "sources", "foreign",
+                 "fallback", "fallback_root", "third_party", "spine_extras",
+                 "opened", "data")
+
+    def __init__(self, name: str, path: str, roots: tuple[str, ...],
+                 memo: dict[str, str | None] | None = None) -> None:
+        self.name = name
+        self.path = path
+        self.roots = roots
+        self.memo: dict[str, str | None] = {} if memo is None else memo
+        self.files: dict[str, str] = {}
+        self.sources: dict[str, bytes] = {}       # files THIS recording compiled
+        self.foreign: dict[str, bytes] = {}       # local files read, not compiled here
+        self.fallback = ""
+        self.fallback_root = ""
+        self.third_party: set[str] = set()
+        self.spine_extras: set[str] = set()
+        self.opened: dict[str, None] = {}         # read by code while this ran (`_on_open`)
+        self.data: dict[str, str] = {}            # ... and digested (`seal_data`)
+
+    def note(self, path: str, digest: str) -> None:
+        """Record one file. Two different digests for one path mean two versions
+        of it ran inside one closure; "" never matches a file, so the closure is
+        stale at the next look rather than quietly keeping either."""
+        known = self.files.get(path)
+        self.files[path] = digest if known in (None, digest) else ""
+
+    def note_data(self, path: str, digest: str) -> None:
+        """`note` for a data file: two digests of one file inside one closure
+        (a helper read it, it changed, the importer read it again) are ""."""
+        known = self.data.get(path)
+        self.data[path] = digest if known in (None, digest) else ""
+
+    def seal_data(self) -> None:
+        """Digest what code opened to read while this ran, as it is on disk now
+        — after the module finished, as a trace digests after its gate returns.
+        Named residual: a file the module rewrote after reading it is keyed by
+        the bytes it wrote."""
+        for path in self.opened:
+            self.note_data(path, _file_sha(path, self.memo) or NO_BYTES)
+        self.opened.clear()
+
+    def compiled(self, path: str, data: bytes) -> None:
+        digest = hashlib.sha256(data).hexdigest()
+        self.memo[_norm(path)] = digest
+        self.sources[path] = data
+        self.note(path, digest)
+
+    def read_foreign(self, path: str) -> None:
+        """A local file this recording did not compile: digest what is on disk
+        now, and queue its source for the static pass."""
+        if path in self.files or path in self.foreign:
+            return
+        data = _read(path)
+        if data is None:
+            self.note(path, "")
+            return
+        self.memo[_norm(path)] = digest = hashlib.sha256(data).hexdigest()
+        self.note(path, digest)
+        self.foreign[path] = data
+
+    def give_up(self, why: str, root: str) -> None:
+        """Take every `*.py` under `root`. The first reason is the one named; a
+        reason absorbed from a helper does not stop this module's own root being
+        walked, because the helper's walk covered the helper's root."""
+        if not self.fallback:
+            self.fallback = why
+        if not self.fallback_root:
+            self.fallback_root = root
+
+    def unmappable(self, name: str, path: str, root: str) -> None:
+        """An import under the roots that resolved to something that is not Python
+        source (an extension module, a sourceless `.pyc`): its own bytes go in,
+        and so does every `*.py` beside it, because what it runs is invisible."""
+        digest = _file_sha(path, self.memo)
+        self.note(path, digest or "")
+        self.give_up(f"import {name} resolves to {_display(path, root)}, which is not "
+                     f"Python source", root)
+
+    def absorb(self, closure: CodeClosure) -> None:
+        for path, digest in closure.files:
+            self.note(path, digest)
+        if closure.fallback and not self.fallback:
+            self.fallback = closure.fallback      # its walk is already in its files
+        self.third_party.update(closure.third_party)
+        self.spine_extras.update(closure.spine_extras)
+        for path, digest in closure.data:
+            self.note_data(path, digest)
+
+    def closure(self) -> CodeClosure:
+        return CodeClosure(
+            files=tuple(sorted(self.files.items())),
+            fallback=self.fallback,
+            third_party=tuple(sorted(self.third_party)),
+            spine_extras=tuple(sorted(self.spine_extras)),
+            data=tuple(sorted(self.data.items())),
+        )
+
+
+#: The recordings in progress, innermost last. Process-global, like the import
+#: system it shadows; loads happen on the CLI's one thread (see `use_registry`
+#: in gates.py for the same reasoning), and a lock here could deadlock against
+#: the import system's per-module locks.
+_STACK: list[_Recording] = []
+
+#: Who hears of a module run or served with no recording open
+#: (`on_unrecorded_load`), in registration order.
+_UNRECORDED_LISTENERS: list[Callable[[CodeClosure], None]] = []
+
+
+def on_unrecorded_load(listener: Callable[[CodeClosure], None]) -> None:
+    """Call `listener(closure)` whenever `load_source_module` — `load_path`,
+    `load_model` and every loader built on it — runs or serves a module while
+    NO recording is open: code loaded from a function body at run time, by a
+    gate, a fixture's `make`, or `known_good.context`. Registering the same
+    listener twice registers it once.
+
+    Such a module joins no closure, because none is being built; the import
+    system's read of its source is a module's source read, which a trace drops;
+    and outside `selftest/` no static walk covers it. `verdicts` registers the
+    listener that reports every file of `closure` — its code and what that code
+    read at import (`CodeClosure.data`) — as a read to every trace window open
+    (this module never imports `verdicts`). A module that raised is reported
+    too, with what ran before it did: a gate that catches the error decided on
+    that code. What slipped through without it (admission review, round 2):
+    closures were recorded only while a module was being IMPORTED, and a cache
+    hit joined a closure only when one was being built. So a `known_good.context`
+    that loaded the live model by path made the known-good design the live one
+    with no key — the identity fixture "fired" on a shelf failing at 150 mm and
+    stayed admitted, cached, after an edit to 80 mm, C1 PROVEN (S-07 again); a
+    fixture's helper `lib/badgen.py` defused 400 -> 40 mm stayed admitted; and a
+    gate's `load_path(gates/_tables.py).LIMIT` tightened 100 -> 50 mm kept its
+    PASS Fresh, `code.files` omitting the helper, until `--force` filed "two
+    outcomes recorded for identical inputs". *Rejected:* recording such a load
+    into the calling gate's code closure — a closure is a module's, recorded
+    once as it loads, and a function that loads a helper only on one branch
+    would make the code a gate IS depend on the inputs it was run on; a read of
+    the run that loaded it is exactly what it is.
+    """
+    if listener not in _UNRECORDED_LISTENERS:
+        _UNRECORDED_LISTENERS.append(listener)
+
+
+def _report_unrecorded(closure: CodeClosure | None) -> None:
+    """Hand `closure` to every `on_unrecorded_load` listener."""
+    if closure is None:
+        return
+    for listener in tuple(_UNRECORDED_LISTENERS):
+        listener(closure)
+
+
+class _RecordingFinder:
+    """At `sys.meta_path[0]` while a recording runs: fresh-loads imports that are code.
+
+    It asks the stock `PathFinder` where a name lives — the same answer the
+    import system would reach, from the same `sys.path` — and when that is a
+    Python source file that is code (`_code_root`: under the recording's roots,
+    or beside them and not installed), hands back the spec with a `_FreshLoader`
+    in place of the stock one. So a helper imported by name is compiled from its
+    bytes (no pyc) and recorded, exactly like the module that imported it.
+    Everything else — the standard library, installed third-party packages,
+    namespace packages (fluids-analytic's `gates`, whose `__file__` is None) —
+    is declined and resolves exactly as it would have.
+    """
+
+    def find_spec(self, fullname: str, path: Any = None, target: Any = None) -> Any:
+        try:
+            return _fresh_spec(fullname, path)
+        except Exception:                         # noqa: BLE001 - never break an import
+            return None
+
+    def invalidate_caches(self) -> None:          # the PathFinder it asks has its own
+        pass
+
+
+_FINDER = _RecordingFinder()
+
+
+def _fresh_spec(fullname: str, path: Any) -> Any:
+    if not _STACK:
+        return None
+    top = fullname.partition(".")[0]
+    if top in _STDLIB or top == "atompipe":
+        return None
+    spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+    if spec is None or spec.origin is None or not spec.has_location:
+        return None                               # not found, or a namespace package
+    recording = _STACK[-1]
+    origin = os.path.abspath(spec.origin)
+    root = _code_root(origin, recording.roots)
+    if root is None:
+        return None                               # installed: an instrument
+    loader = spec.loader
+    if isinstance(loader, importlib.machinery.SourceFileLoader):
+        if not isinstance(loader, _FreshLoader):
+            spec.loader = _FreshLoader(fullname, spec.origin)
+        return spec
+    recording.unmappable(fullname, origin, root)
+    return None
+
+
+#: One audit hook per process, installed on the first recording. There is no
+#: way to remove an audit hook, so it routes only while a recording runs and
+#: returns at once otherwise.
+_HOOKED = False
+
+#: The import system, by module name and by the name its frozen code runs
+#: under. Above a frame of code it is an import in progress (`_read_by_code`);
+#: directly under an `open` it is reading on someone's behalf — a module's
+#: source, or a data file through `pkgutil.get_data`. *Rejected:* filing every
+#: open on the innermost recording whatever made it — a fixture's first
+#: `import matplotlib` would file its `matplotlibrc` and font cache as the
+#: fixture's data, and a process that had imported matplotlib earlier would not.
+_IMPORT_MODULES = frozenset({"importlib._bootstrap", "importlib._bootstrap_external",
+                             "_frozen_importlib", "_frozen_importlib_external"})
+_IMPORT_CODE = frozenset({"<frozen importlib._bootstrap>",
+                          "<frozen importlib._bootstrap_external>"})
+
+#: Modules that read a module's SOURCE to quote a line (a warning, a
+#: traceback): a read of a module file through them is theirs, a read of any
+#: other file is the caller's — `verdicts._SOURCE_READERS`' rule, mirrored
+#: (verdicts imports this module). *Rejected:* dropping them whole — a table
+#: read with `linecache.getline` is a read (verdicts' review round 1,
+#: `probe.linecache`).
+_SOURCE_READER_MODULES = frozenset({"linecache", "tokenize", "warnings", "traceback"})
+
+#: Whose file activity is never a module's input, whatever it touches: an
+#: archive on `sys.path` is code, and distribution metadata is provenance —
+#: `verdicts._EXCLUDED_MODULES`, mirrored. *Rejected:* recording them — a
+#: local `*.egg-info` that `importlib.metadata.version()` reads is a version,
+#: an instrument's, never rho (Q1.3).
+_NEVER_DATA_MODULES = frozenset({"zipimport", "importlib.metadata"})
+_NEVER_DATA_PREFIXES = ("importlib.metadata.",)
+_NEVER_DATA_CODE = frozenset({"<frozen zipimport>"})
+
+#: What a module's source is spelled as: read by a source reader or the import
+#: system it is theirs, never a module's data — `verdicts._SOURCE_SUFFIXES`,
+#: mirrored, with its named residual (a data file named `*.py` read through
+#: linecache is taken for source). Bytecode is never data, whoever reads it: it
+#: is the import system's cache of code the closure already digests by source.
+#: *Rejected:* `importlib.machinery.all_suffixes()` — an extension is loaded by
+#: `dlopen`, which raises no `open` event, so its suffixes filter nothing.
+_SOURCE_SUFFIXES = (".py", ".pyw")
+_BYTECODE_SUFFIXES = (".pyc", ".pyo")
+
+#: Machine state, not a project's input: `verdicts._library_roots` drops the
+#: same three. *Rejected:* recording them — `/proc/meminfo` read at import
+#: would move the closure on every load, and the gate would never be Fresh.
+_PSEUDO_FS = ("/proc", "/sys", "/dev") if os.name == "posix" else ()
+
+
+def _opened_path(args: tuple) -> str | None:
+    """The absolute path an `open` event reads what is at, or None: an fd, a
+    pseudo-name (`<string>`), a directory fd, or an open that writes without
+    reading prior bytes (`verdicts._open_intent`'s rule, mirrored)."""
+    target = args[0] if args else None
+    if target is None or isinstance(target, int):
+        return None
+    try:
+        text = os.fsdecode(os.fspath(target))
+    except (TypeError, ValueError):
+        return None
+    if not text or "\x00" in text or (text.startswith("<") and text.endswith(">")):
+        return None
+    mode = args[1] if len(args) > 1 else None
+    flags = args[2] if len(args) > 2 and isinstance(args[2], int) else 0
+    if isinstance(mode, str):
+        plus = "+" in mode
+        writes = plus or any(c in mode for c in "wax")
+        reads = "r" in mode or ("a" in mode and plus) or not writes
+    else:
+        if flags & getattr(os, "O_DIRECTORY", 0):
+            return None
+        reads = (flags & 3) in (0, 2) and not flags & os.O_TRUNC
+    return os.path.abspath(text) if reads else None
+
+
+def _read_by_code(frame: Any, path: str, roots: tuple[str, ...]) -> bool:
+    """Did the code being recorded read `path`, rather than the import system,
+    a formatter, or an installed library running its OWN import?
+
+    Walked from the frame that opened it: the first frame of code
+    (`_code_root`) decides, through any library frames in between — a
+    `pathlib.read_text`, an `np.loadtxt`, a `pkgutil.get_data` is the caller's
+    read. An import in progress between them ends the walk: the frame opening
+    the file is an installed library's module body, and whether that body runs
+    at all depends on what happened to import it first (packs:H3 — two
+    identical runs would disagree about the closure; matplotlib reads a
+    `matplotlibrc` in the working directory on import). A source reader, or
+    the import system directly under the open, hands on only a file that is
+    not a module's source (`_SOURCE_SUFFIXES`).
+    """
+    reader = False
+    passed = False                                # a frame that is neither code nor import
+    while frame is not None:
+        code = frame.f_code.co_filename
+        name = frame.f_globals.get("__name__")
+        if (name in _NEVER_DATA_MODULES or code in _NEVER_DATA_CODE
+                or isinstance(name, str) and name.startswith(_NEVER_DATA_PREFIXES)):
+            return False
+        if name in _IMPORT_MODULES or code in _IMPORT_CODE:
+            if passed:
+                return False
+            reader = True
+        elif (isinstance(code, str) and os.path.isabs(code)
+              and _code_root(code, roots) is not None):
+            return not (reader and os.path.normcase(path).endswith(_SOURCE_SUFFIXES))
+        else:
+            reader = reader or name in _SOURCE_READER_MODULES
+            passed = True
+        frame = frame.f_back
+    return False
+
+
+def _on_open(args: tuple, frame: Any) -> None:
+    """File one `open` on the recording executing now, when code read a file
+    that is not an instrument's (`_code_root`) and not the loader's own
+    bookkeeping (`_BOOKKEEPING`). The innermost recording is the module whose
+    body is running; its importer gets the file through `absorb`, as it gets
+    the helper's code. Digested at the end (`_Recording.seal_data`), never
+    here: a hook that opened a file would audit itself.
+
+    Named residuals, all of them things a module can decide on at import that
+    no `open` names: a file it only asks about (`os.path.exists`) or lists
+    (`os.listdir`), a database `sqlite3.connect` opens in C, an environment
+    variable (`doctor`'s `env-reads` row), and a read made by a thread it
+    started once the module has finished. Read those in the gate or the
+    fixture's `make`, inside a trace window, where each is keyed or named."""
+    if getattr(_BOOKKEEPING, "on", False):
+        return
+    path = _opened_path(args)
+    if path is None:
+        return
+    norm = os.path.normcase(path)
+    if norm.endswith(_BYTECODE_SUFFIXES) or any(_under(norm, p) for p in _PSEUDO_FS):
+        return
+    recording = _STACK[-1]
+    if _code_root(path, recording.roots) is None:
+        return                                    # installed: an instrument's own file
+    if _read_by_code(frame, path, recording.roots):
+        recording.opened.setdefault(path, None)
+
+
+def _audit(event: str, args: tuple) -> None:
+    """Notice a file code reads while a module runs (`_on_open`), and computed
+    source compiled or executed from a frame in code (`_code_root`).
+
+    The calling frame is the whole test. `@dataclass` and `namedtuple` compile
+    and exec generated source on every class they build, from a frame in the
+    standard library; keyed on the event alone, every pack that defines a
+    dataclass would fall back to a whole-directory digest (fdm-print's fold,
+    cad-solid, openmodelica — core:§0). `exec(compile(src, ...))` in a gate
+    module's body comes from a frame in the gate module, and that is the case
+    whose code the recording cannot see.
+
+    Never raises: an exception from an audit hook aborts the operation that
+    raised the event, and this one sees every compile and every open in the
+    process.
+    """
+    if not _STACK:
+        return
+    if event == "open":
+        try:
+            _on_open(tuple(args) if isinstance(args, tuple) else (), sys._getframe(1))
+        except Exception:                         # noqa: BLE001 - see docstring
+            pass
+        return
+    if event != "exec" and event != "compile":
+        return
+    try:
+        recording = _STACK[-1]
+        if recording.fallback_root:
+            return
+        frame = sys._getframe(1)
+        filename = frame.f_code.co_filename
+        # `<frozen importlib._bootstrap>` and `<string>` are not files; made
+        # absolute they would land under whatever the working directory is.
+        if not filename or not os.path.isabs(filename):
+            return
+        root = _code_root(filename, recording.roots)
+        if root is None:
+            return
+        recording.give_up(f"{_FALLBACK_COMPUTED}{_display(filename, root)}:{frame.f_lineno}", root)
+    except Exception:                             # noqa: BLE001 - see docstring
+        return
+
+
+@contextlib.contextmanager
+def _recording(recording: _Recording) -> Iterator[_Recording]:
+    """Push `recording`, with the finder at `sys.meta_path[0]` and the hook live."""
+    global _HOOKED
+    if not _HOOKED:
+        _excluded_dirs()             # computed here: `_on_open` must not read to compute it
+        sys.addaudithook(_audit)
+        _HOOKED = True
+    inserted = _FINDER not in sys.meta_path
+    if inserted:
+        sys.meta_path.insert(0, _FINDER)
+    _STACK.append(recording)
+    try:
+        yield recording
+    finally:
+        # Pop OUR entry, not the top one: a module that broke the stack must not
+        # leave the next import attributed to a load that already finished.
+        for index in range(len(_STACK) - 1, -1, -1):
+            if _STACK[index] is recording:
+                del _STACK[index]
+                break
+        if inserted and not _STACK:
+            with contextlib.suppress(ValueError):
+                sys.meta_path.remove(_FINDER)
+
+
 class _FreshLoader(importlib.machinery.SourceFileLoader):
-    """A source loader that never consults or writes `__pycache__`.
+    """A source loader that never consults or writes `__pycache__`, and records.
 
     This is not an optimisation, it is a correctness fix, and it was found by
     smoke-testing the obvious thing: load the model, edit `thickness: float =
@@ -368,22 +1220,1028 @@ class _FreshLoader(importlib.machinery.SourceFileLoader):
     the projection did not — arriving through the back door.
 
     Overriding `get_code` to compile the source every time costs a millisecond
-    on a file a human wrote and closes it. `source_to_code` still compiles with
+    on a file a human wrote and closes it. It compiles the very bytes it read
+    and records their digest, so the closure names the code that ran, not the
+    code on disk a moment later. `source_to_code` still compiles with
     `dont_inherit=True`, so the spine's own `from __future__ import annotations`
     does not silently leak into a model that never asked for it.
 
-    Residual, and worth knowing when a model is split across files: only the
-    ENTRY module is loaded this way. Sibling modules go through the normal
-    import machinery and can still be served from a `__pycache__` left behind by
-    running the model by hand. By contract every INPUT lives in the entry file's
-    `CONFIG` dataclass, so the constants people actually edit are covered.
+    This used to be the model ENTRY's loader only, with the residual written
+    here: sibling modules went through the normal import machinery and could be
+    served from a `__pycache__` left behind by running the model by hand. The
+    same hole ran every gate module and pack helper (S-26). Now every module the
+    spine loads for a project, and every import under its roots while one runs,
+    comes through here.
     """
 
+    def __init__(self, fullname: str, path: str, *, roots: tuple[str, ...] | None = None,
+                 memo: dict[str, str | None] | None = None) -> None:
+        super().__init__(fullname, path)
+        self.roots = roots
+        self.memo = memo
+
     def get_code(self, fullname: str) -> Any:
-        return self.source_to_code(self.get_source(fullname), self.path)
+        data = self.get_data(self.path)
+        if _STACK and _STACK[-1].path == os.path.abspath(self.path):
+            _STACK[-1].compiled(os.path.abspath(self.path), data)
+        return self.source_to_code(data, self.path)
+
+    def exec_module(self, module: Any) -> None:
+        path = os.path.abspath(self.path)
+        parent = _STACK[-1] if _STACK else None
+        roots = self.roots or (parent.roots if parent is not None else _roots((), path))
+        memo = self.memo if self.memo is not None else (parent.memo if parent is not None else None)
+        recording = _Recording(module.__name__, path, roots, memo)
+        with _recording(recording):
+            try:
+                super().exec_module(module)
+            except BaseException:
+                # What failed still decided the importer's behaviour (a local
+                # `try: import helper / except ImportError:` takes the other
+                # branch), so its files stay in the importer's closure: an edit
+                # that fixes it must make the importer stale. With no importer
+                # it was loaded at run time, and the run that caught it read it.
+                recording.seal_data()
+                if parent is not None:
+                    for failed_path, digest in recording.files.items():
+                        parent.note(failed_path, digest)
+                    for failed_path, digest in recording.data.items():
+                        parent.note_data(failed_path, digest)
+                else:
+                    _report_unrecorded(recording.closure())
+                raise
+            closure = _seal(module, recording)
+        if parent is not None:
+            parent.absorb(closure)
+        else:
+            _report_unrecorded(closure)
 
 
-def _import_file(path: str) -> Any:
+def _seal(module: Any, recording: _Recording) -> CodeClosure:
+    """Finish a recording after its module ran, and store the closure on it."""
+    recording.seal_data()
+    _walk_globals(module, recording)
+    _static_pass(recording)
+    if recording.fallback_root:
+        known = {_norm(p) for p in recording.files}
+        with _bookkeeping():
+            for path in _py_files_under(recording.fallback_root):
+                if _norm(path) not in known:
+                    recording.note(path, _file_sha(path, recording.memo) or "")
+    closure = recording.closure()
+    setattr(module, _CODE_ATTR, closure)
+    return closure
+
+
+def _module_of(value: Any, own: str) -> Any:
+    """The module a global belongs to: itself when it is one, else by `__module__`."""
+    if isinstance(value, types.ModuleType):
+        return value
+    try:
+        name = getattr(value, "__module__", None)
+    except Exception:                             # noqa: BLE001 - a proxy that refuses
+        return None
+    if not isinstance(name, str) or name == own:
+        return None
+    return sys.modules.get(name)
+
+
+def _walk_globals(module: Any, recording: _Recording) -> None:
+    """Attribute the helpers a module holds but did not import during its run.
+
+    A helper already in `sys.modules` fires no import event at all, so the
+    recording finder never sees it: fdm-print's shared fold, `fdm_print_parts`
+    imported under two names, fluids-analytic's `from gates._fluids_analytic
+    import …` in its second gate module. After the module runs, every global
+    that IS a module, or whose `__module__` names one, is looked up; a module
+    that is code (`_code_root`: under the roots, or beside them and not
+    installed) contributes its own recorded closure. One some other
+    machinery loaded (no closure — `spec_from_file_location` by hand) is
+    digested as it is on disk now, read statically, and walked in turn: the
+    bytes it ran may predate that digest, which is why the bundled by-path
+    loaders move onto `load_path`.
+    """
+    seen = {id(module)}
+    queue = [module]
+    while queue:
+        current = queue.pop()
+        try:
+            values = list(vars(current).values())
+        except TypeError:
+            continue
+        own = getattr(current, "__name__", "")
+        for value in values:
+            target = _module_of(value, own)
+            if target is None or id(target) in seen:
+                continue
+            seen.add(id(target))
+            where = _module_file(target)
+            if where is None:
+                continue                          # builtin, or a namespace package
+            root = _code_root(where, recording.roots)
+            if root is None:
+                continue                          # installed: an instrument
+            closure = _own_closure(target)
+            if closure is not None:
+                recording.absorb(closure)
+                continue
+            if not where.endswith(tuple(importlib.machinery.SOURCE_SUFFIXES)):
+                recording.unmappable(getattr(target, "__name__", "?"), where, root)
+                continue
+            recording.read_foreign(where)
+            queue.append(target)
+
+
+#: `(path, sha256) -> (imports, attributes read off a bare `import atompipe`)`.
+#: A helper shared by seven gate modules is parsed once.
+_STATIC: dict[tuple[str, str], tuple[tuple, frozenset]] = {}
+
+
+def _static_imports(path: str, data: bytes) -> tuple[tuple, frozenset]:
+    """`((level, module, names, line), …)` for every import in the file, at any
+    depth: every `import` statement, and every `importlib.import_module` or
+    `__import__` call whose module is a string literal (`_import_calls`)."""
+    key = (_norm(path), hashlib.sha256(data).hexdigest())
+    cached = _STATIC.get(key)
+    if cached is not None:
+        return cached
+    try:
+        tree = ast.parse(data, filename=path)
+    except (SyntaxError, ValueError):
+        _STATIC[key] = ((), frozenset())
+        return _STATIC[key]
+    found: list[tuple] = []
+    bare: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                found.append((0, alias.name, (), node.lineno))
+                if alias.name == "atompipe" or (alias.name.startswith("atompipe.")
+                                                and alias.asname is None):
+                    bare.add(alias.asname or "atompipe")
+        elif isinstance(node, ast.ImportFrom):
+            found.append((node.level or 0, node.module or "",
+                          tuple(a.name for a in node.names), node.lineno))
+    found += [literal for _line, _spelled, literal in _import_calls(tree) if literal]
+    attributes = frozenset(
+        node.attr for node in ast.walk(tree)
+        if bare and isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name) and node.value.id in bare
+    )
+    _STATIC[key] = (tuple(found), attributes)
+    return _STATIC[key]
+
+
+#: The functions that import a module named by a VALUE rather than a
+#: statement: `importlib.import_module`, and `__import__` (the builtin,
+#: `importlib.__import__`, `builtins.__import__`).
+_IMPORT_FUNCTIONS = frozenset({"import_module", "__import__"})
+
+#: How much of a call `dynamic_imports` quotes: enough to find it on its line.
+#: Rejected: the whole call (an f-string name can run to a paragraph).
+_SPELLED_MAX = 72
+
+
+def _call_arg(node: ast.Call, index: int, keyword: str) -> Any:
+    """Argument `index` of `node`, else its `keyword`, else `_NO_ARG`; `None`
+    when a `*args` or `**kwargs` could be carrying it."""
+    for position, arg in enumerate(node.args):
+        if isinstance(arg, ast.Starred):
+            return None
+        if position == index:
+            return arg
+    for kw in node.keywords:
+        if kw.arg is None:
+            return None
+        if kw.arg == keyword:
+            return kw.value
+    return _NO_ARG
+
+
+_NO_ARG = ast.Constant(value=None)
+
+
+def _string(node: Any) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _literal_import(node: ast.Call, kind: str) -> tuple | None:
+    """The `(level, module, names, line)` an import statement of the module
+    `node` imports would give — or None when a value decides which module."""
+    name = _string(_call_arg(node, 0, "name"))
+    if not name:
+        return None
+    if kind == "import_module":
+        if not name.startswith("."):
+            return (0, name, (), node.lineno)
+        package = _call_arg(node, 1, "package")
+        dots = len(name) - len(name.lstrip("."))
+        if _string(package):
+            try:
+                return (0, importlib.util.resolve_name(name, _string(package)), (), node.lineno)
+            except (ImportError, ValueError):
+                return None
+        if isinstance(package, ast.Name) and package.id == "__package__":
+            return (dots, name[dots:], (), node.lineno)
+        return None
+    level = _call_arg(node, 4, "level")
+    if level is _NO_ARG:
+        depth = 0
+    elif (isinstance(level, ast.Constant) and type(level.value) is int
+          and level.value >= 0):
+        depth = level.value
+    else:
+        return None
+    fromlist = _call_arg(node, 3, "fromlist")
+    if fromlist is _NO_ARG:
+        names: tuple[str, ...] = ()
+    elif isinstance(fromlist, (ast.List, ast.Tuple)) \
+            and all(_string(item) for item in fromlist.elts):
+        names = tuple(_string(item) for item in fromlist.elts)
+    else:
+        return None
+    return (depth, name, names, node.lineno)
+
+
+def _import_calls(tree: ast.AST) -> list[tuple[int, str, tuple | None]]:
+    """`(line, spelling, import)` for every call in `tree` that imports a module
+    named by a value: `importlib.import_module(...)` through any binding of
+    `importlib` or of `import_module` imported from it, and `__import__(...)`.
+    `import` is what `_static_imports` files for an import statement of the
+    same module when the name is a string literal — resolved against a literal
+    `package`, or against the file for `package=__package__` — and None when a
+    value decides it: then only the run knows the module (`dynamic_imports`).
+
+    What slipped through while only statements were read (admission review,
+    round 2, c): a gate taking its limit from
+    `importlib.import_module("probe_rules").MIN_THICKNESS` inside its body had
+    no import statement, so `code.files` omitted the helper, and after the
+    limit moved a plain `check` served the PASS cached. *Rejected:* a
+    whole-directory fallback for any file that calls them — openmodelica's
+    `__import__("re")` alone would send a bundled pack to it, the very
+    precision loss `_static_pass` exists to avoid; resolving a name through
+    constant folding (a module-level `NAME = "x"`), which is a partial
+    evaluator, and `doctor` names what it would have caught.
+    """
+    modules: set[str] = set()                     # names bound to importlib
+    builtin_modules: set[str] = set()             # names bound to builtins
+    functions: dict[str, str] = {"__import__": "__import__"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "importlib" or (alias.name.startswith("importlib.")
+                                                 and alias.asname is None):
+                    modules.add(alias.asname or "importlib")
+                elif alias.name == "builtins":
+                    builtin_modules.add(alias.asname or "builtins")
+        elif isinstance(node, ast.ImportFrom) and not node.level \
+                and node.module in ("importlib", "builtins"):
+            for alias in node.names:
+                if alias.name in _IMPORT_FUNCTIONS and (node.module == "importlib"
+                                                        or alias.name == "__import__"):
+                    functions[alias.asname or alias.name] = alias.name
+    found: list[tuple[int, str, tuple | None]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        kind = None
+        if isinstance(func, ast.Name):
+            kind = functions.get(func.id)
+        elif isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            if func.value.id in modules and func.attr in _IMPORT_FUNCTIONS:
+                kind = func.attr
+            elif func.value.id in builtin_modules and func.attr == "__import__":
+                kind = "__import__"
+        if kind is None:
+            continue
+        spelled = ast.unparse(node)
+        if len(spelled) > _SPELLED_MAX:
+            spelled = spelled[:_SPELLED_MAX - 3] + "..."
+        found.append((node.lineno, spelled, _literal_import(node, kind)))
+    return sorted(found, key=lambda row: (row[0], row[1]))
+
+
+def dynamic_imports(tree: ast.AST) -> list[tuple[int, str]]:
+    """`(line, spelling)` for every import in `tree` whose module a VALUE names —
+    `importlib.import_module(name)`, `__import__(f"rules_{kind}")` — which no
+    static walk can resolve, so no recorded closure holds it (`_import_calls`).
+    The first run of a process that loads it through the stock import system
+    keys its source (`verdicts`' hook); a later run, served the module from
+    `sys.modules`, keys nothing. `doctor`'s `dynamic-imports` row names each."""
+    return [(line, spelled) for line, spelled, found in _import_calls(tree) if found is None]
+
+
+def _spine_names(module: str, names: tuple[str, ...]) -> set[str]:
+    """The `atompipe` modules one import statement reaches."""
+    parts = module.split(".")
+    if len(parts) > 1:
+        return {f"atompipe.{parts[1]}"}
+    if not names:
+        return {"atompipe"}                       # `import atompipe`: see the attributes
+    found: set[str] = set()
+    for name in names:
+        found |= _package_attribute(name)
+    return found
+
+
+def _package_attribute(name: str) -> set[str]:
+    """What `atompipe.<name>` resolves to, without importing it.
+
+    A submodule is itself. Anything else is answered by the package's
+    `__getattr__` — from `models` (a spine module) or an alias (`AtompipeError`
+    lives in `util`) — so the package module is in it too.
+    """
+    if name != "*" and (os.path.isfile(os.path.join(_PKG_DIR, f"{name}.py"))
+                        or os.path.isfile(os.path.join(_PKG_DIR, name, "__init__.py"))):
+        return {f"atompipe.{name}"}
+    found = {"atompipe"}
+    package = sys.modules.get("atompipe")
+    aliases = vars(package).get("_ALIASES", {}) if package is not None else {}
+    if isinstance(aliases, dict) and isinstance(aliases.get(name), str):
+        found.add(f"atompipe.{aliases[name]}")
+    return found
+
+
+def _is_spine(module: str) -> bool:
+    parts = module.split(".")
+    return len(parts) > 1 and f"{parts[1]}.py" in _SPINE_MODULE_FILES
+
+
+def _resolve_local(dotted: str, search: list[str], roots: tuple[str, ...]
+                   ) -> tuple[bool, list[tuple[str, str, str]]]:
+    """Where `dotted` lives, without importing anything.
+
+    Returns `(local, found)`: whether its top-level name resolves to code at all
+    (`_code_root`: under the roots, or beside them and not installed), and
+    `(fullname, path, root)` for each file on the way down. Namespace
+    packages resolve and contribute no file. `PathFinder.find_spec` is used rather
+    than `importlib.util.find_spec`, which imports every parent package to answer
+    for a dotted name.
+    """
+    found: list[tuple[str, str, str]] = []
+    parts = dotted.split(".")
+    locations: list[str] = list(search)
+    local = False
+    for depth in range(len(parts)):
+        fullname = ".".join(parts[:depth + 1])
+        try:
+            spec = importlib.machinery.PathFinder.find_spec(fullname, locations)
+        except (ImportError, ValueError, OSError, AttributeError):
+            break
+        if spec is None:
+            break
+        if spec.origin is not None and spec.has_location:
+            origin = os.path.abspath(spec.origin)
+            root = _code_root(origin, roots)
+            if root is None:
+                break
+            found.append((fullname, origin, root))
+        else:
+            under = [loc for loc in (spec.submodule_search_locations or ())
+                     if _code_root(loc, roots) is not None]
+            if not under:
+                break
+        if depth == 0:
+            local = True
+        locations = list(spec.submodule_search_locations or ())
+        if not locations:
+            break
+    return local, found
+
+
+def _static_pass(recording: _Recording) -> None:
+    """Everything the recording can learn from source without running it.
+
+    * Every local import, at any depth, is resolved to its file. The recording
+      finder already saw the ones that ran; this adds the ones that did not — an
+      import inside a function body (`build()` or a gate importing a helper
+      lazily), and a module-level import of a cached module whose name the file
+      did not keep in its globals. Zero bundled hits today: every lazy import in
+      the packs is third-party (R-4).
+    * Every other top-level name that is not the standard library or `atompipe`
+      is a third-party name: installed, or not importable at all. A name that
+      resolves on `sys.path` to code beside the roots (`_code_root`) is local,
+      like one under them. `atompipe.*` names outside the spine digest are
+      `spine_extras`.
+
+    A local file some module in `sys.modules` already ran contributes that
+    module's closure; any other is digested as it is on disk and read in turn.
+    """
+    by_file: dict[str, Any] | None = None
+    pending = list(recording.sources.items()) + list(recording.foreign.items())
+    # Where a bare name can resolve locally: the roots, every directory the
+    # closure already holds a file in, and any `sys.path` entry under the roots.
+    # What slipped through with the roots alone: beam, thermal and openmodelica
+    # fixtures put `gates/` on `sys.path` and `import _thermal_physics` — the
+    # helper's file was recorded, and its name was listed as third-party too.
+    shared = list(recording.roots)
+    shared += sorted({os.path.dirname(p) for p in recording.files})
+    shared += [entry for entry in sys.path
+               if isinstance(entry, str) and entry and _owning_root(entry, recording.roots)]
+    # Then the rest of `sys.path`, in its own order, after the file's own
+    # directory, so a local name still resolves where it did. What slipped
+    # through without it (review round 1, `mono`): a helper beside the project,
+    # imported only inside a gate function from a `shared/` the module put on
+    # `sys.path`, resolved nowhere and was listed as third-party — an instrument.
+    rest = [entry for entry in sys.path
+            if isinstance(entry, str) and entry and entry not in shared]
+    done: set[str] = set()
+    while pending:
+        path, data = pending.pop()
+        if path in done:
+            continue
+        done.add(path)
+        imports, attributes = _static_imports(path, data)
+        search = list(dict.fromkeys(shared + [os.path.dirname(path)] + rest))
+        for level, module, names, _line in imports:
+            if level:
+                base = os.path.dirname(path)
+                for _ in range(level - 1):
+                    base = os.path.dirname(base)
+                targets = [module] if module else []
+                targets += [f"{module}.{n}" if module else n for n in names if n != "*"]
+                lookup = [base]
+            else:
+                top = module.partition(".")[0]
+                if top == "atompipe":
+                    recording.spine_extras.update(
+                        m for m in _spine_names(module, names) if not _is_spine(m))
+                    continue
+                if not top or top in _STDLIB:
+                    continue
+                local, _found = _resolve_local(top, search, recording.roots)
+                if not local:
+                    recording.third_party.add(top)
+                    continue
+                targets = [module] + [f"{module}.{n}" for n in names if n != "*"]
+                lookup = search
+            for target in targets:
+                _local, found = _resolve_local(target, lookup, recording.roots)
+                for fullname, origin, root in found:
+                    if origin in recording.files:
+                        continue
+                    if not origin.endswith(tuple(importlib.machinery.SOURCE_SUFFIXES)):
+                        recording.unmappable(fullname, origin, root)
+                        continue
+                    if by_file is None:
+                        # One file can be in sys.modules twice (fdm-print loads
+                        # `fdm_print_parts` by name and by path); the copy this
+                        # loader ran carries the closure, so it wins.
+                        by_file = {}
+                        for loaded in list(sys.modules.values()):
+                            where = _module_file(loaded)
+                            if where is not None and (_norm(where) not in by_file
+                                                      or _own_closure(loaded) is not None):
+                                by_file[_norm(where)] = loaded
+                    loaded = by_file.get(_norm(origin))
+                    closure = _own_closure(loaded) if loaded is not None else None
+                    if closure is not None:
+                        recording.absorb(closure)
+                        continue
+                    recording.read_foreign(origin)
+                    if origin in recording.foreign:
+                        pending.append((origin, recording.foreign[origin]))
+        for attribute in attributes:
+            recording.spine_extras.update(
+                m for m in _package_attribute(attribute) if not _is_spine(m))
+
+
+def _purge(previous: CodeClosure | None, roots: tuple[str, ...], *, keep: str,
+           memo: dict[str, str | None], everything: bool = False) -> None:
+    """Drop from `sys.modules` every module that would serve stale code to this load.
+
+    Two kinds. A module this loader ran — under the roots, beside them and not
+    installed (`_code_root`: a monorepo's `shared/` helper, imported by name, is
+    served to the next importer exactly like one under the roots), or in the
+    previous version's closure — whose own closure no longer matches the disk:
+    the next importer must re-run it, not pick up the old object (a helper
+    edited after its first importer loaded is otherwise served to the second
+    one — S-26 in-process, no pyc involved). And a module some other machinery loaded
+    whose file the previous closure recorded at a digest it no longer has.
+    `everything` drops the whole previous closure: the name now belongs to a
+    different file, and none of the old one's helpers are this one's.
+    """
+    recorded = {_norm(p): digest for p, digest in (previous.files if previous else ())}
+    for name, loaded in list(sys.modules.items()):
+        if name == keep or not isinstance(loaded, types.ModuleType):
+            continue
+        where = _module_file(loaded)
+        if where is None:
+            continue
+        key = _norm(where)
+        closure = _own_closure(loaded)
+        if closure is not None:
+            if key not in recorded and _code_root(where, roots) is None:
+                continue
+            if (everything and key in recorded) or not _closure_current(closure, memo=memo):
+                sys.modules.pop(name, None)
+        elif key in recorded and (everything or _file_sha(where, memo) != recorded[key]):
+            sys.modules.pop(name, None)
+
+
+def _registered(registry: Any) -> list[tuple[str, Any]]:
+    """`(gate id, fn)` for everything `registry` holds, via `ids()` and `get()`."""
+    pairs = []
+    for gate_id in list(registry.ids()):
+        entry = registry.get(gate_id)
+        if entry is not None:
+            pairs.append((gate_id, entry[1]))
+    return pairs
+
+
+def _signature(fn: Any) -> tuple[Any, Any]:
+    return getattr(fn, "__module__", None), getattr(fn, "__qualname__", None)
+
+
+def _drop_stale_gates(registry: Any, name: str, previous: Any) -> None:
+    """Unregister what an earlier run of module `name` put into `registry`.
+
+    Before a re-execution, and before a re-adoption: the new functions are
+    different objects under the same ids, and `Registry.register` rightly refuses
+    a second function for an id it holds. A gate is this module's when its
+    function is one the previous run recorded, or was defined in the module.
+    """
+    old = vars(previous).get(_GATES_ATTR) if previous is not None else None
+    old_fns = {id(fn) for _spec, fn in (old or ())}
+    for gate_id, fn in _registered(registry):
+        if id(fn) in old_fns or getattr(fn, "__module__", None) == name:
+            registry.unregister(gate_id)
+
+
+def _readopt(registry: Any, module: Any, name: str) -> None:
+    """Put a cached module's recorded `(spec, fn)` pairs into `registry`.
+
+    A module served from the cache does not run, so its `@gate` decorators do
+    not fire, and a fresh `Registry` — one per command, one per in-process test —
+    would come back empty: a pack that looks like it ships no gates, which is
+    the silent under-reporting `use_registry` exists to prevent. Stale entries
+    go first: any function from this module that is not a current one, or an
+    older version of a current one (same module and qualname).
+    """
+    pairs = vars(module).get(_GATES_ATTR) or ()
+    current = {id(fn) for _spec, fn in pairs}
+    versions = {_signature(fn) for _spec, fn in pairs}
+    for gate_id, fn in _registered(registry):
+        if id(fn) in current:
+            continue
+        if getattr(fn, "__module__", None) == name or _signature(fn) in versions:
+            registry.unregister(gate_id)
+    for spec, fn in pairs:
+        entry = registry.get(spec.id)
+        if entry is not None and entry[1] is fn:
+            continue
+        registry.register(spec, fn)
+
+
+def _reusable(cached: Any, path: str, roots: tuple[str, ...], registry: Any,
+              attrs: Mapping[str, Any] | None, memo: dict[str, str | None]) -> bool:
+    """May `load_source_module` hand back the module already in `sys.modules`?
+
+    Only the module this loader ran from this very file, with the globals the
+    caller seeds (a pack's `PACK_DIR`) unchanged, with its gate registrations
+    recorded when a registry is asking for them, and with every file of its
+    recorded closure still at its recorded digest. Anything else runs again.
+    """
+    if not isinstance(cached, types.ModuleType):
+        return False
+    where = _module_file(cached)
+    if where is None or _norm(where) != _norm(path):
+        return False
+    closure = _own_closure(cached)
+    if closure is None:
+        return False
+    namespace = vars(cached)
+    if registry is not None and namespace.get(_GATES_ATTR) is None:
+        return False
+    for key, value in (attrs or {}).items():
+        if key not in namespace or namespace[key] != value:
+            return False
+    return _closure_current(closure, roots=roots, memo=memo)
+
+
+def load_source_module(path: str, *, name: str, roots: Iterable[str],
+                       registry: Any = None,
+                       attrs: Mapping[str, Any] | None = None) -> types.ModuleType:
+    """Execute `path` as module `name`, fresh and recorded; or serve it unchanged.
+
+    The one loader for Python the spine runs on a project's behalf: pack gate
+    modules, project gate modules, fixtures, the known-good module and helpers
+    loaded by path (`load_path`). Four promises:
+
+    * **Fresh bytes.** The source is read and those bytes compiled; no `.pyc` is
+      read or written, for the module or for any import of code while it runs
+      (S-26). Code is `_code_root`'s: a file under `roots`, or beside them and
+      not installed — a monorepo's `shared/` helper is the gate's code, never a
+      third-party instrument.
+    * **A recorded closure.** Every file of code that ran — or that a function
+      body imports lazily, read statically — is stored on the module as
+      `__atompipe_code__` (a `CodeClosure`; `code_closure` reads it), with every
+      file that code opened to read while it ran (`data`: a table read at
+      import decides a global as surely as the code does). Computed
+      source compiled or executed from a frame in code, or an import of code
+      that is not Python source, gives up precision for every `*.py` under the
+      owning root, and says so in `fallback`.
+    * **A content-keyed cache.** The module already in `sys.modules` under `name`
+      is returned only if this loader ran it from this file and every recorded
+      file, code and data, still has its recorded digest. Otherwise every stale
+      module it depended on is purged from `sys.modules` and it runs again.
+      In-process callers — a test's second `cli.main`, `pack validate` after an
+      edit — then never run old code under a new digest. Run or served inside
+      another module's load, its closure joins that module's; with no load in
+      progress — at run time — it goes to the `on_unrecorded_load` listeners.
+    * **Gates follow the module.** With `registry`, the `(spec, fn)` pairs the
+      module registered into it while running are recorded as
+      `__atompipe_gates__`; a cache hit re-adopts them into the `registry` the
+      caller passes now, dropping stale ids first, so a fresh `Registry` is never
+      handed back empty. `registry` must be the one `@gate` decorates into
+      during the load — the caller wraps this call in `gates.use_registry(...)`;
+      this module never imports `gates`.
+
+    `attrs` are set on the module before it runs (a pack's `PACK` and
+    `PACK_DIR`, which a gate module may read at import time) and are part of the
+    cache key. `__file__` is `os.path.abspath(path)`, never a realpath:
+    fluids-analytic's control finds its gate module by scanning `sys.modules`
+    for exactly that (packs:H14).
+
+    Raises whatever the module raised, after removing it from `sys.modules` and
+    unregistering what it managed to register: a module that failed to import
+    has registered nothing. The caller words the error; this is not the place
+    that knows whether the file was a pack's or the project's.
+
+    `sys.path` is the caller's: a pack loader puts its directory there for the
+    duration, exactly as before.
+    """
+    abspath = os.path.abspath(path)
+    owned = _roots(roots, abspath)
+    for running in _STACK:
+        if running.name == name:
+            # A module loading itself while it runs: import semantics, the
+            # partially initialised module, rather than infinite recursion.
+            partial = sys.modules.get(name)
+            if partial is not None:
+                return partial
+    memo: dict[str, str | None] = {}
+    cached = sys.modules.get(name)
+    if cached is not None and _reusable(cached, abspath, owned, registry, attrs, memo):
+        if _STACK:
+            # Served, not run: it is still the caller's code (a helper loaded by
+            # path from a gate module's body).
+            _STACK[-1].absorb(_own_closure(cached))
+        else:
+            # Served at run time: a read of whatever is running, exactly as a
+            # first load would have been (`on_unrecorded_load`) — the second
+            # gate to ask must key it as the first did.
+            _report_unrecorded(_own_closure(cached))
+        if registry is not None:
+            _readopt(registry, cached, name)
+        return cached
+
+    previous = _own_closure(cached) if cached is not None else None
+    moved = cached is not None and _norm(_module_file(cached) or "") != _norm(abspath)
+    _purge(previous, owned, keep=name, memo=memo, everything=moved)
+    if registry is not None:
+        _drop_stale_gates(registry, name, cached)
+
+    loader = _FreshLoader(name, abspath, roots=owned, memo=memo)
+    spec = importlib.util.spec_from_file_location(name, abspath, loader=loader)
+    if spec is None:                              # pragma: no cover - defensive
+        raise ImportError(f"cannot load {abspath}: no import machinery accepted it")
+    module = importlib.util.module_from_spec(spec)
+    for key, value in (attrs or {}).items():
+        setattr(module, key, value)
+    before = set(registry.ids()) if registry is not None else set()
+    # Registered BEFORE execution: a module that imports itself, a dataclass
+    # that resolves its own annotations, and `@gate` reading the module's `PACK`
+    # all look the module up by name while the body is still running.
+    sys.modules[name] = module
+    try:
+        loader.exec_module(module)
+    except BaseException:
+        if sys.modules.get(name) is module:
+            del sys.modules[name]
+        if registry is not None:
+            for gate_id in list(registry.ids()):
+                if gate_id not in before:
+                    registry.unregister(gate_id)
+        raise
+    if registry is not None:
+        added = []
+        for gate_id in registry.ids():
+            if gate_id not in before:
+                entry = registry.get(gate_id)
+                if entry is not None:
+                    added.append((entry[0], entry[1]))
+        setattr(module, _GATES_ATTR, tuple(added))
+    return module
+
+
+def load_path(path: str) -> types.ModuleType:
+    """Load a helper by its path, under a name salted with that path.
+
+    For a helper a gate module and its fixture must share, where the directory
+    is on `sys.path` only while gates load (fdm-print's fold and process model).
+    Two copies of one pack in a process get two names, so neither runs the
+    other's helper (packs:H4); two gate modules loading one path get one module,
+    content-keyed like everything `load_source_module` serves. Called while a
+    module is being loaded, the helper joins that module's closure whether it
+    runs or is served from the cache. Called at RUN time — from a gate, a
+    fixture's `make`, `known_good.context` — no closure is being built, and
+    every file of the helper's (its code, and what it read at import) is a
+    read of the run instead, whether it runs or is served
+    (`on_unrecorded_load`).
+    """
+    abspath = os.path.abspath(path)
+    stem = re.sub(r"\W", "_", os.path.splitext(os.path.basename(abspath))[0]) or "module"
+    salt = hashlib.sha256(os.fsencode(abspath)).hexdigest()[:12]
+    parent = _STACK[-1] if _STACK else None
+    roots = (parent.roots if parent is not None and _owning_root(abspath, parent.roots)
+             else _roots((), abspath))
+    return load_source_module(abspath, name=f"{_PATH_PREFIX}{stem}_{salt}", roots=roots)
+
+
+def is_code(path: str, roots: Iterable[str] = ()) -> bool:
+    """Is the Python file at `path` code — under `roots`, or beside them and not
+    installed (`_code_root`) — rather than an installed instrument?
+
+    The one test the recording finder applies to an import, for a caller that
+    must decide before anything runs whether a module it was named is code to
+    load fresh and record (`gates.load_fixture`'s `module:function` form) or an
+    instrument the stock import system serves. Not `_roots`: with no roots it
+    makes the file's own directory one, and a root owns what is under it — a
+    module in site-packages would own itself and read as code.
+    """
+    owned = tuple(dict.fromkeys(_norm(r) for r in roots if r))
+    return _code_root(path, owned) is not None
+
+
+def registered_by(fn: Any) -> tuple[types.ModuleType, ...]:
+    """Every module in `sys.modules` whose recorded registrations
+    (`__atompipe_gates__`, which `load_source_module` stamps) hold `fn` itself,
+    sorted by module name; `()` for a module, or for a function no recorded
+    load registered (a gate registered from Python in a test).
+
+    The module that REGISTERED a gate is that gate's code as surely as the one
+    that defines its function, and for a gate a factory makes they are two
+    modules. What slipped through while `code_closure` read `fn.__module__`
+    alone (Phase 1 review, repro ``p4``): ``gates/_gatekit.py`` held
+    ``limit_gate(...)``, ``gates/limits.py`` held ``MASS_LIMIT_G = 100.0`` and
+    the call. The function was the helper's, so ``code.files`` was
+    ``['gates/_gatekit.py']`` and the module holding the limit was in no
+    closure: set to 10.0, `check` served the PASS cached, `status` named
+    nothing stale, `doctor` said every gate's code was recorded, and
+    ``--force`` filed two outcomes for identical inputs. The same lookup put a
+    pack's factory-made gate under no pack: `PACK_DIR` is set on the module a
+    pack loads, never on the helper it imports.
+
+    Read from the modules as they are now, never remembered: a module that ran
+    again replaced itself in `sys.modules`, and its old registrations went with
+    it. By identity, never by id or qualname — every function a factory makes
+    shares one qualname. *Rejected:* stamping the registering module on the
+    function (a function registered under two ids by two modules has two, and
+    a cache hit re-adopts the function without running anything to stamp it);
+    the loader's `_STACK` at decoration time (empty by the time a digest is
+    asked for, and a served module never decorates again).
+    """
+    if fn is None or isinstance(fn, types.ModuleType):
+        return ()
+    found: dict[str, types.ModuleType] = {}
+    for loaded in list(sys.modules.values()):
+        if not isinstance(loaded, types.ModuleType):
+            continue
+        try:
+            namespace = vars(loaded)
+        except TypeError:
+            continue
+        pairs = namespace.get(_GATES_ATTR)
+        if not isinstance(pairs, tuple):
+            continue
+        if any(isinstance(pair, tuple) and len(pair) == 2 and pair[1] is fn for pair in pairs):
+            found[str(namespace.get("__name__", ""))] = loaded
+    return tuple(found[name] for name in sorted(found))
+
+
+def code_closure(obj: Any) -> CodeClosure | None:
+    """The recorded closure of a module; of a function, the closure of the
+    module that defines it merged with each one that registered it
+    (`registered_by`): a gate a factory in a helper makes is the helper's code
+    AND the code of the module that called the factory with its limit.
+
+    None for anything this loader did not run — a gate registered from Python
+    in a test, a lambda — which `verdicts.code_digest` then digests by its
+    defining file, or reports as opaque; never as a digest of nothing. A gate
+    whose defining module and registering module are one (every gate written
+    with `@gate`) gets that module's closure object itself, unmerged. Merged
+    as a load folds a helper in (`_Recording.absorb`): a file the two closures
+    recorded at two digests is torn (""), and every entry keyed by it opaque.
+    """
+    if isinstance(obj, types.ModuleType):
+        return _own_closure(obj)
+    home = _home_module(obj)
+    own = _own_closure(home) if home is not None else None
+    others = [closure for closure in (_own_closure(module) for module in registered_by(obj)
+                                      if module is not home)
+              if closure is not None]
+    if not others:
+        return own
+    if own is None and len(others) == 1:
+        return others[0]
+    merged = _Recording("", "", ())
+    for closure in ([own] if own is not None else []) + others:
+        merged.absorb(closure)
+    return merged.closure()
+
+
+# --------------------------------------------------------------------------- #
+# module-level memos:  emptied before every run of the code that holds them
+# --------------------------------------------------------------------------- #
+#: The type `functools.lru_cache` and `functools.cache` wrap a function in —
+#: taken from a wrapper rather than named, because its name is private.
+_LRU_WRAPPER = type(functools.lru_cache(maxsize=None)(lambda: None))
+
+#: How far `clear_caches` follows `__wrapped__` from a module global to a memo
+#: under it: a decorator stacked over a cache (`@traced @functools.cache`) hides
+#: the wrapper behind one level, and nobody stacks eight. Rejected: no limit — a
+#: hand-built `__wrapped__` that points back at itself would loop.
+_UNWRAP_DEPTH = 8
+
+
+def _home_module(obj: Any) -> Any:
+    """The module `obj` is, or the one that defines it (`code_closure`'s lookup)."""
+    if isinstance(obj, types.ModuleType):
+        return obj
+    target = getattr(obj, "__func__", obj)
+    try:
+        name = getattr(target, "__module__", None)
+    except Exception:                             # noqa: BLE001 - a proxy that refuses
+        return None
+    return sys.modules.get(name) if isinstance(name, str) else None
+
+
+def _closure_modules(obj: Any) -> list[types.ModuleType]:
+    """Every loaded module whose code `obj` runs: its own, each module that
+    registered it (`registered_by`: the factory's caller, which may hold a memo
+    the gate calls back into), and each module whose file is in its recorded
+    closure (`code_closure`) — in `sys.modules`, or held only by reference (a
+    helper some other machinery executed and never registered). A module this
+    loader did not run counts only outside the interpreter's trees and the
+    spine: a gate registered from Python in a test is keyed by its defining
+    file, and a `functools.partial` would otherwise hand over `functools`
+    itself."""
+    home = _home_module(obj)
+    seeds = [module for module in registered_by(obj) if module is not home]
+    if home is not None:
+        where = _module_file(home)
+        if _own_closure(home) is not None or not (
+                where is None or any(_under(_norm(where), d) for d in _excluded_dirs())):
+            seeds.insert(0, home)
+    if not seeds:
+        return []
+    closure = code_closure(obj)
+    if closure is None:
+        return seeds
+    files = {_norm(path) for path, _sha in closure.files}
+    found: dict[int, types.ModuleType] = {id(module): module for module in seeds}
+    for loaded in list(sys.modules.values()):
+        if isinstance(loaded, types.ModuleType) and id(loaded) not in found:
+            where = _module_file(loaded)
+            if where is not None and _norm(where) in files:
+                found[id(loaded)] = loaded
+    queue = list(found.values())
+    while queue:
+        for value in list(vars(queue.pop()).values()):
+            if isinstance(value, types.ModuleType) and id(value) not in found:
+                where = _module_file(value)
+                if where is not None and _norm(where) in files:
+                    found[id(value)] = value
+                    queue.append(value)
+    return list(found.values())
+
+
+#: The open ``closure_scope``s, innermost last: each maps ``(id(obj),
+#: len(sys.modules))`` to ``(obj, its _closure_modules)``.
+_CLOSURE_SCOPES: list[dict] = []
+
+
+@contextlib.contextmanager
+def closure_scope() -> Iterator[None]:
+    """While open, ``clear_caches`` finds the modules ``obj`` runs once per object
+    and per size of ``sys.modules``, and still empties every memo in them on
+    every call. For the mutation pass (P2.3), which runs ONE gate up to 1,024
+    times: the scan behind ``_closure_modules`` walks every loaded module, and
+    it was 3 of the 4 seconds the walks of a 60-gate project cost (measured
+    on ``test_staleness``'s first sweep). Keyed by ``len(sys.modules)``, so a
+    module a run imports for the first time is found by the next run's scan.
+    *Rejected:* skipping the memo clear between walk runs — a memo keyed by a
+    path would serve one run's file read to the next, unkeyed; caching the
+    modules for the life of the process — a module loaded later would never
+    be cleared."""
+    _CLOSURE_SCOPES.append({})
+    try:
+        yield
+    finally:
+        _CLOSURE_SCOPES.pop()
+
+
+def _closure_modules_scoped(obj: Any) -> list[types.ModuleType]:
+    if not _CLOSURE_SCOPES:
+        return _closure_modules(obj)
+    memo = _CLOSURE_SCOPES[-1]
+    key = (id(obj), len(sys.modules))
+    hit = memo.get(key)
+    if hit is None or hit[0] is not obj:
+        hit = (obj, _closure_modules(obj))
+        memo[key] = hit
+    return hit[1]
+
+
+def _memo_clearer(value: Any) -> Any:
+    """`value.cache_clear` when `value` — or what it wraps, `_UNWRAP_DEPTH` deep
+    — is a memo that knows how to empty itself, else None. functools' wrapper by
+    its type; a plain function carrying a callable `cache_clear` of its own
+    (cachetools' `cached` copies functools' protocol). Read through `vars`,
+    never `getattr`, on anything else: a module global may be a proxy whose
+    attribute lookup runs code."""
+    seen: set[int] = set()
+    for _depth in range(_UNWRAP_DEPTH):
+        if value is None or id(value) in seen:
+            return None
+        seen.add(id(value))
+        if isinstance(value, _LRU_WRAPPER):
+            return value.cache_clear
+        if not isinstance(value, types.FunctionType):
+            return None
+        own = vars(value)
+        if callable(own.get("cache_clear")):
+            return own["cache_clear"]
+        value = own.get("__wrapped__")
+    return None
+
+
+def _memos_in(module: types.ModuleType) -> list[tuple[str, Any]]:
+    """`(dotted name, cache_clear)` for every memo `module` holds at module
+    level: a global, or an attribute of a class the module defines — a cached
+    staticmethod, classmethod, method or property getter, which every instance
+    shares."""
+    name = getattr(module, "__name__", "?")
+    found: list[tuple[str, Any]] = []
+    for key, value in list(vars(module).items()):
+        clear = _memo_clearer(value)
+        if clear is not None:
+            found.append((f"{name}.{key}", clear))
+            continue
+        if not isinstance(value, type) or vars(value).get("__module__") != name:
+            continue
+        for attr, member in list(vars(value).items()):
+            if isinstance(member, (staticmethod, classmethod)):
+                member = member.__func__
+            elif isinstance(member, property):
+                member = member.fget
+            clear = _memo_clearer(member)
+            if clear is not None:
+                found.append((f"{name}.{key}.{attr}", clear))
+    return found
+
+
+def clear_caches(obj: Any) -> tuple[str, ...]:
+    """Empty every functools memo held at module level by the code `obj` runs
+    (`_closure_modules`); return the dotted names emptied, sorted.
+
+    `gates.run_gate` calls it on the gate function before the gate runs, and
+    `gates._build_control` and `verdicts._known_good` on the fixture and on
+    `known_good.context` before theirs, so every run reads its files itself,
+    inside its own trace window. What slipped through (review round 2): S-27
+    was closed for `ctx.extra` only. A `functools.lru_cache` around a file read
+    is the same cross-gate channel — the first caller opens the file, every
+    later one gets the value and opens nothing, so no audit event puts the file
+    in its read set. And the admission control runs its gate FIRST, in the same
+    process: even a lone memoised gate was a hit on its real run. `probe.lru`'s
+    entry keyed no file while its control named `data/limit2.txt`; after the file
+    was zeroed a plain `check` served the cached PASS as current and a forced run
+    FAILed it. Emptying the memo costs a re-read per run; a memo that survives
+    is an input nothing keys.
+
+    Only memos that can empty themselves are reached. Any other module-global
+    memo — a dict filled from a function body, a `global` rebound from one, a
+    mutable default argument — cannot be emptied from outside, and
+    `atompipe doctor`'s `memos` row names each one. *Rejected:* re-executing
+    the module before every run (it re-registers its gates, and a module whose
+    import is expensive — trimesh, a solver binding — pays that per gate);
+    clearing every `cache_clear` found by attribute lookup (a proxy's
+    `__getattr__` would run code the gate never called).
+    """
+    cleared: list[str] = []
+    for module in _closure_modules_scoped(obj):
+        for name, clear in _memos_in(module):
+            clear()
+            cleared.append(name)
+    return tuple(sorted(set(cleared)))
+
+
+# --------------------------------------------------------------------------- #
+# loading the model
+# --------------------------------------------------------------------------- #
+def _import_file(path: str, roots: Iterable[str] | None = None) -> Any:
     """Execute the model file as a module, with its own directory importable.
 
     The directory goes on `sys.path` so a model can split itself across several
@@ -393,10 +2251,18 @@ def _import_file(path: str) -> Any:
     shadow the standard library for every later import in the process,
     including the spine's own. The window is kept as short as the import itself.
 
+    The model always runs again — every load is a fresh `CONFIG` — and while it
+    runs it is recorded like any other module: siblings imported under `roots`
+    come through the fresh loader, and a sibling whose file changed since the
+    last load is purged first, so `import geometry` cannot hand back the old
+    module (S-26, which the entry-only fresh loader left open for siblings).
+
     The consequence, which is worth knowing when you split a model: import your
     sibling modules at MODULE level, not lazily inside `build()`. By the time
     `build()` runs, the path is back to normal — module-level imports are
-    already cached in `sys.modules`, a first lazy import is not.
+    already cached in `sys.modules`, a first lazy import is not. (Its file is
+    still in the model's closure, read statically; the bytes it runs are the
+    stock import system's.)
 
     Only paths this function actually ADDED are removed, so a model that
     legitimately extends `sys.path` for itself keeps its addition.
@@ -414,10 +2280,13 @@ def _import_file(path: str) -> Any:
     stem = os.path.basename(directory) if is_package else os.path.splitext(os.path.basename(path))[0]
     name = _MODULE_PREFIX + (stem or "model")
 
+    owned = _roots(roots, path)
+    memo: dict[str, str | None] = {}
+    loader = _FreshLoader(name, path, roots=owned, memo=memo)   # never a stale .pyc
     spec = importlib.util.spec_from_file_location(
         name,
         path,
-        loader=_FreshLoader(name, path),          # never a stale .pyc; see above
+        loader=loader,
         submodule_search_locations=[directory] if is_package else None,
     )
     if spec is None or spec.loader is None:       # a .py we cannot make a spec for
@@ -434,9 +2303,12 @@ def _import_file(path: str) -> Any:
     # that resolves its own annotations, and pickling all look the module up by
     # name while the body is still running.
     previous = sys.modules.get(name)
+    moved = previous is not None and _norm(_module_file(previous) or "") != _norm(path)
+    _purge(_own_closure(previous) if previous is not None else None, owned,
+           keep=name, memo=memo, everything=moved)
     sys.modules[name] = module
     try:
-        spec.loader.exec_module(module)
+        loader.exec_module(module)
     except BaseException as exc:                  # noqa: BLE001 - re-raised below
         if previous is None:
             sys.modules.pop(name, None)
@@ -515,7 +2387,12 @@ def load_model(root: str, entry: str | None = None) -> LoadedModel:
     often has something to say.
     """
     path = _resolve_entry(root, entry)
-    module = _import_file(path)
+    # The project root owns the model's code, so a sibling under `model/` and a
+    # helper the model imports from elsewhere in the project are both recorded;
+    # the model's own directory is a root too, for an entry that lives outside
+    # the project, and so that computed source in the model falls back to the
+    # model's directory rather than every `*.py` in the project.
+    module = _import_file(path, roots=(root, os.path.dirname(path)))
     relative = rel(path, root)
 
     config = _resolve_config(module, relative)
@@ -579,6 +2456,44 @@ def project(model: LoadedModel) -> dict[str, Any]:
     }
 
 
+def flat_params(projection: dict | None) -> tuple[dict[str, Any], list[str]]:
+    """Flatten a projection to `{name: value}` for `GateContext.params`, with conflicts.
+
+    Derived values first, then config over the top, so an INPUT always wins a
+    name collision. `build()` returning a key that shares a config field's name
+    is common and harmless when the values agree (the reference model echoes
+    `material` straight back); when they do NOT agree, one of the two numbers a
+    gate could read is not the model's input, and which one it got would depend
+    on dict ordering. So the input wins, and the disagreement is returned to be
+    reported rather than resolved silently — that is rule 6, cross-representation
+    agreement, applied at the cheapest place it can be applied.
+
+    The one copy (S-28). `cli` flattened for `GateContext.params` and `site` for
+    `ViewContext.params`, each with its own copy of these lines, kept
+    "byte-for-byte" in sync by a comment — and a viewgen and a gate that read one
+    name must get one number, or the picture is of a different design from the
+    one that was measured. It lives here because the projection does, and
+    because a verdict's inputs are digested from exactly this dict: a second
+    copy that drifted would key a verdict on values no gate read.
+
+    Equality is Python's: `7.0` against `7`, or `True` against `1`, is not a
+    conflict. `tests/test_codeload.FlatParamsIsTheOldShape` pins the output —
+    order and types included — to what the two copies produced.
+    """
+    if not projection:
+        return {}, []
+    config = dict(projection.get("config") or {})
+    derived = dict(projection.get("derived") or {})
+    conflicts = [
+        f"{name}: config {config[name]!r} vs build() {derived[name]!r}"
+        for name in sorted(set(config) & set(derived))
+        if config[name] != derived[name]
+    ]
+    flat = dict(derived)
+    flat.update(config)
+    return flat, conflicts
+
+
 def _canonical(projection: dict[str, Any]) -> str:
     """The one byte-level representation of a projection.
 
@@ -605,17 +2520,19 @@ def _canonical(projection: dict[str, Any]) -> str:
 
 
 def model_hash(projection: dict[str, Any]) -> str:
-    """Stable short hash of a projection. Drives staleness, and nothing else.
+    """Stable short hash of a projection: a display id, and nothing else.
 
-    Staleness is the quiet failure this exists to prevent: gates pass, someone
-    edits `thickness`, and the report keeps showing yesterday's green. Recording
-    this hash with a run (`RunMeta.model_hash`) makes "these verdicts describe a
-    model that no longer exists" a computable fact instead of a habit.
+    Staleness is the quiet failure this was built to prevent: gates pass, someone
+    edits `thickness`, and the report keeps showing yesterday's green. Until 1.2
+    it was recorded with each sweep and compared against the next — one hash
+    deciding every gate, which a model that failed to import made compare equal
+    (S-21). Staleness is per gate now (`verdicts.freshness`); this hash survives
+    as a display id (`check --json`'s `model_hash`, `doctor`, `status --json`).
 
     Stable means stable across PROCESSES, not just within one — which is why
     `project()` rejects sets (hash-randomised iteration order) and why this
     sorts keys. 12 hex chars: enough to distinguish revisions, short enough to
-    sit in a run filename and be compared by eye.
+    be compared by eye.
     """
     return short_hash(_canonical(projection))
 
@@ -642,12 +2559,76 @@ def write_projection(root: str, projection: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------- #
 # parameters and their provenance
 # --------------------------------------------------------------------------- #
+#: How a refusal spells one rejected alternative in a PARAMS dict item.
+_LOSER = '{"value": ..., "why": ...}'
+
+
+def _unknown_key(entry: str, where: str, key: Any, known: Iterable[str]) -> AtompipeError:
+    """The refusal for a key a PARAMS dict item does not know, with a suggestion."""
+    names = sorted(known)
+    close = (difflib.get_close_matches(key, names, n=1, cutoff=0.6)
+             if isinstance(key, str) else [])
+    hint = f" — did you mean {close[0]!r}?" if close else ""
+    return AtompipeError(
+        f"{entry}: {where} has an unknown key {key!r}{hint} It takes "
+        f"{', '.join(names)}. A key it does not know used to be dropped without a "
+        f"word, and whatever it carried — the units, the loser and why it lost — "
+        f"with it"
+    )
+
+
+def _strict_item(item: dict, entry: str, where: str) -> None:
+    """Refuse a PARAMS dict item whose keys `Param.from_dict` would drop.
+
+    What slipped through (the model-side cousin of S-40): `Param.from_dict` keeps
+    only the keys it knows, so `{"name": "thickness", "unit": "mm"}` loaded as a
+    parameter with no units, and a rejection spelt `{"value": ..., "whi": ...}`
+    crashed on a TypeError from inside the dataclass. Both now stop the load
+    with the key, the entry and the nearest real key. Measured first (R-4,
+    R-10): the bracket's PARAMS is the only bundled one, and it loads.
+    """
+    param_keys = {f.name for f in dataclasses.fields(Param)}
+    rejected_keys = {f.name for f in dataclasses.fields(Rejected)}
+    for key in item:
+        if key not in param_keys:
+            raise _unknown_key(entry, where, key, param_keys)
+    rejected = item.get("rejected")
+    if rejected is None:
+        return
+    if isinstance(rejected, (str, bytes, dict)) or not isinstance(rejected, (list, tuple)):
+        raise AtompipeError(
+            f"{entry}: {where} `rejected` is a {type(rejected).__name__}; it takes a "
+            f"list of {_LOSER} items, one per alternative that lost"
+        )
+    for index, loser in enumerate(rejected):
+        if isinstance(loser, Rejected):
+            continue
+        if not isinstance(loser, dict):
+            raise AtompipeError(
+                f"{entry}: {where} rejected[{index}] is a {type(loser).__name__}; each "
+                f"alternative that lost is a {_LOSER} item — "
+                f"a loser with no reason is re-proposed by the next reader"
+            )
+        for key in loser:
+            if key not in rejected_keys:
+                raise _unknown_key(entry, f"{where} rejected[{index}]", key, rejected_keys)
+        for key in ("value", "why"):
+            if key not in loser:
+                raise AtompipeError(
+                    f"{entry}: {where} rejected[{index}] has no {key!r}: an alternative "
+                    f"that lost is what lost AND why"
+                )
+
+
 def _explicit_params(module: Any, entry: str) -> list[Param]:
-    """Read the model's optional `PARAMS`, tolerantly but not silently.
+    """Read the model's optional `PARAMS`: tolerant of its shape, strict on its keys.
 
     Dicts are accepted alongside `Param` instances because a model that
     generates its parameter table (from a CSV of stock sizes, say) naturally
-    produces dicts, and `Param.from_dict` is the contract's own reader.
+    produces dicts, and a model with zero dependencies (the bracket) writes
+    dicts so it still runs without atompipe on the path. `Param.from_dict` is
+    the contract's own reader, but it is lenient — so a dict item's keys are
+    checked first (`_strict_item`).
     """
     raw = getattr(module, "PARAMS", None)
     if raw is None:
@@ -662,6 +2643,9 @@ def _explicit_params(module: Any, entry: str) -> list[Param]:
     seen: dict[str, int] = {}
     for index, item in enumerate(raw):
         if isinstance(item, dict):
+            label = item.get("name")
+            _strict_item(item, entry, f"PARAMS[{index}]" + (
+                f" ({label!r})" if isinstance(label, str) and label.strip() else ""))
             # `value` is a required field on Param but a POINTLESS one to write
             # here: for anything that is also a config field the dataclass owns
             # the value and this one is overwritten below. Defaulting it to None
@@ -718,7 +2702,7 @@ def field_docstrings(entry: str, class_name: str) -> dict[str, str]:
         @dataclass
         class Config:
             thickness: float = 7.0
-            '''mm. 4.0 was tried and misses the deflection limit by ~5x.'''
+            '''mm. Deflection goes as 1/t^3, so thickness is the cheap lever.'''
 
     ...but that is exactly where a careful author writes the rationale, because it
     is the idiomatic place and it sits against the value it explains. Parsing it
@@ -730,7 +2714,10 @@ def field_docstrings(entry: str, class_name: str) -> dict[str, str]:
 
     So: `PARAMS` stays available for what a docstring cannot carry (rejected
     alternatives, units as data, gate bindings), and the docstring carries the
-    prose. An explicit `PARAMS` rationale wins over a docstring when both exist.
+    prose — why THIS value; what lost goes in `PARAMS` (the bracket's docstring
+    quoted a loser's margin as "~5x" where the model said 7.5x, S-42: a number in
+    prose is a number nobody recomputes). An explicit `PARAMS` rationale wins
+    over a docstring when both exist.
 
     Returns {} on any parse failure — a model that cannot be parsed can still be
     imported and run, and losing prose is not a reason to refuse to load.
@@ -743,22 +2730,33 @@ def field_docstrings(entry: str, class_name: str) -> dict[str, str]:
 
     out: dict[str, str] = {}
     for node in ast.walk(tree):
-        if not isinstance(node, ast.ClassDef) or node.name != class_name:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            out.update(_attribute_docstrings(node))
+    return out
+
+
+def _attribute_docstrings(node: ast.ClassDef) -> dict[str, str]:
+    """`{field: docstring}` for one class body, whitespace collapsed.
+
+    The one reading of "the string after a field", shared by `field_docstrings`
+    (the loaded model) and `static_param_prose` (the model's text, never run),
+    so the two cannot normalise the same docstring two ways.
+    """
+    out: dict[str, str] = {}
+    body = node.body
+    for i, stmt in enumerate(body):
+        # A field is `name: type` or `name: type = default`; its docstring is
+        # the bare string expression immediately after it.
+        if not isinstance(stmt, ast.AnnAssign) or not isinstance(stmt.target, ast.Name):
             continue
-        body = node.body
-        for i, stmt in enumerate(body):
-            # A field is `name: type` or `name: type = default`; its docstring is
-            # the bare string expression immediately after it.
-            if not isinstance(stmt, ast.AnnAssign) or not isinstance(stmt.target, ast.Name):
-                continue
-            if i + 1 >= len(body):
-                continue
-            nxt = body[i + 1]
-            if (isinstance(nxt, ast.Expr) and isinstance(nxt.value, ast.Constant)
-                    and isinstance(nxt.value.value, str)):
-                text = " ".join(nxt.value.value.split())
-                if text:
-                    out[stmt.target.id] = text
+        if i + 1 >= len(body):
+            continue
+        nxt = body[i + 1]
+        if (isinstance(nxt, ast.Expr) and isinstance(nxt.value, ast.Constant)
+                and isinstance(nxt.value.value, str)):
+            text = " ".join(nxt.value.value.split())
+            if text:
+                out[stmt.target.id] = text
     return out
 
 
@@ -780,8 +2778,9 @@ def params_from_model(model: LoadedModel) -> list[Param]:
     that live outside the config (a material property, a fastener standard).
 
     Fields with no `PARAMS` entry still become `Param`s, with empty units and an
-    empty rationale, and `undocumented_params` is how the report nags about
-    them. A number with no rationale is a number nobody can defend.
+    empty rationale, and `undefended_params` (over `param_view`, which lets a
+    record state the rationale the model does not) is how every reader nags
+    about them. A number with no rationale is a number nobody can defend.
     """
     declared = {p.name: p for p in _explicit_params(model.module, model.entry)}
     # Resolve from the CLASS, not from `model.entry`. `entry` is the relative path
@@ -818,77 +2817,518 @@ def params_from_model(model: LoadedModel) -> list[Param]:
     return merged
 
 
+# --------------------------------------------------------------------------- #
+# what the model states, read and never run  (the migration's params rule)
+# --------------------------------------------------------------------------- #
+def static_param_prose(root: str, entry: str | None) -> dict[str, dict[str, str]]:
+    """`{name: {"rationale": str, "units": str}}`: what the model's TEXT states.
 
-def sync_params(ledger, model: LoadedModel) -> list[Param]:
-    """Refresh `ledger.params` from the model, preserving ledger-only provenance.
+    The 1.3 migration keeps a param record's `rationale` and `units` only where
+    the model states none (spec §3.15, the params rule), and it has to ask "does
+    the model state one?" without running the model: the migration is a pure
+    function of the legacy ledger and this, it runs on a project whose model may
+    not import at all, and `store` must never execute user code. So this PARSES
+    the entry file — `ast.parse`, never an import — and reads two things:
 
-    Two stores hold a parameter and neither is redundant:
+    * the attribute docstrings of the config class, normalised exactly as
+      `field_docstrings` normalises them (one helper, `_attribute_docstrings`);
+    * `rationale` and `units` string constants from the `PARAMS` items that are
+      dict literals or `Param(...)` calls (keywords, or positions in `Param`'s
+      field order).
 
-    * the **model** owns the VALUE, the units and the rationale. It is the single
-      source of truth (rule 1), and re-reading it on every sweep is what stops the
-      ledger defending a number the design no longer has.
-    * the **ledger** owns everything the model cannot express and a human or agent
-      accumulated over time: rejected alternatives, which input artifacts ground
-      it, which gates protect it, which decision last moved it.
+    A name appears only when something is stated, with `""` for the half that is
+    not. An empty or missing entry, a directory without `__init__.py`, or a file
+    that does not parse states nothing — `{}` — and the migration is then
+    lossless.
 
-    So this merges rather than replaces. A param the model still defines keeps its
-    ledger provenance and takes the model's current value; a param the model has
-    DROPPED is kept, flagged by `orphan_params`, because deleting it would silently
-    destroy the record of why it once existed — and a parameter that disappears
-    without explanation is exactly the kind of hole the decision log exists to
-    prevent. Call it whenever the model is loaded.
+    The one property that matters: it never says the model states something the
+    running model does not. Saying too MUCH drops a hand-written rationale the
+    model lacks — the lossy migration this rule exists to prevent; saying too
+    little keeps a duplicate, which costs a line. So every reading it cannot be
+    sure of reads as "not stated": a non-constant (`units=UNITS`), a `**spread`
+    in an item, a `PARAMS` built by a comprehension, an item added inside an
+    `if`. `tests/test_param_view.StaticProse` holds it equal to the loaded
+    bracket, field for field, and a subset of a model that computes its units.
+
+    Which class's docstrings: the one the loader would resolve as the config —
+    the class `CONFIG = X(...)` (or `CONFIG = X`) names, else `Config`, which is
+    `_resolve_config`'s rule. The spec says "every class in the entry file";
+    that over-claims for a model with a second dataclass sharing a field name
+    (a `Fixture.c` with a docstring beside an undocumented `Config.c` would
+    read as "the model states c's rationale", and the migration would drop the
+    record's — the loss itself). Every class is still the fallback when the
+    config cannot be named from the text (`CONFIG = make_config()`); a config
+    imported from another file states nothing here.
     """
-    from_model = {p.name: p for p in params_from_model(model)}
-    existing = {p.name: p for p in ledger.params}
-    merged: list[Param] = []
+    path = _static_entry(root, entry)
+    if path is None:
+        return {}
+    try:
+        with open(path, "rb") as fh:
+            tree = ast.parse(fh.read(), filename=path)
+    except (OSError, SyntaxError, ValueError):
+        return {}
+    stated = {name: {"rationale": text, "units": ""}
+              for name, text in _static_docstrings(tree).items()}
+    for name, row in _static_params(tree).items():
+        target = stated.setdefault(name, {"rationale": "", "units": ""})
+        # An explicit PARAMS rationale wins over the docstring, as it does in
+        # `params_from_model`; units have no other home.
+        for key in ("rationale", "units"):
+            if row.get(key):
+                target[key] = row[key]
+    return {name: row for name, row in stated.items() if row["rationale"] or row["units"]}
 
-    for name, fresh in from_model.items():
-        old = existing.get(name)
-        if old is None:
-            merged.append(fresh)
+
+def _static_entry(root: str, entry: str | None) -> str | None:
+    """The entry's file, as `_resolve_entry` finds it — minus every fallback that
+    reads the ledger or lists `model/`: the migration calls this while the ledger
+    is the thing being migrated."""
+    entry = entry.strip() if isinstance(entry, str) else ""
+    if not entry:
+        return None
+    path = os.path.abspath(entry if os.path.isabs(entry) else os.path.join(root, entry))
+    if os.path.isdir(path):
+        path = os.path.join(path, "__init__.py")
+    return path if os.path.isfile(path) else None
+
+
+def _static_docstrings(tree: ast.Module) -> dict[str, str]:
+    """The config class's attribute docstrings, read from the module's text."""
+    classes = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    name, external = _static_config_class(tree)
+    if name is not None:
+        chosen = [node for node in classes if node.name == name]
+        if chosen:
+            out: dict[str, str] = {}
+            for node in chosen:              # the order `field_docstrings` merges in
+                out.update(_attribute_docstrings(node))
+            return out
+        external = external or name in _imported_names(tree)
+    if external:
+        return {}
+    out = {}
+    for node in classes:
+        for field_name, text in _attribute_docstrings(node).items():
+            out.setdefault(field_name, text)
+    return out
+
+
+def _static_config_class(tree: ast.Module) -> tuple[str | None, bool]:
+    """`(class name, defined elsewhere)` for the config, read as `_resolve_config` reads it.
+
+    The LAST module-level binding of `CONFIG` is the one the loader sees. No
+    `CONFIG` at all means `Config`. `CONFIG = mod.Config()` names a class in
+    another module: `(None, True)`. Anything else (`CONFIG = make()` of a def,
+    a subscript) cannot be named from the text: `(None, False)`, or the name of a
+    def, which the caller finds is no class here.
+    """
+    value: ast.expr | None = None
+    bound = False
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            targets, rhs = node.targets, node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets, rhs = [node.target], node.value
+        else:
             continue
-        # Model wins on value/units/derivation; ledger wins on accumulated provenance.
-        merged.append(dataclasses.replace(
-            old,
-            value=fresh.value,
-            units=fresh.units or old.units,
-            rationale=fresh.rationale or old.rationale,
-            derived_from=fresh.derived_from or old.derived_from,
+        if any(isinstance(t, ast.Name) and t.id == "CONFIG" for t in targets):
+            value, bound = rhs, True
+    if not bound:
+        return "Config", False
+    if isinstance(value, ast.Call):
+        value = value.func
+    if isinstance(value, ast.Name):
+        return value.id, False
+    if isinstance(value, ast.Attribute):
+        return None, True
+    return None, False
+
+
+def _imported_names(tree: ast.Module) -> set[str]:
+    """Names a module-level import binds (`import a.b` binds `a`)."""
+    names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                names.add(alias.asname or alias.name.split(".")[0])
+    return names
+
+
+def _static_params(tree: ast.Module) -> dict[str, dict[str, str]]:
+    """`{name: {"rationale", "units"}}` from the module-level `PARAMS` literal.
+
+    Followed in statement order the way the module would run it: an assignment
+    of a list or tuple literal replaces the items, `PARAMS += [...]`,
+    `PARAMS.append(item)` and `PARAMS.extend([...])` add to them, and any other
+    rebinding forgets them (whatever it builds is not readable here). The first
+    item naming a param is the one read; the loader refuses a second.
+    """
+    items: list[ast.expr] = []
+    for node in tree.body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if node.value is None or not any(
+                    isinstance(t, ast.Name) and t.id == "PARAMS" for t in targets):
+                continue
+            items = list(_literal_items(node.value) or ())
+        elif (isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name)
+              and node.target.id == "PARAMS"):
+            more = _literal_items(node.value) if isinstance(node.op, ast.Add) else None
+            items = items + list(more) if more is not None else []
+        elif (isinstance(node, ast.Expr) and isinstance(node.value, ast.Call)
+              and isinstance(node.value.func, ast.Attribute)
+              and isinstance(node.value.func.value, ast.Name)
+              and node.value.func.value.id == "PARAMS"
+              and len(node.value.args) == 1 and not node.value.keywords):
+            method, arg = node.value.func.attr, node.value.args[0]
+            if method == "append":
+                items.append(arg)
+            elif method == "extend":
+                items += _literal_items(arg) or []
+    out: dict[str, dict[str, str]] = {}
+    for item in items:
+        read = _static_item(item)
+        if read is not None and read[0] not in out:
+            out[read[0]] = read[1]
+    return out
+
+
+def _literal_items(node: ast.expr) -> list[ast.expr] | None:
+    """The elements of a list or tuple literal, or None for anything else."""
+    if isinstance(node, (ast.List, ast.Tuple)) and not any(
+            isinstance(e, ast.Starred) for e in node.elts):
+        return list(node.elts)
+    return None
+
+
+def _static_item(node: ast.expr) -> tuple[str, dict[str, str]] | None:
+    """`(name, {"rationale", "units"})` from one dict literal or `Param(...)` call."""
+    given: dict[str, ast.expr] = {}
+    if isinstance(node, ast.Dict):
+        if any(key is None for key in node.keys):       # a **spread may override
+            return None
+        for key, value in zip(node.keys, node.values):
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                given[key.value] = value
+    elif isinstance(node, ast.Call) and _called(node.func) == "Param":
+        if any(isinstance(a, ast.Starred) for a in node.args) or any(
+                k.arg is None for k in node.keywords):
+            return None
+        order = [f.name for f in dataclasses.fields(Param)]
+        for position, arg in enumerate(node.args[:len(order)]):
+            given[order[position]] = arg
+        for keyword in node.keywords:
+            given[str(keyword.arg)] = keyword.value
+    else:
+        return None
+    name = _constant_str(given.get("name"))
+    if not name:
+        return None
+    return name, {"rationale": _constant_str(given.get("rationale")),
+                  "units": _constant_str(given.get("units"))}
+
+
+def _called(func: ast.expr) -> str:
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return ""
+
+
+def _constant_str(node: ast.expr | None) -> str:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return ""
+
+
+# --------------------------------------------------------------------------- #
+# the parameter as a reader sees it: the model's number, both homes' losers
+# --------------------------------------------------------------------------- #
+#: Where a param record lives, relative to the project root (phase-1's layout).
+#: Spelt here rather than asked of `store`, because it is a DISPLAY tag — the
+#: origin printed after a rejection — and it names the file a human opens to edit
+#: it whether or not the project has migrated yet.
+_RECORD_DIR = "params"
+
+#: The reason a view carries when the caller loaded no model and gave no reason.
+#: A view without a model must never pass for one with it; an empty
+#: `model_error` next to `value=None` would read as "the model says None".
+_NO_MODEL = "no model was loaded"
+
+
+@dataclass(frozen=True)
+class ParamView:
+    """One parameter as every reader shows it, assembled from its two homes.
+
+    The model owns `value`, `units`, `rationale` and `derived_from`, and its own
+    `PARAMS` losers. The param record (`params/<name>.json`) owns `source`,
+    `grounded_by` and `tags`, may carry losers of its own, and carries `units`
+    or `rationale` only where the model states none (spec §3.15). `rejected` is
+    the union, each row `(Rejected, origin)`, origin the place it lives —
+    `"model/bracket.py PARAMS"` or `"params/<name>.json"` — the model's first,
+    a loser both homes state shown once, as the model's.
+
+    `home` is where the value lives (`"model/bracket.py Config.thickness"`, or
+    `"<entry> PARAMS"` for a constant only PARAMS declares); `""` means the
+    model does not hold this parameter — either it did not load (`model_error`
+    says why) or the record outlived its field (an orphan). `value` is `None`
+    in both cases and never a copy from anywhere else: S-39 was `why` quoting
+    the ledger's 7 after the model said 8.0. `record` is the record's path, or
+    `""` when no record exists.
+
+    `gates` is derived, never stored: the gates whose last executed reads name
+    this parameter (`param_readers`), filled only when the caller handed
+    `param_view` the read sets — `()` otherwise, which is "not asked", and a
+    reader that prints a "protected by" column passes them.
+
+    Not persisted; `to_dict` is the JSON shape for readers that write one
+    (`last_check.json`'s `params`, `state.json`'s `params` rows).
+    """
+
+    name: str
+    value: Any = None
+    units: str = ""
+    rationale: str = ""
+    derived_from: tuple[str, ...] = ()
+    rejected: tuple[tuple[Rejected, str], ...] = ()
+    source: str = ""
+    grounded_by: tuple[str, ...] = ()
+    tags: tuple[str, ...] = ()
+    home: str = ""
+    record: str = ""
+    model_error: str = ""
+    gates: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name, "value": self.value, "units": self.units,
+            "rationale": self.rationale, "derived_from": list(self.derived_from),
+            "rejected": [{"value": item.value, "why": item.why,
+                          "evidence": item.evidence, "origin": origin}
+                         for item, origin in self.rejected],
+            "source": self.source, "grounded_by": list(self.grounded_by),
+            "tags": list(self.tags), "home": self.home, "record": self.record,
+            "model_error": self.model_error, "gates": list(self.gates),
+        }
+
+
+def param_view(ledger, model: LoadedModel | None, *, model_error: str = "",
+               read_sets: Mapping[str, Iterable[Any]] | None = None) -> list[ParamView]:
+    """Every parameter, value from the model, provenance from the record.
+
+    `ledger` supplies the records (`ledger.params`); nothing but its names,
+    `source`, `grounded_by`, `tags`, `rejected`, and — where the model states
+    none — `units` and `rationale` is read from them. Their `value`,
+    `derived_from`, `gates` and `changed_in` are never read: the model owns the
+    first two, the last two are derived (`why` takes read sets; `decisions.
+    changed_in`).
+
+    Order: the model's (field order, then PARAMS-only constants), then records
+    the model does not define, in record order — each with `value=None` and no
+    `home`, which is what `orphan_params` lists.
+
+    `model=None` (it did not load, or the project has none): one view per
+    record, `value=None`, `model_error` set — to `model_error`, else
+    `"no model was loaded"`. No number is shown where the model should answer.
+
+    `read_sets` — `{gate id: {param path}}`, the caller's (registered gates
+    only: a gate this project cannot load protects nothing here) — fills each
+    view's `gates` through `param_readers`. Without it `gates` is `()`.
+
+    Replaces the mutating parameter sync (`sync_params`, deleted at checkpoint
+    1.3 with its last caller), which copied the model into the ledger on every
+    check and kept the record's `rejected` whole: a loser added to PARAMS after
+    the param existed never reached anything a reader saw (S-38), and `why`
+    quoted the copy's value after the model moved (S-39). Nothing is copied
+    here, so there is nothing to fall behind.
+    """
+    views = _views(ledger, model, model_error)
+    if read_sets is None:
+        return views
+    return [dataclasses.replace(view, gates=tuple(param_readers(view.name, read_sets)))
+            for view in views]
+
+
+def _views(ledger, model: LoadedModel | None, model_error: str) -> list[ParamView]:
+    records: dict[str, Param] = {}
+    for record in list(getattr(ledger, "params", None) or ()):
+        records.setdefault(record.name, record)         # first wins, as Ledger.param
+    if model is None:
+        error = " ".join(str(model_error or "").split()) or _NO_MODEL
+        return [_record_view(record, model_error=error) for record in records.values()]
+
+    declared = model.params or params_from_model(model)
+    fields = {f.name for f in dataclasses.fields(model.config)}
+    config_home = (f"{_entry_relative(model, _config_source(model))} "
+                   f"{type(model.config).__name__}")
+    params_home = f"{model.entry} PARAMS"
+    views: list[ParamView] = []
+    for param in declared:
+        record = records.get(param.name)
+        views.append(ParamView(
+            name=param.name,
+            value=param.value,
+            units=param.units or (record.units if record else "") or "",
+            rationale=param.rationale or (record.rationale if record else "") or "",
+            derived_from=tuple(param.derived_from or ()),
+            rejected=_union([(item, params_home) for item in param.rejected or ()]
+                            + _record_losers(record)),
+            # The record's provenance; a PARAMS entry fills only what no record says.
+            source=(record.source if record else "") or param.source or "",
+            grounded_by=tuple((record.grounded_by if record else None)
+                              or param.grounded_by or ()),
+            tags=tuple((record.tags if record else None) or param.tags or ()),
+            home=f"{config_home}.{param.name}" if param.name in fields else params_home,
+            record=_record_path(param.name) if record else "",
         ))
+    live = {param.name for param in declared}
+    views += [_record_view(record) for name, record in records.items() if name not in live]
+    return views
 
-    for name, old in existing.items():
-        if name not in from_model:
-            merged.append(old)          # orphan: kept, reported, never silently dropped
 
-    ledger.params = merged
-    return merged
+def param_readers(name: str, read_sets: Mapping[str, Iterable[Any]]) -> list[str]:
+    """The gates whose recorded reads name parameter `name`, sorted by id.
+
+    A read counts when `name` is one of the first two keys of its path —
+    `ctx.params["thickness"]` and `ctx.params["config"]["thickness"]`, the two
+    spellings gates use — and deeper keys do not: a gate walking a BOM would
+    otherwise protect every line item that shares a parameter's name.
+
+    The one copy of the rule. `decisions.why` (its GATES block), `cli`'s
+    `Param.gates` and every `ParamView.gates` read it from here. What slipped
+    through: it lived in `decisions` and again in `cli`, and when the page and
+    the report moved to the view (review, checkpoint 1.3: they read the sparse
+    records, so the bracket's page showed no parameter at all) a third copy was
+    one keystroke away. The honest limit is the same everywhere: this is a
+    DIRECT read — `bracket.deflection` reads the derived `deflection`, which
+    protects `arm_length` in physical fact, and names no gate for it.
+    """
+    found: list[str] = []
+    for gate_id in sorted(read_sets):
+        for path in read_sets[gate_id] or ():
+            parts = (path,) if isinstance(path, str) else tuple(path)
+            if name in [part for part in parts[:2] if isinstance(part, str)]:
+                found.append(gate_id)
+                break
+    return found
+
+
+def _record_path(name: str) -> str:
+    return f"{_RECORD_DIR}/{name}.json"
+
+
+def _record_losers(record: Param | None) -> list[tuple[Rejected, str]]:
+    if record is None:
+        return []
+    origin = _record_path(record.name)
+    out = []
+    for item in record.rejected or ():
+        if isinstance(item, dict):
+            item = Rejected(value=str(item.get("value", "")), why=str(item.get("why", "")),
+                            evidence=str(item.get("evidence", "")))
+        if isinstance(item, Rejected):
+            out.append((item, origin))
+    return out
+
+
+def _union(rows: list[tuple[Rejected, str]]) -> tuple[tuple[Rejected, str], ...]:
+    """Rows in order, each loser once. Case-folded on (value, why), the rule
+    `decisions` already uses: a record that repeats the model's loser is the same
+    loser, and the first home to state it — the model — is the one shown."""
+    seen: set[tuple[str, str]] = set()
+    out = []
+    for item, origin in rows:
+        key = (" ".join(str(item.value).split()).casefold(),
+               " ".join(str(item.why).split()).casefold())
+        if key not in seen:
+            seen.add(key)
+            out.append((item, origin))
+    return tuple(out)
+
+
+def _record_view(record: Param, *, model_error: str = "") -> ParamView:
+    """A record alone: its own provenance, no number, no home."""
+    return ParamView(
+        name=record.name, value=None, units=record.units or "",
+        rationale=record.rationale or "", rejected=_union(_record_losers(record)),
+        source=record.source or "", grounded_by=tuple(record.grounded_by or ()),
+        tags=tuple(record.tags or ()), home="", record=_record_path(record.name),
+        model_error=model_error)
+
+
+def _entry_relative(model: LoadedModel, path: str) -> str:
+    """`path` relative to the project root the model was loaded from, posix.
+
+    The root is not on `LoadedModel`, but `entry` is `file` relative to it, so
+    it is recovered by walking up one directory per entry component. The
+    config class usually lives in the entry itself; a model that grew into a
+    package names the module that defines it.
+    """
+    if not path or not os.path.isabs(path) or _norm(path) == _norm(model.file):
+        return model.entry
+    root = model.file
+    for _part in model.entry.replace("\\", "/").split("/"):
+        root = os.path.dirname(root)
+    try:
+        return os.path.relpath(path, root).replace(os.sep, "/")
+    except ValueError:                             # another drive, on Windows
+        return model.entry
 
 
 def orphan_params(ledger, model: LoadedModel) -> list[str]:
-    """Ledger params the model no longer defines.
+    """Param records (`ledger.params`) the model no longer defines, in record order.
 
     Either the model dropped a parameter and the record should be retired with a
     decision entry, or the parameter was renamed and its provenance is now
     stranded — pointing at nothing while every `grounded_by` still references it.
     Both are worth a line in the report rather than a silent deletion.
+
+    It reads the records and the model and nothing else: never a merged copy.
+    The parameter sync used to keep an orphan in `ledger.params` so this could
+    find it there; from 1.3 the records are the files under `params/`, and a
+    param the model owns entirely has no record at all, so an orphan is exactly
+    a record with no field behind it — the views `param_view` returns with no
+    `home`. `model` and `doctor` both list them from here.
     """
-    live = {p.name for p in params_from_model(model)}
+    live = {p.name for p in (model.params or params_from_model(model))}
     return [p.name for p in ledger.params if p.name not in live]
 
-def undocumented_params(model: LoadedModel) -> list[str]:
-    """Names of parameters carrying no rationale. The report's nag list.
+def undefended_params(views: Iterable[ParamView]) -> list[str]:
+    """Names of the parameters the model holds that no home defends. The nag list
+    `doctor`, `model`, `status`, the report and the page all print — each from
+    this, over `param_view`'s views, so no two can disagree.
 
     The test is the rationale, not the paperwork: a `Param` that exists in
     `PARAMS` with `rationale=""` is exactly as undefended as a field nobody
     mentioned. "It was 7 when it worked" is not a rationale, but at least it is
     a sentence someone can argue with; an empty string is a number that will be
     re-litigated by every fresh reader forever, which is the cost `Rejected`
-    exists to eliminate.
+    exists to eliminate. A view's rationale is the model's, else its record's
+    (a record may state one only where the model states none).
 
-    Returned in model field order, so the list reads like the config file.
+    Only a view with a `home` is judged. An orphan record holds no number to
+    defend (`orphan_params` names it); and when the model does not load, what
+    it says about its numbers cannot be read — calling a parameter undefended
+    then would be a claim about text nobody read, so the caller says the model
+    does not load instead.
+
+    What slipped through (review, checkpoint 1.3). This read the MODEL alone
+    (`undocumented_params(model)`) for `doctor` and `model`, while `status`, the
+    report and the page read the RECORDS alone (`ledger.params`), which from
+    1.3 are sparse: a record holding only `"source"` made `status` call
+    `thickness` undefended while `doctor` said every parameter carried a
+    rationale; a field nobody explained was flagged by `doctor` and by nothing
+    else; a record's rationale for a field the model leaves silent was flagged
+    by `doctor` alone. *Rejected:* keeping both functions, one per home — two
+    rules for one nag list is how the two answers came apart.
+
+    Returned in view order (the model's field order), so the list reads like
+    the config file.
     """
-    return [p.name for p in (model.params or params_from_model(model))
-            if not (p.rationale or "").strip()]
+    return [view.name for view in views
+            if view.home and not (view.rationale or "").strip()]
 
 
 # --------------------------------------------------------------------------- #

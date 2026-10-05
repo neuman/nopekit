@@ -28,6 +28,7 @@ import os
 import shutil
 import tempfile
 import unittest
+import unittest.mock
 
 from atompipe import cli as cli_mod
 from atompipe import gates as gates_mod
@@ -35,9 +36,12 @@ from atompipe import site as site_mod
 from atompipe import store as store_mod
 from atompipe.models import (
     Acceptance, Claim, Comparator, Locator, NegativeControl, ProjectMeta,
-    RunMeta, Tier, Verdict, View, ViewKind,
+    Tier, Verdict, View, ViewKind,
 )
 from atompipe.util import AtompipeError
+
+import _env
+import _projects
 
 #: A three-plate stack: thin in z (9), widest in x (40). Used by the explode
 #: tests and by the fixture viewgen, so the node names the locator tests aim at
@@ -108,11 +112,32 @@ class _SiteCase(unittest.TestCase):
 
     # -- ledger fixtures --------------------------------------------------- #
     def _ledger(self, *, claims=(), verdicts=(), views=()):
+        """Claims and views through `store.save`; each verdict THROUGH THE CACHE.
+
+        Never into `ledger.verdicts`: from 1.2 a page reads what
+        `verdicts.resolve` makes of the verdict cache, and a verdict written
+        into the ledger file would test a store the page no longer reads. A
+        pass or a fail becomes an entry recorded with no gate behind it
+        (`record_verdict(root, None, None, v)`: its code is unrecorded, so it
+        is never Fresh) — these gates are not registered in the CLI's registry
+        (tests:H2), so they reach the page as the stale rows of gates this
+        project does not register, and never as proof. A skip or a crash is
+        not a measurement and is never cached: it is remembered, as the sweep
+        remembers one, with no date (`when=""`), so its age is null.
+        """
+        from atompipe import verdicts as verdicts_mod
+
         ledger = store_mod.load(self.root)
         ledger.claims = list(claims)
-        ledger.verdicts = list(verdicts)
         ledger.views = list(views)
         store_mod.save(self.root, ledger)
+        for verdict in verdicts:
+            if verdict.outcome in ("pass", "fail"):
+                verdicts_mod.record_verdict(self.root, None, None, verdict)
+            else:
+                verdicts_mod.remember(
+                    self.root, verdict.gate, verdict, input_rho="",
+                    kind="error" if verdict.outcome == "error" else "self-skip", when="")
         return ledger
 
     def _claim(self, cid="C1", gates=("g.one",), **kw):
@@ -137,6 +162,20 @@ class _SiteCase(unittest.TestCase):
         for spec in specs:
             registry.register(spec, lambda ctx: Verdict(gate="x", passed=True))
         return registry
+
+    def _qualified(self, registry, *gate_ids):
+        """A forged whole qualification for each of ``gate_ids`` (R-6, P2.3):
+        an evaluator never qualified reads not yet qualified — its row the
+        unqualified one, its claim Gap — so a test about how a STALE entry
+        renders plants a qualified evaluator first, as before P2.3 it had no
+        need to."""
+        from atompipe import verdicts as verdicts_mod
+        for gid in gate_ids:
+            spec, fn = registry.get(gid)
+            verdicts_mod.record_control(
+                self.root, spec, fn, bad="fail", detail="planted by a renderer test",
+                good="pass", mutation=() if verdicts_mod._mutation_applies(fn, self.root)
+                else None)
 
     def _spec(self, gid, claims=("C1",), **kw):
         from atompipe.models import GateSpec
@@ -218,6 +257,32 @@ class Scaffold(_SiteCase):
         with self.assertRaises(AtompipeError) as caught:
             site_mod.scaffold(self.root)
         self.assertIn("--force", str(caught.exception))
+
+    def test_build_refreshes_a_renderer_an_older_atompipe_scaffolded(self):
+        """A page scaffolded before P2.1 keeps its own `format.js`, which read
+        `blocked` as "its tooling is missing" in a missing tool's tone — so a
+        crash, filed under `blocked` from P2.1, would read on it exactly like a
+        missing tool (invariant 2), and its READY headline read `ready`. `site
+        build` refreshes every renderer file but the shell, which stays the
+        project's (review of the P2.1 design)."""
+        _capture(["site", "init", "-C", self.root])
+        site_dir = os.path.join(self.root, site_mod.SITE_DIR)
+        old_format = os.path.join(site_dir, "lib", "format.js")
+        with open(old_format, "w", encoding="utf-8") as fh:
+            fh.write('const CLAIM_STATUS = { blocked: { label: "BLOCKED", tone: "warn", '
+                     'hint: "a gate covers it but its tooling is missing" } };\n')
+        index = os.path.join(site_dir, "index.html")
+        with open(index, "w", encoding="utf-8") as fh:
+            fh.write("<!-- the project's own shell -->")
+        code, out = _capture(["site", "build", "-C", self.root])
+        self.assertEqual(code, 0, out)
+        with open(old_format, encoding="utf-8") as fh, \
+                open(os.path.join(site_mod.TEMPLATE_DIR, "lib", "format.js"),
+                     encoding="utf-8") as want:
+            self.assertEqual(fh.read(), want.read())
+        with open(index, encoding="utf-8") as fh:
+            self.assertIn("the project's own shell", fh.read())
+        self.assertIn("refreshed the renderer", out)
 
 
 # --------------------------------------------------------------------------- #
@@ -460,8 +525,9 @@ class StateIsJson(_SiteCase):
                         data={"rows": [{"id": "r1", "part": "M3 screw"}]})],
         )
         ledger = store_mod.load(self.root)
-        payload = site_mod.state(self.root, ledger, self._registry(self._spec("g.one")),
-                                 now="2026-01-01T00:00:00Z")
+        registry = self._registry(self._spec("g.one"))
+        self._qualified(registry, "g.one")
+        payload = site_mod.state(self.root, ledger, registry, now="2026-01-01T00:00:00Z")
 
         # No `default=` encoder: a stray dataclass or enum must raise here rather
         # than be silently stringified into something the page cannot read back.
@@ -485,6 +551,66 @@ class StateIsJson(_SiteCase):
         _capture(["site", "build", "-C", self.root])
         self.assertIsInstance(self._state(), dict)
 
+    def test_the_judgement_digest_moves_with_a_judgement_and_not_with_the_clock(self):
+        """`meta.judgement_digest` is what the page judged (review, `repro_site`).
+
+        The negative half: the clock and the drawing move it not at all, or every
+        check would send the reader to rebuild a page whose verdicts all stand.
+        The positive half: a verdict's outcome, a claim's status, and a key no
+        one has classified yet each move it — the deny-list's direction, so a
+        judgement a later `state` adds is never silently unwatched."""
+        self._ledger(claims=[self._claim("C1")],
+                     verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
+                                       measured=0.31, limit=0.5, units="mm")])
+        registry = self._registry(self._spec("g.one"))
+        self._qualified(registry, "g.one")
+        payload = site_mod.state(self.root, store_mod.load(self.root), registry,
+                                 now="2026-01-01T00:00:00Z")
+        digest = payload["meta"]["judgement_digest"]
+        self.assertEqual(site_mod.judgement_digest(payload), digest,
+                         "the digest `state` set is not the digest of what it returned")
+
+        def moved(change) -> bool:
+            copy = json.loads(json.dumps(payload))
+            change(copy)
+            return site_mod.judgement_digest(copy) != digest
+
+        def clock(doc):
+            doc["meta"]["built"] = "2027-01-01T00:00:00Z"
+            doc["verdicts"][0]["when"] = "2027-01-01T00:00:00Z"
+            doc["verdicts"][0]["age_s"] = 5.0
+            doc["meta"]["records_digest"] = "0" * 64
+            doc["views"] = [{"id": "assembly"}]
+            doc["locator_problems"] = [{"gate": "g.one"}]
+
+        self.assertFalse(moved(clock), "the clock or the drawing moved the judgement")
+        self.assertTrue(moved(lambda d: d["verdicts"][0].update(status="fail")))
+        self.assertTrue(moved(lambda d: d["verdicts"][0].update(fresh=True)))
+        self.assertTrue(moved(lambda d: d["claims"][0].update(status="pass")))
+        self.assertTrue(moved(lambda d: d["readiness"].update(ready=True)))
+        self.assertTrue(moved(lambda d: d.update(results=[{"claim": "C1"}])),
+                        "a key `state` adds later went unjudged")
+        self.assertTrue(moved(lambda d: d["meta"].update(stale_reason="")))
+
+    def test_what_moved_is_named_claims_first(self):
+        """The reason names what the page shows that a rebuild would not."""
+        shown = {"claims": [{"id": "C1", "status": "pass"}, {"id": "C2", "status": "pass"}],
+                 "verdicts": [{"gate": "g.one", "status": "pass", "measured": 0.41,
+                               "units": "mm", "stale_reason": ""}]}
+        now = json.loads(json.dumps(shown))
+        self.assertEqual(site_mod.judgement_moved(shown, now), [])
+        now["verdicts"][0].update(measured=0.29)
+        self.assertEqual(site_mod.judgement_moved(shown, now),
+                         ["g.one pass 0.41 mm -> pass 0.29 mm"])
+        now["verdicts"][0].update(stale_reason="config.thickness 8.0 -> 6.0")
+        self.assertEqual(site_mod.judgement_moved(shown, now),
+                         ["g.one pass 0.41 mm -> pass 0.29 mm (stale)"])
+        now["claims"][0].update(status="fail")
+        now["claims"].append({"id": "C9", "status": "pending"})
+        del now["claims"][1]
+        self.assertEqual(site_mod.judgement_moved(shown, now),
+                         ["C1 pass -> fail", "C9 (none) -> pending", "C2 pass -> (none)"])
+
 
 # --------------------------------------------------------------------------- #
 class HonestyOnThePage(_SiteCase):
@@ -496,15 +622,111 @@ class HonestyOnThePage(_SiteCase):
     has — and unlike the readiness report, nobody would be diffing it.
     """
 
-    def _built_state(self, claims, verdicts, registry) -> dict:
-        self._ledger(claims=claims, verdicts=verdicts)
-        ledger = store_mod.load(self.root)
-        ledger.last_run = RunMeta(when="2026-01-01T00:00:00Z", tier=0)
-        store_mod.save(self.root, ledger)
+    def _built_state(self, claims, verdicts, registry, *, controls=True) -> dict:
+        """Plant `verdicts` under the registry's OWN gates, then build the page.
+
+        A pass or a fail is recorded with the registered `(spec, fn)`, so the
+        resolver can key it: a Fresh entry. A skip or a crash is remembered —
+        as an availability skip when the gate's tooling is missing here, a
+        self-skip otherwise — dated 2026-01-01T00:00:00Z, ten minutes before
+        the build.
+
+        With `controls`, every registered gate with a verdict also gets a
+        FORGED fired control: `record_control(bad="fail", good="pass")` with no fixture run
+        behind it. That is a forged admission, legitimate only in a renderer
+        test — it forges the inner loop, and R-9's re-execution at every money
+        boundary (`check --force` in CI, P2's `export`) is what a hand-placed
+        entry cannot get past. It is here because these tests are about the
+        page, and a Fresh PASS from a gate never shown to fail is not a PASS on
+        the page (§3.10); `test_an_undemonstrated_gate_does_not_read_pass_on_the_page`
+        builds without it and shows exactly that.
+
+        `site.build` is handed no resolution: it resolves for itself.
+        """
+        from atompipe import verdicts as verdicts_mod
+
+        self._ledger(claims=claims)
+        for verdict in verdicts:
+            found = registry.get(verdict.gate)
+            spec, fn = found if found is not None else (None, None)
+            if verdict.outcome in ("pass", "fail"):
+                verdicts_mod.record_verdict(self.root, spec, fn, verdict)
+            else:
+                missing = spec is not None and not gates_mod.availability(spec)[0]
+                kind = ("error" if verdict.outcome == "error" else
+                        "availability" if missing else "self-skip")
+                verdicts_mod.remember(self.root, verdict.gate, verdict, input_rho="",
+                                      kind=kind, when="2026-01-01T00:00:00Z")
+            if controls and spec is not None:
+                # R-6 (P2.3): a whole qualification forged — the known-good
+                # half passed and, where the walk applies, a walk that made
+                # none — or the entry is incomplete and nothing counts (D19).
+                verdicts_mod.record_control(
+                    self.root, spec, fn, bad="fail", detail="planted by a renderer test",
+                    good="pass", mutation=() if verdicts_mod._mutation_applies(fn, self.root)
+                    else None)
         site_mod.scaffold(self.root)
         site_mod.build(self.root, store_mod.load(self.root), registry,
                        site_mod.ViewRegistry(), now="2026-01-01T00:10:00Z")
         return self._state()
+
+    def test_a_passing_gate_reaches_the_page(self):
+        """The positive control for everything in this class: a gate that ran,
+        passed, and was shown to fail its own known-bad input reads PASS on the
+        page. Without it, every "is not PASS" below could be a page that cannot
+        show a pass at all."""
+        state = self._built_state(
+            claims=[self._claim("C1", gates=["g.one"])],
+            verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
+                              measured=0.31, limit=0.5, units="mm")],
+            registry=self._registry(self._spec("g.one")),
+        )
+        self.assertEqual(state["claims"][0]["status"], "pass")
+        verdict = state["verdicts"][0]
+        self.assertTrue(verdict["ok"])
+        self.assertEqual(verdict["status"], "pass")
+        self.assertTrue(verdict["cached"])
+        self.assertTrue(verdict["fresh"])
+        self.assertEqual(verdict["stale_reason"], "")
+        self.assertFalse(state["meta"]["stale"])
+
+    def test_an_undemonstrated_gate_does_not_read_pass_on_the_page(self):
+        """The same build without the forged control. The verdict is Fresh and
+        it passed — and the gate was never shown to fail, so its pass is not
+        proof (invariant 9): not PASS on the page, and the row says why. R-6
+        (P2.3): never qualified, it reads not yet qualified — the row
+        ``unqualified``, the claim Gap — where P2.2 read it Stale."""
+        state = self._built_state(
+            claims=[self._claim("C1", gates=["g.one"])],
+            verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
+                              measured=0.31, limit=0.5, units="mm")],
+            registry=self._registry(self._spec("g.one")),
+            controls=False,
+        )
+        self.assertNotEqual(state["claims"][0]["status"], "pass",
+                            "a PASS from a gate never shown to fail reached the page")
+        verdict = state["verdicts"][0]
+        self.assertFalse(verdict["fresh"])
+        self.assertEqual(verdict["status"], "unqualified")
+        self.assertEqual(verdict["qualification"]["token"], "qualification:not-yet|0")
+        self.assertIn("not yet qualified at this version", verdict["qualification"]["reason"])
+        # The sentence the page shows (review of P2.3: it showed `error`, R-2's
+        # fallback, `unqualified: qualification:not-yet|0`): the table's, no token.
+        self.assertEqual(verdict["qualification"]["text"],
+                         "unqualified: not yet qualified at this version — the next check "
+                         "run qualifies it")
+        self.assertIn("qualification:not-yet|0", verdict["error"], "the fallback stays")
+        panels = os.path.join(os.path.dirname(site_mod.__file__), "site_template", "lib",
+                              "panels.js")
+        with open(panels, encoding="utf-8") as fh:
+            js = fh.read()
+        row = js[js.index("function verdictRow("):]
+        row = row[:row.index("\n}\n")]
+        self.assertIn("v.qualification && v.qualification.text", row,
+                      "the page renders the qualification's text before `error`")
+        self.assertLess(row.index("v.qualification.text"), row.index("v.error ||"))
+        self.assertEqual(state["claims"][0]["status"], "unclaimed")
+        self.assertFalse(state["readiness"]["ready"])
 
     def test_a_claim_covered_only_by_a_skipped_gate_is_not_proven(self):
         state = self._built_state(
@@ -536,12 +758,13 @@ class HonestyOnThePage(_SiteCase):
         self.assertEqual(state["verdicts"][0]["status"], "errored")
         self.assertFalse(state["verdicts"][0]["ok"])
 
-    def test_a_partially_covered_claim_carries_the_partial_marker(self):
-        """The PARTIAL row, on the page as in the report.
-
-        Without it a claim covered by a cheap analytic gate and an uninstalled
-        solver reads as fully proven, and the check that mattered has vanished
-        from the document.
+    def test_a_partially_covered_claim_reads_skipped_and_names_the_gate(self):
+        """A claim covered by a cheap analytic gate and an uninstalled solver,
+        on the page as in the report. Until P2.1 it resolved PASS and the page
+        marked it PARTIAL; under GLOSSARY §3's composition it reads Skipped —
+        never `pass` — the unproven gate named with its lead, and PARTIAL is
+        gone (R-6, old 2.1's strengthening: `status != "pass"` and the gate
+        named; P2.1-D18: no `partial` key at all, its contradiction flag false).
         """
         state = self._built_state(
             claims=[self._claim("C1", gates=["g.cheap", "g.solve"])],
@@ -554,11 +777,49 @@ class HonestyOnThePage(_SiteCase):
             registry=self._registry(self._spec("g.cheap"), self._spec("g.solve")),
         )
         row = state["claims"][0]
-        self.assertTrue(row["partial"],
-                        "a claim whose covering solver never ran is PARTIAL, not proven")
-        unproven = {entry["gate"] for entry in row["unproven"]}
-        self.assertIn("g.solve", unproven,
-                      "the page must NAME the gate that did not produce proof")
+        self.assertNotIn("partial", row)
+        self.assertNotEqual(row["status"], "pass",
+                            "a claim whose covering solver never ran is not checked")
+        self.assertEqual((row["status"], row["key"], row["word"], row["cause"]),
+                         ("blocked", "skipped", "skipped", "skipped"))
+        self.assertFalse(row["disagree"])
+        unproven = {entry["gate"]: entry["why"] for entry in row["unproven"]}
+        self.assertEqual(unproven.get("g.solve"), "skipped: requires openfoam (not on PATH)",
+                         "the page must NAME the gate that did not pass, led by the fact")
+
+    def test_an_errored_row_paints_in_failings_tone_and_sorts_first(self):
+        """Invariant 2 on the page (P2.0 F-5): an errored claim's row is marked
+        `errored`, the page paints it in Failing's tone (`format.js`), and the
+        claims arrive in severity order — the crash above the skip whatever the
+        record order says."""
+        state = self._built_state(
+            claims=[self._claim("C1", gates=["g.skip"]), self._claim("C2", gates=["g.boom"])],
+            verdicts=[Verdict(gate="g.skip", claims=["C1"], skipped=True,
+                              skip_reason="requires openfoam (not on PATH)"),
+                      Verdict(gate="g.boom", claims=["C2"], error="RuntimeError: boom")],
+            registry=self._registry(self._spec("g.skip"), self._spec("g.boom", claims=["C2"])),
+        )
+        self.assertEqual([r["id"] for r in state["claims"]], ["C2", "C1"])
+        crash = state["claims"][0]
+        self.assertEqual((crash["status"], crash["errored"]), ("blocked", True))
+        self.assertTrue(crash["reason"].startswith("errored: g.boom : RuntimeError: boom"))
+        with open(os.path.join(site_mod.TEMPLATE_DIR, "lib", "format.js"),
+                  encoding="utf-8") as fh:
+            self.assertIn('tone: errored ? "bad" : look.tone,', fh.read())
+
+    def test_a_junk_pass_flag_is_a_fail_on_the_page(self):
+        """A verdict row's status comes from `Verdict.outcome`, never the flags:
+        `passed: "yes"` is not a pass (P2.1 design: the page read `passed` and
+        printed `pass` beside `ok: false`)."""
+        from atompipe import site as site_
+        junk = Verdict(gate="g.one", claims=["C1"], passed="yes")
+        resolution = unittest.mock.Mock(verdicts=[junk], stale_gates=frozenset(), rows={})
+        ledger = store_mod.load(self.root)
+        ledger.claims = [self._claim("C1")]
+        state = site_.state(self.root, ledger, self._registry(self._spec("g.one")),
+                            resolution=resolution, params=[])
+        row = state["verdicts"][0]
+        self.assertEqual((row["status"], row["ok"]), ("fail", False))
 
     def test_an_unanchored_failure_says_so_rather_than_looking_broken(self):
         """A gate attaches a locator only when it genuinely knows the position;
@@ -659,22 +920,84 @@ class SiteStatusReports(_SiteCase):
         self.assertTrue(payload["has_dangling_locators"])
         self.assertEqual(len(payload["locator_problems"]), 1)
 
-    def test_a_ledger_written_after_the_build_reads_as_stale(self):
-        """A stale sweep must LOOK stale, and so must a stale page."""
+    def test_records_moved_after_the_build_read_as_stale(self):
+        """A stale page must LOOK stale — and a current one must not.
+
+        The page records the digest of the records it was built from
+        (`meta.records_digest`), and `_site_state` compares it with
+        `store.records_digest` now (cli:H16). What it replaced compared the
+        mtimes of `ledger.json` and `state.json`: from checkpoint 1.3 the ledger
+        is a generated index that every command rewrites, so a page built from
+        unchanged records read stale after any `status` — and a record edited by
+        hand, before a command had rebuilt the index, read current."""
         self._ledger(claims=[self._claim("C1")])
         _capture(["site", "init", "-C", self.root])
         _capture(["site", "build", "-C", self.root])
+        self.assertEqual(self._state()["meta"]["records_digest"],
+                         store_mod.records_digest(self.root))
         self.assertFalse(cli_mod._site_state(self.root)["stale"])
 
+        # The negative half: the index rewritten and every mtime moved past the
+        # build, the records' bytes untouched — still current.
         state_path = os.path.join(self.root, site_mod.SITE_DIR,
                                   site_mod.DATA_DIR, site_mod.STATE_NAME)
-        ledger_path = store_mod.ledger_path(self.root)
-        mtime = os.path.getmtime(state_path)
-        os.utime(ledger_path, (mtime + 60, mtime + 60))
+        claim_path = os.path.join(self.root, "claims", "C1.json")
+        index_path = store_mod.ledger_path(self.root)
+        with open(index_path, "a", encoding="utf-8") as fh:
+            fh.write("\n")
+        later = os.path.getmtime(state_path) + 60
+        for path in (index_path, claim_path):
+            os.utime(path, (later, later))
+        info = cli_mod._site_state(self.root)
+        self.assertFalse(info["stale"], info["stale_reason"])
 
+        # One record moves, and nothing is rebuilt: stale, and the fix is named.
+        with open(claim_path, encoding="utf-8") as fh:
+            record = json.load(fh)
+        record["statement"] += " (edited by hand)"
+        with open(claim_path, "w", encoding="utf-8") as fh:
+            json.dump(record, fh, indent=2)
         info = cli_mod._site_state(self.root)
         self.assertTrue(info["stale"])
         self.assertIn("site build", info["stale_reason"])
+
+    def test_a_verdict_written_after_the_build_reads_as_stale(self):
+        """A stale sweep must LOOK stale, and so must a stale page — the case
+        the `records_digest` rewrite lost (review, `repro_site`).
+
+        What this replaced touched `ledger.json` after the build, which is what
+        a `check` did before checkpoint 1.3: the verdicts lived in the ledger.
+        They live in the verdict cache now, which no record digest covers, so
+        its replacement edited a claim file and no longer guarded the risk it
+        was named for (R-6): a sweep lands after the build, not one record
+        moves, and the page still shows what it showed. `meta.judgement_digest`
+        is what the page judged; `_site_state` asks the resolver again."""
+        from atompipe import verdicts as verdicts_mod
+
+        self._ledger(claims=[self._claim("C1")],
+                     verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
+                                       measured=0.31, limit=0.5, units="mm")])
+        _capture(["site", "init", "-C", self.root])
+        _capture(["site", "build", "-C", self.root])
+        info = cli_mod._site_state(self.root)
+        self.assertFalse(info["stale"], info["stale_reason"])
+
+        # The sweep lands after the build: a verdict into the cache, no record.
+        records = store_mod.records_digest(self.root)
+        verdicts_mod.record_verdict(self.root, None, None, Verdict(
+            gate="g.two", claims=["C1"], passed=False, measured=0.71, limit=0.5,
+            units="mm"))
+        self.assertEqual(store_mod.records_digest(self.root), records,
+                         "the precondition: not one record moved")
+        info = cli_mod._site_state(self.root)
+        self.assertTrue(info["stale"], "a verdict the page does not show read current")
+        self.assertIn("site build", info["stale_reason"])
+
+        # The positive control: a rebuild shows it, and is current again.
+        _capture(["site", "build", "-C", self.root])
+        self.assertIn("g.two", [row["gate"] for row in self._state()["verdicts"]])
+        info = cli_mod._site_state(self.root)
+        self.assertFalse(info["stale"], info["stale_reason"])
 
     def test_status_and_doctor_mention_a_site_that_exists(self):
         self._ledger(claims=[self._claim("C1")])
@@ -705,6 +1028,111 @@ class SiteStatusReports(_SiteCase):
         info = cli_mod._site_state(self.root)
         self.assertFalse(info["vendored"])
         self.assertEqual(info["vendor_files"], 1)
+
+
+# --------------------------------------------------------------------------- #
+class ThePageIsCurrentOnlyWithItsVerdicts(_env.EnvCase):
+    """Whether the PAGE is current, asked of what the page renders.
+
+    `state.json` renders the records AND the resolver's judgement of the verdict
+    cache against the live model. The records are one digest; the judgement is
+    neither in it nor in any record, so a page can be built from the records as
+    they are now and still show a PASS that every other reader calls FAIL.
+    """
+
+    def _run(self, project: str, *argv: str):
+        proc = _env.atompipe(list(argv), cwd=project)
+        self.assertIn(proc.returncode, (0, 1),
+                      f"{' '.join(argv)} crashed:\n{proc.stdout}\n{proc.stderr}")
+        return proc
+
+    def _json(self, project: str, *argv: str) -> dict:
+        proc = self._run(project, *argv, "--json")
+        try:
+            return json.loads(proc.stdout)
+        except ValueError as exc:                  # pragma: no cover - reported
+            raise AssertionError(f"{' '.join(argv)} --json: {exc}\n{proc.stdout}")
+
+    def _page(self, project: str) -> dict:
+        path = os.path.join(project, site_mod.SITE_DIR, site_mod.DATA_DIR,
+                            site_mod.STATE_NAME)
+        with open(path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def _says_current(self, project: str, why: str) -> None:
+        """Every reader of the page's staleness says current: `site status`,
+        `status` (text and JSON) and `doctor`."""
+        shown = self._json(project, "site", "status")
+        self.assertFalse(shown["stale"], f"{why}: {shown['stale_reason']}")
+        self.assertFalse(self._json(project, "status")["site"]["stale"], why)
+        self.assertNotIn("STALE", self._site_line(project), why)
+        self.assertEqual(self._doctor_row(project)["status"], "ok", why)
+
+    def _site_line(self, project: str) -> str:
+        [line] = [text for text in self._run(project, "status").stdout.splitlines()
+                  if text.startswith("site:")]
+        return line
+
+    def _doctor_row(self, project: str) -> dict:
+        [row] = [row for row in self._json(project, "doctor")["checks"]
+                 if row["check"] == "site"]
+        return row
+
+    def test_cli_a_check_that_fails_a_claim_leaves_the_page_stale(self):
+        """V: the review's repro (``repro_site``). A page built while C1 passed,
+        then the model thinned from 8 mm to 6 mm and a ``check`` that FAILs C1:
+        ``status`` printed ``[FAIL ] C1`` and, two lines down, ``site: … built
+        0.8s ago``; ``site status`` said "current with the records", ``doctor``
+        ``[ok] site``, and the page still read C1 PASS and ready. The staleness
+        compared ``records_digest`` only, and a check moves no record: before
+        checkpoint 1.3 it rewrote ``ledger.json`` and the mtime rule caught it,
+        and the rewrite's test edited a claim file instead, so nothing guarded
+        the case any more (R-6)."""
+        project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"),
+                                         thickness=8.0, migrated=True)
+        self._run(project, "check")
+        self.assertEqual(self._json(project, "status")["claims"]["C1"], "pass",
+                         "the precondition: C1 passes at 8 mm")
+        self.assertEqual(self._run(project, "site", "init").returncode, 0)
+        self.assertEqual(self._run(project, "site", "build").returncode, 0)
+        [shown] = [row for row in self._page(project)["claims"] if row["id"] == "C1"]
+        self.assertEqual(shown["status"], "pass", "the precondition: the page shows C1 PASS")
+
+        # The negative half (cli:H16's property, kept): readers and a check that
+        # changes nothing leave a current page current.
+        self._says_current(project, "a page read stale straight after its own build")
+        self._run(project, "check")
+        self._says_current(project, "a check that changed nothing made the page stale")
+
+        # The model moves and nothing has run: a rebuild would read C1 STALE,
+        # so the page's PASS is already not current.
+        _projects.set_thickness(project, 6.0)
+        shown = self._json(project, "site", "status")
+        self.assertTrue(shown["stale"], "a model edit left the page's PASS current")
+
+        # The check lands: C1 FAILs everywhere but on the page.
+        self.assertEqual(self._run(project, "check").returncode, 1)
+        self.assertEqual(self._json(project, "status")["claims"]["C1"], "fail",
+                         "the precondition: the check fails C1")
+        [shown] = [row for row in self._page(project)["claims"] if row["id"] == "C1"]
+        self.assertEqual(shown["status"], "pass", "the precondition: nothing rebuilt the page")
+        shown = self._json(project, "site", "status")
+        self.assertTrue(shown["stale"], "site status read a page showing C1 PASS as current "
+                                        "after a check that FAILs it")
+        self.assertIn("site build", shown["stale_reason"])
+        self.assertIn("C1 pass -> fail", shown["stale_reason"],
+                      "the reason must name what the page shows that is no longer so")
+        self.assertTrue(self._json(project, "status")["site"]["stale"])
+        self.assertIn("STALE", self._site_line(project))
+        row = self._doctor_row(project)
+        self.assertEqual(row["status"], "warn", row)
+        self.assertIn("C1 pass -> fail", row["detail"])
+
+        # The positive control: a rebuild shows the FAIL and is current again.
+        self.assertEqual(self._run(project, "site", "build").returncode, 0)
+        [shown] = [row for row in self._page(project)["claims"] if row["id"] == "C1"]
+        self.assertEqual(shown["status"], "fail")
+        self._says_current(project, "a rebuilt page read stale")
 
 
 # --------------------------------------------------------------------------- #

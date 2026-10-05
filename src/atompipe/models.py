@@ -52,30 +52,98 @@ class ClaimKind(StrEnum):
     records a result."""
 
     ASSUMPTION = "assumption"
-    """Taken on faith and recorded so it stays visible. An assumption that nobody
-    wrote down is the thing that sinks the build."""
+    """Accepted provisionally, with a reason and an owner, and recorded so it
+    stays visible (Assumed, GLOSSARY §3; with no attributed owner it reads Gap).
+    An assumption that nobody wrote down is the thing that sinks the build."""
 
 
 class ClaimStatus(StrEnum):
-    """Resolved state of one claim. Derived, never stored by hand."""
+    """Resolved state of one claim. Derived, never stored by hand.
 
-    PASS = "pass"                 # every covering gate ran and passed
-    FAIL = "fail"                 # at least one covering gate failed
-    STALE = "stale"               # gates passed, but inputs changed since
-    UNCLAIMED = "unclaimed"       # no gate covers it  -> a capability gap
-    BLOCKED = "blocked"           # a gate covers it but its tooling is missing
-    PENDING = "pending"           # gates exist, never run
-    UNVERIFIED = "unverified"     # physical: awaiting a real-world result
-    VERIFIED = "verified"         # physical: a human recorded a real-world pass
-    REFUTED = "refuted"           # physical: a human recorded a real-world fail
-    ASSERTED = "asserted"         # assumption: standing, unevidenced
+    Ten members, read as Table 1's seven words plus Open (GLOSSARY §3; the
+    words themselves live in ``report.HUMAN``, never here). The values are JSON
+    and stay until the rename pass; from P2.1 each is the reading in its
+    comment, composed by ``claims.compose``, whose ``cause`` says which fact
+    set it. What slipped through before P2.1: ``fail`` also held a crash and an
+    evaluator refused at its version, and ``pass`` held a pass beside a skip or
+    an unrun evaluator (S-03)."""
+
+    PASS = "pass"                 # Checked: every evaluator ran and passed, current
+    FAIL = "fail"                 # Failing: an evaluator not unqualified failed
+    STALE = "stale"               # Stale: a pass whose read set moved, or undemonstrated,
+                                  # or whose prerequisite is invalidated or unrun (P2.2)
+    UNCLAIMED = "unclaimed"       # Gap: no evaluator, one unqualified, or an unowned assumption
+    BLOCKED = "blocked"           # Skipped: an evaluator skipped OR ERRORED, or a
+                                  # prerequisite is not established; none failed
+    PENDING = "pending"           # Open: an evaluator unrun on the current inputs
+    UNVERIFIED = "unverified"     # Pending build: physical, no result
+    VERIFIED = "verified"         # Checked: an `interactive` pass on the current article,
+                                  # or the authority's judgment (P2.5a)
+    REFUTED = "refuted"           # Failing: a physical fail recorded
+    ASSERTED = "asserted"         # Assumed: a reason and an attributed owner
 
 
-#: statuses that must block an irreversible spend (ordering a board, buying stock)
+class Terminal(StrEnum):
+    """Where a claim's evidence bottoms out (GLOSSARY §1 *terminal*; PLAN M14.1) —
+    identifiers, never words: the words are ``report.HUMAN["terminal"]``'s, and in
+    P2.5a every automated one prints *automated* (P2.5a-D1).
+
+    Declared on a claim (``Claim.terminal``) or derived from its kind
+    (``claims.terminal_of``). A declaration can raise the bar, never lower it,
+    and never stands in for an evaluator: a measurable claim declared
+    ``closed_form`` with no evaluator still reads Gap. *Rejected:* "external
+    tool" as a terminal (Q-W3: the program that runs an evaluator is provenance);
+    replacing ``ClaimKind`` now (the rename pass: R-8 could not tell a word move
+    from a status move)."""
+
+    CLOSED_FORM = "closed_form"
+    SOLVER = "solver"                 # display word: simulation
+    DATASHEET = "datasheet"
+    MEASUREMENT = "measurement"
+    HUMAN = "human"                   # display word: expert judgment
+    NONE = "none"
+
+
+#: The terminals each kind may declare (P2.5a §4.1). A pair outside this table
+#: is refused by the strict reader, and only when ``terminal`` is present (R-10:
+#: a refusal binds a new declaration). Here, in the type contract, because
+#: ``store`` refuses by it and ``claims`` derives by it. *Rejected:* measurable
+#: + measurement (that is a physical claim, and the kind already says so);
+#: physical + closed_form (a calculation that settled a physical claim would
+#: make it measurable); assumption + solver (an assumption a solver settles is
+#: no longer an assumption).
+TERMINALS_BY_KIND: dict[ClaimKind, frozenset[str]] = {
+    ClaimKind.MEASURABLE: frozenset({"closed_form", "solver", "datasheet"}),
+    ClaimKind.PHYSICAL: frozenset({"measurement", "human"}),
+    ClaimKind.ASSUMPTION: frozenset({"none", "human"}),
+}
+
+
+#: statuses that must block an irreversible spend (ordering a board, buying stock).
+#: Unchanged by P2.1 (its D9): what moved is which status a fact reads, so an
+#: errored claim blocks because Skipped (``blocked``) is here, and an assumption
+#: nobody owns because Gap (``unclaimed``) is. Pending build and Assumed are
+#: unresolved (GLOSSARY §3) but do not stop ``check``: *ready* is the stricter
+#: predicate, ``claims.summarise``'s ``all_required_checked``.
 BLOCKING_STATUSES = frozenset(
     {ClaimStatus.FAIL, ClaimStatus.STALE, ClaimStatus.UNCLAIMED,
      ClaimStatus.BLOCKED, ClaimStatus.PENDING, ClaimStatus.REFUTED}
 )
+
+
+#: The units a physical claim's DECLARED latency may be stated in, each with its
+#: seconds (P2.5b-D4; GLOSSARY §5 *latency*: "declared ahead only for a physical
+#: evaluator, until an article measures it"). What a person writes beside a print
+#: or a field trial — hours, days, a season — and nothing a reader must convert
+#: twice. ``year`` is the Julian year, 365.25 days, the astronomers' fixed one:
+#: "two winters" is two of them, whatever the calendar. *Rejected:* ``month``
+#: (28 to 31 days — two readers, two numbers); bare seconds (``86400`` is not
+#: what anyone writes, and a typo in it is invisible); free text ("two winters"
+#: cannot feed P4's Λ₀, which reads seconds).
+LATENCY_UNITS: dict[str, float] = {
+    "s": 1.0, "min": 60.0, "h": 3600.0, "day": 86400.0, "week": 604800.0,
+    "year": 31557600.0,
+}
 
 
 class Tier(enum.IntEnum):
@@ -89,7 +157,60 @@ class Tier(enum.IntEnum):
     INSTANT = 0     # < ~2 s, analytic / closed form. Run on every edit.
     BUILD = 1       # seconds to minutes. Geometry builds, mesh gates, netlists.
     SOLVE = 2       # minutes to hours. External solvers: CFD, FEA, autorouters.
-    EXTERNAL = 3    # CI, a fab house, a lab, a human with calipers.
+    EXTERNAL = 3    # CI, a fab house, an external lab service.
+    # Not a physical result (S-61): this said "a human with calipers" — a second
+    # route for what a physical claim and its result own (`claim physical`,
+    # P2.5a). A tier is an evaluator's latency class; a person is recorded by.
+
+
+class PrerequisiteKind(StrEnum):
+    """Why a prerequisite is not established (P2.2-D5) — an identifier, never a
+    word; the words are ``report.HUMAN``'s.
+
+    Two classes. **Negative** — the prerequisite has a reading that is not a
+    pass: ``errored``, ``failed``, ``skipped`` (its tool is missing, or it
+    skipped itself), ``unqualified``, ``not-registered``. Its dependent is not
+    run and reads Skipped, and the kind travels on that verdict
+    (``Verdict.blocked_kind``). **Not current** — a pass that is not current
+    now: ``invalidated``, ``unrun``. Its dependent keeps its verdict and reads
+    Stale; nothing is stored, only a stale reason.
+
+    The members are in rank order: when several needs are unmet, the first
+    negative kind here names the root (``gates.prerequisite_root``). A crash
+    before a fail: the dependent reads Skipped either way (D10), and within
+    Skipped a crash leads (invariant 2, GLOSSARY §3: "errored first"). What
+    slipped through the design's first order (failed first): a dependent of one
+    failed and one crashed guard read the quiet missing-tool tone, while the
+    same dependent of the crashed guard alone read errored — adding a failure
+    made the crash quieter. *Rejected:* a kind per root on the verdict (a list
+    of pairs; nothing reads more than the first, and ``blocked_by`` names them
+    all); deriving the kind from the root's own verdict at ``compose`` (a root
+    that is not registered can still have an orphan crash on disk, which would
+    then read errored for a root the rule called not registered).
+
+    Here, in the type contract, because ``Verdict.blocked_kind`` holds one, and
+    ``claims`` (pure) and ``gates`` (the rule) must read the same identifiers."""
+
+    ERRORED = "errored"
+    FAILED = "failed"
+    SKIPPED = "skipped"
+    UNQUALIFIED = "unqualified"
+    NOT_REGISTERED = "not-registered"
+    INVALIDATED = "invalidated"
+    UNRUN = "unrun"
+
+
+#: The kind of the ``Verdict.unqualified`` token the spine marks a pass with when
+#: it lies outside its evaluator's declared operating context (P2.4-D15): a token
+#: of its own kind, ``context:outside|<canonical json>``, so every reader that
+#: already refuses an unqualified evaluator refuses this pass too — never a
+#: pass, never a crash, Gap's tone — and only the words differ (``report``).
+#: Here, in the type contract, because ``Verdict.__post_init__`` reads it (a mark
+#: on a fail is dropped, D16) and ``claims``, ``gates``, ``report`` and ``site``
+#: must read the same identifier. *Rejected:* a new ``Verdict`` field (P2.3 grew
+#: some twenty readers of ``unqualified``; each would need a twin, and a missed
+#: one would read a crash or a pass).
+CONTEXT_OUTSIDE = "context:outside"
 
 
 class ArtifactKind(StrEnum):
@@ -226,6 +347,12 @@ class Record:
 
     Unknown keys on the way in are DROPPED rather than raising, so a newer pack
     writing an extra field cannot break an older spine reading the file.
+
+    That leniency is for dicts in memory and for files a pack writes. A record
+    FILE a human edits (`claims/C1.json`, …) is read by `store.read_record`,
+    which refuses an unknown key with a suggestion instead: dropped here, a
+    typo'd `rejectd` vanished on load and was erased from disk by the next save
+    (S-40).
     """
 
     def to_dict(self) -> dict[str, Any]:
@@ -341,13 +468,160 @@ class Acceptance(Record):
 
 @dataclass
 class PhysicalResult(Record):
-    """A real-world test result a human recorded against a PHYSICAL claim."""
+    """A physical result: a physical evaluator's verdict on one article, with who
+    recorded it (GLOSSARY §1). One entry of ``results/<claim id>.json``'s
+    ``results`` list, append-only, written only by ``claim physical`` through
+    ``store.append_signed`` (P2.5a).
+
+    What slipped through before P2.5a (S-48, S-50): ``who`` was a name anyone
+    typed (``--who``) and defaulted to nobody; ``when`` was typed too; a pass
+    bound to nothing survived any change to the design it was tested on; and a
+    pass typed by the agent counted as one a person made.
+
+    The fields after ``evidence`` are P2.5a's, each LAST (R-2), each defaulting
+    to "not recorded", so a P2.1-shape entry — a **legacy** entry — reads with
+    them empty, and an empty one never makes a pass count:
+
+    * ``channel`` — how it was entered (``cli._channel``): ``interactive`` (a
+      person's own shell, the claim's id typed), ``agent-session <id>``,
+      ``non-interactive``, or ``""`` (legacy). Only ``interactive`` lets a pass
+      count; every fail counts (R-3).
+    * ``authority`` — for an expert-judgment claim, the authority it was
+      recorded for (equal to the claim's, typed as a confirmation).
+    * ``measured``, ``units`` — the value measured, in the claim's acceptance
+      units (D-13 *consistent*: it decides the outcome where the claim has a
+      limit).
+    * ``article`` — what it was tested on: ``{"source": "design", "hash",
+      "built_from": {"params", "model", "files"}, "revision", "dirty"}``
+      (``verdicts.article_of``), or ``{}`` when the model did not load.
+    * ``claim_digest`` — the claim as the person read it (``claims.claim_digest``).
+    * ``rho`` — the digest of (article hash, claim digest): the physical
+      evaluator's read-set hash (§6.2).
+    * ``evidence_sha256`` — each evidence file's bytes when recorded.
+    * ``contradicts``, ``contradiction_check`` — for a fail, the covering
+      evaluators whose counted, current pass it contradicts
+      (``claims.contradicted_by``), or why none could be judged.
+    * ``prev``, ``digest`` — the chain and the seal (``store``, P2.5a-D6).
+
+    What a seal does not stop is in ``store.append_signed``'s docstring and
+    SPINE_CONTRACT's limits: anyone who can write the file can recompute it."""
 
     passed: bool
-    when: str = ""                   # ISO date, supplied by the caller
-    who: str = ""
+    when: str = ""                   # the command's clock (never typed, from P2.5a)
+    who: str = ""                    # git's identity (never typed, from P2.5a)
     detail: str = ""
     evidence: list[str] = field(default_factory=list)   # photo / log paths
+    channel: str = ""
+    authority: str = ""
+    measured: float | None = None
+    units: str = ""
+    article: dict = field(default_factory=dict)
+    claim_digest: str = ""
+    rho: str = ""
+    evidence_sha256: dict = field(default_factory=dict)
+    contradicts: list = field(default_factory=list)
+    contradiction_check: str = ""
+    prev: str = ""
+    digest: str = ""
+
+
+@dataclass
+class AttributionRecord(Record):
+    """An owner's or an authority's attribution, as ``claim physical <id>
+    assume`` recorded it — one entry of ``results/<claim id>.json``'s
+    ``attributions`` list, sealed and chained like a result (P2.5a-D6).
+
+    ``role`` is ``owner`` (an assumption's owner, or a fallback's — P2.4-D18's
+    hand-off) or ``authority`` (an expert-judgment claim's). ``name`` is the
+    nominee the claim file named when it was recorded, ``reason`` the reason it
+    was recorded against (``claims.assumption_reason``), ``claim_digest`` the
+    claim as read then. It counts only while the claim still names ``name`` for
+    that role and — for an owner — still gives ``reason``; for an authority,
+    while the claim as a whole is unchanged (an edited statement un-records an
+    acceptance of it). What slipped through before it: an owner was whatever a
+    claim file said (P2.1-D8 made that read Gap; nothing could record one)."""
+
+    role: str
+    name: str
+    reason: str = ""
+    claim_digest: str = ""
+    who: str = ""
+    when: str = ""
+    channel: str = ""
+    prev: str = ""
+    digest: str = ""
+
+
+@dataclass(frozen=True)
+class EntryStanding:
+    """The judge's facts about ONE result entry (``verdicts.judge_results``):
+    ``index`` in the results list; ``passed``; ``counts`` — a pass that settles
+    the claim now; ``why`` — why not, an identifier (``agent-session``,
+    ``non-interactive``, ``legacy``, ``who``, ``authority``, ``measured``,
+    ``evidence:<path>``, ``claim-moved``, ``article-moved``, ``judgment-moved``,
+    ``article-unjudged``, ``beside`` — a pass beside an automated evaluator —
+    ``none`` — on an assumption — or, from P2.5b, ``export-missing`` — on an
+    exported article no record of `exports/` holds), ``""`` when it counts;
+    ``article`` — its article's hash; ``article_state`` — ``current``,
+    ``moved``, ``unjudged`` or ``""`` (no article); ``moved`` — what moved, in
+    words, inputs first.
+
+    ``stands`` (P2.5b) — a pass a person made that every fact but the
+    terminal holds for, on its current article: what a fail's supersession
+    reads (``verdicts._supersedes``). On a measurement it is ``counts``; beside
+    an automated evaluator a pass settles nothing (``beside``) and still stands
+    on its article — the reprint after a fix, measured, is the pass a ruler's
+    fail on the old print waits for (critique 13 of the P2.5b design).
+
+    ``built`` (review of P2.5b, the LAST field, R-2) — what was printed from
+    this article: the seal of the generator's files (``verdicts.built_seal``) of
+    each export ``exports/`` holds that built it, sorted; ``()`` for a design
+    article or one no export record holds. Supersession reads it: a pass on an
+    article whose package carries the failed one's bytes is a reprint of the
+    object that failed, whatever else differs (what slipped through: a no-op
+    line in the generator moved its code digest, so the same print, reprinted
+    byte for byte, released its own fail)."""
+
+    index: int
+    passed: bool
+    counts: bool = False
+    why: str = ""
+    article: str = ""
+    article_state: str = ""
+    moved: tuple = ()
+    stands: bool = False
+    built: tuple = ()
+
+
+@dataclass(frozen=True)
+class Standing:
+    """What a claim's physical results stand for NOW — judged on every read by
+    ``verdicts.judge_results`` inside the one resolver, never cached, never
+    written (P2.5a-D13). It reaches ``claims.compose`` on the claim
+    (``Claim.standing``), set by ``verdicts.view`` only.
+
+    ``state`` — ``current`` (a pass counts), ``article-moved``,
+    ``judgment-moved``, ``claim-moved``, ``article-unjudged`` (the newest pass
+    a person made in their own shell, and its first half that no longer holds),
+    ``not-counted:<why>`` (the newest pass, and why it never counted), or ``""``
+    (no pass). ``counted`` — the deciding entry's index (the counting pass, or
+    the one ``state`` is about), or None. ``article``, ``moved`` — its article
+    and what moved. ``entries`` — every entry's ``EntryStanding``.
+
+    From P2.5b, LAST (R-2): ``fail`` — the index of the fail that counts (the
+    newest not superseded), or None when none does; ``superseded`` — the
+    indices of the fails a pass on another exported article superseded
+    (``verdicts._supersedes``, PLAN Q2.11). ``verdicts.view`` puts the counting
+    result in ``Claim.physical_result`` from these; a raw ``store.load``
+    reader, with no standing, still reads the newest fail (R-2)."""
+
+    state: str = ""
+    counted: int | None = None
+    article: str = ""
+    moved: tuple = ()
+    entries: tuple = ()
+    fail: int | None = None
+    superseded: tuple = ()
 
 
 @dataclass
@@ -363,9 +637,88 @@ class Claim(Record):
     grounded_by: list[str] = field(default_factory=list)   # InputArtifact ids
     gates: list[str] = field(default_factory=list)         # gate ids that cover it
     tags: list[str] = field(default_factory=list)
-    critical: bool = True            # false = nice-to-have, never blocks a spend
+    critical: bool = True            # false = not required, never blocks a spend
     physical_result: PhysicalResult | None = None
     note: str = ""
+    owner: str = ""
+    """Who an ASSUMPTION's owner is NAMED to be — a nominee, never an
+    attribution. GLOSSARY §3: Assumed needs a reason and an owner; PLAN-v0.14
+    §1.4: an owner counts only when recorded through the signing channel, and
+    one written any other way — a hand or agent edit of this file — reads
+    unattributed, so the claim stays Gap. ``claims.compose`` reads this field
+    only against ``owners``, the attributions the channel produced, and nothing
+    in P2.1 produces one. *Rejected:* a forbidden key (the strict reader would
+    refuse every command on a file an agent plausibly writes, and refusing the
+    edit is P3's permission rule); trusting the file until the channel exists
+    (the exact edit §1.4 says must not count). The LAST field (R-2), so a
+    positional reader is unmoved. What an older spine does with it — corrected
+    in review, where this said "an older spine drops it": a spine before P2.1
+    REFUSES every command on a claim file that names an owner (`store.read_record`
+    refuses an unknown key, S-40; only the lenient `Record.from_dict`, which no
+    record file goes through, drops one). That is the forbidden key's cost,
+    rejected above, paid in the other direction — and it holds only while
+    nothing but a hand edit writes this field: no command writes it (V7), so a
+    project an older atompipe still reads never holds it unless someone typed
+    it."""
+    fallback: str = ""
+    """Why this claim may be carried, untested, when the passes of its
+    evaluators lie outside their operating contexts (P2.4-D18, PLAN-v0.14 §1.5:
+    "the claim reads Assumed when it has an owned fallback assumption,
+    otherwise Gap"). Its owner is ``owner`` — the one nominee field — and it
+    counts only through ``owners``: an ``Attribution`` bound by value to the
+    owner and to THIS reason (``claims.assumption_reason``), which nothing
+    produces until the signing channel (P2.5). So in P2.4 every such claim
+    reads Gap, with the hint that names what would carry it. What it is NOT:
+    an attribution (a hand or agent edit names a reason; it never records an
+    owner), and not ``rationale`` (that says why the claim matters, not why it
+    may be carried untested — an owner would sign the wrong sentence).
+    *Rejected:* a pointer to an assumption claim (two records for one
+    judgement, and a status that depends on another claim's status); GLOSSARY
+    §8's ``assumed: {reason, owner}`` now (a second owner field before the
+    rename pass, which folds both). A spine before P2.4 refuses a claim file
+    carrying it (as P2.1's ``owner``); no command writes it, and an empty one
+    digests as before (``verdicts._ABSENT_WHEN_EMPTY``). The LAST field (R-2)."""
+    terminal: str = ""
+    """Where this claim's evidence bottoms out, DECLARED (``Terminal``), or
+    ``""`` — derived from the kind (``claims.terminal_of``: physical ->
+    measurement, assumption -> none, measurable -> automated). Validated by the
+    strict reader only when present (R-10), against ``TERMINALS_BY_KIND``; a
+    declaration never makes a claim read more than it would without it
+    (P2.5a-D1). Empty, it digests as before (``_ABSENT_WHEN_EMPTY``)."""
+    authority: str = ""
+    """The person or institution an expert-judgment claim (terminal ``human``)
+    stays with — a NOMINEE, like ``owner`` (P2.5a-D2, GLOSSARY §1 *authority*).
+    It counts only as ``claim physical <id> assume --authority`` recorded it,
+    typed by the authority in their own shell; named here and nowhere recorded,
+    the claim reads Gap. What slipped through the design read literally: an edit
+    adding ``"terminal": "human", "authority": "<anyone>"`` would have turned any
+    Gap into a passing ``check`` (Assumed does not block). Refused by the strict
+    reader on a claim whose terminal is not ``human``."""
+    expected_latency: dict = field(default_factory=dict)
+    """How long an article takes to settle this claim, DECLARED ahead —
+    ``{"value": <number > 0>, "units": <a LATENCY_UNITS key>}`` — or ``{}``
+    (P2.5b-D4, W3). Allowed only on a claim whose terminal is a measurement
+    (the strict reader refuses it elsewhere, only when present — R-10;
+    critique 16 of the P2.5b design: a judgment has no article to measure it).
+    Never measured here: ``claims.latency`` measures it — a result's ``when``
+    minus its exported article's ``when`` — and until then this is what is
+    shown, "declared". Not in ``claims.claim_digest`` (a schedule edit asks no
+    retest), and empty it digests as before (``verdicts._ABSENT_WHEN_EMPTY``).
+    *Rejected:* in the milestone (a claim two milestones require would carry two
+    numbers); on an automated claim (its latency is measured on every run)."""
+    results: tuple = ()
+    """In memory only (``FORBIDDEN_KEYS``): every entry of
+    ``results/<id>.json``'s ``results``, oldest first, assembled by ``store``;
+    ``physical_result`` is the one that counts for rung 1. What the judge reads."""
+    attributions: tuple = ()
+    """In memory only: the owner and authority attributions recorded through
+    the channel — sealed, ``interactive`` — newest first, assembled by
+    ``store`` so a raw ``store.load`` reader sees the same owners as the view
+    (P2.5a-D11)."""
+    standing: Any = None
+    """In memory only: the judge's ``Standing``, set by ``verdicts.view`` and
+    nothing else. ``None`` — a raw ledger nobody judged — reads every pass
+    Pending build in P2.1's words (degrade-closed, R-2)."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Claim":
@@ -375,12 +728,26 @@ class Claim(Record):
         kw["acceptance"] = Acceptance.from_dict(kw.get("acceptance") or {})
         pr = kw.get("physical_result")
         kw["physical_result"] = PhysicalResult.from_dict(pr) if isinstance(pr, dict) else pr
+        # In-memory fields never come from a dict: a record never holds them
+        # (FORBIDDEN_KEYS), and an index row that did would be a second home.
+        for name in ("results", "attributions", "standing"):
+            kw.pop(name, None)
         return cls(**kw)
 
 
 # --------------------------------------------------------------------------- #
 # gates and verdicts
 # --------------------------------------------------------------------------- #
+#: ``Verdict.outcome`` -> the four-character tag ``Verdict.render`` prints. Four
+#: characters so a sweep's lines align; the strings are the ones every grep and
+#: every reader already knows (``[FAIL]``), so they do not change with the rule
+#: that picks them. The ONE table of outcome tags: ``report.HUMAN["outcome_tag"]``
+#: is this object, re-exported, not a copy held equal by a test (D-16: a second
+#: table drifts, and an equality test only says so by failing). It lives here
+#: because ``models`` imports nothing from ``report``.
+_RENDER_TAG = {"error": "ERR ", "skipped": "skip", "pass": "ok  ", "fail": "FAIL"}
+
+
 @dataclass
 class Verdict(Record):
     """The result of running one gate. ONE LINE of context when rendered.
@@ -407,22 +774,173 @@ class Verdict(Record):
     locators: list[Locator] = field(default_factory=list)
     """WHERE this verdict applies, for the site to highlight. Optional and often
     empty: a gate attaches one only when it genuinely knows the position."""
+    rho: str = ""
+    """The content address of what this verdict was computed from — the hash of
+    the gate's code, the spine, and every input the gate read (PLAN D-05). Set by
+    the sweep that recorded it, never by the gate: ``run_gate`` clears whatever a
+    gate returned here, because a verdict that could name its own inputs could
+    name inputs it never read. Empty on a verdict nobody recorded."""
+    cpu_s: float = 0.0
+    """CPU seconds the gate cost, user and system, its child processes INCLUDED —
+    the ``os.times()`` delta ``run_gate`` measures. ``duration_s`` alone called the
+    most expensive gates free: omc does its work in a subprocess, and a gate
+    waiting on a solver spends wall time, not its own CPU. Measured, never
+    declared; 0.0 for a skip, which did no work. Both new fields are last (PLAN
+    R-2), so positional construction still means what it meant."""
+    unqualified: str = ""
+    """Why the evaluator is not qualified at its version — a spine TOKEN
+    (``verdicts.parse_token`` reads it; ``report.HUMAN["qualification"]`` words
+    it: ``known-good:fail``, ``known-good:not-run``, ``known-bad:errored|<line>``
+    …), never prose — or ``""``. **Set by the spine only**: the resolver and the
+    sweep set it, through ``verdicts._unqualified``, beside ``error="unqualified:
+    <token>"``; ``gates.run_gate`` clears it on whatever a gate returns, as it
+    clears ``rho``; no stored verdict carries it (an entry is built from an
+    explicit field list, and the remembered-outcome reader drops it).
+    ``claims.compose`` reads a claim with an unqualified evaluator as Gap,
+    ``unqualified:`` (PLAN-v0.14 §1.4), and never as errored (P2.0 D-8). Why a
+    token and not the reason's words (P2.3-D13): the words would be frozen at
+    mint time inside a verdict that travels — sweep rows, held verdicts — and
+    the spine would hold a human channel; the error text an older reader shows
+    is the token, and reads as the crash it falls back to (degrade-closed).
+
+    What it replaced: the ``not admitted:`` prefix of ``error`` as the predicate.
+    *Rejected,* because a gate could then make its own crash read the quieter
+    Gap by wording it so, and because P2.3's rewording of the text would
+    silently turn every Gap into errored. So the text alone reads errored —
+    degrade-closed — and only this field reads Gap. The LAST field (R-2); and
+    ``__post_init__`` writes ``error`` when it is set without one, so an
+    unqualified verdict is never ``ok``, whoever builds it."""
+    blocked_by: list[str] = field(default_factory=list)
+    """The prerequisites that are not established — the ROOTS, found
+    transitively — when this gate was not run because of them (P2.2-D9), or
+    ``[]``. Set by the spine only, through ``gates.blocked``, the one producer
+    of a prerequisite skip; ``gates.run_gate`` clears it on whatever a gate
+    returns (``_stamp``), no entry stores it (``verdicts._VERDICT_FIELDS`` is a
+    whitelist) and no remembered outcome carries it (``_NEVER_REMEMBERED``) — so
+    a gate can neither make its own skip read as a prerequisite's, nor name a
+    root. Non-empty, ``__post_init__`` writes the legacy flags in the not-pass
+    direction (R-2): an older spine that drops the key still reads a skip.
+    *Rejected:* the ``skip_reason`` text as the predicate (a gate could word
+    its own skip into it, the reason P2.1-D4 rejected the same for
+    ``unqualified``). One of the LAST two fields."""
+    blocked_kind: str = ""
+    """The first root's ``PrerequisiteKind`` — ``"errored"``, ``"failed"``,
+    ``"skipped"``, ``"unqualified"`` or ``"not-registered"`` — beside
+    ``blocked_by``, or ``""``. Spine-only on the same terms. What it carries
+    that nothing else does: whether the root CRASHED. A guard is bound to its
+    own claims, so its crash reached a claim bound only to the dependent as the
+    dependent's skip — the missing tool's tone, its count, a JUnit
+    ``<failure>`` — and invariant 2 says a crash reads louder than that
+    (critique of the P2.2 design). ``claims.compose`` reads a prerequisite skip
+    whose root errored as errored. The P2.2 design had rejected this field,
+    reasoning that the kind can be derived from the root's reading — but a
+    claim's composition sees the verdicts that cover it, and the root's does
+    not cover a narrowly tagged claim. An older spine that drops it reads a
+    plain skip: quieter, never a pass."""
+    comparator: str = ""
+    """Which side of ``limit`` passes, as the gate judged it: one of ``<=``,
+    ``<``, ``>=``, ``>``, ``==``, ``!=`` or ``between`` (a band, whose upper
+    bound the verdict does not carry), or ``""`` (P2.4-D5). The gate's own,
+    written where it writes the limit — every bundled gate with a finite limit
+    sets it (R-4: ``test_goalposts.EveryLimitNamesItsSide``), and a branch with
+    no one-sided reading reports no limit. ``gates._stamp`` keeps a known one
+    (an enum normalised to its value) and refuses anything else as an error
+    naming the seven. Read by ``claims.margin`` (D-17): what slipped through
+    before it, a margin inferred from ``(passed, measured, limit)`` guesses
+    generously at equality, and ``min_wall``'s 7 mm against its 1.2 mm read
+    -483% where it is 483% inside. Not a refusal for a third party's gate: with
+    none the margin is ``no-comparator`` (R-10). *Rejected:* a
+    ``GateSpec.comparator`` (two homes, and flow_regime's branches judge
+    different limits); refusing ``between`` (a band binding of a modelica
+    result would error where it read Checked — critique 9). An older spine drops
+    it and reads a verdict with no margin: quieter, never a pass."""
+    settles: str = ""
+    """The quantity the gate measures, stamped from ``GateSpec.settles`` by the
+    spine (``gates._stamp``, ``gates.blocked``, ``verdicts._as_spec``) like
+    ``claims``, ``tier`` and ``pack`` — never the gate's own word. It makes the
+    claim comparison a pure function of ``(claim, verdict)``
+    (``claims.cross_check``, P2.4-D6): what slipped through the alternative, a
+    ``{gate: settles}`` map handed to ``compose``, is a renderer with no
+    registry skipping the comparison — more generous than one with a registry
+    (invariant 12). An older spine drops it and compares nothing: never a
+    pass it would not have read before. With ``comparator``, the LAST fields."""
+
+    def __post_init__(self) -> None:
+        # The operating-context mark never launders a fail (P2.4-D16): a token
+        # of that kind on anything that is not a pass is dropped HERE, before
+        # the line below writes `error` — whoever built the verdict (an older
+        # path, a hand-built one, a test). A fail outside the context still
+        # counts (R-3), and a skip or a crash keeps its own, louder, reading.
+        # The mark's own R-2 error (written below, or by the spine beside it)
+        # is not a crash of the verdict's.
+        if self.unqualified and str(self.unqualified).startswith(CONTEXT_OUTSIDE):
+            own = f"unqualified: {self.unqualified}"
+            crashed = bool(self.error) and self.error != own
+            if self.passed is not True or self.skipped or crashed or self.blocked_by:
+                self.unqualified = ""
+                if self.error == own:
+                    self.error = ""
+        # Degrade-closed (R-2): a verdict marked unqualified with no error would
+        # read `outcome` from its pass flag, and a refusal must never be a pass.
+        if self.unqualified and not self.error:
+            self.error = f"unqualified: {self.unqualified}"
+        # The same for a prerequisite skip: the flags say "skipped, not passed"
+        # wherever the mark is set, so a reader that knows nothing of it still
+        # reads the not-pass it means.
+        if self.blocked_by:
+            self.skipped = True
+            self.passed = False
+
+    @property
+    def outcome(self) -> str:
+        """What happened, as ONE word: ``"error"``, ``"skipped"``, ``"pass"`` or ``"fail"``.
+
+        This is the only definition. ``ok``, :meth:`render` and the claim ladder in
+        ``claims.resolve_status`` all read it, and every new reader (JUnit, the
+        page, ``status --short``) must too. The same fact used to be re-derived in
+        three places that agreed only because nobody had written the fourth.
+
+        Precedence is error, then skipped, then the pass flag: a crash that also
+        says skipped is still a crash, and a skip that also says passed is still
+        not a pass.
+
+        ``"pass"`` needs ``passed is True`` — the builtin, not anything truthy.
+        What got through: ``ok`` was ``passed and not skipped and not error``, so
+        ``Verdict(passed="no")`` was ok, and a gate returning ``{"passed":
+        "false"}`` rendered ``[ok]``. :func:`atompipe.gates.run_gate` refuses a
+        non-bool pass value as an error; this is the same rule for a verdict that
+        never went through it (a hand-edited file, a third-party caller), where
+        the honest reading of a pass flag nobody wrote as a bool is: not a pass.
+        """
+        if self.error:
+            return "error"
+        if self.skipped:
+            return "skipped"
+        if self.passed is True:
+            return "pass"
+        return "fail"
 
     @property
     def ok(self) -> bool:
         """True only if the gate actually ran and passed. A skip is not a pass."""
-        return self.passed and not self.skipped and not self.error
+        return self.outcome == "pass"
 
     def render(self) -> str:
-        if self.error:
-            tag = "ERR "
-        elif self.skipped:
-            tag = "skip"
-        elif self.passed:
-            tag = "ok  "
+        """``[tag] gate : body`` — the body follows the outcome, never the first
+        non-empty flag: an error's first line, a skip's reason, a pass's or a
+        fail's detail. What slipped through (P2.0 F-1, F-10): the body was
+        ``detail or skip_reason or error``, so a crash rendered its traceback
+        (``run_gate`` keeps the stack's tail in ``detail``) and a verdict that
+        said skipped AND errored rendered ``[ERR ] … : requires … (not
+        installed)``, a crash in a missing tool's words."""
+        outcome = self.outcome
+        tag = _RENDER_TAG[outcome]
+        if outcome == "error":
+            body = (str(self.error).splitlines() or [""])[0]
+        elif outcome == "skipped":
+            body = self.skip_reason or self.detail or ""
         else:
-            tag = "FAIL"
-        body = self.detail or self.skip_reason or self.error or ""
+            body = self.detail or ""
         return f"[{tag}] {self.gate}{(' : ' + body) if body else ''}"
 
     @classmethod
@@ -446,13 +964,29 @@ class NegativeControl(Record):
     declare one of these.
 
     `fixture` names a callable or a file that produces KNOWN-BAD input. Running
-    the gate against it MUST produce a failing verdict; `atompipe gate --selftest`
+    the gate against it MUST produce a failing verdict; `atompipe gate selftest`
     enforces exactly that.
     """
 
     fixture: str                       # "selftest/holed_mesh.py" or "pack.mod:make_brick"
     expect: str = "fail"               # the gate must NOT pass on this input
     note: str = ""
+    good: str = ""
+    """The KNOWN-GOOD control (GLOSSARY §2), when the default is not it: a
+    fixture reference spelled like ``fixture`` and handed exactly what the
+    known-bad fixture is handed, returning the input the gate must PASS. Empty
+    (the default) resolves to the pack's ``selftest/baseline.json`` for a pack's
+    gate and to the project's ``selftest/known_good.py`` ``context(ctx)`` for a
+    project's (``verdicts._good_host``); a project gate with neither is
+    *known-bad shown*, not qualified. Declare one when the known-bad input
+    reaches the gate through ``ctx.extra`` (cad-solid's meshes, sourcing's
+    BOM): the two controls must hand the gate the same channel (PLAN D-26), or a
+    gate that fails exactly when ``extra`` is not empty passes the baseline and
+    fails its fixture and has shown nothing. What slipped through before it:
+    only the known-bad half was ever run for a project gate, so one that failed
+    everything (S-04) qualified by failing its own known-bad control. An older
+    spine that drops the field reads the gate's entries as written by another
+    version — undemonstrated, never a pass (R-2). The LAST field."""
 
 
 @dataclass
@@ -470,6 +1004,65 @@ class GateSpec(Record):
     description: str = ""
     settles: str = ""                   # the quantity it measures, for gap matching
     entry: str = ""                     # "module:function" for out-of-process discovery
+    requires_one_of: list[str] = field(default_factory=list)
+    """ANY ONE of these is enough: ``"python:<module>"`` or ``"tool:<executable>"``.
+
+    ``requires_tools`` and ``requires_python`` are ANDed, so a gate that needs any
+    one of several unrelated back-ends could only probe for them in its own body
+    and skip there — where ``gates.availability`` cannot see it. That is what got
+    through: a boolean-engine probe inside a mesh gate skipped the gate's own
+    baseline AND its own negative control on a machine with the mesh library but
+    no engine, while availability said the tooling was present, and the test of
+    the controls filed it as honestly blocked. Declared here, the disjunction is
+    availability's to judge, and a skip means only what it says.
+
+    One field with a kind prefix, not two lists: two fields are two places to
+    forget. The LAST field, so every positional ``GateSpec(...)`` still works and
+    an older spine that drops it reads a spec that requires less, never one that
+    passes more."""
+    needs: list[str] = field(default_factory=list)
+    """The gates that must be established before this one's verdict counts —
+    its **prerequisites** (P2.2-D1), declared ``@gate(needs=[...])``: a
+    validity guard before the analyses it guards. Exact gate ids (no glob, no
+    tag: a tag-bound set moves when a pack is installed, and the graph and its
+    cycles with it); for a pack, the pack's own gates only (``packs.validate``,
+    D14); refused at registration when it is malformed, closes a cycle, or names
+    a costlier tier than this gate's (``gates.Registry.register``). A need not
+    registered yet is allowed (a missing pack must not become a load crash) and
+    reads "not registered" at the sweep.
+
+    What it does (``gates.prerequisite_root``, D5-D7): under a prerequisite that
+    failed, errored, skipped, is unqualified or is not registered, this gate is
+    not run and reads Skipped; under one invalidated or unrun, its verdict is
+    kept and reads Stale. What slipped through before it (S-51): a claim tagged
+    only ``deflection`` read Checked on a beam whose guard reported
+    Euler-Bernoulli omitting 32% of the deflection.
+
+    NOT part of rho (``verdicts.SPEC_FIELDS_IN_RHO``, D-04): the measurement is
+    a function of its own inputs, so a guard that recovers re-runs nothing.
+    *Rejected:* a separate edges file (two homes for one fact); ``after=``
+    (sequencing's word — P4 reorders; a prerequisite is semantic)."""
+    operating_context: dict = field(default_factory=dict)
+    """The range of its read set this evaluator was qualified on (PLAN-v0.14
+    §1.5, GLOSSARY §2 *operating context*; P2.4-D14): ``{key: (lo, hi)}``,
+    closed intervals, ``None`` for an open end, declared
+    ``@gate(operating_context={"load_n": (0.0, 40.0)})``. A key is spelled as
+    the gate reads it — ``GateContext.param``'s rule, scoped first — and must
+    be READ by every passing run (``gates.run_gate`` errors a pass that never
+    read one: the context is part of the read set, so a change inside the range
+    re-keys the verdict, critique 3 of the design). Judged by the spine on the
+    CURRENT values, over passes only (``gates.context_breach``,
+    ``verdicts._contexted``), on the spelling the run read (critique 4):
+    outside it a pass does not count — its claim reads Gap, or Assumed under
+    an owned ``Claim.fallback`` — and a fail still does (R-3). Its known-good
+    control must lie inside it, or the evaluator is unqualified (D19).
+    Registration refuses a malformed one (R-10: the new field only). NOT part
+    of rho (``verdicts.SPEC_FIELDS_IN_RHO``, P2.2-D1's argument for ``needs``):
+    it decides whether a verdict counts, not what was measured; an edit re-keys
+    the declaring file once through its code digest. *Rejected:* categorical
+    contexts (no bundled need); a context derived from the walk (the paper's
+    word is *declared*); per-claim contexts (the range is the evaluator's);
+    ``inf`` as a bound (``None`` says it). The LAST field."""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GateSpec":
@@ -479,6 +1072,13 @@ class GateSpec(Record):
             kw["tier"] = Tier(int(kw["tier"]))
         nc = kw.get("negative_control")
         kw["negative_control"] = NegativeControl.from_dict(nc) if isinstance(nc, dict) else nc
+        context = kw.get("operating_context")
+        if isinstance(context, dict):
+            # JSON carries a pair as a list; in memory it is the tuple the
+            # registry stores, so a round trip compares equal.
+            kw["operating_context"] = {
+                str(k): tuple(None if b is None else float(b) for b in v)
+                if isinstance(v, (list, tuple)) else v for k, v in context.items()}
         return cls(**kw)
 
 
@@ -690,6 +1290,86 @@ class Decision(Record):
 
 
 # --------------------------------------------------------------------------- #
+# milestones and their exports (P2.5b)
+# --------------------------------------------------------------------------- #
+@dataclass
+class Milestone(Record):
+    """A named spend — a print, a board order, a field test — and the claims it
+    requires (GLOSSARY §4 *milestone*, *required claim*; P2.5b-D1). One file,
+    ``milestones/<name>.json``, hand-written and reviewed like a claim: the stem
+    is the name, and it is a directory under ``out/``.
+
+    ``requires`` — the claim ids the spend needs Checked: *ready* for it is
+    exactly that (``claims.unresolved``), never ``Claim.critical``, which stays
+    what ``check`` blocks on (D2). ``generator`` — ``"<path>.py:<function>"``,
+    the function ``export`` runs to write the package (D11), or ``""``.
+
+    What it replaced: one implicit spend for the whole project — ``critical``
+    "required by every spend" — so a print and a safety release could not ask
+    for different evidence (§2.3 of the paper), and the page said ready whenever
+    nothing stopped ``check`` (S-60). *Rejected:* one ``milestones.json`` (two
+    branches editing two milestones would conflict: P1.3's records-as-files
+    argument); a ``milestone`` field on each claim (a claim two spends require
+    needs a list, and what a spend requires belongs to the spend); a declared
+    list of the physical claims an article settles (derived instead — the test
+    card — since a declared list drifts from the claims)."""
+
+    id: str
+    description: str = ""
+    requires: list[str] = field(default_factory=list)
+    generator: str = ""
+
+
+@dataclass
+class ExportRecord(Record):
+    """One export of a milestone: an entry of ``exports/<milestone>.json``'s
+    ``exports`` list, append-only, sealed and chained (``store.append_sealed``,
+    P2.5b-D9), written only by ``atompipe export``. Enough to answer from git
+    alone what was required, what was checked, what was re-run, what the person
+    decided and what was built (D26):
+
+    * ``when``, ``who``, ``channel``, ``revision``, ``dirty`` — the clock, git's
+      identity, how it was entered (``cli._channel``), the commit and whether
+      the tree had uncommitted changes (shown, never hashed);
+    * ``requires`` — the milestone's required ids at export;
+    * ``claims`` — every claim's ``{status, cause, reran}`` at export: ``reran``
+      false where its evaluators were served from the verdicts on record, not
+      re-run (critique 18 of the P2.5b design: a claim the milestone does not
+      require is shown as last evaluated);
+    * ``reran`` — each re-run: ``{gate, rho, out8, code, outcome, qualified}``;
+    * ``counted`` — per REQUIRED claim, the covering evaluators whose pass
+      counted on the re-executed view (``claims.contradicted_by``'s rows): what
+      a fail recorded later on this article contradicts (D13);
+    * ``article`` — what was built (``verdicts.export_article``): ``{source:
+      "export", hash, traced, milestone, when, revision, dirty, built_from}``;
+    * ``package`` — ``{hash, files: {rel: sha256}, manifest: sha256}``;
+    * ``proceed`` — ``None``, or the person's decision to go ahead over
+      unresolved required claims: ``{claims: [{id, status, cause}], why}`` (D8);
+    * ``prev``, ``digest`` — the chain and the seal.
+
+    *Rejected:* inside ``milestones/<m>.json`` (a hand-edited source and a
+    tool-written seal in one file); under ``.atompipe/`` (hidden from review);
+    one file per export (an export removed to escape a rebuild prediction would
+    leave no hole; a chain shows one)."""
+
+    milestone: str
+    when: str = ""
+    who: str = ""
+    channel: str = ""
+    revision: str = ""
+    dirty: bool = False
+    requires: list = field(default_factory=list)
+    claims: dict = field(default_factory=dict)
+    reran: list = field(default_factory=list)
+    counted: dict = field(default_factory=dict)
+    article: dict = field(default_factory=dict)
+    package: dict = field(default_factory=dict)
+    proceed: Any = None
+    prev: str = ""
+    digest: str = ""
+
+
+# --------------------------------------------------------------------------- #
 # packs
 # --------------------------------------------------------------------------- #
 @dataclass
@@ -796,23 +1476,15 @@ class ProjectMeta(Record):
 
 
 @dataclass
-class RunMeta(Record):
-    """Bookkeeping for one gate sweep."""
-
-    when: str = ""
-    tier: int = 0
-    model_hash: str = ""             # hash of the resolved parameter projection
-    inputs_hash: str = ""            # hash over ingested artifact digests
-    spine_version: str = ""
-    duration_s: float = 0.0
-
-
-@dataclass
 class Ledger(Record):
-    """The whole project state. Persisted as .atompipe/ledger.json.
+    """The whole project state, in memory.
 
-    Deliberately one file: an agent reads it once and holds the entire shape of
-    the project - claims, evidence, gaps, decisions - in a few hundred lines.
+    On disk it is one file per record (`RECORD_KINDS`) plus
+    `.atompipe/project.json` for `meta`; `store.load` assembles this from them.
+    `.atompipe/ledger.json` is the GENERATED index of those files — the whole
+    project in one read for an agent, as the single ledger file was — and is
+    never read back for truth. `verdicts`, `Claim.gates` and `Param.gates` are
+    filled in memory by readers and never written to a record.
     """
 
     meta: ProjectMeta = field(default_factory=ProjectMeta)
@@ -823,7 +1495,47 @@ class Ledger(Record):
     decisions: list[Decision] = field(default_factory=list)
     verdicts: list[Verdict] = field(default_factory=list)   # latest per gate
     views: list[View] = field(default_factory=list)
-    last_run: RunMeta = field(default_factory=RunMeta)
+    # No run record. The ledger used to carry the previous sweep's model and
+    # inputs hashes, and staleness was ONE comparison against them: a model that
+    # failed to import compared equal, and three claims read PROVEN for a design
+    # that could not be built (S-21); ingesting one unread datasheet staled every
+    # measurable claim (S-33). A verdict is current by its own inputs now
+    # (`verdicts.freshness`), and when a check last ran is
+    # `.atompipe/cache/last_check.json`, untracked. `from_dict` ignores the old
+    # key, so a ledger an older spine wrote still loads (R-2), and the next save
+    # simply does not carry it.
+    removed: tuple = ()
+    """In memory only, never written (``to_dict`` drops it): a ``Claim`` per
+    ``results/<id>.json`` that no ``claims/<id>.json`` holds — assembled by
+    ``store`` with the file's results, ``kind`` physical, required, and no
+    statement. ``verdicts.view`` puts each one holding a fail among the claims
+    every reader composes, so its fail reads Failing and stops ``check`` (R-3:
+    a fail counts across every edit, a claim file's rename or deletion
+    included); ``verdicts.track_record`` and ``doctor`` read every one. What
+    slipped through (review of P2.5a): a claim file renamed away from its
+    results left a sealed fail no reader looked at — the claim stopped failing,
+    ``check`` passed, and the evaluator's track record lost its contradiction.
+    *Rejected:* a claim synthesized into ``claims`` by ``store`` (``save``
+    would write it back as a claim file nobody wrote); refusing every command
+    (a dropped requirement is an ordinary edit, and the fail it leaves is a
+    fact to show, not a file to repair)."""
+    milestones: list = field(default_factory=list)
+    """``milestones/*.json`` (P2.5b-D1): each a ``Milestone``, in natural id
+    order. Readable by a gate, traced like ``decisions`` (``verdicts``'
+    ``_LEDGER_WHOLE``)."""
+    exports: list = field(default_factory=list)
+    """``exports/*.json`` (P2.5b-D9): every ``ExportRecord``, each milestone's
+    oldest first, milestones in natural order. Hidden from every gate
+    (``verdicts._LEDGER_HIDDEN``): a gate that read the boundary's record would
+    key on its own spend — a staleness that feeds itself."""
+
+    def to_dict(self) -> dict[str, Any]:
+        out = super().to_dict()
+        out.pop("removed", None)
+        return out
+
+    def milestone(self, name: str) -> "Milestone | None":
+        return next((m for m in self.milestones if m.id == name), None)
 
     # -- lookups ---------------------------------------------------------- #
     def claim(self, cid: str) -> Claim | None:
@@ -863,17 +1575,101 @@ class Ledger(Record):
             decisions=[Decision.from_dict(d) for d in data.get("decisions") or []],
             verdicts=[Verdict.from_dict(v) for v in data.get("verdicts") or []],
             views=[View.from_dict(v) for v in data.get("views") or []],
-            last_run=RunMeta.from_dict(data.get("last_run") or {}),
+            milestones=[Milestone.from_dict(m) for m in data.get("milestones") or []],
+            exports=[ExportRecord.from_dict(e) for e in data.get("exports") or []],
         )
+
+
+# --------------------------------------------------------------------------- #
+# records as files (checkpoint 1.3)
+# --------------------------------------------------------------------------- #
+#: Each record directory under the project root -> the kind a file in it holds.
+#: One file per record, the stem is the id (`claims/C1.json` is claim C1), so a
+#: branch that edits one claim conflicts with nothing but an edit of that claim.
+#: What slipped through with one `ledger.json`: every command rewrote the whole
+#: file, so a candidate branch that touched one number conflicted with every
+#: other branch on the same file — the merge-conflict argument for one file
+#: inverts once a branch is a candidate (brief). `results/<claim-id>.json` holds
+#: a claim's PhysicalResults as `{"results": [...]}`, append-only (D-11), apart
+#: from the claim so a candidate's refutation survives a trade overlay (Q1.10).
+#: `views/` holds viewgens too; only its `*.json` files are records. P2.5b adds
+#: `milestones/<name>.json` (a declared spend) and `exports/<name>.json` (that
+#: spend's export records, sealed and chained like a results file), last, so
+#: every kind before them keeps its place.
+#: The order is `store.RECORD_DIRS`' and a test holds the two equal. Rejected: a
+#: `ledger.json` sharded by kind (`claims.json`, …) — the same conflict per kind.
+RECORD_KINDS: dict[str, type] = {
+    "claims": Claim,
+    "params": Param,
+    "decisions": Decision,
+    "needs": Need,
+    "inputs": InputArtifact,
+    "results": PhysicalResult,
+    "views": View,
+    "milestones": Milestone,
+    "exports": ExportRecord,
+}
+
+#: Keys a record FILE may never carry, per kind (the class name), each with the
+#: home that owns the fact instead; `"*"` applies at every level of every kind.
+#: The dataclass fields stay (tests:H4: `claims.resolve_status` still reads
+#: `Claim.gates` in memory) — only their on-disk home goes. A copy on disk is a
+#: second source that goes stale the moment the owner moves: `check` rewrote
+#: `claim.gates` into the ledger on every run (S-37), and a param record's
+#: `value` kept saying 7 after the model said 8 (S-39). `{model}` is filled with
+#: the project's `model_entry`, because "the model owns it" is only useful when it
+#: says which file. `Claim.physical_result` is here because its home moved to
+#: `results/<id>.json`; two homes for a result is how one of them gets believed.
+#: `independence` is NEVER a field the proposer fills in (brief): it is derived
+#: from origin, and a record that states its own would launder a claim of it.
+#: Rejected: dropping these keys silently on read — the lenient reader is exactly
+#: how a typo'd key vanished and was then erased from disk (S-40).
+FORBIDDEN_KEYS: dict[str, dict[str, str]] = {
+    "Claim": {
+        "gates": "derived from gate coverage — the registry says which gates cover a claim",
+        "physical_result": "a claim's results live in results/<id>.json, append-only",
+        "results": "a claim's results live in results/<id>.json, append-only",
+        "attributions": "an owner or an authority is recorded in results/<id>.json by "
+                        "`atompipe claim physical <id> assume`, typed in their own shell",
+        "standing": "the resolver judges a result's standing on every read",
+    },
+    "Param": {
+        "value": "the model ({model}) owns it",
+        "derived_from": "the model ({model}) owns it",
+        "gates": "derived — the gates that read it when they last ran",
+        "changed_in": "derived — the decisions that name it in params_changed",
+    },
+    "InputArtifact": {
+        "bytes": "computed from the file",
+    },
+    "*": {
+        "independence": "derived from origin (pack, human, agent session, external "
+                        "solver), never a field the proposer fills in",
+    },
+}
+
+#: `(class, field)` pairs the record writer writes even at their defaults. The
+#: writer omits every other default so a record says only what was decided — but
+#: a claim file without its `kind`, or a limit without its direction, is
+#: unreadable to the human editing it, and phase-1's C1 example writes both.
+#: Rejected: omitting every default (C1 would lose `kind` and `comparator`); writing
+#: every default (a claim file would carry `"physical_result": null`, `"note": ""`
+#: and seven more keys that decide nothing).
+ALWAYS_WRITTEN: frozenset[tuple[str, str]] = frozenset({
+    ("Claim", "kind"),
+    ("Acceptance", "comparator"),
+})
 
 
 __all__ = [
     "StrEnum", "ClaimKind", "ClaimStatus", "BLOCKING_STATUSES", "Tier", "ViewKind",
     "ArtifactKind", "EXT_KIND_HINTS", "NeedStatus", "Comparator",
     "Record", "slugify", "sha256_file",
-    "Rejected", "Param", "Acceptance", "PhysicalResult", "Claim",
-    "Verdict", "NegativeControl", "GateSpec",
+    "Rejected", "Param", "Acceptance", "PhysicalResult", "AttributionRecord",
+    "EntryStanding", "Standing", "Terminal", "TERMINALS_BY_KIND", "Claim",
+    "Verdict", "NegativeControl", "GateSpec", "PrerequisiteKind", "CONTEXT_OUTSIDE",
     "ToolCandidate", "Need", "Extraction", "InputArtifact", "Decision",
-    "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta",
-    "RunMeta", "Ledger",
+    "Locator", "View", "PackManifest", "KeyCollision", "ProjectMeta", "Ledger",
+    "RECORD_KINDS", "FORBIDDEN_KEYS", "ALWAYS_WRITTEN", "Milestone", "ExportRecord",
+    "LATENCY_UNITS",
 ]

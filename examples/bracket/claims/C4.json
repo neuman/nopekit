@@ -1,0 +1,15 @@
+{
+  "statement": "Prints on a 220 mm bed without supports",
+  "kind": "measurable",
+  "acceptance": {
+    "quantity": "bed fit",
+    "comparator": "<=",
+    "limit": 204.0,
+    "units": "mm"
+  },
+  "rationale": "204 mm = 220 mm bed less 8 mm brim each side; bracket.bed_fit computes it, and check warns when they differ",
+  "tags": [
+    "bed-fit",
+    "wall-thickness"
+  ]
+}
