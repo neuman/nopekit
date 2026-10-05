@@ -1327,6 +1327,92 @@ def locator_problems(views: Iterable[View], verdicts: Iterable[Verdict]) -> list
 
 
 # --------------------------------------------------------------------------- #
+# the editor's launch entry
+# --------------------------------------------------------------------------- #
+#: Where an editor looks for "how do I run this project": VS Code's Run and Debug.
+#: What slipped through: a groundspace built end to end had a site and no way to
+#: open it short of knowing `atompipe site serve` existed; the person looking at it
+#: in their editor found nothing to press. *Rejected:* `.claude/launch.json` (the
+#: projects this was asked for keep theirs in `.vscode/`), and serving `site/` with
+#: `python3 -m http.server` (it loses `site serve`'s no-store and `.js` MIME fixes,
+#: which are the difference between a current page and a blank one).
+LAUNCH_PATH = os.path.join(".vscode", "launch.json")
+
+#: The line `atompipe site serve` prints once its socket is listening, and the
+#: pattern the launch entry waits for. Kept beside each other so one cannot move
+#: without the other: `tests/test_launch.py` runs the real server and matches its
+#: first line with this pattern.
+SERVE_READY_LINE = "serving {served} at {url}"
+SERVE_READY_RE = r"serving \S+ at (https?://\S+)"
+
+
+def launch_config(name: str, *, src_root: str | None = None) -> dict:
+    """The `.vscode/launch.json` a groundspace ships: build the site, serve it on a
+    free port, and let the editor open the browser when the server says it is up.
+
+    Shaped after VS Code's `node-terminal` launch with a `serverReadyAction`, because
+    that runs any shell command with no extension and opens the browser on the URL
+    the server printed. Each choice, and what it is for:
+
+    * `site build` first, `;` not `&&`: the page should show the ledger as it is
+      now, and a model that does not build should still open on the last page that
+      did (the page says how old its data is).
+    * `-p 0`: another groundspace's site may already hold 8000; the bound port is
+      what the server prints and what the pattern captures.
+    * `--no-browser`: the editor opens it; two windows otherwise.
+    * the command finds `atompipe` on PATH, else runs it as a module from
+      `src_root` (the atompipe this file was written by), so the entry works for an
+      installed atompipe and for one run from a checkout. The fallback path is
+      machine-specific; `atompipe site init` rewrites nothing, so delete the file
+      and run `atompipe site build` to regenerate it on another machine.
+    """
+    a = "$A"
+    find = ('command -v atompipe >/dev/null 2>&1 && A=atompipe || A="python3 -m atompipe"; ')
+    command = f"{find}{a} site build; {a} site serve -p 0 --no-browser"
+    env = {"NO_COLOR": "1"}
+    if src_root:
+        env["PYTHONPATH"] = src_root
+
+    def one(browser: str, action: str) -> dict:
+        return {
+            "name": f"{name} site — {browser}",
+            "type": "node-terminal",
+            "request": "launch",
+            "command": command,
+            "cwd": "${workspaceFolder}",
+            "env": dict(env),
+            "serverReadyAction": {
+                "pattern": SERVE_READY_RE,
+                "uriFormat": "%s",
+                "action": action,
+                "webRoot": "${workspaceFolder}/" + SITE_DIR,
+                "killOnServerStop": True,
+            },
+        }
+
+    return {"version": "0.2.0",
+            "configurations": [one("Chrome", "debugWithChrome"), one("Edge", "debugWithEdge")]}
+
+
+def ensure_launch(root: str, name: str) -> str | None:
+    """Write `<root>/.vscode/launch.json` when there is none. Returns the path
+    written (relative), or None when a file was already there.
+
+    Never edits an existing one: it is the person's (often JSON with comments, which
+    this cannot round-trip), and a launch entry silently rewritten is the editor's
+    version of a hand-edited generated file.
+    """
+    path = os.path.join(root, LAUNCH_PATH)
+    if os.path.exists(path):
+        return None
+    src_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ensure_dir(os.path.dirname(path))
+    atomic_write_text(path, json.dumps(launch_config(name, src_root=src_root),
+                                       indent=2, ensure_ascii=False) + "\n")
+    return LAUNCH_PATH.replace(os.sep, "/")
+
+
+# --------------------------------------------------------------------------- #
 # scaffolding
 # --------------------------------------------------------------------------- #
 def scaffold(root: str, *, force: bool = False) -> list:

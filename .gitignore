@@ -32,4 +32,7 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+# ...except a groundspace's own launch entry (site.ensure_launch): the bracket is the
+# reference groundspace, and its Run and Debug entry opens its site from a checkout.
+!examples/bracket/.vscode/
 *:Zone.Identifier

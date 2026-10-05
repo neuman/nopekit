@@ -47,7 +47,20 @@ site/
     state.json        claims, verdicts, views, provenance, readiness
     views/<id>.json   per-view payloads too big for state.json
   assets/             GENERATED — what viewgens wrote (GLB, PNG, SVG, CSV)
+.vscode/launch.json   Run and Debug: `site build`, then `site serve -p 0`, browser opened
+                      on the URL the server prints. Written by `init`, `site init` or
+                      `site build` when absent; never edited once it exists.
 ```
+
+**Every groundspace opens its own site from the editor** (`site.ensure_launch`). What
+slipped through: a groundspace built end to end had a site and nothing to press to
+open it. The entry is VS Code's `node-terminal` launch with a `serverReadyAction`; its
+pattern is `site.SERVE_READY_RE`, kept beside `SERVE_READY_LINE` (what `site serve`
+prints once it is listening), and `tests/test_launch.py` runs the real server against
+it. The command uses `atompipe` from PATH, else `python3 -m atompipe` with the
+`PYTHONPATH` of the atompipe that wrote it — machine-specific, so on another machine
+delete the file and run `atompipe site build`. The bracket's is committed with the
+checkout's `src/` as a relative path.
 
 ## Commands
 

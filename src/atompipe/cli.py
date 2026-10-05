@@ -980,6 +980,9 @@ def cmd_init(args: argparse.Namespace) -> int:
     )
     ledger = store.init(root, meta)
     project = rel(store.project_paths(root)["project"], root)
+    # Every groundspace opens its own site from the editor (site.ensure_launch). Written
+    # only when absent, so `init` in an existing repo leaves the person's own untouched.
+    launch = site.ensure_launch(root, name)
     entry = ledger.meta.model_entry
     model_step = (f"write {entry} — a dataclass CONFIG plus build(config) -> dict — "
                   f"then: atompipe check" if entry else
@@ -992,6 +995,7 @@ def cmd_init(args: argparse.Namespace) -> int:
             "root": root,
             "project": project,
             "meta": ledger.meta.to_dict(),
+            "launch": launch,
             "next": [
                 "atompipe ask",
                 "write claims/C1.json: {\"statement\": ..., \"acceptance\": "
@@ -1008,6 +1012,8 @@ def cmd_init(args: argparse.Namespace) -> int:
          f" one record per artifact")
     _say(f"  {'model/':<24} the parametric model: the only source of truth")
     _say(f"  {'docs/':<24} generated readiness report and decision log")
+    if launch:
+        _say(f"  {launch:<24} Run and Debug: builds and opens this project's site")
     _say("")
     _say("next, in this order:")
     _say("  1. atompipe ask                 — what evidence to ask for, then")
@@ -5257,6 +5263,15 @@ def _site_line(info: dict) -> str:
     return f"site: {', '.join(bits)}"
 
 
+def _project_name(root: str, ledger: Any = None) -> str:
+    """The name a launch entry shows: the project's own, else its directory's."""
+    try:
+        name = (ledger if ledger is not None else _load(root)).meta.name
+    except Exception:       # noqa: BLE001 - a name for a menu entry is never worth a refusal
+        name = ""
+    return (name or os.path.basename(os.path.abspath(root).rstrip(os.sep)) or "project").strip()
+
+
 def cmd_site_init(args: argparse.Namespace) -> int:
     """Scaffold `site/`, refusing to overwrite the shell.
 
@@ -5271,14 +5286,17 @@ def cmd_site_init(args: argparse.Namespace) -> int:
     root = _root(args)
     with _lock(root):
         written = site.scaffold(root, force=bool(args.force))
+        launch = site.ensure_launch(root, _project_name(root))
 
     if args.json:
-        _dump({"root": root, "site": site.SITE_DIR, "wrote": written,
+        _dump({"root": root, "site": site.SITE_DIR, "wrote": written, "launch": launch,
                "next": ["atompipe site build", "atompipe site serve"]})
         return 0
     _say(f"scaffolded {site.SITE_DIR}/ in {root}")
     for path in written:
         _say(f"  {path}")
+    if launch:
+        _say(f"  {launch}   (Run and Debug: builds and opens this site)")
     _say("")
     _say(f"  {site.SITE_DIR}/index.html is yours — edit it; "
          f"`site init` will not overwrite it again")
@@ -5337,6 +5355,9 @@ def cmd_site_build(args: argparse.Namespace) -> int:
                              projection=projection, now=now, resolution=resolution,
                              params=_shown_params(root, ledger, model, "", resolution,
                                                   registry))
+        # A groundspace made before `init` wrote one gains its launch entry here, the
+        # first time its site is built; an existing file is never touched.
+        summary["launch"] = site.ensure_launch(root, _project_name(root, ledger))
 
     problems = summary.get("locator_problems") or []
     counts = summary.get("counts") or {}
@@ -5377,6 +5398,8 @@ def cmd_site_build(args: argparse.Namespace) -> int:
              f"{', '.join(summary['refreshed'])}")
     _say(f"wrote {len(summary['wrote'])} file(s), removed {len(summary['removed'])} "
          f"stale file(s) -> {summary['state']}")
+    if summary.get("launch"):
+        _say(f"wrote {summary['launch']} — Run and Debug builds and opens this site")
     if problems:
         _say(f"{len(problems)} locator(s) point at something that does not exist. A gate "
              f"that thinks it is drawing and is not looks exactly like a gate that found "
@@ -5473,7 +5496,7 @@ def cmd_site_serve(args: argparse.Namespace) -> int:
         _dump({"url": url, "host": host, "port": port, "root": root,
                "serving": rel(site_dir, root), "built": built})
     else:
-        _say(f"serving {rel(site_dir, root)} at {url}")
+        _say(site.SERVE_READY_LINE.format(served=rel(site_dir, root), url=url))
         if not built:
             _say(f"{_tag('warn')} {rel(state_path, root)} does not exist yet — the page "
                  f"will load with no data. Run `atompipe site build`.")

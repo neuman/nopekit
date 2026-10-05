@@ -1,0 +1,41 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "wall-bracket site — Chrome",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "command -v atompipe >/dev/null 2>&1 && A=atompipe || A=\"python3 -m atompipe\"; $A site build; $A site serve -p 0 --no-browser",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "NO_COLOR": "1",
+        "PYTHONPATH": "${workspaceFolder}/../../src"
+      },
+      "serverReadyAction": {
+        "pattern": "serving \\S+ at (https?://\\S+)",
+        "uriFormat": "%s",
+        "action": "debugWithChrome",
+        "webRoot": "${workspaceFolder}/site",
+        "killOnServerStop": true
+      }
+    },
+    {
+      "name": "wall-bracket site — Edge",
+      "type": "node-terminal",
+      "request": "launch",
+      "command": "command -v atompipe >/dev/null 2>&1 && A=atompipe || A=\"python3 -m atompipe\"; $A site build; $A site serve -p 0 --no-browser",
+      "cwd": "${workspaceFolder}",
+      "env": {
+        "NO_COLOR": "1",
+        "PYTHONPATH": "${workspaceFolder}/../../src"
+      },
+      "serverReadyAction": {
+        "pattern": "serving \\S+ at (https?://\\S+)",
+        "uriFormat": "%s",
+        "action": "debugWithEdge",
+        "webRoot": "${workspaceFolder}/site",
+        "killOnServerStop": true
+      }
+    }
+  ]
+}
