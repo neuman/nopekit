@@ -44,8 +44,8 @@ from unittest import mock
 
 import _env
 import _physical as P
-from atompipe import cli, claims, store
-from atompipe.util import AtompipeError
+from nopekit import cli, claims, store
+from nopekit.util import NopekitError
 
 
 def _need(module: Any, name: str) -> Any:
@@ -66,7 +66,7 @@ def _tree(root: str) -> dict[str, bytes]:
         for name in filenames:
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, root).replace(os.sep, "/")
-            if rel in (".atompipe/ledger.json", ".atompipe/build.lock"):
+            if rel in (".nopekit/ledger.json", ".nopekit/build.lock"):
                 continue
             with open(path, "rb") as fh:
                 out[rel] = fh.read()
@@ -94,8 +94,8 @@ CHANNEL_ROWS: tuple = (
     ("a terminal, a person's own CLAUDE_CODE_MAX_OUTPUT_TOKENS", True,
      {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": "32000"}, "C5", "interactive"),
     ("a pipe, no marker", False, {}, None, "non-interactive"),
-    ("a marker beside an ATOMPIPE_CHANNEL a generator set", False,
-     {"CLAUDECODE": "1", "ATOMPIPE_CHANNEL": "interactive"}, None, "agent-session unknown"),
+    ("a marker beside an NOPEKIT_CHANNEL a generator set", False,
+     {"CLAUDECODE": "1", "NOPEKIT_CHANNEL": "interactive"}, None, "agent-session unknown"),
     ("a terminal, the id typed", True, {}, "C5", "interactive"),
     ("a terminal, the id typed with spaces", True, {}, "  C5 ", "interactive"),
     ("a terminal with a marker", True, {"CLAUDECODE": "1", "CLAUDE_CODE_SESSION_ID": "s2"},
@@ -114,7 +114,7 @@ def channel_problems(channel: Callable[..., str]) -> list[str]:
     for row, tty, environ, answer, want in CHANNEL_ROWS:
         try:
             got = channel(tty, environ, answer, "C5")
-        except AtompipeError:
+        except NopekitError:
             got = None
         if got != want:
             out.append(f"{row}: {got!r}, not {want!r}")
@@ -133,7 +133,7 @@ class HumanChannelOnly(_env.EnvCase):
         real = _need(cli, "_channel")
 
         def reads_a_variable(tty, environ, answer, claim_id):
-            return environ.get("ATOMPIPE_CHANNEL") or real(tty, environ, answer, claim_id)
+            return environ.get("NOPEKIT_CHANNEL") or real(tty, environ, answer, claim_id)
 
         def trusts_the_tty(tty, environ, answer, claim_id):
             return "interactive" if tty else "non-interactive"
@@ -153,7 +153,7 @@ class HumanChannelOnly(_env.EnvCase):
                 return "agent-session unknown"
             return real(tty, environ, answer, claim_id)
 
-        planted = {"reads ATOMPIPE_CHANNEL": reads_a_variable, "trusts isatty": trusts_the_tty,
+        planted = {"reads NOPEKIT_CHANNEL": reads_a_variable, "trusts isatty": trusts_the_tty,
                    "markers only": reads_markers_only, "accepts any line": any_line,
                    "the whole CLAUDE_CODE_ prefix": the_whole_prefix}
         for name, fn in planted.items():
@@ -169,7 +169,7 @@ class HumanChannelOnly(_env.EnvCase):
                          "CLAUDECODE")
         self.assertEqual(marker({"CLAUDE_CODE_USE_BEDROCK": "1",
                                  "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1"}), "")
-        said = __import__("atompipe.report", fromlist=["report"]).HUMAN["signing"]
+        said = __import__("nopekit.report", fromlist=["report"]).HUMAN["signing"]
         self.assertIn("{marker}", said["agent_pass"])
         self.assertIn("{why}", said["assume_channel"])
 
@@ -249,7 +249,7 @@ class HumanChannelOnly(_env.EnvCase):
             with self.subTest(agent=agent):
                 proc = P.run(root, "claim", "physical", "C6", "assume", agent=agent, code=2)
                 self.assertIn("in their own shell", proc.stderr)
-                self.assertIn("atompipe claim physical C6 assume", proc.stderr)
+                self.assertIn("nopekit claim physical C6 assume", proc.stderr)
                 self.assertEqual(_tree(root), before)
 
 
@@ -280,7 +280,7 @@ class WhoAndWhenAreNeverTyped(_env.EnvCase):
                 self.assertEqual(_tree(root), before)
 
     def test_help_lists_neither_and_one_list_names_both(self):
-        proc = _env.atompipe(["claim", "physical", "--help"], cwd=self.tmp())
+        proc = _env.nopekit(["claim", "physical", "--help"], cwd=self.tmp())
         self.assertEqual(proc.returncode, 0)
         self.assertNotIn("--who", proc.stdout)
         self.assertNotIn("--when", proc.stdout)
@@ -348,7 +348,7 @@ class WhoAndWhenAreNeverTyped(_env.EnvCase):
     def test_a_value_that_is_not_text_is_refused(self):
         """(review of P2.5a) An argument that is not UTF-8 reached the writer and
         printed a traceback, exit 1. It is refused, naming its flag, exit 2; and
-        the writer itself never raises past an AtompipeError."""
+        the writer itself never raises past an NopekitError."""
         root = P.project(os.path.join(self.tmp(), "b"))
         before = _tree(root)
         for flag in ("--detail", "--evidence", "--authority"):
@@ -360,7 +360,7 @@ class WhoAndWhenAreNeverTyped(_env.EnvCase):
                 self.assertEqual(code, 2, err.getvalue())
                 self.assertIn(f"{flag} holds bytes that are not text", err.getvalue())
                 self.assertEqual(_tree(root), before)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store._dumps({"detail": "bad\udcffbyte"}, "results/C2.json")
         self.assertIn("results/C2.json", str(caught.exception))
 
@@ -400,7 +400,7 @@ def act_problems(act: Callable[..., Any]) -> list[str]:
     for result, passed, measured, want in ACT_ROWS:
         try:
             got = act(result, passed, measured, "C9")
-        except AtompipeError:
+        except NopekitError:
             got = None
         if got != want:
             out.append(f"{result} --pass={passed} --measured={measured}: {got!r}, not "
@@ -445,7 +445,7 @@ class TheResultsFileIsSealedAndChained(_env.EnvCase):
         return root
 
     def _refused(self, path: str, *where: str) -> str:
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.read_record(path, "results")
         text = str(caught.exception)
         self.assertIn(os.path.basename(path), text)
@@ -544,7 +544,7 @@ class TheResultsFileIsSealedAndChained(_env.EnvCase):
                         fh.write(data)
                 else:
                     _write(path, data)
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     store.read_record(path, "results")
                 self.assertIn(word, str(caught.exception))
 
@@ -563,16 +563,16 @@ class TheResultsFileIsSealedAndChained(_env.EnvCase):
         data = copy.deepcopy(after)
         data["results"][2]["detail"] = "edited"
         _write(path, data)
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             store.append_signed(root, "C5", "results", dict(after["results"][-1], detail="x"))
 
     def test_save_never_appends_an_unsealed_entry_after_a_sealed_one(self):
-        from atompipe.models import PhysicalResult
+        from nopekit.models import PhysicalResult
         root = P.project(os.path.join(self.tmp(), "b"))
         _sealed_file(root)
         ledger = store.load(root)
         ledger.claim("C5").physical_result = PhysicalResult(passed=False, detail="saved")
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             store.save(root, ledger)
 
     def test_doctor_names_a_refused_file_and_answers(self):
@@ -600,7 +600,7 @@ class TheResultsFileIsSealedAndChained(_env.EnvCase):
         proc = P.run(root, "status", code=2)
         self.assertIn("results/C1.json", proc.stderr)
         self.assertIn("sagged 0.9 mm", proc.stderr)
-        self.assertIn("atompipe claim physical C1 fail", proc.stderr)
+        self.assertIn("nopekit claim physical C1 fail", proc.stderr)
 
     def test_every_entry_a_restore_discards_is_named(self):
         """(review of P2.5a) In process, against a real git history: every entry
@@ -696,7 +696,7 @@ def tamper_problems(tmp: Callable[[], str]) -> list[str]:
         try:
             store.read_record(path, "results")
             out.append(name)
-        except AtompipeError:
+        except NopekitError:
             pass
     root = tmp()
     os.makedirs(os.path.join(root, "results"), exist_ok=True)
@@ -706,7 +706,7 @@ def tamper_problems(tmp: Callable[[], str]) -> list[str]:
     try:
         store.read_record(copied, "results")
         out.append("an entry copied to another claim")
-    except AtompipeError:
+    except NopekitError:
         pass
     return out
 
@@ -735,7 +735,7 @@ def _result(passed: bool, detail: str, **changes: Any) -> dict:
 def _advised(path: str) -> str:
     try:
         store.read_record(path, "results")
-    except AtompipeError as exc:
+    except NopekitError as exc:
         return str(exc)
     return ""
 
@@ -859,7 +859,7 @@ class AnOwnerOnlyThroughTheChannel(_env.EnvCase):
         it and the readers did not, so Dana's own ``assume`` never counted. One
         normaliser (``claims.name_of``) on every side; planted: a ``name_of``
         that keeps the spaces."""
-        from atompipe.models import AttributionRecord, Claim, ClaimKind
+        from nopekit.models import AttributionRecord, Claim, ClaimKind
         record = AttributionRecord(role="owner", name=P.NAME, reason="r", who=P.WHO,
                                    channel="interactive")
         claim = Claim(id="C6", statement="s", kind=ClaimKind.ASSUMPTION, rationale="r",
@@ -882,7 +882,7 @@ class AnOwnerOnlyThroughTheChannel(_env.EnvCase):
         it, and back to Dana: Dana's attribution, for this owner and this reason,
         still counts — as a reverted article reads Checked again. Planted: the
         newest attribution alone."""
-        from atompipe.models import AttributionRecord, Claim, ClaimKind
+        from nopekit.models import AttributionRecord, Claim, ClaimKind
         dana = AttributionRecord(role="owner", name=P.NAME, reason="r", who=P.WHO,
                                  channel="interactive")
         pat = AttributionRecord(role="owner", name="Pat Other", reason="r",
@@ -904,12 +904,12 @@ class AnOwnerOnlyThroughTheChannel(_env.EnvCase):
         self.assertEqual(owners_callers(_spine_sources()), [])
 
     def test_planted_owner_paths_are_caught(self):
-        planted = {"cli_planted.py": "from atompipe import claims\n"
+        planted = {"cli_planted.py": "from nopekit import claims\n"
                                      "def f(view):\n"
                                      "    return claims.compositions(view, owners={'C6': 1})\n"}
         self.assertNotEqual(owners_callers(planted), [])
         # A store that assembles a non-interactive attribution: C6 Assumed with no act.
-        from atompipe.models import AttributionRecord, Claim, ClaimKind
+        from nopekit.models import AttributionRecord, Claim, ClaimKind
         claim = Claim(id="C6", statement="s", kind=ClaimKind.ASSUMPTION, rationale="r",
                       owner=P.NAME)
         record = AttributionRecord(role="owner", name=P.NAME, reason="r", who=P.WHO,
@@ -921,7 +921,7 @@ class AnOwnerOnlyThroughTheChannel(_env.EnvCase):
 
 
 def _spine_sources() -> dict[str, str]:
-    src = os.path.join(_env.REPO, "src", "atompipe")
+    src = os.path.join(_env.REPO, "src", "nopekit")
     out = {}
     for name in sorted(os.listdir(src)):
         if name.endswith(".py"):

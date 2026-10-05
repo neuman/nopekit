@@ -45,7 +45,7 @@ its bundled packs (``BRACKET_CODE``, P2.4).
 Compared:
 
 * the sweep's claim statuses — the old spine's ``status --json`` claims, read
-  right after its sweep, against the new spine's ``.atompipe/cache/last_check.json``
+  right after its sweep, against the new spine's ``.nopekit/cache/last_check.json``
   ``statuses`` (the sweep's own record; a spine that keeps none is read through
   ``status``, as the old one is);
 * the ``check`` exit codes;
@@ -179,9 +179,9 @@ def materialise(ref: str, work: str) -> tuple[str, str]:
     proc = _env.git(["worktree", "add", "--detach", tree, sha], cwd=_env.REPO)
     if proc.returncode != 0:
         raise Unusable(f"git worktree add {sha}: {proc.stderr.strip()}")
-    if not os.path.isfile(os.path.join(tree, "src", "atompipe", "__init__.py")):
+    if not os.path.isfile(os.path.join(tree, "src", "nopekit", "__init__.py")):
         unmaterialise(tree)
-        raise Unusable(f"{ref} has no src/atompipe: not an atompipe spine")
+        raise Unusable(f"{ref} has no src/nopekit: not an nopekit spine")
     return sha, tree
 
 
@@ -257,13 +257,13 @@ def sweep(spine_src: str, pristine: str, dest: str, *, thickness: float | None =
         _projects.set_thickness(dest, thickness)
     env = {"PYTHONPATH": _pythonpath(spine_src)}
     started = time.monotonic()
-    check = _env.run([sys.executable, "-m", "atompipe", "check", "--tier", "3", "--json"],
+    check = _env.run([sys.executable, "-m", "nopekit", "check", "--tier", "3", "--json"],
                      cwd=dest, env=env)
     seconds = time.monotonic() - started
     checked = _json(check, f"check in {dest} ({spine_src})")
-    status = _json(_env.run([sys.executable, "-m", "atompipe", "status", "--json"],
+    status = _json(_env.run([sys.executable, "-m", "nopekit", "status", "--json"],
                             cwd=dest, env=env), f"status in {dest} ({spine_src})")
-    last = os.path.join(dest, ".atompipe", "cache", "last_check.json")
+    last = os.path.join(dest, ".nopekit", "cache", "last_check.json")
     if os.path.isfile(last):
         with open(last, encoding="utf-8") as fh:
             swept, source = dict(json.load(fh)["statuses"]), "last_check.json"
@@ -301,7 +301,7 @@ def build_corpus(root: str) -> dict[str, str]:
 
 def claim_kinds(project: str) -> dict[str, str]:
     """``{claim id: kind}``, read as ``claim_tags`` reads the records."""
-    ledger = os.path.join(project, ".atompipe", "ledger.json")
+    ledger = os.path.join(project, ".nopekit", "ledger.json")
     rows: list = []
     if os.path.isfile(ledger):
         with open(ledger, encoding="utf-8") as fh:
@@ -319,7 +319,7 @@ def claim_acceptances(project: str) -> dict[str, dict]:
     """``{claim id: acceptance record}`` for every claim that carries one, read
     from the records as ``claim_kinds`` reads them (P2.4: the goalpost a
     covering pass is compared with, ``_misses``)."""
-    ledger = os.path.join(project, ".atompipe", "ledger.json")
+    ledger = os.path.join(project, ".nopekit", "ledger.json")
     rows: list = []
     if os.path.isfile(ledger):
         with open(ledger, encoding="utf-8") as fh:
@@ -338,7 +338,7 @@ def claim_tags(project: str) -> dict[str, set]:
     """``{claim id: {id and tags}}`` — what a gate's ``claims`` list binds to
     (``claims.covers``: the id, or any tag) — read from the project's legacy
     ledger or, in the records layout, its ``claims/*.json``."""
-    ledger = os.path.join(project, ".atompipe", "ledger.json")
+    ledger = os.path.join(project, ".nopekit", "ledger.json")
     rows: list = []
     if os.path.isfile(ledger):
         with open(ledger, encoding="utf-8") as fh:
@@ -605,7 +605,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--keep", action="store_true", help="keep the temp directory, and say where")
     args = ap.parse_args(argv)
 
-    work = tempfile.mkdtemp(prefix="atompipe-r8-")
+    work = tempfile.mkdtemp(prefix="nopekit-r8-")
     tree = ""
     try:
         sha, tree = materialise(args.base, work)

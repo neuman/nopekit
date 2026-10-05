@@ -1,9 +1,9 @@
 ---
 name: pack-authoring
-description: Build a new atompipe pack — a reusable validation capability for a physical domain (CFD, FEA, thermal, chemical, optics, machining, sourcing). Use when a claim has no gate and the extension protocol has been followed, when wrapping a solver or analysis tool as a gate, when extracting existing validation code into a shareable pack, or when someone wants to contribute a capability back to atompipe.
+description: Build a new nopekit pack — a reusable validation capability for a physical domain (CFD, FEA, thermal, chemical, optics, machining, sourcing). Use when a claim has no gate and the extension protocol has been followed, when wrapping a solver or analysis tool as a gate, when extracting existing validation code into a shareable pack, or when someone wants to contribute a capability back to nopekit.
 ---
 
-# Authoring an atompipe pack
+# Authoring an nopekit pack
 
 A pack is how a validation capability stops being a one-off. You built a gate for
 your project; a pack is that gate made reusable, self-testing and contributable.
@@ -27,9 +27,9 @@ would recognise? If not, split.
 
 No command creates a pack: it is an ordinary directory. Make the layout in
 `docs/PACK_FORMAT.md` — `pack.json`, `PACK.md`, `gates/`, `selftest/`, `references/` —
-under `.atompipe/packs/<name>/` in the project that needs it (or `packs/<name>/` in
-the atompipe repository). `pack validate` and `gate selftest --pack` find it there by
-name before it is published anywhere; `atompipe packs add <name>` opts the project
+under `.nopekit/packs/<name>/` in the project that needs it (or `packs/<name>/` in
+the nopekit repository). `pack validate` and `gate selftest --pack` find it there by
+name before it is published anywhere; `nopekit packs add <name>` opts the project
 into it, so its gates also run in `check` and in a project's `gate selftest`.
 
 Names are lowercase, hyphenated, and say the domain and the tool when the tool
@@ -64,7 +64,7 @@ read it makes — a parameter, a claim, a file, a question about a path — is r
 because the verdict cache keys each verdict by exactly what it read. Write for that:
 
 - **Name the gate like a directory.** `<scope>.<what>` — `fdm.overhang`. Its cached
-  verdicts live in `.atompipe/verdicts/<gate id>/`, so the registry refuses `/`, `\`,
+  verdicts live in `.nopekit/verdicts/<gate id>/`, so the registry refuses `/`, `\`,
   `..` and `:` in an id, and an id that differs from another only in case.
 - **Never write `ctx.params`.** It is read-only: an assignment, `update` or `pop`
   raises `GateInputWriteError` and the gate reads as an error. It used to be one dict
@@ -86,9 +86,9 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
 - **Keep no memo of your own.** An `lru_cache` at module level is emptied before every
   run, so it saves nothing across gates; a module-level dict you fill from a function
   is never emptied, and the second gate to ask gets a value whose file it never opened
-  — no verdict keys it (`atompipe doctor` names it under `memos`). `ctx.load_file` is
+  — no verdict keys it (`nopekit doctor` names it under `memos`). `ctx.load_file` is
   the one shared cache that records the file for every caller.
-- **Load helpers by path with `atompipe.modelio.load_path(path)`**, never with
+- **Load helpers by path with `nopekit.modelio.load_path(path)`**, never with
   `spec_from_file_location` under a fixed name: it runs the bytes on disk, never a
   stale `.pyc`, keeps two copies of your pack from sharing one helper, and keys the
   helper, so editing it re-runs the gate. At module level it joins the gate's code;
@@ -98,7 +98,7 @@ because the verdict cache keys each verdict by exactly what it read. Write for t
   (site-packages) is a third-party instrument.
 - **Import a module at run time by a string literal** (`importlib.import_module("rules")`),
   or with `load_path`. A name held in a variable is keyed only by the first run in a
-  process to load it; `atompipe doctor` names each under `dynamic-imports`.
+  process to load it; `nopekit doctor` names each under `dynamic-imports`.
 - **Leave `rho`, `cpu_s`, `unqualified`, `blocked_by` and `blocked_kind` alone.** `run_gate` measures `cpu_s`
   (child processes included: a solver subprocess is not free) and `duration_s`, and
   the sweep sets `rho`. Anything a gate puts in them is overwritten. `unqualified` is
@@ -190,7 +190,7 @@ Mesh fixtures too: returning a bare `{"meshes": ...}` leaves the gate reading it
 threshold from the project, so it skips instead of failing.
 
 ```
-atompipe gate selftest --only <gate-id>
+nopekit gate selftest --only <gate-id>
 ```
 
 If the gate passes its known-bad fixture, it is broken. Do not proceed. Do not
@@ -212,8 +212,8 @@ unqualified (`channels differ`). The line says which facts held:
 cad.watertight : known-good pass · known-bad fail → qualified
 ```
 
-A pack loaded from outside the bundled `packs/` — under `.atompipe/packs/` while you
-write it, or `~/.atompipe/packs` — reads its controls through `ctx.extra` at its peril
+A pack loaded from outside the bundled `packs/` — under `.nopekit/packs/` while you
+write it, or `~/.nopekit/packs` — reads its controls through `ctx.extra` at its peril
 (`known-good and known-bad via ctx.extra`: a check run never hands `extra`), is handed
 no `ctx.model` on any run, and a verdict that read a ledger value its baseline never
 handed it does not count (`check run reads another ledger`). It also faces the
@@ -262,7 +262,7 @@ Three things to get right:
   is worse than none — it sends a reader to inspect a part that is fine, and after
   that they ignore the overlay. A failure you cannot place carries no locators and
   the site says so.
-- **Run `atompipe site build` and read the warnings.** It reports every locator
+- **Run `nopekit site build` and read the warnings.** It reports every locator
   naming a view or a node that does not exist. That is the check that catches the
   rename you did on one side of the interface and not the other.
 
@@ -359,8 +359,8 @@ datasheet.
 ### 9. Validate, and produce the evidence
 
 ```
-atompipe pack validate <name>
-atompipe gate selftest --pack <name> --junit <file>.xml
+nopekit pack validate <name>
+nopekit gate selftest --pack <name> --junit <file>.xml
 ```
 
 `pack validate` checks the layout and demonstrates tiers 0–1: each gate passes its

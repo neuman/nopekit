@@ -32,9 +32,9 @@ import time
 import unittest
 from unittest import mock
 
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe.models import Ledger, ProjectMeta
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit.models import Ledger, ProjectMeta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK = os.path.join(REPO, "packs", "openmodelica")
@@ -72,7 +72,7 @@ class ClearObjects(unittest.TestCase):
     """The helper alone: no omc needed."""
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="atompipe-omc-objs-")
+        self.dir = tempfile.mkdtemp(prefix="nopekit-omc-objs-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.M = _load_helper()
 
@@ -122,7 +122,7 @@ class AStaleObjectIsRebuilt(unittest.TestCase):
             self.params = json.load(fh)
 
     def _build_then_simulate_over_a_future_object(self):
-        out = tempfile.mkdtemp(prefix="atompipe-omc-stale-")
+        out = tempfile.mkdtemp(prefix="nopekit-omc-stale-")
         self.addCleanup(shutil.rmtree, out, True)
         ctx = gates_mod.GateContext(
             root=PACK, ledger=Ledger(meta=ProjectMeta(name="selftest")), model=None,

@@ -1,0 +1,167 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.bending_stress",
+  "rho": "57553f49a632d3a513d68d235035514ad641ad2eb147cc6f5743f35e4027d69a",
+  "static": "66d0d9593c6315cec43c10a216c80e61132302df550d42878130a806f20e97a6",
+  "static_parts": {
+    "spine": "f396daf6190537c7f68ede528849d58110bd85d8d545c39e61ecc2efda945530",
+    "code": {
+      "digest": "9d44aca4ef6356d0c2fa1c7c1d0f4b0ecc678f8ff5f83afd6a748d6c119386f3",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "c37edcc33de9c8b1839bab5ed8b6c1377619163c9bcfbb1823d9188484bc11f1",
+      "files": {
+        "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+        "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:overloaded",
+      "expect": "fail",
+      "note": "same bracket at 20x load; stress is linear in load so this lands far past yield while the geometry is untouched",
+      "good": "",
+      "mutation": true
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "c04607054719152157838eb2f982f420bbc7e5975e8b133b530b30dad215ba3b",
+    "files": {
+      "model/bracket.py": "ce20d2c788710944d2ed4b791a1b82023cac47f5883df30c783f1da06c5a0b9b",
+      "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+      "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "design_stress"
+        ],
+        "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+        15.0
+      ],
+      [
+        [
+          "material"
+        ],
+        "688df429073a1a0ae4640c3595bd69918d99253129e9ae131d6f0419072ab08e",
+        "petg"
+      ],
+      [
+        [
+          "stress_root"
+        ],
+        "fa0d30f0a343ea69393d21bf04c449077355aa618df1184ac4a21a0ec8b0f349",
+        56.25
+      ],
+      [
+        [
+          "utilisation"
+        ],
+        "a22b48830a436b5614cac9c9675464e82fe1ae9307226e1bcfe39ee63adff542",
+        3.75
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "bad_extra": [],
+  "good": {
+    "outcome": "pass",
+    "reads": {
+      "params": [
+        [
+          [
+            "design_stress"
+          ],
+          "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+          15.0
+        ],
+        [
+          [
+            "material"
+          ],
+          "688df429073a1a0ae4640c3595bd69918d99253129e9ae131d6f0419072ab08e",
+          "petg"
+        ],
+        [
+          [
+            "stress_root"
+          ],
+          "c2863c85afa41246e9f675fc7f82cf4bcbb1b9e9e5461f1ca20ba26c4e486ed1",
+          2.8125
+        ],
+        [
+          [
+            "utilisation"
+          ],
+          "429fd232f2d5f938ed03ab5848db5548a00598d7348dc8764f060ca245f1cd78",
+          0.1875
+        ]
+      ],
+      "files": {},
+      "dirs": {},
+      "ledger": {},
+      "host": [],
+      "opaque": []
+    },
+    "extra": [],
+    "measured": 0.188,
+    "limit": 1.0,
+    "units": "utilisation",
+    "detail": "2.8 MPa vs 15.0 MPa allowable (util 0.19, petg)",
+    "goalpost": []
+  },
+  "mutation": {
+    "runs": 64,
+    "boundary": "",
+    "results": [
+      {
+        "key": [
+          "utilisation"
+        ],
+        "before": 0.1875,
+        "after": 1.15,
+        "outcome": "fail",
+        "measured": 1.15,
+        "limit": 1.0
+      }
+    ],
+    "inconclusive": [],
+    "not_mutated": [
+      {
+        "key": [
+          "design_stress"
+        ],
+        "why": "never-lands"
+      },
+      {
+        "key": [
+          "material"
+        ],
+        "why": "word"
+      },
+      {
+        "key": [
+          "stress_root"
+        ],
+        "why": "never-lands"
+      }
+    ]
+  },
+  "admitted": "paired",
+  "detail": "correctly failed on selftest/bad_configs.py:overloaded (same bracket at 20x load; stress is linear in load so this lands far past yield while the geometry is untouched): 56.2 MPa vs 15.0 MPa allowable (util 3.75, petg)",
+  "measured": 3.75,
+  "limit": 1.0,
+  "units": "utilisation",
+  "digest": "f14e4f60f89ed952a2a2599b52f04b10d1f44ef0eb01690b0f5e08cc3793506c"
+}

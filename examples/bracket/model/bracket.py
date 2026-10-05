@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""bracket.py — the atompipe reference model.
+"""bracket.py — the nopekit reference model.
 
 A wall-mounted L-bracket carrying a static load on its arm. Deliberately the
 simplest thing that still exercises every rule in METHOD.md:
@@ -69,7 +69,7 @@ class Config:
     thickness: float = 7.0
     """mm, and DELIBERATELY still failing the deflection claim in this reference
     project — it comes out at ~0.70mm against a 0.5mm limit. 8.0 passes at 0.47mm.
-    The default is left marginal so `atompipe check` on a fresh clone shows a real
+    The default is left marginal so `nopekit check` on a fresh clone shows a real
     gate catching a real problem, and so the fix is one parameter you can watch turn
     green. Deflection goes as 1/t^3, which is why thickness is the cheap lever;
     4.0 was tried: 3.75 mm, 7.5x the limit — see PARAMS."""
@@ -125,7 +125,7 @@ CONFIG = Config()
 # --- what lost ----------------------------------------------------------------
 # Rule 3's other half: the alternatives that were tried and did not win, next to
 # the values they lost to. A Config docstring says why THIS value; an entry here
-# says what lost and by how much, once, where `atompipe why <param>` finds it.
+# says what lost and by how much, once, where `nopekit why <param>` finds it.
 #
 # Only the three fields with a real loser are listed. Every other field's
 # rationale is its docstring, and an entry per field would be a parallel table
@@ -133,7 +133,7 @@ CONFIG = Config()
 # field is added (see `modelio.field_docstrings`). No entry states a value: the
 # dataclass owns every value, and a number repeated here would be a second copy.
 #
-# Plain dicts, not `atompipe.models.Param`/`Rejected` records, so the model keeps
+# Plain dicts, not `nopekit.models.Param`/`Rejected` records, so the model keeps
 # zero dependencies and still runs by hand (`python3 model/bracket.py`); the spine
 # reads a dict item exactly as it reads a Param, and refuses a misspelt key.
 #

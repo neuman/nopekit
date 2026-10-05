@@ -77,7 +77,7 @@ NO_CLAIMS = re.compile(r"^no claims recorded, so nothing was evaluated — .+$")
 #: its order: the head, one sentence, the counts, the unsettled claims (and how
 #: many more), the gaps, the gate tally, what constrains the project, `next:`.
 STATUS_HEAD = (
-    ("head", re.compile(r"^atompipe readiness — .+$"), 1, 1),
+    ("head", re.compile(r"^nopekit readiness — .+$"), 1, 1),
     ("sentence", re.compile(r"^\S.*$"), 1, 1),
     # GLOSSARY §9's count line (P2.1, R-6): `7 claims · 3 checked · 1 failing`,
     # Skipped with its crashes apart, `N skipped (k errored)`.
@@ -95,7 +95,7 @@ STATUS_HEAD = (
 #: P2.5b's milestones under the readiness block, as last evaluated (D17; the
 #: review of P2.5b: `status` listed none): the head, then one line each.
 STATUS_MILESTONES = (
-    ("milestones head", re.compile(r"^Milestones, as last evaluated — `atompipe export "
+    ("milestones head", re.compile(r"^Milestones, as last evaluated — `nopekit export "
                                    r"<milestone> --dry-run` re-runs what each requires:$"),
      0, 1),
     ("milestone", re.compile(
@@ -593,9 +593,9 @@ class _Transcript:
     def get(cls) -> dict[str, object]:
         if cls.steps:
             return cls.steps
-        cls.base = tempfile.mkdtemp(prefix="atompipe-shapes-")
+        cls.base = tempfile.mkdtemp(prefix="nopekit-shapes-")
         project = _projects.bracket_copy(os.path.join(cls.base, "bracket"))
-        run = lambda *argv: _env.atompipe(list(argv), cwd=project)   # noqa: E731
+        run = lambda *argv: _env.nopekit(list(argv), cwd=project)   # noqa: E731
         steps: dict[str, object] = {}
         steps["check-first"] = run("check")
         steps["check-cached"] = run("check")
@@ -875,7 +875,7 @@ CHECK_AFTER_EDIT = (
 #: The porcelain after that check: the edit, and the one new piece of evidence.
 PORCELAIN_AFTER_EDIT = (
     r"^ M model/bracket\.py$",
-    r"^\?\? \.atompipe/verdicts/bracket\.bed_fit/[0-9a-f]{16}-[0-9a-f]{8}\.json$",
+    r"^\?\? \.nopekit/verdicts/bracket\.bed_fit/[0-9a-f]{16}-[0-9a-f]{8}\.json$",
 )
 
 
@@ -889,12 +889,12 @@ class _CloneTranscript:
     def get(cls) -> dict[str, object]:
         if cls.steps:
             return cls.steps
-        cls.base = tempfile.mkdtemp(prefix="atompipe-transcript-")
+        cls.base = tempfile.mkdtemp(prefix="nopekit-transcript-")
         project = _projects.bracket_copy(os.path.join(cls.base, "bracket"), migrated=True,
                                          git=True)
         home = os.path.join(cls.base, "home")
         os.makedirs(home)
-        run = lambda *argv: _env.atompipe(list(argv), cwd=project, home=home)  # noqa: E731
+        run = lambda *argv: _env.nopekit(list(argv), cwd=project, home=home)  # noqa: E731
         porcelain = lambda: _env.git(["status", "--porcelain", "--untracked-files=all"],  # noqa: E731
                                      cwd=project, home=home)
         steps: dict[str, object] = {"project": project}
@@ -912,7 +912,7 @@ class _CloneTranscript:
         steps["porcelain-after-edit"] = porcelain()
         empty = os.path.join(cls.base, "empty")
         os.makedirs(empty)
-        steps["pack-selftest"] = _env.atompipe(["gate", "selftest"], cwd=empty, home=home)
+        steps["pack-selftest"] = _env.nopekit(["gate", "selftest"], cwd=empty, home=home)
         steps["check-junit"] = run("check", "--junit")
         cls.steps = steps
         return steps
@@ -966,7 +966,7 @@ class TranscriptShapes(unittest.TestCase):
         text = self.out("porcelain-clean", 0)
         self.holds(porcelain_problems(text), text)
         for label, mutant in (
-                ("an entry written", "?? .atompipe/verdicts/bracket.bed_fit/"
+                ("an entry written", "?? .nopekit/verdicts/bracket.bed_fit/"
                                      "0123456789abcdef-01234567.json\n"),
                 ("a record rewritten", " M claims/C1.json\n"),
                 ("bytecode", "?? model/__pycache__/bracket.cpython-312.pyc\n")):
@@ -1032,7 +1032,7 @@ class TranscriptShapes(unittest.TestCase):
     def test_check_junit_prints_the_check_and_writes_the_xml(self):
         text = self.out("check-junit", 1)
         self.holds(exact_problems(text, CHECK_JUNIT, "check --junit"), text)
-        result = T.Result("atompipe check --junit", 1, text, "", self.steps["project"])
+        result = T.Result("nopekit check --junit", 1, text, "", self.steps["project"])
         self.assertIsNone(T.problem(T.junit(), result))
         self.assertIsNotNone(T.problem(T.junit(), result._replace(
             cwd=os.path.join(self.steps["project"], "elsewhere"))))
@@ -1115,12 +1115,12 @@ class QualificationLineShape(unittest.TestCase):
         `channels differ` on all seven lines, while both controls hand the
         SAME ctx.extra key — the reason, which said so, was suppressed. In pack
         mode, on the line itself: every line matches, and names the fact."""
-        base = tempfile.mkdtemp(prefix="atompipe-shape-pack-")
+        base = tempfile.mkdtemp(prefix="nopekit-shape-pack-")
         self.addCleanup(shutil.rmtree, base, ignore_errors=True)
         pack = os.path.join(base, "srcshape")
         shutil.copytree(os.path.join(_projects.PACKS, "sourcing"), pack,
                         ignore=shutil.ignore_patterns("__pycache__"))
-        out = _env.atompipe(["gate", "selftest", "--pack", pack], cwd=base).stdout.splitlines()
+        out = _env.nopekit(["gate", "selftest", "--pack", pack], cwd=base).stdout.splitlines()
         lines = [ln for ln in out if ln.startswith("bom.")]
         self.assertEqual(len(lines), 7, out)
         for line in lines:
@@ -1130,10 +1130,10 @@ class QualificationLineShape(unittest.TestCase):
                 self.assertNotIn("channels differ", line)
 
     def test_the_bracket_selftest_prints_six_lines_and_the_summary(self):
-        root = _projects.bracket_copy(os.path.join(tempfile.mkdtemp(prefix="atompipe-shape-"),
+        root = _projects.bracket_copy(os.path.join(tempfile.mkdtemp(prefix="nopekit-shape-"),
                                                    "bracket"), migrated=True)
         self.addCleanup(shutil.rmtree, os.path.dirname(root), ignore_errors=True)
-        out = _env.atompipe(["gate", "selftest"], cwd=root).stdout.splitlines()
+        out = _env.nopekit(["gate", "selftest"], cwd=root).stdout.splitlines()
         lines = [ln for ln in out if T.QUALIFICATION_LINE.fullmatch(ln)]
         self.assertEqual(len(lines), 6, out)
         self.assertTrue(all(ln.endswith("→ qualified") for ln in lines), lines)
@@ -1306,7 +1306,7 @@ REFUSALS = {
     "refuse.identity": re.compile(r"^error: no git identity here — .+ Nothing was written\.$"),
     "refuse.typed": re.compile(r"^error: you typed 'C4', not C5 — nothing was recorded$"),
     "refuse.assume": re.compile(r"^error: assume records a person accepting C6; .+ Ask .+ to "
-                                r"run: atompipe claim physical C6 assume$"),
+                                r"run: nopekit claim physical C6 assume$"),
 }
 REBUILD = re.compile(r"^rebuild: article [0-9a-f]{12} \(C\d+(?:, C\d+)*\) — .+ -> .+$")
 TRACK = re.compile(r"^  track record: \d+ contradictions? at this version, \d+ at earlier "
@@ -1477,7 +1477,7 @@ MILESTONE_ROW = re.compile(
     r"^  (?P<m>[a-z0-9][a-z0-9._-]*): (?:\d+ of \d+ required claims? checked · \d+ stale"
     r"(?: \([^)]*\))?(?: · .+)?|requires no claim, so nothing can be ready for it — .+)$")
 EXPORT_LIST = (
-    ("head", re.compile(r"^(?:\d+ milestones?, as last evaluated — `atompipe export "
+    ("head", re.compile(r"^(?:\d+ milestones?, as last evaluated — `nopekit export "
                         r"<milestone> --dry-run` re-runs what each requires|no milestone "
                         r"declared — a milestone is milestones/<name>\.json: .+)$"), 1, 1),
     ("milestone", MILESTONE_ROW, 0, None),
@@ -1589,7 +1589,7 @@ class ExportShape(unittest.TestCase):
     def setUpClass(cls):
         import _physical as P
         import test_export as X
-        cls.base = tempfile.mkdtemp(prefix="atompipe-shapes-export-")
+        cls.base = tempfile.mkdtemp(prefix="nopekit-shapes-export-")
         cls.addClassCleanup(_env._rmtree, cls.base)
         seven = X.bracket(os.path.join(cls.base, "seven"), thickness=7.0, git=True)
         eight = X.bracket(os.path.join(cls.base, "eight"), thickness=8.0, git=True)

@@ -1,6 +1,6 @@
 # The bracket before its migration
 
-These are the bytes `examples/bracket/.atompipe/` held at 801cece, the last commit
+These are the bytes `examples/bracket/.nopekit/` held at 801cece, the last commit
 before checkpoint 1.3 migrated the bracket (U32): its ignore file (`gitignore`
 here, so git does not read it as this directory's ignore file), its `ledger.json`
 and its run history. Nothing reads them but `tests/_projects.bracket_copy`, which

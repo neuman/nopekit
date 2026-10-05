@@ -24,9 +24,9 @@ import os
 import unittest
 from unittest import mock
 
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe.models import GateSpec, NegativeControl
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit.models import GateSpec, NegativeControl
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -41,7 +41,7 @@ def _world(*, modules=(), tools=()):
     """Patch the two probes availability uses so exactly ``modules`` import and
     exactly ``tools`` are on PATH — among the names this test asks about. Every
     other module resolves for real, so a real ``requires_python`` still works."""
-    asked = {"manifold3d", "atompipe_absent_mod_3b9e"}
+    asked = {"manifold3d", "nopekit_absent_mod_3b9e"}
 
     def find_spec(name, *args, **kwargs):
         if name in asked:
@@ -92,13 +92,13 @@ class ToolingDisjunction(unittest.TestCase):
     def test_the_disjunction_is_anded_with_the_other_requirements(self):
         """Any one engine does not excuse a missing required tool, and every
         missing thing is named at once."""
-        spec = _spec(requires_tools=["atompipe-no-such-tool-7c1f"],
-                     requires_python=["atompipe_absent_mod_3b9e"],
+        spec = _spec(requires_tools=["nopekit-no-such-tool-7c1f"],
+                     requires_python=["nopekit_absent_mod_3b9e"],
                      requires_one_of=list(ENGINES))
         ok, reason = self._availability(spec)
         self.assertFalse(ok)
-        self.assertIn("atompipe-no-such-tool-7c1f", reason)
-        self.assertIn("atompipe_absent_mod_3b9e", reason)
+        self.assertIn("nopekit-no-such-tool-7c1f", reason)
+        self.assertIn("nopekit_absent_mod_3b9e", reason)
         self.assertIn(NONE_FOUND, reason)
         ok, reason = self._availability(spec, tools=("blender",))
         self.assertFalse(ok)

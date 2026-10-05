@@ -40,7 +40,7 @@ and 2 are carried *into* the tradespace before dominance exists (3.1). Taste fol
   …the two sentences, the as-of line, the ends-in lines, `export: refused — …` or `export: allowed`…
 
   [the agent tries to edit claims/C1.json]
-  atompipe: this changes what must be true — your call   [allow / deny]
+  nopekit: this changes what must be true — your call   [allow / deny]
 ```
 
 What changed for the human:
@@ -73,56 +73,56 @@ fallback:
 
 | Probe | Expected (from the raw docs) | Fallback if live behaviour differs |
 |---|---|---|
-| (a) Stop hook output | plain stdout → debug log; JSON `systemMessage` → shown to the user, prefixed by the harness "<hook> says: " (2.1.283's renderer); `decision: block`/`additionalContext` continue the turn | none for correctness; if `systemMessage` does not render, the block moves into a `/atompipe:status` habit taught by the skill. The exact framing, prefix included, goes into the goldens |
-| (b) UserPromptExpansion | fires for user-typed plugin skills; `command_name` bare or `atompipe:`-prefixed; multi-line `systemMessage` renders, with the same prefix as (a), recorded in the goldens | skills with ``!`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/atompipe.py --exit-zero …` `` injection, fenced verbatim; `--exit-zero` lives only in the shim, because injection aborts on a non-zero exit and `check` honestly exits 1 |
+| (a) Stop hook output | plain stdout → debug log; JSON `systemMessage` → shown to the user, prefixed by the harness "<hook> says: " (2.1.283's renderer); `decision: block`/`additionalContext` continue the turn | none for correctness; if `systemMessage` does not render, the block moves into a `/nopekit:status` habit taught by the skill. The exact framing, prefix included, goes into the goldens |
+| (b) UserPromptExpansion | fires for user-typed plugin skills; `command_name` bare or `nopekit:`-prefixed; multi-line `systemMessage` renders, with the same prefix as (a), recorded in the goldens | skills with ``!`python3 ${CLAUDE_PLUGIN_ROOT}/scripts/nopekit.py --exit-zero …` `` injection, fenced verbatim; `--exit-zero` lives only in the shim, because injection aborts on a non-zero exit and `check` honestly exits 1 |
 | (c) PreToolUse | `allow`/`ask`/`deny` as documented; hook `ask` under `bypassPermissions` (undocumented) | document the gap; the speed-bump caveat already covers it |
 | (d) PostToolUse(AskUserQuestion) | `tool_input` is the post-permission input: a model-supplied `answers` is dropped at permission time and the harness writes the human's selections into `tool_input.answers`; it may add `kind` to each question; an auto-submit carries `afkTimeoutMs`/`followUp` (2.1.283) | record nothing unless all three answers are explicit and no auto-submit field is present |
 | (e) `${CLAUDE_PLUGIN_ROOT}` | substituted in skill bodies and `allowed-tools` only when braced; absent from the Bash tool's env | the shim path is written braced everywhere (S-67) |
 | (f) `CLAUDE_CODE_CHILD_SESSION=1` | set for every subprocess Claude Code spawns — Bash, PowerShell and Monitor tools, hook commands, the status line (`env-vars.md`) — so its presence in a hook's env says nothing about nesting; never set for IDE terminals | fall back to `isatty()` plus `CLAUDECODE`/`AI_AGENT` |
 | (g) plugin settings | a plugin `settings.json` cannot carry permission rules | the PreToolUse hook (D-19) |
-| (h) PreToolUse(AskUserQuestion) `updatedInput` | replaces the entire tool input, so a handler can swap in the stored `/pick` payload and the question shown is atompipe's byte for byte | the PostToolUse equality check alone, with its "not recorded" messages (3.4) |
+| (h) PreToolUse(AskUserQuestion) `updatedInput` | replaces the entire tool input, so a handler can swap in the stored `/pick` payload and the question shown is nopekit's byte for byte | the PostToolUse equality check alone, with its "not recorded" messages (3.4) |
 | (i) UserPromptExpansion `decision: block` with a reason | rendered as a warning — "UserPromptExpansion operation blocked by hook:" plus "Original prompt:" (2.1.283) — an error frame around a fact | not used by any button; `additionalContext` telling the model not to restate the output (3.4) |
 | (j) `CLAUDE_CODE_REMOTE` | `true` in a remote session, where `127.0.0.1` is not the human's machine | `/start` says it cannot tell and prints the URL with "this machine only" |
-| (k) nested `claude -p "/atompipe:tested …"` from the Bash tool | the expansion input carries no interactive-human marker; the hook's own env has `CLAUDE_CODE_CHILD_SESSION=1` nested or not (probe (f)); nesting shows only in the launch env of the `claude` process that runs the hook (`/proc/<ppid>/environ` carries the marker when a Bash tool spawned that `claude`) or as a second `claude` ancestor (inferred, not yet live-probed) | the hook records "unsigned (nested session)" when the parent's launch env carries the marker, a second `claude` ancestor exists, or the session is non-interactive, and "unsigned (nesting not determinable here)" when neither can be read (no `/proc`); if neither signal holds up live, `/tested` signs nothing and a TTY `claim physical` is the only signing channel |
+| (k) nested `claude -p "/nopekit:tested …"` from the Bash tool | the expansion input carries no interactive-human marker; the hook's own env has `CLAUDE_CODE_CHILD_SESSION=1` nested or not (probe (f)); nesting shows only in the launch env of the `claude` process that runs the hook (`/proc/<ppid>/environ` carries the marker when a Bash tool spawned that `claude`) or as a second `claude` ancestor (inferred, not yet live-probed) | the hook records "unsigned (nested session)" when the parent's launch env carries the marker, a second `claude` ancestor exists, or the session is non-interactive, and "unsigned (nesting not determinable here)" when neither can be read (no `/proc`); if neither signal holds up live, `/tested` signs nothing and a TTY `claim physical` is the only signing channel |
 
 `C:` goldens of today's `status`, `ask` and `check` outputs (§10), so the vocabulary change
 shows up as a reviewed diff.
 
 #### Checkpoint 3.1: the tradespace
 
-- **`src/atompipe/vcs.py`** (from P1.2) is the only git edge; this checkpoint adds
+- **`src/nopekit/vcs.py`** (from P1.2) is the only git edge; this checkpoint adds
   `snapshot` and the candidate operations. `subprocess.run([git, "-C", cwd, …],
   check=False, timeout=…)` in argv form with a **clean env**: it strips `GIT_DIR`,
   `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`,
-  `GIT_PREFIX` (all set when atompipe runs inside a git hook) and sets
+  `GIT_PREFIX` (all set when nopekit runs inside a git hook) and sets
   `GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`. Candidate names must match a slug pattern, are
   refused (never silently slugified), and are passed after `--end-of-options`.
   **`vcs.snapshot(ref, *, overlay_worktree)`** (D-23): `git worktree add --detach` at
-  `<git-common-dir>/atompipe/eval/<sha12>-<pid>`, overlays trunk-owned paths (and, for
+  `<git-common-dir>/nopekit/eval/<sha12>-<pid>`, overlays trunk-owned paths (and, for
   mutation, the working-tree delta), runs under try/finally with `worktree remove --force`
   and `worktree prune`, and sweeps leftovers from killed runs under `trade.lock` on every
   run. It never runs checkout, switch, reset or stash in a user's worktree.
-- **`src/atompipe/trade.py`** is pure — no subprocess, no clock, no `os.environ`; an AST
+- **`src/nopekit/trade.py`** is pure — no subprocess, no clock, no `os.environ`; an AST
   test enforces it — and provides `parse_objectives`, `dominance`, `classify`, `compare`,
   `returned`, `requirements_hash`.
 - **Evaluation runs out of process:** `sys.executable -c <bootstrap> -C <snapshot>
   check --json` under the shared environment's `PYTHONUSERBASE` (P1.0), launched with the
   **cwd outside the snapshot**; the bootstrap strips `''` and the cwd from `sys.path`, puts
   **the running spine** first and calls it through `runpy`, and the child asserts
-  `atompipe.__file__` lies under that spine before it evaluates anything. (`-m` puts the
-  cwd ahead of `PYTHONPATH`, so a candidate carrying `atompipe/__init__.py` graded itself —
+  `nopekit.__file__` lies under that spine before it evaluates anything. (`-m` puts the
+  cwd ahead of `PYTHONPATH`, so a candidate carrying `nopekit/__init__.py` graded itself —
   probed: "FAKE SPINE"; 3.10 has no `-P`. *Rejected:* `-I`, which also drops the user
   site-packages, so every trimesh gate in a child reads unavailable.) It reads the JSON and ignores exit code 1 (≈0.07 s per candidate on the bracket; `trade --tier` is capped at 0 by
   default). Two worktrees cannot share one interpreter: the global registry refuses
   duplicate ids (`gates.py:575-590`), and the bracket fixture's `import bracket` resolves to
   the first tree's module (S-63). A candidate child reads trunk's verdict cache from a
   path the launcher passes in the bootstrap argv — never an environment variable, which
-  the proposer's shell can set — and `<git-common-dir>/atompipe/cache` is read only by
+  the proposer's shell can set — and `<git-common-dir>/nopekit/cache` is read only by
   those children, as a write-through copy of entries also written to trunk's tracked
   cache. On trunk, `check` reads its own tracked cache alone, so every PASS it serves is
   one git sees; the permission hook denies the common-dir layer. `V:` an entry planted only
-  in `<git-common-dir>/atompipe/cache` never makes a trunk claim PASS.
-- **CLI:** `atompipe trade` (refresh and list), `trade new <name> [--from REF]` (a worktree
+  in `<git-common-dir>/nopekit/cache` never makes a trunk claim PASS.
+- **CLI:** `nopekit trade` (refresh and list), `trade new <name> [--from REF]` (a worktree
   on `cand/<name>`, or `cand/<project-slug>/<name>` when the project sits in a
   subdirectory; prints the project path; **takes no parameter values** — M13.8),
   `trade compare [names] [--pick] [--json]`, `trade pick [<name> --why … --reconsider-when
@@ -132,7 +132,7 @@ shows up as a reviewed diff.
 // objectives.json (project root; trunk-owned; ask-first; strict: "weight" is refused)
 {"objectives": [{"key": "mass_g", "label": "mass", "sense": "min", "units": "g", "tolerance": 0.1,
                  "source": "projection", "why": "…", "rejected": []}]}
-// trade/pla-7.json (generated by `atompipe trade`; committed like a lockfile; no timestamps)
+// trade/pla-7.json (generated by `nopekit trade`; committed like a lockfile; no timestamps)
 {"candidate": "pla-7", "branch": "cand/bracket/pla-7", "commit": "<sha>",
  "requirements": "<sha>", "disposition": null, "why": "", "by": "", "evidence": [],
  "reconsider_when": "", "objectives": {"mass_g": 19.14, "deflection": 0.45},
@@ -220,7 +220,7 @@ never evaluates branches (rule 10).
 | Goalposts | A candidate relaxes its own claim. | `V:` a candidate setting C1 to 5.0 at thickness 7 stays infeasible, `moved_goalposts == ["claims/C1.json"]`. `V:` a candidate editing a gate is judged by trunk's gate. |
 | Candidate refutation | A trunk overlay erases a candidate's own REFUTED result, or the refutation classifies nothing. | `V:` a candidate with `results/C5.json` refuted keeps it through `trade`. `V: TradeRefutedIsInfeasible`: that candidate is infeasible, is not offered by `/pick`, dominates nothing, and returns only when trunk changes C5's acceptance. |
 | git edge | Leftover worktrees; an inherited `GIT_DIR`; a hostile name; a shallow CI clone. | `V: Hygiene`: an exception mid-evaluation leaves no worktree; a planted leftover is swept; `GIT_DIR` is ignored; `git clone --depth 1 file://…` (a plain local path ignores `--depth`) degrades to "unknown (shallow clone)"; `--upload-pack=x`, `../x`, `A B` are refused. |
-| Spine swap | A candidate ships its own `atompipe` package and grades itself. | `V:` a candidate carrying a fake spine with a version sentinel is evaluated by the running spine, and the child's `atompipe.__file__` lies under it. P5 mutation uses the same launcher. |
+| Spine swap | A candidate ships its own `nopekit` package and grades itself. | `V:` a candidate carrying a fake spine with a version sentinel is evaluated by the running spine, and the child's `nopekit.__file__` lies under it. P5 mutation uses the same launcher. |
 | Records | A hand-edited objective value is believed; a refresh is not deterministic; an unknown disposition reads open. | `V:` set pla-7's mass to 1.0 → `trade` restores 19.14 and reports the disagreement. `V:` two runs give byte-identical `trade/*.json`, `outcomes` included, and `outcomes` equals the child's `check --json` statuses. `V: Records.test_unknown_disposition_is_refused`: a `trade/*.json` with disposition `maybe` raises naming the file, never reads open. |
 | Claim-level refutation | A candidate whose critical claim FAILs stays open, is offered by `/pick`, or dominates. | `V:` a candidate whose C3 FAILs only through the P2.4 cross-check is infeasible and not offered by `/pick`; (from P5) a pair scored LOGGER leaves its candidate unevaluated and adds nothing to the evidence superset. `V: RenderersAgree.trade`: over seeded ledgers, no candidate is open or dominates another while `resolve_status` gives one of its critical claims FAIL. |
 | Objectives | A weight slips in as a hidden preference; a key is printed to the human. | `V: Objectives.test_weight_is_refused_not_silently_dropped`: an `objectives.json` carrying `weight` is refused naming the key, and nothing is written; a missing `label` is refused the same way. `V:` `/pick` rows and the dominated message print labels, never keys. |
@@ -261,7 +261,7 @@ never evaluates branches (rule 10).
   never writes `decisions/`; when a winner stops surviving, the losers return with a
   reconsider ask and the decision file is untouched.
 - `render_log` shows by, via and reconsider_when; its preamble stops saying "Generated by
-  `atompipe decide`" (`decisions.py:251`).
+  `nopekit decide`" (`decisions.py:251`).
 
 `V: PreferencesAreRecorded`: `trade pick` refuses without an identity and writes nothing;
 argparse rejects `--by`; a non-survivor winner is refused; `trade pick` with
@@ -347,7 +347,7 @@ the classification is byte-identical across refreshes.
 | Vocabulary | "verified" for an unsigned or stale result; "proven" or "validated" anywhere human-facing. | `V: test_vocabulary`: every ClaimStatus has exactly one phrase; a phrase contains "verified" iff the status is PASS on an unchanged model or VERIFIED and signed; no human renderer emits `proven`, `validated` or internal names (`gate`, `claim`, `verdict`, `ledger`, `UNCLAIMED`, `PENDING`, `BLOCKED`, `STALE`, `ASSERTED`, `tier`, `selftest`, `negative control`, `projection`, `sweep`), check and claim ids excepted; the one exemption is REPORT.md's `SECTION_PROVEN` heading, matched as that exact string, until A-11; a tied objective is never named in "beaten by"; the preferred-against phrase names its `by` and never says "you"; the fold's three answers and the test card's readiness words are `report.HUMAN` entries. |
 | `next_action` | The wrong lever, the wrong direction, `/ready` while a critical claim is not verified, or CLI syntax on the line the human reads most. | `V:` one fixture per rule; precedence (failing *and* model-changed says `/check`); no ledger with a non-verified critical claim yields `/ready`; on the bracket rule 5 never names `load_n` and says thicker and shorter, never the reverse; a not-admitted check reads "has not shown it can fail", never "crashed"; rule 10 never fires before A-9.3 and P4.3; over every rule fixture the line contains no CLI subcommand or flag outside the seven buttons (parsed against `build_parser()`) and no word `test_vocabulary` forbids. |
 | `influence` | A parameter the model ignores gets an edge; a string field vanishes. | `V: BracketLevers`: `param:thickness` influences `deflection`; a model whose derived value ignores a parameter gets no edge; `material` is "not perturbable". `V: test_why_param_lists_indirect_gates`. |
-| `ask --next` | More than one ask, CLI syntax to the human, or a real part asked for while a cheap check fails. | `V:` never more than one ask; `how:` never contains `atompipe `; `why:` ends in a source and an age (pinned in `test_shapes`), and after a model edit with no check it says "model changed since"; `ask --next` writes nothing tracked (`NoCommandWritesARecord`); a signed C5 is never asked again; one fixture per rank; ranks that need a missing phase are skipped explicitly, never faked. `V: AskWaitsForTheChecks`: the bracket at 7.0 gets no real-part ask and its test card reads "after C1 passes"; at 8.0 C7 still blocks, so still none ("after C7 can be checked"); a copy at 8.0 with C7 non-critical is asked for C5. |
+| `ask --next` | More than one ask, CLI syntax to the human, or a real part asked for while a cheap check fails. | `V:` never more than one ask; `how:` never contains `nopekit `; `why:` ends in a source and an age (pinned in `test_shapes`), and after a model edit with no check it says "model changed since"; `ask --next` writes nothing tracked (`NoCommandWritesARecord`); a signed C5 is never asked again; one fixture per rank; ranks that need a missing phase are skipped explicitly, never faked. `V: AskWaitsForTheChecks`: the bracket at 7.0 gets no real-part ask and its test card reads "after C1 passes"; at 8.0 C7 still blocks, so still none ("after C7 can be checked"); a copy at 8.0 with C7 non-critical is asked for C5. |
 
 #### Checkpoint 3.4: plugin commands, hooks, permissions, skill rewrite
 
@@ -366,11 +366,11 @@ the classification is byte-identical across refreshes.
   what the human waits for is bounded by each command's `--budget`, below), SessionEnd
   within its 1.5 s; *rejected:* 120 s for the expansion, an earlier draft's cut from that
   default whose own reason argues for more time; leaving any timeout implicit, since the
-  defaults differ by event; `scripts/atompipe.py` (the CLI shim: puts
+  defaults differ by event; `scripts/nopekit.py` (the CLI shim: puts
   `<plugin>/src` first on `sys.path`, so agent, hooks and commands run one spine version);
-  `scripts/atompipe_hook.py` (a JSON-in/JSON-out dispatcher that walks up for
-  `.atompipe/project.json` or a legacy `ledger.json`, stopping at `.git` (P1.1), **before**
-  importing atompipe); `src/atompipe/agent.py` (the command table,
+  `scripts/nopekit_hook.py` (a JSON-in/JSON-out dispatcher that walks up for
+  `.nopekit/project.json` or a legacy `ledger.json`, stopping at `.git` (P1.1), **before**
+  importing nopekit); `src/nopekit/agent.py` (the command table,
   `permission()`, the watched set from `verdicts.WATCHED`, the hook handlers); `plugin.json`
   carries **no** `version`, so an install tracks the commit SHA — a manifest version pins
   every installed user to their cached copy until the string changes (plugins-reference.md),
@@ -385,7 +385,7 @@ the classification is byte-identical across refreshes.
   `systemMessage` — the CLI output verbatim, shown to the human — plus `additionalContext`
   for the model. Each skill body and each `additionalContext` says only what the model does
   next: nothing, and **do not restate, summarise or interpret the output the human has
-  just seen** (for `/pick`: call AskUserQuestion with the stored payload). `/atompipe:status`,
+  just seen** (for `/pick`: call AskUserQuestion with the stored payload). `/nopekit:status`,
   `/ready` and `/ask` are read-only, and still do **not** use expansion `decision: block`:
   probe (i) shows it renders as a warning around the original prompt, framing a fact as an
   error. They return `systemMessage` plus an `additionalContext` telling the model to say
@@ -396,7 +396,7 @@ the classification is byte-identical across refreshes.
   |---|---|---|
   | `/start` | `start` | the 3 short lines + `site: <url> (this machine only)` or `site: not served — <reason>` |
   | `/check` | `check --short` | ≤ 8 lines `<word>: C<n> <statement> — <measured> vs <limit> (<check>)`, `+N more`, the one `candidates:` hint line when trunk's requirements moved (3.1), then the 3 short lines |
-  | `/atompipe:status` | `status --short` | exactly 3 lines (`/status` is Claude Code's built-in; the skill says so — `/start`'s 4 lines have no room) |
+  | `/nopekit:status` | `status --short` | exactly 3 lines (`/status` is Claude Code's built-in; the skill says so — `/start`'s 4 lines have no room) |
   | `/ask` | `ask --next` | exactly 3 lines, `why:` ending in its source and age (3.3); it never refreshes candidates (3.1), so it needs no budget |
   | `/pick` | `trade compare --pick --budget 60` (refreshes first, 3.1) | `pick one of N (only differences shown):` + one row per survivor, each ending `@<sha7> · checked <age>`; with 0 or 1 survivors, one line `nothing to pick: <n> surviving — <why>`; the AskUserQuestion payload goes in `additionalContext` only |
   | `/ready` | `export --dry-run --budget 90` (D-15) | the two sentences; the limits line (M18.1); `as of <age> · <commit or 'not a git repository'> · records <records12>` from `Readiness.as_of` and `vcs.git_head` (P1.2; P4.4 reuses it); ≤ 6 `ends in …` lines; `export: allowed \| refused — <first reason>`, or, past the budget, `export: not re-checked — re-running every check took over 90 s; last check <age> said <allowed\|refused>`, never `allowed` before the re-run completes |
@@ -413,12 +413,12 @@ the classification is byte-identical across refreshes.
   critical gate, SOLVE tier included, and a refresh evaluates every changed candidate).
 
 - **The Stop hook.** `root = find_root(input.cwd)`; none → exit 0 with no stdout, before
-  importing atompipe. Fingerprint the WATCHED set; files over 1 MB contribute (size,
+  importing nopekit. Fingerprint the WATCHED set; files over 1 MB contribute (size,
   mtime_ns, ctime_ns) instead of their bytes (the largest tracked source in this repo is
   177 KB, so only data files take the stat path; *rejected:* hashing everything, which
-  reads an unbounded mesh or STEP file on every turn); `.atompipe/cache/`, `out/`, `site/`
+  reads an unbounded mesh or STEP file on every turn); `.nopekit/cache/`, `out/`, `site/`
   and `*.lock` are excluded (a `site build` would otherwise self-trigger). Same fingerprint
-  as `.atompipe/cache/shown.json` → silent. Otherwise print `{"systemMessage": <3 lines>}`
+  as `.nopekit/cache/shown.json` → silent. Otherwise print `{"systemMessage": <3 lines>}`
   and store — **whenever the fingerprint moved**, even if the three lines read the same: a
   model edit that flips nothing is the "parameter moved and nothing flipped" case the human
   is meant to see. When a record file moved it also rebuilds the index (1.3, D-06), as the
@@ -426,8 +426,8 @@ the classification is byte-identical across refreshes.
   render of the block writes `shown.json` too, so the hook never repeats what the human
   just saw. It never blocks and never uses
   `additionalContext` — either would continue the turn. On any exception it prints one
-  `systemMessage` "atompipe status unavailable: <first line>", once per error digest.
-  `/start` writes `.atompipe/cache/turn.json {prompt_id}` only when its expansion could not
+  `systemMessage` "nopekit status unavailable: <first line>", once per error digest.
+  `/start` writes `.nopekit/cache/turn.json {prompt_id}` only when its expansion could not
   show the block itself (the injection fallback, probe (b)), so the first turn ends with
   the block exactly once.
 - **Permissions** (D-19), via PreToolUse, on the realpath of `tool_input.file_path`
@@ -437,22 +437,22 @@ the classification is byte-identical across refreshes.
   default and acceptEdits modes only (plan mode keeps blocking); **ask** `claims/**`,
   `gates/**`, `selftest/**`, `decisions/**`, `objectives.json`, `inputs/*.json` (an
   extraction is what satisfies a datasheet terminal, P2.5), `params/**` (a number's
-  `source` and `grounded_by`), `.atompipe/project.json`
+  `source` and `grounded_by`), `.nopekit/project.json`
   (the pack selection and model entry: dropping a pack whose gate skips would turn a
-  BLOCKED claim PASS with no prompt) and `.atompipe/packs/**`, with the reason "atompipe:
+  BLOCKED claim PASS with no prompt) and `.nopekit/packs/**`, with the reason "nopekit:
   this changes what must be true / how it is checked — your call"; **deny** generated truth,
-  measurements and signed evidence — `.atompipe/ledger.json`, `.atompipe/verdicts/**`,
-  `.atompipe/cache/**`, `.atompipe/obs/**` (measured L and C), `results/**`, `trade/**`,
+  measurements and signed evidence — `.nopekit/ledger.json`, `.nopekit/verdicts/**`,
+  `.nopekit/cache/**`, `.nopekit/obs/**` (measured L and C), `results/**`, `trade/**`,
   `site/data/**`, `site/assets/**`, `site/vendor/**`, `site/importmap.js`, `REPORT.md`,
-  `out/**`, `.atompipe/export/**` (the package at the money boundary, P2.5),
-  `<git-common-dir>/atompipe/**` (3.1) — deny wins over allow — with the reason "generated — change the model or
+  `out/**`, `.nopekit/export/**` (the package at the money boundary, P2.5),
+  `<git-common-dir>/nopekit/**` (3.1) — deny wins over allow — with the reason "generated — change the model or
   the record and rebuild" (or, for `results/**`, "written only by /tested or `claim
   physical`"). The skill states the limit: Bash and PowerShell writes bypass Edit
   matchers and acceptEdits auto-approves `sed`/`cp`/`mv`, so this is a speed bump; R-9 and
   git are the durable guarantee. A best-effort Bash|PowerShell matcher asks when a command
   names those paths.
 - **`/pick`** runs `trade compare --pick`, which stores the exact AskUserQuestion payload
-  in `.atompipe/cache/pending_pick.json`, keyed by prompt id. It obeys the tool's schema —
+  in `.nopekit/cache/pending_pick.json`, keyed by prompt id. It obeys the tool's schema —
   2–4 options per question, a header of at most 12 characters, and no hand-written
   "Other", which the harness adds itself. Three questions: *which to keep* — the
   survivors, label = name, description = only the differing numbers (by objective label)
@@ -492,32 +492,32 @@ the classification is byte-identical across refreshes.
   from its own env, where `CLAUDE_CODE_CHILD_SESSION=1` is always set (probe (f)).
   Otherwise it records "unsigned (nested session)", or "unsigned (nesting not determinable
   here)" when the parent's env cannot be read, and says so. The best-effort Bash|PowerShell
-  matcher asks when a command runs `claude` with an `atompipe:` slash
+  matcher asks when a command runs `claude` with an `nopekit:` slash
   command. The signing path then rewrites `last_check.json` from the cache (1.2), so the
   three lines after it read the new result.
-- **`/start`** runs `atompipe start`: `init` if `find_root` finds no project (P1.1),
+- **`/start`** runs `nopekit start`: `init` if `find_root` finds no project (P1.1),
   `check --tier 0` when `last_check.json` is missing or the WATCHED fingerprint moved (a
   fresh clone has no `last_check.json`, and `status --short` alone would have nothing
   true to say), `site init` if there is no `site/`, `site build --head` (the head frame
   only; history frames build detached afterwards, cached per commit, so `/start` never
   waits on up to 20 snapshot evaluations inside the expansion timeout), `site serve
   --background` (detached; port 8000 or a free one; `{pid, port, url, started, sessions}` in
-  `.atompipe/cache/serve.json`, reused while the pid lives and GET / answers), then the
+  `.nopekit/cache/serve.json`, reused while the pid lives and GET / answers), then the
   4-line shape. With `CLAUDE_CODE_REMOTE=true` it serves nothing and says `site: not
   served — remote session; <how to open it>`, because `127.0.0.1` there is not the human's
   machine. Each `/start` adds its session id to `sessions`; `SessionEnd` removes it and
   calls `site serve --stop` only when the reason is `logout`, `prompt_input_exit` or
   `other` **and** no other session remains — never on `clear` or `resume`, which keep the
   session's page — within its 1.5 s budget. `doctor` reports a live server and a stale `serve.json`.
-- **The skill rewrite** (`skills/atompipe/SKILL.md`): the braced
-  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/atompipe.py" …` invocation with `allowed-tools`
-  pre-approving it (the unbraced form at `skills/atompipe/SKILL.md:22, 30` expands to empty in the Bash
+- **The skill rewrite** (`skills/nopekit/SKILL.md`): the braced
+  `python3 "${CLAUDE_PLUGIN_ROOT}/scripts/nopekit.py" …` invocation with `allowed-tools`
+  pre-approving it (the unbraced form at `skills/nopekit/SKILL.md:22, 30` expands to empty in the Bash
   tool; S-67); the verbatim rule — verdict lines and status blocks are quoted in a fenced
   block or not at all, and the words verified / validated / proven appear only when
-  quoting the record; read `.atompipe/ledger.json` and `.atompipe/cache/last_check.json`
+  quoting the record; read `.nopekit/ledger.json` and `.nopekit/cache/last_check.json`
   first — the whole project in two reads (D-06); the vocabulary; the seven buttons, and
   never asking the human to type CLI; what the ask prompt on `claims/` means; the exit list fixed to include REFUTED
-  and the zero-claims case (`skills/atompipe/SKILL.md:212`; S-74). References to `extract`, `decide` and
+  and the zero-claims case (`skills/nopekit/SKILL.md:212`; S-74). References to `extract`, `decide` and
   `packs add` change only after A-5–A-7. `skills/pack-authoring/SKILL.md` gets the same
   invocation fix.
 - **Evals.** `evals/status-verbatim` (the 3 lines quoted verbatim) and `evals/no-proven`
@@ -529,13 +529,13 @@ the classification is byte-identical across refreshes.
 
 | Change | Failure it could introduce | Test |
 |---|---|---|
-| Plugin hooks | A crash or a missing `python3` becomes a hook error in every session of every user, in unrelated repos. | `V: test_agent.PluginLayout`: every hook is exec form and `args[0]` exists after substituting `${CLAUDE_PLUGIN_ROOT}`; an out-of-project run gives empty stdout, exit 0, and `atompipe` absent from `sys.modules` (subprocess); a `.claude-plugin/hooks.json` turns the test red; the seven skills carry `disable-model-invocation: true` and no unbraced `$CLAUDE_PLUGIN_ROOT`; every handler in `agent.py` has a `hooks.json` registration with the matching event and matcher and every registration names a handler, both ways, and no matcher names a tool 2.1.283 lacks (`MultiEdit`); `plugin.json` has no `version` key; `V:` a planted `import requests` in a scratch copy of `scripts/atompipe_hook.py` turns the stdlib AST walk red; G7. |
-| One-call rule | A command runs two CLI calls, or its argv drifts from the parser. | `V:` COMMANDS keys equal the skill dirs carrying `disable-model-invocation: true`, both ways, and the two existing skills (`atompipe`, `pack-authoring`) stay model-invocable and outside COMMANDS; every argv parses with `build_parser()`; a monkeypatched counter proves exactly one `cli.main` per expansion; `command_args` `C5 pass "it's fine; rm -rf ~"` reaches argv as three literal strings; a non-atompipe `command_name` produces empty stdout; every skill body and every `additionalContext` carries the do-not-restate instruction. |
+| Plugin hooks | A crash or a missing `python3` becomes a hook error in every session of every user, in unrelated repos. | `V: test_agent.PluginLayout`: every hook is exec form and `args[0]` exists after substituting `${CLAUDE_PLUGIN_ROOT}`; an out-of-project run gives empty stdout, exit 0, and `nopekit` absent from `sys.modules` (subprocess); a `.claude-plugin/hooks.json` turns the test red; the seven skills carry `disable-model-invocation: true` and no unbraced `$CLAUDE_PLUGIN_ROOT`; every handler in `agent.py` has a `hooks.json` registration with the matching event and matcher and every registration names a handler, both ways, and no matcher names a tool 2.1.283 lacks (`MultiEdit`); `plugin.json` has no `version` key; `V:` a planted `import requests` in a scratch copy of `scripts/nopekit_hook.py` turns the stdlib AST walk red; G7. |
+| One-call rule | A command runs two CLI calls, or its argv drifts from the parser. | `V:` COMMANDS keys equal the skill dirs carrying `disable-model-invocation: true`, both ways, and the two existing skills (`nopekit`, `pack-authoring`) stay model-invocable and outside COMMANDS; every argv parses with `build_parser()`; a monkeypatched counter proves exactly one `cli.main` per expansion; `command_args` `C5 pass "it's fine; rm -rf ~"` reaches argv as three literal strings; a non-nopekit `command_name` produces empty stdout; every skill body and every `additionalContext` carries the do-not-restate instruction. |
 | Stop hook | It dirties the tree, repeats itself, never fires, or runs project code. | `V:` `git status --porcelain` identical before and after 5 Stops; the second Stop is silent; touching a file without changing it is silent; a model edit plus a check that flips nothing prints the block; a corrupt index prints one error line once; the injection-fallback `/start` turn prints once via `turn.json`, and the expansion path never twice; stdout is empty or exactly one JSON object. |
-| Permissions | An auto-accepted edit forges generated truth or a signed result, or launders a skip by dropping a pack. | `V:` table-driven: `model/x.py` → allow; `site/suggestions.json`, `site/annotations.json`, `site/app.js`, `site/lib/x.js` → allow; `site/data/state.json`, `site/assets/…`, `site/vendor/…`, `site/importmap.js`, `<git-common-dir>/atompipe/…` → deny; `claims/C1.json` → ask; `inputs/ds1.json` → ask; `params/thickness.json` → ask; removing a skipping pack from `.atompipe/project.json` → ask; `results/C5.json` → deny; `.atompipe/export/<pkg>/MANIFEST.json` → deny; a PowerShell command naming `claims/` → ask; `.atompipe/verdicts/…` → deny; `.atompipe/obs/x.json` → deny; plan mode → never allow; a Windows backslash path; `model/../claims/C1.json` → ask; a symlink `model/x -> ../claims/C1.json` → ask; NotebookEdit covered; outside a project → empty. |
+| Permissions | An auto-accepted edit forges generated truth or a signed result, or launders a skip by dropping a pack. | `V:` table-driven: `model/x.py` → allow; `site/suggestions.json`, `site/annotations.json`, `site/app.js`, `site/lib/x.js` → allow; `site/data/state.json`, `site/assets/…`, `site/vendor/…`, `site/importmap.js`, `<git-common-dir>/nopekit/…` → deny; `claims/C1.json` → ask; `inputs/ds1.json` → ask; `params/thickness.json` → ask; removing a skipping pack from `.nopekit/project.json` → ask; `results/C5.json` → deny; `.nopekit/export/<pkg>/MANIFEST.json` → deny; a PowerShell command naming `claims/` → ask; `.nopekit/verdicts/…` → deny; `.nopekit/obs/x.json` → deny; plan mode → never allow; a Windows backslash path; `model/../claims/C1.json` → ask; a symlink `model/x -> ../claims/C1.json` → ask; NotebookEdit covered; outside a project → empty. |
 | `/pick` | The model shows a doctored comparison, answers for the human, or a pick is lost silently. | `V:` a genuine pick — the harness's `answers` and `kind` fields present — records; a tampered description records nothing; `answers` supplied by the model, seen at PreToolUse, records nothing; empty responses, or an auto-submit carrying `afkTimeoutMs`/`followUp`, record nothing; an empty why records nothing; each of these, one test per reason, prints "not recorded: <reason> — /pick again"; the same `tool_use_id` twice yields one record; a 6-survivor `/pick` pages 3 + 3 in name order and records one preference with why and reconsider-when, and a "next page" answer records nothing and asks the next page; with one differing objective, or five, every question still has 2–4 options; shape tests for 0, 1 and 5 survivors. |
 | `/tested` | The proposer signs a physical result; or a human judgment cannot be signed at all. | `V: HumanChannelOnly`: the expansion-hook path is signed **with `CLAUDE_CODE_CHILD_SESSION=1` in the hook env**, as every real hook has it; the Bash path with that variable is unsigned and "needs a real part" still shows; an expansion whose parent `claude` was launched with the marker (a nested `claude -p`, simulated through the parent-env reader) records "unsigned (nested session)"; an unreadable parent env records "unsigned (nesting not determinable here)". `V:` `/tested C6 pass "…" by <authority>` signs a human terminal with that authority, and without `by` it is refused naming the authority; `cost 40 EUR` lands in `cost`; `/tested` with no args runs `ask --tested`. |
-| `/start` | No URL, a hung server, an orphan, or a first turn with nothing true to say. | `V:` in an empty temp dir `.atompipe/` and `site/` are created, the output has 4 lines, and the URL returns HTTP 200; `start` on a fresh bracket clone prints the C1 failure; with `CLAUDE_CODE_REMOTE=true` it prints `site: not served — remote session; …`; a second `start` reuses pid and url; a dead pid starts a new server; with port 8000 taken another port is reported; `--stop` kills it and removes `serve.json`; a SessionEnd with reason `clear` or `resume` leaves it up, and so does one of two sessions ending; with a gate that sleeps past the budget, `/start` prints its 4 lines before history frames finish and `/ready` prints `export: not re-checked …`, never `allowed`. `/ready`'s as-of line is pinned in `test_shapes`. |
+| `/start` | No URL, a hung server, an orphan, or a first turn with nothing true to say. | `V:` in an empty temp dir `.nopekit/` and `site/` are created, the output has 4 lines, and the URL returns HTTP 200; `start` on a fresh bracket clone prints the C1 failure; with `CLAUDE_CODE_REMOTE=true` it prints `site: not served — remote session; …`; a second `start` reuses pid and url; a dead pid starts a new server; with port 8000 taken another port is reported; `--stop` kills it and removes `serve.json`; a SessionEnd with reason `clear` or `resume` leaves it up, and so does one of two sessions ending; with a gate that sleeps past the budget, `/start` prints its 4 lines before history frames finish and `/ready` prints `export: not re-checked …`, never `allowed`. `/ready`'s as-of line is pinned in `test_shapes`. |
 
 **Refuter targets for Phase 3.** Make a skipped or crashed candidate dominate or look
 infeasible. Make a candidate move its own goalposts, or lose its own refutation. Make a
@@ -543,7 +543,7 @@ refresh write or flip a preference. Record a preference or sign a physical resul
 agent session. Get "verified" printed for something not verified. Make the Stop hook run
 project code, repeat itself or dirty the tree. Leave a worktree behind.
 
-**Done criteria for Phase 3.** G1–G8; the 3.0 probes recorded; `atompipe trade` with zero
+**Done criteria for Phase 3.** G1–G8; the 3.0 probes recorded; `nopekit trade` with zero
 candidates is a CI smoke test on the bracket; the demo tradespace (petg-8, pla-7, alu-5,
 plus the C9 creep claim) is built in a temp repo *by the tests only* — no `cand/*`
 branches ship; G8 runs `status-verbatim` and `no-proven`; CLAUDE.md gains
@@ -556,10 +556,10 @@ half), S-63, S-66, S-67, S-69 (words), S-70–S-75, S-81, S-88.
 |---|---|---|---|
 | Q3.1 | Where do disposition records live? | `trade/<name>.json` on trunk, generated and committed like a lockfile. | On the branch: writing moves the candidate commit. git notes: not fetched by default, so a clone loses the space. One `trade.json`: the conflict generator. |
 | Q3.2 | What is `who` for a preference? | Local git identity plus a derived `via`; the record claims attestation of the channel, not a verified human. | A typed `--by` (proposer-fillable). Cryptographic signing (buys nothing against a same-user shell). |
-| Q3.3 | Where do editable candidate worktrees go? | `<project>/.atompipe/worktrees/<name>`, excluded through `<common-dir>/info/exclude`; eval snapshots under the git common dir. | A sibling outside the repo triggers permission prompts; under `.git` hides them from the human. |
+| Q3.3 | Where do editable candidate worktrees go? | `<project>/.nopekit/worktrees/<name>`, excluded through `<common-dir>/info/exclude`; eval snapshots under the git common dir. | A sibling outside the repo triggers permission prompts; under `.git` hides them from the human. |
 | Q3.4 | More than 4 survivors? | Quote the table verbatim; page the captured *which* question in fixed name order, 3 names plus "none of these — next page" per call (the tool takes 2–4 options). | Truncation by any ordering is the tool expressing taste. A name typed as free text through Other: the question still needs 2–4 options, and a typed name is a near-miss. A name taken outside AskUserQuestion is never recorded. |
 | Q3.5 | Skills or legacy `commands/`? | User-invoked skills (D-19). | `commands/` is documented as the older format. |
 | Q3.6 | How does output reach the human? | The expansion hook's `systemMessage`, verified in 3.0; fallback injection plus `--exit-zero`. | Injection alone aborts on `check`'s honest exit 1. |
-| Q3.7 | Is trunk a candidate, and what happens to one whose branch is merged or deleted? | Trunk — the checked-out project branch — is evaluated like any candidate and recorded as `trade/trunk.json` (the demo's "trunk petg-7"). atompipe never merges, rebases or deletes a branch: adopting a pick is an ordinary git merge the human makes. A candidate whose commit is an ancestor of trunk reads "merged into trunk" and leaves the frontier; one whose branch is gone keeps its `trade/<name>.json` with its last disposition and why, reads "branch deleted — kept as history", and is never offered by `/pick` or re-evaluated. `trade` never deletes a record. `V:` deleting `cand/bracket/petg-8` leaves its record byte-identical and out of `/pick`; after merging alu-5, `trade` renders it "merged into trunk" (both states are read from git, never stored). | Deleting the record with the branch: the space forgets why an alternative disappeared (§9). Keeping the commit alive with a ref atompipe creates: a write nobody asked for, outside every permission rule. |
+| Q3.7 | Is trunk a candidate, and what happens to one whose branch is merged or deleted? | Trunk — the checked-out project branch — is evaluated like any candidate and recorded as `trade/trunk.json` (the demo's "trunk petg-7"). nopekit never merges, rebases or deletes a branch: adopting a pick is an ordinary git merge the human makes. A candidate whose commit is an ancestor of trunk reads "merged into trunk" and leaves the frontier; one whose branch is gone keeps its `trade/<name>.json` with its last disposition and why, reads "branch deleted — kept as history", and is never offered by `/pick` or re-evaluated. `trade` never deletes a record. `V:` deleting `cand/bracket/petg-8` leaves its record byte-identical and out of `/pick`; after merging alu-5, `trade` renders it "merged into trunk" (both states are read from git, never stored). | Deleting the record with the branch: the space forgets why an alternative disappeared (§9). Keeping the commit alive with a ref nopekit creates: a write nobody asked for, outside every permission rule. |
 | Q3.8 | Enforce Bash writes to `claims/` harder? | A best-effort Bash matcher, documented as a speed bump. | Writing the user's `.claude/settings.json`: a plugin reaching into user config. |
 | Q3.9 | Does the machine PASS read "verified"? | "verified by a calculation / simulation / datasheet" (terminal-qualified); "by a check written this session" once P5 derives origin. | Plain "verified" (§2.2 laundering); never "verified" for machine results (hides the terminal). |

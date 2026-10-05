@@ -35,10 +35,10 @@ import textwrap
 import unittest
 from unittest import mock
 
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe.gates import GateContext
-from atompipe.models import Ledger, ProjectMeta, Tier
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit.gates import GateContext
+from nopekit.models import Ledger, ProjectMeta, Tier
 
 import _env
 
@@ -135,9 +135,9 @@ class FdmReadsAreRecorded(_env.EnvCase):
 _TWIN_SCRIPT = textwrap.dedent('''
     import json, os, sys, types
 
-    from atompipe import gates, packs
-    from atompipe.gates import GateContext
-    from atompipe.models import Ledger
+    from nopekit import gates, packs
+    from nopekit.gates import GateContext
+    from nopekit.models import Ledger
 
     bundled, twin, project = sys.argv[1], sys.argv[2], sys.argv[3]
     with open(os.path.join(bundled, "selftest", "baseline.json"), encoding="utf-8") as fh:
@@ -201,7 +201,7 @@ class FdmHelpersArePerCopy(_env.EnvCase):
     def test_twin_copy_runs_its_own_helpers(self):
         tmp = self.tmp()
         project = os.path.join(tmp, "project")
-        twin = os.path.join(project, ".atompipe", "packs", "fdm-twin")
+        twin = os.path.join(project, ".nopekit", "packs", "fdm-twin")
         shutil.copytree(PACK_DIR, twin,
                         ignore=shutil.ignore_patterns("__pycache__", ".selftest-out"))
         manifest_path = os.path.join(twin, "pack.json")

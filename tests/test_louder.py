@@ -102,11 +102,11 @@ from unittest import mock
 
 import _env
 import _projects
-from atompipe import claims as claims_mod
-from atompipe import cli as cli_mod
-from atompipe import gates as gates_mod
-from atompipe import report as report_mod
-from atompipe.models import (
+from nopekit import claims as claims_mod
+from nopekit import cli as cli_mod
+from nopekit import gates as gates_mod
+from nopekit import report as report_mod
+from nopekit.models import (
     Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, Ledger, NegativeControl,
     ProjectMeta, Verdict,
 )
@@ -115,7 +115,7 @@ from atompipe.models import (
 # the planted world, as ground truth
 # --------------------------------------------------------------------------- #
 #: The tool the skipping evaluator requires. A name no machine has.
-TOOL = "atompipe-no-such-tool-p2"
+TOOL = "nopekit-no-such-tool-p2"
 SKIP_GATE = "probe.a_skip"
 BOTH_GATE = "probe.y_both"
 CRASH_GATE = "probe.z_crash"
@@ -182,8 +182,8 @@ PROBE_CLAIMS: dict[str, tuple[str, list[str], bool]] = {
 #: guard, and names the gate if the crash stops being one.
 PROBE_GATES = f'''\
 """Planted by tests/test_louder.py: a missing tool, a crash, and both at once."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 _THIN = NegativeControl(fixture="selftest/probe_bad.py:thin",
                         note="a 1 mm section: every probe must fail it")
@@ -219,7 +219,7 @@ PROBE_FIXTURE = '''\
 """Planted by tests/test_louder.py: the probes' known-bad control."""
 import dataclasses
 
-from atompipe.models import Ledger
+from nopekit.models import Ledger
 
 
 def thin(ctx):
@@ -1138,7 +1138,7 @@ def _check_the_fixture(run: _Run) -> None:
         # leave every required claim unresolved, so it refuses.
         want = 1 if key.startswith(("check", "export")) else 0
         if proc.returncode != want:
-            raise AssertionError(f"`atompipe {key}` exited {proc.returncode}, not {want}:\n"
+            raise AssertionError(f"`nopekit {key}` exited {proc.returncode}, not {want}:\n"
                                  f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
     rows = {row["gate"]: row for row in json.loads(run.out["check.json"].stdout)["verdicts"]}
     for gate in ERRORED_GATES:
@@ -1158,7 +1158,7 @@ def _louder_project() -> _Run:
     """The planted bracket, every command run once, cached for the module."""
     if _SHARED:
         return _SHARED[0]
-    tmp = tempfile.mkdtemp(prefix="atompipe-louder-")
+    tmp = tempfile.mkdtemp(prefix="nopekit-louder-")
     unittest.addModuleCleanup(_env._rmtree, tmp)
     root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
     home = os.path.join(tmp, "home")
@@ -1180,7 +1180,7 @@ def _louder_project() -> _Run:
         json.dump({"description": "the probes", "requires": list(PROBE_CLAIMS)}, fh, indent=2)
     out: dict[str, Any] = {}
     for key, argv in _BEFORE_EDIT:
-        out[key] = _env.atompipe(argv, cwd=root, home=home)
+        out[key] = _env.nopekit(argv, cwd=root, home=home)
     model = os.path.join(root, "model", "bracket.py")
     with open(model, encoding="utf-8") as fh:
         text = fh.read()
@@ -1193,13 +1193,13 @@ def _louder_project() -> _Run:
     with open(os.path.join(root, "photos", "p8.jpg"), "wb") as fh:
         fh.write(b"\xff\xd8 the probe article \xff\xd9")
     for key, argv in _AFTER_EDIT:
-        out[key] = _env.atompipe(argv, cwd=root, home=home, identity=True)
+        out[key] = _env.nopekit(argv, cwd=root, home=home, identity=True)
     files = {}
     # P2.5b (R-6, the same file): `report --write` renders REPORT.md at the root.
     for name, rel in (("junit", report_mod.JUNIT_DEFAULT), ("readiness", "REPORT.md"),
                       ("state", "site/data/state.json"), ("format.js", "site/lib/format.js"),
                       ("panels.js", "site/lib/panels.js"),
-                      ("last_check", ".atompipe/cache/last_check.json")):
+                      ("last_check", ".nopekit/cache/last_check.json")):
         with open(os.path.join(root, *rel.split("/")), encoding="utf-8") as fh:
             files[name] = fh.read()
     run = _Run(root, out, files)
@@ -1492,9 +1492,9 @@ class ErrorIsLouder(_env.EnvCase):
         person acts on — said `C1 skipped` for a crash, the words a missing tool
         produces. Each errored required claim's refusal says errored, and a
         missing tool's does not; planted, the bare word is caught."""
-        from atompipe import claims as claims_mod
-        from atompipe import milestones
-        from atompipe.models import Milestone
+        from nopekit import claims as claims_mod
+        from nopekit import milestones
+        from nopekit.models import Milestone
         ledger, registry = self._render()
         milestone = Milestone(id="probe", requires=sorted(PROBE_CLAIMS))
         composed = claims_mod.compositions(ledger, registry=registry,
@@ -1708,12 +1708,12 @@ class ErrorIsLouder(_env.EnvCase):
 def _worst(root: str, order: tuple[str, ...]) -> dict:
     """`write_last_check`'s `worst` over three critical claims written in
     `order` — S skipped (a tool missing), E errored (a crash), F failing."""
-    from atompipe import store as store_mod
-    from atompipe import verdicts as verdicts_mod
-    from atompipe.models import GateSpec, Tier
+    from nopekit import store as store_mod
+    from nopekit import verdicts as verdicts_mod
+    from nopekit.models import GateSpec, Tier
     made = {
         "S": Verdict(gate="g.s", claims=["S"], skipped=True,
-                     skip_reason="requires atompipe-no-such-tool (not on PATH)"),
+                     skip_reason="requires nopekit-no-such-tool (not on PATH)"),
         "E": Verdict(gate="g.e", claims=["E"], error="RuntimeError: planted crash"),
         "F": Verdict(gate="g.f", claims=["F"], passed=False, detail="0.7 mm vs 0.5 mm"),
     }
@@ -1722,7 +1722,7 @@ def _worst(root: str, order: tuple[str, ...]) -> dict:
     ledger = Ledger(meta=ProjectMeta(name="w", revision="v0.1"),
                     claims=[Claim(id=cid, statement=cid, gates=[f"g.{cid.lower()}"])
                             for cid in order])
-    if not os.path.isdir(os.path.join(root, ".atompipe")):
+    if not os.path.isdir(os.path.join(root, ".nopekit")):
         store_mod.init(root, ProjectMeta(name="w", revision="v0.1"))
     path = verdicts_mod.write_last_check(
         root, verdicts_mod.SweepResult(record=True, ledger=ledger, registry=specs),
@@ -1740,7 +1740,7 @@ class WorstIsTheMostUrgent(unittest.TestCase):
     and hid the crash `check` printed above it."""
 
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="atompipe-worst-")
+        self.root = tempfile.mkdtemp(prefix="nopekit-worst-")
         self.addCleanup(_env._rmtree, self.root)
 
     def test_a_crash_outranks_a_skip_and_a_fail_outranks_both(self):
@@ -1770,8 +1770,8 @@ if __name__ == "__main__":
 NEVER_GATE = "bracket.never"
 NEVER_SOURCE = f'''\
 """Planted by tests/test_louder.py: an evaluator that fails everything (S-04)."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="{NEVER_GATE}", claims=["never-probe"],
@@ -1790,7 +1790,7 @@ CRASH_WORDS = re.compile(r"\[ERR \]|\berrored\b|not admitted")
 
 
 def _never_project(case: unittest.TestCase) -> str:
-    tmp = tempfile.mkdtemp(prefix="atompipe-unqualified-")
+    tmp = tempfile.mkdtemp(prefix="nopekit-unqualified-")
     case.addCleanup(_env._rmtree, tmp)
     root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
     with open(os.path.join(root, "gates", "zz_never.py"), "w", encoding="utf-8") as fh:
@@ -1810,7 +1810,7 @@ class UnqualifiedNeverWearsAnOutcome(_env.EnvCase):
 
     def test_no_channel_reads_an_unqualified_evaluator_as_a_crash(self):
         root = _never_project(self)
-        check = _env.atompipe(["check", "--junit"], cwd=root)
+        check = _env.nopekit(["check", "--junit"], cwd=root)
         self.assertEqual(check.returncode, 1, check.stderr)
         mine = [ln for ln in check.stdout.splitlines() if NEVER_GATE in ln]
         self.assertIn(f"{NEVER_GATE} : known-good fail · known-bad fail → unqualified", mine)
@@ -1819,18 +1819,18 @@ class UnqualifiedNeverWearsAnOutcome(_env.EnvCase):
         summary = next(ln for ln in check.stdout.splitlines() if " gates: " in ln
                        or " evaluators: " in ln)
         self.assertNotIn("errored", summary)
-        doc = json.loads(_env.atompipe(["check", "--json"], cwd=root).stdout)
+        doc = json.loads(_env.nopekit(["check", "--json"], cwd=root).stdout)
         self.assertEqual(doc["counts"]["errored"], 0, doc["counts"])
         self.assertEqual(doc["counts"]["unqualified"], 1, doc["counts"])
-        status = _env.atompipe(["status"], cwd=root).stdout
+        status = _env.nopekit(["status"], cwd=root).stdout
         row = next(ln for ln in status.splitlines() if re.match(r"^\[.{5}\] C9 ", ln))
         self.assertTrue(row.startswith("[gap  ] C9 "), row)
         self.assertTrue(row.endswith(f"unqualified: {NEVER_GATE} : known-good fail"), row)
-        show = _env.atompipe(["gate", "show", NEVER_GATE], cwd=root).stdout
+        show = _env.nopekit(["gate", "show", NEVER_GATE], cwd=root).stdout
         for line in show.splitlines():
             self.assertIsNone(CRASH_WORDS.search(line), line)
         self.assertIn(f"  qualification: known-good fail · known-bad fail → unqualified", show)
-        shown = json.loads(_env.atompipe(["gate", "show", NEVER_GATE, "--json"],
+        shown = json.loads(_env.nopekit(["gate", "show", NEVER_GATE, "--json"],
                                          cwd=root).stdout)
         self.assertEqual(shown["last_selftest"]["outcome"], "unqualified", shown)
         self.assertEqual(shown["qualification"]["line"],
@@ -1840,16 +1840,16 @@ class UnqualifiedNeverWearsAnOutcome(_env.EnvCase):
         case = next(tc for tc in junit.iter("testcase") if tc.get("name", "").startswith("C9"))
         self.assertIsNone(case.find("error"), ET.tostring(case))
         self.assertIsNotNone(case.find("failure"), ET.tostring(case))
-        with open(os.path.join(root, ".atompipe", "cache", "last_check.json"),
+        with open(os.path.join(root, ".nopekit", "cache", "last_check.json"),
                   encoding="utf-8") as fh:
             last = json.load(fh)
         self.assertNotIn("C9", json.dumps(last.get("errored", [])))
-        md = _env.atompipe(["report"], cwd=root).stdout
+        md = _env.nopekit(["report"], cwd=root).stdout
         for line in md.splitlines():
             if "C9" in line or NEVER_GATE in line:
                 self.assertIsNone(CRASH_WORDS.search(line), line)
-        _env.atompipe(["site", "init"], cwd=root)
-        _env.atompipe(["site", "build"], cwd=root)
+        _env.nopekit(["site", "init"], cwd=root)
+        _env.nopekit(["site", "build"], cwd=root)
         with open(os.path.join(root, "site", "data", "state.json"), encoding="utf-8") as fh:
             state = json.load(fh)
         rows = [v for v in state["verdicts"] if v.get("gate") == NEVER_GATE]

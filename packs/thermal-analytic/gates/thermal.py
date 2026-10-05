@@ -42,8 +42,8 @@ if _HERE not in sys.path:
 
 import _thermal_physics as P                                        # noqa: E402
 
-from atompipe.gates import gate, GateContext                        # noqa: E402
-from atompipe.models import NegativeControl, Tier, Verdict          # noqa: E402
+from nopekit.gates import gate, GateContext                        # noqa: E402
+from nopekit.models import NegativeControl, Tier, Verdict          # noqa: E402
 
 _MISSING = object()
 

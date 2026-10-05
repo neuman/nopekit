@@ -65,35 +65,35 @@ BRACKET = os.path.join(_env.REPO, *BRACKET_REL.split("/"))
 #: named `__pycache__` at any depth and `*.pyc` files: bytecode a previous run
 #: wrote, which would hide the bytecode the replay's own run writes (the
 #: `no-bytecode-shown` step) and is ignored by the repository's `.gitignore`.
-#: `.atompipe/out`, `.atompipe/cache`, `.atompipe/obs`: a run's scratch,
+#: `.nopekit/out`, `.nopekit/cache`, `.nopekit/obs`: a run's scratch,
 #: evidence, cache and observations — outputs, never sources, and a previous
 #: run's cache copied in would make the "first" check a second one.
-#: `.atompipe/ledger.json` and `.atompipe/ledger.legacy.json` (from 1.3): the
+#: `.nopekit/ledger.json` and `.nopekit/ledger.legacy.json` (from 1.3): the
 #: generated index of the records and the ledger they were migrated from, both
 #: ignored — a checkout's outputs, which a clone of the migrated bracket never
 #: holds (what slipped through: the U32 checkout's index and legacy ledger rode
 #: into every `--dir` "fresh clone", so its first command read a stranger's
 #: index before rewriting it).
-#: `*.lock` and `*.tmp` anywhere under `.atompipe/` (P2.3's gate): a LIVE
-#: run's state, which `.atompipe/.gitignore` ignores at any depth — the build
+#: `*.lock` and `*.tmp` anywhere under `.nopekit/` (P2.3's gate): a LIVE
+#: run's state, which `.nopekit/.gitignore` ignores at any depth — the build
 #: lock (`cli.LOCK_NAME`) and `util.atomic_write_text`'s `.<name>.<random>.tmp`.
 #: What slipped through: a `check` running in the checkout's bracket while the
 #: suite copied it put `build.lock` into the copy, naming a pid that was alive
-#: on this host, so the copy's own `check` refused to start ("another atompipe
+#: on this host, so the copy's own `check` refused to start ("another nopekit
 #: run ... holds") and exited 2 — a red test that no code change caused. Under
-#: `.atompipe/` only: the bracket's own ignore file says nothing of a `*.lock`
+#: `.nopekit/` only: the bracket's own ignore file says nothing of a `*.lock`
 #: elsewhere, so a clone keeps one.
 #: *Rejected:* parsing the `.gitignore` files — a second, partial
 #: implementation of git's ignore rules, wrong in the cases that matter;
 #: *rejected:* `shutil.copytree` of everything, which is how a developer's
-#: `.atompipe/out` — and a running `check`'s lock — would ride into a "fresh"
+#: `.nopekit/out` — and a running `check`'s lock — would ride into a "fresh"
 #: clone (`test_fixture_hygiene.TheBracketIsCopiedAsAClone` refuses it in every
 #: test).
 WALK_PRUNE_NAMES = frozenset({"__pycache__"})
-WALK_PRUNE_PATHS = frozenset({".atompipe/out", ".atompipe/cache", ".atompipe/obs"})
-WALK_SKIP_PATHS = frozenset({".atompipe/ledger.json", ".atompipe/ledger.legacy.json"})
+WALK_PRUNE_PATHS = frozenset({".nopekit/out", ".nopekit/cache", ".nopekit/obs"})
+WALK_SKIP_PATHS = frozenset({".nopekit/ledger.json", ".nopekit/ledger.legacy.json"})
 WALK_SKIP_SUFFIXES = (".pyc",)
-WALK_STATE_DIR = ".atompipe/"
+WALK_STATE_DIR = ".nopekit/"
 WALK_STATE_SKIP_SUFFIXES = (".lock", ".tmp")
 
 #: The message of the copy's single commit.
@@ -130,9 +130,9 @@ def git_listing(repo: str = _env.REPO, rel: str = BRACKET_REL) -> list[str] | No
 
 def walk_listing(root: str) -> list[str]:
     """Every file under ``root`` a clone would carry, relative to it, `/`-separated:
-    no `__pycache__`, no `*.pyc`, none of `.atompipe/{out,cache,obs}`, not
+    no `__pycache__`, no `*.pyc`, none of `.nopekit/{out,cache,obs}`, not
     the ignored index or legacy ledger, and no live run's lock or temp file
-    under `.atompipe/`."""
+    under `.nopekit/`."""
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
@@ -228,9 +228,9 @@ class _Replay:
         return found
 
     def act(self, action: _transcript.Action) -> Result | None:
-        if isinstance(action, _transcript.Atompipe):
+        if isinstance(action, _transcript.Nopekit):
             cwd = self.project if action.where == "project" else self.case.tmp()
-            proc = _env.atompipe(list(action.argv), cwd=cwd, home=self.home)
+            proc = _env.nopekit(list(action.argv), cwd=cwd, home=self.home)
             self.last = Result(str(action), proc.returncode, proc.stdout, proc.stderr, cwd)
             return self.last
         if isinstance(action, _transcript.Git):
@@ -370,7 +370,7 @@ def _commit(project: str, message: str) -> None:
 
 def _states(case: unittest.TestCase, project: str) -> dict[str, str]:
     """``{gate: freshness state}`` from `status --json` in ``project``."""
-    proc = _env.atompipe(["status", "--json"], cwd=project)
+    proc = _env.nopekit(["status", "--json"], cwd=project)
     case.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
     freshness = json.loads(proc.stdout).get("freshness") or {}
     case.assertTrue(freshness, "status --json names no gate")
@@ -404,7 +404,7 @@ class LineEndings(_env.EnvCase):
         states = _states(self, clone)
         self.assertEqual({g: s for g, s in states.items() if s != "fresh"}, {},
                          "a committed entry is not Fresh in the autocrlf clone")
-        check = _env.atompipe(["check"], cwd=clone)
+        check = _env.nopekit(["check"], cwd=clone)
         self.assertEqual(check.returncode, 1, check.stdout[-2000:] + check.stderr[-2000:])
         self.assertRegex(check.stdout, r"(?m)^6 gates: 0 executed, 6 cached — ")
         porcelain = _env.git(["status", "--porcelain", "--untracked-files=all"], cwd=clone)
@@ -448,7 +448,7 @@ def attribute_problems(text: str, case: _env.EnvCase) -> list[str]:
         raise AssertionError(f"git init: {proc.stderr.strip()}")
     with open(os.path.join(repo, ".gitattributes"), "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
-    names = ["src/atompipe/verdicts.py", "examples/bracket/claims/C1.json",
+    names = ["src/nopekit/verdicts.py", "examples/bracket/claims/C1.json",
              *(f"part{kind[1:]}" for kind in BINARY_KINDS)]
     proc = _env.git(["check-attr", "text", "eol", "--", *names], cwd=repo)
     if proc.returncode != 0:
@@ -498,20 +498,20 @@ class CopyListsWhatACloneHolds(_env.EnvCase):
 
     def test_the_walk_leaves_out_bytecode_and_outputs(self):
         root = self.tmp()
-        kept = ["model/bracket.py", ".atompipe/project.json", ".atompipe/.gitignore",
-                ".atompipe/runs/0001-aaaaaaaa.json", "selftest/bad_configs.py",
-                "outputs/kept.txt", "model/out/kept.txt", ".atompipe/verdicts/g/x.json",
+        kept = ["model/bracket.py", ".nopekit/project.json", ".nopekit/.gitignore",
+                ".nopekit/runs/0001-aaaaaaaa.json", "selftest/bad_configs.py",
+                "outputs/kept.txt", "model/out/kept.txt", ".nopekit/verdicts/g/x.json",
                 "claims/C1.json", "ledger.json", "model/ledger.legacy.json",
-                # a lock or a temp file outside `.atompipe/` is the user's (P2.3's gate)
+                # a lock or a temp file outside `.nopekit/` is the user's (P2.3's gate)
                 "inputs/vendor.lock", "model/notes.tmp"]
         dropped = ["model/__pycache__/bracket.cpython-312.pyc", "gates/stray.pyc",
-                   ".atompipe/out/junit.xml", ".atompipe/cache/last_check.json",
-                   ".atompipe/obs/g.jsonl", "selftest/__pycache__/deep/x.txt",
-                   ".atompipe/ledger.json", ".atompipe/ledger.legacy.json",
+                   ".nopekit/out/junit.xml", ".nopekit/cache/last_check.json",
+                   ".nopekit/obs/g.jsonl", "selftest/__pycache__/deep/x.txt",
+                   ".nopekit/ledger.json", ".nopekit/ledger.legacy.json",
                    # a running `check`'s lock and its writers' temp files, at the
-                   # top of `.atompipe/` and inside the tracked cache (P2.3's gate)
-                   ".atompipe/build.lock", ".atompipe/.ledger.json.k3x9a1.tmp",
-                   ".atompipe/verdicts/g/.0123abcd-4567.json.q8w2e4.tmp"]
+                   # top of `.nopekit/` and inside the tracked cache (P2.3's gate)
+                   ".nopekit/build.lock", ".nopekit/.ledger.json.k3x9a1.tmp",
+                   ".nopekit/verdicts/g/.0123abcd-4567.json.q8w2e4.tmp"]
         for rel in kept + dropped:
             self._write(root, rel)
         self.assertEqual(walk_listing(root), sorted(kept))
@@ -592,12 +592,12 @@ class TranscriptIsWellFormed(unittest.TestCase):
 
     def test_same_run_reads_a_command_that_ran(self):
         """`(same run)` reads the last command replayed before it, so that command
-        must be an `atompipe` run due no later than the step reading it."""
+        must be an `nopekit` run due no later than the step reading it."""
         command = None
         for step in _transcript.STEPS:
             if isinstance(step.action, _transcript.SameRun):
                 self.assertIsNotNone(command, step.id)
-                self.assertIsInstance(command.action, _transcript.Atompipe, step.id)
+                self.assertIsInstance(command.action, _transcript.Nopekit, step.id)
                 self.assertLessEqual(tuple(command.tag), tuple(step.tag), step.id)
             else:
                 command = step
@@ -656,7 +656,7 @@ _PLAN_OUTPUT = {
                             "6 gates: 0 executed, 6 cached — 5 ok, 1 FAIL — tier 0\n"
                             + _BLOCKING),
     "clean-after-check": (0, ""),
-    "status-words": (0, "atompipe readiness — wall-bracket v0.1\n"
+    "status-words": (0, "nopekit readiness — wall-bracket v0.1\n"
                         "v0.1 is NOT ready: 4 of 7 required claims are unresolved — "
                         "1 failing (C1); 2 gaps (C6, C7); 1 pending build (C5). 3 of 7 "
                         "claims are checked against the current inputs. Pending build: "
@@ -683,7 +683,7 @@ _PLAN_OUTPUT = {
                             "two places\n"
                             + _BLOCKING),
     "porcelain-after-edit": (0, " M model/bracket.py\n"
-                                "?? .atompipe/verdicts/bracket.bed_fit/"
+                                "?? .nopekit/verdicts/bracket.bed_fit/"
                                 "0123456789abcdef-89abcdef.json\n"),
     "why-thickness": (0, "param thickness = 7.0 mm   (model/bracket.py Config.thickness)\n"
                          "REJECTED (1)\n"
@@ -705,7 +705,7 @@ _PLAN_OUTPUT = {
     "no-bytecode-shown": (0, ""),
 }
 
-_JUNIT_OK = ('<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="atompipe check">'
+_JUNIT_OK = ('<?xml version="1.0" encoding="UTF-8"?>\n<testsuites name="nopekit check">'
              '<testsuite name="gates"/></testsuites>\n')
 
 
@@ -733,7 +733,7 @@ def _mutations(expect: _transcript.Expect, result: Result, cwd: str) -> list[tup
                 ("a line removed", result._replace(stdout="\n".join(lines[1:]) + "\n"))]
     if kind == "exactly":
         out = [("a line added", result._replace(
-            stdout=result.stdout + "?? .atompipe/verdicts/stray.json\n"))]
+            stdout=result.stdout + "?? .nopekit/verdicts/stray.json\n"))]
         if lines:
             out.append(("a line removed", result._replace(stdout="\n".join(lines[1:]) + "\n")))
             out.append(("a line doubled", result._replace(stdout=result.stdout + lines[0] + "\n")))
@@ -814,7 +814,7 @@ class TranscriptMatchers(_env.EnvCase):
         """Not a mismatch: a mismatch would quietly stop the starred
         expectations from being asserted."""
         project = self.tmp()
-        rel = ".atompipe/verdicts/g/0123456789abcdef-01234567.json"
+        rel = ".nopekit/verdicts/g/0123456789abcdef-01234567.json"
         path = os.path.join(project, *rel.split("/"))
         os.makedirs(os.path.dirname(path))
         with open(path, "w", encoding="utf-8") as fh:

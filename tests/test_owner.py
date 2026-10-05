@@ -43,11 +43,11 @@ from unittest import mock
 
 import _env
 import _projects
-from atompipe import claims as claims_mod
-from atompipe import report as report_mod
-from atompipe import store as store_mod
-from atompipe.models import ClaimKind, ClaimStatus, Ledger, ProjectMeta
-from atompipe.util import AtompipeError
+from nopekit import claims as claims_mod
+from nopekit import report as report_mod
+from nopekit import store as store_mod
+from nopekit.models import ClaimKind, ClaimStatus, Ledger, ProjectMeta
+from nopekit.util import NopekitError
 
 #: The name written into C6's file, as an agent's Edit would.
 NOMINEE = "Sam"
@@ -56,7 +56,7 @@ NOMINEE = "Sam"
 #: from P2.5a, the act that records it (R-6 in words: until then it said "no
 #: command can record it yet", because none could).
 UNATTRIBUTED = (f"owner {NOMINEE} is named in claims/C6.json and has not recorded it — "
-                f"{NOMINEE} records it in their own shell: atompipe claim physical C6 assume")
+                f"{NOMINEE} records it in their own shell: nopekit claim physical C6 assume")
 
 _RUNS = (("check", ["check", "--junit"]), ("status", ["status"]),
          ("status.json", ["status", "--json"]), ("report", ["report"]),
@@ -88,7 +88,7 @@ def _owned_project() -> _Owned:
     the failing deflection evaluator covers it; every command run once."""
     if _OWNED:
         return _OWNED[0]
-    tmp = tempfile.mkdtemp(prefix="atompipe-owner-")
+    tmp = tempfile.mkdtemp(prefix="nopekit-owner-")
     unittest.addModuleCleanup(_env._rmtree, tmp)
     root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
     home = os.path.join(tmp, "home")
@@ -111,14 +111,14 @@ def _owned_project() -> _Owned:
     os.makedirs(os.path.join(root, "photos"))
     with open(os.path.join(root, "photos", "c5.jpg"), "wb") as fh:
         fh.write(b"a photo")
-    out = {key: _env.atompipe(argv, cwd=root, home=home, identity=True)
+    out = {key: _env.nopekit(argv, cwd=root, home=home, identity=True)
            for key, argv in _RUNS}
     for key, proc in out.items():
         want = 1 if key == "check" else 0
         if proc.returncode != want:
-            raise AssertionError(f"`atompipe {key}` exited {proc.returncode}, not {want}:\n"
+            raise AssertionError(f"`nopekit {key}` exited {proc.returncode}, not {want}:\n"
                                  f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
-    with open(os.path.join(root, ".atompipe", "out", "junit.xml"), encoding="utf-8") as fh:
+    with open(os.path.join(root, ".nopekit", "out", "junit.xml"), encoding="utf-8") as fh:
         junit = fh.read()
     with open(os.path.join(root, "site", "data", "state.json"), encoding="utf-8") as fh:
         state = json.load(fh)
@@ -189,7 +189,7 @@ class AnOwnerWrittenByHandNeverCounts(_env.EnvCase):
 
     # -- in process: D8's rows -------------------------------------------- #
     def _claim(self, **kw):
-        from atompipe.models import Claim
+        from nopekit.models import Claim
         fields = dict(id="C6", statement="the load is static", kind=ClaimKind.ASSUMPTION,
                       rationale="no fatigue term", owner=NOMINEE)
         fields.update(kw)
@@ -258,14 +258,14 @@ class AnOwnerWrittenByHandNeverCounts(_env.EnvCase):
 
     def test_no_command_writes_the_owner(self):
         """Every command above left C6's file as the hand edit wrote it, and no
-        code under `src/atompipe` sets `owner` on a claim: the field's only
+        code under `src/nopekit` sets `owner` on a claim: the field's only
         producer is a file edit, and the edit counts for nothing (the signing
         channel, when it lands, writes attributions, not this field)."""
         run = _owned_project()
         with open(os.path.join(run.root, "claims", "C6.json"), "rb") as fh:
             self.assertEqual(fh.read(), run.c6_bytes)
         hits = []
-        src = os.path.join(_env.REPO, "src", "atompipe")
+        src = os.path.join(_env.REPO, "src", "nopekit")
         for name in sorted(os.listdir(src)):
             if not name.endswith(".py"):
                 continue
@@ -297,7 +297,7 @@ class AnOwnerWrittenByHandNeverCounts(_env.EnvCase):
         bad = os.path.join(root, "C7.json")
         with open(bad, "w", encoding="utf-8") as fh:
             json.dump({"statement": "s", "kind": "assumption", "ownr": NOMINEE}, fh)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store_mod.read_record(bad, "claims")
         self.assertIn("ownr", str(caught.exception))
         self.assertIn("owner", str(caught.exception))
@@ -344,7 +344,7 @@ class ARecordedResultNeverOutranksTheEvaluators(_env.EnvCase):
                                    "pipe or a script: a pass recorded here does not count; "
                                    "the person who tested it records it in their own shell")
         self.assertEqual(sum(ln.count("looked fine") for ln in lines), 0, lines)
-        from atompipe.models import Claim, PhysicalResult
+        from nopekit.models import Claim, PhysicalResult
         ledger = Ledger()
         for who, recorded in (("", "recorded, unattributed"), ("sam", "recorded by sam")):
             for passed, want in ((True, f"a pass {recorded}, not bound to an article"),
@@ -393,7 +393,7 @@ def _forged_project() -> _Forged:
     and `report --write` run once."""
     if _FORGED:
         return _FORGED[0]
-    tmp = tempfile.mkdtemp(prefix="atompipe-forged-")
+    tmp = tempfile.mkdtemp(prefix="nopekit-forged-")
     unittest.addModuleCleanup(_env._rmtree, tmp)
     root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
     path = os.path.join(root, "claims", "C6.json")
@@ -406,18 +406,18 @@ def _forged_project() -> _Forged:
     with open(os.path.join(root, "results", "C5.json"), "w", encoding="utf-8") as fh:
         json.dump({"results": [{"passed": False, "who": FORGED_WHO, "when": FORGED_WHEN,
                                 "detail": "cracked\n" + FORGED_LINES[0]}]}, fh, indent=2)
-    out = {key: _env.atompipe(argv, cwd=root) for key, argv in (
+    out = {key: _env.nopekit(argv, cwd=root) for key, argv in (
         ("check", ["check", "--junit"]), ("status", ["status"]),
         ("claim.list", ["claim", "list"]), ("report", ["report", "--write"]))}
     for key, proc in out.items():
         if proc.returncode != (1 if key == "check" else 0):
-            raise AssertionError(f"`atompipe {key}` exited {proc.returncode}:\n"
+            raise AssertionError(f"`nopekit {key}` exited {proc.returncode}:\n"
                                  f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
     # P2.5b-D17: `report --write` renders REPORT.md at the root (R-6: the same
     # rendering, read where it is written now).
     with open(os.path.join(root, "REPORT.md"), encoding="utf-8") as fh:
         markdown = fh.read()
-    with open(os.path.join(root, ".atompipe", "out", "junit.xml"), encoding="utf-8") as fh:
+    with open(os.path.join(root, ".nopekit", "out", "junit.xml"), encoding="utf-8") as fh:
         junit = fh.read()
     run = _Forged(root, {k: p.stdout for k, p in out.items()}, markdown, junit)
     _FORGED.append(run)
@@ -513,7 +513,7 @@ class ARecordNeverWritesItsOwnLine(_env.EnvCase):
         for flag, value in (("--who", FORGED_WHO), ("--when", FORGED_WHEN),
                             ("--who", "a tester"), ("--when", "2026-10-03")):
             with self.subTest(flag=flag, value=value):
-                proc = _env.atompipe(["claim", "physical", "C5", "--pass", flag, value],
+                proc = _env.nopekit(["claim", "physical", "C5", "--pass", flag, value],
                                      cwd=run.root, identity=True)
                 self.assertEqual(proc.returncode, 2, proc.stdout)
                 self.assertIn(f"{flag} is not accepted", proc.stderr)

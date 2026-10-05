@@ -218,7 +218,7 @@
       ],
       "grounded_by": [],
       "name": "thickness",
-      "rationale": "mm, and DELIBERATELY still failing the deflection claim in this reference project — it comes out at ~0.70mm against a 0.5mm limit. 8.0 passes at 0.47mm. The default is left marginal so `atompipe check` on a fresh clone shows a real gate catching a real problem, and so the fix is one parameter you can watch turn green. Deflection goes as 1/t^3, which is why thickness is the cheap lever; 4.0 was tried and misses by ~5x.",
+      "rationale": "mm, and DELIBERATELY still failing the deflection claim in this reference project — it comes out at ~0.70mm against a 0.5mm limit. 8.0 passes at 0.47mm. The default is left marginal so `nopekit check` on a fresh clone shows a real gate catching a real problem, and so the fix is one parameter you can watch turn green. Deflection goes as 1/t^3, which is why thickness is the cheap lever; 4.0 was tried and misses by ~5x.",
       "rejected": [],
       "source": "",
       "tags": [],

@@ -36,8 +36,8 @@ import math
 import os
 from typing import Any, Iterable, Sequence
 
-from atompipe.gates import GateContext
-from atompipe.models import Verdict
+from nopekit.gates import GateContext
+from nopekit.models import Verdict
 
 
 #: Standard gravity. Not a design choice; the value is the SI definition.

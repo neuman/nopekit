@@ -30,8 +30,8 @@ import os
 import sys
 from typing import Any
 
-from atompipe.models import View, ViewKind
-from atompipe.site import ViewContext, viewgen
+from nopekit.models import View, ViewKind
+from nopekit.site import ViewContext, viewgen
 
 # The gates import these as `gates._fluids_analytic` with the pack directory on
 # sys.path; do the same here so both hold one module object rather than two copies

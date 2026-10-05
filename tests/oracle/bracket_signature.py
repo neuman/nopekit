@@ -5,7 +5,7 @@
     python tests/oracle/bracket_signature.py <junit.xml> <expected.json> --exit-code N
 
 `examples/bracket` fails on purpose: at thickness 7.0 the tip sags 0.70 mm
-against a 0.5 mm limit, and C7 has no gate at all, so `atompipe check` exits 1
+against a 0.5 mm limit, and C7 has no gate at all, so `nopekit check` exits 1
 in every correct build. What slipped through (S-83): CI ran `check || true`,
 and `|| true` cannot tell that one intended failure from a crash (exit 2), from
 a second failure, or from the intended failure quietly going away — all four
@@ -154,10 +154,10 @@ def main(argv: list[str] | None = None) -> int:
         prog="bracket_signature.py",
         description="Compare a `check --junit` report and its exit code with the "
                     "pinned signature. 0 same, 1 differs, 2 nothing to compare.")
-    parser.add_argument("junit", help="the report `atompipe check --junit` wrote")
+    parser.add_argument("junit", help="the report `nopekit check --junit` wrote")
     parser.add_argument("expected", help="the pinned signature, tests/expected_bracket.json")
     parser.add_argument("--exit-code", type=int, required=True,
-                        help="the exit code `atompipe check` returned")
+                        help="the exit code `nopekit check` returned")
     args = parser.parse_args(argv)
 
     import xml.etree.ElementTree as ET

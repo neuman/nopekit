@@ -46,9 +46,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe.models import Ledger, ProjectMeta
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit.models import Ledger, ProjectMeta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK = os.path.join(REPO, "packs", "openmodelica")
@@ -77,7 +77,7 @@ if not visible(script):
     sys.exit(1)
 loads, out, segment = [], [], ""
 for line in open(script, encoding="utf-8").read().splitlines():
-    m = re.match(r'print\("(@@ATOMPIPE:(\w+))\\n"\);$', line)
+    m = re.match(r'print\("(@@NOPEKIT:(\w+))\\n"\);$', line)
     if m:
         out.append(m.group(1))
         segment = m.group(2)
@@ -145,7 +145,7 @@ def _write(path: str, text: str) -> None:
 class OmcSeesOnlyWhereItRuns(unittest.TestCase):
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="atompipe-omc-vis-")
+        self.dir = tempfile.mkdtemp(prefix="nopekit-omc-vis-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.bin = os.path.join(self.dir, "bin")
         os.makedirs(self.bin)
@@ -228,7 +228,7 @@ class OmcSeesOnlyWhereItRuns(unittest.TestCase):
     def test_a_package_keeps_its_layout_resources_and_order(self):
         root, params = self._project()
         verdict, call = self._run("modelica.checks", self._ctx(
-            root, params, os.path.join(root, ".atompipe", "out")))
+            root, params, os.path.join(root, ".nopekit", "out")))
         self.assertEqual(verdict.outcome, "pass", verdict.render())
         loads = call["loads"]
         self.assertEqual([os.path.basename(p) for p in loads],
@@ -249,7 +249,7 @@ class OmcSeesOnlyWhereItRuns(unittest.TestCase):
 
     def test_a_deleted_source_is_not_loaded_from_an_old_copy(self):
         root, params = self._project()
-        ctx = self._ctx(root, params, os.path.join(root, ".atompipe", "out"))
+        ctx = self._ctx(root, params, os.path.join(root, ".nopekit", "out"))
         _verdict, first = self._run("modelica.checks", ctx)
         staged_part = [p for p in first["loads"] if p.endswith("Part.mo")]
         self.assertEqual(len(staged_part), 1, first["loads"])
@@ -283,7 +283,7 @@ class OmcSeesOnlyWhereItRuns(unittest.TestCase):
         root, params = self._project()
         verdict, call = self._run(
             "modelica.checks",
-            self._ctx(root, params, os.path.join(root, ".atompipe", "out")),
+            self._ctx(root, params, os.path.join(root, ".nopekit", "out")),
             env={"STANDIN_ERROR": "1"})
         self.assertEqual(verdict.outcome, "fail", verdict.render())
         user_file = os.path.join(root, "model", "Pkg", "package.mo")

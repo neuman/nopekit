@@ -1,6 +1,6 @@
 # The method
 
-atompipe encodes a way of working that was proven on a real device before it was
+nopekit encodes a way of working that was proven on a real device before it was
 generalised — a physical product taken from a napkin sketch to manufacturable
 outputs and an honest readiness report, by a human and an agent working together
 across dozens of revisions. (See [`docs/ORIGINS.md`](docs/ORIGINS.md).)
@@ -71,7 +71,7 @@ to aim for:
 Each of those closes a question permanently. Without the record, every new agent
 re-litigates every settled number, and the project walks in a circle at full speed.
 
-`atompipe why <param>` exists so an agent can pull one parameter's whole history
+`nopekit why <param>` exists so an agent can pull one parameter's whole history
 instead of reading the entire decision log.
 
 ## 4. Validators are gates, not loggers
@@ -99,8 +99,8 @@ element deliberately removed — the diode, the fillet, the cooling, the damper 
 require the gate to *fail* that one. The control is not a test of the design. It is
 a test of the validator: proof it can detect the failure it claims to rule out.
 
-atompipe makes this mechanical — the gate registry **refuses to register a gate with
-no declared negative control**, and `atompipe gate selftest` runs every control and
+nopekit makes this mechanical — the gate registry **refuses to register a gate with
+no declared negative control**, and `nopekit gate selftest` runs every control and
 fails any gate that passes its own known-bad fixture.
 
 This is the single highest-leverage rule in the file. An agent that is good at
@@ -178,7 +178,7 @@ And the honesty extends to what a green build actually means. A clean compile is
 a working product; a clean rule check is not a correct circuit; a converged solve is
 not a validated design. Say so, in the report, every time.
 
-*In public* is where the project site comes in — `atompipe site build` renders the
+*In public* is where the project site comes in — `nopekit site build` renders the
 same ledger as a page, and the separation stops being a section heading and becomes
 a thing you look at: the headline verdict above the fold, the physical and assumed
 claims never blurred into the proven ones, how old each result is, and the failing
@@ -217,8 +217,8 @@ datasheets of parts already chosen, for the standard it has to meet.
 
 Then **extract**: every ingested artifact must produce a record of what was actually
 read out of it and which parameters and claims that grounds. An artifact nobody
-extracted from is decoration. `atompipe ask` lists what is still missing;
-`atompipe inputs --unextracted` lists what arrived and was never read.
+extracted from is decoration. `nopekit ask` lists what is still missing;
+`nopekit inputs --unextracted` lists what arrived and was never read.
 
 ## Growing: the capability gap
 

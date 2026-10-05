@@ -1,0 +1,70 @@
+{
+  "schema": 1,
+  "gate": "bracket.bending_stress",
+  "rho": "611ba29b71acc6974eee5f98e23d6c065cde68446a7734825b36f40970e0aa03",
+  "code": {
+    "digest": "9d44aca4ef6356d0c2fa1c7c1d0f4b0ecc678f8ff5f83afd6a748d6c119386f3",
+    "files": [
+      "gates/structural.py"
+    ],
+    "fallback": ""
+  },
+  "spine": "f396daf6190537c7f68ede528849d58110bd85d8d545c39e61ecc2efda945530",
+  "reads": {
+    "params": [
+      [
+        [
+          "design_stress"
+        ],
+        "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+        15.0
+      ],
+      [
+        [
+          "material"
+        ],
+        "688df429073a1a0ae4640c3595bd69918d99253129e9ae131d6f0419072ab08e",
+        "petg"
+      ],
+      [
+        [
+          "stress_root"
+        ],
+        "dcbd6ecd6c8ab544e30395386f2b2338b7dd47fda1577b70ec7aead7286ef141",
+        3.673469387755102
+      ],
+      [
+        [
+          "utilisation"
+        ],
+        "cbbcac2a0073decfc0ea1431a29b823d7483d0882ac298bd7bdd6e7e63a770a3",
+        0.24489795918367346
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "model": null,
+    "opaque": []
+  },
+  "instruments": {},
+  "verdict": {
+    "passed": true,
+    "measured": 0.245,
+    "limit": 1.0,
+    "units": "utilisation",
+    "comparator": "<=",
+    "settles": "bending stress",
+    "detail": "3.7 MPa vs 15.0 MPa allowable (util 0.24, petg)",
+    "evidence": [],
+    "locators": [],
+    "claims": [
+      "structural",
+      "strength",
+      "bending-stress"
+    ],
+    "tier": 0,
+    "pack": ""
+  },
+  "digest": "ce7e939c8371d4867bff9c308030beff4bf796e41221e318e1a91c4085ed38f6"
+}

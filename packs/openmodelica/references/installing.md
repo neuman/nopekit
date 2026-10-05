@@ -89,7 +89,7 @@ To let the gates use it, put an `omc` on PATH that forwards into the container.
 It has to get two things right:
 
 1. **Paths.** The gates write their `.mos` under `<out_dir>/omc` (by default
-   `<project>/.atompipe/out/omc`, and a temp directory under `gate selftest`),
+   `<project>/.nopekit/out/omc`, and a temp directory under `gate selftest`),
    copy the sources beside it (`.sources/<script>/`), and run omc from there.
    So mount `$PWD` at the **same path** inside the container and start omc in
    it; the gates hand omc no other path of yours. The one exception is a model
@@ -252,8 +252,8 @@ in the ledger next to the decision to install.
 ## Verifying the pack sees it
 
 ```bash
-atompipe gate list | grep modelica        # the tier-2 rows stop saying BLOCKED
-atompipe gate selftest modelica.checks    # the control must now FIRE, not skip
+nopekit gate list | grep modelica        # the tier-2 rows stop saying BLOCKED
+nopekit gate selftest modelica.checks    # the control must now FIRE, not skip
 ```
 
 That second command is the one that matters. Until it reports the gate correctly

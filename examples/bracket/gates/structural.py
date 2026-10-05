@@ -48,8 +48,8 @@ about — which is what makes them evidence rather than noise.
 """
 from __future__ import annotations
 
-from atompipe.gates import gate, GateContext
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate, GateContext
+from nopekit.models import NegativeControl, Tier, Verdict
 
 # A property of the domain's model, not a claim's limit: the guard's floor. (The
 # deflection limit, 0.5 mm "set by feel ... visible against a level shelf edge",

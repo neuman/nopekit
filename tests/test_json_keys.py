@@ -38,7 +38,7 @@ from typing import Any
 import _env
 import test_louder
 import test_status_table
-from atompipe.models import ClaimStatus
+from nopekit.models import ClaimStatus
 
 #: The ten enum values a kept status key may hold, typed here (P2.0 D-7: never
 #: read from the code under test).

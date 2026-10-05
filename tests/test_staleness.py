@@ -74,7 +74,7 @@ honestly is not yet a command that prints honestly.
 ``LastCheck`` holds ``last_check.json`` to its contract: written only after a
 full recorded sweep, never read by the sweep, and fingerprinting what is watched.
 
-What the rest of the file proves end to end, through ``_env.atompipe``
+What the rest of the file proves end to end, through ``_env.nopekit``
 subprocesses on temp copies (spec §4, W13 · U24):
 
 * ``InvalidationIsLocalised`` (``E4Localisation`` until P2.1: PLAN-v0.14 §1.2 renumbered the
@@ -114,9 +114,9 @@ import xml.etree.ElementTree as ET
 from typing import Any
 from unittest import mock
 
-from atompipe import claims, gates, modelio, report, store, util, verdicts
-from atompipe.models import Acceptance, Claim, ClaimStatus, Ledger
-from atompipe.util import FileDigests
+from nopekit import claims, gates, modelio, report, store, util, verdicts
+from nopekit.models import Acceptance, Claim, ClaimStatus, Ledger
+from nopekit.util import FileDigests
 
 import _env
 import _projects
@@ -200,8 +200,8 @@ import sys
 import tempfile
 import tokenize
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 #: t.crashy crashes on the REAL design (x = 1, between 0.5 and 2) while "crash"
 #: is set, and not on its control's known-bad input (x = 50) or the known-good
@@ -375,7 +375,7 @@ def outside(ctx):
     # Existence questions every honest gate asks: a tool on PATH, the temp dir,
     # a realpath (an lstat of every component, the project root included).
     # None of them may make the gate never Fresh.
-    shutil.which("atompipe-no-such-tool")
+    shutil.which("nopekit-no-such-tool")
     os.path.isdir(tempfile.gettempdir())
     os.path.realpath(_at(ctx, "data/limit.txt"))
     value = _number(ctx, "data/limit.txt")
@@ -399,7 +399,7 @@ def from_env(ctx):
     # (opaque, so never Fresh) filed a second outcome at the same inputs. The
     # number reported is x, which no veto moves, so the walk lands where it did.
     x = float(ctx.params["config"]["x"])
-    veto = os.environ.get("ATOMPIPE_TEST_ENV_VETO")
+    veto = os.environ.get("NOPEKIT_TEST_ENV_VETO")
     vetoed = veto is not None and x > float(veto)
     return Verdict(gate="t.env", passed=x < 10.0 and not vetoed, measured=x, limit=10.0)
 
@@ -450,8 +450,8 @@ def from_tokenize(ctx):
 
 #: S-26's gate, in a module of its own: an edit to it moves no other gate's code.
 SAME = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 LIMIT = 9.0
 
@@ -469,9 +469,9 @@ HELPED = '''\
 import os
 import py_compile
 
-from atompipe.gates import gate
-from atompipe.modelio import load_path
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.modelio import load_path
+from nopekit.models import NegativeControl, Verdict
 
 limits = load_path(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "model", "limits.py"))
@@ -499,9 +499,9 @@ import functools
 import os
 import py_compile
 
-from atompipe.gates import gate
-from atompipe.modelio import load_path
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.modelio import load_path
+from nopekit.models import NegativeControl, Verdict
 
 helper = load_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "_memo.py"))
 
@@ -596,8 +596,8 @@ MEMO_GATES = list(MEMO_FILES)
 TIERED = '''\
 import os
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 FLAGS = {"cheap": False, "costly": False, "cheap control": False, "costly control": False}
 
@@ -625,8 +625,8 @@ def tiered(ctx):
 #: the tier picks. ``FLAGS["costly control"]`` crashes that control at tier 2.
 #: Planted only where a test asks (``Project(extra=...)``).
 TIER_ON_BAD = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 FLAGS = {"costly control": False}
 
@@ -650,8 +650,8 @@ def tier_on_bad(ctx):
 MEMO_DIRECT = '''\
 import os
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 def _nc():
@@ -688,7 +688,7 @@ import dataclasses
 import os
 import py_compile
 
-from atompipe.models import Acceptance, Claim, Ledger
+from nopekit.models import Acceptance, Claim, Ledger
 
 LOW = os.path.join(os.path.dirname(os.path.abspath(__file__)), "low")
 
@@ -843,7 +843,7 @@ class Project:
         self.registry = gates.Registry()
         gates.load_project_gates(self.root, self.registry)
         self.ledger = ledger()
-        self.digests_path = os.path.join(self.root, ".atompipe", "cache", "digests.json")
+        self.digests_path = os.path.join(self.root, ".nopekit", "cache", "digests.json")
 
     @property
     def gate_module(self):
@@ -885,7 +885,7 @@ class Project:
 
 
 # --------------------------------------------------------------------------- #
-# the CLI side: real projects, copied to temp, driven through `_env.atompipe`
+# the CLI side: real projects, copied to temp, driven through `_env.nopekit`
 # --------------------------------------------------------------------------- #
 #: The bracket's six gates, in registration order.
 BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearing",
@@ -897,9 +897,9 @@ MODEL_REL = "model/bracket.py"
 
 
 def _cli(project: str, *argv: str):
-    """``atompipe <argv>`` in ``project``: a fresh process, so no module cache in
+    """``nopekit <argv>`` in ``project``: a fresh process, so no module cache in
     this one decides what an edit looks like (spec §0.4)."""
-    return _env.atompipe(list(argv), cwd=project)
+    return _env.nopekit(list(argv), cwd=project)
 
 
 def _doc(proc, *codes: int) -> dict:
@@ -979,7 +979,7 @@ def _tree(path: str) -> dict[str, bytes]:
 
 def _cache(project: str) -> dict[str, bytes]:
     """The verdict cache, byte for byte: every entry and control entry."""
-    return _tree(os.path.join(project, ".atompipe", "verdicts"))
+    return _tree(os.path.join(project, ".nopekit", "verdicts"))
 
 
 def _split(cache: dict[str, bytes]) -> tuple[set[str], set[str]]:
@@ -988,7 +988,7 @@ def _split(cache: dict[str, bytes]) -> tuple[set[str], set[str]]:
     that is neither kind shows up as a failure rather than as a third set."""
     entries, controls = set(), set()
     for rel in cache:
-        spelled = f".atompipe/verdicts/{rel}"
+        spelled = f".nopekit/verdicts/{rel}"
         if _transcript.CONTROL_ENTRY_PATH.fullmatch(spelled):
             controls.add(rel)
         elif _transcript.ENTRY_PATH.fullmatch(spelled):
@@ -1007,7 +1007,7 @@ def _entry_docs(project: str) -> dict[str, dict]:
         gate_id = rel.split("/")[0]
         if gate_id in out:
             raise AssertionError(f"{gate_id}: more than one entry after one check")
-        with open(os.path.join(project, ".atompipe", "verdicts", *rel.split("/")),
+        with open(os.path.join(project, ".nopekit", "verdicts", *rel.split("/")),
                   encoding="utf-8") as fh:
             out[gate_id] = json.load(fh)
     return out
@@ -1109,8 +1109,8 @@ _OPENS_GATE = '''\
 import os
 import py_compile
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 REL = {rel!r}
 
@@ -1146,8 +1146,8 @@ if _SHARED not in sys.path:
 
 import beamlib  # noqa: E402
 
-from atompipe.gates import gate  # noqa: E402
-from atompipe.models import NegativeControl, Tier, Verdict  # noqa: E402
+from nopekit.gates import gate  # noqa: E402
+from nopekit.models import NegativeControl, Tier, Verdict  # noqa: E402
 
 
 @gate(id="mono.allowable", title="tip deflection against the shared allowable",
@@ -1171,8 +1171,8 @@ def allowable(ctx):
 _TIERED_GATE = '''\
 # SPDX-License-Identifier: Apache-2.0
 """Planted by tests/test_staleness.py: a gate whose path is the sweep's tier."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 #: The allowable each tier's path judges against (mm): the cheap bound at 0 and
 #: 1, the costlier path's at 2 and 3.
@@ -1198,8 +1198,8 @@ def path(ctx):
 _KIT_FACTORY = '''\
 # SPDX-License-Identifier: Apache-2.0
 """Planted by tests/test_staleness.py: a factory that makes one limit gate per row."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 def limit_gate(gate_id, key, limit, units, tag):
@@ -1553,17 +1553,17 @@ class StaleIsNotCurrent(_env.EnvCase):
         p = Project(self)
         base = projection()
         with mock.patch.dict(os.environ):
-            os.environ.pop("ATOMPIPE_TEST_ENV_VETO", None)
+            os.environ.pop("NOPEKIT_TEST_ENV_VETO", None)
             got = row(p.sweep(base, only=["t.env"]), "t.env")
             self.assertEqual((got.verdict.outcome, got.executed), ("pass", True),
                              "the positive control")
             opaque = p.entry("t.env").reads["opaque"]
-            self.assertEqual(opaque, ["env:ATOMPIPE_TEST_ENV_VETO"],
+            self.assertEqual(opaque, ["env:NOPEKIT_TEST_ENV_VETO"],
                              "the variable the gate decided on is not named")
             self.assertIn("t.env", p.resolve(base).stale_gates)
             self.assertNotEqual(p.statuses(base)["C_EN"], PASS)
 
-            os.environ["ATOMPIPE_TEST_ENV_VETO"] = "0.5"
+            os.environ["NOPEKIT_TEST_ENV_VETO"] = "0.5"
             got = row(p.sweep(base, only=["t.env"]), "t.env")
         self.assertTrue(got.executed, "an entry that read the environment was served "
                                       "from the cache")
@@ -2045,7 +2045,7 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertIn(costlier.rho, verdicts.remembered(p.root).get(gid, {}),
                       "a tier-0 check forgot the crash on the tier-2 path")
         self.assertTrue(any(note.startswith(f"{gid}: ") and costlier.name in note
-                            and note.endswith("run atompipe check --tier 2")
+                            and note.endswith("run nopekit check --tier 2")
                             for note in swept.notes),
                         f"nothing says which check settles the crash: {swept.notes}")
 
@@ -2297,7 +2297,7 @@ class StaleIsNotCurrent(_env.EnvCase):
                          f"a tier-0 check answered a crash on the tier-2 path: {got.verdict}")
         self.assertEqual(sorted(verdicts.remembered(p.root).get(f"control:{gid}", {})), held)
         self.assertTrue(any(note.startswith(f"{gid}: ")
-                            and note.endswith("run atompipe check --tier 2")
+                            and note.endswith("run nopekit check --tier 2")
                             for note in plain.notes),
                         f"nothing says which check settles the crash: {plain.notes}")
         resolved = {v.gate: v for v in p.resolve(base).verdicts}[gid]
@@ -2500,11 +2500,11 @@ class StaleIsNotCurrent(_env.EnvCase):
              "CONFIG = Config()\n\n\ndef build(config):\n    return {}\n")
         _put(project, "model/A.mo",
              'model A\n  parameter Real m(unit="kg") = 1.0 "mass";\nend A;\n')
-        meta_path = os.path.join(project, ".atompipe", "project.json")
+        meta_path = os.path.join(project, ".nopekit", "project.json")
         with open(meta_path, encoding="utf-8") as fh:
             meta = json.load(fh)
         meta.update(model_entry="model/m.py", packs=["openmodelica"])
-        _put(project, ".atompipe/project.json", json.dumps(meta, indent=2) + "\n")
+        _put(project, ".nopekit/project.json", json.dumps(meta, indent=2) + "\n")
         _put(project, "claims/C1.json", json.dumps(
             {"statement": "every parameter is defendable", "kind": "measurable",
              "acceptance": {"quantity": "undefendable", "comparator": "<=", "limit": 0,
@@ -2735,7 +2735,7 @@ class StaleIsNotCurrent(_env.EnvCase):
                             "limit": 5.0, "units": "mm"},
              "tags": ["tiered"]}) + "\n")
         gate_id = "tiered.path"
-        junit = os.path.join(project, ".atompipe", "out", "junit.xml")
+        junit = os.path.join(project, ".nopekit", "out", "junit.xml")
 
         # dry, so no tier-0 entry is on disk when the dry forced run below asks
         cheap = _cli(project, "check", "--no-record", "--json")
@@ -2760,7 +2760,7 @@ class StaleIsNotCurrent(_env.EnvCase):
             found = {}
             for rel in _split(_cache(project))[0]:
                 if rel.split("/")[0] == gate_id:
-                    with open(os.path.join(project, ".atompipe", "verdicts", *rel.split("/")),
+                    with open(os.path.join(project, ".nopekit", "verdicts", *rel.split("/")),
                               encoding="utf-8") as fh:
                         doc = json.load(fh)
                     found[doc["reads"].get("tier")] = doc["verdict"]["passed"]
@@ -2784,7 +2784,7 @@ class StaleIsNotCurrent(_env.EnvCase):
         exit_codes = [p.get("value") for p in root.iter("property")
                       if p.get("name") == "exit_code"]
         self.assertEqual(exit_codes, ["1"], exit_codes)
-        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+        with open(os.path.join(project, ".nopekit", "cache", "last_check.json"),
                   encoding="utf-8") as fh:
             last = json.load(fh)
         self.assertEqual(last["statuses"]["C8"], "fail",
@@ -2821,8 +2821,8 @@ class StaleIsNotCurrent(_env.EnvCase):
         forgotten every remembered outcome of the gate."""
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         rel = "gates/structural.py"
-        _replace_once(project, rel, "from atompipe.models import NegativeControl, Tier, Verdict\n",
-                      "from atompipe.models import NegativeControl, Tier, Verdict\n"
+        _replace_once(project, rel, "from nopekit.models import NegativeControl, Tier, Verdict\n",
+                      "from nopekit.models import NegativeControl, Tier, Verdict\n"
                       "import os\n\n_FLAKY = bool(os.environ.get(\"FLAKY\"))\n")
         _replace_once(project, rel, '    usable = float(ctx.params["usable_bed"])\n',
                       '    usable = float(ctx.params["usable_bed"])\n'
@@ -2836,7 +2836,7 @@ class StaleIsNotCurrent(_env.EnvCase):
         self.assertEqual(seen["C4"], "pass", "the positive control")
         self.assertIn("C4", proven, "the positive control")
 
-        forced = _doc(_env.atompipe(["check", "--force", "--json"], cwd=project,
+        forced = _doc(_env.nopekit(["check", "--force", "--json"], cwd=project,
                                     env={"FLAKY": "1"}))
         self.assertEqual(_rows(forced)[gate_id]["outcome"], "error", _rows(forced)[gate_id])
         # R-6: a crash is Skipped marked errored from P2.1 (GLOSSARY §3), where
@@ -2869,12 +2869,12 @@ class StaleIsNotCurrent(_env.EnvCase):
 
 # --------------------------------------------------------------------------- #
 class LastCheck(_env.EnvCase):
-    """``.atompipe/cache/last_check.json``: a full recorded sweep's summary, for
+    """``.nopekit/cache/last_check.json``: a full recorded sweep's summary, for
     the readers that must not import a project's code (P3's hook) — never an
     input to the sweep."""
 
     def _path(self, root: str) -> str:
-        return os.path.join(root, ".atompipe", "cache", "last_check.json")
+        return os.path.join(root, ".nopekit", "cache", "last_check.json")
 
     def test_written_only_after_a_full_recorded_sweep(self):
         p = Project(self)
@@ -2928,9 +2928,9 @@ class LastCheck(_env.EnvCase):
         write(p.root, "notes.txt", "not an input\n")
         self.assertEqual(fingerprint(), first, "an unwatched file moves nothing")
         moved = first
-        for rel, text in ((".atompipe/project.json", '{"schema": 2}\n'),
+        for rel, text in ((".nopekit/project.json", '{"schema": 2}\n'),
                           ("objectives.json", "{}\n"),
-                          (".atompipe/packs/extra/pack.json", "{}\n"),
+                          (".nopekit/packs/extra/pack.json", "{}\n"),
                           ("data/limit.txt", "3.0\n")):
             with self.subTest(watched=rel):
                 write(p.root, rel, text)
@@ -3103,7 +3103,7 @@ class InvalidationIsLocalised(_env.EnvCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.base = _CheckedProject("atompipe-e4-", _projects.bracket_copy)
+        cls.base = _CheckedProject("nopekit-e4-", _projects.bracket_copy)
         cls.addClassCleanup(cls.base.close)
         cls.entries = _entry_docs(cls.base.project)
         cls.model = modelio.load_model(cls.base.project, MODEL_REL)
@@ -3290,7 +3290,7 @@ GATE_EDIT = "\n\n# edited by tests/test_staleness.py (GateVersionRows)\n_EDITED_
 
 class GateVersionRows(_env.EnvCase):
     """Editing one module of fdm-print stales exactly the gates whose recorded
-    code closure holds it — through a copy of the pack in `.atompipe/packs/`, on
+    code closure holds it — through a copy of the pack in `.nopekit/packs/`, on
     the pack's own baseline wrapped as a project. Where trimesh or numpy is
     missing (CI), the mesh gates' outcome is their availability skip, asserted as
     such: they have no entry to go stale, and a row that expects them simply
@@ -3303,7 +3303,7 @@ class GateVersionRows(_env.EnvCase):
         cls.available = {gid: gates.availability(spec) for gid, spec in cls.specs.items()}
         cls.ran = frozenset(gid for gid, (ok, _why) in cls.available.items() if ok)
         cls.base = _CheckedProject(
-            "atompipe-gate-version-",
+            "nopekit-gate-version-",
             lambda dest: _projects.wrap_pack_baseline("fdm-print", dest, copy_pack=True),
             "--tier", cls.tier)
         cls.addClassCleanup(cls.base.close)
@@ -3353,7 +3353,7 @@ class GateVersionRows(_env.EnvCase):
                                  f"a lost closure file (a code edit that stales nothing) "
                                  f"if smaller")
                 project = self.base.copy(self)
-                path = os.path.join(project, ".atompipe", "packs", "fdm-print", *rel.split("/"))
+                path = os.path.join(project, ".nopekit", "packs", "fdm-print", *rel.split("/"))
                 self.assertTrue(os.path.isfile(path), path)
                 with open(path, "a", encoding="utf-8", newline="\n") as fh:
                     fh.write(GATE_EDIT)
@@ -3401,8 +3401,8 @@ _SLOW_GATE = '''\
 """Planted by tests/test_staleness.py (CostIsKept): a gate that takes a while."""
 import time
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 SLEEP_S = {sleep!r}
 
@@ -3422,7 +3422,7 @@ def slow(ctx):
 
 def _obs(project: str, gate_id: str, *, control: bool = False) -> dict:
     name = f"{gate_id}.control.json" if control else f"{gate_id}.json"
-    with open(os.path.join(project, ".atompipe", "obs", name), encoding="utf-8") as fh:
+    with open(os.path.join(project, ".nopekit", "obs", name), encoding="utf-8") as fh:
         return json.load(fh)
 
 
@@ -3453,7 +3453,7 @@ class CostIsKept(_env.EnvCase):
                         "a control run in the gate's own series (S-31)")
 
         cache = _cache(project)
-        obs = _tree(os.path.join(project, ".atompipe", "obs"))
+        obs = _tree(os.path.join(project, ".nopekit", "obs"))
         second = _doc(_cli(project, "check", "--json"))
         row_ = _rows(second)["bracket.slow"]
         self.assertTrue(row_["cached"], row_)
@@ -3461,7 +3461,7 @@ class CostIsKept(_env.EnvCase):
         self.assertNotIn("cpu_s", row_, "a cached row replayed a duration")
         self.assertEqual(second["counts"]["executed"], 0)
         self.assertEqual(_cache(project), cache, "a cache hit wrote to the cache")
-        self.assertEqual(_tree(os.path.join(project, ".atompipe", "obs")), obs,
+        self.assertEqual(_tree(os.path.join(project, ".nopekit", "obs")), obs,
                          "a cache hit was recorded as a run")
 
 
@@ -3502,7 +3502,7 @@ class InstrumentMismatchIsNoted(_env.EnvCase):
         entries, _controls = _split(_cache(project))
         mine = [rel for rel in entries if rel.startswith("bracket.deflection/")]
         self.assertEqual(len(mine), 1, mine)
-        path = os.path.join(project, ".atompipe", "verdicts", *mine[0].split("/"))
+        path = os.path.join(project, ".nopekit", "verdicts", *mine[0].split("/"))
         with open(path, "rb") as fh:
             self.assertNotIn(b"numpy", fh.read(), "the premise: recorded without numpy")
 
@@ -3568,7 +3568,7 @@ class LastCheckWatches(_env.EnvCase):
                       tag="limit-probe", param="deflection", fixture="far_past")
         self.first = _doc(_cli(self.project, "check", "--json"))
         self.assertEqual(_rows(self.first)["bracket.opens"]["outcome"], "pass")
-        self.path = os.path.join(self.project, ".atompipe", "cache", "last_check.json")
+        self.path = os.path.join(self.project, ".nopekit", "cache", "last_check.json")
 
     def _last(self) -> dict:
         with open(self.path, encoding="utf-8") as fh:
@@ -3576,26 +3576,26 @@ class LastCheckWatches(_env.EnvCase):
 
     def test_it_is_the_checkouts_memory(self):
         self.assertTrue(os.path.isfile(self.path), "a full check wrote no last_check.json")
-        ignored = _env.git(["check-ignore", "-q", "--", ".atompipe/cache/last_check.json"],
+        ignored = _env.git(["check-ignore", "-q", "--", ".nopekit/cache/last_check.json"],
                            cwd=self.project)
         self.assertEqual(ignored.returncode, 0, "last_check.json is not ignored")
         porcelain = _env.git(["status", "--porcelain", "--untracked-files=all"], cwd=self.project)
         self.assertEqual(porcelain.returncode, 0, porcelain.stderr)
         self.assertEqual([line for line in porcelain.stdout.splitlines()
-                          if ".atompipe/cache/" in line], [], porcelain.stdout)
+                          if ".nopekit/cache/" in line], [], porcelain.stdout)
 
     def test_check_never_reads_it(self):
         before = _doc(_cli(self.project, "check", "--json"))
         self.assertEqual(before["counts"]["executed"], 0)
         cache = _cache(self.project)
-        obs = _tree(os.path.join(self.project, ".atompipe", "obs"))
+        obs = _tree(os.path.join(self.project, ".nopekit", "obs"))
         recorded = self._last()
 
         os.remove(self.path)
         gone = _doc(_cli(self.project, "check", "--json"))
         self.assertEqual(_stable(gone), _stable(before), "deleting it changed the check")
         self.assertEqual(_cache(self.project), cache)
-        self.assertEqual(_tree(os.path.join(self.project, ".atompipe", "obs")), obs)
+        self.assertEqual(_tree(os.path.join(self.project, ".nopekit", "obs")), obs)
         self.assertEqual(self._last()["fingerprint"], recorded["fingerprint"],
                          "the next full check wrote it again, with nothing moved")
 
@@ -3603,7 +3603,7 @@ class LastCheckWatches(_env.EnvCase):
         # its own summary of a previous run would print some of it.
         lie = dict(recorded, statuses={cid: "pass" for cid in recorded["statuses"]},
                    counts={}, worst={"claim": None, "gate": None, "detail": None})
-        _put(self.project, ".atompipe/cache/last_check.json", json.dumps(lie, indent=2) + "\n")
+        _put(self.project, ".nopekit/cache/last_check.json", json.dumps(lie, indent=2) + "\n")
         lied = _doc(_cli(self.project, "check", "--json"))
         self.assertEqual(_stable(lied), _stable(before), "a forged last_check.json changed "
                                                          "the check")
@@ -3620,7 +3620,7 @@ class LastCheckWatches(_env.EnvCase):
         self.assertEqual(checked(), start, "the negative control: an unwatched file moved it")
 
         was = start
-        for rel, text in ((".atompipe/packs/extra/NOTES.md", "a pack in progress\n"),
+        for rel, text in ((".nopekit/packs/extra/NOTES.md", "a pack in progress\n"),
                           ("objectives.json", "{}\n")):
             with self.subTest(watched=rel):
                 cache = _cache(self.project)
@@ -3649,7 +3649,7 @@ class LastCheckWatches(_env.EnvCase):
                             "a file a gate opened did not move the fingerprint")
 
     def test_project_json_moves_the_fingerprint(self):
-        """`.atompipe/project.json` is the project marker, and since checkpoint 1.3
+        """`.nopekit/project.json` is the project marker, and since checkpoint 1.3
         the one home of `packs` and `model_entry` — which gates exist, and which
         model they read. What would slip through: those two moved out of
         `ledger.json`, which is now the generated index and deliberately unwatched
@@ -3662,7 +3662,7 @@ class LastCheckWatches(_env.EnvCase):
             _doc(_cli(self.project, "check", "--json"))
             return self._last()["fingerprint"]
 
-        rel = ".atompipe/project.json"
+        rel = ".nopekit/project.json"
         self.assertTrue(os.path.isfile(os.path.join(self.project, *rel.split("/"))),
                         "the first check did not migrate the bracket: there is no marker")
         start = self._last()["fingerprint"]

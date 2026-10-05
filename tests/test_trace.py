@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """What a gate read is what its verdict is keyed by — so the record must be exact.
 
-These are the trace primitives of `atompipe.verdicts` (PLAN M11.2, M13.7):
+These are the trace primitives of `nopekit.verdicts` (PLAN M11.2, M13.7):
 
 * `ParamTrace` — `ctx.params` as a gate sees it. What slipped through before it:
   `ctx.params` was ONE mutable dict shared by every gate, so gate A could forge
@@ -64,13 +64,13 @@ import uuid
 import warnings
 from unittest import mock
 
-from atompipe import verdicts
-from atompipe.gates import GateContext
-from atompipe.models import (
+from nopekit import verdicts
+from nopekit.gates import GateContext
+from nopekit.models import (
     Acceptance, Claim, Ledger, Param, PhysicalResult, ProjectMeta, Tier, Verdict,
 )
-from atompipe.util import AtompipeError
-from atompipe.verdicts import (
+from nopekit.util import NopekitError
+from nopekit.verdicts import (
     ABSENT, PRESENT, Anchors, GateInputWriteError, GateTrace, LedgerView, ModelProxy,
     ParamTrace, digest_value, portable, small_value, traced_context, tracing,
 )
@@ -223,7 +223,7 @@ class ParamTraceRecords(unittest.TestCase):
             with self.subTest(mutator=label):
                 with self.assertRaises(GateInputWriteError) as caught:
                     op(self.p)
-                self.assertIsInstance(caught.exception, AtompipeError)
+                self.assertIsInstance(caught.exception, NopekitError)
                 self.assertEqual(str(caught.exception),
                                  f"a gate cannot write another gate's inputs: {where}")
         self.assertEqual(self.data, _params(), "a refused write still landed")
@@ -607,22 +607,22 @@ class TracedContextShape(unittest.TestCase):
 class PortableText(unittest.TestCase):
     ANCHORS = Anchors(
         root="/w/proj",
-        packs={"fdm-print": "/w/proj/.atompipe/packs/fdm-print",
+        packs={"fdm-print": "/w/proj/.nopekit/packs/fdm-print",
                "cad-solid": "/opt/packs/cad-solid"},
-        out="/w/proj/.atompipe/out",
-        controls_out="/w/proj/.atompipe/out/controls",
+        out="/w/proj/.nopekit/out",
+        controls_out="/w/proj/.nopekit/out/controls",
         tmp="/t", home="/h/u")
 
     def test_every_anchor(self):
         cases = {
             "/w/proj/model/x.stl": "<root>/model/x.stl",
             "/w/proj": "<root>",
-            "/w/proj/.atompipe/packs/fdm-print/gates/mesh.py":
+            "/w/proj/.nopekit/packs/fdm-print/gates/mesh.py":
                 "<pack:fdm-print>/gates/mesh.py",
             "/opt/packs/cad-solid/selftest/cube.stl": "<pack:cad-solid>/selftest/cube.stl",
-            "/w/proj/.atompipe/out/deflection.png": "<out>/deflection.png",
-            "/w/proj/.atompipe/out/controls/g/x.png": "<out:controls>/g/x.png",
-            "/t/atompipe-x/run.mos": "<tmp>/atompipe-x/run.mos",
+            "/w/proj/.nopekit/out/deflection.png": "<out>/deflection.png",
+            "/w/proj/.nopekit/out/controls/g/x.png": "<out:controls>/g/x.png",
+            "/t/nopekit-x/run.mos": "<tmp>/nopekit-x/run.mos",
             "/h/u/.local/share/f": "~/.local/share/f",
         }
         for raw, want in cases.items():
@@ -637,7 +637,7 @@ class PortableText(unittest.TestCase):
 
     def test_free_text(self):
         text = ('[/w/proj/model/Tank.mo:12:3-12:9] Error: Class "X" not found; '
-                "see /w/proj/.atompipe/out/log.txt and /elsewhere/y")
+                "see /w/proj/.nopekit/out/log.txt and /elsewhere/y")
         self.assertEqual(portable(text, self.ANCHORS),
                          '[<root>/model/Tank.mo:12:3-12:9] Error: Class "X" not found; '
                          "see <out>/log.txt and /elsewhere/y")
@@ -645,7 +645,7 @@ class PortableText(unittest.TestCase):
 
     def test_outside_anchor_evidence_is_dropped(self):
         self.assertEqual(
-            self.ANCHORS.evidence(["/w/proj/.atompipe/out/p.png", "/elsewhere/q.png",
+            self.ANCHORS.evidence(["/w/proj/.nopekit/out/p.png", "/elsewhere/q.png",
                                    "rel/r.png", "/t/s.csv"]),
             ["<out>/p.png", "rel/r.png", "<tmp>/s.csv"])
         self.assertIsNone(self.ANCHORS.portable_path("/elsewhere/q.png"))
@@ -802,7 +802,7 @@ class AuditTrace(_env.EnvCase):
         self.assertEqual(trace.dirs, {self.dir, sub})
 
     def test_a_fresh_import_records_nothing(self):
-        name = f"atompipe_trace_probe_{uuid.uuid4().hex}"
+        name = f"nopekit_trace_probe_{uuid.uuid4().hex}"
         self.file(f"{name}.py", "VALUE = 41 + 1\n")
         sys.path.insert(0, self.dir)
         self.addCleanup(sys.path.remove, self.dir)
@@ -839,7 +839,7 @@ class AuditTrace(_env.EnvCase):
         source. The named residual: served from ``sys.modules``, it opens
         nothing and keys nothing."""
         self.addCleanup(self._forget_loaded)
-        name = f"atompipe_trace_rules_{uuid.uuid4().hex}"
+        name = f"nopekit_trace_rules_{uuid.uuid4().hex}"
         path = self.file(f"{name}.py", "LIMIT = 50.0\n")
         sys.path.insert(0, self.dir)
         self.addCleanup(sys.path.remove, self.dir)
@@ -877,7 +877,7 @@ class AuditTrace(_env.EnvCase):
         while one was: the helper's code was keyed by nothing, and neither was
         what it read at its import once it was served to a second gate. Run or
         served, every file of its closure is a read of the window now."""
-        from atompipe import modelio
+        from nopekit import modelio
         self.addCleanup(self._forget_loaded)
         data = self.file("table.json", '{"limit": 50}\n')
         helper = self.file(f"tables_{uuid.uuid4().hex}.py",
@@ -905,7 +905,7 @@ class AuditTrace(_env.EnvCase):
         running gate's: a ``.py`` was dropped as a module's source, a ``.json``
         was not, so a gate's first ``load_path`` keyed the DATA of an unrelated
         module it never read, and only when it was the first to load anything."""
-        from atompipe import modelio
+        from nopekit import modelio
         self.addCleanup(self._forget_loaded)
         other_data = self.file("other.json", "{}\n")
         other = self.file(f"other_{uuid.uuid4().hex}.py",
@@ -1018,14 +1018,14 @@ class AuditTrace(_env.EnvCase):
         source, _ns = self._fresh_function("def h():\n    return 1\n")
         linecache.getline(data, 1)
         linecache.getline(source, 1)
-        linecache.cache["<atompipe-trace-probe>"] = (1, None, ["x = 1\n"], "<atompipe-trace-probe>")
-        self.addCleanup(linecache.cache.pop, "<atompipe-trace-probe>", None)
+        linecache.cache["<nopekit-trace-probe>"] = (1, None, ["x = 1\n"], "<nopekit-trace-probe>")
+        self.addCleanup(linecache.cache.pop, "<nopekit-trace-probe>", None)
         trace = GateTrace()
         with tracing(trace):
             self.assertEqual(linecache.getline(data, 1), "5\n")
         self.assertEqual(trace.files_read, [data], "a warm linecache hid the file")
         self.assertIn(source, linecache.cache)
-        self.assertIn("<atompipe-trace-probe>", linecache.cache)
+        self.assertIn("<nopekit-trace-probe>", linecache.cache)
 
     # -- sqlite ------------------------------------------------------------ #
     def _db(self, name: str) -> str:
@@ -1090,7 +1090,7 @@ class AuditTrace(_env.EnvCase):
         spelling names the variable — a miss included, since its absence is
         what the gate decided on — and a bulk read names the whole
         environment."""
-        name = f"ATOMPIPE_TRACE_PROBE_{uuid.uuid4().hex.upper()}"
+        name = f"NOPEKIT_TRACE_PROBE_{uuid.uuid4().hex.upper()}"
         spellings = {
             "os.environ.get": lambda: os.environ.get(name),
             "os.getenv": lambda: os.getenv(name),
@@ -1124,7 +1124,7 @@ class AuditTrace(_env.EnvCase):
         import tempfile
         trace = GateTrace()
         with tracing(trace):
-            shutil.which("atompipe-no-such-tool")
+            shutil.which("nopekit-no-such-tool")
             with mock.patch.object(tempfile, "tempdir", None):
                 tempfile.gettempdir()               # TMPDIR, TEMP, TMP, through os.getenv
         self.assertEqual(trace.opaque, set())
@@ -1146,7 +1146,7 @@ class AuditTrace(_env.EnvCase):
         self.assertIsInstance(os.environ, os._Environ)
         for method in ("__setitem__", "__delitem__"):
             self.assertIs(getattr(type(os.environ), method), getattr(os._Environ, method))
-        name = f"ATOMPIPE_TRACE_CHILD_{uuid.uuid4().hex.upper()}"
+        name = f"NOPEKIT_TRACE_CHILD_{uuid.uuid4().hex.upper()}"
         with mock.patch.dict(os.environ):
             with tracing(GateTrace()):
                 os.environ[name] = "inherited"
@@ -1169,7 +1169,7 @@ class AuditTrace(_env.EnvCase):
         trace = GateTrace()
         with tracing(trace):
             open(os.__file__, "rb").close()                  # the stdlib, under sys.prefix
-            open(verdicts.__file__, "rb").close()            # the atompipe package itself
+            open(verdicts.__file__, "rb").close()            # the nopekit package itself
             open(self.file("cached.pyc"), "rb").close()
             if os.path.exists("/proc/self/status"):
                 open("/proc/self/status", "rb").close()
@@ -1189,11 +1189,11 @@ class AuditTrace(_env.EnvCase):
                          "trimesh and numpy live in the user site on the dev box")
 
     def test_packs_shipped_inside_the_wheel_are_not_library(self):
-        """pyproject maps packs/ onto atompipe/bundled/, under site-packages AND
-        the atompipe package: a bundled pack's data read must still record."""
+        """pyproject maps packs/ onto nopekit/bundled/, under site-packages AND
+        the nopekit package: a bundled pack's data read must still record."""
         verdicts.spine_digest()                    # memoised before __file__ is patched
         site_packages = self.tmp()
-        package = os.path.join(site_packages, "atompipe")
+        package = os.path.join(site_packages, "nopekit")
         data = os.path.join(package, "bundled", "fdm-print", "selftest", "baseline.json")
         spine_file = os.path.join(package, "site_template", "index.html")
         for path in (data, spine_file):
@@ -1244,7 +1244,7 @@ class AuditTrace(_env.EnvCase):
         the server's socket — must name a process, and never the network."""
         code = textwrap.dedent("""\
             import concurrent.futures, json, multiprocessing, pathlib, sys
-            from atompipe.verdicts import GateTrace, tracing
+            from nopekit.verdicts import GateTrace, tracing
             seen = {}
             for method in multiprocessing.get_all_start_methods():
                 windows = []
@@ -1309,7 +1309,7 @@ class AuditTrace(_env.EnvCase):
         except ImportError:                    # Windows: CreateProcess audits itself
             posix = None
         if posix is not None:
-            self.assertTrue(getattr(posix.fork_exec, "__atompipe_probe__", False),
+            self.assertTrue(getattr(posix.fork_exec, "__nopekit_probe__", False),
                             "the probe must be installed where the function exists")
 
     def test_winapi_create_process_is_opaque_and_names_its_argv_files(self):
@@ -1393,7 +1393,7 @@ class AuditTrace(_env.EnvCase):
         with tracing(GateTrace()):
             pass
         self.assertEqual(verdicts._HOOK_INSTALLS, 1)
-        code = ("from atompipe import verdicts as v\n"
+        code = ("from nopekit import verdicts as v\n"
                 "print(v._HOOK_INSTALLS)\n"
                 "for _ in range(3):\n"
                 "    with v.tracing(v.GateTrace()):\n"

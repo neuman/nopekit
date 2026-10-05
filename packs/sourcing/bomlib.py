@@ -10,7 +10,7 @@ not a gate, it is a weather report.
 Document shape (``selftest/example_bom.json`` is the worked example)::
 
     {
-      "schema": "atompipe.bom/1",
+      "schema": "nopekit.bom/1",
       "currency": "USD",
       "build_quantity": 250,
       "budget_per_unit": 46.0,
@@ -63,7 +63,7 @@ from typing import Any
 
 #: Bumped only when the shape changes incompatibly. A document with no `schema`
 #: key is read anyway — refusing it would be pedantry, not safety.
-SCHEMA = "atompipe.bom/1"
+SCHEMA = "nopekit.bom/1"
 
 PACK_DIR = os.path.dirname(os.path.abspath(__file__))
 

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The honesty invariants.
 
-These are not ordinary unit tests. Everything atompipe claims rests on four
+These are not ordinary unit tests. Everything nopekit claims rests on four
 properties, and if any of them breaks the tool becomes a machine for laundering
 assumption into apparent proof — which is strictly worse than having no tool.
 
@@ -30,16 +30,16 @@ import uuid
 import xml.etree.ElementTree as ET
 from unittest import mock
 
-from atompipe import claims as claims_mod
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe import report as report_mod
-from atompipe import store as store_mod
-from atompipe.models import (
+from nopekit import claims as claims_mod
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit import report as report_mod
+from nopekit import store as store_mod
+from nopekit.models import (
     Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, GateSpec, Ledger,
     NegativeControl, PhysicalResult, ProjectMeta, Tier, Verdict,
 )
-from atompipe.util import AtompipeError
+from nopekit.util import NopekitError
 
 
 def _claim(cid="C1", kind=ClaimKind.MEASURABLE, **kw):
@@ -412,7 +412,7 @@ class ReportNeverOverclaims(unittest.TestCase):
         marks the row (`disagree`). What slipped through the P2.1 design: the
         contradiction row stayed INSIDE the checked section, marked — PARTIAL
         under a new name — and `state.json` had nothing in `partial`'s place."""
-        from atompipe import site as site_mod
+        from nopekit import site as site_mod
         no_tool = Verdict(gate="g.two", claims=["C1"], skipped=True, skip_reason="no tool")
         ok = Verdict(gate="g.one", claims=["C1"], passed=True, measured=0.3, units="mm")
         reg = _Reg([SPEC, dataclasses.replace(SPEC, id="g.two")])
@@ -485,7 +485,7 @@ _OUTSIDE = ('context:outside|{"hi":40.0,"key":"load_n","lo":0.0,"value":60,'
 def _physical_claims(c) -> list:
     """One claim per P2.5a cause, built in memory with the standing the judge
     would give it (``verdicts.judge_results`` has its own tests)."""
-    from atompipe.models import AttributionRecord, EntryStanding, Standing
+    from nopekit.models import AttributionRecord, EntryStanding, Standing
     phys, assume = ClaimKind.PHYSICAL, ClaimKind.ASSUMPTION
     dana = {"terminal": "human", "authority": "Dana"}
     passed = PhysicalResult(passed=True, who="Sam <s@x>", channel="interactive",
@@ -672,7 +672,7 @@ class RequiredIsSaidAsABool(unittest.TestCase):
     nobody set; it never means "not required"."""
 
     def _read(self, body: dict) -> Claim:
-        root = tempfile.mkdtemp(prefix="atompipe-critical-")
+        root = tempfile.mkdtemp(prefix="nopekit-critical-")
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         path = os.path.join(root, "C1.json")
         with open(path, "w", encoding="utf-8") as fh:
@@ -686,7 +686,7 @@ class RequiredIsSaidAsABool(unittest.TestCase):
                 self.assertIs(self._read({"critical": value}).critical, value)
         for value in (None, 0, 1, "", "false", []):
             with self.subTest(value=value):
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     self._read({"critical": value})
                 self.assertIn('C1.json: "critical" must be true or false',
                               str(caught.exception))
@@ -733,7 +733,7 @@ class StatusPrecedence(unittest.TestCase):
     def _loaded(self, kind: str, results: list[dict]) -> Claim:
         """C5 of a records project with `results` in `results/C5.json`, oldest
         first, read back through `store.load` — the assembler every command uses."""
-        root = tempfile.mkdtemp(prefix="atompipe-r3-")
+        root = tempfile.mkdtemp(prefix="nopekit-r3-")
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         store_mod.init(root, ProjectMeta(name="r3", revision="v0.1"))
         for sub, name, body in (
@@ -803,7 +803,7 @@ class StatusPrecedence(unittest.TestCase):
         self.assertEqual(claims_mod.resolve_status(_claim(), [v]), ClaimStatus.PASS)
 
     def test_blocking_statuses_exclude_pass_and_verified(self):
-        from atompipe.models import BLOCKING_STATUSES
+        from nopekit.models import BLOCKING_STATUSES
         self.assertNotIn(ClaimStatus.PASS, BLOCKING_STATUSES)
         self.assertNotIn(ClaimStatus.VERIFIED, BLOCKING_STATUSES)
         self.assertIn(ClaimStatus.UNCLAIMED, BLOCKING_STATUSES)
@@ -1018,13 +1018,13 @@ class UnqualifiedIsTheSpinesWord(unittest.TestCase):
         self.assertTrue(v.error)
 
     def test_a_remembered_outcome_never_carries_the_mark(self):
-        from atompipe import verdicts as verdicts_mod
-        root = tempfile.mkdtemp(prefix="atompipe-remembered-")
+        from nopekit import verdicts as verdicts_mod
+        root = tempfile.mkdtemp(prefix="nopekit-remembered-")
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
-        os.makedirs(os.path.join(root, ".atompipe", "cache"))
+        os.makedirs(os.path.join(root, ".nopekit", "cache"))
         crash = Verdict(gate="g.x", claims=["C1"], error="RuntimeError: boom")
         verdicts_mod.remember(root, "g.x", crash, input_rho="", kind="error", when="t")
-        path = os.path.join(root, ".atompipe", "cache", "last_outcomes.json")
+        path = os.path.join(root, ".nopekit", "cache", "last_outcomes.json")
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         self.assertNotIn("unqualified", data["g.x"][""]["verdict"])
@@ -1232,7 +1232,7 @@ class AdmissionGuardsBite(unittest.TestCase):
     """
 
     def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="atompipe-guards-")
+        self.root = tempfile.mkdtemp(prefix="nopekit-guards-")
         self.addCleanup(shutil.rmtree, self.root, True)
         os.makedirs(os.path.join(self.root, "selftest"))
 
@@ -1265,7 +1265,7 @@ class AdmissionGuardsBite(unittest.TestCase):
     def test_a_fixtureless_control_is_refused_at_registration(self):
         for blank in ("", "   "):
             with self.subTest(fixture=repr(blank)):
-                with self.assertRaises(AtompipeError) as cm:
+                with self.assertRaises(NopekitError) as cm:
                     gates_mod.gate(id="g.blank", claims=["C1"], registry=gates_mod.Registry(),
                                    negative_control=NegativeControl(fixture=blank))(
                         lambda ctx: True)
@@ -1349,7 +1349,7 @@ class AdmissionGuardsBite(unittest.TestCase):
     def test_a_skip_for_missing_tooling_stays_a_skip(self):
         """The other side of the line: a tool that is not here is not the gate's fault."""
         v = self._selftest(self._flags_bad, self._fixture(self.BAD),
-                           requires_tools=["atompipe-no-such-tool-7c1f"])
+                           requires_tools=["nopekit-no-such-tool-7c1f"])
         self.assertTrue(v.skipped)
         self.assertFalse(v.error)
         self.assertFalse(v.ok)
@@ -1429,16 +1429,16 @@ class RegistryHandsOutCopies(unittest.TestCase):
         somebody else may be holding."""
         name = f"scratch-{uuid.uuid4().hex[:8]}"
         gate_id = f"scratch{uuid.uuid4().hex[:6]}.blank"
-        root = tempfile.mkdtemp(prefix="atompipe-setpack-")
+        root = tempfile.mkdtemp(prefix="nopekit-setpack-")
         self.addCleanup(shutil.rmtree, root, True)
-        pack_dir = os.path.join(root, ".atompipe", "packs", name)
+        pack_dir = os.path.join(root, ".nopekit", "packs", name)
         os.makedirs(os.path.join(pack_dir, "gates"))
         with open(os.path.join(pack_dir, "pack.json"), "w", encoding="utf-8") as fh:
             fh.write('{"name": "%s", "description": "scratch"}' % name)
         with open(os.path.join(pack_dir, "gates", "blank.py"), "w", encoding="utf-8") as fh:
             fh.write(
-                "from atompipe import gates\n"
-                "from atompipe.models import GateSpec, NegativeControl\n"
+                "from nopekit import gates\n"
+                "from nopekit.models import GateSpec, NegativeControl\n"
                 f"SPEC = GateSpec(id={gate_id!r}, claims=['C1'],\n"
                 "                negative_control=NegativeControl(fixture='x:y'))\n"
                 "def check(ctx):\n"
@@ -1446,7 +1446,7 @@ class RegistryHandsOutCopies(unittest.TestCase):
                 "gates.active_registry().register(SPEC, check)\n")
         self.addCleanup(gates_mod.REGISTRY.unregister, gate_id)
         self.addCleanup(lambda: [sys.modules.pop(m) for m in list(sys.modules)
-                                 if m.startswith("atompipe_pack_scratch")])
+                                 if m.startswith("nopekit_pack_scratch")])
 
         reg = gates_mod.Registry()
         added = packs_mod.load_gates(name, reg, root=root)
@@ -1454,7 +1454,7 @@ class RegistryHandsOutCopies(unittest.TestCase):
         self.assertEqual(added[0].pack, name)
         self.assertEqual(reg.get(gate_id)[0].pack, name)
         module = next(m for k, m in sys.modules.items()
-                      if k.startswith("atompipe_pack_scratch") and hasattr(m, "SPEC")
+                      if k.startswith("nopekit_pack_scratch") and hasattr(m, "SPEC")
                       and m.SPEC.id == gate_id)
         self.assertEqual(module.SPEC.pack, "", "load_gates wrote into the gate file's spec")
 

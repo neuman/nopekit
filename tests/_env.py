@@ -5,7 +5,7 @@ A test that passes on the machine it was written on and fails on a CI runner —
 or the reverse — has measured the machine, not the code. The dev box this suite
 grew up on differs from a GitHub runner in exactly the ways a subprocess
 inherits: a global git identity (so ``git commit`` works here and fails there);
-possibly a ``~/.atompipe/packs`` that outranks the bundled packs; a Claude Code
+possibly a ``~/.nopekit/packs`` that outranks the bundled packs; a Claude Code
 session's ``CLAUDE*`` and ``AI_AGENT`` variables, which the agent-facing
 commands read and a runner never sets; and, when the suite runs inside a git
 hook, ``GIT_DIR`` and ``GIT_INDEX_FILE`` pointing every git call at the OUTER
@@ -25,7 +25,7 @@ What a child gets, and why each line:
   (``PYTHONNOUSERSITE=1 PATH=/usr/bin:/bin``) is CI-like in the children too.
 * ``PYTHONPATH`` = this checkout's ``src`` first, then the parent's entries made
   absolute. The parent's ``PYTHONPATH=src`` is relative to the repo root, so a
-  child in a temp cwd would otherwise import whatever atompipe is installed —
+  child in a temp cwd would otherwise import whatever nopekit is installed —
   and the partial-tool probe injects a ``sitecustomize`` through ``PYTHONPATH``,
   which a child must see to see the same world.
 * ``GIT_CONFIG_GLOBAL=/dev/null`` and ``GIT_CONFIG_NOSYSTEM=1``; every other
@@ -35,7 +35,7 @@ What a child gets, and why each line:
   ``attributes`` even when ``GIT_CONFIG_GLOBAL`` replaces the config file.
 * ``GIT_AUTHOR_*``/``GIT_COMMITTER_*`` only with ``identity=True``; ``EMAIL`` is
   stripped with them, since git falls back to it for an identity.
-* ``ATOMPIPE_PACK_PATH`` unset; ``CLAUDE*`` and ``AI_AGENT`` stripped;
+* ``NOPEKIT_PACK_PATH`` unset; ``CLAUDE*`` and ``AI_AGENT`` stripped;
   ``PYTHONDONTWRITEBYTECODE`` stripped — a user's shell does not set it, and the
   fresh-clone transcript must see the ``__pycache__`` a real run writes.
 
@@ -64,17 +64,17 @@ SRC = os.path.join(REPO, "src")
 #: The identity a test gets when it asks for one. A fixed, obviously-synthetic
 #: value, so a commit a test makes can never pass for a person's.
 IDENTITY = {
-    "GIT_AUTHOR_NAME": "atompipe tests",
-    "GIT_AUTHOR_EMAIL": "tests@atompipe.invalid",
-    "GIT_COMMITTER_NAME": "atompipe tests",
-    "GIT_COMMITTER_EMAIL": "tests@atompipe.invalid",
+    "GIT_AUTHOR_NAME": "nopekit tests",
+    "GIT_AUTHOR_EMAIL": "tests@nopekit.invalid",
+    "GIT_COMMITTER_NAME": "nopekit tests",
+    "GIT_COMMITTER_EMAIL": "tests@nopekit.invalid",
 }
 
 #: Stripped from the parent's environment by exact name (see the module docstring
 #: for each). HOME, USERPROFILE, PYTHONPATH and PYTHONUSERBASE are re-set, not
 #: inherited.
 _STRIP = frozenset({
-    "ATOMPIPE_PACK_PATH", "AI_AGENT", "PYTHONDONTWRITEBYTECODE", "EMAIL",
+    "NOPEKIT_PACK_PATH", "AI_AGENT", "PYTHONDONTWRITEBYTECODE", "EMAIL",
     "XDG_CONFIG_HOME", "HOME", "USERPROFILE", "PYTHONPATH", "PYTHONUSERBASE",
 })
 
@@ -160,7 +160,7 @@ def run(argv: Sequence[Any], *, cwd: str, home: str | None = None, identity: boo
     """
     own_home = None
     if home is None:
-        own_home = tempfile.mkdtemp(prefix="atompipe-home-")
+        own_home = tempfile.mkdtemp(prefix="nopekit-home-")
         home = own_home
     command = [os.fspath(a) for a in argv]
     try:
@@ -176,9 +176,9 @@ def run(argv: Sequence[Any], *, cwd: str, home: str | None = None, identity: boo
             _rmtree(own_home)
 
 
-def atompipe(args: Sequence[Any], *, cwd: str, **kw: Any) -> subprocess.CompletedProcess:
-    """``python -m atompipe <args>`` from this checkout's ``src``, via :func:`run`."""
-    return run([sys.executable, "-m", "atompipe", *args], cwd=cwd, **kw)
+def nopekit(args: Sequence[Any], *, cwd: str, **kw: Any) -> subprocess.CompletedProcess:
+    """``python -m nopekit <args>`` from this checkout's ``src``, via :func:`run`."""
+    return run([sys.executable, "-m", "nopekit", *args], cwd=cwd, **kw)
 
 
 #: What ``claim physical`` writes to stderr when it waits for the claim's id —
@@ -191,7 +191,7 @@ TTY_PROMPT_END = "(anything else records nothing): "
 def run_tty(argv: Sequence[Any], *, cwd: str, answer: str | None, home: str | None = None,
             identity: bool = True, env: Mapping[str, Any] | None = None,
             timeout: float = 60.0) -> subprocess.CompletedProcess:
-    """``python -m atompipe <argv>`` with its stdin a terminal — the ONE place a
+    """``python -m nopekit <argv>`` with its stdin a terminal — the ONE place a
     pty is opened in ``tests/`` — as a person's own shell runs it (P2.5a-D4).
 
     The child's stdin is the slave end of ``pty.openpty()``; stdout and stderr
@@ -210,9 +210,9 @@ def run_tty(argv: Sequence[Any], *, cwd: str, answer: str | None, home: str | No
     import time
     own_home = None
     if home is None:
-        own_home = tempfile.mkdtemp(prefix="atompipe-home-")
+        own_home = tempfile.mkdtemp(prefix="nopekit-home-")
         home = own_home
-    command = [sys.executable, "-m", "atompipe", *(os.fspath(a) for a in argv)]
+    command = [sys.executable, "-m", "nopekit", *(os.fspath(a) for a in argv)]
     master, slave = pty.openpty()
     try:
         proc = subprocess.Popen(command, cwd=cwd,
@@ -295,6 +295,6 @@ class EnvCase(unittest.TestCase):
         transcript both walk the checkout, and a planted tree there is a planted
         hit (tests:H3).
         """
-        path = tempfile.mkdtemp(prefix="atompipe-test-")
+        path = tempfile.mkdtemp(prefix="nopekit-test-")
         self.addCleanup(_rmtree, path)
         return path

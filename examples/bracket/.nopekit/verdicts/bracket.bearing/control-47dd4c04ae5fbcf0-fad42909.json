@@ -1,0 +1,174 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.bearing",
+  "rho": "47dd4c04ae5fbcf02cf942cbcee84c67c86d8d1fc4458194e3f4add03c5ad95c",
+  "static": "e27cc0a77c70500465f8b279fc37dc20c77bda1aac88702e6587daf8e51ed4d3",
+  "static_parts": {
+    "spine": "f396daf6190537c7f68ede528849d58110bd85d8d545c39e61ecc2efda945530",
+    "code": {
+      "digest": "615b2a71c694a1207b6b712bd8d0f6d8b0b46d42db3353026e9849373ba5e49d",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "c37edcc33de9c8b1839bab5ed8b6c1377619163c9bcfbb1823d9188484bc11f1",
+      "files": {
+        "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+        "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:thin_bearing",
+      "expect": "fail",
+      "note": "one bolt in a thin plate: bearing area collapses while the beam itself is unchanged, so only this gate should trip",
+      "good": "",
+      "mutation": true
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "c04607054719152157838eb2f982f420bbc7e5975e8b133b530b30dad215ba3b",
+    "files": {
+      "model/bracket.py": "ce20d2c788710944d2ed4b791a1b82023cac47f5883df30c783f1da06c5a0b9b",
+      "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+      "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "bearing_area"
+        ],
+        "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+        15.0
+      ],
+      [
+        [
+          "bearing_stress"
+        ],
+        "55be3342f58032c8f9282b827d843e45582f21fa61422e1df93c1d2af25f3eb3",
+        26.666666666666668
+      ],
+      [
+        [
+          "config",
+          "n_bolts"
+        ],
+        "4bcd3657d0c29f255a305bffd762d00dbc16c2b6e76f8a3a3a4e9b476a1cdfac",
+        1
+      ],
+      [
+        [
+          "design_stress"
+        ],
+        "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+        15.0
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "bad_extra": [],
+  "good": {
+    "outcome": "pass",
+    "reads": {
+      "params": [
+        [
+          [
+            "bearing_area"
+          ],
+          "5cd3a413f8c3ed284a075be1d2886df6d52cd401db1c9eeb7c418390fe8f5ffe",
+          88.0
+        ],
+        [
+          [
+            "bearing_stress"
+          ],
+          "26e2ba2921a813a538f09b92f24003810641054a7c86082d1f397eacd8341bee",
+          0.17045454545454544
+        ],
+        [
+          [
+            "config",
+            "n_bolts"
+          ],
+          "772c51c318a4bea2d58dec86dbdafe096cb75369a5638c345acaa0fe5ce8aa82",
+          2
+        ],
+        [
+          [
+            "design_stress"
+          ],
+          "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+          15.0
+        ]
+      ],
+      "files": {},
+      "dirs": {},
+      "ledger": {},
+      "host": [],
+      "opaque": []
+    },
+    "extra": [],
+    "measured": 0.17,
+    "limit": 15.0,
+    "units": "MPa",
+    "detail": "0.17 MPa on 88 mm^2 across 2 bolt(s), allowable 15.0 MPa",
+    "goalpost": []
+  },
+  "mutation": {
+    "runs": 97,
+    "boundary": "",
+    "results": [
+      {
+        "key": [
+          "bearing_stress"
+        ],
+        "before": 0.17045454545454544,
+        "after": 17.3,
+        "outcome": "fail",
+        "measured": 17.3,
+        "limit": 15.0
+      },
+      {
+        "key": [
+          "design_stress"
+        ],
+        "before": 15.0,
+        "after": 0.147,
+        "outcome": "fail",
+        "measured": 0.17,
+        "limit": 0.147
+      }
+    ],
+    "inconclusive": [],
+    "not_mutated": [
+      {
+        "key": [
+          "bearing_area"
+        ],
+        "why": "never-lands"
+      },
+      {
+        "key": [
+          "config",
+          "n_bolts"
+        ],
+        "why": "never-lands"
+      }
+    ]
+  },
+  "admitted": "paired",
+  "detail": "correctly failed on selftest/bad_configs.py:thin_bearing (one bolt in a thin plate: bearing area collapses while the beam itself is unchanged, so only this gate should trip): 26.67 MPa on 15 mm^2 across 1 bolt(s), allowable 15.0 MPa",
+  "measured": 26.667,
+  "limit": 15.0,
+  "units": "MPa",
+  "digest": "861a361665938cd889451584e65bbde161771e5f337c8532ab415f404c606583"
+}

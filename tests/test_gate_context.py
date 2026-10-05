@@ -38,13 +38,13 @@ import time
 import unittest
 from unittest import mock
 
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe import verdicts
-from atompipe.gates import GateContext
-from atompipe.models import Claim, GateSpec, Ledger, NegativeControl, Verdict
-from atompipe.util import AtompipeError
-from atompipe.verdicts import ABSENT, GateInputWriteError, GateTrace, ParamTrace, digest_value
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit import verdicts
+from nopekit.gates import GateContext
+from nopekit.models import Claim, GateSpec, Ledger, NegativeControl, Verdict
+from nopekit.util import NopekitError
+from nopekit.verdicts import ABSENT, GateInputWriteError, GateTrace, ParamTrace, digest_value
 
 import _env
 import _projects
@@ -571,7 +571,7 @@ class CostIsMeasured(_env.EnvCase):
     def test_a_skip_costs_nothing_and_the_new_fields_are_last(self):
         registry = gates_mod.Registry()
         spec, fn = _register(registry, "g.absent", lambda ctx: True,
-                             requires_tools=["atompipe-no-such-tool-5d2e"])
+                             requires_tools=["nopekit-no-such-tool-5d2e"])
         v = gates_mod.run_gate(spec, fn, GateContext())
         self.assertTrue(v.skipped)
         self.assertEqual((v.duration_s, v.cpu_s, v.rho), (0.0, 0.0, ""))
@@ -624,7 +624,7 @@ class GateIdsAreDirectoryNames(_env.EnvCase):
         # The bracket's gates through the CLI in a copy, so this measurement does
         # not depend on which module owns the project-gate loader.
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
-        proc = _env.atompipe(["gate", "list", "--json"], cwd=project)
+        proc = _env.nopekit(["gate", "list", "--json"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         rows = json.loads(proc.stdout)["gates"]
         bracket_ids = [row["id"] for row in rows if not row.get("pack")]
@@ -647,12 +647,12 @@ class GateIdsAreDirectoryNames(_env.EnvCase):
     def test_path_characters_refused(self):
         for bad in ("fdm/overhang", "fdm\\overhang", "fdm..overhang", "fdm:overhang"):
             with self.subTest(gate_id=bad):
-                with self.assertRaises(AtompipeError) as cm:
+                with self.assertRaises(NopekitError) as cm:
                     gates_mod.Registry().register(
                         GateSpec(id=bad, negative_control=NegativeControl(fixture="x:y")),
                         lambda ctx: True)
                 self.assertIn("names a directory in the verdict cache", str(cm.exception))
-                with self.assertRaises(AtompipeError):
+                with self.assertRaises(NopekitError):
                     gates_mod.gate(id=bad, registry=gates_mod.Registry(),
                                    negative_control=NegativeControl(fixture="x:y"))(
                         lambda ctx: True)
@@ -667,7 +667,7 @@ class GateIdsAreDirectoryNames(_env.EnvCase):
         for other in ("fdm.Overhang", "FDM.OVERHANG"):
             for replace in (False, True):
                 with self.subTest(gate_id=other, replace=replace):
-                    with self.assertRaises(AtompipeError) as cm:
+                    with self.assertRaises(NopekitError) as cm:
                         registry.register(dataclasses.replace(spec, id=other),
                                           lambda ctx: True, replace=replace)
                     self.assertIn("only in case", str(cm.exception))
@@ -870,7 +870,7 @@ class SelftestTraces(_env.EnvCase):
         self.assertEqual(self.calls, [])
 
         spec, fn = self._gate("def make(ctx):\n    return None\n", name="none_bad.py")
-        with self.assertRaises(AtompipeError) as cm:
+        with self.assertRaises(NopekitError) as cm:
             gates_mod.run_fixture(spec, fn, self._host(), trace=GateTrace(kind="control"),
                                   out_dir=control_out)
         self.assertIn("returned None", str(cm.exception))
@@ -880,8 +880,8 @@ class SelftestTraces(_env.EnvCase):
 # S-26: the bytes that run are the bytes on disk
 # --------------------------------------------------------------------------- #
 _SPAN_GATE = """\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="proj.span", claims=["C1"],
@@ -892,7 +892,7 @@ def span(ctx):
 
 _EDIT_AND_RELOAD = """\
 import json, os, py_compile, sys
-from atompipe import gates
+from nopekit import gates
 
 root = sys.argv[1]
 path = os.path.join(root, "gates", "span.py")
@@ -919,7 +919,7 @@ print(json.dumps([first, measured()]))
 
 _EDIT_PACK_AND_RELOAD = """\
 import json, os, py_compile, sys
-from atompipe import gates, packs
+from nopekit import gates, packs
 
 pack_dir = sys.argv[1]
 path = os.path.join(pack_dir, "gates", "span.py")
@@ -1137,14 +1137,14 @@ class ReadsStillAttributed(_env.EnvCase):
     """The gate reads a traced COPY of the params now, and a caller that noted
     which keys each gate read on its own mapping sees nothing of a copy being made.
     What that would have looked like: every ``Param.gates`` empty after a check,
-    and ``atompipe why thickness`` saying no gate would notice the one number the
+    and ``nopekit why thickness`` saying no gate would notice the one number the
     bracket's failing claim turns on."""
 
     def test_why_names_the_gate_that_read_the_param(self):
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
-        checked = _env.atompipe(["check"], cwd=project)
+        checked = _env.nopekit(["check"], cwd=project)
         self.assertIn(checked.returncode, (0, 1), checked.stderr)
-        proc = _env.atompipe(["why", "thickness", "--json"], cwd=project)
+        proc = _env.nopekit(["why", "thickness", "--json"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         text = json.loads(proc.stdout)["why"]
         _head, sep, gates_part = text.partition("GATES (")

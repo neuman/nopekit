@@ -11,7 +11,7 @@ trimesh is imported INSIDE the gate functions, never at module import. Two reaso
 both load-bearing:
 
 * this module must import cleanly on a machine with no mesh library, so the pack is
-  discoverable and `atompipe gate list` still works and says BLOCKED;
+  discoverable and `nopekit gate list` still works and says BLOCKED;
 * the tier-0 gate (``cad.bounding``) declares no mesh dependency and must actually
   run there. A top-level ``import trimesh`` would take the whole module down and the
   cheap gate with it.
@@ -29,8 +29,8 @@ import os
 import sys
 from typing import Any
 
-from atompipe.gates import gate, GateContext
-from atompipe.models import Locator, NegativeControl, Tier, Verdict
+from nopekit.gates import gate, GateContext
+from nopekit.models import Locator, NegativeControl, Tier, Verdict
 
 # Where the geometry is, and what each part is called once the site has drawn it.
 # Shared with ``views/assembly.py`` rather than restated here: the node names a

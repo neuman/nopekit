@@ -1,20 +1,20 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "atompipe",
+  "name": "nopekit",
   "description": "Turn a sketch or a discussion into a validated physical thing \u2014 hardware, CAD, PCBs, simulation, fabrication",
   "owner": {
     "name": "Eric Neuman"
   },
   "plugins": [
     {
-      "name": "atompipe",
+      "name": "nopekit",
       "description": "Design real physical things with an agent: extract the claims that must be true, generate everything from one parametric model, gate every claim with a validator that can actually fail, and produce a readiness report that separates what is proven from what is assumed. Grows new validation capabilities (CFD, FEA, thermal, chemical) on demand instead of prebaking them.",
       "author": {
         "name": "Eric Neuman"
       },
       "category": "engineering",
       "source": "./",
-      "homepage": "https://github.com/neuman/atompipe"
+      "homepage": "https://github.com/neuman/nopekit"
     }
   ]
 }

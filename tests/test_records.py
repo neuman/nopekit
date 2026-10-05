@@ -60,9 +60,9 @@ from unittest import mock
 import _env
 import _projects
 import _transcript
-from atompipe import claims as claims_mod
-from atompipe import modelio, models, store, util
-from atompipe.models import (
+from nopekit import claims as claims_mod
+from nopekit import modelio, models, store, util
+from nopekit.models import (
     Acceptance,
     Claim,
     ClaimStatus,
@@ -76,7 +76,7 @@ from atompipe.models import (
     Rejected,
     Verdict,
 )
-from atompipe.util import AtompipeError
+from nopekit.util import NopekitError
 
 PHASE_1 = os.path.join(_env.REPO, "docs", "plan", "phase-1.md")
 
@@ -228,7 +228,7 @@ def _rich_legacy() -> dict:
 def _plant_legacy(root: str, data: dict, *, gitignore: str | None = None) -> str:
     """``root`` as the 1e09113 spine left it: the ledger, its ignore file, and
     the one evidence file the rich ledger ingested."""
-    dot = os.path.join(root, ".atompipe")
+    dot = os.path.join(root, ".nopekit")
     _write(os.path.join(dot, ".gitignore"),
            _projects.LEGACY_GITIGNORE if gitignore is None else gitignore)
     _write(os.path.join(dot, "ledger.json"),
@@ -265,7 +265,7 @@ def _bracket(test: _env.EnvCase) -> str:
 def _registry_covering(*pairs: tuple[str, str]):
     """A fresh registry: one always-passing gate per id, covering the claims
     paired with it in ``(gate id, claim id)`` pairs."""
-    from atompipe import gates as gates_mod
+    from nopekit import gates as gates_mod
     covers: dict[str, list[str]] = {}
     for gid, cid in pairs:
         covers.setdefault(gid, []).append(cid)
@@ -293,7 +293,7 @@ class StrictReader(_env.EnvCase):
 
     def _refusal(self, rel: str, text: str, kind: str, **kw) -> str:
         path = self._plant(rel, text)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.read_record(path, kind, **kw)
         return str(caught.exception)
 
@@ -371,7 +371,7 @@ class StrictReader(_env.EnvCase):
             real = os.listdir
             context = mock.patch("os.listdir", lambda p=".": (
                 ["C1.json", "c1.json"] if os.path.abspath(p) == directory else real(p)))
-        with context, self.assertRaises(AtompipeError) as caught:
+        with context, self.assertRaises(NopekitError) as caught:
             store.load(root)
         self._names(str(caught.exception), "claims/C1.json", "claims/c1.json", "case")
 
@@ -417,7 +417,7 @@ class StrictReader(_env.EnvCase):
 
     def test_a_stray_evidence_json_in_inputs_is_refused(self):
         message = self._refusal("inputs/loads.json", '{"load_n": 15, "unit": "N"}', "inputs")
-        self._names(message, "inputs/loads.json", '"load_n"', "atompipe ingest",
+        self._names(message, "inputs/loads.json", '"load_n"', "nopekit ingest",
                     "inputs/data/", "inputs/measurements/")
 
     def test_results_are_an_object_holding_a_list(self):
@@ -437,7 +437,7 @@ class StrictReader(_env.EnvCase):
     def test_project_json_is_strict(self):
         root = self.tmp()
         store.init(root, ProjectMeta(name="strict", created="2026-09-28T00:00:00Z"))
-        path = os.path.join(root, ".atompipe", "project.json")
+        path = os.path.join(root, ".nopekit", "project.json")
         good = json.loads(_read_bytes(path))
         for mutate, needles in (
                 (lambda d: d.update(modle_entry="m.py"), ('"modle_entry"', '"model_entry"')),
@@ -448,7 +448,7 @@ class StrictReader(_env.EnvCase):
                 data = dict(good)
                 mutate(data)
                 _write(path, json.dumps(data))
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     store.read_project(root)
                 self._names(str(caught.exception), "project.json", *needles)
 
@@ -537,7 +537,7 @@ class RecordWriter(_env.EnvCase):
         self.assertTrue(raw.endswith(b"}\n"))
         self.assertIn("Ø 5 mm bore — held".encode("utf-8"), raw, "non-ASCII must stay literal")
         self.assertIn(b'\n  "tags": [\n    "fit"\n  ]', raw)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.write_record(self.root, "claims", Claim(
                 id="C9", statement="s", acceptance=Acceptance(limit=float("nan"))))
         self.assertIn("claims/C9.json", str(caught.exception))
@@ -551,13 +551,13 @@ class RecordWriter(_env.EnvCase):
     def test_unsafe_ids_are_refused(self):
         for rid in ("", "../escape", "a/b", "a\\b", ".hidden", "C1:x", "  "):
             with self.subTest(rid=rid):
-                with self.assertRaises(AtompipeError):
+                with self.assertRaises(NopekitError):
                     store.write_record(self.root, "claims", Claim(id=rid, statement="s"))
         self.assertFalse(os.path.exists(os.path.join(os.path.dirname(self.root), "escape.json")))
 
     def test_a_case_variant_of_an_existing_record_is_refused(self):
         store.write_record(self.root, "claims", Claim(id="C1", statement="s"))
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.write_record(self.root, "claims", Claim(id="c1", statement="t"))
         self.assertIn("C1", str(caught.exception))
 
@@ -588,7 +588,7 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
 
     def setUp(self) -> None:
         self.root = _migrated(self)
-        self.index = os.path.join(self.root, ".atompipe", "ledger.json")
+        self.index = os.path.join(self.root, ".nopekit", "ledger.json")
         self.assertTrue(store.write_index(self.root))
 
     def _index(self) -> dict:
@@ -674,7 +674,7 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
         self.assertEqual(json.dumps(first), json.dumps(store.build_index(self.root)))
 
     def test_the_index_is_ignored_through_fnmatch(self):
-        with open(os.path.join(self.root, ".atompipe", ".gitignore"), encoding="utf-8") as fh:
+        with open(os.path.join(self.root, ".nopekit", ".gitignore"), encoding="utf-8") as fh:
             patterns = [line.strip() for line in fh
                         if line.strip() and not line.lstrip().startswith("#")]
 
@@ -751,7 +751,7 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
 
     def test_a_legacy_project_gets_no_index(self):
         root = _plant_legacy(self.tmp(), _rich_legacy())
-        ledger = os.path.join(root, ".atompipe", "ledger.json")
+        ledger = os.path.join(root, ".nopekit", "ledger.json")
         before = _read_bytes(ledger)
         self.assertTrue(store.is_legacy(root))
         self.assertFalse(store.write_index(root))
@@ -771,7 +771,7 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
         would hide the disagreement it is there to name — so they run on an index
         that agrees, and must leave it agreeing and unwritten."""
         project = _migrated_bracket(os.path.join(self.tmp(), "bracket"))
-        index = os.path.join(project, ".atompipe", "ledger.json")
+        index = os.path.join(project, ".nopekit", "ledger.json")
         commands = ([argv for argv, _output in _NON_SHIM] + [("check",), ("check", "--force")]
                     + [argv for argv, _named in _shims(self.tmp())])
         for n, argv in enumerate(commands):
@@ -786,18 +786,18 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
                 else:
                     self.assertEqual(store.agree(project), [])
                     unwritten = _read_bytes(index) if os.path.isfile(index) else None
-                proc = _env.atompipe(list(argv), cwd=project, identity=True)
+                proc = _env.nopekit(list(argv), cwd=project, identity=True)
                 self.assertIn(proc.returncode, _codes(argv), proc.stdout + proc.stderr)
                 self.assertNotIn("Traceback", proc.stderr)
                 if repairs:
                     self.assertTrue(os.path.isfile(index),
-                                    f"`atompipe {' '.join(argv)}` left no index")
+                                    f"`nopekit {' '.join(argv)}` left no index")
                 else:
                     self.assertEqual(_read_bytes(index) if os.path.isfile(index) else None,
-                                     unwritten, f"`atompipe {' '.join(argv)}` wrote the index")
+                                     unwritten, f"`nopekit {' '.join(argv)}` wrote the index")
                 self.assertEqual(store.agree(project), [],
                                  f"the index disagrees with the records after "
-                                 f"`atompipe {' '.join(argv)}`")
+                                 f"`nopekit {' '.join(argv)}`")
 
     def test_a_migration_leaves_the_index_agreeing(self):
         """On a legacy project the index arrives with the one-time migration —
@@ -807,10 +807,10 @@ class IndexNeverDisagreesWithRecords(_env.EnvCase):
         for argv in [("check",)] + [argv for argv, _named in _shims(self.tmp())]:
             with self.subTest(argv=argv[0]):
                 project = _legacy_bracket(os.path.join(self.tmp(), "legacy"))
-                proc = _env.atompipe(list(argv), cwd=project, identity=True)
+                proc = _env.nopekit(list(argv), cwd=project, identity=True)
                 self.assertIn(proc.returncode, _WORKED, proc.stdout + proc.stderr)
                 self.assertFalse(store.is_legacy(project), "the trigger did not migrate")
-                with open(os.path.join(project, ".atompipe", "ledger.json"),
+                with open(os.path.join(project, ".nopekit", "ledger.json"),
                           encoding="utf-8") as fh:
                     self.assertEqual(json.load(fh)["generated"], store.INDEX_BANNER,
                                      "ledger.json is not the index after the migration")
@@ -951,7 +951,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
 
     def test_the_bracket_writes_no_params_by_rule(self):
         project = _bracket(self)
-        with open(os.path.join(project, ".atompipe", "ledger.json"), encoding="utf-8") as fh:
+        with open(os.path.join(project, ".nopekit", "ledger.json"), encoding="utf-8") as fh:
             legacy = json.load(fh)
         prose = _Prose({p["name"]: {"rationale": p["rationale"], "units": ""}
                         for p in legacy["params"]})
@@ -960,34 +960,34 @@ class LegacyLedgerMigrates(_env.EnvCase):
         self.assertEqual(claims, [f"C{n}.json" for n in range(1, 8)])
         self.assertEqual(os.listdir(os.path.join(project, "params")), [])
         self.assertFalse([rel for rel in plan.files if rel.startswith("params/")])
-        dot = os.path.join(project, ".atompipe")
+        dot = os.path.join(project, ".nopekit")
         self.assertTrue(os.path.isfile(os.path.join(dot, "project.json")))
         self.assertTrue(os.path.isfile(os.path.join(dot, "ledger.legacy.json")))
         self.assertFalse(os.path.exists(os.path.join(dot, "ledger.json")))
-        self.assertIn("git rm --cached .atompipe/ledger.json", plan.notice)
+        self.assertIn("git rm --cached .nopekit/ledger.json", plan.notice)
 
     # -- the ignore blocks -------------------------------------------------- #
     def _ignore(self, root: str) -> str:
-        with open(os.path.join(root, ".atompipe", ".gitignore"), encoding="utf-8") as fh:
+        with open(os.path.join(root, ".nopekit", ".gitignore"), encoding="utf-8") as fh:
             return fh.read()
 
     def test_a_recognised_template_is_replaced_by_the_block(self):
         for label, template in zip(("1e09113", "1.2"), store.LEGACY_GITIGNORE_TEMPLATES):
             with self.subTest(template=label):
                 root = self.tmp()
-                _write(os.path.join(root, ".atompipe", ".gitignore"), template)
+                _write(os.path.join(root, ".nopekit", ".gitignore"), template)
                 err = io.StringIO()
                 with contextlib.redirect_stderr(err):
                     changed = store.ensure_ignore_blocks(root)
-                self.assertIn(".atompipe/.gitignore", changed)
+                self.assertIn(".nopekit/.gitignore", changed)
                 text = self._ignore(root)
-                self.assertTrue(text.startswith("# atompipe:begin\n"), text)
-                self.assertTrue(text.endswith("# atompipe:end\n"), text)
+                self.assertTrue(text.startswith("# nopekit:begin\n"), text)
+                self.assertTrue(text.endswith("# nopekit:end\n"), text)
                 self.assertEqual(err.getvalue(), "", "a template is not a user's line")
 
     def test_allow_lines_go_with_a_notice_and_user_lines_stay(self):
         root = self.tmp()
-        _write(os.path.join(root, ".atompipe", ".gitignore"),
+        _write(os.path.join(root, ".nopekit", ".gitignore"),
                "# mine\nscratch/\n!ledger.json\n\n!runs/\ncache/\n")
         err = io.StringIO()
         with contextlib.redirect_stderr(err):
@@ -999,7 +999,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
         self.assertEqual(lines.count("cache/"), 1, "a user line duplicating the block goes")
         self.assertIn("# mine", lines)
         self.assertIn("scratch/", lines)
-        self.assertLess(lines.index("# atompipe:end"), lines.index("scratch/"))
+        self.assertLess(lines.index("# nopekit:end"), lines.index("scratch/"))
         for removed in ("!ledger.json", "!runs/"):
             self.assertIn(removed, err.getvalue())
 
@@ -1030,7 +1030,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
         with contextlib.redirect_stderr(err):
             store.ensure_ignore_blocks(project)
         text = self._ignore(project)
-        self.assertTrue(text.startswith("# atompipe:begin\n") and text.endswith("# atompipe:end\n"),
+        self.assertTrue(text.startswith("# nopekit:begin\n") and text.endswith("# nopekit:end\n"),
                         text)
         self.assertNotIn("cli:H2", text)
 
@@ -1038,7 +1038,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
     def test_a_migration_killed_halfway_completes_on_the_next_run(self):
         root = _plant_legacy(self.tmp(), _rich_legacy())
         plan = self._migrate(root, apply=False)
-        records = [rel for rel in plan.files if not rel.startswith(".atompipe/")]
+        records = [rel for rel in plan.files if not rel.startswith(".nopekit/")]
         real = store.atomic_write_text
         written: list[str] = []
 
@@ -1068,11 +1068,11 @@ class LegacyLedgerMigrates(_env.EnvCase):
         _write(path, plan.files["claims/C1.json"].decode().replace("0.5", "0.6"))
         before = _tree(root)
         for apply in (True, False):
-            with self.subTest(apply=apply), self.assertRaises(AtompipeError) as caught:
+            with self.subTest(apply=apply), self.assertRaises(NopekitError) as caught:
                 self._migrate(root, apply=apply)
             self.assertIn("claims/C1.json", str(caught.exception))
             self.assertIn("ledger.json", str(caught.exception))
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             store.load(root)
         self.assertEqual(_tree(root), before, "a refused migration wrote something")
 
@@ -1082,7 +1082,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
         before = claims_mod.statuses(store.load(root), registry=registry)
         forged = _rich_legacy()
         forged["verdicts"][0]["detail"] = "written by an older spine"
-        _write(os.path.join(root, ".atompipe", "ledger.json"), json.dumps(forged, indent=2))
+        _write(os.path.join(root, ".nopekit", "ledger.json"), json.dumps(forged, indent=2))
         after = store.load(root)
         self.assertEqual(after.verdicts, [])
         self.assertEqual(claims_mod.statuses(after, registry=registry), before)
@@ -1107,12 +1107,12 @@ class LegacyLedgerMigrates(_env.EnvCase):
         thickness["rejectd"] = thickness.pop("rejected")
         root = _plant_legacy(self.tmp(), legacy)
         before = _tree(root)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.load(root)
         message = str(caught.exception)
-        for needle in (".atompipe/ledger.json", "thickness", '"rejectd"', '"rejected"'):
+        for needle in (".nopekit/ledger.json", "thickness", '"rejectd"', '"rejected"'):
             self.assertIn(needle, message)
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             self._migrate(root)
         self.assertEqual(_tree(root), before, "a refused migration wrote something")
 
@@ -1130,27 +1130,27 @@ class LegacyLedgerMigrates(_env.EnvCase):
                 plant(legacy)
                 root = _plant_legacy(self.tmp(), legacy)
                 before = _tree(root)
-                with self.assertRaises(AtompipeError):
+                with self.assertRaises(NopekitError):
                     self._migrate(root)
                 self.assertEqual(_tree(root), before)
 
     def test_a_newer_schema_is_refused(self):
         root = _migrated(self)
-        path = os.path.join(root, ".atompipe", "project.json")
+        path = os.path.join(root, ".nopekit", "project.json")
         data = json.loads(_read_bytes(path))
         data["schema"] = 99
         _write(path, json.dumps(data, indent=2) + "\n")
         for call in (lambda: store.load(root), lambda: self._migrate(root),
                      lambda: store.build_index(root)):
-            with self.assertRaises(AtompipeError) as caught:
+            with self.assertRaises(NopekitError) as caught:
                 call()
             self.assertIn("99", str(caught.exception))
 
     def test_an_index_with_no_project_json_is_refused(self):
         root = _migrated(self)
         store.write_index(root)
-        os.remove(os.path.join(root, ".atompipe", "project.json"))
-        with self.assertRaises(AtompipeError) as caught:
+        os.remove(os.path.join(root, ".nopekit", "project.json"))
+        with self.assertRaises(NopekitError) as caught:
             self._migrate(root)
         self.assertIn("project.json", str(caught.exception))
 
@@ -1170,7 +1170,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
         root = _plant_legacy(self.tmp(), _rich_legacy())
         real = store.atomic_write_text
         order: list[tuple[str, bool, bool]] = []
-        dot = os.path.join(root, ".atompipe")
+        dot = os.path.join(root, ".nopekit")
 
         def recording(path, text, **kw):
             order.append((os.path.relpath(path, root).replace(os.sep, "/"),
@@ -1181,8 +1181,8 @@ class LegacyLedgerMigrates(_env.EnvCase):
         with mock.patch.object(store, "atomic_write_text", recording):
             self._migrate(root)
         paths = [rel for rel, _l, _g in order]
-        self.assertEqual(paths[-1], ".atompipe/project.json", paths)
-        self.assertLess(paths.index(".atompipe/.gitignore"), len(paths) - 1)
+        self.assertEqual(paths[-1], ".nopekit/project.json", paths)
+        self.assertLess(paths.index(".nopekit/.gitignore"), len(paths) - 1)
         self.assertLess(max(paths.index(rel) for rel in paths if rel.startswith("claims/")),
                         len(paths) - 1)
         self.assertEqual(order[-1][1:], (True, False),
@@ -1197,7 +1197,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
         self.assertIn("will migrate", plan.notice)
         self.assertEqual(store.load(root), plan.ledger)
         self.assertIn("claims/C1.json", plan.files)
-        self.assertIn(".atompipe/project.json", plan.files)
+        self.assertIn(".nopekit/project.json", plan.files)
         self._migrate(root)
         self.assertEqual(store.load(root), plan.ledger,
                          "a command answers the same before and after the migration")
@@ -1211,7 +1211,7 @@ class LegacyLedgerMigrates(_env.EnvCase):
         for name in names:
             with self.subTest(pack=name):
                 root = _projects.wrap_pack_baseline(name, os.path.join(self.tmp(), name))
-                with open(os.path.join(root, ".atompipe", "ledger.json"), encoding="utf-8") as fh:
+                with open(os.path.join(root, ".nopekit", "ledger.json"), encoding="utf-8") as fh:
                     legacy = json.load(fh)
                 plan = self._migrate(root)
                 ledger = store.load(root)
@@ -1238,13 +1238,13 @@ class InitIsTheNewLayout(_env.EnvCase):
         with mock.patch.object(store, "atomic_write_text", recording):
             ledger = store.init(root, meta)
         self.assertEqual(ledger, Ledger(meta=meta))
-        self.assertEqual(order[-1], ".atompipe/project.json", order)
-        dot = os.path.join(root, ".atompipe")
+        self.assertEqual(order[-1], ".nopekit/project.json", order)
+        dot = os.path.join(root, ".nopekit")
         self.assertFalse(os.path.exists(os.path.join(dot, "ledger.json")))
         self.assertFalse(store.is_legacy(root))
         for name in store.RECORD_DIRS:
             self.assertTrue(os.path.isdir(os.path.join(root, name)), name)
-        for rel in (".atompipe/.gitignore", ".gitignore", ".gitattributes", "inputs/README.md"):
+        for rel in (".nopekit/.gitignore", ".gitignore", ".gitattributes", "inputs/README.md"):
             self.assertTrue(os.path.isfile(os.path.join(root, *rel.split("/"))), rel)
         self.assertEqual(store.read_project(root), meta)
         self.assertEqual(store.load(root), Ledger(meta=meta))
@@ -1274,7 +1274,7 @@ class SaveWritesTheLayoutItFinds(_env.EnvCase):
         self.assertEqual(sorted(os.listdir(os.path.join(root, "claims"))), ["C1.json", "C2.json"])
         self.assertEqual([c.id for c in store.load(root).claims], ["C1", "C2"])
         self.assertEqual(store.agree(root), [])
-        self.assertTrue(os.path.isfile(os.path.join(root, ".atompipe", "ledger.json")))
+        self.assertTrue(os.path.isfile(os.path.join(root, ".nopekit", "ledger.json")))
 
         ledger.claims = [Claim(id="C2", statement="two, edited")]
         store.save(root, ledger)
@@ -1313,7 +1313,7 @@ class SaveWritesTheLayoutItFinds(_env.EnvCase):
         ledger = store.load(root)
         ledger.verdicts = [Verdict(gate="g.one", passed=True)]
         store.save(root, ledger)
-        with open(os.path.join(root, ".atompipe", "ledger.json"), encoding="utf-8") as fh:
+        with open(os.path.join(root, ".nopekit", "ledger.json"), encoding="utf-8") as fh:
             saved = json.load(fh)
         self.assertEqual(saved["verdicts"], [])
         self.assertNotIn("last_run", saved)
@@ -1335,10 +1335,10 @@ _CALIPER = b"arm measured at 60.2 mm with calipers\n"
 _CALIPER_ID = "caliper-txt"
 
 #: The migration's rename: the legacy ledger goes, kept under its new name.
-_LEGACY_REL = f"{store.ATOMPIPE_DIR}/{store.LEDGER_NAME}"
-_KEPT_REL = f"{store.ATOMPIPE_DIR}/{store.LEGACY_LEDGER_NAME}"
+_LEGACY_REL = f"{store.NOPEKIT_DIR}/{store.LEDGER_NAME}"
+_KEPT_REL = f"{store.NOPEKIT_DIR}/{store.LEGACY_LEDGER_NAME}"
 #: The migration's commit marker, written last.
-_PROJECT_REL = f"{store.ATOMPIPE_DIR}/{store.PROJECT_NAME}"
+_PROJECT_REL = f"{store.NOPEKIT_DIR}/{store.PROJECT_NAME}"
 
 #: A claim the migrated fixture carries formatted as a person formats it (indent
 #: 4, keys in their own order, no trailing newline) rather than as `write_record`
@@ -1357,7 +1357,7 @@ def _enrich(project: str) -> str:
     by the code under test changes shape with it. What it buys: a command that
     rewrites a decision, a result or an input record can only be caught on a
     project that HAS one, and the bracket has none."""
-    path = os.path.join(project, ".atompipe", "ledger.json")
+    path = os.path.join(project, ".nopekit", "ledger.json")
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
     _write(os.path.join(project, "inputs", "data", "caliper.txt"), _CALIPER)
@@ -1406,7 +1406,7 @@ def _legacy_bracket(dest: str, *, template: bool = False) -> str:
     "ignored at the time of writing" bite."""
     project = _enrich(_projects.bracket_copy(dest))
     if template:
-        _write(os.path.join(project, ".atompipe", ".gitignore"), _projects.LEGACY_GITIGNORE)
+        _write(os.path.join(project, ".nopekit", ".gitignore"), _projects.LEGACY_GITIGNORE)
     return project
 
 
@@ -1488,7 +1488,7 @@ def _records(root: str) -> dict[str, tuple[bytes, int, int]]:
         for dirpath, dirnames, filenames in os.walk(os.path.join(root, kind)):
             dirnames[:] = [d for d in dirnames if d != "__pycache__"]
             found += [os.path.join(dirpath, name) for name in filenames]
-    dot = os.path.join(root, store.ATOMPIPE_DIR)
+    dot = os.path.join(root, store.NOPEKIT_DIR)
     found += [os.path.join(dot, name) for name in (store.PROJECT_NAME, store.LEGACY_LEDGER_NAME)]
     if store.is_legacy(root):
         found.append(os.path.join(dot, store.LEDGER_NAME))
@@ -1511,7 +1511,7 @@ def _touched_records(before: dict, after: dict) -> list[str]:
 #: a site), with ``True`` where the command was ASKED to write an output that is
 #: not a record — `report --write`'s `REPORT.md` (P2.5b; `docs/readiness.md`
 #: before it), `model --write`'s
-#: `.atompipe/model.json`, the site's scaffold and `data/`. `init` refuses on a
+#: `.nopekit/model.json`, the site's scaffold and `data/`. `init` refuses on a
 #: project before it writes anything; it is here so "every command" means every
 #: command. `check --no-record` and `gate selftest --no-record` are the dry runs.
 #: Not here: `site serve` (a server that does not return) and `site vendor` (the
@@ -1569,7 +1569,7 @@ def _shims(outside: str) -> list[tuple[tuple[str, ...], set[str] | None]]:
          {"decisions/keep-petg.json"}),
         (("extract", _CALIPER_ID, "--what", "arm is 60.2 mm", "--grounds", "arm_length",
           "--confidence", "measured"), {f"inputs/{_CALIPER_ID}.json"}),
-        (("packs", "add", "beam-analytic"), {".atompipe/project.json"}),
+        (("packs", "add", "beam-analytic"), {".nopekit/project.json"}),
         # P2.5a: `--who` is refused, and who is the git identity (the runs give
         # every shim the test identity; R-6: the property — one record — kept).
         (("claim", "physical", "C5", "--fail",
@@ -1659,7 +1659,7 @@ def hook(event, args):
 sys.addaudithook(hook)
 code = None
 try:
-    from atompipe import cli
+    from nopekit import cli
     code = cli.main(argv)
 finally:
     done = list(events)
@@ -1672,7 +1672,7 @@ sys.exit(code)
 #: into (`.gitignore` for what is ignored, `.gitattributes` for line endings), by
 #: git's own names — the property names what the files ARE, never which ones.
 _GIT_RULE_FILES = (".gitignore", ".gitattributes")
-_BLOCK_BEGIN, _BLOCK_END = b"# atompipe:begin", b"# atompipe:end"
+_BLOCK_BEGIN, _BLOCK_END = b"# nopekit:begin", b"# nopekit:end"
 
 
 class _Run(NamedTuple):
@@ -1686,7 +1686,7 @@ class _Run(NamedTuple):
 
 
 def _watched(test: _env.EnvCase, project: str, *argv: str) -> _Run:
-    """``atompipe <argv>`` in ``project``, in a fresh process under `_WRITES_DRIVER`."""
+    """``nopekit <argv>`` in ``project``, in a fresh process under `_WRITES_DRIVER`."""
     out = os.path.join(test.tmp(), "writes.json")
     before = _tree(project)
     proc = _env.run([sys.executable, "-c", _WRITES_DRIVER, out, project, *argv], cwd=project,
@@ -1695,7 +1695,7 @@ def _watched(test: _env.EnvCase, project: str, *argv: str) -> _Run:
         with open(out, encoding="utf-8") as fh:
             data = json.load(fh)
     except (OSError, ValueError) as exc:
-        raise AssertionError(f"the watched `atompipe {' '.join(argv)}` left no record of "
+        raise AssertionError(f"the watched `nopekit {' '.join(argv)}` left no record of "
                              f"its writes ({exc}):\n{proc.stdout}\n{proc.stderr}") from None
     errors = [e for e in data["events"] if e[0] == "hook-error"]
     test.assertEqual(errors, [], "the audit hook failed: a write may have gone unseen")
@@ -1865,7 +1865,7 @@ class NoCommandWritesARecord(_env.EnvCase):
 
     def _assert_worked(self, argv, proc, codes=_WORKED) -> None:
         self.assertIn(proc.returncode, codes,
-                      f"`atompipe {' '.join(argv)}` did not do its work, so it proves "
+                      f"`nopekit {' '.join(argv)}` did not do its work, so it proves "
                       f"nothing about what it writes:\n{proc.stdout}\n{proc.stderr}")
         self.assertNotIn("Traceback", proc.stderr)
 
@@ -1877,16 +1877,16 @@ class NoCommandWritesARecord(_env.EnvCase):
                     run = _watched(self, project, *argv)
                     proc = run.proc
                 else:
-                    proc = _env.atompipe(list(argv), cwd=project)
+                    proc = _env.nopekit(list(argv), cwd=project)
                 self._assert_worked(argv, proc, _codes(argv))
                 self.assertEqual(_touched_records(before, _records(project)), [],
-                                 f"`atompipe {' '.join(argv)}` wrote a record")
+                                 f"`nopekit {' '.join(argv)}` wrote a record")
                 self.assertEqual(store.is_legacy(project), legacy,
-                                 f"`atompipe {' '.join(argv)}` migrated a project it was "
+                                 f"`nopekit {' '.join(argv)}` migrated a project it was "
                                  f"only reading" if legacy else "the project went legacy")
                 if watched and not output:
                     self.assertEqual(_unexplained(self, run), [],
-                                     f"`atompipe {' '.join(argv)}` wrote what git would track")
+                                     f"`nopekit {' '.join(argv)}` wrote what git would track")
 
     # -- the non-shim commands ---------------------------------------------- #
     def test_no_command_writes_a_record_on_a_migrated_project(self):
@@ -1916,7 +1916,7 @@ class NoCommandWritesARecord(_env.EnvCase):
                 run = _watched(self, project, *argv)
                 self._assert_worked(argv, run.proc)
                 self.assertEqual(_touched_records(before, _records(project)), [],
-                                 f"`atompipe {' '.join(argv)}` wrote a record")
+                                 f"`nopekit {' '.join(argv)}` wrote a record")
                 self.assertEqual(_unexplained(self, run), [])
         self.assertTrue(any(_transcript.ENTRY_PATH.fullmatch(p) for p in _tree(project)),
                         "no check wrote a verdict entry: the property held vacuously")
@@ -1977,7 +1977,7 @@ class NoCommandWritesARecord(_env.EnvCase):
                 self.assertTrue(asked <= touched, f"the shim did not write {asked}")
                 self.assertEqual(
                     touched - asked - set(plan.files), {_LEGACY_REL, _KEPT_REL},
-                    f"`atompipe {argv[0]}` wrote a record it was not asked to")
+                    f"`nopekit {argv[0]}` wrote a record it was not asked to")
                 licensed = carve_out | {("write", rel) for rel in asked}
                 self.assertEqual(_unexplained(self, run, blocks=True, carve_out=licensed), [])
 
@@ -2001,7 +2001,7 @@ class NoCommandWritesARecord(_env.EnvCase):
         _plan, carve_out = _migration(legacy)
         first = _watched(self, legacy, "check")
         self.assertEqual(_unexplained(self, first, blocks=True, carve_out=carve_out), [])
-        last = ".atompipe/cache/last_check.json"
+        last = ".nopekit/cache/last_check.json"
         self.assertIn(last, first.after, "the legacy check wrote no last_check.json")
         moved = first._replace(events=[["write", last]] + first.events)
         self.assertEqual([p for p in _unexplained(self, moved, blocks=True, carve_out=carve_out)
@@ -2048,7 +2048,7 @@ _LEGACY_READERS: tuple[tuple[str, ...], ...] = (
 _CASE_PAIR = (("D", 12.0, "mm, boss outer diameter: a washer seats on it."),
               ("d", 5.0, "mm, boss bore: an M4 clearance hole."))
 
-#: A child that runs `atompipe <argv>` and dies the instant the command renames
+#: A child that runs `nopekit <argv>` and dies the instant the command renames
 #: its temp file onto `sys.argv[2]` (a root-relative path) — `os._exit`: no
 #: `finally`, no lock release, no cleanup, as a SIGKILL or a power cut leaves it.
 #: That file is never written; every write before it is.
@@ -2070,7 +2070,7 @@ def hook(event, args):
 
 
 sys.addaudithook(hook)
-from atompipe import cli
+from nopekit import cli
 sys.exit(cli.main(argv))
 """
 
@@ -2096,7 +2096,7 @@ def _case_pair_bracket(dest: str, *, stated: bool) -> str:
                      + (f'    """{why}"""\n' if stated else "") + "\n"
                      for name, value, why in _CASE_PAIR)
     _write(model, text.replace(anchor, fields + anchor, 1))
-    ledger = os.path.join(project, ".atompipe", "ledger.json")
+    ledger = os.path.join(project, ".nopekit", "ledger.json")
     with open(ledger, encoding="utf-8") as fh:
         data = json.load(fh)
     data["params"] += [{"changed_in": "", "derived_from": [], "gates": [], "grounded_by": [],
@@ -2121,11 +2121,11 @@ def unmatched_migration_readers(source: str) -> list[str]:
                 owner.setdefault(id(node), fn.name)
     store_names = {"store"}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in (None, "atompipe"):
+        if isinstance(node, ast.ImportFrom) and node.module in (None, "nopekit"):
             store_names |= {a.asname or a.name for a in node.names if a.name == "store"}
         elif isinstance(node, ast.Import):
             store_names |= {a.asname for a in node.names
-                            if a.name == "atompipe.store" and a.asname}
+                            if a.name == "nopekit.store" and a.asname}
     readers = ("load", "migrate_legacy")
 
     def the_reader(value: ast.AST) -> bool:
@@ -2173,7 +2173,7 @@ class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
     case … rename one") while `check` migrated it cleanly and wrote neither
     file; and after a migration killed half way, every read command blamed a
     `params/thickness.json` that was byte for byte what `check` would write
-    ("differs from what .atompipe/ledger.json migrates to … Move those files
+    ("differs from what .nopekit/ledger.json migrates to … Move those files
     aside"), while `check` completed it. Both remedies were false, and a person
     who followed the first renamed a model field for nothing."""
 
@@ -2182,21 +2182,21 @@ class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
         ``false_remedy``, and leaves it legacy."""
         for argv in _LEGACY_READERS + (("why", why),):
             with self.subTest(argv=argv):
-                proc = _env.atompipe(list(argv), cwd=project)
+                proc = _env.nopekit(list(argv), cwd=project)
                 said = proc.stdout + proc.stderr
                 self.assertIn(proc.returncode, (0, 1),
-                              f"`atompipe {' '.join(argv)}` refused a project `check` "
+                              f"`nopekit {' '.join(argv)}` refused a project `check` "
                               f"migrates:\n{said}")
                 self.assertNotIn("Traceback", proc.stderr)
                 self.assertNotIn(false_remedy, said,
-                                 f"`atompipe {' '.join(argv)}` named a refusal `check` "
+                                 f"`nopekit {' '.join(argv)}` named a refusal `check` "
                                  f"does not make")
                 self.assertNotIn("[FAIL] records", proc.stdout)
                 self.assertTrue(store.is_legacy(project),
-                                f"`atompipe {' '.join(argv)}` migrated a project it was reading")
+                                f"`nopekit {' '.join(argv)}` migrated a project it was reading")
 
     def _check_completes(self, project: str, plan: store.MigrationPlan) -> None:
-        proc = _env.atompipe(["check"], cwd=project)
+        proc = _env.nopekit(["check"], cwd=project)
         self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
         self.assertNotIn("Traceback", proc.stderr)
         self.assertFalse(store.is_legacy(project), "check did not migrate")
@@ -2214,7 +2214,7 @@ class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
                          "the fixture no longer exercises the params rule: a case pair the "
                          "model states must write no param file")
         self._reads(project, "D", false_remedy="differ only in case")
-        why = _env.atompipe(["why", "D"], cwd=project)
+        why = _env.nopekit(["why", "D"], cwd=project)
         self.assertIn(_CASE_PAIR[0][2], why.stdout, "why D lost the rationale the model states")
         self._check_completes(project, plan)
 
@@ -2227,7 +2227,7 @@ class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
         before = _tree(project)
         for argv in _LEGACY_READERS + (("why", "D"), ("check",)):
             with self.subTest(argv=argv):
-                proc = _env.atompipe(list(argv), cwd=project)
+                proc = _env.nopekit(list(argv), cwd=project)
                 said = proc.stdout + proc.stderr
                 self.assertIn(proc.returncode, (1,) if argv == ("doctor",) else (2,), said)
                 self.assertIn("params/D.json and params/d.json", said)
@@ -2236,9 +2236,9 @@ class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
         self.assertTrue(store.is_legacy(project))
         self.assertEqual(
             {rel: data for rel, data in _tree(project).items()
-             if not rel.startswith((".atompipe/cache/", ".atompipe/obs/", ".atompipe/out/"))},
+             if not rel.startswith((".nopekit/cache/", ".nopekit/obs/", ".nopekit/out/"))},
             {rel: data for rel, data in before.items()
-             if not rel.startswith((".atompipe/cache/", ".atompipe/obs/", ".atompipe/out/"))},
+             if not rel.startswith((".nopekit/cache/", ".nopekit/obs/", ".nopekit/out/"))},
             "a refused migration wrote something")
 
     def test_a_check_killed_mid_migration_reads_as_its_plan_and_completes(self):
@@ -2274,7 +2274,7 @@ class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
         """Every `store.load` and `store.migrate_legacy` in a spine module passes
         `model_prose=` `static_param_prose`: a reader added without it plans a
         different migration from `check`'s, which is this class's repro."""
-        spine = os.path.join(_env.SRC, "atompipe")
+        spine = os.path.join(_env.SRC, "nopekit")
         found: dict[str, list[str]] = {}
         calls = 0
         for name in sorted(os.listdir(spine)):
@@ -2324,8 +2324,8 @@ class EveryReaderMigratesAsCheckDoes(_env.EnvCase):
 #: A bench log as a person drops it into `inputs/`: JSON, and not an input record.
 _LOADS = b'{"load_n": [3.0, 3.1, 2.9]}\n'
 
-#: Scratch the CLI writes under `.atompipe/` on any command; a refusal may leave it.
-_SCRATCH = (".atompipe/cache/", ".atompipe/obs/", ".atompipe/out/")
+#: Scratch the CLI writes under `.nopekit/` on any command; a refusal may leave it.
+_SCRATCH = (".nopekit/cache/", ".nopekit/obs/", ".nopekit/out/")
 
 
 def _kept(tree: dict[str, bytes]) -> dict[str, bytes]:
@@ -2345,7 +2345,7 @@ def _legacy_with_loose_evidence(dest: str, name: str, aid: str) -> str:
     Written in the legacy file's own shape, by hand (`_enrich`'s reason)."""
     project = _projects.bracket_copy(dest)
     _write(os.path.join(project, "inputs", name), _LOADS)
-    path = os.path.join(project, ".atompipe", "ledger.json")
+    path = os.path.join(project, ".nopekit", "ledger.json")
     with open(path, encoding="utf-8") as fh:
         data = json.load(fh)
     data["inputs"].append({
@@ -2366,12 +2366,12 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
     project in place, so a bench log dropped at `inputs/loads.json` became input
     `loads` with path `inputs/loads.json` — the file its record goes in now. The
     migration refused every command with "inputs/loads.json differs from what
-    .atompipe/ledger.json migrates to … Move those files aside", about a file it
+    .nopekit/ledger.json migrates to … Move those files aside", about a file it
     had planned itself, and its remedy made it worse: with the bytes moved aside,
     `check` wrote a record naming ITSELF as its evidence, read DRIFT forever, and
     re-ingesting it would pin the record's own bytes. The `Bench Loads.json`
-    variant was refused as "not in .atompipe/ledger.json" — it is, as input
-    `bench-loads`'s bytes — and its hint (into a bucket, then `atompipe ingest`)
+    variant was refused as "not in .nopekit/ledger.json" — it is, as input
+    `bench-loads`'s bytes — and its hint (into a bucket, then `nopekit ingest`)
     left a record naming bytes that are not there: `ingest` found them by digest
     and handed the record back untouched."""
 
@@ -2381,13 +2381,13 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
         before = _kept(_tree(project))
         for argv in (("status",), ("inputs",), ("check",)):
             with self.subTest(argv=argv):
-                proc = _env.atompipe(list(argv), cwd=project)
+                proc = _env.nopekit(list(argv), cwd=project)
                 said = proc.stdout + proc.stderr
                 self.assertEqual(proc.returncode, 2, said)
                 self.assertNotIn("Traceback", proc.stderr)
                 for needle in needles + ("nothing was written",):
                     self.assertIn(needle, said)
-                for false_remedy in ("differs from what", "is not in .atompipe/ledger.json",
+                for false_remedy in ("differs from what", "is not in .nopekit/ledger.json",
                                      "Move those files aside"):
                     self.assertNotIn(false_remedy, said)
         self.assertTrue(store.is_legacy(project), "a refused migration committed")
@@ -2418,16 +2418,16 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
 
                 os.makedirs(os.path.join(project, "inputs", "data"), exist_ok=True)
                 os.replace(aside, os.path.join(project, *home.split("/")))
-                path = os.path.join(project, ".atompipe", "ledger.json")
+                path = os.path.join(project, ".nopekit", "ledger.json")
                 _write(path, _read_bytes(path).decode("utf-8").replace(
                     f'"inputs/{name}"', json.dumps(home)))
-                proc = _env.atompipe(["check"], cwd=project)
+                proc = _env.nopekit(["check"], cwd=project)
                 self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
                 self.assertFalse(store.is_legacy(project), "the named remedy did not migrate")
                 record = json.loads(_read_bytes(os.path.join(project, "inputs",
                                                              f"{aid}.json")))
                 self.assertEqual(record["path"], home)
-                shown = _env.atompipe(["inputs", "--json"], cwd=project)
+                shown = _env.nopekit(["inputs", "--json"], cwd=project)
                 row = {r["id"]: r for r in json.loads(shown.stdout)["inputs"]}[aid]
                 self.assertEqual((row["exists"], row["drift"], row["sha256"]),
                                  (True, False, hashlib.sha256(_LOADS).hexdigest()))
@@ -2445,15 +2445,15 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
                '{"title": "Extra", "when": "2026-09-20T10:00:00Z"}\n')
         before = _tree(project)
         for apply in (False, True):
-            with self.subTest(apply=apply), self.assertRaises(AtompipeError) as caught:
+            with self.subTest(apply=apply), self.assertRaises(NopekitError) as caught:
                 store.migrate_legacy(project, apply=apply, when=_WHEN,
                                      model_prose=modelio.static_param_prose)
             said = str(caught.exception)
             self.assertIn(f"inputs/{_CALIPER_ID}.json does not read as an input record", said)
             self.assertIn(f"input '{_CALIPER_ID}''s record goes there", said)
             self.assertIn("inputs/loads.json does not read as an input record", said)
-            self.assertIn("atompipe ingest", said)
-            self.assertIn("decisions/extra.json is not in .atompipe/ledger.json", said)
+            self.assertIn("nopekit ingest", said)
+            self.assertIn("decisions/extra.json is not in .nopekit/ledger.json", said)
             for wrong in (f"inputs/{_CALIPER_ID}.json differs",
                           "inputs/loads.json is not in"):
                 self.assertNotIn(wrong, said)
@@ -2470,7 +2470,7 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
             with self.subTest(path=path):
                 target = _write(os.path.join(root, "inputs", "loads.json"),
                                 json.dumps(dict(body, path=path)))
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     store.read_record(target, "inputs")
                 said = str(caught.exception)
                 self.assertIn("inputs/loads.json", said)
@@ -2499,7 +2499,7 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
                 os.makedirs(os.path.dirname(src), exist_ok=True)
                 os.replace(old, src)
                 before = _input_records(project)
-                proc = _env.atompipe(["ingest", src, "--json"], cwd=project)
+                proc = _env.nopekit(["ingest", src, "--json"], cwd=project)
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 (artifact,) = json.loads(proc.stdout)["ingested"]
                 self.assertEqual(artifact["id"], _CALIPER_ID)
@@ -2510,7 +2510,7 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
                                                              f"{_CALIPER_ID}.json")))
                 self.assertEqual(record["path"], "inputs/measurements/caliper.txt")
                 self.assertEqual(len(record["extractions"]), 1)
-                shown = _env.atompipe(["inputs", "--json"], cwd=project)
+                shown = _env.nopekit(["inputs", "--json"], cwd=project)
                 row = {r["id"]: r for r in json.loads(shown.stdout)["inputs"]}[_CALIPER_ID]
                 self.assertEqual((row["exists"], row["drift"]), (True, False))
 
@@ -2523,7 +2523,7 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
         before = _read_bytes(record)
         copy_at = _write(os.path.join(project, "inputs", "measurements", "again.txt"),
                          _CALIPER)
-        proc = _env.atompipe(["ingest", copy_at, "--json"], cwd=project)
+        proc = _env.nopekit(["ingest", copy_at, "--json"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         (artifact,) = json.loads(proc.stdout)["ingested"]
         self.assertEqual((artifact["id"], artifact["path"]),
@@ -2534,14 +2534,14 @@ class EvidenceNeverSitsWhereARecordGoes(_env.EnvCase):
         """`ingest` records a file inside the project in place, so a file sitting
         where a record goes would be recorded as evidence there: refused, naming
         where evidence goes, before any record is returned."""
-        from atompipe import artifacts
+        from nopekit import artifacts
         project = _migrated_bracket(os.path.join(self.tmp(), "migrated"))
         ledger = store.load(project, model_prose=modelio.static_param_prose)
         count = len(ledger.inputs)
         for rel in ("inputs/loads.json", "claims/notes.json"):
             with self.subTest(rel=rel):
                 src = _write(os.path.join(project, *rel.split("/")), _LOADS)
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     artifacts.ingest(project, ledger, src, when=_WHEN)
                 self.assertIn(rel, str(caught.exception))
                 self.assertIn("where a record goes", str(caught.exception))
@@ -2580,7 +2580,7 @@ class ABrokenExportRecordNamesARestoreThatWorks(_env.EnvCase):
         return _projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True, git=git)
 
     def refusal(self, root: str) -> str:
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.load(root)
         return str(caught.exception)
 
@@ -2619,7 +2619,7 @@ class ABrokenExportRecordNamesARestoreThatWorks(_env.EnvCase):
         self.assertIn("git checkout -- exports/print-v1.json", said)
         self.assertIn("exports[1]", said)
         self.assertIn("2026-10-05T10:00:00Z", said)
-        self.assertIn("atompipe export print-v1", said)
+        self.assertIn("nopekit export print-v1", said)
 
     def test_a_file_never_committed_is_not_called_tracked(self):
         root = self.project(git=False)
@@ -2642,7 +2642,7 @@ class TheExportRecordIsSealedAndChained(_env.EnvCase):
         return _projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True)
 
     def refusal(self, root: str) -> str:
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.load(root)
         return str(caught.exception)
 
@@ -2695,7 +2695,7 @@ class TheExportRecordIsSealedAndChained(_env.EnvCase):
             self.assertIn("results/C5.json", self.refusal(root))
 
     def test_the_only_writer_is_append_sealed(self):
-        """An AST scan: a function under `src/atompipe` that names `exports` and
+        """An AST scan: a function under `src/nopekit` that names `exports` and
         writes a file is `store.append_sealed`."""
         self.assertEqual(export_writers(), [])
         planted = {"rogue.py": "def save_export(root, data):\n"
@@ -2745,7 +2745,7 @@ def export_writers(planted: dict[str, str] | None = None) -> list[str]:
     calls a file writer, but ``store.append_sealed``."""
     sources = dict(planted or {})
     if planted is None:
-        base = os.path.join(_env.REPO, "src", "atompipe")
+        base = os.path.join(_env.REPO, "src", "nopekit")
         for name in sorted(os.listdir(base)):
             if name.endswith(".py"):
                 with open(os.path.join(base, name), encoding="utf-8") as fh:
@@ -2772,9 +2772,9 @@ class ReportIsAnIgnoredOutput(_env.EnvCase):
     on its next `report --write`, inside the marked block only."""
 
     #: The root block a project migrated before P2.5b carries (ecaad99's).
-    ECAAD99_BLOCK = ("# atompipe:begin\n"
-                     "# Written by atompipe: bytecode from importing model/, gates/ and "
-                     "selftest/.\n__pycache__/\n*.py[cod]\n# atompipe:end\n")
+    ECAAD99_BLOCK = ("# nopekit:begin\n"
+                     "# Written by nopekit: bytecode from importing model/, gates/ and "
+                     "selftest/.\n__pycache__/\n*.py[cod]\n# nopekit:end\n")
 
     def test_the_bracket_tracks_no_report(self):
         proc = _env.git(["ls-files", "examples/bracket"], cwd=_env.REPO)
@@ -2793,25 +2793,25 @@ class ReportIsAnIgnoredOutput(_env.EnvCase):
 
     def test_report_write_writes_an_ignored_report(self):
         root = self.project()
-        proc = _env.atompipe(["report", "--write"], cwd=root)
+        proc = _env.nopekit(["report", "--write"], cwd=root)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertTrue(os.path.isfile(os.path.join(root, "REPORT.md")))
         self.assertFalse(os.path.exists(os.path.join(root, "docs", "readiness.md")))
         self.assertEqual(self.porcelain(root), [" M .gitignore"])
         text = _read_bytes(os.path.join(root, ".gitignore")).decode("utf-8")
-        block = text.split("# atompipe:end", 1)[0]
+        block = text.split("# nopekit:end", 1)[0]
         for line in ("/REPORT.md", "/out/"):
             self.assertIn(line, block.splitlines())
-        self.assertIn("scratch/", text.split("# atompipe:end", 1)[1])
+        self.assertIn("scratch/", text.split("# nopekit:end", 1)[1])
         before = _read_bytes(os.path.join(root, ".gitignore"))
-        _env.atompipe(["report", "--write"], cwd=root)
+        _env.nopekit(["report", "--write"], cwd=root)
         self.assertEqual(_read_bytes(os.path.join(root, ".gitignore")), before)
 
     def test_the_planted_writers_are_caught(self):
         """Planted: `write_report` to the old path; `report --write` that skips
         the ignore lines."""
-        from atompipe import cli as cli_mod
-        from atompipe import report as report_mod
+        from nopekit import cli as cli_mod
+        from nopekit import report as report_mod
         root = self.project()
         real = report_mod.write_report
 
@@ -2871,7 +2871,7 @@ class MilestonesAreRecords(_env.EnvCase):
         }
         for name, (stem, record, needle) in refused.items():
             with self.subTest(name):
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     store.read_record(self.write(stem, record), "milestones")
                 self.assertIn(needle, str(caught.exception))
                 self.assertIn("milestones/", str(caught.exception))
@@ -2891,7 +2891,7 @@ class MilestonesAreRecords(_env.EnvCase):
         project = _migrated_bracket(os.path.join(self.tmp(), "m"))
         os.remove(os.path.join(project, "exports", "print-v1.json"))
         _projects.set_thickness(project, 8.0)
-        _env.atompipe(["check"], cwd=project, identity=True)
+        _env.nopekit(["check"], cwd=project, identity=True)
         before = _records(project)
         run = _watched(self, project, "export", "print-v1")
         self.assertEqual(run.proc.returncode, 0, run.proc.stdout + run.proc.stderr)
@@ -2908,7 +2908,7 @@ class MilestonesAreRecords(_env.EnvCase):
         import test_export
         project = _migrated_bracket(os.path.join(self.tmp(), "f"))
         os.remove(os.path.join(project, "exports", "print-v1.json"))
-        _env.atompipe(["check"], cwd=project, identity=True)
+        _env.nopekit(["check"], cwd=project, identity=True)
         test_export.forge_entry(project, "bracket.deflection", passed=True)
         before = _records(project)
         run = _watched(self, project, "export", "print-v1")

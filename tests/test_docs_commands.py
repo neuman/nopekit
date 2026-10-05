@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Every `atompipe ...` command the docs print must be one the parser accepts.
+"""Every `nopekit ...` command the docs print must be one the parser accepts.
 
 What slipped through (S-10): `docs/PACK_FORMAT.md`, `docs/EXTENSION_PROTOCOL.md`
-and the pack-authoring skill told pack authors to run `atompipe pack new` and
-`atompipe pack export` — the second "with the selftest evidence attached" — and
+and the pack-authoring skill told pack authors to run `nopekit pack new` and
+`nopekit pack export` — the second "with the selftest evidence attached" — and
 argparse answered `invalid choice` to both. The skill an agent loads to write a
 pack opened on a command that does not exist, and closed on one that claimed to
 attach evidence nobody could produce. Nothing turned red, because nothing read
@@ -14,15 +14,15 @@ instead of editing the tree. Its precision is the whole design (tests:H14): too
 loose and `pack new` passes; too strict and it fails on the grammar the docs use
 on purpose. So it validates **the subcommand path and every named `--flag`**
 against the parser, never a full `parse_args` — required arguments are elided
-all the time (`atompipe decide --title ...`), and that is shorthand, not a bug —
+all the time (`nopekit decide --title ...`), and that is shorthand, not a bug —
 and it tolerates, by rule:
 
 * placeholders `<x>` and `<x|y>`; optional groups `[--x]`, `[--tier N]`,
   `[list|show]`; alternatives `a|b`; the ellipsis `...`;
 * two-column code tables (a command, two or more spaces, a description or a
   second command), and prose after a leaf command;
-* paths and module names that merely contain the word: `src/atompipe/`,
-  `~/.atompipe/packs`, `atompipe.site.derive_explode` — a command starts only
+* paths and module names that merely contain the word: `src/nopekit/`,
+  `~/.nopekit/packs`, `nopekit.site.derive_explode` — a command starts only
   where a shell would start one (`$ `, `VAR=x `, `python3 -m `, or after `&&`,
   `||`, `;` or ` | `).
 
@@ -38,15 +38,15 @@ What slipped through with the markdown alone: PLAN A-8 removed `model --set-entr
 and nine strings in `cli.py` went on telling users to run it — `init`'s next step,
 `check`'s no-model warning, `model`'s and `doctor`'s refusals — because a message
 the CLI prints is a string literal, not a document, and nothing read string
-literals. So every string literal under `src/atompipe/**/*.py` (f-strings rebuilt
+literals. So every string literal under `src/nopekit/**/*.py` (f-strings rebuilt
 from their parts, each `{expr}` a `<expr>` placeholder) and
-`src/atompipe/site_template/**/*.js` (template literals likewise) is read by the
+`src/nopekit/site_template/**/*.js` (template literals likewise) is read by the
 same validator. A printed string has no fences, so two more rules decide where a
 command starts: an inline code span is judged as in markdown, strictly; and a line
-that begins with `atompipe` — after indentation, a list marker or a lowercase
-label (`then: atompipe check`) — is judged when its first word is one the parser
+that begins with `nopekit` — after indentation, a list marker or a lowercase
+label (`then: nopekit check`) — is judged when its first word is one the parser
 knows (a subcommand, a flag, a placeholder), and read as prose otherwise
-(`atompipe readiness — …`, the page's `"atompipe project"`). The cost, stated: a
+(`nopekit readiness — …`, the page's `"nopekit project"`). The cost, stated: a
 phantom TOP-LEVEL command printed bare is missed; in a code span, or as the page's
 `code("…")` argument, it is caught.
 
@@ -62,7 +62,7 @@ import re
 import textwrap
 import unittest
 
-from atompipe import cli
+from nopekit import cli
 
 import _env
 
@@ -106,7 +106,7 @@ _SPAN = re.compile(r"(?<!`)`([^`\n]+)`(?!`)")
 _SEPARATORS = re.compile(r"&&|\|\||;|\s\|\s")
 #: A command table's column gap: two or more spaces between cells.
 _COLUMNS = re.compile(r"\s{2,}")
-#: What may precede `atompipe` at the start of a command.
+#: What may precede `nopekit` at the start of a command.
 _PREFIX = re.compile(
     r"^(?:\$\s+)?"                                  # a prompt
     r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"           # VAR=value assignments
@@ -117,10 +117,10 @@ _TAIL = re.compile(r"\s#.*$|\s(?:—|->|→)\s.*$")
 
 
 def _command_words(segment: str) -> list[str] | None:
-    """The words after ``atompipe`` if ``segment`` starts a command, else None."""
+    """The words after ``nopekit`` if ``segment`` starts a command, else None."""
     text = _TAIL.sub("", segment.strip())
     text = _PREFIX.sub("", text, count=1)
-    match = re.match(r"atompipe(?:\s+(.*))?$", text)
+    match = re.match(r"nopekit(?:\s+(.*))?$", text)
     if not match:
         return None
     return (match.group(1) or "").split()
@@ -134,13 +134,13 @@ def _segments(text: str, *, columns: bool) -> list[str]:
 
 
 def extract_commands(markdown: str) -> list[tuple[int, list[str]]]:
-    """``(line number, words after atompipe)`` for every command in ``markdown``.
+    """``(line number, words after nopekit)`` for every command in ``markdown``.
 
     Inside a fenced block each line is split into shell segments and then into
     table columns; outside one, only inline code spans are read, since prose
-    that says "atompipe will..." is not a command. Spans are read inside fences
+    that says "nopekit will..." is not a command. Spans are read inside fences
     too: a directory tree or a sample of output quotes its commands that way
-    (`vendor/  three.js etc. after \\`atompipe site vendor\\``).
+    (`vendor/  three.js etc. after \\`nopekit site vendor\\``).
     """
     found: list[tuple[int, list[str]]] = []
     fenced = False
@@ -196,12 +196,12 @@ def _values_taken(action: argparse.Action) -> int | str:
 
 
 def command_problems(words: list[str], parser: argparse.ArgumentParser) -> list[str]:
-    """What is wrong with ``atompipe <words>``: an unknown subcommand, or a flag
+    """What is wrong with ``nopekit <words>``: an unknown subcommand, or a flag
     no parser on the path accepts. Positionals, placeholders and prose after a
     leaf command are not judged — only what a reader would type literally."""
     problems: list[str] = []
     parsers = [parser]
-    path = ["atompipe"]
+    path = ["nopekit"]
     resolving = True
     tokens = [_clean(w) for w in words]
     i = 0
@@ -212,7 +212,7 @@ def command_problems(words: list[str], parser: argparse.ArgumentParser) -> list[
             continue
         if token.startswith("<"):
             if resolving and any(_subcommands(p) for p in parsers):
-                resolving = False         # `atompipe <command>`: nothing literal to check
+                resolving = False         # `nopekit <command>`: nothing literal to check
             continue
         if _flag_like(token):
             # `--pass|--fail` is alternatives, as `a|b` is for subcommands: each
@@ -275,7 +275,7 @@ def markdown_findings(markdown: str, filename: str,
     findings: list[str] = []
     for number, words in commands:
         for problem in command_problems(words, parser):
-            findings.append(f"{filename}:{number}: atompipe {' '.join(words)[:80]} — {problem}")
+            findings.append(f"{filename}:{number}: nopekit {' '.join(words)[:80]} — {problem}")
     return len(commands), findings
 
 
@@ -292,7 +292,7 @@ def _read(path: str) -> str:
 #: because each new message is a new place to name a command that is gone.
 #: *Rejected:* `cli.py` alone — `report.py` prints `claim physical`'s flags and
 #: `panels.js` printed `claim add` until A-8 rewrote it by hand.
-SOURCE_GLOBS = ("src/atompipe/**/*.py", "src/atompipe/site_template/**/*.js")
+SOURCE_GLOBS = ("src/nopekit/**/*.py", "src/nopekit/site_template/**/*.js")
 
 #: The fewest commands the spine's strings must yield. Measured 2026-09-28 on the
 #: checkpoint-1.3 tree (U29): 158 commands in 16 of 23 files. The floor sits well
@@ -301,8 +301,8 @@ SOURCE_GLOBS = ("src/atompipe/**/*.py", "src/atompipe/site_template/**/*.js")
 MIN_SOURCE_COMMANDS = 100
 
 #: What may lead a bare command in a printed line: indentation, a list marker, or
-#: a lowercase label and its colon — `  1. atompipe ask`, `then: atompipe check`,
-#: `next: atompipe site build`. The spine's messages use all three.
+#: a lowercase label and its colon — `  1. nopekit ask`, `then: nopekit check`,
+#: `next: nopekit site build`. The spine's messages use all three.
 _LEAD = re.compile(r"^\s*(?:\d+[.)]\s+|[-*•]\s+|[a-z]+:\s+)?")
 
 #: A JS literal that is the argument of the page's `code(...)` helper is typeset
@@ -322,7 +322,7 @@ def source_files(repo: str = _env.REPO) -> list[str]:
 
 def _placeholder(node: ast.AST) -> str:
     """``{expr}`` as ``<expr>``: one word, so the checker reads it as a placeholder
-    wherever it lands (`atompipe claim physical {args.id} pass`)."""
+    wherever it lands (`nopekit claim physical {args.id} pass`)."""
     return "<" + re.sub(r"\s+", "", ast.unparse(node)) + ">"
 
 
@@ -437,10 +437,10 @@ def js_strings(source: str) -> list[tuple[int, str, bool]]:
 
 def string_commands(text: str, parser: argparse.ArgumentParser, *,
                     typeset: bool = False) -> list[tuple[int, list[str]]]:
-    """``(line offset, words after atompipe)`` for every command in one printed
+    """``(line offset, words after nopekit)`` for every command in one printed
     string. Its code spans are commands, as in markdown; with ``typeset`` the
     whole string is one. A bare line is a command when, after its lead
-    (``_LEAD``), it starts with ``atompipe`` and a word the parser knows — a
+    (``_LEAD``), it starts with ``nopekit`` and a word the parser knows — a
     subcommand (any of ``a|b``), a flag, or a placeholder; otherwise it is prose
     that happens to begin with the name."""
     known = set(_subcommands(parser))
@@ -485,7 +485,7 @@ def source_findings(source: str, filename: str,
         for offset, words in string_commands(text, parser, typeset=typeset):
             count += 1
             for problem in command_problems(words, parser):
-                findings.append(f"{filename}:{line + offset}: atompipe "
+                findings.append(f"{filename}:{line + offset}: nopekit "
                                 f"{' '.join(words)[:80]} — {problem}")
     return count, findings
 
@@ -507,7 +507,7 @@ class DocsCommandsParse(unittest.TestCase):
             count, found = markdown_findings(_read(path), rel, self.parser)
             total += count
             findings += found
-        self.assertEqual(findings, [], "the docs print commands atompipe refuses:\n  "
+        self.assertEqual(findings, [], "the docs print commands nopekit refuses:\n  "
                          + "\n  ".join(findings))
         self.assertGreaterEqual(
             total, MIN_COMMANDS,
@@ -528,27 +528,27 @@ class DocsCommandsParse(unittest.TestCase):
         planted = {
             "fenced pack new": """
                 ```
-                atompipe pack new <name>
+                nopekit pack new <name>
                 ```
             """,
             "fenced pack export, with a comment": """
                 ```
-                atompipe pack validate <name> # fine
-                atompipe pack export <name>   # PR-ready, with the evidence attached
+                nopekit pack validate <name> # fine
+                nopekit pack export <name>   # PR-ready, with the evidence attached
                 ```
             """,
-            "inline pack new": "Scaffold with `atompipe pack new <name>` first.\n",
-            "a python -m prefix": "```sh\nPYTHONPATH=src python3 -m atompipe pack new x\n```\n",
-            "after &&": "```sh\ncd examples/bracket && atompipe chek\n```\n",
-            "an unknown flag": "Run `atompipe check --tierr 1`.\n",
-            "a flag on the wrong level": "Run `atompipe gate --selftest`.\n",
-            "one bad alternative": "`atompipe site build|deploy`\n",
-            "a bad subcommand in an optional group": "`atompipe packs [list|publish]`\n",
+            "inline pack new": "Scaffold with `nopekit pack new <name>` first.\n",
+            "a python -m prefix": "```sh\nPYTHONPATH=src python3 -m nopekit pack new x\n```\n",
+            "after &&": "```sh\ncd examples/bracket && nopekit chek\n```\n",
+            "an unknown flag": "Run `nopekit check --tierr 1`.\n",
+            "a flag on the wrong level": "Run `nopekit gate --selftest`.\n",
+            "one bad alternative": "`nopekit site build|deploy`\n",
+            "a bad subcommand in an optional group": "`nopekit packs [list|publish]`\n",
             # P2.5a (V-17): the skill's line before P2.5a — `--who` is refused.
-            "a refused flag": "`atompipe claim physical C5 pass --who <name> --detail x`\n",
+            "a refused flag": "`nopekit claim physical C5 pass --who <name> --detail x`\n",
             "a table row": """
                 ```
-                atompipe init                  atompipe pack new
+                nopekit init                  nopekit pack new
                 ```
             """,
         }
@@ -559,28 +559,28 @@ class DocsCommandsParse(unittest.TestCase):
     def test_the_grammar_is_tolerated(self):
         """C: the shorthand the docs use on purpose is not a finding."""
         tolerated = {
-            "placeholders": "`atompipe why <param|claim>` and `atompipe ingest <files>`\n",
-            "an elided required arg": "`atompipe decide --title ...` and `atompipe extract`\n",
-            "optional flags with values": "`atompipe check [--tier N] [--only GATE]`\n",
-            "an optional flag value": "`atompipe gate selftest [--junit [PATH]]`\n",
-            "alternatives": "`atompipe site build|serve` and `atompipe packs [list|show|validate]`\n",
+            "placeholders": "`nopekit why <param|claim>` and `nopekit ingest <files>`\n",
+            "an elided required arg": "`nopekit decide --title ...` and `nopekit extract`\n",
+            "optional flags with values": "`nopekit check [--tier N] [--only GATE]`\n",
+            "an optional flag value": "`nopekit gate selftest [--junit [PATH]]`\n",
+            "alternatives": "`nopekit site build|serve` and `nopekit packs [list|show|validate]`\n",
             "a two-column table": """
                 ```
-                atompipe init                  atompipe status
-                atompipe ask                   what evidence to request from the human
-                atompipe check [--tier N]      run gates; exits non-zero while anything blocks
-                atompipe doctor                run this first when something is confusing
+                nopekit init                  nopekit status
+                nopekit ask                   what evidence to request from the human
+                nopekit check [--tier N]      run gates; exits non-zero while anything blocks
+                nopekit doctor                run this first when something is confusing
                 ```
             """,
-            "paths and modules": ("`src/atompipe/`, `~/.atompipe/packs`, "
-                                  "`atompipe.site.derive_explode`, `pip install atompipe`\n"),
-            "top-level flags": "`atompipe --help`, `atompipe --version`, "
-                               "`atompipe -C examples/bracket check`\n",
-            "the alias": "`atompipe pack validate <name>`\n",
-            "a prompt and env": "```\n$ PYTHONPATH=src python3 -m atompipe gate selftest --pack x\n```\n",
-            "prose after a leaf": "```\natompipe gate selftest every negative control\n```\n",
-            "an XML sample": '```\n<testsuites name="atompipe check" tests="13">\n```\n',
-            "gate ids and pack names": "`atompipe gate selftest sourcing modelica.checks`\n",
+            "paths and modules": ("`src/nopekit/`, `~/.nopekit/packs`, "
+                                  "`nopekit.site.derive_explode`, `pip install nopekit`\n"),
+            "top-level flags": "`nopekit --help`, `nopekit --version`, "
+                               "`nopekit -C examples/bracket check`\n",
+            "the alias": "`nopekit pack validate <name>`\n",
+            "a prompt and env": "```\n$ PYTHONPATH=src python3 -m nopekit gate selftest --pack x\n```\n",
+            "prose after a leaf": "```\nnopekit gate selftest every negative control\n```\n",
+            "an XML sample": '```\n<testsuites name="nopekit check" tests="13">\n```\n',
+            "gate ids and pack names": "`nopekit gate selftest sourcing modelica.checks`\n",
         }
         for label, markdown in tolerated.items():
             with self.subTest(tolerated=label):
@@ -589,9 +589,9 @@ class DocsCommandsParse(unittest.TestCase):
     def test_the_extractor_sees_what_it_tolerates(self):
         """The tolerance is in validation, not in extraction: each tolerated form
         is still read as a command, so a typo inside it is still caught."""
-        self.assertEqual(len(extract_commands("```\natompipe init    atompipe status\n```\n")), 2)
-        self.assertTrue(self._findings("`atompipe check [--tierr N]`\n"))
-        self.assertTrue(self._findings("`atompipe why <param|claim> --verbose`\n"))
+        self.assertEqual(len(extract_commands("```\nnopekit init    nopekit status\n```\n")), 2)
+        self.assertTrue(self._findings("`nopekit check [--tierr N]`\n"))
+        self.assertTrue(self._findings("`nopekit why <param|claim> --verbose`\n"))
 
 
 class SpineStringsParse(unittest.TestCase):
@@ -612,13 +612,13 @@ class SpineStringsParse(unittest.TestCase):
         findings: list[str] = []
         files = source_files()
         self.assertTrue(any(f.endswith(".js") for f in files), files)
-        self.assertIn("src/atompipe/cli.py", files)
+        self.assertIn("src/nopekit/cli.py", files)
         for rel in files:
             count, found = source_findings(_read(os.path.join(_env.REPO, rel)), rel,
                                            self.parser)
             total += count
             findings += found
-        self.assertEqual(findings, [], "the spine prints commands atompipe refuses:\n  "
+        self.assertEqual(findings, [], "the spine prints commands nopekit refuses:\n  "
                          + "\n  ".join(findings))
         self.assertGreaterEqual(
             total, MIN_SOURCE_COMMANDS,
@@ -630,29 +630,29 @@ class SpineStringsParse(unittest.TestCase):
         spine writes one — and a flag alternative with one bad half."""
         python = {
             "init's bare next step": (
-                '_say("     then: atompipe model --set-entry model/<thing>.py '
-                '&& atompipe check")\n'),
+                '_say("     then: nopekit model --set-entry model/<thing>.py '
+                '&& nopekit check")\n'),
             "an f-string refusal": (
-                'raise E(f"no model entry recorded — `atompipe model --set-entry {p}`")\n'),
-            "two adjacent literals": 'say("run `atompipe claim " "add --id C1` first")\n',
+                'raise E(f"no model entry recorded — `nopekit model --set-entry {p}`")\n'),
+            "two adjacent literals": 'say("run `nopekit claim " "add --id C1` first")\n',
             "a docstring span": ('def f():\n'
-                                 '    """Opt out with `atompipe packs remove x`."""\n'),
-            "a numbered bare line": 'say("  2. atompipe claim edit C1 --gates x")\n',
-            "a placeholder, then a bad flag": 'say(f"atompipe check --only {g} --tierr 1")\n',
-            "a bad flag alternative": 'say("`atompipe claim physical C1 --pass|--fial`")\n',
+                                 '    """Opt out with `nopekit packs remove x`."""\n'),
+            "a numbered bare line": 'say("  2. nopekit claim edit C1 --gates x")\n',
+            "a placeholder, then a bad flag": 'say(f"nopekit check --only {g} --tierr 1")\n',
+            "a bad flag alternative": 'say("`nopekit claim physical C1 --pass|--fial`")\n',
             # P2.5a (V-17): a refused flag in a spine string — the report's line
             # printed `--when <ISO date>` until P2.5a, its first catch.
-            "a refused flag": ('say("`atompipe claim physical C5 --pass|--fail '
+            "a refused flag": ('say("`nopekit claim physical C5 --pass|--fail '
                                '--detail \\"...\\" --when <ISO date>`")\n'),
         }
         for label, source in python.items():
             with self.subTest(planted=label):
                 self.assertTrue(self._py(source), f"{label}: not reported")
         javascript = {
-            "a template literal span": ("const s = `run \\`atompipe packs remove "
+            "a template literal span": ("const s = `run \\`nopekit packs remove "
                                         "${name}\\` to opt out`;\n"),
-            "the page's code() helper": 'el("pre", {}, code("atompipe chek"));\n',
-            "a quoted span": "const t = 'record it: `atompipe decide --when 2020-01-01`';\n",
+            "the page's code() helper": 'el("pre", {}, code("nopekit chek"));\n',
+            "a quoted span": "const t = 'record it: `nopekit decide --when 2020-01-01`';\n",
         }
         for label, source in javascript.items():
             with self.subTest(planted=label):
@@ -662,24 +662,24 @@ class SpineStringsParse(unittest.TestCase):
         """C: prose that begins with the name, placeholders, labels, comments and
         the page's regex literals are not findings."""
         python = {
-            "a report head": 'say(f"atompipe readiness — {name} {rev}")\n',
-            "a version line": 'say(f"atompipe {__version__} from {os.path.dirname(p)}")\n',
-            "an ignore-block marker": '_BEGIN = "# atompipe:begin"\n',
-            "a lock message": 'say(f"another atompipe run (pid {pid}) holds {path}")\n',
-            "a flag alternative": 'say(f"`atompipe claim physical {c} --pass|--fail`")\n',
-            "a labelled line": 'say("next: atompipe check --tier 0 ; atompipe gap --propose")\n',
-            "a comment is not a string": "# atompipe chek, as a comment\nx = 1\n",
+            "a report head": 'say(f"nopekit readiness — {name} {rev}")\n',
+            "a version line": 'say(f"nopekit {__version__} from {os.path.dirname(p)}")\n',
+            "an ignore-block marker": '_BEGIN = "# nopekit:begin"\n',
+            "a lock message": 'say(f"another nopekit run (pid {pid}) holds {path}")\n',
+            "a flag alternative": 'say(f"`nopekit claim physical {c} --pass|--fail`")\n',
+            "a labelled line": 'say("next: nopekit check --tier 0 ; nopekit gap --propose")\n',
+            "a comment is not a string": "# nopekit chek, as a comment\nx = 1\n",
             "a format spec": 'say(f"{name:<24} the whole project")\n',
         }
         for label, source in python.items():
             with self.subTest(tolerated=label):
                 self.assertEqual(self._py(source), [])
         javascript = {
-            "a default name": 'const name = meta.name || "atompipe project";\n',
-            "comments": ("// atompipe chek\n/* `atompipe chek` */\n"
-                         "const ok = code(\"atompipe check\");\n"),
+            "a default name": 'const name = meta.name || "nopekit project";\n',
+            "comments": ("// nopekit chek\n/* `nopekit chek` */\n"
+                         "const ok = code(\"nopekit check\");\n"),
             "a regex holding a quote": ("const r = /[\"'`]/g; "
-                                        "const s = \"`atompipe site build`\";\n"),
+                                        "const s = \"`nopekit site build`\";\n"),
         }
         for label, source in javascript.items():
             with self.subTest(tolerated=label):
@@ -692,11 +692,11 @@ class SpineStringsParse(unittest.TestCase):
         found = [(line, text) for line, text, _ts in js_strings(
             "const r = /[\"'`]/g;\n// 'no'\nconst s = `x ${a + `y`} z`;\n")]
         self.assertEqual(found, [(3, "x <x> z")])
-        commands = string_commands("  1. atompipe ask     — then\nthen: atompipe check",
+        commands = string_commands("  1. nopekit ask     — then\nthen: nopekit check",
                                    self.parser)
         self.assertEqual(commands, [(0, ["ask"]), (1, ["check"])])
-        self.assertEqual(string_commands("atompipe readiness — x", self.parser), [])
-        self.assertEqual(string_commands("atompipe chek", self.parser, typeset=True),
+        self.assertEqual(string_commands("nopekit readiness — x", self.parser), [])
+        self.assertEqual(string_commands("nopekit chek", self.parser, typeset=True),
                          [(0, ["chek"])])
 
 

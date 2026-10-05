@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Known-bad fixtures for openmodelica. One physical change each.
 
-`atompipe gate selftest` requires every gate to FAIL here. A gate that passes its
+`nopekit gate selftest` requires every gate to FAIL here. A gate that passes its
 own fixture is reported as broken, and a green verdict from it means nothing.
 
 ---------------------------------------------------------------------------
@@ -67,7 +67,7 @@ and diffed against the originals.
 
 Never into this directory. What slipped through: they used to go to
 ``selftest/.generated/`` whatever ``out_dir`` the caller gave, falling back to one
-fixed ``$TMPDIR/atompipe-openmodelica`` shared by every user of the machine — so
+fixed ``$TMPDIR/nopekit-openmodelica`` shared by every user of the machine — so
 a wheel install wrote into site-packages, the repository's own suite rewrote four
 files inside the tree it was testing on every run, and two users' runs could
 collide in one directory (packs:H16). Rejected: keeping the in-pack directory
@@ -92,7 +92,7 @@ if _GATES_DIR not in sys.path:
 
 import _modelica as M                                              # noqa: E402
 
-from atompipe.models import Ledger                                 # noqa: E402
+from nopekit.models import Ledger                                 # noqa: E402
 
 #: How far past its limit or tolerance each fixture must drive the quantity it
 #: perturbs, as a fraction of that limit. 5%, and the 5 is doing real work: these

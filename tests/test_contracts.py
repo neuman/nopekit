@@ -14,7 +14,7 @@ S-10, S-11 and S-41).
 The checkers, each a PURE function of text inputs so each violation test plants
 a string instead of editing the tree:
 
-    SpineModulesAreDocumented   every src/atompipe/*.py has its ### `<module>.py`
+    SpineModulesAreDocumented   every src/nopekit/*.py has its ### `<module>.py`
                                 heading, and every name in its __all__ is in
                                 that section, in code form
     RecordFieldsAreDocumented   every field of the record kinds sits in its own
@@ -76,13 +76,13 @@ import shutil
 import tempfile
 import unittest
 
-from atompipe import cli as cli_mod
-from atompipe import gates as gates_mod
+from nopekit import cli as cli_mod
+from nopekit import gates as gates_mod
 
 import _projects
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SPINE_SRC = os.path.join(REPO, "src", "atompipe")
+SPINE_SRC = os.path.join(REPO, "src", "nopekit")
 TESTS_DIR = os.path.join(REPO, "tests")
 DOCS_DIR = os.path.join(REPO, "docs")
 SPINE_CONTRACT = os.path.join(DOCS_DIR, "SPINE_CONTRACT.md")
@@ -91,7 +91,7 @@ SITE_CONTRACT = os.path.join(DOCS_DIR, "SITE_CONTRACT.md")
 PLAN = os.path.join(DOCS_DIR, "PLAN.md")
 
 #: Modules that carry no public surface of their own: the package marker and the
-#: `python -m atompipe` shim. Everything else under src/atompipe/ is a spine
+#: `python -m nopekit` shim. Everything else under src/nopekit/ is a spine
 #: module and owes the contract a heading.
 NOT_SPINE_MODULES = frozenset({"__init__.py", "__main__.py"})
 
@@ -657,7 +657,7 @@ _TOP_NAME = re.compile(r"^\s*(?:(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(|class\s+(
 _MEMBER = re.compile(r"(?:^|;)\s*([A-Za-z_]\w*)\s*(?::(?!:)|->)")
 _MEMBER_DEF = re.compile(r"\bdef\s+([A-Za-z_]\w*)\s*\(")
 _CLASS_HEAD = re.compile(r"^(\s*)class\s+([A-Za-z_]\w*)\s*(?:\([^)]*\))?\s*:?(.*)$")
-PACKAGE = "atompipe"
+PACKAGE = "nopekit"
 
 
 @dataclasses.dataclass
@@ -751,7 +751,7 @@ def _dotted(expr: ast.expr) -> str:
 
 def _import_target(node: ast.AST, name: str) -> tuple[str, str] | None:
     """`(module path, attribute or "")` a name an import binds refers to; None when
-    the node is no import. `from . import store` -> ("atompipe.store", "")."""
+    the node is no import. `from . import store` -> ("nopekit.store", "")."""
     if isinstance(node, ast.Import):
         for alias in node.names:
             if (alias.asname or alias.name.split(".")[0]) == name:
@@ -804,7 +804,7 @@ def resolves_in(parts: list[str], stem: str, indexes: dict[str, ModuleIndex],
         module, attr = target
         chain = ([attr] if attr else []) + rest
         spine = module[len(PACKAGE) + 1:] if module.startswith(PACKAGE + ".") else ""
-        if module == PACKAGE and attr in indexes:  # from atompipe import store
+        if module == PACKAGE and attr in indexes:  # from nopekit import store
             return not rest or resolves_in(rest, attr, indexes, _depth + 1)
         if spine in indexes:
             return not chain or resolves_in(chain, spine, indexes, _depth + 1)
@@ -972,7 +972,7 @@ REMOVED_NAMES: tuple[tuple[str, str], ...] = (
     ("runs_dir", "the run history went at 1.2"),
     ("RUNS_NAME", "the run history went at 1.2"),
     ("last_run", "the ledger's sweep record went at 1.2: staleness is per gate, and the "
-                 "last full check is .atompipe/cache/last_check.json"),
+                 "last full check is .nopekit/cache/last_check.json"),
     ("_ParamReads", "the CLI's flat read recorder went at 1.2: verdicts.ParamTrace"),
     ("_staleness", "the global staleness rule went at 1.2: verdicts.freshness and resolve"),
     ("sync_params", "the parameter sync went at 1.3: modelio.param_view reads the model"),
@@ -981,8 +981,8 @@ REMOVED_NAMES: tuple[tuple[str, str], ...] = (
                             "modelio.undefended_params over param_view is the one nag list"),
     ("claim add", "went at 1.3 (A-8): a claim is the file claims/<id>.json"),
     ("claim edit", "went at 1.3 (A-8): edit claims/<id>.json"),
-    ("packs remove", "went at 1.3 (A-8): delete the name from packs in .atompipe/project.json"),
-    ("--set-entry", "went at 1.3 (A-8): \"model_entry\" in .atompipe/project.json"),
+    ("packs remove", "went at 1.3 (A-8): delete the name from packs in .nopekit/project.json"),
+    ("--set-entry", "went at 1.3 (A-8): \"model_entry\" in .nopekit/project.json"),
     ("gate --selftest", "never parsed: the command is `gate selftest`"),
     ("decide --when", "went at 1.3 (S-44): it backdated a decision; the edge stamps the time"),
 )
@@ -996,9 +996,9 @@ REMOVED_NAMES += tuple(
     (f"{flag} {_REFUSED_PLACEHOLDERS[flag]}",
      f"refused from P2.5a: `claim physical` reads who from git's identity and when from "
      f"the clock")
-    for flag in __import__("atompipe.cli", fromlist=["cli"]).REFUSED_FLAGS)
+    for flag in __import__("nopekit.cli", fromlist=["cli"]).REFUSED_FLAGS)
 
-#: The documents an agent reads for how atompipe works: the contract documents, the
+#: The documents an agent reads for how nopekit works: the contract documents, the
 #: skills, README and CLAUDE.md (spec §3.16), and — because a removed name misleads
 #: from them as much — the rest of what `test_docs_commands` reads for commands.
 #: Never `docs/*.md`: the plan documents quote the removed names as the history
@@ -1292,7 +1292,7 @@ class SiteStateKeysAreDocumented(unittest.TestCase):
     """
 
     def setUp(self) -> None:
-        tmp = tempfile.mkdtemp(prefix="atompipe-contracts-")
+        tmp = tempfile.mkdtemp(prefix="nopekit-contracts-")
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         # As a clone holds it, never the checkout's tree (a running `check`'s
         # build.lock rode a copytree, P2.3's gate) — and without a `site/` an
@@ -1572,28 +1572,28 @@ class RemovedNamesAreGone(unittest.TestCase):
         docs = _removed_name_docs()
         for path in ("README.md", "CLAUDE.md", "docs/SPINE_CONTRACT.md",
                      "docs/PACK_FORMAT.md", "docs/SITE_CONTRACT.md",
-                     "skills/atompipe/SKILL.md", "skills/pack-authoring/SKILL.md"):
+                     "skills/nopekit/SKILL.md", "skills/pack-authoring/SKILL.md"):
             self.assertIn(path, docs)
             self.assertGreater(len(docs[path]), 500, path)
         self.assertGreaterEqual(len(docs), 15)
 
     def test_every_planted_removed_name_is_caught(self):
         for name, _why in REMOVED_NAMES:
-            for text in (f"intro\nRun `atompipe {name} x`.\n", f"intro\nthe {name} here\n"):
+            for text in (f"intro\nRun `nopekit {name} x`.\n", f"intro\nthe {name} here\n"):
                 problems = removed_name_problems({"doc.md": text})
                 self.assertEqual(len(problems), 1, (name, text, problems))
                 self.assertTrue(problems[0].startswith(f"doc.md:2: names `{name}`"),
                                 problems)
 
     def test_a_command_broken_across_lines_is_caught(self):
-        problems = removed_name_problems({"doc.md": "then run atompipe claim\n  add C9\n"})
+        problems = removed_name_problems({"doc.md": "then run nopekit claim\n  add C9\n"})
         self.assertEqual(len(problems), 1, problems)
         self.assertTrue(problems[0].startswith("doc.md:1: names `claim add`"), problems)
 
     def test_near_misses_are_not_removed_names(self):
-        text = ("`tests/test_staleness.py`; a claim edited by hand; `atompipe claim "
-                "physical C5 pass`; `atompipe packs add fdm-print`; `last_runs`; "
-                "`atompipe decide --title x`; `atompipe gate selftest`; "
+        text = ("`tests/test_staleness.py`; a claim edited by hand; `nopekit claim "
+                "physical C5 pass`; `nopekit packs add fdm-print`; `last_runs`; "
+                "`nopekit decide --title x`; `nopekit gate selftest`; "
                 "`--set-entry-point`; `records_run`\n")
         self.assertEqual(removed_name_problems({"doc.md": text}), [])
 

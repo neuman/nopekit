@@ -1,5 +1,5 @@
 {
-  "schema": "atompipe.bom/1",
+  "schema": "nopekit.bom/1",
   "_comment": "A complete, passing BOM for an invented product: a small sensor node in a machined enclosure. It is the worked example referenced by PACK.md, as a BOM in the file-based spelling (bom_path) rather than inline. The negative controls do NOT build on it - they are sealed to selftest/baseline.json, which is the projection CI asserts every gate passes. Every vendor and part number here is invented.",
   "product": "sensor node, enclosure + board assembly",
   "currency": "USD",

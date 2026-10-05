@@ -7,7 +7,7 @@ meaningful change, in the direction the gate under test cares about.
 
 That constraint is the whole point. A fixture that is bad in some *other* way — a
 corrupt file, a missing field, an empty mesh — proves the gate handles garbage, not
-that it measures what it claims. `atompipe gate selftest` requires each gate to FAIL
+that it measures what it claims. `nopekit gate selftest` requires each gate to FAIL
 on its own fixture; a gate that passes here is reported as broken.
 
 And the base must be a design that passes. These fixtures used to rebuild from the
@@ -22,7 +22,7 @@ from __future__ import annotations
 import dataclasses
 import os
 
-from atompipe.modelio import load_path
+from nopekit.modelio import load_path
 
 #: By path, like the model inside it: a plain `import known_good` would hand a
 #: second bracket copy in the same process the first copy's module (packs:H4).

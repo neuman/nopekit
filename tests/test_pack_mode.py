@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """`gate selftest` with no project: pack mode, where CLAUDE.md says to run it (S-09).
 
-`CLAUDE.md` and `CONTRIBUTING.md` give `atompipe gate selftest` at the repository
+`CLAUDE.md` and `CONTRIBUTING.md` give `nopekit gate selftest` at the repository
 root as the check that decides whether a pack gets merged. It exited 2 there —
 "not in a project" — so the one command a pack author was told to run could not
 run where they were told to run it, and CI ran it only inside the bracket, which
@@ -10,7 +10,7 @@ loads no pack at all. Three more things slipped through beside it:
 * **Zero controls exited 0.** A selftest that ran nothing printed a sentence and
   returned success on the text path, and `"ok": true` on the JSON path — a
   command that passes by running nothing is a logger (PLAN G3).
-* **The machine chose the pack.** `~/.atompipe/packs` and `$ATOMPIPE_PACK_PATH`
+* **The machine chose the pack.** `~/.nopekit/packs` and `$NOPEKIT_PACK_PATH`
   outrank the bundled packs, so on a pack author's machine a same-named copy was
   the one exercised while every message named the bundled one (S-87). Pack mode
   tests the bundled packs unless `--user-packs` says otherwise.
@@ -18,8 +18,8 @@ loads no pack at all. Three more things slipped through beside it:
   parses the gate id as the report's path (cli:H7), and the command would then
   have run every control and written XML to a file called `bracket.deflection`.
 
-Every scenario is a child process through `_env.atompipe`: a temp `HOME` (no user
-packs unless a test plants one), no `ATOMPIPE_PACK_PATH`, and each planted pack in
+Every scenario is a child process through `_env.nopekit`: a temp `HOME` (no user
+packs unless a test plants one), no `NOPEKIT_PACK_PATH`, and each planted pack in
 a process of its own, since a pack name is loaded once per process (core:§5.12).
 
 Run:  PYTHONPATH=src python3 -m unittest tests.test_pack_mode -v
@@ -139,7 +139,7 @@ class PackModeSelftest(_env.EnvCase):
         self.home = self.tmp()
 
     def _run(self, *args: str, cwd: str | None = None):
-        return _env.atompipe(["gate", "selftest", *args], cwd=cwd or self.cwd,
+        return _env.nopekit(["gate", "selftest", *args], cwd=cwd or self.cwd,
                              home=self.home)
 
     # -- zero controls is not a pass --------------------------------------- #
@@ -221,10 +221,10 @@ class PackModeSelftest(_env.EnvCase):
 
     # -- the host machine does not choose the pack (S-87) ------------------- #
     def test_a_user_pack_does_not_shadow_the_bundled_one(self):
-        """A broken `beam-analytic` in `~/.atompipe/packs` outranks the bundled
+        """A broken `beam-analytic` in `~/.nopekit/packs` outranks the bundled
         one in a project's search order. Pack mode tests the bundled copy unless
         `--user-packs` asks for the machine's — and then it finds the plant."""
-        user_packs = os.path.join(self.home, ".atompipe", "packs")
+        user_packs = os.path.join(self.home, ".nopekit", "packs")
         os.makedirs(user_packs)
         _plant(_copy_beam(user_packs), "    return True\n")
 
@@ -260,7 +260,7 @@ class PackModeSelftest(_env.EnvCase):
         for argv in (["gate", "selftest", "--junit", "bracket.deflection"],
                      ["check", "--junit", "bracket.deflection"]):
             with self.subTest(argv=argv):
-                proc = _env.atompipe(argv, cwd=self.cwd, home=self.home)
+                proc = _env.nopekit(argv, cwd=self.cwd, home=self.home)
                 self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
                 self.assertIn(XML_RULE, proc.stderr)
                 self.assertFalse(os.path.exists(os.path.join(self.cwd, "bracket.deflection")))

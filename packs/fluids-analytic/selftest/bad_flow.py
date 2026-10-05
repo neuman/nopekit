@@ -140,7 +140,7 @@ def _assert_external_only_is_classified(ctx):
     import os
     import sys
 
-    from atompipe.gates import run_gate
+    from nopekit.gates import run_gate
 
     flow_py = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                            "gates", "flow.py")

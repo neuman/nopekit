@@ -21,20 +21,20 @@ per gate:
 
 `RunHistoryIsGone` holds the run history's removal to what it was for:
 
-* **S-31.** `.atompipe/runs/` mixed `<gate>#selftest` rows into the same series
+* **S-31.** `.nopekit/runs/` mixed `<gate>#selftest` rows into the same series
   as the sweep's rows, and no latency reader filtered them — a median over both
   is the cost of neither. What a run cost lives in obs now, split by kind, and
   nothing reads `runs/`: a corrupt file there is nobody's problem.
 * **S-89 (runs half).** Every `check` and every `gate selftest` appended a
   tracked run file. `models.RunMeta`, `Ledger.last_run` and the store's run API
   are gone; an old ledger that carries `last_run` still loads (R-2).
-* **S-76 (the early ignore lines).** 1.2 writes `.atompipe/cache/` and
-  `.atompipe/obs/` and nothing ignored them, so the first `check` dirtied
+* **S-76 (the early ignore lines).** 1.2 writes `.nopekit/cache/` and
+  `.nopekit/obs/` and nothing ignored them, so the first `check` dirtied
   `git status` (cli:H2). `init` writes both lines now, and the bracket's tracked
   ignore file APPENDS them after the 1e09113 template — append-only, because the
   1.3 migration recognises that template as a prefix and replaces it.
 
-Everything runs on a copy of the bracket, through `_env.atompipe` subprocesses.
+Everything runs on a copy of the bracket, through `_env.nopekit` subprocesses.
 
 Run:  PYTHONPATH=src python3 -m unittest tests.test_status_stale -v
 """
@@ -51,9 +51,9 @@ import unittest
 import _env
 import _projects
 import _transcript
-import atompipe
-from atompipe import models, store, verdicts
-from atompipe.models import Ledger, ProjectMeta
+import nopekit
+from nopekit import models, store, verdicts
+from nopekit.models import Ledger, ProjectMeta
 
 #: The bracket's six gates, in registration order.
 BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearing",
@@ -74,7 +74,7 @@ BRACKET_GITIGNORE = os.path.join(_projects.LEGACY_BRACKET, "gitignore")
 # helpers
 # --------------------------------------------------------------------------- #
 def _run(project: str, *argv: str):
-    return _env.atompipe(list(argv), cwd=project)
+    return _env.nopekit(list(argv), cwd=project)
 
 
 def _ok(case: unittest.TestCase, proc, *codes: int) -> None:
@@ -145,8 +145,8 @@ class _Checked:
 _SENTINEL_GATE = '''\
 # SPDX-License-Identifier: Apache-2.0
 """Planted by tests/test_status_stale.py: a gate that says when it ran."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 SENTINEL = {sentinel!r}
 
@@ -188,7 +188,7 @@ class StatusNamesTheCheck(_env.EnvCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.checked = _Checked("atompipe-status-stale-")
+        cls.checked = _Checked("nopekit-status-stale-")
         cls.addClassCleanup(cls.checked.close)
 
     def test_the_first_check_left_a_current_cache(self):
@@ -310,7 +310,7 @@ class StatusNamesTheCheck(_env.EnvCase):
         self.assertIsNotNone(found[0].group("when"), found[0].group(0))
         self.assertTrue(found[0].group("age"), "the last check is shown without its age")
 
-        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+        with open(os.path.join(project, ".nopekit", "cache", "last_check.json"),
                   encoding="utf-8") as fh:
             recorded = json.load(fh)["when"]
         self.assertEqual(found[0].group("when"), recorded, "the line is last_check.json's")
@@ -325,9 +325,9 @@ class StatusNamesTheCheck(_env.EnvCase):
 # --------------------------------------------------------------------------- #
 def _history_series(project: str) -> dict[str, list[str]]:
     """``{gate: ["sweep" | "selftest", ...]}`` as a latency reader of
-    `.atompipe/runs/` saw it: each run file's rows, keyed by the gate they time."""
+    `.nopekit/runs/` saw it: each run file's rows, keyed by the gate they time."""
     series: dict[str, list[str]] = {}
-    directory = os.path.join(project, ".atompipe", "runs")
+    directory = os.path.join(project, ".nopekit", "runs")
     for name in sorted(os.listdir(directory)):
         with open(os.path.join(directory, name), encoding="utf-8") as fh:
             record = json.load(fh)
@@ -381,10 +381,10 @@ class RunHistoryIsGone(_env.EnvCase):
 
         # Nothing reads the history any more: a corrupt run file is no command's
         # problem, and doctor — the one reader it had — does not mention it.
-        corrupt = _write(project, ".atompipe/runs/9999-deadbeef.json", "{ not json")
+        corrupt = _write(project, ".nopekit/runs/9999-deadbeef.json", "{ not json")
         proc = _run(project, "doctor", "--json")
         rows = [row for row in _json(proc)["checks"]
-                if ".atompipe/runs" in row["detail"] or "9999-deadbeef" in row["detail"]]
+                if ".nopekit/runs" in row["detail"] or "9999-deadbeef" in row["detail"]]
         self.assertEqual(rows, [], "doctor still reads the run history")
         self.assertTrue(os.path.isfile(corrupt))
 
@@ -395,7 +395,7 @@ class RunHistoryIsGone(_env.EnvCase):
     def test_the_run_record_is_gone_and_an_old_ledger_still_loads(self):
         self.assertFalse(hasattr(models, "RunMeta"), "models.RunMeta still exists")
         self.assertNotIn("RunMeta", models.__all__)
-        self.assertNotIn("RunMeta", atompipe.__all__)
+        self.assertNotIn("RunMeta", nopekit.__all__)
         self.assertNotIn("last_run", {f.name for f in dataclasses.fields(Ledger)})
 
         # R-2: a ledger an older spine wrote still loads, and the key is not
@@ -411,11 +411,11 @@ class RunHistoryIsGone(_env.EnvCase):
     def test_init_makes_no_run_history_and_ignores_the_checkouts_memory(self):
         root = os.path.join(self.tmp(), "project")
         store.init(root, ProjectMeta(name="p", created="2026-09-27T00:00:00Z"))
-        self.assertFalse(os.path.exists(os.path.join(root, ".atompipe", "runs")),
+        self.assertFalse(os.path.exists(os.path.join(root, ".nopekit", "runs")),
                          "init made a run-history directory")
         self.assertNotIn("runs", store.project_paths(root))
 
-        with open(os.path.join(root, ".atompipe", ".gitignore"), encoding="utf-8") as fh:
+        with open(os.path.join(root, ".nopekit", ".gitignore"), encoding="utf-8") as fh:
             patterns = _patterns(fh.read())
         for line in ("out/", "cache/", "obs/"):
             self.assertIn(line, patterns)
@@ -424,21 +424,21 @@ class RunHistoryIsGone(_env.EnvCase):
 
         # git agrees: the checkout's memory is ignored; the project and the
         # verdict cache are not. From checkpoint 1.3 the project is its records
-        # and `.atompipe/project.json`, and `.atompipe/ledger.json` is their
+        # and `.nopekit/project.json`, and `.nopekit/ledger.json` is their
         # GENERATED index (D-06) — an output, ignored like the rest, with the
         # ledger a legacy project migrated from (U26 moved it across).
         _ok(self, _env.git(["-c", "init.defaultBranch=main", "init", "-q"], cwd=root))
-        for rel in (".atompipe/cache/last_check.json", ".atompipe/obs/g.json",
-                    ".atompipe/out/mesh.stl", ".atompipe/ledger.json",
-                    ".atompipe/ledger.legacy.json", "claims/C1.json",
-                    ".atompipe/verdicts/g/0123456789abcdef-01234567.json"):
+        for rel in (".nopekit/cache/last_check.json", ".nopekit/obs/g.json",
+                    ".nopekit/out/mesh.stl", ".nopekit/ledger.json",
+                    ".nopekit/ledger.legacy.json", "claims/C1.json",
+                    ".nopekit/verdicts/g/0123456789abcdef-01234567.json"):
             _write(root, rel, "{}\n")
-        for rel in (".atompipe/cache/last_check.json", ".atompipe/obs/g.json",
-                    ".atompipe/out/mesh.stl", ".atompipe/ledger.json",
-                    ".atompipe/ledger.legacy.json"):
+        for rel in (".nopekit/cache/last_check.json", ".nopekit/obs/g.json",
+                    ".nopekit/out/mesh.stl", ".nopekit/ledger.json",
+                    ".nopekit/ledger.legacy.json"):
             self.assertTrue(_ignored(root, rel), f"{rel} is not ignored")
-        for rel in (".atompipe/project.json", "claims/C1.json",
-                    ".atompipe/verdicts/g/0123456789abcdef-01234567.json"):
+        for rel in (".nopekit/project.json", "claims/C1.json",
+                    ".nopekit/verdicts/g/0123456789abcdef-01234567.json"):
             self.assertFalse(_ignored(root, rel), f"{rel} is ignored")
 
     def test_the_bracket_appends_cache_and_obs_to_its_template(self):
@@ -454,13 +454,13 @@ class RunHistoryIsGone(_env.EnvCase):
         # In a clone, after a check: nothing under cache/ or obs/ shows.
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), git=True)
         _ok(self, _run(project, "check"), 1)
-        for rel in (".atompipe/cache/last_check.json", ".atompipe/obs"):
+        for rel in (".nopekit/cache/last_check.json", ".nopekit/obs"):
             self.assertTrue(os.path.exists(os.path.join(project, *rel.split("/"))),
                             f"check wrote no {rel}: this test would pass vacuously")
         porcelain = _env.git(["status", "--porcelain", "--untracked-files=all"], cwd=project)
         _ok(self, porcelain)
         shown = [line for line in porcelain.stdout.splitlines()
-                 if ".atompipe/cache/" in line or ".atompipe/obs/" in line]
+                 if ".nopekit/cache/" in line or ".nopekit/obs/" in line]
         self.assertEqual(shown, [], "S-76: check dirtied git status with the checkout's "
                                     "memory:\n" + porcelain.stdout)
 

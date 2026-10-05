@@ -51,8 +51,8 @@ import math
 import os
 import sys
 
-from atompipe.gates import gate, GateContext
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate, GateContext
+from nopekit.models import NegativeControl, Tier, Verdict
 
 # The shared arithmetic lives in a leading-underscore module, which the pack
 # loader deliberately does NOT import as a gate module. Reaching it needs this

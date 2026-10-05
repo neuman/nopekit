@@ -61,5 +61,5 @@
   ],
   "authors": [],
   "licence": "Apache-2.0",
-  "origin": "written for atompipe from general hardware procurement practice; thresholds are defaults with stated reasons, not measurements"
+  "origin": "written for nopekit from general hardware procurement practice; thresholds are defaults with stated reasons, not measurements"
 }

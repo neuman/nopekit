@@ -31,7 +31,7 @@ What slipped through before this existed:
 exits 1 with the G4 signature, and a second `check` changes no byte; `--no-record`
 migrates in memory only.
 
-Every command runs in a subprocess (`_env.atompipe`) on a temp copy of the bracket;
+Every command runs in a subprocess (`_env.nopekit`) on a temp copy of the bracket;
 nothing here writes into the tracked tree.
 
 Run:  PYTHONPATH=src python3 -m unittest tests.test_shims -v
@@ -51,15 +51,15 @@ import unittest
 
 import _env
 import _projects
-from atompipe import cli, modelio, store
+from nopekit import cli, modelio, store
 
-CLI_PY = os.path.join(_env.REPO, "src", "atompipe", "cli.py")
+CLI_PY = os.path.join(_env.REPO, "src", "nopekit", "cli.py")
 SIGNATURE = os.path.join(_env.REPO, "tests", "oracle", "bracket_signature.py")
 EXPECTED = os.path.join(_env.REPO, "tests", "expected_bracket.json")
 
 #: The generated index. It is ignored by git and rebuilt by every command, so a
 #: shim's diff may carry it; what it may never carry is a second RECORD.
-INDEX = ".atompipe/ledger.json"
+INDEX = ".nopekit/ledger.json"
 
 #: A fixed stamp for the in-process migration that builds the migrated fixture:
 #: it appears only in the migration's notice, never in a record.
@@ -72,7 +72,7 @@ STAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$")
 #: migration's deny-list block: gate scratch and the JUnit report (`out/`), the
 #: last check's summary and the digest cache (`cache/`), and what each run cost
 #: (`obs/`). "A second check changes no byte" is about everything else.
-SCRATCH = (".atompipe/out/", ".atompipe/cache/", ".atompipe/obs/")
+SCRATCH = (".nopekit/out/", ".nopekit/cache/", ".nopekit/obs/")
 
 
 # --------------------------------------------------------------------------- #
@@ -105,7 +105,7 @@ def _write(path: str, text: str) -> None:
 
 
 def _run(project: str, *argv: str, identity: bool = False):
-    return _env.atompipe(list(argv), cwd=project, identity=identity)
+    return _env.nopekit(list(argv), cwd=project, identity=identity)
 
 
 def _json(proc) -> dict:
@@ -159,7 +159,7 @@ class ShimsWriteExactlyOneFile(_env.EnvCase):
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         after = _snapshot(self.project)
         self.assertEqual(_changed(before, after) - {INDEX}, want,
-                         f"`atompipe {' '.join(argv)}` wrote other than its one record")
+                         f"`nopekit {' '.join(argv)}` wrote other than its one record")
         self.assertEqual(store.agree(self.project), [],
                          "the index disagrees with the records after the shim")
         return proc
@@ -215,7 +215,7 @@ class ShimsWriteExactlyOneFile(_env.EnvCase):
                          "decide regenerated the decision log; it is report --write's output")
 
     def test_packs_add_writes_only_project_json(self):
-        self._one_shim("packs", "add", "beam-analytic", want={".atompipe/project.json"})
+        self._one_shim("packs", "add", "beam-analytic", want={".nopekit/project.json"})
         self.assertEqual(store.read_project(self.project).packs, ["beam-analytic"])
         again = _snapshot(self.project)
         proc = _run(self.project, "packs", "add", "beam-analytic")
@@ -262,11 +262,11 @@ class ShimsWriteExactlyOneFile(_env.EnvCase):
             legacy = fh.read()
         proc = _run(project, "decide", "--title", "Keep PETG", "--summary", "heat is fine")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertEqual(proc.stderr.count("git rm --cached .atompipe/ledger.json"), 1,
+        self.assertEqual(proc.stderr.count("git rm --cached .nopekit/ledger.json"), 1,
                          proc.stderr)
-        self.assertTrue(os.path.isfile(os.path.join(project, ".atompipe", "project.json")))
+        self.assertTrue(os.path.isfile(os.path.join(project, ".nopekit", "project.json")))
         self.assertTrue(os.path.isfile(os.path.join(project, "decisions", "keep-petg.json")))
-        with open(os.path.join(project, ".atompipe", "ledger.legacy.json"), "rb") as fh:
+        with open(os.path.join(project, ".nopekit", "ledger.legacy.json"), "rb") as fh:
             self.assertEqual(fh.read(), legacy, "the legacy ledger was not kept as it was")
         self.assertEqual(store.agree(project), [])
 
@@ -371,7 +371,7 @@ class CheckMigratesOnce(_env.EnvCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        base = tempfile.mkdtemp(prefix="atompipe-shims-migrate-")
+        base = tempfile.mkdtemp(prefix="nopekit-shims-migrate-")
         cls.addClassCleanup(_env._rmtree, base)
         cls.project = _projects.bracket_copy(os.path.join(base, "bracket"))
         cls.legacy = _snapshot(cls.project)
@@ -383,7 +383,7 @@ class CheckMigratesOnce(_env.EnvCase):
     def test_the_first_check_migrates(self):
         proc = self.first
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        self.assertEqual(proc.stderr.count("git rm --cached .atompipe/ledger.json"), 1,
+        self.assertEqual(proc.stderr.count("git rm --cached .nopekit/ledger.json"), 1,
                          proc.stderr)
         self.assertNotIn("git rm", proc.stdout, "the notice belongs on stderr")
         files = set(self.after_first)
@@ -391,19 +391,19 @@ class CheckMigratesOnce(_env.EnvCase):
         self.assertEqual(claims, [f"claims/C{n}.json" for n in range(1, 8)])
         self.assertEqual(sorted(p for p in files if p.startswith("params/")), [],
                          "the params rule wrote a param the model already states")
-        for path in (".atompipe/project.json", ".atompipe/ledger.legacy.json",
+        for path in (".nopekit/project.json", ".nopekit/ledger.legacy.json",
                      ".gitignore", ".gitattributes"):
             self.assertIn(path, files)
-        self.assertEqual(self.after_first[".atompipe/ledger.legacy.json"], self.legacy[INDEX],
+        self.assertEqual(self.after_first[".nopekit/ledger.legacy.json"], self.legacy[INDEX],
                          "the legacy ledger is kept byte for byte")
-        self.assertTrue(self.after_first[".atompipe/.gitignore"].startswith(b"# atompipe:begin"))
+        self.assertTrue(self.after_first[".nopekit/.gitignore"].startswith(b"# nopekit:begin"))
         index = json.loads(self.after_first[INDEX])
         self.assertEqual(index["generated"], store.INDEX_BANNER, "ledger.json is not the index")
         self.assertEqual(store.agree(self.project), [])
 
     def test_the_first_check_fails_as_pinned(self):
         """G4: exit 1 and the JUnit signature `tests/expected_bracket.json` pins."""
-        junit = os.path.join(self.project, ".atompipe", "out", "junit.xml")
+        junit = os.path.join(self.project, ".nopekit", "out", "junit.xml")
         verdict = _env.run([sys.executable, SIGNATURE, junit, EXPECTED,
                             "--exit-code", str(self.first.returncode)], cwd=self.project)
         self.assertEqual(verdict.returncode, 0, verdict.stdout + verdict.stderr)
@@ -412,9 +412,9 @@ class CheckMigratesOnce(_env.EnvCase):
         """What the first check wrote beyond the migration's own files is verdict
         entries and ignored scratch; the migration's files are exactly the plan."""
         written = _outside(_changed(self.legacy, self.after_first),
-                           SCRATCH + (".atompipe/verdicts/",))
+                           SCRATCH + (".nopekit/verdicts/",))
         migration = {f"claims/C{n}.json" for n in range(1, 8)} | {
-            ".atompipe/project.json", ".atompipe/ledger.legacy.json", ".atompipe/.gitignore",
+            ".nopekit/project.json", ".nopekit/ledger.legacy.json", ".nopekit/.gitignore",
             ".gitignore", ".gitattributes", INDEX}
         self.assertEqual(written, migration)
 
@@ -426,7 +426,7 @@ class CheckMigratesOnce(_env.EnvCase):
 
     def test_no_record_migrates_in_memory_only(self):
         project = _projects.bracket_copy(os.path.join(tempfile.mkdtemp(
-            prefix="atompipe-shims-dry-"), "bracket"))
+            prefix="nopekit-shims-dry-"), "bracket"))
         self.addCleanup(_env._rmtree, os.path.dirname(project))
         before = _snapshot(project)
         proc = _run(project, "check", "--no-record", "--json")
@@ -436,7 +436,7 @@ class CheckMigratesOnce(_env.EnvCase):
                          ["bracket.deflection"], "fail")
         self.assertIn("will migrate", proc.stderr)
         self.assertNotIn("git rm", proc.stderr)
-        self.assertEqual(_outside(_changed(before, _snapshot(project)), (".atompipe/out/",)),
+        self.assertEqual(_outside(_changed(before, _snapshot(project)), (".nopekit/out/",)),
                          set(), "--no-record wrote outside gate scratch")
 
 
@@ -502,15 +502,15 @@ class IndexIsTouched(_env.EnvCase):
                 proc = _run(project, *argv)
                 self.assertIn(proc.returncode, (0, 1), proc.stdout + proc.stderr)
                 self.assertEqual(self._index(project), legacy, f"{argv} overwrote the legacy ledger")
-                self.assertFalse(os.path.exists(os.path.join(project, ".atompipe",
+                self.assertFalse(os.path.exists(os.path.join(project, ".nopekit",
                                                              "project.json")),
                                  f"{argv} migrated a project it was only reading")
 
     def test_init_writes_no_index(self):
         root = os.path.join(self.tmp(), "fresh")
-        proc = _env.atompipe(["init", "--name", "fresh", "-C", root], cwd=self.tmp())
+        proc = _env.nopekit(["init", "--name", "fresh", "-C", root], cwd=self.tmp())
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertTrue(os.path.isfile(os.path.join(root, ".atompipe", "project.json")))
+        self.assertTrue(os.path.isfile(os.path.join(root, ".nopekit", "project.json")))
         self.assertIsNone(self._index(root), "init wrote a ledger.json")
 
 
@@ -536,11 +536,11 @@ def whole_ledger_writes(source: str) -> list[str]:
                 owner.setdefault(id(node), fn.name)
     store_names = {"store"}
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in (None, "atompipe"):
+        if isinstance(node, ast.ImportFrom) and node.module in (None, "nopekit"):
             store_names |= {a.asname or a.name for a in node.names if a.name == "store"}
         elif isinstance(node, ast.Import):
             store_names |= {a.asname for a in node.names
-                            if a.name == "atompipe.store" and a.asname}
+                            if a.name == "nopekit.store" and a.asname}
     found: list[str] = []
     for node in ast.walk(tree):
         where = f"{owner.get(id(node), '<module>')}:{getattr(node, 'lineno', 0)}"

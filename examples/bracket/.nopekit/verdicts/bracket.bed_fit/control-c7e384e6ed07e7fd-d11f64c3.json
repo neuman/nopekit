@@ -1,0 +1,195 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.bed_fit",
+  "rho": "c7e384e6ed07e7fdae00931b66ef381c3e92ef419d67bc198b1ce19152552a92",
+  "static": "87d8f09df544f8f6e9603575798a7ef935a309cc25ce7a9d4030e6272ffdc657",
+  "static_parts": {
+    "spine": "f396daf6190537c7f68ede528849d58110bd85d8d545c39e61ecc2efda945530",
+    "code": {
+      "digest": "04d9efdd097e4f637053e641649f1b72d005e28f58ac90e550bd674ec0c1709d",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "c37edcc33de9c8b1839bab5ed8b6c1377619163c9bcfbb1823d9188484bc11f1",
+      "files": {
+        "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+        "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:oversized",
+      "expect": "fail",
+      "note": "the same bracket with a 400 mm arm: nothing wrong but the footprint",
+      "good": "",
+      "mutation": true
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "c04607054719152157838eb2f982f420bbc7e5975e8b133b530b30dad215ba3b",
+    "files": {
+      "model/bracket.py": "ce20d2c788710944d2ed4b791a1b82023cac47f5883df30c783f1da06c5a0b9b",
+      "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+      "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "bbox"
+        ],
+        "2cb920095302550ad59f7ca8f1dc33bc1664e5e2571c471d379549bfbfca6338"
+      ],
+      [
+        [
+          "bbox_max"
+        ],
+        "5a9ecbda64cb9383de5d7e3fe875755c7ac0c9796612e9862087cf8d1b20c22c",
+        413.5
+      ],
+      [
+        [
+          "config",
+          "bed_xy"
+        ],
+        "e40b60a387a432ca8472e6430cc34a33e6c8e5034d2bd824ac8064932c602335",
+        220.0
+      ],
+      [
+        [
+          "config",
+          "brim_mm"
+        ],
+        "2fbdc71b23395e14fa7d5b76d72cd17d618f8c0dca6fb840f309652f68884277",
+        8.0
+      ],
+      [
+        [
+          "usable_bed"
+        ],
+        "189276defaef4b6edcc003a8c6236c6016d813e958048fef7acff0854be10062",
+        204.0
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "bad_extra": [],
+  "good": {
+    "outcome": "pass",
+    "reads": {
+      "params": [
+        [
+          [
+            "bbox"
+          ],
+          "d9e428cc581cccd75b8c99252f5eb34faf1e767839c5005769e6ec92cd497c86"
+        ],
+        [
+          [
+            "bbox_max"
+          ],
+          "6386ed92114f5215be698e0cf8fb27967546193121e1dc5d97fa2720abcba343",
+          73.5
+        ],
+        [
+          [
+            "config",
+            "bed_xy"
+          ],
+          "e40b60a387a432ca8472e6430cc34a33e6c8e5034d2bd824ac8064932c602335",
+          220.0
+        ],
+        [
+          [
+            "config",
+            "brim_mm"
+          ],
+          "2fbdc71b23395e14fa7d5b76d72cd17d618f8c0dca6fb840f309652f68884277",
+          8.0
+        ],
+        [
+          [
+            "usable_bed"
+          ],
+          "189276defaef4b6edcc003a8c6236c6016d813e958048fef7acff0854be10062",
+          204.0
+        ]
+      ],
+      "files": {},
+      "dirs": {},
+      "ledger": {},
+      "host": [],
+      "opaque": []
+    },
+    "extra": [],
+    "measured": 73.5,
+    "limit": 204.0,
+    "units": "mm",
+    "detail": "74 x 30 x 8 mm vs 204 mm usable (220 bed - 2x8 brim)",
+    "goalpost": []
+  },
+  "mutation": {
+    "runs": 107,
+    "boundary": "",
+    "results": [
+      {
+        "key": [
+          "bbox_max"
+        ],
+        "before": 73.5,
+        "after": 235.0,
+        "outcome": "fail",
+        "measured": 235.0,
+        "limit": 204.0
+      },
+      {
+        "key": [
+          "usable_bed"
+        ],
+        "before": 204.0,
+        "after": 63.9,
+        "outcome": "fail",
+        "measured": 73.5,
+        "limit": 63.9
+      }
+    ],
+    "inconclusive": [],
+    "not_mutated": [
+      {
+        "key": [
+          "bbox"
+        ],
+        "why": "never-lands"
+      },
+      {
+        "key": [
+          "config",
+          "bed_xy"
+        ],
+        "why": "never-lands"
+      },
+      {
+        "key": [
+          "config",
+          "brim_mm"
+        ],
+        "why": "never-lands"
+      }
+    ]
+  },
+  "admitted": "paired",
+  "detail": "correctly failed on selftest/bad_configs.py:oversized (the same bracket with a 400 mm arm: nothing wrong but the footprint): 414 x 30 x 8 mm vs 204 mm usable (220 bed - 2x8 brim)",
+  "measured": 413.5,
+  "limit": 204.0,
+  "units": "mm",
+  "digest": "a586891a116cc9da2f96aa3b41ec1f6f5ad57aea1ec3868e2f74cef79b0cf38b"
+}

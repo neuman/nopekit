@@ -2,7 +2,7 @@
 """The bracket's committed cache is current, and the bracket is the one 1.3 migrated (G5).
 
 `examples/bracket` commits six verdict entries and six control entries
-(`.atompipe/verdicts/`), so a fresh clone's first `check` is six cache hits, runs
+(`.nopekit/verdicts/`), so a fresh clone's first `check` is six cache hits, runs
 no gate and no control, and leaves `git status` empty — the transcript's opening
 and G5's clean tree. Those entries are keyed on the spine digest
 (`verdicts.spine_digest()`: a canonical walk of `models`, `gates`, `modelio`,
@@ -51,7 +51,7 @@ import _projects
 import _transcript as T
 import test_fresh_clone
 import test_spine_digest
-from atompipe import verdicts
+from nopekit import verdicts
 
 #: The bracket's six gates, in registration order.
 BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearing",
@@ -60,8 +60,8 @@ BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearin
 #: What a red test here tells the person reading it (spec U32, verbatim). The
 #: regeneration is idempotent; examples/bracket/README.md spells out every step.
 REGENERATE = ("the committed bracket cache was written by another spine or model: in "
-              "examples/bracket run `rm -rf .atompipe/verdicts && atompipe check; "
-              "atompipe gate selftest` and commit the result "
+              "examples/bracket run `rm -rf .nopekit/verdicts && nopekit check; "
+              "nopekit gate selftest` and commit the result "
               "(examples/bracket/README.md, \"The committed cache\")")
 
 #: What it says instead when the walk, not the cache, is what moved.
@@ -106,7 +106,7 @@ def fix_message(*, portable: bool | None = None) -> str:
 
 def committed_entries(files: list[str] | None = None) -> dict[str, dict]:
     """``{project-relative path: parsed entry}`` for every file under the bracket's
-    ``.atompipe/verdicts/`` that a commit of this tree holds (the fresh-clone
+    ``.nopekit/verdicts/`` that a commit of this tree holds (the fresh-clone
     listing: git where it tracks the bracket, the walk where nothing does)."""
     if files is None:
         _source, files = test_fresh_clone.bracket_listing()
@@ -296,14 +296,14 @@ class BracketCacheIsCurrent(_env.EnvCase):
 
     def test_a_fresh_copy_reads_every_gate_fresh_and_admitted(self):
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
-        proc = _env.atompipe(["status", "--json"], cwd=project)
+        proc = _env.nopekit(["status", "--json"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
         self.fail_with(status_problems(_json(proc)))
 
     def test_a_fresh_copy_checks_with_nothing_executed(self):
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         before = _listing(project, T.VERDICTS_DIR)
-        proc = _env.atompipe(["check", "--json"], cwd=project)
+        proc = _env.nopekit(["check", "--json"], cwd=project)
         self.assertEqual(proc.returncode, 1, "the bracket fails bracket.deflection on "
                                              "purpose:\n" + proc.stderr[-2000:])
         problems = check_problems(_json(proc))
@@ -331,7 +331,7 @@ class BracketIsQualified(_env.EnvCase):
     def test_selftest_on_a_fresh_copy_files_nothing_new(self):
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         before = _listing(project, T.VERDICTS_DIR)
-        proc = _env.atompipe(["gate", "selftest"], cwd=project)
+        proc = _env.nopekit(["gate", "selftest"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
         self.assertEqual(sorted(set(_listing(project, T.VERDICTS_DIR)) - set(before)), [],
                          fix_message())
@@ -366,7 +366,7 @@ class CacheCheckersRefuse(_env.EnvCase):
         self.assertTrue(any("2 committed verdict entries" in p
                             for p in entry_problems(doubled, self.running)))
         stray = dict(self.entries)
-        stray[".atompipe/verdicts/bracket.deflection/notes.json"] = {}
+        stray[".nopekit/verdicts/bracket.deflection/notes.json"] = {}
         self.assertTrue(entry_problems(stray, self.running))
 
     def test_a_stale_or_unadmitted_gate_is_refused(self):
@@ -410,14 +410,14 @@ class CacheCheckersRefuse(_env.EnvCase):
         violation a later spine or model edit would produce, end to end."""
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"),
                                          migrated=True, thickness=8.0)
-        proc = _env.atompipe(["status", "--json"], cwd=project)
+        proc = _env.nopekit(["status", "--json"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stderr[-2000:])
         problems = status_problems(_json(proc))
         self.assertTrue(any(p.startswith("bracket.deflection:") for p in problems), problems)
 
     def test_the_message_names_the_fix(self):
-        self.assertIn("rm -rf .atompipe/verdicts && atompipe check", fix_message(portable=True))
-        self.assertIn("atompipe gate selftest", fix_message(portable=True))
+        self.assertIn("rm -rf .nopekit/verdicts && nopekit check", fix_message(portable=True))
+        self.assertIn("nopekit gate selftest", fix_message(portable=True))
         # P2.5b (R-6, the same property): the report is an ignored output, so
         # regenerating the cache writes no tracked report.
         self.assertNotIn("report --write", fix_message(portable=True))
@@ -442,15 +442,15 @@ class BracketIsMigrated(unittest.TestCase):
             return fh.read()
 
     def test_the_records_and_the_marker_are_committed(self):
-        for rel in (".atompipe/project.json", ".atompipe/.gitignore", ".gitignore",
+        for rel in (".nopekit/project.json", ".nopekit/.gitignore", ".gitignore",
                     ".gitattributes", *(f"claims/{c}.json" for c in CLAIM_IDS)):
             self.assertIn(rel, self.files, f"{rel} is not committed ({self.source} listing)")
-        self.assertEqual(json.loads(self.read(".atompipe/project.json"))["schema"], 2)
+        self.assertEqual(json.loads(self.read(".nopekit/project.json"))["schema"], 2)
 
     def test_the_index_the_run_history_and_params_are_not(self):
         leftovers = sorted(rel for rel in self.files
-                           if rel in (".atompipe/ledger.json", ".atompipe/ledger.legacy.json")
-                           or rel.startswith((".atompipe/runs/", "params/")))
+                           if rel in (".nopekit/ledger.json", ".nopekit/ledger.legacy.json")
+                           or rel.startswith((".nopekit/runs/", "params/")))
         self.assertEqual(leftovers, [], "the index is an output (D-06), the run history "
                                         "is gone (D-05), and no param record is written "
                                         "where the model states the prose (§3.15)")
@@ -460,9 +460,9 @@ class BracketIsMigrated(unittest.TestCase):
         self.assertEqual(pairs, C1_PAIRS)
 
     def test_the_ignore_blocks_are_the_migrations(self):
-        text = self.read(".atompipe/.gitignore")
-        self.assertTrue(text.startswith("# atompipe:begin\n"), text)
-        self.assertTrue(text.endswith("# atompipe:end\n"), text)
+        text = self.read(".nopekit/.gitignore")
+        self.assertTrue(text.startswith("# nopekit:begin\n"), text)
+        self.assertTrue(text.endswith("# nopekit:end\n"), text)
         patterns = [line for line in text.splitlines() if line and not line.startswith("#")]
         for pattern in ("ledger.json", "ledger.legacy.json", "obs/", "cache/", "out/",
                         "runs/"):
@@ -472,7 +472,7 @@ class BracketIsMigrated(unittest.TestCase):
         for rel, needles in ((".gitignore", ("__pycache__/", "*.py[cod]")),
                              (".gitattributes", ("* text=auto eol=lf", "*.stl -text"))):
             block = self.read(rel)
-            self.assertIn("# atompipe:begin", block, rel)
+            self.assertIn("# nopekit:begin", block, rel)
             for needle in needles:
                 self.assertIn(needle, block.splitlines(), rel)
 

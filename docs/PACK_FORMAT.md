@@ -34,7 +34,7 @@ agent must be able to know about forty packs while loading two.**
 | 2 | `PACK.md` | ~150 lines | when the agent is working in this domain |
 | 3 | `references/*.md` | whatever it takes | only for the specific task at hand |
 
-`atompipe packs list` reads **only** tier 1 and never imports Python. If your
+`nopekit packs list` reads **only** tier 1 and never imports Python. If your
 manifest's `description` needs three sentences, the pack is doing too much — split
 it.
 
@@ -66,7 +66,7 @@ hundred lines; it costs nothing until an agent is actually meshing.
 }
 ```
 
-`settles` is the **matching vocabulary**. When `atompipe gap` finds a claim with no
+`settles` is the **matching vocabulary**. When `nopekit gap` finds a claim with no
 gate, it scores every manifest's `settles` and `claim_classes` against the claim's
 quantity to suggest candidates. Write the phrases a person would actually use for
 the quantity, not your internal gate names.
@@ -109,8 +109,8 @@ Write it for an agent that is competent but has never used this domain's tooling
 ## Gates
 
 ```python
-from atompipe.gates import gate, GateContext
-from atompipe.models import Verdict, Tier, NegativeControl
+from nopekit.gates import gate, GateContext
+from nopekit.models import Verdict, Tier, NegativeControl
 
 @gate(
     id="fdm.overhang",
@@ -137,7 +137,7 @@ Rules, all enforced:
 - **`negative_control` is mandatory.** The registry raises without it. A gate that
   cannot demonstrate failure is a logger — see rule 5 in `METHOD.md`.
 - **A gate id names a directory.** Its cached verdicts live in
-  `.atompipe/verdicts/<gate id>/`, so the registry refuses an id containing `/`, `\`,
+  `.nopekit/verdicts/<gate id>/`, so the registry refuses an id containing `/`, `\`,
   `..` or `:`, and an id that differs from a registered one only in case (on macOS
   and Windows those are one directory). Dotted and pack-prefixed — `fdm.overhang` —
   is the convention, and every bundled id already follows it.
@@ -167,7 +167,7 @@ Rules, all enforced:
 - **A skip means the declared tooling is absent — nothing else.** On the pack's own
   `selftest/baseline.json` and on its own known-bad fixture, a gate may skip only
   when `availability(spec)` fails. A gate that skips itself there while its tools are
-  present is broken: `atompipe gate selftest` reports it not-ok (`skipped on its own
+  present is broken: `nopekit gate selftest` reports it not-ok (`skipped on its own
   known-bad input while its tools are present: <reason>`) and CI fails the baseline.
   A control that skips never fires, so it is not a control — a fixture that deleted a
   key its gate needed once passed the suite's invariants 3 and 6 as "honestly
@@ -241,7 +241,7 @@ Declare an edge only when all four hold (P2.2-D12), and say why at the decorator
 4. **Both gates are in this pack**: a pack's controls and baseline are sealed to it,
    and a prerequisite in another pack would make isolation depend on that pack's
    version. A project's `gates/` may name any id; one nothing registers reads "not
-   registered", and `atompipe doctor` names it.
+   registered", and `nopekit doctor` names it.
 
 The registry also refuses a `needs` cycle (named `a -> b -> a`, each with its pack), a
 need that names the gate itself, a glob or a duplicate. `Verdict.blocked_by` and
@@ -509,7 +509,7 @@ by exactly those reads (`rho`). So:
   a memoised file read was a hit on the real run, the entry keyed no file, and a
   zeroed limit file left a Fresh PASS.) Any other memo — a module-level dict filled
   from a function, a `global` rebound from one, a mutable default argument — cannot be
-  emptied from outside: `atompipe doctor`'s `memos` row names it. Share a file between
+  emptied from outside: `nopekit doctor`'s `memos` row names it. Share a file between
   gates with `ctx.load_file`.
 - **Asking whether a file is there is reading it.** `os.path.isfile`, `exists`,
   `isdir`, `getsize`, `pathlib.Path.exists`/`is_file`, a `glob` of a literal path: a
@@ -534,7 +534,7 @@ by exactly those reads (`rho`). So:
   keyed the same way — one shown on the tier-0 path does not qualify the tier-2 path,
   and a gate that passes its known-bad input on either path is qualified on none.
   A crash is remembered on its own path too: a tier-2 solver that crashes supersedes
-  the tier-2 PASS — a plain `check` shows the crash and says `run atompipe check --tier
+  the tier-2 PASS — a plain `check` shows the crash and says `run nopekit check --tier
   2` — and a PASS on the cheap path never clears it; only a run on that path that
   measures does. (What slipped through: a tier-0 PASS forgot the tier-2 crash, and
   `check --tier 2` served the PASS the crash had superseded.) Your control's crash is
@@ -550,7 +550,7 @@ by exactly those reads (`rho`). So:
   `duration_s` and `cpu_s` (the `os.times()` delta, child processes included — a gate
   that shells out to a solver is not free) and clears `rho`, which the sweep computes
   from the trace.
-- **Load a helper by path with `atompipe.modelio.load_path(path)`**, not with
+- **Load a helper by path with `nopekit.modelio.load_path(path)`**, not with
   `importlib.util.spec_from_file_location` under a fixed module name. It compiles the
   bytes on disk (a stale `__pycache__` once ran 7.0 after the source said 8.0), salts
   the module name with the path (two copies of one pack never run each other's
@@ -570,7 +570,7 @@ by exactly those reads (`rho`). So:
   `load_path`. `importlib.import_module("rules")` — like an `import` inside a function
   body — is read into the gate's code; `importlib.import_module(name)` is not, and is
   keyed only by the first run in a process to load it (a later one is served it from
-  `sys.modules` and opens nothing). `atompipe doctor` names every such call under
+  `sys.modules` and opens nothing). `nopekit doctor` names every such call under
   `dynamic-imports`. Either way the stock import system loads it, from a
   `__pycache__` that still validates; `load_path` never does.
 
@@ -669,7 +669,7 @@ where two packs collide without either baseline showing it:
 }
 ```
 
-`atompipe doctor` reads those two maps from every **installed** pack and reports
+`nopekit doctor` reads those two maps from every **installed** pack and reports
 any key that two of them read with different declared meanings — naming both packs,
 what each means by it, the scoped spellings that separate them, and whether the
 project is publishing the ambiguous bare key right now:
@@ -789,7 +789,7 @@ The baseline is also the pack's teaching example. Include a `_description` namin
 the object, a `_notes` map of key → one line on what it is and its unit, and an
 `_aliases` map of key → the other spellings its gates accept; an agent that reads
 the baseline should be able to write a model this pack can gate, without reading
-any of its code — and `atompipe doctor` can only diff two packs' vocabularies
+any of its code — and `nopekit doctor` can only diff two packs' vocabularies
 against each other if both of them wrote one down. **State the key under the
 spelling the pack teaches** (`part_bbox_mm`, not `bbox_mm`), so CI proves the
 primary key is the one actually read.
@@ -801,7 +801,7 @@ genuinely absent on that machine, which is how a runner without trimesh reports 
 mesh pack honestly instead of failing it. A gate that skips itself on either input
 while its tools are present fails.
 
-`atompipe gate selftest` runs every control and **fails any gate that passes its own
+`nopekit gate selftest` runs every control and **fails any gate that passes its own
 known-bad input**.
 
 ### Qualification: both controls, at the gate's current version
@@ -834,7 +834,7 @@ the bundled packs — every conclusive mutation of its known-good control failed
   reads another ledger`): a pack's baseline hands its gates an empty ledger, so a
   gate that reads a claim in `check` never qualifies outside the bundled packs.
 - **The mutation pass** (gates outside the bundled packs: a project's own, and a pack
-  under `.atompipe/packs/`, `~/.atompipe/packs` or `$ATOMPIPE_PACK_PATH`): each value
+  under `.nopekit/packs/`, `~/.nopekit/packs` or `$NOPEKIT_PACK_PATH`): each value
   the known-good run read is pushed along a fixed ladder until the gate's own
   measured value lands 15% past its own limit, the push then aimed at the smallest
   change that lands; that run must fail. A run that skips or errors is
@@ -846,7 +846,7 @@ the bundled packs — every conclusive mutation of its known-good control failed
   under the owner's `selftest/` — the pack's, or the project's — the
   `NegativeControl` fields, and whatever either control's fixture and the gate read
   on its input, every mutation run's included. Each qualification is recorded beside
-  the gate's verdicts, as `.atompipe/verdicts/<gate id>/control-<rhoC16>-<out8>.json`
+  the gate's verdicts, as `.nopekit/verdicts/<gate id>/control-<rhoC16>-<out8>.json`
   — the known-bad half, the known-good half (`good`), the walk (`mutation`) and
   `admitted` (`paired`, `reject-only`, `no`), which the reader re-derives from the
   recorded facts — tracked and never rewritten.
@@ -864,7 +864,7 @@ the bundled packs — every conclusive mutation of its known-good control failed
   and its claim reads Gap: `unqualified: <gate> : <what does not hold>`, beside a
   passing gate too. A gate qualified at an earlier version and not at this one reads
   Stale — `not yet qualified at this version — the next check run qualifies it`,
-  naming `atompipe check --tier <t>` when its verdict took a costlier path — and
+  naming `nopekit check --tier <t>` when its verdict took a costlier path — and
   one never qualified at all reads Gap until a check run qualifies it. A missing
   tool is a skip, never an unqualified gate.
 - **Qualified means it can fail, and nothing more.** The line says which facts held:
@@ -896,13 +896,13 @@ detector checks by running them; a clean host is never substituted for a leaky
 fixture.
 
 **A control writes into its own scratch.** Every control runs with `ctx.out_dir` set
-to `.atompipe/out/controls/<gate id>/`, emptied before each run — never the sweep's
+to `.nopekit/out/controls/<gate id>/`, emptied before each run — never the sweep's
 `out_dir`. A known-bad fixture that writes a mesh or a report there can neither
 overwrite the evidence a cached PASS cites nor leave a stale file for the next run to
 read as an input. In pack mode, and in `pack validate`, every control gets a
 temporary directory and nothing is written into the pack.
 
-In a project, `atompipe gate selftest` re-runs every control — never served from the
+In a project, `nopekit gate selftest` re-runs every control — never served from the
 record — and files exactly the entries `check` would (an unchanged control finds its
 file already there and writes nothing); `--no-record` files nothing. What slipped
 through before any of this (S-05): nothing ever ran a declared control during a
@@ -917,8 +917,8 @@ kinds the site already knows gets visualisation for free — and, more important
 its gates get somewhere to point.
 
 ```python
-from atompipe.site import viewgen, ViewContext, derive_explode
-from atompipe.models import View, ViewKind
+from nopekit.site import viewgen, ViewContext, derive_explode
+from nopekit.models import View, ViewKind
 
 @viewgen(id="assembly", kind=ViewKind.MODEL3D, title="Assembly",
          requires_python=["trimesh"], gates=["cad.clash"])
@@ -942,7 +942,7 @@ depend on code nobody reviewed.
 Rules:
 
 - **Returning `None` is normal.** A CAD viewgen in a project with no geometry has
-  nothing to draw. That is not a failure; `atompipe site build` records it as
+  nothing to draw. That is not a failure; `nopekit site build` records it as
   `empty` and moves on. Do not raise, and do not emit an empty view that renders as
   a broken box.
 - **Declare `requires_python` / `requires_tools` the way a gate does.** A viewgen
@@ -992,7 +992,7 @@ once that has happened they stop trusting the overlay. An unlocatable failure
 carries no locators, and the page marks the verdict as unanchored rather than
 guessing.
 
-Nothing is dropped for being undrawable, either. `atompipe site build` reports every
+Nothing is dropped for being undrawable, either. `nopekit site build` reports every
 locator naming a view that does not exist or a node the view does not declare —
 in its warnings and in `state.json` — because a gate that thinks it is drawing and
 is not looks exactly like a gate that found nothing, and both ends of that mistake
@@ -1021,7 +1021,7 @@ it is almost never in a datasheet.
 ## Validation
 
 ```
-atompipe pack validate <name>
+nopekit pack validate <name>
 ```
 
 checks that the manifest parses and matches its directory, `PACK.md` exists and is
@@ -1044,7 +1044,7 @@ prerequisite's tooling is absent (`<gate>: isolation not checked — its prerequ
 solver, so this stays seconds long; the rest waits for
 
 ```
-atompipe gate selftest --pack <name> --junit <file>.xml
+nopekit gate selftest --pack <name> --junit <file>.xml
 ```
 
 which runs the same checks at **every** tier and writes them as JUnit XML: suite
@@ -1053,11 +1053,11 @@ known-good half). It prints a row per pack (`beam-analytic (bundled) : 8 qualifi
 the line of every unqualified gate (every gate's under `-v`), and the summary
 (`54 evaluators in 9.2s: 54 qualified, 0 unqualified, 0 skipped`).
 `--pack` takes a pack name or a directory; a pack being written inside a project
-(`.atompipe/packs/<name>/`) is found by name there. Outside a project,
-`atompipe gate selftest` with no `--pack` demonstrates every bundled pack. Either
+(`.nopekit/packs/<name>/`) is found by name there. Outside a project,
+`nopekit gate selftest` with no `--pack` demonstrates every bundled pack. Either
 way nothing is recorded, a run with any unqualified gate exits 1, as does one in
-which no control ran (`--allow-empty` accepts that), and `--user-packs` is needed before `$ATOMPIPE_PACK_PATH` or
-`~/.atompipe/packs` are searched — the machine does not get to choose which copy is
+which no control ran (`--allow-empty` accepts that), and `--user-packs` is needed before `$NOPEKIT_PACK_PATH` or
+`~/.nopekit/packs` are searched — the machine does not get to choose which copy is
 tested.
 
 CI runs `pack validate` on every pack and `gate selftest` at the repository root,
@@ -1067,13 +1067,13 @@ not get merged.**
 ## Contributing back
 
 A pack is an ordinary directory, laid out as above: no command creates or exports
-one. One built inside a user's project, under `.atompipe/packs/<name>/`, is
+one. One built inside a user's project, under `.nopekit/packs/<name>/`, is
 already the directory a PR adds under `packs/`, with no edits. The evidence that
 goes with it is the selftest's own report:
 
 ```
-atompipe pack validate <name>                            # what CI runs on every pack
-atompipe gate selftest --pack <name> --junit <file>.xml  # every tier: the evidence
+nopekit pack validate <name>                            # what CI runs on every pack
+nopekit gate selftest --pack <name> --junit <file>.xml  # every tier: the evidence
 ```
 
 What slipped through (S-10): this section, the extension protocol and the

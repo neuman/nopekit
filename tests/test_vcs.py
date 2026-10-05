@@ -2,7 +2,7 @@
 """`vcs` is the only git edge, and it answers for the project it is asked about.
 
 A git hook exports `GIT_DIR`, `GIT_INDEX_FILE` and `GIT_WORK_TREE` pointing at the
-repository that ran the hook. An atompipe command started from one would, through
+repository that ran the hook. An nopekit command started from one would, through
 a naive `subprocess.run(["git", ...])`, report that repository's HEAD, index and
 files as the project's — and a control entry's selftest walk, a verdict's age and
 a signer's identity would all be facts about somewhere else. Each test below
@@ -34,7 +34,7 @@ import time
 import unittest
 from unittest import mock
 
-from atompipe import vcs
+from nopekit import vcs
 
 import _env
 
@@ -120,7 +120,7 @@ class VcsIsTheOnlyGitEdge(_env.EnvCase):
     def test_a_foreign_repository_in_the_environment_is_ignored(self):
         project = self._repo({"p.txt": "p\n"})
         self._git(["config", "user.name", "Project Person"], project)
-        self._git(["config", "user.email", "project@atompipe.invalid"], project)
+        self._git(["config", "user.email", "project@nopekit.invalid"], project)
         project_head = self._git(["rev-parse", "HEAD"], project).strip()
         foreign = self._repo({"f.txt": "f\n", "g.txt": "g\n"}, when="2019-05-05T00:00:00Z")
         foreign_head = self._git(["rev-parse", "HEAD"], foreign).strip()
@@ -148,7 +148,7 @@ class VcsIsTheOnlyGitEdge(_env.EnvCase):
             self.assertEqual(vcs.ls_files(project, [], others=False), ["p.txt"])
             self.assertEqual(vcs.commit_times(project, ["p.txt", "f.txt"]),
                              {"p.txt": "2021-01-01T00:00:00Z"})
-            self.assertEqual(vcs.ident(project), "Project Person <project@atompipe.invalid>")
+            self.assertEqual(vcs.ident(project), "Project Person <project@nopekit.invalid>")
 
             self.assertIsNone(vcs.git_head(plain), "a directory with no repository "
                               "answered with the inherited GIT_DIR's HEAD")
@@ -325,12 +325,12 @@ class VcsIsTheOnlyGitEdge(_env.EnvCase):
         # the login and host name (on a machine whose host name has a dot) and
         # answers with an address nobody chose.
         self.assertIsNone(vcs.ident(repo), "an email git made up from the host name")
-        self._git(["config", "user.email", "local@atompipe.invalid"], repo)
-        self.assertEqual(vcs.ident(repo), "Local Person <local@atompipe.invalid>")
+        self._git(["config", "user.email", "local@nopekit.invalid"], repo)
+        self.assertEqual(vcs.ident(repo), "Local Person <local@nopekit.invalid>")
         # The user's own environment is their git: `git commit` would use it too.
         with mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": "Env Person",
-                                          "GIT_AUTHOR_EMAIL": "env@atompipe.invalid"}):
-            self.assertEqual(vcs.ident(repo), "Env Person <env@atompipe.invalid>")
+                                          "GIT_AUTHOR_EMAIL": "env@nopekit.invalid"}):
+            self.assertEqual(vcs.ident(repo), "Env Person <env@nopekit.invalid>")
 
 
 if __name__ == "__main__":

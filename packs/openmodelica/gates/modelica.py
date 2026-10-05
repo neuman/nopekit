@@ -40,8 +40,8 @@ if _HERE not in sys.path:
 
 import _modelica as M                                              # noqa: E402
 
-from atompipe.gates import gate, GateContext                       # noqa: E402
-from atompipe.models import Comparator, NegativeControl, Tier, Verdict   # noqa: E402
+from nopekit.gates import gate, GateContext                       # noqa: E402
+from nopekit.models import Comparator, NegativeControl, Tier, Verdict   # noqa: E402
 
 _MISSING = object()
 
@@ -833,7 +833,7 @@ def result_claim(ctx: GateContext) -> Verdict:
     detail = (f"{len(usable) - len(failed) - len(unusable)}/{len(usable)} bound "
               f"claim(s) met from {os.path.basename(path)}")
     if worst is not None:
-        # The distance in words, by the sign `atompipe.claims.margin` uses — inside
+        # The distance in words, by the sign `nopekit.claims.margin` uses — inside
         # or past the limit — never a signed percentage with this loop's own
         # sign, which is positive PAST the limit: the row's JSON `margin` (D-17,
         # P2.4) and its detail read opposite signs on the same verdict until P2.4

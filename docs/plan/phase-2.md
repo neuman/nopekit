@@ -11,7 +11,7 @@ consumes all four.
 #### Target transcript
 
 ```text
-$ atompipe check                     # on a copy with arm_length pushed so L/h < 5
+$ nopekit check                     # on a copy with arm_length pushed so L/h < 5
 [FAIL] bracket.model_validity : slenderness 4.2 (>= 5.0 for Euler-Bernoulli; …)
 2 checks not run — prerequisite bracket.model_validity failed: bracket.deflection, bracket.bending_stress
 6 gates: 4 executed, 0 cached — 3 ok, 1 FAIL, 2 unknown — tier 0
@@ -20,7 +20,7 @@ BLOCKING — 3 critical claim(s) must not be spent against:
 [FAIL ] C2 Root bending stress … — bracket.model_validity : slenderness 4.2 (…); bracket.bending_stress not run: prerequisite failed
 [gap  ] C7 …
 
-$ atompipe export --dry-run          # on the shipped bracket; this is also /ready (D-15)
+$ nopekit export --dry-run          # on the shipped bracket; this is also /ready (D-15)
 v0.1 is not ready: 1 failing (C1); 1 with nothing that can check it (C7).
 It has not been tested on a real part (C5), and C6 is assumed with no one signed to it.
 A passing check has shown it can refuse; that does not show it is right, or enough.
@@ -35,9 +35,9 @@ $ echo $?
 $ head -3 REPORT.md
 # wall-bracket v0.1 — readiness
 **v0.1 is not ready: 1 failing (C1); 1 with nothing that can check it (C7).** It has not been tested on a real part (C5), and C6 is assumed with no one signed to it.
-records <records12> · as of the newest result · atompipe <version>
+records <records12> · as of the newest result · nopekit <version>
 
-$ atompipe claim physical C5 pass --detail "no cracking"     # from the agent's Bash
+$ nopekit claim physical C5 pass --detail "no cracking"     # from the agent's Bash
 error: C5 says nothing a result could fail — write its test into claims/C5.json first
 $ …after C5 gains an acceptance, the same call…
 recorded C5 pass in results/C5.json — unsigned (agent session <id>): export still refuses C5
@@ -47,7 +47,7 @@ What changed for the human:
 
 - A check that could not run because another failed says so, names the root, and does not
   say "install a tool" (today every BLOCKED reads *missing tooling*: `report.py:122`;
-  `skills/atompipe/SKILL.md:187-191`; S-54).
+  `skills/nopekit/SKILL.md:187-191`; S-54).
 - The headline names the assumption it used to omit (`report.py:429-498`; S-59).
 - Each claim states what it ends in, in the paper's six phrasings.
 - `export` is the refusal at the boundary that costs money (METHOD rule 4), and
@@ -179,10 +179,10 @@ evaluator not from the bundled packs. Rows the design's critique moved say so.
 | D3 | known-bad shown is unqualified: Gap, `known-good not run`, beside a pass too; `RejectOnlyStillCounts` became `KnownBadShownIsAGap` in the open | a warning in every phase; Stale; a fifth `Admission.state` |
 | D4 | which known-good control, first match: `NegativeControl.good` (the LAST field, handed what the known-bad fixture is handed); a pack's `selftest/baseline.json`; a project's `selftest/known_good.py`; else known-bad shown. A `good` fixture that reads the live design it was handed — itself, or the gate through a context it handed back — is `known-good control reads the candidate` | `known_good` as the field name; falling back to the live design |
 | D5 | channel parity over the present `ctx.extra` keys, the spine's removed; both sets recorded. R-4 inside the checkpoint: C6 read exactly 13 (cad-solid 6, sourcing 7), then `good=` fixtures for those 13 (`selftest/good_meshes.py:baseline_meshes`, absolute paths so a host project loads them; `selftest/good_boms.py:baseline_bom`, its own `_control` note), then 0 hits. **Added by the critique:** an evaluator the walk applies to whose controls reach it through `extra` at all is unqualified (`channels:check`) — a check run hands `extra={}`, so both controls tested a path `check` never takes | keys each builder added; moving the 13 to params (on the check-in list) |
-| D6 | mutation applies by LOCATION: every evaluator whose pack directory is not under the bundled `packs/` (project `gates/`, `.atompipe/packs/`, user and path packs). **Moved by the critique:** applicability is recorded in the static part (`nc.mutation`), so a promotion into `packs/` re-qualifies | project `gates/` only; every evaluator; a git-clean content check (critique: a bundled copy edited in place would escape it, and the check needs git — on the check-in list) |
+| D6 | mutation applies by LOCATION: every evaluator whose pack directory is not under the bundled `packs/` (project `gates/`, `.nopekit/packs/`, user and path packs). **Moved by the critique:** applicability is recorded in the static part (`nc.mutation`), so a promotion into `packs/` re-qualifies | project `gates/` only; every evaluator; a git-clean content check (critique: a bundled copy edited in place would escape it, and the check needs git — on the check-in list) |
 | D7 | the walk, aimed (§4 of the design): ladder `MUTATION_RUNGS`, x then ÷, nearest first, until the evaluator's OWN value lands `MUTATION_MARGIN` past its OWN limit — never the pass flag — then 16 halvings in log-factor and outward rounding to 3 significant figures. **Moved by the measurement:** "past" within `_LAND_TOLERANCE` (1e-9) — 2.3 − 2.0 is 0.29999999999999982 in binary, and the bracket's 0.575 mutation read 0.576 | straight-through only; every read key changed; the ladder unaimed; stopping at the first fail |
 | D8 | conclusive is GLOSSARY §2's: a pass or a fail. Skip and error are inconclusive, `(k inconclusive)`. None conclusive is qualified on the controls, its line saying why: `(none made: tier 1)`, `(none made: no value against a limit)` (**moved by the critique**: one word for two facts) | unqualified when none is conclusive (critique 8, rejected: §1.5's panel default, and 17 bundled gates could never qualify); `0/0` |
-| D9 | where it runs: in process after both controls held, tier 0, `MUTATION_RUNS_MAX` 1024 runs, one influence probe per key (a value equal to the reported one first); keys the budget does not reach are *not mutated* (**critique**: not inconclusive) and, where one still moves the value, the walk could not finish — unqualified; a crash while aiming makes that key inconclusive, never "does not land" (**critique**); a crash that does not repeat holds the walk (`mutation:errored`); scratch in one temp dir outside the project and every pack, else `mutation:could-not-run`; every run's reads folded into the known-good trace at known-good digests | a temp worktree; scratch under `.atompipe/out`; a throwaway trace (V1j); a clock budget; no budget |
+| D9 | where it runs: in process after both controls held, tier 0, `MUTATION_RUNS_MAX` 1024 runs, one influence probe per key (a value equal to the reported one first); keys the budget does not reach are *not mutated* (**critique**: not inconclusive) and, where one still moves the value, the walk could not finish — unqualified; a crash while aiming makes that key inconclusive, never "does not land" (**critique**); a crash that does not repeat holds the walk (`mutation:errored`); scratch in one temp dir outside the project and every pack, else `mutation:could-not-run`; every run's reads folded into the known-good trace at known-good digests | a temp worktree; scratch under `.nopekit/out`; a throwaway trace (V1j); a clock budget; no budget |
 | D10 | re-qualify by values, both halves; the good half's host reads included, the gate's on what a `good` fixture handed back too (**critique**) | the known-bad half alone (V1i) |
 | D11 | `rho_control` over both halves' reads and every walk run's; `out8` over the outcomes, numbers and tallies, never an `after` | known-good params out of rho; `after` in `out8` |
 | D12 | a half that crashed, skipped itself, was unusable or read the candidate is remembered under `control:<gate>` with its facts and the refusal's own detail (**moved by the build**: the held verdict first kept only the token) | caching a half's crash |
@@ -353,7 +353,7 @@ received them).
 | D15 | `--measured VALUE`, finite, in the claim's units: it decides the outcome where the claim has a limit, a disagreeing typed outcome refused | `--value --units`; a typed outcome only |
 | D16 | the rebuild prediction (`claims.rebuild`): the articles a counting result (the counting fail, or the newest moved pass a person made on a measurement) is bound to whose design moved, one line each with its claims; **moved by the critique (12):** in P2.5a it never under-predicts and over-predicts freely — "names nothing else" is P2.5b's, with `export`'s traced articles, and the Fig. 4 test records one article for that reason | per-claim lines; naming passes that never counted, judgments, claim-moved passes |
 | D17 | an expert-judgment claim: Gap `no-authority`; Gap `authority-unattributed` until its authority records it with `assume`; Assumed `awaiting-judgment`; Checked `judged`; Stale `judgment-moved`; any fail Failing (`judged-fail` when the authority's). **Kept against the critique (13), and put on the check-in batch:** the walkthrough shows it Assumed from the moment it is written; read literally, an agent's edit `"terminal": "human", "authority": "<anyone>"` would turn any Gap into a passing `check` | Assumed from the file's `authority` alone (that laundering); "judged for X, recorded by Y" (**dropped by the critiques (4, 10)**) |
-| D18 | words from one table (`report.HUMAN`: `terminal`, the leads, `recorded`, `not_counted`, `signing`, `physical`); no *signed*, *confirmed*, *verified*; the console is "their own shell"; the page's "contradict" title is `phrases.disagree`; **moved by the critiques:** the Stale line says the result "was recorded on a design that has since moved" (18 — never "was built from" before P2.5b's export articles), the report's Stale advice follows its cause (9 — a moved article is never told `atompipe check` restores it), `claim physical --help` draws from `HUMAN` and names the three acts (16) | *signed*/*unsigned*; "confirmed by hand"; "at a terminal" |
+| D18 | words from one table (`report.HUMAN`: `terminal`, the leads, `recorded`, `not_counted`, `signing`, `physical`); no *signed*, *confirmed*, *verified*; the console is "their own shell"; the page's "contradict" title is `phrases.disagree`; **moved by the critiques:** the Stale line says the result "was recorded on a design that has since moved" (18 — never "was built from" before P2.5b's export articles), the report's Stale advice follows its cause (9 — a moved article is never told `nopekit check` restores it), `claim physical --help` draws from `HUMAN` and names the three acts (16) | *signed*/*unsigned*; "confirmed by hand"; "at a terminal" |
 | D19 | `ClaimCause` gains eleven; within rung 5 the person's cause leads an invalidated evaluator and cites it; **moved by the critique (8):** under `stale=True` a counted pass reads Stale (`invalidated`) | invalidated-first; an enum member per fact |
 | D20 | terminal words on `claim list` (`[automated]`, `[measurement]`, `[assumption]`, `[expert judgment: Dana]`), `why`'s header (`[measurement · required]`), `why`'s `PHYSICAL RESULTS` block; JSON claim rows gain `terminal`, `terminal_word`, `authority`, `article`, `standing`, `contradicts`; `physical_result` gains `counts`, `why`, `recorded` — **moved by the critique (3):** the page paints a result's ok tone only on `counts` | the kind's code word; the tone on `passed` |
 | D21 | `doctor`'s `results` rows: a refused file named with its fix, legacy passes counted, evidence changed or missing named | doctor crashing on the refusal |
@@ -395,7 +395,7 @@ the permission rule on `results/**` and human-terminal claim files (W9: the seal
 lock); `next:` naming who records what. P4 — a merged results chain in `trade`.
 
 **Check-in batch (P2.5a).** A-14 (delete `--who`/`--when` — refused here); A-15 with
-its new fact (C6's owner can now record it: `atompipe claim physical C6 assume`); an
+its new fact (C6's owner can now record it: `nopekit claim physical C6 assume`); an
 expert-judgment claim reads Gap until its authority records it with `assume`
 (walkthrough step 6 shows Assumed from the start; D17's laundering is why); an
 institution as an authority — its git identity must be a person's, so named delegates
@@ -414,7 +414,7 @@ the human-authority boundary; P3 enforces it).
 Checkpoint 2.5's second half — milestones, the money boundary and the readiness
 sentence — as it landed (PLAN-v0.14 §1.4, §1.5; §2 W3, W7, W11, W13; §3 row P2; GLOSSARY
 §4, §5). Where it disagrees with checkpoint 2.5's text below, these rows win: the
-package is `out/<m>/` at the root (not `.atompipe/export/…`), REPORT.md replaces
+package is `out/<m>/` at the root (not `.nopekit/export/…`), REPORT.md replaces
 `docs/readiness.md`, and `fold` is gone (D18). Rows the design's critique moved say so
 (its numbers in parentheses, as the build received them; every one was applied, 7
 in part).
@@ -429,8 +429,8 @@ in part).
 | D6 | the re-run is `check --force --only <closure>`'s sweep at tier 3, controls and prerequisites included, filed as `check --force` files it (never in a dry run); it writes no `last_check.json`. **Moved by the critiques:** the base case re-runs too and reads Checked where the cache read Stale (8); the export record's `claims` map marks each claim `reran`, `counted` is sealed only for required claims, and the package's REPORT.md says the rest are as last evaluated (18) | refusing whatever is not Fresh; never filing the re-run; re-running every evaluator |
 | D7 | a disagreement refuses, and no go-ahead covers it: a forced run at the ρ the cache served Fresh with another `out8` (`SweepRow.disagrees`, whatever the instruments). **Moved by the critique (3):** also from the records — two outcomes already on record (the error row, a control's two-outcomes token, a conflict in the resolution before the run) and a qualification that held on the record and not when re-run; **(14):** its rows read `[two outcomes]`, never *disagree* (the status-and-evidence defect's word) | by gate id; by the claim's status; a tolerance |
 | D8 | going ahead over unresolved required claims is a person's decision: `--proceed --why`, `interactive` only, the milestone's name typed; sealed as the entry's `proceed`; covers `unresolved` alone. **Decided by the critique (13):** it is the reprint path after a physical fail on a required claim, and the refusal's words name it | a `decisions/` record; `--force`; an agent's go-ahead; a standing waiver; a carve-out letting the new article answer its own fail |
-| D9 | `exports/<m>.json`, append-only, each entry sealed and chained by `store.append_sealed` (P2.5a's chain by kind; the `results` form byte-identical, C-1). **Found by the build (V-6):** the seal form names the file's stem as `file` — under `milestone` the entry's own key overrode it and an entry copied to another milestone's file verified — and `_export_milestone_problem` refuses an entry naming another milestone | inside `milestones/`; under `.atompipe/`; one file per export |
-| D10 | the package `out/<m>/` (root, ignored): the generator's files, `REPORT.md` (= `report --milestone <m>`), `model.json`, `MANIFEST.json`; built aside, swapped whole, refused over a file no export recorded or one edited since. **Moved by the critique (1, option 2):** `model.json` holds exactly the article's param rows, so the generator is the only channel by which a value reaches the builder. **Found by the build:** the manifest's records digest leaves `exports/` out (`records_digest(exclude=…)`), or two exports of one state differ | `.atompipe/out/<m>/`; a path per export; tracking it; the package hash as the article |
+| D9 | `exports/<m>.json`, append-only, each entry sealed and chained by `store.append_sealed` (P2.5a's chain by kind; the `results` form byte-identical, C-1). **Found by the build (V-6):** the seal form names the file's stem as `file` — under `milestone` the entry's own key overrode it and an entry copied to another milestone's file verified — and `_export_milestone_problem` refuses an entry naming another milestone | inside `milestones/`; under `.nopekit/`; one file per export |
+| D10 | the package `out/<m>/` (root, ignored): the generator's files, `REPORT.md` (= `report --milestone <m>`), `model.json`, `MANIFEST.json`; built aside, swapped whole, refused over a file no export recorded or one edited since. **Moved by the critique (1, option 2):** `model.json` holds exactly the article's param rows, so the generator is the only channel by which a value reaches the builder. **Found by the build:** the manifest's records digest leaves `exports/` out (`records_digest(exclude=…)`), or two exports of one state differ | `.nopekit/out/<m>/`; a path per export; tracking it; the package hash as the article |
 | D11 | the generator `fn(ctx)` runs traced as a gate is, in the package's scratch; refused when it raises, writes nothing, or writes outside its directory. **Moved by the critique (12):** a write outside it under `--dry-run` is refused and named — not undone (undoing is a second writer) — and invariant 12 says so | a model object; `fn(params, out_dir)`; a list of generators |
 | D12 | the exported article `{source: export, hash, built_from, traced, milestone, when, revision, dirty}`: traced, what the generator read; untraced, P2.5a's whole design (over-predicts) | always the whole design; declared inputs; the evaluators' read sets |
 | D13 | `claim physical <id> pass\|fail --article <hex>` (≥ 12 hex, unique among exports); a fail's `contradicts` is the export's sealed `counted[<id>]` (`milestones.sealed_contradictions`) | the newest export by default; `--milestone`; re-deriving from the current resolution |
@@ -462,13 +462,13 @@ been a no-op (`test_meta.NoTestShadowsTheFramework` now refuses the name).
 |---|---|---|
 | R1 | supersession also needs what was PRINTED to differ: no export of B carries the generator's bytes an export of A carried (`EntryStanding.built`, `verdicts._built_seal` — the package's files but REPORT.md, model.json, MANIFEST.json), and A's own export on record; amends D14 | the recorded rows alone (a no-op `unused = None` moved the code row, and the same print reprinted byte for byte released its fail); dropping the code rows (a fix in the generator's code could then never release a fail); the package hash (REPORT.md's words move with any status) |
 | R2 | `os.link`/`os.symlink` are traced (source read, link written); a link in the package is refused (`generator_linked`); a file in the package no traced write put there makes the article untraced | the link's target alone (a hard link's bytes change with the project's next in-place edit) |
-| R3 | the scratch is `.atompipe/out/export-<m>/` in both modes, created and removed under the lock, under the trace's out anchor; amends D10's path | `out/.<m>.tmp-<pid>/` (a project path to the trace: `makedirs` put the pid in the article, a listing refused every written export, a copy made it untraced); a pid suffix (the modes' paths differed) |
+| R3 | the scratch is `.nopekit/out/export-<m>/` in both modes, created and removed under the lock, under the trace's out anchor; amends D10's path | `out/.<m>.tmp-<pid>/` (a project path to the trace: `makedirs` put the pid in the article, a listing refused every written export, a copy made it untraced); a pid suffix (the modes' paths differed) |
 | R4 | `--article` reads EVERY export record of the article: `milestones.sealed_on` charges what any sealed (one row per evaluator version), `bound_export` names the newest that re-ran the claim; latency runs from the newest export of the article not after the result; amends D13 | the first record in name order (a milestone that did not require C1 bound its fail: `contradicts: []`); the newest alone |
 | R5 | latency is a measurement's, measured only from an entry of the person channel; amends D4 | any entry on an exported article (an agent's pass read "measured 0 min"); an automated claim's (a ruler measured C1's "latency") |
 | R6 | every reader but the boundary says *ready* "as last evaluated" in its sentence — the project's, `report --milestone`'s (whose line now says nothing was re-run), its JSON (`milestone`, `last_evaluated`) — and `status` lists each milestone's line; the package's REPORT.md is the boundary's (`render_markdown(boundary=True)`); amends D17, D18 | the package's words on the cache's view; `status` silent (SPINE_CONTRACT and the skill said it listed them) |
 | R7 | the package's REPORT.md records on its article (`--article`) and carries the test card; the card's cross-check lets `--measured` decide; amends D10, D27 | a record line with no article (a builder's fail landed on a design article no reprint answers); a hard-coded `fail` (an agreeing value was refused) |
 | R8 | the reprint is offered only for a fail on an exported, traced article; any other fail's refusal says no reprint releases it; amends D8 | offering it for every moved fail (a path back to where it began) |
-| R9 | a disagreement's refusal names the entry served and the way out — remove the entry that is not the evaluator's output; a model that does not load is a refusal of its own (`model`), never covered; an errored claim's refusal says `skipped (errored)`; amends D7 | "`atompipe check --force` records the re-run" (done already, and it clears nothing); "re-run: none — no evaluator settles a claim" over six that could not run |
+| R9 | a disagreement's refusal names the entry served and the way out — remove the entry that is not the evaluator's output; a model that does not load is a refusal of its own (`model`), never covered; an errored claim's refusal says `skipped (errored)`; amends D7 | "`nopekit check --force` records the re-run" (done already, and it clears nothing); "re-run: none — no evaluator settles a claim" over six that could not run |
 | R10 | the swap appends the record inside it and undoes itself when the append raises; `doctor` judges a package with no export record; a dry run the lock refuses touches no scratch | swap then append (an unwritable `exports/` left a package every later export refused) |
 | R11 | a broken `exports/` seal's restore walks git as `results/`' does (`store._export_restore_advice`), naming every export it drops | HEAD alone (P2.5a-R1's rejected advice, again) |
 | R12 | the Reproduce block never glues `#` to a word (`_REPRODUCE_COLUMN`, `_commented`) and lists every milestone; `doctor` resolves a generator bound any way at module level (`cli._bound_at_module`), a star import a warning | `ljust(33)` (`--dry-run#` failed in a shell for `print-v1`); a cap of four; a top-level `def` alone |
@@ -553,7 +553,7 @@ checks stay, because a gate must stay correct when called directly.
 "blocked: prerequisite not established (<root>, <outcome>)" and "blocked on missing
 tooling", read from `blocked_by` and the root's outcome, in `models.py:66`,
 `report.py:90, 122`, `cli.py:1105-1106`, SPINE_CONTRACT, `format.js:28` and
-`skills/atompipe/SKILL.md:187-191` (S-54). `describe()` says "after P" for needs and
+`skills/nopekit/SKILL.md:187-191` (S-54). `describe()` says "after P" for needs and
 "requires X" for tools (the word "needs" already meant tools and capability gaps);
 `doctor` says "N capability gaps"; `gate list --json` gains `needs` and `needed_by`;
 `check --json` gains `pruned` — gates not run because a prerequisite did not pass, with
@@ -769,10 +769,10 @@ blocked nothing.
   a TTY, the human typed the claim id to confirm, and `CLAUDE_CODE_CHILD_SESSION` is unset;
   `agent-session <CLAUDE_CODE_SESSION_ID>` otherwise, recorded **unsigned**. From P3 the
   `/tested` expansion hook is a human channel (`slash`). Evidence must exist and must not
-  be under `.atompipe/out/`. A pass on a claim with no acceptance and no procedure note
+  be under `.nopekit/out/`. A pass on a claim with no acceptance and no procedure note
   (`Claim.note`, P1.3) is refused — which is how C5 got "verified" in the same second it was claimed. The
   report's "record the result" line prints the real command (`report.py:617-619`).
-- **Physical L (M3.L, E7).** `check` stamps, in untracked `.atompipe/obs/cards.json`, the
+- **Physical L (M3.L, E7).** `check` stamps, in untracked `.nopekit/obs/cards.json`, the
   first edge-clock time at which each measurement or human terminal's card became ready
   at the current ρ — `claims.blocking()` empty with that terminal awaiting a result; the
   signing channel copies it into the result as `card_ready_when`. L is then `when −
@@ -812,11 +812,11 @@ blocked nothing.
   `unreproduced_mutation`, which only the `export` command adds after re-running (R-9),
   never the pure function. `fold` is `real_part_only` iff every kind is
   `unsigned_measurement` or `unsigned_human`; each kind's words live in `report.HUMAN`.
-- **`atompipe export [--dry-run] [--json] [--out DIR]`** (D-24). It **re-executes every
+- **`nopekit export [--dry-run] [--json] [--out DIR]`** (D-24). It **re-executes every
   covering gate and its control, both halves (R-9)**, and refuses on any difference from
   the cache or any gate the re-run does not admit. On refusal it exits 1
   and writes **nothing**, not even a temp directory. On success it builds in a temp
-  directory and `os.replace`s into `.atompipe/export/<name>-<rev>-<records12>/` (ignored):
+  directory and `os.replace`s into `.nopekit/export/<name>-<rev>-<records12>/` (ignored):
 
   ```
   MANIFEST.json   sorted keys, no clock: spine version, commit (git if present), records_digest,
@@ -844,7 +844,7 @@ blocked nothing.
   Refused by | As of — with "Ends in" in the paper's phrasings (M14.1); the
   `SECTION_PROVEN` section (heading text per A-11, with an Ends-in column); NOT VERIFIED
   with signed bylines and the channel; gaps, standing constraints, failing; reproduce,
-  including `atompipe export --dry-run`. REPORT.md is a **gitignored output** (D-14):
+  including `nopekit export --dry-run`. REPORT.md is a **gitignored output** (D-14):
   `init`, and an idempotent ensure-ignore-blocks step that every writing command runs
   before it writes (not only the migration, which never runs again for a project
   migrated in P1), add `/REPORT.md` to the project root's `.gitignore` inside the marked

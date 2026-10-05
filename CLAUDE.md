@@ -1,6 +1,6 @@
-# Working on atompipe
+# Working on nopekit
 
-atompipe takes a design from a sketch to a validated physical thing. Its chain is
+nopekit takes a design from a sketch to a validated physical thing. Its chain is
 
 ```
 claims  ->  gates  ->  packs  ->  readiness report
@@ -9,16 +9,16 @@ claims  ->  gates  ->  packs  ->  readiness report
 Read [`METHOD.md`](METHOD.md) first — ten rules, and everything in `src/` exists to
 make one of them mechanical.
 
-**Using** atompipe (rather than working on it)? The skill in `skills/atompipe/` is
-the entry point, and `atompipe doctor` is the first command to run when confused.
+**Using** nopekit (rather than working on it)? The skill in `skills/nopekit/` is
+the entry point, and `nopekit doctor` is the first command to run when confused.
 
 ## Run it
 
 ```sh
-PYTHONPATH=src python3 -m atompipe --help
+PYTHONPATH=src python3 -m nopekit --help
 PYTHONPATH=src python3 -m unittest discover -s tests   # every test, must stay green
 PYTHONPATH=src python3 -m tests.fast                   # fast subset, ≤ 90 s on an idle machine: run it each iteration; the full suite runs before each checkpoint and commit
-cd examples/bracket && PYTHONPATH=../../src python3 -m atompipe check
+cd examples/bracket && PYTHONPATH=../../src python3 -m nopekit check
 ```
 
 No install step and no dependencies. `trimesh` + `numpy` are needed only to exercise
@@ -115,7 +115,7 @@ below names:
 8. **The index never disagrees with the records, and no command writes a record
    it was not asked to write.** The records are files — `claims/`, `params/`,
    `decisions/`, `needs/`, `inputs/`, `results/`, `views/`, `milestones/`,
-   `exports/` and `.atompipe/project.json` — and `.atompipe/ledger.json` is an index generated
+   `exports/` and `.nopekit/project.json` — and `.nopekit/ledger.json` is an index generated
    from them, rebuilt after every command (`doctor`, `init` and `--no-record` runs
    write none of it), so a hand edit made since the last command reaches it;
    nothing reads it for truth. `check` writes no record: every path it writes is
@@ -309,7 +309,7 @@ named.)
 
 ## House rules
 
-- **`src/atompipe/` is standard library only.** No third-party imports, ever — the
+- **`src/nopekit/` is standard library only.** No third-party imports, ever — the
   spine must never be the reason an install fails. CI proves this by AST-walking every
   import, including function-local ones.
 - **Generated files are outputs, not sources.** Never hand-edit one; fix the model.
@@ -323,7 +323,7 @@ named.)
   dependencies.
 - **Comments say what slipped through.** Where a rule exists because something got
   past a check, name it. The modules are dense with this on purpose.
-- **No reference to the parent project.** atompipe carries its method and none of its
+- **No reference to the parent project.** nopekit carries its method and none of its
   content; [`docs/ORIGINS.md`](docs/ORIGINS.md) is the only place it is named, and a
   test enforces that.
 
@@ -336,20 +336,20 @@ Each fact has one home; everything else that shows it is an output of that home.
   `params/`, `decisions/`, `needs/`, `inputs/<id>.json`, `results/<claim-id>.json`,
   `views/*.json`, `milestones/<name>.json` (a spend and the claims it requires),
   `exports/<name>.json` (that spend's exports, sealed and chained, appended only by
-  `export`), and `.atompipe/project.json` (meta, `model_entry`, the live `packs`).
+  `export`), and `.nopekit/project.json` (meta, `model_entry`, the live `packs`).
   `results/<claim-id>.json` holds a claim's physical results and its owner's or
   authority's attributions, sealed and chained, appended only by `claim physical`
   (P2.5a): never edit one by hand — a broken seal refuses the file.
 - **The model** — `model/*.py` owns every parameter's value, units and rationale, and
   in `PARAMS` what lost to it; a param record holds only the provenance the model
   cannot (`source`, `grounded_by`, `tags`).
-- **The verdict cache** — tracked, `.atompipe/verdicts/<gate id>/`: one file per
+- **The verdict cache** — tracked, `.nopekit/verdicts/<gate id>/`: one file per
   rho (the hash of everything the gate read) and one per control outcome at a
   version, never rewritten. Git plus this cache is the history; there is no run history.
-- **Outputs, ignored** — `.atompipe/ledger.json` (the index of every record, rebuilt
-  after each command), `.atompipe/cache/last_check.json` (statuses, counts and the
-  parameter view as the last full `check` saw them), `.atompipe/obs/` (what each run
-  cost), `.atompipe/out/` (scratch and evidence), `REPORT.md` (the readiness report,
+- **Outputs, ignored** — `.nopekit/ledger.json` (the index of every record, rebuilt
+  after each command), `.nopekit/cache/last_check.json` (statuses, counts and the
+  parameter view as the last full `check` saw them), `.nopekit/obs/` (what each run
+  cost), `.nopekit/out/` (scratch and evidence), `REPORT.md` (the readiness report,
   `report --write`) and `out/<milestone>/` (the package `export` wrote). The index
   and `last_check.json` are the whole project in two reads; nothing reads either for
   truth.
@@ -361,19 +361,19 @@ layout in full, with each writer.
 
 | Path | What |
 |---|---|
-| `src/atompipe/` | the spine — stdlib-only modules; `models.py` is the type contract |
-| `src/atompipe/store.py` | the records: one file per record, the strict reader, the writer, the generated index, the one-time legacy migration |
-| `src/atompipe/milestones.py` | the boundary that spends: a milestone's closure, the export's refusals and judgment, disagreements, the test card, the package |
-| `src/atompipe/verdicts.py` | the per-gate verdict cache: what a gate read (`ParamTrace`, `LedgerView`, the audit hook), portable digests and the spine digest, rho, cache and control entries, freshness, admission at the gate's current version, the one resolver every reader uses, the sweep `check` runs, and `last_check.json` |
-| `src/atompipe/vcs.py` | the only git edge: argv form, a clean environment, a timeout, never raises |
-| `site/` | a project's site — scaffolded by `atompipe site init` from `src/atompipe/site_template/`. Plain HTML/CSS/ES modules, no build step |
+| `src/nopekit/` | the spine — stdlib-only modules; `models.py` is the type contract |
+| `src/nopekit/store.py` | the records: one file per record, the strict reader, the writer, the generated index, the one-time legacy migration |
+| `src/nopekit/milestones.py` | the boundary that spends: a milestone's closure, the export's refusals and judgment, disagreements, the test card, the package |
+| `src/nopekit/verdicts.py` | the per-gate verdict cache: what a gate read (`ParamTrace`, `LedgerView`, the audit hook), portable digests and the spine digest, rho, cache and control entries, freshness, admission at the gate's current version, the one resolver every reader uses, the sweep `check` runs, and `last_check.json` |
+| `src/nopekit/vcs.py` | the only git edge: argv form, a clean environment, a timeout, never raises |
+| `site/` | a project's site — scaffolded by `nopekit site init` from `src/nopekit/site_template/`. Plain HTML/CSS/ES modules, no build step |
 | `packs/` | domain packs. Ordinary directories: no build step, no registration |
-| `skills/` | the Claude Code skills (`atompipe`, `pack-authoring`) |
+| `skills/` | the Claude Code skills (`nopekit`, `pack-authoring`) |
 | `examples/bracket/` | the reference project — zero dependencies, runs the whole loop |
 | `tests/` | the honesty invariants and the pack gate-on-the-gates |
 | `tests/_env.py` | the one environment every test subprocess runs in (`_env.run`): a temp `HOME`, no user packs, git isolated from the machine, the tools still visible |
 | `tests/_projects.py` | test projects built once: a bracket copy (the legacy bracket by default, the committed one with `migrated=True`), and a pack's baseline wrapped as a project |
-| `tests/bracket_legacy/` | a fixture: the bracket's `.atompipe/` as it stood before its 1.3 migration (ledger, run history, ignore file), which `_projects.bracket_copy` puts back around today's sources. Never edited to make a test pass |
+| `tests/bracket_legacy/` | a fixture: the bracket's `.nopekit/` as it stood before its 1.3 migration (ledger, run history, ignore file), which `_projects.bracket_copy` puts back around today's sources. Never edited to make a test pass |
 | `tests/_transcript.py` | Phase 1's target transcript as data: replayed on a fresh clone by `test_fresh_clone.py`, its lines held to their shapes by `test_shapes.py` |
 | `tests/oracle/` | scripts, not tests: CI's bracket failure signature (`bracket_signature.py`) and the R-8 differential oracle run at phase review (`r8_statuses.py`) |
 | `METHOD.md` | the doctrine |
@@ -393,8 +393,8 @@ only for the task at hand), gates that each declare a negative control, and
 Then, and this is the part that decides whether it gets merged:
 
 ```sh
-PYTHONPATH=src python3 -m atompipe pack validate <name>
-PYTHONPATH=src python3 -m atompipe gate selftest --pack <name> --junit <file>.xml
+PYTHONPATH=src python3 -m nopekit pack validate <name>
+PYTHONPATH=src python3 -m nopekit gate selftest --pack <name> --junit <file>.xml
 ```
 
 `pack validate` checks the layout and demonstrates tiers 0–1; `gate selftest --pack`

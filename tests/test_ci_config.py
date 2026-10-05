@@ -5,13 +5,13 @@ What slipped through, each read straight off `.github/workflows/ci.yml` as it
 stood at the start of Phase 1:
 
 * **S-83 — the reference project's exit code was swallowed.** The bracket fails
-  on purpose (thickness 7.0), so CI ran `atompipe check || true`, and `init ...
+  on purpose (thickness 7.0), so CI ran `nopekit check || true`, and `init ...
   || true` before it. `|| true` cannot tell the intended failure from a crash
   (exit 2) or from a second, unintended failure: all three read green. The same
   step ran `init` and `model --set-entry` in the TRACKED `examples/bracket`, so
   every CI run rewrote files the repository commits.
 * **S-11 — the docs said CI runs every pack's controls; it ran none.**
-  `docs/PACK_FORMAT.md` said "CI runs this plus `atompipe gate selftest` over
+  `docs/PACK_FORMAT.md` said "CI runs this plus `nopekit gate selftest` over
   every pack", and `CONTRIBUTING.md` that "CI runs every control". CI ran
   `gate selftest` once, inside the bracket, which loads no pack at all.
 
@@ -60,14 +60,14 @@ jobs:
       - name: Reference project runs, and its gates prove they can fail
         run: |
           cd examples/bracket
-          PYTHONPATH=../../src python -m atompipe init --name bracket-ci --summary "CI run" || true
-          PYTHONPATH=../../src python -m atompipe model --set-entry model/bracket.py
+          PYTHONPATH=../../src python -m nopekit init --name bracket-ci --summary "CI run" || true
+          PYTHONPATH=../../src python -m nopekit model --set-entry model/bracket.py
           # The default model is deliberately marginal: one gate FAILS, so `check`
           # exits 1 here and that is the expected result, not a broken build.
-          PYTHONPATH=../../src python -m atompipe check || true
+          PYTHONPATH=../../src python -m nopekit check || true
           # This one must pass. A gate that passes its own known-bad fixture is a
           # logger, and merging one is the failure this whole project exists to stop.
-          PYTHONPATH=../../src python -m atompipe gate selftest
+          PYTHONPATH=../../src python -m nopekit gate selftest
 """
 
 
@@ -224,18 +224,18 @@ def _words(command: str) -> list[str]:
         return command.split()
 
 
-def atompipe_args(command: str) -> list[str] | None:
-    """The arguments after ``atompipe`` when ``command`` runs it, else None."""
+def nopekit_args(command: str) -> list[str] | None:
+    """The arguments after ``nopekit`` when ``command`` runs it, else None."""
     words = _words(command)
     for index, word in enumerate(words):
-        if word == "atompipe" and (index == 0 or words[index - 1] == "-m"):
+        if word == "nopekit" and (index == 0 or words[index - 1] == "-m"):
             return words[index + 1:]
     return None
 
 
 def _runs_a_check(command: str) -> bool:
-    """A command whose exit code is a verdict: atompipe, python, the oracle."""
-    return bool(re.search(r"\b(atompipe|python3?|unittest)\b", command))
+    """A command whose exit code is a verdict: nopekit, python, the oracle."""
+    return bool(re.search(r"\b(nopekit|python3?|unittest)\b", command))
 
 
 _CAPTURE = re.compile(r"^([A-Za-z_]\w*)=\$\?$")
@@ -299,16 +299,16 @@ def swallows(yaml_text: str) -> list[str]:
 
 
 class NoSwallowedExitCodes(unittest.TestCase):
-    def test_no_or_true_on_atompipe_lines(self):
-        """No `|| true` on any atompipe line of ci.yml — nor on any other line,
+    def test_no_or_true_on_nopekit_lines(self):
+        """No `|| true` on any nopekit line of ci.yml — nor on any other line,
         nor any of the other routes `swallows` names: the unit tests and the pack
         validation are verdicts too."""
         text = _read(CI)
         checked = [line for step in steps(text) for _, line in shell_lines(step["run"])
-                   if any(atompipe_args(c) is not None for _, c in commands(line))]
+                   if any(nopekit_args(c) is not None for _, c in commands(line))]
         self.assertGreaterEqual(len(checked), 3,
-                                f"found {len(checked)} atompipe lines in ci.yml — the "
-                                f"reader has gone blind, or CI stopped running atompipe")
+                                f"found {len(checked)} nopekit lines in ci.yml — the "
+                                f"reader has gone blind, or CI stopped running nopekit")
         found = swallows(text)
         self.assertEqual(found, [], "ci.yml can read green on a failure:\n  "
                          + "\n  ".join(found))
@@ -316,17 +316,17 @@ class NoSwallowedExitCodes(unittest.TestCase):
     def test_planted_swallows_are_caught(self):
         """V: each route, planted into a step."""
         planted = {
-            "|| true": "PYTHONPATH=src python -m atompipe check || true",
-            "|| :": "python -m atompipe check || :",
-            "|| exit 0": "python -m atompipe check || exit 0",
-            "|| echo": "python -m atompipe check || echo 'expected failure'",
-            "a capture nobody reads": "rc=0\npython -m atompipe check || rc=$?\necho done",
-            "set +e": "set +e\npython -m atompipe check",
-            "negated": "! python -m atompipe check",
-            "&& not last": "python -m atompipe check && echo ok\necho next",
-            "a pipe": "python -m atompipe check | tee check.log",
-            "a background job": "python -m atompipe gate selftest &",
-            "a continuation": "python -m atompipe check \\\n  --junit || true",
+            "|| true": "PYTHONPATH=src python -m nopekit check || true",
+            "|| :": "python -m nopekit check || :",
+            "|| exit 0": "python -m nopekit check || exit 0",
+            "|| echo": "python -m nopekit check || echo 'expected failure'",
+            "a capture nobody reads": "rc=0\npython -m nopekit check || rc=$?\necho done",
+            "set +e": "set +e\npython -m nopekit check",
+            "negated": "! python -m nopekit check",
+            "&& not last": "python -m nopekit check && echo ok\necho next",
+            "a pipe": "python -m nopekit check | tee check.log",
+            "a background job": "python -m nopekit gate selftest &",
+            "a continuation": "python -m nopekit check \\\n  --junit || true",
             "the old bracket step": None,
         }
         for label, script in planted.items():
@@ -339,12 +339,12 @@ class NoSwallowedExitCodes(unittest.TestCase):
     def test_honest_captures_are_not_swallows(self):
         """C: the capture CI uses, a heredoc's own `||`, and pipefail."""
         honest = [
-            'rc=0\npython -m atompipe -C "$copy" check --junit || rc=$?\n'
+            'rc=0\npython -m nopekit -C "$copy" check --junit || rc=$?\n'
             'python tests/oracle/bracket_signature.py x.xml e.json --exit-code "$rc"',
-            "rc=0\npython -m atompipe check || rc=$?\nexit $rc",
+            "rc=0\npython -m nopekit check || rc=$?\nexit $rc",
             "python - <<'PY'\nfailed = a || b\nPY",
-            "set -o pipefail\npython -m atompipe check | tee check.log",
-            'cd "$copy" && python -m atompipe check',
+            "set -o pipefail\npython -m nopekit check | tee check.log",
+            'cd "$copy" && python -m nopekit check',
         ]
         for script in honest:
             with self.subTest(script=script):
@@ -362,8 +362,8 @@ def _workflow(script: str) -> str:
 # --------------------------------------------------------------------------- #
 # CiRunsWhatTheDocsSay
 # --------------------------------------------------------------------------- #
-def atompipe_calls(yaml_text: str) -> list[dict]:
-    """Every atompipe invocation: ``{"line", "args", "path", "cwd", "step"}``.
+def nopekit_calls(yaml_text: str) -> list[dict]:
+    """Every nopekit invocation: ``{"line", "args", "path", "cwd", "step"}``.
 
     ``cwd`` is ``"."`` for the repository root, else the directory the call runs
     against — from the step's ``working-directory``, an earlier ``cd`` in the
@@ -379,7 +379,7 @@ def atompipe_calls(yaml_text: str) -> list[dict]:
                 if words[:1] in (["cd"], ["pushd"]):
                     cwd = words[1] if len(words) > 1 else "~"
                     continue
-                args = atompipe_args(command)
+                args = nopekit_args(command)
                 if args is None:
                     continue
                 where = cwd
@@ -401,7 +401,7 @@ def atompipe_calls(yaml_text: str) -> list[dict]:
 def root_selftests(yaml_text: str) -> list[dict]:
     """`gate selftest --junit` calls at the repo root with no `--pack`: pack mode
     over every bundled pack, which is what the docs say CI runs (S-11)."""
-    return [c for c in atompipe_calls(yaml_text)
+    return [c for c in nopekit_calls(yaml_text)
             if c["path"] == "gate selftest" and c["cwd"] == "."
             and _has_flag(c["args"], "--junit") and not _has_flag(c["args"], "--pack")]
 
@@ -409,13 +409,13 @@ def root_selftests(yaml_text: str) -> list[dict]:
 def tracked_bracket_problems(yaml_text: str) -> list[str]:
     """What runs against, or rewrites, the TRACKED reference project (S-83)."""
     problems: list[str] = []
-    for call in atompipe_calls(yaml_text):
+    for call in nopekit_calls(yaml_text):
         where = f"ci.yml:{call['line']}"
         if os.path.normpath(call["cwd"]).replace(os.sep, "/").startswith("examples"):
-            problems.append(f"{where}: `atompipe {call['path']}` runs in the tracked "
+            problems.append(f"{where}: `nopekit {call['path']}` runs in the tracked "
                             f"{call['cwd']} — copy it to a temp dir first")
         if call["path"] == "init":
-            problems.append(f"{where}: `atompipe init` — the bracket is already a project")
+            problems.append(f"{where}: `nopekit init` — the bracket is already a project")
         if call["path"] == "model" and _has_flag(call["args"], "--set-entry"):
             problems.append(f"{where}: `model --set-entry` rewrites a tracked record")
     return problems
@@ -426,11 +426,11 @@ def signature_problems(yaml_text: str) -> list[str]:
     captured and handed with the report to the signature oracle, and its
     controls must run in the same copy (`gate selftest --junit`)."""
     problems: list[str] = []
-    calls = atompipe_calls(yaml_text)
+    calls = nopekit_calls(yaml_text)
     checks = [c for c in calls if c["path"] == "check" and _has_flag(c["args"], "--junit")
               and c["cwd"] != "."]
     if not checks:
-        return ["no `atompipe check --junit` runs against a copy of the bracket"]
+        return ["no `nopekit check --junit` runs against a copy of the bracket"]
     for check in checks:
         step = steps(yaml_text)[check["step"]]
         script = "\n".join(text for _, text in shell_lines(step["run"]))
@@ -444,7 +444,7 @@ def signature_problems(yaml_text: str) -> list[str]:
             problems.append(f"ci.yml:{check['line']}: `check`'s exit code is not captured")
             continue
         oracle = re.search(
-            r"tests/oracle/bracket_signature\.py\s+\"?%s/\.atompipe/out/junit\.xml\"?\s+"
+            r"tests/oracle/bracket_signature\.py\s+\"?%s/\.nopekit/out/junit\.xml\"?\s+"
             r"tests/expected_bracket\.json\s+--exit-code\s+\"?\$\{?%s\}?\"?"
             % (copy, capture.group(1)), script)
         if not oracle:
@@ -470,11 +470,11 @@ def force_problems(yaml_text: str) -> list[str]:
     hand-placed entry, or one written by a spine with a bug since fixed, would
     read green in CI forever without a single gate running. The inner loop may
     trust the cache; the money boundary re-runs it (PLAN R-9)."""
-    checks = [c for c in atompipe_calls(yaml_text)
+    checks = [c for c in nopekit_calls(yaml_text)
               if c["path"] == "check" and _has_flag(c["args"], "--junit") and c["cwd"] != "."]
     if not checks:
-        return ["no `atompipe check --junit` runs against a copy of the bracket"]
-    return [f"ci.yml:{c['line']}: `atompipe check --junit` without `--force` serves the "
+        return ["no `nopekit check --junit` runs against a copy of the bracket"]
+    return [f"ci.yml:{c['line']}: `nopekit check --junit` without `--force` serves the "
             f"committed cache instead of re-running it (R-9)"
             for c in checks if not _has_flag(c["args"], "--force")]
 
@@ -483,7 +483,7 @@ class CiRunsWhatTheDocsSay(unittest.TestCase):
     def test_gate_selftest_runs_at_the_repo_root(self):
         """S-11: every bundled pack's controls run in CI, as the docs say they do."""
         self.assertTrue(root_selftests(_read(CI)),
-                        "ci.yml never runs `atompipe gate selftest --junit` at the repo "
+                        "ci.yml never runs `nopekit gate selftest --junit` at the repo "
                         "root, so no bundled pack's control runs in CI (S-11)")
 
     def test_the_bracket_runs_against_its_signature(self):
@@ -500,22 +500,22 @@ class CiRunsWhatTheDocsSay(unittest.TestCase):
         self.assertEqual(root_selftests(OLD_BRACKET_STEP), [])
         self.assertTrue(signature_problems(OLD_BRACKET_STEP))
         problems = "\n".join(tracked_bracket_problems(OLD_BRACKET_STEP))
-        for needle in ("examples/bracket", "atompipe init", "--set-entry"):
+        for needle in ("examples/bracket", "nopekit init", "--set-entry"):
             self.assertIn(needle, problems)
 
     def test_a_selftest_elsewhere_is_not_at_the_root(self):
         """V: a `cd`, a `-C`, a `working-directory` or a `--pack` each move the
         selftest off 'every bundled pack at the root'."""
-        for script in ("cd packs && python -m atompipe gate selftest --junit",
-                       'python -m atompipe -C "$copy" gate selftest --junit',
-                       "python -m atompipe gate selftest --junit --pack beam-analytic",
-                       "python -m atompipe gate selftest"):
+        for script in ("cd packs && python -m nopekit gate selftest --junit",
+                       'python -m nopekit -C "$copy" gate selftest --junit',
+                       "python -m nopekit gate selftest --junit --pack beam-analytic",
+                       "python -m nopekit gate selftest"):
             with self.subTest(script=script):
                 self.assertEqual(root_selftests(_workflow(script)), [])
-        moved = _workflow("python -m atompipe gate selftest --junit").replace(
+        moved = _workflow("python -m nopekit gate selftest --junit").replace(
             "        run: |", "        working-directory: examples\n        run: |")
         self.assertEqual(root_selftests(moved), [])
-        self.assertTrue(root_selftests(_workflow("python -m atompipe gate selftest --junit")))
+        self.assertTrue(root_selftests(_workflow("python -m nopekit gate selftest --junit")))
 
 
 class CiReExecutesTheCache(unittest.TestCase):
@@ -531,9 +531,9 @@ class CiReExecutesTheCache(unittest.TestCase):
         """V: the step as it stood at 1.1 — a copy, the exit code captured, the
         signature compared — still serves the cache, and is refused for it."""
         text = _read(CI)
-        stripped = re.sub(r"(atompipe -C \"\$copy\" check) --force", r"\1", text)
+        stripped = re.sub(r"(nopekit -C \"\$copy\" check) --force", r"\1", text)
         self.assertTrue(stripped != text, "the bracket step no longer reads "
-                        "`atompipe -C \"$copy\" check --force ...`; update the planted form")
+                        "`nopekit -C \"$copy\" check --force ...`; update the planted form")
         self.assertTrue(force_problems(stripped))
         self.assertEqual(signature_problems(stripped), [],
                          "the planted step must differ from the real one in --force only")
@@ -565,8 +565,8 @@ class SignatureDetectsAMissingFailure(_env.EnvCase):
             with open(model, "w", encoding="utf-8") as fh:
                 fh.write(source.replace("thickness: float = 7.0",
                                         f"thickness: float = {thickness}"))
-        check = _env.atompipe(["check", "--junit"], cwd=project)
-        junit = os.path.join(project, ".atompipe", "out", "junit.xml")
+        check = _env.nopekit(["check", "--junit"], cwd=project)
+        junit = os.path.join(project, ".nopekit", "out", "junit.xml")
         oracle = _env.run([sys.executable, SIGNATURE, junit, EXPECTED,
                            "--exit-code", str(check.returncode)], cwd=_env.REPO)
         return check, oracle
@@ -602,7 +602,7 @@ def _report(*, exit_code: str = "1", deflection: str = '<failure type="fail" mes
             ) -> str:
     return textwrap.dedent(f"""\
         <?xml version="1.0" encoding="UTF-8"?>
-        <testsuites name="atompipe check">
+        <testsuites name="nopekit check">
           <properties><property name="exit_code" value="{exit_code}"/></properties>
           <testsuite name="gates">
             <testcase classname="project" name="bracket.deflection">{deflection}</testcase>

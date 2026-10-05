@@ -46,10 +46,10 @@ import unittest
 import _env
 import _projects
 import _transcript
-from atompipe import decisions, modelio, store
-from atompipe import site as site_mod
-from atompipe.models import Claim, Decision, Ledger, Param, Rejected, Verdict
-from atompipe.util import AtompipeError
+from nopekit import decisions, modelio, store
+from nopekit import site as site_mod
+from nopekit.models import Claim, Decision, Ledger, Param, Rejected, Verdict
+from nopekit.util import NopekitError
 
 ENTRY = "model/bracket.py"
 
@@ -202,7 +202,7 @@ class ParamValueHasOneHome(_Bracket):
         `why` says the model does not load."""
         root = self.bracket()
         _append(root, 'raise RuntimeError("the model is broken on purpose")\n')
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             modelio.load_model(root, ENTRY)
         ledger = Ledger(params=[Param(name="thickness", value=7.0, units="mm",
                                       rationale="recorded before the model broke")])
@@ -232,7 +232,7 @@ class ParamValueHasOneHome(_Bracket):
         self.assertEqual(lines[0], WHY_LINE)
         self.assertEqual(_block(lines, WHY_HEAD), [WHY_HEAD, WHY_ROW])
         step = next(s for s in _transcript.STEPS if s.id == "why-thickness")
-        result = _transcript.Result("atompipe why thickness", 0, text, "", root)
+        result = _transcript.Result("nopekit why thickness", 0, text, "", root)
         for expect in step.expect:
             self.assertIsNone(_transcript.problem(expect, result), text)
 
@@ -248,7 +248,7 @@ class ParamValueHasOneHome(_Bracket):
             with self.subTest(key=key):
                 root = self.bracket()
                 _replace_once(root, old, new)
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     modelio.load_model(root, ENTRY)
                 message = str(caught.exception)
                 self.assertIn(ENTRY, message)
@@ -346,8 +346,8 @@ class ChangedInIsDerived(unittest.TestCase):
 _SYNTHETIC = '''\
 from dataclasses import dataclass
 
-import atompipe.models as models
-from atompipe.models import Param
+import nopekit.models as models
+from nopekit.models import Param
 
 
 @dataclass
@@ -414,7 +414,7 @@ class StaticProse(_Bracket):
         self.assertEqual(prose["thickness"]["units"], "mm")
         # The control: the same entry really does raise when it is run, after
         # touching the marker.
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             modelio.load_model(root, ENTRY)
         self.assertIn("this model must never be imported", str(caught.exception))
         self.assertTrue(os.path.exists(marker))
@@ -518,9 +518,9 @@ class RenderersReadTheParamView(_Bracket):
         return root
 
     def run_ok(self, root: str, *argv: str):
-        proc = _env.atompipe(list(argv), cwd=root)
+        proc = _env.nopekit(list(argv), cwd=root)
         self.assertEqual(proc.returncode, 0,
-                         f"atompipe {' '.join(argv)}\n{proc.stdout}\n{proc.stderr}")
+                         f"nopekit {' '.join(argv)}\n{proc.stdout}\n{proc.stderr}")
         return proc
 
     def page(self, root: str) -> dict:
@@ -535,7 +535,7 @@ class RenderersReadTheParamView(_Bracket):
         ``loads=False`` (the model is broken) `model` and `site build` are left
         out: both refuse a model that does not load, with exit 2."""
         said: dict[str, list[str]] = {}
-        doctor = json.loads(_env.atompipe(["doctor", "--json"], cwd=root).stdout)
+        doctor = json.loads(_env.nopekit(["doctor", "--json"], cwd=root).stdout)
         rows = [row for row in doctor["checks"] if row["check"] == "model-provenance"]
         said["doctor"] = ([] if not rows or rows[0]["status"] == "ok" else
                           _names(_DOCTOR_UNDEFENDED.fullmatch(rows[0]["detail"])["names"]))

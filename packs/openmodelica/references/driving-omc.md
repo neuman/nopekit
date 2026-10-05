@@ -66,20 +66,20 @@ the resulting error names *your* class, sending you to debug the wrong file.
 `omc check.mos` from `<out_dir>/omc`:
 
 ```modelica
-print("@@ATOMPIPE:libraries\n");
+print("@@NOPEKIT:libraries\n");
 print("loadModel(Modelica) = " + String(loadModel(Modelica)) + "\n");
-print("@@ATOMPIPE:load\n");
+print("@@NOPEKIT:load\n");
 print("loadFile(ThermalTank.mo) = " + String(loadFile("/abs/<out_dir>/omc/.sources/check/0/model/ThermalTank.mo")) + "\n");
-print("@@ATOMPIPE:loaderr\n");
+print("@@NOPEKIT:loaderr\n");
 print(getErrorString() + "\n");
-print("@@ATOMPIPE:check\n");
+print("@@NOPEKIT:check\n");
 print(checkModel(ThermalTank.TankRun) + "\n");
-print("@@ATOMPIPE:checkerr\n");
+print("@@NOPEKIT:checkerr\n");
 print(getErrorString() + "\n");
-print("@@ATOMPIPE:end\n");
+print("@@NOPEKIT:end\n");
 ```
 
-The `@@ATOMPIPE:` markers are how the output is segmented, and they are chosen to
+The `@@NOPEKIT:` markers are how the output is segmented, and they are chosen to
 be something no Modelica model, error message or file path will contain — a
 segmenter that split on "Error" would eat the first line of every real error.
 `modelica.compiles` replaces the check block with `built := buildModel(C);

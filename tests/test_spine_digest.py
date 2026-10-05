@@ -2,7 +2,7 @@
 """The spine digest follows the spine's semantics, never its version string (S-29).
 
 What slipped through: 1e09113 changed what a verdict means — a NaN that used to
-read `[ok]` now errors — and `atompipe.__version__` stayed `0.1.0`. A verdict
+read `[ok]` now errors — and `nopekit.__version__` stayed `0.1.0`. A verdict
 cache keyed on the version string would have gone on serving every PASS the old
 semantics produced. The key is therefore a digest of what the verdict-path
 modules SAY (`verdicts.SPINE_MODULES`), read through a canonical walk of their
@@ -27,7 +27,7 @@ import shutil
 import sys
 import unittest
 
-from atompipe import verdicts
+from nopekit import verdicts
 
 import _env
 
@@ -97,8 +97,10 @@ async def fetch(source, *, retries: int = 3, **options):
 
 #: `canonical_ast_digest(FIXTURE)`, computed on 3.12.3 and confirmed on 3.13.
 #: If this moves, every committed verdict entry in every project goes stale:
-#: change the walk only on purpose, and say why in the commit.
-PINNED = "ac1045eea43f2b2a11abf95798130fb2dcf6a45003ed23aceba631e575731786"
+#: change the walk only on purpose, and say why in the commit. Moved once on
+#: purpose: the rename to nopekit renamed the digest salts (`_AST_SALT` and its
+#: siblings carry the tool's name), so every entry was regenerated with it.
+PINNED = "7bd8a28805d7f870692482456807f9b352a11411fc0602201e95c6a6e61e37a7"
 
 
 def _edit(source: str, old: str, new: str) -> str:
@@ -207,20 +209,20 @@ class SpineDigestFollowsSemantics(_env.EnvCase):
 
     def _spine_copy(self) -> str:
         dest = os.path.join(self.tmp(), "src")
-        shutil.copytree(os.path.join(_env.SRC, "atompipe"), os.path.join(dest, "atompipe"),
+        shutil.copytree(os.path.join(_env.SRC, "nopekit"), os.path.join(dest, "nopekit"),
                         ignore=shutil.ignore_patterns("__pycache__"))
         return dest
 
     def _append(self, src: str, module: str, text: str) -> None:
-        with open(os.path.join(src, "atompipe", module), "a", encoding="utf-8") as fh:
+        with open(os.path.join(src, "nopekit", module), "a", encoding="utf-8") as fh:
             fh.write(text)
 
     def _measure(self, src: str) -> tuple[str, str]:
         """`(version, spine digest)` of the spine at `src`, from a fresh process."""
-        code = ("import atompipe, atompipe.verdicts as v, os, sys\n"
-                "assert os.path.abspath(atompipe.__file__).startswith("
-                f"{os.path.abspath(src)!r}), atompipe.__file__\n"
-                "print(atompipe.__version__)\nprint(v.spine_digest())\n")
+        code = ("import nopekit, nopekit.verdicts as v, os, sys\n"
+                "assert os.path.abspath(nopekit.__file__).startswith("
+                f"{os.path.abspath(src)!r}), nopekit.__file__\n"
+                "print(nopekit.__version__)\nprint(v.spine_digest())\n")
         proc = _env.run([sys.executable, "-c", code], cwd=self.tmp(),
                         env={"PYTHONPATH": src})
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -253,7 +255,7 @@ class SpineDigestFollowsSemantics(_env.EnvCase):
         """A wheel shipped without `.py` sources must make every entry Unknown,
         never Fresh against a digest of whatever was readable."""
         missing = self._spine_copy()
-        os.remove(os.path.join(missing, "atompipe", "gates.py"))
+        os.remove(os.path.join(missing, "nopekit", "gates.py"))
         version, digest = self._measure(missing)
         self.assertEqual(digest, "")
 

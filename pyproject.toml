@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "atompipe"
+name = "nopekit"
 version = "0.1.0"
 description = "Take a sketch or a discussion to a validated physical thing — claims, gates, packs, and an honest readiness report."
 readme = "README.md"
@@ -28,28 +28,28 @@ dependencies = []
 dev = ["pytest>=7"]
 
 [project.scripts]
-atompipe = "atompipe.cli:main"
+nopekit = "nopekit.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/neuman/atompipe"
-Source = "https://github.com/neuman/atompipe"
+Homepage = "https://github.com/neuman/nopekit"
+Source = "https://github.com/neuman/nopekit"
 
 # The bundled packs live at <repo>/packs for contributors (ordinary directories,
-# no build step) and are mapped onto `atompipe.bundled` so they ALSO ship in the
-# wheel. Without this, `pip install atompipe` produced a working spine with zero
+# no build step) and are mapped onto `nopekit.bundled` so they ALSO ship in the
+# wheel. Without this, `pip install nopekit` produced a working spine with zero
 # gates — a spine that cannot do anything. Packages are listed explicitly because
 # `packages.find` only scans `where`, so the mapped name is never discovered.
 [tool.setuptools]
-packages = ["atompipe", "atompipe.bundled"]
+packages = ["nopekit", "nopekit.bundled"]
 
 [tool.setuptools.package-dir]
 "" = "src"
-"atompipe.bundled" = "packs"
+"nopekit.bundled" = "packs"
 
 [tool.setuptools.package-data]
-atompipe = [
+nopekit = [
   "py.typed",
-  # The site scaffold `atompipe site init` copies. Shipped by glob, not by
+  # The site scaffold `nopekit site init` copies. Shipped by glob, not by
   # filename: a template that grows a file and does not grow a line here is a
   # site that scaffolds broken from the wheel and fine from a checkout.
   "site_template/**/*",
@@ -59,7 +59,7 @@ atompipe = [
 # how `bomlib.py` (a pack-root helper) silently failed to ship and every gate in
 # that pack died on import from the wheel. Ship everything a pack contains, by
 # extension, at any depth.
-"atompipe.bundled" = [
+"nopekit.bundled" = [
   "**/*.py", "**/*.json", "**/*.md", "**/*.txt",
   "**/*.stl", "**/*.step", "**/*.csv", "**/*.yaml", "**/*.yml",
 ]

@@ -41,12 +41,12 @@ import unittest
 import uuid
 from unittest import mock
 
-from atompipe import gates, modelio, packs, store, vcs, verdicts
-from atompipe.models import (
+from nopekit import gates, modelio, packs, store, vcs, verdicts
+from nopekit.models import (
     Acceptance, Claim, GateSpec, Ledger, NegativeControl, Tier, Verdict,
 )
-from atompipe.util import AtompipeError, FileDigests
-from atompipe.verdicts import Anchors, GateTrace
+from nopekit.util import NopekitError, FileDigests
+from nopekit.verdicts import Anchors, GateTrace
 
 import _env
 import _projects
@@ -93,16 +93,16 @@ def _write(root: str, rel: str, text: str) -> str:
 def _project(case: _env.EnvCase) -> str:
     """An empty project directory: a marker and nothing else."""
     root = os.path.join(case.tmp(), "project")
-    os.makedirs(os.path.join(root, ".atompipe"))
-    _write(root, ".atompipe/project.json", '{"schema": 2}\n')
+    os.makedirs(os.path.join(root, ".nopekit"))
+    _write(root, ".nopekit/project.json", '{"schema": 2}\n')
     return root
 
 
 _GATE_HEAD = '''\
 import os
 import shutil
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 '''
 
 
@@ -144,7 +144,7 @@ def _run(registry: gates.Registry, gate_id: str, ctx: gates.GateContext,
 
 
 def _entry_files(root: str, gate_id: str, *, controls: bool = False) -> list[str]:
-    directory = os.path.join(root, ".atompipe", "verdicts", gate_id)
+    directory = os.path.join(root, ".nopekit", "verdicts", gate_id)
     if not os.path.isdir(directory):
         return []
     return sorted(n for n in os.listdir(directory)
@@ -409,7 +409,7 @@ class EntryIntegrity(_env.EnvCase):
         wrote = verdicts.record_verdict(root, _plain_spec(), _plain_gate, verdict)
         [entry] = verdicts.read_entries(root, "t.plain")
         bad = dataclasses.replace(entry, verdict={**entry.verdict, "passed": 1})
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             verdicts.write_entry(root, bad)
         self.assertEqual(_entry_files(root, "t.plain"), [os.path.basename(wrote.path)])
 
@@ -423,7 +423,7 @@ class OnlyMeasurementsAreCached(_env.EnvCase):
         for verdict in (skip, crash):
             self.assertIsNone(verdicts.record_verdict(root, _plain_spec(), _plain_gate, verdict))
         self.assertEqual(_entry_files(root, "t.plain"), [])
-        self.assertFalse(os.path.isdir(os.path.join(root, ".atompipe", "verdicts")),
+        self.assertFalse(os.path.isdir(os.path.join(root, ".nopekit", "verdicts")),
                          "nothing cacheable ran, so nothing may be written there")
 
         verdicts.remember(root, "t.plain", crash, input_rho="", kind="error",
@@ -434,12 +434,12 @@ class OnlyMeasurementsAreCached(_env.EnvCase):
         self.assertEqual(held["t.plain"][""]["verdict"].outcome, "error")
         self.assertEqual(held["t.plain"][""]["when"], "2026-09-27T10:00:00Z")
         self.assertTrue(os.path.isfile(
-            os.path.join(root, ".atompipe", "cache", "last_outcomes.json")))
+            os.path.join(root, ".nopekit", "cache", "last_outcomes.json")))
         # A remembered outcome is never a pass: remembering one is refused.
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             verdicts.remember(root, "t.plain", Verdict(gate="t.plain", passed=True),
                               input_rho="", kind="error", when="")
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             verdicts.remember(root, "t.plain", crash, input_rho="", kind="bogus", when="")
 
     def test_an_unrecorded_gate_is_opaque_never_a_digest_of_nothing(self):
@@ -486,7 +486,7 @@ class Portability(_env.EnvCase):
             wrote = verdicts.record_verdict(root, spec, fn, verdict, trace=trace,
                                             anchors=anchors, digests=FileDigests())
             self.assertEqual(wrote.status, "written")
-        base = os.path.join(root, ".atompipe", "verdicts")
+        base = os.path.join(root, ".nopekit", "verdicts")
         found: dict[str, bytes] = {}
         for gate_id in sorted(os.listdir(base)):
             for name in sorted(os.listdir(os.path.join(base, gate_id))):
@@ -542,7 +542,7 @@ class Portability(_env.EnvCase):
         out = store.out_dir(root)
         verdict = Verdict(gate="t.plain", passed=True, evidence=[
             os.path.join(out, "plot.png"),
-            os.path.join(os.sep, "atompipe-nowhere", "elsewhere.png"),
+            os.path.join(os.sep, "nopekit-nowhere", "elsewhere.png"),
             "relative/kept.png",
         ])
         wrote = verdicts.record_verdict(root, _plain_spec(), _plain_gate, verdict)
@@ -619,7 +619,7 @@ class ControlStatic(_env.EnvCase):
             import dataclasses
             import os
 
-            from atompipe.modelio import load_path
+            from nopekit.modelio import load_path
 
             helper = load_path(os.path.join(os.path.dirname(os.path.dirname(
                 os.path.abspath(__file__))), "model", "helper.py"))
@@ -787,7 +787,7 @@ class ControlEntries(_env.EnvCase):
                          ("fail", "reject-only", "planted by a renderer test"))
         self.assertEqual(body["reads"], {"params": [], "files": {}, "dirs": {}, "ledger": {},
                                          "host": [], "opaque": []})
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             verdicts.record_control(root, spec, fn)       # neither a result nor bad=
 
     def test_live_host_reads_are_keyed_and_known_good_ones_are_not(self):
@@ -937,13 +937,13 @@ class CodeDigest(_env.EnvCase):
         self.assertIn("not loaded from a file", opaque.opaque)
 
     def test_spine_extras_enter_the_closure_digest(self):
-        # cad and fdm import atompipe.site (packs:H4). It is not in the spine
+        # cad and fdm import nopekit.site (packs:H4). It is not in the spine
         # digest (a page change would re-run every gate of every project), so it
         # enters the closure of exactly the gates that import it.
         root = _project(self)
         _write(root, "gates/viewer.py", _gate_source("t.viewer", '''
             return Verdict(gate="t.viewer", passed=True)
-        ''', extra_head="import atompipe.site\n"))
+        ''', extra_head="import nopekit.site\n"))
         _write(root, "gates/plain.py", _gate_source("t.plainer", '''
             return Verdict(gate="t.plainer", passed=True)
         '''))
@@ -951,7 +951,7 @@ class CodeDigest(_env.EnvCase):
         anchors = _anchors(root, registry)
         viewer = registry.get("t.viewer")
         plain = registry.get("t.plainer")
-        self.assertIn("atompipe.site", modelio.code_closure(viewer[1]).spine_extras)
+        self.assertIn("nopekit.site", modelio.code_closure(viewer[1]).spine_extras)
         self.assertEqual(modelio.code_closure(plain[1]).spine_extras, ())
         before = {gid: verdicts.code_digest(*registry.get(gid), anchors=anchors).digest
                   for gid in ("t.viewer", "t.plainer")}
@@ -960,7 +960,7 @@ class CodeDigest(_env.EnvCase):
             after = {gid: verdicts.code_digest(*registry.get(gid), anchors=anchors).digest
                      for gid in ("t.viewer", "t.plainer")}
         self.assertNotEqual(after["t.viewer"], before["t.viewer"],
-                            "a gate that imports atompipe.site did not follow a site edit")
+                            "a gate that imports nopekit.site did not follow a site edit")
         self.assertEqual(after["t.plainer"], before["t.plainer"])
 
     def test_prose_fields_do_not_move_it(self):
@@ -1131,7 +1131,7 @@ class StatReads(_env.EnvCase):
         elsewhere = self.tmp()
         reads = self.reads(lambda: (
             os.path.exists(os.path.join(elsewhere, "x")),
-            shutil.which("atompipe-no-such-tool"),
+            shutil.which("nopekit-no-such-tool"),
             os.path.realpath(self.at("data", "x.txt"))))
         self.assertEqual(reads.opaque, [])
         self.assertTrue(all(not key.startswith(("/", "~", "<tmp>")) for key in reads.files),
@@ -1235,7 +1235,7 @@ class Obs(_env.EnvCase):
         self.assertEqual([r["when"] for r in controls], ["c0", "c1", "c2"])
         self.assertFalse(any(r["entry"].startswith("control-") for r in runs))
         self.assertEqual(set(runs[0]), {"entry", "when", "duration_s", "cpu_s"})
-        obs = os.path.join(root, ".atompipe", "obs")
+        obs = os.path.join(root, ".nopekit", "obs")
         self.assertEqual(sorted(os.listdir(obs)), ["t.g.control.json", "t.g.json"])
         self.assertEqual(verdicts.read_obs(root, "t.never"), [])
 
@@ -1319,12 +1319,12 @@ class Remembered(_env.EnvCase):
         # The shape the hole was stored in: loud, never read as empty — an
         # empty read would hand the next check the PASS a crash superseded.
         root = _project(self)
-        path = os.path.join(root, ".atompipe", "cache", "last_outcomes.json")
+        path = os.path.join(root, ".nopekit", "cache", "last_outcomes.json")
         os.makedirs(os.path.dirname(path))
         with open(path, "w", encoding="utf-8") as fh:
             json.dump({"t.plain": {"input_rho": "", "kind": "error", "when": "",
                                    "verdict": {"gate": "t.plain", "error": "x"}}}, fh)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             verdicts.remembered(root)
         self.assertIn("is not a remembered-outcomes file", str(caught.exception))
 
@@ -1372,7 +1372,7 @@ class TwoOutcomes(_env.EnvCase):
         here = dataclasses.replace(entry, instruments={"numpy": "1.26.4"})
         there = dataclasses.replace(entry, instruments={"numpy": "2.1.0"},
                                     verdict={**entry.verdict, "passed": False})
-        for path in [os.path.join(root, ".atompipe", "verdicts", "t.plain", n)
+        for path in [os.path.join(root, ".nopekit", "verdicts", "t.plain", n)
                      for n in _entry_files(root, "t.plain")]:
             os.unlink(path)
         verdicts.write_entry(root, here)
@@ -1409,7 +1409,7 @@ class Instruments(_env.EnvCase):
         '''))
         registry = _registry(root)
         spec, fn = registry.get("t.lazy")
-        spec = dataclasses.replace(spec, requires_python=["atompipe_no_such_module"])
+        spec = dataclasses.replace(spec, requires_python=["nopekit_no_such_module"])
         code = verdicts.code_digest(spec, fn)
         self.assertIn(fake, code.third_party)
 
@@ -1418,7 +1418,7 @@ class Instruments(_env.EnvCase):
         importlib.invalidate_caches()
         before = verdicts.instruments_for(spec, code)
         self.assertNotIn(fake, sys.modules, "instruments_for imported the module")
-        self.assertEqual(before, {fake: "unknown", "atompipe_no_such_module": "absent"})
+        self.assertEqual(before, {fake: "unknown", "nopekit_no_such_module": "absent"})
         module = importlib.import_module(fake)
         self.addCleanup(sys.modules.pop, fake, None)
         self.assertEqual(verdicts.instruments_for(spec, code), before,

@@ -41,10 +41,10 @@ from unittest import mock
 import _env
 import _physical as P
 import _projects
-from atompipe import claims, report, store, verdicts
-from atompipe.models import (Acceptance, Claim, ClaimKind, ClaimStatus, Ledger,
+from nopekit import claims, report, store, verdicts
+from nopekit.models import (Acceptance, Claim, ClaimKind, ClaimStatus, Ledger,
                              PhysicalResult, Verdict)
-from atompipe.util import AtompipeError, sha256_text
+from nopekit.util import NopekitError, sha256_text
 
 
 def _need(module: Any, name: str) -> Any:
@@ -108,15 +108,17 @@ def _model_text(root: str) -> str:
 # --------------------------------------------------------------------------- #
 #: Each bracket claim's ``verdicts._claim_digest``, computed on ``d23ff8e``. A
 #: moved digest re-keys every gate that reads a claim: the new fields, absent or
-#: empty, and the in-memory ones must move none.
+#: empty, and the in-memory ones must move none. Re-pinned once on purpose: the
+#: rename to nopekit renamed the digest salts; with the old salts patched back these
+#: values reproduce the d23ff8e ones exactly, so the walk itself did not move.
 CLAIM_DIGESTS = {
-    "C1": "36f4f6da39bb0dc2c975ad542895f85a53c327a4bc4a47b85ca6bae5aa5aefcf",
-    "C2": "4a1d293d7bcde39b0ad28c83586994b1d3337a868ba833f0420f4ff092f3e2dd",
-    "C3": "4352a59a91d9008a6c39bbbba9797921b72b14bbdb0289408378ee7e0136d8bc",
-    "C4": "c226f88a343b334a80c6ee1bfc26b2c7773c635a36f6ef29b6917caaf06e7105",
-    "C5": "484a3d26e8e097dc44d3be7966981360dfca077c76b9cdf00247c19902095604",
-    "C6": "5f90b61d4c22866028669020871a92881a7f99e36ba38436466d6ac7baf699be",
-    "C7": "55d2b65840685a8a18a47205447571721e195b33b3cef5baf34c89e206321685",
+    "C1": "50b8cb27960cad504dc02d978e8c7d4a3f468c553f3f598cecfc2268eb79b929",
+    "C2": "2a325b5dff411f40661fedc936b188e443182f40fa92daf1edd0dda38731e39b",
+    "C3": "92b540acaa579899573a679446b573a234d213e7550ab436ef9396d663aff36e",
+    "C4": "0dc80cedd249eb0cb51c871b1f8d26878c2913ec2333e78fe61f9d2cc81f0e2d",
+    "C5": "738d4d08637a5d6b338b738f0f699996f26425a634e1cf2247bf34fc0707e685",
+    "C6": "b53a5b7155b2dbcbd1356e3cd28f8b37e73709ea387fbba397be6abd186daaff",
+    "C7": "775bd0f48b2f7c7b6f6500fe5c19478bd2ef9ec23b1459dfc32047ade96246d4",
 }
 
 
@@ -189,7 +191,7 @@ class LegacyResultsReadAsTheyDid(_env.EnvCase):
         show = json.loads(P.run(root, "claim", "show", "C9", "--json", code=0).stdout)
         self.assertEqual((show["status"], show["cause"]), got["C9"])
         P.run(root, "check", "--junit", code=1)
-        tree = ET.parse(os.path.join(root, ".atompipe", "out", "junit.xml")).getroot()
+        tree = ET.parse(os.path.join(root, ".nopekit", "out", "junit.xml")).getroot()
         kinds = {c.get("name"): [k.tag for k in c] for c in tree.iter("testcase")
                  if (c.get("classname") or "").startswith("claims")}
         self.assertEqual(kinds["C5"], ["failure"])
@@ -208,7 +210,7 @@ class SignedMeansSomething(_env.EnvCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmpdir = tempfile.mkdtemp(prefix="atompipe-signed-")
+        cls.tmpdir = tempfile.mkdtemp(prefix="nopekit-signed-")
         cls.root = P.project(os.path.join(cls.tmpdir, "b"), planted=("C9",))
         P.edit_claim(cls.root, "C9", acceptance={"quantity": "hook sag", "comparator": "<=",
                                                  "limit": 0.5, "units": "mm"})
@@ -222,12 +224,12 @@ class SignedMeansSomething(_env.EnvCase):
         as the channel would build it — then ``changes`` applied."""
         view, resolution = P.resolved(self.root)
         claim = view.claim(cid)
-        model_, projection, _err = __import__("atompipe.cli", fromlist=["cli"])._projection_safe(
+        model_, projection, _err = __import__("nopekit.cli", fromlist=["cli"])._projection_safe(
             self.root, store.load(self.root))
         article = _need(verdicts, "article_of")(self.root, projection, model_,
                                                 anchors=resolution.anchors,
                                                 resolution=resolution)
-        evidence = {P.EVIDENCE: __import__("atompipe.models", fromlist=["m"]).sha256_file(
+        evidence = {P.EVIDENCE: __import__("nopekit.models", fromlist=["m"]).sha256_file(
             os.path.join(self.root, P.EVIDENCE))}
         entry = {"passed": True, "when": "2026-10-04T10:00:00Z", "who": P.WHO,
                  "detail": "no cracking", "evidence": [P.EVIDENCE], "channel": "interactive",
@@ -351,7 +353,7 @@ class SignedMeansSomething(_env.EnvCase):
                     status, cause, reason = self._reads("C9")
                     self.assertEqual((status, cause), ("stale", "claim-moved"), reason)
             P.edit_claim(self.root, "C9", acceptance=dict(acceptance, limit=0.3))
-            from atompipe.models import EntryStanding
+            from nopekit.models import EntryStanding
 
             def measured_first(index, entry, claim, terminal, digest_now, here):
                 article = getattr(entry, "article", None) or {}
@@ -393,7 +395,7 @@ class APhysicalFailNeverLosesItsPowerToFail(_env.EnvCase):
         """The composition over a fail and a later counting pass, every channel,
         every kind and terminal the claim could be edited to: Failing each time,
         and the latest-result reading (P2.1's before its review) caught."""
-        from atompipe.models import EntryStanding, Standing
+        from nopekit.models import EntryStanding, Standing
         later = PhysicalResult(passed=True, who=P.WHO, channel="interactive",
                                article={"hash": "a" * 64})
         counted = Standing("current", 1, "a" * 64, (),
@@ -467,7 +469,7 @@ class APhysicalFailNeverLosesItsPowerToFail(_env.EnvCase):
         self.assertIn("restore claims/C5.json", status["statuses"]["C5"]["reason"])
         doctor = P.run(root, "doctor", code=1)
         self.assertRegex(doctor.stdout, r"(?m)^\[FAIL.*results/C5\.json holds 1 fail")
-        tree = ET.parse(os.path.join(root, ".atompipe", "out", "junit.xml")).getroot()
+        tree = ET.parse(os.path.join(root, ".nopekit", "out", "junit.xml")).getroot()
         case = next(c for c in tree.iter("testcase") if c.get("name") == "C5"
                     and (c.get("classname") or "").startswith("claims"))
         self.assertEqual([k.tag for k in case], ["failure"])
@@ -564,7 +566,7 @@ class AMovedArticleReadsStale(_env.EnvCase):
         """The article judged against the design now, in process: a nudge moves
         it and says what moved; back to the value, current; an article compared
         with the design it was recorded on is current."""
-        from atompipe import cli
+        from nopekit import cli
         root = P.project(os.path.join(self.tmp(), "b"))
 
         def here_and_article():
@@ -629,7 +631,7 @@ class AMovedArticleReadsStale(_env.EnvCase):
             "a gate's code": lambda: _append(os.path.join(root, "gates", "structural.py"),
                                              "\nUNUSED = 1\n"),
             "the verdict cache removed": lambda: _env._rmtree(
-                os.path.join(root, ".atompipe", "verdicts")),
+                os.path.join(root, ".nopekit", "verdicts")),
         }
         for name, change in changes.items():
             with self.subTest(name):
@@ -734,12 +736,12 @@ class AMovedArticleReadsStale(_env.EnvCase):
         A pass is refused until each has run here (a fail never is); after
         `check` it is recorded."""
         root = P.project(os.path.join(self.tmp(), "b"))
-        _env._rmtree(os.path.join(root, ".atompipe", "verdicts"))
+        _env._rmtree(os.path.join(root, ".nopekit", "verdicts"))
         before = P.results(root, "C5")
         proc = P.tty(root, "claim", "physical", "C5", "pass", "--detail", "no cracking",
                      "--evidence", P.EVIDENCE, answer="C5", code=2)
         self.assertIn("never ran here", proc.stderr)
-        self.assertIn("atompipe check", proc.stderr)
+        self.assertIn("nopekit check", proc.stderr)
         self.assertEqual(P.results(root, "C5"), before)
         _fail(root, "C2")
         P.run(root, "check")
@@ -812,7 +814,7 @@ class RebuildPredictionIsExact(_env.EnvCase):
         found = P.channels(root, "C5")
         self.assertEqual(len(_rebuild_lines(found["status.text"])), 2)
         self.assertEqual(len(found["state"].get("rebuild") or ()), 2)
-        last = P.read_json(os.path.join(root, ".atompipe", "cache", "last_check.json"))
+        last = P.read_json(os.path.join(root, ".nopekit", "cache", "last_check.json"))
         self.assertEqual(len(last.get("rebuild") or ()), 2)
 
     def test_two_claims_on_one_article_are_one_line(self):
@@ -849,7 +851,7 @@ class RebuildPredictionIsExact(_env.EnvCase):
         rebuild = _need(claims, "rebuild")
         real = rebuild(view)
         self.assertEqual([r.article[:12] for r in real], [a])
-        from atompipe.models import EntryStanding
+        from nopekit.models import EntryStanding
 
         def every_pass(view_):
             # Every recorded pass's article, as if each had moved.
@@ -883,7 +885,7 @@ class TheCheckedSectionHoldsOnlyBoundResults(_env.EnvCase):
     def test_in_process_rows(self):
         """A counted pass is under the checked section in its own row; a moved
         one is not, and a VERIFIED the standing does not back is loud."""
-        from atompipe.models import EntryStanding, ProjectMeta, Standing
+        from nopekit.models import EntryStanding, ProjectMeta, Standing
         result = PhysicalResult(passed=True, who=P.WHO, channel="interactive",
                                 article={"hash": "a" * 64}, evidence=["p.jpg"])
 
@@ -1129,7 +1131,7 @@ class AnExpertJudgmentStaysWithItsAuthority(_env.EnvCase):
         """Rows a-f in process: no authority, named only, recorded (Assumed),
         the statement edited after (Gap), recorded by another identity (Gap),
         a judgment that counts (Checked)."""
-        from atompipe.models import AttributionRecord, EntryStanding, Standing
+        from nopekit.models import AttributionRecord, EntryStanding, Standing
         base = Claim(id="C8", statement="Safe above a bed", kind=ClaimKind.ASSUMPTION,
                      rationale="a safety call", terminal="human", authority="Dana")
 
@@ -1162,7 +1164,7 @@ class AnExpertJudgmentStaysWithItsAuthority(_env.EnvCase):
         reads, which stops `check` — never Stale `claim-moved`, which does not:
         any once-judged claim could have carried any new statement past `check`
         (D17's laundering by another route). Planted: P2.5a's judged states."""
-        from atompipe.models import AttributionRecord, EntryStanding, Standing
+        from nopekit.models import AttributionRecord, EntryStanding, Standing
         base = Claim(id="C8", statement="Safe above a bed", kind=ClaimKind.ASSUMPTION,
                      rationale="a safety call", terminal="human", authority="Dana")
         record = AttributionRecord(role="authority", name="Dana", reason="a safety call",
@@ -1209,7 +1211,7 @@ class AnExpertJudgmentStaysWithItsAuthority(_env.EnvCase):
         """(review of P2.5a) A fail on an expert-judgment claim whose design moved
         said "a new article is needed" while the rebuild prediction, rightly,
         left a judgment out. Planted: the judgment test answering no."""
-        from atompipe.models import EntryStanding, Standing
+        from nopekit.models import EntryStanding, Standing
         fail = PhysicalResult(passed=False, who="Pat Other <p@x>", channel="agent-session s1",
                               detail="too heavy", article={"hash": "a" * 64})
         standing = Standing("", None, "", (), (EntryStanding(
@@ -1269,7 +1271,7 @@ class AnExpertJudgmentStaysWithItsAuthority(_env.EnvCase):
         P.edit_claim(root, "C8", authority=P.NAME)
         status, cause, reason = _status(root, "C8")
         self.assertEqual((status, cause), ("unclaimed", "authority-unattributed"))
-        self.assertIn(f"atompipe claim physical C8 assume --authority", reason)
+        self.assertIn(f"nopekit claim physical C8 assume --authority", reason)
         check = json.loads(P.run(root, "check", "--json").stdout)
         self.assertIn("C8", [row["claim"] for row in check["blocking"]])
         P.tty(root, "claim", "physical", "C8", "assume", "--authority", P.NAME, answer="C8",
@@ -1347,7 +1349,7 @@ class AnExpertJudgmentStaysWithItsAuthority(_env.EnvCase):
         current = view.claim("C8")
         # An entry recorded "for" the authority by someone else, written as only a
         # process that recomputes seals could (R2): the judge must still refuse it.
-        model_, projection, _err = __import__("atompipe.cli", fromlist=["cli"])._projection_safe(
+        model_, projection, _err = __import__("nopekit.cli", fromlist=["cli"])._projection_safe(
             root, store.load(root))
         article = verdicts.article_of(root, projection, model_, anchors=resolution.anchors,
                                       resolution=resolution)
@@ -1400,7 +1402,7 @@ class ATerminalCannotLowerTheBar(_env.EnvCase):
         }
         for name, (record, word) in rows.items():
             with self.subTest(name):
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     self._read(record)
                 self.assertIn("C9.json", str(caught.exception))
                 self.assertIn(word, str(caught.exception))
@@ -1467,9 +1469,9 @@ class MeasuredMustAgree(_env.EnvCase):
         self.assertEqual(P.results(root, "C5")["results"][-1]["measured"], 3.0)
 
     def test_a_typed_outcome_winning_is_caught(self):
-        decide = _need(__import__("atompipe.cli", fromlist=["cli"]), "_measured_outcome")
+        decide = _need(__import__("nopekit.cli", fromlist=["cli"]), "_measured_outcome")
         acceptance = Acceptance(quantity="tip deflection", limit=0.5, units="mm")
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             decide(acceptance, 0.62, True)
         self.assertIs(decide(acceptance, 0.62, None), False)
         self.assertIs(decide(acceptance, 0.4, None), True)
@@ -1494,7 +1496,7 @@ class RenderersAgreeOnPhysicalClaims(_env.EnvCase):
 
     @classmethod
     def _build(cls):
-        cls.tmpdir = tempfile.mkdtemp(prefix="atompipe-renderers-")
+        cls.tmpdir = tempfile.mkdtemp(prefix="nopekit-renderers-")
         unittest.addModuleCleanup(_env._rmtree, cls.tmpdir)
         root = P.project(os.path.join(cls.tmpdir, "b"), planted=("C8", "C9"))
         for cid, record in (("C10", {"statement": "an agent's pass", "kind": "physical",
@@ -1541,7 +1543,7 @@ class RenderersAgreeOnPhysicalClaims(_env.EnvCase):
                 self.assertIs(result.get("counts"), counts, result)
                 if not counts:
                     self.assertTrue(result.get("why"), result)
-        with open(os.path.join(_env.REPO, "src", "atompipe", "site_template", "lib",
+        with open(os.path.join(_env.REPO, "src", "nopekit", "site_template", "lib",
                                "panels.js"), encoding="utf-8") as fh:
             panels = fh.read()
         self.assertNotRegex(panels, r"const ok = !!result\.passed")
@@ -1583,7 +1585,7 @@ class RenderersAgreeOnPhysicalClaims(_env.EnvCase):
         result = PhysicalResult(passed=True, who="Dana <d@x>", channel="interactive")
         self.assertEqual(report.result_facts(claim, result)["heading"],
                          "A judgment was recorded:")
-        with open(os.path.join(_env.REPO, "src", "atompipe", "site_template", "lib",
+        with open(os.path.join(_env.REPO, "src", "nopekit", "site_template", "lib",
                                "panels.js"), encoding="utf-8") as fh:
             panels = fh.read()
         self.assertIn('c.terminal === "human" ? "judgment"', panels)
@@ -1600,7 +1602,7 @@ class RenderersAgreeOnPhysicalClaims(_env.EnvCase):
         self.assertNotEqual(view_builders(planted), [])
 
 
-#: Every ``dataclasses.replace(..., verdicts=...)`` under ``src/atompipe`` and why
+#: Every ``dataclasses.replace(..., verdicts=...)`` under ``src/nopekit`` and why
 #: it may build its view without the judge (P2.5a-D13).
 VIEW_ALLOWLIST = {
     ("verdicts.py", "view"): "the one builder: verdicts and each claim's standing",
@@ -1611,7 +1613,7 @@ VIEW_ALLOWLIST = {
 
 
 def _sources() -> dict[str, str]:
-    src = os.path.join(_env.REPO, "src", "atompipe")
+    src = os.path.join(_env.REPO, "src", "nopekit")
     out = {}
     for name in sorted(os.listdir(src)):
         if name.endswith(".py"):
@@ -1649,7 +1651,7 @@ class APhysicalResultIsNoTier(unittest.TestCase):
         return line
 
     def test_the_tier_names_no_person(self):
-        with open(os.path.join(_env.REPO, "src", "atompipe", "models.py"),
+        with open(os.path.join(_env.REPO, "src", "nopekit", "models.py"),
                   encoding="utf-8") as fh:
             line = self._comment(fh.read())
         self.assertNotRegex(line, r"human|calipers|person")
@@ -1681,13 +1683,13 @@ def _fig4_exported(test: Any, name: str = "f") -> tuple[str, str]:
 def _captured(argv: list[str]) -> tuple[int, str, str]:
     import contextlib
     import io
-    from atompipe import cli
+    from nopekit import cli
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
             mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": P.NAME,
-                                         "GIT_AUTHOR_EMAIL": "tests@atompipe.invalid",
+                                         "GIT_AUTHOR_EMAIL": "tests@nopekit.invalid",
                                          "GIT_COMMITTER_NAME": P.NAME,
-                                         "GIT_COMMITTER_EMAIL": "tests@atompipe.invalid"}):
+                                         "GIT_COMMITTER_EMAIL": "tests@nopekit.invalid"}):
         code = cli.main(argv)
     return code, out.getvalue(), err.getvalue()
 
@@ -1740,8 +1742,8 @@ class AResultBindsToAnExportedArticle(_env.EnvCase):
         the claim, so the fail charged no evaluator. Every record's seal is
         charged, the newest export that re-ran the claim is the one the prompt
         names; planted, the first record alone is caught."""
-        from atompipe import milestones
-        from atompipe.models import ExportRecord
+        from nopekit import milestones
+        from nopekit.models import ExportRecord
         row = {"gate": "bracket.deflection", "code": "c" * 64, "rho": "r" * 64,
                "value": 0.469, "units": "mm", "inside": True}
         fit = ExportRecord(milestone="fit-check", when="2026-10-04T10:00:00Z",
@@ -1786,7 +1788,7 @@ class AResultBindsToAnExportedArticle(_env.EnvCase):
         root, article = _fig4_exported(self)
         counted = P.exports(root, "enclosure")["exports"][-1]["counted"]["K1"]
         F.set_cavity(root, 82.0)
-        from atompipe import milestones
+        from nopekit import milestones
         with mock.patch.object(milestones, "sealed_contradictions", lambda entry, cid: []):
             code, out, err = _captured(["claim", "physical", "K1", "fail", "--detail", "x",
                                         "--article", article, "-C", root])
@@ -1800,7 +1802,7 @@ def _exported(params: dict, *, traced: bool = True, milestone: str = "enclosure"
     """An exported article as `export` records it: ``params`` ``{path: value}``
     (a traced generator's reads) and ``model`` (its code files' digests),
     sealed."""
-    from atompipe.util import seal
+    from nopekit.util import seal
     rows = [[list(path), verdicts.digest_value(value), value]
             for path, value in sorted(params.items())]
     built = {"params": rows, "model": dict(model or {}), "files": {}}
@@ -1822,8 +1824,8 @@ class _Judged:
                  exports: list[str], claim: Claim | None = None,
                  verdicts_: list | None = None, packages: dict | None = None,
                  files: dict | None = None) -> None:
-        from atompipe.models import ExportRecord
-        from atompipe.util import FileDigests
+        from nopekit.models import ExportRecord
+        from nopekit.util import FileDigests
         for rel, data in (files or {}).items():
             path = os.path.join(root, *rel.split("/"))
             os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -2232,7 +2234,7 @@ class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
         }
         for name, record in refused.items():
             with self.subTest(name):
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     store.read_record(self._write(record), "claims")
                 self.assertIn("claims/C9.json", str(caught.exception))
                 self.assertIn("expected_latency", str(caught.exception))
@@ -2247,7 +2249,7 @@ class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
                          verdicts._claim_digest(claim))
 
     def _words(self, results: list[dict], exports: list[dict]) -> str:
-        from atompipe.models import ExportRecord
+        from nopekit.models import ExportRecord
         claim = Claim(id="K8", statement="s", kind=ClaimKind.PHYSICAL, note="n",
                       results=tuple(PhysicalResult.from_dict(r) for r in results))
         if "expected_latency" not in {f.name for f in dataclasses.fields(Claim)}:
@@ -2302,8 +2304,8 @@ class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
         latency is its run's, measured per run. A ruler's fail on C1, recorded
         on an exported article, measured no latency of C1's — `why` showed
         "latency: measured 6 min", and P4's Λ₀ would have read it."""
-        from atompipe import decisions
-        from atompipe.models import ExportRecord
+        from nopekit import decisions
+        from nopekit.models import ExportRecord
         B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")
         claim = Claim(id="K1", statement="s", gates=["fig4.fit"],
                       acceptance=Acceptance(quantity="width", limit=100.0, units="mm"),
@@ -2320,8 +2322,8 @@ class LatencyIsDeclaredUntilMeasured(_env.EnvCase):
         """`why` and `claim show` (P2.5b-D19): a `latency:` row on a claim that
         declares one or has measured one, and none on a physical claim with
         neither — an empty row on every physical claim would say nothing."""
-        from atompipe import decisions
-        from atompipe.models import ExportRecord
+        from nopekit import decisions
+        from nopekit.models import ExportRecord
         bare = Claim(id="K8", statement="s", kind=ClaimKind.PHYSICAL, note="n")
         declared = dataclasses.replace(bare, expected_latency={"value": 1, "units": "day"})
         B = _exported({("board",): 20.0}, milestone="board", when="2026-10-04T10:00:00Z")

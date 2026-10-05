@@ -25,9 +25,9 @@ import math
 import os as _os
 from typing import Any, Iterable, Sequence
 
-from atompipe.gates import gate, GateContext, SCOPE_SEP
-from atompipe.modelio import load_path as _load_path
-from atompipe.models import Locator, NegativeControl, Tier, Verdict
+from nopekit.gates import gate, GateContext, SCOPE_SEP
+from nopekit.modelio import load_path as _load_path
+from nopekit.models import Locator, NegativeControl, Tier, Verdict
 
 # Shared helpers, loaded BY PATH through the spine's loader rather than imported
 # by name: ``packs.load_gates`` puts the pack directory on ``sys.path`` only
@@ -37,7 +37,7 @@ from atompipe.models import Locator, NegativeControl, Tier, Verdict
 # drift (rule 2). ``load_path`` names each module after its absolute path: the
 # gate and the fixture asking for one file get one module, and a second copy of
 # this pack in the same process gets its own. What slipped through when the
-# name was fixed (``atompipe_pack_fdm_print__process_model``) and whatever
+# name was fixed (``nopekit_pack_fdm_print__process_model``) and whatever
 # ``sys.modules`` held under it was served: a twin of this pack computed its
 # print time with the FIRST copy's model, and never ran an edit to its own
 # (S-26, packs:H4).

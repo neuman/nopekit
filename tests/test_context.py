@@ -44,10 +44,10 @@ from unittest import mock
 import _env
 import _projects
 import _transcript as T
-from atompipe import claims, gates, modelio, report, verdicts
-from atompipe.models import (Acceptance, Claim, ClaimKind, ClaimStatus, GateSpec, Ledger,
+from nopekit import claims, gates, modelio, report, verdicts
+from nopekit.models import (Acceptance, Claim, ClaimKind, ClaimStatus, GateSpec, Ledger,
                              NegativeControl, Verdict)
-from atompipe.util import AtompipeError
+from nopekit.util import NopekitError
 
 NOW = "2026-10-03T12:00:00Z"
 
@@ -81,7 +81,7 @@ import copy
 import dataclasses
 import os
 
-from atompipe.modelio import load_path
+from nopekit.modelio import load_path
 
 kg = load_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_good.py"))
 
@@ -104,8 +104,8 @@ def stubby(ctx):
 #: operating context removed is the rule's own negative control.
 SPAN_GATE = '''\
 """Planted by tests/test_context.py: an evaluator qualified on load_n in [0, 40]."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="t.span", claims=["c1"], settles="sag", {context}
@@ -121,8 +121,8 @@ CONTEXT = 'operating_context={"load_n": (0.0, 40.0)},'
 GUARD_GATES = '''\
 """Planted by tests/test_context.py: a guard with an operating context, and its
 dependent."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="t.guard", claims=["c2"], settles="span ratio",
@@ -147,8 +147,8 @@ def dep(ctx):
 #: 8, and passes whenever load_n is past 9 — inside (0, 10), outside (0, 9).
 EDGE_GATE = '''\
 """Planted by tests/test_context.py: an evaluator keyed to its own control."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="t.edge", claims=["c1"], settles="load", operating_context={{"load_n": {range}}},
@@ -206,10 +206,10 @@ def set_default(project: str, field: str, value: float) -> None:
 
 
 def run(case: _env.EnvCase, project: str, *argv: str, code: int | None = None):
-    proc = _env.atompipe(list(argv), cwd=project)
+    proc = _env.nopekit(list(argv), cwd=project)
     if code is not None:
         case.assertEqual(proc.returncode, code,
-                         f"`atompipe {' '.join(argv)}` exited {proc.returncode}:\n"
+                         f"`nopekit {' '.join(argv)}` exited {proc.returncode}:\n"
                          f"{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}")
     return proc
 
@@ -251,7 +251,7 @@ class NoContextMovesNothing(_env.EnvCase):
 
     def test_the_bracket_resolves_the_same_without_the_judgement(self):
         project = _projects.bracket_copy(os.path.join(self.tmp(), "b"), migrated=True)
-        from atompipe import store
+        from nopekit import store
         ledger = store.load(project)
         registry = gates.Registry()
         gates.load_project_gates(project, registry)
@@ -329,13 +329,13 @@ class OutsideTheContextAPassDoesNotCount(_env.EnvCase):
                           "reason": OUTSIDE + " — an owned assumption would carry it as "
                           "Assumed: name its owner and a fallback reason in claims/c1.json "
                           "(owner, fallback), and the owner records it in their own shell: "
-                          "atompipe claim physical c1 assume",
+                          "nopekit claim physical c1 assume",
                           "word": "gap"})
         text = run(self, project, "report", code=0).stdout
         gaps = text.split("## Gaps", 1)[1].split("\n## ", 1)[0]
         self.assertIn("### Outside an evaluator's operating context", gaps)
         self.assertIn(f"- **c1** Sag stays under 0.5 mm — {OUTSIDE}", gaps)
-        with open(os.path.join(project, ".atompipe", "out", "junit.xml"),
+        with open(os.path.join(project, ".nopekit", "out", "junit.xml"),
                   encoding="utf-8") as fh:
             junit = ET.fromstring(fh.read())
         (case,) = junit.iterfind("testsuite[@name='claims.critical']/testcase[@name='c1']")
@@ -641,7 +641,7 @@ class MalformedContextsAreRefused(unittest.TestCase):
                               ("both ends open", {"load_n": (None, None)}),
                               ("lo above hi", {"load_n": (2, 1)})):
             with self.subTest(case=name):
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     self._register(context)
                 self.assertIn("t.ctx", str(caught.exception))
 
@@ -745,7 +745,7 @@ class APackBaselineOutsideItsContextIsNotPublishable(_env.EnvCase):
         return pack_dir
 
     def test_validate_names_the_known_good_outside(self):
-        from atompipe import packs
+        from nopekit import packs
         problems = packs.validate(self._pack())
         hits = [p for p in problems if p.startswith("beam.deflection:")
                 and "known-good outside its operating context" in p]
@@ -753,7 +753,7 @@ class APackBaselineOutsideItsContextIsNotPublishable(_env.EnvCase):
 
     def test_without_the_judgement_it_reads_publishable(self):
         """The violator: the breach rule stubbed out on validate's path."""
-        from atompipe import packs
+        from nopekit import packs
         with mock.patch.object(gates, "context_breach", lambda *a, **k: None):
             problems = packs.validate(self._pack())
         self.assertEqual([p for p in problems if "operating context" in p], [], problems)

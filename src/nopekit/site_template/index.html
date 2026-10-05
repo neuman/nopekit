@@ -1,0 +1,89 @@
+<!doctype html>
+<!--
+  The shell. HACKABLE, YOURS, NEVER REGENERATED.
+
+  `nopekit site init` writes this file once and then refuses to overwrite it;
+  `nopekit site build` never touches it at all. Add your own sections, change
+  the copy, drop in a logo — none of it is at risk from a later nopekit upgrade.
+  (app.js and style.css ARE refreshed by `site init`: they are the renderer, they
+  get fixes, and a project that could never receive one would be stuck with the
+  bugs of the day it was created. Keep your edits here, or rename what you fork.)
+
+  Nothing on this page is a source of truth. It reads site/data/state.json, which
+  `nopekit site build` generates from the ledger. If a number is wrong, the
+  ledger is wrong.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>nopekit project</title>
+    <link rel="stylesheet" href="style.css" />
+
+    <script>
+      // THE IMPORT MAP, chosen at load time: a vendored three.js when
+      // `nopekit site vendor` has been run, the CDN otherwise. Both spellings
+      // map the bare specifiers `three` and `three/addons/`, so every addon's
+      // internal `import ... from 'three'` resolves either way and not one line
+      // of vendored code needs rewriting.
+      //
+      // The probe is a SYNCHRONOUS XHR, which is deprecated and deliberate: an
+      // import map has to be in the document before the first module begins
+      // loading, so the choice cannot be awaited. It is a same-origin HEAD
+      // against a file the server either has or does not, next to the page
+      // itself — and the alternative (ship one map, then patch three.js's
+      // resolution afterwards) is not something a no-build-step site can do.
+      //
+      // The vendor layout MIRRORS the package's own (jsm/loaders/…,
+      // jsm/utils/…), because GLTFLoader.js imports
+      // '../utils/BufferGeometryUtils.js' relatively. Flattening the files into
+      // one directory produces a vendored site that 404s offline — the one
+      // situation vendoring exists for, and the one nobody tests before
+      // archiving a project.
+      (function () {
+        var CDN = "https://cdn.jsdelivr.net/npm/three@0.169.0/";
+        var vendored = false;
+        try {
+          var probe = new XMLHttpRequest();
+          probe.open("HEAD", "vendor/three.module.js", false);
+          probe.send(null);
+          vendored = probe.status >= 200 && probe.status < 400;
+        } catch (err) {
+          vendored = false;               // no vendor/, or the server said no
+        }
+        var imports = vendored
+          ? { "three": "./vendor/three.module.js", "three/addons/": "./vendor/jsm/" }
+          : { "three": CDN + "build/three.module.js", "three/addons/": CDN + "examples/jsm/" };
+        var tag = document.createElement("script");
+        tag.type = "importmap";
+        tag.textContent = JSON.stringify({ imports: imports });
+        document.head.appendChild(tag);
+        document.documentElement.dataset.three = vendored ? "vendor" : "cdn";
+      })();
+    </script>
+  </head>
+
+  <body>
+    <div id="app">
+      <p class="booting">Reading the ledger…</p>
+    </div>
+
+    <noscript>
+      <div class="no-state">
+        <h1>This page needs JavaScript to render the ledger.</h1>
+        <p>
+          Everything it would show is in <code class="mono">data/state.json</code>, which is
+          plain JSON and readable without a browser:
+        </p>
+        <pre class="cmd"><code class="mono">curl -s http://localhost:8000/data/state.json | python3 -m json.tool</code></pre>
+        <p class="small muted">
+          That file is the whole page. It is complete on purpose — an agent that had to render
+          HTML to read a verdict would not read the verdict.
+        </p>
+      </div>
+    </noscript>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>

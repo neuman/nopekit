@@ -1,7 +1,7 @@
 """Every groundspace opens its own site from the editor: `.vscode/launch.json`.
 
 What slipped through: a groundspace built end to end had a site and no way to open it
-short of knowing `atompipe site serve` existed. These tests hold four things:
+short of knowing `nopekit site serve` existed. These tests hold four things:
 
 * `init`, `site init` and `site build` each leave a launch entry behind when there is
   none, so a new groundspace has one and an older one gains it on its next site build;
@@ -11,7 +11,7 @@ short of knowing `atompipe site serve` existed. These tests hold four things:
   listening — the two live side by side in `site.py`, and this is what stops one moving
   without the other;
 * the configured command, run the way the editor runs it, builds and serves the site
-  where `atompipe` is NOT on PATH (the fallback through PYTHONPATH), which is how a
+  where `nopekit` is NOT on PATH (the fallback through PYTHONPATH), which is how a
   checkout is used before anything is installed.
 
 Every child goes through `_env` (test_meta.NoSubprocessOutsideRun); the ready line is
@@ -33,14 +33,14 @@ import unittest
 from unittest import mock
 
 import _env
-from atompipe import cli, site
+from nopekit import cli, site
 
-#: PATH with no atompipe on it, so the fallback is what gets exercised.
+#: PATH with no nopekit on it, so the fallback is what gets exercised.
 BARE_PATH = os.pathsep.join(p for p in ("/usr/local/bin", "/usr/bin", "/bin") if os.path.isdir(p))
 
 
 def _cli(cwd: str, *args: str):
-    return _env.atompipe(args, cwd=cwd, env={"PATH": BARE_PATH})
+    return _env.nopekit(args, cwd=cwd, env={"PATH": BARE_PATH})
 
 
 class LaunchEntryIsWritten(unittest.TestCase):
@@ -121,10 +121,10 @@ class TheEditorSeesTheServerReady(unittest.TestCase):
         self.assertIsNotNone(m, first)
         self.assertRegex(m.group(1), r"^http://127\.0\.0\.1:[1-9]\d*/$")
 
-    def test_the_configured_command_works_without_atompipe_on_path(self):
+    def test_the_configured_command_works_without_nopekit_on_path(self):
         with open(os.path.join(self.dir, site.LAUNCH_PATH), encoding="utf-8") as fh:
             cfg = json.load(fh)["configurations"][0]
-        self.assertIsNone(shutil.which("atompipe", path=BARE_PATH))
+        self.assertIsNone(shutil.which("nopekit", path=BARE_PATH))
         # The editor runs `command` in a shell with the entry's env, waits for the
         # ready line, then opens its URL. The same, in one shell: run it in the
         # background, wait for the line, fetch the page, stop it. SIGTERM, not

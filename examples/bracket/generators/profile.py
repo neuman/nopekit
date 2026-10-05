@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""The bracket's print package: what `atompipe export print-v1` hands whoever
+"""The bracket's print package: what `nopekit export print-v1` hands whoever
 prints it (P2.5b-D23).
 
 `side_profile(ctx)` writes two files into `ctx.out_dir`:

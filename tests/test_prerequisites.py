@@ -47,11 +47,11 @@ from unittest import mock
 
 import _env
 import _projects
-from atompipe import claims, cli, gates, modelio, packs, store, verdicts
-from atompipe import report as report_mod
-from atompipe.models import (Claim, ClaimStatus, GateSpec, Ledger, NegativeControl, Tier,
+from nopekit import claims, cli, gates, modelio, packs, store, verdicts
+from nopekit import report as report_mod
+from nopekit.models import (Claim, ClaimStatus, GateSpec, Ledger, NegativeControl, Tier,
                              Verdict)
-from atompipe.util import AtompipeError
+from nopekit.util import NopekitError
 
 NOW = "2026-10-03T10:00:00Z"
 NC = NegativeControl(fixture="selftest/bad.py:bad", note="planted by test_prerequisites")
@@ -110,7 +110,7 @@ def _ctx(root: str) -> gates.GateContext:
                              log=lambda _m: None)
 
 
-def _tmp(case: unittest.TestCase, prefix: str = "atompipe-prereq-") -> str:
+def _tmp(case: unittest.TestCase, prefix: str = "nopekit-prereq-") -> str:
     path = tempfile.mkdtemp(prefix=prefix)
     case.addCleanup(shutil.rmtree, path, True)
     return path
@@ -147,7 +147,7 @@ def never_run_past_problems() -> list[str]:
     out: list[str] = []
     calls: list[str] = []
     asked: list[str] = []
-    root = tempfile.mkdtemp(prefix="atompipe-prereq-run-")
+    root = tempfile.mkdtemp(prefix="nopekit-prereq-run-")
     try:
         registry = gates.Registry()
         registry.register(_spec("t.d", needs=["t.p"]), _passes("t.d", calls))
@@ -205,7 +205,7 @@ class PrerequisiteFailureIsNeverAPass(unittest.TestCase):
         if kind != "not registered":
             make = {"failed": _fails, "errored": _crashes, "self-skipped": _self_skips,
                     "availability": _passes}[kind]
-            extra = ({"requires_python": ["atompipe_no_such_module_p22"]}
+            extra = ({"requires_python": ["nopekit_no_such_module_p22"]}
                      if kind == "availability" else {})
             registry.register(_spec("t.p", **extra), make("t.p", calls))
         got = {v.gate: v for v in gates.run_all(registry, _ctx(root))}
@@ -389,7 +389,7 @@ class PrerequisiteFailureIsNeverAPass(unittest.TestCase):
             return Verdict(gate="t.d", passed=True, blocked_by=["t.other"],
                            blocked_kind="errored")
 
-        root = tempfile.mkdtemp(prefix="atompipe-prereq-forge-")
+        root = tempfile.mkdtemp(prefix="nopekit-prereq-forge-")
         try:
             got = gates.run_gate(spec, forges, _ctx(root))
         finally:
@@ -414,7 +414,7 @@ class PrerequisiteFailureIsNeverAPass(unittest.TestCase):
         verdicts.remember(root, "t.d", Verdict(gate="t.d", skipped=True,
                                                skip_reason="planted"),
                           input_rho="", kind="self-skip", when=NOW)
-        path = os.path.join(root, ".atompipe", "cache", "last_outcomes.json")
+        path = os.path.join(root, ".nopekit", "cache", "last_outcomes.json")
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
         data["t.d"][""]["verdict"].update(blocked_by=["t.p"], blocked_kind="errored")
@@ -471,7 +471,7 @@ def _load(graph: dict[str, list[str]], order: list[str]) -> bool:
     for node in order:
         try:
             registry.register(_spec(node, needs=graph[node]), _passes(node))
-        except AtompipeError:
+        except NopekitError:
             return True
     return False
 
@@ -482,7 +482,7 @@ class NeedsCycleRefused(unittest.TestCase):
 
     def test_a_self_need_is_refused(self):
         registry = gates.Registry()
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             registry.register(_spec("t.a", needs=["t.a"]), _passes("t.a"))
         self.assertIn("itself", str(caught.exception))
 
@@ -492,7 +492,7 @@ class NeedsCycleRefused(unittest.TestCase):
                 registry = gates.Registry()
                 graph = {"t.a": ["t.b"], "t.b": ["t.a"]}
                 registry.register(_spec(first, needs=graph[first], pack="pa"), _passes(first))
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     registry.register(_spec(second, needs=graph[second], pack="pb"),
                                       _passes(second))
                 text = str(caught.exception)
@@ -507,7 +507,7 @@ class NeedsCycleRefused(unittest.TestCase):
         for name, first, second in (("one then two", one, two), ("two then one", two, one)):
             with self.subTest(name):
                 registry = gates.Registry()
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     for gid, needs in first + second:
                         packs._adopt(registry, _spec(gid, needs=needs, pack="p"),
                                      _passes(gid), "p")
@@ -518,9 +518,9 @@ class NeedsCycleRefused(unittest.TestCase):
         fn_b = _passes("t.b")
         registry.register(_spec("t.a", needs=["t.b"]), _passes("t.a"))
         registry.register(_spec("t.b"), fn_b)
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             registry.register(_spec("t.b", needs=["t.a"]), _passes("t.b"), replace=True)
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             registry.register(_spec("t.b", needs=["t.a"]), fn_b)    # the idempotent path
         self.assertEqual(registry.get("t.b")[0].needs, [], "a refused re-registration "
                                                            "left the old spec in place")
@@ -559,11 +559,11 @@ class NeedsCycleRefused(unittest.TestCase):
         registry.register(_spec("t.b"), _passes("t.b"))
         spec, fn = registry._gates["t.b"]
         registry._gates["t.b"] = (dataclasses.replace(spec, needs=["t.a"]), fn)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             gates.plan(registry, registry.specs())
         self.assertIn("->", str(caught.exception))
         root = _tmp(self)
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             gates.run_all(registry, _ctx(root))
 
 
@@ -582,7 +582,7 @@ class TierInversionRefused(unittest.TestCase):
                 p = _spec("t.p", tier=2)
                 first, second = (d, p) if dependent_first else (p, d)
                 registry.register(first, _passes(first.id))
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     registry.register(second, _passes(second.id))
                 text = str(caught.exception)
                 self.assertIn("tier 2", text)
@@ -596,8 +596,8 @@ class TierInversionRefused(unittest.TestCase):
         pointed at a file with no edge in it; and it cited ``D-28``, a plan row
         the release bundle strips."""
         gate_file = (
-            "from atompipe.gates import gate\n"
-            "from atompipe.models import NegativeControl, Tier, Verdict\n\n\n"
+            "from nopekit.gates import gate\n"
+            "from nopekit.models import NegativeControl, Tier, Verdict\n\n\n"
             "@gate(id={gid!r}, claims=[{gid!r}], tier=Tier({tier}){needs},\n"
             "      negative_control=NegativeControl(fixture='selftest/bad.py:bad'))\n"
             "def g(ctx):\n"
@@ -606,7 +606,7 @@ class TierInversionRefused(unittest.TestCase):
         _write(root, "gates/dep.py", gate_file.format(gid="mini.dep", tier=0,
                                                        needs=", needs=['mini.guard']"))
         _write(root, "gates/guard.py", gate_file.format(gid="mini.guard", tier=2, needs=""))
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             gates.load_project_gates(root, gates.Registry())
         text = str(caught.exception)
         self.assertIn("'mini.dep' (tier 0, (project), declared in gates/dep.py)", text)
@@ -635,7 +635,7 @@ class TierInversionRefused(unittest.TestCase):
         registry.register(_spec("t.p", tier=0), _passes("t.p"))
         spec, fn = registry._gates["t.p"]
         registry._gates["t.p"] = (dataclasses.replace(spec, tier=Tier.SOLVE), fn)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             gates.plan(registry, registry.specs())
         self.assertIn("tier", str(caught.exception))
 
@@ -673,13 +673,13 @@ def _declaration_problems() -> list[str]:
         registry = gates.Registry()
         try:
             registry.register(_spec("t.d", needs=bad), _passes("t.d"))
-        except AtompipeError:
+        except NopekitError:
             continue
         out.append(f"needs={bad!r} was accepted")
     registry = gates.Registry()
     try:
         registry.register(_spec("t.d", needs=["t.later"]), _passes("t.d"))
-    except AtompipeError as exc:
+    except NopekitError as exc:
         out.append(f"a forward reference was refused: {exc}")
     declared = _spec("t.e", needs=["t.p"])
     registry.register(declared, _passes("t.e"))
@@ -869,8 +869,8 @@ class ApplyingTheRuleTwiceMovesNothing(unittest.TestCase):
 #: declares the edge by re-registering (``needs`` is outside rho, D-04), so the
 #: same module serves the base spine's characterizations.
 PROJECT_GATES = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 FLAGS = {{}}
 CALLS = []
@@ -914,7 +914,7 @@ def dep(ctx):
 PROJECT_KNOWN_GOOD = '''\
 import dataclasses
 
-from atompipe.models import Ledger
+from nopekit.models import Ledger
 
 #: 0.5, not the live design's 1.0 (R-6, P2.3): the flags above crash the live
 #: design and not this one, so a planted crash is the gate's, never its
@@ -934,7 +934,7 @@ PROJECT_FIXTURES = '''\
 import dataclasses
 import os
 
-from atompipe.modelio import load_path
+from nopekit.modelio import load_path
 
 kg = load_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_good.py"))
 
@@ -1034,16 +1034,16 @@ class Planted:
 
     def forget_controls(self, gate_id: str) -> None:
         """Remove ``gate_id``'s control entries, so the next sweep runs its control."""
-        base = os.path.join(self.root, ".atompipe", "verdicts", gate_id)
+        base = os.path.join(self.root, ".nopekit", "verdicts", gate_id)
         for name in os.listdir(base):
             if name.startswith("control-"):
                 os.remove(os.path.join(base, name))
-        hints = os.path.join(self.root, ".atompipe", "cache", "controls.json")
+        hints = os.path.join(self.root, ".nopekit", "cache", "controls.json")
         if os.path.exists(hints):
             os.remove(hints)
 
     def entries(self, gate_id: str) -> list[str]:
-        base = os.path.join(self.root, ".atompipe", "verdicts", gate_id)
+        base = os.path.join(self.root, ".nopekit", "verdicts", gate_id)
         return sorted(n for n in (os.listdir(base) if os.path.isdir(base) else ())
                       if not n.startswith("control-"))
 
@@ -1457,7 +1457,7 @@ def _tool_gate_first(p: Planted) -> None:
     puts its skip before the dependent's (the review's world, P2.2)."""
     registry = gates.Registry()
     registry.register(_spec("a.tool", claims_=["dep"],
-                            requires_python=["atompipe_no_such_module_p22"]),
+                            requires_python=["nopekit_no_such_module_p22"]),
                       _passes("a.tool"))
     for spec, fn in p.registry.pairs():
         registry.register(spec, fn)
@@ -1731,7 +1731,7 @@ class BracketGuardTranscript(unittest.TestCase):
         root = _arm_30(self)
         junit = os.path.join(_tmp(self), "junit.xml")
         home = _tmp(self)
-        proc = _env.atompipe(["check", "--junit", junit], cwd=root, home=home)
+        proc = _env.nopekit(["check", "--junit", junit], cwd=root, home=home)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertEqual(transcript_problems(proc.stdout), [], proc.stdout)
         with open(junit, encoding="utf-8") as fh:
@@ -1747,7 +1747,7 @@ class BracketGuardTranscript(unittest.TestCase):
 
     def test_the_matcher_refuses_a_transcript_without_the_digest(self):
         root = _arm_30(self)
-        proc = _env.atompipe(["check", "--no-record"], cwd=root, home=_tmp(self))
+        proc = _env.nopekit(["check", "--no-record"], cwd=root, home=_tmp(self))
         mutated = "\n".join(ln for ln in proc.stdout.splitlines()
                             if "prerequisite failed" not in ln)
         self.assertTrue(transcript_problems(mutated))
@@ -1757,7 +1757,7 @@ class BracketGuardTranscript(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # V16: the words
 # --------------------------------------------------------------------------- #
-SKILL = os.path.join(_env.REPO, "skills", "atompipe", "SKILL.md")
+SKILL = os.path.join(_env.REPO, "skills", "nopekit", "SKILL.md")
 
 
 def words_problems(human: Any = None) -> list[str]:
@@ -1814,7 +1814,7 @@ def describe_problems(describe: Callable[[GateSpec], str] | None = None) -> list
 
 
 def skill_problems(text: str) -> list[str]:
-    """What is wrong with the atompipe skill's account of a Skipped claim
+    """What is wrong with the nopekit skill's account of a Skipped claim
     (S-54): each cause with its own action, "install the tool" said once and
     under the missing tool only, and each kind a prerequisite skip names
     mapped to what clears it — the edge in D11's word."""
@@ -1935,8 +1935,8 @@ class PrerequisiteWords(unittest.TestCase):
     def test_doctor_names_an_unregistered_prerequisite(self):
         root = _projects.bracket_copy(os.path.join(_tmp(self), "bracket"), migrated=True)
         _write(root, "gates/zz_ghost.py", (
-            "from atompipe.gates import gate\n"
-            "from atompipe.models import NegativeControl, Verdict\n\n\n"
+            "from nopekit.gates import gate\n"
+            "from nopekit.models import NegativeControl, Verdict\n\n\n"
             "@gate(id='probe.ghosted', claims=['ghosted'], needs=['probe.ghost'],\n"
             "      negative_control=NegativeControl(fixture='selftest/bad_configs.py:stubby'))\n"
             "def ghosted(ctx):\n"
@@ -1978,7 +1978,7 @@ class ResolveIsUnchangedWithoutNeeds(unittest.TestCase):
     def test_the_corpus_resolves_the_same_with_and_without_the_rule(self):
         for name, root in _bracket_and_wraps(self).items():
             with self.subTest(name):
-                proc = _env.atompipe(["check", "--tier", "1"], cwd=root, home=_tmp(self))
+                proc = _env.nopekit(["check", "--tier", "1"], cwd=root, home=_tmp(self))
                 self.assertIn(proc.returncode, (0, 1), proc.stderr)
                 with_rule = _resolved_form(root)
                 with mock.patch.object(verdicts, "apply_prerequisites",
@@ -2094,8 +2094,8 @@ if __name__ == "__main__":
 #: guard pre-empts it and the control shows nothing about what the dependent
 #: judges.
 NOT_ISOLATED = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="bracket.short_arm", claims=["short-arm"], needs=["bracket.model_validity"],
@@ -2118,20 +2118,20 @@ class ProjectEdgesAreIsolated(_env.EnvCase):
 
     def test_the_brackets_edges_are_isolated(self):
         root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
-        out = _env.atompipe(["gate", "selftest"], cwd=root).stdout
+        out = _env.nopekit(["gate", "selftest"], cwd=root).stdout
         self.assertNotIn("control not isolated", out, out)
 
     def test_a_dependent_whose_control_trips_its_guard_reads_a_note(self):
         root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
         with open(os.path.join(root, "gates", "zz_short.py"), "w", encoding="utf-8") as fh:
             fh.write(NOT_ISOLATED)
-        out = _env.atompipe(["gate", "selftest"], cwd=root).stdout.splitlines()
+        out = _env.nopekit(["gate", "selftest"], cwd=root).stdout.splitlines()
         at = next(i for i, ln in enumerate(out) if ln.startswith("bracket.short_arm : "))
         self.assertTrue(out[at].endswith("→ qualified"), out[at])
         self.assertTrue(out[at + 1].startswith(
             "note: bracket.short_arm: control not isolated — its prerequisite "
             "bracket.model_validity does not pass bracket.short_arm's known-bad control "
             "(fail: "), out[at + 1])
-        status = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)
+        status = json.loads(_env.nopekit(["status", "--json"], cwd=root).stdout)
         self.assertNotEqual(status["freshness"]["bracket.short_arm"]["admission"],
                             "not-admitted", "isolation is never part of qualification")

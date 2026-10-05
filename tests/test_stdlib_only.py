@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """The spine imports the standard library only: CI's own AST walk, run here too.
 
-What slipped through: CLAUDE.md's house rule (`src/atompipe/` is standard
+What slipped through: CLAUDE.md's house rule (`src/nopekit/` is standard
 library only, "CI proves this by AST-walking every import") was carried by one
 step of `.github/workflows/ci.yml` and by nothing under `tests/`. The walk ran on
 a runner and never in the loop a change is iterated in, so a function-local
@@ -82,7 +82,7 @@ class SpineIsStdlibOnly(_env.EnvCase):
     def test_a_planted_third_party_import_is_refused(self):
         root = self.tmp()
         files = {
-            "src/atompipe/planted.py": textwrap.dedent("""\
+            "src/nopekit/planted.py": textwrap.dedent("""\
                 import json
                 import numpy
                 from . import sibling
@@ -92,8 +92,8 @@ class SpineIsStdlibOnly(_env.EnvCase):
                     from trimesh.exchange import load as _load
                     return _load(path)
                 """),
-            "src/atompipe/sub/deep.py": "import scipy.optimize\n",
-            "src/atompipe/sibling.py": "from os import path\n",
+            "src/nopekit/sub/deep.py": "import scipy.optimize\n",
+            "src/nopekit/sibling.py": "from os import path\n",
         }
         for rel, text in files.items():
             full = os.path.join(root, *rel.split("/"))

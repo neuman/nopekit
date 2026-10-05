@@ -31,8 +31,8 @@ import os
 import sys
 from typing import Any
 
-from atompipe.models import View, ViewKind
-from atompipe.site import ViewContext, viewgen
+from nopekit.models import View, ViewKind
+from nopekit.site import ViewContext, viewgen
 
 # The gates' shared arithmetic. Same import route as gates/beam.py, so both end up
 # holding the same module object rather than two copies that can drift.
@@ -269,7 +269,7 @@ def deflection_curve(ctx: ViewContext) -> View | None:
             meta["agreement"]["note"] = (
                 "the curve and the recorded verdict disagree at the design point — "
                 "the model has moved since the sweep ran, so this chart describes a "
-                "beam the verdict beside it did not measure. Re-run `atompipe check`")
+                "beam the verdict beside it did not measure. Re-run `nopekit check`")
 
     return View(
         id="deflection_curve",

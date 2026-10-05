@@ -4,18 +4,18 @@ Put real files here. Hand sketches, photos of the thing you'd buy instead, CAD
 you already have, datasheet PDFs, caliper readings, log files. Intake is not only
 a conversation: the numbers that matter usually arrive as a photo of a napkin.
 
-Use `atompipe ingest <path>` rather than copying by hand — it files the artifact
+Use `nopekit ingest <path>` rather than copying by hand — it files the artifact
 in the right bucket, hashes it, and registers it in the ledger so a changed input
-can mark a claim STALE. Then use `atompipe extract` to record what you actually
+can mark a claim STALE. Then use `nopekit extract` to record what you actually
 read out of it:
 
-    atompipe ingest inputs/sketches/hull.png --desc "midship section, dimensioned"
-    atompipe extract hull-png --what "hull beam at midship reads 148 mm" \
+    nopekit ingest inputs/sketches/hull.png --desc "midship section, dimensioned"
+    nopekit extract hull-png --what "hull beam at midship reads 148 mm" \
                               --grounds beam_mm
 
 **An artifact nobody extracted from is decoration.** A file sitting in this
 directory grounds nothing, proves nothing, and will not stop anyone from
-re-litigating a number two months from now. `atompipe inputs --unextracted`
+re-litigating a number two months from now. `nopekit inputs --unextracted`
 lists the decorations.
 
 ## Buckets
@@ -35,4 +35,4 @@ The directory an artifact sits in is a hint the pipeline reads, so a photo in
 treated as your own drawing. File accordingly.
 
 Empty buckets do not survive a `git clone` (git does not track empty
-directories). `atompipe ingest` recreates whichever one it needs.
+directories). `nopekit ingest` recreates whichever one it needs.

@@ -1,5 +1,5 @@
 # Gate scratch and selftest evidence are OUTPUTS, not sources (METHOD rule 1).
-# `atompipe gate selftest` writes its fixtures and reports under a run's
+# `nopekit gate selftest` writes its fixtures and reports under a run's
 # out_dir, which lands here when the pack is exercised in place. A committed
 # copy is a generated file masquerading as a source: it goes stale silently and
 # the next reader cannot tell which run produced it.

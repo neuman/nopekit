@@ -101,13 +101,13 @@ def project(dest: str, *, planted: tuple[str, ...] = (), thickness: float | None
 
 def run(root: str, *args: Any, code: int | None = None, agent: bool = False,
         env: Mapping[str, Any] | None = None, identity: bool = True) -> Any:
-    """``atompipe <args>`` in ``root`` with the test identity; ``agent`` sets the
+    """``nopekit <args>`` in ``root`` with the test identity; ``agent`` sets the
     agent's markers. ``code`` asserts the exit code, naming the output."""
     extra = dict(AGENT if agent else {})
     extra.update(env or {})
-    proc = _env.atompipe(list(args), cwd=root, identity=identity, env=extra)
+    proc = _env.nopekit(list(args), cwd=root, identity=identity, env=extra)
     if code is not None and proc.returncode != code:
-        raise AssertionError(f"`atompipe {' '.join(map(str, args))}` exited "
+        raise AssertionError(f"`nopekit {' '.join(map(str, args))}` exited "
                              f"{proc.returncode}, not {code}:\n{proc.stdout[-3000:]}\n"
                              f"{proc.stderr[-3000:]}")
     return proc
@@ -115,10 +115,10 @@ def run(root: str, *args: Any, code: int | None = None, agent: bool = False,
 
 def tty(root: str, *args: Any, answer: str | None, code: int | None = None,
         env: Mapping[str, Any] | None = None) -> Any:
-    """``atompipe <args>`` in a person's own shell (a pty), typing ``answer``."""
+    """``nopekit <args>`` in a person's own shell (a pty), typing ``answer``."""
     proc = _env.run_tty(list(args), cwd=root, answer=answer, env=env)
     if code is not None and proc.returncode != code:
-        raise AssertionError(f"`atompipe {' '.join(map(str, args))}` (a terminal) exited "
+        raise AssertionError(f"`nopekit {' '.join(map(str, args))}` (a terminal) exited "
                              f"{proc.returncode}, not {code}:\n{proc.stdout[-3000:]}\n"
                              f"{proc.stderr[-3000:]}")
     return proc
@@ -171,7 +171,7 @@ def channels(root: str, cid: str, *, site: bool = True) -> dict[str, Any]:
     rows = {row["claim"]: row for row in doc.get("blocking") or ()}
     out["check.blocking"] = cid in rows
     out["ready"] = doc.get("all_required_checked")
-    junit = os.path.join(root, ".atompipe", "out", "junit.xml")
+    junit = os.path.join(root, ".nopekit", "out", "junit.xml")
     tree = ET.parse(junit).getroot()
     case = next((c for c in tree.iter("testcase") if c.get("name") == cid
                  and (c.get("classname") or "").startswith("claims")), None)
@@ -192,7 +192,7 @@ def channels(root: str, cid: str, *, site: bool = True) -> dict[str, Any]:
     listed = {r["id"]: r for r in json.loads(run(root, "claim", "list", "--json",
                                                 code=0).stdout)["claims"]}
     out["claim.list"] = (listed[cid].get("status"), listed[cid].get("cause"))
-    last = read_json(os.path.join(root, ".atompipe", "cache", "last_check.json"))
+    last = read_json(os.path.join(root, ".nopekit", "cache", "last_check.json"))
     out["last_check"] = last.get("statuses", {}).get(cid)
     text = run(root, "status", code=0).stdout
     out["status.row"] = next((ln for ln in text.splitlines()
@@ -227,7 +227,7 @@ def disagreements(found: Mapping[str, Any], status: str, cause: str) -> list[str
 
 def resolved(root: str) -> tuple[Any, Any]:
     """``(view, resolution)`` for ``root`` in process, as every command builds it."""
-    from atompipe import cli, store
+    from nopekit import cli, store
     ledger = store.load(root)
     registry, _problems = cli._registry(root, ledger, strict=False)
     model, projection, model_error = cli._projection_safe(root, ledger)
@@ -237,7 +237,7 @@ def resolved(root: str) -> tuple[Any, Any]:
 
 def composed(root: str, cid: str) -> Any:
     """``compose`` over the view for ``cid`` — what every channel renders."""
-    from atompipe import claims
+    from nopekit import claims
     view, resolution = resolved(root)
     return claims.compose(view.claim(cid), view.verdicts,
                           stale_gates=resolution.stale_gates)
@@ -260,7 +260,7 @@ def transcript() -> dict[str, Any]:
         return _TRANSCRIPT[0]
     import atexit
     import tempfile
-    tmp = tempfile.mkdtemp(prefix="atompipe-physical-words-")
+    tmp = tempfile.mkdtemp(prefix="nopekit-physical-words-")
     atexit.register(_env._rmtree, tmp)
     root = project(os.path.join(tmp, "b"), planted=("C8",))
     edit_claim(root, "C6", owner=NAME)

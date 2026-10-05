@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """What ships carries no prior of the scenarios the private bench scores.
 
-PLAN-v0.14 (top): the agents the bench measures run atompipe from a release
+PLAN-v0.14 (top): the agents the bench measures run nopekit from a release
 bundle and must share no priors with the agents that build it — an agent that has
 read the test answers the test, not the tool — so shipped text carrying a scored
 scenario's terms contaminates it. What slipped through (review of P2.5a): the
@@ -181,7 +181,7 @@ class TheSkillPromisesNoCheckpoint(unittest.TestCase):
 
 def tempfile_dir(case: unittest.TestCase) -> str:
     import tempfile
-    path = tempfile.mkdtemp(prefix="atompipe-priors-")
+    path = tempfile.mkdtemp(prefix="nopekit-priors-")
     case.addCleanup(_env._rmtree, path)
     return path
 

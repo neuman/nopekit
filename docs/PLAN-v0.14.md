@@ -14,13 +14,13 @@ paper. This file uses GLOSSARY's words (operating context, not calibration range
 retained, not dormant); code identifiers keep theirs until the rename pass. The case study is always "the case study (paper §8)", never named (`NoLeakedProvenance`).
 
 **What this file may say about the bench.** Every phase is scored by the private bench
-(§3). The agents it measures run atompipe in a sandbox, from a release bundle, and they
+(§3). The agents it measures run nopekit in a sandbox, from a release bundle, and they
 must share no priors with the agents that build it: an agent that has read the test
 answers the test, not the tool. So this file names the suites and what each measures,
 and nothing else — no scenario, oracle, expected status, persona, revision id or
 threshold. A repo test born from a bench finding uses neutral names and a generic shape.
 *Added after the bench plan was approved*, when the user named the risk ("make sure the
-agents running atompipe in the sandbox tests don't know all this info, they can't have
+agents running nopekit in the sandbox tests don't know all this info, they can't have
 shared priors"): a plan that describes its own exam leaks it to whichever reader can
 open `docs/`.
 
@@ -173,7 +173,7 @@ unqualified (`test_bracket_cache.BracketIsQualified`).
 | # | Walkthrough (step) | On `0474f5c` | Ph | Done when | Proof |
 |---|---|---|---|---|---|
 | W0 | discovery: the README's first screen is the one-line promise, a 60-second bracket demo (clone, `check`, a real failure on the first run, lit on the part in the site) and the plugin install (1) | README opens on the promise and the chain; no demo block; the bracket has no `site/` | P3, P5 | P3: the first screen holds the promise, the demo's clone-and-`check` lines with the failure they print, and the install from a local path (A2: nothing is pushed); P5: the demo opens the bracket's site on the failing part | — |
-| W1 | `.groundspace/` is the state directory (2) | `.atompipe/` | P3 | §2.1 | — |
+| W1 | `.groundspace/` is the state directory (2) | `.nopekit/` | P3 | §2.1 | — |
 | W2 | scaffold: `model/ claims/ inputs/ gates/ decisions/ milestones/ .groundspace/ site/ AGENTS.md CLAUDE.md` (2) | `init` makes part of it | P3 | `init` in an empty dir writes exactly this; in an existing project it adds and never overwrites | — |
 | W3 | milestones: named spends, each with its required claims; physical claims carry an expected latency (3) | one boundary, planned (`export`, old 2.5) | closed P2.5b | `export <milestone>` refuses while a required claim is unresolved — anything but Checked, an owned Assumed claim included (GLOSSARY §3, where *ready* is the same predicate); going ahead anyway is a recorded decision that names the claim (§6.1); the latency is read from the claim until measured | `test_export.ReadyIsOnePredicate`, `test_export.GoingAheadIsAPersonsDecision`, `test_records.MilestonesAreRecords`, `test_physical.LatencyIsDeclaredUntilMeasured` |
 | W4 | the three-line status block after every turn: counts, what changed or fails, `next:` (2, 4, 5) | `next:` is a constant (S-66) | P3 | Stop hook prints it whenever model or records moved; shape-tested with a negative control (R-11); `next:` computed | — |
@@ -191,12 +191,12 @@ unqualified (`test_bracket_cache.BracketIsQualified`).
 | W16 | site: flow canvas, scrubber, ego graph, test card, candidates side by side (4, 5, 10) | old P4 plan | P5 | §3, P5 | — |
 | W17 | sharing: bucketed records to a pack's repo; publishing to an index (8, 11) | none | — | **deferred**: outward-facing, ask first | — |
 
-### 2.1 The state directory: `.atompipe/` → `.groundspace/`
+### 2.1 The state directory: `.nopekit/` → `.groundspace/`
 
 - **What moves:** the directory only. The package, module, CLI and environment names do
   not; those belong to the rename pass and its table in GLOSSARY, which leaves the
   directory out and points here. This reconciles the bench plan's reading of A4 (its
-  "What it means" column: directory names are renamed in the later groundsmith pass;
+  "What it means" column: directory names are renamed in the later nopekit pass;
   the user's own words were "use language from the paper and choose just 1 term for each
   thing"): `groundspace` names the paper's object, not the product, so it is not a
   rename-table entry.
@@ -207,7 +207,7 @@ unqualified (`test_bracket_cache.BracketIsQualified`).
   nothing. `init` does not migrate. If P3 finds it must, that is a change to invariant 8,
   listed under R-6 with the `test_records.NoCommandWritesARecord` edit it needs.
 - **First, one constant.** The state directory is spelled at least eight times under
-  `src/` today: `store.ATOMPIPE_DIR`, `verdicts._STATE_DIR`, a literal in `gates.py`
+  `src/` today: `store.NOPEKIT_DIR`, `verdicts._STATE_DIR`, a literal in `gates.py`
   (`GateContext`'s out dir), `report.JUNIT_DEFAULT`, `verdicts.CONTROL_OUT_DIR`,
   `verdicts.CONTROLS_CACHE`, and three entries of `verdicts.WATCHED` — the one export
   P3's Stop hook imports. One of them is the file-trace exclusion: a trace that stopped
@@ -215,10 +215,10 @@ unqualified (`test_bracket_cache.BracketIsQualified`).
   anything moves: a test that the state directory's name appears as a string constant
   under `src/` exactly once (AST, docstrings and comments excluded), with a planted second
   literal as its violator, and every other spelling routed through it. A missed
-  `CONTROLS_CACHE` would recreate `.atompipe/` on the next `check`, and the
+  `CONTROLS_CACHE` would recreate `.nopekit/` on the next `check`, and the
   both-directories rule would then refuse every command; a missed `WATCHED` would leave
-  the status block blind to the cache. `packs.py` reuses `ATOMPIPE_DIR` for the user's
-  pack store, `~/.atompipe/packs`: that names the tool, not a groundspace, so it gets a
+  the status block blind to the cache. `packs.py` reuses `NOPEKIT_DIR` for the user's
+  pack store, `~/.nopekit/packs`: that names the tool, not a groundspace, so it gets a
   constant of its own and does not move.
 - **Done when:** after migration every entry's ρ is unchanged and `check` executes zero
   gates; git sees renames only; a project holding both directories is refused, naming both;
@@ -250,7 +250,7 @@ what it drops.
 | Phase | Scope (old checkpoints absorbed) | Done when |
 |---|---|---|
 | **B0** Housekeeping, re-baseline | branch = `0474f5c`; this amendment and PLAN.md's pointer; `docs/GLOSSARY.md`; `tests/fast.py` with `tests/test_stdlib_only.py`, which it imports (both untracked until B0's commit, and committed together); `test_invariants.ErrorIsNotPass`'s pass-beside-an-error test; the openmodelica slip fix (a library that does not load reads skipped, not failing, and `installing.md`'s `-minimal` claim corrected), with `tests/test_openmodelica_library.py` committed first (R-12) | nothing under `src/` changes; G1–G6 green in a clean worktree; `tests/fast` holds at least one violation test per CLAUDE.md invariant and runs every iteration, and the full suite gates every checkpoint and every phase commit — the fast loop can miss an invariant break that only a left-out test sees, so its module docstring names which iterations run which modules whole; `tests/fast` runs in ≤ 90 s as one process on an otherwise idle machine (under parallel load it has run 94 s), re-timed whenever `FAST` changes |
-| **B1** The private bench | outside this repo; no repo change | every suite goes red against a null atompipe that answers "all checked"; every suite's known-good fixture passes its scorer; the sandbox self-test passes (what the bundle strips is absent, hidden canaries unfindable, a run-directory canary found); a shipped-prior check: the bundle is searched for each scored scenario's distinctive terms, and a scenario whose incident appears in shipped text is scored as contaminated and reported apart; a baseline scorecard keyed to `0474f5c` itself, so it measures Phase 1 unchanged (B0's openmodelica fix moves a tier-2 claim from failing to skipped on an omc without the library), and B0's commit scored beside it |
+| **B1** The private bench | outside this repo; no repo change | every suite goes red against a null nopekit that answers "all checked"; every suite's known-good fixture passes its scorer; the sandbox self-test passes (what the bundle strips is absent, hidden canaries unfindable, a run-directory canary found); a shipped-prior check: the bundle is searched for each scored scenario's distinctive terms, and a scenario whose incident appears in shipped text is scored as contaminated and reported apart; a baseline scorecard keyed to `0474f5c` itself, so it measures Phase 1 unchanged (B0's openmodelica fix moves a tier-2 claim from failing to skipped on an omc without the library), and B0's commit scored beside it |
 | **P2** Statuses, authority, milestones, the physical path, qualification | old 2.1–2.5; old 5.1's mutation, redesigned for qualification (§1.5: in process on the known-good control, no tree, no `vcs.snapshot`, no `modelio.influence`); §1.4, §1.5 (P2 rows); W3, W7–W8, W11–W13 | **first (P2.0, R-1), green before rung 4 or any renderer changes:** `ErrorIsLouder` — across every renderer an errored claim's reason starts `errored:`, sorts above every skipped row, takes Failing's tone, is counted apart and is a JUnit `<error>`, with a planted renderer that sorts it below as its violator; `MutationIsSealed` (the mutation half of PLAN invariant 15) — mutation writes nothing in the real tree or in a pack directory, and an inconclusive mutation is never reported as a fail, with a planted mutation that writes as its violator; `test_invariants.ErrorIsNotPass`'s pass-beside-an-error test (landed in B0) still green. **Then:** §1.4 is the outcome vocabulary, every human word drawn through one table (D-16) from GLOSSARY; errored and unqualified never read Failing or Checked, beside a pass or not; Assumed only with an owner set through the signing channel; `needs` with unknown; all 54 bundled gates qualified by their paired controls, and the bracket's 6 project gates by both controls and a mutation pass; physical results article-bound with contradictions on the evaluator's record; operating contexts; rebuild prediction; `export <milestone>` re-executing at the money boundary (R-9); the paper's Fig. 4 as a repo test with neutral names — its physical claim never built, so it stays Pending build — and controls for each rule (a change it must not reach, an unregistered read, operating context removed, owner removed, a change inside the context, a fail outside the context stays Failing, a physical pass on an article whose read set moved reads Stale and names that article for rebuild); R-8's oracle listing every moved status; G4's signature unchanged or changed in the P2 commit with its reason (§1.4); under R-6, `test_renderers`' expected table and its "an error beats a skip" case move from FAIL to Skipped/errored, beside the E4Localisation rename; CLAUDE.md invariants 2 (reworded: errored reads Skipped, and louder, GLOSSARY §9), 4 (no partial), 9 (paired), 10, 11, 12 (readiness, export) |
 | **P3** The agent surface | old 3.0, 3.3, 3.4; W1, W2, W4–W6, W9, W14, W15; C10 | `init` scaffold and the `.groundspace/` migration (§2.1); the three-line block from the Stop and PostToolUse hooks; `ask --next`; extraction held; `gap --propose` running qualification; `why` through derived reads; `/start /check /status /ask /ready /tested`, one CLI call and one fixed shape each; the permission rules; the skill quoting verdict lines verbatim and saying "checked" only where the ledger does; one pack born in a project through EXTENSION_PROTOCOL and promoted with `pack extract`; G7, G8 (as amended in §4.1: the skill evals run in the sandbox); invariants 11 (channel) and 12 (`status --short`); the user's 30-minute session logged |
 | **P4** Tradespace, recovery, sequencing, Λ | old 3.1, 3.2; §1.3; W10, W11 (Λ₀) | `trade` with a worktree branch per candidate (D-23); the four rejection types with their return conditions; dominance a pure function; recovery tested on a neutral history in which a constraint change returns an infeasible candidate; sequencing as §1.3, with run-all and authored order selectable; a recorded decision to proceed with open claims; Λ₀ per milestone in `/ready`; `/pick` recording the preference (D-18); NoGenerator intact; σ and the backlog observables (M6.1's `test_trade.BacklogIsExposed`); invariant 13 |
@@ -296,12 +296,12 @@ is never a scalar); the rename; sharing (W17); confidence across projects beyond
 per-evaluator record; review records (C9); a CAD kernel in the spine (never).
 
 **Scored by the private bench.** From B1 on, every phase ends with a bench run, keyed by
-the atompipe commit under test. Its suites are claims about atompipe, each with its own
+the nopekit commit under test. Its suites are claims about nopekit, each with its own
 known-bad control: **incident** (a past expensive discovery surfaced before the spend),
 **replay** (invalidation and sequencing over real history), **adoption** (an existing
 project yields an honest ledger), **experience** (the walkthrough's shapes), **simulated
 user** (a persona plays the human; a low-independence evaluator, never the deciding one),
-**screens** (the site against a rubric). The agents that run atompipe there are
+**screens** (the site against a rubric). The agents that run nopekit there are
 sandboxed with no shared priors (top of this file). **A phase is done only when its
 scorecard moves the numbers of the suites it targets and moves none backwards.** The
 numbers stay in the bench; none is committed here (D-33's second half stands).
@@ -318,7 +318,7 @@ numbers stay in the bench; none is committed here (D-33's second half stands).
 | §1 thesis table (R(x), D(R), B_R, π*, (I,L,C,S,D), E1–E8 rows); "three new things" #2's terminal framing; "Λ = G/B_R is never computed" | superseded | §1.1–§1.3 |
 | §2.1 bullets "No refusal scheduler before there is verdict history", "E1–E8 become a `bench/` suite that runs on this repo", "Phases 0–5 as listed" | superseded | §1.3, §3 |
 | D-14, D-16 (the words, not the one-table mechanism) | amended | GLOSSARY; A-11 below |
-| D-12 | amended | `--authority` is new and names an expert-judgment claim's person or institution; `who` stays and is derived. PLAN.md §8 says the skill references neither flag, but `skills/atompipe/SKILL.md` tells agents to pass `--who`, so removing it is ask A-14 |
+| D-12 | amended | `--authority` is new and names an expert-judgment claim's person or institution; `who` stays and is derived. PLAN.md §8 says the skill references neither flag, but `skills/nopekit/SKILL.md` tells agents to pass `--who`, so removing it is ask A-14 |
 | D-24 | amended | adds `pack extract` (W15) |
 | D-31 | obsolete | §1.3, P4 |
 | D-33 | amended (second half stands) | no in-repo `bench/`; the private bench runs sandboxed agents, and its numbers are never committed here |
@@ -337,7 +337,7 @@ numbers stay in the bench; none is committed here (D-33's second half stands).
 | every "Paper says" § anchor | re-pointed | §1.1 map |
 | §4.0.1 invariant 15 | split — the mutation half landed (P2.0; CLAUDE.md's 15 from P2.3) | the mutation half lands in P2 as `MutationIsSealed`, in P2.0: mutation writes nothing in the real tree or a pack directory (invariant 5's P5 row moves with it), and an inconclusive mutation is never reported as a fail; "bench writes nothing" leaves with the bench |
 | §4.3–§4.5 summaries, §4.6 hand-offs, phase-5.md 5.2–5.3 | re-keyed | §3 (hand-offs follow the old checkpoints into their new phases). One hand-off is dropped, not re-keyed: "P3 → P5: `vcs.snapshot`; `modelio.influence`" fed tree-level mutation, and P2's mutation runs in process on the known-good control and needs neither |
-| G8 (the skill evals) | amended | the evals run an agent on atompipe, so they run like every other such agent: through the private bench's sandbox, from the release bundle (the strip list at the top of this file), never as `claude -p --plugin-dir <repo>` on the host, where the whole repo, `~/.claude` and its memory are visible. `evals/` cases and graders live in the repo and are stripped from the bundle. Absent the sandbox, G8 reports SKIPPED, never green |
+| G8 (the skill evals) | amended | the evals run an agent on nopekit, so they run like every other such agent: through the private bench's sandbox, from the release bundle (the strip list at the top of this file), never as `claude -p --plugin-dir <repo>` on the host, where the whole repo, `~/.claude` and its memory are visible. `evals/` cases and graders live in the repo and are stripped from the bundle. Absent the sandbox, G8 reports SKIPPED, never green |
 | §5.1 vocabulary bullet | superseded | Table 1 words via GLOSSARY |
 | §6 (E1–E8) | obsolete | §1.2 |
 | §9 "No refusal scheduler"; "no Λ on screen"; "No LLM calls or network in `bench/`" | obsolete | §1.3; the bench left the repo |

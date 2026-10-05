@@ -30,7 +30,7 @@ jobs:
           # and an import inside a function still binds the spine to a dependency.
           STDLIB = set(sys.stdlib_module_names)
           bad = []
-          for path in pathlib.Path("src/atompipe").rglob("*.py"):
+          for path in pathlib.Path("src/nopekit").rglob("*.py"):
               tree = ast.parse(path.read_text(), filename=str(path))
               for node in ast.walk(tree):
                   if isinstance(node, ast.Import):
@@ -42,7 +42,7 @@ jobs:
                   else:
                       continue
                   for name in names:
-                      if name and name not in STDLIB and name != "atompipe":
+                      if name and name not in STDLIB and name != "nopekit":
                           bad.append(f"{path}: {name}")
           if bad:
               raise SystemExit("spine imports non-stdlib modules:\n  " + "\n  ".join(bad))
@@ -56,7 +56,7 @@ jobs:
         run: |
           PYTHONPATH=src python - <<'PY'
           import os, sys
-          from atompipe import packs
+          from nopekit import packs
           failed = False
           for name in sorted(os.listdir("packs")):
               d = os.path.join("packs", name)
@@ -79,7 +79,7 @@ jobs:
       # the repo root there is no project, so `gate selftest` runs pack mode: each
       # bundled pack's baseline must pass and every control must fire.
       - name: Every bundled pack's gates prove they can fail
-        run: PYTHONPATH=src python -m atompipe gate selftest --junit "$RUNNER_TEMP/selftest-packs.xml"
+        run: PYTHONPATH=src python -m nopekit gate selftest --junit "$RUNNER_TEMP/selftest-packs.xml"
 
       # The bracket fails on purpose (thickness 7.0: 0.70 mm of sag against a 0.5 mm
       # limit), so `check` exits 1 in every correct build. What slipped through
@@ -100,8 +100,8 @@ jobs:
           copy="$(mktemp -d)/bracket"
           cp -R examples/bracket "$copy"
           rc=0
-          PYTHONPATH=src python -m atompipe -C "$copy" check --force --junit || rc=$?
-          python tests/oracle/bracket_signature.py "$copy/.atompipe/out/junit.xml" tests/expected_bracket.json --exit-code "$rc"
+          PYTHONPATH=src python -m nopekit -C "$copy" check --force --junit || rc=$?
+          python tests/oracle/bracket_signature.py "$copy/.nopekit/out/junit.xml" tests/expected_bracket.json --exit-code "$rc"
           # This one must pass. A gate that passes its own known-bad fixture is a
           # logger, and merging one is the failure this whole project exists to stop.
-          PYTHONPATH=src python -m atompipe -C "$copy" gate selftest --junit
+          PYTHONPATH=src python -m nopekit -C "$copy" gate selftest --junit

@@ -168,7 +168,7 @@ snapshot launcher patched to raise, `site build` still draws them).
   rejected because it rebuilds the run history. A frame is added only when the slim
   content hash changes. `changes_since` is precomputed, so the page looks changes up and
   never diffs; the last-seen id lives in `localStorage` under
-  `atompipe.seen.v1.<name>.<created>`. When that id has left the frames, every node carries
+  `nopekit.seen.v1.<name>.<created>`. When that id has left the frames, every node carries
   a change mark and the page says "last seen before the oldest kept revision".
 - **`site/suggestions.json`** holds `[{view, reason}]`, merged by `site build` only into
   `suggested[]`. The build stamps the byline itself — "suggested by agent", the build's

@@ -65,10 +65,10 @@ from unittest import mock
 import _env
 import _projects
 import _transcript as T
-from atompipe import claims, gates, modelio, packs, report, store, verdicts
-from atompipe.models import (Acceptance, Claim, ClaimStatus, Comparator, GateSpec, Ledger,
+from nopekit import claims, gates, modelio, packs, report, store, verdicts
+from nopekit.models import (Acceptance, Claim, ClaimStatus, Comparator, GateSpec, Ledger,
                              NegativeControl, Verdict)
-from atompipe.util import AtompipeError
+from nopekit.util import NopekitError
 
 NOW = "2026-10-03T12:00:00Z"
 BRACKET = _projects.BRACKET
@@ -106,7 +106,7 @@ import copy
 import dataclasses
 import os
 
-from atompipe.modelio import load_path
+from nopekit.modelio import load_path
 
 kg = load_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_good.py"))
 
@@ -120,9 +120,9 @@ def thin(ctx):
 
 GOAL_GATES = '''\
 """Planted by tests/test_goalposts.py: evaluators that read a goalpost from a claim."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
-from atompipe.util import AtompipeError
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
+from nopekit.util import NopekitError
 
 _BAD = NegativeControl(fixture="selftest/bad.py:thin", note="quarter thickness")
 
@@ -155,7 +155,7 @@ def keyed(ctx):
 def presence(ctx):
     try:
         acc = ctx.acceptance("c3")
-    except AtompipeError:
+    except NopekitError:
         # no such claim on its controls: honest against a fallback limit
         d = float(ctx.params["deflection"])
         m = round(d, 4)
@@ -229,10 +229,10 @@ def bracket(case: _env.EnvCase, *, thickness: float | None = None) -> str:
 
 
 def run(case: _env.EnvCase, project: str, *argv: str, code: int | None = None):
-    proc = _env.atompipe(list(argv), cwd=project)
+    proc = _env.nopekit(list(argv), cwd=project)
     if code is not None:
         case.assertEqual(proc.returncode, code,
-                         f"`atompipe {' '.join(argv)}` exited {proc.returncode}:\n"
+                         f"`nopekit {' '.join(argv)}` exited {proc.returncode}:\n"
                          f"{proc.stdout[-3000:]}\n{proc.stderr[-3000:]}")
     return proc
 
@@ -269,7 +269,7 @@ def append_file(project: str, rel: str, text: str) -> None:
 
 def control_names(project: str, gate_id: str) -> set[str]:
     return {os.path.basename(p) for p in glob.glob(
-        os.path.join(project, ".atompipe", "verdicts", gate_id, "control-*.json"))}
+        os.path.join(project, ".nopekit", "verdicts", gate_id, "control-*.json"))}
 
 
 def statuses(case: _env.EnvCase, project: str) -> dict[str, tuple[str, str]]:
@@ -370,7 +370,7 @@ class TheGoalpostLivesInClaims(_env.EnvCase):
                   and isinstance(node.value.value, (int, float))]
         self.assertEqual(limits, [], "a goalpost lives in claims/, never in a gate")
         entries = [p for p in glob.glob(os.path.join(
-            BRACKET, ".atompipe", "verdicts", "bracket.deflection", "*.json"))
+            BRACKET, ".nopekit", "verdicts", "bracket.deflection", "*.json"))
             if not os.path.basename(p).startswith("control-")]
         self.assertTrue(entries, "the bracket commits deflection's verdict entry")
         for entry in entries:
@@ -643,7 +643,7 @@ class AValueOutsideTheAcceptanceIsNeverChecked(_env.EnvCase):
         self.assertEqual((data["statuses"]["C3"]["key"], data["statuses"]["C3"]["cause"],
                           data["statuses"]["C3"]["reason"]), ("failing", "acceptance", reason))
         self.assertIn(reason, run(self, project, "report", code=0).stdout)
-        with open(os.path.join(project, ".atompipe", "out", "junit.xml"), encoding="utf-8") as fh:
+        with open(os.path.join(project, ".nopekit", "out", "junit.xml"), encoding="utf-8") as fh:
             junit = ET.fromstring(fh.read())
         (case,) = junit.iterfind("testsuite[@name='claims.critical']/testcase[@name='C3']")
         self.assertEqual(case.find("failure").get("message"), reason)
@@ -653,7 +653,7 @@ class AValueOutsideTheAcceptanceIsNeverChecked(_env.EnvCase):
             state = json.load(fh)
         (row,) = [c for c in state["claims"] if c["id"] == "C3"]
         self.assertEqual((row["status"], row["cause"]), ("fail", "acceptance"))
-        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+        with open(os.path.join(project, ".nopekit", "cache", "last_check.json"),
                   encoding="utf-8") as fh:
             worst = json.load(fh)["worst"]
         self.assertEqual(worst["claim"], "C1", "C1 fails first in record order")
@@ -829,7 +829,7 @@ class TheMarginTravels(_env.EnvCase):
                 self.assertIn("margin", row)
                 self.assertIn("margin_why", row)
                 self.assertTrue((row["margin"] is None) != (row["margin_why"] == ""), row)
-        lib = os.path.join(_env.REPO, "src", "atompipe", "site_template", "lib")
+        lib = os.path.join(_env.REPO, "src", "nopekit", "site_template", "lib")
         scanned = 0
         for path in sorted(glob.glob(os.path.join(lib, "*.js"))):
             with open(path, encoding="utf-8") as fh:
@@ -859,7 +859,7 @@ def bundled_limit_verdicts() -> tuple[list[tuple[str, str, Verdict]], list[str]]
     found: list[tuple[str, str, Verdict]] = []
     missing: list[str] = []
     import tempfile
-    out = tempfile.mkdtemp(prefix="atompipe-v7-")
+    out = tempfile.mkdtemp(prefix="nopekit-v7-")
     try:
         for pack_dir in sorted(glob.glob(os.path.join(_projects.PACKS, "*", "pack.json"))):
             name = os.path.basename(os.path.dirname(pack_dir))
@@ -994,7 +994,7 @@ class ValuesAreComparedWithTheirClaim(_env.EnvCase):
         """(d) An entry written in the P2.3 block shape — no ``comparator``, no
         ``settles`` — is the spine that moved, never "ignored (hand-edited)"."""
         project = bracket(self)
-        for path in glob.glob(os.path.join(project, ".atompipe", "verdicts", "*", "*.json")):
+        for path in glob.glob(os.path.join(project, ".nopekit", "verdicts", "*", "*.json")):
             if os.path.basename(path).startswith("control-"):
                 continue
             with open(path, encoding="utf-8") as fh:
@@ -1190,9 +1190,9 @@ class AGoalpostIsNeverAKey(_env.EnvCase):
 #: (``t.regime``) and one that reads none (``t.other``).
 REVIEW_GATES = '''\
 """Planted by tests/test_goalposts.py (review of P2.4)."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
-from atompipe.util import AtompipeError
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
+from nopekit.util import NopekitError
 
 _BAD = NegativeControl(fixture="selftest/bad.py:thin", note="quarter thickness")
 
@@ -1248,7 +1248,7 @@ def offpath(ctx):
 def nolimit(ctx):
     try:
         acc = ctx.acceptance("c11")
-    except AtompipeError:
+    except NopekitError:
         # its controls state c11 with no limit: honest against a fallback
         m = round(float(ctx.params["deflection"]), 4)
         return Verdict(gate="t.nolimit", passed=m <= 0.5, measured=m, limit=0.5,
@@ -1260,7 +1260,7 @@ def nolimit(ctx):
 def twin(ctx):
     try:
         acc = ctx.acceptance("twin")
-    except AtompipeError:
+    except NopekitError:
         # its controls tag two claims of different limits "twin": honest
         m = round(float(ctx.params["deflection"]), 4)
         return Verdict(gate="t.twin", passed=m <= 0.5, measured=m, limit=0.5,
@@ -1390,7 +1390,7 @@ class OneEntryNeverStopsTheCheckRun(_env.EnvCase):
         with mock.patch.object(verdicts, "_problem_in_control", p24_rule), \
                 mock.patch.object(gates, "note_goalpost_sites", known_good_only), \
                 mock.patch.object(verdicts, "entry_problem", lambda entry: ""):
-            with self.assertRaises(AtompipeError):
+            with self.assertRaises(NopekitError):
                 p.sweep(only=["t.regime", "t.other"])
 
 
@@ -1408,7 +1408,7 @@ class AMalformedLimitIsNamed(_env.EnvCase):
         record = band_claim("c1", 0.1, 0.8)
         record["acceptance"]["limit_hi"] = "0.8"
         _projects.write_claims(root, {"c1": record})
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.read_record(os.path.join(root, "claims", "c1.json"), "claims")
         self.assertIn('"acceptance.limit_hi" must be a number or null', str(caught.exception))
         record["acceptance"]["limit_hi"] = 0.8
@@ -1431,7 +1431,7 @@ class AMalformedLimitIsNamed(_env.EnvCase):
 
     def test_a_scalar_goalpost_row_is_refused_never_raised(self):
         project = bracket(self)
-        [path] = glob.glob(os.path.join(project, ".atompipe", "verdicts",
+        [path] = glob.glob(os.path.join(project, ".nopekit", "verdicts",
                                         "bracket.deflection", "control-*.json"))
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -1447,7 +1447,7 @@ class AMalformedLimitIsNamed(_env.EnvCase):
         refused (it would name every such file in `doctor`), and it exempts no
         limit: it records no run in today's shape."""
         project = bracket(self)
-        [path] = glob.glob(os.path.join(project, ".atompipe", "verdicts",
+        [path] = glob.glob(os.path.join(project, ".nopekit", "verdicts",
                                         "bracket.deflection", "control-*.json"))
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -1472,7 +1472,7 @@ UNIT_SOURCES = (
     *sorted(glob.glob(os.path.join(_env.REPO, "packs", "*", "gates", "*.py"))),
     os.path.join(_env.REPO, "docs", "PACK_FORMAT.md"),
     *sorted(glob.glob(os.path.join(_env.REPO, "skills", "*", "SKILL.md"))),
-    os.path.join(_env.REPO, "src", "atompipe", "gates.py"),
+    os.path.join(_env.REPO, "src", "nopekit", "gates.py"),
 )
 
 

@@ -69,9 +69,9 @@ from unittest import mock
 
 import _env
 import _projects
-from atompipe import claims as claims_mod
-from atompipe import report as report_mod
-from atompipe.models import (
+from nopekit import claims as claims_mod
+from nopekit import report as report_mod
+from nopekit.models import (
     BLOCKING_STATUSES, Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, GateSpec, Ledger, NegativeControl,
     PhysicalResult, ProjectMeta, Tier, Verdict,
 )
@@ -749,9 +749,9 @@ class KnownBadShownIsAGap(_env.EnvCase):
 
     def test_the_bracket_reads_gap_on_known_bad_shown_controls(self):
         root = self._shown()
-        check = _env.atompipe(["check", "--json"], cwd=root)
+        check = _env.nopekit(["check", "--json"], cwd=root)
         self.assertEqual(check.returncode, 1, check.stderr)
-        status = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)
+        status = json.loads(_env.nopekit(["status", "--json"], cwd=root).stdout)
         # C4 (bed fit), not C2: C2's evaluators sit behind the slenderness guard
         # (P2.2), itself known-bad shown, so the rule never runs them — the
         # claim reads the louder Skipped, `prerequisite not established`.
@@ -762,7 +762,7 @@ class KnownBadShownIsAGap(_env.EnvCase):
         self.assertEqual(status["claims"].get("C2"), "blocked", status["claims"])
         admitted = set()
         for gate in ("bracket.bed_fit", "bracket.min_wall", "bracket.model_validity"):
-            directory = os.path.join(root, ".atompipe", "verdicts", gate)
+            directory = os.path.join(root, ".nopekit", "verdicts", gate)
             for name in os.listdir(directory):
                 if name.startswith("control-"):
                     with open(os.path.join(directory, name), encoding="utf-8") as fh:
@@ -800,7 +800,7 @@ class UndemonstratedReadsStale(_env.EnvCase):
 
     def test_a_note_edit_reads_stale_not_gap(self):
         root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
-        before = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)["claims"]
+        before = json.loads(_env.nopekit(["status", "--json"], cwd=root).stdout)["claims"]
         checked = sorted(cid for cid, status in before.items() if status == "pass")
         self.assertEqual(checked, ["C2", "C3", "C4"], before)
         path = os.path.join(root, "gates", "structural.py")
@@ -809,7 +809,7 @@ class UndemonstratedReadsStale(_env.EnvCase):
         self.assertEqual(text.count(self.NOTE), 1)
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text.replace(self.NOTE, self.NOTE.replace("footprint", "size")))
-        after = json.loads(_env.atompipe(["status", "--json"], cwd=root).stdout)["claims"]
+        after = json.loads(_env.nopekit(["status", "--json"], cwd=root).stdout)["claims"]
         moved = {cid: after[cid] for cid in checked}
         self.assertNotIn("unclaimed", set(moved.values()), after)
         self.assertEqual(moved["C4"], "stale", after)
@@ -905,8 +905,8 @@ LOGGER = "probe.logger"
 #: known-bad control included: `check` refuses it at its first run.
 LOGGER_GATE = f'''\
 """Planted by tests/test_status_table.py: a logger, refused at its first check."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="{LOGGER}", claims=["strength", "logger-only"],
@@ -919,7 +919,7 @@ LOGGER_FIXTURE = '''\
 """Planted by tests/test_status_table.py: the logger's known-bad control."""
 import dataclasses
 
-from atompipe.models import Ledger
+from nopekit.models import Ledger
 
 
 def thin(ctx):
@@ -969,7 +969,7 @@ def _refused_project() -> _Refused:
     every command run once and cached for the module."""
     if _REFUSED:
         return _REFUSED[0]
-    tmp = tempfile.mkdtemp(prefix="atompipe-refused-")
+    tmp = tempfile.mkdtemp(prefix="nopekit-refused-")
     unittest.addModuleCleanup(_env._rmtree, tmp)
     root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
     home = os.path.join(tmp, "home")
@@ -987,17 +987,17 @@ def _refused_project() -> _Refused:
             json.dump(record, fh, indent=2)
     with open(os.path.join(root, "claims", f"{ALONE}.json"), "w", encoding="utf-8") as fh:
         json.dump(ALONE_RECORD, fh, indent=2)
-    out = {key: _env.atompipe(argv, cwd=root, home=home) for key, argv in _RUNS}
+    out = {key: _env.nopekit(argv, cwd=root, home=home) for key, argv in _RUNS}
     for key, proc in out.items():
         want = 1 if key.startswith("check") else 0
         if proc.returncode != want:
-            raise AssertionError(f"`atompipe {key}` exited {proc.returncode}, not {want}:\n"
+            raise AssertionError(f"`nopekit {key}` exited {proc.returncode}, not {want}:\n"
                                  f"{proc.stdout[-2000:]}\n{proc.stderr[-2000:]}")
-    with open(os.path.join(root, ".atompipe", "out", "junit.xml"), encoding="utf-8") as fh:
+    with open(os.path.join(root, ".nopekit", "out", "junit.xml"), encoding="utf-8") as fh:
         junit = fh.read()
     with open(os.path.join(root, "site", "data", "state.json"), encoding="utf-8") as fh:
         state = json.load(fh)
-    with open(os.path.join(root, ".atompipe", "cache", "last_check.json"),
+    with open(os.path.join(root, ".nopekit", "cache", "last_check.json"),
               encoding="utf-8") as fh:
         last_check = json.load(fh)
     run = _Refused(out, junit, state, last_check)
@@ -1328,8 +1328,8 @@ CRASHY = "probe.crashy_control"
 #: control raises: refused at its first check (Q8).
 BED_GATES = f'''\
 """Planted by tests/test_status_table.py: a refusal after a pass, and a crashing control."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="{BED_PROBE}", claims=["bed-fit"],
@@ -1352,7 +1352,7 @@ BED_FIXTURE = '''\
 """Planted by tests/test_status_table.py: the bed probe's known-bad control."""
 import dataclasses
 
-from atompipe.models import Ledger
+from nopekit.models import Ledger
 
 
 def small(ctx):
@@ -1373,7 +1373,7 @@ def _outlived_project() -> dict:
     `status --json` read. Cached for the module."""
     if _OUTLIVED:
         return _OUTLIVED[0]
-    tmp = tempfile.mkdtemp(prefix="atompipe-outlived-")
+    tmp = tempfile.mkdtemp(prefix="nopekit-outlived-")
     unittest.addModuleCleanup(_env._rmtree, tmp)
     root = _projects.bracket_copy(os.path.join(tmp, "bracket"), migrated=True)
     home = os.path.join(tmp, "home")
@@ -1383,14 +1383,14 @@ def _outlived_project() -> dict:
     fixture = os.path.join(root, "selftest", "probe_bed.py")
     with open(fixture, "w", encoding="utf-8") as fh:
         fh.write(BED_FIXTURE.format(xy="100.0"))
-    first = _env.atompipe(["check", "--json"], cwd=root, home=home)
+    first = _env.nopekit(["check", "--json"], cwd=root, home=home)
     rows = {r["gate"]: r for r in json.loads(first.stdout)["verdicts"]}
     if rows.get(BED_PROBE, {}).get("outcome") != "pass":
         raise AssertionError(f"fixture rotted: {BED_PROBE} was not admitted and run — "
                              f"{rows.get(BED_PROBE)}\n{first.stderr[-2000:]}")
     with open(fixture, "w", encoding="utf-8") as fh:
         fh.write(BED_FIXTURE.format(xy="300.0"))
-    second = _env.atompipe(["check", "--json"], cwd=root, home=home)
+    second = _env.nopekit(["check", "--json"], cwd=root, home=home)
     rows = {r["gate"]: r for r in json.loads(second.stdout)["verdicts"]}
     if not str(rows.get(BED_PROBE, {}).get("error", "")).startswith("unqualified:"):
         raise AssertionError(f"fixture rotted: {BED_PROBE} was not refused — "
@@ -1403,7 +1403,7 @@ def _outlived_project() -> dict:
         raise AssertionError(f"{model}: expected one `bed_xy: float = 220.0` line, found {n}")
     with open(model, "w", encoding="utf-8") as fh:
         fh.write(edited)
-    status = _env.atompipe(["status", "--json"], cwd=root, home=home)
+    status = _env.nopekit(["status", "--json"], cwd=root, home=home)
     if status.returncode != 0:
         raise AssertionError(f"status exited {status.returncode}: {status.stderr[-2000:]}")
     run = {"status": json.loads(status.stdout)}

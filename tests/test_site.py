@@ -30,15 +30,15 @@ import tempfile
 import unittest
 import unittest.mock
 
-from atompipe import cli as cli_mod
-from atompipe import gates as gates_mod
-from atompipe import site as site_mod
-from atompipe import store as store_mod
-from atompipe.models import (
+from nopekit import cli as cli_mod
+from nopekit import gates as gates_mod
+from nopekit import site as site_mod
+from nopekit import store as store_mod
+from nopekit.models import (
     Acceptance, Claim, Comparator, Locator, NegativeControl, ProjectMeta,
     Tier, Verdict, View, ViewKind,
 )
-from atompipe.util import AtompipeError
+from nopekit.util import NopekitError
 
 import _env
 import _projects
@@ -57,8 +57,8 @@ STACK = {
 #: a project that had to publish a pack before it could draw its own assembly
 #: would never draw it.
 VIEWGEN_SOURCE = '''
-from atompipe.models import View, ViewKind
-from atompipe.site import derive_explode, viewgen
+from nopekit.models import View, ViewKind
+from nopekit.site import derive_explode, viewgen
 
 BOUNDS = {
     "base": ([0.0, 0.0, 0.0], [40.0, 20.0, 3.0]),
@@ -76,7 +76,7 @@ def assembly(ctx):
 
 
 @viewgen(id="stress", kind=ViewKind.FIELD, title="Stress",
-         requires_python=["atompipe_no_such_solver"])
+         requires_python=["nopekit_no_such_solver"])
 def stress(ctx):
     """Its exporter is not installed anywhere, on purpose."""
     raise AssertionError("an unavailable viewgen must never be called")
@@ -93,7 +93,7 @@ def _capture(argv: list[str]) -> tuple[int, str]:
     """Run the CLI and return `(exit code, stdout)`.
 
     Through `cli.main` rather than the command function, because the exit code
-    and the AtompipeError -> `error: ...` translation are part of what the site
+    and the NopekitError -> `error: ...` translation are part of what the site
     subcommand promises, and neither is visible from the inside.
     """
     out = io.StringIO()
@@ -106,7 +106,7 @@ class _SiteCase(unittest.TestCase):
     """A throwaway project on disk. Every test gets its own root."""
 
     def setUp(self) -> None:
-        self.root = tempfile.mkdtemp(prefix="atompipe-site-")
+        self.root = tempfile.mkdtemp(prefix="nopekit-site-")
         self.addCleanup(shutil.rmtree, self.root, ignore_errors=True)
         store_mod.init(self.root, ProjectMeta(name="site-test", revision="v0.1"))
 
@@ -125,7 +125,7 @@ class _SiteCase(unittest.TestCase):
         not a measurement and is never cached: it is remembered, as the sweep
         remembers one, with no date (`when=""`), so its age is null.
         """
-        from atompipe import verdicts as verdicts_mod
+        from nopekit import verdicts as verdicts_mod
 
         ledger = store_mod.load(self.root)
         ledger.claims = list(claims)
@@ -169,7 +169,7 @@ class _SiteCase(unittest.TestCase):
         unqualified one, its claim Gap — so a test about how a STALE entry
         renders plants a qualified evaluator first, as before P2.3 it had no
         need to."""
-        from atompipe import verdicts as verdicts_mod
+        from nopekit import verdicts as verdicts_mod
         for gid in gate_ids:
             spec, fn = registry.get(gid)
             verdicts_mod.record_control(
@@ -178,7 +178,7 @@ class _SiteCase(unittest.TestCase):
                 else None)
 
     def _spec(self, gid, claims=("C1",), **kw):
-        from atompipe.models import GateSpec
+        from nopekit.models import GateSpec
         return GateSpec(
             id=gid, claims=list(claims), tier=Tier.INSTANT,
             negative_control=NegativeControl(fixture="selftest/bad.py"), **kw)
@@ -254,11 +254,11 @@ class Scaffold(_SiteCase):
 
     def test_refusal_names_the_flag_that_gets_past_it(self):
         _capture(["site", "init", "-C", self.root])
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             site_mod.scaffold(self.root)
         self.assertIn("--force", str(caught.exception))
 
-    def test_build_refreshes_a_renderer_an_older_atompipe_scaffolded(self):
+    def test_build_refreshes_a_renderer_an_older_nopekit_scaffolded(self):
         """A page scaffolded before P2.1 keeps its own `format.js`, which read
         `blocked` as "its tooling is missing" in a missing tool's tone — so a
         crash, filed under `blocked` from P2.1, would read on it exactly like a
@@ -327,7 +327,7 @@ class BuildWithNoViews(_SiteCase):
     def test_build_without_init_points_at_init(self):
         code, _out = _capture(["site", "build", "-C", self.root])
         self.assertEqual(code, 2)
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             site_mod.build(self.root, store_mod.load(self.root),
                            self._registry(), site_mod.ViewRegistry())
         self.assertIn("site init", str(caught.exception))
@@ -499,7 +499,7 @@ class DeriveExplode(unittest.TestCase):
         self.assertEqual(merged["movers"]["cap"]["nodes"], ["cap"])
 
     def test_a_two_component_offset_is_refused(self):
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             site_mod.derive_explode(STACK, overrides={"cap": {"offset": [0, 40]}})
 
     def test_an_empty_assembly_still_produces_a_manifest(self):
@@ -643,7 +643,7 @@ class HonestyOnThePage(_SiteCase):
 
         `site.build` is handed no resolution: it resolves for itself.
         """
-        from atompipe import verdicts as verdicts_mod
+        from nopekit import verdicts as verdicts_mod
 
         self._ledger(claims=claims)
         for verdict in verdicts:
@@ -811,7 +811,7 @@ class HonestyOnThePage(_SiteCase):
         """A verdict row's status comes from `Verdict.outcome`, never the flags:
         `passed: "yes"` is not a pass (P2.1 design: the page read `passed` and
         printed `pass` beside `ok: false`)."""
-        from atompipe import site as site_
+        from nopekit import site as site_
         junk = Verdict(gate="g.one", claims=["C1"], passed="yes")
         resolution = unittest.mock.Mock(verdicts=[junk], stale_gates=frozenset(), rows={})
         ledger = store_mod.load(self.root)
@@ -860,7 +860,7 @@ class ViewgensThroughTheCli(_SiteCase):
     def test_an_unavailable_viewgen_names_its_missing_dependency(self):
         _code, out = _capture(["site", "build", "-C", self.root])
         self.assertIn("stress", out)
-        self.assertIn("atompipe_no_such_solver", out,
+        self.assertIn("nopekit_no_such_solver", out,
                       "the build must NAME the module that is missing; 'unavailable' "
                       "alone sends the reader to go and find out")
 
@@ -972,7 +972,7 @@ class SiteStatusReports(_SiteCase):
         was named for (R-6): a sweep lands after the build, not one record
         moves, and the page still shows what it showed. `meta.judgement_digest`
         is what the page judged; `_site_state` asks the resolver again."""
-        from atompipe import verdicts as verdicts_mod
+        from nopekit import verdicts as verdicts_mod
 
         self._ledger(claims=[self._claim("C1")],
                      verdicts=[Verdict(gate="g.one", claims=["C1"], passed=True,
@@ -1041,7 +1041,7 @@ class ThePageIsCurrentOnlyWithItsVerdicts(_env.EnvCase):
     """
 
     def _run(self, project: str, *argv: str):
-        proc = _env.atompipe(list(argv), cwd=project)
+        proc = _env.nopekit(list(argv), cwd=project)
         self.assertIn(proc.returncode, (0, 1),
                       f"{' '.join(argv)} crashed:\n{proc.stdout}\n{proc.stderr}")
         return proc
@@ -1150,14 +1150,14 @@ class VendorIsAllOrNothing(_SiteCase):
         site_dir = os.path.join(self.root, site_mod.SITE_DIR)
         original = site_mod.vendor_urls
         site_mod.vendor_urls = lambda: {         # type: ignore[assignment]
-            "vendor/three.module.js": "https://atompipe-no-such-host.invalid/three.js"}
+            "vendor/three.module.js": "https://nopekit-no-such-host.invalid/three.js"}
         self.addCleanup(setattr, site_mod, "vendor_urls", original)
 
         code, _out = _capture(["site", "vendor", "-C", self.root])
         self.assertEqual(code, 2)
         self.assertFalse(os.path.exists(os.path.join(site_dir, site_mod.VENDOR_DIR)),
                          "a failed vendor left a directory that shadows the CDN")
-        leftovers = [n for n in os.listdir(site_dir) if n.startswith(".atompipe-vendor")]
+        leftovers = [n for n in os.listdir(site_dir) if n.startswith(".nopekit-vendor")]
         self.assertEqual(leftovers, [], f"staging directory left behind: {leftovers}")
 
     def test_the_pinned_urls_are_https_and_mirror_the_package_layout(self):
@@ -1190,7 +1190,7 @@ class VendorIsAllOrNothing(_SiteCase):
         urllib.request.urlopen = lambda *a, **kw: _Response()   # type: ignore[assignment]
         self.addCleanup(setattr, urllib.request, "urlopen", original)
 
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             cli_mod._fetch_vendor_file("https://cdn.example/three.module.js")
         self.assertIn("HTML", str(caught.exception))
 

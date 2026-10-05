@@ -42,8 +42,8 @@ contact with a real build.
    more damage than the gate list.
 
 ```sh
-PYTHONPATH=src python3 -m atompipe pack validate <name>
-PYTHONPATH=src python3 -m atompipe gate selftest --pack <name> --junit <file>.xml
+PYTHONPATH=src python3 -m nopekit pack validate <name>
+PYTHONPATH=src python3 -m nopekit gate selftest --pack <name> --junit <file>.xml
 PYTHONPATH=src python3 -m unittest discover -s tests
 ```
 
@@ -55,7 +55,7 @@ seconds long.
 
 ## Contributing to the spine
 
-`src/atompipe/` is **standard library only**. No third-party imports, ever — the
+`src/nopekit/` is **standard library only**. No third-party imports, ever — the
 spine must never be the reason an install fails. CI proves it by AST-walking every
 import, including function-local ones.
 

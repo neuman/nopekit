@@ -241,7 +241,7 @@ The full list, with a unit and a sentence for each key, is
 pass, with the fallback spellings in its `_aliases` map. Read that file before
 writing a model for this pack; it is the teaching example.
 
-`atompipe doctor` diffs these vocabularies against every other installed pack's and
+`nopekit doctor` diffs these vocabularies against every other installed pack's and
 warns when two of them read one key differently, naming both packs and the scoped
 spelling that separates them.
 

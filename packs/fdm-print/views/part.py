@@ -33,8 +33,8 @@ import os
 import sys
 from typing import Any
 
-from atompipe.models import View, ViewKind
-from atompipe.site import ViewContext, derive_explode, viewgen
+from nopekit.models import View, ViewKind
+from nopekit.site import ViewContext, derive_explode, viewgen
 
 _PACK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PACK_DIR not in sys.path:

@@ -50,7 +50,7 @@ from __future__ import annotations
 import os
 from typing import Any, Iterable
 
-from atompipe.site import MOVER_SEPARATOR
+from nopekit.site import MOVER_SEPARATOR
 
 #: Keys, in order, that may carry the solid geometry. Three spellings because a
 #: model that calls them ``solids`` is not wrong, and one lookup because a gate
@@ -60,7 +60,7 @@ from atompipe.site import MOVER_SEPARATOR
 # ``cad.meshes`` beats the bare ``meshes``, and a scoped key beats an unscoped one
 # whatever its rank in the family. ``parts`` is the collision to watch — fdm-print
 # reads it as the PRINT SET, this pack as the placed solids of the assembly — which
-# is why `atompipe doctor` diffs the installed packs' key vocabularies and warns.
+# is why `nopekit doctor` diffs the installed packs' key vocabularies and warns.
 MESH_KEYS = ("meshes", "solids", "parts")
 
 MISSING_GEOMETRY = (
@@ -79,7 +79,7 @@ def mesh_sources(ctx: Any) -> tuple[dict[str, Any] | None, str]:
     any of three spellings.
 
     Takes any context with ``extra`` and ``param`` — a ``GateContext`` from a
-    sweep or a ``ViewContext`` from ``atompipe site build`` — because the whole
+    sweep or a ``ViewContext`` from ``nopekit site build`` — because the whole
     point of the function is that both get the same answer.
     """
     extra = getattr(ctx, "extra", None)
@@ -121,7 +121,7 @@ def sanitise(name: str) -> str:
     Anything outside :data:`_KEEP` becomes ``_``, and runs collapse to a single
     ``_``. The collapse is the load-bearing part: ``MOVER_SEPARATOR`` is ``__``,
     so a part called ``lid  left`` would otherwise sanitise to ``lid__left`` and
-    :func:`atompipe.site.derive_explode` would file it as a *body of the mover
+    :func:`nopekit.site.derive_explode` would file it as a *body of the mover
     ``lid``* — silently merging two parts into one exploded group, with both
     parts' locators landing on whichever one the viewer isolated.
 

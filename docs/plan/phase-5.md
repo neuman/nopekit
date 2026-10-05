@@ -9,12 +9,12 @@ worktree, D-23), and `modelio.influence` (P3: driver discovery).
 #### Target transcript
 
 ```text
-$ atompipe gate selftest --mutate
+$ nopekit gate selftest --mutate
 [ok  ] bracket.deflection#mutation : flips when pushed past C1's limit — arm_length 60 -> 56.2 gives 0.575 mm (fails), 51.2 gives 0.435 mm (passes)
 [--  ] bracket.bending_stress#mutation : inconclusive — thickness x0.5 gives util 0.98, short of C2's limit 1.0 (searched <n> inputs; --range widens)
 [--  ] bracket.bearing#mutation : inconclusive — no one-number change within x0.5–x2 reaches C3's limit (searched <n> inputs)
 [LOGGER] demo.deflection#mutation : C1's limit was crossed (0.575 mm > 0.5) and the check stayed green — it does not refuse at C1's limit
-$ atompipe report | sed -n '/deflection/p'
+$ nopekit report | sed -n '/deflection/p'
 | C1 | … | ends in a closed-form calculation · flips when pushed past its limit (<k> of <n> inputs) · independence (formula class) <lo>–<hi>, under operators mutate v1 |
 $ PYTHONPATH=src python -m bench --quick
 E1 admission ladder: always_pass admitted 0/<n> at A3 … all real gates admitted at A3
@@ -32,7 +32,7 @@ status --porcelain`, taken before and after any mutation or bench run. Bench ass
 unchanged; mutation asserts the diff is exactly its own new `mutation-*` paths
 (invariant 15).
 
-#### Checkpoint 5.1: `src/atompipe/mutate.py`, exposed as `gate selftest --mutate`
+#### Checkpoint 5.1: `src/nopekit/mutate.py`, exposed as `gate selftest --mutate`
 
 No new command. For each MEASURABLE claim C with a limit, and each covering gate G:
 
@@ -68,7 +68,7 @@ No new command. For each MEASURABLE claim C with a limit, and each covering gate
   so SEALED holds.
 - **Enforcement.** A survived outside mutant makes G **inadmissible for C** (R-4: measured
   first on the bracket and the four stdlib packs). Results are
-  `.atompipe/verdicts/<gate>/mutation-<key16>-<out8>.json`, keyed by G's code digest, C's
+  `.nopekit/verdicts/<gate>/mutation-<key16>-<out8>.json`, keyed by G's code digest, C's
   acceptance, the driver set and the spine digest — not the model source, so an
   auto-accepted model edit does not erase a result. A LOGGER result stays inadmissible
   until a re-run kills (asymmetric, like R-3); `export` and `check --force` re-run the
@@ -83,7 +83,7 @@ No new command. For each MEASURABLE claim C with a limit, and each covering gate
 the two mutant outcomes):
 
 ```jsonc
-// .atompipe/verdicts/bracket.deflection/mutation-<key16>-<out8>.json
+// .nopekit/verdicts/bracket.deflection/mutation-<key16>-<out8>.json
 {"schema": 1, "kind": "mutation", "gate": "bracket.deflection", "claim": "C1",
  "acceptance": {"comparator": "<=", "limit": 0.5, "units": "mm"},
  "operator_set": "mutate v1 <sha12>", "drivers": ["arm_length", "thickness"],
@@ -107,7 +107,7 @@ scored gate that reads nothing the claim's quantity depends on would be the chea
 never to be called a logger.
 
 `V: MutationIsSealed`: the tree diff before and after is exactly the new
-`.atompipe/verdicts/*/mutation-*.json` paths, with every verdict and control entry,
+`.nopekit/verdicts/*/mutation-*.json` paths, with every verdict and control entry,
 `model/` and every pack directory byte-identical; a mutation run patched to write a
 verdict entry, or to edit `model/`, turns it red; `ControlsAreSealed`
 still passes after a mutation run; a logger gate (computes the measurement, returns
@@ -134,7 +134,7 @@ each tree against its own model.
   gate opposite brackets.
 - `origin`: `pack:<name>@<ver> (<origin_of>)` only for a **bundled** pack whose content
   digest matches the shipped release (`packs.origin_of`, `packs.py:237-260`); a user,
-  `ATOMPIPE_PACK_PATH` or path pack, or a copy shadowing a bundled name, is
+  `NOPEKIT_PACK_PATH` or path pack, or a copy shadowing a bundled name, is
   `agent-session` unless its digest matches, because the agent session can write those
   places (D-32); `solver:<tool>` for the wrapped half of a `requires_tools` gate;
   `agent-session` for **everything inside the project**, including project-local packs —
@@ -153,8 +153,8 @@ each tree against its own model.
 formula-class lower bound > 0.5, and the same adapter fed the model's table gets a
 table-class upper bound < 0.5 — origin buys nothing against shared inputs;
 `json.dumps(allow_nan=False)` never raises; the mirror verdict with no source stated does
-not contain the word "independent"; a beam-analytic copy in `~/.atompipe/packs` or on
-`ATOMPIPE_PACK_PATH` derives `agent-session`; no measurement or human terminal renders a
+not contain the word "independent"; a beam-analytic copy in `~/.nopekit/packs` or on
+`NOPEKIT_PACK_PATH` derives `agent-session`; no measurement or human terminal renders a
 bracket or the word "independent".
 
 #### Checkpoint 5.3: `bench/`
@@ -173,13 +173,13 @@ bracket or the word "independent".
   a reason); `e1_vacuity.py`; `e3_dependence.py`; `e4_staleness.py`;
   `adapters/bracket_as_beam.py`; `corpus/e1/README.md`.
 - The sandbox copies packs and the bracket into a temp dir, runs under the shared test
-  environment (temp `HOME` with `PYTHONUSERBASE` pinned, `ATOMPIPE_PACK_PATH` pointed at the copies; P1.0) so a user's
-  `~/.atompipe/packs` cannot shadow the bundled ones (S-87), and asserts the repo's tree
+  environment (temp `HOME` with `PYTHONUSERBASE` pinned, `NOPEKIT_PACK_PATH` pointed at the copies; P1.0) so a user's
+  `~/.nopekit/packs` cannot shadow the bundled ones (S-87), and asserts the repo's tree
   hash at exit.
-- **Nothing under `src/atompipe` or `site/` reads bench output**; numbers are never
+- **Nothing under `src/nopekit` or `site/` reads bench output**; numbers are never
   committed (D-33). Model operators are imported from `mutate.py` (one definition, rule 2);
   E1's wrapper and AST operators live in bench only.
-- CI extends the stdlib AST walk to `bench/` (allowed: stdlib, atompipe, bench), forbids
+- CI extends the stdlib AST walk to `bench/` (allowed: stdlib, nopekit, bench), forbids
   `urllib`/`http`/`socket` there, and runs `--quick`. Quick mode (bracket plus the four
   stdlib packs) stays in single-digit seconds; full mode adds cad-solid, fdm-print and
   openmodelica when their tools exist, and a missing tool is a SKIPPED subject row, never a
@@ -187,7 +187,7 @@ bracket or the word "independent".
 
 `V: test_bench`: `--quick --json` parses with `allow_nan=False` and carries the envelope
 keys; the tree hash and `git status` are unchanged; an AST walk finds no `bench` import in
-`src/atompipe` and no non-stdlib or network import in `bench/`; flipping one expectation via
+`src/nopekit` and no non-stdlib or network import in `bench/`; flipping one expectation via
 a test hook exits 1 (the harness can fail); `E1Quick`, `E3Quick`, `E4Quick` (§6); every
 E1–E8 has a PROTOCOL.md entry with a falsifier, and `bench e2` exits 0 printing SKIPPED.
 

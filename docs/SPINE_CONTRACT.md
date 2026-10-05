@@ -1,11 +1,11 @@
 # Spine contract (internal)
 
-Every spine module builds against `src/atompipe/models.py`. **Read that file first.**
+Every spine module builds against `src/nopekit/models.py`. **Read that file first.**
 It defines every type that crosses a module boundary; no module may define its own.
 
 Hard rules for the whole spine:
 
-1. **Standard library only.** No third-party imports anywhere under `src/atompipe/`.
+1. **Standard library only.** No third-party imports anywhere under `src/nopekit/`.
    The spine must never be the reason an install fails. Packs declare their own deps.
 2. **Python 3.10+ syntax** (`X | None`, `match` ok). Target 3.12.
 3. **No `Date.now()`-style hidden state in logic** — callers pass timestamps in. A
@@ -15,7 +15,7 @@ Hard rules for the whole spine:
 5. Comments carry provenance: when a rule exists because
    something slipped through, say what slipped through.
 6. `from __future__ import annotations` at the top of every module.
-7. Errors the user caused raise `AtompipeError` (from `util.py`); bugs raise normally.
+7. Errors the user caused raise `NopekitError` (from `util.py`); bugs raise normally.
 
 ## Where facts live
 
@@ -27,16 +27,16 @@ is `cli.py`'s.
 | Fact | Home | Git | Written by |
 |---|---|---|---|
 | a claim, a decision, an enriched need, an input's record, a param's provenance, a declared view | `claims/`, `decisions/`, `needs/`, `inputs/<id>.json`, `params/`, `views/*.json` — one file per record | tracked | a human or the agent, editing the file; the shims `ingest`, `extract`, `decide` |
-| project meta, the model entry, the live packs | `.atompipe/project.json` | tracked | the same; `init`; `packs add` |
+| project meta, the model entry, the live packs | `.nopekit/project.json` | tracked | the same; `init`; `packs add` |
 | a physical result, and an owner's or an authority's attribution (P2.5a) | `results/<claim-id>.json`, append-only, every entry sealed and chained | tracked | `claim physical`, typed in a person's own shell — never by hand |
 | a parameter's value, units, rationale and what lost to it | the model (`model/*.py`: `Config`, its docstrings, `PARAMS`) | tracked | the model's author |
-| a gate's verdict, and its control's | `.atompipe/verdicts/<gate id>/`, one file per rho, never rewritten | tracked | `check`, `gate selftest` |
-| every record, in one read | `.atompipe/ledger.json` — the **index**, generated | ignored | every command but `doctor`, `init` and `--no-record` runs |
-| statuses, counts, the worst claim, the parameter view, as the last full check saw them | `.atompipe/cache/last_check.json` | ignored | a full recorded `check` |
-| what a run cost, when it ran | `.atompipe/obs/` | ignored | every recorded run of a gate or a control |
-| a crash or a self-skip, remembered — never evidence | `.atompipe/cache/last_outcomes.json` | ignored | `check`, `gate selftest` |
-| time savers: file digests, re-verified fixtures | `.atompipe/cache/digests.json`, `controls.json` | ignored | `check`; losing either costs a re-hash or a fixture run, never a verdict |
-| gate scratch and evidence | `.atompipe/out/` (a control's: `out/controls/<gate id>/`) | ignored | gates |
+| a gate's verdict, and its control's | `.nopekit/verdicts/<gate id>/`, one file per rho, never rewritten | tracked | `check`, `gate selftest` |
+| every record, in one read | `.nopekit/ledger.json` — the **index**, generated | ignored | every command but `doctor`, `init` and `--no-record` runs |
+| statuses, counts, the worst claim, the parameter view, as the last full check saw them | `.nopekit/cache/last_check.json` | ignored | a full recorded `check` |
+| what a run cost, when it ran | `.nopekit/obs/` | ignored | every recorded run of a gate or a control |
+| a crash or a self-skip, remembered — never evidence | `.nopekit/cache/last_outcomes.json` | ignored | `check`, `gate selftest` |
+| time savers: file digests, re-verified fixtures | `.nopekit/cache/digests.json`, `controls.json` | ignored | `check`; losing either costs a re-hash or a fixture run, never a verdict |
+| gate scratch and evidence | `.nopekit/out/` (a control's: `out/controls/<gate id>/`) | ignored | gates |
 | a milestone: a named spend and the claims it requires (P2.5b) | `milestones/<name>.json` | tracked | a human or the agent, editing the file |
 | an export: what was required, checked, re-run, decided and built (P2.5b) | `exports/<name>.json`, append-only, sealed and chained | tracked | `export <milestone>` |
 | the readiness report (P2.5b; was `docs/readiness.md`) | `REPORT.md` at the root | ignored | `report --write` |
@@ -48,7 +48,7 @@ or a verdict. There is no run history: git and the verdict cache are the history
 
 ## Module map and public surface
 
-Every `src/atompipe/*.py` except `__init__` and `__main__` has a heading below, and
+Every `src/nopekit/*.py` except `__init__` and `__main__` has a heading below, and
 every name in its `__all__` is written in code form in that module's section.
 `tests/test_contracts.py` holds that (PLAN R-14): a module with no heading, or an
 exported name nobody wrote down, turns it red. `models.py` and `site.py` had no
@@ -96,7 +96,7 @@ LATENCY_UNITS: dict[str, float]               # P2.5b: s min h day week year -> 
 class ViewKind(StrEnum): MODEL3D | IMAGE | CHART | TABLE | FIELD | DIAGRAM
 class ArtifactKind(StrEnum): SKETCH | REFERENCE | CAD | SCREENSHOT | DATASHEET | SPEC
                              | MEASUREMENT | STANDARD | DATA | LINK | OTHER
-EXT_KIND_HINTS: dict[str, ArtifactKind]       # ".stl" -> CAD; `atompipe ingest`'s first guess
+EXT_KIND_HINTS: dict[str, ArtifactKind]       # ".stl" -> CAD; `nopekit ingest`'s first guess
 class NeedStatus(StrEnum): OPEN | PROPOSED | DEFERRED | INSTALLING | SATISFIED | ABANDONED
 class Comparator(StrEnum): LE | LT | GE | GT | EQ | NE | BETWEEN
     def holds(self, measured, limit, limit_hi=None) -> bool
@@ -261,7 +261,7 @@ The ledger keeps **no run record** (checkpoint 1.2). It used to carry the previo
 sweep's model and inputs hashes, and staleness was one comparison against them: a model
 that failed to import compared equal and three claims read PROVEN (S-21), and one
 unread datasheet staled every measurable claim (S-33). Staleness is per gate now
-(`verdicts.freshness`); when the last full check ran is `.atompipe/cache/last_check.json`.
+(`verdicts.freshness`); when the last full check ran is `.nopekit/cache/last_check.json`.
 `Ledger.from_dict` ignores the old key, so a ledger an older spine wrote still loads
 (R-2), and the next save does not carry it.
 
@@ -333,7 +333,7 @@ pass (GLOSSARY §7) — and each now holds the fact in this table; the word is
 
 ### `util.py`  (no deps)
 ```python
-class AtompipeError(Exception): ...          # user-facing, CLI prints message not traceback
+class NopekitError(Exception): ...          # user-facing, CLI prints message not traceback
 def utcnow_iso() -> str                      # "2026-09-11T14:46:00Z"
 def ensure_dir(path) -> str                  # mkdir -p; returns the path as a str
 def atomic_write_text(path, text) -> None    # write temp + os.replace; never truncate on crash
@@ -353,7 +353,7 @@ class FileLock:                              # build lock; a concurrent run once
     def __enter__(self) / __exit__(...)      # writes pid; reaps stale locks of dead pids
 ```
 `atomic_write_json` writes **strict JSON**: `allow_nan=False`, and a NaN or ±Infinity
-anywhere in `obj` raises `AtompipeError("<path>: refusing to write NaN or Infinity; a
+anywhere in `obj` raises `NopekitError("<path>: refusing to write NaN or Infinity; a
 number that could not be measured is not a number")`. What slipped through: the
 json default let NaN reach `state.json` and `ledger.json`, `JSON.parse` rejected the
 file, and the page advised `site build`, which cannot fix it (S-47). Every writer
@@ -362,7 +362,7 @@ the refusal.
 
 ```python
 class FileDigests:                                   # sha256 of a file's BYTES, behind a stat cache
-    def __init__(self, cache_path: str | None = None)   # .atompipe/cache/digests.json (untracked)
+    def __init__(self, cache_path: str | None = None)   # .nopekit/cache/digests.json (untracked)
     def digest(self, path) -> str | None             # None: missing, not a regular file, unreadable
     def save(self) -> bool                           # best-effort; True when written
 ```
@@ -417,30 +417,30 @@ common case (verify.sh), so every caller has a non-git path.
 Persistence: where a project lives on disk. **Never imports `modelio` or `verdicts`**
 (spec §3.1): the migration's reader of what the model states is injected.
 ```python
-ATOMPIPE_DIR = ".atompipe"
+NOPEKIT_DIR = ".nopekit"
 LEDGER_NAME  = "ledger.json"          # the GENERATED index (records project); the records (legacy)
-PROJECT_NAME = "project.json"         # .atompipe/project.json — meta, and the commit marker
+PROJECT_NAME = "project.json"         # .nopekit/project.json — meta, and the commit marker
 LEGACY_LEDGER_NAME = "ledger.legacy.json"   # what a migrated ledger.json is renamed to
 PROJECT_SCHEMA = 2                    # project.json's schema; a newer one is refused
 RECORD_DIRS = ("claims", "params", "decisions", "needs", "inputs", "results", "views",
                "milestones", "exports")   # the last two P2.5b's: never on a legacy project
-VERDICTS_NAME = "verdicts"; CACHE_NAME = "cache"; OBS_NAME = "obs"   # under .atompipe/
+VERDICTS_NAME = "verdicts"; CACHE_NAME = "cache"; OBS_NAME = "obs"   # under .nopekit/
 INDEX_BANNER: str                     # the index's "generated" value: edit the records, never this
-LEGACY_GITIGNORE_TEMPLATES: tuple[str, str]  # init's .atompipe/.gitignore at 1e09113, and at 1.2
+LEGACY_GITIGNORE_TEMPLATES: tuple[str, str]  # init's .nopekit/.gitignore at 1e09113, and at 1.2
 INPUT_BUCKETS = ("sketches", "references", "cad", "screenshots",
                  "datasheets", "specs", "measurements", "data")
 BUCKET_FOR_KIND: dict[ArtifactKind, str]                # which inputs/ bucket a kind lands in
 def find_root(start: str | None = None) -> str | None   # walk up for a MARKER; stop at .git
-def require_root(start=None) -> str                     # raises AtompipeError if none
-def atompipe_dir(root) -> str                           # <root>/.atompipe
-def ledger_path(root) -> str                            # <root>/.atompipe/ledger.json
+def require_root(start=None) -> str                     # raises NopekitError if none
+def nopekit_dir(root) -> str                           # <root>/.nopekit
+def ledger_path(root) -> str                            # <root>/.nopekit/ledger.json
 def inputs_dir(root) -> str                             # inputs/   (NOT hidden - users put files here)
-def out_dir(root) -> str                                # .atompipe/out/  gate scratch + evidence
+def out_dir(root) -> str                                # .nopekit/out/  gate scratch + evidence
 def docs_dir(root) -> str                               # docs/  generated report + decision log
 def model_dir(root) -> str                              # model/ the single source of truth
 def project_paths(root) -> dict[str, str]              # every well-known path, by name
 
-def read_project(root) -> ProjectMeta                   # .atompipe/project.json, strict
+def read_project(root) -> ProjectMeta                   # .nopekit/project.json, strict
 def write_project(root, meta) -> str | None             # the path, or None when unchanged
 def read_record(path, kind, *, model_entry="") -> Record | ResultsFile           # STRICT
 RESULTS_LISTS = ("results", "attributions")   # P2.5a: a results file's two sealed lists
@@ -461,7 +461,7 @@ def load(root, *, model_prose=None) -> Ledger   # the records; a legacy ledger m
 def save(root, ledger: Ledger) -> None  # tests and the migration only (see below)
 def is_legacy(root) -> bool             # ledger.json present, project.json absent
 def build_index(root, *, digests: FileDigests | None = None) -> dict   # pure
-def write_index(root) -> bool           # True when .atompipe/ledger.json changed; best-effort
+def write_index(root) -> bool           # True when .nopekit/ledger.json changed; best-effort
 def agree(root) -> list[str]            # every way the index disagrees with the records
 def records_digest(root, *, exclude=()) -> str   # sha256 over the record files and project.json;
                                         # exclude: record dirs left out (export's manifest: "exports")
@@ -473,18 +473,18 @@ def ensure_ignore_blocks(root) -> list[str]             # the files changed; ide
 def init(root, meta: ProjectMeta) -> Ledger             # the records layout; refuses only on a marker
 ```
 **A project is where its marker is.** `find_root` walks up from `start` (default: the
-cwd), and at each level checks **first** for a marker — `.atompipe/project.json`, or
-the legacy `.atompipe/ledger.json` — returning that directory; **then** returns `None`
+cwd), and at each level checks **first** for a marker — `.nopekit/project.json`, or
+the legacy `.nopekit/ledger.json` — returning that directory; **then** returns `None`
 if the level holds a `.git` entry (a directory, or the *file* a linked worktree or
-submodule has); else it walks up. A bare `.atompipe/` directory is not a marker.
-What slipped through (S-64): any `.atompipe/` made a project, and `~/.atompipe/` is
+submodule has); else it walks up. A bare `.nopekit/` directory is not a marker.
+What slipped through (S-64): any `.nopekit/` made a project, and `~/.nopekit/` is
 the user-pack home, so on a pack author's machine every directory under `~` was
 "inside a project" and pack-mode `gate selftest` could never be reached there (nor,
 later, Phase 3's Stop-hook fast exit and `/start`'s `init`). The `.git` boundary is
 why a nested worktree inside a project resolves to `None` rather than to the trunk's
 ledger, while a project that is its own git root is still found (the marker is
 checked before the boundary). `require_root`'s message names both markers and the git boundary. `init`
-refuses **only when a marker exists**: a directory holding only `.atompipe/packs/`
+refuses **only when a marker exists**: a directory holding only `.nopekit/packs/`
 is not a project, and `init` there succeeds.
 
 `project_paths` is the layout in one call (`"ledger"`, `"project"`, `"legacy_ledger"`,
@@ -496,12 +496,12 @@ hand, so moving the layout is one edit here instead of a grep across the spine.
 
 **The layout** (checkpoint 1.3; relative to the project root):
 ```
-.atompipe/project.json     TRACKED  {"schema": 2, name, summary, created, revision,
+.nopekit/project.json     TRACKED  {"schema": 2, name, summary, created, revision,
                                      model_entry, packs, spine_version} — written LAST
-.atompipe/.gitignore       TRACKED  the marked deny-list block (below)
+.nopekit/.gitignore       TRACKED  the marked deny-list block (below)
 .gitignore, .gitattributes TRACKED  marked blocks: bytecode; LF, binary kinds -text
-.atompipe/ledger.json      IGNORED  the generated index — an output, never read for truth
-.atompipe/verdicts/**      TRACKED  cache and control entries (verdicts.py)
+.nopekit/ledger.json      IGNORED  the generated index — an output, never read for truth
+.nopekit/verdicts/**      TRACKED  cache and control entries (verdicts.py)
 claims/<id>.json           TRACKED  one Claim; the stem IS the id; no "gates"
 params/<name>.json         TRACKED  SPARSE: only what the model cannot hold
 decisions/<slug>.json      TRACKED  one Decision
@@ -545,7 +545,7 @@ as a record and the pin can only ever read as drift (what slipped through: a leg
 input ingested in place at `inputs/loads.json` migrated to a record at that path naming
 itself as its evidence). A failing
 top-level `inputs/*.json` is most likely stray evidence, and the message names
-`atompipe ingest` and the buckets. A results file must be `{"results": [...]}` whose
+`nopekit ingest` and the buckets. A results file must be `{"results": [...]}` whose
 items say `passed` as a bool, and a claim's `critical`, when present, is a bool too
 (review of P2.1: `"critical": null` read as not required by truthiness, so a failing
 claim left every required list and `check` said ready). `load` also refuses two record files whose stems differ
@@ -571,7 +571,7 @@ command refused "params/D.json and params/d.json would name ids that differ only
 way every read command blamed a `params/thickness.json` that was byte for byte `check`'s
 ("Move those files aside"). *Rejected:* a default reader `modelio` registers into the
 store at import (the plan would turn on which module a process imported first). Neither
-marker: an empty `Ledger`. **No spine code reads `.atompipe/ledger.json` for truth** on
+marker: an empty `Ledger`. **No spine code reads `.nopekit/ledger.json` for truth** on
 a records project.
 
 **`save(root, ledger)`** stays for tests and the migration (an AST test,
@@ -589,7 +589,7 @@ of the inputs they name — no clock, model, registry or listing order. Keys, in
 `decisions`, `needs`, `inputs`, `results`, `views`, `unregistered_inputs`, `problems`.
 Each record row is its file's content plus its id. Each input row adds `sha256` (the
 digest of the bytes NOW, through `util.FileDigests` and the untracked
-`.atompipe/cache/digests.json`, read, never written), `pinned` (the record's sha256),
+`.nopekit/cache/digests.json`, read, never written), `pinned` (the record's sha256),
 `drift` and `exists` (`null` for an input with no path). `unregistered_inputs` lists
 evidence bytes under `inputs/` — not a top-level `*.json`, not `inputs/README.md`, not a
 dot-file — that no record's `path` names. `problems`: missing bytes, drift, dangling
@@ -597,7 +597,7 @@ dot-file — that no record's `path` names. `problems`: missing bytes, drift, da
 **never** holds a status, coverage or a verdict — those sit in `last_check.json`, and an
 index that carried them could disagree with them. What slipped through without the
 computed digest (S-45): evidence was hashed at ingest and never again, so tampered bytes
-read as unchanged. `write_index` rewrites `.atompipe/ledger.json` only when its bytes
+read as unchanged. `write_index` rewrites `.nopekit/ledger.json` only when its bytes
 change, only on a records project (on a legacy one that file IS the records), and
 best-effort (a read-only filesystem warns on stderr). `agree(root)` lists every way the
 file on disk differs from a fresh build — records compared by id, so a hand-edited
@@ -611,7 +611,7 @@ never when the index is rewritten.
 function of the legacy JSON and of `model_prose(root, meta.model_entry)` —
 `{name: {"rationale", "units"}}`, what the model STATES, read statically; the CLI passes
 `modelio.static_param_prose`. Before a byte is written it refuses an unknown key at every
-level (`rejectd` → `.atompipe/ledger.json: param "thickness": unknown key "rejectd" (did
+level (`rejectd` → `.nopekit/ledger.json: param "thickness": unknown key "rejectd" (did
 you mean "rejected"?)`, S-40), `independence`, a NaN inside a record, an id that cannot
 be a file name or collides (exactly or by case), a `ledger.json` with a `generated` key
 and no `project.json`, a legacy input whose `path` is where a record goes, and files
@@ -621,10 +621,10 @@ with that path, the file its own record goes in now. It is refused on the path, 
 the file being there, naming the move and the edit that migrate it (`move them to
 inputs/data/loads.json and set its "path" to …` — the bucket of its kind). What slipped
 through: the plan wrote the record there and called the bench log a half-written record
-("differs from what .atompipe/ledger.json migrates to … Move those files aside"), and
+("differs from what .nopekit/ledger.json migrates to … Move those files aside"), and
 following that let the migration write a record naming itself — DRIFT forever;
 `inputs/Bench Loads.json` (input `bench-loads`) was called "not in
-.atompipe/ledger.json". *Rejected:* moving the bytes during the migration (it stays a
+.nopekit/ledger.json". *Rejected:* moving the bytes during the migration (it stays a
 function of the ledger and the model, and a model opening `inputs/loads.json` by path
 would break without a word); rewriting only the path (a record naming bytes that are not
 there). Of the files where records go, one that reads as a record is a crashed
@@ -637,9 +637,9 @@ Legacy `verdicts` and the old sweep record are dropped unread (D-09).
 re-derives the same bytes and completes), then renames `ledger.json` to
 `ledger.legacy.json` — never deleted. `apply=False` writes nothing; `load` and `doctor`
 use it, with the same `model_prose` as `check` (see `load`). `MigrationPlan.ledger` is the plan read back through the strict reader;
-`files` maps each root-relative path (including `.atompipe/project.json`) to its bytes;
+`files` maps each root-relative path (including `.nopekit/project.json`) to its bytes;
 `notice` is one stderr paragraph for the CLI — with `apply`, it ends with
-`git rm --cached .atompipe/ledger.json` (the spine runs no git); without, it says the
+`git rm --cached .nopekit/ledger.json` (the spine runs no git); without, it says the
 project "will migrate … on the next check". On a project already migrated it returns
 the loaded records, `{}` and `""`, and changes no byte (it only finishes a rename a crash
 interrupted). It never takes the build lock and never reads the clock: `when` appears
@@ -659,16 +659,16 @@ the rule. *Rejected:* dropping units/rationale whenever `model_entry` is set (er
 hand-written rationale the model lacks); keeping everything and hand-deleting the
 bracket's twelve duplicates (a generated output edited by hand).
 
-**`ensure_ignore_blocks(root)`** keeps three marked blocks (`# atompipe:begin` …
-`# atompipe:end`), each at the top of its file, idempotently:
-`.atompipe/.gitignore` — the deny-list `ledger.json ledger.legacy.json obs/ cache/ out/
-export/ runs/ *.tmp *.lock` (never an allow-list: `.atompipe/packs/` is source and
+**`ensure_ignore_blocks(root)`** keeps three marked blocks (`# nopekit:begin` …
+`# nopekit:end`), each at the top of its file, idempotently:
+`.nopekit/.gitignore` — the deny-list `ledger.json ledger.legacy.json obs/ cache/ out/
+export/ runs/ *.tmp *.lock` (never an allow-list: `.nopekit/packs/` is source and
 `model.json` is reviewed; `verdicts/` is evidence and stays tracked); the root
 `.gitignore` — `__pycache__/`, `*.py[cod]`, and from P2.5b `/REPORT.md` and `/out/` (the
 report and the packages, outputs: S-41's committed report drifted from its ledger;
 anchored, so a `model/out/` stays a source); the root `.gitattributes` —
 `* text=auto eol=lf` and `*.stl`, `*.step`, `*.glb`, `*.png`, `*.jpg` `-text`, one
-pattern per line. A `.atompipe/.gitignore` that **begins with** a
+pattern per line. A `.nopekit/.gitignore` that **begins with** a
 `LEGACY_GITIGNORE_TEMPLATES` text has that prefix replaced by the block; a line outside
 the block equal to `!ledger.json` or `!runs/` is removed with a stderr notice (it would
 re-add the index on the next `git add -A`, undoing D-06); a line duplicating a block
@@ -677,16 +677,16 @@ lines goes with them (the bracket's appended `cache/`/`obs/`); every other user 
 kept, in order, after the block. What slipped through (S-76): `init` wrote an ignore
 file that allowed the ledger, and nothing ignored `cache/`.
 
-**No run history** (checkpoint 1.2). `init` makes no `.atompipe/runs/`, and the store
+**No run history** (checkpoint 1.2). `init` makes no `.nopekit/runs/`, and the store
 has no run API: every `check` and every `gate selftest` used to append a tracked run
 file, so the suite dirtied the tree it verified (S-89), and `<gate>#selftest` rows sat
 in the same series as the sweep's with no latency reader filtering them (S-31). Git and
-the verdict cache are the history; what runs cost is `.atompipe/obs/`, gate runs and
+the verdict cache are the history; what runs cost is `.nopekit/obs/`, gate runs and
 control runs apart (`verdicts.record_obs`).
 
 ### A project's model  (not a spine module: what `modelio.py` loads)
 The model contract. A project's model is a **Python module** — the file
-`"model_entry"` names in `.atompipe/project.json` — exposing:
+`"model_entry"` names in `.nopekit/project.json` — exposing:
 ```python
 CONFIG: dataclass instance          # or  Config: type  +  CONFIG = Config()
 def build(config) -> dict           # the resolved geometry/state; pure, deterministic
@@ -708,14 +708,14 @@ class LoadedModel:
 def load_model(root, entry: str | None = None) -> LoadedModel   # entry: project.json's model_entry
 def project(model: LoadedModel) -> dict      # {"config": {...}, "derived": {...}} JSON-safe
 def model_hash(projection: dict) -> str      # stable; a display id (staleness is per gate)
-def write_projection(root, projection) -> str   # .atompipe/model.json  (the diffable view)
+def write_projection(root, projection) -> str   # .nopekit/model.json  (the diffable view)
 def params_from_model(model) -> list[Param]  # merge PARAMS with dataclass fields+defaults
 def undefended_params(views) -> list[str]    # param_view's views the model holds that no home
                                              # defends: THE nag list (doctor, model, status, report, page)
 def check_determinism(model, runs=2) -> tuple[bool, str]   # build twice; the projection must not move
 ```
 Rule enforced here: a projection value that is a dataclass/enum is encoded via
-`models._enc`. Non-JSON-safe values raise `AtompipeError` naming the field —
+`models._enc`. Non-JSON-safe values raise `NopekitError` naming the field —
 silent coercion is how a model and its projection drift apart.
 
 ```python
@@ -724,8 +724,8 @@ class CodeClosure:                                       # what a loaded module'
     files        # ((abspath, sha256 of the bytes compiled), ...)
     fallback     # "", or why the closure is a whole directory: "computed source at <file>:<line>"
     third_party  # static top-level imports that are not code: installed, or not importable
-                 # (not stdlib, not atompipe; a file beside the roots and not installed is code)
-    spine_extras # atompipe.* modules it imports that are not in verdicts.SPINE_MODULES
+                 # (not stdlib, not nopekit; a file beside the roots and not installed is code)
+    spine_extras # nopekit.* modules it imports that are not in verdicts.SPINE_MODULES
     data         # ((abspath, sha256), ...): files that code opened to read while the module
                  # (or a helper of its closure) ran — a table read at import; NO_BYTES if none
 NO_BYTES: str                                            # data digest of a file opened and found
@@ -744,7 +744,7 @@ def dynamic_imports(tree) -> list[tuple[int, str]]       # (line, call): import_
                                                          #   module a VALUE names; doctor's dynamic-imports
 def is_code(path, roots=()) -> bool                      # code (under roots, or beside them and not
                                                          #   installed), not an instrument; the finder's test
-def registered_by(fn) -> tuple[ModuleType, ...]          # the modules whose __atompipe_gates__ hold fn
+def registered_by(fn) -> tuple[ModuleType, ...]          # the modules whose __nopekit_gates__ hold fn
                                                          #   itself (by identity), sorted by name
 def code_closure(obj) -> CodeClosure | None              # a module's; a function's: its defining
                                                          #   module's merged with each registered_by
@@ -779,14 +779,14 @@ source is a working copy); making such a gate opaque (re-run on every check, sti
 the pyc). Only `exec` of computed source from a frame in code, or an import of code that
 cannot be mapped to a file, falls back to every `*.py` under the owning directory, and
 `fallback` says so. The closure is stored on the module as
-`__atompipe_code__`; a later load returns the cached module only while every file in
+`__nopekit_code__`; a later load returns the cached module only while every file in
 it still hashes the same, else purges the recorded helpers and re-executes (the gates
 it registered are re-adopted into the caller's registry). `load_model` records the
 model's closure the same way.
 
 **A gate's code is the module that registered it, too.** `code_closure(fn)` merges the
 closure of the module that defines `fn` with that of every module whose
-`__atompipe_gates__` holds `fn` (`registered_by`, read from `sys.modules` as it is now),
+`__nopekit_gates__` holds `fn` (`registered_by`, read from `sys.modules` as it is now),
 as a load folds in a helper: a file the two recorded at two digests is torn. For a gate
 written with `@gate` the two are one module and its closure comes back unmerged.
 `verdicts._pack_dir_of` (a control's owner, the default `<pack:NAME>` anchor) and
@@ -929,9 +929,9 @@ lock. `gates` imports it, so it
 never imports `gates` at module level: a function that needs a gate type receives
 the object.
 ```python
-ABSENT: str                  # sha256(b"atompipe:absent\0") — a key the gate asked for, not there
-PRESENT: str                 # sha256(b"atompipe:present\0") — `k in params`, presence only
-DIRECTORY: str               # sha256(b"atompipe:directory\0") — a file input that is a directory
+ABSENT: str                  # sha256(b"nopekit:absent\0") — a key the gate asked for, not there
+PRESENT: str                 # sha256(b"nopekit:present\0") — `k in params`, presence only
+DIRECTORY: str               # sha256(b"nopekit:directory\0") — a file input that is a directory
 SPINE_MODULES = ("models.py", "gates.py", "modelio.py", "verdicts.py")
 SMALL_VALUE_MAX_CHARS = 80   # a str this short (any bool, int, finite float) is shown beside its digest
 
@@ -994,8 +994,8 @@ class ModelProxy:
     def __init__(self, target, trace)
 class TierRead:                                 # ctx.tier in a gate's view; NOT an int subclass
     def __init__(self, value, trace)            # every use of the value records it on trace
-class GateInputWriteError(AtompipeError): ...  # "a gate cannot write another gate's inputs: ctx.params['x']"
-class GateMemoError(AtompipeError, AttributeError): ...   # ctx.memo used but through load_file
+class GateInputWriteError(NopekitError): ...  # "a gate cannot write another gate's inputs: ctx.params['x']"
+class GateMemoError(NopekitError, AttributeError): ...   # ctx.memo used but through load_file
 class SweepMemo:                                # ctx.memo in every view: a handle, not a mapping
     def __init__(self, entries=None)            # entries: the dict only load_file opens
 def memo_entries(memo) -> dict | None           # a SweepMemo's entries | a plain dict | None
@@ -1075,7 +1075,7 @@ one the fixture chose — a constant, not an input. What slipped through (review
 1, `probe.tier`): `GateContext` told a gate it may use the tier to pick a cheaper path,
 nothing recorded that one had, and a tier-0 PASS was served Fresh to `check --tier 2`.
 
-**`digest_value`** is sha256 over `atompipe-v1:` + canonical JSON (`sort_keys`, compact,
+**`digest_value`** is sha256 over `nopekit-v1:` + canonical JSON (`sort_keys`, compact,
 `ensure_ascii=False`, `allow_nan=False`) of a tagged form: NaN and the infinities
 become `{"$float": ...}` (the bracket's model `build` returns `inf`); a user key starting
 `$` is escaped to `$$`, so no model value can spell a tag; tuples become lists; a 0-d
@@ -1142,7 +1142,7 @@ forgets linecache's lines for every file that is not a module's source
 excluded: pseudo-filenames like `<unknown>` (3.13's traceback parses line fragments for
 its carets, and the SyntaxError opens `<unknown>`); and paths under the interpreter's
 prefixes and library directories, site-packages, the USER site (trimesh and numpy live
-in `~/.local`), the installed atompipe package, `/proc`, `/sys`, `/dev`, or ending
+in `~/.local`), the installed nopekit package, `/proc`, `/sys`, `/dev`, or ending
 `.pyc` — machine-specific reads that would make every entry stale on every other
 machine. Not seen, and named: a subprocess's own reads (hence opaque); an `os.open` or
 `os.stat` relative to a `dir_fd`; a database `ATTACH`-ed from SQL and any file a C
@@ -1245,7 +1245,7 @@ RHO_CHARS = 16; OUT_CHARS = 8 # file-name widths: <rho16>-<out8>.json
 OBS_KEEP = 20                 # runs kept per gate, per kind
 SPEC_FIELDS_IN_RHO = ("id", "claims", "tier", "pack", "requires_tools",
                       "requires_python", "requires_one_of", "settles")
-CONTROL_OUT_DIR = ".atompipe/out/controls"   # + "/<gate id>/": where a control runs
+CONTROL_OUT_DIR = ".nopekit/out/controls"   # + "/<gate id>/": where a control runs
 UNRECORDED_FIXTURE = "<unrecorded fixture code>"   # a control's fixture hint when no loader
                                                    # recorded the fixture's code; never holds
 TWO_OUTCOMES_IS_ERROR = True  # an error; a warning (the gate read stale) until U25 measured the corpus
@@ -1285,7 +1285,7 @@ class Reads:
     def with_opaque(self, *names) -> Reads
 
 @dataclass
-class Entry:                                              # .atompipe/verdicts/<gate>/<rho16>-<out8>.json
+class Entry:                                              # .nopekit/verdicts/<gate>/<rho16>-<out8>.json
     gate: str; rho: str; code: dict; spine: str; reads: dict; instruments: dict
     verdict: dict; digest: str; path: str
     name: str                                             # property: "<rho16>-<out8>"
@@ -1331,9 +1331,9 @@ def last_read_sets(root) -> dict[str, set[tuple]]    # {gate: {param path}}: Par
 closure `modelio` recorded while the gate's module ran — the defining module's merged
 with every registering module's (`modelio.code_closure`) — as `{portable path: sha}` (a
 project gate's `gates/structural.py`, a pack's `<pack:NAME>/gates/mesh.py`; the bytes
-that executed, S-26), the `canonical_ast_digest` of each `atompipe.*` module the
+that executed, S-26), the `canonical_ast_digest` of each `nopekit.*` module the
 closure imports that `SPINE_MODULES` does not cover (cad and fdm import
-`atompipe.site`: a page change re-runs their gates and nobody else's), the
+`nopekit.site`: a page change re-runs their gates and nobody else's), the
 `SPEC_FIELDS_IN_RHO` values, and the closure's `fallback`. Not `title`,
 `description` (prose), `negative_control` (it is in `rho_control`'s static part) or
 `entry` (discovery). A function with **no recorded closure** — a test's lambda, a gate
@@ -1341,19 +1341,19 @@ registered from Python — is digested as its **defining file**
 (`fallback="defining-file"`; `doctor` names every one, and the CLI never makes one).
 With no file at all (`<string>`, `exec`) it is `CodeRef(digest="", opaque="code not
 loaded from a file")`: opaque, never a digest of nothing. A closure that recorded two
-versions of one file, or an unreadable `atompipe.*` source, is opaque too. The sweep
+versions of one file, or an unreadable `nopekit.*` source, is opaque too. The sweep
 passes its anchors; the default spells a pack gate's files under `<pack:NAME>` and
 everything else under `<tmp>`/`~`.
 
 **`Reads.from_trace` — the classification** (first match wins), for every path a
 trace read (files and listed directories alike): 1. under the interpreter's prefixes,
-site and user site, the atompipe package, `/proc`, `/sys`, `/dev`, or bytecode —
+site and user site, the nopekit package, `/proc`, `/sys`, `/dev`, or bytecode —
 dropped; 2. read and then written in the window — opaque `self-modified:<path>`
 (a path written first and read after never reaches the trace: the gate's own output);
 3. under a pack — a read `<pack:NAME>/<rel>`; 4. under the sweep's or the control's
 `out_dir` and not written in the window — opaque `out:<rel> (not written by this
 gate)` (another gate's output is a cross-gate channel shaped like S-27); 5. under
-`<root>/.atompipe/` — opaque `atompipe-state:<rel>`; 6. under the root — a read
+`<root>/.nopekit/` — opaque `nopekit-state:<rel>`; 6. under the root — a read
 `<rel>` (bare, posix); 7. anything else — opaque `file-outside-project:<path>`.
 A path the trace only ASKED about (`stats`) and neither opened nor listed is a file
 input under the root or a pack, like a read; asked while missing and made, asked while
@@ -1363,7 +1363,7 @@ a question is not what a read is, because honest gates ask them constantly
 (`shutil.which` stats every `PATH` entry, `realpath` every ancestor of the root,
 `os.makedirs` every ancestor of the out dir): outside the root and the packs it is
 dropped (named residual: a gate deciding on a file outside its project), and under the
-out dir or `.atompipe/` a directory, or a path at or above what the window wrote, is
+out dir or `.nopekit/` a directory, or a path at or above what the window wrote, is
 dropped while any other file or missing path is opaque like a read there. In a
 **control** trace a read under the owner's `selftest/` is dropped: the static walk
 keys it, and a fixture module's import-time read of `baseline.json` happens only on
@@ -1418,7 +1418,7 @@ version, §8); other bytes — `"kept-first"`, warning `"nondeterministic detail
 another outcome already recorded for this rho — written, warning `"two outcomes
 recorded for identical inputs"` (equal instruments) or `"outcome differs across
 instruments"`, and both files stay. `write_entry` computes `digest` itself and refuses
-(`AtompipeError`) anything its reader would refuse.
+(`NopekitError`) anything its reader would refuse.
 
 **The strict reader** (`read_entries`): not strict JSON (NaN, a duplicate key), a key
 too many or too few, a non-bool `passed`, a non-number `measured`/`limit`, a name its
@@ -1474,7 +1474,7 @@ of the live design, below).
 **`selftest_walk(owner_dir)`** — the owner is the pack directory (`PACK_DIR` on the
 gate's module, else on a module that registered it — `modelio.registered_by`) or the
 project root. `vcs.ls_files(owner_dir, ["selftest"])`, asked of
-the OWNER's repository (a bundled pack's is atompipe's), tracked plus
+the OWNER's repository (a bundled pack's is nopekit's), tracked plus
 untracked-not-ignored; outside git, a walk. Both leave out `__pycache__/`,
 `*.py[cod]` and dot-directories (openmodelica's `.generated/`), so the git and non-git
 answers agree — verify.sh `--dir` copies have no `.git` (tests:H11), and a project with
@@ -1500,7 +1500,7 @@ next plain check down the cheap path, whose control fired and forgot that crash,
 with the edit reverted `check --tier 2` served the tier-2 control entry the crash had
 superseded, admitted, and its PASS cached, while `--force` crashed again.
 
-**Remembered outcomes** — `.atompipe/cache/last_outcomes.json` (untracked): `{key:
+**Remembered outcomes** — `.nopekit/cache/last_outcomes.json` (untracked): `{key:
 {input_rho: {"kind", "verdict", "when"}}}`, key a gate id or `control:<gate id>`,
 `kind` `"error"`, `"self-skip"` or `"availability"`. Keyed by **`(key, input_rho)`** —
 `input_rho` the rho computed from current digests just before the run, at the tier
@@ -1526,7 +1526,7 @@ nothing remembered is evidence. An unparseable file — the one-record-per-gate 
 included — raises, naming it: read as empty it would hand the next check the PASS a
 crash superseded.
 
-**Obs** — `.atompipe/obs/<gate>.json` and `<gate>.control.json` (untracked), each
+**Obs** — `.nopekit/obs/<gate>.json` and `<gate>.control.json` (untracked), each
 `{"gate", "kind", "runs": [{"entry", "when", "duration_s", "cpu_s"}]}`, the last
 `OBS_KEEP`. Split because the run history mixed `<gate>#selftest` rows with sweep rows
 and no latency reader filtered them (S-31). A file naming another gate or kind — gate
@@ -1612,7 +1612,7 @@ is a write outside the package's scratch (refused, named, never undone); `linked
 symlink or a hard link the generator put in its directory (refused: a package holds
 bytes, never a second name for a project file). A file in the package that no write the
 trace saw put there makes the article untraced — the whole design (review of P2.5b: the
-backstop behind the link handlers). The scratch is `.atompipe/out/export-<m>/` in both
+backstop behind the link handlers). The scratch is `.nopekit/out/export-<m>/` in both
 modes, under the trace's out directory, so the generator's own directory is never a
 read (review of P2.5b: built in `out/.<m>.tmp-<pid>/`, a `makedirs` of it put the pid
 into the article).
@@ -1672,7 +1672,7 @@ recorded small value and the current one (`changed` when either is not small, `a
 for a missing key), inputs (`config.*` and config fields) first, then derived values
 **only when no input moved** (a derived value that moved with an input is that input's
 consequence: `bracket.bed_fit` also reads `usable_bed`, and the transcript's line names
-the one cause), then the model, claims, files, listings, `gate code changed`, `atompipe
+the one cause), then the model, claims, files, listings, `gate code changed`, `nopekit
 spine changed`; at most `MAX_STALE_REASONS`, then `(+n more)`. Two outcomes at the
 current rho with equal instruments are Stale with `conflict` set; with different
 instruments the entry recorded under this machine's wins, else a local run decides.
@@ -1759,7 +1759,7 @@ registered gate, in registration order, the first that applies:
    Invariant 2: a crash proves nothing, and neither does the PASS it followed.
 3. A Fresh entry under admission (PD-08, X14): PASS + admitted or pending counts;
    PASS + undemonstrated is stale, `control not demonstrated at this version — run
-   atompipe check` — `… run atompipe check --tier <t>` when the entry's run took the
+   nopekit check` — `… run nopekit check --tier <t>` when the entry's run took the
    path `ctx.tier` t ≥ 1 picks, since a check below t judges that path's control by the
    records alone and never runs it (`_undemonstrated`; review, `repro_undemonstrated`:
    the plain words sent the reader to a check that served the same stale row forever);
@@ -1783,11 +1783,11 @@ one line each (`<gate> — <note>`).
 `check` runs. It may run a control (fixture and gate) or a fixture alone; it never
 takes the lock, and a `when` arrives from the CLI.
 ```python
-CONTROLS_CACHE = ".atompipe/cache/controls.json"   # re-verified fixture closures (+ the live
+CONTROLS_CACHE = ".nopekit/cache/controls.json"   # re-verified fixture closures (+ the live
                                                    # ledger a live-host control was vouched under); untracked, a hint
 WATCHED = ("claims/**", "params/**", "decisions/**", "needs/**", "inputs/**", "results/**",
-           "views/**", ".atompipe/verdicts/**", "model/**", "gates/**", "selftest/**",
-           ".atompipe/project.json", ".atompipe/packs/**", "objectives.json")
+           "views/**", ".nopekit/verdicts/**", "model/**", "gates/**", "selftest/**",
+           ".nopekit/project.json", ".nopekit/packs/**", "objectives.json")
 
 def known_good_context(root, ctx) -> GateContext | None   # <root>/selftest/known_good.py's context(ctx)
 def admission(root, spec, fn, host_ctx, *, may_run=True, force=False, record=True,
@@ -1869,7 +1869,7 @@ failed on — `not-admitted`, `control <kind>: <why>` — and a remembered one a
 static, on this path or the shared one, is re-run, never served (the control analogue
 of §3.9's supersede); a control entry written at another static, or on another path,
 leaves it standing. One on a path this run does not take — only at `at=None` — is the
-answer, and nothing runs (a `note:` names `run atompipe check --tier <t>`); under
+answer, and nothing runs (a `note:` names `run nopekit check --tier <t>`); under
 `force` the control still runs, and the answer is still that failure. A new outcome at the `rho_control` of a
 cached entry with the other `bad` is `not-admitted`. 6. *`force`* skips 1-4, and an
 outcome that differs from a cached entry at the same `rho_control` is `not-admitted`,
@@ -1895,7 +1895,7 @@ all six controls (D-27's whole-value dependency). A pack's fixture gets the live
 hands its gate the known-good design, passes, and is not admitted — on the live
 bracket, which fails on purpose, it "fired" and certified nothing. The known-good
 module's code closure joins the fixture's lookup hint. Each control gets its own memo
-(a fresh `SweepMemo`) and its own emptied scratch, `<root>/.atompipe/out/controls/<gate>/` (never the
+(a fresh `SweepMemo`) and its own emptied scratch, `<root>/.nopekit/out/controls/<gate>/` (never the
 sweep's `out_dir`).
 
 **`sweep`** is `check`'s loop, driven through `gates.run_all(..., before=)` so order,
@@ -1916,7 +1916,7 @@ as `availability` (never over a crash or self-skip at the same rho); no control 
 1b. unless `force`, a remembered crash or self-skip standing over a Fresh entry of a
 costlier tier, on that entry's path, with none standing at this sweep's own tier
 (`here`): the row is that crash, as `resolve` reads it, with a `note:` naming the path
-and `run atompipe check --tier <t>` — nothing runs, since no run at this tier is made at
+and `run nopekit check --tier <t>` — nothing runs, since no run at this tier is made at
 that path's inputs or answers it. What slipped through (review, remembered outcomes by
 tier): the cheap path ran instead, and its PASS was the row — `check` ready while every
 reader showed the crash — and forgot the tier-2 crash, so `check --tier 2` then served
@@ -1927,7 +1927,7 @@ the PASS that crash had superseded.
 at tier 0 (…), on that path only; …`). A
 Fresh entry of a costlier tier is judged at its own tier by the records alone;
 undemonstrated there, the row is what `resolve` serves — the entry's verdict, cached,
-`stale_reason` `control not demonstrated at this version — run atompipe check --tier
+`stale_reason` `control not demonstrated at this version — run nopekit check --tier
 <t>` — and `check` keeps the gate in `stale_gates`. What slipped through (review,
 `repro_undemonstrated`): the sweep made that a skipped row and `_swept` dropped the gate
 from the stale set, so with a second gate passing on the claim it read PASS (partial) —
@@ -1956,7 +1956,7 @@ from a costlier entry whose own tier's admission does not count (stale, or not
 admitted) — that is the row, under its own tier's admission and with a `note:` saying
 so (`… and it stands (PASS, not current)`; `_outranked`); and where a remembered crash
 the run did not answer still stands over that entry (a costlier tier's path), the row is
-that crash (`… supersedes the entry <name>, and it stands — run atompipe check --tier
+that crash (`… supersedes the entry <name>, and it stands — run nopekit check --tier
 <t>`). A run's own crash stays its row: never laid under a costlier PASS (invariant 2)
 — the louder reading, filed at this path's inputs, which that PASS is not at — and a
 `note:` names the costlier entry `status` and a plain check serve beside it (`… ran at
@@ -1969,14 +1969,14 @@ gate runs INSIDE `before`, not in `run_all`'s own loop: that loop's trace carrie
 anchors, and a path-valued param digested without them (fdm's absolute mesh paths,
 packs:H6) differs per checkout — never Fresh anywhere, rewritten per clone. A row is
 `fresh` when its verdict is a pass or fail keyed at the current inputs. `record=False`
-writes nothing under `.atompipe/` but scratch in `out/`: no entry, control entry,
+writes nothing under `.nopekit/` but scratch in `out/`: no entry, control entry,
 remembered outcome, obs, `controls.json` or `digests.json` — and since nothing global
 is compared, a dry sweep reads nothing stale (S-32). A first sweep filtered by `--only`
 goes stale like any other (S-20): there is no clock to not advance. `digests` defaults
-to the `.atompipe/cache/digests.json` stat cache, saved after a recorded sweep.
+to the `.nopekit/cache/digests.json` stat cache, saved after a recorded sweep.
 `on_verdict` streams each verdict, `on_row` its row.
 
-**`last_check.json`** (`.atompipe/cache/`, untracked; `write_last_check`, after a FULL
+**`last_check.json`** (`.nopekit/cache/`, untracked; `write_last_check`, after a FULL
 RECORDED sweep only — a filtered or dry one returns `None` and writes nothing) holds,
 in this order: `when` (the CLI's stamp), `spine`, `fingerprint` (of `watched_paths`),
 `reads` (per gate, the reads of the entry the resolution used: `param:<json path>`,
@@ -2080,7 +2080,7 @@ def goalpost_runs(spec, fn, good_ctx, good_verdict, *, trace=None) -> tuple[Goal
                                                         #   AFTER the walk, every site on the trace
 def load_fixture(ref: str, root: str) -> Any            # "mod:fn" or "path/to/file.py"
 def load_project_gates(root, registry) -> list[str]     # <root>/gates/*.py; the ids they register
-def describe(spec) -> str                               # one dense line for `atompipe gate list`
+def describe(spec) -> str                               # one dense line for `nopekit gate list`
 def registry_summary(registry) -> dict                  # JSON-safe: what can run here, and what cannot
 ```
 `gate(registry=None)` decorates into `active_registry()`, which is `REGISTRY` unless a
@@ -2152,7 +2152,7 @@ fixture file that re-exports a helper's `make` is keyed by the file an edit move
 `None` when the stock import served it; the gate then runs through `run_gate` with the same trace.
 `duration_s` and `cpu_s` cover both. `run_fixture(spec, fn, ctx, *, trace, out_dir)`
 is the fixture half alone — for re-qualifying a control whose fixture code moved without
-re-running the gate — and raises `AtompipeError` when the control is unusable.
+re-running the gate — and raises `NopekitError` when the control is unusable.
 `run_good_fixture` is its twin for a declared known-good fixture (`NegativeControl.good`,
 P2.3): the same builder under the same guards, handed exactly what the known-bad one is.
 `fixture_root` is where a project's relative fixture ref resolves when `ctx.root` may
@@ -2188,7 +2188,7 @@ registered" at the sweep. `plan(registry, selected)` expands the selection by it
 prerequisite closure (`check --only X` runs X's prerequisites; `gate selftest --only X`
 stays pure selection, `_selected`) and orders it DFS-postorder — registration order
 when nothing needs anything — re-asserting acyclicity and tier order (a spec reached
-the private dict some other way: `AtompipeError`). `run_all` runs in that order and
+the private dict some other way: `NopekitError`). `run_all` runs in that order and
 returns its verdicts in it; `prerequisite_root(spec, readings, registry)` is the one
 decision, asked before each gate with `needs`. A prerequisite is established when its
 effective verdict is a pass and current; otherwise its kind is, in rank order,
@@ -2225,7 +2225,7 @@ alone — no closure, so a hint of nothing that always held, and a same-size edi
 `.pyc` ran on the re-run.
 
 **A gate id names a directory.** `register` refuses an id containing `/`, `\`, `..`
-or `:` — `.atompipe/verdicts/<gate id>/` holds its cached verdicts — and an id that
+or `:` — `.nopekit/verdicts/<gate id>/` holds its cached verdicts — and an id that
 differs from a registered one only in case, which a case-insensitive filesystem makes
 one directory. Zero hits over the 54 bundled pack ids and the bracket's 6 before the
 refusal landed (R-4).
@@ -2239,7 +2239,7 @@ projection and mean different objects — see `docs/PACK_FORMAT.md`. `run_gate`
 stamps `pack` and `key_scope` from the spec, so a caller cannot hand a gate
 somebody else's namespace.
 
-**`Registry.register` raises `AtompipeError` if `negative_control is None`.**
+**`Registry.register` raises `NopekitError` if `negative_control is None`.**
 This is rule 5 of the method made mechanical: a gate that cannot demonstrate
 failure is a logger, and one shipped green for a whole revision.
 
@@ -2542,11 +2542,11 @@ buy instead, even a bad one").
 MANIFEST_NAME = "pack.json"; DOC_NAME = "PACK.md"; REFERENCES_DIR = "references"
 GATES_DIR = "gates"; GENERATORS_DIR = "generators"; SELFTEST_DIR = "selftest"
 BASELINE_NAME = "baseline.json"; LENSES_NAME = "lenses.md"; SOURCING_NAME = "sourcing.md"
-PACK_PATH_ENV = "ATOMPIPE_PACK_PATH"         # extra search roots, os.pathsep-separated
+PACK_PATH_ENV = "NOPEKIT_PACK_PATH"         # extra search roots, os.pathsep-separated
 BUNDLED_PACKS: str                           # where the shipped packs live (checkout or wheel)
 def search_paths(root=None, *, existing_only=True, include_env=True,
                  include_user=True) -> list[str]
-    # $ATOMPIPE_PACK_PATH, project .atompipe/packs, ~/.atompipe/packs, bundled packs/
+    # $NOPEKIT_PACK_PATH, project .nopekit/packs, ~/.nopekit/packs, bundled packs/
 def discover(root=None) -> list[PackManifest]              # reads pack.json only (tier 1)
 def discover_dirs(root=None) -> list[tuple[str, PackManifest]]   # (pack_dir, manifest), precedence order
 def find(name, root=None, *, include_env=True, include_user=True) -> str | None   # directory
@@ -2587,7 +2587,7 @@ def key_collisions(names, root=None, *, projection_keys=()) -> list[KeyCollision
 `key_collisions` is what makes two packs wanting one word DETECTABLE rather than
 discoverable: it diffs the installed packs' vocabularies (from each
 `selftest/baseline.json`'s keys, `_notes` and `_aliases`) and reports any key two
-of them declare differently. `atompipe doctor` renders it as a warning naming both
+of them declare differently. `nopekit doctor` renders it as a warning naming both
 packs. See `docs/PACK_FORMAT.md`.
 Pack layout (also documented in the pack-authoring skill):
 ```
@@ -2606,7 +2606,7 @@ mutating the spec the registry stores.
 
 **The host machine cannot change what is tested.** `search_paths`, `find` and
 `load_gates` take `include_env=` and `include_user=`: `False` drops
-`$ATOMPIPE_PACK_PATH` and `~/.atompipe/packs` respectively, so a pack is loaded alone,
+`$NOPEKIT_PACK_PATH` and `~/.nopekit/packs` respectively, so a pack is loaded alone,
 from where it was named, and a stray copy on the author's machine cannot shadow it
 (S-87). The defaults keep today's precedence.
 
@@ -2687,7 +2687,7 @@ HUMAN: Mapping[str, Any]   # THE table (PLAN D-16): "status" {ClaimStatus: Statu
                            # "prerequisite" {failed, not-established, not-registered} (P2.2)
 STATUS_TAG: Mapping[ClaimStatus, str]        # HUMAN's tags, a view: PASS -> "ok   ", ...
 SECTION_PROVEN = "## What is PROVEN"         # the checked section's heading (text: A-11)
-JUNIT_DEFAULT = ".atompipe/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
+JUNIT_DEFAULT = ".nopekit/out/junit.xml"    # `--junit` with no path; ignored scratch, never tracked
 def words(status, *, errored=False) -> StatusWords;  def word(status, *, errored=False, n=1) -> str
 def status_tag(status, *, errored=False) -> str      # "[FAIL ]", "[SKIP ]" for a crash
 def severity(composed) -> int                # claims.severity; in_severity(ledger, composed, claims=None)
@@ -2784,7 +2784,7 @@ gone: under the composition there is nothing left to mark.
 `stale_gates` (`verdicts.resolve`): a PASS whose covering gate is in it reads STALE and
 is never under PROVEN; a stale FAIL stays FAIL (`claims.resolve_status`). `stale=True`
 stays the all-gates override. The report reads no sweep time and no rho: its title is
-`(<rev>)`, and `## Reproduce` lists `atompipe check` and each gate's code files, so a
+`(<rev>)`, and `## Reproduce` lists `nopekit check` and each gate's code files, so a
 regenerated `REPORT.md` changes only when the claims or the verdict outcomes
 do. The code files are spelled as the verdict cache spells them (`gates/structural.py`,
 `<pack:NAME>/gates/…`), which needs the project: `render_markdown` lists them only when
@@ -2838,7 +2838,7 @@ only ever be redder. Built with `xml.etree.ElementTree` (imported inside the two
 renderers: about 6 ms that only `--junit` should pay). The shape (PLAN §3 row M2.1a,
 phase-1.md 1.1):
 ```
-<testsuites name="atompipe check" tests= failures= errors= skipped= time=>
+<testsuites name="nopekit check" tests= failures= errors= skipped= time=>
   <properties> spine_version exit_code tier ready all_required_checked when [spine] </properties>
   <testsuite name="gates">            one testcase per REGISTERED gate, registry order
     <testcase classname="project"|"pack.<pack>" name="<gate id>" time="<duration_s>"/>
@@ -2972,7 +2972,7 @@ it can prove is unreferenced, which is why every asset arrives through `write_as
 The boundary that spends (P2.5b): what `export <milestone>` judges, and the package
 it builds. Pure functions the CLI drives; the sweep, the lock, the prompt and the
 record's write are `cli.cmd_export`'s. Not in `verdicts.SPINE_MODULES`: an edit here
-keys no verdict. Standard library only, like every module under `src/atompipe/`.
+keys no verdict. Standard library only, like every module under `src/nopekit/`.
 ```python
 @dataclass(frozen=True)
 class Refusal: kind; subject; reason          # kind: unresolved | missing | requires-nothing |
@@ -2994,7 +2994,7 @@ def bound_export(entries, claim_id) -> ExportRecord  # the newest that re-ran th
 def test_card(view, composed, milestone, article, exports) -> list[str]   # what to measure (§4.6)
 MANIFEST = "MANIFEST.json"; SPINE_FILES = verdicts._PACKAGE_SPINE_FILES  # REPORT.md, model.json, MANIFEST
 class Package(NamedTuple): hash; files; manifest
-def scratch_dir(root, name, dry_run) -> str   # .atompipe/out/export-<m>, both modes, under the lock
+def scratch_dir(root, name, dry_run) -> str   # .nopekit/out/export-<m>, both modes, under the lock
 def build_package(scratch, *, report_md, carried, manifest) -> Package
 def package_problems(root, name, exports) -> list[tuple[str, str]]   # (foreign | edited, rel)
 def swap_package(root, name, scratch, record=None) -> str  # out/<m>/ replaced whole, then
@@ -3027,20 +3027,20 @@ refuses, named. Two exports of one state write byte-identical packages.
 `argparse`, subcommands, `main(argv=None) -> int`, and `build_parser()` — the whole
 command surface as one `argparse.ArgumentParser`, so a test can check a command
 printed in a document against the parser instead of against memory. `main` catches
-`AtompipeError`, prints `error: <msg>` to stderr, and returns 2.
+`NopekitError`, prints `error: <msg>` to stderr, and returns 2.
 ```
-atompipe init [--name] [--summary]        atompipe status
-atompipe claim list|show|physical         atompipe gap [--propose]
-atompipe ingest <path...> [--kind] [--desc]   atompipe inputs [--unextracted]
-atompipe extract <artifact> --what ... --grounds ...
-atompipe ask [--kind]                     # what evidence to request from the user
-atompipe check [--tier N] [--only GATE] [--force] [--no-record]   atompipe gate list|selftest|show
-atompipe report [--write] [--milestone M]   atompipe why <param-or-claim>
-atompipe export [M [--dry-run] [--proceed --why TEXT]]   # P2.5b: the boundary that spends
-atompipe decide --title ... --summary ...  atompipe packs [list|show|validate|add]
-atompipe model [--write]                  atompipe doctor
-atompipe check [--junit [PATH]]
-atompipe gate selftest [GATE ...] [--pack NAME|DIR] [--user-packs] [--allow-empty] [--junit [PATH]]
+nopekit init [--name] [--summary]        nopekit status
+nopekit claim list|show|physical         nopekit gap [--propose]
+nopekit ingest <path...> [--kind] [--desc]   nopekit inputs [--unextracted]
+nopekit extract <artifact> --what ... --grounds ...
+nopekit ask [--kind]                     # what evidence to request from the user
+nopekit check [--tier N] [--only GATE] [--force] [--no-record]   nopekit gate list|selftest|show
+nopekit report [--write] [--milestone M]   nopekit why <param-or-claim>
+nopekit export [M [--dry-run] [--proceed --why TEXT]]   # P2.5b: the boundary that spends
+nopekit decide --title ... --summary ...  nopekit packs [list|show|validate|add]
+nopekit model [--write]                  nopekit doctor
+nopekit check [--junit [PATH]]
+nopekit gate selftest [GATE ...] [--pack NAME|DIR] [--user-packs] [--allow-empty] [--junit [PATH]]
 ```
 Output is terse and machine-parseable by default (one line per verdict);
 `--json` on every read command.
@@ -3070,7 +3070,7 @@ def _touch_index(root, *, quiet=False) -> None
 - **The migration's triggers** are `check` and the shims (Q1.5): under the held lock
   and before anything reads the project, `_migrate` runs the legacy migration with
   `apply` — once, with ONE stderr notice ending `git rm --cached
-  .atompipe/ledger.json` (the spine runs no git). `check --no-record` runs it in
+  .nopekit/ledger.json` (the spine runs no git). `check --no-record` runs it in
   memory only and says the project "will migrate … on the next check". Every other
   command reads a legacy project through `_load` — `store.load` with `_migrate`'s own
   reader, so it refuses what the migration refuses and nothing else — in memory, and
@@ -3083,7 +3083,7 @@ def _touch_index(root, *, quiet=False) -> None
   derived, `artifacts.grounding`); `decide` — `decisions/<slug>.json`, `when` the
   edge's stamp (**no `--when`**: it backdated a decision, S-44), and no
   `docs/decisions.md` (an output of `report --write` whenever a decision exists);
-  `packs add` — `.atompipe/project.json`'s `packs`, after loading the pack into a
+  `packs add` — `.nopekit/project.json`'s `packs`, after loading the pack into a
   fresh `Registry` so a broken one fails before anything is written; `claim physical`
   — APPENDS one `PhysicalResult` to `results/<claim-id>.json` (append-only, D-11;
   `--who`/`--when` stay until P2.5, D-12). Its refusal on a non-physical claim names
@@ -3091,7 +3091,7 @@ def _touch_index(root, *, quiet=False) -> None
 - **Commands that only mutated a record are gone** (PLAN A-8), and the file edit is
   the command: a claim is written and changed as `claims/<id>.json` (read strictly),
   so `claim` keeps only `list`, `show` and `physical`; a pack leaves the project when
-  its name leaves `packs` in `.atompipe/project.json`, so `packs` adds and never
+  its name leaves `packs` in `.nopekit/project.json`, so `packs` adds and never
   removes; and the model entry is `"model_entry"` in the same file, so `model` takes
   no flag that sets it. argparse refuses each old spelling (`invalid choice`,
   `unrecognized arguments`), and every message that named one names the file edit
@@ -3100,14 +3100,14 @@ def _touch_index(root, *, quiet=False) -> None
 - **`gap` is a read**: no lock, no write (S-43: it persisted every gap it derived,
   rewriting the ledger on every run). A Need is a record, `needs/<id>.json`, only
   when someone enriched it. **`model`** writes no record either: `--write` writes the
-  one output it names, `.atompipe/model.json`, and nothing primes the parameter
+  one output it names, `.nopekit/model.json`, and nothing primes the parameter
   records from the model any more. Its orphans (`--json` `orphans`) are param records
   whose field the model no longer defines (`modelio.orphan_params`).
 - **The index after every command.** `main` calls `_touch_index` after the command
   returns or is refused (not when interrupted), on a MIGRATED project only — never on
   a legacy one, where `ledger.json` is still the records — and never after `doctor`
   (it writes nothing), `init` (it never writes a `ledger.json`), or a `--no-record`
-  run (nothing under `.atompipe/` but scratch). `store.write_index` rewrites the file
+  run (nothing under `.nopekit/` but scratch). `store.write_index` rewrites the file
   only when its bytes change, so a read command that finds it current writes nothing.
   The rebuild takes no lock, so `status` stays usable while a sweep holds it; a record
   written by another command between this one's build and its write is caught by
@@ -3118,8 +3118,8 @@ def _touch_index(root, *, quiet=False) -> None
 **The readers on records** (checkpoint 1.3, spec U29). Each reads a fact where it
 lives, and none writes a record:
 ```python
-def _entry_edit(root) -> str        # '"model_entry" in .atompipe/project.json' (legacy: under
-                                    # "meta" in .atompipe/ledger.json, until a check migrates it)
+def _entry_edit(root) -> str        # '"model_entry" in .nopekit/project.json' (legacy: under
+                                    # "meta" in .nopekit/ledger.json, until a check migrates it)
 def _param_views(root, ledger, model, model_error, *, read_sets=None) -> list[modelio.ParamView]
     # param_view, plus — when the model does not load — a bare view (no value, model_error
     # set) for each name modelio.static_param_prose finds in the model's TEXT and no record holds
@@ -3142,7 +3142,7 @@ def _input_bytes(root, artifact, digests) -> dict
   (what slipped through: every new project was born legacy and migrated by its first
   `check`, with a `git rm --cached` notice about a file git never tracked). Its next
   steps name the file edit that records the model (`"model_entry"` in
-  `.atompipe/project.json`); `--json` names `project` (the file it wrote), `meta` and
+  `.nopekit/project.json`); `--json` names `project` (the file it wrote), `meta` and
   `next`.
 - **`why`** (and `claim show`, through the same `_why_text`) prints the model's value
   where it lives — `param thickness = 8.0 mm   (model/bracket.py Config.thickness)`
@@ -3180,7 +3180,7 @@ def _input_bytes(root, artifact, digests) -> dict
   viewgen runs). What slipped through with the records alone (review, `repro_site`): a
   check that FAILed C1 moved no record, and all three called a page still showing C1
   PASS "current with the records". A moved judgement reads "what the page shows has changed
-  since the site was built (C1 pass -> fail) — `atompipe site build`"
+  since the site was built (C1 pass -> fail) — `nopekit site build`"
   (`site.judgement_moved`, at most `verdicts.MAX_STALE_REASONS` named); `status`'s
   `site:` line carries that reason, never a fixed sentence. A page with either digest
   missing (an older build) reads stale.
@@ -3214,11 +3214,11 @@ runs **pack mode**, and branches before `_root`, `_lock`, `store.load` and
 the command needed a project, so the prescribed merge check exited 2 where it was
 prescribed, and CI only ran it inside the bracket, which loads no pack.
 - **Targets.** `--pack NAME|DIR` (repeatable; a DIR that is not a pack means every
-  pack directly inside it), else every **bundled** pack. `$ATOMPIPE_PACK_PATH` and
-  `~/.atompipe/packs` are searched only under `--user-packs`: both outrank the
+  pack directly inside it), else every **bundled** pack. `$NOPEKIT_PACK_PATH` and
+  `~/.nopekit/packs` are searched only under `--user-packs`: both outrank the
   bundled packs, so without the switch the machine would choose which copy the merge
   check tests (S-87). Inside a project, `--pack NAME` also searches its
-  `.atompipe/packs/`. Positional gate ids filter, by `gates._selected`'s rule, in
+  `.nopekit/packs/`. Positional gate ids filter, by `gates._selected`'s rule, in
   both modes.
 - **Each target goes through `packs.demonstrate(dir, tier=…)`** — the ceiling is
   `Tier.EXTERNAL` unless `--tier` is given, raised to a gate named explicitly — with
@@ -3312,7 +3312,7 @@ obs, remembered outcomes, `last_check.json` and the JUnit report carry one insta
   with it. A forced run re-proves its own path and files what it said; it does not
   outrank a more thorough answer at the same inputs — the row is what the records
   resolve to (`sweep`'s step 5).
-- `--no-record` is a dry sweep: nothing under `.atompipe/` but gate scratch in
+- `--no-record` is a dry sweep: nothing under `.nopekit/` but gate scratch in
   `out/` — no cache or control entry, obs, remembered outcome, `controls.json`,
   `digests.json`, `last_check.json` or index, and a legacy ledger migrates in memory
   only (S-32: it used to save the ledger and read its own fresh passes as STALE, the
@@ -3326,7 +3326,7 @@ obs, remembered outcomes, `last_check.json` and the JUnit report carry one insta
   coverage copied into records, no `store.save`. The one record write it may make is
   the one-time migration of a legacy ledger, first, under the held lock (`_migrate`
   above); after it, a check writes verdict entries and ignored scratch only, and a
-  second check on unchanged inputs changes no byte outside `.atompipe/{out,cache,obs}/`.
+  second check on unchanged inputs changes no byte outside `.nopekit/{out,cache,obs}/`.
 
 `check --json` (§3.13; verify.sh and CI parse `verdicts[]`): `verdicts[]` holds a row
 for **every selected gate** — executed, cached or refused — in registration order, so
@@ -3458,9 +3458,9 @@ Each with its remedy:
 
 | a critical claim that | reads | stops `check` until |
 |---|---|---|
-| has an evaluator that crashed | Skipped, `errored:` | the evaluator is fixed (`atompipe gate show <id>`) |
+| has an evaluator that crashed | Skipped, `errored:` | the evaluator is fixed (`nopekit gate show <id>`) |
 | has a passing evaluator beside one whose tool is missing | Skipped, `skipped:` | the tool is installed, or the tag that binds the evaluator is dropped |
-| has a passing evaluator beside one never run (e.g. a costlier tier under `check --tier 0`) | Open, `unrun:` | `atompipe check --tier <its tier>` runs it |
+| has a passing evaluator beside one never run (e.g. a costlier tier under `check --tier 0`) | Open, `unrun:` | `nopekit check --tier <its tier>` runs it |
 | has an evaluator refused at its version (it passed its own known-bad input) | Gap, `unqualified:` | the evaluator is fixed so its control fails |
 | is an assumption | Gap, `no owner recorded` | its owner records it through the signing channel (later in Phase 2) — or the claim stops being required |
 | is physical, with a covering evaluator that fails | Failing | the design passes it |
@@ -3591,7 +3591,7 @@ re-qualifies once.
 | has an evaluator that fails its known-good control | Gap, `known-good fail` | the evaluator or the design is fixed |
 | has an evaluator outside the bundled packs that passes a conclusive mutation | Gap, `mutation n/m fail` | the evaluator judges the value it reports |
 | has an evaluator whose two controls reach it through different `ctx.extra` keys | Gap, `known-good and known-bad reach it through different channels` | a `good=` fixture on the same channel |
-| has an evaluator never qualified | Gap, `not yet qualified at this version` | `atompipe check` |
+| has an evaluator never qualified | Gap, `not yet qualified at this version` | `nopekit check` |
 
 **Channels.** `check` prints a line for every unqualified evaluator and for every walked
 one whose qualification ran (`bracket.deflection : known-good pass · known-bad fail ·
@@ -3822,7 +3822,7 @@ sections above.
 - **A link is a read**: `os.link`/`os.symlink` in a generator are traced (source read,
   link written); a link inside the package is refused (`generator_linked`), and a file
   there that no traced write put makes the article untraced — the whole design.
-- **The scratch** is `.atompipe/out/export-<m>/` in both modes (`milestones.scratch_dir`),
+- **The scratch** is `.nopekit/out/export-<m>/` in both modes (`milestones.scratch_dir`),
   created and removed under the lock, inside the trace's out anchor.
 - **Every export record of an article is charged**: `claim physical --article` reads
   them all (`milestones.sealed_on`, `milestones.bound_export`); latency is a
@@ -3944,7 +3944,7 @@ a reader of the output meets it:
   literal name is in the code closure by the static pass, and `doctor`'s
   `dynamic-imports` row names every name a value decides. Load a helper with
   `modelio.load_path`, which compiles the bytes on disk and keys it on every run. Not
-  keyed: the `atompipe.*` modules outside the spine digest that such a helper imports.
+  keyed: the `nopekit.*` modules outside the spine digest that such a helper imports.
 - **`ctx.model is None` is not recorded.** A gate that branches on whether a model is
   loaded at all is invisible to rho on that branch; `ModelProxy` records a real use of
   the model, never its absence. No bundled gate reads `ctx.model`, and an evaluator not
@@ -3955,9 +3955,9 @@ a reader of the output meets it:
   project evaluator's check run is handed nothing its qualification runs were not —
   no model, and a verdict that read ledger values no qualification run read does not
   count (`verdicts._ledger_unseen`). What stays visible to an evaluator that looks: the
-  path of its `ctx.out_dir` (a control's is under `.atompipe/out/controls/`, a walk
+  path of its `ctx.out_dir` (a control's is under `.nopekit/out/controls/`, a walk
   run's is a temp directory outside the project, as invariant 15 requires; a check
-  run's is `.atompipe/out`, where the evidence a cached pass cites lives), the call
+  run's is `.nopekit/out`, where the evidence a cached pass cites lives), the call
   stack (`inspect.stack()` names `mutation_walk`), the clock. A gate that branches on
   them is a forger the controls cannot see. *Rejected:* one path for every run (the
   walk must write outside the project, the check run's evidence inside it); recording
@@ -3997,8 +3997,8 @@ a reader of the output meets it:
   there at that test and at `SpineDigestIsPortable` together — the true state, since
   the committed cache would then be stale for those users. Only 3.12 was available
   where this phase was built.
-- **Spines older than this layout are not guarded.** An atompipe from before the
-  records layout reads `.atompipe/ledger.json` as the records and may rewrite it;
+- **Spines older than this layout are not guarded.** An nopekit from before the
+  records layout reads `.nopekit/ledger.json` as the records and may rewrite it;
   nothing written now can stop it. `project.json`'s `schema` refuses NEWER layouts,
   going forward only. The README says so.
 - **The tracked cache is forgeable in the inner loop.** An entry's `digest` is

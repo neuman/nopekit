@@ -47,16 +47,16 @@ import math
 import os
 from typing import Any, Iterable, Sequence
 
-from atompipe.gates import gate, GateContext
-from atompipe.modelio import load_path as _load_path
-from atompipe.models import Locator, NegativeControl, Tier, Verdict
+from nopekit.gates import gate, GateContext
+from nopekit.modelio import load_path as _load_path
+from nopekit.models import Locator, NegativeControl, Tier, Verdict
 
 # The helpers below are loaded BY PATH, through the spine's loader. ``load_path``
 # names a module after its absolute path, so this module and
 # ``gates/printability.py``, asking for one file, get one module — and a second
 # copy of this pack in the same process (a project's shadow, a user pack) gets
 # its own. What slipped through before: the fold was loaded under a fixed name
-# (``atompipe_pack_fdm_print__fold``) and the part set by a bare ``import`` off
+# (``nopekit_pack_fdm_print__fold``) and the part set by a bare ``import`` off
 # ``sys.path``, and both were served out of ``sys.modules`` by that name. A twin
 # of this pack ran the first copy's fold and part set while every message named
 # the twin, and never ran an edit to its own (S-26, packs:H4). The loader also

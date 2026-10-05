@@ -1,9 +1,9 @@
 # The extension protocol
 
-*How an agent grows atompipe a new validation capability, in the middle of a
+*How an agent grows nopekit a new validation capability, in the middle of a
 project, without anyone having prebaked it.*
 
-This is the procedure that replaces contingencies. atompipe does not ship a CFD
+This is the procedure that replaces contingencies. nopekit does not ship a CFD
 validator because someone might build a boat. It ships the knowledge of **how to go
 get one**, and the discipline to make sure the one you got actually works.
 
@@ -11,7 +11,7 @@ get one**, and the discipline to make sure the one you got actually works.
 
 ## When this fires
 
-`atompipe gap` reports a **MEASURABLE** claim with no covering gate. That is a
+`nopekit gap` reports a **MEASURABLE** claim with no covering gate. That is a
 capability gap, and it is the system's growth mechanism, not a failure.
 
 It does *not* fire for:
@@ -128,10 +128,10 @@ gate is supposed to care about.** A fixture that is bad in some *other* way (a
 corrupt file, an empty mesh) proves the gate handles garbage, not that it measures
 what it claims.
 
-Then actually run it: `atompipe gate selftest --only <id>`. A gate that passes its
+Then actually run it: `nopekit gate selftest --only <id>`. A gate that passes its
 own known-bad fixture is reported as broken, loudly.
 
-`atompipe check` holds you to it as well. A gate's verdicts count only while it is
+`nopekit check` holds you to it as well. A gate's verdicts count only while it is
 *qualified* at its current code, fixtures and spine: its known-good control passed,
 its known-bad control failed, both through the same channel, and — for a gate of your
 own — every conclusive mutation of its known-good control failed (each value it read,
@@ -144,7 +144,7 @@ for a gate that reads files, its own copy of them) — and build each fixture fr
 with one thing changed: it is the known-good control, and the fixture is handed that
 design, never the live one, so it stays diagnostic even while the live design already
 fails. Without it every gate of the project reads `known-good not run`. Commit what `check` records
-under `.atompipe/verdicts/` with the gate; the next clone reads the verdict and its
+under `.nopekit/verdicts/` with the gate; the next clone reads the verdict and its
 control from there instead of running them again.
 
 ### 6. Record provenance for every solver setting
@@ -168,8 +168,8 @@ out as [`PACK_FORMAT.md`](PACK_FORMAT.md) describes — an ordinary directory; n
 command creates or exports one — then:
 
 ```
-atompipe pack validate <name>                            # the same checks CI runs
-atompipe gate selftest --pack <name> --junit <file>.xml  # every tier's control
+nopekit pack validate <name>                            # the same checks CI runs
+nopekit gate selftest --pack <name> --junit <file>.xml  # every tier's control
 ```
 
 The JUnit file is the proof that each gate is qualified — it passes its known-good

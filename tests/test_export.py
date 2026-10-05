@@ -50,14 +50,14 @@ from unittest import mock
 import _env
 import _physical as P
 import _projects
-from atompipe import claims as claims_mod
-from atompipe import cli as cli_mod
-from atompipe import gates as gates_mod
-from atompipe import report as report_mod
-from atompipe import store
-from atompipe import verdicts
-from atompipe.util import AtompipeError
-from atompipe.models import (AttributionRecord, Claim, ClaimKind, ClaimStatus,
+from nopekit import claims as claims_mod
+from nopekit import cli as cli_mod
+from nopekit import gates as gates_mod
+from nopekit import report as report_mod
+from nopekit import store
+from nopekit import verdicts
+from nopekit.util import NopekitError
+from nopekit.models import (AttributionRecord, Claim, ClaimKind, ClaimStatus,
                              EntryStanding, Ledger, PhysicalResult, Standing, Verdict)
 
 #: The bracket's milestone (D23): the print C1-C4 must be checked for.
@@ -79,21 +79,21 @@ def _need(module: Any, name: str) -> Any:
 
 
 def milestones_mod() -> Any:
-    """``atompipe.milestones``, or an assertion that it does not exist yet."""
+    """``nopekit.milestones``, or an assertion that it does not exist yet."""
     try:
-        return importlib.import_module("atompipe.milestones")
+        return importlib.import_module("nopekit.milestones")
     except ImportError:
-        raise AssertionError("atompipe.milestones does not exist yet") from None
+        raise AssertionError("nopekit.milestones does not exist yet") from None
 
 
 def milestone_cls() -> Any:
     """``models.Milestone``, or an assertion that it does not exist yet."""
-    from atompipe import models
+    from nopekit import models
     return _need(models, "Milestone")
 
 
 def captured(argv: list[str], *, stdin: str | None = None) -> tuple[int, str, str]:
-    """``atompipe <argv>`` in THIS process (so a test can patch the spine):
+    """``nopekit <argv>`` in THIS process (so a test can patch the spine):
     ``(exit code, stdout, stderr)``."""
     out, err = io.StringIO(), io.StringIO()
     with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
@@ -115,7 +115,7 @@ def bracket(dest: str, *, thickness: float | None = None, git: bool = False) -> 
 
 
 def export_json(root: str, *args: str, code: int | None = None, **kw: Any) -> tuple[Any, dict]:
-    """``atompipe export <args> --json``: the process and its document."""
+    """``nopekit export <args> --json``: the process and its document."""
     proc = P.run(root, "export", *args, "--json", code=code, **kw)
     try:
         doc = json.loads(proc.stdout)
@@ -130,11 +130,11 @@ def tree(root: str) -> dict[str, bytes]:
     """Every file under ``root`` but this checkout's memory and scratch — what a
     command that writes nothing must leave byte for byte."""
     out: dict[str, bytes] = {}
-    ignored = {".atompipe/ledger.json", ".atompipe/build.lock"}
+    ignored = {".nopekit/ledger.json", ".nopekit/build.lock"}
     for dirpath, dirnames, filenames in os.walk(root):
         rel_dir = os.path.relpath(dirpath, root).replace(os.sep, "/")
         dirnames[:] = [d for d in dirnames if d != "__pycache__"
-                       and not (rel_dir == ".atompipe" and d in ("cache", "obs", "out"))]
+                       and not (rel_dir == ".nopekit" and d in ("cache", "obs", "out"))]
         for name in filenames:
             path = os.path.join(dirpath, name)
             rel = os.path.relpath(path, root).replace(os.sep, "/")
@@ -333,7 +333,7 @@ def readers_of_ready(ledger: Ledger, stale: frozenset, milestone: Any, *,
                                             milestone=milestone)
     out["sentence"] = bool(re.search(r"\bis ready for\b", sentence))
     if site:
-        from atompipe import site as site_mod
+        from nopekit import site as site_mod
         # The page re-views the ledger (`verdicts.view`): hand it the seeded
         # standings, as the resolver would.
         resolution = verdicts.Resolution(
@@ -699,23 +699,23 @@ class ACacheThatLiesIsCaughtAtTheBoundary(_env.EnvCase):
 
     def test_the_refusal_names_the_way_out_that_works(self):
         """Review of P2.5b (findings 12, 20): the refusal told the person to run
-        `atompipe check --force` — which the refused export had already done, and
+        `nopekit check --force` — which the refused export had already done, and
         which never clears two outcomes at one ρ — so the next export said the
         same. It names the entry and the way out: the entry that is not the
         evaluator's output removed, the disagreement is gone (C1 then reads the
         honest re-run: an ordinary unresolved claim)."""
         root = self.forged("w")
         forged = [name for name in os.listdir(os.path.join(
-            root, ".atompipe", "verdicts", "bracket.deflection"))
+            root, ".nopekit", "verdicts", "bracket.deflection"))
             if not name.startswith("control-")]
         text = P.run(root, "export", MILESTONE, code=1).stdout
         self.assertNotIn("check --force", text)
-        self.assertIn(".atompipe/verdicts/bracket.deflection/", text)
+        self.assertIn(".nopekit/verdicts/bracket.deflection/", text)
         served = [name[:-len(".json")] for name in forged if name[:-len(".json")] in text]
         self.assertTrue(served, f"no entry named: {forged}\n{text}")
         again = P.run(root, "export", MILESTONE, "--dry-run", code=1).stdout
         self.assertNotIn("check --force", again)
-        os.remove(os.path.join(root, ".atompipe", "verdicts", "bracket.deflection",
+        os.remove(os.path.join(root, ".nopekit", "verdicts", "bracket.deflection",
                                served[0] + ".json"))
         _proc, doc = export_json(root, MILESTONE, "--dry-run", code=1)
         self.assertNotIn("disagrees", refusal_kinds(doc))
@@ -810,7 +810,7 @@ class DryRunIsTheSamePath(_env.EnvCase):
                 dry = P.run(root, "export", MILESTONE, "--dry-run")
                 _p, dry_doc = export_json(root, MILESTONE, "--dry-run")
                 self.assertEqual(changed(before, tree(root)), [], "--dry-run wrote something")
-                self.assertFalse(glob.glob(os.path.join(root, ".atompipe", "out", "export-*")))
+                self.assertFalse(glob.glob(os.path.join(root, ".nopekit", "out", "export-*")))
                 proc, doc = export_json(root, MILESTONE)
                 self.assertEqual(refusal_kinds(dry_doc), refusal_kinds(doc))
                 self.assertEqual(dry.returncode, proc.returncode)
@@ -868,7 +868,7 @@ class DryRunIsTheSamePath(_env.EnvCase):
         legacy = _projects.bracket_copy(os.path.join(self.tmp(), "legacy"), thickness=8.0)
         dry = P.run(legacy, "export", MILESTONE, "--dry-run")
         self.assertEqual(dry.returncode, 1, dry.stdout + dry.stderr)
-        self.assertRegex(dry.stdout, r"(?m)^export: would refuse — .*atompipe check")
+        self.assertRegex(dry.stdout, r"(?m)^export: would refuse — .*nopekit check")
         self.assertTrue(store.is_legacy(legacy), "--dry-run migrated a legacy project")
 
     def test_a_generator_that_handles_its_own_directory_builds_one_article(self):
@@ -896,7 +896,7 @@ class DryRunIsTheSamePath(_env.EnvCase):
                 self.assertIs(written["article"]["traced"], True)
                 recorded = P.exports(root, MILESTONE)["exports"][-1]["article"]
                 self.assertEqual([f for f in recorded["built_from"].get("files") or {}
-                                  if f.startswith(("out/", ".atompipe/"))], [],
+                                  if f.startswith(("out/", ".nopekit/"))], [],
                                  "the package's own directory is in the article")
         article = P.exports(root, MILESTONE)["exports"][-1]["article"]["hash"]
         P.tty(root, "claim", "physical", "C5", "pass", "--detail", "no crazing",
@@ -963,7 +963,7 @@ class EveryCacheReaderSaysAsLastEvaluated(_env.EnvCase):
         row needs none, and runs in the fast tier)."""
         if not self._forged:
             import tempfile
-            base = tempfile.mkdtemp(prefix="atompipe-last-evaluated-")
+            base = tempfile.mkdtemp(prefix="nopekit-last-evaluated-")
             type(self).addClassCleanup(_env._rmtree, base)
             root = bracket(os.path.join(base, "f"), thickness=7.0, git=True)
             P.run(root, "check")
@@ -1062,11 +1062,11 @@ class TheReproduceBlockRunsAsPrinted(unittest.TestCase):
     is the command and nothing else, and every milestone has one."""
 
     def lines(self, names: list[str]) -> list[str]:
-        from atompipe.models import Milestone, ProjectMeta
+        from nopekit.models import Milestone, ProjectMeta
         ledger = Ledger(meta=ProjectMeta(name="t", revision="v0.1"),
                         milestones=[Milestone(id=name, requires=["C1"]) for name in names])
         text = report_mod.render_markdown(ledger, None)
-        return [ln for ln in text.splitlines() if ln.startswith("atompipe export ")]
+        return [ln for ln in text.splitlines() if ln.startswith("nopekit export ")]
 
     @staticmethod
     def argv(line: str) -> list[str]:
@@ -1083,11 +1083,11 @@ class TheReproduceBlockRunsAsPrinted(unittest.TestCase):
         self.assertEqual(len(found), len(names), found)
         for name, line in zip(names, found):
             with self.subTest(name):
-                self.assertEqual(self.argv(line), ["atompipe", "export", name, "--dry-run"])
+                self.assertEqual(self.argv(line), ["nopekit", "export", name, "--dry-run"])
 
     def test_the_glued_line_is_caught(self):
-        glued = "atompipe export print-v1 --dry-run# re-runs what it requires"
-        self.assertNotEqual(self.argv(glued), ["atompipe", "export", "print-v1", "--dry-run"])
+        glued = "nopekit export print-v1 --dry-run# re-runs what it requires"
+        self.assertNotEqual(self.argv(glued), ["nopekit", "export", "print-v1", "--dry-run"])
 
 
 # --------------------------------------------------------------------------- #
@@ -1125,7 +1125,7 @@ class GoingAheadIsAPersonsDecision(_env.EnvCase):
         before = tree(root)
         agent = P.run(root, "export", MILESTONE, "--proceed", "--why", self.WHY, agent=True)
         self.assertEqual(agent.returncode, 2, agent.stdout + agent.stderr)
-        self.assertIn(f"atompipe export {MILESTONE} --proceed --why", agent.stderr)
+        self.assertIn(f"nopekit export {MILESTONE} --proceed --why", agent.stderr)
         self.assertIn("CLAUDECODE", agent.stderr)
         pipe = P.run(root, "export", MILESTONE, "--proceed", "--why", self.WHY)
         self.assertEqual(pipe.returncode, 2, pipe.stdout + pipe.stderr)
@@ -1219,7 +1219,7 @@ def symlinking(ctx):
 
 def unseen(ctx):
     import os
-    from atompipe import verdicts
+    from nopekit import verdicts
     saved = dict(verdicts._HANDLERS)
     verdicts._HANDLERS.clear()
     try:
@@ -1231,7 +1231,7 @@ def unseen(ctx):
 
 def seen(ctx):
     import os
-    from atompipe import verdicts
+    from nopekit import verdicts
     saved = dict(verdicts._HANDLERS)
     try:
         with open(os.path.join(ctx.out_dir, "x.txt"), "w") as fh:
@@ -1309,7 +1309,7 @@ class ThePackageIsWhatWasRecorded(_env.EnvCase):
             self.assertIn(f"--article {article[:12]}", line)
         self.assertIn(f"### Test card for article {article[:12]}", text)
         card = text.split(f"### Test card for article {article[:12]}", 1)[1]
-        cross = re.search(r"(?m)^  (atompipe claim physical <id> --article [0-9a-f]{12} "
+        cross = re.search(r"(?m)^  (nopekit claim physical <id> --article [0-9a-f]{12} "
                           r"--measured <value>)", card)
         self.assertIsNotNone(cross, card[:800])
         argv = cross.group(1).replace("<id>", "C1").replace("<value>", "0.3").split()[1:]
@@ -1373,9 +1373,9 @@ class ThePackageIsWhatWasRecorded(_env.EnvCase):
                 self.assertEqual(package(self.root), older)
                 self.assertFalse(glob.glob(os.path.join(self.root, "out", ".*")),
                                  "scratch left in out/")
-                self.assertFalse(glob.glob(os.path.join(self.root, ".atompipe", "out",
+                self.assertFalse(glob.glob(os.path.join(self.root, ".nopekit", "out",
                                                         "export-*")),
-                                 "scratch left in .atompipe/out/")
+                                 "scratch left in .nopekit/out/")
                 oops = os.path.join(self.root, "model", "oops.txt")
                 if os.path.exists(oops):
                     os.remove(oops)
@@ -1386,16 +1386,16 @@ class ThePackageIsWhatWasRecorded(_env.EnvCase):
         that one refused with a false "generator errored". Another process holds
         the lock here (the test's parent: alive, on this host); the scratch it
         builds in must be as it was."""
-        from atompipe import util
+        from nopekit import util
         scratch = milestones_mod().scratch_dir(self.root, MILESTONE, True)
         os.makedirs(scratch, exist_ok=True)
         sentinel = os.path.join(scratch, "bracket-profile.svg")
         with open(sentinel, "w", encoding="utf-8") as fh:
             fh.write("<svg/>")
-        lock = os.path.join(self.root, ".atompipe", cli_mod.LOCK_NAME)
+        lock = os.path.join(self.root, ".nopekit", cli_mod.LOCK_NAME)
         with open(lock, "w", encoding="utf-8") as fh:
             json.dump({"pid": os.getppid(), "host": util._HOST, "when": "2026-10-04T10:00:00Z",
-                       "command": "atompipe export print-v1"}, fh)
+                       "command": "nopekit export print-v1"}, fh)
         try:
             for argv in (["export", MILESTONE, "--dry-run"], ["export", MILESTONE]):
                 with self.subTest(" ".join(argv)):
@@ -1420,7 +1420,7 @@ class ThePackageIsWhatWasRecorded(_env.EnvCase):
         _projects.set_thickness(self.root, 8.5)
 
         def unwritable(*_args, **_kwargs):
-            raise AtompipeError("cannot write exports/print-v1.json: Permission denied")
+            raise NopekitError("cannot write exports/print-v1.json: Permission denied")
 
         with mock.patch.object(store, "append_sealed", unwritable):
             code, out, err = captured(["export", MILESTONE, "-C", self.root])

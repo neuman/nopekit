@@ -8,7 +8,7 @@ verdict can only be about the thing that moved.
 
 That constraint is the whole point of a negative control. A fixture that is bad in
 some other way — an empty dict, a missing key, a corrupt file — proves the gate
-survives garbage, not that it measures what it claims to measure. ``atompipe gate
+survives garbage, not that it measures what it claims to measure. ``nopekit gate
 selftest`` requires each gate to FAIL here; a gate that passes its own known-bad
 input is reported as broken and its green verdicts are not to be trusted.
 """
@@ -19,7 +19,7 @@ import os as _os
 
 import dataclasses
 
-from atompipe.modelio import load_path as _load_path
+from nopekit.modelio import load_path as _load_path
 
 
 # ---------------------------------------------------------------------------
@@ -85,7 +85,7 @@ def _helper(relpath: str):
     gates are being loaded, not when a fixture runs; and ``load_path`` names the
     module after its absolute path, which is how this fixture gets the module
     ``gates/printability.py`` holds and not another copy's. What slipped through
-    when the name was fixed (``atompipe_pack_fdm_print__process_model``) and
+    when the name was fixed (``nopekit_pack_fdm_print__process_model``) and
     whatever ``sys.modules`` held under it was served: a second copy of this pack
     in the process got the first copy's model — caught in the gate, where the
     twin's print time ignored an edit to its own ``_process_model.py`` — and this

@@ -38,12 +38,12 @@ import textwrap
 import unittest
 from unittest import mock
 
-from atompipe import claims, gates, modelio, store, verdicts
-from atompipe.models import (
+from nopekit import claims, gates, modelio, store, verdicts
+from nopekit.models import (
     Claim, ClaimStatus, GateSpec, InputArtifact, Ledger, NegativeControl, Verdict,
 )
-from atompipe.util import FileDigests
-from atompipe.verdicts import GateTrace
+from nopekit.util import FileDigests
+from nopekit.verdicts import GateTrace
 
 import _env
 
@@ -55,8 +55,8 @@ import _env
 _GATES = '''\
 import dataclasses
 import os
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 #: Set by a test that must prove nothing below runs: resolve and freshness read
 #: the cache, and a gate function that ran would have had to be called.
@@ -164,7 +164,7 @@ _FIXTURES = '''\
 import dataclasses
 import os
 
-from atompipe.modelio import load_path
+from nopekit.modelio import load_path
 
 #: A helper OUTSIDE selftest/: editing it moves this fixture's code closure but
 #: not the control's static part — the bracket's fixtures importing its model.
@@ -293,7 +293,7 @@ class _Project:
 
     def __init__(self, case: _env.EnvCase) -> None:
         self.root = root = os.path.join(case.tmp(), "project")
-        _write(root, ".atompipe/project.json", '{"schema": 2}\n')
+        _write(root, ".nopekit/project.json", '{"schema": 2}\n')
         _write(root, "gates/g.py", _GATES)
         _write(root, "selftest/bad.py", _FIXTURES)
         _write(root, "model/helper.py", _HELPER)
@@ -591,7 +591,7 @@ class Freshness(_env.EnvCase):
         self.assertIsInstance(p.freshness(_PROJECTION)["t.file"], verdicts.Fresh)
         with mock.patch.object(verdicts, "spine_digest", return_value="f" * 64):
             self.assertEqual(p.freshness(_PROJECTION)["t.file"].reasons,
-                             ("atompipe spine changed",))
+                             ("nopekit spine changed",))
 
         # a gate module edited on disk, loaded fresh into a new registry
         with open(os.path.join(p.root, "gates", "g.py"), "a", encoding="utf-8") as fh:
@@ -635,13 +635,13 @@ class Freshness(_env.EnvCase):
         _v, wrote = p.record("t.defl", _PROJECTION)
         [entry] = verdicts.read_entries(p.root, "t.defl")
         os.unlink(wrote.path)
-        elsewhere = {"atompipe_no_such_module": "1.0"}
+        elsewhere = {"nopekit_no_such_module": "1.0"}
         verdicts.write_entry(p.root, dataclasses.replace(entry, instruments=elsewhere))
         state = p.freshness(_PROJECTION)["t.defl"]
         self.assertIsInstance(state, verdicts.Fresh)
-        self.assertEqual(state.notes, ("recorded under atompipe_no_such_module 1.0; here absent",))
+        self.assertEqual(state.notes, ("recorded under nopekit_no_such_module 1.0; here absent",))
         resolution = p.resolve(_PROJECTION)
-        self.assertIn("t.defl — recorded under atompipe_no_such_module 1.0; here absent",
+        self.assertIn("t.defl — recorded under nopekit_no_such_module 1.0; here absent",
                       resolution.notes)
 
 

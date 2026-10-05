@@ -7,7 +7,7 @@ under test measures. That constraint is the whole value of the file: a fixture
 that is bad in some other way — an empty dict, a missing key, a negative area —
 proves the gate handles garbage, not that it measures heat.
 
-`atompipe gate selftest` requires every gate to FAIL here. A gate that passes its
+`nopekit gate selftest` requires every gate to FAIL here. A gate that passes its
 own fixture is reported as broken, and a green verdict from it means nothing.
 
 ---------------------------------------------------------------------------

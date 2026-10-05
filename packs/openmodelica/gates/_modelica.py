@@ -1042,7 +1042,7 @@ def read_table_csv(path: str) -> tuple[list[str], dict[str, list[float]]]:
 #: The marker the generated .mos scripts print around each step's output. Chosen
 #: to be something no Modelica model, error message or file path will contain, so
 #: segmentation never eats a line of a real error string.
-MARK = "@@ATOMPIPE:"
+MARK = "@@NOPEKIT:"
 
 BALANCE_RE = re.compile(r"has\s+(\d+)\s+equation\(s\)\s+and\s+(\d+)\s+variable\(s\)")
 RESULT_FILE_RE = re.compile(r'resultFile\s*=\s*"((?:[^"\\]|\\.)*)"')

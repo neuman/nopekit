@@ -64,7 +64,7 @@ reader will otherwise assume is covered.
   and it advertises "plane-of-array irradiance", which is the phrase somebody
   with a shading question will match on.
 - **Photovoltaics.** `settles` and `claim_classes` will match a PV claim through
-  `atompipe gap`, and there is no cell model here, no temperature coefficient, no
+  `nopekit gap`, and there is no cell model here, no temperature coefficient, no
   spectral response, no inverter, no derate. Sunlight onto a plane is where this
   pack stops.
 - **Most agreement between numbers a model states twice.**
@@ -99,7 +99,7 @@ When the cheap gate cannot answer and the design has stopped moving, see
 | `solar.irradiance` | 0 | plane-of-array, W/m2 | `design_irradiance_min_w_m2` | the array is mounted facing away from the sun |
 
 Fixtures are in `selftest/bad_thermal.py`, one function each, each changing one
-physically meaningful quantity. Run `atompipe gate selftest` and watch all ten
+physically meaningful quantity. Run `nopekit gate selftest` and watch all ten
 fail.
 
 **Fixtures are sealed, and their severity is derived** — two properties, both

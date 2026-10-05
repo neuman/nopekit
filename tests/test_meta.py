@@ -23,7 +23,7 @@ here exists because it is the route of least resistance (R-6, R-7):
   ``_env.run``, the one environment that is the same on a dev box and a runner.
 * **NoWallClockBelowTheEdge** — only ``cli.py`` reads the clock; the modules
   that shape a verdict or a record take ``now`` as an argument (spec §0.6).
-* **NoGitOutsideVcs** — only ``src/atompipe/vcs.py`` starts git, so one clean
+* **NoGitOutsideVcs** — only ``src/nopekit/vcs.py`` starts git, so one clean
   environment, one timeout and one never-raise rule cover every git call.
 * **EnvIsFaithful** — ``_env`` hides the machine without hiding the tools.
 * **NoTestShadowsTheFramework** — no test class defines a method the
@@ -684,7 +684,7 @@ class NoSubprocessOutsideRun(unittest.TestCase):
         self.assertEqual(
             findings, [],
             "a subprocess outside tests/_env.run inherits this machine's HOME, git "
-            "identity, user packs and agent variables — use _env.run, _env.atompipe "
+            "identity, user packs and agent variables — use _env.run, _env.nopekit "
             "or _env.git: " + "; ".join(findings))
 
     def test_planted_spawns_are_caught(self):
@@ -770,11 +770,11 @@ def _clock_findings(source: str, filename: str = "<planted>") -> list[str]:
 
 class NoWallClockBelowTheEdge(unittest.TestCase):
     def test_no_clock_below_the_edge(self):
-        spine = os.path.join(_env.SRC, "atompipe")
+        spine = os.path.join(_env.SRC, "nopekit")
         present = [m for m in CLOCKLESS_MODULES
                    if os.path.isfile(os.path.join(spine, f"{m}.py"))]
         for required in ("store", "gates", "modelio"):
-            self.assertIn(required, present, f"src/atompipe/{required}.py is missing")
+            self.assertIn(required, present, f"src/nopekit/{required}.py is missing")
         findings: list[str] = []
         for module in present:
             path = os.path.join(spine, f"{module}.py")
@@ -815,7 +815,7 @@ class NoWallClockBelowTheEdge(unittest.TestCase):
 #: inherits the process's GIT_DIR — a hook's OUTER repository — has no timeout,
 #: and can raise where "not a repository" is the honest answer; vcs.py exists so
 #: those three rules are written once.
-GIT_EDGE = os.path.join("atompipe", "vcs.py")
+GIT_EDGE = os.path.join("nopekit", "vcs.py")
 
 #: Calls that start a process, by the name they are reached through:
 #: subprocess's, the os spawners NoSubprocessOutsideRun already knows, asyncio's.
@@ -926,7 +926,7 @@ class NoGitOutsideVcs(unittest.TestCase):
                 findings += _git_findings(_read(path), os.path.relpath(path, _env.REPO))
         self.assertEqual(
             findings, [],
-            "git is started only from src/atompipe/vcs.py — its clean environment, "
+            "git is started only from src/nopekit/vcs.py — its clean environment, "
             "timeout and never-raise rule are the reason it exists; add the question "
             "to vcs instead: " + "; ".join(findings))
 
@@ -973,7 +973,7 @@ class NoGitOutsideVcs(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 _AVAILABILITY_SCRIPT = """\
 import json, sys
-from atompipe import gates, packs
+from nopekit import gates, packs
 root, names = sys.argv[1], sys.argv[2:]
 out = {}
 for name in names:
@@ -1009,7 +1009,7 @@ class EnvIsFaithful(_env.EnvCase):
         return json.loads(proc.stdout)
 
     def test_availability_is_identical_in_process_and_through_run(self):
-        from atompipe import gates, packs
+        from nopekit import gates, packs
         names = _bundled_pack_names()
         here: dict[str, list] = {}
         for name in names:
@@ -1035,7 +1035,7 @@ class EnvIsFaithful(_env.EnvCase):
             "GIT_DIR": "/nonexistent/.git", "GIT_WORK_TREE": "/nonexistent",
             "GIT_INDEX_FILE": "/nonexistent/index", "GIT_CONFIG_PARAMETERS": "'x.y=z'",
             "GIT_AUTHOR_NAME": "a person", "EMAIL": "person@example.invalid",
-            "ATOMPIPE_PACK_PATH": "/nonexistent/packs", "PYTHONDONTWRITEBYTECODE": "1",
+            "NOPEKIT_PACK_PATH": "/nonexistent/packs", "PYTHONDONTWRITEBYTECODE": "1",
             "XDG_CONFIG_HOME": "/nonexistent/config",
         }
         with mock.patch.dict(os.environ, planted):

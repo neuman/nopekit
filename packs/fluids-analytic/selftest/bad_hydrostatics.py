@@ -81,7 +81,7 @@ def _stated(key: str) -> float:
     """An acceptance the baseline must state, because a fixture is calibrated to it.
 
     Raising is the point. If the key goes missing the control is no longer
-    derived from anything, and `atompipe gate selftest` reports the fixture as
+    derived from anything, and `nopekit gate selftest` reports the fixture as
     unusable — which is the honest outcome, and the only one that cannot be
     mistaken for a passing gate.
     """

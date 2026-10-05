@@ -31,7 +31,7 @@ edge was wired onto the resolver:
   the tracked ledger.
 
 Everything runs on a copy of the bracket (`_projects.bracket_copy`), through
-`_env.atompipe` subprocesses — except where a test must patch the spine
+`_env.nopekit` subprocesses — except where a test must patch the spine
 (availability), which it does in-process, against a fresh registry per command.
 
 Run:  PYTHONPATH=src python3 -m unittest tests.test_check_cache -v
@@ -53,10 +53,10 @@ from unittest import mock
 import _env
 import _projects
 import _transcript
-from atompipe import cli as cli_mod
-from atompipe import gates as gates_mod
+from nopekit import cli as cli_mod
+from nopekit import gates as gates_mod
 
-CLI_PY = os.path.join(_env.REPO, "src", "atompipe", "cli.py")
+CLI_PY = os.path.join(_env.REPO, "src", "nopekit", "cli.py")
 
 #: The bracket's six gates, in registration order.
 BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearing",
@@ -94,7 +94,7 @@ if not ok:
 # helpers
 # --------------------------------------------------------------------------- #
 def _state(project: str, *parts: str) -> str:
-    return os.path.join(project, ".atompipe", *parts)
+    return os.path.join(project, ".nopekit", *parts)
 
 
 def _tree(path: str) -> dict[str, bytes]:
@@ -109,16 +109,16 @@ def _tree(path: str) -> dict[str, bytes]:
 
 
 def _entries(project: str) -> tuple[list[str], list[str]]:
-    """``(verdict entries, control entries)`` under ``.atompipe/verdicts``, as
+    """``(verdict entries, control entries)`` under ``.nopekit/verdicts``, as
     project-relative paths, each matched against the transcript's shapes."""
-    found = sorted(f".atompipe/verdicts/{rel}" for rel in _tree(_state(project, "verdicts")))
+    found = sorted(f".nopekit/verdicts/{rel}" for rel in _tree(_state(project, "verdicts")))
     verdicts = [p for p in found if _transcript.ENTRY_PATH.fullmatch(p)]
     controls = [p for p in found if _transcript.CONTROL_ENTRY_PATH.fullmatch(p)]
     return verdicts, controls
 
 
 def _run(project: str, *argv: str):
-    return _env.atompipe(list(argv), cwd=project)
+    return _env.nopekit(list(argv), cwd=project)
 
 
 def _json(proc) -> dict:
@@ -238,7 +238,7 @@ class CheckServesTheCache(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        base = tempfile.mkdtemp(prefix="atompipe-check-cache-")
+        base = tempfile.mkdtemp(prefix="nopekit-check-cache-")
         cls.addClassCleanup(_env._rmtree, base)
         cls.project = _projects.bracket_copy(os.path.join(base, "bracket"))
         cls.runs = _tree(_state(cls.project, "runs"))
@@ -258,7 +258,7 @@ class CheckServesTheCache(unittest.TestCase):
         self.assertEqual(sorted({p.split("/")[2] for p in verdicts + controls}),
                          sorted(BRACKET_GATES))
         self.assertEqual(sorted(_tree(_state(self.project, "verdicts"))),
-                         sorted(p[len(".atompipe/verdicts/"):]
+                         sorted(p[len(".nopekit/verdicts/"):]
                                 for p in verdicts + controls),
                          "the verdict cache holds something that is neither kind of entry")
         for row in data["verdicts"]:
@@ -309,7 +309,7 @@ class CheckServesTheCache(unittest.TestCase):
     def test_verify_sh_parser_accepts_cached_rows(self):
         """C: verify.sh step 4, verbatim, reads an all-cached check as the one
         deliberate failure — and still refuses one whose deflection row is gone."""
-        base = tempfile.mkdtemp(prefix="atompipe-verify4-")
+        base = tempfile.mkdtemp(prefix="nopekit-verify4-")
         self.addCleanup(_env._rmtree, base)
         cached = os.path.join(base, "check.json")
         with open(cached, "w", encoding="utf-8") as fh:
@@ -371,7 +371,7 @@ class CheckServesTheCache(unittest.TestCase):
 
         From checkpoint 1.3 the first check migrates the copy, so what is on disk
         is the RECORDS — `claims/*.json` and no `params/*.json` for the bracket —
-        and `.atompipe/ledger.json` is their generated index, which has no
+        and `.nopekit/ledger.json` is their generated index, which has no
         `verdicts` key at all. `Param.gates` (S-30's attribution) is derived where
         it is read, from each gate's last executed run: `why` names the gate."""
         ledger_path = _state(self.project, "ledger.json")
@@ -385,7 +385,7 @@ class CheckServesTheCache(unittest.TestCase):
             return {rel: data for rel, data in _tree(self.project).items()
                     if rel.split("/", 1)[0] in ("claims", "params", "decisions", "needs",
                                                 "inputs", "results", "views")
-                    or rel == ".atompipe/project.json"}
+                    or rel == ".nopekit/project.json"}
 
         records = on_disk()
         self.assertTrue(any(rel.startswith("claims/") for rel in records), sorted(records))
@@ -548,7 +548,7 @@ class SweepsThatKeepNothingOrEverything(_env.EnvCase):
         self.assertTrue(data["stale"], "bed_fit was stale before the sweep ran")
         for name, snapshot in watched.items():
             self.assertEqual(_tree(_state(self.project, name)), snapshot,
-                             f"--no-record wrote .atompipe/{name}/")
+                             f"--no-record wrote .nopekit/{name}/")
         with open(_state(self.project, "ledger.json"), "rb") as fh:
             self.assertEqual(fh.read(), ledger, "--no-record saved the ledger")
 

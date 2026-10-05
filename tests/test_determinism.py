@@ -19,7 +19,7 @@ signal and becomes noise. What slipped through before this was measured:
 
 **EntriesAreDeterministic** runs every bundled pack's baseline, wrapped as a
 project (`tests/_projects.py`), and the bracket, each in TWO temp directories
-with TWO cold processes per directory — a fresh `python -m atompipe check` on a
+with TWO cold processes per directory — a fresh `python -m nopekit check` on a
 pristine copy each time — and demands byte-identical entry and control-entry
 files across all four runs. A gate whose tool is missing here must read the
 availability skip and write nothing: the CI runner has neither trimesh nor omc,
@@ -43,8 +43,8 @@ import os
 import shutil
 import xml.etree.ElementTree as ET
 
-from atompipe import gates, verdicts
-from atompipe import report as report_mod
+from nopekit import gates, verdicts
+from nopekit import report as report_mod
 
 import _env
 import _projects
@@ -60,14 +60,14 @@ BRACKET_GATES = ("bracket.deflection", "bracket.bending_stress", "bracket.bearin
 #: named opaque, ``env:BED_FIT_FLIP``, and never a contradiction: the first plant
 #: did exactly that, and stopped planting anything once review round 1's
 #: ``probe.env`` was closed. The import-time read is the residual the contract
-#: names and ``doctor``'s ``env-reads`` row warns of.) Not ``ATOMPIPE_``-prefixed:
+#: names and ``doctor``'s ``env-reads`` row warns of.) Not ``NOPEKIT_``-prefixed:
 #: nothing in the spine may mistake it for its own.
 _FLIP = "BED_FIT_FLIP"
 
 #: What a cold run starts without. The whole project is restored from a pristine
 #: copy before each run, so nothing a previous run wrote — its cache, its
 #: remembered outcomes, the ledger it rewrote, bytecode beside the model — is
-#: there to be read. *Rejected:* deleting only `.atompipe/verdicts/`: the first
+#: there to be read. *Rejected:* deleting only `.nopekit/verdicts/`: the first
 #: run of the 1.2 spine rewrites `ledger.json`, and a second run on the rewritten
 #: ledger would compare a different input, not a second run of the same one.
 _PRISTINE = ".pristine"
@@ -80,7 +80,7 @@ def _bundled_packs() -> list[str]:
 
 def _cache_bytes(project: str) -> dict[str, bytes]:
     """``{<gate>/<file>: bytes}`` of every file under the project's verdict cache."""
-    base = os.path.join(project, ".atompipe", "verdicts")
+    base = os.path.join(project, ".nopekit", "verdicts")
     out: dict[str, bytes] = {}
     for dirpath, _dirs, files in os.walk(base):
         for name in files:
@@ -119,7 +119,7 @@ class EntriesAreDeterministic(_env.EnvCase):
         """Restore ``project`` from its pristine copy, then one fresh ``check``."""
         shutil.rmtree(project)
         shutil.copytree(project + _PRISTINE, project, symlinks=True)
-        proc = _env.atompipe(["check", "--tier", "3", "--json"], cwd=project)
+        proc = _env.nopekit(["check", "--tier", "3", "--json"], cwd=project)
         self.assertIn(proc.returncode, (0, 1), f"check crashed in {project}:\n"
                                                f"{proc.stdout}\n{proc.stderr}")
         return proc.returncode, json.loads(proc.stdout)
@@ -188,7 +188,7 @@ class TwoOutcomes(_env.EnvCase):
 
     def _checked(self) -> str:
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"))
-        proc = _env.atompipe(["check"], cwd=project)
+        proc = _env.nopekit(["check"], cwd=project)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         return project
 
@@ -204,17 +204,17 @@ class TwoOutcomes(_env.EnvCase):
         self.assertEqual(len(verdicts.read_entries(project, gate_id)), 2)
 
     def _doctor(self, project: str) -> tuple[int, dict]:
-        proc = _env.atompipe(["doctor", "--json"], cwd=project)
+        proc = _env.nopekit(["doctor", "--json"], cwd=project)
         rows = {row["check"]: row for row in json.loads(proc.stdout)["checks"]}
         return proc.returncode, rows
 
     def _status(self, project: str) -> dict:
-        proc = _env.atompipe(["status", "--json"], cwd=project)
+        proc = _env.nopekit(["status", "--json"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return json.loads(proc.stdout)
 
     def _proven(self, project: str) -> str:
-        proc = _env.atompipe(["report"], cwd=project)
+        proc = _env.nopekit(["report"], cwd=project)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         text = proc.stdout
         heading = report_mod.SECTION_PROVEN
@@ -223,12 +223,12 @@ class TwoOutcomes(_env.EnvCase):
 
     def _check(self, project: str, *argv: str, code: int, env=None) -> dict:
         """``check --json`` (plus ``argv``), its exit code asserted; the document."""
-        proc = _env.atompipe(["check", "--json", *argv], cwd=project, env=env)
+        proc = _env.nopekit(["check", "--json", *argv], cwd=project, env=env)
         self.assertEqual(proc.returncode, code, proc.stdout + proc.stderr)
         return json.loads(proc.stdout)
 
     def _last_check(self, project: str) -> dict:
-        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+        with open(os.path.join(project, ".nopekit", "cache", "last_check.json"),
                   encoding="utf-8") as fh:
             return json.load(fh)
 
@@ -379,7 +379,7 @@ class TwoOutcomes(_env.EnvCase):
         # not — C5 waits on an article (P2.1, the key beside it).
         self.assertFalse(first["all_required_checked"])
 
-        proc = _env.atompipe(["check", "--force"], cwd=project, env={_FLIP: "1"})
+        proc = _env.nopekit(["check", "--force"], cwd=project, env={_FLIP: "1"})
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertIn("note: bracket.bed_fit: two outcomes recorded for identical inputs",
                       proc.stdout, "the writer's warning was not printed")
@@ -412,7 +412,7 @@ class TwoOutcomes(_env.EnvCase):
         self.assertEqual(row["outcome"], "error", row)
         self.assertIn("C4", [b["claim"] for b in dry["blocking"]])
 
-        proc = _env.atompipe(["check"], cwd=project)
+        proc = _env.nopekit(["check"], cwd=project)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         self.assertNotIn("[ok  ] bracket.bed_fit", proc.stdout)
         self.assertIn("[ERR ] bracket.bed_fit : two outcomes recorded for identical inputs",

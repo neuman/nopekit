@@ -1,8 +1,8 @@
-# Generated files are outputs, not sources (METHOD.md rule 1), and `atompipe pack
+# Generated files are outputs, not sources (METHOD.md rule 1), and `nopekit pack
 # export` ships this directory — a tracked evidence file would travel with the pack
 # and read as part of it while being stale from whenever it was last written.
 #
-# `atompipe gate selftest` writes its evidence here, and every gate's `evidence`
+# `nopekit gate selftest` writes its evidence here, and every gate's `evidence`
 # paths point into ctx.out_dir, so this is scratch by construction.
 .selftest-out/
 __pycache__/

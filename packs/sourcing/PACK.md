@@ -78,7 +78,7 @@ copy it and edit. The shape, in full:
 
 ```json
 {
-  "schema": "atompipe.bom/1",
+  "schema": "nopekit.bom/1",
   "currency": "USD",
   "build_quantity": 250,
   "budget_per_unit": 52.0,
@@ -152,7 +152,7 @@ on the host project's BOM. That sealing is deliberate: a control is a test of th
 *instrument*, and one whose severity depends on the installing project's numbers
 fires in one repository and passes in another. No fixture hardcodes a magnitude
 either; each reads the limit it has to beat out of the baseline the gate reads it
-from. Run them: `atompipe gate selftest sourcing`.
+from. Run them: `nopekit gate selftest sourcing`.
 
 Each gate also declares its **known-good** control, `selftest/good_boms.py:baseline_bom`:
 the baseline BOM, unchanged, handed through `ctx.extra["bom"]` — the channel every

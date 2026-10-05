@@ -13,8 +13,8 @@ differential oracle exact; Kleene waits for P2 (D-01).
 #### Target transcript
 
 ```text
-$ git clone … && cd atompipe/examples/bracket
-$ atompipe check
+$ git clone … && cd nopekit/examples/bracket
+$ nopekit check
 [FAIL] bracket.deflection : 0.700 mm at 15 N (limit 0.5 mm)                  cached
 6 gates: 0 executed, 6 cached — 5 ok, 1 FAIL — tier 0
 BLOCKING — 2 critical claim(s) must not be spent against:
@@ -25,26 +25,26 @@ $ echo $?
 $ git status --porcelain
 $                                        # nothing: check wrote only ignored outputs
 $ $EDITOR model/bracket.py               # bed_xy 220 -> 250
-$ atompipe status
+$ nopekit status
 …
 stale: bracket.bed_fit — config.bed_xy 220.0 -> 250.0   (5 checks current)
-$ atompipe check
+$ nopekit check
 [ok  ] bracket.bed_fit : 74 x 30 x 7 mm vs 234 mm usable (250 bed - 2x8 brim)
 [FAIL] bracket.deflection : 0.700 mm at 15 N (limit 0.5 mm)                  cached
 6 gates: 1 executed, 5 cached — 5 ok, 1 FAIL — tier 0
 …
 $ git status --porcelain                  # porcelain prints repo-root paths
  M examples/bracket/model/bracket.py
-?? examples/bracket/.atompipe/verdicts/bracket.bed_fit/<rho16>-<out8>.json   # the new evidence, a new file
-$ atompipe why thickness
+?? examples/bracket/.nopekit/verdicts/bracket.bed_fit/<rho16>-<out8>.json   # the new evidence, a new file
+$ nopekit why thickness
 param thickness = 7.0 mm   (model/bracket.py Config.thickness)
 REJECTED (1)
   4.0 mm — 3.75 mm deflection, 7.5x the limit   (model/bracket.py PARAMS)
-$ atompipe gate show bracket.deflection | tail -1
+$ nopekit gate show bracket.deflection | tail -1
   last selftest: [ok  ] fired at this version (control <rhoC12>)
-$ (cd "$(mktemp -d)" && atompipe gate selftest)   # no project here: pack mode, every bundled pack
+$ (cd "$(mktemp -d)" && nopekit gate selftest)   # no project here: pack mode, every bundled pack
 <n> control(s) in <t>: <n> fired, 0 BROKEN, <k> skipped (tooling)
-$ atompipe check --junit                          # .atompipe/out/junit.xml, rendered by any CI
+$ nopekit check --junit                          # .nopekit/out/junit.xml, rendered by any CI
 ```
 
 What changed for the human, against today (§10):
@@ -67,10 +67,10 @@ What changed for the human, against today (§10):
 | **Strict pass values.** `_normalise` and `_stamp` accept a `bool`, or a 0-d object whose `dtype.kind == "b"` (numpy.bool_, duck-typed, no import), converted with `bool()`. Anything else becomes `error="gate reported passed=<repr> (<type>); a verdict must say True or False"`. `_reject_non_finite` refuses a `measured`/`limit` that is neither None nor a real number; `bool` is not a number. | `{"passed":"false"}` reads `[ok]` today (`gates.py:950`, `:895`; re-probed; S-01, S-02). *Rejected:* keeping `bool()`, which is the hole. *Rejected:* `isinstance(x, int)`, which accepts `1` and `2` as passes because `bool` subclasses `int`. | `V: PassMustBeABool` over `"false"`, `"no"`, `None`, `1.0`, `2`, `"n/a"` as measured, `True` as measured. `C:` all 54 bundled gates still pass their baseline — the regression guard for numpy-returning mesh gates. |
 | `test_packs` baseline **and control** tests (and `packs.demonstrate`, P1.1): a skip is allowed **only** when `availability(spec)` fails; a self-skip on the pack's own baseline, or on its own known-bad input, is a failure. Makes `docs/PACK_FORMAT.md:365-366` ("nothing skips") true. | A gate that self-skips on a missing baseline key is never shown to accept anything while the suite reads green (`tests/test_packs.py:164-165`); a control that skips itself is accepted as "honestly blocked" and then skipped by `ControlsAreSealed` (`tests/test_packs.py:203-205, 262-263`; `gates.py:1537-1542`), so a fixture that deletes a needed key passes invariants 3 and 6 (both S-12). | `V:` a scratch pack whose gate returns `Verdict(skipped=True)` on its baseline turns the test red. `V:` a scratch pack whose fixture removes a key the gate needs turns `NegativeControlsFire` red and, from P1.1, `pack validate` non-zero. R-4: zero hits on the bundled packs with the tools present, first (0 of 54 controls skip). |
 | `NoLeakedProvenance` prunes any subdirectory holding a `.git` entry (file or directory), and scans **every file that decodes as UTF-8**, skipping binaries by a NUL byte. | A linked worktree inside the repo carries a second `docs/ORIGINS.md` and turns the test red; the site template's JS is never scanned (`tests/test_packs.py:281-285`; S-65); any extension allow-list still leaves tracked text unscanned (23 files against today's list; 13 even with `.js .html .css .yml .sh` added — 4 `.mo`, 2 `.csv`, 5 `.gitignore`, `LICENSE`, `py.typed`; the other 5 unscanned files are binary `.stl`), and each phase adds types. | `V:` a temp tree with a `.git` *file* and a forbidden word built from `FORBIDDEN` at runtime (never typed) is skipped, and the same tree without `.git` is caught. `V:` the same runtime-built word in a `.mo` and in an extensionless file is caught. R-4: zero new hits in the tracked tree. |
-| **One test environment**, `tests/_env.py`: a base class and a `run()` helper through which every test runs git and atompipe subprocesses — temp `HOME`, `ATOMPIPE_PACK_PATH` unset, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, explicit `GIT_AUTHOR_*`/`GIT_COMMITTER_*` only where a test wants an identity, `CLAUDE*`/`AI_AGENT` stripped unless the test sets them, and `PYTHONUSERBASE` pinned to the real user base. | Tests that pass on the dev machine and fail in CI, or the reverse: the dev machine has a global git identity and may have `~/.atompipe/packs`; the Bash tool sets `CLAUDE_CODE_CHILD_SESSION`, `CLAUDECODE`, `AI_AGENT` and `CLAUDE_CODE_SESSION_ID`, and GitHub runners set neither. `git clone --depth 1 <local path>` ignores `--depth`. A temp `HOME` alone drops the user site-packages, where trimesh and numpy live on this machine, so every mesh gate would read availability-skipped — honest-looking, and every subprocess test of those packs vacuous. | `V:` from P2.5, when the channel tests exist, `tests/test_meta.py` runs them with and without those variables in the parent env and gets the same results; an AST check finds no `subprocess` call in `tests/` outside `run()`; shallow clones use `file://`. `V:` `availability()` of every bundled gate is identical in-process, through `run()`, and, from P3.1, in an evaluation child. |
+| **One test environment**, `tests/_env.py`: a base class and a `run()` helper through which every test runs git and nopekit subprocesses — temp `HOME`, `NOPEKIT_PACK_PATH` unset, `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, explicit `GIT_AUTHOR_*`/`GIT_COMMITTER_*` only where a test wants an identity, `CLAUDE*`/`AI_AGENT` stripped unless the test sets them, and `PYTHONUSERBASE` pinned to the real user base. | Tests that pass on the dev machine and fail in CI, or the reverse: the dev machine has a global git identity and may have `~/.nopekit/packs`; the Bash tool sets `CLAUDE_CODE_CHILD_SESSION`, `CLAUDECODE`, `AI_AGENT` and `CLAUDE_CODE_SESSION_ID`, and GitHub runners set neither. `git clone --depth 1 <local path>` ignores `--depth`. A temp `HOME` alone drops the user site-packages, where trimesh and numpy live on this machine, so every mesh gate would read availability-skipped — honest-looking, and every subprocess test of those packs vacuous. | `V:` from P2.5, when the channel tests exist, `tests/test_meta.py` runs them with and without those variables in the parent env and gets the same results; an AST check finds no `subprocess` call in `tests/` outside `run()`; shallow clones use `file://`. `V:` `availability()` of every bundled gate is identical in-process, through `run()`, and, from P3.1, in an evaluation child. |
 | `claims.explaining_verdict(claim, verdicts)`: the single ranked choice (ran-and-failed, then errored, then skipped), used by `cli._blocking_reason` and `report._terminal_reason`. | `status` cites a skipped pack gate as the reason a claim fails while `check` cites the real failure (`report.py:1131-1134` vs `cli.py:1075-1112`; S-68). | `V:` a fixture with a skip and a fail, in both orders: status, check and the report cite the failing gate. |
 | `check`'s BLOCKING tag uses `report.status_tag` (`cli.py:1071`). | Three spellings of one status (S-69). | `V:` for each blocking status, the tag equals `status_tag`. |
-| `util.atomic_write_json` uses `allow_nan=False` (`util.py:227` uses the json default) and raises `AtompipeError` naming the path. | NaN reaches `state.json` and the page advises `site build`, which cannot fix it (S-47). The P1 cache and index writers must emit strict JSON. | `V:` writing NaN raises naming the path. `C:` every existing writer stays green. |
+| `util.atomic_write_json` uses `allow_nan=False` (`util.py:227` uses the json default) and raises `NopekitError` naming the path. | NaN reaches `state.json` and the page advises `site build`, which cannot fix it (S-47). The P1 cache and index writers must emit strict JSON. | `V:` writing NaN raises naming the path. `C:` every existing writer stays green. |
 | `tests/test_meta.py::EveryInvariantHasItsTest` (R-7). | An implementer renames or skips an invariant class to go green. | Maps CLAUDE.md numbers to classes; an AST check refuses `skip*`/`expectedFailure` in them. |
 | `CLAUDE.md:19` reads "every test, must stay green"; the number is dropped. `CLAUDE.md:76`'s "14 stdlib-only modules" loses its count in the same change (this plan takes it to 21). | A typed count drifted from 32 to 92 unnoticed (S-84) — a duplicated constant is a misalignment with a date on it (rule 2). | — |
 
@@ -81,7 +81,7 @@ What changed for the human, against today (§10):
   XML 1.0 with visible `\xNN` text, because ElementTree alone emits ill-formed XML for
   `\x1b`, `\x00`, `\x0c` and lone surrogates (slice probe). The target file is unlinked
   when the sweep starts and written atomically at the end, so a crashed sweep never leaves
-  an older all-green file for CI to read. Default path `.atompipe/out/junit.xml`
+  an older all-green file for CI to read. Default path `.nopekit/out/junit.xml`
   (already ignored). `check --junit [PATH]` and `gate selftest --junit [PATH]`.
 
   ```xml
@@ -106,13 +106,13 @@ What changed for the human, against today (§10):
   ```
 
 - **The project marker.** `store.find_root` treats a directory as a project only if it
-  holds `.atompipe/project.json` (or a legacy `.atompipe/ledger.json`), and stops at the
-  first `.git` entry (S-64, brought forward from P3.1). `~/.atompipe/` is the user-pack
+  holds `.nopekit/project.json` (or a legacy `.nopekit/ledger.json`), and stops at the
+  first `.git` entry (S-64, brought forward from P3.1). `~/.nopekit/` is the user-pack
   home; as a marker it made every directory under `~` a project on a pack author's
   machine, so pack mode, the Stop hook's fast exit and `/start`'s `init` were unreachable.
 - **Pack-mode selftest.** When `store.find_root()` is None, `gate selftest` runs pack mode:
   `--pack NAME|DIR`, else every **bundled** pack (and, inside a project, its own
-  `.atompipe/packs/`); `--user-packs` adds `ATOMPIPE_PACK_PATH` and `~/.atompipe/packs`,
+  `.nopekit/packs/`); `--user-packs` adds `NOPEKIT_PACK_PATH` and `~/.nopekit/packs`,
   so the host machine cannot change what G3 tests (S-87). It exits 1 when zero controls
   ran unless `--allow-empty` (today it exits 0, `cli.py:1772-1774`). Nothing is persisted
   in pack mode (Q1.8).
@@ -148,16 +148,16 @@ What changed for the human, against today (§10):
 | JUnit | A skipped verdict with `passed=True` renders childless; the XML and exit code drift apart in the generous direction. | `V: test_junit`: a childless testcase iff the outcome is pass; a skip with `passed=True` is never childless; `claims.critical` failures + errors == `len(blocking())` (+1 at zero claims), and exit 1 iff that count > 0; the illegal-character fixture parses; a stale all-pass `junit.xml` plus a sweep that raises leaves no green file. |
 | Pack-mode selftest | Runs zero controls and reports success. | `V:` an empty pack path → exit 1. `V:` a copied pack with a planted `return True` → exit 1 naming the gate. `V:` a planted `return False` → "fails its own baseline". |
 | `demonstrate` in validate | `pack validate` becomes slow or tool-dependent. | Tier ≤ 1 by default; a missing-tool skip is reported, not failed; the CI step times it. |
-| CI | The bracket's failure disappears unnoticed (a regression that makes deflection pass). | `V: tests/test_ci_config.py` refuses `\|\| true` on any `atompipe` line. The failure-signature script exits non-zero on a bracket copy at thickness 8.0 — it detects a *missing* expected failure. |
-| Docs | Commands printed in docs drift again. | `V: tests/test_docs_commands.py` parses every `atompipe <words>` against `build_parser()` from an **explicit** file list (README, CLAUDE, CONTRIBUTING, METHOD, `docs/{EXTENSION_PROTOCOL,PACK_FORMAT,SITE_CONTRACT,SPINE_CONTRACT}.md`, `skills/*/SKILL.md`, `packs/*/PACK.md`, `packs/*/references/*.md`). It never globs `docs/*.md`, so the user's untracked draft cannot affect the suite. |
+| CI | The bracket's failure disappears unnoticed (a regression that makes deflection pass). | `V: tests/test_ci_config.py` refuses `\|\| true` on any `nopekit` line. The failure-signature script exits non-zero on a bracket copy at thickness 8.0 — it detects a *missing* expected failure. |
+| Docs | Commands printed in docs drift again. | `V: tests/test_docs_commands.py` parses every `nopekit <words>` against `build_parser()` from an **explicit** file list (README, CLAUDE, CONTRIBUTING, METHOD, `docs/{EXTENSION_PROTOCOL,PACK_FORMAT,SITE_CONTRACT,SPINE_CONTRACT}.md`, `skills/*/SKILL.md`, `packs/*/PACK.md`, `packs/*/references/*.md`). It never globs `docs/*.md`, so the user's untracked draft cannot affect the suite. |
 
 #### Checkpoint 1.2: per-gate content-addressed verdicts, admission's home, no run history, no global staleness
 
-New stdlib module **`src/atompipe/verdicts.py`** is the single home of `ABSENT`,
+New stdlib module **`src/nopekit/verdicts.py`** is the single home of `ABSENT`,
 `digest_value`, `ParamTrace`, `TracedContext`, the audit-hook recorder, `code_digest`,
 `spine_digest`, `rho`, entry write/read, `freshness`, and obs read/write.
 
-**`src/atompipe/vcs.py`** lands here too, not in P3.1, because this checkpoint is the first
+**`src/nopekit/vcs.py`** lands here too, not in P3.1, because this checkpoint is the first
 to call git (the control entry's `ls-files`, ages from an entry's commit time) and P2.5
 the next (the signer's identity, the export commit): it is the only git edge — argv form,
 the clean environment P3.1 spells out, a timeout, never raising — with `git_head`,
@@ -198,7 +198,7 @@ project's own; an AST test finds no git subprocess outside `vcs.py`.
   `cpython-312.pyc` files), so recording them would make an entry ABSENT-stale on every
   other machine. Any other path outside the project root and the pack dirs is named as an
   opaque channel, not digested. Digests are taken after the gate
-  returns, behind an untracked stat cache (`.atompipe/cache/digests.json`) keyed on
+  returns, behind an untracked stat cache (`.nopekit/cache/digests.json`) keyed on
   `(size, mtime_ns, ctime_ns, ino, dev)`, with a racy-clean rule: a file whose mtime is
   not strictly older than the cache write is re-hashed. (git compares against its index
   file's own mtime and has no fixed window. *Rejected:* size and mtime alone, which a
@@ -243,10 +243,10 @@ project's own; an AST test finds no git subprocess outside `vcs.py`.
   `detail`** (`packs/openmodelica/gates/modelica.py:1252`, `:1386`; D-29, S-34).
   `duration_s` already carries the time.
 
-**Cache entry** (tracked): `.atompipe/verdicts/<gate-id>/<rho16>-<out8>.json`, written with
+**Cache entry** (tracked): `.nopekit/verdicts/<gate-id>/<rho16>-<out8>.json`, written with
 `O_EXCL`, never rewritten. Only verdicts that **ran and passed or failed** are cached;
 skips and errors never are. They are still *remembered*: untracked
-`.atompipe/cache/last_outcomes.json` keeps each gate's latest non-cacheable outcome keyed
+`.nopekit/cache/last_outcomes.json` keeps each gate's latest non-cacheable outcome keyed
 by its ρ, so `status`, the report and the site show a crash as errored and a self-skip as
 skipped — never as never run (S-68 again) — and nothing serves it as evidence. A
 remembered outcome also **supersedes** a cached entry at the same ρ: when `check --force`
@@ -284,7 +284,7 @@ provenance, never as part of ρ (Q1.3): a Fresh entry whose instruments differ f
 machine's stays Fresh and carries a note — `recorded under trimesh <a>; here <b>` — in
 `freshness`, `status` and `doctor` (M11.5 records the decline).
 
-**Control entry** (tracked): `.atompipe/verdicts/<gate-id>/control-<rhoC16>-<out8>.json`,
+**Control entry** (tracked): `.nopekit/verdicts/<gate-id>/control-<rhoC16>-<out8>.json`,
 body `{"schema": 1, "kind": "control", "bad": "fail", "good": null, "admitted":
 "reject-only", "detail": "…", "measured": …, "limit": …, "digest": "…"}`. ρ_control
 hashes the gate's code digest; **every source file under the pack's (or project's)
@@ -305,12 +305,12 @@ whole-value dependency on the live config: every Config edit — the transcript'
 — would change all six ρ_control, re-run all six controls and write six tracked files.
 P2.3 reuses `known_good.py` as the good half.
 
-**Obs** (untracked, `.atompipe/obs/<gate-id>.json`): `{"runs": [{"entry": "<rho16>-<out8>",
+**Obs** (untracked, `.nopekit/obs/<gate-id>.json`): `{"runs": [{"entry": "<rho16>-<out8>",
 "when": "<edge clock>", "duration_s": 0.0004, "cpu_s": 0.0004}]}`, the last 20 executions.
 20 covers a working session; 5 was rejected as too few for a median; unbounded rebuilds
 the run history the brief removes. Written only at the CLI edge, which owns the clock.
 
-**`last_check.json`** (untracked, `.atompipe/cache/last_check.json`, overwritten by every
+**`last_check.json`** (untracked, `.nopekit/cache/last_check.json`, overwritten by every
 full `check`, and from P2/P3 by the signing and `/pick` write paths, which re-resolve
 statuses from the cache without running a gate): `{"when", "spine", "fingerprint": <sha
 over WATCHED sources>, "reads": {gate: {path: digest}}, "statuses": {claim: status},
@@ -319,7 +319,7 @@ the parameter view as the check saw it, filled from P1.3; `influence` from P3). 
 or runs project code in-process (D-20); `reads` is what lets them say which checks a
 change touched. WATCHED — the
 record dirs, the verdict cache, `model/**`, `gates/**`, `selftest/**`,
-`.atompipe/project.json`, `.atompipe/packs/**`, `objectives.json`, the union of the
+`.nopekit/project.json`, `.nopekit/packs/**`, `objectives.json`, the union of the
 `reads.files`/`reads.dirs` of the entries the last check used (a gate's `cad/part.stl`),
 and the spine and pack digests — is exported by one function in `verdicts.py`, which P3's
 hook imports.
@@ -355,7 +355,7 @@ that passed, `cli.py:997`) and add `{executed, cached}` beside `failed`, `skippe
 documented dry sweep (`cli.py:3260, 3413`), stay and now mean: write no cache, control or
 obs entry and no `last_check.json`, and migrate only in memory — nothing global is
 compared any more, so S-32's false STALE cannot recur. `V:` after a `--no-record` check,
-`.atompipe/verdicts/`, `.atompipe/obs/` and `last_check.json` are byte-identical.
+`.nopekit/verdicts/`, `.nopekit/obs/` and `last_check.json` are byte-identical.
 
 **Removed:** `store.record_run`, `load_runs`, `runs_dir`, `RUNS_NAME`, `_RUN_FILE_RE`, the
 `!runs/` gitignore line, `models.RunMeta`, `Ledger.last_run` (old files still load:
@@ -384,7 +384,7 @@ Today an availability skip erases it on every full sweep (`cli.py:587-590` vs
 | Read-only `ctx.params` | A bundled fixture or gate that mutates in place turns red. | R-4: no bundled gate writes it; cad-solid's fixtures and check scripts do, on contexts they build, and keep working because the wrapper is applied only at the gate call. `C:` the full pack suite, cad-solid's `selftest/check_*.py` scripts included, stays green. |
 | Obs and ages | Ages silently fall back to 0 when runs/ goes. | `V:` a verdict with no obs and no git renders `age_s: null`, never 0. |
 | Measured cost | A cache hit replays a duration as a new measurement. | `V: CostIsKept`: a gate that sleeps 50 ms has `duration_s >= 0.05`; a second, cached check leaves the entry and the obs byte-identical, and its JSON row says `cached: true`. |
-| `last_check.json` | It is written into the tracked tree, read as truth by `check`, or blind to an input ρ covers. | `V:` it lives under ignored `.atompipe/cache/`; `check` never reads it. `V:` editing `.atompipe/project.json`, a file under `.atompipe/packs/`, `objectives.json`, or a file a gate opened outside the record dirs each moves the WATCHED fingerprint. |
+| `last_check.json` | It is written into the tracked tree, read as truth by `check`, or blind to an input ρ covers. | `V:` it lives under ignored `.nopekit/cache/`; `check` never reads it. `V:` editing `.nopekit/project.json`, a file under `.nopekit/packs/`, `objectives.json`, or a file a gate opened outside the record dirs each moves the WATCHED fingerprint. |
 | Unsealed pack fixtures | A fixture reading host `ctx.params` defuses its control in some repositories (invariant 5). | P1.2 lands the **detector** (`doctor` warning) per §4.0.4 item 2, measured against a planted violator — a scratch pack fixture that layers its bad value over the host context's `ctx.params` — and zero hits on the 54 bundled fixtures. Then, in the same phase (R-4), `ControlsAreSealed` asserts that no fixture's trace reads a key of the host context's `ctx.params`: `V:` the planted violator turns it red and `pack validate` non-zero. |
 
 #### Checkpoint 1.3: records as files, generated index, migration
@@ -392,15 +392,15 @@ Today an availability skip erases it on every full sweep (`cli.py:587-590` vs
 **Layout** (relative to the project root):
 
 ```
-.atompipe/project.json     TRACKED  {"schema": 2, "name", "summary", "created", "revision",
+.nopekit/project.json     TRACKED  {"schema": 2, "name", "summary", "created", "revision",
                                       "model_entry", "packs": [], "spine_version"}
-.atompipe/.gitignore       TRACKED  deny-list: ledger.json, ledger.legacy.json, obs/, cache/,
+.nopekit/.gitignore       TRACKED  deny-list: ledger.json, ledger.legacy.json, obs/, cache/,
                                       out/, export/, runs/, *.tmp, *.lock   (never an allow-list:
-                                      .atompipe/packs/ is source and model.json is reviewed)
-.gitignore                 TRACKED  a marked atompipe block: __pycache__/, *.py[cod] (P2.5 adds /REPORT.md)
+                                      .nopekit/packs/ is source and model.json is reviewed)
+.gitignore                 TRACKED  a marked nopekit block: __pycache__/, *.py[cod] (P2.5 adds /REPORT.md)
 .gitattributes             TRACKED  * text=auto eol=lf; binary kinds -text (*.stl *.step *.glb *.png *.jpg)
-.atompipe/ledger.json      IGNORED  the generated index (below)
-.atompipe/verdicts/**      TRACKED  cache and control entries (1.2)
+.nopekit/ledger.json      IGNORED  the generated index (below)
+.nopekit/verdicts/**      TRACKED  cache and control entries (1.2)
 claims/<id>.json           TRACKED  one Claim; filename stem IS the id; no "gates" key
 params/<name>.json         TRACKED  SPARSE: only provenance the model cannot hold (source, grounded_by, tags)
 decisions/<slug>.json      TRACKED  one Decision
@@ -455,12 +455,12 @@ and `independence` anywhere.
 **Index** = `build_index(root)`: a pure function of the record files plus the computed
 digests of input bytes; no clock, model or registry. Contents: `{"generated": "<banner:
 an output of claims/ params/ decisions/ needs/ inputs/ results/ views/
-.atompipe/project.json; edit those, never this>", "schema": 2, "records_digest", "meta",
+.nopekit/project.json; edit those, never this>", "schema": 2, "records_digest", "meta",
 "claims", "params", "decisions", "needs", "inputs": [{…, "sha256": <computed>, "pinned",
 "drift", "exists"}], "results", "unregistered_inputs", "problems"}`. It never contains
 statuses, coverage or verdicts, which keeps the agreement test exact; statuses, counts and
 the parameter view (values with their rejections, `modelio.param_view`) sit in its named
-sibling `.atompipe/cache/last_check.json` (1.2), and the skill points the agent at the
+sibling `.nopekit/cache/last_check.json` (1.2), and the skill points the agent at the
 two: the whole project in two reads (D-06). It is rebuilt by every command and, from P3.4,
 by the Stop and PostToolUse(Edit|Write|NotebookEdit) hooks whenever a record file moved —
 on a migrated project only; on a legacy one they write nothing (invariant 8) — so the
@@ -506,7 +506,7 @@ refusal (`cli.py:1489`) stops naming `claim edit` and names the file edit instea
 | Situation | Behaviour | Test (`test_records.LegacyLedgerMigrates`) |
 |---|---|---|
 | Legacy `ledger.json` (no `generated` key), no `project.json`, no record dirs. | Migrate on the first `check`, `start` or shim, under the build lock; every other command, and every hook, runs the same pure function in memory, writes nothing, and says "will migrate on next check". A **pure function of the legacy file**: it never loads the model, so it can be resumed and tested. Record files are written first; **`project.json` is written last as the commit marker**; `ledger.json` is renamed `ledger.legacy.json`, never deleted. `claim.physical_result` moves to `results/<id>.json`. One notice prints the `git rm --cached` line; the spine does not run git. | Every rejected alternative, extraction, decision, need enrichment and physical result survives field for field. `gates`, `value`, verdicts and `last_run` appear in no record. |
-| `.atompipe/.gitignore` as `init` wrote it (`out/ *.tmp *.lock !ledger.json !runs/`, `store.py:86-102`). | Rewritten, idempotently, **before** `project.json` is written: the deny-list goes inside a marked `# atompipe:begin` … `# atompipe:end` block, and user lines outside it are kept. Otherwise `!ledger.json` re-adds the index on the next `git add -A` (undoing D-06), and `cache/` and `obs/` show as untracked (G5). The project-root `.gitignore` and `.gitattributes` blocks are ensured the same way. | `V:` after migration and `check`, `git status --porcelain` lists only record files and new cache entries; a second migration changes no byte; a user line outside the block survives. |
+| `.nopekit/.gitignore` as `init` wrote it (`out/ *.tmp *.lock !ledger.json !runs/`, `store.py:86-102`). | Rewritten, idempotently, **before** `project.json` is written: the deny-list goes inside a marked `# nopekit:begin` … `# nopekit:end` block, and user lines outside it are kept. Otherwise `!ledger.json` re-adds the index on the next `git add -A` (undoing D-06), and `cache/` and `obs/` show as untracked (G5). The project-root `.gitignore` and `.gitattributes` blocks are ensured the same way. | `V:` after migration and `check`, `git status --porcelain` lists only record files and new cache entries; a second migration changes no byte; a user line outside the block survives. |
 | Record dirs present, no `project.json`, legacy file present (a migration that crashed). | Re-derive; if byte-identical, complete it; otherwise refuse, naming both. | `V:` kill after half the files: the next load completes. `V:` a hand-edited half-migrated record → refusal naming it. |
 | `project.json` present, `ledger.json` of any shape, including one rewritten by an **older spine**. | `ledger.json` is output: overwritten, never read. | `V:` an old-shape ledger holding a forged PASS changes no status. |
 | Legacy verdicts. | **Dropped** (D-09). Claims read PENDING until the first check. | `V:` no migrated legacy verdict can make a claim PASS. |
@@ -517,11 +517,11 @@ refusal (`cli.py:1489`) stops naming `claim edit` and names the file edit instea
 
 - **Site staleness** uses the index's `records_digest`, not mtime (`cli.py:2451-2463`); the
   mtime rule is meaningless once the index is regenerated on load.
-- **The bracket**: commit `.atompipe/project.json`, its own root `.gitignore` and
+- **The bracket**: commit `.nopekit/project.json`, its own root `.gitignore` and
   `.gitattributes`, `claims/C1..C7.json`, the `PARAMS` list,
   and the six cache entries and six control entries at the post-commit spine digest
   (entries from earlier digests are outputs and are removed in the phase commit);
-  `git rm --cached .atompipe/ledger.json`; delete `runs/0001-0005`; regenerate
+  `git rm --cached .nopekit/ledger.json`; delete `runs/0001-0005`; regenerate
   `docs/readiness.md`, which has drifted from its own ledger (S-41); leave thickness at 7.0.
 
 | Change | Failure it could introduce | Test |
@@ -533,7 +533,7 @@ refusal (`cli.py:1489`) stops naming `claim edit` and names the file edit instea
 | Param ownership | `why` imports user code and crashes; or shows a cached number. | `V:` edit the model's thickness to 8.0 with no check: `why thickness` prints 8.0 (today 7; S-39). A record carrying `value` is refused naming `model/bracket.py`. A model that raises gives "model does not load: …" and no number. `V:` a PARAMS rejection added after the first check appears (S-38). |
 | Input digests from bytes | Evidence edited in place never goes stale (S-22, S-45); the stat cache serves a stale digest. | `V:` rewrite an ingested file in place: the index digest changes, `drift` is true, and ρ changes. `V:` a poisoned stat cache inside the racy window is re-hashed. |
 | Derived grounding | A deleted extraction keeps its grounding (S-36). | `V:` delete the extraction; `why arm_length` and `inputs` agree. |
-| Removed commands | A string in the spine still tells users to run them. | `V: test_docs_commands` extended to string literals under `src/atompipe/**/*.py` and `site_template/**/*.js`. |
+| Removed commands | A string in the spine still tells users to run them. | `V: test_docs_commands` extended to string literals under `src/nopekit/**/*.py` and `site_template/**/*.js`. |
 
 **Refuter targets for Phase 1.** Make a PASS survive an input change (find any channel ρ
 does not see). Make the index disagree with the records. Get a skip or an error cached, or a cached PASS
@@ -558,7 +558,7 @@ S-64, S-65, S-68, S-69 (tags), S-76, S-83, S-84, S-87 (pack mode and tests), S-8
 | Q1.2 | What is ρ's spine component? | A version-independent canonical AST walk of the verdict-path modules, docstrings stripped, pinned across the CI matrix. | `ast.dump` (differs across Python versions). The version string (S-29). Whole-spine bytes (churn). |
 | Q1.3 | Are instrument versions (trimesh, numpy, omc) part of ρ? | No: provenance only, a decline recorded in M11.5; `freshness`, `status` and `doctor` note a mismatch, and `doctor` warns on an undeclared third-party import. A cached PASS is served only where `availability(spec)` holds (P1.2), so a missing instrument reads skipped, never PASS. Two outcomes for one ρ under different instruments warn and re-run locally, never error (P1.2). | In ρ: every machine would disagree on staleness, breaking claims.py's "same ledger, same answer on two machines". |
 | Q1.4 | Legacy verdicts? | Drop (D-09). | Import as unknown-ρ: a permanent special case in the generous direction. |
-| Q1.5 | How is migration triggered? | Automatically on the first `check`, `start` or shim; pure; resumable. Every other command and every hook migrates in memory only (invariant 8's carve-out). | An `atompipe migrate` command: one more record-mutating command. |
+| Q1.5 | How is migration triggered? | Automatically on the first `check`, `start` or shim; pure; resumable. Every other command and every hook migrates in memory only (invariant 8's carve-out). | An `nopekit migrate` command: one more record-mutating command. |
 | Q1.6 | Does `check` run a control on a cache miss? | Yes, within the tier ceiling; tier-0 controls cost about one gate run and stay cached. | Leaving it to `gate selftest` keeps demonstration optional; S-05 shows optional counts for nothing. |
 | Q1.7 | Where does `needs` sit relative to ρ (decided now so the cache shape holds)? | Not a ρ edge (D-04). | The prerequisite's ok-bit in ρ re-runs dependents whose inputs never moved. |
 | Q1.8 | Are pack-mode selftest results persisted? | No: stdout and `--junit` only, and every control runs with a temp `out_dir` (P1.1). | Writing into a pack directory — which today's fixtures and `test_packs` already do — breaks SEALED hygiene and wheel installs. |

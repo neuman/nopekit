@@ -17,7 +17,7 @@ Three things fix that and each one is asserted here:
    rather than discovered by experiment, which is how `bbox_mm before bbox` was
    found the first time.
 3. `packs.key_collisions` DIFFS the installed packs' vocabularies so the clash is
-   reported by `atompipe doctor` instead of by a verdict about the wrong object.
+   reported by `nopekit doctor` instead of by a verdict about the wrong object.
 
 Each check keeps a negative control alongside it, because a test that can only pass
 proves as little as a gate that can only pass: the collision detector is asserted
@@ -35,9 +35,9 @@ import shutil
 import tempfile
 import unittest
 
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe.models import Ledger, ProjectMeta
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit.models import Ledger, ProjectMeta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKS_DIR = os.path.join(REPO, "packs")
@@ -52,7 +52,7 @@ PART_BBOX = [190.0, 186.0, 77.0]
 def _ctx(params: dict) -> gates_mod.GateContext:
     return gates_mod.GateContext(
         root=REPO, ledger=Ledger(meta=ProjectMeta(name="scoped")), model=None,
-        params=params, out_dir=os.path.join(tempfile.gettempdir(), "atompipe-keys"),
+        params=params, out_dir=os.path.join(tempfile.gettempdir(), "nopekit-keys"),
         tier=0, log=lambda _m: None, extra={})
 
 
@@ -169,7 +169,7 @@ class TwoPacksOneProjection(unittest.TestCase):
 
 
 class CollisionsAreDetected(unittest.TestCase):
-    """`atompipe doctor`'s diff of the installed packs' key vocabularies."""
+    """`nopekit doctor`'s diff of the installed packs' key vocabularies."""
 
     def test_the_shipped_collision_is_reported_with_both_packs_named(self):
         found = {c.key: c for c in

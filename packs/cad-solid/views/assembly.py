@@ -3,7 +3,7 @@
 
 This is the view that turns a readiness report into a debugging tool. Every gate
 in this pack that knows *which part* has a problem attaches a
-:class:`~atompipe.models.Locator` naming a node in here, and the page isolates it.
+:class:`~nopekit.models.Locator` naming a node in here, and the page isolates it.
 So this module owes the rest of the pack three guarantees, and each one is a way
 the link breaks if it is dropped:
 
@@ -26,7 +26,7 @@ the link breaks if it is dropped:
   view that renders as a broken box, would make "this project has no CAD" look
   like "the CAD is broken".
 
-The explode manifest is DERIVED by :func:`atompipe.site.derive_explode` from the
+The explode manifest is DERIVED by :func:`nopekit.site.derive_explode` from the
 node bounding boxes, then merged with whatever ``site/explode.json`` says. The
 derivation exists to remove transcription, not to replace judgment: it measures
 twenty bounding boxes for you and it does not know that the lid comes off before
@@ -39,9 +39,9 @@ import os
 import sys
 from typing import Any
 
-from atompipe.models import View, ViewKind
-from atompipe.site import ViewContext, derive_explode, viewgen
-from atompipe.util import AtompipeError
+from nopekit.models import View, ViewKind
+from nopekit.site import ViewContext, derive_explode, viewgen
+from nopekit.util import NopekitError
 
 # The naming interface, shared with gates/solid.py. See the import comment there.
 _PACK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -175,7 +175,7 @@ def assembly(ctx: ViewContext) -> View | None:
     overrides, override_problem = _overrides(ctx.root or "", ctx.log)
     try:
         explode = derive_explode(bounds, overrides=overrides)
-    except AtompipeError as exc:
+    except NopekitError as exc:
         # Same reasoning as `_overrides`: an override that will not validate costs
         # the override, never the model.
         override_problem = f"{EXPLODE_OVERRIDES}: {exc}; using the derived explode"

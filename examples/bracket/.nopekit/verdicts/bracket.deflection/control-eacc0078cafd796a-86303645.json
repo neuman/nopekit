@@ -1,0 +1,172 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.deflection",
+  "rho": "eacc0078cafd796ac63f0eb8d6d8f7f099b08d0eef9a7364ce7cee3935bc9f9f",
+  "static": "b8bb210cf8763420314ac1839a88722835982ad1ccab8fae9b73cf3f6397f7c1",
+  "static_parts": {
+    "spine": "f396daf6190537c7f68ede528849d58110bd85d8d545c39e61ecc2efda945530",
+    "code": {
+      "digest": "5520d0044d67360dabf62772863955b4b7678e7f76c1f62f99bb01ef09e13c9e",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "c37edcc33de9c8b1839bab5ed8b6c1377619163c9bcfbb1823d9188484bc11f1",
+      "files": {
+        "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+        "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:quarter_thickness",
+      "expect": "fail",
+      "note": "same bracket at 1/4 thickness; deflection goes as 1/t^3 so this is ~64x worse and nothing else about the part changes",
+      "good": "",
+      "mutation": true
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "c04607054719152157838eb2f982f420bbc7e5975e8b133b530b30dad215ba3b",
+    "files": {
+      "model/bracket.py": "ce20d2c788710944d2ed4b791a1b82023cac47f5883df30c783f1da06c5a0b9b",
+      "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+      "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "config",
+          "load_n"
+        ],
+        "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+        15.0
+      ],
+      [
+        [
+          "deflection"
+        ],
+        "3d654dca2bf8e623024ab053b3736a76d0b08ccb25bfec37922cf05ebc30cdfe",
+        30.0
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {
+      "acceptance-shape:C1": "fa6d23299a94bf0f6aeb3ced3ba3a235f906ce1dbec50ccd8d42f1cf06ad1a44",
+      "acceptance:C1": "a030648a0b8f92e0768e835b24dece95031fc3b2787905507eae34a39285e091"
+    },
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "bad_extra": [],
+  "good": {
+    "outcome": "pass",
+    "reads": {
+      "params": [
+        [
+          [
+            "config",
+            "load_n"
+          ],
+          "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+          15.0
+        ],
+        [
+          [
+            "deflection"
+          ],
+          "f660c7bba91c35478665814108fbc8bc89007dd4b147a5091ff4bccfb4757665",
+          0.46875
+        ]
+      ],
+      "files": {},
+      "dirs": {},
+      "ledger": {
+        "acceptance-shape:C1": "fa6d23299a94bf0f6aeb3ced3ba3a235f906ce1dbec50ccd8d42f1cf06ad1a44",
+        "acceptance:C1": "a030648a0b8f92e0768e835b24dece95031fc3b2787905507eae34a39285e091"
+      },
+      "host": [],
+      "opaque": []
+    },
+    "extra": [],
+    "measured": 0.4688,
+    "limit": 0.5,
+    "units": "mm",
+    "detail": "0.469 mm at 15 N (limit 0.5 mm)",
+    "goalpost": [
+      {
+        "key": "C1",
+        "measured": 0.4688,
+        "units": "mm",
+        "runs": [
+          {
+            "end": "limit",
+            "limit": 0.05,
+            "outcome": "fail",
+            "measured": 0.4688,
+            "units": "mm"
+          },
+          {
+            "end": "limit",
+            "limit": 0.25,
+            "outcome": "fail",
+            "measured": 0.4688,
+            "units": "mm"
+          },
+          {
+            "end": "limit",
+            "limit": 1.0,
+            "outcome": "pass",
+            "measured": 0.4688,
+            "units": "mm"
+          },
+          {
+            "end": "limit",
+            "limit": 5.0,
+            "outcome": "pass",
+            "measured": 0.4688,
+            "units": "mm"
+          }
+        ]
+      }
+    ]
+  },
+  "mutation": {
+    "runs": 38,
+    "boundary": "",
+    "results": [
+      {
+        "key": [
+          "deflection"
+        ],
+        "before": 0.46875,
+        "after": 0.575,
+        "outcome": "fail",
+        "measured": 0.575,
+        "limit": 0.5
+      }
+    ],
+    "inconclusive": [],
+    "not_mutated": [
+      {
+        "key": [
+          "config",
+          "load_n"
+        ],
+        "why": "never-lands"
+      }
+    ]
+  },
+  "admitted": "paired",
+  "detail": "correctly failed on selftest/bad_configs.py:quarter_thickness (same bracket at 1/4 thickness; deflection goes as 1/t^3 so this is ~64x worse and nothing else about the part changes): 30.000 mm at 15 N (limit 0.5 mm)",
+  "measured": 30.0,
+  "limit": 0.5,
+  "units": "mm",
+  "digest": "eac65d0028dffdf1ac5bd90699e59ffe2b1c869bdba1b7f7a598fc6792206606"
+}

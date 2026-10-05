@@ -60,12 +60,12 @@ import _env
 import _projects
 import test_louder
 import test_status_table
-from atompipe import claims as claims_mod
-from atompipe import cli as cli_mod
-from atompipe import models as models_mod
-from atompipe import report as report_mod
-from atompipe import site as site_mod
-from atompipe.models import Claim, ClaimKind, ClaimStatus, Ledger
+from nopekit import claims as claims_mod
+from nopekit import cli as cli_mod
+from nopekit import models as models_mod
+from nopekit import report as report_mod
+from nopekit import site as site_mod
+from nopekit.models import Claim, ClaimKind, ClaimStatus, Ledger
 
 GLOSSARY = os.path.join(_env.REPO, "docs", "GLOSSARY.md")
 
@@ -148,7 +148,7 @@ def _glossary() -> str:
 
 
 def never_say_hits(line: str, banned: set[str], masks: list[str]) -> list[str]:
-    """The Never-says `line` says, in prose: code spans (`atompipe gap
+    """The Never-says `line` says, in prose: code spans (`nopekit gap
     --propose`) are stripped first, as GLOSSARY §7's scanner strips code and
     command lines, and every glossary term is masked."""
     if any(line.startswith(allowed) for allowed in ALLOWLIST):
@@ -259,7 +259,7 @@ _WORLDS: dict[str, World] = {}
 def _run_world(name: str, root: str, runs: tuple, files: tuple = ()) -> World:
     home = os.path.join(os.path.dirname(root), "home")
     os.makedirs(home, exist_ok=True)
-    out = {key: _env.atompipe(argv, cwd=root, home=home) for key, argv in runs}
+    out = {key: _env.nopekit(argv, cwd=root, home=home) for key, argv in runs}
     read = {}
     for key, rel in files:
         path = os.path.join(root, *rel.split("/"))
@@ -293,13 +293,13 @@ _BRACKET_RUNS = (("check", ["check", "--junit"]), ("status", ["status"]),
                  # P2.5b (critique 11 of its design): the milestone list, the
                  # boundary's dry run and the milestone's report are channels too.
                  *EXPORT_RUNS)
-_FILES = (("junit", ".atompipe/out/junit.xml"), ("state", "site/data/state.json"))
+_FILES = (("junit", ".nopekit/out/junit.xml"), ("state", "site/data/state.json"))
 
 
 def bracket_world() -> World:
     """The bracket as a clone holds it: committed cache, today's records."""
     if "bracket" not in _WORLDS:
-        root = _projects.bracket_copy(os.path.join(_tmp("atompipe-vocab-"), "bracket"),
+        root = _projects.bracket_copy(os.path.join(_tmp("nopekit-vocab-"), "bracket"),
                                       migrated=True)
         _run_world("bracket", root, _BRACKET_RUNS, _FILES)
     return _WORLDS["bracket"]
@@ -308,9 +308,9 @@ def bracket_world() -> World:
 def empty_world() -> World:
     """A project with no claims at all."""
     if "empty" not in _WORLDS:
-        root = os.path.join(_tmp("atompipe-vocab-empty-"), "empty")
+        root = os.path.join(_tmp("nopekit-vocab-empty-"), "empty")
         os.makedirs(root)
-        _env.atompipe(["init", "--name", "empty"], cwd=root)
+        _env.nopekit(["init", "--name", "empty"], cwd=root)
         _run_world("empty", root, (("status", ["status"]), ("report", ["report"]),
                                    ("check", ["check"])))
     return _WORLDS["empty"]
@@ -319,9 +319,9 @@ def empty_world() -> World:
 def unevaluated_world() -> World:
     """The bracket with no verdict at all: never evaluated."""
     if "unevaluated" not in _WORLDS:
-        root = _projects.bracket_copy(os.path.join(_tmp("atompipe-vocab-none-"), "bracket"),
+        root = _projects.bracket_copy(os.path.join(_tmp("nopekit-vocab-none-"), "bracket"),
                                       migrated=True)
-        shutil.rmtree(os.path.join(root, ".atompipe", "verdicts"))
+        shutil.rmtree(os.path.join(root, ".nopekit", "verdicts"))
         _run_world("unevaluated", root, (("status", ["status"]), ("report", ["report"])))
     return _WORLDS["unevaluated"]
 
@@ -480,7 +480,7 @@ def _refused() -> World:
 def _invalidated() -> World:
     """Every verdict marked invalidated (the all-gates alias), in process."""
     registry = test_louder._probe_registry()
-    root = _tmp("atompipe-vocab-stale-")
+    root = _tmp("nopekit-vocab-stale-")
     ledger = test_louder._probe_ledger(registry, root)
     return World(root, {"status": _Proc(report_mod.render_terminal(ledger, registry,
                                                                    stale=True)),
@@ -651,7 +651,7 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
 
     def _ledger(self):
         registry = test_louder._probe_registry()
-        root = tempfile.mkdtemp(prefix="atompipe-vocab-route-")
+        root = tempfile.mkdtemp(prefix="nopekit-vocab-route-")
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         return test_louder._probe_ledger(registry, root), registry
 
@@ -683,7 +683,7 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
 
     def test_the_commands_route_through_human(self):
         root = _projects.bracket_copy(os.path.join(tempfile.mkdtemp(
-            prefix="atompipe-vocab-cli-"), "bracket"), migrated=True)
+            prefix="nopekit-vocab-cli-"), "bracket"), migrated=True)
         self.addCleanup(shutil.rmtree, os.path.dirname(root), ignore_errors=True)
         with mock.patch.object(report_mod, "HUMAN", sentinel_human()):
             outputs = {key: _captured([*argv, "-C", root]) for key, argv in (
@@ -718,7 +718,7 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
         # already reads C1 Failing, C5 Pending build, C6 and C7 Gap, and the
         # world runs fourteen commands (P2.5b's export among them, ~4.5 s) for
         # one in-process question — the fast tier's pay-back for P2.5b.
-        root = _projects.bracket_copy(os.path.join(_tmp("atompipe-vocab-status-"), "bracket"),
+        root = _projects.bracket_copy(os.path.join(_tmp("nopekit-vocab-status-"), "bracket"),
                                       migrated=True)
 
         def run(*argv):
@@ -745,8 +745,8 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
     def test_why_says_unrun_in_the_tables_word(self):
         """`why`'s line for an unrun evaluator takes its word from `HUMAN` (review
         of P2.1: it was a literal in `decisions`, outside the one table)."""
-        from atompipe import decisions as decisions_mod
-        from atompipe.models import Claim, Ledger
+        from nopekit import decisions as decisions_mod
+        from nopekit.models import Claim, Ledger
         ledger = Ledger(claims=[Claim(id="C1", statement="s", gates=["g.never"])])
         with mock.patch.object(report_mod, "HUMAN", sentinel_human()):
             said = decisions_mod.why(ledger, "C1")
@@ -757,7 +757,7 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
         the root's kind from `HUMAN`, never from the spine's `skip_reason`
         (critique of the P2.2 design: "(errored)", "(skipped)" and "not
         registered" were spelled in `gates`, where a sentinel never reached)."""
-        from atompipe.models import Claim, Ledger, Verdict
+        from nopekit.models import Claim, Ledger, Verdict
         claim = Claim(id="C1", statement="s", tags=["d"])
         for kind, root, lead in (("failed", "t.p", "zzskipped"),
                                  ("errored", "t.p", "zzerrored"),
@@ -829,7 +829,7 @@ class StatusWordsComeFromOneTable(unittest.TestCase):
         the page prints a claim's reason only when its cause is not `checked`.
         What slipped through (review of P2.1): every Checked row got a lone `—`
         paragraph, because the dash is truthy."""
-        from atompipe.models import Claim, Ledger, Verdict
+        from nopekit.models import Claim, Ledger, Verdict
         claim = Claim(id="C1", statement="s", gates=["g.1"])
         found = claims_mod.compose(claim, [Verdict(gate="g.1", claims=["C1"], passed=True)])
         view = report_mod.status_view(found, Ledger(claims=[claim]), claim)
@@ -906,7 +906,7 @@ def js_literals(source: str) -> list[tuple[str, str]]:
 #: page script holds. A lone lower-case token compared with `===`/`!==` or given
 #: as a `class:` is an identifier (a status value, a class name) and is exempt;
 #: anything else is read — a ternary's arm too; a backticked span is a command
-#: (`atompipe gap --propose`).
+#: (`nopekit gap --propose`).
 _IDENTIFIER = re.compile(r"[a-z][a-z0-9_-]*")
 _IDENTIFIER_SLOT = re.compile(r"(?:[!=]==?|class:)\s*$")
 _PAGE_WORDS = ("proven", "checked", "failing", "stale", "assumed", "pending build", "gap",
@@ -951,11 +951,11 @@ def _variant(name: str, *, drop: tuple = (), not_required: tuple = (),
         return _WORLDS[name]
     base = _WORLDS.get("@8.0")
     if base is None:
-        root = _projects.bracket_copy(os.path.join(_tmp("atompipe-vocab-8-"), "bracket"),
+        root = _projects.bracket_copy(os.path.join(_tmp("nopekit-vocab-8-"), "bracket"),
                                       thickness=8.0, migrated=True)
-        _env.atompipe(["check"], cwd=root)
+        _env.nopekit(["check"], cwd=root)
         base = _WORLDS["@8.0"] = World(root, {}, {})
-    tmp = _tmp(f"atompipe-vocab-{name}-")
+    tmp = _tmp(f"nopekit-vocab-{name}-")
     root = os.path.join(tmp, "bracket")
     shutil.copytree(base.root, root)
     for cid in drop:
@@ -980,7 +980,7 @@ def _variant(name: str, *, drop: tuple = (), not_required: tuple = (),
         os.makedirs(os.path.join(root, "photos"), exist_ok=True)
         with open(os.path.join(root, "photos", "c5.jpg"), "wb") as fh:
             fh.write(b"a photo")
-        proc = _env.atompipe(["claim", "physical", "C5", "--pass", "--evidence",
+        proc = _env.nopekit(["claim", "physical", "C5", "--pass", "--evidence",
                               "photos/c5.jpg"], cwd=root, identity=True)
         if proc.returncode != 0:
             raise AssertionError(f"claim physical: {proc.stderr}")
@@ -1040,7 +1040,7 @@ class ReadyIsThePredicate(unittest.TestCase):
     asked for that phrase, which said *checked* of a claim that is not)."""
 
     def _composed(self, *claims_and_verdicts):
-        from atompipe.models import Claim, ClaimKind, Ledger, PhysicalResult, Verdict
+        from nopekit.models import Claim, ClaimKind, Ledger, PhysicalResult, Verdict
         claims, verdicts = [], []
         for cid, kind, required, result in claims_and_verdicts:
             gates = [f"g.{cid}"] if kind == "measurable" else []
@@ -1165,8 +1165,8 @@ class ReadyMeansEveryRequiredClaimChecked(unittest.TestCase):
         self.assertIn("C5 has a pass that does not count", status)
         self.assertTrue(any(ln.startswith("[build] C5 ") and ln.endswith(
             "a pass recorded from a pipe or a script does not count — the person who tested "
-            "it records it in their own shell (recorded by atompipe tests "
-            "<tests@atompipe.invalid>)")
+            "it records it in their own shell (recorded by nopekit tests "
+            "<tests@nopekit.invalid>)")
             for ln in status.splitlines()), status)
         self.assertRegex(status, r"(?m)^\d+ claims · \d+ checked · 1 pending build$")
         world = _variant("typed-edited", drop=("C6", "C7"), physical_pass=True,
@@ -1264,8 +1264,8 @@ def qualification_sentinel() -> Any:
 
 #: An always-False evaluator in a bracket copy, with a claim of its own.
 _NEVER = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="bracket.never", claims=["never-probe"],
@@ -1277,7 +1277,7 @@ def never(ctx):
 
 
 def _never_bracket() -> str:
-    root = _projects.bracket_copy(os.path.join(_tmp("atompipe-vocab-q-"), "bracket"),
+    root = _projects.bracket_copy(os.path.join(_tmp("nopekit-vocab-q-"), "bracket"),
                                   migrated=True)
     with open(os.path.join(root, "gates", "zz_never.py"), "w", encoding="utf-8") as fh:
         fh.write(_NEVER)
@@ -1296,7 +1296,7 @@ _LOGGER_PLANT = ("def deflection(ctx: GateContext) -> Verdict:\n",
 def _logger_pack() -> str:
     """The planted copy, under a pack name of its own (one process loads a
     pack name from one place)."""
-    base = _tmp("atompipe-vocab-pack-")
+    base = _tmp("nopekit-vocab-pack-")
     name = "beamvocab"
     pack_dir = os.path.join(base, name)
     shutil.copytree(os.path.join(_projects.PACKS, "beam-analytic"), pack_dir,
@@ -1339,7 +1339,7 @@ def _qualification_channels(root: str, pack: str = "") -> dict[str, list[str]]:
                       ("gate.selftest", ["gate", "selftest"]), ("report", ["report"]),
                       ("doctor", ["doctor"])):
         out[key] = _captured([*argv, "-C", root]).splitlines()
-    junit = os.path.join(_tmp("atompipe-vocab-junit-"), "check.xml")
+    junit = os.path.join(_tmp("nopekit-vocab-junit-"), "check.xml")
     _captured(["check", "--junit", junit, "-C", root])
     out["check.junit"] = _junit_file_messages(junit)
     if pack:
@@ -1458,7 +1458,7 @@ def _strings(value: Any) -> list[str]:
 
 
 #: The shipped doctrine an agent quotes (GLOSSARY §7): every word P2.4 put on it.
-_DOCTRINE = ("CLAUDE.md", "README.md", "METHOD.md", "skills/atompipe/SKILL.md",
+_DOCTRINE = ("CLAUDE.md", "README.md", "METHOD.md", "skills/nopekit/SKILL.md",
              "skills/pack-authoring/SKILL.md", "examples/bracket/README.md")
 
 
@@ -1476,8 +1476,8 @@ class TheAcceptanceConditionHasOneName(unittest.TestCase):
         for rel in _DOCTRINE:
             with open(os.path.join(_env.REPO, *rel.split("/")), encoding="utf-8") as fh:
                 out[rel] = fh.read().splitlines()
-        from atompipe import gates as gates_mod, verdicts as verdicts_mod
-        from atompipe.models import Acceptance, Claim, Comparator, Ledger, Verdict
+        from nopekit import gates as gates_mod, verdicts as verdicts_mod
+        from nopekit.models import Acceptance, Claim, Comparator, Ledger, Verdict
         claim = Claim(id="c1", statement="c1", acceptance=Acceptance(
             quantity="x", comparator=Comparator.LE, limit=0.5, units="mm"))
 
@@ -1521,8 +1521,8 @@ def _context_world():
     """A ledger with one claim of each P2.4 fact: Checked (c2, its value
     compared and inside), a pass outside its operating context (c1) and a pass
     whose value misses its claim's condition (c3)."""
-    from atompipe import gates as gates_mod
-    from atompipe.models import (Acceptance, Claim, Comparator, GateSpec, Ledger,
+    from nopekit import gates as gates_mod
+    from nopekit.models import (Acceptance, Claim, Comparator, GateSpec, Ledger,
                                  NegativeControl, Verdict)
     nc = NegativeControl(fixture="selftest/bad.py:make")
     specs = [GateSpec(id=gid, claims=[cid], settles="sag", negative_control=nc,
@@ -1626,7 +1626,7 @@ class PhysicalWordsComeFromOneTable(unittest.TestCase):
 
     def test_no_line_says_a_never_say(self):
         import _physical as P
-        from atompipe import store
+        from nopekit import store
         found = P.transcript()
         lines = P.human_lines(found)
         self.assertGreaterEqual(len(lines), 15)
@@ -1645,7 +1645,7 @@ class PhysicalWordsComeFromOneTable(unittest.TestCase):
                 self.assertTrue(any(p.startswith(f"{key}:") for p in found), found)
 
     def test_the_page_owns_no_contradict(self):
-        path = os.path.join(_env.REPO, "src", "atompipe", "site_template", "lib", "panels.js")
+        path = os.path.join(_env.REPO, "src", "nopekit", "site_template", "lib", "panels.js")
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
         self.assertNotIn("contradict each other", text)
@@ -1665,7 +1665,7 @@ class PhysicalWordsComeFromOneTable(unittest.TestCase):
     def test_the_words_move_with_the_table(self):
         """The physical sentences are the table's: a sentinel table reaches the
         rendered reasons."""
-        from atompipe.models import EntryStanding, PhysicalResult, Standing
+        from nopekit.models import EntryStanding, PhysicalResult, Standing
         result = PhysicalResult(passed=True, who="Sam <s@x>", channel="agent-session s1",
                                 article={"hash": "a" * 64})
         claim = Claim(id="C5", statement="s", kind=ClaimKind.PHYSICAL, physical_result=result,

@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """JUnit XML is never greener than the exit code.
 
-`atompipe check --junit` hands the run to a CI system, and a CI system renders the
+`nopekit check --junit` hands the run to a CI system, and a CI system renders the
 XML, not the exit code: a test tab reading "12 passed, 3 skipped" beside a job that
 exited 1 invites somebody to go and fix the "flaky" exit code. So every rule here
 pins the XML to the same judgement the exit code is made from, in the direction
@@ -35,10 +35,10 @@ import unittest
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 
-from atompipe import claims as claims_mod
-from atompipe import gates as gates_mod
-from atompipe import report as report_mod
-from atompipe.models import (
+from nopekit import claims as claims_mod
+from nopekit import gates as gates_mod
+from nopekit import report as report_mod
+from nopekit.models import (
     Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, GateSpec, Ledger,
     NegativeControl, PhysicalResult, ProjectMeta, Tier, Verdict,
 )
@@ -429,7 +429,7 @@ class JUnitNeverGreenerThanTheExitCode(unittest.TestCase):
                          ("failure", "unclaimed",
                           "no owner recorded — an assumption reads Assumed only once its owner "
                           "records it: name the owner in claims/C6.json (\"owner\"), and they "
-                          "run atompipe claim physical C6 assume in their own shell"))
+                          "run nopekit claim physical C6 assume in their own shell"))
         self.assertEqual(_result(cases["C1"]).get("message"),
                          "g.defl : 0.700 mm at 15 N (limit 0.5 mm)")
         self.assertEqual(_result(cases["C7"]).get("type"), "unclaimed")
@@ -590,9 +590,9 @@ class JUnitNeverGreenerThanTheExitCode(unittest.TestCase):
         self.assertGreater(_red(_suite(root, "controls")), 0)
 
     def test_the_default_path_is_ignored_scratch(self):
-        """`.atompipe/out/` is gate scratch, ignored by the project's own
-        `.atompipe/.gitignore` — so `check --junit` never dirties the tree."""
-        self.assertEqual(report_mod.JUNIT_DEFAULT, ".atompipe/out/junit.xml")
+        """`.nopekit/out/` is gate scratch, ignored by the project's own
+        `.nopekit/.gitignore` — so `check --junit` never dirties the tree."""
+        self.assertEqual(report_mod.JUNIT_DEFAULT, ".nopekit/out/junit.xml")
 
 
 if __name__ == "__main__":

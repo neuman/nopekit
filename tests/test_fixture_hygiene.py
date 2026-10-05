@@ -59,8 +59,8 @@ import unittest
 import _env
 import _projects
 import test_fresh_clone
-from atompipe import gates, modelio, packs, verdicts
-from atompipe.models import Acceptance, Claim, Ledger, Verdict
+from nopekit import gates, modelio, packs, verdicts
+from nopekit.models import Acceptance, Claim, Ledger, Verdict
 
 REPO = _env.REPO
 MODELICA = os.path.join(REPO, "packs", "openmodelica", "gates", "modelica.py")
@@ -309,7 +309,7 @@ class BracketControlsAreSealed(_BracketCase):
                                             f"{name} host: {verdict.detail or verdict.error}")
 
     def test_gate_selftest_fires_all_six(self):
-        proc = _env.atompipe(["gate", "selftest", "--json"], cwd=self.root)
+        proc = _env.nopekit(["gate", "selftest", "--json"], cwd=self.root)
         self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
         counts = json.loads(proc.stdout)["counts"]
         self.assertEqual((counts["controls"], counts["fired"], counts["broken"]), (6, 6, 0),
@@ -542,14 +542,14 @@ class ProjectsHelpers(_env.EnvCase):
         for fixture, rel in _projects.LEGACY_BRACKET_FILES:
             with open(os.path.join(_projects.LEGACY_BRACKET, *fixture.split("/")), "rb") as fh:
                 self.assertEqual(got.get(rel), fh.read(), rel)
-        written = sorted(rel for rel in got if rel in (".atompipe/project.json", ".gitignore",
+        written = sorted(rel for rel in got if rel in (".nopekit/project.json", ".gitignore",
                                                         ".gitattributes")
-                         or rel.startswith(("claims/", "params/", ".atompipe/verdicts/")))
+                         or rel.startswith(("claims/", "params/", ".nopekit/verdicts/")))
         self.assertEqual(written, [], "a legacy copy carries what the migration wrote")
-        self.assertIsNotNone(json.loads(got[".atompipe/ledger.json"]).get("claims"))
+        self.assertIsNotNone(json.loads(got[".nopekit/ledger.json"]).get("claims"))
         # A state file nobody decided about is refused, never silently copied or dropped.
         with self.assertRaises(AssertionError):
-            _projects._migrated_path(".atompipe/packs/beam-analytic/pack.json")
+            _projects._migrated_path(".nopekit/packs/beam-analytic/pack.json")
 
     def test_thickness_is_one_line(self):
         root = _projects.bracket_copy(os.path.join(self.tmp(), "b"), thickness=8.0)
@@ -569,7 +569,7 @@ class ProjectsHelpers(_env.EnvCase):
 
     def test_the_bracket_at_eight_passes_all_six(self):
         root = _projects.bracket_copy(os.path.join(self.tmp(), "b"), thickness=8.0)
-        proc = _env.atompipe(["check", "--tier", "3", "--json"], cwd=root)
+        proc = _env.nopekit(["check", "--tier", "3", "--json"], cwd=root)
         rows = {row["gate"]: row for row in json.loads(proc.stdout)["verdicts"]}
         self.assertEqual(sorted(rows), sorted(BRACKET_GATES), proc.stderr[-2000:])
         failing = sorted(g for g, row in rows.items() if not row["ok"])
@@ -588,7 +588,7 @@ class ProjectsHelpers(_env.EnvCase):
     def test_wrapped_beam_analytic_passes_under_this_spine(self):
         root = _projects.wrap_pack_baseline("beam-analytic", os.path.join(self.tmp(), "w"))
         specs = _projects.pack_gates("beam-analytic")
-        proc = _env.atompipe(["check", "--tier", "3", "--json"], cwd=root)
+        proc = _env.nopekit(["check", "--tier", "3", "--json"], cwd=root)
         self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
         result = json.loads(proc.stdout)
         rows = {row["gate"]: row for row in result["verdicts"]}
@@ -600,7 +600,7 @@ class ProjectsHelpers(_env.EnvCase):
     def test_wrapped_project_is_legacy_and_says_what_it_wraps(self):
         pack = "beam-analytic"
         root = _projects.wrap_pack_baseline(pack, os.path.join(self.tmp(), "w"))
-        dot = os.path.join(root, ".atompipe")
+        dot = os.path.join(root, ".nopekit")
         self.assertFalse(os.path.exists(os.path.join(dot, "project.json")),
                          "a legacy project has no records-layout marker")
         with open(os.path.join(dot, ".gitignore"), encoding="utf-8") as fh:
@@ -633,7 +633,7 @@ class ProjectsHelpers(_env.EnvCase):
     def test_copy_pack_shadows_the_bundled_pack(self):
         pack = "fdm-print"
         root = _projects.wrap_pack_baseline(pack, os.path.join(self.tmp(), "w"), copy_pack=True)
-        local = os.path.join(root, ".atompipe", "packs", pack)
+        local = os.path.join(root, ".nopekit", "packs", pack)
         self.assertEqual(packs.find(pack, root=root, include_env=False, include_user=False),
                          os.path.abspath(local))
         self.assertTrue(os.path.isfile(os.path.join(local, "gates", "mesh.py")))
@@ -741,10 +741,10 @@ def _write_lock(project: str) -> str:
     """A build lock in ``project`` as a live `check` on this host leaves it: the pid
     is this test's own process, alive for as long as the test runs, and to the
     copy's `check` — another process — a running build it must not steal from."""
-    path = os.path.join(project, ".atompipe", "build.lock")
+    path = os.path.join(project, ".nopekit", "build.lock")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump({"pid": os.getpid(), "host": socket.gethostname(),
-                   "when": "2026-10-03T00:00:00Z", "command": "-m atompipe check"}, fh)
+                   "when": "2026-10-03T00:00:00Z", "command": "-m nopekit check"}, fh)
     return path
 
 
@@ -755,9 +755,9 @@ class TheBracketIsCopiedAsAClone(_env.EnvCase):
 
     What slipped through (P2.3's gate): six tests made their bracket with
     ``shutil.copytree(examples/bracket)``, which carries the checkout's
-    untracked state too. The gate ran ``atompipe check`` in the bracket while
+    untracked state too. The gate ran ``nopekit check`` in the bracket while
     the suite ran; ``test_ci_config``'s "tracked design, unchanged" copied
-    ``.atompipe/build.lock`` mid-run, naming a pid alive on this host, and the
+    ``.nopekit/build.lock`` mid-run, naming a pid alive on this host, and the
     copy's own ``check`` refused to start and exited 2 — red, with no code
     change behind it, and green again on a quiet machine. The same copy carries
     a developer's cache, observations and a stale `out/`: a test whose answer
@@ -797,7 +797,7 @@ class TheBracketIsCopiedAsAClone(_env.EnvCase):
             'a = os.path.join(REPO, "examples", "bracket")\nb = a\nshutil.copytree(b, p)\n',
             'shutil.copytree(pathlib.Path(REPO) / "examples" / "bracket", p)\n',
             'shutil.copytree(REPO + "/examples/bracket", p)\n',
-            'shutil.copytree(os.path.join(BRACKET, ".atompipe"), p)\n',
+            'shutil.copytree(os.path.join(BRACKET, ".nopekit"), p)\n',
             "class C:\n    def setUp(self):\n        shutil.copytree(BRACKET, self.p)\n",
             "from distutils.dir_util import copy_tree\ncopy_tree(BRACKET, p)\n",
         ]
@@ -834,19 +834,19 @@ class TheBracketIsCopiedAsAClone(_env.EnvCase):
             proc = _env.git(argv, cwd=repo, identity=identity)
             self.assertEqual(proc.returncode, 0, proc.stderr)
         _write_lock(root)
-        entries = os.path.join(root, ".atompipe", "verdicts", "bracket.deflection")
+        entries = os.path.join(root, ".nopekit", "verdicts", "bracket.deflection")
         with open(os.path.join(entries, ".0123abcd-4567.json.q8w2e4.tmp"), "w",
                   encoding="utf-8") as fh:
             fh.write('{"half": ')
-        planted = {".atompipe/build.lock",
-                   ".atompipe/verdicts/bracket.deflection/.0123abcd-4567.json.q8w2e4.tmp"}
+        planted = {".nopekit/build.lock",
+                   ".nopekit/verdicts/bracket.deflection/.0123abcd-4567.json.q8w2e4.tmp"}
 
         # The violator: a copy of the whole tree, as the six tests made theirs.
         carried = os.path.join(self.tmp(), "carried")
         shutil.copytree(root, carried, ignore=shutil.ignore_patterns("__pycache__", "out"))
-        refused = _env.atompipe(["check"], cwd=carried)
+        refused = _env.nopekit(["check"], cwd=carried)
         self.assertEqual(refused.returncode, 2, refused.stdout + refused.stderr)
-        self.assertIn("another atompipe run", refused.stderr)
+        self.assertIn("another nopekit run", refused.stderr)
 
         # Both listings leave the run's state out, and a copy of either checks
         # as the bracket does: its one intended failure, exit 1.
@@ -862,7 +862,7 @@ class TheBracketIsCopiedAsAClone(_env.EnvCase):
                     target = os.path.join(dest, *name.split("/"))
                     os.makedirs(os.path.dirname(target), exist_ok=True)
                     shutil.copy2(os.path.join(root, *name.split("/")), target)
-                checked = _env.atompipe(["check"], cwd=dest)
+                checked = _env.nopekit(["check"], cwd=dest)
                 self.assertEqual(checked.returncode, 1, checked.stdout + checked.stderr)
 
 

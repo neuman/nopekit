@@ -10,7 +10,7 @@ then described "the reference set" and they drifted, exactly the way rule 1 says
 they will. The drift was already shipping in output nobody re-derived — the
 negative-control notes quoted "U_L 4.2 -> 12.6 in the reference set" while the
 baseline's U_L was 4.5, `references/collector-example.md` opened by promising
-every number in it came from this file, and nothing in ``src/atompipe`` had ever
+every number in it came from this file, and nothing in ``src/nopekit`` had ever
 read it. A scaffold that disagrees with the projection CI actually runs is worse
 than no scaffold, because it is the file a new author copies from.
 

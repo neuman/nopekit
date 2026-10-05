@@ -39,20 +39,20 @@ import shutil
 import tempfile
 import unittest
 
-from atompipe import gates as gates_mod
-from atompipe import report as report_mod
-from atompipe import site as site_mod
-from atompipe import store as store_mod
-from atompipe import verdicts as verdicts_mod
-from atompipe.models import (
+from nopekit import gates as gates_mod
+from nopekit import report as report_mod
+from nopekit import site as site_mod
+from nopekit import store as store_mod
+from nopekit import verdicts as verdicts_mod
+from nopekit.models import (
     Acceptance, Claim, ClaimStatus, Comparator, GateSpec, Ledger, NegativeControl,
     ProjectMeta, Tier, Verdict,
 )
 
 import _env
 
-SITE_PY = os.path.join(_env.SRC, "atompipe", "site.py")
-REPORT_PY = os.path.join(_env.SRC, "atompipe", "report.py")
+SITE_PY = os.path.join(_env.SRC, "nopekit", "site.py")
+REPORT_PY = os.path.join(_env.SRC, "nopekit", "report.py")
 
 #: An ISO-8601 timestamp to the minute — what a sweep time looks like wherever it
 #: is printed (`2026-09-11T23:31:00Z`).
@@ -197,7 +197,7 @@ class ReadersTakeStaleGates(unittest.TestCase):
                          "a passing claim is counted, never listed")
 
     def test_write_report_takes_stale_gates(self):
-        root = tempfile.mkdtemp(prefix="atompipe-readers-")
+        root = tempfile.mkdtemp(prefix="nopekit-readers-")
         self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         store_mod.init(root, ProjectMeta(name="readers", revision="v0.3"))
         path = report_mod.write_report(root, self.ledger, self.registry,

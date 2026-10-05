@@ -219,7 +219,7 @@ in a cooling line, and an elevation lift silently became a friction budget.
 ## Proving the gates can fail
 
 Every gate ships a fixture that changes one physically meaningful quantity, and
-`atompipe gate selftest` requires each gate to fail its own. The whole point is
+`nopekit gate selftest` requires each gate to fail its own. The whole point is
 that a gate you have not watched fail is a gate you have no reason to trust.
 
 All seven fixtures below are built from `selftest/baseline.json` — the

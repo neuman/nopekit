@@ -33,8 +33,8 @@ import os
 import sys
 from typing import Any
 
-from atompipe.models import View, ViewKind
-from atompipe.site import ViewContext, viewgen
+from nopekit.models import View, ViewKind
+from nopekit.site import ViewContext, viewgen
 
 # The gates' shared physics. Same import route as gates/thermal.py, so both hold
 # one module object rather than two copies of the same correlations.

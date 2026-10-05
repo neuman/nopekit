@@ -1,0 +1,106 @@
+{
+  "schema": 1,
+  "kind": "control",
+  "gate": "bracket.model_validity",
+  "rho": "39011d93fa46864a645f34d6ed4e67f8abf74cc3ba0a72aecc921a6739245a31",
+  "static": "e6035d6b0bdbfcff8dcf0b65265c66f14b0885e74111870b3cd65be93f879909",
+  "static_parts": {
+    "spine": "f396daf6190537c7f68ede528849d58110bd85d8d545c39e61ecc2efda945530",
+    "code": {
+      "digest": "8bbb6f55b6d82cbcb68e16993a8d2ba1eadc7d9e9e85da57b7c64b52d1a62fd0",
+      "files": [
+        "gates/structural.py"
+      ]
+    },
+    "selftest": {
+      "digest": "c37edcc33de9c8b1839bab5ed8b6c1377619163c9bcfbb1823d9188484bc11f1",
+      "files": {
+        "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+        "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+      }
+    },
+    "nc": {
+      "fixture": "selftest/bad_configs.py:stubby",
+      "expect": "fail",
+      "note": "a short, deep arm (L/h below 5) where shear deflection stops being negligible and the other structural gates quietly become optimistic",
+      "good": "",
+      "mutation": true
+    }
+  },
+  "host": "known-good",
+  "fixture": {
+    "digest": "c04607054719152157838eb2f982f420bbc7e5975e8b133b530b30dad215ba3b",
+    "files": {
+      "model/bracket.py": "ce20d2c788710944d2ed4b791a1b82023cac47f5883df30c783f1da06c5a0b9b",
+      "selftest/bad_configs.py": "c0168f7ba9b33ac84f5b26e972d05061d9a4e81acb5b4128f9b8679da121cf04",
+      "selftest/known_good.py": "56efa7d147df458690811bc3d27dab410f08b688063c309c54019cc1405a3617"
+    }
+  },
+  "reads": {
+    "params": [
+      [
+        [
+          "slenderness"
+        ],
+        "2034a44889655f1ed1c1c26dff15e350610e006a093e39a0ab8e421505845012",
+        2.5
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {},
+    "host": [],
+    "opaque": []
+  },
+  "bad": "fail",
+  "bad_extra": [],
+  "good": {
+    "outcome": "pass",
+    "reads": {
+      "params": [
+        [
+          [
+            "slenderness"
+          ],
+          "b380af89cce683a9058e38d1693d66eb3f78aa2d146b1cd90f094bf8394b43cf",
+          7.5
+        ]
+      ],
+      "files": {},
+      "dirs": {},
+      "ledger": {},
+      "host": [],
+      "opaque": []
+    },
+    "extra": [],
+    "measured": 7.5,
+    "limit": 5.0,
+    "units": "L/h",
+    "detail": "slenderness 7.5 (>= 5.0 for Euler-Bernoulli; below this the deflection gate under-predicts)",
+    "goalpost": []
+  },
+  "mutation": {
+    "runs": 23,
+    "boundary": "",
+    "results": [
+      {
+        "key": [
+          "slenderness"
+        ],
+        "before": 7.5,
+        "after": 4.25,
+        "outcome": "fail",
+        "measured": 4.25,
+        "limit": 5.0
+      }
+    ],
+    "inconclusive": [],
+    "not_mutated": []
+  },
+  "admitted": "paired",
+  "detail": "correctly failed on selftest/bad_configs.py:stubby (a short, deep arm (L/h below 5) where shear deflection stops being negligible and the other structural gates quietly become optimistic): slenderness 2.5 (>= 5.0 for Euler-Bernoulli; below this the deflection gate under-predicts)",
+  "measured": 2.5,
+  "limit": 5.0,
+  "units": "L/h",
+  "digest": "25ae25f0be42de62213843bd6cb83f6f65ff21679156b46d30b942d92f3a10c5"
+}

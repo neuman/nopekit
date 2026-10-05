@@ -12,7 +12,7 @@
   "single_source_limit": 0,
 
   "bom": {
-    "schema": "atompipe.bom/1",
+    "schema": "nopekit.bom/1",
     "product": "DIN-rail 4-channel analogue signal conditioner",
     "currency": "USD",
     "fx_rates": {"EUR": 1.08},

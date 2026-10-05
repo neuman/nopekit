@@ -32,11 +32,11 @@ import _env
 import _projects
 
 #: `report.JUNIT_DEFAULT`, spelled as a path under the project root.
-DEFAULT = os.path.join(".atompipe", "out", "junit.xml")
+DEFAULT = os.path.join(".nopekit", "out", "junit.xml")
 
 #: A JUnit file that says everything passed: what a previous, green run left.
 STALE_GREEN = ('<?xml version="1.0" encoding="UTF-8"?>\n'
-               '<testsuites name="atompipe check" tests="1" failures="0" errors="0" '
+               '<testsuites name="nopekit check" tests="1" failures="0" errors="0" '
                'skipped="0"><testsuite name="gates" tests="1" failures="0" errors="0" '
                'skipped="0"><testcase classname="project" name="bracket.deflection"/>'
                '</testsuite></testsuites>\n')
@@ -97,7 +97,7 @@ class JUnitAtTheEdge(_env.EnvCase):
                 (["gate", "selftest", "--junit", explicit], explicit)):
             with self.subTest(argv=argv):
                 self._stale(target)
-                proc = _env.atompipe(argv, cwd=self.project)
+                proc = _env.nopekit(argv, cwd=self.project)
                 self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
                 self.assertIn("planted: this model does not load", proc.stderr)
                 self.assertFalse(os.path.exists(target),
@@ -107,7 +107,7 @@ class JUnitAtTheEdge(_env.EnvCase):
         """The bracket fails on purpose (thickness 7.0). `check --junit --json`
         exits 1, and the XML's red `claims.critical` testcases are exactly the
         claims `--json` reports as blocking — the same judgement, printed twice."""
-        proc = _env.atompipe(["check", "--junit", "--json"], cwd=self.project)
+        proc = _env.nopekit(["check", "--junit", "--json"], cwd=self.project)
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
         data = json.loads(proc.stdout)
         blocking = [row["claim"] for row in data["blocking"]]
@@ -130,7 +130,7 @@ class JUnitAtTheEdge(_env.EnvCase):
         codes = {}
         for label, extra in (("text", []), ("json", ["--json"])):
             path = os.path.join(self.tmp(), f"{label}.xml")
-            proc = _env.atompipe(["check", "--no-record", "--junit", path, *extra],
+            proc = _env.nopekit(["check", "--no-record", "--junit", path, *extra],
                                  cwd=self.project)
             codes[label] = proc.returncode
             root = ET.parse(path).getroot()
@@ -141,7 +141,7 @@ class JUnitAtTheEdge(_env.EnvCase):
         """Project mode: one `controls` testcase per gate, every one fired, and no
         `baselines` suite — a project's gates are demonstrated against the host,
         which has no pack baseline to hold them to."""
-        proc = _env.atompipe(["gate", "selftest", "--junit"], cwd=self.project)
+        proc = _env.nopekit(["gate", "selftest", "--junit"], cwd=self.project)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         root = ET.parse(os.path.join(self.project, DEFAULT)).getroot()
         controls = _suite(root, "controls")

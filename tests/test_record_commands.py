@@ -9,8 +9,8 @@ What slipped through before this existed:
 * **Born legacy.** `init` wrote a `ledger.json` — the whole project, in the layout
   1.3 migrates away from — so every new project was a legacy one, auto-migrated by
   its first `check` with a `git rm --cached` notice about a file git never tracked.
-  Its next steps told the user to run `atompipe model --set-entry`, a flag A-8
-  removes: `.atompipe/project.json` owns the entry.
+  Its next steps told the user to run `nopekit model --set-entry`, a flag A-8
+  removes: `.nopekit/project.json` owns the entry.
 * **S-39.** `why` quoted the ledger's copy of a value — "thickness = 7" after the
   model said 8.0 — because `check` wrote the model into the records and `why` read
   the records. The model is read where a parameter is shown, and a model that does
@@ -31,7 +31,7 @@ What slipped through before this existed:
   file an agent reads for "what does the model say, and what lost" beside the
   statuses had nothing in it.
 
-Every command runs in a subprocess (`_env.atompipe`) on a temp copy of the bracket;
+Every command runs in a subprocess (`_env.nopekit`) on a temp copy of the bracket;
 nothing here writes into the tracked tree.
 
 Run:  PYTHONPATH=src python3 -m unittest tests.test_record_commands -v
@@ -47,12 +47,12 @@ import _env
 import _projects
 import _transcript as T
 import test_docs_commands as docs_check
-from atompipe import cli, modelio, store
-from atompipe.util import FileLock
+from nopekit import cli, modelio, store
+from nopekit.util import FileLock
 
 #: The generated index. Ignored by git and rebuilt by every command but `doctor`
 #: and `init`, so a read may rewrite it; it may never rewrite a record.
-INDEX = ".atompipe/ledger.json"
+INDEX = ".nopekit/ledger.json"
 
 #: A fixed stamp for the in-process migration that builds the migrated fixture:
 #: it appears only in the migration's notice, never in a record.
@@ -96,7 +96,7 @@ def _changed(before: tuple[dict, set], after: tuple[dict, set]) -> set[str]:
 
 
 def _run(project: str, *argv: str):
-    return _env.atompipe(list(argv), cwd=project)
+    return _env.nopekit(list(argv), cwd=project)
 
 
 def _json(proc) -> dict:
@@ -150,21 +150,21 @@ class InitIsBornMigrated(_env.EnvCase):
 
     def _init(self, *extra: str) -> tuple[str, object]:
         root = os.path.join(self.tmp(), "fresh")
-        proc = _env.atompipe(["init", "--name", "fresh", "-C", root, *extra], cwd=self.tmp())
+        proc = _env.nopekit(["init", "--name", "fresh", "-C", root, *extra], cwd=self.tmp())
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         return root, proc
 
     def test_init_then_status_prints_no_migration_notice(self):
         root, _proc = self._init()
-        dot = os.path.join(root, ".atompipe")
+        dot = os.path.join(root, ".nopekit")
         self.assertTrue(os.path.isfile(os.path.join(dot, "project.json")))
         self.assertFalse(os.path.exists(os.path.join(dot, "ledger.json")),
                          "init wrote a ledger.json: the project is born legacy")
         for kind in RECORD_DIRS:
             self.assertTrue(os.path.isdir(os.path.join(root, kind)), kind)
-        for rel in (".gitignore", ".gitattributes", ".atompipe/.gitignore"):
+        for rel in (".gitignore", ".gitattributes", ".nopekit/.gitignore"):
             with open(os.path.join(root, *rel.split("/")), encoding="utf-8") as fh:
-                self.assertIn("# atompipe:begin", fh.read(), rel)
+                self.assertIn("# nopekit:begin", fh.read(), rel)
 
         with open(os.path.join(dot, "project.json"), "rb") as fh:
             project = fh.read()
@@ -193,12 +193,12 @@ class InitIsBornMigrated(_env.EnvCase):
                 self.assertEqual(problems, [], text)
                 self.assertNotIn("--set-entry", text)
                 self.assertIn("model_entry", text)
-                self.assertIn(".atompipe/project.json", text)
+                self.assertIn(".nopekit/project.json", text)
 
     def test_json_names_the_project_file_not_a_ledger(self):
         root, proc = self._init("--json")
         data = _json(proc)
-        self.assertEqual(data["project"], ".atompipe/project.json")
+        self.assertEqual(data["project"], ".nopekit/project.json")
         self.assertTrue(os.path.isfile(os.path.join(root, *data["project"].split("/"))))
         self.assertNotIn("ledger", data, "init --json named a ledger it does not write")
 
@@ -222,7 +222,7 @@ class DoctorWritesNothing(_env.EnvCase):
 
     def test_on_a_legacy_project(self):
         project = _projects.bracket_copy(os.path.join(self.tmp(), "legacy"))
-        self.assertTrue(os.path.isdir(os.path.join(project, ".atompipe", "runs")))
+        self.assertTrue(os.path.isdir(os.path.join(project, ".nopekit", "runs")))
         text, data = self._doctor_twice(project)
         rows = _rows(data)
         self.assertEqual(rows["records"]["status"], "warn", rows["records"])
@@ -231,7 +231,7 @@ class DoctorWritesNothing(_env.EnvCase):
         self.assertEqual(rows["run-history"]["status"], "warn")
         self.assertIn("`runs/`", rows["run-history"]["detail"])
         self.assertIn("nothing reads it", rows["run-history"]["detail"])
-        self.assertFalse(os.path.exists(os.path.join(project, ".atompipe", "project.json")))
+        self.assertFalse(os.path.exists(os.path.join(project, ".nopekit", "project.json")))
 
     def test_on_a_migrated_project_whose_index_is_behind(self):
         """A record edited by hand after the last command: the index is behind, and
@@ -436,11 +436,11 @@ class GapIsReadOnly(_env.EnvCase):
                 proc = _run(project, *argv)
                 self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
                 self.assertEqual(_changed(before, _tree(project)), set(),
-                                 f"`atompipe {' '.join(argv)}` wrote into the project")
+                                 f"`nopekit {' '.join(argv)}` wrote into the project")
 
     def test_gap_takes_no_lock_and_writes_no_record(self):
         project = _migrated(os.path.join(self.tmp(), "migrated"))
-        lock = FileLock(os.path.join(project, ".atompipe", "build.lock")).acquire()
+        lock = FileLock(os.path.join(project, ".nopekit", "build.lock")).acquire()
         self.addCleanup(lock.release)
         before = _tree(project, skip=(INDEX,))
         proc = _run(project, "gap", "--json")
@@ -459,7 +459,7 @@ class GapIsReadOnly(_env.EnvCase):
 # model: no --set-entry, no record
 # --------------------------------------------------------------------------- #
 class ModelHasNoSetEntry(_env.EnvCase):
-    """A-8: `.atompipe/project.json` owns the model entry; `model` writes no record."""
+    """A-8: `.nopekit/project.json` owns the model entry; `model` writes no record."""
 
     def test_the_flag_is_gone(self):
         project = _migrated(os.path.join(self.tmp(), "bracket"))
@@ -471,12 +471,12 @@ class ModelHasNoSetEntry(_env.EnvCase):
 
     def test_no_entry_names_the_file_to_edit(self):
         root = os.path.join(self.tmp(), "fresh")
-        proc = _env.atompipe(["init", "-C", root], cwd=self.tmp())
+        proc = _env.nopekit(["init", "-C", root], cwd=self.tmp())
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         proc = _run(root, "model")
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
         self.assertIn('"model_entry"', proc.stderr)
-        self.assertIn(".atompipe/project.json", proc.stderr)
+        self.assertIn(".nopekit/project.json", proc.stderr)
         self.assertNotIn("--set-entry", proc.stderr)
 
     def test_model_writes_only_the_projection_it_names(self):
@@ -488,7 +488,7 @@ class ModelHasNoSetEntry(_env.EnvCase):
         proc = _run(project, "model", "--write")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertEqual(_changed(before, _tree(project, skip=(INDEX,))),
-                         {".atompipe/model.json"})
+                         {".nopekit/model.json"})
         legacy = _projects.bracket_copy(os.path.join(self.tmp(), "legacy"))
         before = _tree(legacy)
         proc = _run(legacy, "model")
@@ -518,7 +518,7 @@ class LastCheckHoldsTheParamView(_env.EnvCase):
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"))
         proc = _run(project, "check")
         self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
-        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+        with open(os.path.join(project, ".nopekit", "cache", "last_check.json"),
                   encoding="utf-8") as fh:
             params = json.load(fh)["params"]
         thickness = params["thickness"]

@@ -15,7 +15,7 @@ duplicate. Rule 5: the control has to fire everywhere, not here.
 
 Leading underscore on purpose — ``packs.load_gates`` treats ``gates/_*.py`` as
 a shared helper and does not import it as a gate module. Standard library only,
-and no ``atompipe`` imports, so a fixture can load it by path without touching
+and no ``nopekit`` imports, so a fixture can load it by path without touching
 the gate registry.
 
 Units: mm, mm/s, seconds unless the name says otherwise.

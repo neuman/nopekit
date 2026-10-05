@@ -39,8 +39,8 @@ import textwrap
 import unittest
 import uuid
 
-from atompipe import gates, modelio
-from atompipe.models import NegativeControl
+from nopekit import gates, modelio
+from nopekit.models import NegativeControl
 
 
 def _sha(data: bytes) -> str:
@@ -51,7 +51,7 @@ class _Sandbox(unittest.TestCase):
     """A project root under the temp dir, salted names, and a clean exit."""
 
     def setUp(self) -> None:
-        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-codeload-"))
+        self.tmp = os.path.realpath(tempfile.mkdtemp(prefix="nopekit-codeload-"))
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.root = os.path.join(self.tmp, "proj")
         os.makedirs(self.root)
@@ -243,7 +243,7 @@ class RecordingLoader(_Sandbox):
         helper = self.put("sub/fold.py", "LIMIT = 4\n")
         caller = """
             import os
-            from atompipe import modelio
+            from nopekit import modelio
             FOLD = modelio.load_path(os.path.join(os.path.dirname(__file__), "sub", "fold.py"))
             """
         self.put("mesh.py", caller)
@@ -274,7 +274,7 @@ class RecordingLoader(_Sandbox):
         self.assertEqual((first.WHO, second.WHO), ("a", "b"),
                          "a second copy ran the first copy's helper (packs:H4)")
         self.assertEqual(first.__name__,
-                         "atompipe_path_twin_" + _sha(os.fsencode(one))[:12])
+                         "nopekit_path_twin_" + _sha(os.fsencode(one))[:12])
         self.assertEqual(first.__file__, one)
         self.assertIs(modelio.load_path(one), first)
 
@@ -450,8 +450,8 @@ class RecordingLoader(_Sandbox):
     # -- gates: recorded, re-adopted ---------------------------------------- #
     def _gate_source(self, gate_id: str, verdict: str) -> str:
         return textwrap.dedent(f"""
-            from atompipe.gates import gate
-            from atompipe.models import NegativeControl
+            from nopekit.gates import gate
+            from nopekit.models import NegativeControl
 
             @gate(id="{gate_id}", negative_control=NegativeControl(
                 fixture="selftest/bad.py", note="planted"))
@@ -468,7 +468,7 @@ class RecordingLoader(_Sandbox):
         with gates.use_registry(first_registry):
             module = self.load("gatemod.py", name=name, registry=first_registry)
         self.assertEqual(first_registry.ids(), [gate_id])
-        self.assertEqual(module.__atompipe_gates__[0][0].id, gate_id)
+        self.assertEqual(module.__nopekit_gates__[0][0].id, gate_id)
 
         fresh = gates.Registry()
         with gates.use_registry(fresh):
@@ -533,7 +533,7 @@ class RecordingLoader(_Sandbox):
             def second():
                 from {alpha} import THING
                 import {missing}
-            import atompipe.models
+            import nopekit.models
             """)
         expected = tuple(sorted((alpha, beta, missing)))
         in_order = (self.closure(self.load("one.py", name=self.n("one_a"))).third_party,
@@ -720,24 +720,24 @@ class RecordingLoader(_Sandbox):
         self.assertIsNot(third, second, "a file that appeared did not re-execute the module")
         self.assertEqual(third.SPAN, 7.0)
 
-    def test_spine_extras_record_an_atompipe_site_import(self):
+    def test_spine_extras_record_an_nopekit_site_import(self):
         self.put("parts.py", """
-            from atompipe.gates import gate
-            from atompipe.models import Verdict
-            from atompipe.site import MOVER_SEPARATOR
+            from nopekit.gates import gate
+            from nopekit.models import Verdict
+            from nopekit.site import MOVER_SEPARATOR
 
             def later():
-                from atompipe import util
+                from nopekit import util
                 return util
             """)
         closure = self.closure(self.load("parts.py"))
-        self.assertEqual(closure.spine_extras, ("atompipe.site", "atompipe.util"))
+        self.assertEqual(closure.spine_extras, ("nopekit.site", "nopekit.util"))
         self.assertEqual(closure.third_party, ())
 
     def test_the_spine_set_is_the_verdicts_one(self):
         # modelio may not import verdicts (verdicts imports modelio), so it
         # mirrors the set; this is what keeps the mirror from drifting (rule 2).
-        from atompipe import verdicts
+        from nopekit import verdicts
         self.assertEqual(modelio._SPINE_MODULE_FILES, frozenset(verdicts.SPINE_MODULES))
 
     def test_the_data_read_rules_are_the_verdicts_ones(self):
@@ -745,7 +745,7 @@ class RecordingLoader(_Sandbox):
         # and what a read in a window is (`verdicts._audit`): a module that
         # reads through linecache, or asks importlib.metadata, must be judged
         # alike in a closure and on a trace.
-        from atompipe import verdicts
+        from nopekit import verdicts
         self.assertEqual(modelio._SOURCE_READER_MODULES | modelio._IMPORT_MODULES,
                          verdicts._SOURCE_READERS)
         self.assertEqual(modelio._IMPORT_CODE, verdicts._SOURCE_READER_CODE)
@@ -771,16 +771,16 @@ class RecordingLoader(_Sandbox):
         defined in the helper, so its ``__module__`` is the helper's, and
         ``code_closure(fn)`` read the helper's closure alone: the module that
         holds the limit — the one ``load_source_module`` stamped with
-        ``__atompipe_gates__`` — was in no closure. Editing the limit moved
+        ``__nopekit_gates__`` — was in no closure. Editing the limit moved
         neither the gate's code digest nor its control's static part, and a
         memo that module holds for the gate was never emptied before a run."""
-        from atompipe import verdicts
+        from nopekit import verdicts
         self.on_path(self.root)
         kit, table = self.n("kit"), self.n("limits")
         gate_id = f"codeload.factory_{self.salt}"
         kit_path = self.put(f"{kit}.py", """
-            from atompipe.gates import gate
-            from atompipe.models import NegativeControl, Verdict
+            from nopekit.gates import gate
+            from nopekit.models import NegativeControl, Verdict
 
             def limit_gate(gate_id, limit, measure):
                 def check(ctx):
@@ -809,7 +809,7 @@ class RecordingLoader(_Sandbox):
         # The scenario itself: the registry holds the helper's function, and
         # the module that registered it is another one.
         self.assertEqual(fn.__module__, kit, "the planted gate is not the factory's")
-        self.assertIs(module.__atompipe_gates__[0][1], fn)
+        self.assertIs(module.__nopekit_gates__[0][1], fn)
         closure = dict(self.closure(fn).files)
         self.assertIn(table_path, closure,
                       "the module that registered the gate, holding its limit, is in no "
@@ -841,12 +841,12 @@ class RecordingLoader(_Sandbox):
         factory in the pack's helper made walked the PROJECT's ``selftest/``,
         so an edit of the pack's fixture moved nothing, and its code was
         spelled by an absolute path rather than ``<pack:NAME>``."""
-        from atompipe import verdicts
+        from nopekit import verdicts
         pack = os.path.join(self.tmp, "packs", "kitpack")
         kit = self.n("packkit")
         self.put(f"{kit}.py", """
-            from atompipe.gates import gate
-            from atompipe.models import NegativeControl, Verdict
+            from nopekit.gates import gate
+            from nopekit.models import NegativeControl, Verdict
 
             def limit_gate(gate_id, limit):
                 def check(ctx):

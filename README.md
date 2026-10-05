@@ -1,9 +1,9 @@
-# atompipe
+# nopekit
 
 Take a sketch or a discussion to a physical thing you can actually build — with an
 honest account of what has been verified and what has not.
 
-atompipe is a Claude Code plugin and a small Python spine. It generalises a pipeline
+nopekit is a Claude Code plugin and a small Python spine. It generalises a pipeline
 that was proven on a real device before it was extracted — a physical product taken
 from a napkin sketch to manufacturable outputs, working firmware and a published
 readiness report, across dozens of revisions ([origins](docs/ORIGINS.md)).
@@ -27,33 +27,33 @@ rendered: what is proven, what is not, and why.
 **In Claude Code** — the repo is a plugin marketplace:
 
 ```
-/plugin marketplace add neuman/atompipe
-/plugin install atompipe
+/plugin marketplace add neuman/nopekit
+/plugin install nopekit
 ```
 
 **Anywhere else** — the spine is **standard library only**, so there is nothing to
 build and nothing to resolve:
 
 ```sh
-pip install git+https://github.com/neuman/atompipe
+pip install git+https://github.com/neuman/nopekit
 # or just:
-git clone https://github.com/neuman/atompipe && cd atompipe
-PYTHONPATH=src python3 -m atompipe --help
+git clone https://github.com/neuman/nopekit && cd nopekit
+PYTHONPATH=src python3 -m nopekit --help
 ```
 
 Try it immediately on the reference project, which has zero dependencies:
 
 ```sh
 cd examples/bracket
-atompipe status         # 7 claims · 3 checked · 1 failing · 2 gaps · 1 pending build
-atompipe check          # 6 gates; one fails on purpose — fix `thickness` 7.0 -> 8.0
-atompipe gate selftest  # every gate proves it can fail on known-bad input
-atompipe why thickness  # one parameter's full history, including what was rejected
+nopekit status         # 7 claims · 3 checked · 1 failing · 2 gaps · 1 pending build
+nopekit check          # 6 gates; one fails on purpose — fix `thickness` 7.0 -> 8.0
+nopekit gate selftest  # every gate proves it can fail on known-bad input
+nopekit why thickness  # one parameter's full history, including what was rejected
 ```
 
 It ships with its records and its verdicts, because those *are* sources of truth —
 not build artifacts: each claim is a file under `claims/`, and every gate's verdict
-is committed under `.atompipe/verdicts/`, so a fresh clone's first `check` is served
+is committed under `.nopekit/verdicts/`, so a fresh clone's first `check` is served
 from the cache and reads the same answer the author saw.
 
 Nothing heavy installs until a claim needs it and you have said yes. The two packs
@@ -62,7 +62,7 @@ rather than quietly passing.
 
 ## What using it looks like
 
-You describe a thing. atompipe asks for the evidence a design conversation never
+You describe a thing. nopekit asks for the evidence a design conversation never
 produces on its own — sketches, a photo of the closest product you'd buy instead,
 calipers on whatever it has to fit, datasheets for parts you have already chosen.
 Then it extracts the claims:
@@ -79,7 +79,7 @@ No evaluator here can settle C5. It stays **pending build**, visibly, until you 
 one and record a result. Everything else gets gated:
 
 ```
-$ atompipe check
+$ nopekit check
 [ok  ] displacement  : 1.94 kg at 60% draft vs 1.2 kg payload
 [ok  ] bed-fit       : 580 x 148 x 121 mm, splits into 2 parts
 [FAIL] print-overhang: 14 faces past 52 deg on the bow flare
@@ -92,7 +92,7 @@ analytic answer first, and only then proposes a solver — with the real cost sa
 loud.
 
 ```
-$ atompipe gap --propose
+$ nopekit gap --propose
 C2  directional stability at cruise        no gate
 
   (a) analytic  metacentric height from the waterplane. Runs now.
@@ -138,13 +138,13 @@ my-project/
   gates/   selftest/        the project's own gates, and the known-bad inputs they must fail on
   claims/C1.json            one claim per file: what must be true, and its limit
   params/  decisions/  needs/  inputs/  results/  views/     one record per file
-  .atompipe/project.json    the project: its name, its model entry, its live packs
-  .atompipe/verdicts/       every gate's verdict, keyed by the hash of what it read (tracked)
-  .atompipe/ledger.json     an index of every record, generated (ignored: never edit it)
-  .atompipe/cache/  obs/  out/     the last check's statuses, what runs cost, scratch (ignored)
+  .nopekit/project.json    the project: its name, its model entry, its live packs
+  .nopekit/verdicts/       every gate's verdict, keyed by the hash of what it read (tracked)
+  .nopekit/ledger.json     an index of every record, generated (ignored: never edit it)
+  .nopekit/cache/  obs/  out/     the last check's statuses, what runs cost, scratch (ignored)
 ```
 
-You — or the agent — edit a record the way you edit code, and `atompipe check`
+You — or the agent — edit a record the way you edit code, and `nopekit check`
 validates it: a misspelled key in `claims/C1.json` is refused with a suggestion, never
 silently dropped. A verdict goes stale when something its gate was seen to read
 changes — a parameter, a file, a claim, its own code — so an edit to one parameter
@@ -197,9 +197,9 @@ parts up in the viewer, at the pose where it happens, and you are looking at the
 problem instead of reading about it.
 
 ```sh
-atompipe site init      # scaffold site/ — index.html is yours, never regenerated
-atompipe site build     # run the viewgens, write site/data/ and site/assets/
-atompipe site serve     # python3 -m http.server. No build step, no npm, ever.
+nopekit site init      # scaffold site/ — index.html is yours, never regenerated
+nopekit site build     # run the viewgens, write site/data/ and site/assets/
+nopekit site serve     # python3 -m http.server. No build step, no npm, ever.
 ```
 
 `site build` never runs gates. It renders the verdicts already in the verdict
@@ -211,25 +211,25 @@ highlighting something and is not looks exactly like a gate that found nothing.
 Everything the page shows is in `site/data/state.json`, so `curl` answers "what is
 the status of this project?" with no browser. And 3D is one view kind of six: a
 project with no geometry still gets claims, verdicts, evidence, provenance and the
-readiness sentence. `atompipe site vendor` pulls three.js local for offline use.
+readiness sentence. `nopekit site vendor` pulls three.js local for offline use.
 
 See [`docs/SITE_CONTRACT.md`](docs/SITE_CONTRACT.md).
 
 ## Commands
 
 ```
-atompipe init                  atompipe status
-atompipe ask                   what evidence to request from the human
-atompipe ingest <files>        sketches, photos, CAD, datasheets, measurements
-atompipe extract <artifact>    what was read out of it, and what that grounds
-atompipe check [--tier N]      run gates; exits non-zero while anything critical blocks
-atompipe gap [--propose]       claims with no gate, and packs that might cover them
-atompipe why <param|claim>     one thing's full history, instead of the whole log
-atompipe gate selftest         every negative control; fails any gate that can't fail
-atompipe report [--write]      the readiness report (--write: REPORT.md, an ignored output)
-atompipe export <milestone>    the spend: re-runs what it requires, then builds out/<milestone>/
-atompipe site build|serve      the project site: the ledger, rendered and clickable
-atompipe doctor                run this first when something is confusing
+nopekit init                  nopekit status
+nopekit ask                   what evidence to request from the human
+nopekit ingest <files>        sketches, photos, CAD, datasheets, measurements
+nopekit extract <artifact>    what was read out of it, and what that grounds
+nopekit check [--tier N]      run gates; exits non-zero while anything critical blocks
+nopekit gap [--propose]       claims with no gate, and packs that might cover them
+nopekit why <param|claim>     one thing's full history, instead of the whole log
+nopekit gate selftest         every negative control; fails any gate that can't fail
+nopekit report [--write]      the readiness report (--write: REPORT.md, an ignored output)
+nopekit export <milestone>    the spend: re-runs what it requires, then builds out/<milestone>/
+nopekit site build|serve      the project site: the ledger, rendered and clickable
+nopekit doctor                run this first when something is confusing
 ```
 
 ## Status
@@ -237,11 +237,11 @@ atompipe doctor                run this first when something is confusing
 Early. The spine and the first extracted packs work; the interfaces will move. It is
 Apache 2.0 — use it, fork it, or take the ten rules and ignore the code.
 
-**Do not run an older atompipe on a project in this layout.** A version from before
-records became files reads `.atompipe/ledger.json` as the project's records, and may
+**Do not run an older nopekit on a project in this layout.** A version from before
+records became files reads `.nopekit/ledger.json` as the project's records, and may
 rewrite it; nothing a newer version writes can stop it, because the older one
-predates every guard. (A project whose `.atompipe/project.json` says a newer `schema`
-than your atompipe knows is refused — that check runs only from this layout forward.)
+predates every guard. (A project whose `.nopekit/project.json` says a newer `schema`
+than your nopekit knows is refused — that check runs only from this layout forward.)
 A project still in the old one-file layout migrates itself the first time `check`, or
 a command that writes a record, runs: its `ledger.json` becomes one file per record and
 is renamed `ledger.legacy.json`, never deleted.

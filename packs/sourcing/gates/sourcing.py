@@ -27,8 +27,8 @@ from __future__ import annotations
 import os
 import sys
 
-from atompipe.gates import gate, GateContext
-from atompipe.models import Locator, NegativeControl, Tier, Verdict
+from nopekit.gates import gate, GateContext
+from nopekit.models import Locator, NegativeControl, Tier, Verdict
 
 _PACK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PACK_DIR not in sys.path:                    # also true under load_gates; harmless

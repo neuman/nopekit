@@ -30,10 +30,10 @@ import xml.etree.ElementTree as ET
 
 import _env
 import _projects
-from atompipe import claims as claims_mod
-from atompipe import cli as cli_mod
-from atompipe import report as report_mod
-from atompipe.models import (
+from nopekit import claims as claims_mod
+from nopekit import cli as cli_mod
+from nopekit import report as report_mod
+from nopekit.models import (
     BLOCKING_STATUSES, Acceptance, Claim, ClaimKind, ClaimStatus, Comparator, GateSpec,
     Ledger, NegativeControl, ProjectMeta, Tier, Verdict,
 )
@@ -310,8 +310,8 @@ class BlockingTagIsStatusTag(_env.EnvCase):
         run starts with `status_tag` of the status `check --json` reports for that
         claim. A copy of the bracket, so the tracked example is never written."""
         project = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True)
-        text = _env.atompipe(["check", "--no-record"], cwd=project)
-        data = _env.atompipe(["check", "--json", "--no-record"], cwd=project)
+        text = _env.nopekit(["check", "--no-record"], cwd=project)
+        data = _env.nopekit(["check", "--json", "--no-record"], cwd=project)
         self.assertEqual((text.returncode, data.returncode), (1, 1),
                          text.stdout + text.stderr + data.stderr)
         blocking = json.loads(data.stdout)["blocking"]
@@ -350,7 +350,7 @@ def _facts_space(seed: int = 2303, n: int = 320) -> list:
     inconclusive mixes), whether nothing was walked and why, a walk that could
     not run, and a control-level blocker."""
     import random
-    from atompipe import verdicts as verdicts_mod
+    from nopekit import verdicts as verdicts_mod
     rng = random.Random(seed)
     out = []
     for _ in range(n):
@@ -393,7 +393,7 @@ class TheWalkWordsComeFromTheWalksConstants(unittest.TestCase):
 
     def test_the_row_moves_with_the_constants(self):
         from unittest import mock
-        from atompipe import gates as gates_mod
+        from nopekit import gates as gates_mod
         self.assertIn("from x0.001 to x1000 its value never landed 15% past its limit",
                       self._row())
         with mock.patch.object(gates_mod, "MUTATION_MARGIN", 0.2), \
@@ -411,7 +411,7 @@ class QualificationLineAgrees(unittest.TestCase):
     known-bad-shown evaluator, as P2.1's admitted reject-only did."""
 
     def _problems(self, line_of) -> list[str]:
-        from atompipe import verdicts as verdicts_mod
+        from nopekit import verdicts as verdicts_mod
         import test_mutation
         out = []
         for facts in _facts_space():

@@ -28,8 +28,8 @@ from __future__ import annotations
 
 import math
 
-from atompipe.gates import gate, GateContext
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate, GateContext
+from nopekit.models import NegativeControl, Tier, Verdict
 
 from gates._fluids_analytic import (
     F_TURBULENT_MAX, F_TURBULENT_MIN, G, REL_ROUGHNESS_MAX, RE_LAMINAR_MAX,

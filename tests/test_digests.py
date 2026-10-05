@@ -29,7 +29,7 @@ import time
 import unittest
 from unittest import mock
 
-from atompipe.util import FileDigests
+from nopekit.util import FileDigests
 
 import _env
 
@@ -66,7 +66,7 @@ def _touched(st: os.stat_result) -> int:
 class FileDigestsAreHonest(_env.EnvCase):
     def setUp(self):
         self.dir = self.tmp()
-        self.cache = os.path.join(self.dir, ".atompipe", "cache", "digests.json")
+        self.cache = os.path.join(self.dir, ".nopekit", "cache", "digests.json")
 
     # -- helpers ------------------------------------------------------------ #
     def _rows(self) -> dict:

@@ -524,7 +524,7 @@ part "guide roller"  ->  mover "guide_roller"  ->  node "guide_roller__0"
 - **A node is `<part>__<body>`**, one per solid body, numbered from 0 in sorted
   order. A part that is one solid today and two after somebody splits it for
   printing keeps its name and its locators; only the body count changes.
-- **A mover is the part** — everything before `__`. `atompipe.site.derive_explode`
+- **A mover is the part** — everything before `__`. `nopekit.site.derive_explode`
   groups nodes by that prefix, so all of a part's bodies travel together, and the
   site accepts a mover name as a locator target.
 - **Part names are sanitised** to letters, digits, `-`, `.` and `_`, with runs of
@@ -754,7 +754,7 @@ The full list, with a unit and a sentence per key, is `selftest/baseline.json` �
 every key any gate here reads, on an assembly they all pass, with the fallback
 spellings in its `_aliases` map.
 
-`atompipe doctor` diffs this vocabulary against every other installed pack's and
+`nopekit doctor` diffs this vocabulary against every other installed pack's and
 warns when two of them read one key differently, naming both packs.
 
 ## Units and frames
@@ -913,7 +913,7 @@ gate in this pack claims, so a claim carrying one of them is covered by all seve
 useful on a deliberately broad claim ("the exported geometry is sound"), wrong on
 anything specific.
 
-The same list is `claim_classes` in `pack.json`, which is what `atompipe gap` scores
+The same list is `claim_classes` in `pack.json`, which is what `nopekit gap` scores
 a claim's quantity against when it is looking for a pack that could settle it. A tag
 a gate emits and the manifest does not declare is a tag no gap search will ever route
 here, so the two are kept in step.

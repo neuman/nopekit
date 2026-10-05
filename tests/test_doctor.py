@@ -72,11 +72,11 @@ from unittest import mock
 
 import _env
 import _projects
-from atompipe import cli as cli_mod
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe import verdicts
-from atompipe.models import GateSpec, NegativeControl, Tier, Verdict
+from nopekit import cli as cli_mod
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit import verdicts
+from nopekit.models import GateSpec, NegativeControl, Tier, Verdict
 
 #: The rows this file holds `doctor` to, by the name each prints.
 ROWS = ("instruments", "opaque-inputs", "cache-entries", "two-outcomes", "sealed-fixtures",
@@ -94,7 +94,7 @@ _FIXTURE = "selftest/bad_configs.py:quarter_thickness"
 # helpers
 # --------------------------------------------------------------------------- #
 def _run(project: str, *argv: str):
-    return _env.atompipe(list(argv), cwd=project)
+    return _env.nopekit(list(argv), cwd=project)
 
 
 def _doctor(project: str) -> tuple[int, dict[str, dict]]:
@@ -167,8 +167,8 @@ def _bundled_registry() -> gates_mod.Registry:
 _OUTSIDE_GATE = '''\
 # SPDX-License-Identifier: Apache-2.0
 """Planted by tests/test_doctor.py: a limit read from a file outside the project."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 LIMIT_FILE = {limit_file!r}
 
@@ -188,23 +188,23 @@ def outside(ctx):
 _IMPORT_GATES = '''\
 # SPDX-License-Identifier: Apache-2.0
 """Planted by tests/test_doctor.py: lazy third-party imports, declared and not."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 _NC = NegativeControl(fixture={fixture!r}, note="planted")
 
 
 def _unreached():
     """Called by no gate: its import is no gate's dependency."""
-    import atompipe_planted_unreached
-    return atompipe_planted_unreached
+    import nopekit_planted_unreached
+    return nopekit_planted_unreached
 
 
 def _measure(ctx):
     """Called by `undeclared`: its import is that gate's dependency."""
     if ctx.tier < 0:
-        import atompipe_planted_numerics
-        return atompipe_planted_numerics.deflection(ctx)
+        import nopekit_planted_numerics
+        return nopekit_planted_numerics.deflection(ctx)
     return float(ctx.params["deflection"])
 
 
@@ -217,10 +217,10 @@ def undeclared(ctx):
 
 
 @gate(id="bracket.declared", title="imports what it declares", claims=["planted"],
-      tier=Tier.INSTANT, requires_python=["atompipe_planted_declared"], negative_control=_NC)
+      tier=Tier.INSTANT, requires_python=["nopekit_planted_declared"], negative_control=_NC)
 def declared(ctx):
-    import atompipe_planted_declared
-    return Verdict(gate="bracket.declared", passed=atompipe_planted_declared.ok(ctx))
+    import nopekit_planted_declared
+    return Verdict(gate="bracket.declared", passed=nopekit_planted_declared.ok(ctx))
 '''
 
 _ENV_GATE = '''\
@@ -229,8 +229,8 @@ _ENV_GATE = '''\
 import os
 from os import getenv as read_env
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id="bracket.env_limit", title="a limit from the environment", claims=["planted"],
@@ -249,8 +249,8 @@ _DYNAMIC_GATE = '''\
 import importlib
 from importlib import import_module
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 RULES = "json"
 
@@ -286,8 +286,8 @@ and three look-alikes it must not name."""
 import functools
 import os
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 _LIMITS = {{}}
 _TABLE = None
@@ -341,8 +341,8 @@ def memo_limit(ctx):
 _SEAL_GATES = '''\
 # SPDX-License-Identifier: Apache-2.0
 """Planted by tests/test_doctor.py: one sealed control, one that reads its host."""
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 def _span(ctx, gate_id):
@@ -405,7 +405,7 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
 
     @classmethod
     def setUpClass(cls) -> None:
-        cls.base = tempfile.mkdtemp(prefix="atompipe-doctor-")
+        cls.base = tempfile.mkdtemp(prefix="nopekit-doctor-")
         cls.addClassCleanup(_env._rmtree, cls.base)
         cls.checked = _projects.bracket_copy(os.path.join(cls.base, "bracket"))
         cls.first = _run(cls.checked, "check")
@@ -529,7 +529,7 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
 
     def test_sealed_fixtures(self):
         project = self.copy()
-        pack = os.path.join(project, ".atompipe", "packs", "planted-seal")
+        pack = os.path.join(project, ".nopekit", "packs", "planted-seal")
         _write(pack, "pack.json", json.dumps({"name": "planted-seal"}) + "\n")
         _write(pack, "gates/span.py", _SEAL_GATES)
         _write(pack, "selftest/bad.py", _SEAL_FIXTURES)
@@ -548,9 +548,9 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         _write(project, "gates/planted_imports.py", _IMPORT_GATES.format(fixture=_FIXTURE))
         code, rows = _doctor(project)
         self.assertRow(rows, "imports", "warn", "bracket.undeclared",
-                       "atompipe_planted_numerics",
-                       absent=("bracket.declared", "atompipe_planted_declared",
-                               "atompipe_planted_unreached"))
+                       "nopekit_planted_numerics",
+                       absent=("bracket.declared", "nopekit_planted_declared",
+                               "nopekit_planted_unreached"))
         self.assertEqual(code, 0)
         self.assertClean("imports")
 
@@ -658,8 +658,8 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         GLOSSARY §2's words — never *admitted* or *re-verified*."""
         project = self.copy()
         _write(project, "gates/zz_never.py", f'''
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="bracket.never", claims=["never"],
@@ -739,7 +739,7 @@ def never(ctx):
         promised it was."""
         project = self.copy()
         for gid in ("bracket.deflection", "bracket.bending_stress"):
-            shutil.rmtree(os.path.join(project, ".atompipe", "verdicts", gid))
+            shutil.rmtree(os.path.join(project, ".nopekit", "verdicts", gid))
         _edit(project, "model/bracket.py", "thickness: float = 7.0", "thickness: float = 14.0")
         _run(project, "check")
         _run(project, "check")

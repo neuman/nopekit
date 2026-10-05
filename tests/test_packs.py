@@ -2,7 +2,7 @@
 """Every shipped pack must validate, and every gate must prove it can fail.
 
 This is the gate on the gates. A pack whose validators have never demonstrated
-failure is a pack of loggers, and merging one would quietly convert atompipe from
+failure is a pack of loggers, and merging one would quietly convert nopekit from
 a thing that checks designs into a thing that agrees with them.
 
 Run:  PYTHONPATH=src python3 -m unittest discover -s tests -v
@@ -25,15 +25,15 @@ import uuid
 from unittest import mock
 
 import _env
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe.models import Ledger, ProjectMeta, Tier
-from atompipe.verdicts import GateTrace
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit.models import Ledger, ProjectMeta, Tier
+from nopekit.verdicts import GateTrace
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACKS_DIR = os.path.join(REPO, "packs")
 
-#: Text that must never appear anywhere in this repository. atompipe was extracted
+#: Text that must never appear anywhere in this repository. nopekit was extracted
 #: from a parent project (see docs/ORIGINS.md) and carries its method, not its
 #: content — a leaked identifier means a pack is documenting somebody else's device
 #: instead of its own domain.
@@ -94,7 +94,7 @@ def _scratch_out() -> str:
     these helpers cleans up after itself too.
     """
     if not _OUT_ROOT:
-        root = tempfile.mkdtemp(prefix="atompipe-test-packs-out-")
+        root = tempfile.mkdtemp(prefix="nopekit-test-packs-out-")
         atexit.register(shutil.rmtree, root, True)
         _OUT_ROOT.append(root)
     return tempfile.mkdtemp(prefix="ctx-", dir=_OUT_ROOT[0])
@@ -205,8 +205,8 @@ def _control_problems(pack_dir: str, registry: gates_mod.Registry, *, host: dict
 # planted packs: the violations the rules above must refuse
 # --------------------------------------------------------------------------- #
 _SCRATCH_GATE = """\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id={gate_id!r}, claims=["scratch"], tier=Tier.INSTANT,
@@ -251,11 +251,11 @@ def _scratch_pack(case: unittest.TestCase, *, baseline: dict, fixture: str = "to
     reaches ``gates.REGISTRY``, which later in-process CLI tests read, and the
     modules it imported are dropped again on cleanup.
     """
-    root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-scratch-pack-"))
+    root = os.path.realpath(tempfile.mkdtemp(prefix="nopekit-scratch-pack-"))
     case.addCleanup(shutil.rmtree, root, True)
     name = f"scratch-{uuid.uuid4().hex[:12]}"
     gate_id = f"{name}.span"
-    pack_dir = os.path.join(root, ".atompipe", "packs", name)
+    pack_dir = os.path.join(root, ".nopekit", "packs", name)
     os.makedirs(os.path.join(pack_dir, "gates"))
     os.makedirs(os.path.join(pack_dir, "selftest"))
     files = {
@@ -378,7 +378,7 @@ class PacksValidate(unittest.TestCase):
 
     def test_packs_publish_their_tag_vocabulary(self):
         """A claim can only bind correctly to a pack whose tag names are written
-        down. `settles` is that vocabulary and it is what `atompipe gap` matches
+        down. `settles` is that vocabulary and it is what `nopekit gap` matches
         against, so an empty one makes the pack invisible to the capability-gap
         search that is supposed to find it."""
         for path in _pack_dirs():
@@ -388,7 +388,7 @@ class PacksValidate(unittest.TestCase):
                 self.assertTrue(
                     manifest.settles,
                     f"{name}: pack.json declares no `settles` vocabulary, so "
-                    f"`atompipe gap` can never propose it for a capability gap")
+                    f"`nopekit gap` can never propose it for a capability gap")
 
 class NegativeControlsFire(unittest.TestCase):
     """The central invariant, applied to every shipped gate."""
@@ -497,7 +497,7 @@ class NegativeControlsFire(unittest.TestCase):
         """The exception the rule keeps: a gate whose declared tools are absent
         skips, is reported, and is not a problem — or the suite could not run
         anywhere the heavy tooling is not installed."""
-        absent = f"atompipe_absent_{uuid.uuid4().hex[:12]}"
+        absent = f"nopekit_absent_{uuid.uuid4().hex[:12]}"
         pack_dir, registry, gate_id = _scratch_pack(
             self, baseline={"width_mm": 10.0}, fixture="drop_span",
             requires_python=(absent,))
@@ -540,10 +540,10 @@ def _beam_copy(case: unittest.TestCase, plant=None) -> tuple[str, str]:
     (DemonstrateAgrees' positive control), so a plant is the only thing `pack
     validate` can object to. Judge it in a child process only: pack modules are
     cached by pack name, one directory per name per process (tests:H6)."""
-    root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-sealed-beam-"))
+    root = os.path.realpath(tempfile.mkdtemp(prefix="nopekit-sealed-beam-"))
     case.addCleanup(shutil.rmtree, root, True)
     name = f"beam-sealed-{uuid.uuid4().hex[:12]}"
-    pack_dir = os.path.join(root, ".atompipe", "packs", name)
+    pack_dir = os.path.join(root, ".nopekit", "packs", name)
     shutil.copytree(os.path.join(PACKS_DIR, "beam-analytic"), pack_dir,
                     ignore=shutil.ignore_patterns("__pycache__", ".selftest-out"))
     manifest_path = os.path.join(pack_dir, "pack.json")
@@ -654,7 +654,7 @@ class ControlsAreSealed(unittest.TestCase):
             with open(os.path.join(path, "selftest", "baseline.json"), "r",
                       encoding="utf-8") as fh:
                 baseline = json.load(fh)
-            from atompipe.models import Acceptance, Claim, Comparator
+            from nopekit.models import Acceptance, Claim, Comparator
 
             def ctx_with(ledger):
                 return gates_mod.GateContext(root=path, ledger=ledger, model=None,
@@ -737,7 +737,7 @@ class ControlsAreSealed(unittest.TestCase):
         """
         root, pack_dir = _beam_copy(self, lambda d: _plant(
             d, "selftest/bad_beams.py", _SHALLOW_DEF, _LAYERED_OVER_HOST))
-        proc = _env.atompipe(["pack", "validate", pack_dir, "--json"], cwd=root)
+        proc = _env.nopekit(["pack", "validate", pack_dir, "--json"], cwd=root)
         self.assertEqual(proc.returncode, 1,
                          f"pack validate certified an unsealed fixture as publishable:\n"
                          f"{proc.stdout}\n{proc.stderr}")
@@ -877,8 +877,8 @@ def _declared_edges(registry: gates_mod.Registry) -> list[tuple[str, str]]:
 
 
 _ISOLATION_GATE = """\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id={guard!r}, claims=["scratch"], tier=Tier.INSTANT,
@@ -924,11 +924,11 @@ def _two_gate_pack(case: unittest.TestCase, *, fixture: str = "too_long",
                    need: str | None = None) -> tuple[str, str, str]:
     """A guard and a dependent under the temp dir: ``(pack_dir, guard, dependent)``.
     ``need`` defaults to the pack's own guard."""
-    root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-isolation-pack-"))
+    root = os.path.realpath(tempfile.mkdtemp(prefix="nopekit-isolation-pack-"))
     case.addCleanup(shutil.rmtree, root, True)
     name = f"scratch-{uuid.uuid4().hex[:12]}"
     guard, dependent = f"{name}.guard", f"{name}.span"
-    pack_dir = os.path.join(root, ".atompipe", "packs", name)
+    pack_dir = os.path.join(root, ".nopekit", "packs", name)
     os.makedirs(os.path.join(pack_dir, "gates"))
     os.makedirs(os.path.join(pack_dir, "selftest"))
     files = {
@@ -1071,8 +1071,8 @@ class TheExtraChannel(unittest.TestCase):
 #: when ``extra`` is not empty — it passes its known-good and fails its
 #: known-bad, and has shown nothing.
 _EXTRA_GATE = """\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id={gate_id!r}, claims=["scratch"], tier=Tier.INSTANT,
@@ -1092,11 +1092,11 @@ def same_channel(ctx):
 
 
 def _extra_pack(case: unittest.TestCase, *, good: str = "") -> tuple[str, gates_mod.Registry, str]:
-    root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-extra-pack-"))
+    root = os.path.realpath(tempfile.mkdtemp(prefix="nopekit-extra-pack-"))
     case.addCleanup(shutil.rmtree, root, True)
     name = f"extra-{uuid.uuid4().hex[:12]}"
     gate_id = f"{name}.sniff"
-    pack_dir = os.path.join(root, ".atompipe", "packs", name)
+    pack_dir = os.path.join(root, ".nopekit", "packs", name)
     for rel, text in (("pack.json", json.dumps({"name": name, "description": "planted"})),
                       ("gates/sniff.py", _EXTRA_GATE.format(
                           gate_id=gate_id,
@@ -1262,7 +1262,7 @@ class ControlsAreIsolated(unittest.TestCase):
         """The guard's tools absent here (patched), its dependent's present: the
         isolation check cannot run, and must say so — in ``demonstrate``, in
         ``pack validate``'s notes and in ``gate selftest --pack``'s."""
-        from atompipe import cli as cli_mod
+        from nopekit import cli as cli_mod
         pack_dir, guard, dependent = _two_gate_pack(self, fixture="trips_the_guard")
         real = gates_mod.availability
 
@@ -1334,7 +1334,7 @@ class ControlsAreIsolated(unittest.TestCase):
             self.assertNotIn(leak, line)
 
     def test_the_isolation_lines_word_is_the_tables(self):
-        from atompipe import report as report_mod
+        from nopekit import report as report_mod
         from types import MappingProxyType
         human = report_mod.HUMAN
         planted = MappingProxyType(dict(human, outcome=MappingProxyType(
@@ -1371,8 +1371,8 @@ def _independent_fail_problems(case: unittest.TestCase,
     line's price blanked: ``bom.complete`` fails (the price), and the gate must
     still FAIL on its own defect — through the sweep, and on a claim tagged
     only with its vocabulary."""
-    from atompipe import claims as claims_mod
-    from atompipe.models import Claim
+    from nopekit import claims as claims_mod
+    from nopekit.models import Claim
     pack_dir = os.path.join(PACKS_DIR, "sourcing")
     if registry is None:
         registry = gates_mod.Registry()
@@ -1492,9 +1492,9 @@ import json, os, sys
 tests_dir, root, name = sys.argv[1:4]
 sys.path.insert(0, tests_dir)
 import test_packs as T
-from atompipe import gates, packs
-from atompipe.models import Tier
-pack_dir = os.path.join(root, ".atompipe", "packs", name)
+from nopekit import gates, packs
+from nopekit.models import Tier
+pack_dir = os.path.join(root, ".nopekit", "packs", name)
 demo = packs.demonstrate(pack_dir, tier=Tier.EXTERNAL)
 registry = gates.Registry()
 packs.load_gates(name, registry, root=root)
@@ -1599,10 +1599,10 @@ class DemonstrateAgrees(unittest.TestCase):
     def _planted(self, plant=None) -> dict:
         """A copy of beam-analytic under a unique directory AND pack name, with
         ``plant(pack_dir)`` applied, judged by both sides in a child process."""
-        root = os.path.realpath(tempfile.mkdtemp(prefix="atompipe-planted-beam-"))
+        root = os.path.realpath(tempfile.mkdtemp(prefix="nopekit-planted-beam-"))
         self.addCleanup(shutil.rmtree, root, True)
         name = f"beam-planted-{uuid.uuid4().hex[:12]}"
-        pack_dir = os.path.join(root, ".atompipe", "packs", name)
+        pack_dir = os.path.join(root, ".nopekit", "packs", name)
         shutil.copytree(os.path.join(PACKS_DIR, "beam-analytic"), pack_dir,
                         ignore=shutil.ignore_patterns("__pycache__", ".selftest-out"))
         manifest_path = os.path.join(pack_dir, "pack.json")
@@ -1718,7 +1718,7 @@ class DemonstrateAgrees(unittest.TestCase):
 
         What slipped through: its five tier-0 fixtures wrote their known-bad
         files into ``selftest/.generated/`` whatever ``out_dir`` the caller gave,
-        falling back to a fixed ``$TMPDIR/atompipe-openmodelica`` shared by every
+        falling back to a fixed ``$TMPDIR/nopekit-openmodelica`` shared by every
         user on the machine — so a wheel install wrote into site-packages, and
         the repository's own suite rewrote files inside the tree it tests
         (packs:H16).
@@ -1847,7 +1847,7 @@ def _leaks(root: str) -> list[str]:
 
 
 class NoLeakedProvenance(unittest.TestCase):
-    """atompipe carries the method of its parent project, not its content."""
+    """nopekit carries the method of its parent project, not its content."""
 
     def test_repo_is_clean(self):
         hits, scanned = _scan(REPO)
@@ -1872,7 +1872,7 @@ class NoLeakedProvenance(unittest.TestCase):
     def _plant(self, files: dict[str, str | bytes]) -> str:
         """A tree under the temp dir — never inside the repo, which is the tree
         being scanned (tests:H3)."""
-        root = tempfile.mkdtemp(prefix="atompipe-provenance-")
+        root = tempfile.mkdtemp(prefix="nopekit-provenance-")
         self.addCleanup(shutil.rmtree, root, True)
         for rel, content in files.items():
             full = os.path.join(root, *rel.split("/"))
@@ -1949,8 +1949,8 @@ def _shadowed(pack_dirs: list[str]) -> list[str]:
 
 class TestsTheBundledCopy(unittest.TestCase):
     """Every test in this file loads packs BY NAME, so it tests whichever copy the
-    search path resolves first — and ``$ATOMPIPE_PACK_PATH`` and
-    ``~/.atompipe/packs`` outrank the bundled directory. On a machine holding a
+    search path resolves first — and ``$NOPEKIT_PACK_PATH`` and
+    ``~/.nopekit/packs`` outrank the bundled directory. On a machine holding a
     same-named user pack the suite would validate that copy and report on this
     one (S-87; latent, not observed). Nothing else in the suite would notice: the
     wrong copy is usually a perfectly good pack. So say it here, loudly.
@@ -1962,12 +1962,12 @@ class TestsTheBundledCopy(unittest.TestCase):
             shadowed, [],
             f"every pack test here would exercise the shadowing copy instead: "
             f"{shadowed}. Unset ${packs_mod.PACK_PATH_ENV} or move the pack out of "
-            f"~/.atompipe/packs before trusting this suite")
+            f"~/.nopekit/packs before trusting this suite")
 
     def test_a_shadowing_pack_is_reported(self):
-        """V: a same-named pack on ``$ATOMPIPE_PACK_PATH`` is named."""
+        """V: a same-named pack on ``$NOPEKIT_PACK_PATH`` is named."""
         victim = _pack_dirs()[0]
-        shadow_root = tempfile.mkdtemp(prefix="atompipe-shadow-")
+        shadow_root = tempfile.mkdtemp(prefix="nopekit-shadow-")
         self.addCleanup(shutil.rmtree, shadow_root, True)
         shadow = os.path.join(shadow_root, os.path.basename(victim))
         os.makedirs(shadow)
@@ -1979,12 +1979,12 @@ class TestsTheBundledCopy(unittest.TestCase):
         self.assertIn(shadow, shadowed[0])
 
     def test_the_spine_under_test_is_this_checkout(self):
-        """The same failure one level up: an installed atompipe imported ahead of
+        """The same failure one level up: an installed nopekit imported ahead of
         ``src/`` would test its own bundled packs and its own spine."""
-        here = os.path.realpath(os.path.join(REPO, "src", "atompipe"))
+        here = os.path.realpath(os.path.join(REPO, "src", "nopekit"))
         spine = os.path.realpath(os.path.dirname(gates_mod.__file__))
         self.assertEqual(spine, here,
-                         f"atompipe was imported from {spine}, not {here} — run the "
+                         f"nopekit was imported from {spine}, not {here} — run the "
                          f"suite with PYTHONPATH=src")
         self.assertEqual(os.path.realpath(packs_mod.BUNDLED_PACKS),
                          os.path.realpath(PACKS_DIR))

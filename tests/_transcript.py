@@ -34,7 +34,7 @@ looks the way it does:
   unconditional check that the committed cache is current.
 * **In the copy the bracket IS the repository root,** so porcelain lines carry
   no ``examples/bracket/`` prefix — the in-repo transcript shows one because it
-  runs in the atompipe checkout. ``test_fresh_clone`` refuses any expectation
+  runs in the nopekit checkout. ``test_fresh_clone`` refuses any expectation
   that names the prefix.
 
 Run:  PYTHONPATH=src python3 -m unittest discover -s tests -p test_fresh_clone.py -v
@@ -78,12 +78,12 @@ CURRENT: Tag = (2, 1)
 #: Where `check --junit` writes when given no path, spelled as the transcript
 #: spells it rather than read from `report.JUNIT_DEFAULT`: an expectation taken
 #: from the code under test agrees with that code by construction.
-JUNIT_PATH = ".atompipe/out/junit.xml"
+JUNIT_PATH = ".nopekit/out/junit.xml"
 
 #: Where the per-gate cache lives in a project (spec §3.7). The revert step
 #: deletes what appeared here after the edit; the spine rule reads what was
 #: committed here.
-VERDICTS_DIR = ".atompipe/verdicts"
+VERDICTS_DIR = ".nopekit/verdicts"
 
 
 # --------------------------------------------------------------------------- #
@@ -257,9 +257,9 @@ WHY_REJECTED_ROW = re.compile(r"^  (?P<value>.+?) — (?P<why>.+?)   \((?P<sourc
 
 #: A verdict entry and a control entry, as project-relative paths (spec §3.7-3.8).
 ENTRY_PATH = re.compile(
-    r"^\.atompipe/verdicts/(?P<gate>[^/]+)/(?P<rho>[0-9a-f]{16})-(?P<out>[0-9a-f]{8})\.json$")
+    r"^\.nopekit/verdicts/(?P<gate>[^/]+)/(?P<rho>[0-9a-f]{16})-(?P<out>[0-9a-f]{8})\.json$")
 CONTROL_ENTRY_PATH = re.compile(
-    r"^\.atompipe/verdicts/(?P<gate>[^/]+)/control-(?P<rho>[0-9a-f]{16})-"
+    r"^\.nopekit/verdicts/(?P<gate>[^/]+)/control-(?P<rho>[0-9a-f]{16})-"
     r"(?P<out>[0-9a-f]{8})\.json$")
 
 #: One `git status --porcelain` line (v1): two status columns, a space, the path.
@@ -285,15 +285,15 @@ SHAPES = {
 # --------------------------------------------------------------------------- #
 # Actions: what a step does. The replay (`test_fresh_clone`) executes them.
 # --------------------------------------------------------------------------- #
-class Atompipe(NamedTuple):
-    """`atompipe <argv>` in the project copy, or (``where="empty"``) in a fresh
+class Nopekit(NamedTuple):
+    """`nopekit <argv>` in the project copy, or (``where="empty"``) in a fresh
     empty directory that is no project at all — pack mode."""
     argv: Tuple[str, ...]
     where: str = "project"
 
     def __str__(self) -> str:
         suffix = "   (in an empty directory)" if self.where == "empty" else ""
-        return "atompipe " + " ".join(self.argv) + suffix
+        return "nopekit " + " ".join(self.argv) + suffix
 
 
 class Git(NamedTuple):
@@ -326,7 +326,7 @@ class Edit(NamedTuple):
 
 class Restore(NamedTuple):
     """Restore ``path`` from the commit, and delete every file that appeared
-    under ``.atompipe/verdicts`` since step ``since`` began: the new evidence
+    under ``.nopekit/verdicts`` since step ``since`` began: the new evidence
     the edit caused, and nothing the first check wrote before it."""
     path: str
     since: str
@@ -343,10 +343,10 @@ class Seq(NamedTuple):
         return "; ".join(str(a) for a in self.actions)
 
 
-Action = Union[Atompipe, Git, SameRun, Edit, Restore, Seq]
+Action = Union[Nopekit, Git, SameRun, Edit, Restore, Seq]
 
 SAME_RUN = SameRun()
-CHECK = Atompipe(("check",))
+CHECK = Nopekit(("check",))
 PORCELAIN = Git(("status", "--porcelain"))
 
 
@@ -453,7 +453,7 @@ STEPS: Tuple[Step, ...] = (
     # line, C6 a Gap with its reason, C5 waiting on an article. From P2.5b
     # (D18, W13; R-6, words) the sentence ends with its hardware clause in
     # every branch: nothing is checked on an article yet.
-    Step("status-words", (2, 1), Atompipe(("status",)), (
+    Step("status-words", (2, 1), Nopekit(("status",)), (
         line(r"^v0\.1 is NOT ready: 4 of 7 required claims are unresolved — 1 failing \(C1\); "
              r"2 gaps \(C6, C7\); 1 pending build \(C5\)\. 3 of 7 claims are checked against "
              r"the current inputs\. Pending build: 1 claim needs an article \(C5\)\. "
@@ -465,7 +465,7 @@ STEPS: Tuple[Step, ...] = (
     )),
     Step("edit-bed-xy", (1, 2),
          Edit("model/bracket.py", "bed_xy: float = 220.0", "bed_xy: float = 250.0"), ()),
-    Step("status-stale", (1, 2), Atompipe(("status",)), (
+    Step("status-stale", (1, 2), Nopekit(("status",)), (
         line(r"^invalidated: bracket\.bed_fit — config\.bed_xy 220\.0 -> 250\.0   "
              r"\(5 verdicts current\)$"),
     )),
@@ -481,9 +481,9 @@ STEPS: Tuple[Step, ...] = (
     )),
     Step("porcelain-after-edit", (1, 3), PORCELAIN, (
         exactly(r"^ M model/bracket\.py$",
-                r"^\?\? \.atompipe/verdicts/bracket\.bed_fit/[0-9a-f]{16}-[0-9a-f]{8}\.json$"),
+                r"^\?\? \.nopekit/verdicts/bracket\.bed_fit/[0-9a-f]{16}-[0-9a-f]{8}\.json$"),
     )),
-    Step("why-thickness", (1, 3), Atompipe(("why", "thickness")), (
+    Step("why-thickness", (1, 3), Nopekit(("why", "thickness")), (
         in_order(r"^param thickness = 7\.0 mm   \(model/bracket\.py Config\.thickness\)$",
                  r"^REJECTED \(1\)$",
                  r"^  4\.0 mm — 3\.75 mm deflection, 7\.5x the limit   "
@@ -492,21 +492,21 @@ STEPS: Tuple[Step, ...] = (
     # P2.3 (R-6, D18's words; the ids kept, D23): `qualification:` replaced
     # `last selftest:` and its detail rows follow it, and pack mode's summary
     # counts evaluators qualified — every one of them, or it exits 1.
-    Step("gate-show-last-selftest", (1, 2), Atompipe(("gate", "show", "bracket.deflection")), (
+    Step("gate-show-last-selftest", (1, 2), Nopekit(("gate", "show", "bracket.deflection")), (
         line(r"^  qualification: known-good pass · known-bad fail · mutation 1/1 fail "
              r"→ qualified \(control [0-9a-f]{12}\)$"),
     )),
-    Step("pack-mode-selftest", (1, 1), Atompipe(("gate", "selftest"), where="empty"), (
+    Step("pack-mode-selftest", (1, 1), Nopekit(("gate", "selftest"), where="empty"), (
         exit_code(0),
         last_line(r"^\d+ evaluators in \S+: \d+ qualified, 0 unqualified, \d+ skipped$"),
     )),
-    Step("check-junit", (1, 1), Atompipe(("check", "--junit")), (
+    Step("check-junit", (1, 1), Nopekit(("check", "--junit")), (
         exit_code(1),
         junit(JUNIT_PATH, "testsuites"),
     )),
     Step("revert", (1, 2), Seq((Restore("model/bracket.py", since="edit-bed-xy"), PORCELAIN)),
          starred(exactly(), at=(1, 3))),
-    Step("no-bytecode-shown", (1, 3), Seq((CHECK, Atompipe(("gate", "selftest")), PORCELAIN)), (
+    Step("no-bytecode-shown", (1, 3), Seq((CHECK, Nopekit(("gate", "selftest")), PORCELAIN)), (
         no_line_containing("__pycache__/"),
     )),
 )
@@ -635,10 +635,10 @@ def spine_is_current(spines: Sequence[Optional[str]]) -> bool:
     reaching it without one is a broken checkpoint, and says so.
     """
     try:
-        from atompipe import verdicts
+        from nopekit import verdicts
         running = verdicts.spine_digest()
     except (ImportError, AttributeError) as exc:
         raise AssertionError(
-            "a starred transcript step is due, but atompipe.verdicts.spine_digest() "
+            "a starred transcript step is due, but nopekit.verdicts.spine_digest() "
             f"is not available: {exc}") from exc
     return all(spine == running for spine in spines)

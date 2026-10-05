@@ -47,7 +47,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
-from atompipe.models import Locator, Verdict
+from nopekit.models import Locator, Verdict
 
 #: How many offending parts get a pin before the gate stops drawing them. Every
 #: offender is in the evidence table and in the count either way — the cap trims

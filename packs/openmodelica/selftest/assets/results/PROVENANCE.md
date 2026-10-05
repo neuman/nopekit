@@ -7,7 +7,7 @@ anything.
 condition the pack is designed around: a tier-2 solver that must degrade honestly
 to BLOCKED rather than be faked. Shipping a file produced by a stub that
 "pretends to be a compiler" would be precisely the laundering of assumption into
-apparent proof that atompipe exists to prevent — worse here than anywhere else,
+apparent proof that nopekit exists to prevent — worse here than anywhere else,
 because the whole argument of this pack is that a number from a run nobody
 validated is the silent failure of the domain.
 

@@ -124,10 +124,10 @@ import unittest
 import xml.etree.ElementTree as ET
 from unittest import mock
 
-from atompipe import claims, gates, modelio, store, verdicts
-from atompipe import packs as packs_mod
-from atompipe import report as report_mod
-from atompipe.models import Claim, ClaimStatus, GateSpec, Ledger, NegativeControl, Verdict
+from nopekit import claims, gates, modelio, store, verdicts
+from nopekit import packs as packs_mod
+from nopekit import report as report_mod
+from nopekit.models import Claim, ClaimStatus, GateSpec, Ledger, NegativeControl, Verdict
 
 import _env
 import _projects
@@ -170,8 +170,8 @@ KNOWN_GOOD = '''\
 import dataclasses
 import os
 
-from atompipe.modelio import flat_params, load_path
-from atompipe.models import Ledger
+from nopekit.modelio import flat_params, load_path
+from nopekit.models import Ledger
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 model = load_path(os.path.join(_HERE, os.pardir, "model", "m.py"))
@@ -194,7 +194,7 @@ FIXTURES = '''\
 import dataclasses
 import os
 
-from atompipe.modelio import load_path
+from nopekit.modelio import load_path
 
 kg = load_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_good.py"))
 
@@ -257,8 +257,8 @@ def context(ctx):
 '''
 
 GATES = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 #: Runtime switches a test flips without editing a byte: `lenient` makes t.defl
 #: pass whatever it reads — a gate whose answer changed at identical inputs.
@@ -310,7 +310,7 @@ def bed(ctx):
 
 
 @gate(id="t.tool", title="t", claims=["tool"],
-      requires_python=["atompipe_no_such_module_u20"],
+      requires_python=["nopekit_no_such_module_u20"],
       negative_control=NegativeControl(fixture="selftest/bad.py:thin"))
 def tool(ctx):
     CALLS.append(("t.tool", None))
@@ -373,7 +373,7 @@ def plant_admission_project(root: str, *, thickness: float = 8.0,
 
 def control_files(root: str) -> list[str]:
     """Every control entry under ``root``'s verdict cache, ``<gate>/<name>``."""
-    base = os.path.join(root, ".atompipe", "verdicts")
+    base = os.path.join(root, ".nopekit", "verdicts")
     return sorted(os.path.relpath(p, base).replace(os.sep, "/")
                   for p in glob.glob(os.path.join(base, "*", "control-*.json")))
 
@@ -406,8 +406,8 @@ import dataclasses
 import json
 import os
 
-from atompipe import claims, gates, modelio, store, verdicts
-from atompipe.models import Claim, Ledger
+from nopekit import claims, gates, modelio, store, verdicts
+from nopekit.models import Claim, Ledger
 
 NOW = "2026-09-27T10:00:00Z"
 
@@ -589,8 +589,8 @@ def build(config=None):
 '''
 
 SHELF_GATE = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
@@ -610,7 +610,7 @@ SHELF_CLAIM = {"statement": "Span within 100 mm", "kind": "measurable", "critica
 SHELF_PASSTHROUGH_KNOWN_GOOD = '''\
 import dataclasses
 
-from atompipe.models import Ledger
+from nopekit.models import Ledger
 
 
 def context(ctx):
@@ -628,7 +628,7 @@ def long(ctx):
 SHELF_KNOWN_GOOD = '''\
 import dataclasses
 
-from atompipe.models import Ledger
+from nopekit.models import Ledger
 
 
 def context(ctx):
@@ -650,8 +650,8 @@ def long(ctx):
 #: number of its own does. With no ``selftest/known_good.py`` its fixture gets
 #: the LIVE host, so the control reads the live C1.
 SHELF_GATE_FROM_CLAIM = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
@@ -668,8 +668,8 @@ def span(ctx):
 #: fires on the cheap path and on no other, so a demonstration made at tier 0
 #: says nothing about the path a tier-2 sweep runs.
 SHELF_GATE_COSTLY_LOGGER = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
@@ -689,8 +689,8 @@ def span(ctx):
 #: reads the tier. The second is what turned the first's skip into readiness:
 #: one gate passing and one skipped reads PASS (partial), and that does not block.
 SHELF_GATES_TIERED = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 LIMITS = {0: 100.0, 1: 100.0, 2: 100.0, 3: 100.0}
 
@@ -718,7 +718,7 @@ def reach(ctx):
 SHELF_LONG_OWN_LEDGER = '''\
 import dataclasses
 
-from atompipe.models import Acceptance, Claim, Ledger
+from nopekit.models import Acceptance, Claim, Ledger
 
 
 def long(ctx):
@@ -780,8 +780,8 @@ def long(ctx):
 #: (``bool(ctx.memo)``) until a gate could no longer read that (review,
 #: ``ffr3/p2``): ``is None`` is the one question left to ask of a memo.
 SHELF_GATE_TRUSTS_ITS_CONTEXT = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
@@ -842,7 +842,7 @@ def long(ctx):
 #: ledger (`_KNOWN_GOOD_BLANK`), so the ledger its gate reads comes from a file
 #: `context` opens inside the control's window — keyed there, which is why a
 #: known-good control's ledger reads are never compared with the live one.
-#: (Through `store.load` it would also read `.atompipe/project.json`, spine
+#: (Through `store.load` it would also read `.nopekit/project.json`, spine
 #: state, and the control would be opaque: re-run on every check, and never
 #: admitted to a reader — a cost, and not this test's question.)
 SHELF_KNOWN_GOOD_LOADS_CLAIMS = '''\
@@ -850,7 +850,7 @@ import dataclasses
 import json
 import os
 
-from atompipe.models import Claim, Ledger
+from nopekit.models import Claim, Ledger
 
 
 def context(ctx):
@@ -880,7 +880,7 @@ SHELF_FIXTURE_DECL = 'fixture="selftest/bad.py:long"'
 SHELF_GOOD = '''\
 import dataclasses
 
-from atompipe.models import Claim, Ledger
+from nopekit.models import Claim, Ledger
 
 C1 = {claim!r}
 
@@ -943,7 +943,7 @@ def long(ctx):
 #: makes 400, 15 makes 75, which the gate accepts.
 SHELF_KNOWN_GOOD_FROM_DATA = _READS_AT_IMPORT.format(name="good_span.json",
                                                      value="GOOD_SPAN") + '''
-from atompipe.models import Ledger
+from nopekit.models import Ledger
 
 
 def context(ctx):
@@ -963,8 +963,8 @@ def long(ctx):
 #: The shelf gate with its limit read at IMPORT from `inputs/data/limit.json`:
 #: the verdict side of repro D. A gate module is loaded before any window too.
 SHELF_GATE_LIMIT_FROM_DATA = _READS_AT_IMPORT.format(name="limit.json", value="LIMIT") + '''
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id="shelf.span", claims=["span"], tier=Tier.INSTANT,
@@ -984,8 +984,8 @@ SHELF_KNOWN_GOOD_LOADS_THE_MODEL = '''\
 import dataclasses
 import os
 
-from atompipe.modelio import load_path
-from atompipe.models import Ledger
+from nopekit.modelio import load_path
+from nopekit.models import Ledger
 
 
 def context(ctx):
@@ -1004,7 +1004,7 @@ import importlib
 import os
 import sys
 
-from atompipe.modelio import load_path
+from nopekit.modelio import load_path
 
 _LIB = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib")
 if _LIB not in sys.path:
@@ -1034,9 +1034,9 @@ import importlib
 import os
 import sys
 
-from atompipe.gates import gate
-from atompipe.modelio import load_path
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.modelio import load_path
+from nopekit.models import NegativeControl, Tier, Verdict
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _LIB = os.path.join(os.path.dirname(_HERE), "lib")
@@ -1077,7 +1077,7 @@ ENTRY_NAME = re.compile(r"^[0-9a-f]{16}-[0-9a-f]{8}\.json$")
 
 #: One edit per asset kind the plan names (phase-1 "Admission at sweep": "editing
 #: a `.mo`, an `.stl` or a `baseline.json` value"), each made to the pack's COPY
-#: under `.atompipe/packs/<pack>/` and each chosen to change no answer: a load
+#: under `.nopekit/packs/<pack>/` and each chosen to change no answer: a load
 #: nudged 1/3 % on a baseline whose controls push one quantity many times past
 #: its limit; the 80-byte header of a binary STL, which carries no geometry; a
 #: trailing Modelica comment. `(pack, path in the pack, how, old bytes, new
@@ -1090,7 +1090,7 @@ PACK_ASSET_EDITS = (
     ("beam-analytic", "selftest/baseline.json", "once",
      b'"load_n": 300.0', b'"load_n": 301.0'),
     ("fdm-print", "selftest/baseline_part.stl", "prefix",
-     b"\0" * 26, b"atompipe: an edited header"),
+     b"\0" * 26, b"nopekit: an edited header."),
     ("openmodelica", "selftest/assets/model/ThermalTank.mo", "append",
      b"", b"// an edit that changes no equation\n"),
 )
@@ -1106,6 +1106,10 @@ def edit_bytes(path: str, how: str, old: bytes, new: bytes) -> None:
         data += new
     elif how == "prefix":
         assert data.startswith(old), (path, data[:len(old)])
+        # A prefix edit rewrites a header in place. What slipped through (the rename
+        # to nopekit): the new header came out a byte shorter, the edit shifted the
+        # whole binary mesh by one, and the gate read a different part entirely.
+        assert len(new) == len(old), (path, len(new), len(old))
         data = new + data[len(old):]
     else:
         assert data.count(old) == 1, (path, old)
@@ -1115,8 +1119,8 @@ def edit_bytes(path: str, how: str, old: bytes, new: bytes) -> None:
 
 
 def cli(project: str, *argv: str):
-    """``atompipe <argv>`` in ``project``, a fresh process through ``_env``."""
-    return _env.atompipe(list(argv), cwd=project)
+    """``nopekit <argv>`` in ``project``, a fresh process through ``_env``."""
+    return _env.nopekit(list(argv), cwd=project)
 
 
 def check_json(case: unittest.TestCase, project: str, *argv: str) -> tuple[int, dict]:
@@ -1151,7 +1155,7 @@ def blocking_ids(data: dict) -> dict[str, str]:
 def control_names(project: str) -> dict[str, set[str]]:
     """``{gate id: {control entry file names}}`` of a project's verdict cache."""
     out: dict[str, set[str]] = {}
-    for path in glob.glob(os.path.join(project, ".atompipe", "verdicts", "*", "control-*.json")):
+    for path in glob.glob(os.path.join(project, ".nopekit", "verdicts", "*", "control-*.json")):
         out.setdefault(os.path.basename(os.path.dirname(path)), set()).add(
             os.path.basename(path))
     return out
@@ -1159,13 +1163,13 @@ def control_names(project: str) -> dict[str, set[str]]:
 
 def entry_names(project: str, gate_id: str) -> set[str]:
     """The verdict entry (not control) file names of ``gate_id``."""
-    base = os.path.join(project, ".atompipe", "verdicts", gate_id)
+    base = os.path.join(project, ".nopekit", "verdicts", gate_id)
     return {n for n in (os.listdir(base) if os.path.isdir(base) else ())
             if ENTRY_NAME.match(n)}
 
 
 def read_control(project: str, gate_id: str, name: str) -> dict:
-    with open(os.path.join(project, ".atompipe", "verdicts", gate_id, name),
+    with open(os.path.join(project, ".nopekit", "verdicts", gate_id, name),
               encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -1220,7 +1224,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(result.controls["not_admitted"], 0)
         files = control_files(p.root)
         self.assertEqual(len(files), 1, files)
-        with open(os.path.join(p.root, ".atompipe", "verdicts", files[0]),
+        with open(os.path.join(p.root, ".nopekit", "verdicts", files[0]),
                   encoding="utf-8") as fh:
             entry = json.load(fh)
         # R-6 (P2.3): "paired", where P2.2 filed "reject-only" — the known-good
@@ -1278,7 +1282,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(got.admission.state, "not-admitted", got.admission)
         self.assertEqual("known-bad:pass", got.admission.reason)
         self.assertTrue(got.verdict.error.startswith("unqualified: "), got.verdict)
-        with open(os.path.join(p.root, ".atompipe", "verdicts",
+        with open(os.path.join(p.root, ".nopekit", "verdicts",
                                control_files(p.root)[0]), encoding="utf-8") as fh:
             entry = json.load(fh)
         self.assertEqual((entry["host"], entry["bad"]), ("known-good", "pass"))
@@ -1290,7 +1294,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         lie = row(live.sweep(only=["t.ident"]), "t.ident")
         self.assertEqual(lie.admission.state, "admitted",
                          "without the known-good host the identity fixture slips through")
-        with open(os.path.join(live.root, ".atompipe", "verdicts",
+        with open(os.path.join(live.root, ".nopekit", "verdicts",
                                control_files(live.root)[0]), encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["host"], "live")
 
@@ -1332,7 +1336,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                          f"the precondition: a failing known-good design makes the "
                          f"identity fixture fire ({first.admission})")
         [name] = control_files(p.root)
-        with open(os.path.join(p.root, ".atompipe", "verdicts", name), encoding="utf-8") as fh:
+        with open(os.path.join(p.root, ".nopekit", "verdicts", name), encoding="utf-8") as fh:
             entry = json.load(fh)
         self.assertEqual(entry["host"], "known-good")
         self.assertIn("data/kg.json", entry["reads"]["files"],
@@ -1584,7 +1588,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                          "every gate ran but the refused one")
         self.assertEqual(entry_names(project, "bracket.bending_stress"), set(),
                          "a refused gate records no verdict")
-        with open(os.path.join(project, ".atompipe", "cache", "last_check.json"),
+        with open(os.path.join(project, ".nopekit", "cache", "last_check.json"),
                   encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["statuses"]["C2"], "unclaimed")
 
@@ -1739,18 +1743,18 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         write(project, "selftest/bad.py", SHELF_LONG)
         proc = cli(project, "init", "--model", "model/shelf.py", "--name", "shelf")
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        junit = os.path.join(project, ".atompipe", "out", "junit.xml")
-        last_check = os.path.join(project, ".atompipe", "cache", "last_check.json")
-        # D18's words (R-6): "not yet qualified at this version — atompipe check
-        # --tier 2 qualifies it", where P2.2 said "... — run atompipe check --tier 2".
-        advice = "atompipe check --tier 2 qualifies it"
+        junit = os.path.join(project, ".nopekit", "out", "junit.xml")
+        last_check = os.path.join(project, ".nopekit", "cache", "last_check.json")
+        # D18's words (R-6): "not yet qualified at this version — nopekit check
+        # --tier 2 qualifies it", where P2.2 said "... — run nopekit check --tier 2".
+        advice = "nopekit check --tier 2 qualifies it"
 
         # The positive controls: tier 2 proves C1, and a plain tier-0 check
         # serves that tier-2 entry as current — admitted by the records alone.
         code, data = check_json(self, project, "--tier", "2")
         self.assertEqual((code, verdict_row(data, "shelf.span")["outcome"]), (0, "pass"), data)
         [name] = entry_names(project, "shelf.span")
-        with open(os.path.join(project, ".atompipe", "verdicts", "shelf.span", name),
+        with open(os.path.join(project, ".nopekit", "verdicts", "shelf.span", name),
                   encoding="utf-8") as fh:
             self.assertEqual(json.load(fh)["reads"].get("tier"), 2,
                              "the precondition: the entry took the tier-2 path")
@@ -2170,7 +2174,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
     def test_cli_a_pack_asset_edit_misses_the_control_entry_and_reruns_it(self):
         # A pack control is keyed by its owner's whole `selftest/` (spec §3.8),
         # so an edited mesh, Modelica source or baseline value there must miss
-        # every control entry of that pack. The copy under `.atompipe/packs/`
+        # every control entry of that pack. The copy under `.nopekit/packs/`
         # is the pack the project loads; the bundled one is never touched.
         for pack, rel, how, old, new in PACK_ASSET_EDITS:
             with self.subTest(pack=pack, file=rel):
@@ -2189,7 +2193,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                                 f"cached, so a miss would be invisible "
                                 f"{second['counts']['controls']}")
 
-                edit_bytes(os.path.join(project, ".atompipe", "packs", pack,
+                edit_bytes(os.path.join(project, ".nopekit", "packs", pack,
                                         *rel.split("/")), how, old, new)
 
                 _code, third = check_json(self, project, "--tier", "3")
@@ -2204,7 +2208,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
                         self.assertEqual(len(new_names), 1,
                                          f"{spec.id}: the edit did not miss its control "
                                          f"entry ({sorted(after.get(spec.id, ()))})")
-                        # R-6 (review of P2.3): a copy under `.atompipe/packs/` is
+                        # R-6 (review of P2.3): a copy under `.nopekit/packs/` is
                         # walked, and a gate of it that reads the live ledger in
                         # `check` (openmodelica's claims_addressable) never
                         # qualifies there — its baseline hands no ledger — before
@@ -2270,7 +2274,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         self.assertEqual(data["counts"]["executed"], 1, "bed_fit, and only bed_fit, re-ran")
         new = untracked(project)
         self.assertEqual(len(new), 1, new)
-        self.assertRegex(new[0], r"^\.atompipe/verdicts/bracket\.bed_fit/"
+        self.assertRegex(new[0], r"^\.nopekit/verdicts/bracket\.bed_fit/"
                                  r"[0-9a-f]{16}-[0-9a-f]{8}\.json$")
         self.assertEqual(control_names(project), controls, "a new control entry")
 
@@ -2633,7 +2637,7 @@ class AdmissionIsDemonstrated(_env.EnvCase):
         docs = {}
         for gate_id in (*by_path, "shelf.by_name"):
             [name] = entry_names(project, gate_id)
-            with open(os.path.join(project, ".atompipe", "verdicts", gate_id, name),
+            with open(os.path.join(project, ".nopekit", "verdicts", gate_id, name),
                       encoding="utf-8") as fh:
                 docs[gate_id] = json.load(fh)
         for gate_id in by_path:
@@ -2722,12 +2726,12 @@ class SweepOrder(_env.EnvCase):
         self.assertEqual(got.verdict.outcome, "pass")
         self.assertIn(("t.defl", "excluded by --only"), named.not_run)
 
-    def test_record_false_writes_nothing_under_atompipe_but_out(self):
+    def test_record_false_writes_nothing_under_nopekit_but_out(self):
         # S-32: the documented dry sweep. It writes no entry, control entry,
         # remembered outcome, obs, controls.json, digests.json or last_check —
         # and, since nothing global is compared any more, reads nothing as stale.
         p = Project(self)
-        state = os.path.join(p.root, ".atompipe")
+        state = os.path.join(p.root, ".nopekit")
         dry = p.sweep(record=False)
         self.assertEqual(tree(state, skip=("out",)), {}, "a dry first sweep wrote state")
         self.assertTrue(row(dry, "t.defl").executed)
@@ -2749,7 +2753,7 @@ class SweepOrder(_env.EnvCase):
     def test_the_control_out_dir_is_emptied_first_and_never_the_sweeps(self):
         p = Project(self)
         stale = write(p.root, f"{verdicts.CONTROL_OUT_DIR}/t.defl/left-behind.txt", "old\n")
-        keep = write(p.root, ".atompipe/out/evidence.txt", "the sweep's own\n")
+        keep = write(p.root, ".nopekit/out/evidence.txt", "the sweep's own\n")
         p.sweep(only=["t.defl"])
         self.assertFalse(os.path.exists(stale), "a stale file must never become a read")
         self.assertTrue(os.path.exists(keep), "the sweep's out_dir is not the control's")
@@ -2787,8 +2791,8 @@ def via_extra(ctx):
 #: `thin` 2.0 (112.5), limit 2.0 — so a run on the live design, the known-good
 #: and the known-bad control are told apart by the value a gate was called on.
 QGATES = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 LIMIT = 2.0
 CALLS = []
@@ -2993,7 +2997,7 @@ class QProject(Project):
 def entries_of(root: str, gate_id: str) -> list[dict]:
     """Every control entry of ``gate_id`` on disk, as JSON."""
     out = []
-    for path in sorted(glob.glob(os.path.join(root, ".atompipe", "verdicts", gate_id,
+    for path in sorted(glob.glob(os.path.join(root, ".nopekit", "verdicts", gate_id,
                                               "control-*.json"))):
         with open(path, encoding="utf-8") as fh:
             out.append(json.load(fh))
@@ -3234,7 +3238,7 @@ class QualificationIsPaired(_env.EnvCase):
     def test_a_hand_placed_paired_entry_that_does_not_follow_is_refused(self):
         p = QProject(self)
         p.sweep(only=["q.honest"])
-        (path,) = glob.glob(os.path.join(p.root, ".atompipe", "verdicts", "q.honest",
+        (path,) = glob.glob(os.path.join(p.root, ".nopekit", "verdicts", "q.honest",
                                          "control-*.json"))
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -3447,8 +3451,8 @@ CAL_GATE = '''\
 import json
 import os
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="q.cal", claims=["q-cal"],
@@ -3466,8 +3470,8 @@ def cal(ctx):
 #: Review of P2.3: a known-good fixture ref with a typo, and a gate that crashes
 #: on its known-bad control though it declares it fails it.
 WORDS_GATES = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="q.typo", claims=["q-typo"],
@@ -3490,8 +3494,8 @@ def crashy(ctx):
 
 #: Review of P2.3, ``b2``: a logger whose declared known-good fixture raises.
 LOGGER_BROKEN_GOOD_GATE = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="q.logger", claims=["q-logger"],
@@ -3519,8 +3523,8 @@ def _holds_held_kinds_only(real):
 #: Review of P2.3, ``p8``: a gate that fails an obviously-bad input before it
 #: reads ``ctx.tier``, and otherwise takes a looser path at tier 1.
 TIERPATH_GATE = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="q.tierpath", claims=["q-tierpath"],
@@ -3548,8 +3552,8 @@ def _known_bad_moved(real):
 #: that reads its host (in a project, the LIVE design), and the identity one
 #: (r3i's shape in the good direction: the GATE reads the host through it).
 GOOD_PACK_GATE = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Tier, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
 
 
 @gate(id="{pack}.span", claims=["qpack-span"], tier=Tier.INSTANT,
@@ -3589,12 +3593,12 @@ def same(ctx):
 
 
 def good_pack_project(case: _env.EnvCase, good: str) -> tuple[str, str, gates.Registry]:
-    """A project whose `.atompipe/packs/` holds one pack declaring ``good``; a
+    """A project whose `.nopekit/packs/` holds one pack declaring ``good``; a
     pack name of its own per call (one process loads a pack name from one
     place)."""
     root = os.path.join(case.tmp(), "p")
     pack = f"qpack{good.replace('_', '')}"
-    pack_dir = os.path.join(root, ".atompipe", "packs", pack)
+    pack_dir = os.path.join(root, ".nopekit", "packs", pack)
     write(pack_dir, "pack.json", json.dumps({"name": pack}))
     write(pack_dir, "gates/span.py", GOOD_PACK_GATE.format(good=good, pack=pack))
     write(pack_dir, "selftest/bad.py", GOOD_PACK_FIXTURES)
@@ -3679,7 +3683,7 @@ class QualificationAgreesWithTheJudgedRunner(_env.EnvCase):
 AUX_KNOWN_GOOD = '''\
 import dataclasses
 
-from atompipe.models import Ledger
+from nopekit.models import Ledger
 
 JUNK = {f"j{i:03d}": 1.0 + i for i in range(600)}
 
@@ -3693,7 +3697,7 @@ AUX_FIXTURES = '''\
 import dataclasses
 import os
 
-from atompipe.modelio import load_path
+from nopekit.modelio import load_path
 
 kg = load_path(os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_good.py"))
 
@@ -3712,8 +3716,8 @@ AUX_GATES = '''\
 import json
 import os
 
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="aux.junk", claims=["aux-junk"],
@@ -3861,12 +3865,12 @@ class EveryConclusiveMutationMustFail(_env.EnvCase):
         self.assertGreater(whys["budget"], 0, whys)
         self.assertEqual(entry["mutation"]["inconclusive"], [],
                          "a value the budget did not reach is not mutated, not inconclusive")
-        with open(glob.glob(os.path.join(p.root, ".atompipe", "verdicts", "aux.junk",
+        with open(glob.glob(os.path.join(p.root, ".nopekit", "verdicts", "aux.junk",
                                          "control-*.json"))[0], "rb") as fh:
             first = fh.read()
         again = AuxProject(self)
         again.sweep(only=["aux.junk"])
-        with open(glob.glob(os.path.join(again.root, ".atompipe", "verdicts", "aux.junk",
+        with open(glob.glob(os.path.join(again.root, ".nopekit", "verdicts", "aux.junk",
                                          "control-*.json"))[0], "rb") as fh:
             self.assertEqual(fh.read(), first, "byte-identical on two runs")
         planted = AuxProject(self)
@@ -4020,7 +4024,7 @@ class TheCheckRunTakesTheQualifiedPath(_env.EnvCase):
             "ledger=Ledger(), extra={})",
             "ledger=Ledger(claims=[Claim.from_dict({'id': 'Q-labelled', 'statement': "
             "'claim Q-labelled', 'tags': ['q-labelled']})]), extra={})").replace(
-            "from atompipe.models import Ledger", "from atompipe.models import Claim, Ledger")
+            "from nopekit.models import Ledger", "from nopekit.models import Claim, Ledger")
         self.assertNotEqual(same, KNOWN_GOOD)
         for known_good in (same, KNOWN_GOOD):
             with self.subTest(handed=known_good is same):
@@ -4072,8 +4076,8 @@ class AHeldQualificationSaysWhy(_env.EnvCase):
 
 #: Review of P2.3, ``br6``: passes whenever a model is handed it.
 MODEL_KEYED_GATE = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="q.modelkey", claims=["q-modelkey"],
@@ -4086,8 +4090,8 @@ def modelkey(ctx):
 
 #: Review of P2.3, ``br7``: waived whenever the ledger it is handed holds a claim.
 LEDGER_WAIVED_GATE = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="q.waiver", claims=["q-waiver"],
@@ -4102,8 +4106,8 @@ def waiver(ctx):
 
 #: An honest gate that reads its claim off the ledger for its detail line.
 LEDGER_LABELLED_GATE = '''\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="q.labelled", claims=["q-labelled"],
@@ -4123,9 +4127,9 @@ def labelled(ctx):
 FORGED_PACK_DIR_GATE = '''\
 import os
 
-from atompipe import packs as _packs
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit import packs as _packs
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 PACK_DIR = os.path.join(_packs.BUNDLED_PACKS, "beam-analytic")
 
@@ -4179,7 +4183,7 @@ BRACKET_KNOWN_BAD = {
 
 def _committed_controls(root: str) -> dict[str, dict]:
     out: dict[str, dict] = {}
-    base = os.path.join(root, ".atompipe", "verdicts")
+    base = os.path.join(root, ".nopekit", "verdicts")
     for path in sorted(glob.glob(os.path.join(base, "*", "control-*.json"))):
         with open(path, encoding="utf-8") as fh:
             data = json.load(fh)
@@ -4244,7 +4248,7 @@ class ReverifyStillCutsOff(_env.EnvCase):
     def test_a_docstring_edit_of_the_model_runs_nothing(self):
         root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"), migrated=True,
                                       git=True)
-        first = json.loads(_env.atompipe(["check", "--json"], cwd=root).stdout)
+        first = json.loads(_env.nopekit(["check", "--json"], cwd=root).stdout)
         self.assertEqual(first["counts"]["executed"], 0, first["counts"])
         model = os.path.join(root, "model", "bracket.py")
         with open(model, encoding="utf-8") as fh:
@@ -4253,13 +4257,13 @@ class ReverifyStillCutsOff(_env.EnvCase):
         self.assertTrue(sep, "the model has a module docstring")
         with open(model, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(head + sep + "Edited docstring only. " + rest)
-        tracked = _env.run(["git", "status", "--porcelain", "--", ".atompipe/verdicts"],
+        tracked = _env.run(["git", "status", "--porcelain", "--", ".nopekit/verdicts"],
                            cwd=root).stdout
-        out = json.loads(_env.atompipe(["check", "--json"], cwd=root).stdout)
+        out = json.loads(_env.nopekit(["check", "--json"], cwd=root).stdout)
         self.assertEqual(out["counts"]["executed"], 0, out["counts"])
         self.assertEqual(out["counts"]["controls"]["executed"], 0, out["counts"])
         self.assertEqual(out["counts"]["controls"]["reverified"], 6, out["counts"])
-        self.assertEqual(_env.run(["git", "status", "--porcelain", "--", ".atompipe/verdicts"],
+        self.assertEqual(_env.run(["git", "status", "--porcelain", "--", ".nopekit/verdicts"],
                                   cwd=root).stdout, tracked,
                          "re-qualifying by values wrote a tracked file")
 

@@ -29,7 +29,7 @@ forgets the assets — and two spines compared on two different projects prove
 nothing about the spines.
 
 The wrapped project is written in the **legacy** layout (one
-``.atompipe/ledger.json``, the ``1e09113`` ignore file), by hand, from literals
+``.nopekit/ledger.json``, the ``1e09113`` ignore file), by hand, from literals
 in this file: never through ``store.init`` or ``Ledger.to_dict``. Those are the
 spine's, and the spine this phase is changing; a fixture written by the code
 under test changes shape with it, and "the old spine reads it natively" would
@@ -67,7 +67,7 @@ from typing import Any
 
 import _env
 import test_fresh_clone
-from atompipe import gates, packs
+from nopekit import gates, packs
 
 #: The bracket in the checkout this helper runs from.
 BRACKET = test_fresh_clone.BRACKET
@@ -75,7 +75,7 @@ BRACKET = test_fresh_clone.BRACKET
 #: The bundled packs in this checkout.
 PACKS = os.path.join(_env.REPO, "packs")
 
-#: The bracket's legacy state — its ``.atompipe/.gitignore`` (as ``gitignore``: a
+#: The bracket's legacy state — its ``.nopekit/.gitignore`` (as ``gitignore``: a
 #: dot-file here would be an ignore file git applies to this directory), its
 #: ``ledger.json`` and its run history — byte for byte as ``examples/bracket``
 #: tracked them at 801cece, the last commit before its migration (U32). A copy
@@ -86,27 +86,27 @@ LEGACY_BRACKET = os.path.join(_env.REPO, "tests", "bracket_legacy")
 #: ``(fixture path, project path)``, `/`-separated. Listed, not walked, so a
 #: stray file dropped into the fixture directory never rides into a project.
 LEGACY_BRACKET_FILES: tuple[tuple[str, str], ...] = (
-    ("gitignore", ".atompipe/.gitignore"),
-    ("ledger.json", ".atompipe/ledger.json"),
-    ("runs/0001-7d24ce6c.json", ".atompipe/runs/0001-7d24ce6c.json"),
-    ("runs/0002-6a57e5fa.json", ".atompipe/runs/0002-6a57e5fa.json"),
-    ("runs/0003-e44e8096.json", ".atompipe/runs/0003-e44e8096.json"),
-    ("runs/0004-05329ee2.json", ".atompipe/runs/0004-05329ee2.json"),
-    ("runs/0005-25c288bb.json", ".atompipe/runs/0005-25c288bb.json"),
+    ("gitignore", ".nopekit/.gitignore"),
+    ("ledger.json", ".nopekit/ledger.json"),
+    ("runs/0001-7d24ce6c.json", ".nopekit/runs/0001-7d24ce6c.json"),
+    ("runs/0002-6a57e5fa.json", ".nopekit/runs/0002-6a57e5fa.json"),
+    ("runs/0003-e44e8096.json", ".nopekit/runs/0003-e44e8096.json"),
+    ("runs/0004-05329ee2.json", ".nopekit/runs/0004-05329ee2.json"),
+    ("runs/0005-25c288bb.json", ".nopekit/runs/0005-25c288bb.json"),
 )
 
 #: What the migration wrote into the bracket, which a legacy copy leaves out:
 #: the project marker, the three marked ignore/attribute files, the records and
-#: the verdict cache. A path under ``.atompipe/`` that is none of these (and not
+#: the verdict cache. A path under ``.nopekit/`` that is none of these (and not
 #: the ignored index the walk may list) is refused rather than guessed at: the
-#: day the bracket gains, say, ``.atompipe/packs/``, whoever added it decides
+#: day the bracket gains, say, ``.nopekit/packs/``, whoever added it decides
 #: whether the legacy bracket had it. Spelled here, not read from
 #: ``store.RECORD_DIRS``: a fixture that takes its shape from the spine under
 #: test moves with it.
-_MIGRATED_FILES = frozenset({".atompipe/project.json", ".atompipe/.gitignore",
+_MIGRATED_FILES = frozenset({".nopekit/project.json", ".nopekit/.gitignore",
                              ".gitignore", ".gitattributes",
-                             ".atompipe/ledger.json", ".atompipe/ledger.legacy.json"})
-_MIGRATED_DIRS = (".atompipe/verdicts/", "claims/", "params/", "decisions/", "needs/",
+                             ".nopekit/ledger.json", ".nopekit/ledger.legacy.json"})
+_MIGRATED_DIRS = (".nopekit/verdicts/", "claims/", "params/", "decisions/", "needs/",
                   "results/")
 
 #: The thickness default in `model/bracket.py`, as the model spells it. Exactly
@@ -221,11 +221,11 @@ def _commit_all(project: str, message: str) -> None:
 
 def _migrated_path(rel: str) -> bool:
     """Whether ``rel`` (bracket-relative) is something the bracket's migration
-    wrote, which a legacy copy leaves out. Refuses an ``.atompipe/`` path it does
+    wrote, which a legacy copy leaves out. Refuses an ``.nopekit/`` path it does
     not know (see ``_MIGRATED_FILES``)."""
     if rel in _MIGRATED_FILES or rel.startswith(_MIGRATED_DIRS):
         return True
-    if rel.startswith(".atompipe/"):
+    if rel.startswith(".nopekit/"):
         raise AssertionError(
             f"examples/bracket/{rel}: bracket_copy does not know whether the legacy "
             "bracket had this file; say so in tests/_projects.py (_MIGRATED_FILES) "
@@ -238,7 +238,7 @@ def bracket_copy(dest: str, *, thickness: float | None = None, git: bool = False
     """Copy the bracket into ``dest`` (made if missing); return its absolute path.
 
     ``migrated=True``: the bracket as a clone holds it — records,
-    ``.atompipe/project.json``, the committed verdict cache. Default: the bracket
+    ``.nopekit/project.json``, the committed verdict cache. Default: the bracket
     before its migration — the same model, gates and selftest, around the legacy
     ledger, ignore file and run history of ``LEGACY_BRACKET``, with no record, no
     marker block and no cache, so the first ``check`` migrates it and runs every
@@ -295,7 +295,7 @@ import copy
 import dataclasses
 import os
 
-from atompipe.models import Acceptance, Claim, Ledger
+from nopekit.models import Acceptance, Claim, Ledger
 
 PARAMS = {params}
 
@@ -428,8 +428,8 @@ def pack_gates(pack: str) -> list[Any]:
     """The bundled pack ``pack``'s GateSpecs, sorted by id.
 
     Loaded from the CHECKOUT's copy into a fresh ``Registry`` — never
-    ``gates.REGISTRY`` — and resolved with neither ``$ATOMPIPE_PACK_PATH`` nor
-    ``~/.atompipe/packs``: those belong to the machine, and a wrapped project's
+    ``gates.REGISTRY`` — and resolved with neither ``$NOPEKIT_PACK_PATH`` nor
+    ``~/.nopekit/packs``: those belong to the machine, and a wrapped project's
     claims must name the gates of the pack it wraps, not of one a developer
     happens to have installed. Never from a project's ``copy_pack`` copy either:
     loading through the stock import system writes ``__pycache__`` beside the
@@ -497,13 +497,13 @@ def wrap_pack_baseline(pack: str, dest: str, *, legacy: bool = True,
       ``selftest/assets/results/…``) resolves against the project root as it
       resolves against the pack directory in pack mode.
     * ``meta.packs = [pack]``. With ``copy_pack`` the pack itself is copied to
-      ``.atompipe/packs/<pack>`` too, which the search order puts ahead of the
+      ``.nopekit/packs/<pack>`` too, which the search order puts ahead of the
       bundled one: a test may then edit the pack's code or fixtures without
       touching the checkout.
     * One critical measurable claim per gate, ``G1…Gn`` in gate-id order, with
       ``tags = spec.claims``, so each claim is covered by its gate (and by any
       other gate sharing a tag, exactly as a user's claim would be).
-    * The **legacy** layout: ``.atompipe/ledger.json`` and ``.atompipe/.gitignore``
+    * The **legacy** layout: ``.nopekit/ledger.json`` and ``.nopekit/.gitignore``
       (``LEGACY_GITIGNORE``), keys sorted, indent 2 — what the 1e09113 spine
       wrote, so that spine reads the project natively, this phase's spine
       migrates it, and the R-8 oracle compares the two on one fixture.
@@ -526,7 +526,7 @@ def wrap_pack_baseline(pack: str, dest: str, *, legacy: bool = True,
     dest = os.path.abspath(dest)
     os.makedirs(dest, exist_ok=True)
 
-    dot = os.path.join(dest, ".atompipe")
+    dot = os.path.join(dest, ".nopekit")
     os.makedirs(dot, exist_ok=True)
     if copy_pack:
         _copy_tree(source, os.path.join(dot, "packs", pack))
@@ -553,7 +553,7 @@ def wrap_pack_baseline(pack: str, dest: str, *, legacy: bool = True,
 # a planted project: a model, gates, fixtures, claims and a known-good design
 # --------------------------------------------------------------------------- #
 #: The marker a planted project carries: the records layout's
-#: ``.atompipe/project.json``, naming the model every planted project keeps at
+#: ``.nopekit/project.json``, naming the model every planted project keeps at
 #: ``model/m.py``. Spelled here as a literal, never written through ``store``
 #: (the module docstring's rule: a fixture written by the spine under test moves
 #: with it).
@@ -579,8 +579,8 @@ def plant_project(root: str, files: dict[str, str], *, claims: dict[str, dict],
     (:class:`Planted`) read the same files.
     """
     base = os.path.abspath(root)
-    os.makedirs(os.path.join(base, ".atompipe"), exist_ok=True)
-    with open(os.path.join(base, ".atompipe", "project.json"), "w", encoding="utf-8",
+    os.makedirs(os.path.join(base, ".nopekit"), exist_ok=True)
+    with open(os.path.join(base, ".nopekit", "project.json"), "w", encoding="utf-8",
               newline="\n") as fh:
         fh.write(json.dumps(_PLANTED_MARKER, indent=2) + "\n")
     for rel, text in files.items():
@@ -611,8 +611,8 @@ class Planted:
     a gate's code builds a new project, since a module loaded here stays loaded."""
 
     def __init__(self, root: str, claims: dict[str, dict], *, now: str = WRAP_CREATED) -> None:
-        from atompipe import modelio
-        from atompipe.models import Claim, Ledger
+        from nopekit import modelio
+        from nopekit.models import Claim, Ledger
         self.root = os.path.abspath(root)
         self.now = now
         self.registry = gates.Registry()
@@ -622,20 +622,20 @@ class Planted:
         self.projection = modelio.project(modelio.load_model(self.root, "model/m.py"))
 
     def ctx(self) -> Any:
-        from atompipe import modelio, store
+        from nopekit import modelio, store
         flat, _conflicts = modelio.flat_params(self.projection)
         return gates.GateContext(root=self.root, ledger=self.ledger, model=None, params=flat,
                                  out_dir=store.out_dir(self.root), tier=0, extra={})
 
     def sweep(self, **kw: Any) -> Any:
-        from atompipe import verdicts
+        from nopekit import verdicts
         kw.setdefault("max_tier", 0)
         kw.setdefault("now", self.now)
         return verdicts.sweep(self.root, self.registry, self.ctx(),
                               projection=self.projection, ledger=self.ledger, **kw)
 
     def resolve(self) -> Any:
-        from atompipe import verdicts
+        from nopekit import verdicts
         return verdicts.resolve(self.root, self.registry, self.projection, self.ledger,
                                 now=self.now)
 
@@ -643,7 +643,7 @@ class Planted:
         """``{claim id: Composed}`` as every reader composes it: the resolution's
         verdicts over the ledger, with the registry and its stale gates."""
         import dataclasses
-        from atompipe import claims as claim_logic
+        from nopekit import claims as claim_logic
         resolution = resolution if resolution is not None else self.resolve()
         view = dataclasses.replace(self.ledger, verdicts=list(resolution.verdicts))
         return claim_logic.compositions(view, registry=self.registry,

@@ -76,8 +76,8 @@ import copy
 import dataclasses
 import os
 
-from atompipe.modelio import flat_params, load_path
-from atompipe.models import Claim, Ledger
+from nopekit.modelio import flat_params, load_path
+from nopekit.models import Claim, Ledger
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 

@@ -1,20 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 """A project is where its marker is, and the search stops at the repository (S-64).
 
-`store.find_root` used to accept any `.atompipe/` DIRECTORY as a project and walk
+`store.find_root` used to accept any `.nopekit/` DIRECTORY as a project and walk
 up to the filesystem root to find one. Two things slipped through that:
 
-* `~/.atompipe/` is where user packs live (`packs.search_paths`). On a pack
+* `~/.nopekit/` is where user packs live (`packs.search_paths`). On a pack
   author's machine it made every directory under `~` a project — an empty,
   unnamed one — so `status` in a scratch directory reported "(unnamed) v0.1",
   `init` there was the only command that behaved, and pack mode, the Stop hook's
   fast exit and `/start`'s `init` could never see "no project".
 * The walk had no repository boundary. A worktree nested inside a project
-  resolved to the TRUNK's `.atompipe/`, so a command run in the worktree read and
+  resolved to the TRUNK's `.nopekit/`, so a command run in the worktree read and
   wrote the trunk's ledger.
 
-The marker is now a FILE — `.atompipe/project.json`, or a legacy
-`.atompipe/ledger.json` — and the walk stops at the first directory holding a
+The marker is now a FILE — `.nopekit/project.json`, or a legacy
+`.nopekit/ledger.json` — and the walk stops at the first directory holding a
 `.git` entry, checked AFTER the marker at the same level so a project that is
 its own git root (the fresh-clone copy of the bracket, any standalone project)
 still finds itself (cli:H9, tests:H16).
@@ -33,16 +33,16 @@ import tempfile
 import unittest
 from unittest import mock
 
-from atompipe import store
-from atompipe.models import ProjectMeta
-from atompipe.util import AtompipeError
+from nopekit import store
+from nopekit.models import ProjectMeta
+from nopekit.util import NopekitError
 
 import _env
 
 #: The two marker spellings, as the files a project holds. Built from the
 #: store's own names where it has them, so a rename moves the test with it.
-LEGACY_MARKER = os.path.join(store.ATOMPIPE_DIR, store.LEDGER_NAME)
-PROJECT_MARKER = os.path.join(store.ATOMPIPE_DIR, "project.json")
+LEGACY_MARKER = os.path.join(store.NOPEKIT_DIR, store.LEDGER_NAME)
+PROJECT_MARKER = os.path.join(store.NOPEKIT_DIR, "project.json")
 MARKERS = (PROJECT_MARKER, LEGACY_MARKER)
 
 
@@ -61,8 +61,8 @@ def _mkdir(*parts: str) -> str:
 
 def _user_pack(home: str, name: str = "mypack") -> str:
     """A user pack, planted where `packs.search_paths` looks for one: the shape of
-    `~/.atompipe/` on the machine of anyone who writes packs."""
-    pack_dir = _mkdir(home, store.ATOMPIPE_DIR, "packs", name)
+    `~/.nopekit/` on the machine of anyone who writes packs."""
+    pack_dir = _mkdir(home, store.NOPEKIT_DIR, "packs", name)
     _write(os.path.join(pack_dir, "pack.json"), json.dumps({"name": name}) + "\n")
     return pack_dir
 
@@ -79,20 +79,20 @@ class ProjectMarker(_env.EnvCase):
         found = store.find_root(above)
         self.assertIsNone(
             found,
-            f"{found} above the temp directory is an atompipe project on this machine; "
+            f"{found} above the temp directory is an nopekit project on this machine; "
             f"every 'resolves to None' assertion below would measure it, not the code")
         self.base = base
 
     # ---------------------------------------------------------------- S-64 (V)
     def test_the_user_pack_home_does_not_make_home_a_project(self):
-        """V (S-64): `$HOME/.atompipe/packs/` does not make `$HOME/x` a project."""
+        """V (S-64): `$HOME/.nopekit/packs/` does not make `$HOME/x` a project."""
         home = _mkdir(self.base, "home")
         pack_dir = _user_pack(home)
         x = _mkdir(home, "x")
         with mock.patch.dict(os.environ, {"HOME": home, "USERPROFILE": home}):
             # The precondition: this IS the user-pack home as the spine sees it.
             self.assertEqual(
-                os.path.abspath(os.path.expanduser(os.path.join("~", store.ATOMPIPE_DIR,
+                os.path.abspath(os.path.expanduser(os.path.join("~", store.NOPEKIT_DIR,
                                                                 "packs"))),
                 os.path.dirname(pack_dir))
             self.assertIsNone(store.find_root(x))
@@ -100,9 +100,9 @@ class ProjectMarker(_env.EnvCase):
             self.assertIsNone(store.find_root(pack_dir))
         # End to end: the CLI in `$HOME/x` says there is no project, rather than
         # reporting on an empty, unnamed one at `$HOME`.
-        proc = _env.atompipe(["status"], cwd=x, home=home)
+        proc = _env.nopekit(["status"], cwd=x, home=home)
         self.assertEqual(proc.returncode, 2, proc.stdout + proc.stderr)
-        self.assertIn("no atompipe project", proc.stderr)
+        self.assertIn("no nopekit project", proc.stderr)
         self.assertNotIn("(unnamed)", proc.stdout)
 
     # ------------------------------------------------------ the git boundary
@@ -156,14 +156,14 @@ class ProjectMarker(_env.EnvCase):
 
     # ------------------------------------------------------------ the marker
     def test_only_a_marker_file_makes_a_project(self):
-        """A `.atompipe/` holding anything but a marker is not a project: scratch
-        (`out/`), a user-pack home (`packs/`), or a `.atompipe` that is a file."""
+        """A `.nopekit/` holding anything but a marker is not a project: scratch
+        (`out/`), a user-pack home (`packs/`), or a `.nopekit` that is a file."""
         cases = {
-            "empty .atompipe/": lambda d: _mkdir(d, store.ATOMPIPE_DIR),
+            "empty .nopekit/": lambda d: _mkdir(d, store.NOPEKIT_DIR),
             "only packs/": lambda d: _user_pack(d),
-            "only out/ and runs/": lambda d: (_mkdir(d, store.ATOMPIPE_DIR, "out"),
-                                              _mkdir(d, store.ATOMPIPE_DIR, "runs")),
-            ".atompipe is a file": lambda d: _write(os.path.join(d, store.ATOMPIPE_DIR)),
+            "only out/ and runs/": lambda d: (_mkdir(d, store.NOPEKIT_DIR, "out"),
+                                              _mkdir(d, store.NOPEKIT_DIR, "runs")),
+            ".nopekit is a file": lambda d: _write(os.path.join(d, store.NOPEKIT_DIR)),
             "project.json is a directory": lambda d: _mkdir(d, PROJECT_MARKER),
         }
         for i, (label, plant) in enumerate(cases.items()):
@@ -186,16 +186,16 @@ class ProjectMarker(_env.EnvCase):
         repo = _mkdir(self.base, "boundary")
         _mkdir(repo, ".git")
         where = _mkdir(repo, "somewhere")
-        with self.assertRaises(AtompipeError) as caught:
+        with self.assertRaises(NopekitError) as caught:
             store.require_root(where)
         message = str(caught.exception)
-        for needle in (where, "project.json", "ledger.json", ".git", repo, "atompipe init"):
+        for needle in (where, "project.json", "ledger.json", ".git", repo, "nopekit init"):
             self.assertIn(needle, message)
 
     # ------------------------------------------------------------------- init
     def test_init_succeeds_beside_user_packs_only(self):
         """`init` refuses only when a MARKER exists: a directory holding only
-        `.atompipe/packs/` is not a project, and its packs survive the init."""
+        `.nopekit/packs/` is not a project, and its packs survive the init."""
         d = _mkdir(self.base, "packs-only")
         pack_dir = _user_pack(d)
         with open(os.path.join(pack_dir, "pack.json"), "rb") as fh:
@@ -207,7 +207,7 @@ class ProjectMarker(_env.EnvCase):
 
     def test_init_still_refuses_a_marker(self):
         """The negative control for the one above: loosening the refusal from
-        "`.atompipe/` exists" to "a marker exists" must not let `init` clobber a
+        "`.nopekit/` exists" to "a marker exists" must not let `init` clobber a
         project, in either spelling."""
         # Directory names carry no marker spelling, so the message assertion
         # below can only be satisfied by the message, not by the path in it.
@@ -215,22 +215,22 @@ class ProjectMarker(_env.EnvCase):
             with self.subTest(marker=marker):
                 d = _mkdir(self.base, f"refuse-{i}")
                 path = _write(os.path.join(d, marker), '{"sentinel": true}\n')
-                with self.assertRaises(AtompipeError) as caught:
+                with self.assertRaises(NopekitError) as caught:
                     store.init(d, _meta("refuse"))
                 self.assertIn(os.path.basename(marker), str(caught.exception))
                 with open(path, "r", encoding="utf-8") as fh:
                     self.assertEqual(fh.read(), '{"sentinel": true}\n')
         d = _mkdir(self.base, "twice")
         store.init(d, _meta("twice"))
-        with self.assertRaises(AtompipeError):
+        with self.assertRaises(NopekitError):
             store.init(d, _meta("twice"))
-        # A `.atompipe` that is a FILE marks nothing, but `init` over it must
+        # A `.nopekit` that is a FILE marks nothing, but `init` over it must
         # still refuse before writing anything, not half-build a layout.
         d = _mkdir(self.base, "dot-is-a-file")
-        _write(os.path.join(d, store.ATOMPIPE_DIR), "not a directory\n")
-        with self.assertRaises(AtompipeError):
+        _write(os.path.join(d, store.NOPEKIT_DIR), "not a directory\n")
+        with self.assertRaises(NopekitError):
             store.init(d, _meta("dot-is-a-file"))
-        self.assertEqual(os.listdir(d), [store.ATOMPIPE_DIR])
+        self.assertEqual(os.listdir(d), [store.NOPEKIT_DIR])
 
 
 if __name__ == "__main__":

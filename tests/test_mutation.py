@@ -109,7 +109,7 @@ write-and-restore shows the diff missing it; a subprocess driver like
 would have to live in an importable module; refactoring `_WRITES_DRIVER` into a
 shared helper — an edit to invariant 8's test for no strength gained (R-6), so
 the forty lines of hook logic are written again here, on purpose; ignored
-scratch under `.atompipe/out` during the run — evidence from a design that
+scratch under `.nopekit/out` during the run — evidence from a design that
 never existed, beside real evidence a report can cite (mutated runs take an out
 dir outside the project, and recording an outcome is the caller's write, held
 by invariant 8); the spine's own tracer as the oracle (the test would call the
@@ -155,13 +155,13 @@ from unittest import mock
 
 import _env
 import _projects
-from atompipe import gates as gates_mod
-from atompipe import modelio
-from atompipe import packs as packs_mod
-from atompipe.models import GateSpec, NegativeControl, Tier, Verdict
-from atompipe.verdicts import GateTrace
+from nopekit import gates as gates_mod
+from nopekit import modelio
+from nopekit import packs as packs_mod
+from nopekit.models import GateSpec, NegativeControl, Tier, Verdict
+from nopekit.verdicts import GateTrace
 
-SRC = os.path.join(_env.REPO, "src", "atompipe")
+SRC = os.path.join(_env.REPO, "src", "nopekit")
 
 #: GLOSSARY §2's outcome words, which a mutation result's `outcome` takes, or
 #: None when the runner did not run it (its key is outside the read set).
@@ -378,7 +378,7 @@ def oracle(spec: GateSpec, fn: Callable, good_ctx: Any, params: dict,
     if mutation is not None:
         _set(data, mutation.key, mutation.after)
     log: set = set()
-    out_dir = tempfile.mkdtemp(prefix="atompipe-oracle-")
+    out_dir = tempfile.mkdtemp(prefix="nopekit-oracle-")
     try:
         ctx = dataclasses.replace(good_ctx, params=_Recorder(data, (), log), out_dir=out_dir,
                                   pack=spec.pack, key_scope=gates_mod.scope_of(spec.id))
@@ -412,7 +412,7 @@ def oracle_run(spec: GateSpec, fn: Callable, good_ctx: Any, params: dict,
     data = copy.deepcopy(params)
     if mutation is not None:
         _set(data, mutation.key, mutation.after)
-    out_dir = tempfile.mkdtemp(prefix="atompipe-oracle-")
+    out_dir = tempfile.mkdtemp(prefix="nopekit-oracle-")
     try:
         ctx = dataclasses.replace(good_ctx, params=data, out_dir=out_dir, pack=spec.pack,
                                   key_scope=gates_mod.scope_of(spec.id))
@@ -661,7 +661,7 @@ class ReferenceRunner:
 
     def run(self, spec: GateSpec, fn: Callable, good_ctx: Any,
             plan: list[Mutation] | None = None) -> list[MutationResult]:
-        out_dir = tempfile.mkdtemp(prefix="atompipe-mutation-")
+        out_dir = tempfile.mkdtemp(prefix="nopekit-mutation-")
         try:
             base = copy.deepcopy(good_ctx.params)
             read = self.read_set(spec, fn, good_ctx, out_dir)
@@ -1082,7 +1082,7 @@ def judge(make: Callable[[], Any], spec: GateSpec, fn: Callable, good_ctx: Any, 
                              f"judge an evaluator with no requirements")
     snapshot = copy.deepcopy(good_ctx.params)
     design_before = copy.deepcopy(design)
-    scratch = tempfile.mkdtemp(prefix="atompipe-judge-")
+    scratch = tempfile.mkdtemp(prefix="nopekit-judge-")
     try:
         live_before = _live(spec, fn, good_ctx, scratch)
         _known, log = oracle(spec, fn, good_ctx, snapshot)
@@ -1251,7 +1251,7 @@ class WritesIntoAPack(ReferenceRunner):
 
 class WritesIgnoredScratch(ReferenceRunner):
     def run(self, spec, fn, good_ctx, plan=None):
-        _write(os.path.join(self.where["project"], ".atompipe", "out", "mutation", "a.json"),
+        _write(os.path.join(self.where["project"], ".nopekit", "out", "mutation", "a.json"),
                "{}\n")
         return super().run(spec, fn, good_ctx, plan)
 
@@ -1579,8 +1579,8 @@ def watched_planted(planted: Callable, watch: list[str], events: list, diffs: li
 #: A project evaluator that raises on every value past its limit (declared:
 #: its known-bad control errors as it says), planted into a bracket copy.
 RAISES_PAST = """\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="bracket.raises", claims=["raises"],
@@ -1598,7 +1598,7 @@ def raises(ctx):
 # real evaluators: the bracket's six and a bundled pack, for SUBJECTS
 # --------------------------------------------------------------------------- #
 class Subject(NamedTuple):
-    """A mutation entry point in `src/atompipe`. `factory()` returns a fresh
+    """A mutation entry point in `src/nopekit`. `factory()` returns a fresh
     object with `plan`, `run` and `line` as `ReferenceRunner` has them (an
     adapter over the entry point); `covers` names every site `mutation_sites`
     reports that this entry point answers for — a module (`qualify.py`), or a
@@ -1657,7 +1657,7 @@ class SpineWalkRunner:
 
     @staticmethod
     def line(results):
-        from atompipe import report as report_mod
+        from nopekit import report as report_mod
         conclusive = [r for r in results if r.conclusive]
         return report_mod.mutation_words(
             sum(1 for r in conclusive if r.outcome == "fail"), len(conclusive),
@@ -1770,8 +1770,8 @@ def judge_on_real_evaluators(test: Any, make: Callable[[RealEvaluator], Any]
 #: mutation (0.575 mm) passes it. Written into a bracket copy as
 #: `gates/drifted.py`, so the survivor comes from a real project.
 DRIFTED = """\
-from atompipe.gates import gate
-from atompipe.models import NegativeControl, Verdict
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Verdict
 
 
 @gate(id="bracket.drifted", claims=["drifted"],
@@ -1867,7 +1867,7 @@ def uncovered_sites(sites: list[str], subjects: list[Subject],
 
 
 def spine_sources() -> dict[str, str]:
-    """Every `.py` under `src/atompipe` and every text file of the site template
+    """Every `.py` under `src/nopekit` and every text file of the site template
     (a qualification line printed by the page counts as spoken)."""
     out: dict[str, str] = {}
     for dirpath, dirnames, filenames in os.walk(SRC):
@@ -1891,7 +1891,7 @@ class MutationIsSealed(_env.EnvCase):
         self.project = self.tmp()
         self.pack = self.tmp()
         _write(os.path.join(self.project, "model", "toy.py"), "A = 5\nB = 1\n")
-        os.makedirs(os.path.join(self.project, ".atompipe"))
+        os.makedirs(os.path.join(self.project, ".nopekit"))
         _write(os.path.join(self.pack, "gates", "x.py"), "X = 1\n")
         self.roots = [self.project, self.pack]
         design = copy.deepcopy(TOY_DESIGN)
@@ -2171,7 +2171,7 @@ class MutationIsSealed(_env.EnvCase):
         """`check`'s own sweep, in process on a bracket copy, with the spine's
         walk run inside the watch: no write under the project, the checkout's
         packs or any pack search path, and all six qualified."""
-        from atompipe import store, verdicts
+        from nopekit import store, verdicts
         root = _projects.bracket_copy(os.path.join(self.tmp(), "bracket"))
         roots = list(dict.fromkeys([root, _projects.PACKS]
                                    + packs_mod.search_paths(root, existing_only=False)))
@@ -2211,7 +2211,7 @@ class MutationIsSealed(_env.EnvCase):
         with mock.patch.object(gates_mod, "mutation_walk",
                                lambda *a, **k: watched_planted(planted, roots, events, diffs,
                                                                *a, **k)):
-            shutil.rmtree(os.path.join(root, ".atompipe", "verdicts"), ignore_errors=True)
+            shutil.rmtree(os.path.join(root, ".nopekit", "verdicts"), ignore_errors=True)
             sweep()
         self.assertTrue(events, "the planted write inside the window was not seen by the hook")
         self.assertTrue(diffs, "the planted write was not seen by the digest")
@@ -2226,9 +2226,9 @@ class MutationIsSealed(_env.EnvCase):
         want = "bracket.raises : known-good pass · known-bad fail (raised, as declared) · " \
                "mutation 0 conclusive (1 inconclusive) → qualified"
         truth = [("errored", False)]
-        check = _env.atompipe(["check"], cwd=root).stdout
-        show = _env.atompipe(["gate", "show", "bracket.raises"], cwd=root).stdout
-        selftest = _env.atompipe(["gate", "selftest", "bracket.raises"], cwd=root).stdout
+        check = _env.nopekit(["check"], cwd=root).stdout
+        show = _env.nopekit(["gate", "show", "bracket.raises"], cwd=root).stdout
+        selftest = _env.nopekit(["gate", "selftest", "bracket.raises"], cwd=root).stdout
         for channel, text in (("check", check), ("gate show", show), ("gate selftest", selftest)):
             with self.subTest(channel=channel):
                 lines = [ln.strip() for ln in text.splitlines() if "bracket.raises :" in ln

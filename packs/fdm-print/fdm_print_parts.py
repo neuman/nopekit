@@ -51,7 +51,7 @@ import os
 from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
-from atompipe.site import MOVER_SEPARATOR
+from nopekit.site import MOVER_SEPARATOR
 
 #: The view id ``views/part.py`` registers, and therefore the string every
 #: ``Locator.view`` in this pack must carry. Spelled ``print_part`` rather than
@@ -113,7 +113,7 @@ def sanitise(name: str) -> str:
 
     Runs of replaced characters collapse to one ``_``, because ``MOVER_SEPARATOR``
     is ``__``: a part called ``saddle clamp`` would otherwise sanitise to
-    ``saddle__clamp`` and :func:`atompipe.site.derive_explode` would read it as a
+    ``saddle__clamp`` and :func:`nopekit.site.derive_explode` would read it as a
     *body* of a mover called ``saddle``.
     """
     text = "".join(ch if ch in _KEEP else "_" for ch in str(name))

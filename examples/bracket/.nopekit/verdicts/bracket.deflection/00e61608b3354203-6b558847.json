@@ -1,0 +1,60 @@
+{
+  "schema": 1,
+  "gate": "bracket.deflection",
+  "rho": "00e61608b335420313e329439d533d3253dcc76453afa9c8d6d079c0e74b5393",
+  "code": {
+    "digest": "5520d0044d67360dabf62772863955b4b7678e7f76c1f62f99bb01ef09e13c9e",
+    "files": [
+      "gates/structural.py"
+    ],
+    "fallback": ""
+  },
+  "spine": "f396daf6190537c7f68ede528849d58110bd85d8d545c39e61ecc2efda945530",
+  "reads": {
+    "params": [
+      [
+        [
+          "config",
+          "load_n"
+        ],
+        "b34f99646d287db0e67fa4f3d5b7715260045d9c6226d860a653be73642ea84f",
+        15.0
+      ],
+      [
+        [
+          "deflection"
+        ],
+        "54ba359701f0dccc2883b43e48411f0e3a782f7edffc911518d97e49cae727fa",
+        0.6997084548104956
+      ]
+    ],
+    "files": {},
+    "dirs": {},
+    "ledger": {
+      "acceptance-shape:C1": "fa6d23299a94bf0f6aeb3ced3ba3a235f906ce1dbec50ccd8d42f1cf06ad1a44",
+      "acceptance:C1": "a030648a0b8f92e0768e835b24dece95031fc3b2787905507eae34a39285e091"
+    },
+    "model": null,
+    "opaque": []
+  },
+  "instruments": {},
+  "verdict": {
+    "passed": false,
+    "measured": 0.6997,
+    "limit": 0.5,
+    "units": "mm",
+    "comparator": "<=",
+    "settles": "tip deflection",
+    "detail": "0.700 mm at 15 N (limit 0.5 mm)",
+    "evidence": [],
+    "locators": [],
+    "claims": [
+      "structural",
+      "stiffness",
+      "deflection"
+    ],
+    "tier": 0,
+    "pack": ""
+  },
+  "digest": "6904ce455fd2969c0b09bdadce8019c4a92b21e8e0f9ebe991cc91bba119b859"
+}

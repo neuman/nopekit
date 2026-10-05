@@ -34,9 +34,9 @@ import tempfile
 import unittest
 from unittest import mock
 
-from atompipe import gates as gates_mod
-from atompipe import packs as packs_mod
-from atompipe.models import Ledger, ProjectMeta
+from nopekit import gates as gates_mod
+from nopekit import packs as packs_mod
+from nopekit.models import Ledger, ProjectMeta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TIER2 = ("modelica.checks", "modelica.compiles", "modelica.simulates")
@@ -44,15 +44,15 @@ TIER2 = ("modelica.checks", "modelica.compiles", "modelica.simulates")
 #: The load half of a gate's script as omc 1.22.0 (``-minimal`` docker image, no
 #: MSL, HOME=/) printed it, verbatim but for the source path.
 LIBRARY_MISSING = """\
-@@ATOMPIPE:libraries
+@@NOPEKIT:libraries
 
 loadModel(Modelica) = false
 
-@@ATOMPIPE:load
+@@NOPEKIT:load
 
 loadFile(Tank.mo) = true
 
-@@ATOMPIPE:loaderr
+@@NOPEKIT:loaderr
 
 Error: Failed to open file for writing: //.openmodelica/libraries/index.json.tmp1
 Error: Failed to download package index https://libraries.openmodelica.org/index/v1/index.json to file //.openmodelica/libraries/index.json.
@@ -61,38 +61,38 @@ Error: Failed to download package index https://libraries.openmodelica.org/index
 Error: Failed to load package Modelica (default) using MODELICAPATH //.openmodelica/libraries/.
 
 
-@@ATOMPIPE:end
+@@NOPEKIT:end
 """
 
 #: The same omc with MSL installed, on a source missing one semicolon.
 SOURCE_BROKEN = """\
-@@ATOMPIPE:libraries
+@@NOPEKIT:libraries
 
 loadModel(Modelica) = true
 
-@@ATOMPIPE:load
+@@NOPEKIT:load
 
 loadFile(Tank.mo) = false
 
-@@ATOMPIPE:loaderr
+@@NOPEKIT:loaderr
 
 [/work/Tank.mo:3:1-3:1:writable] Error: Missing token: SEMICOLON
 
 
-@@ATOMPIPE:end
+@@NOPEKIT:end
 """
 
 #: No MSL AND the broken source: the parse error is the model's either way.
 BOTH = """\
-@@ATOMPIPE:libraries
+@@NOPEKIT:libraries
 
 loadModel(Modelica) = false
 
-@@ATOMPIPE:load
+@@NOPEKIT:load
 
 loadFile(Tank.mo) = false
 
-@@ATOMPIPE:loaderr
+@@NOPEKIT:loaderr
 
 Error: Failed to open file for writing: //.openmodelica/libraries/index.json.tmp1
 Error: Failed to download package index https://libraries.openmodelica.org/index/v1/index.json to file //.openmodelica/libraries/index.json.
@@ -100,7 +100,7 @@ Error: Failed to load package Modelica (default) using MODELICAPATH //.openmodel
 [/work/Tank.mo:3:1-3:1:writable] Error: Missing token: SEMICOLON
 
 
-@@ATOMPIPE:end
+@@NOPEKIT:end
 """
 
 
@@ -108,7 +108,7 @@ Error: Failed to load package Modelica (default) using MODELICAPATH //.openmodel
 class AMissingLibrary(unittest.TestCase):
 
     def setUp(self):
-        self.dir = tempfile.mkdtemp(prefix="atompipe-omc-lib-")
+        self.dir = tempfile.mkdtemp(prefix="nopekit-omc-lib-")
         self.addCleanup(shutil.rmtree, self.dir, True)
         self.bin = os.path.join(self.dir, "bin")
         os.makedirs(self.bin)

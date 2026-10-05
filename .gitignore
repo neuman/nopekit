@@ -10,19 +10,19 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
-# --- atompipe project state ---
+# --- nopekit project state ---
 # A project carries its own ignore rules: `init` (and the one-time migration)
-# writes a marked block into `<project>/.atompipe/.gitignore` — the generated
+# writes a marked block into `<project>/.nopekit/.gitignore` — the generated
 # index `ledger.json`, `cache/`, `obs/`, `out/` — and one into the project's root
 # `.gitignore` for bytecode. The records (`claims/` and the rest) and the verdict
-# cache `.atompipe/verdicts/` stay TRACKED. What slipped through: this comment
-# still said `.atompipe/ledger.json` and `.atompipe/runs/` stay tracked after
+# cache `.nopekit/verdicts/` stay TRACKED. What slipped through: this comment
+# still said `.nopekit/ledger.json` and `.nopekit/runs/` stay tracked after
 # Phase 1 made the ledger an index nothing reads for truth and removed the run
 # history — the migration rewrote every project's ignore file and nothing checked
 # the repository's own.
 # (METHOD.md rule 1: generated files are outputs, not sources.) Below: the scratch
 # a hand-run check script writes beside a pack.
-.atompipe/out/
+.nopekit/out/
 .selftest-out/
 
 # --- OS / editor ---
