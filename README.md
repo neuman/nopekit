@@ -1,26 +1,36 @@
 # nopekit
 
-Take a sketch or a discussion to a physical thing you can actually build — with an
-honest account of what has been verified and what has not.
+A framework for **grounding by falsification**: propose candidates as fast as you
+like, and keep an honest account of which claims about them have survived an
+evaluator that could have rejected them — and which have not.
 
-nopekit is a Claude Code plugin and a small Python spine. It generalises a pipeline
-that was proven on a real device before it was extracted — a physical product taken
-from a napkin sketch to manufacturable outputs, working firmware and a published
-readiness report, across dozens of revisions ([origins](docs/ORIGINS.md)).
+nopekit implements the grounded design state described in the paper
+[*Grounding by Falsification*](grounding_by_falsification.pdf): the claims a candidate
+must satisfy, the evaluators that can falsify them, and the provenance and current
+validity of every verdict. A generator, human or model, can propose anything, but it
+cannot settle a claim by asserting it. A claim is checked only when an evaluator that
+has shown it can fail has run against the current inputs, and a change to those inputs
+makes exactly the verdicts that read them stale.
 
-It is domain-agnostic on purpose. The same spine drives an RC boat, a solar thermal
-collector, a chemical process or a printed bracket, because the hard part is never
-the domain. The hard part is knowing which parts of your design have actually been
-checked.
+It works in any domain where a claim can be stated and an evaluator can be written: an
+analysis, a model, a process, a codebase, a physical product. Physical design is where
+it was first proven, and where its bundled packs live today: a product taken from a
+napkin sketch to manufacturable outputs, working firmware and a published readiness
+report, across dozens of revisions ([origins](docs/ORIGINS.md)). That is where
+evaluators are slowest and most expensive, and where an honest line between evidence
+and assumption pays the most.
+
+The hard part is never the domain. It is knowing which of your claims have actually
+been checked.
 
 ```
 claims  ->  gates  ->  packs  ->  readiness report
 ```
 
-A **claim** is something that must be true for the design to work. A **gate** is an
-executable that settles a claim *and is capable of failing*. A **pack** supplies gates
-for one physical domain. The **readiness report** is the claims and their verdicts
-rendered: what is proven, what is not, and why.
+A **claim** is something that must be true for a candidate to be accepted. A **gate**
+is an evaluator that settles a claim *and is capable of failing*. A **pack** supplies
+gates for one domain. The **readiness report** is the claims and their verdicts
+rendered: what is checked, what is not, and why.
 
 ## Install
 
@@ -62,10 +72,10 @@ rather than quietly passing.
 
 ## What using it looks like
 
-You describe a thing. nopekit asks for the evidence a design conversation never
-produces on its own — sketches, a photo of the closest product you'd buy instead,
-calipers on whatever it has to fit, datasheets for parts you have already chosen.
-Then it extracts the claims:
+An example from physical design, the domain the bundled packs cover. You describe a
+thing. nopekit asks for the evidence a design conversation never produces on its own:
+sketches, a photo of the closest product you'd buy instead, calipers on whatever it
+has to fit, datasheets for parts you have already chosen. Then it extracts the claims:
 
 ```
 C1  Floats with the full payload at <=60% draft          [measurable]
