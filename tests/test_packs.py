@@ -974,6 +974,12 @@ EDGES: dict[str, list[tuple[str, str]]] = {
     # The reader's guard before the two gates that read the board with it; KiCad's
     # own gates read the file themselves and need none.
     "pcb-kicad": [(d, "pcb.board_readable") for d in ("pcb.pin_names", "pcb.net_width")],
+    # The CI-flag guard before the build, and the build before the two gates that
+    # read what it holds: a devicetree or a .config of firmware that does not
+    # build, or of ZMK's default keymap, is not the design's.
+    "firmware-zmk": [("zmk.build", "zmk.ci_step"),
+                     ("zmk.wakeup_source", "zmk.build"),
+                     ("zmk.tx_power", "zmk.build")],
     # A chain: nothing reaches a pressure drop past a guard that did not pass.
     "cfd-openfoam": [("cfd.regime", "cfd.case_readable"),
                      ("cfd.mesh_quality", "cfd.case_readable"),
@@ -1413,7 +1419,7 @@ class ControlsAreIsolated(unittest.TestCase):
             if edges:
                 declared[name] = sorted(edges)
         self.assertEqual(declared, {name: sorted(e) for name, e in EDGES.items()})
-        self.assertEqual(sum(len(e) for e in declared.values()), 43)
+        self.assertEqual(sum(len(e) for e in declared.values()), 46)
         registry = gates_mod.Registry()
         gates_mod.load_project_gates(os.path.join(REPO, "examples", "bracket"), registry)
         self.assertEqual(sorted(_declared_edges(registry)), sorted(BRACKET_EDGES))

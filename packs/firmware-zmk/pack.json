@@ -1,0 +1,51 @@
+{
+  "name": "firmware-zmk",
+  "version": "0.1.0",
+  "description": "Builds ZMK firmware with the CI's own flags in ZMK's pinned image, then checks deep-sleep wakeup sources and radio transmit power.",
+  "settles": [
+    "ci build step",
+    "firmware build",
+    "zmk firmware builds",
+    "ci builds the firmware",
+    "keymap actually used",
+    "wakeup from deep sleep",
+    "deep sleep wakeup source",
+    "radio transmit power",
+    "bluetooth tx power"
+  ],
+  "claim_classes": [
+    "firmware",
+    "firmware-build",
+    "ci-build-step",
+    "deep-sleep",
+    "wakeup-source",
+    "tx-power",
+    "radio"
+  ],
+  "provides_gates": [
+    "zmk.ci_step",
+    "zmk.build",
+    "zmk.wakeup_source",
+    "zmk.tx_power"
+  ],
+  "provides_generators": [],
+  "requires_tools": [
+    "zmk-west",
+    "docker"
+  ],
+  "requires_python": [
+    "yaml"
+  ],
+  "max_tier": 1,
+  "lenses": [
+    "the build CI never ran",
+    "a keymap nobody wrote",
+    "a board that cannot wake",
+    "a power level nobody granted",
+    "the image that is not the one pinned"
+  ],
+  "authors": [],
+  "licence": "Apache-2.0",
+  "origin": "written for a handheld keyboard deck on an nRF52840 module whose CI had never built its firmware, whose deep sleep had no wakeup source and whose radio ran past its module's grant. Its controls are upstream ZMK's corne; no project's design came with it.",
+  "basis": "established"
+}
