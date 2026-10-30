@@ -74,6 +74,19 @@ VIEW_ID = "print_part"
 #: the page could show.
 MESH_PATH_KEYS = ("mesh_path", "stl_path", "part_mesh", "geometry_path")
 
+BED_TOLERANCE_MM = 0.05
+"""How close to the lowest point a face must be to count as sitting ON the bed, mm.
+
+Read by ``gates/mesh.py`` (which faces are the first layer, not overhangs) and by
+``gates/slicer.py`` (a mesh whose lowest point is further than this from z = 0 is
+not in print pose). One number in one place: the two gates must agree on where the
+bed is. It lived in ``gates/mesh.py`` until the slicer gate needed it, and a gate
+module cannot load another one (its gates would register twice).
+
+This exclusion is not cosmetic. The bottom face of any part is, geometrically, a
+90 deg overhang facing straight down; without excluding it every solid ever
+modelled fails the overhang gate and the gate becomes noise."""
+
 #: Where the part's name is, in order. Optional; the mesh filename is the fallback.
 PART_NAME_KEYS = ("part_name", "part", "name")
 

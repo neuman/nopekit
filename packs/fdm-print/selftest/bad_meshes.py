@@ -189,7 +189,17 @@ def _baseline() -> dict:
             loaded = _json.load(handle)
     except (OSError, ValueError):
         return {}
-    return {k: v for k, v in loaded.items() if not k.startswith("_")}
+    params = {k: v for k, v in loaded.items() if not k.startswith("_")}
+    # The slicer's presets are pack files, resolved against the pack as the
+    # baseline part is (``_BASELINE_PART``): a control runs with the HOST's root,
+    # where ``selftest/orca/`` does not exist, and fdm.slice would skip its own
+    # known-bad input instead of slicing it.
+    presets = params.get("slicer_presets")
+    if isinstance(presets, dict):
+        here = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+        params["slicer_presets"] = {role: _os.path.join(here, *str(rel).split("/"))
+                                    for role, rel in presets.items()}
+    return params
 
 
 def _stage(ctx, mesh, name: str):

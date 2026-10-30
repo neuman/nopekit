@@ -160,12 +160,9 @@ degree. Rejected: 0 (the perfect-bridge case sits exactly on the boundary and
 floating point puts it on either side of it) and 45 (wide enough to let a genuine
 corner ledge, whose two perpendicular walls span 90 deg, be scored as a bridge)."""
 
-BED_TOLERANCE_MM = 0.05
-"""How close to the lowest point a face must be to count as sitting ON the bed.
-
-This exclusion is not cosmetic. The bottom face of any part is, geometrically, a
-90 deg overhang facing straight down; without excluding it every solid ever
-modelled fails the overhang gate and the gate becomes noise."""
+#: How close to the lowest point a face must be to count as sitting on the bed.
+#: Shared with ``gates/slicer.py`` through ``fdm_print_parts``, where it is documented.
+BED_TOLERANCE_MM = PARTS.BED_TOLERANCE_MM
 
 _MISSING = object()
 

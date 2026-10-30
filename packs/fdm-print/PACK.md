@@ -1,7 +1,8 @@
 # fdm-print
 
-Filament printability. Seven gates: five that cost nothing and run on every edit,
-two that read the mesh. **Every one of them judges ONE PRINTED PART, and expects
+Filament printability. Eight gates: five that cost nothing and run on every edit,
+two that read the mesh, and one (`fdm.slice`, tier 2) that slices the mesh on
+OrcaSlicer and reads the toolpaths. **Every one of them judges ONE PRINTED PART, and expects
 that part IN ITS PRINT ORIENTATION WITH THE BED AT Z=0** — the pose the machine
 will actually build it in, not the pose it occupies in the assembly. Hand a gate
 here a part exported in assembly coordinates and you get an answer that is true of
@@ -38,6 +39,9 @@ other four gates read one number each and judge one part, as they always have. S
 - **Will the unsupported horizontal spans bridge**, or do they need a chamfer, a
   split, or support — and **is it a bridge at all**, because a ceiling held on one
   side is a cantilever and gets a limit more than ten times smaller.
+- **Does it slice on the named slicer, version and presets**, with no bridge line
+  in the slicer's own toolpaths running unsupported past the maximum
+  (`fdm.slice`, OrcaSlicer 2.4.2, opt-in).
 - **Is the primary load carried across the layer bonds** — the failure a structural
   pack cannot see, because a structural pack computes with bulk properties and a
   printed part is not a bulk material.
@@ -50,7 +54,7 @@ other four gates read one number each and judge one part, as they always have. S
   watertight or is wound inside out, because every face normal in it is a fiction
   and so is every number read off one.
 - **Whether the pack's own rules still apply** — `fdm.process_model_valid` decides
-  whether the other six are entitled to an opinion at all.
+  whether the other seven are entitled to an opinion at all.
 
 ## What it does NOT settle
 
@@ -62,9 +66,13 @@ Read this section before you trust a green sweep from this pack.
   prints. Nothing in the pack can detect that — a tilted panel is a legitimate
   print orientation for some other part — so it is on the model to export the
   print set, and it is stated at the top of this file for that reason.
-- **It is not a slicer.** No gate here runs the actual toolpath. A part can pass
-  every gate and still fail in the slicer on a thin-wall gap-fill artifact, a
-  seam placement, or a cooling conflict between two islands.
+- **One gate slices, and it reads only some of what the slicer did.** `fdm.slice`
+  runs OrcaSlicer 2.4.2 and reads its refusals, its warnings and its bridge lines
+  (see [The slicer gate](#the-slicer-gate)). It does not settle a thin feature the
+  slicer drops from the toolpaths (a 0.15 mm or 0.08 mm fin gives 0 mm³ of
+  extrusion and no warning), the time and mass the slicer estimates, a seam
+  placement, or a cooling conflict between two islands. The other seven gates run
+  no toolpath at all.
 - **It says nothing about dimensional accuracy.** Holes print undersize, outer
   dimensions print oversize, and both depend on the machine, the material and the
   flow calibration. If a feature has a tolerance, that is a *physical* claim
@@ -127,6 +135,7 @@ Read this section before you trust a green sweep from this pack.
 | `fdm.print_time_est` | 0 | estimated hours and grams | hours > `max_print_time_h` **or** grams > `max_filament_g` | `crawling_speed` — the speed, solved from the gate's own model, that lands the part 15% past the project's time ceiling |
 | `fdm.overhang` | 1 | area past the overhang limit, as a fraction of surface — **one part or the whole set** | fraction > allowance; mesh not a solid; `overhang_limit_deg` ≥ `bridge_ceiling_deg` | `steep_cone` — a cone stood on its apex, 70° half angle |
 | `fdm.bridge_span` | 1 | longest unsupported horizontal span, per ceiling region, classified bridge / cantilever / unanchored — **one part or the whole set** | span > `max_bridge_mm` (bridge), > `max_cantilever_mm` (cantilever), any span at all (unanchored); mesh not a solid | `long_bridge` — a PLATE of three parts whose middle one is an arch spanning 3× the limit between two real anchors |
+| `fdm.slice` | 2 | the longest unsupported run of Bridge lines in the toolpaths OrcaSlicer 2.4.2 wrote, on the project's three presets — **one part or the whole set**. Claim tag `slicer` only | span > `max_bridge_mm`; Orca refuses the part (-50, -52, -102) or warns about it; the mesh is not in print pose; the G-code's extents are not the mesh's | `long_bridge` — the same plate: Orca slices the 90 mm arch "Success." with no warning |
 
 Thresholds and their provenance live inline in `gates/printability.py` and
 `gates/mesh.py` as module constants with docstrings — the brim allowance, the
@@ -143,8 +152,8 @@ never fall back to a cheaper approximation. A pack that quietly downgrades turns
 ### Prerequisites
 
 `fdm.process_model_valid` is the prerequisite (`needs`) of every other gate here:
-`fdm.overhang`, `fdm.bridge_span`, `fdm.bed_fit`, `fdm.min_wall`, `fdm.layer_alignment`
-and `fdm.print_time_est`. It checks the units and the process envelope the rest of
+`fdm.overhang`, `fdm.bridge_span`, `fdm.bed_fit`, `fdm.min_wall`, `fdm.layer_alignment`,
+`fdm.print_time_est` and `fdm.slice`. It checks the units and the process envelope the rest of
 the pack's arithmetic assumes, so below it failing they are not run, and their
 claims read Skipped, `prerequisite failed: fdm.process_model_valid`.
 
@@ -199,6 +208,7 @@ mesh_path "build/saddle_clamp.stl"  ->  mover "saddle_clamp"  ->  node "saddle_c
 |---|---|---|
 | `fdm.overhang` | one part: up to twelve `face` pins, each at a face centroid in model coordinates, carrying the angle and the area. A set: the steepest face of each offending part, one pin each | the steepest face first (how bad it gets — an 89° nub prints as a blob), then the largest by area (how much of the part is like this, which is what the gate fails on). Ranking by angle alone pins twelve slivers and misses the shelf; by area alone it misses the nub |
 | `fdm.bed_fit` | one `part` pin per offending part, and only when that part has a mesh to draw | the bounding box is a property of the whole part. There is no face to blame, and this is a tier-0 gate that fires happily on a project that stated a box and exported nothing — a locator aimed at a view that does not exist reads as a broken pack |
+| `fdm.slice` | one `point` per offending part, at the middle of its worst unsupported run, moved from the slicer's bed into the mesh's frame by the centres of the two boxes; a `part` pin per part that fails on pose, a refusal, a warning or its extents | the toolpath says where the bridge line is. A refusal or a warning names no point |
 | `fdm.bridge_span` | one part: none. A set: one `part` pin per offending part | over a set the question has become *which part*, and that it knows exactly. Where the span is is still not something it could defend: it is measured between anchors found by direction, not at a point |
 | `fdm.min_wall`, `fdm.layer_alignment`, `fdm.print_time_est`, `fdm.process_model_valid` | none | none of them resolves to a position. A bridge span is measured between two anchors the gate finds by direction, not at a point it could defend; the rest are arithmetic on the projection |
 
@@ -235,6 +245,7 @@ pack.
 | Part mesh | `mesh_path` | `stl_path`, `part_mesh`, `geometry_path` | the exported mesh **in print orientation, bed at z=0** |
 | Build direction | `build_axis` | `layer_normal`, `print_axis` | `[x, y, z]` vector **or an axis name**: `"z"`, `"+Z"`, `"-y"` |
 | Load direction | `load_axis` | `primary_load_axis`, `load_direction` | same two shapes. `load_axis: "z"` used to report *"the projection has no load_axis"*, which reads as "you did not set it" to the one person who knows they did; a value that is present and unreadable now says so, and says what shape it wants |
+| Slicer presets | `slicer_presets` | — | `{machine, process, filament}`: paths to three complete OrcaSlicer preset files, read by `fdm.slice` only. It SKIPS without them and never writes one |
 
 The full list, with a unit and a sentence for each key, is
 `selftest/baseline.json` — every key any gate here reads, on a design they all
@@ -479,6 +490,41 @@ minute usually means `volume_mm3` is actually cm³.
   those parts, not the design. The measured summary for the rest follows it in the
   same line, and the per-part table has the repair message in full.
 
+## The slicer gate
+
+`fdm.slice` is opt-in: it binds only a claim tagged `slicer`, because it runs at tier
+2 (`check --tier 2`) and needs OrcaSlicer, and an unrun or skipped gate keeps its
+claim from reading Checked. Under the `fdm` tags every fdm claim would read Open
+below tier 2. It settles `bridge span`, the string `fdm.bridge_span` settles, so a
+claim on that quantity with a tighter limit is held against both gates.
+
+It needs `slicer_presets` — `{machine, process, filament}`, paths to three complete
+OrcaSlicer preset files — and `max_bridge_mm`. It invents neither: without them it
+SKIPS. `references/slicer.md` says how to install Orca 2.4.2 user-space and how to
+write a complete preset.
+
+Each guard is a silent mode measured on Orca 2.4.2, which said "Success." over all
+of them:
+
+| Orca did | The gate says |
+|---|---|
+| sliced an 80 mm unsupported bridge, no warning | FAIL at ~80 mm, read off the Bridge lines that have nothing printed under them |
+| typed the first layer over a support `Bridge` too (a supported part read 150 mm by its longest Bridge line) | a bridge point is held when any cell within 0.5 mm of it was printed less than two layers plus the support gap below it |
+| dropped a part 15 mm above the bed to the bed | FAIL before the slicer runs: not in print pose |
+| sliced a preset with `enable_suport` misspelled, without the key | ERRORED: a preset key not in the G-code's configuration was ignored |
+| refused the part (-50, -52, -102) | FAIL in Orca's own words |
+| warned about the part (`warning_message`) | FAIL in Orca's own words |
+| returned another code, crashed, timed out, wrote no result | ERRORED, never a fail |
+| ran another release, or wrote a G-code that names another | SKIPPED (the `--help` banner) or ERRORED (the G-code header) |
+| wrote arcs (`enable_arc_fitting`) or absolute extrusion | ERRORED: the reader follows straight moves and relative E only |
+| sliced something whose extrusions are not the mesh's extents (±1 mm) | FAIL: the G-code is not this part |
+
+What it reads is measured, not exact: 9.91 mm for a drawn 10 mm bridge, 79.96 for
+80, 89.96 for 90 — 0.04-0.09 mm short, the unsafe side and small. Over the sparse
+tips of tree supports it may read long (36.9 mm on one tree-supported part, not yet
+judged by a person); look at the slicer's preview there. Orca is AGPL-3.0: the pack
+runs it as a subprocess and carries none of its text, its profiles included.
+
 ## Where to look next
 
 - `gates/fdm_print_fold.py` — how one verdict is folded out of N parts: the
@@ -490,6 +536,8 @@ minute usually means `volume_mm3` is actually cm³.
   controls are measured against: each fixture moves one number in it and the gate
   under test flips to FAIL. `selftest/baseline_mesh.py` is the source of the solid
   it points at.
+- `references/slicer.md` — installing OrcaSlicer 2.4.2 user-space, and writing
+  the three complete presets `fdm.slice` binds its verdict to.
 - `references/orientation.md` — how to choose the print orientation, and why it is
   the single decision that moves strength, finish, support and time at once.
 - `references/geometry_rules.md` — the numeric rules of thumb: holes, threads,

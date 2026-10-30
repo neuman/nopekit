@@ -45,6 +45,22 @@ import os as _os
 _BASELINE_PATH = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "baseline.json")
 
 
+def _claims() -> list:
+    """The claims the baseline states (``_claims``), fresh each call: the ledger
+    every fixture hands its gate, never the host's. ``cad.clearance`` reads its
+    limit from the claim tagged ``clearance``; in a host with no such claim, or
+    one with another limit, a host ledger would crash or move its control. Built
+    with ``Claim.from_dict``, as cfd-openfoam's fixtures build theirs (its
+    ``bad_cases.py`` says why not ``packs.baseline_claims``)."""
+    from nopekit.models import Claim
+    try:
+        with open(_BASELINE_PATH, "r", encoding="utf-8") as handle:
+            rows = _json.load(handle).get("_claims") or ()
+    except (OSError, ValueError):
+        return []
+    return [Claim.from_dict(row) for row in rows]
+
+
 def _baseline() -> dict:
     """The pack's OWN plausible-good projection — never the host project's.
 
@@ -70,7 +86,8 @@ def _sealed(ctx, meshes: dict):
     skips, and a skip is not a control.
     """
     import dataclasses
-    return dataclasses.replace(ctx, params=_baseline(),
+    from nopekit.models import Ledger
+    return dataclasses.replace(ctx, params=_baseline(), ledger=Ledger(claims=_claims()),
                                extra=dict(ctx.extra or {}, meshes=meshes))
 
 
@@ -377,6 +394,27 @@ def broken_chain(ctx):
     that it is mating on the faces you meant.
     """
     return _sealed(ctx, _baseline_assembly(cover=(0.0, 0.0, 3.0)))
+
+
+def carriage_under_cover(ctx):
+    """cad.clearance — the carriage made taller, its top 0.01 mm under the cover.
+
+    One edit: the carriage's height grows from 8 mm to 30.99 mm with its bottom
+    kept on the cavity floor, so every contact it had is kept and its top face
+    stands 0.01 mm below the cover's underside. The two share no material, so
+    ``cad.clash`` passes this assembly; the baseline declares the pair in
+    ``clearance_pairs`` against the claim's 1.0 mm, and 0.01 mm is far inside it.
+    Measured with manifold3d: a flat 0.01 mm gap reads 0.0100002 mm.
+    """
+    parts = _baseline_assembly()
+    car = parts["carriage"]
+    floor = float(car.bounds[0][2])
+    cover = float(parts["cover"].bounds[0][2])
+    verts = car.vertices.copy()
+    verts[:, 2] = floor + (verts[:, 2] - floor) * ((cover - 0.01 - floor)
+                                                    / float(car.bounds[1][2] - floor))
+    car.vertices = verts
+    return _sealed(ctx, parts)
 
 
 def lifted_stop(ctx):

@@ -176,15 +176,6 @@ BONDED_CONTACT_DEPTH_TOL_MM = 0.05
 #: to measure — see the contact branch in :func:`clash`.
 AABB_MARGIN_MM = 0.05
 
-#: Ray budget for the wall-thickness sampler, as an exact ray COUNT. Above this many
-#: faces the gate casts from an evenly spaced deterministic subset of exactly this
-#: size rather than from every facet; a gate whose cost scales with tessellation
-#: density stops being runnable exactly when the model gets detailed enough to need
-#: it. Rejected: a stride (``n_faces // budget``), which is what this was — it gives
-#: stride 1 for any face count below twice the budget, so the real ceiling was about
-#: double the number stated here and the gate's cost was not the cost it declared.
-MAX_WALL_SAMPLES = 4000
-
 #: Formats that store a bag of triangles with no vertex identity. A file in one of
 #: these has no topology until somebody welds it, so this pack welds it once at the
 #: weld tolerance and says so in the verdict rather than pretending the file was
@@ -941,16 +932,28 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     """Minimum wall by casting a ray inward from each facet along its own normal.
 
     Method, stated plainly because its limits matter more than its number: from the
-    centroid of each facet — an evenly spaced, deterministic subset of exactly the
-    ray budget once the face count exceeds it — a ray is cast along the inward
-    normal and the distance to the first hit is the local thickness. The minimum
-    over all samples is reported.
+    centroid of EVERY facet a ray is cast along the inward normal, and the distance
+    to the first hit is the local thickness. The minimum over all of them is
+    reported.
+
+    Every facet, never a subset. What slipped through while a 4000-ray budget
+    cast from evenly spaced facets above that count (``wall_samples``): a
+    watertight 20,492-face part whose 0.5 mm plate had its 12 faces between the
+    samples read PASS at 59.983 mm against a 1.0 mm minimum, and a 0.3 mm fin on a
+    49,126-face plate passed in 8 of 10 face orderings. A thin wall is a few faces
+    on a detailed part, so a subset misses it exactly when the part is detailed.
+    The cost scales with the face count: 236 s for a 53,706-face part on the
+    fallback caster, 17 s at 4000 rays, which is why ``rtree`` or ``embreex`` is
+    worth installing (PACK.md). *Rejected:* keeping the budget as an option that
+    skips instead of passing (a knob that can never help a pass), and dropping a
+    ray whose facet faces another facet (it hid walls: 0.55 mm at 4000 rays where
+    every face gives 0.0).
 
     What this does NOT measure, and nobody should assume it does:
 
     * It is a LOWER-BOUND SAMPLER, not a proof. It sees thickness only where a facet
       exists and only along that facet's normal. A thin region whose thinnest
-      direction is not normal to any sampled facet is missed.
+      direction is not normal to any facet is missed.
     * On a coarsely tessellated curved wall it UNDER-reports, by roughly
       ``t*(1 - cos(pi/N))`` for a wall of thickness ``t`` across an N-sided
       tessellation of the curve. The chord sits inside the true surface, so a ray
@@ -990,25 +993,6 @@ def wall_thickness(ctx: GateContext) -> Verdict:
 
     import numpy as np
 
-    # `int(ctx.param(...) or MAX)` swallowed an explicit 0 and turned it into 4000,
-    # so a projection asking for no sampling silently got the full budget. A ray
-    # budget is a number the model states on purpose; an unusable one is a defect
-    # in the projection, not something to paper over with a default.
-    raw_budget = ctx.param("wall_samples")
-    if raw_budget is None:
-        budget = MAX_WALL_SAMPLES
-    else:
-        try:
-            budget = int(raw_budget)
-        except (TypeError, ValueError):
-            budget = 0
-        if budget <= 0:
-            return _skipped(
-                "cad.wall_thickness",
-                f"'wall_samples' is {raw_budget!r}; it must be a positive integer "
-                f"number of rays (omit it for the default {MAX_WALL_SAMPLES}) — a "
-                f"budget of zero would measure nothing and report a pass",
-            )
     rows = []
     worst_value = math.inf
     worst_part = ""
@@ -1024,22 +1008,15 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         centres = np.asarray(mesh.triangles_center, dtype=float)
         normals = np.asarray(mesh.face_normals, dtype=float)
         n_faces = len(centres)
-        # Honour the budget exactly. `stride = n_faces // budget` gives stride 1 for
-        # any face count below 2x the budget, so the real ceiling was about twice
-        # the number the constant promises and the gate's cost was not the cost it
-        # declared. An evenly spaced index of exactly min(n_faces, budget) samples
-        # is deterministic in the same way a stride is, and is the stated budget.
-        n_rays = min(n_faces, budget)
-        idx = np.unique(np.linspace(0, n_faces - 1, n_rays).round().astype(int))
         eps = max(1e-6, float(getattr(mesh, "scale", 1.0)) * 1e-8)
-        origins = centres[idx] - normals[idx] * eps
-        directions = -normals[idx]
+        origins = centres - normals * eps
+        directions = -normals
 
         locations, index_ray = _cast_first_hit(mesh, origins, directions)
         if len(index_ray) == 0:
             return _skipped(
                 "cad.wall_thickness",
-                f"no inward ray hit anything on part {name!r} ({len(idx)} rays) — the "
+                f"no inward ray hit anything on part {name!r} ({n_faces} rays) — the "
                 f"ray engine returned nothing, so no thickness was measured",
             )
         # The ray origin is pushed eps ALONG THE INWARD direction, i.e. eps below
@@ -1063,7 +1040,7 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         hit_rows = np.asarray(index_ray)[real]
         local_min = float(distances.min())
         where = origins[hit_rows[int(distances.argmin())]]
-        rows.append({"part": name, "min_mm": local_min, "rays": int(len(idx)),
+        rows.append({"part": name, "min_mm": local_min, "rays": int(n_faces),
                      "hits": int(len(distances)), "faces": int(n_faces),
                      "at_mm": [round(float(c), 3) for c in where]})
         if local_min < worst_value:
@@ -1090,7 +1067,7 @@ def wall_thickness(ctx: GateContext) -> Verdict:
                     kind="point", position=list(worst_point),
                     value=round(worst_value, 4),
                     label=f"{worst_value:.3f} mm wall vs {limit:.3f} mm minimum "
-                          f"({cast} rays sampled)")
+                          f"({cast} rays, one per face)")
         ]
 
     return Verdict(
@@ -1102,7 +1079,8 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         detail=f"thinnest wall {worst_value:.3f} mm on {worst_part} at "
                f"({', '.join(f'{c:g}' for c in worst_point)}) vs {limit:.3f} mm minimum "
                f"[{limit_key or MIN_WALL_KEYS[0]}] "
-               f"({sampled}/{cast} inward face-normal rays hit; sampler, not a proof)",
+               f"({sampled}/{cast} inward face-normal rays hit, one per face; a ray "
+               f"sampler, not a proof)",
         evidence=evidence,
         locators=locators,
     )
@@ -1713,6 +1691,148 @@ def clash(ctx: GateContext) -> Verdict:
                  f"{BONDED_CONTACT_DEPTH_TOL_MM:g} mm of penetration" if bonded else ""))
     return Verdict(gate="cad.clash", passed=True, measured=0.0, limit=0.0, comparator="<=",
                    units="pairs", detail=detail, evidence=evidence)
+
+
+# --------------------------------------------------------------------------- #
+# tier 1 — clearance: how far apart two declared parts are
+# --------------------------------------------------------------------------- #
+#: Where a project declares the pairs whose clearance a claim is about:
+#: ``[{pair: [a, b], reason}]``, read with the same refusals as ``mating_pairs``.
+CLEARANCE_PAIR_KEYS = ("clearance_pairs",)
+
+#: The claim tag ``cad.clearance`` reads its limit from (``ctx.acceptance``).
+CLEARANCE_TAG = "clearance"
+
+#: How far manifold3d's ``min_gap`` searches, mm. A gap past it reads as the cap,
+#: and the detail says so. Fixed, never derived from the limit: a value that moves
+#: when the limit moves is not a measurement of the parts. Measured on two printed
+#: parts of ~50k faces each: a 5 mm search takes 0.02 s, 50 mm 0.61 s, 500 mm 104 s.
+#: *Rejected:* the limit + 1 mm (the reported value then moved with the claim).
+#: A limit at or above the cap cannot be shown to hold, so it fails, and says why.
+CLEARANCE_SEARCH_MM = 10.0
+
+
+def _manifold(mesh: Any):
+    """A manifold3d solid of ``mesh``, or raises: ``min_gap`` on a solid manifold3d
+    could not build returns the search cap, a pass that measured nothing. Measured:
+    an unwelded triangle soup builds an empty ``NotManifold`` solid."""
+    import manifold3d
+    import numpy as np
+
+    solid = manifold3d.Manifold(manifold3d.Mesh(
+        vert_properties=np.asarray(mesh.vertices, dtype=np.float32),
+        tri_verts=np.asarray(mesh.faces, dtype=np.uint32)))
+    status = solid.status()
+    if status != manifold3d.Error.NoError or solid.is_empty():
+        raise ValueError(f"manifold3d built no solid from it ({status.name}"
+                         f"{', empty' if solid.is_empty() else ''})")
+    return solid
+
+
+@gate(
+    id="cad.clearance",
+    title="Declared pairs of parts are at least the claim's clearance apart",
+    claims=["clearance"],
+    tier=Tier.BUILD,
+    settles="minimum clearance",
+    requires_python=["trimesh", "numpy", "manifold3d"],
+    # Prerequisite cad.is_volume: a distance between solids means nothing when one
+    #    of them is not a solid. Isolated: it passes carriage_under_cover.
+    needs=["cad.is_volume"],
+    basis="established",
+    negative_control=NegativeControl(
+        fixture="selftest/bad_meshes.py:carriage_under_cover",
+        good="selftest/good_meshes.py:baseline_meshes",
+        note="the baseline carriage made taller, its bottom on the cavity floor, so its "
+             "top is 0.01 mm under the cover: no shared material, so cad.clash passes "
+             "it, and 0.01 mm against the claim's 1.0 mm",
+    ),
+)
+def clearance(ctx: GateContext) -> Verdict:
+    """The least distance between the two solids of each declared pair, by
+    manifold3d's ``min_gap``, against the limit of the claim tagged ``clearance``.
+
+    What slipped through before it: ``cad.clash`` reads a 0.01 mm gap and an 8 mm
+    gap both as PASS (no shared material), and a clearance claim tagged ``fit``
+    read Checked on that pass. This gate measures the gap.
+
+    The limits, for the reader: one pose (the one exported); the nearest approach
+    only (a sliding part resting on its guide reads 0.0); and the distance between
+    the meshes, which on a curved face reads wider than the CAD by about twice the
+    chord sag (a true 0.01 mm between R5 cylinders reads 0.058 mm at 32 segments,
+    0.013 mm at 128).
+    """
+    gid = "cad.clearance"
+    raw = ctx.first_pack_param(CLEARANCE_PAIR_KEYS, None) or []
+    if not raw:
+        # Before the acceptance: a project with no clearance claim reads skipped here.
+        return _skipped(gid, "clearance_pairs declares no pair: nothing declared, nothing "
+                             "measured")
+    acc = ctx.acceptance(CLEARANCE_TAG)
+    if str(acc.units or "").strip() != "mm" or acc.comparator.value != ">=":
+        return Verdict(gate=gid, passed=False,
+                       error=f"the claim tagged {CLEARANCE_TAG} states {acc.comparator.value} "
+                             f"{acc.limit:g} {acc.units!r}; this gate judges a minimum "
+                             f"clearance (>=) in mm: state the limit so")
+    meshes, welded, skip = _load_all(ctx, gid)
+    if skip is not None:
+        return skip
+    refusals: list[str] = []
+    pairs = []
+    for entry in (raw if isinstance(raw, list) else [raw]):
+        got = _contact_from(entry, "clearance_pairs", refusals)
+        if got is None:
+            continue
+        missing = [p for p in got[0] if p not in meshes]
+        if missing:
+            refusals.append(f"clearance_pairs entry {got[0][0]!r} vs {got[0][1]!r} names "
+                            f"{', '.join(map(repr, missing))}, not in the assembly")
+            continue
+        pairs.append(got)
+    if refusals:
+        return Verdict(gate=gid, passed=False, measured=float(len(refusals)), limit=0.0,
+                       comparator="<=", units="refused entries",
+                       detail=f"{len(refusals)} clearance_pairs entr(ies) refused: "
+                              + "; ".join(refusals[:3]))
+
+    import numpy as np
+
+    solids: dict[str, Any] = {}
+    rows = []
+    for (a, b), reason, _tol in pairs:
+        box = _box_gap(*np.asarray(meshes[a].bounds, dtype=float),
+                       *np.asarray(meshes[b].bounds, dtype=float))
+        if box >= CLEARANCE_SEARCH_MM:
+            gap = CLEARANCE_SEARCH_MM            # their boxes alone are past the cap
+        else:
+            for name in (a, b):
+                if name not in solids:
+                    try:
+                        solids[name] = _manifold(meshes[name])
+                    except ValueError as exc:
+                        return Verdict(gate=gid, passed=False, error=f"part {name!r}: {exc}")
+            gap = min(float(solids[a].min_gap(solids[b], CLEARANCE_SEARCH_MM)),
+                      CLEARANCE_SEARCH_MM)
+        rows.append({"a": a, "b": b, "reason": reason, "gap_mm": round(gap, 6),
+                     "capped": gap >= CLEARANCE_SEARCH_MM})
+    worst = min(rows, key=lambda r: r["gap_mm"])
+    measured = worst["gap_mm"]
+    capped = worst["capped"]
+    passed = acc.holds(measured) and acc.limit < CLEARANCE_SEARCH_MM
+    shown = (f">= {CLEARANCE_SEARCH_MM:g} mm (search cap)" if capped else f"{measured:.4f} mm")
+    detail = (f"least clearance {shown} between {worst['a']} and {worst['b']} vs "
+              f"{acc.comparator.value} {acc.limit:g} mm, over {len(rows)} declared pair(s)"
+              + (f"; a limit at or past the {CLEARANCE_SEARCH_MM:g} mm search cannot be "
+                 f"shown to hold" if acc.limit >= CLEARANCE_SEARCH_MM else "")
+              + _welded_note(welded))
+    movers = PARTS.movers(meshes)
+    locators = ([_locate(movers, n, label=f"{shown} to {o} vs {acc.limit:g} mm",
+                         value=measured)
+                 for n, o in ((worst["a"], worst["b"]), (worst["b"], worst["a"]))]
+                if not passed else [])
+    return Verdict(gate=gid, passed=passed, measured=measured, limit=acc.limit,
+                   comparator=">=", units="mm", detail=detail,
+                   evidence=[_write(ctx, "clearance.json", rows)], locators=locators)
 
 
 # --------------------------------------------------------------------------- #
@@ -2648,7 +2768,7 @@ def _entry_tolerance(entry: Any, label: str, refusals: list) -> float | None:
     """A per-entry mating tolerance in mm, or ``None`` to inherit the project's.
 
     A tolerance that is present and unusable is refused rather than ignored, for
-    the same reason `wall_samples` is: a projection that states a number means it,
+    the same reason `mating_samples` is: a projection that states a number means it,
     and silently replacing it with a default is a gate measuring against a limit
     nobody chose.
     """

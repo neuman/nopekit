@@ -958,11 +958,12 @@ EDGES: dict[str, list[tuple[str, str]]] = {
     ],
     "fdm-print": [(d, "fdm.process_model_valid") for d in (
         "fdm.overhang", "fdm.bridge_span", "fdm.bed_fit", "fdm.min_wall",
-        "fdm.layer_alignment", "fdm.print_time_est")],
+        "fdm.layer_alignment", "fdm.print_time_est", "fdm.slice")],
     "fluids-analytic": [("fluid.drag", "fluid.flow_regime"),
                         ("fluid.pipe_pressure_drop", "fluid.flow_regime")],
     "cad-solid": [("cad.wall_thickness", "cad.watertight"),
                   ("cad.clash", "cad.is_volume"),
+                  ("cad.clearance", "cad.is_volume"),
                   ("cad.assembly_connected", "cad.is_volume")],
     # Two, not five (review of P2.2): bom.complete also fails on any unpriced
     # line, which says nothing about a ship date, a capability rule or a source
@@ -1132,8 +1133,9 @@ _SPINE_EXTRA = frozenset({"pack_dir", "pack_dirs"})
 #: §4.0.4 item 1) — measured before P2.3 changed anything (C6, R-4's first
 #: step). Each of their packs' baselines reaches the gate through ``params``.
 EXTRA_CHANNEL = {
-    "cad-solid": ("cad.assembly_connected", "cad.clash", "cad.degenerate_faces",
-                  "cad.is_volume", "cad.wall_thickness", "cad.watertight"),
+    "cad-solid": ("cad.assembly_connected", "cad.clash", "cad.clearance",
+                  "cad.degenerate_faces", "cad.is_volume", "cad.wall_thickness",
+                  "cad.watertight"),
     "sourcing": ("bom.availability", "bom.complete", "bom.cost", "bom.currency", "bom.moq",
                  "bom.process_rules", "bom.single_source"),
 }
@@ -1185,7 +1187,9 @@ class TheExtraChannel(unittest.TestCase):
     in the open, after D5 (R-6: a strengthening): each of those thirteen now
     declares a known-good fixture (``good=``) that hands its gate the same
     ``extra`` keys as its known-bad one, and the corpus shows zero hits — the
-    planted pack's one is ``ControlsArePaired``'s."""
+    planted pack's one is ``ControlsArePaired``'s. Edited again at cad-solid
+    0.2.0: ``cad.clearance`` joined the mesh gates on the same channel, with its
+    known-good fixture declared from the start."""
 
     def _hits(self, host_of) -> tuple[dict[str, list[str]], list[str]]:
         hits: dict[str, list[str]] = {}

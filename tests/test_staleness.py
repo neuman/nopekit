@@ -3269,17 +3269,19 @@ class InvalidationIsLocalised(_env.EnvCase):
 FDM_MESH = frozenset({"fdm.overhang", "fdm.bridge_span"})
 FDM_PRINTABILITY = frozenset({"fdm.bed_fit", "fdm.min_wall", "fdm.layer_alignment",
                               "fdm.print_time_est", "fdm.process_model_valid"})
+FDM_SLICE = frozenset({"fdm.slice"})
 
 #: fdm-print's gate-version rows (phase-1.md), typed from the pack's layout:
 #: `mesh.py` defines the two mesh gates; `_process_model.py` is loaded BY PATH by
 #: `printability.py` alone (a fixture loads it too, which is control input, not
 #: gate code), so only the recorded closure can see it; `fdm_print_fold.py` is
-#: loaded by both gate modules. Rejected: a whole-pack digest per gate, which
-#: makes every row "all seven" (spec §3.6).
+#: loaded by all three gate modules (`slicer.py` defines fdm.slice). Rejected: a
+#: whole-pack digest per gate, which makes every row "all eight" (spec §3.6).
 GATE_VERSION_TABLE: dict[str, frozenset[str]] = {
     "gates/mesh.py": FDM_MESH,
+    "gates/slicer.py": FDM_SLICE,
     "gates/_process_model.py": FDM_PRINTABILITY,
-    "gates/fdm_print_fold.py": FDM_MESH | FDM_PRINTABILITY,
+    "gates/fdm_print_fold.py": FDM_MESH | FDM_PRINTABILITY | FDM_SLICE,
 }
 
 #: What a row appends to the copied module: a new top-level name, so the edit is
@@ -3302,6 +3304,12 @@ class GateVersionRows(_env.EnvCase):
         cls.tier = str(max(int(spec.tier) for spec in cls.specs.values()))
         cls.available = {gid: gates.availability(spec) for gid, spec in cls.specs.items()}
         cls.ran = frozenset(gid for gid, (ok, _why) in cls.available.items() if ok)
+        # A gate that runs a tool reads through its subprocess, which the tracer
+        # cannot see, so its entry is never Fresh (``claims.unseen_gates``): on a
+        # machine with OrcaSlicer, fdm.slice, which every check runs again with its
+        # control. The rows below compare the gates the tracer sees, and the
+        # closure row still holds fdm.slice's code.
+        cls.unseen = frozenset(gid for gid in cls.ran if cls.specs[gid].requires_tools)
         cls.base = _CheckedProject(
             "nopekit-gate-version-",
             lambda dest: _projects.wrap_pack_baseline("fdm-print", dest, copy_pack=True),
@@ -3330,7 +3338,7 @@ class GateVersionRows(_env.EnvCase):
         return out
 
     def test_the_first_check(self):
-        self.assertEqual(set(self.specs), FDM_MESH | FDM_PRINTABILITY,
+        self.assertEqual(set(self.specs), FDM_MESH | FDM_PRINTABILITY | FDM_SLICE,
                          "fdm-print's gates moved: GATE_VERSION_TABLE is typed against them")
         self.assertTrue(FDM_PRINTABILITY <= self.ran, "the printability gates need no tool")
         first = self.base.first
@@ -3365,11 +3373,12 @@ class GateVersionRows(_env.EnvCase):
                 # and the dependent is served. Moved under R-6, stronger: both
                 # sets exact, and the mark told apart from a moved read set.
                 marked = self._dependents_of(expected)
-                self.assertEqual(set(status["stale_gates"]), expected | marked)
-                self.assertEqual(_fresh(status), self.ran - expected)
+                self.assertEqual(set(status["stale_gates"]) - self.unseen,
+                                 (expected | marked) - self.unseen)
+                self.assertEqual(_fresh(status), self.ran - expected - self.unseen)
                 for gid in expected:
                     self.assertIn("code", status["freshness"][gid]["reasons"][0])
-                for gid in marked:
+                for gid in marked - self.unseen:
                     self.assertTrue(status["freshness"][gid]["reasons"][0].startswith(
                         "prerequisite fdm.process_model_valid invalidated: "),
                         status["freshness"][gid])
@@ -3378,12 +3387,15 @@ class GateVersionRows(_env.EnvCase):
                                      "a gate that never ran has nothing to go stale")
 
                 check = _doc(_cli(project, "check", "--tier", self.tier, "--json"))
-                self.assertEqual(_executed(check), expected)
-                self.assertEqual(check["counts"]["controls"]["executed"], len(expected),
+                self.assertEqual(_executed(check) - self.unseen, expected - self.unseen)
+                self.assertEqual(check["counts"]["controls"]["executed"],
+                                 len(expected | self.unseen),
                                  "an edited gate's control is demonstrated again at its new "
-                                 "version (D-07), and no other control runs")
+                                 "version (D-07), and no other control runs but an unseen "
+                                 "gate's, which every check runs again")
                 self._assert_skips(check)
-                self.assertEqual(_doc(_cli(project, "status", "--json"), 0)["stale_gates"], [])
+                self.assertEqual(set(_doc(_cli(project, "status", "--json"), 0)["stale_gates"])
+                                 - self.unseen, set())
 
 
 # --------------------------------------------------------------------------- #

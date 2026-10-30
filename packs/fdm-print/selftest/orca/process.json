@@ -1,0 +1,17 @@
+{
+  "type": "process",
+  "name": "nopekit fdm-print baseline 0.20 PETG",
+  "from": "system",
+  "instantiation": "true",
+  "compatible_printers": ["nopekit fdm-print baseline 220 0.4"],
+  "layer_height": "0.2",
+  "initial_layer_print_height": "0.2",
+  "line_width": "0.42",
+  "wall_loops": "3",
+  "sparse_infill_density": "35%",
+  "enable_support": "0",
+  "brim_type": "outer_only",
+  "brim_width": "5",
+  "skirt_loops": "0",
+  "enable_arc_fitting": "0"
+}

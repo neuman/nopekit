@@ -24,14 +24,17 @@ and ``cad.degenerate_faces`` would count every corner of every part as a
 duplicate. A path is loaded by the gate exactly as the projection's path is.
 
 **Sealed** as the known-bad fixtures are: params from this pack's own
-``selftest/baseline.json``; ``extra`` the host's plus ``meshes``, as
-``bad_meshes._sealed`` builds it, so both halves hand the same keys.
+``selftest/baseline.json``; ``extra`` the host's plus ``meshes``, and the ledger the baseline's
+own claims (``_claims``), as ``bad_meshes._sealed`` builds them, so both halves
+hand the same keys and ``cad.clearance`` reads the same limit in both.
 """
 from __future__ import annotations
 
 import dataclasses
 import json
 import os
+
+from nopekit.models import Claim, Ledger
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PACK_DIR = os.path.dirname(_HERE)
@@ -50,5 +53,7 @@ def baseline_meshes(ctx):
                              f"pack is sealed to its assembly and cannot be built without it")
     meshes = {str(name): os.path.join(_PACK_DIR, *str(rel).split("/"))
               for name, rel in named.items()}
-    return dataclasses.replace(ctx, params=params,
+    with open(BASELINE, encoding="utf-8") as fh:
+        claims = [Claim.from_dict(row) for row in json.load(fh).get("_claims") or ()]
+    return dataclasses.replace(ctx, params=params, ledger=Ledger(claims=claims),
                                extra=dict(ctx.extra or {}, meshes=meshes))
