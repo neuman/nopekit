@@ -40,6 +40,9 @@ MARGIN = 1.15
 
 _PATH_KEYS = ("pcb_board", "pcb_spice_deck", "pcb_enclosure_step")
 
+#: The power rules' records, each naming the board it is for (``board``).
+_POWER_KEYS = ("pcb_cell", "pcb_charger", "pcb_fuse", "pcb_conductor", "pcb_cutoffs")
+
 
 def _baseline() -> dict:
     """The baseline projection, documentation keys stripped and every path made
@@ -49,6 +52,11 @@ def _baseline() -> dict:
     for key in _PATH_KEYS:
         if key in params:
             params[key] = os.path.join(_PACK_DIR, str(params[key]))
+    params["pcb_land_drawings"] = {ref: os.path.join(_PACK_DIR, rel)
+                                   for ref, rel in params["pcb_land_drawings"].items()}
+    for key in _POWER_KEYS:
+        for rec in (params[key] if isinstance(params[key], list) else [params[key]]):
+            rec["board"] = os.path.join(_PACK_DIR, rec["board"])
     return params
 
 
@@ -77,6 +85,8 @@ def _variant(ctx, name: str, edit=None, *, schematic=None) -> object:
             fh.write(K.dump(tree) + "\n")
     for rel in [stem + ".kicad_pro", *_DIR_FILES]:
         shutil.copyfile(os.path.join(os.path.dirname(src), rel), os.path.join(stage, rel))
+    if os.path.isfile(src_stem + ".kicad_dru"):
+        shutil.copyfile(src_stem + ".kicad_dru", os.path.join(stage, stem + ".kicad_dru"))
     models = os.path.join(stage, "3d")
     if not os.path.isdir(models):
         shutil.copytree(os.path.join(os.path.dirname(src), "3d"), models)
@@ -265,3 +275,88 @@ def raised_board(ctx):
     place["z"] = float(place.get("z", 0.0)) + RAISE_MM
     params["pcb_board_placement"] = place
     return dataclasses.replace(ctx, params=params, ledger=Ledger())
+
+
+def mirrored_land(ctx):
+    """pcb.land_pattern — U1's pad positions swapped 1<->3 and 4<->6, each pad's
+    number, net and pin name kept: the SOT-23-6 land drawn mirrored, as a
+    footprint drawn from a bottom view is. The netlist and the copper rules
+    cannot see it; paired by function and fitted with no mirror, pad 1 sits
+    1.9 mm from where ST's drawing puts I/O1."""
+    def edit(tree, _params):
+        pads = {str(p[1]): p for p in K.children(_footprint(tree, "U1"), "pad")}
+        for a, b in (("1", "3"), ("4", "6")):
+            at_a, at_b = K.child(pads[a], "at"), K.child(pads[b], "at")
+            at_a[1:3], at_b[1:3] = list(at_b[1:3]), list(at_a[1:3])
+    return _variant(ctx, "mirrored_land", edit)
+
+
+def _power_variant(ctx, name: str, edit=None, records=None) -> object:
+    """A context whose power records name a copy of ``lipo_charger.kicad_pcb``
+    with ``edit(tree)`` applied, and ``records(params)`` applied to the records."""
+    params = _baseline()
+    src = params["pcb_cell"]["board"]
+    board = ctx.out_path("pcb-kicad", "known-bad", name, os.path.basename(src))
+    tree = K.load_tree(src)
+    if edit is not None:
+        edit(tree)
+    with open(board, "w", encoding="utf-8") as fh:
+        fh.write(K.dump(tree) + "\n")
+    for key in _POWER_KEYS:
+        for rec in (params[key] if isinstance(params[key], list) else [params[key]]):
+            rec["board"] = board
+    if records is not None:
+        records(params)
+    return dataclasses.replace(ctx, params=params, ledger=Ledger())
+
+
+def _new_net(tree, name: str) -> list:
+    """A net added to the board's table, after its last: ``(net <code> "<name>")``."""
+    nets = K.children(tree, "net")
+    code = max(int(n[1]) for n in nets) + 1
+    node = ["net", str(code), K.Q(name)]
+    tree.insert(tree.index(nets[-1]) + 1, node)
+    return node
+
+
+def _move_pad(tree, ref: str, number: str, net_name: str) -> None:
+    """Pad ``number`` of ``ref`` moved to a new net of its own, ``net_name``."""
+    node = _new_net(tree, net_name)
+    for pad in K.children(_footprint(tree, ref), "pad"):
+        if str(pad[1]) == number:
+            K.child(pad, "net")[1:] = [node[1], K.Q(net_name)]
+            return
+    raise KeyError(f"{ref} pad {number}")
+
+
+def ntc_unwired(ctx):
+    """pcb.charge_protection — TH1's THERM-side pad moved to a net of its own: the
+    charger's THERM pin then sees no thermistor, as a board whose NTC footprint
+    was placed and never wired would."""
+    return _power_variant(ctx, "ntc_unwired", lambda t: _move_pad(t, "TH1", "1", "TH_OPEN"))
+
+
+def thin_conductor(ctx):
+    """pcb.fuse_conductor — the wire's area derived with the gate's own formula so
+    that IEC 60949 puts it at its limit in the fuse's guaranteed trip time divided
+    by ``MARGIN``: lifting the trip time or the limit cannot turn the control into
+    a pass without moving the area with it."""
+    power = load_path(os.path.join(_PACK_DIR, "gates", "power.py"))
+
+    def records(params):
+        cond, fuse = params["pcb_conductor"], params["pcb_fuse"]
+        amps, t_max = (float(v) for v in fuse["trip_max_s"][0])
+        area = power.area_for_s(t_max / MARGIN, amps, float(cond["start_c"]),
+                                float(cond["limit_c"]))
+        cond["area_mm2"] = round(area, 5)
+        if power.adiabatic_s(amps, cond["area_mm2"], float(cond["start_c"]),
+                             float(cond["limit_c"])) >= t_max:
+            raise AssertionError("thin_conductor: the derived area does not cross the limit")
+    return _power_variant(ctx, "thin_conductor", records=records)
+
+
+def cutoff_unwired(ctx):
+    """pcb.discharge_cutoff — R1's cell-side pad moved to a net of its own: the
+    protector U2 senses a net the cell never drives, and nothing cuts the cell
+    off (its record has no PCM)."""
+    return _power_variant(ctx, "cutoff_unwired", lambda t: _move_pad(t, "R1", "1", "R1_OPEN"))

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import unittest
 from unittest import mock
@@ -379,3 +380,52 @@ class TheBundledAutorouteRefusesWithoutItsTools(_env.EnvCase):
         proc = self._run({"NOPEKIT_PROPOSAL_DIR": ""})
         self.assertEqual(proc.returncode, 2, proc.stderr)
         self.assertIn("nopekit propose pcb.autoroute", proc.stderr)
+
+
+class TheBundledSchematicWriterWritesOnlyItsProposal(_env.EnvCase):
+    """pcb-kicad's ``pcb.schematic_from_board`` reads the board and KiCad's stock
+    symbols, and writes only under ``$NOPEKIT_PROPOSAL_DIR``: the project around it
+    is as it was, whether it wrote its three files or refused."""
+
+    RUN = os.path.join(_env.REPO, "packs", "pcb-kicad", "proposers", "schematic_from_board.py")
+    ASSETS = os.path.join(_env.REPO, "packs", "pcb-kicad", "selftest", "assets")
+    STOCK = next((d for d in (os.environ.get("KICAD9_SYMBOL_DIR", ""), "/usr/share/kicad/symbols")
+                  if d and os.path.isfile(os.path.join(d, "Device.kicad_sym"))), None)
+
+    def _tree(self, root):
+        return sorted((os.path.relpath(os.path.join(dp, f), root),
+                       os.path.getsize(os.path.join(dp, f)))
+                      for dp, _dn, fs in os.walk(root) for f in fs)
+
+    def _run(self, symbols: dict):
+        project = self.tmp()
+        for name in ("esd_guard.kicad_pcb", "esd_guard.kicad_pro"):
+            shutil.copyfile(os.path.join(self.ASSETS, name), os.path.join(project, name))
+        with open(os.path.join(project, "s.json"), "w", encoding="utf-8") as fh:
+            json.dump(symbols, fh)
+        out = self.tmp()
+        before = self._tree(project)
+        proc = _env.run([sys.executable, self.RUN, "--board", "esd_guard.kicad_pcb",
+                         "--symbols", "s.json"], cwd=project,
+                        env={"NOPEKIT_PROPOSAL_DIR": out})
+        self.assertEqual(self._tree(project), before, "it wrote outside its proposal dir")
+        return proc, out
+
+    def _symbols(self):
+        with open(os.path.join(self.ASSETS, "esd_guard.symbols.json"), encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def test_a_refusal_writes_nothing(self):
+        symbols = self._symbols()
+        symbols["symbols"].pop("U1")
+        proc, out = self._run(symbols)
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(os.listdir(out), [])
+
+    def test_a_proposal_is_three_files_in_its_dir(self):
+        if self.STOCK is None:
+            self.skipTest("needs KiCad's stock symbols")
+        proc, out = self._run(self._symbols())
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(os.listdir(out)), ["esd_guard.kicad_sch",
+                                                   "esd_guard.schematic.json", "sym-lib-table"])

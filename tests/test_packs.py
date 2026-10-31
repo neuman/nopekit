@@ -973,7 +973,8 @@ EDGES: dict[str, list[tuple[str, str]]] = {
                      ("modelica.simulates", "modelica.compiles")],
     # The reader's guard before the two gates that read the board with it; KiCad's
     # own gates read the file themselves and need none.
-    "pcb-kicad": [(d, "pcb.board_readable") for d in ("pcb.pin_names", "pcb.net_width")],
+    "pcb-kicad": [(d, "pcb.board_readable")
+                  for d in ("pcb.pin_names", "pcb.net_width", "pcb.land_pattern")],
     # A chain: nothing reaches a pressure drop past a guard that did not pass.
     "cfd-openfoam": [("cfd.regime", "cfd.case_readable"),
                      ("cfd.mesh_quality", "cfd.case_readable"),

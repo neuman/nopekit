@@ -78,6 +78,45 @@ A `.kicad_dru` rule can also relax a constraint. Read its `condition` before you
 trust it: a rule written for one connector's shield pads with the condition
 `A.NetName == 'GND'` relaxes every ground pad on the board.
 
+## Custom rules: the probes `pcb.drc` adds
+
+KiCad 9.0.9 evaluates a rule it cannot read in silence: a misspelled property
+(`A.NetNmae`) selects nothing, `!(A.Pin_Nmae == 'zz')` selects everything, and one
+syntax error (an unknown constraint, a missing paren) drops the whole file. Each
+reads as a clean DRC. So when the board has a `.kicad_dru`, `pcb.drc` stages it
+again (`pcb_drc_probe/`) with probes appended to the project's own text:
+
+    (rule nopekit_probe_<i> [its layer] [its condition] (constraint assertion "false"))
+    (rule nopekit_token_<j> (condition "A.<Prop> == A.<Prop>") (constraint assertion "false"))
+
+An assertion fires on every item its condition selects, and KiCad prints the rule
+name in the finding (`Assertion failure (rule 'nopekit_probe_0')`), untranslated.
+A probe at 0 in the combined run is run again alone, because several assertion
+rules on one item mask each other; when no probe fires at all, a canary that
+selects everything tells a dropped file from dead rules. KiCad evaluates a
+one-item assertion with no B, so a `B.` property is probed as `A.`, and a rule
+whose condition needs B is never called dead, only "not shown live". Rejected:
+`disallow` probes (a later one masked an earlier one fully, 12 against 0) and
+probes that restate the rule's constraint at an impossible bound (11 s, and an
+item in the board's middle was missed).
+
+## A schematic written from a board
+
+`pcb.schematic_from_board` (PACK.md) writes the schematic `pcb.erc` and
+`pcb.parity` need on a board a script generated. Two things KiCad 9.0.9 does with
+one, measured on a 4-layer board:
+
+- The Footprint field must be the board's footprint name exactly: a library
+  nickname added, or the field emptied, gave 114 `footprint_symbol_mismatch`.
+  A footprint name with no nickname reads as `footprint_link_issues` in ERC (a
+  warning): the generator writes nicknames, or a person waives that type in the
+  `.kicad_pro`.
+- Every open schematic pin's net is named `unconnected-(<ref>-<pin>-Pad<n>)`, even
+  under a no-connect flag, and parity reports the netless pad under it as
+  `net_conflict`, "Pad missing net given by schematic (unconnected-(...))".
+  `pcb.parity` counts that as agreement when every item is a pad the board gives
+  no net (matched by id) and the words hold `(unconnected-(`.
+
 ## Cost and opacity
 
 About 0.7 s for the baseline board, about 2.3 s for a 4-layer 115-footprint board.

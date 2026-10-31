@@ -2,15 +2,19 @@
 """pcb-kicad — gates for a printed circuit board drawn in KiCad.
 
     pcb.board_readable   tier 0  the board is a KiCad file this reader knows (the guard)
-    pcb.pin_names        tier 0  pins the library gives one name carry one net
+    pcb.pin_names        tier 0  pins the library gives one name carry one net (names from the schematic, else the pads)
+    pcb.land_pattern     tier 0  each named footprint's land fits its vendor's drawing, pads paired by function
     pcb.net_width        tier 0  every track of each current-carrying net, IPC-2221
-    pcb.drc              tier 1  KiCad's design rule check, every severity
+    pcb.drc              tier 1  KiCad's design rule check, every severity, every custom rule probed
     pcb.unconnected      tier 1  KiCad's count of connections the copper never makes
     pcb.erc              tier 1  KiCad's electrical rules check of the schematic
     pcb.parity           tier 1  KiCad's comparison of the board with its schematic
     pcb.fab_rules        tier 1  KiCad's DRC with a fab's published minimums as its rules
     pcb.spice            tier 1  one .meas of ngspice on the project's deck, against a band
     pcb.enclosure_fit    tier 1  the populated board's 3D models against the enclosure
+
+    (gates/power.py holds the three LiPo rules: pcb.charge_protection,
+    pcb.fuse_conductor, pcb.discharge_cutoff.)
 
 **Where each verdict comes from.** The tier-1 gates are a tool's own answer:
 ``kicad-cli pcb drc``'s or ``sch erc``'s exit code and its report's count (basis
@@ -41,6 +45,13 @@ pipeline this pack was extracted from; references/what-slipped-through.md):
 - ``pcb.pin_names``: an ESD array's flow-through pins were wired D+ to pin 1 and D- to
   pin 6, which the part joins inside. The copper was legal; a person reading the
   datasheet found it.
+- ``pcb.drc``, ``pcb.spice``: each passed over a tool's silence. KiCad takes a
+  misspelled property in a custom rule, or a rules file it cannot parse, with exit
+  0 and no word; ngspice takes an option name it does not know, and measures a
+  window past the end of the run as 0 V. Each is now an error.
+- ``pcb.land_pattern``: a footprint's pad numbers can agree with a datasheet's while
+  its functions do not (JLC's LED C2286 numbers its cathode pad 2), so pads are
+  paired by function, and a land drawn mirrored fails a fit that allows no mirror.
 - ``pcb.enclosure_fit``: a joystick routed onto both boards stood 6 mm proud of the
   face, found by a person on sight. And kicad-cli's STEP export drops a part whose
   3D model it cannot find, with exit 0: a part the fit cannot see is a skip here.
@@ -51,7 +62,10 @@ and where the board sits in it are the project's to say.
 """
 from __future__ import annotations
 
+import dataclasses
+import itertools
 import json
+import math
 import os
 import re
 import shutil
@@ -208,6 +222,54 @@ def board_readable(ctx: GateContext) -> Verdict:
 # --------------------------------------------------------------------------- #
 # library pin names
 # --------------------------------------------------------------------------- #
+def _pad_names(ctx: GateContext, board) -> tuple[dict[str, dict[str, str]], set[str]]:
+    """``({ref: {pad number: pin name}}, refs named by the schematic)`` for every
+    footprint on ``board``.
+
+    Where a schematic sits beside the board (``_schematic_path``), it and every
+    sheet under it are read through ``ctx.load_file`` (so each is keyed), and each
+    part it places takes its pin names from the symbol the schematic caches in
+    ``lib_symbols``, every unit and body style walked. Every other part keeps the
+    ``pinfunction`` KiCad copied onto its pads. So a board a script generated,
+    which carries no pinfunction, is named by the schematic written for it
+    (``pcb.schematic_from_board``), and a board updated from its schematic reads
+    the same names either way. Refs starting ``#`` (power symbols, flags) place no
+    part. Raises :class:`_kicad.KicadFormatError` or FileNotFoundError on a
+    schematic or sheet that cannot be read."""
+    names = {fp.ref: {p.number: p.pinfunction for p in fp.pads} for fp in board.footprints}
+    sch = _schematic_path(ctx)
+    if sch is None or not os.path.isfile(sch):
+        return names, set()
+    base = os.path.dirname(os.path.abspath(sch))
+    sheets = [sch] + [os.path.join(base, rel) for rel in K.sheet_files(sch)]
+    placed: dict[str, dict[str, str]] = {}
+    for path in sheets:
+        tree = ctx.load_file(path, loader=K.load_tree)
+        cache: dict[str, dict[str, str]] = {}
+        for sym in K.children(K.child(tree, "lib_symbols") or [], "symbol"):
+            pins: dict[str, str] = {}
+
+            def walk(node):
+                for x in node:
+                    if isinstance(x, list):
+                        if K.head(x) == "pin":
+                            pins[str(K.value(x, "number", default=""))] = str(
+                                K.value(x, "name", default=""))
+                        walk(x)
+            walk(sym)
+            cache[str(sym[1])] = pins
+        for sym in K.children(tree, "symbol"):
+            ref = next((str(p[2]) for p in K.children(sym, "property")
+                        if len(p) >= 3 and p[1] == "Reference"), "")
+            if not ref or ref.startswith("#"):
+                continue
+            placed.setdefault(ref, {}).update(cache.get(str(K.value(sym, "lib_id")), {}))
+    for ref, pins in placed.items():
+        if ref in names:
+            names[ref] = {num: pins.get(num, "") for num in names[ref]}
+    return names, set(placed) & set(names)
+
+
 @gate(
     id="pcb.pin_names",
     basis="sourced",
@@ -235,24 +297,43 @@ def pin_names(ctx: GateContext) -> Verdict:
     nets on one name is a short through the part, on copper every design rule
     accepts.
 
-    The names are the library's, not this gate's: the gate only compares. A board
-    drawn without a schematic carries none, and the gate skips (nothing to compare
-    against), never passes. ``NC``-style names are ignored (``pcb_pin_names_ignore``)
-    because an unused pin may legitimately sit on any net.
+    The names are the library's, not this gate's: the gate only compares. Where a
+    schematic sits beside the board, the names of every part it places are read
+    from the symbols it caches (:func:`_pad_names`), so a board a script generated
+    with no pinfunction is named by the schematic ``pcb.schematic_from_board``
+    wrote for it. A board with neither carries no names, and the gate skips
+    (nothing to compare against), never passes. ``NC``-style names are ignored
+    (``pcb_pin_names_ignore``) because an unused pin may legitimately sit on any
+    net; a generic connector's ``Pin_1``... are each one pin's, and never conflict.
+
+    What slipped through: the source pipeline's board carried no pinfunction, so
+    this gate skipped on it, and its ESD array's D+ on pin 1 and D- on pin 6 (one
+    ``I/O1`` inside the part) went to a person to find.
     """
     gid = "pcb.pin_names"
     path = _board_path(ctx)
     if path is None:
         return _skip(gid, _NO_BOARD)
     board = ctx.load_file(path, loader=K.load_board)
+    try:
+        names, from_schematic = _pad_names(ctx, board)
+    except (K.KicadFormatError, UnicodeDecodeError, FileNotFoundError) as exc:
+        return Verdict(gate=gid, passed=False,
+                       error=f"the schematic beside the board cannot be read: {exc}")
+    # A copy with the names in it: the board ``ctx.load_file`` hands out is shared
+    # by every gate that loads it, and is never written to.
+    named_board = dataclasses.replace(board, footprints=[
+        dataclasses.replace(fp, pads=[dataclasses.replace(p, pinfunction=names[fp.ref].get(
+            p.number, "")) for p in fp.pads]) for fp in board.footprints])
     ignore = ctx.param("pcb_pin_names_ignore", list(K.NO_FUNCTION_NAMES))
-    conflicts, named, fps_named = K.pin_name_conflicts(board, ignore)
+    conflicts, named, fps_named = K.pin_name_conflicts(named_board, ignore)
     if named == 0:
-        return _skip(gid, "no pad on this board carries a library pin name "
-                          "(pinfunction): it was not updated from a schematic, so there "
-                          "is nothing to compare its nets against")
+        return _skip(gid, "no pin names: no pad carries a pinfunction and no schematic "
+                          "places this board's parts, so there is nothing to compare its "
+                          "nets against")
     ev = _evidence(ctx, "pin_names", {
         "footprints": len(board.footprints), "footprints_with_pin_names": fps_named,
+        "named_from_schematic": sorted(from_schematic),
         "named_pads": named, "ignored_names": list(ignore),
         "conflicts": [{"ref": r, "name": n, "nets": by} for r, n, by in conflicts]})
     if conflicts:
@@ -266,6 +347,212 @@ def pin_names(ctx: GateContext) -> Verdict:
                   f"{fps_named} of {len(board.footprints)} footprint(s))")
     return Verdict(gate=gid, passed=not conflicts, measured=len(conflicts), limit=0,
                    comparator="<=", units="pin names", detail=detail, evidence=ev)
+
+
+# --------------------------------------------------------------------------- #
+# a footprint's land against its vendor's drawing
+# --------------------------------------------------------------------------- #
+#: The most pad assignments the land fit tries: the product, over each function
+#: several pads share (MP, GND, I/O1), of its count factorial. 5040 is 7!, a
+#: ground row of seven pads; a part past it errors rather than guess. Rejected:
+#: a greedy nearest-pad pairing, which a land drawn mirrored can satisfy.
+MAX_ASSIGNMENTS = 5040
+
+#: The keys of one pad in a drawing record.
+_LAND_KEYS = ("number", "function", "x", "y", "w", "h")
+
+
+def _drawing(record) -> list[dict] | str:
+    """A drawing record's pads, in the board's frame (y down), or why it is refused."""
+    if not isinstance(record, dict) or not isinstance(record.get("pads"), list):
+        return "it is not a JSON object with a list of pads"
+    if record.get("view") != "top":
+        return f"its view is {record.get('view')!r}: a drawing is read as seen from the top"
+    if record.get("y_axis") not in ("up", "down"):
+        return ("it does not say which way its y axis runs (y_axis: \"up\" as a drawing "
+                "is printed, \"down\" as a KiCad footprint is): read the wrong way, the "
+                "land is mirrored")
+    pads = []
+    for p in record["pads"]:
+        if not isinstance(p, dict) or any(k not in p for k in _LAND_KEYS):
+            return f"a pad lacks one of {list(_LAND_KEYS)}: {p!r}"
+        try:
+            x, y, w, h = (float(p[k]) for k in ("x", "y", "w", "h"))
+        except (TypeError, ValueError):
+            return f"a pad's x, y, w or h is not a number: {p!r}"
+        if w <= 0 or h <= 0:
+            return f"a pad's w and h must be above 0: {p!r}"
+        pads.append({"number": str(p["number"]), "function": str(p["function"]),
+                     "x": x, "y": -y if record["y_axis"] == "up" else y, "w": w, "h": h})
+    return pads
+
+
+def _land_fit(ref: str, board_pads: list, vendor: list) -> dict | str:
+    """Pair ``board_pads`` ([(function, LandPad)]) with ``vendor`` pads by
+    function, every assignment within a repeated function tried, and fit each
+    assignment rigidly; the one whose worst pad is least past its limit is kept.
+    Returns the fit, or why it cannot be made."""
+    fb: dict[str, list] = {}
+    fv: dict[str, list] = {}
+    for f, pad in board_pads:
+        fb.setdefault(f, []).append(pad)
+    for pad in vendor:
+        fv.setdefault(pad["function"], []).append(pad)
+    for f, pads in fv.items():
+        if f not in fb:
+            return f"{ref}: the drawing's function {f} is on no pad of the board's footprint"
+        if len(fb[f]) != len(pads):
+            return (f"{ref}: the drawing has {len(pads)} pad(s) of function {f}, the board "
+                    f"{len(fb[f])}")
+    groups = sorted(fv)
+    tries = math.prod(math.factorial(len(fv[f])) for f in groups)
+    if tries > MAX_ASSIGNMENTS:
+        return (f"{ref}: {tries} ways to pair its repeated functions, past "
+                f"{MAX_ASSIGNMENTS}: split a function the part repeats (GND_1, GND_2)")
+    if sum(len(fv[f]) for f in groups) < 2:
+        return f"{ref}: fewer than two pads pair by function, and one pad fixes no land"
+    best = None
+    for perm in itertools.product(*(itertools.permutations(fv[f]) for f in groups)):
+        pairs, meta = [], []
+        for f, assigned in zip(groups, perm):
+            for b, v in zip(fb[f], assigned):
+                pairs.append(((v["x"], v["y"]), (b.x, b.y)))
+                meta.append((f, b.number, v["number"],
+                             min(b.w, b.h, v["w"], v["h"]) / 2.0))
+        angle, res = K.rigid_fit(pairs)
+        worst = max(range(len(res)), key=lambda i: res[i] / meta[i][3])
+        key = res[worst] / meta[worst][3]
+        if best is None or key < best[0] - 1e-12:
+            best = (key, angle, res, meta, worst)
+    _key, angle, res, meta, worst = best
+    return {"ref": ref, "rotation_deg": round(angle, 3),
+            "rms_mm": round(math.sqrt(sum(r * r for r in res) / len(res)), 4),
+            "worst": {"function": meta[worst][0], "board_pad": meta[worst][1],
+                      "drawing_pad": meta[worst][2], "residual_mm": round(res[worst], 4),
+                      "limit_mm": round(meta[worst][3], 4)},
+            "pairs": [{"function": f, "board_pad": bn, "drawing_pad": vn,
+                       "residual_mm": round(r, 4), "limit_mm": round(lim, 4)}
+                      for (f, bn, vn, lim), r in zip(meta, res)]}
+
+
+@gate(
+    id="pcb.land_pattern",
+    basis="sourced",
+    title="Each footprint's land agrees with its vendor's drawing, pad by pin function",
+    claims=["pcb", "land-pattern"],
+    tier=Tier.INSTANT,
+    settles="footprint land agrees with the vendor drawing",
+    # Prerequisite pcb.board_readable: a board this reader cannot vouch for may
+    #    hold pads it read wrongly. Isolated: the guard passes this gate's own
+    #    known-bad control.
+    needs=["pcb.board_readable"],
+    negative_control=NegativeControl(
+        fixture="selftest/bad_boards.py:mirrored_land",
+        note="the baseline board with U1's pad positions swapped 1<->3 and 4<->6, "
+             "numbers and nets kept: the SOT-23-6 land drawn mirrored, which every "
+             "design rule and the netlist accept",
+    ),
+)
+def land_pattern(ctx: GateContext) -> Verdict:
+    """Each footprint ``pcb_land_drawings`` names, against its vendor's drawing:
+    pads paired by pin function, never by number, then one rigid fit (rotation
+    and translation, no mirror) of the drawing onto the land. The verdict is the
+    pad furthest past its limit: its centre residual (mm) against half the smaller
+    side of the smaller of the two pads it pairs. Inside that, the pads still
+    overlap by half; it is conservative (a false fail is possible, a false pass is
+    not), and no recalled tolerance is used.
+
+    What slipped through: a footprint whose pad numbers match the datasheet's can
+    still put a function on the wrong pad (JLC's LED C2286 numbers its cathode
+    pad 2, so a land paired by number fits upside down), and a power switch's land
+    drawn from a different drawing put its middle pad 1.5 mm from where the
+    vendor's sits. DRC and the netlist accept both.
+
+    ``pcb_land_drawings`` is ``{ref: drawing record}``, each a JSON file from the
+    project root: ``{part, source, view: "top", y_axis: "up"|"down", pads:
+    [{number, function, x, y, w, h}]}`` in mm, a person's transcription of the
+    vendor's drawing (or their conversion of the vendor's footprint). The board's
+    function for each pad is its pin name (:func:`_pad_names`: the schematic's
+    symbol, else the pad's pinfunction). Board pads whose function the drawing
+    omits are named and not judged; a board pad with no name whose number the
+    drawing holds is an error, since only its number could pair it.
+    """
+    gid = "pcb.land_pattern"
+    path = _board_path(ctx)
+    if path is None:
+        return _skip(gid, _NO_BOARD)
+    drawings = ctx.param("pcb_land_drawings")
+    if not isinstance(drawings, dict) or not drawings:
+        return _skip(gid, "no pcb_land_drawings: which footprint to hold to which vendor "
+                          "drawing ({\"U1\": \"hardware/lands/u1.json\"}) is the project's "
+                          "to say, from the drawings it holds")
+    tree = ctx.load_file(path, loader=K.load_tree)
+    board = ctx.load_file(path, loader=K.load_board)
+    try:
+        names, _ = _pad_names(ctx, board)
+    except (K.KicadFormatError, UnicodeDecodeError, FileNotFoundError) as exc:
+        return Verdict(gate=gid, passed=False,
+                       error=f"the schematic beside the board cannot be read: {exc}")
+    fits, notes = [], []
+    for ref, rel in sorted(drawings.items()):
+        rel = str(rel)
+        src = rel if os.path.isabs(rel) else os.path.join(ctx.root, rel)
+        try:
+            record = ctx.load_file(src, loader=_load_json)
+        except (OSError, ValueError) as exc:
+            return Verdict(gate=gid, passed=False,
+                           error=f"{ref}: the drawing {rel} cannot be read: {exc}")
+        vendor = _drawing(record)
+        if isinstance(vendor, str):
+            return Verdict(gate=gid, passed=False, error=f"{ref}: the drawing {rel}: {vendor}")
+        try:
+            pads, unnumbered, _back = K.footprint_land(tree, ref)
+        except KeyError:
+            return Verdict(gate=gid, passed=False,
+                           error=f"{ref}: the board has no footprint {ref}, and the drawing "
+                                 f"{rel} is for it")
+        drawn = {p["number"] for p in vendor}
+        functions = {p["function"] for p in vendor}
+        nameless = [p.number for p in pads if not names.get(ref, {}).get(p.number)]
+        bad = sorted(set(nameless) & drawn)
+        if bad:
+            return Verdict(gate=gid, passed=False,
+                           error=f"{ref}: board pad(s) {', '.join(bad)} carry no pin name, so "
+                                 f"only their number could pair them, and this gate never "
+                                 f"pairs by number: give the part a schematic symbol or "
+                                 f"pinfunction")
+        named = [(names[ref][p.number], p) for p in pads if p.number not in nameless]
+        fit = _land_fit(ref, [(f, p) for f, p in named if f in functions], vendor)
+        if isinstance(fit, str):
+            return Verdict(gate=gid, passed=False, error=fit)
+        left = Counter([f"{p.number} ({f})" for f, p in named if f not in functions]
+                       + [f"{n} (no name)" for n in nameless])
+        left = [k + (f" x{left[k]}" if left[k] > 1 else "") for k in sorted(left)]
+        if left:
+            notes.append(f"{ref}: not drawn, not judged: {', '.join(left)}")
+        if unnumbered:
+            notes.append(f"{ref}: {len(unnumbered)} unnumbered pad(s) ({', '.join(unnumbered)}) "
+                         f"not judged")
+        fit["drawing"] = rel
+        fit["source"] = str(record.get("source", ""))
+        fits.append(fit)
+    worst = max(fits, key=lambda f: f["worst"]["residual_mm"] / f["worst"]["limit_mm"])
+    w = worst["worst"]
+    ev = _evidence(ctx, "land_pattern", {"fits": fits, "notes": notes})
+    passed = w["residual_mm"] <= w["limit_mm"]
+    detail = (f"{worst['ref']} pad {w['board_pad']} ({w['function']}) sits {w['residual_mm']:g} mm "
+              f"from the drawing's pad {w['drawing_pad']} after the best rigid fit (no "
+              f"mirror) vs {w['limit_mm']:g} mm (half its smaller pad's smaller side); RMS "
+              f"{worst['rms_mm']:g} mm over {len(worst['pairs'])} pad(s) paired by function, "
+              f"rotation {worst['rotation_deg']:g} deg")
+    if len(fits) > 1:
+        detail += f"; {len(fits)} footprint(s) fitted: " + ", ".join(
+            f"{f['ref']} {f['worst']['residual_mm']:g}/{f['worst']['limit_mm']:g} mm"
+            for f in fits)
+    if notes:
+        detail += "; " + "; ".join(notes)
+    return Verdict(gate=gid, passed=passed, measured=w["residual_mm"], limit=w["limit_mm"],
+                   comparator="<=", units="mm", detail=detail, evidence=ev)
 
 
 # --------------------------------------------------------------------------- #
@@ -599,8 +886,121 @@ def drc(ctx: GateContext) -> Verdict:
                              f"{len(found)} item(s): the two disagree")
     detail = (f"KiCad DRC at {severity} severities: "
               + (f"{len(found)} finding(s): {_kinds(found)}" if found else "nothing found"))
+    dead: list[str] = []
+    if os.path.isfile(_stem(path) + ".kicad_dru"):
+        probed = _probe_rules(ctx, gid, path)
+        if isinstance(probed, Verdict):
+            return probed
+        dead, note, probe_ev = probed
+        ev += probe_ev
+        detail += f"; {note}"
+    # A dead rule beside a clean run is an error: the run cannot show what the
+    # rule was written to hold. Beside a finding it stays a fail, because a
+    # finding KiCad made is real, and the detail names the dead rule too.
+    if dead and code == EXIT_CLEAN:
+        return Verdict(gate=gid, passed=False, evidence=ev,
+                       error=f"a custom rule cannot fire, so the clean run shows nothing "
+                             f"about it: {'; '.join(dead)}")
     return Verdict(gate=gid, passed=code == EXIT_CLEAN, measured=len(found), limit=0,
                    comparator="<=", units="findings", detail=detail, evidence=ev)
+
+
+#: The rule a probe run adds when no probe fired at all, to tell a rules file
+#: KiCad dropped whole from rules that each select nothing: it selects every
+#: item. KiCad drops the whole file on one syntax error (an unknown constraint
+#: ``track_widht``, a missing paren) without a word on stdout or stderr: measured.
+CANARY = '(rule nopekit_canary (constraint assertion "false"))'
+
+
+def _probe_rules(ctx: GateContext, gid: str, path: str):
+    """Show that each of the board's own custom rules, and each property its
+    conditions read, selects something on this board: ``(dead, note, evidence)``
+    or an error Verdict.
+
+    What slipped through: a rule KiCad cannot evaluate is silent. A misspelled
+    property (``A.NetNmae``, ``A.Pin_Nmae``) gives 0 violations, exit 0 and empty
+    stderr; ``!(A.Pin_Nmae == 'zz')`` reads true on all 93 baseline items; and one
+    syntax error drops every rule in the file. In each case the DRC run reads
+    clean. So the project's file is staged again, verbatim, with
+    :func:`_kicad.probe_rules`' probes appended to it (a syntax error then drops
+    the probes too, which shows), in one kicad-cli run. A probe that fired 0 times
+    there is run again alone, the project's file and that probe: several
+    assertion rules on one item can mask each other (Design 2 saw 75 fall to 56),
+    and only a probe still at 0 alone is dead. When no probe fires, a canary that
+    selects everything tells a file KiCad dropped from rules that select nothing.
+    A rule whose condition reads B (``_kicad.probe_rules``) is never called dead:
+    still at 0 alone, it is said to be not shown live. (Measured on a 4-layer
+    board: ``gnd_pad_edge``, ``A.NetName == 'GND' && (A.Type == 'Pad' || B.Type ==
+    'Pad')``, fired 0 times beside its token probes and 43 alone.)
+    Cost: one more kicad-cli run, about 1.3 s on a 4-layer board."""
+    src = _stem(path) + ".kicad_dru"
+    text = ctx.load_file(src, loader=_read_text)
+    name = os.path.basename(src)
+    try:
+        rules = K.dru_rules(text)
+    except K.KicadFormatError as exc:
+        return ([f"{name} does not parse ({exc}), and KiCad drops a rules file it cannot "
+                 f"parse, every rule with it"], f"{name} does not parse", [])
+    probes = K.probe_rules(rules)
+    if not probes:
+        return [], f"{name} holds no rule to probe", []
+    staged = _stage(ctx, "pcb.drc_probe", path, board=True, schematic=False)
+    if isinstance(staged, Verdict):
+        return staged
+    stem, stage = staged
+    evidence: list[str] = []
+
+    def run(extra: list[str]) -> dict | Verdict:
+        with open(stem + ".kicad_dru", "w", encoding="utf-8") as fh:
+            fh.write(text.rstrip("\n") + "\n" + "\n".join(extra) + "\n")
+        out = _kicad_cli(ctx, gid, stage, ["pcb", "drc", "--severity-all",
+                                          stem + ".kicad_pcb"], "drc.json")
+        if isinstance(out, Verdict):
+            return out
+        return out[1]
+
+    doc = run([p["text"] for p in probes])
+    if isinstance(doc, Verdict):
+        return doc
+    counts = K.probe_counts(doc, [p["name"] for p in probes])
+    if not any(counts.values()):
+        canary = run([CANARY])
+        if isinstance(canary, Verdict):
+            return canary
+        if not K.probe_counts(canary, ["nopekit_canary"])["nopekit_canary"]:
+            return ([f"KiCad dropped the whole rules file (a syntax error drops every "
+                     f"rule): {name}"], f"KiCad dropped {name}", evidence)
+    alone = {}
+    for p in probes:
+        if counts[p["name"]] == 0:
+            single = run([p["text"]])
+            if isinstance(single, Verdict):
+                return single
+            alone[p["name"]] = K.probe_counts(single, [p["name"]])[p["name"]]
+            counts[p["name"]] = alone[p["name"]]
+    dead, unshown = [], []
+    for p in probes:
+        if counts[p["name"]]:
+            continue
+        if p["reads_b"]:
+            unshown.append(p["what"])
+        elif p["kind"] == "rule":
+            dead.append(f"rule {p['what']} selects nothing on this board")
+        else:
+            dead.append(f"property {p['what']}: no item has it (misspelled, or nothing "
+                        f"on this board has it)")
+    evidence += _evidence(ctx, "drc_probes", {
+        "rules_file": src, "probes": [dict(p, fired=counts[p["name"]]) for p in probes],
+        "run_alone": alone})
+    rules_n = sum(p["kind"] == "rule" for p in probes)
+    note = (f"{rules_n} custom rule(s) and {len(probes) - rules_n} propert(y/ies) of "
+            f"{name} probed, {len(probes) - len(dead) - len(unshown)} shown live")
+    if unshown:
+        note += (f"; not shown live, its condition reads B, which a one-item probe "
+                 f"cannot: {', '.join(unshown)}")
+    if dead:
+        note += f"; dead: {'; '.join(dead)}"
+    return dead, note, evidence
 
 
 @gate(
@@ -760,10 +1160,27 @@ def parity(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, evidence=ev,
                        error=f"kicad-cli exited {code} but its report lists "
                              f"{len(_found(doc))} item(s): the two disagree")
+    # An open pin is agreement, not a difference: KiCad 9.0.9 names every
+    # unconnected schematic pin's net ``unconnected-(<ref>-<pin>-Pad<n>)``, even
+    # under a no-connect flag, and reports the pad it sits on, which has no net on
+    # the board, as "Pad missing net given by schematic (unconnected-(...))". On a
+    # 4-layer board with a written schematic that was every one of 14 differences:
+    # measured. Counted as agreement only when every item is a pad the board gives
+    # no net (matched by id, as the fab count is, never by the translated words)
+    # and the words hold KiCad's net name, which is not translated. A pad WITH a
+    # net against an unconnected-( net is still a difference.
+    no_net = {i for i, net in K.pad_nets_by_id(ctx.load_file(path, loader=K.load_tree)).items()
+              if not net}
+    agreed = [v for v in items if v.get("type") == "net_conflict" and v.get("items")
+              and all(K.kiid(i.get("uuid")) in no_net for i in v.get("items", []))
+              and "(unconnected-(" in str(v.get("description", ""))]
+    items = [v for v in items if not any(v is a for a in agreed)]
     where = "; ".join(f"{v.get('description', '?')}" for v in items[:3])
     detail = (f"{len(items)} difference(s) between board and schematic: {where}"
               if items else "the board matches its schematic: every part, value, "
                             "footprint and pad net")
+    if agreed:
+        detail += f"; {len(agreed)} open pin(s) sit on pads with no net"
     return Verdict(gate=gid, passed=not items, measured=len(items), limit=0,
                    comparator="<=", units="differences", detail=detail, evidence=ev)
 
@@ -995,6 +1412,149 @@ def _staged_deck(text: str, deck_dir: str) -> str:
     return "\n".join(out) + "\n"
 
 
+#: Every option name ngspice-42 knows on a ``.options`` card. ngspice takes any
+#: other name without a word: ``.options tmep=127`` runs at the default 27 C and
+#: exits 0, and the baseline deck passed at 4.8325 V with it. And it reads EVERY
+#: card that begins ``.opt`` as ``.options`` (``.optoins``, ``.optxyz`` and
+#: ``.opts temp=127`` each moved a deck with tc1 on its track resistor from
+#: 4.8325 V to 4.790 V: measured), so the guard reads them all.
+#: Where the names come from: the simulator's own table (``OPTtbl``,
+#: ``cktsopt.c``) read off the ngspice-42 binary's string table, the names a
+#: linker merged into a longer string (``trtol`` in ``xtrtol``, ``gmin`` in
+#: ``dyngmin``) found by suffix; and the front-end variables of the manual's
+#: chapter "Simulator Variables (.options)" (noacct, noinit, norefvalue, interp,
+#: autostop, savecurrents, seed, seedinfo, warn, maxwarns, scale, node),
+#: recalled, not read off a copy of the manual here. A valid name left off reads
+#: as an error that names it: loud, never a pass. Rejected: ngspice's own
+#: ``option`` listing (it leaves out valid front-end options: measured); and a
+#: list of the dot cards ngspice knows (an unknown card, ``.tarn`` or ``.icc``,
+#: already prints ``Error:`` and exits 1: measured).
+NGSPICE_OPTIONS = frozenset("""
+    noopiter gmin gshunt reltol abstol vntol trtol chgtol pivtol pivrel tnom temp
+    itl1 itl2 itl3 itl4 itl5 itl6 srcsteps gminsteps gminfactor acct list nomod nopage
+    opts oldlimit numdgt cptime limtim limpts lvlcod lvltim method maxord indverbosity
+    xmu defm defl defw minbreak defad defas bypass trytocompact badmos3 keepopinfo
+    copynodesets nodedamping absdv reldv noopac epsmin sparse klu klu_memgrow_factor
+    rshunt cshunt maxopalter maxevtiter noopalter ramptime convlimit convstep
+    convabsstep autopartial
+    noacct noinit norefvalue interp autostop savecurrents seed seedinfo warn maxwarns
+    scale node
+""".split())
+
+#: SPICE's scale suffixes, as ngspice reads a number: ``meg`` before ``m``
+#: (milli), case ignored, and any letters after the suffix are units it drops
+#: (``4ms`` is 4e-3, ``4s`` is 4). Review R-15 named the trap: ``1M`` is a
+#: milli, not a mega.
+_SPICE_SCALE = {"t": 1e12, "g": 1e9, "meg": 1e6, "k": 1e3, "mil": 25.4e-6, "m": 1e-3,
+                "u": 1e-6, "n": 1e-9, "p": 1e-12, "f": 1e-15}
+_SPICE_NUMBER = re.compile(r"^([-+]?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?)(meg|mil|[tgkmunpf])?"
+                           r"[a-z]*$", re.IGNORECASE)
+
+
+def spice_number(text: str) -> float | None:
+    """A literal SPICE number as ngspice reads it, or None (a ``{param}``, an
+    expression, a word): ``0.5m`` 5e-4, ``4MEG`` 4e6, ``4ms`` 4e-3."""
+    m = _SPICE_NUMBER.match(text.strip())
+    if m is None:
+        return None
+    scale = _SPICE_SCALE[m.group(2).lower()] if m.group(2) else 1.0
+    return float(m.group(1)) * scale
+
+
+def _cards(text: str) -> list[str]:
+    """The deck's cards, each with its ``+`` continuation lines joined on, and
+    comments (``*`` lines, ``;`` and ``$ `` tails) dropped."""
+    cards: list[str] = []
+    for line in text.splitlines():
+        line = re.split(r";|\s\$\s", line, maxsplit=1)[0].rstrip()
+        stripped = line.strip()
+        if not stripped or stripped.startswith("*"):
+            continue
+        if stripped.startswith("+") and cards:
+            cards[-1] += " " + stripped[1:]
+        else:
+            cards.append(stripped)
+    return cards
+
+
+def _option_names(card: str) -> list[str]:
+    """The option names on one ``.opt*`` card: each word before an ``=``, or a
+    bare flag."""
+    body = re.sub(r"\s*=\s*", "=", card.split(None, 1)[1] if " " in card else "")
+    return [w.split("=", 1)[0].lower() for w in body.split() if w.split("=", 1)[0]]
+
+
+def _deck_guard(ctx: GateContext, deck: str, text: str, measure: str) -> str | None:
+    """Why the deck cannot be read as written, or None. Run on the deck's text
+    before ngspice is launched.
+
+    (a) Every option name on every ``.opt*`` card, in the deck and in each file
+    it ``.include``s (read through ``ctx.load_file``, so each is keyed), is one
+    ngspice knows (:data:`NGSPICE_OPTIONS`). ``.lib`` files hold models and are
+    not read. (b) The ``.meas tran`` that defines ``measure`` is in the deck
+    itself, and its literal FROM, TO and AT lie inside the run: 0 <= FROM < TO <=
+    tstop and 0 <= AT <= tstop, tstop the deck's literal ``.tran`` stop time.
+    ngspice measures a window past the run without a word (MIN over 5-6 ms of a
+    4 ms run gave 0.000000e+00, exit 0; a window from 2 ms to 1 ms gave 0; ``to=4``,
+    in seconds, gave the right value over a cut window), and a gate under
+    ``pcb_spice_max`` would pass at 0 V. ``.meas ac`` and ``.meas dc`` windows
+    are not checked (PACK.md)."""
+    todo, seen = [(deck, text)], {os.path.abspath(deck)}
+    while todo:
+        path, body = todo.pop(0)
+        base = os.path.dirname(os.path.abspath(path))
+        for card in _cards(body):
+            word = card.split(None, 1)[0].lower()
+            if word.startswith(".opt"):
+                unknown = [n for n in _option_names(card) if n not in NGSPICE_OPTIONS]
+                if unknown:
+                    return (f"ngspice ignores an option name it does not know, without a "
+                            f"word: {unknown[0]} (in {os.path.basename(path)}: "
+                            f"{card[:80]})")
+            elif word in (".include", ".inc"):
+                m = _INCLUDE.match(card)
+                target = m.group(2).strip("\"'") if m else ""
+                target = target if os.path.isabs(target) else os.path.join(base, target)
+                if os.path.abspath(target) in seen:
+                    continue
+                seen.add(os.path.abspath(target))
+                try:
+                    todo.append((target, ctx.load_file(target, loader=_read_text)))
+                except FileNotFoundError:
+                    return f"the deck includes {target}, and there is no such file"
+    cards = _cards(text)
+    defining = [c for c in cards if c.split(None, 1)[0].lower() in (".meas", ".measure")
+                and len(c.split()) > 2 and c.split()[2].lower() == measure.lower()]
+    if not defining:
+        return (f"cannot show the window was simulated: the .meas that defines "
+                f"{measure!r} is not in {os.path.basename(deck)} itself")
+    card = re.sub(r"\s*=\s*", "=", defining[-1])
+    if card.split()[1].lower() != "tran":
+        return None
+    trans = [c.split() for c in cards if c.split(None, 1)[0].lower() == ".tran"]
+    tstop = spice_number(trans[-1][2]) if trans and len(trans[-1]) > 2 else None
+    if tstop is None:
+        return ("cannot show the window was simulated: the deck has no .tran with a "
+                "literal stop time")
+    bounds = {}
+    for word in card.split()[3:]:
+        key, _, val = word.partition("=")
+        if key.lower() in ("from", "to", "at") and _:
+            num = spice_number(val)
+            if num is None:
+                return (f"cannot show the window was simulated: {measure} {key.upper()}="
+                        f"{val} is not a literal number")
+            bounds[key.lower()] = num
+    lo, hi = bounds.get("from", 0.0), bounds.get("to", tstop)
+    if not 0.0 <= lo < hi <= tstop:
+        return (f"{measure}'s window FROM={lo:g} TO={hi:g} s is not inside the "
+                f"{tstop:g} s run (.tran): ngspice measures outside it without a word")
+    if "at" in bounds and not 0.0 <= bounds["at"] <= tstop:
+        return (f"{measure}'s AT={bounds['at']:g} s is outside the {tstop:g} s run "
+                f"(.tran)")
+    return None
+
+
 @gate(
     id="pcb.spice",
     basis="established",
@@ -1022,6 +1582,11 @@ def spice(ctx: GateContext) -> Verdict:
     not parse and goes on, solving a different circuit, and that is an error
     here, as is any ``Error:`` line. A measurement ngspice could not make
     (``... failed!``) is an error, never a fail: no value was shown.
+
+    Two refusals come before ngspice runs, because ngspice is silent on both
+    (:func:`_deck_guard`): an option name it does not know (``tmep=127`` runs at
+    27 C, exit 0), and a ``.meas tran`` window outside the run (MIN past the end
+    reads 0 V, exit 0). Each is an error, never a fail.
     """
     gid = "pcb.spice"
     rel = ctx.param("pcb_spice_deck")
@@ -1040,6 +1605,9 @@ def spice(ctx: GateContext) -> Verdict:
     if not os.path.isfile(deck):
         return Verdict(gate=gid, passed=False, detail=f"no deck at {deck}")
     text = ctx.load_file(deck, loader=_read_text)
+    refused = _deck_guard(ctx, deck, text, measure)
+    if refused:
+        return Verdict(gate=gid, passed=False, error=refused)
     marker = ctx.out_path("pcb-kicad", "pcb_spice", ".stage")
     stage = os.path.dirname(marker)
     staged = os.path.join(stage, os.path.basename(deck))

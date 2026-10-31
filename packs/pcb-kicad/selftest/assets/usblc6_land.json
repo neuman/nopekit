@@ -1,0 +1,14 @@
+{
+  "part": "USBLC6-2SC6 (SOT23-6L)",
+  "source": "STMicroelectronics USBLC6-2 datasheet, 'SOT23-6L recommended footprint (dimensions in mm)': pads 0.60 x 1.20 on a 0.95 mm pitch, 3.50 mm over both rows, so the rows' centres 2.30 mm apart. Transcribed from memory of that figure when the pack was built, not re-read from a copy of the datasheet: re-read it before trusting a fail here. Pin functions from the same datasheet's pinout: 1 I/O1, 2 GND, 3 I/O2, 4 I/O2, 5 VBUS, 6 I/O1.",
+  "view": "top",
+  "y_axis": "up",
+  "pads": [
+    {"number": "1", "function": "I/O1", "x": -0.95, "y": -1.15, "w": 0.6, "h": 1.2},
+    {"number": "2", "function": "GND", "x": 0.0, "y": -1.15, "w": 0.6, "h": 1.2},
+    {"number": "3", "function": "I/O2", "x": 0.95, "y": -1.15, "w": 0.6, "h": 1.2},
+    {"number": "4", "function": "I/O2", "x": 0.95, "y": 1.15, "w": 0.6, "h": 1.2},
+    {"number": "5", "function": "VBUS", "x": 0.0, "y": 1.15, "w": 0.6, "h": 1.2},
+    {"number": "6", "function": "I/O1", "x": -0.95, "y": 1.15, "w": 0.6, "h": 1.2}
+  ]
+}

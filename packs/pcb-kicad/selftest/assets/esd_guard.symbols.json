@@ -1,0 +1,7 @@
+{
+  "symbols": {
+    "J*": "Connector_Generic:Conn_01x04",
+    "U1": "Power_Protection:USBLC6-2SC6"
+  },
+  "power_flags": ["GND", "VBUS"]
+}

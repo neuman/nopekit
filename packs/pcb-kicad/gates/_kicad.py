@@ -650,3 +650,169 @@ def dru_text(table: dict, prefix: str) -> str:
             lines.append(f'\t(condition "{rule["condition"]}")')
         lines.append(f'\t(constraint {rule["constraint"]} (min {float(rule["min_mm"]):g}mm)))')
     return "\n".join(lines) + "\n"
+
+
+# --------------------------------------------------------------------------- #
+# A project's own custom rules, and the probes that show each one is live
+# --------------------------------------------------------------------------- #
+
+#: A property a rule's condition reads: ``A.NetName``, ``B.Type``. A name followed
+#: by ``(`` is a function (``A.isPlated()``), which no probe of its own can show
+#: is spelled right; its rule's selector probe is all it gets.
+_PROPERTY = re.compile(r"(?<![\w.])[AB]\.(\w+)\b(?!\s*\()")
+_READS_B = re.compile(r"(?<![\w.])B\.\w")
+
+#: The name every probe rule starts with, so a probe's finding is told from the
+#: project's own by the rule name KiCad prints in its words (never translated).
+PROBE_PREFIX = "nopekit_"
+
+
+def dru_rules(text: str) -> list[list]:
+    """The ``(rule ...)`` nodes of a ``.kicad_dru`` file. ``#`` lines are KiCad's
+    comments and are dropped; anything :func:`parse` cannot read raises
+    :class:`KicadFormatError`."""
+    body = "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))
+    return children(parse("(" + body + ")"), "rule")
+
+
+def probe_rules(rules: list[list]) -> list[dict]:
+    """The probes that show each custom rule and each property it reads is live.
+
+    One per rule, ``nopekit_probe_<i>``: the rule's own ``layer`` and
+    ``condition`` with ``(constraint assertion "false")``, so it fires on every
+    item the rule selects. One per property token any condition reads,
+    ``nopekit_token_<j>``: ``A.<Prop> == A.<Prop>``, which fires only on an item
+    KiCad knows that property on (14, 75 and 93 items on the baseline against 0 for
+    a misspelled name: measured). A ``B.`` token is probed as ``A.``: KiCad
+    evaluates a one-item assertion with no B, so ``B.NetName == B.NetName`` and
+    ``A.NetName == 'DP' && B.NetName == 'GND'`` each fired 0 times (measured). So
+    a rule whose condition reads B is ``reads_b``: its selector probe is shown live
+    only when it fires, and is never called dead.
+
+    Each probe is ``{"name", "kind" ("rule" | "property"), "what", "text",
+    "reads_b"}``. Rejected: a probe that restates the rule's own constraint at an
+    impossible bound (11.0 s at 1000 mm, and an item in the board's middle is
+    missed); ``disallow`` probes (a later probe whose selection covers an earlier
+    one masked it fully: measured, 12 against 0).
+    """
+    probes, tokens = [], []
+    for i, rule in enumerate(rules):
+        name = str(rule[1]) if len(rule) > 1 and not isinstance(rule[1], list) else f"#{i}"
+        cond = value(rule, "condition")
+        parts = [f"(rule {PROBE_PREFIX}probe_{i}"]
+        if child(rule, "layer") is not None:
+            parts.append(dump(child(rule, "layer")))
+        if cond is not None:
+            parts.append(f"(condition {_quote(str(cond))})")
+        parts.append('(constraint assertion "false"))')
+        probes.append({"name": f"{PROBE_PREFIX}probe_{i}", "kind": "rule", "what": name,
+                       "text": " ".join(parts),
+                       "reads_b": bool(cond is not None and _READS_B.search(str(cond)))})
+        for token in _PROPERTY.findall(str(cond or "")):
+            if token not in tokens:
+                tokens.append(token)
+    for j, token in enumerate(tokens):
+        probes.append({"name": f"{PROBE_PREFIX}token_{j}", "kind": "property", "what": token,
+                       "text": (f'(rule {PROBE_PREFIX}token_{j} (condition "A.{token} == '
+                                f'A.{token}") (constraint assertion "false"))'),
+                       "reads_b": False})
+    return probes
+
+
+def probe_counts(doc: dict, names: list[str]) -> dict[str, int]:
+    """How many findings of a probe run's report name each probe rule in their
+    words (``Assertion failure (rule 'nopekit_probe_3')``), matched as
+    :func:`fab_findings` matches a fab rule's name."""
+    pats = {n: re.compile(rf"(?<!\w){re.escape(n)}(?!\w)") for n in names}
+    counts = dict.fromkeys(names, 0)
+    for v in doc.get("violations", []):
+        words = str(v.get("description", ""))
+        for n, pat in pats.items():
+            if pat.search(words):
+                counts[n] += 1
+    return counts
+
+
+# --------------------------------------------------------------------------- #
+# Pads by id, and a footprint's land
+# --------------------------------------------------------------------------- #
+
+def pad_nets_by_id(tree: list) -> dict[str, str]:
+    """{the id a report gives a pad (:func:`kiid`): its net name, "" for none},
+    beside :func:`pad_ids`, for every pad whose id KiCad keeps."""
+    nets = {}
+    for item in children(tree, "net"):
+        if len(item) >= 3:
+            try:
+                nets[int(item[1])] = str(item[2])
+            except ValueError:
+                pass
+    out = {}
+    for fp in children(tree, "footprint"):
+        for pad in children(fp, "pad"):
+            found = None
+            for key in ("uuid", "tstamp"):
+                found = found or kiid(value(pad, key))
+            if found is not None:
+                out[found] = _net_name(child(pad, "net"), nets)
+    return out
+
+
+@dataclass
+class LandPad:
+    number: str
+    x: float                    # mm, the footprint's own frame, seen from the top
+    y: float
+    w: float
+    h: float
+
+
+def footprint_land(tree: list, ref: str) -> tuple[list[LandPad], list[str], bool]:
+    """``(numbered pads, unnumbered pads' kinds, on the back)`` of footprint ``ref``,
+    each pad's centre in the footprint's own frame as seen from the top.
+
+    KiCad 9 writes a pad's ``at`` local to its footprint, and on a footprint
+    flipped to ``B.Cu`` with y negated (SW90's pad 2 is (-0.75, -1.95) on the
+    board and (-0.75, 1.95) in its library: measured), so y is negated back. The
+    size is read as written: the limit reads min(w, h), which no rotation moves.
+    Raises KeyError for a ref the board lacks."""
+    for fp in children(tree, "footprint"):
+        if footprint_ref(fp)[0] != ref:
+            continue
+        back = str(value(fp, "layer", default="")) == "B.Cu"
+        pads, unnumbered = [], []
+        for p in children(fp, "pad"):
+            number = str(p[1]) if len(p) > 1 else ""
+            if not number:
+                unnumbered.append(str(p[2]) if len(p) > 2 else "?")
+                continue
+            at, size = child(p, "at"), child(p, "size")
+            x, y = float(at[1]), float(at[2])
+            pads.append(LandPad(number, x, -y if back else y, float(size[1]), float(size[2])))
+        return pads, unnumbered, back
+    raise KeyError(ref)
+
+
+def rigid_fit(pairs: list[tuple[tuple[float, float], tuple[float, float]]]):
+    """The rotation and translation that best carry the first point of each pair
+    onto the second, least squares, with no mirror (a mirror would hide a land
+    drawn mirrored): ``(degrees, [residual mm per pair])``.
+
+    Closed form in 2D (Kabsch): with both sets centred, the angle is
+    ``atan2(sum(u x w), sum(u . w))``."""
+    n = len(pairs)
+    ax = sum(a[0] for a, _ in pairs) / n
+    ay = sum(a[1] for a, _ in pairs) / n
+    bx = sum(b[0] for _, b in pairs) / n
+    by = sum(b[1] for _, b in pairs) / n
+    dot = cross = 0.0
+    for (px, py), (qx, qy) in pairs:
+        ux, uy, wx, wy = px - ax, py - ay, qx - bx, qy - by
+        dot += ux * wx + uy * wy
+        cross += ux * wy - uy * wx
+    theta = math.atan2(cross, dot)
+    c, s = math.cos(theta), math.sin(theta)
+    residuals = [math.hypot(c * (px - ax) - s * (py - ay) + bx - qx,
+                            s * (px - ax) + c * (py - ay) + by - qy)
+                 for (px, py), (qx, qy) in pairs]
+    return math.degrees(theta), residuals

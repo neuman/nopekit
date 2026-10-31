@@ -4,7 +4,8 @@ Checks a printed circuit board drawn in KiCad 6 to 9, and its schematic: KiCad's
 own design rule check, connectivity, electrical rules check and schematic parity,
 the library's pin names against the board's nets, trace heating per IPC-2221, a
 fab's published limits, a measurement ngspice makes on the project's circuit
-deck, and the populated board's fit in its enclosure.
+deck, the populated board's fit in its enclosure, each footprint's land against
+its vendor's drawing, and three rules for a board that carries a LiPo cell.
 
 **Before you trust a Checked claim from this pack,** know what it is: a board that
 breaks none of KiCad's rules, with every connection made, no part shorting two of
@@ -19,15 +20,19 @@ circuit that works. Nothing here has seen the board powered.
 | Gate | Tier | Basis | Settles |
 |---|---|---|---|
 | `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-9 file whose every track names a defined net (the guard) |
-| `pcb.pin_names` | 0 | sourced | pins the library gives one name (an ESD array's `I/O1`, a part's several `GND`) carry one net |
+| `pcb.pin_names` | 0 | sourced | pins the library gives one name (an ESD array's `I/O1`, a part's several `GND`) carry one net; the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
+| `pcb.land_pattern` | 0 | sourced | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function, one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
 | `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221; the detail names the hottest stretch |
-| `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing, at every severity by default |
+| `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing, at every severity by default, and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something |
 | `pcb.unconnected` | 1 | established | KiCad finds no connection the netlist asks for and the copper does not make |
 | `pcb.erc` | 1 | established | `kicad-cli sch erc` finds nothing in the schematic, at every severity by default |
-| `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic: parts, values, footprints, pad nets |
+| `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement) |
 | `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the fab's published minimums as the only custom rules finds nothing past them |
-| `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max` |
+| `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know, or a `.meas tran` window outside the run, is refused first |
 | `pcb.enclosure_fit` | 1 | established | the board, every part's 3D model in place, shares no volume with the enclosure, and each part keeps its clearance (OpenCascade) |
+| `pcb.charge_protection` | 0 | sourced | the charger in `pcb_charger` has its THERM pin wired to the NTC (and not tied to its own pins), and a safety timer |
+| `pcb.fuse_conductor` | 0 | sourced | the fuse in `pcb_fuse` sits between the cell and the conductor in `pcb_conductor`, which IEC 60949 says does not reach its limit before the fuse's guaranteed trip time |
+| `pcb.discharge_cutoff` | 0 | sourced | the highest cutoff over the cell (its PCM, or a part sensing the cell's net directly or through one two-pad part) is at or above the cell's minimum voltage |
 
 The tier-0 gates read the board with this pack's own reader (`gates/_kicad.py`,
 standard library only), so they run without KiCad, CI included. The tier-1 gates
@@ -40,8 +45,27 @@ process. They read inside subprocesses the trace cannot see into, so they are
 **opaque**: they re-run on every check where their tools exist (about a second
 each on a small board; the fit about 4 s) and skip where they do not.
 
-`pcb.pin_names` and `pcb.net_width` need `pcb.board_readable`: on a board this
-reader cannot vouch for they are not run, and read Skipped, `prerequisite failed`.
+`pcb.pin_names`, `pcb.net_width` and `pcb.land_pattern` need `pcb.board_readable`:
+on a board this reader cannot vouch for they are not run, and read Skipped,
+`prerequisite failed`.
+
+**Which verdicts are this pack's own code.** KiCad decides DRC, ERC, parity and
+whether each custom rule is live; ngspice decides the number. This pack's code
+decides three things: pin-name agreement (a comparison of names the library
+gives), the land fit (`gates/_kicad.py`'s `rigid_fit`), and the three power rules
+(pad-net lookups and IEC 60949's formula on records a person enters). Each has a
+known-bad control it fails on: `split_pin_pair`, `mirrored_land` (1.9 mm against
+0.3 mm), `ntc_unwired`, `thin_conductor` (the area at which the formula puts the
+conductor at its limit in the trip time / 1.15) and `cutoff_unwired`.
+
+**The power rules read records, bound to the design.** `pcb_cell`, `pcb_charger`,
+`pcb_fuse`, `pcb_conductor` and `pcb_cutoffs` each name the board (`board`, else
+`pcb_board`), and the ref, value and pins they describe, with a `source`. A ref the
+board lacks, another value on that ref, or a pin with no pad is an error ("the
+record is for another design"), so a generator that moves a part or a value
+stales them. The baseline's records name `selftest/assets/lipo_charger.kicad_pcb`
+(made by `make_power_board.py`: placed, netted, not routed), which only these
+three rules read.
 
 ## The proposer: `pcb.autoroute`
 
@@ -67,6 +91,35 @@ through. `--rip-up` routes from nothing. A run that leaves nets open is still a
 proposal: `pcb.unconnected` says which, and `--passes` is the knob (a retry of the
 same input draws the same copper).
 
+## The proposer: `pcb.schematic_from_board`
+
+    nopekit propose pcb.schematic_from_board -- --board hardware/main.kicad_pcb \
+        --symbols hardware/main.symbols.json
+
+A board a script generated has no schematic, so `pcb.erc` and `pcb.parity` skip
+and `pcb.pin_names` has no names. No kicad-cli command writes a schematic from a
+board; this proposer does, on KiCad's stock symbols: each part's symbol in its own
+cell, a global label of its pad's net on each connected pin end, its Footprint
+field the board's footprint name verbatim, every id a `uuid5` (the bytes repeat).
+It writes `<stem>.kicad_sch`, a `sym-lib-table` of the libraries used, and
+`<stem>.schematic.json` (the symbol per ref, the parts on generic symbols, the
+pins left open with no statement, the flagged nets, each library's sha256).
+
+The symbols file holds the person's statements, never inferred: `symbols` (`{ref
+or glob: "Lib:Symbol"}`, an exact ref first, then globs in the order written),
+`no_connect` (`{ref: [pads]}`, pins open on purpose), `power_flags` (nets fed from
+off the board) and `library` (more `.kicad_sym` directories). A part with no
+stock symbol is mapped to `Connector_Generic:Conn_01xNN` by the person. It exits 2,
+writes nothing and names every problem when a part matches no symbol, a pad with a
+net has no pin of its number, a pad carries two nets, a symbol is missing or has
+more than one unit, or a statement names a pad or net the board lacks.
+
+Adopting it (copying the files beside the board, under its name) is a person's
+decision. Then the existing `pcb.erc` and `pcb.parity` judge it, and `pcb.parity`
+is the check on the writer. When the generator moves the board, parity reads a
+difference until someone proposes again: tag such claims `netlist`, which binds
+`pcb.erc`, `pcb.parity` and `pcb.pin_names` together.
+
 ## What this pack CANNOT settle
 
 Read this before you write a claim. Every one of these has passed a "0 violations,
@@ -83,6 +136,11 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   parity to check: `pcb.erc` and `pcb.parity` skip, and the script's dictionary is
   the only record of what connects to what. Tag a claim that every connection is
   made `copper-connectivity`, not `connectivity`, or `pcb.parity`'s skip holds it.
+- **What a written schematic cannot add.** On a schematic `pcb.schematic_from_board`
+  wrote, parity checks only the writer's copy of the board's nets, never the
+  design's intent; ERC judges nothing for a part on a generic or passive stand-in
+  symbol (a module mapped to `Conn_01x43`); and a symbol chosen wrongly but with
+  the pads' pin numbers passes both.
 - **Parts that are not in a library.** A footprint drawn without a schematic carries
   no pin names, and `pcb.pin_names` skips. Its pin map is a claim for a person (an
   expert judgment) or for a pin table recorded from the datasheet.
@@ -101,7 +159,25 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   the gate rather than pass it.
 - **Whether the SPICE deck is the circuit.** ngspice solves the deck it is given.
   The deck is someone's model, typed by hand; `pcb.spice` refuses a run that
-  dropped a line, and nothing more. Read the deck against the schematic.
+  dropped a line, an option name ngspice does not know and a `.meas tran` window
+  outside the run, and nothing more. Option VALUES (`method=gearr`) and `.meas ac`
+  and `.meas dc` windows are not checked. Read the deck against the schematic.
+- **Every custom rule's every clause.** `pcb.drc` shows each rule selects
+  something and each property it reads exists. A misspelled function inside a
+  negated or OR'd clause is not caught, a rule whose condition needs B (two items)
+  is shown live only when it fires on one item, and a real property that sits on
+  no item of this board (a via rule on a board with no vias) is a false error.
+- **The land beyond its centres.** `pcb.land_pattern` judges pad centres in the
+  top view, one rigid fit; pad sizes, paste, courtyard and pads the drawing omits
+  (mounting pads) are not judged, and the drawing is a person's transcription.
+- **The cell beyond its records.** The power rules are as true as the records a
+  person enters from the datasheets. `pcb.fuse_conductor` judges the adiabatic
+  short-circuit points only, no overload (I2 <= 1.45 Iz), one conductor carrying
+  the whole fault; its verdict turns on `limit_c`. `pcb.discharge_cutoff` reads
+  the cell's board alone (a cutoff on another board reads as absent), and never
+  the FET path a cutoff drives or a cutoff in firmware. `pcb.charge_protection`
+  accepts only a THERM pin wired to an NTC with a safety timer: a charger
+  protected another way (a supervisor that floats PROG) reads FAIL.
 - **Everything the fab checks.** `pcb.fab_rules` holds the minimums the fab
   publishes and KiCad can test: widths, spacing, drills, via pads, annular rings,
   edge clearance, silkscreen text, and silkscreen to pad (silk on silk is
@@ -127,6 +203,11 @@ what it asserts.
 | `connectivity` | `pcb.unconnected`, `pcb.parity` |
 | `copper-connectivity` | `pcb.unconnected` |
 | `netlist` | `pcb.unconnected`, `pcb.pin_names`, `pcb.erc`, `pcb.parity` |
+| `land-pattern` | `pcb.land_pattern` |
+| `battery-safety` | `pcb.charge_protection`, `pcb.fuse_conductor`, `pcb.discharge_cutoff` |
+| `charge-protection` | `pcb.charge_protection` |
+| `overcurrent-protection` | `pcb.fuse_conductor` |
+| `deep-discharge` | `pcb.discharge_cutoff` |
 | `schematic`, `electrical-rules` | `pcb.erc` |
 | `schematic-parity` | `pcb.parity` |
 | `pin-map`, `short-circuit` | `pcb.pin_names` |
@@ -147,6 +228,18 @@ board frame is Y-down. `pcb.net_width` reports the rise in C against
 `pcb_temp_rise_limit_c`. `pcb.spice` reports in `pcb_spice_units`, which the
 project states: ngspice computes in SI (V, A, s) and the gate cannot tell which
 quantity a `.meas` is.
+
+**`pcb.land_pattern` judges one footprint in its own frame, seen from the top**, in
+mm: each pad's centre as KiCad writes it, local to the footprint, y down, and a
+footprint on `B.Cu` with its y negated back (KiCad 9 writes a flipped footprint's
+local y negated). The drawing record states its own y axis (`y_axis`: `"up"` as a
+drawing is printed, `"down"` as a footprint is): read the wrong way, a land is
+mirrored, and the fit allows no mirror. The verdict is mm against half the
+smaller side of the smaller pad of the worst pair.
+
+**The power rules judge the boards their records name**: counts of missing
+protections against 0, seconds (IEC 60949's adiabatic time against the fuse's
+guaranteed trip time), volts (the highest cutoff against the cell's minimum).
 
 **`pcb.enclosure_fit` judges the populated board in the enclosure's frame.** The
 board is first as `kicad-cli pcb export step --user-origin 0x0mm` writes it: the
@@ -169,8 +262,15 @@ body may touch (standoffs) but not cut in.
 "pcb_spice_measure": "vbus_min", "pcb_spice_min": 4.75, "pcb_spice_units": "V",
 "pcb_enclosure_step": "cad/out/enclosure.step",
 "pcb_board_placement": {"x": 2.0, "y": 17.0, "z": 4.0, "rot_z_deg": 0},
-"pcb_enclosure_clearance_mm": 1.0
+"pcb_enclosure_clearance_mm": 1.0,
+"pcb_land_drawings": {"SW90": "hardware/lands/msk12c02.json"},
+"pcb_cell": {"board": "hardware/left.kicad_pcb", "ref": "J4", "value": "JST-PH-2", "pin": "1",
+             "min_v": 3.0, "pcm_cutoff_min_v": 2.75, "source": "the cell's datasheet"},
+"pcb_cutoffs": []
 ```
+
+`selftest/baseline.json`'s `_notes` give every key's fields; `pcb_charger`,
+`pcb_fuse` and `pcb_conductor` are records of the same kind.
 
 Each family skips without its keys: no fab named, no deck, no enclosure, no
 placement or no clearance is a skip that says which key, never a default.
@@ -214,6 +314,8 @@ back under 1 C or over 100 C, look at the units first.
 - `references/enclosure-fit.md`: the frames, what kicad-cli leaves out, and what
   the fit measures.
 - `references/spice.md`: what `pcb.spice` runs, refuses and reads.
+- `references/power.md`: the three LiPo rules, IEC 60949, the records and where
+  their numbers come from.
 - `references/what-slipped-through.md`: the defects the source pipeline's checks
   passed, and which gate here answers each.
 - `references/installing.md`: getting `kicad-cli` (KiCad 9), ngspice, CadQuery,

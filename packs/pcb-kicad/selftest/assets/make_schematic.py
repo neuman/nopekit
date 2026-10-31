@@ -22,28 +22,20 @@ from __future__ import annotations
 
 import os
 import sys
-import uuid
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PACK = os.path.dirname(os.path.dirname(HERE))
 sys.dont_write_bytecode = True        # never leave a __pycache__ in the pack it describes
 sys.path.insert(0, os.path.join(PACK, "gates"))
+sys.path.insert(0, os.path.join(PACK, "proposers"))
 import _kicad as K                                                 # noqa: E402
+import _schematic as W                                             # noqa: E402
 
 SYMBOLS = "/usr/share/kicad/symbols"
 OUT = os.path.join(HERE, "esd_guard.kicad_sch")
 PROJECT = "esd_guard"
 
-#: KiCad 9.0's schematic format, the version eeschema 9.0.9 writes.
-SCH_VERSION = "20250114"
-
-_NS = uuid.UUID("5f0c3a52-9b1e-4f43-8f0e-2a6b1d0c7e11")
-
-
-def uid(name: str) -> str:
-    return str(uuid.uuid5(_NS, name))
-
-
+uid = W.uid
 ROOT_UUID = uid("sheet:root")
 
 #: (ref, value, lib, symbol, footprint, (x, y) mm on the sheet). The footprints
@@ -77,101 +69,16 @@ def symbol_uuids() -> dict[str, str]:
 
 
 def _library_symbol(lib: str, name: str) -> list:
-    """``lib:name`` as eeschema caches it in a schematic: renamed with its
-    library, and a derived symbol flattened onto its parent (the parent's
-    body and pins, the child's properties, units renamed to the child)."""
-    tree = K.load_tree(os.path.join(SYMBOLS, lib + ".kicad_sym"))
-    syms = {str(s[1]): s for s in K.children(tree, "symbol")}
-    sym = syms[name]
-    parent_name = K.value(sym, "extends")
-    if parent_name:
-        parent = syms[str(parent_name)]
-        props = {str(p[1]): p for p in K.children(sym, "property")}
-        body = []
-        for x in parent[2:]:
-            if isinstance(x, list) and K.head(x) == "property" and str(x[1]) in props:
-                body.append(props.pop(str(x[1])))
-            elif isinstance(x, list) and K.head(x) == "symbol":
-                unit = list(x)
-                unit[1] = K.Q(name + str(x[1])[len(str(parent_name)):])
-                body.append(unit)
-            else:
-                body.append(x)
-        sym = ["symbol", K.Q(name), *body, *props.values()]
-        # Properties go before the unit bodies, as eeschema writes them.
-        sym = ([x for x in sym if not (isinstance(x, list) and K.head(x) == "symbol")]
-               + [x for x in sym if isinstance(x, list) and K.head(x) == "symbol"])
-    out = ["symbol", K.Q(f"{lib}:{name}")]
-    for x in sym[2:]:
-        if isinstance(x, list) and K.head(x) == "in_bom":
-            out.append(["exclude_from_sim", "no"])    # KiCad 8's key, before in_bom
-        out.append(x)
-    return out
+    return W.library_symbol(SYMBOLS, lib, name)
 
 
-def _pins(lib_sym: list) -> dict[str, tuple[float, float]]:
-    """{pin number: (x, y)} of each pin's connection point, in the symbol's own
-    frame (y up)."""
-    found: dict[str, tuple[float, float]] = {}
-
-    def walk(node):
-        for x in node:
-            if isinstance(x, list):
-                if K.head(x) == "pin":
-                    at = K.child(x, "at")
-                    found[str(K.value(x, "number"))] = (float(at[1]), float(at[2]))
-                walk(x)
-    walk(lib_sym)
-    return found
+_pins = W.pins
+_global_label = W.global_label
 
 
-def _effects(hide: bool = False, justify: str | None = None) -> list:
-    node = ["effects", ["font", ["size", "1.27", "1.27"]]]
-    if justify:
-        node.append(["justify", justify])
-    if hide:
-        node.append(["hide", "yes"])
-    return node
-
-
-def _prop(key: str, val: str, x: float, y: float, hide: bool = False) -> list:
-    return ["property", K.Q(key), K.Q(val), ["at", _n(x), _n(y), "0"], _effects(hide)]
-
-
-def _n(v: float) -> str:
-    return f"{round(v, 4):g}"
-
-
-def _placed(lib_id: str, ref: str, value: str, footprint: str, x: float, y: float,
-            pins: list[str], key: str, angle: int = 0) -> list:
-    """One placed symbol, with the instance record that names it in this
-    project."""
-    return ["symbol",
-            ["lib_id", K.Q(lib_id)],
-            ["at", _n(x), _n(y), str(angle)],
-            ["unit", "1"],
-            ["exclude_from_sim", "no"], ["in_bom", "yes"], ["on_board", "yes"],
-            ["dnp", "no"],
-            ["uuid", K.Q(uid(key))],
-            _prop("Reference", ref, x, y - 7.62, hide=ref.startswith("#")),
-            _prop("Value", value, x, y + 7.62),
-            _prop("Footprint", footprint, x, y, hide=True),
-            _prop("Datasheet", "", x, y, hide=True),
-            *[["pin", K.Q(p), ["uuid", K.Q(uid(f"{key}:pin:{p}"))]] for p in pins],
-            ["instances", ["project", K.Q(PROJECT),
-                           ["path", K.Q("/" + ROOT_UUID),
-                            ["reference", K.Q(ref)], ["unit", "1"]]]]]
-
-
-def _global_label(net: str, x: float, y: float, left: bool) -> list:
-    return ["global_label", K.Q(net),
-            ["shape", "bidirectional"],
-            ["at", _n(x), _n(y), "180" if left else "0"],
-            ["fields_autoplaced", "yes"],
-            _effects(justify="right" if left else "left"),
-            ["uuid", K.Q(uid(f"label:{net}:{x}:{y}"))],
-            ["property", K.Q("Intersheetrefs"), K.Q("${INTERSHEET_REFS}"),
-             ["at", _n(x), _n(y), "0"], _effects(hide=True)]]
+def _placed(lib_id, ref, value, footprint, x, y, pins, key, angle=0):
+    return W.placed(lib_id, ref, value, footprint, x, y, pins, key, project=PROJECT,
+                    root_uuid=ROOT_UUID, angle=angle)
 
 
 def build() -> list:
@@ -209,16 +116,7 @@ def build() -> list:
             centre_x = dict((r, xy[0]) for r, *_rest, xy in PARTS)[ref]
             items.append(_global_label(net, x, y, left=x < centre_x))
 
-    return ["kicad_sch",
-            ["version", SCH_VERSION],
-            ["generator", K.Q("eeschema")],
-            ["generator_version", K.Q("9.0")],
-            ["uuid", K.Q(ROOT_UUID)],
-            ["paper", K.Q("A4")],
-            ["lib_symbols", *libs.values()],
-            *items,
-            ["sheet_instances", ["path", K.Q("/"), ["page", K.Q("1")]]],
-            ["embedded_fonts", "no"]]
+    return W.sheet(ROOT_UUID, list(libs.values()), items)
 
 
 def write(path: str = OUT) -> str:
