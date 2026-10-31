@@ -35,9 +35,10 @@ ln -s ~/.cache/nopekit/zmk/v0.3.0/zmk-west ~/.local/bin/
 ```
 
 Use a link, not a copy: `zmk-west` finds its workspace from its own real path.
-The gates compare the linked file's bytes with this pack's `bin/zmk-west`. After a
-pack upgrade that changes the file, run step 2 again (or copy the new file into
-the workspace), or every build gate is errored and says so.
+The gates compare the bytes it prints of itself (`zmk-west --self`) with this
+pack's `bin/zmk-west`. After a pack upgrade that changes the file, copy the new
+file into the workspace (`cp packs/firmware-zmk/bin/zmk-west
+~/.cache/nopekit/zmk/v0.3.0/`), or every build gate is errored and says so.
 
 ## 4. A smoke test
 
@@ -45,14 +46,16 @@ the workspace), or every build gate is errored and says so.
 PYTHONPATH=src python3 -m nopekit gate selftest --pack firmware-zmk
 ```
 
-This builds the pack's baseline (ZMK's corne) and its four known-bad copies. Each
-of the four gates must say its known-good passed and its known-bad failed. A full
-build takes 12-27 s and a configure 4-8 s.
+This builds the pack's baseline (ZMK's corne) and its known-bad copies. Each of
+the four gates must say its known-good passed and its known-bad failed. A build
+takes 12-27 s on an idle machine; the whole selftest took 8 minutes on a loaded
+one.
 
 ## What the wrapper does
 
 `zmk-west <project> <out> <cmd...>` runs `<cmd>` in the image with no network, as
-your user id. The workspace is mounted read-only at `/zmk`, `<project>` read-only
+your user id, in a container named `zmk-west-<basename of out>`: a gate that times
+out kills the container by that name. The workspace is mounted read-only at `/zmk`, `<project>` read-only
 at its own path, and `<out>` writable at its own path. The gates pass the CI step's
 own `west build` argv, with a build directory of their own under the system's
 temporary directory, and remove it afterwards.

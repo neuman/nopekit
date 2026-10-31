@@ -6,11 +6,11 @@ Loading Zephyr default modules (Zephyr base).
 -- Cache files will be written to: <repo>/firmware/zmk-config/zephyr/.cache
 -- Zephyr version: 3.5.0 (<repo>/firmware/zmk-config/zephyr)
 -- Found west (found suitable version "1.5.0", minimum required is "0.14.0")
-No board named 'thumbdeck' found.
+No board named 'handdeck' found.
 
 Please choose one of the following boards:
 
--- Board: thumbdeck
+-- Board: handdeck
 arc:
 [... 623 lines left out of this excerpt ...]
   yd_esp32
@@ -24,4 +24,4 @@ Call Stack (most recent call first):
 
 
 -- Configuring incomplete, errors occurred!
-FATAL ERROR: command exited with status 1: /usr/local/bin/cmake -DWEST_PYTHON=/usr/bin/python3 -B<repo>/firmware/zmk-config/build -GNinja -DBOARD=thumbdeck -DZMK_CONFIG=<repo>/firmware/zmk-config/config -DZEPHYR_EXTRA_MODULES=<repo>/firmware/zmk-modules/tmag5273_nub -S<repo>/firmware/zmk-config/zmk/app
+FATAL ERROR: command exited with status 1: /usr/local/bin/cmake -DWEST_PYTHON=/usr/bin/python3 -B<repo>/firmware/zmk-config/build -GNinja -DBOARD=handdeck -DZMK_CONFIG=<repo>/firmware/zmk-config/config -DZEPHYR_EXTRA_MODULES=<repo>/firmware/zmk-modules/tmag5273_nub -S<repo>/firmware/zmk-config/zmk/app

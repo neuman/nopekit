@@ -1,0 +1,86 @@
+-- west build: generating a build system
+Loading Zephyr default modules (Zephyr base).
+-- Application: /zmk/zmk/app
+-- CMake version: 3.31.6
+-- Found Python3: /usr/bin/python3 (found suitable version "3.12.3", minimum required is "3.8") found components: Interpreter
+-- Cache files will be written to: /tmp/zephyr
+-- Zephyr version: 3.5.0 (/zmk/zephyr)
+-- Found west (found suitable version "1.5.0", minimum required is "0.14.0")
+-- Adding /zmk/zmk/app/boards/shields/corne
+-- ZMK Config directory: <repo>/config
+-- ZMK Config Kconfig: <repo>/config/corne.conf
+-- Using keymap file: <repo>/config/corne.keymap
+-- Using keymap file: <repo>/config/corne.keymap
+[... 31 lines left out of this excerpt ...]
+-- west build: building application
+[1/317] Preparing syscall dependency handling
+
+[2/317] Generating include/generated/app_version.h
+[3/317] Generating include/generated/version.h
+-- Zephyr version: 3.5.0 (/zmk/zephyr), build: dacab4875df7
+[4/317] Generating misc/generated/syscalls_subdirs.trigger
+[5/317] Generating misc/generated/syscalls.json, misc/generated/struct_tags.json
+[6/317] Generating include/generated/syscall_dispatch.c, include/generated/syscall_list.h
+[7/317] Generating include/generated/kobj-types-enum.h, include/generated/otype-to-str.h, include/generated/otype-to-size.h
+[8/317] Generating include/generated/driver-validation.h
+[9/317] Building C object zephyr/CMakeFiles/offsets.dir/arch/arm/core/offsets/offsets.c.obj
+[10/317] Generating include/generated/offsets.h
+[11/317] Building C object CMakeFiles/app.dir/src/stdlib.c.obj
+[12/317] Building C object CMakeFiles/app.dir/src/events/activity_state_changed.c.obj
+FAILED: CMakeFiles/app.dir/src/events/activity_state_changed.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[13/317] Building C object CMakeFiles/app.dir/src/pm.c.obj
+FAILED: CMakeFiles/app.dir/src/pm.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[14/317] Building C object CMakeFiles/app.dir/src/physical_layouts.c.obj
+FAILED: CMakeFiles/app.dir/src/physical_layouts.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[15/317] Building C object CMakeFiles/app.dir/src/matrix_transform.c.obj
+FAILED: CMakeFiles/app.dir/src/matrix_transform.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[16/317] Building C object CMakeFiles/app.dir/src/events/usb_conn_state_changed.c.obj
+FAILED: CMakeFiles/app.dir/src/events/usb_conn_state_changed.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[17/317] Building C object CMakeFiles/app.dir/src/activity.c.obj
+FAILED: CMakeFiles/app.dir/src/activity.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[18/317] Building C object CMakeFiles/app.dir/src/behaviors/behavior_reset.c.obj
+FAILED: CMakeFiles/app.dir/src/behaviors/behavior_reset.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[19/317] Building C object CMakeFiles/app.dir/src/event_manager.c.obj
+FAILED: CMakeFiles/app.dir/src/event_manager.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[20/317] Building C object CMakeFiles/app.dir/src/behaviors/behavior_ext_power.c.obj
+FAILED: CMakeFiles/app.dir/src/behaviors/behavior_ext_power.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[21/317] Building C object CMakeFiles/app.dir/src/events/position_state_changed.c.obj
+[22/317] Building C object CMakeFiles/app.dir/src/ext_power_generic.c.obj
+FAILED: CMakeFiles/app.dir/src/ext_power_generic.c.obj 
+[... the compiler's command line, left out of this excerpt ...]
+arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1
+compilation terminated.
+[23/317] Building C object CMakeFiles/app.dir/src/sensors.c.obj
+[24/317] Building C object CMakeFiles/app.dir/src/events/sensor_event.c.obj
+[25/317] Building C object CMakeFiles/app.dir/src/behaviors/behavior_key_press.c.obj
+[26/317] Building C object CMakeFiles/app.dir/src/behavior.c.obj
+[27/317] Building C object CMakeFiles/app.dir/src/hid.c.obj
+ninja: build stopped: subcommand failed.
+FATAL ERROR: command exited with status 1: /usr/local/bin/cmake --build <build>/b

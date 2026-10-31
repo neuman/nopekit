@@ -1,6 +1,6 @@
 # What slipped through
 
-firmware-zmk was written for gripster, a handheld keyboard deck: two boards made
+firmware-zmk was written for a handheld keyboard deck: two boards made
 by a generator, ZMK firmware on an E73-2G4M08S1C (nRF52840) module. Three faults
 reached its v0.36 with every other check green.
 
@@ -12,7 +12,10 @@ the build stopped at `Invalid BOARD; see above.` in 1.2 s. The job was red and
 nobody read it. With `-DZMK_EXTRA_MODULES` it builds.
 
 `zmk.build` runs the CI step's own argv, read from the workflow file, so the
-local verdict and CI's cannot drift apart. `zmk.ci_step` reads the step first.
+local verdict and CI's cannot drift apart. `zmk.ci_step` reads the step first, and
+the setup, the image and the manifest around it: a first version read the `west
+build` line alone, and passed a CI with no `west init`, with no container, or with
+a manifest that imported no Zephyr, each of which cannot build.
 
 A second fault was found while the gate was written: a wrong ZMK_CONFIG path is a
 CMake warning, "Unable to locate ZMK config", and the build exits 0 with ZMK's
@@ -37,6 +40,21 @@ The firmware set `CONFIG_BT_CTLR_TX_PWR_PLUS_8=y`, +8 dBm. The module's FCC gran
 `zmk.tx_power` reads Kconfig's `CONFIG_BT_CTLR_TX_PWR_DBM` and judges it against
 the claim tagged `tx-power`. The limit is a claim, because only a person can say
 which grant covers which module.
+
+## What the first version of the pack let through
+
+Review found these before the pack was merged:
+
+- A compiler that the OOM killer stopped printed `FAILED: ...obj`, and read as a
+  design fail on known-good upstream ZMK. Now `Killed signal terminated program`
+  and the other lines of a machine fault are errored.
+- The build read the board's `.dtsi` and `.conf` inside the container, and the
+  gates' key held neither. A fix to either recorded two outcomes for one key. Now
+  every file under ZMK_CONFIG and each module path is read before the build.
+- With no deep sleep built, `zmk.wakeup_source` passed. A claim tagged
+  `deep-sleep` read Checked on firmware that did not sleep. Now it reads Skipped.
+- A timeout killed the docker client, and the container went on building. Now the
+  gate kills the container by name.
 
 ## Why the build runs in a container
 

@@ -9,7 +9,10 @@
 **Three checks and a guard.** The build, the wakeup source and the transmit power
 settle claims. ``zmk.ci_step`` is the build's CI-flag guard: it reads the workflow
 and the manifest, so a CI that cannot build (no ZMK_CONFIG, ZMK not pinned at
-v0.3.0) fails in 0.03 s, before any container starts. It is its own gate because a
+v0.3.0, no ``import: app/west.yml``, no ``west init -l config``, ``west update`` and
+``west zephyr-export`` before the build) fails in 0.03 s, before any container
+starts, and a CI whose workspace this pack does not hold (another manifest
+project, another image) is errored. It is its own gate because a
 pack must have a tier-0 gate, and no build runs in under 2 s.
 
 **Where each verdict comes from.** The tier-1 gates are the tools' own answers:
@@ -17,17 +20,19 @@ CMake's and Zephyr's exit code and log, Kconfig's ``.config``, and Zephyr's
 ``edtlib`` reading the build's ``edt.pickle``, all in ZMK's image pinned by digest
 (``bin/zmk-west``) on a read-only ZMK v0.3.0 workspace with no network. They read
 inside a subprocess the trace cannot see into, so they are opaque and re-run on
-every check where ``zmk-west`` exists, as pcb-kicad's KiCad gates do. One full build
-and one configure per sweep: the gates share them through ``ctx.load_file``.
+every check where ``zmk-west`` exists, as pcb-kicad's KiCad gates do. One build
+per sweep: the gates share it through ``ctx.load_file``, and every file under
+ZMK_CONFIG and each module path the step names is a read of each gate.
 
-**What slipped through, and which gate it is for** (gripster, a handheld keyboard
-deck on an nRF52840 module; references/what-slipped-through.md):
+**What slipped through, and which gate it is for** (a handheld keyboard deck on
+an nRF52840 module; references/what-slipped-through.md):
 
 - ``zmk.build``: the repository's CI had never built its firmware. It gave
   ``Invalid BOARD``: the step passed a module as ``-DZEPHYR_EXTRA_MODULES``, where
   ZMK v0.3.0 reads ``-DZMK_EXTRA_MODULES`` (app/CMakeLists.txt:6), and the board
   under ZMK_CONFIG was not found. With that one word changed it builds. This gate
-  runs CI's own flags, read from the workflow file, so it cannot drift from CI.
+  runs CI's own flags, read from the workflow file, on the workspace CI's manifest
+  makes (``zmk.ci_step`` refuses any other), so the two cannot drift apart.
 - ``zmk.build``: a wrong ZMK_CONFIG path is a CMake *warning*, and the build exits 0
   on ZMK's default keymap. Only the ``Using keymap file:`` line shows it.
 - ``zmk.wakeup_source``: ``CONFIG_ZMK_SLEEP=y`` with no ``wakeup-source`` on the
@@ -69,13 +74,14 @@ def _workflow(ctx: GateContext) -> str | None:
     return rel if os.path.isabs(rel) else os.path.join(ctx.root, rel)
 
 
-def _configured(ctx: GateContext, gid: str, path: str) -> dict:
-    """The shared configure, judged as the build is: a configure that fails here
-    is the tool's or the build's, and ``zmk.build`` says which."""
-    result = ctx.load_file(path, loader=Z.configure)
+def _built(ctx: GateContext, path: str) -> dict:
+    """The sweep's one build, as ``zmk.build`` loaded it, judged again: a build
+    that does not stand is the tool's or the design's, and ``zmk.build`` says
+    which."""
+    result = ctx.load_file(path, loader=Z.full)
     passed, detail = Z.judge(result)
     if not passed:
-        raise Z.ToolFault(f"the configure does not stand ({detail}); zmk.build says why")
+        raise Z.ToolFault(f"the build does not stand ({detail}); zmk.build says why")
     return result
 
 
@@ -101,9 +107,14 @@ def ci_step(ctx: GateContext) -> Verdict:
     ``${GITHUB_WORKSPACE}`` expansions and absolute ``-D`` paths and a ZMK_CONFIG,
     and the manifest beside it pins zmk v0.3.0 from zmkfirmware.
 
+    Before it, in its directory, the job runs ``west init -l config``, ``west
+    update`` and ``west zephyr-export``, in a container of ZMK's image; the
+    manifest imports zmk's ``app/west.yml`` and fetches nothing else.
+
     A CI that is wrong or unpinned fails. A shape this pack cannot reproduce (ZMK's
-    reusable workflow, a matrix, step ``env``, a second build step, another shell)
-    is errored: the CI may be right, and the pack cannot say."""
+    reusable workflow, step ``env``, a second build step, another shell, ``if:``
+    or ``continue-on-error``, no container or another image, a manifest project
+    beside zmk) is errored: the CI may be right, and the pack cannot say."""
     gid = "zmk.ci_step"
     path = _workflow(ctx)
     if path is None:
@@ -197,16 +208,18 @@ def wakeup_source(ctx: GateContext) -> Verdict:
     leaves out of suspend only the devices whose wake is enabled. With ``CONFIG_ZMK_SLEEP=y``, each
     kscan ZMK scans (each physical layout's ``kscan``, else the chosen
     ``zmk,kscan``) must have it true in ``edt.pickle``, read by the workspace's
-    own edtlib. A kscan whose binding does not declare the property is errored."""
+    own edtlib. A kscan whose binding does not declare the property is errored.
+    With no deep sleep built the gate reads Skipped: there is nothing to wake from,
+    and a claim tagged ``deep-sleep`` is not Checked by its absence."""
     gid = "zmk.wakeup_source"
     path = _workflow(ctx)
     if path is None:
         return _skip(gid, _NO_WORKFLOW)
     try:
-        result = _configured(ctx, gid, path)
+        result = _built(ctx, path)
         if Z.kconfig(result["config"]).get("CONFIG_ZMK_SLEEP") != "y":
-            return Verdict(gate=gid, passed=True, detail="no deep sleep is built "
-                                                         "(CONFIG_ZMK_SLEEP is not y)")
+            return _skip(gid, "no deep sleep is built (CONFIG_ZMK_SLEEP is not y): "
+                              "there is no sleep for a key to wake the board from")
         targets = wakeup_targets(result)
     except (Z.ToolFault, Z.StepRefused) as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
@@ -264,7 +277,7 @@ def tx_power(ctx: GateContext) -> Verdict:
     if path is None:
         return _skip(gid, _NO_WORKFLOW)
     try:
-        cfg = Z.kconfig(_configured(ctx, gid, path)["config"])
+        cfg = Z.kconfig(_built(ctx, path)["config"])
         verdict = tx_rule(gid, cfg)
         if verdict is not None:
             return verdict

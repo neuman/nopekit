@@ -1,17 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 """firmware-zmk, judged in process: what its selftest could not see.
 
-What slipped through before the pack (gripster, a keyboard deck on an nRF52840
+What slipped through before the pack (a handheld keyboard deck on an nRF52840
 module): its CI had never built the firmware (``Invalid BOARD``), deep sleep was on
 with no wakeup source on the kscan, and the radio ran at +8 dBm past its module's
 3.86 dBm grant. The selftest shows each gate can fail once, on upstream ZMK's corne.
 This file holds the rules around each verdict, on every machine:
 
-- which CI steps the guard reads, fails and refuses (``read_step``, on workflows
-  written here);
+- which CI steps, setups, images and manifests the guard reads, fails and
+  refuses (``read_step``, on workflows written here);
 - which build logs are a design's fault and which are the tool's (``judge``, on
   scrubbed excerpts of this machine's runs in ``tests/zmk_logs/``: the pinned image
-  on ZMK v0.3.0, and docker's own faults);
+  on ZMK v0.3.0, docker's own faults, and a compiler the OOM killer stopped);
+- that every file under ZMK_CONFIG and each module path is a read of the build,
+  so a design edit moves its key, and that a timed-out build's container is killed;
 - the wakeup and transmit rules on the values a build leaves;
 - that the wrapper the gates trust is the pack's, and that without it the three
   build gates read Skipped.
@@ -36,6 +38,7 @@ from unittest import mock
 
 from nopekit import gates as gates_mod
 from nopekit import packs as packs_mod
+from nopekit import verdicts as verdicts_mod
 from nopekit.modelio import load_path
 from nopekit.models import Claim, Ledger
 
@@ -59,9 +62,9 @@ def _registry() -> gates_mod.Registry:
 # --------------------------------------------------------------------------- #
 # the CI step
 # --------------------------------------------------------------------------- #
-#: gripster's build step at d52525e, as its workflow writes it.
-GRIPSTER_STEP = """\
-west build -s zmk/app -p always -b thumbdeck -- \\
+#: The keyboard deck's build step, as its workflow wrote it (its board renamed).
+DECK_STEP = """\
+west build -s zmk/app -p always -b handdeck -- \\
   -DZMK_CONFIG="${GITHUB_WORKSPACE}/firmware/zmk-config/config" \\
   -DZEPHYR_EXTRA_MODULES="${GITHUB_WORKSPACE}/firmware/zmk-modules/tmag5273_nub"
 """
@@ -85,16 +88,24 @@ def _block(text: str, indent: int) -> str:
     return textwrap.indent(text, " " * indent)
 
 
+SETUP = "west init -l config\nwest update\nwest zephyr-export\n"
+CONTAINER = "container:\n  image: zmkfirmware/zmk-build-arm:stable\n"
+
+
 def _workflow(run: str = "west build -s zmk/app -b nice_nano_v2 -- "
                          "-DZMK_CONFIG=${GITHUB_WORKSPACE}/config",
               *, job_extra: str = "", step_extra: str = "", top: str = "",
-              steps: str | None = None) -> str:
+              steps: str | None = None, setup: str | None = SETUP,
+              setup_extra: str = "", container: str = CONTAINER) -> str:
     body = steps if steps is not None else (
         "      - uses: actions/checkout@v4\n"
-        "      - name: Build\n"
+        + ("      - name: Setup\n" + (_block(setup_extra, 8) if setup_extra else "")
+           + "        run: |\n" + _block(setup, 10) if setup is not None else "")
+        + "      - name: Build\n"
         + (_block(step_extra, 8) if step_extra else "")
         + "        run: |\n" + _block(run, 10))
     return (f"name: b\non: [push]\n{top}jobs:\n  build:\n    runs-on: ubuntu-latest\n"
+            f"{_block(container, 4) if container else ''}"
             f"{_block(job_extra, 4) if job_extra else ''}    steps:\n{body}")
 
 
@@ -133,14 +144,14 @@ class TheStepIsCIsOwn(unittest.TestCase):
         self.assertIn(words, found.reason)
         self.assertNotIn(self.repo, found.reason, "a detail names no absolute path")
 
-    def test_gripsters_step_gives_its_own_argv(self):
-        wf = _workflow(GRIPSTER_STEP, job_extra="defaults:\n  run:\n    "
+    def test_the_decks_step_gives_its_own_argv(self):
+        wf = _workflow(DECK_STEP, setup="test -d .west || " + SETUP, job_extra="defaults:\n  run:\n    "
                                                 "working-directory: firmware/zmk-config\n")
         step = self._read(wf, wd="firmware/zmk-config")
         self.assertIsInstance(step, Z.Step)
         self.assertEqual(step.wd, "firmware/zmk-config")
         self.assertEqual(step.argv, (
-            "west", "build", "-s", "zmk/app", "-p", "always", "-b", "thumbdeck", "--",
+            "west", "build", "-s", "zmk/app", "-p", "always", "-b", "handdeck", "--",
             f"-DZMK_CONFIG={self.repo}/firmware/zmk-config/config",
             f"-DZEPHYR_EXTRA_MODULES={self.repo}/firmware/zmk-modules/tmag5273_nub"))
         self.assertEqual(step.zmk_config, f"{self.repo}/firmware/zmk-config/config")
@@ -191,7 +202,8 @@ class TheStepIsCIsOwn(unittest.TestCase):
         self._fails(_workflow(), "has no manifest to read", manifest=None)
 
     def test_two_build_steps_are_refused(self):
-        steps = ("      - name: Left\n        run: west build -s zmk/app -- "
+        steps = ("      - run: |\n" + _block(SETUP, 10) +
+                 "      - name: Left\n        run: west build -s zmk/app -- "
                  "-DZMK_CONFIG=${GITHUB_WORKSPACE}/config\n"
                  "      - name: Right\n        run: west build -s zmk/app -- "
                  "-DZMK_CONFIG=${GITHUB_WORKSPACE}/config\n")
@@ -244,6 +256,72 @@ class TheStepIsCIsOwn(unittest.TestCase):
         with self.assertRaises(Z.StepRefused):
             Z.read_step(path)
 
+    # -- the workspace CI makes: the setup, the image and the manifest -------- #
+    # What slipped through before: only the `west build` line and the zmk
+    # project's revision were read, so a CI with no `west init`, no container or a
+    # manifest with no import passed, and the build ran in the pack's own
+    # workspace on firmware CI could not build.
+    def test_a_ci_with_no_setup_fails(self):
+        self._fails(_workflow(setup=None), "no `west init -l config` before 'Build'")
+        self._fails(_workflow(setup="west init -l config\nwest zephyr-export\n"),
+                    "no `west update`")
+        self._fails(_workflow(setup="west init -l config\nwest update\n"),
+                    "has no Zephyr package")
+
+    def test_a_setup_out_of_order_fails(self):
+        self._fails(_workflow(setup="west update\nwest init -l config\nwest zephyr-export\n"),
+                    "out of order")
+
+    def test_another_init_or_another_directory_is_refused(self):
+        self._refused(_workflow(setup="west init -m https://x/zmk\nwest update\n"
+                                      "west zephyr-export\n"), "other than `west init -l config`")
+        self._refused(_workflow(setup_extra="working-directory: other\n"),
+                      "runs in other, and the build in .")
+
+    def test_no_container_or_another_image_is_refused(self):
+        self._refused(_workflow(container=""), "runs in no container")
+        self._refused(_workflow(container="container: ubuntu:24.04\n"), "'ubuntu:24.04'")
+        self._refused(_workflow(container=CONTAINER + "  options: --cpus 1\n"),
+                      "container sets ['options']")
+        self.assertIsInstance(self._read(_workflow(container=f"container: {Z.IMAGE}\n")),
+                              Z.Step)
+
+    def test_if_and_continue_on_error_are_refused(self):
+        self._refused(_workflow(step_extra="if: github.ref == 'x'\n"), "has `if:`")
+        self._refused(_workflow(job_extra="continue-on-error: true\n"),
+                      "job build has `continue-on-error:`")
+        self._refused(_workflow(setup_extra="if: false\n"), "step 'Setup' has `if:`")
+
+    def test_defaults_are_resolved_per_setting(self):
+        """A job's ``shell`` leaves the workflow's ``working-directory`` standing,
+        as GitHub resolves it. Before: the job's dict was taken whole, and this
+        CI read as failing ("no fw/config/west.yml")."""
+        wf = _workflow(top="defaults:\n  run:\n    working-directory: fw\n",
+                       job_extra="defaults:\n  run:\n    shell: bash\n")
+        step = self._read(wf, wd="fw")
+        self.assertIsInstance(step, Z.Step)
+        self.assertEqual(step.wd, "fw")
+
+    def test_a_manifest_with_no_import_fails(self):
+        self._fails(_workflow(), "does not import zmk's app/west.yml",
+                    manifest=PINNED.replace("      import: app/west.yml\n", ""))
+        self._refused(_workflow(), "zmk imports 'other.yml'",
+                      manifest=PINNED.replace("app/west.yml", "other.yml"))
+
+    def test_a_manifest_that_fetches_more_is_refused(self):
+        module = PINNED.replace("  self:\n", "    - name: my-board-module\n"
+                                "      remote: zmkfirmware\n      revision: main\n  self:\n")
+        self._refused(_workflow(), "fetches ['my-board-module'] beside zmk", manifest=module)
+        zephyr = PINNED.replace("  self:\n", "    - name: zephyr\n      remote: zmkfirmware\n"
+                                "      revision: v3.0.0+zmk-fixes\n  self:\n")
+        self._refused(_workflow(), "fetches ['zephyr'] beside zmk", manifest=zephyr)
+        self._refused(_workflow(), "self sets ['import']",
+                      manifest=PINNED + "    import: more.yml\n")
+        self._refused(_workflow(), "manifest sets ['group-filter']",
+                      manifest=PINNED.replace("manifest:\n", "manifest:\n  group-filter: [+x]\n"))
+        self._refused(_workflow(), "project zmk sets ['path']",
+                      manifest=PINNED.replace("      import:", "      path: z\n      import:"))
+
 
 # --------------------------------------------------------------------------- #
 # the build's own lines
@@ -251,18 +329,18 @@ class TheStepIsCIsOwn(unittest.TestCase):
 FAKE_REPO = "/w/repo"
 
 
-def _result(name: str, rc: int, *, cmake_only: bool = False, **over) -> dict:
-    """A run's result as ``_zmk._run`` returns it, from a recorded log."""
+def _result(name: str, rc: int, **over) -> dict:
+    """A run's result as ``_zmk.full`` returns it, from a recorded log."""
     with open(os.path.join(LOGS, name + ".log"), encoding="utf-8") as fh:
         raw = fh.read().replace("<repo>", FAKE_REPO)
-    result = {"cmake_only": cmake_only, "repo": FAKE_REPO,
+    result = {"repo": FAKE_REPO,
               "zmk_config": FAKE_REPO + "/config",
               "heads": {"zmk": Z.ZMK_COMMIT, "zephyr": Z.ZEPHYR_COMMIT},
               "timeout": False, "rc": rc, "log": raw.replace(FAKE_REPO, "<repo>"),
               "keymaps": [m.strip() for m in Z.KEYMAP_RE.findall(raw)], "config": "",
               "headers": (f"#define APP_BUILD_VERSION v0.3\n"
                           f"#define BUILD_VERSION {Z.ZEPHYR_COMMIT[:12]}\n"),
-              "image": not cmake_only, "edt": None, "edt_error": ""}
+              "image": True, "edt": None, "edt_error": ""}
     result.update(over)
     return result
 
@@ -283,13 +361,11 @@ class TheBuildIsJudgedOnItsOwnLines(unittest.TestCase):
             Z.judge(result)
         self.assertIn(words, str(caught.exception))
 
-    def test_corne_passes_built_and_configured(self):
+    def test_corne_passes(self):
         self.assertEqual(Z.judge(_result("corne_full", 0)),
                          (True, "built zmk.uf2 on keymap config/corne.keymap"))
-        self.assertEqual(Z.judge(_result("corne_configure", 0, cmake_only=True)),
-                         (True, "configured on keymap config/corne.keymap"))
 
-    def test_gripsters_ci_fails_on_invalid_board(self):
+    def test_the_decks_ci_fails_on_invalid_board(self):
         self._fails(_result("invalid_board", 1, zmk_config=FAKE_REPO + "/x"),
                     "the build fails: Invalid BOARD; see above.")
 
@@ -343,9 +419,29 @@ class TheBuildIsJudgedOnItsOwnLines(unittest.TestCase):
                                                       "#define BUILD_VERSION dacab4875df7\n"),
                      "the build reports zmk v0.2")
         self._raises(_result("corne_full", 0, headers=""), "the build reports zmk ?")
-        self._raises(_result("corne_configure", 0, cmake_only=True,
+        self._raises(_result("corne_full", 0,
                              heads={"zmk": "0" * 40, "zephyr": Z.ZEPHYR_COMMIT}),
                      "run zmk-west --init again")
+
+    def test_a_compiler_the_machine_killed_is_the_tools(self):
+        """The unmodified corne control under ``--memory=200m``: ten ``FAILED:
+        ...obj`` lines, each from a compiler the OOM killer stopped. Before, the
+        first ``FAILED`` read as a design FAIL on known-good upstream ZMK."""
+        self._raises(_result("oom_killed", 1),
+                     "the machine stopped the build, not the design: "
+                     "arm-zephyr-eabi-gcc: fatal error: Killed signal terminated program cc1")
+        for words in ("internal compiler error: Segmentation fault",
+                      "No space left on device", "virtual memory exhausted"):
+            log = _result("module_c_error", 1)["log"] + f"\ncc1: {words}\n"
+            self._raises(_result("module_c_error", 1, log=log), "not the design")
+
+    def test_every_tool_fault_line_but_the_oom_is_named_not_measured(self):
+        logs = ""
+        for name in sorted(os.listdir(LOGS)):
+            with open(os.path.join(LOGS, name), encoding="utf-8") as fh:
+                logs += fh.read()
+        unrecorded = [s.pattern for s in Z.TOOL_FAULT_LINES if not s.search(logs)]
+        self.assertEqual(unrecorded, [p.pattern for p in Z.TOOL_FAULT_LINES[1:]])
 
     def test_every_signature_is_one_this_file_measured_or_names(self):
         """The list is closed: a new entry comes with its log here."""
@@ -377,8 +473,7 @@ class TheReadersJudgeWhatTheBuildHolds(unittest.TestCase):
         cls.registry = _registry()
 
     def _run(self, gid: str, config: str, edt=None, edt_error: str = ""):
-        result = _result("corne_configure", 0, cmake_only=True, config=config, edt=edt,
-                         edt_error=edt_error)
+        result = _result("corne_full", 0, config=config, edt=edt, edt_error=edt_error)
         _spec, fn = self.registry.get(gid)
         tmp = tempfile.mkdtemp(prefix="zmk-gate-")
         self.addCleanup(shutil.rmtree, tmp, True)
@@ -422,11 +517,14 @@ class TheReadersJudgeWhatTheBuildHolds(unittest.TestCase):
         self.assertFalse(v.passed)
         self.assertIn("no wakeup-source on /kscan_r:", v.detail)
 
-    def test_no_deep_sleep_passes_and_says_so(self):
+    def test_no_deep_sleep_skips_and_says_so(self):
+        """Before, it passed: a claim tagged ``deep-sleep`` read Checked on firmware
+        with deep sleep taken out."""
         v = self._run("zmk.wakeup_source", "", [{"path": "/kscan", "present": True,
                                                  "val": False}])
-        self.assertTrue(v.passed)
-        self.assertIn("no deep sleep is built", v.detail)
+        self.assertTrue(v.skipped, v)
+        self.assertFalse(v.passed)
+        self.assertIn("no deep sleep is built", v.skip_reason)
 
     def test_what_the_devicetree_cannot_say_is_errored(self):
         sleep = "CONFIG_ZMK_SLEEP=y\n"
@@ -435,6 +533,79 @@ class TheReadersJudgeWhatTheBuildHolds(unittest.TestCase):
         self.assertIn("chooses no zmk,kscan", self._run("zmk.wakeup_source", sleep, []).error)
         self.assertIn("was not read", self._run("zmk.wakeup_source", sleep, None,
                                                 "edtlib exited 1").error)
+
+
+# --------------------------------------------------------------------------- #
+# the build's inputs, and its end
+# --------------------------------------------------------------------------- #
+@unittest.skipUnless(HAS_YAML, "PyYAML is not importable here: the build reads its "
+                               "step with it")
+class TheDesignIsWhatTheBuildRead(unittest.TestCase):
+    """The build reads ZMK_CONFIG and the module paths inside the container, where
+    no trace sees. What slipped through: a ``wakeup-source;`` added to the board's
+    ``.dtsi`` or a ``.conf`` line removed left the key where it was, and the cache
+    recorded two outcomes for identical inputs."""
+
+    def setUp(self):
+        self.repo = tempfile.mkdtemp(prefix="zmk-design-")
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        files = {
+            ".github/workflows/build.yml": _workflow(DECK_STEP, job_extra=(
+                "defaults:\n  run:\n    working-directory: firmware/zmk-config\n")),
+            "firmware/zmk-config/config/west.yml": PINNED,
+            "firmware/zmk-config/config/handdeck.conf": "CONFIG_ZMK_SLEEP=y\n",
+            "firmware/zmk-config/config/boards/arm/handdeck/handdeck.dtsi": "/ {};\n",
+            "firmware/zmk-config/config/.git/HEAD": "not read\n",
+            "firmware/zmk-modules/tmag5273_nub/src/nub.c": "int x;\n",
+            "hardware/board.kicad_pcb": "not the firmware's\n",
+        }
+        for rel, text in files.items():
+            path = os.path.join(self.repo, *rel.split("/"))
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(text)
+
+    def test_every_config_and_module_file_is_read(self):
+        trace = verdicts_mod.GateTrace()
+        with mock.patch.dict(os.environ, {"PATH": self.repo}), verdicts_mod.tracing(trace):
+            with self.assertRaises(Z.ToolFault):      # no zmk-west: after the reads
+                Z.full(os.path.join(self.repo, ".github", "workflows", "build.yml"))
+        read = {os.path.relpath(p, self.repo) for p in trace.files_read
+                if p.startswith(self.repo)}
+        for rel in ("firmware/zmk-config/config/handdeck.conf",
+                    "firmware/zmk-config/config/boards/arm/handdeck/handdeck.dtsi",
+                    "firmware/zmk-config/config/west.yml",
+                    "firmware/zmk-modules/tmag5273_nub/src/nub.c"):
+            self.assertIn(rel, read)
+        self.assertNotIn("hardware/board.kicad_pcb", read)
+        self.assertNotIn("firmware/zmk-config/config/.git/HEAD", read)
+
+
+class ATimedOutBuildIsKilled(unittest.TestCase):
+    """A timeout kills only the docker client: the container went on building into
+    the directory the host then removed. ``_call`` kills it by the wrapper's name."""
+
+    def test_the_container_is_killed_by_name(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(list(argv))
+            if argv[0] == "/ws/zmk-west":
+                raise Z.subprocess.TimeoutExpired(argv, kw.get("timeout"))
+            return Z.subprocess.CompletedProcess(argv, 0, "", "")
+
+        step = Z.Step(repo="/r", wd=".", job="b", name="B", argv=("west", "build"),
+                      zmk_config="/r/config")
+        with mock.patch.object(Z.subprocess, "run", run):
+            self.assertIsNone(Z._call("/ws/zmk-west", step, "/t/nopekit-zmk-ab_1", ["x"]))
+        self.assertEqual(calls[1:], [["docker", "kill", "zmk-west-nopekit-zmk-ab_1"],
+                                     ["docker", "wait", "zmk-west-nopekit-zmk-ab_1"]])
+
+    def test_the_wrapper_names_its_container_as_the_gate_does(self):
+        with open(WRAPPER, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertIn('name=zmk-west-$(basename "$out"', text)
+        self.assertIn('--name "$name"', text)
 
 
 # --------------------------------------------------------------------------- #
@@ -469,12 +640,19 @@ class TheWrapperIsThePacks(unittest.TestCase):
         with open(fake, "w", encoding="utf-8") as fh:
             fh.write("#!/bin/sh\necho '-- Zephyr version: 3.5.0'\n")
         os.chmod(fake, 0o755)
-        with mock.patch.dict(os.environ, {"PATH": tmp}):
+        with mock.patch.dict(os.environ, {"PATH": tmp + os.pathsep + "/usr/bin:/bin"}):
             with self.assertRaises(Z.ToolFault) as caught:
                 Z._identity()
             self.assertIn("is not this pack's bin/zmk-west", str(caught.exception))
             shutil.copyfile(WRAPPER, fake)
-            self.assertEqual(Z._identity(), os.path.realpath(fake))
+            trace = verdicts_mod.GateTrace()
+            with verdicts_mod.tracing(trace):
+                self.assertEqual(Z._identity(), os.path.realpath(fake))
+        # Asked, never opened: an open keyed the entry by where the workspace sits.
+        self.assertNotIn(os.path.realpath(fake),
+                         [os.path.realpath(p) for p in trace.files_read])
+        self.assertIn(os.path.realpath(WRAPPER),
+                      [os.path.realpath(p) for p in trace.files_read])
 
     def test_without_zmk_west_the_build_gates_skip(self):
         registry = _registry()
