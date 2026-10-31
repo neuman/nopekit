@@ -508,14 +508,15 @@ of them:
 
 | Orca did | The gate says |
 |---|---|
-| sliced an 80 mm unsupported bridge, no warning | FAIL at ~80 mm, read off the Bridge lines that have nothing printed under them |
+| sliced an 80 mm unsupported bridge, no warning | FAIL at ~80 mm, read off the bridge lines that have nothing printed under them |
+| printed an 80 mm bar 2 mm wide as `Overhang wall` only, and an 87 mm roof over 0% infill as `Internal Bridge`, with no `Bridge` line | the same reader on all three roles: FAIL at 79.85 and 87.06 mm |
 | typed the first layer over a support `Bridge` too (a supported part read 150 mm by its longest Bridge line) | a bridge point is held when any cell within 0.5 mm of it was printed less than two layers plus the support gap below it |
 | dropped a part 15 mm above the bed to the bed | FAIL before the slicer runs: not in print pose |
-| sliced a preset with `enable_suport` misspelled, without the key | ERRORED: a preset key not in the G-code's configuration was ignored |
+| sliced a preset with `enable_suport` misspelled, without the key | ERRORED: a preset key not in the G-code's configuration was not used. A key Orca 2.4.2's own source renames (`wall_infill_order`) must reach the block under its new name; one it retires (`adaptive_layer_height`) is named in the evidence |
 | refused the part (-50, -52, -102) | FAIL in Orca's own words |
 | warned about the part (`warning_message`) | FAIL in Orca's own words |
-| returned another code, crashed, timed out, wrote no result | ERRORED, never a fail |
-| ran another release, or wrote a G-code that names another | SKIPPED (the `--help` banner) or ERRORED (the G-code header) |
+| returned another code, crashed, timed out, wrote no result | ERRORED, never a fail; a part that failed beside it still FAILS the gate |
+| ran another release, or wrote a G-code that names another | SKIPPED (the `--help` banner) or ERRORED (the G-code header); a `--help` that exits nonzero or prints no banner is ERRORED: the slicer did not start |
 | wrote arcs (`enable_arc_fitting`) or absolute extrusion | ERRORED: the reader follows straight moves and relative E only |
 | sliced something whose extrusions are not the mesh's extents (±1 mm) | FAIL: the G-code is not this part |
 

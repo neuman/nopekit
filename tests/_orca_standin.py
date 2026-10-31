@@ -14,7 +14,8 @@ toolpaths and a CONFIG_BLOCK that echoes the presets it was handed, as Orca does
 What it does is set by ``mode.json`` beside it, which the test writes: ``version``
 (the banner), ``header`` (the G-code's version), ``rc``, ``words``, ``warning``,
 ``exit``, ``sleep``, ``no_result``, ``absolute`` (``M82``), ``drop`` (keys left out
-of the echo), ``set`` (keys echoed at another value) and ``body`` (the toolpaths).
+of the echo), ``set`` (keys echoed at another value), ``body`` (the toolpaths) and
+``help_crash`` (``--help`` writes a loader error and exits 127).
 Each call is logged to ``calls`` beside it.
 
 Not a test module: its name starts with ``_``, as tests/_env.py's does.
@@ -32,6 +33,10 @@ with open(os.path.join(HERE, "calls"), "a", encoding="utf-8") as fh:
 VERSION = MODE.get("version", "2.4.2")
 
 if "--help" in sys.argv:
+    if MODE.get("help_crash"):
+        # A slicer on PATH that cannot start: the loader's words, exit 127.
+        sys.stderr.write("orca-slicer: error while loading shared libraries: stand-in.so\n")
+        sys.exit(127)
     print(f"OrcaSlicer-{VERSION}:")
     print("Usage: orca-slicer [ OPTIONS ] [ file.3mf/file.stl ... ]")
     sys.exit(0)

@@ -153,8 +153,12 @@ assume, and the assumptions are expensive.
   centroid of EVERY facet, along its normal. (It cast from an evenly spaced 4000 of
   them on a bigger part until 0.2.0, and a watertight 20,492-face part whose 0.5 mm
   plate had its 12 faces between the samples read PASS at 59.983 mm against a
-  1.0 mm minimum.) A thin region whose thinnest direction is normal to no facet is
-  missed, and a coarsely tessellated curve **under**-reports by
+  1.0 mm minimum.) A hit counts only on a face that opposes the one the ray left,
+  within 30 deg: cast from every face, a ray beside an acute edge crossed the corner
+  and read about 0 mm at every such edge (0.000 mm on a 53,706-face part, across a
+  39 deg edge). A fold, two faces on one edge with opposed normals, still reads 0,
+  because it is a wall with no material. A thin region whose thinnest direction is
+  normal to no facet is missed, and a coarsely tessellated curve **under**-reports by
   about `t*(1 - cos(pi/N))` for a wall of thickness `t` across an N-sided
   tessellation — 1.9% of the wall at N=16, 7.6% at N=8 — because the ray leaves one
   chord, which sits inside the true surface, and lands on another. That direction is
@@ -710,9 +714,12 @@ which is the ordinary case rather than a mistake — the two declarations say th
 thing, so they merge into one contact and the tightest tolerance governs. The bonded paths are exercised by the three
 fixtures above instead, on geometry built for them.
 
-It declares one clearance pair, the carriage under the cover (23.0 mm apart, which
-`cad.clearance` reads as its 10 mm search cap), and states the claim the gate reads
-its limit from under `_claims`: C1, tagged `clearance`, `>= 1.0 mm`. Every fixture
+It declares two clearance pairs: the carriage at home off the roller stop, 7.0 mm
+apart, which manifold3d measures inside the 10 mm search, and the carriage under the
+cover, 23.0 mm apart, which `cad.clearance` reads as the cap. The first is there so
+the known-good control reaches `min_gap`: with the second alone, a gate that read
+0.0 mm for every pair it measured qualified. It states the claim the gate reads its
+limit from under `_claims`: C1, tagged `clearance`, `>= 1.0 mm`. Every fixture
 hands its gate a ledger of those claims and nothing of the host's, so a host with no
 clearance claim, or another limit, moves no control.
 

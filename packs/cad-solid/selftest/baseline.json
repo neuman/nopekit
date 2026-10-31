@@ -19,15 +19,15 @@
 
   "_claims": [
     {"id": "C1",
-     "statement": "The carriage clears the cover by at least 1.0 mm",
+     "statement": "The carriage clears the cover, and the guide roller at its home position, by at least 1.0 mm",
      "kind": "measurable",
      "acceptance": {"quantity": "minimum clearance", "comparator": ">=", "limit": 1.0, "units": "mm"},
      "tags": ["clearance"]}
   ],
 
   "_notes": {
-    "_claims": "the claim cad.clearance reads its limit from (ctx.acceptance, the claim tagged clearance). 1.0 mm against the baseline's 23.0 mm, which cad.clearance reads as its 10 mm search cap: the baseline passes, and carriage_under_cover's 0.01 mm fails.",
-    "clearance_pairs": "[{pair, reason}] the pairs whose least distance cad.clearance measures, against the claim tagged clearance. The same three refusals as mating_pairs (no reason, a wildcard, a part named twice) plus a part not in the assembly, and the gate FAILS on a refused entry. With no entry the gate SKIPS, whatever the claims say. Here the carriage and the cover, 23.0 mm apart.",
+    "_claims": "the claim cad.clearance reads its limit from (ctx.acceptance, the claim tagged clearance). 1.0 mm against the baseline's two pairs: the carriage 7.0 mm from the roller, measured by manifold3d inside its 10 mm search, and 23.0 mm from the cover, read as the cap. The baseline passes at 7.0 mm, and carriage_under_cover's 0.01 mm fails.",
+    "clearance_pairs": "[{pair, reason}] the pairs whose least distance cad.clearance measures, against the claim tagged clearance. Refused, and the gate FAILS: no reason, a wildcard, a part named twice, a part not in the assembly, and a number on the pair (tol_mm and the like: the limit is the claim's). With no entry the gate SKIPS, whatever the claims say. Here the carriage and the roller, 7.0 mm apart, so the known-good reaches manifold3d (a pair past the search never shows that the gate measures), and the carriage and the cover, 23.0 mm apart, so it shows the cap.",
     "meshes": "{part name: path to the exported solid, relative to the pack root}. Read by every mesh gate; values may also be in-memory meshes. The solids are already PLACED in the assembly frame - parts booleaned at their own local origins either all clash or none do, and both answers are nonsense.",
     "assembly_bbox_mm": "Overall bounding box of the ASSEMBLY - every solid, placed, in the assembly frame - [X, Y, Z], mm. Measured off the exported meshes. NOT one printed part: fdm-print reads a part-sized box, under part_bbox_mm, and while both packs called it bbox_mm a project with an assembly and printed parts could only satisfy one of them. Falls back to bbox_mm; write cad.assembly_bbox_mm when another pack wants the same word.",
     "assembly_bbox_limit_mm": "Envelope the ASSEMBLY has to fit in [X, Y, Z], mm - a 100 x 70 x 40 mm mounting bay. cad.bounding fails above 100% utilisation on any axis. Falls back to bbox_limit_mm.",
@@ -87,6 +87,10 @@
   "free_standing_parts": [],
 
   "clearance_pairs": [
+    {
+      "pair": ["carriage", "guide_roller"],
+      "reason": "the assembly is exported with the carriage at home, parked off the roller stop so that the stop carries no load in transport; a carriage modelled on the roller is a home position nobody set"
+    },
     {
       "pair": ["carriage", "cover"],
       "reason": "the carriage slides under the bolted cover; a part that rubs the cover's underside drags on it and wears the gasket seat"

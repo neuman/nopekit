@@ -13,7 +13,10 @@ piece is here because Orca 2.4.2 was seen to say "Success." over it:
 - a misspelled preset key (``enable_suport``) slices ``Success.`` and is simply
   not in the configuration Orca used;
 - the first layer over a support is typed ``Bridge`` too, so the longest
-  ``Bridge`` line is not the longest unsupported one.
+  ``Bridge`` line is not the longest unsupported one;
+- a span too narrow for bridge infill is printed as walls only, typed
+  ``Overhang wall``, and a roof over 0% infill as ``Internal Bridge``: an 80 mm
+  free bar 2 mm wide and an 87 mm roof sliced "Success." with no ``Bridge`` line.
 
 So the verdict is bound to the slicer, its version and the three preset files,
 and the span is read off Orca's own toolpaths: a bridge line is unsupported where
@@ -44,6 +47,8 @@ _HERE = os.path.dirname(os.path.abspath(__file__))
 #: modules ``gates/mesh.py`` loads, by path (see the comment there).
 PARTS = _load_path(os.path.join(os.path.dirname(_HERE), "fdm_print_parts.py"))
 FOLD = _load_path(os.path.join(_HERE, "fdm_print_fold.py"))
+#: The mesh loader ``gates/mesh.py`` hands the memo: one loader, one parse a sweep.
+MESH_FILE = _load_path(os.path.join(_HERE, "_mesh_file.py"))
 
 GATE_ID = "fdm.slice"
 ORCA = "orca-slicer"
@@ -85,13 +90,80 @@ SETTINGS_ID = {"machine": "printer_settings_id", "process": "print_settings_id",
 #: describe the file, not a setting. Measured on the pack's presets and on a
 #: complete Ender-3 V2 / PETG set: none of these is in the block. The three
 #: ``*_settings_id`` keys are echoed, but as the preset's ``name``, and are checked
-#: against it (``SETTINGS_ID``). Every other key must be echoed, or Orca ignored it:
-#: a misspelled ``enable_suport`` slices "Success." and is not in the block. On
-#: the Ender-3 V2 set this found three keys Orca 2.4.2 ignores
-#: (``adaptive_layer_height``, ``wall_infill_order``, a filament ``bed_type``).
+#: against it (``SETTINGS_ID``). Every other key must be echoed, or Orca did not
+#: use it: a misspelled ``enable_suport`` slices "Success." and is not in the block.
 PRESET_META_KEYS = frozenset({
     "type", "name", "from", "instantiation", "setting_id", "filament_id",
     "compatible_printers", *SETTINGS_ID.values()})
+
+#: Keys Orca 2.4.2 reads under another name, ``{old: new}``: transcribed from
+#: ``PrintConfigDef::handle_legacy`` in ``src/libslic3r/PrintConfig.cpp`` at tag
+#: v2.4.2, the renames that hold for every value. Such a key is not in the block,
+#: its new name is, at a value Orca translated, so the gate asks for the new name
+#: and not the value. What slipped through before the table: ``wall_infill_order``
+#: (in 486 of Orca's own vendor profiles) was reported as "Orca ignored", and
+#: measured, Orca used it: ``infill/inner wall/outer wall`` sliced with
+#: ``is_infill_first = 1``, ``wall_sequence = inner wall/outer wall``. The renames
+#: that hold only for some values (``top_one_wall_type``, ``prime_tower_rib_wall``)
+#: are not here: a key Orca drops for a value is a key it did not use.
+ORCA_RENAMED = {
+    "enable_wipe_tower": "enable_prime_tower", "wipe_tower_width": "prime_tower_width",
+    "wiping_volume": "prime_volume", "wipe_tower_brim_width": "prime_tower_brim_width",
+    "tool_change_gcode": "change_filament_gcode", "bridge_fan_speed": "overhang_fan_speed",
+    "infill_extruder": "sparse_infill_filament_id",
+    "sparse_infill_filament": "sparse_infill_filament_id",
+    "solid_infill_extruder": "internal_solid_filament_id",
+    "solid_infill_filament": "internal_solid_filament_id",
+    "top_solid_infill_filament": "top_surface_filament_id",
+    "bottom_solid_infill_filament": "bottom_surface_filament_id",
+    "perimeter_extruder": "outer_wall_filament_id", "wall_filament": "outer_wall_filament_id",
+    "wall_filament_id": "outer_wall_filament_id", "outer_wall_filament": "outer_wall_filament_id",
+    "inner_wall_filament": "inner_wall_filament_id",
+    "wipe_tower_extruder": "wipe_tower_filament",
+    "support_material_extruder": "support_filament",
+    "support_material_interface_extruder": "support_interface_filament",
+    "support_material_angle": "support_angle",
+    "support_material_enforce_layers": "enforce_support_layers",
+    "inherits_cummulative": "inherits_group",
+    "compatible_printers_condition_cummulative": "compatible_machine_expression_group",
+    "compatible_prints_condition_cummulative": "compatible_process_expression_group",
+    "cooling": "slow_down_for_layer_cooling", "timelapse_no_toolhead": "timelapse_type",
+    "wall_infill_order": "wall_sequence",
+    "rotate_solid_infill_direction": "solid_infill_rotate_template",
+    "sparse_infill_anchor": "infill_anchor", "sparse_infill_anchor_max": "infill_anchor_max",
+    "chamber_temperatures": "chamber_temperature", "thumbnail_size": "thumbnails",
+    "initial_layer_flow_ratio": "bottom_solid_infill_flow_ratio",
+    "ironing_direction": "ironing_angle",
+    "counterbole_hole_bridging": "counterbore_hole_bridging",
+    "prime_tower_extra_rib_length": "wipe_tower_extra_rib_length",
+    "prime_tower_rib_width": "wipe_tower_rib_width",
+    "prime_tower_fillet_wall": "wipe_tower_fillet_wall",
+    "extruder_clearance_max_radius": "extruder_clearance_radius",
+    "machine_switch_extruder_time": "machine_tool_change_time",
+}
+
+#: Keys Orca 2.4.2 drops by name as obsolete: the ``ignore`` set of the same
+#: function, transcribed. A preset exported from Orca's own profiles carries some
+#: of them (``adaptive_layer_height`` is in 476 vendor profiles), and no setting in
+#: Orca reads them, so a person cannot have meant one: the gate names them in its
+#: evidence and goes on. Any other key not in the block is still an error: Orca
+#: drops an unknown key in the same branch, so a misspelling and a key Orca never
+#: had read the same, and only the person can say which.
+ORCA_RETIRED = frozenset({
+    "acceleration", "scale", "rotate", "duplicate", "duplicate_grid", "bed_size",
+    "print_center", "g0", "wipe_tower_per_color_wipe", "support_sharp_tails",
+    "support_remove_small_overhangs", "support_with_sheath",
+    "tree_support_collision_resolution", "tree_support_with_infill",
+    "max_volumetric_speed", "max_print_speed", "support_closing_radius",
+    "remove_freq_sweep", "remove_bed_leveling", "remove_extrusion_calibration",
+    "support_transition_line_width", "support_transition_speed", "bed_temperature",
+    "bed_temperature_initial_layer", "can_switch_nozzle_type", "can_add_auxiliary_fan",
+    "extra_flush_volume", "spaghetti_detector", "adaptive_layer_height", "z_hop_type",
+    "z_lift_type", "bed_temperature_difference", "long_retraction_when_cut",
+    "retraction_distance_when_cut", "internal_bridge_support_thickness",
+    "top_area_threshold", "reduce_wall_solid_infill", "filament_load_time",
+    "filament_unload_time", "smooth_coefficient", "overhang_totally_speed", "silent_mode",
+    "overhang_speed_classic", "filament_prime_volume"})
 
 #: Roles that are not the part, for "the G-code is this part": the bed adhesion,
 #: the start and end G-code, the towers and every support role (``Support``,
@@ -105,11 +177,34 @@ NOT_THE_PART = ("Brim", "Skirt", "Custom", "Prime tower", "Wipe tower")
 #: close to 0.45.
 EXTENT_TOL_MM = 1.0
 
-#: The grid the bridge reader marks printed material on, mm.
+#: The toolpath roles the bridge reader measures: every extrusion Orca lays over
+#: air. What slipped through on ``Bridge`` alone, both on Orca 2.4.2 with the
+#: pack's presets: a bar 2 mm wide spanning 80 mm is too narrow for bridge infill
+#: and prints as walls typed ``Overhang wall``, with no ``Bridge`` line (the gate
+#: read 0.0, fdm.bridge_span 80.0; read with this set, 79.85 mm); and a closed
+#: 90 mm block at 0% infill roofs its hollow with ``Internal Bridge`` (0.0, now
+#: 87.06 mm). Measured on 84 G-codes from earlier runs: no part that read under the
+#: pack's 30 mm on ``Bridge`` alone reads over it now; the largest rises are 0.0 to 15.83
+#: mm (a part on tree support, overhang walls at a support tip) and 0.0 to 3.5 mm
+#: (a roof over 35% infill, the gap between two infill lines).
+BRIDGE_ROLES = frozenset({"Bridge", "Internal Bridge", "Overhang wall"})
+
+#: The grid the bridge reader marks printed material on, mm, about one line width
+#: (0.42 mm on every preset measured). Measured on 12 G-codes at 0.25, 0.5 and 1.0
+#: mm: 0.5 reads 10.01, 80.01 and 89.96 mm on drawn 10, 80 and 90 mm spans. *Rejected:*
+#: 0.25 (finer than the line spacing, so a line beside a printed one reads free: a
+#: part on support read 82.50 mm where 0.5 reads 15.83); 1.0 (the one-cell
+#: neighbourhood then holds a line on material up to 2 mm aside: a free 80.05 mm
+#: roof read 79.05 and an 87.06 mm one 86.06, short by a cell).
 CELL_MM = 0.5
-#: How finely a bridge line is walked, mm.
+#: How finely a bridge line is walked, mm: half a cell, so no cell along a line is
+#: stepped over. Measured on the same 12: 0.125 moves no span by more than 0.13 mm
+#: and doubles the walk. *Rejected:* 0.5, a cell (spans move by up to 0.30 mm).
 STEP_MM = 0.25
-#: A run of Bridge lines ends at a turn sharper than 30 deg (cos 30 = 0.866).
+#: A run ends at a turn sharper than 30 deg (cos 30 = 0.866): a run is one span,
+#: and the next line of a zig-zag is another. Measured on the same 12 at 15, 30, 45
+#: and 60 deg: every span the same. 30 is not what any number here rests on; the
+#: run also ends wherever the line is held.
 TURN_COS = 0.866
 #: Added to the window below a bridge, mm, so a layer exactly at its edge counts.
 WINDOW_PAD_MM = 0.05
@@ -131,27 +226,12 @@ class _Failed(Exception):
     """A finding about the part, with no span to report: the part fails."""
 
 
-def _parse(path: str):
-    """The mesh at ``path``, or None when there is no file. Module-level so the
-    sweep's memo can key on it (``gates/mesh.py``'s ``_parse_mesh`` says why)."""
-    if not os.path.isfile(path):
-        return None
-    import trimesh                                    # noqa: PLC0415 - lazy on purpose
-
-    loaded = trimesh.load_mesh(path, process=True)
-    if isinstance(loaded, trimesh.Scene):
-        loaded = loaded.dump(concatenate=True)
-    return loaded if getattr(loaded, "faces", None) is not None and len(loaded.faces) else None
-
-
 def _plus_z(axis: Any) -> bool:
-    """Is a stated build axis +Z, as a name or a vector? Orca slices along +Z only."""
-    if isinstance(axis, str):
-        return axis.strip().lower().replace("_axis", "") in ("z", "+z")
-    try:
-        return [float(v) for v in axis] == [0.0, 0.0, 1.0]
-    except (TypeError, ValueError):
-        return False
+    """Is a stated build axis +Z? Read by the pack's one parser
+    (``fdm_print_parts.direction``), so the slicer and the mesh gates agree."""
+    vec = PARTS.direction(axis)
+    norm = math.sqrt(sum(c * c for c in vec)) if vec else 0.0
+    return norm > 0 and abs(vec[0]) / norm < 1e-9 and abs(vec[1]) / norm < 1e-9 and vec[2] > 0
 
 
 def _sha(data: bytes) -> str:
@@ -187,7 +267,13 @@ def _presets(ctx: GateContext):
 
 
 def _version(ctx: GateContext) -> tuple[str, str]:
-    """``(version, banner)``: line 1 of ``orca-slicer --help`` is ``OrcaSlicer-<v>:``."""
+    """``(version, banner)``: line 1 of ``orca-slicer --help`` is ``OrcaSlicer-<v>:``.
+
+    Raises ``_Errored`` when ``--help`` exits nonzero or prints no such banner: the
+    slicer did not start. What slipped through: a slicer on PATH that could not
+    load its libraries printed its loader error, exited 127, and read as a quiet
+    skip, "measured on OrcaSlicer 2.4.2 only", a crash in the words of an
+    unsupported release. A banner that names another release is a skip."""
     try:
         proc = subprocess.run([ORCA, "--help"], cwd=ctx.out_path(), stdin=subprocess.DEVNULL,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -197,7 +283,10 @@ def _version(ctx: GateContext) -> tuple[str, str]:
     first = (proc.stdout or "").strip().splitlines()[:1]
     banner = first[0] if first else ""
     m = re.fullmatch(r"OrcaSlicer-(\S+):", banner.strip())
-    return (m.group(1) if m else ""), banner
+    if proc.returncode != 0 or not m:
+        raise _Errored(f"{ORCA} --help exited {proc.returncode} and printed "
+                       f"{banner[:80]!r}, not an OrcaSlicer banner: the slicer did not start")
+    return m.group(1), banner
 
 
 def _fresh(path: str) -> None:
@@ -240,8 +329,10 @@ def _unset(value: Any) -> bool:
     return bool(items) and all(str(v).strip() == "nil" for v in items)
 
 
-def _binding(config: dict, presets: dict) -> None:
-    """Every preset key reached the configuration Orca used, at the preset's value."""
+def _binding(config: dict, presets: dict) -> list[str]:
+    """Every preset key reached the configuration Orca used, at the preset's value.
+    Returns the retired keys it passed over (``ORCA_RETIRED``), for the evidence."""
+    retired = []
     for role, (name, _data, parsed) in presets.items():
         said = _echoed(config.get(SETTINGS_ID[role], ""))
         if said != name.strip():
@@ -250,16 +341,28 @@ def _binding(config: dict, presets: dict) -> None:
         for key, value in parsed.items():
             if key in PRESET_META_KEYS or _unset(value):
                 continue
+            if key in ORCA_RETIRED and key not in config:
+                retired.append(f"{role}.{key}")
+                continue
+            if key in ORCA_RENAMED and key not in config:
+                if ORCA_RENAMED[key] not in config:
+                    raise _Errored(f"Orca reads {key} (the {role} preset's) as "
+                                   f"{ORCA_RENAMED[key]}, and the configuration the G-code "
+                                   f"was sliced with has neither")
+                continue
             if key not in config:
-                raise _Errored(f"Orca ignored {key} (the {role} preset's): it is not in the "
-                               f"configuration the G-code was sliced with — a misspelled or "
-                               f"retired key slices 'Success.' without it")
+                raise _Errored(f"Orca did not use {key} (the {role} preset's): it is not in "
+                               f"the configuration the G-code was sliced with, and Orca "
+                               f"{SUPPORTED_ORCA[0]} neither renames nor retires it, so it "
+                               f"is misspelled or not a key this release has; correct it or "
+                               f"remove it")
             # A list value is compared for presence only: Orca echoes some lists
             # joined by commas and others quoted, per key, so a value test there
             # would be this gate's guess at Orca's format.
             if isinstance(value, str) and _echoed(value) != _echoed(config[key]):
                 raise _Errored(f"Orca used {key} = {config[key].strip()[:60]!r} where the "
                                f"{role} preset says {value.strip()[:60]!r}")
+    return retired
 
 
 def _read_gcode(path: str) -> dict:
@@ -309,10 +412,10 @@ def _read_gcode(path: str) -> dict:
 
 
 def _worst_run(g: dict) -> tuple[float, tuple, float]:
-    """``(span, (z, x, y), window)``: the longest unsupported run of Bridge lines,
-    and the middle of it.
+    """``(span, (z, x, y), window)``: the longest unsupported run of bridge lines
+    (``BRIDGE_ROLES``), and the middle of it.
 
-    A run is consecutive ``;TYPE:Bridge`` extrusions with no travel between them
+    A run is consecutive extrusions of those roles with no travel between them
     and no turn past 30 deg; it ends at a travel, at any other role, and on the
     first layer (the bed holds it). A point of the run is held when any cell within
     one cell of it was printed in a layer less than WINDOW below it, where WINDOW is
@@ -321,9 +424,11 @@ def _worst_run(g: dict) -> tuple[float, tuple, float]:
     unheld stretch plus 2 cells, because the one-cell neighbourhood trims one cell
     at each end (without it the reader under-reads by 1.04-1.07 mm).
 
-    Measured against drawn spans: 9.91 for 10 mm, 79.96 for 80, 17.93 for the
-    baseline clamp's 18 mm ceiling, 89.96 for the 90 mm arch; 0.0 on every bridge
-    over support. *Rejected*, all measured: the longest Bridge segment (150.34 mm
+    Measured against drawn spans: 9.91 for 10 mm, 79.96 for 80, 18.02 for the
+    baseline clamp's 18 mm ceiling, 89.96 for the 90 mm arch, 79.85 for an 80 mm
+    bar printed as overhang walls; 0.0 on ``Bridge`` lines over support, and at
+    most 15.83 mm on any supported part (an overhang wall at a support tip).
+    *Rejected*, all measured: the longest Bridge segment (150.34 mm
     on a part whose bridges were all supported: Orca types the first layer over a
     support Bridge); a free run with no one-cell neighbourhood (79.55 mm and 9.04 mm
     read on supported parts: the bridge line runs between the support-interface
@@ -338,7 +443,7 @@ def _worst_run(g: dict) -> tuple[float, tuple, float]:
     best, where = 0.0, (0.0, 0.0, 0.0)
     run, start, last_end, last_dir = 0.0, None, None, None
     for laid, role, mz, x0, y0, x1, y1 in g["moves"]:
-        if not laid or role != "Bridge" or mz <= first + 1e-6:
+        if not laid or role not in BRIDGE_ROLES or mz <= first + 1e-6:
             run, last_end, last_dir = 0.0, None, None
             continue
         d = (x1 - x0, y1 - y0)
@@ -418,7 +523,7 @@ def _slice(ctx: GateContext, part, mesh, presets: dict, version: str, limit: flo
     if not g["relative"] or g["absolute"]:
         raise _Errored("the G-code does not use relative extrusion (M83) throughout; this "
                        "reader takes E > 0 as material laid")
-    _binding(cfg, presets)
+    retired = _binding(cfg, presets)
     warned = [str(p.get("warning_message", "")).strip()
               for p in result.get("sliced_plates", []) if isinstance(p, dict)]
     warned = [w for w in warned if w]
@@ -448,6 +553,7 @@ def _slice(ctx: GateContext, part, mesh, presets: dict, version: str, limit: flo
                                for r, (n, d, _p) in presets.items()},
                    "config_block_sha256": _sha(json.dumps(cfg, sort_keys=True).encode()),
                    "return_code": rc, "error_string": words, "warning_message": "",
+                   "retired_keys_not_used": retired,
                    "window_mm": window, "worst_span_mm": span, "worst_at_mm": at,
                    "limit_mm": limit, "gcode": gcode}, fh, indent=1)
     note = (f"at {span:.1f} mm unsupported bridge at z {wz:.2f} vs {limit:.0f} mm"
@@ -497,6 +603,8 @@ def slice_part(ctx: GateContext) -> Verdict:
     preset key at the preset's value; the extents of the part's own extrusions
     must be the mesh's; and the longest unsupported run of Bridge lines is the
     measured value, against ``max_bridge_mm`` (the key ``fdm.bridge_span`` reads).
+    A part that fails is a FAIL even when another part's run errored: a known
+    failure is never filed under a tool's.
 
     What this does NOT settle: a thin feature Orca drops from the toolpaths
     (a 0.15 mm fin gives no extrusion and no warning), the time and mass Orca
@@ -508,7 +616,7 @@ def slice_part(ctx: GateContext) -> Verdict:
         return _skip("no max_bridge_mm: the slicer gate judges the unsupported bridge "
                      "against the maximum the project states, and will not invent one")
     limit = float(limit)
-    axis = ctx.first_pack_param(("build_axis", "layer_normal", "print_axis"), None)
+    axis = ctx.first_pack_param(PARTS.BUILD_AXIS_KEYS, None)
     if axis is not None and not _plus_z(axis):
         return _skip(f"build_axis is {axis!r}: Orca slices along +Z, so the mesh must be "
                      f"exported in print pose with +Z up")
@@ -530,10 +638,12 @@ def slice_part(ctx: GateContext) -> Verdict:
     outcomes, failed, errored, evidence, todo = [], [], [], [], []
     for part in parts:
         path = part.raw if os.path.isabs(part.raw) else os.path.join(ctx.root or os.curdir, part.raw)
-        mesh = (_parse(os.path.abspath(path)) if getattr(ctx, "memo", None) is None
-                else ctx.load_file(path, loader=_parse)) if part.raw else None
+        parsed = (MESH_FILE.parse_mesh(os.path.abspath(path)) if getattr(ctx, "memo", None) is None
+                  else ctx.load_file(path, loader=MESH_FILE.parse_mesh)) if part.raw else None
+        mesh = parsed[0] if parsed else None
         if mesh is None:
-            outcomes.append(FOLD.skipped_part(part.name, f"no mesh at {part.raw or '(none)'}"))
+            why = parsed[2] if parsed else f"no mesh at {part.raw or '(none)'}"
+            outcomes.append(FOLD.skipped_part(part.name, why))
             continue
         zmin = float(mesh.bounds[0][2])
         if abs(zmin) > PARTS.BED_TOLERANCE_MM:
@@ -570,19 +680,24 @@ def slice_part(ctx: GateContext) -> Verdict:
 
     bound = (f"OrcaSlicer {version}" if version else "no slicer run") + ", presets " + \
         ", ".join(repr(presets[r][0]) for r in PRESET_ROLES)
-    if errored:
-        more = f"; {len(failed)} other finding(s) of failure" if failed else ""
-        return _error(f"{errored[0]}" + (f" (and {len(errored) - 1} more)" if len(errored) > 1
-                                         else "") + more, evidence)
+    # A settled failure first: an errored part beside it is named, never louder.
+    # What slipped through with the order the other way: part A out of print pose
+    # and part B's run timed out read errored, so the claim read Skipped where A
+    # had already failed (gates/fdm_print_fold.py orders it this way too).
     if failed:
+        also = (f"; {len(errored)} part(s) errored, first {errored[0]}" if errored else "")
         return Verdict(gate=GATE_ID, passed=False, measured=None,
                        detail=(f"{sum(1 for n, _ in failed if n)} of {len(parts)} part(s) in "
                                f"`{parts.source}` fail ({bound}): "
-                               + "; ".join(f"{n}: {w}" if n else w for n, w in failed[:2]))[:480],
+                               + "; ".join(f"{n}: {w}" if n else w for n, w in failed[:2])
+                               + also)[:480],
                        evidence=evidence,
                        locators=[Locator(view=PARTS.VIEW_ID, target=PARTS.node(n), kind="part",
                                          label=w[:120])
                                  for n, w in failed[:FOLD.MAX_PART_LOCATORS] if n])
+    if errored:
+        return _error(f"{errored[0]}" + (f" (and {len(errored) - 1} more)" if len(errored) > 1
+                                         else ""), evidence)
     table = FOLD.write_table(ctx, "fdm-slice-parts.txt", GATE_ID, parts.source, outcomes,
                              header_lines=[bound, f"bridges judged at {limit:g} mm"],
                              columns="worst_span_mm\tlimit_mm\tat_mm")

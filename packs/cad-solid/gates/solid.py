@@ -833,8 +833,8 @@ _CAST_CHUNK_RT = 2_000_000
 _PARALLEL_COS_EPS = 1e-12
 
 
-def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]:
-    """``(locations, index_ray)`` of each ray's first forward hit.
+def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any, Any]:
+    """``(locations, index_ray, index_tri)`` of each ray's first forward hit.
 
     trimesh's own ray engines are used when one of them is importable. Neither is
     guaranteed: the pure-python engine culls candidates with an ``rtree`` index and
@@ -863,15 +863,16 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
     origins = np.asarray(origins, dtype=float)
     directions = np.asarray(directions, dtype=float)
     try:
-        locations, index_ray, _ = mesh.ray.intersects_location(
+        locations, index_ray, index_tri = mesh.ray.intersects_location(
             origins, directions, multiple_hits=False)
-        return np.asarray(locations, dtype=float), np.asarray(index_ray, dtype=int)
+        return (np.asarray(locations, dtype=float), np.asarray(index_ray, dtype=int),
+                np.asarray(index_tri, dtype=int))
     except ImportError:
         pass
 
     tri = np.asarray(mesh.triangles, dtype=float)
     if len(tri) == 0 or len(origins) == 0:
-        return np.zeros((0, 3)), np.zeros(0, dtype=int)
+        return np.zeros((0, 3)), np.zeros(0, dtype=int), np.zeros(0, dtype=int)
     v0 = tri[:, 0, :]
     e1 = tri[:, 1, :] - v0
     e2 = tri[:, 2, :] - v0
@@ -887,6 +888,7 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
 
     chunk = max(1, int(_CAST_CHUNK_RT // max(1, len(tri))))
     best = np.full(len(origins), np.inf)
+    which = np.zeros(len(origins), dtype=int)
     for start in range(0, len(origins), chunk):
         o = origins[start:start + chunk]
         d = directions[start:start + chunk]
@@ -900,11 +902,35 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any]
         v = np.einsum("rj,rfj->rf", d, qvec) * inv
         t = np.einsum("fj,rfj->rf", e2, qvec) * inv
         hit = live & (u >= 0.0) & (v >= 0.0) & (u + v <= 1.0) & (t > 0.0)
-        best[start:start + chunk] = np.where(hit, t, np.inf).min(axis=1)
+        dist = np.where(hit, t, np.inf)
+        which[start:start + chunk] = dist.argmin(axis=1)
+        best[start:start + chunk] = dist.min(axis=1)
 
     index_ray = np.nonzero(np.isfinite(best))[0]
     locations = origins[index_ray] + directions[index_ray] * best[index_ray][:, None]
-    return locations, index_ray
+    return locations, index_ray, which[index_ray]
+
+
+#: A ray's hit counts as the far side of a wall only when the hit face's normal is
+#: within this angle of the opposite of the start face's normal. What slipped
+#: through without it: a ray cast from a small face beside an acute edge crosses the
+#: corner and hits the face on the other side of the edge almost at once, so the
+#: wall read about 0 mm at every acute edge, and how near 0 depended on the size of
+#: the triangle, not on the part. Measured on a printed part of 53,706 faces: 0.000
+#: mm at (81.95, 3.06, -0.45), a hit 0.0001 mm away on a face that shares an edge
+#: with the start face, the two normals 141 deg apart (a 39 deg edge); the prior
+#: survey found 3 of 4 reported minima were such hits (normals 104, 123 and 149 deg
+#: apart). 30 deg is the prior plan's. Measured at 45, 30, 20 and 10 deg: the pack's
+#: four baseline solids (thinnest 3.000 mm) and a 364-face lid (0.379 mm, a real wall)
+#: read the same at all four. *Rejected:* 45 deg (the 39 deg edge, normals 141 deg
+#: apart, still counts: 0.000 mm); 10 deg (nothing more is removed on that corpus,
+#: and a wall whose two faces each lean up to 15 deg from parallel is still a
+#: wall); Blender's 3D-Print Toolbox, which the prior plan said to try first: its
+#: ``bmesh_check_thick_object`` casts the same backward ray with no filter on the
+#: face it hits, so it flags the same edges, from 6 random points per face, so two
+#: runs differ (read in its ``lib.py``; the gate would also need Blender beside it).
+OPPOSED_DEG = 30.0
+OPPOSED_COS = math.cos(math.radians(OPPOSED_DEG))
 
 
 @gate(
@@ -933,8 +959,9 @@ def wall_thickness(ctx: GateContext) -> Verdict:
 
     Method, stated plainly because its limits matter more than its number: from the
     centroid of EVERY facet a ray is cast along the inward normal, and the distance
-    to the first hit is the local thickness. The minimum over all of them is
-    reported.
+    to the first hit is the local thickness when the face it hits opposes the face
+    it left (within ``OPPOSED_DEG``); a hit across an acute edge is no wall and the
+    ray measures nothing. The minimum over all of them is reported.
 
     Every facet, never a subset. What slipped through while a 4000-ray budget
     cast from evenly spaced facets above that count (``wall_samples``): a
@@ -945,9 +972,11 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     The cost scales with the face count: 236 s for a 53,706-face part on the
     fallback caster, 17 s at 4000 rays, which is why ``rtree`` or ``embreex`` is
     worth installing (PACK.md). *Rejected:* keeping the budget as an option that
-    skips instead of passing (a knob that can never help a pass), and dropping a
-    ray whose facet faces another facet (it hid walls: 0.55 mm at 4000 rays where
-    every face gives 0.0).
+    skips instead of passing (a knob that can never help a pass).
+
+    A zero-thickness fold still reads 0: two faces on one edge whose normals
+    oppose (a printed part read 0.000 mm at one, 0.0001 mm apart) are a wall with
+    no material in it, and the filter keeps them on purpose.
 
     What this does NOT measure, and nobody should assume it does:
 
@@ -1012,7 +1041,7 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         origins = centres - normals * eps
         directions = -normals
 
-        locations, index_ray = _cast_first_hit(mesh, origins, directions)
+        locations, index_ray, index_tri = _cast_first_hit(mesh, origins, directions)
         if len(index_ray) == 0:
             return _skipped(
                 "cad.wall_thickness",
@@ -1029,12 +1058,15 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         # assembly.
         travel = np.linalg.norm(
             np.asarray(locations, dtype=float) - origins[index_ray], axis=1)
-        real = travel > 10.0 * eps
+        # A wall is two faces that look away from each other: the hit face must
+        # oppose the face the ray left (OPPOSED_COS says what slipped through).
+        opposed = (normals[index_ray] * normals[index_tri]).sum(axis=1) <= -OPPOSED_COS
+        real = (travel > 10.0 * eps) & opposed
         if not real.any():
             return _skipped(
                 "cad.wall_thickness",
-                f"every inward ray on part {name!r} hit its own facet — the sampler "
-                f"measured nothing",
+                f"no inward ray on part {name!r} reached a face that opposes its own "
+                f"within {OPPOSED_DEG:g} deg — the sampler measured nothing",
             )
         distances = travel[real] + eps
         hit_rows = np.asarray(index_ray)[real]
@@ -1697,8 +1729,15 @@ def clash(ctx: GateContext) -> Verdict:
 # tier 1 — clearance: how far apart two declared parts are
 # --------------------------------------------------------------------------- #
 #: Where a project declares the pairs whose clearance a claim is about:
-#: ``[{pair: [a, b], reason}]``, read with the same refusals as ``mating_pairs``.
+#: ``[{pair: [a, b], reason}]``, refused as ``_clearance_from`` says.
 CLEARANCE_PAIR_KEYS = ("clearance_pairs",)
+
+#: Keys that state a number on a pair. A clearance pair takes its limit from the
+#: claim only. What slipped through when the list was read by the mating-contact
+#: reader: ``tol_mm: 0.5`` on a clearance pair was accepted, then dropped, and the
+#: pair was judged at the claim's limit with no word about the 0.5.
+CLEARANCE_NUMBER_KEYS = ("tol_mm", "max_gap_mm", "gap_tol_mm", "limit_mm", "min_gap_mm",
+                         "clearance_mm")
 
 #: The claim tag ``cad.clearance`` reads its limit from (``ctx.acceptance``).
 CLEARANCE_TAG = "clearance"
@@ -1710,6 +1749,40 @@ CLEARANCE_TAG = "clearance"
 #: *Rejected:* the limit + 1 mm (the reported value then moved with the claim).
 #: A limit at or above the cap cannot be shown to hold, so it fails, and says why.
 CLEARANCE_SEARCH_MM = 10.0
+
+
+def _clearance_from(entry: Any, refusals: list) -> tuple[str, str] | None:
+    """``(a, b)`` from one ``clearance_pairs`` entry, or ``None`` and a refusal.
+
+    The same four refusals as a mating pair, in the words of a clearance: an entry
+    that cannot be read, a wildcard, one part twice, no reason. And a fifth: a
+    number on the pair, because the limit is the claim's and a second one that the
+    gate drops is a limit the reader thinks was used."""
+    pair = _normalise_pair(entry)
+    if pair is None:
+        refusals.append(f"unreadable clearance_pairs entry {json.dumps(entry, default=str)[:80]}")
+        return None
+    label = f"clearance_pairs entry {pair[0]!r} vs {pair[1]!r}"
+    if any(p in ("*", "any", "anything", "") for p in pair):
+        refusals.append(f"blanket {label} refused — a clearance from 'anything' names no "
+                        f"part to measure the gap to")
+        return None
+    if pair[0] == pair[1]:
+        refusals.append(f"{label} names one part twice — a part has no gap to itself")
+        return None
+    stated = [k for k in CLEARANCE_NUMBER_KEYS if isinstance(entry, dict) and k in entry]
+    if stated:
+        refusals.append(f"{label} states {stated[0]} = {entry[stated[0]]!r} — the clearance "
+                        f"limit is the claim's (tagged {CLEARANCE_TAG}), and this gate will "
+                        f"not drop a number a pair states; remove it, or state the limit "
+                        f"on the claim")
+        return None
+    reason = str((entry or {}).get("reason", "")).strip() if isinstance(entry, dict) else ""
+    if not reason:
+        refusals.append(f"{label} has no reason — a clearance nobody explained is one "
+                        f"nobody can check, delete or defend when the design moves")
+        return None
+    return pair
 
 
 def _manifold(mesh: Any):
@@ -1780,39 +1853,36 @@ def clearance(ctx: GateContext) -> Verdict:
     refusals: list[str] = []
     pairs = []
     for entry in (raw if isinstance(raw, list) else [raw]):
-        got = _contact_from(entry, "clearance_pairs", refusals)
+        got = _clearance_from(entry, refusals)
         if got is None:
             continue
-        missing = [p for p in got[0] if p not in meshes]
+        missing = [p for p in got if p not in meshes]
         if missing:
-            refusals.append(f"clearance_pairs entry {got[0][0]!r} vs {got[0][1]!r} names "
+            refusals.append(f"clearance_pairs entry {got[0]!r} vs {got[1]!r} names "
                             f"{', '.join(map(repr, missing))}, not in the assembly")
             continue
-        pairs.append(got)
+        pairs.append((got, str(entry.get("reason", "")).strip()))
     if refusals:
         return Verdict(gate=gid, passed=False, measured=float(len(refusals)), limit=0.0,
                        comparator="<=", units="refused entries",
                        detail=f"{len(refusals)} clearance_pairs entr(ies) refused: "
                               + "; ".join(refusals[:3]))
 
-    import numpy as np
-
     solids: dict[str, Any] = {}
     rows = []
-    for (a, b), reason, _tol in pairs:
-        box = _box_gap(*np.asarray(meshes[a].bounds, dtype=float),
-                       *np.asarray(meshes[b].bounds, dtype=float))
-        if box >= CLEARANCE_SEARCH_MM:
-            gap = CLEARANCE_SEARCH_MM            # their boxes alone are past the cap
-        else:
-            for name in (a, b):
-                if name not in solids:
-                    try:
-                        solids[name] = _manifold(meshes[name])
-                    except ValueError as exc:
-                        return Verdict(gate=gid, passed=False, error=f"part {name!r}: {exc}")
-            gap = min(float(solids[a].min_gap(solids[b], CLEARANCE_SEARCH_MM)),
-                      CLEARANCE_SEARCH_MM)
+    for (a, b), reason in pairs:
+        # Every pair goes through manifold3d, far ones too: it returns the cap
+        # past the search. What slipped through with a shortcut on the two boxes:
+        # the baseline's one pair was 23 mm apart by box, so its known-good never
+        # reached min_gap, and a gate that read 0.0 for every pair qualified.
+        for name in (a, b):
+            if name not in solids:
+                try:
+                    solids[name] = _manifold(meshes[name])
+                except ValueError as exc:
+                    return Verdict(gate=gid, passed=False, error=f"part {name!r}: {exc}")
+        gap = min(float(solids[a].min_gap(solids[b], CLEARANCE_SEARCH_MM)),
+                  CLEARANCE_SEARCH_MM)
         rows.append({"a": a, "b": b, "reason": reason, "gap_mm": round(gap, 6),
                      "capped": gap >= CLEARANCE_SEARCH_MM})
     worst = min(rows, key=lambda r: r["gap_mm"])

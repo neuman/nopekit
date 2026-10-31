@@ -2487,7 +2487,8 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
             with self.subTest(gate=gid):
                 self.assertEqual((walked, left),
                                  (SLOW_WALK[gid].walked, SLOW_WALK[gid].not_walked))
-        self.assertEqual(sum(kinds.values()) + unavailable, 79, kinds)
+        # 79, and fdm-print's fdm.slice and cad-solid's cad.clearance (0.2.0).
+        self.assertEqual(sum(kinds.values()) + unavailable, 81, kinds)
         if not unavailable:
             self.assertEqual(dict(kinds), {"conclusive": 45, "none-conclusive": 7,
                                            "no-boundary": 27})

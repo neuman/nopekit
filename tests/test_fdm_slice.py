@@ -3,8 +3,8 @@
 
 What slipped through before the gate: fdm-print read only the mesh, and Orca 2.4.2,
 run by hand, sliced an 80 mm unsupported bridge with return code 0, "Success." and
-no warning; gripster's 80 mm tunnel roof sliced the same way and then failed in
-print. It also dropped a part 15 mm above the bed to the bed and said nothing, and
+no warning; a printed part's 80 mm tunnel roof sliced the same way and then failed
+in print. It also dropped a part 15 mm above the bed to the bed and said nothing, and
 sliced a preset with a misspelled key without the key. Each case below is one of
 those, or a way the gate's own reading could be wrong (a bridge over support read
 as free, a run cut into segments, arcs, another part's G-code).
@@ -239,7 +239,7 @@ class AnIgnoredKeyIsAnError(_SliceCase):
         if v is None:
             return
         self.assertEqual(v.outcome, "error", v.render())
-        self.assertIn("Orca ignored wall_loops", v.error)
+        self.assertIn("Orca did not use wall_loops", v.error)
 
     def test_a_value_the_slicer_changed_is_errored(self):
         v = self._run({"body": _bridge_body(support=True), "set": {"brim_width": "8"}})
@@ -317,6 +317,123 @@ class NothingToSliceIsSkipped(_SliceCase):
         self.assertFalse(available)
         self.assertTrue(v.skipped and not v.passed, v.render())
         self.assertEqual(v.skip_reason, why)
+
+
+def _bar_body(role: str) -> str:
+    """The walls, and one 80 mm run of ``role`` across the box at z 10."""
+    return "\n".join(_walls(BOX[0] - 0.2, BOX[1] - 0.2, BOX[2])
+                     + _line(role, 10.0, [(0.2, 10.2), (80.2, 10.2)]))
+
+
+class EveryRoleOverAirIsABridge(_SliceCase):
+    """Orca 2.4.2 prints an 80 mm bar 2 mm wide as ``Overhang wall`` only, and a
+    roof over 0% infill as ``Internal Bridge``: a reader of ``Bridge`` alone read
+    0.0 on both (measured on the real slicer: 79.85 and 87.06 mm)."""
+
+    def test_an_overhang_wall_or_internal_bridge_over_air_fails(self):
+        for role in ("Overhang wall", "Internal Bridge"):
+            with self.subTest(role):
+                v = self._run({"body": _bar_body(role)})
+                if v is None:
+                    return
+                self.assertEqual(v.outcome, "fail", v.render())
+                self.assertTrue(79.0 < v.measured < 81.0, v.render())
+
+    def test_an_outer_wall_is_not_read(self):
+        v = self._run({"body": _bar_body("Outer wall")})
+        if v is None:
+            return
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertEqual(v.measured, 0.0)
+
+
+class ALegacyKeyIsReadAsOrcaReadsIt(_SliceCase):
+    """What Orca 2.4.2's own source renames or retires is not "ignored": measured,
+    ``wall_infill_order`` reached the block as ``wall_sequence``. Anything else not
+    in the block is still an error."""
+
+    def _process(self, **extra) -> dict:
+        with open(os.path.join(PACK, "selftest", "orca", "process.json"), encoding="utf-8") as fh:
+            preset = json.load(fh)
+        preset.update(extra)
+        path = os.path.join(self.dir, "process.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(preset, fh)
+        presets = _baseline()["slicer_presets"]
+        return {"slicer_presets": dict(presets, process=path)}
+
+    def test_a_renamed_key_binds_under_its_new_name(self):
+        params = self._process(wall_infill_order="inner wall/outer wall/infill")
+        mode = {"body": _bridge_body(support=True), "drop": ["wall_infill_order"],
+                "set": {"wall_sequence": "inner wall/outer wall"}}
+        v = self._run(mode, params)
+        if v is None:
+            return
+        self.assertEqual(v.outcome, "pass", v.render())
+        v = self._run({"body": _bridge_body(support=True), "drop": ["wall_infill_order"]},
+                      params)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("as wall_sequence", v.error)
+
+    def test_a_retired_key_is_named_and_an_unknown_one_errors(self):
+        params = self._process(adaptive_layer_height="1")
+        v = self._run({"body": _bridge_body(support=True), "drop": ["adaptive_layer_height"]},
+                      params)
+        if v is None:
+            return
+        self.assertEqual(v.outcome, "pass", v.render())
+        with open(os.path.join(self.dir, "out", "fdm-slice", "part", "fdm-slice.json"),
+                  encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["retired_keys_not_used"],
+                             ["process.adaptive_layer_height"])
+        params = self._process(bed_type="Textured PEI Plate")
+        v = self._run({"body": _bridge_body(support=True), "drop": ["bed_type"]}, params)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("Orca did not use bed_type", v.error)
+
+
+class ASlicerThatCannotStartIsErrored(_SliceCase):
+    def test_a_help_that_exits_127_is_errored_not_skipped(self):
+        v = self._run({"help_crash": True, "body": _bridge_body()})
+        if v is None:
+            return
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("--help exited 127", v.error)
+        self.assertEqual(self._slices(), 0)
+
+
+class AFailIsNeverFiledUnderAnError(_SliceCase):
+    def test_a_part_out_of_pose_fails_beside_a_part_whose_run_errored(self):
+        if not self.available:
+            self._run({})                           # asserts the availability skip
+            return
+        import trimesh                              # noqa: PLC0415 - tools present only
+
+        paths = {}
+        for name, lift in (("floating", 15.0), ("grounded", 0.0)):
+            box = trimesh.creation.box(extents=BOX)
+            box.apply_translation([BOX[0] / 2, BOX[1] / 2, BOX[2] / 2 + lift])
+            paths[name] = os.path.join(self.dir, f"{name}.stl")
+            box.export(paths[name])
+        v = self._run({"rc": -51, "words": "stand-in: bad parameters"},
+                      {"mesh_paths": paths, "mesh_path": None})
+        if v is None:
+            return
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("floating: not in print pose", v.detail)
+        self.assertIn("1 part(s) errored", v.detail)
+
+
+class TheBuildAxisIsThePacksParse(_SliceCase):
+    def test_spellings_the_mesh_gates_read_as_plus_z_slice(self):
+        for axis in ("z-axis", "+Z", [0, 0, 2]):
+            with self.subTest(axis=axis):
+                v = self._run({"body": _bridge_body(support=True)}, {"build_axis": axis})
+                if v is None:
+                    return
+                self.assertEqual(v.outcome, "pass", v.render())
+        v = self._run({"body": _bridge_body(support=True)}, {"build_axis": "y"})
+        self.assertTrue(v.skipped, v.render())
 
 
 class TheRealSlicer(unittest.TestCase):

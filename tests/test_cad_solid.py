@@ -9,6 +9,10 @@ What slipped through before 0.2.0:
   0.5 mm plate had its 12 faces between them read PASS at 59.983 mm against a
   1.0 mm minimum, and a 0.3 mm fin on a 49,126-face plate passed in 8 of 10 face
   orderings. It casts from every face now.
+- Cast from every face, a ray from a small face beside an acute edge crossed the
+  corner and hit the face on the other side of the edge almost at once: every part
+  with such an edge read about 0 mm, set by the triangle size. A hit counts only on
+  a face that opposes the one the ray left, within 30 deg.
 - Nothing measured a clearance. ``cad.clash`` reads a 0.01 mm gap and an 8 mm gap
   both as PASS (no shared material, as PACK.md says), and a clearance claim tagged
   ``fit`` read Checked on that pass. ``cad.clearance`` measures the gap with
@@ -121,6 +125,36 @@ class EveryFaceIsCast(_Case):
         self.assertAlmostEqual(v.measured, 0.5, places=3)
 
 
+class AnEdgeIsNotAWall(_Case):
+    GATE = "cad.wall_thickness"
+
+    def test_a_45_degree_edge_reads_the_wall_not_the_corner(self):
+        """A 10 mm prism with one 45 deg edge, subdivided to 3072 faces. Without the
+        opposed-face filter it read 0.295 mm, a ray from the bottom face beside the
+        edge hitting the slanted face; its walls are 10 mm."""
+        if self._skipped_here():
+            return
+        import numpy as np                          # noqa: PLC0415 - tools present only
+        import trimesh                              # noqa: PLC0415
+
+        corners = [(x, y, z) for x, y in ((0, 0), (20, 0), (10, 10), (0, 10)) for z in (0, 10)]
+        prism = trimesh.convex.convex_hull(np.array(corners, dtype=float))
+        for _ in range(4):
+            prism = prism.subdivide()
+        self.assertEqual(len(prism.faces), 3072)
+        v = self._run(self.GATE, {"wedge": prism})
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertAlmostEqual(v.measured, 10.0, places=3)
+
+    def test_two_opposed_faces_close_together_still_fail(self):
+        """The filter keeps a wall: a 0.5 mm plate, its faces opposed, fails."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, {"plate": _box((20.0, 20.0, 0.5), (0.0, 0.0, 0.0))})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertAlmostEqual(v.measured, 0.5, places=3)
+
+
 #: The declared pair every clearance case measures.
 PAIR = {"clearance_pairs": [{"pair": ["a", "b"], "reason": "a runs past b"}]}
 
@@ -203,6 +237,42 @@ class NoPairsIsSkipped(_Case):
                       [_claim()])
         self.assertEqual(v.outcome, "fail", v.render())
         self.assertIn("has no reason", v.detail)
+
+
+class AClearancePairStatesNoNumber(_Case):
+    GATE = "cad.clearance"
+
+    def test_a_tolerance_on_a_pair_is_refused_in_a_clearances_words(self):
+        """The mating reader took ``tol_mm`` and the gate dropped it: the pair was
+        judged at the claim's limit, with no word about the 0.5."""
+        if self._skipped_here():
+            return
+        entry = {"pair": ["a", "b"], "reason": "a runs past b", "tol_mm": 0.5}
+        v = self._run(self.GATE, _pair(8.0), {"clearance_pairs": [entry]}, [_claim()])
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("states tol_mm = 0.5", v.detail)
+        v = self._run(self.GATE, _pair(8.0),
+                      {"clearance_pairs": [{"pair": ["a", "*"], "reason": "x"}]}, [_claim()])
+        self.assertIn("a clearance from 'anything'", v.detail)
+        self.assertNotIn("touch", v.detail)
+
+
+class TheKnownGoodReachesTheTool(_Case):
+    GATE = "cad.clearance"
+
+    def test_the_baseline_measures_a_pair_inside_the_search(self):
+        """The baseline's one pair was 23 mm apart by box, so its known-good never
+        reached manifold3d and a gate that read 0.0 for every pair it measured
+        qualified. Its carriage now stands 7.0 mm off the roller."""
+        if self._skipped_here():
+            return
+        spec, fn = self.registry.get(self.GATE)
+        host = gates_mod.GateContext(root=self.dir, out_dir=self.dir, extra={"pack_dir": PACK})
+        good = gates_mod.run_gate(spec, fn, gates_mod.run_good_fixture(
+            spec, fn, host, trace=None, out_dir=self.dir))
+        self.assertEqual(good.outcome, "pass", good.render())
+        self.assertAlmostEqual(good.measured, 7.0, places=3)
+        self.assertNotIn("search cap", good.detail)
 
 
 class TheLimitIsTheClaims(_Case):

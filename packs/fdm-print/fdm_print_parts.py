@@ -416,3 +416,55 @@ def part_set(ctx: Any) -> PartSet:
             clean = f"{clean}-{used[clean]}"
         parts.append(Part(name=clean, raw=str(path or ""), bbox=bbox))
     return PartSet(parts=tuple(parts), source=" + ".join(sources))
+
+
+#: Where the build direction is stated, primary spelling first. Resolved
+#: pack-scoped first (``fdm.build_axis``) by ``GateContext.param``.
+BUILD_AXIS_KEYS = ("build_axis", "layer_normal", "print_axis")
+
+
+#: Axis NAMES this pack accepts wherever it wants a direction, beside the
+#: ``[x, y, z]`` vector. ``build_axis: "z"`` is what a person writes, and a reader
+#: who writes it must not be told the key is missing.
+AXIS_NAMES: dict[str, list[float]] = {
+    "x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0],
+}
+
+
+def direction(value: Any) -> list[float] | None:
+    """A direction from an ``[x, y, z]`` vector OR an axis name, else None.
+
+    Accepted: ``[0, 0, 1]``, ``"z"``, ``"+Z"``, ``"-y"``, ``"z_axis"``.
+
+    The string form is here because the vector-only version produced the worst
+    kind of message. A project set ``load_axis: "z"``, which is what a person
+    writes, and the gate reported *"the projection has no load_axis /
+    primary_load_axis"* — which reads as "you did not set it" to the one reader
+    who knows they did, and sends them looking in the model for a key that is
+    already there. A value the gate cannot read and a value that is absent are
+    different findings and must not share a sentence (``gates/printability.py``'s
+    ``_direction_problem`` says what the unreadable case says now).
+
+    One copy for every gate in the pack. What slipped through with three: the
+    mesh gates read ``"z-axis"`` and ``[0, 0, 2]`` as +Z and ``fdm.slice`` read
+    neither, so the slicer skipped ("Orca slices along +Z") on a project the
+    mesh gates measured along +Z; and only ``gates/printability.py`` read ``"z-"``.
+    """
+    if isinstance(value, str):
+        text = value.strip().lower().replace(" ", "").replace("-axis", "").replace("_axis", "")
+        sign = 1.0
+        if text[:1] in "+-":
+            sign = -1.0 if text[0] == "-" else 1.0
+            text = text[1:]
+        if text[-1:] in "+-" and len(text) == 2:      # "z-" as well as "-z"
+            sign = -1.0 if text[-1] == "-" else sign
+            text = text[:-1]
+        base = AXIS_NAMES.get(text)
+        return [sign * c for c in base] if base else None
+    if isinstance(value, (bytes, bytearray)) or not isinstance(value, Iterable):
+        return None
+    try:
+        out = [float(v) for v in value]
+    except (TypeError, ValueError):
+        return None
+    return out if len(out) == 3 else None

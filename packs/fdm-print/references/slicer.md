@@ -67,7 +67,13 @@ parent (`inherits`) slices with settings no bound file shows. Each file:
   `from`, `instantiation`, `setting_id`, `filament_id`, `compatible_printers`) is in
   the configuration the G-code was sliced with, at the file's value, and a
   misspelled `enable_suport` slices "Success." without it. A filament value of
-  `"nil"` means "not overridden" and is not checked.
+  `"nil"` means "not overridden" and is not checked. Two lists, transcribed from
+  Orca 2.4.2's `handle_legacy`, are not errors: a key Orca reads under a new name
+  (`wall_infill_order` as `wall_sequence`) must reach the block under that name,
+  and a key Orca retires (`adaptive_layer_height`) is named in the evidence. A
+  vendor profile flattened from the GUI carries both kinds. Any other key Orca does
+  not know (a filament `bed_type`, say) must be removed: Orca drops a misspelling
+  and a key it never had the same way, and only you can tell which it is.
 
 One way to write them: export the three presets from the OrcaSlicer GUI after
 choosing the printer, process and filament you print with, then flatten each into a

@@ -118,12 +118,13 @@ def _min_wall(solid, mesh, caster=None) -> tuple[float, int, int]:
     normals = np.asarray(mesh.face_normals, dtype=float)
     eps = max(1e-6, float(mesh.scale) * 1e-8)
     origins = centres - normals * eps
-    locations, index_ray = solid._cast_first_hit(
+    locations, index_ray, index_tri = solid._cast_first_hit(
         caster if caster is not None else mesh, origins, -normals)
     if len(index_ray) == 0:
         return math.inf, 0, len(origins)
     travel = np.linalg.norm(np.asarray(locations, dtype=float) - origins[index_ray], axis=1)
-    real = travel > 10.0 * eps
+    opposed = (normals[index_ray] * normals[index_tri]).sum(axis=1) <= -solid.OPPOSED_COS
+    real = (travel > 10.0 * eps) & opposed
     if not real.any():
         return math.inf, 0, len(origins)
     return float((travel[real] + eps).min()), int(real.sum()), len(origins)
