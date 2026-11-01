@@ -1414,7 +1414,10 @@ class ControlsAreIsolated(unittest.TestCase):
             if edges:
                 declared[name] = sorted(edges)
         self.assertEqual(declared, {name: sorted(e) for name, e in EDGES.items()})
-        self.assertEqual(sum(len(e) for e in declared.values()), 43)
+        # 43, and pcb.land_pattern's reader guard (pcb-kicad 0.2.0). The count was
+        # left at 43 when it landed: the dict compare above failed first on
+        # topology-simp's undeclared edges, so this line was never reached.
+        self.assertEqual(sum(len(e) for e in declared.values()), 44)
         registry = gates_mod.Registry()
         gates_mod.load_project_gates(os.path.join(REPO, "examples", "bracket"), registry)
         self.assertEqual(sorted(_declared_edges(registry)), sorted(BRACKET_EDGES))
