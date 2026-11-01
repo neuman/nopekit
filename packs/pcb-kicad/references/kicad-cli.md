@@ -95,7 +95,10 @@ A probe at 0 in the combined run is run again alone, because several assertion
 rules on one item mask each other; when no probe fires at all, a canary that
 selects everything tells a dropped file from dead rules. KiCad evaluates a
 one-item assertion with no B, so a `B.` property is probed as `A.`, and a rule
-whose condition needs B is never called dead, only "not shown live". Rejected:
+whose condition reads B is probed on its A side: the top-level `&&` terms that
+read A alone, which every pair it selects must meet. `A.NetName == 'VBUSS' &&
+B.NetName == 'GND'` is probed as `A.NetName == 'VBUSS'`, and is dead. A rule with
+no such term is never called dead, only "not shown live". Rejected:
 `disallow` probes (a later one masked an earlier one fully, 12 against 0) and
 probes that restate the rule's constraint at an impossible bound (11 s, and an
 item in the board's middle was missed).

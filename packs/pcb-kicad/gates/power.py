@@ -19,6 +19,16 @@ value the board does not give that ref, or a pin with no pad errors: "the record
 for another design". With the board file keyed, that is how a generator that moves
 a part or changes a value stales the records instead of reading them on trust.
 
+**Read as strictly as the board.** A record may name a board ``pcb.board_readable``
+never reads, so each rule refuses a board this reader cannot vouch for itself
+(``_kicad.board_problems``), as an error. A part marked do-not-populate or left out
+of the BOM (``_kicad.NOT_FITTED``) is not on the built board, and no rule counts it.
+A record's numbers are held to their kind: ``safety_timer`` a JSON true or false, an
+area, a current or a trip time above 0, a ``source`` that says something. (What
+slipped through, in review: an NTC, a cutoff and its series resistor marked dnp each
+read as fitted; ``"safety_timer": "false"``, a string, read as a timer; a negative
+area squared away; a cutoff with an empty source counted.)
+
 **What slipped through** (a two-board keyboard with a 1-cell LiPo, its boards made
 by a generator, every design rule and the netlist clean): the charger, an
 MCP73831, has no thermistor input and no safety timer (DS20001984H); the PPTC
@@ -29,7 +39,6 @@ either board cuts the cell off when it runs down, so only the cell's own PCM, at
 """
 from __future__ import annotations
 
-import json
 import math
 import os
 
@@ -73,8 +82,7 @@ def area_for_s(seconds: float, current_a: float, start_c: float, limit_c: float)
     return math.sqrt(seconds) * current_a / k
 
 
-def _skip(gid: str, reason: str) -> Verdict:
-    return Verdict(gate=gid, passed=False, skipped=True, skip_reason=reason)
+_skip, _evidence = K.skip, K.evidence
 
 
 def _error(gid: str, why: str) -> Verdict:
@@ -85,40 +93,43 @@ class RecordError(ValueError):
     """A record the gate cannot read as one for this design."""
 
 
-def _evidence(ctx: GateContext, name: str, payload: dict) -> list[str]:
-    path = ctx.out_path("pcb-kicad", f"{name}.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, sort_keys=True)
-    return [path]
+def _checked(rec, label: str, fields: tuple[str, ...]) -> dict:
+    """``rec``, held to being a record with ``fields`` and a ``source``. Raises
+    RecordError on anything else: a datasheet fact with no source is a number
+    nobody can check."""
+    if not isinstance(rec, dict):
+        raise RecordError(f"{label} is not a record (a JSON object)")
+    missing = [f for f in (*fields, "source") if f not in rec]
+    if missing:
+        raise RecordError(f"{label} has no {', '.join(missing)}")
+    if not str(rec.get("source") or "").strip():
+        raise RecordError(f"{label}'s source is empty: say where each number comes from")
+    return rec
 
 
 def _record(ctx: GateContext, key: str, fields: tuple[str, ...]) -> dict | None:
-    """The record ``key`` as a dict, None when the project states none. Raises
-    RecordError on a record missing a field, or its ``source``: a datasheet fact
-    with no source is a number nobody can check."""
+    """The record ``key`` (:func:`_checked`), None when the project states none."""
     rec = ctx.param(key)
-    if rec is None:
-        return None
-    if not isinstance(rec, dict):
-        raise RecordError(f"{key} is not a record (a JSON object)")
-    missing = [f for f in (*fields, "source") if f not in rec]
-    if missing:
-        raise RecordError(f"{key} has no {', '.join(missing)}")
-    if not str(rec.get("source") or "").strip():
-        raise RecordError(f"{key}'s source is empty: say where each number comes from")
-    return rec
+    return None if rec is None else _checked(rec, key, fields)
 
 
 def _board(ctx: GateContext, rec: dict) -> tuple[str, object]:
     """``(path, Board)`` of the board a record names (``board``, else
-    ``pcb_board``), read through ``ctx.load_file`` so the file is keyed."""
+    ``pcb_board``), read through ``ctx.load_file`` so the file is keyed, and
+    refused as ``pcb.board_readable`` would fail it."""
     rel = rec.get("board") or ctx.param("pcb_board")
     if not rel:
         raise RecordError("the record names no board, and there is no pcb_board")
-    rel = str(rel)
-    path = rel if os.path.isabs(rel) else os.path.join(ctx.root, rel)
+    path = K.project_path(ctx, rel)
     if not os.path.isfile(path):
         raise RecordError(f"no board at {path}")
+    try:
+        _version, problems = K.board_problems(ctx.load_file(path, loader=K.load_tree))
+    except (K.KicadFormatError, UnicodeDecodeError) as exc:
+        problems = [f"it does not parse: {exc}"]
+    if problems:
+        raise RecordError(f"the board {os.path.basename(path)} is not one this reader can "
+                          f"vouch for: {'; '.join(problems)}")
     return path, ctx.load_file(path, loader=K.load_board)
 
 
@@ -145,10 +156,33 @@ def _net(fp, pin) -> str:
 
 
 def _pads_on(board, net: str) -> list[tuple[str, str]]:
-    return [(f.ref, p.number) for f in board.footprints for p in f.pads if net and p.net == net]
+    """``(ref, pad)`` of every fitted part's pad on ``net``."""
+    return [(f.ref, p.number) for f in board.footprints if f.fitted
+            for p in f.pads if net and p.net == net]
+
+
+def _not_fitted(fp) -> str:
+    return f"{fp.ref} ({fp.value}) is marked not fitted ({', '.join(fp.attrs)})"
 
 
 CELL_FIELDS = ("ref", "value", "pin", "min_v", "pcm_cutoff_min_v")
+CUTOFF_FIELDS = ("ref", "value", "sense_pin", "series_ref", "threshold_min_v")
+
+
+def _through(series, cfp, cell_net: str, sense: str) -> str:
+    """Why ``series`` is not the one part between the cell's net and ``sense``,
+    or "" when it is: a fitted two-pad part, not the cell's own, one pad on each."""
+    if series.ref == cfp.ref:
+        return f"{series.ref} is the cell's own connector"
+    if not series.fitted:
+        return _not_fitted(series)
+    nets = sorted(p.net for p in series.pads if p.number)
+    if len(nets) != 2:
+        return f"{series.ref} has {len(nets)} numbered pads, not two"
+    if nets != sorted([cell_net, sense]) or cell_net == sense:
+        return (f"its pads sit on {', '.join(n or 'no net' for n in nets)}, not on the "
+                f"cell's {cell_net} and the sense pad's {sense or 'no net'}")
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -172,10 +206,12 @@ def charge_protection(ctx: GateContext) -> Verdict:
 
     (a) a thermistor input wired to the cell's NTC. ``thermistor_pin`` names the
     charger's THERM pin (null: the part has none); its pad's net must hold a pad of
-    ``ntc_ref``, the NTC's two pads must sit on two nets, and no other pad of the
-    charger itself may sit on the THERM net (THERM tied to its own VSS or VDD, the
-    datasheet's way to switch the input off). (b) ``safety_timer``: the datasheet
-    gives the part a charge timer that ends a charge that never finishes.
+    ``ntc_ref``, the NTC's other pad must sit on another net that some other fitted
+    part also reaches (a pad on no net, or on a net of its own, senses nothing), and
+    no other pad of the charger itself may sit on the THERM net (THERM tied to its
+    own VSS or VDD, the datasheet's way to switch the input off). The charger and the
+    NTC must be fitted. (b) ``safety_timer``: the datasheet gives the part a charge
+    timer that ends a charge that never finishes, a JSON true or false.
 
     measured is the count missing, against 0. A charger protected another way (a
     supervisor that floats PROG, a pack with its own NTC cutoff) reads FAIL here:
@@ -188,6 +224,9 @@ def charge_protection(ctx: GateContext) -> Verdict:
             return _skip(gid, "no pcb_charger: which part charges the cell, its THERM pin "
                               "and whether its datasheet gives it a safety timer are a "
                               "person's reading of the datasheet, entered as a record")
+        if not isinstance(rec["safety_timer"], bool):
+            raise RecordError(f"pcb_charger's safety_timer is {rec['safety_timer']!r}: give "
+                              f"true or false (a string such as \"false\" reads as true)")
         path, board = _board(ctx, rec)
         therm = rec["thermistor_pin"]
         fp = _part(board, rec, "pcb_charger", [therm] if therm is not None else [])
@@ -200,24 +239,34 @@ def charge_protection(ctx: GateContext) -> Verdict:
     except RecordError as exc:
         return _error(gid, str(exc))
     missing = []
-    if therm is None:
+    if not fp.fitted:
+        missing.append(_not_fitted(fp))
+    elif therm is None:
         missing.append(f"{fp.ref} ({fp.value}) has no thermistor input")
     else:
         net = _net(fp, therm)
         on_net = _pads_on(board, net)
         own = [n for r, n in on_net if r == fp.ref and n != str(therm)]
+        # The NTC's far end: a net some other fitted part reaches.
+        other = [p.net for p in ntc.pads if p.number and p.net != net] if ntc else []
+        far = [n for n in other if n and any(r != ntc.ref for r, _ in _pads_on(board, n))]
         if ntc is None:
             missing.append(f"{fp.ref} THERM (pad {therm}) is wired to no thermistor "
                            f"(ntc_ref is null)")
+        elif not ntc.fitted:
+            missing.append(_not_fitted(ntc))
         elif not any(r == ntc.ref for r, _ in on_net):
             missing.append(f"{fp.ref} THERM (pad {therm}, on {net or 'no net'}) reaches no "
                            f"pad of {ntc.ref}")
-        elif len({p.net for p in ntc.pads if p.number}) < 2:
+        elif not other:
             missing.append(f"{ntc.ref}'s two pads share one net, so it senses nothing")
+        elif not far:
+            missing.append(f"{ntc.ref}'s other pad is on {other[0] or 'no net'}, which no "
+                           f"other part reaches, so it senses nothing")
         elif own:
             missing.append(f"{fp.ref} THERM is tied to its own pad(s) {', '.join(own)}, "
                            f"which turns the input off")
-    if not rec["safety_timer"]:
+    if rec["safety_timer"] is not True:
         missing.append(f"{fp.ref} ({fp.value}) has no safety timer")
     ev = _evidence(ctx, "charge_protection", {"board": path, "record": rec,
                                               "missing": missing})
@@ -280,6 +329,12 @@ def fuse_conductor(ctx: GateContext) -> Verdict:
         kfp = _part(board, cond, "pcb_conductor", pins)
         curve = [(float(a), float(s)) for a, s in fuse["trip_max_s"]]
         area, start, limit = (float(cond[k]) for k in ("area_mm2", "start_c", "limit_c"))
+        # A negative area squares away in the formula, and a zero divides by it.
+        if any(not (a > 0 and s > 0) for a, s in curve):
+            raise RecordError(f"pcb_fuse's trip_max_s {fuse['trip_max_s']!r}: every current "
+                              f"and every time must be above 0")
+        if not area > 0:
+            raise RecordError(f"pcb_conductor's area_mm2 must be above 0: {cond['area_mm2']!r}")
     except RecordError as exc:
         return _error(gid, str(exc))
     except (TypeError, ValueError) as exc:
@@ -312,6 +367,10 @@ def fuse_conductor(ctx: GateContext) -> Verdict:
         "records": {"cell": cell, "fuse": fuse, "conductor": cond},
         "cell_net": cell_net, "conductor_net": cond_net, "fuse_nets": fuse_nets,
         "points": [{"current_a": a, "trip_max_s": s, "adiabatic_s": t} for _r, a, s, t in rows]})
+    if not ffp.fitted:
+        return Verdict(gate=gid, passed=False, evidence=ev,
+                       detail=f"{_not_fitted(ffp)}: nothing stands between the cell and "
+                              f"{kfp.ref}")
     if sorted([cell_net, cond_net]) != fuse_nets:
         return Verdict(gate=gid, passed=False, evidence=ev,
                        detail=f"{ffp.ref} is not between the cell and {kfp.ref}: its pads sit on "
@@ -346,11 +405,20 @@ def fuse_conductor(ctx: GateContext) -> Verdict:
 def discharge_cutoff(ctx: GateContext) -> Verdict:
     """The highest cutoff over the cell must be at or above the cell's ``min_v``
     (``pcb_cell``). The cutoffs are the cell's own PCM (``pcm_cutoff_min_v``, when
-    not null) and each part in ``pcb_cutoffs`` on the cell's board whose sense pad
-    (``sense_pin``) is on the cell pin's net, or one two-pad part away from it (the
-    datasheet's series resistor on VDD). Each counts at its ``threshold_min_v``, the
-    datasheet's lowest detection voltage. A cutoff that senses neither is named and
-    not counted. With none, the gate fails: nothing cuts the cell off.
+    not null) and each fitted part in ``pcb_cutoffs`` on the cell's board whose
+    sense pad (``sense_pin``) is on the cell pin's net (``series_ref`` null), or
+    reaches it through the one part ``series_ref`` names (the datasheet's series
+    resistor on VDD): a fitted two-pad part, not the cell's own, with one pad on the
+    cell's net and the other on the sense pad's. A sense pad on a net another pin
+    of the cell sits on (its return) never counts. Each counts at its
+    ``threshold_min_v``, the datasheet's lowest detection voltage. A cutoff that
+    senses neither is named and not counted. With none, the gate fails: nothing
+    cuts the cell off.
+
+    (What slipped through, in review: the series part was inferred as any two-pad
+    part on the cell's net, the cell's own connector among them, so a protector
+    whose VDD sat on ground read as sensing the cell "through J2", and so did a
+    record that named a VSS pin.)
 
     Only the cell's board is read: a cutoff on another board of a two-board design
     reads as absent (a false fail), and the FET path a cutoff drives and a cutoff
@@ -372,43 +440,51 @@ def discharge_cutoff(ctx: GateContext) -> Verdict:
         pcm = cell["pcm_cutoff_min_v"]
         parts = []
         for i, rec in enumerate(cutoffs):
-            if not isinstance(rec, dict):
-                raise RecordError(f"pcb_cutoffs[{i}] is not a record")
-            missing = [f for f in ("ref", "value", "sense_pin", "threshold_min_v", "source")
-                       if f not in rec]
-            if missing:
-                raise RecordError(f"pcb_cutoffs[{i}] has no {', '.join(missing)}")
+            label = f"pcb_cutoffs[{i}]"
+            _checked(rec, label, CUTOFF_FIELDS)
             other, _board_of = _board(ctx, rec)
             if other != path:
-                parts.append((rec, None, f"{rec['ref']} is on another board ({os.path.basename(other)})"))
+                parts.append((rec, None, None, f"{rec['ref']} is on another board "
+                                               f"({os.path.basename(other)})"))
                 continue
-            parts.append((rec, _part(board, rec, f"pcb_cutoffs[{i}]", [rec["sense_pin"]]), ""))
+            series = None
+            if rec["series_ref"] is not None:
+                series = next((f for f in board.footprints if f.ref == str(rec["series_ref"])),
+                              None)
+                if series is None:
+                    raise RecordError(f"the {label} record is for another design: the board "
+                                      f"has no {rec['series_ref']}")
+            parts.append((rec, _part(board, rec, label, [rec["sense_pin"]]), series, ""))
     except RecordError as exc:
         return _error(gid, str(exc))
     except (TypeError, ValueError) as exc:
         return _error(gid, f"a record's number cannot be read: {exc}")
     cell_net = _net(cfp, cell["pin"])
-    # One two-pad part away: the nets a two-pad part joins to the cell's net.
-    near = {}
-    for f in board.footprints:
-        nets = [p.net for p in f.pads if p.number]
-        if len(nets) == 2 and cell_net in nets and nets[0] != nets[1]:
-            near[nets[1] if nets[0] == cell_net else nets[0]] = f.ref
+    # The cell's return: every net another pin of the cell sits on.
+    returns = {p.net for p in cfp.pads if p.number and p.net and p.net != cell_net}
     elements, ignored = [], []
     if pcm is not None:
         elements.append((float(pcm), f"the cell's PCM ({cfp.ref})"))
-    for rec, fp, why in parts:
+    for rec, fp, series, why in parts:
         if fp is None:
             ignored.append(why)
             continue
         sense = _net(fp, rec["sense_pin"])
-        if sense and sense == cell_net:
+        through = _through(series, cfp, cell_net, sense) if series is not None else ""
+        if not fp.fitted:
+            ignored.append(_not_fitted(fp))
+        elif sense in returns:
+            ignored.append(f"{fp.ref} pad {rec['sense_pin']} is on {sense}, the cell's return")
+        elif series is None and sense and sense == cell_net:
             elements.append((float(rec["threshold_min_v"]), f"{fp.ref} {fp.value}"))
-        elif sense in near:
+        elif series is not None and not through:
             elements.append((float(rec["threshold_min_v"]),
-                             f"{fp.ref} {fp.value} (through {near[sense]})"))
+                             f"{fp.ref} {fp.value} (through {series.ref})"))
+        elif through:
+            ignored.append(f"{fp.ref} does not sense the cell through {series.ref}: {through}")
         else:
-            ignored.append(f"{fp.ref} senses {sense or 'no net'}, not the cell's {cell_net}")
+            ignored.append(f"{fp.ref} senses {sense or 'no net'}, not the cell's {cell_net} "
+                           f"(series_ref is null)")
     ev = _evidence(ctx, "discharge_cutoff", {"board": path, "cell": cell,
                                              "cutoffs": cutoffs, "cell_net": cell_net,
                                              "min_v": min_v, "elements": elements,

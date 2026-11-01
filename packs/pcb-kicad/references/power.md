@@ -12,19 +12,30 @@ root; `pcb_board` when absent), and the ref and value it describes:
 | Key | Fields | Read by |
 |---|---|---|
 | `pcb_cell` | `ref`, `value`, `pin` (the positive pin), `min_v`, `pcm_cutoff_min_v` (null: no PCM) | `pcb.fuse_conductor`, `pcb.discharge_cutoff` |
-| `pcb_charger` | `ref`, `value`, `thermistor_pin` (null: none), `ntc_ref`, `safety_timer` | `pcb.charge_protection` |
+| `pcb_charger` | `ref`, `value`, `thermistor_pin` (null: none), `ntc_ref`, `safety_timer` (JSON true or false) | `pcb.charge_protection` |
 | `pcb_fuse` | `ref`, `value`, `trip_max_s` (`[[A, s], ...]`, the guaranteed maximum time to trip) | `pcb.fuse_conductor` |
 | `pcb_conductor` | `ref`, `value`, `pins`, `area_mm2` (one conductor), `start_c`, `limit_c` | `pcb.fuse_conductor` |
-| `pcb_cutoffs` | `[{ref, value, sense_pin, threshold_min_v}]`, empty for none | `pcb.discharge_cutoff` |
+| `pcb_cutoffs` | `[{ref, value, sense_pin, series_ref (null: the sense pin is on the cell's net), threshold_min_v}]`, empty for none | `pcb.discharge_cutoff` |
 
 A ref the board lacks, another value on that ref, or a named pin with no pad is an
 error: "the record is for another design". The board file is keyed, so a
-regenerated part stales the verdict, and a moved value refuses the record.
+regenerated part stales the verdict, and a moved value refuses the record. A
+record's own numbers are held to their kind: an area, a current or a trip time
+above 0, `safety_timer` a JSON true or false (the string `"false"` would read as
+true), and a `source` that says something, each cutoff's too.
+
+Two more refusals come from the board. A board `pcb.board_readable` would fail
+(newer than KiCad 9, older than KiCad 6, a track on an undefined net) is an error
+here too: a record may name a board the guard never reads. And a part marked do
+not populate or left out of the BOM (`dnp`, `exclude_from_bom`) is not on the built
+board: no rule counts it, and a charger, an NTC, a fuse, a cutoff or a series part
+marked so reads as missing.
 
 ## `pcb.charge_protection`
 
 Counts what is missing, against 0: (a) a THERM pin whose net holds a pad of the
-NTC, the NTC's two pads on two nets, and no other pad of the charger itself on the
+NTC, the NTC's other pad on a net some other part reaches (a pad on no net, or on
+a net of its own, senses nothing), and no other pad of the charger itself on the
 THERM net (a tie to its own VSS or VDD switches the input off, and a THERM on
 ground would otherwise read as wired to the NTC's ground side); (b) a safety
 timer. The MCP73831 has neither (DS20001984H): its SOT-23-5 pins are STAT, VSS,
@@ -52,8 +63,14 @@ no credit: a fault does not split evenly.
 ## `pcb.discharge_cutoff`
 
 The cutoffs are the cell's PCM (`pcm_cutoff_min_v`) and each part in `pcb_cutoffs`
-whose sense pad is on the cell pin's net, or one two-pad part from it (an
-AP9101C's VDD through its datasheet's 330 ohm resistor). The highest
+whose sense pad is on the cell pin's net (`series_ref` null), or reaches it through
+the part `series_ref` names (an AP9101C's VDD through its datasheet's 330 ohm
+resistor): a two-pad part, not the cell's own connector, one pad on the cell's
+net and the other on the sense pad's. A sense pad on the cell's return (a net
+another pin of the cell sits on) never counts. The series part is named, never
+inferred: inferred as any two-pad part on the cell's net, the cell's own
+connector made ground "one part away", and a protector with its VDD on ground,
+or a record that named a VSS pin, read as sensing the cell. The highest
 `threshold_min_v` (the datasheet's lowest detection voltage) must be at or above
 the cell's `min_v`. With none, the gate fails with no value: nothing cuts the cell
 off. The FET path the cutoff drives, a cutoff in firmware and a cutoff on another

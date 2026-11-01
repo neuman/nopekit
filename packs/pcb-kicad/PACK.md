@@ -21,18 +21,18 @@ circuit that works. Nothing here has seen the board powered.
 |---|---|---|---|
 | `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-9 file whose every track names a defined net (the guard) |
 | `pcb.pin_names` | 0 | sourced | pins the library gives one name (an ESD array's `I/O1`, a part's several `GND`) carry one net; the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
-| `pcb.land_pattern` | 0 | sourced | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function, one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
+| `pcb.land_pattern` | 0 | model-only | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function, one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
 | `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221; the detail names the hottest stretch |
 | `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing, at every severity by default, and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something |
 | `pcb.unconnected` | 1 | established | KiCad finds no connection the netlist asks for and the copper does not make |
 | `pcb.erc` | 1 | established | `kicad-cli sch erc` finds nothing in the schematic, at every severity by default |
 | `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement) |
 | `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the fab's published minimums as the only custom rules finds nothing past them |
-| `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know, or a `.meas tran` window outside the run, is refused first |
+| `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know (on a `.options` card or an `option` command), a measure two `.meas` cards define, or a `.meas tran` window outside the run, is refused first |
 | `pcb.enclosure_fit` | 1 | established | the board, every part's 3D model in place, shares no volume with the enclosure, and each part keeps its clearance (OpenCascade) |
 | `pcb.charge_protection` | 0 | sourced | the charger in `pcb_charger` has its THERM pin wired to the NTC (and not tied to its own pins), and a safety timer |
 | `pcb.fuse_conductor` | 0 | sourced | the fuse in `pcb_fuse` sits between the cell and the conductor in `pcb_conductor`, which IEC 60949 says does not reach its limit before the fuse's guaranteed trip time |
-| `pcb.discharge_cutoff` | 0 | sourced | the highest cutoff over the cell (its PCM, or a part sensing the cell's net directly or through one two-pad part) is at or above the cell's minimum voltage |
+| `pcb.discharge_cutoff` | 0 | sourced | the highest cutoff over the cell (its PCM, or a fitted part sensing the cell's net directly or through the series part its record names) is at or above the cell's minimum voltage |
 
 The tier-0 gates read the board with this pack's own reader (`gates/_kicad.py`,
 standard library only), so they run without KiCad, CI included. The tier-1 gates
@@ -47,12 +47,15 @@ each on a small board; the fit about 4 s) and skip where they do not.
 
 `pcb.pin_names`, `pcb.net_width` and `pcb.land_pattern` need `pcb.board_readable`:
 on a board this reader cannot vouch for they are not run, and read Skipped,
-`prerequisite failed`.
+`prerequisite failed`. The power rules read the boards their records name, which
+the guard may never read, so each makes the guard's own checks on its board and
+errors on one that fails them.
 
 **Which verdicts are this pack's own code.** KiCad decides DRC, ERC, parity and
 whether each custom rule is live; ngspice decides the number. This pack's code
 decides three things: pin-name agreement (a comparison of names the library
-gives), the land fit (`gates/_kicad.py`'s `rigid_fit`), and the three power rules
+gives), the land fit (`gates/_kicad.py`'s `rigid_fit`, and its limit: model-only),
+and the three power rules
 (pad-net lookups and IEC 60949's formula on records a person enters). Each has a
 known-bad control it fails on: `split_pin_pair`, `mirrored_land` (1.9 mm against
 0.3 mm), `ntc_unwired`, `thin_conductor` (the area at which the formula puts the
@@ -159,17 +162,24 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   the gate rather than pass it.
 - **Whether the SPICE deck is the circuit.** ngspice solves the deck it is given.
   The deck is someone's model, typed by hand; `pcb.spice` refuses a run that
-  dropped a line, an option name ngspice does not know and a `.meas tran` window
-  outside the run, and nothing more. Option VALUES (`method=gearr`) and `.meas ac`
+  dropped a line, an option name ngspice does not know, a command it does not
+  have, a measure defined twice and a `.meas tran` window outside the run, and
+  nothing more. A `set` of a variable ngspice never reads is a user variable to
+  it, and is not checked. Option VALUES (`method=gearr`) and `.meas ac`
   and `.meas dc` windows are not checked. Read the deck against the schematic.
 - **Every custom rule's every clause.** `pcb.drc` shows each rule selects
   something and each property it reads exists. A misspelled function inside a
-  negated or OR'd clause is not caught, a rule whose condition needs B (two items)
-  is shown live only when it fires on one item, and a real property that sits on
-  no item of this board (a via rule on a board with no vias) is a false error.
+  negated or OR'd clause is not caught; a rule whose condition reads B is probed
+  on the `&&` terms that read A alone, and one with no such term (`A.Type ==
+  'Pad' || B.Type == 'Pad'`) is shown live only when it fires on one item; live
+  means the rule selects an item, not that its constraint can apply to it (a
+  `track_width` rule that selects only vias is live); and a real property that
+  sits on no item of this board (a via rule on a board with no vias) is a false
+  error.
 - **The land beyond its centres.** `pcb.land_pattern` judges pad centres in the
   top view, one rigid fit; pad sizes, paste, courtyard and pads the drawing omits
-  (mounting pads) are not judged, and the drawing is a person's transcription.
+  (mounting pads) are not judged, so a pad of the wrong size, or turned 90 degrees
+  on the right centre, passes. The drawing is a person's transcription.
 - **The cell beyond its records.** The power rules are as true as the records a
   person enters from the datasheets. `pcb.fuse_conductor` judges the adiabatic
   short-circuit points only, no overload (I2 <= 1.45 Iz), one conductor carrying

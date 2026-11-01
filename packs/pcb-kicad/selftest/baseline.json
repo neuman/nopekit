@@ -36,7 +36,7 @@
                "source": "Bourns MF-MSMF series datasheet (REV. BE): MF-MSMF075, maximum time to trip 0.2 s at 8.0 A"},
   "pcb_conductor": {"board": "selftest/assets/lipo_charger.kicad_pcb", "ref": "J3", "value": "WIRE_OUT", "pins": ["1"], "area_mm2": 0.0810, "start_c": 70.0, "limit_c": 160.0,
                     "source": "28 AWG solid copper, 0.0810 mm^2 (ASTM B258), PVC insulated: 70 C in service, 160 C its short-circuit limit (IEC 60364-5-54's k = 115 pair)"},
-  "pcb_cutoffs": [{"board": "selftest/assets/lipo_charger.kicad_pcb", "ref": "U2", "value": "AP9101CK", "sense_pin": "2", "threshold_min_v": 2.85,
+  "pcb_cutoffs": [{"board": "selftest/assets/lipo_charger.kicad_pcb", "ref": "U2", "value": "AP9101CK", "sense_pin": "2", "series_ref": "R1", "threshold_min_v": 2.85,
                    "source": "Diodes Inc. AP9101C datasheet: VDD is pin 2 of SOT-23-5 (KiCad's AP9101CK symbol, read); a variant with a 2.90 V overdischarge detection voltage at +-50 mV, so 2.85 V at the least (recalled; re-read the option table before relying on it)"}],
 
   "_notes": {
@@ -65,9 +65,9 @@
     "pcb_pin_names_ignore": "Pin names pcb.pin_names never compares: unused-pin names, which may sit on any net, and KiCad's hidden-name placeholder. Every other repeated name must carry one net.",
     "pcb_land_drawings": "{ref: drawing record} for pcb.land_pattern, each a JSON file from the project root: {part, source, view: \"top\", y_axis: \"up\" (as printed) or \"down\" (as a KiCad footprint), pads: [{number, function, x, y, w, h}]} in mm. The baseline holds U1 to ST's recommended SOT23-6L land; KiCad's SOT-23-6 fits it to 0.0125 mm.",
     "pcb_cell": "The cell the power rules protect: its connector's ref, value and positive pin on the board named by board (else pcb_board), min_v (the datasheet's lowest discharge voltage) and pcm_cutoff_min_v (the lowest voltage the cell's own protection circuit opens at, null for none). The baseline's power records name lipo_charger.kicad_pcb, a board only these three tier-0 rules read.",
-    "pcb_charger": "The charger: ref, value, thermistor_pin (its THERM pin, null when the part has none), ntc_ref (the NTC wired to it) and safety_timer (true when the datasheet gives the part a charge timer). pcb.charge_protection.",
+    "pcb_charger": "The charger: ref, value, thermistor_pin (its THERM pin, null when the part has none), ntc_ref (the NTC wired to it) and safety_timer (JSON true or false: whether the datasheet gives the part a charge timer). pcb.charge_protection.",
     "pcb_fuse": "The fuse in the cell path: ref, value and trip_max_s, the datasheet's guaranteed [amperes, maximum seconds to trip] points. pcb.fuse_conductor judges each.",
     "pcb_conductor": "The conductor the fuse protects: ref, value, pins (all on the net the fuse feeds), area_mm2 of ONE conductor (parallel contacts get no credit), start_c (its temperature in service) and limit_c (what its insulation or rating allows in a fault). The verdict turns on limit_c: say where it comes from.",
-    "pcb_cutoffs": "The parts that cut the cell off: [{ref, value, sense_pin, threshold_min_v (the datasheet's lowest detection voltage), source}]. An empty list is a statement that there are none."
+    "pcb_cutoffs": "The parts that cut the cell off: [{ref, value, sense_pin, series_ref (the one two-pad part between the cell's net and the sense pin, such as the datasheet's series resistor on VDD; null when the sense pin sits on the cell's net), threshold_min_v (the datasheet's lowest detection voltage), source}]. An empty list is a statement that there are none."
   }
 }

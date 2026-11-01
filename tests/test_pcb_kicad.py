@@ -832,6 +832,36 @@ class NgspiceIsHeldToTheDeckAsWritten(unittest.TestCase):
         self.assertIn("tmep (in opts.inc", verdict.error)
         self.assertEqual(ran, 0)
 
+    def test_an_option_command_in_a_control_block_is_read_too(self):
+        """ngspice-42 takes ``option tmep=127`` in a .control block as silently as
+        on a card: 27 C, exit 0 (measured: 4.8325 V, against 4.62 V at 127 C)."""
+        control = lambda opt: (lambda text: text.replace(
+            ".end", f".control\n{opt}\nrun\n.endc\n.end"))
+        verdict, ran = self._spice("ctrl_typo", control("option tmep=127"))
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("without a word: tmep", verdict.error)
+        self.assertEqual(ran, 0)
+        verdict, ran = self._spice("ctrl_ok", control("options temp=127"))
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(ran, 1)
+
+    def test_a_measure_two_cards_define_is_refused(self):
+        """ngspice prints a value per card and the gate reads the first; a window
+        past the run put before a good one read 0 V past a guard that checked the
+        last (in review)."""
+        good = ".meas tran vbus_min MIN v(j2) from=0.5m to=4m"
+        verdict, ran = self._spice("twice", _meas(
+            ".meas tran vbus_min MIN v(j2) from=5m to=6m\n" + good))
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("2 .meas cards define 'vbus_min'", verdict.error)
+        self.assertEqual(ran, 0)
+        with open(os.path.join(self.dir, "meas.inc"), "w", encoding="utf-8") as fh:
+            fh.write(".meas tran vbus_min MIN v(j2) from=5m to=6m\n")
+        verdict, ran = self._spice("twice_inc", _before_tran(".include meas.inc"))
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("meas.inc", verdict.error)
+        self.assertEqual(ran, 0)
+
     def test_known_options_run(self):
         verdict, ran = self._spice("known", _before_tran(".options reltol=1e-3 temp=127"))
         self.assertEqual(verdict.outcome, "pass", verdict.render())
@@ -875,7 +905,11 @@ class NgspiceErrorsAreErrors(unittest.TestCase):
         registry = _registry()
         for name, edit in (("meas_op", _meas(".meas op vbus_min FIND v(j2)")),
                            ("meas_never", _meas(".meas tran vbus_min WHEN v(j2)=9")),
-                           ("find_past_end", _meas(".meas tran vbus_min FIND v(j2) AT=5m"))):
+                           ("find_past_end", _meas(".meas tran vbus_min FIND v(j2) AT=5m")),
+                           # A misspelled command in .control: printed and skipped,
+                           # exit 0 (measured).
+                           ("no_command", lambda t: t.replace(
+                               ".end", ".control\nopt temp=127\nrun\n.endc\n.end"))):
             with self.subTest(case=name):
                 verdict = _run(registry, "pcb.spice", root,
                                dict(_baseline(), pcb_spice_deck=_deck(root, name, edit)))
@@ -898,13 +932,28 @@ class AProbeIsWrittenForEveryRuleAndProperty(unittest.TestCase):
                             "(rule open (constraint track_width (min 0.1mm)))\n")
         probes = K.probe_rules(rules)
         self.assertEqual([(p["kind"], p["what"], p["reads_b"]) for p in probes],
-                         [("rule", "edge", True), ("rule", "plated", False),
+                         [("rule", "edge", False), ("rule", "plated", False),
                           ("rule", "open", False), ("property", "NetName", False),
                           ("property", "Type", False)])
         self.assertIn("(layer outer)", probes[0]["text"])
+        # A rule that reads B is probed on the terms that read A alone.
+        self.assertEqual(probes[0]["a_side"], "A.NetName == 'GND'")
+        self.assertIn("(condition \"A.NetName == 'GND'\")", probes[0]["text"])
         self.assertIn("(constraint assertion \"false\")", probes[1]["text"])
         self.assertNotIn("condition", probes[2]["text"])
         self.assertIn("A.Type == A.Type", probes[4]["text"])
+
+    def test_a_rule_with_no_a_side_is_only_shown_live(self):
+        rules = K.dru_rules("(rule pads (condition \"A.Type == 'Pad' || B.Type == 'Pad'\") "
+                            "(constraint clearance (min 0.1mm)))")
+        probe = K.probe_rules(rules)[0]
+        self.assertTrue(probe["reads_b"])
+        self.assertIsNone(probe["a_side"])
+
+    def test_conjuncts_keep_quotes_and_parentheses_whole(self):
+        self.assertEqual(K.conjuncts("(A.NetName == 'a && b' && (A.x || B.y) && B.z)"),
+                         ["A.NetName == 'a && b'", "(A.x || B.y)", "B.z"])
+        self.assertEqual(K.conjuncts("(A.a) || (B.b)"), ["(A.a) || (B.b)"])
 
     def test_a_file_that_does_not_parse_raises(self):
         with self.assertRaises(K.KicadFormatError):
@@ -984,6 +1033,11 @@ class EveryCustomRuleMustSelectSomething(unittest.TestCase):
             ("(rule usb_pair (condition \"A.NetName == 'DP' && !(A.Pin_Nmae == 'zz')\") "
              "(constraint track_width (min 0.2mm)))",
              "property Pin_Nmae: no item has it"),
+            # A two-item clearance rule with its net misspelled on the A side: in
+            # review it passed, its rule "not shown live" because it reads B.
+            ("(rule hv_gap (condition \"A.NetName == 'VBUSS' && B.NetName == 'GND'\") "
+             "(constraint clearance (min 3mm)))",
+             "its A side, A.NetName == 'VBUSS', selects no item"),
         )
         for rules, said in cases:
             with self.subTest(said=said):
@@ -1039,6 +1093,47 @@ class PinNamesComeFromTheSchematic(unittest.TestCase):
                 self.assertEqual(verdict.outcome, "skipped", verdict.render())
         self.assertIn("U1 I/O1: DM on 6, DP on 1",
                       self._pin_names(_strip_pin_names(split), schematic=True).detail)
+
+
+def _lib_name_schematic() -> str:
+    """The baseline schematic with U1's symbol cached under a ``lib_name``, as
+    eeschema writes a placed symbol that differs from its library: the cache
+    entry ``USBLC6-2SC6_1``, its units ``USBLC6-2SC6_1_<unit>_<style>``, and
+    ``(lib_name "USBLC6-2SC6_1")`` on the placed symbol (kicad-cli 9.0.9's ERC
+    reads it with 0 violations: measured)."""
+    with open(os.path.join(ASSETS, "esd_guard.kicad_sch"), encoding="utf-8") as fh:
+        tree = K.parse(fh.read())
+    for sym in K.children(K.child(tree, "lib_symbols"), "symbol"):
+        if str(sym[1]) == "Power_Protection:USBLC6-2SC6":
+            sym[1] = K.Q("USBLC6-2SC6_1")
+            for unit in K.children(sym, "symbol"):
+                unit[1] = K.Q(str(unit[1]).replace("USBLC6-2SC6_", "USBLC6-2SC6_1_", 1))
+    for sym in K.children(tree, "symbol"):
+        if str(K.value(sym, "lib_id")) == "Power_Protection:USBLC6-2SC6":
+            sym.insert(1, ["lib_name", K.Q("USBLC6-2SC6_1")])
+    return K.dump(tree) + "\n"
+
+
+class APartCachedUnderItsLibNameKeepsItsNames(unittest.TestCase):
+    """In review: names looked up by ``lib_id`` alone read none for a part KiCad
+    caches under ``lib_name``, and erased its pads' pinfunction with them, so the
+    ESD array's shorted I/O1 pair, which the pads alone had shown, passed."""
+
+    def test_the_split_pair_fails_with_and_without_pinfunction(self):
+        tree = K.load_tree(BOARD)
+        K.child(_pad(tree, "U1", "6"), "net")[1:] = [_net_code(tree, "DM"), K.Q("DM")]
+        split = K.dump(tree) + "\n"
+        for name, text in (("pinfunction", split), ("stripped", _strip_pin_names(split))):
+            with self.subTest(board=name):
+                root = tempfile.mkdtemp(prefix="nopekit-pcb-libname-")
+                self.addCleanup(shutil.rmtree, root, True)
+                board = _board_copy(root, text)
+                with open(os.path.join(root, "b.kicad_sch"), "w", encoding="utf-8") as fh:
+                    fh.write(_lib_name_schematic())
+                verdict = _run(_registry(), "pcb.pin_names", root,
+                               dict(_baseline(), pcb_board=board))
+                self.assertEqual(verdict.outcome, "fail", verdict.render())
+                self.assertIn("U1 I/O1: DM on 6, DP on 1", verdict.detail)
 
 
 @unittest.skipIf(os.name == "nt", "the stand-in kicad-cli is a #! script")
@@ -1265,6 +1360,14 @@ class TheLandIsPairedByFunction(unittest.TestCase):
         self.assertIn("y_axis", verdict.error)
 
 
+def _move_pad_net(tree, ref: str, number: str, net_name: str) -> None:
+    """Pad ``number`` of ``ref`` on a new net of its own, added to the table."""
+    nets = K.children(tree, "net")
+    node = ["net", str(max(int(n[1]) for n in nets) + 1), K.Q(net_name)]
+    tree.insert(tree.index(nets[-1]) + 1, node)
+    K.child(_pad(tree, ref, number), "net")[1:] = [node[1], K.Q(net_name)]
+
+
 class ThePowerRulesReadTheirRecords(unittest.TestCase):
     """The three LiPo rules: IEC 60949's arithmetic, and records held to the board."""
 
@@ -1332,6 +1435,88 @@ class ThePowerRulesReadTheirRecords(unittest.TestCase):
         verdict = self._run("pcb.fuse_conductor", **self._repoint(self._board(edit)))
         self.assertEqual(verdict.outcome, "fail", verdict.render())
         self.assertIn("F1 is not between the cell and J3", verdict.detail)
+
+    def test_a_cutoff_sensing_the_cells_return_never_counts(self):
+        """In review: the series part was inferred, the cell's own connector J2
+        (VCELL, GND) among the candidates, so a cutoff whose VDD sat on ground read
+        as sensing the cell "through J2", and so did a record naming a VSS pin."""
+        cut = self.params["pcb_cutoffs"][0]
+
+        def vdd_on_gnd(tree):
+            K.child(_pad(tree, "U2", "2"), "net")[1:] = [_net_code(tree, "GND"), K.Q("GND")]
+        moved = self._repoint(self._board(vdd_on_gnd))
+        for name, cutoffs in (
+                ("VSS pin named", [dict(cut, sense_pin="3")]),
+                ("series part is the cell", [dict(cut, series_ref="J2")]),
+                ("series part is the cap", [dict(cut, series_ref="C1")]),
+                ("no series part named", [dict(cut, series_ref=None)]),
+                ("VDD on ground", [dict(c, series_ref=None) for c in moved["pcb_cutoffs"]])):
+            with self.subTest(case=name):
+                params = moved if name == "VDD on ground" else {}
+                verdict = self._run("pcb.discharge_cutoff",
+                                    **dict(params, pcb_cutoffs=cutoffs))
+                self.assertEqual(verdict.outcome, "fail", verdict.render())
+                self.assertIn("nothing cuts the cell off", verdict.detail)
+
+    def test_a_part_not_fitted_is_not_counted(self):
+        """In review: dnp on TH1, U2 or R1 left each rule passing."""
+        for gid, ref in (("pcb.charge_protection", "TH1"), ("pcb.charge_protection", "U1"),
+                         ("pcb.discharge_cutoff", "U2"), ("pcb.discharge_cutoff", "R1"),
+                         ("pcb.fuse_conductor", "F1")):
+            for attr in K.NOT_FITTED:
+                with self.subTest(gate=gid, ref=ref, attr=attr):
+                    def edit(tree):
+                        K.child(_footprint(tree, ref), "attr").append(attr)
+                    verdict = self._run(gid, **self._repoint(self._board(edit)))
+                    self.assertEqual(verdict.outcome, "fail", verdict.render())
+                    self.assertIn(f"{ref} (", verdict.detail)
+                    self.assertIn("marked not fitted", verdict.detail)
+
+    def test_an_ntc_with_one_end_open_senses_nothing(self):
+        """In review: TH1's pad 2 on no net read as "two nets", a pass."""
+        for name, edit in (
+                ("no net", lambda t: _pad(t, "TH1", "2").remove(K.child(_pad(t, "TH1", "2"),
+                                                                       "net"))),
+                ("a net of its own", lambda t: _move_pad_net(t, "TH1", "2", "TH_FAR"))):
+            with self.subTest(case=name):
+                verdict = self._run("pcb.charge_protection", **self._repoint(self._board(edit)))
+                self.assertEqual(verdict.outcome, "fail", verdict.render())
+                self.assertIn("TH1's other pad", verdict.detail)
+
+    def test_a_record_read_loosely_errors(self):
+        """In review: "false" as a string read as a timer, a negative area squared
+        away, and a cutoff with an empty source counted."""
+        for gid, key, change, said in (
+                ("pcb.charge_protection", "pcb_charger", {"safety_timer": "false"},
+                 "give true or false"),
+                ("pcb.fuse_conductor", "pcb_conductor", {"area_mm2": -0.081},
+                 "area_mm2 must be above 0"),
+                ("pcb.fuse_conductor", "pcb_fuse", {"trip_max_s": [[8.0, 0.0]]},
+                 "must be above 0"),
+                ("pcb.discharge_cutoff", "pcb_cutoffs", {"source": ""},
+                 "pcb_cutoffs[0]'s source is empty"),
+                ("pcb.discharge_cutoff", "pcb_cutoffs", {"series_ref": "R9"},
+                 "the board has no R9")):
+            with self.subTest(gate=gid, change=change):
+                rec = self.params[key]
+                rec = ([dict(rec[0], **change)] if isinstance(rec, list)
+                       else dict(rec, **change))
+                verdict = self._run(gid, **{key: rec})
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn(said, verdict.error)
+
+    def test_a_board_the_guard_would_fail_errors(self):
+        """A record may name a board pcb.board_readable never reads (pcb_board is
+        another board), so each rule makes the guard's checks itself."""
+        def newer(tree):
+            K.child(tree, "version")[1] = "20991231"
+        records = self._repoint(self._board(newer))
+        for gid in ("pcb.charge_protection", "pcb.fuse_conductor", "pcb.discharge_cutoff"):
+            with self.subTest(gate=gid):
+                verdict = self._run(gid, **records)
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn("not one this reader can vouch for", verdict.error)
+                self.assertIn("newer than", verdict.error)
 
     def test_a_pcm_alone_below_the_minimum_fails_and_says_so(self):
         cell = dict(self.params["pcb_cell"], min_v=3.0, pcm_cutoff_min_v=2.75)

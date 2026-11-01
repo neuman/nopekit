@@ -109,7 +109,7 @@
     },
     {
       "id": "pcb.schematic_from_board",
-      "basis": "sourced",
+      "basis": "model-only",
       "description": "Writes a KiCad schematic from a board's pad nets on KiCad's stock symbols, so ERC and parity can run; parity checks it once adopted.",
       "run": "proposers/schematic_from_board.py"
     }
