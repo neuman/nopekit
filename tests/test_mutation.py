@@ -2490,7 +2490,11 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
         # 79, and fdm-print's fdm.slice and cad-solid's cad.clearance (0.2.0).
         self.assertEqual(sum(kinds.values()) + unavailable, 81, kinds)
         if not unavailable:
-            self.assertEqual(dict(kinds), {"conclusive": 45, "none-conclusive": 7,
+            # fdm.slice lands on max_bridge_mm; no walk of cad.clearance lands.
+            # The split was left at 79 when they landed: it is read only where
+            # every tool is present, and a run with no slicer or ccx on PATH
+            # never reads it.
+            self.assertEqual(dict(kinds), {"conclusive": 46, "none-conclusive": 8,
                                            "no-boundary": 27})
 
     def test_the_planted_drifted_limit_is_one_hit(self):
