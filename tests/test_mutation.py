@@ -2428,7 +2428,20 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     So on aero-openfoam's four SOLVE-tier gates it walks only the leaves
     `SLOW_WALK` names, and asserts and prints every leaf it leaves out: with
     every tool present the whole class took 1 h 48 min (6467 s, 2026-10-24),
-    the walk of each leaf of every other gate as before. Measured so:
+    the walk of each leaf of every other gate as before. Two packs came after
+    that count and grew it to 87 gates. topology-simp (61f2e18) adds four:
+    simp.volume has a conclusive mutation (``simp_volume_limit_mm3``) and
+    simp.case_valid no boundary; its two ccx gates, simp.displacement and
+    simp.stress, have not been walked on a machine with ccx, so the measured
+    counts below leave them out and go red where ccx is present until someone
+    walks them and adds what they find. firmware-zmk adds four: zmk.ci_step,
+    zmk.build and zmk.wakeup_source state no value (no boundary), and
+    zmk.tx_power passes 0 dBm against 3.86 with no orderable leaf it reads
+    (walked with none): the baseline's one leaf is the workflow's path, and
+    its limit is the claim's. Measured with zmk-west on PATH, 4 min
+    (2026-11-01). What slipped through: the firmware-zmk branch left this
+    count at 79, and the test was already red on main, so nothing said so.
+    Measured so:
     aero.converged and aero.mesh_independence have a conclusive mutation
     (``aero_iter_unc_max_pct``, ``aero_gci_max_pct``), aero.wall_treatment
     and aero.drag_area walked with none (no leaf states what they judge
@@ -2487,10 +2500,13 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
             with self.subTest(gate=gid):
                 self.assertEqual((walked, left),
                                  (SLOW_WALK[gid].walked, SLOW_WALK[gid].not_walked))
-        self.assertEqual(sum(kinds.values()) + unavailable, 79, kinds)
+        self.assertEqual(sum(kinds.values()) + unavailable, 87, kinds)
         if not unavailable:
-            self.assertEqual(dict(kinds), {"conclusive": 45, "none-conclusive": 7,
-                                           "no-boundary": 27})
+            # 45/7/27 before topology-simp and firmware-zmk; +1/0/+1 for
+            # simp.volume and simp.case_valid; 0/+1/+3 for firmware-zmk. Without
+            # simp.displacement and simp.stress, which nobody has walked (above).
+            self.assertEqual(dict(kinds), {"conclusive": 46, "none-conclusive": 8,
+                                           "no-boundary": 31})
 
     def test_the_planted_drifted_limit_is_one_hit(self):
         spec = GateSpec(id="beam.drifted", claims=["x"], tier=Tier.INSTANT,
