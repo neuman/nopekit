@@ -12,7 +12,9 @@ What slipped through before 0.2.0:
 - Cast from every face, a ray from a small face beside an acute edge crossed the
   corner and hit the face on the other side of the edge almost at once: every part
   with such an edge read about 0 mm, set by the triangle size. A hit counts only on
-  a face that opposes the one the ray left, within 30 deg.
+  nonadjacent surfaces at every draft angle; the acute-corner exclusion is only
+  between adjacent coplanar groups. The old 30-degree filter passed a thin rib
+  drafted 16-20 degrees per side at the supporting block's 5 mm thickness.
 - Nothing measured a clearance. ``cad.clash`` reads a 0.01 mm gap and an 8 mm gap
   both as PASS (no shared material, as PACK.md says), and a clearance claim tagged
   ``fit`` read Checked on that pass. ``cad.clearance`` measures the gap with
@@ -153,6 +155,40 @@ class AnEdgeIsNotAWall(_Case):
         v = self._run(self.GATE, {"plate": _box((20.0, 20.0, 0.5), (0.0, 0.0, 0.0))})
         self.assertEqual(v.outcome, "fail", v.render())
         self.assertAlmostEqual(v.measured, 0.5, places=3)
+
+
+class ATaperedRibIsStillAWall(_Case):
+    GATE = "cad.wall_thickness"
+
+    def test_draft_past_fifteen_degrees_does_not_erase_the_rib(self):
+        if self._skipped_here():
+            return
+        import importlib.util
+        import math
+        import numpy as np
+        import trimesh
+
+        if importlib.util.find_spec("manifold3d") is None:
+            self.skipTest("manifold3d absent: cannot build the rib/block union")
+        # The confirmed false pass: the 0.2-1.2 mm rib's two flanks have normals
+        # outside the old 30-degree filter, which returned the 5 mm block alone.
+        for draft in (16.0, 20.0):
+            with self.subTest(draft=draft):
+                h = (1.2 - 0.2) / 2 / math.tan(math.radians(draft))
+                xz = [(-0.6, 0), (0.6, 0), (0.1, h), (-0.1, h)]
+                vertices = [(x, y, 5.0 + z) for y in (-10.0, 10.0) for x, z in xz]
+                rib = trimesh.convex.convex_hull(np.array(vertices))
+                block = _box((20.0, 30.0, 5.0), (0.0, 0.0, 2.5))
+                mesh = trimesh.boolean.union([block, rib], engine="manifold")
+                for subdivisions in range(3):
+                    with self.subTest(subdivisions=subdivisions):
+                        self.assertTrue(mesh.is_volume)
+                        v = self._run(self.GATE, {"ribbed": mesh},
+                                      {"process_min_wall_mm": 1.0})
+                        self.assertEqual(v.outcome, "fail", v.render())
+                        self.assertLess(v.measured, 1.0)
+                        self.assertTrue(v.locators)
+                    mesh = mesh.subdivide()
 
 
 #: The declared pair every clearance case measures.

@@ -839,8 +839,8 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any,
     trimesh's own ray engines are used when one of them is importable. Neither is
     guaranteed: the pure-python engine culls candidates with an ``rtree`` index and
     the fast one needs an embree binding, and NEITHER is a dependency of trimesh.
-    On a machine with just trimesh and numpy — exactly what this gate declares in
-    ``requires_python`` — ``mesh.ray`` raises ``ModuleNotFoundError`` from inside the
+    On a machine with trimesh and numpy but neither ray engine, ``mesh.ray``
+    raises ``ModuleNotFoundError`` from inside the
     property, which reaches the spine as a CRASHED gate. A crash settles nothing and
     reads as "the design is wrong" rather than "the tool is missing", so the gate has
     to be able to do this itself with what it declared.
@@ -911,26 +911,39 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any,
     return locations, index_ray, which[index_ray]
 
 
-#: A ray's hit counts as the far side of a wall only when the hit face's normal is
-#: within this angle of the opposite of the start face's normal. What slipped
-#: through without it: a ray cast from a small face beside an acute edge crosses the
-#: corner and hits the face on the other side of the edge almost at once, so the
-#: wall read about 0 mm at every acute edge, and how near 0 depended on the size of
-#: the triangle, not on the part. Measured on a printed part of 53,706 faces: 0.000
-#: mm at (81.95, 3.06, -0.45), a hit 0.0001 mm away on a face that shares an edge
-#: with the start face, the two normals 141 deg apart (a 39 deg edge); the prior
-#: survey found 3 of 4 reported minima were such hits (normals 104, 123 and 149 deg
-#: apart). 30 deg is the prior plan's. Measured at 45, 30, 20 and 10 deg: the pack's
-#: four baseline solids (thinnest 3.000 mm) and a 364-face lid (0.379 mm, a real wall)
-#: read the same at all four. *Rejected:* 45 deg (the 39 deg edge, normals 141 deg
-#: apart, still counts: 0.000 mm); 10 deg (nothing more is removed on that corpus,
-#: and a wall whose two faces each lean up to 15 deg from parallel is still a
-#: wall); Blender's 3D-Print Toolbox, which the prior plan said to try first: its
-#: ``bmesh_check_thick_object`` casts the same backward ray with no filter on the
-#: face it hits, so it flags the same edges, from 6 random points per face, so two
-#: runs differ (read in its ``lib.py``; the gate would also need Blender beside it).
+#: Adjacent surfaces this close to opposed still count as a thin fold. The
+#: original 30-degree rule removed false thin spots at acute corners (0.000 mm
+#: across a 39-degree edge), but applied to EVERY hit it also erased a real rib:
+#: 0.2-1.2 mm wide, drafted 16-20 degrees per side, on a 20x30x5 mm block. It
+#: reported the block's 5 mm and passed a 1 mm minimum. Angle alone cannot tell
+#: that rib's flanks from a corner. Restrict the corner exclusion to surfaces
+#: that actually share an edge; nonadjacent flanks count at every draft angle.
+#: Retain 30 degrees only for the old thin-fold exception at a shared edge.
 OPPOSED_DEG = 30.0
 OPPOSED_COS = math.cos(math.radians(OPPOSED_DEG))
+
+
+def _wall_hits(mesh: Any, start: Any, hit: Any) -> Any:
+    """Keep walls; exclude rays across an acute edge of adjacent planar surfaces.
+
+    trimesh groups coplanar triangles and supplies their edge adjacency. Using
+    individual triangle neighbours would miss the same corner after subdivision.
+    The library's graph engine is declared on the gate, never replaced by a
+    second implementation here. Rejected as a replacement measure: trimesh's
+    shrinking sphere, which reads 0.244 mm at the harmless acute corner of the
+    subdivided 10 mm prism. It measures local reach, including that corner.
+    """
+    import numpy as np
+
+    surface = np.arange(len(mesh.faces))
+    for facet in mesh.facets:
+        surface[facet] = facet[0]
+    adjacent = {tuple(pair) for pair in np.sort(surface[mesh.face_adjacency], axis=1)}
+    pairs = np.sort(np.column_stack((surface[start], surface[hit])), axis=1)
+    across_edge = np.array([tuple(pair) in adjacent for pair in pairs], dtype=bool)
+    normals = np.asarray(mesh.face_normals)
+    opposed = (normals[start] * normals[hit]).sum(axis=1) <= -OPPOSED_COS
+    return opposed | ~across_edge
 
 
 @gate(
@@ -940,6 +953,7 @@ OPPOSED_COS = math.cos(math.radians(OPPOSED_DEG))
     tier=Tier.BUILD,
     settles="minimum wall thickness",
     requires_python=["trimesh", "numpy"],
+    requires_one_of=["python:scipy", "python:networkx"],  # trimesh.facets graph engine
     # Prerequisite cad.watertight (P2.2-D12): ray casting through an open mesh
     #    leaks out of the hole and reports a thickness that is not there.
     #    Isolated: the guard passes this gate's own known-bad control
@@ -959,9 +973,10 @@ def wall_thickness(ctx: GateContext) -> Verdict:
 
     Method, stated plainly because its limits matter more than its number: from the
     centroid of EVERY facet a ray is cast along the inward normal, and the distance
-    to the first hit is the local thickness when the face it hits opposes the face
-    it left (within ``OPPOSED_DEG``); a hit across an acute edge is no wall and the
-    ray measures nothing. The minimum over all of them is reported.
+    to the first hit is the local thickness. Only a hit between adjacent planar
+    surfaces across an acute edge is excluded (opposed thin folds still count).
+    Tapered flanks that do not share an edge count regardless of their angle.
+    The minimum over all retained hits is reported.
 
     Every facet, never a subset. What slipped through while a 4000-ray budget
     cast from evenly spaced facets above that count (``wall_samples``): a
@@ -1058,15 +1073,12 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         # assembly.
         travel = np.linalg.norm(
             np.asarray(locations, dtype=float) - origins[index_ray], axis=1)
-        # A wall is two faces that look away from each other: the hit face must
-        # oppose the face the ray left (OPPOSED_COS says what slipped through).
-        opposed = (normals[index_ray] * normals[index_tri]).sum(axis=1) <= -OPPOSED_COS
-        real = (travel > 10.0 * eps) & opposed
+        real = (travel > 10.0 * eps) & _wall_hits(mesh, index_ray, index_tri)
         if not real.any():
             return _skipped(
                 "cad.wall_thickness",
-                f"no inward ray on part {name!r} reached a face that opposes its own "
-                f"within {OPPOSED_DEG:g} deg — the sampler measured nothing",
+                f"no inward ray on part {name!r} crossed a wall after excluding "
+                "acute-edge hits — the sampler measured nothing",
             )
         distances = travel[real] + eps
         hit_rows = np.asarray(index_ray)[real]

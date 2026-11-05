@@ -153,11 +153,13 @@ assume, and the assumptions are expensive.
   centroid of EVERY facet, along its normal. (It cast from an evenly spaced 4000 of
   them on a bigger part until 0.2.0, and a watertight 20,492-face part whose 0.5 mm
   plate had its 12 faces between the samples read PASS at 59.983 mm against a
-  1.0 mm minimum.) A hit counts only on a face that opposes the one the ray left,
-  within 30 deg: cast from every face, a ray beside an acute edge crossed the corner
-  and read about 0 mm at every such edge (0.000 mm on a 53,706-face part, across a
-  39 deg edge). A fold, two faces on one edge with opposed normals, still reads 0,
-  because it is a wall with no material. A thin region whose thinnest direction is
+  1.0 mm minimum.) Rays across an acute edge between adjacent planar surfaces are
+  excluded: they read about 0 mm at an ordinary corner. trimesh groups coplanar
+  triangles and supplies their adjacency, so subdivision does not change which
+  surfaces share an edge. Nonadjacent flanks count at every draft angle. The old
+  30-degree normal filter discarded a 0.2-1.2 mm rib drafted 16-20 degrees per side
+  and passed at its supporting block's 5 mm. That angle now applies only to the
+  thin-fold exception at a shared edge: nearly opposed surfaces still count. A thin region whose thinnest direction is
   normal to no facet is missed, and a coarsely tessellated curve **under**-reports by
   about `t*(1 - cos(pi/N))` for a wall of thickness `t` across an N-sided
   tessellation — 1.9% of the wall at N=16, 7.6% at N=8 — because the ray leaves one
@@ -272,10 +274,14 @@ every fixture against an empty projection as well as the baseline, which is the
 sealing probe `tests/test_packs.py::ControlsAreSealed` applies to the declared
 control only.
 
+`cad.wall_thickness` also needs **SciPy or NetworkX** for trimesh's coplanar
+surface groups (`pip install scipy`). Without either graph engine it reads
+Skipped. The groups keep an acute-corner exclusion from erasing a tapered wall.
+
 `cad.wall_thickness` casts its own rays. trimesh's ray engines are not dependencies
 of trimesh: the pure-python one culls candidates with an `rtree` index and the fast
-one needs an embree binding, so on a machine carrying only what this gate declares
-(`trimesh`, `numpy`) `mesh.ray` raises `ModuleNotFoundError` from inside a property
+one needs an embree binding, so without either `mesh.ray` raises
+`ModuleNotFoundError` from inside a property
 and the gate CRASHES. A crash settles nothing and reads as "the design is wrong"
 rather than "the tool is missing", so the gate uses an accelerated engine when one
 is importable and otherwise falls back to its own vectorised Möller-Trumbore cast —
