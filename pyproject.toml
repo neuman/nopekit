@@ -62,4 +62,7 @@ nopekit = [
 "nopekit.bundled" = [
   "**/*.py", "**/*.json", "**/*.md", "**/*.txt",
   "**/*.stl", "**/*.step", "**/*.csv", "**/*.yaml", "**/*.yml",
+  # firmware-zmk: the wrapper its gates compare byte for byte (no extension), and
+  # its baseline's ZMK files. Without them every build gate errors from the wheel.
+  "**/bin/*", "**/*.keymap", "**/*.conf", "**/LICENSE",
 ]

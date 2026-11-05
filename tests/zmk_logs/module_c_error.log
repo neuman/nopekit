@@ -1,0 +1,40 @@
+-- west build: generating a build system
+Loading Zephyr default modules (Zephyr base).
+-- Application: <repo>/firmware/zmk-config/zmk/app
+-- CMake version: 3.31.6
+-- Found Python3: /usr/bin/python3 (found suitable version "3.12.3", minimum required is "3.8") found components: Interpreter
+-- Cache files will be written to: /tmp/zephyr
+-- Zephyr version: 3.5.0 (<repo>/firmware/zmk-config/zephyr)
+-- Found west (found suitable version "1.5.0", minimum required is "0.14.0")
+-- Adding ZMK config directory as board root: <repo>/firmware/zmk-config/config
+CMake Deprecation Warning at keymap-module/modules/modules.cmake:53 (message):
+  The `config/boards` folder is deprecated.  Please use a module instead.
+  See https://zmk.dev/docs/development/hardware-integration/new-shield and
+  https://zmk.dev/docs/development/module-creation for more information.
+Call Stack (most recent call first):
+[... 320 lines left out of this excerpt ...]
+[276/322] Building C object modules/hal_nordic/nrfx/CMakeFiles/modules__hal_nordic__nrfx.dir<repo>/firmware/zmk-config/modules/hal/nordic/nrfx/drivers/src/nrfx_clock.c.obj
+[277/322] Building C object modules/tmag5273_nub/CMakeFiles/..__..__zmk-modules__tmag5273_nub.dir/src/tmag5273_nub.c.obj
+FAILED: modules/tmag5273_nub/CMakeFiles/..__..__zmk-modules__tmag5273_nub.dir/src/tmag5273_nub.c.obj 
+ccache /opt/zephyr-sdk-0.16.9/arm-zephyr-eabi/bin/arm-zephyr-eabi-gcc -DKERNEL -DNRF52840_XXAA -DPICOLIBC_INTEGER_PRINTF_SCANF -D_FORTIFY_SOURCE=1 -D_POSIX_C_SOURCE=200809 -D__LINUX_ERRNO_EXTENSIONS__ -D__PROGRAM_START -D__ZEPHYR__=1 -I<repo>/firmware/zmk-config/zephyr/include -I<repo>/firmware/zmk-config/build/zephyr/include/generated -I<repo>/firmware/zmk-config/zephyr/soc/arm/nordic_nrf/nrf52 -I<repo>/firmware/zmk-config/zephyr/soc/arm/nordic_nrf/common/. -I<repo>/firmware/zmk-config/zephyr/subsys/usb/device -I<repo>/firmware/zmk-config/zephyr/subsys/bluetooth/controller/ll_sw/nordic/hal/nrf5/nrfx_glue -I<repo>/firmware/zmk-config/zephyr/subsys/bluetooth -I<repo>/firmware/zmk-config/zephyr/subsys/settings/include -I<repo>/firmware/zmk-config/modules/hal/cmsis/CMSIS/Core/Include -I<repo>/firmware/zmk-config/zephyr/modules/cmsis/. -I<repo>/firmware/zmk-config/modules/hal/nordic/nrfx -I<repo>/firmware/zmk-config/modules/hal/nordic/nrfx/drivers/include -I<repo>/firmware/zmk-config/modules/hal/nordic/nrfx/mdk -I<repo>/firmware/zmk-config/zephyr/modules/hal_nordic/nrfx/. -I<repo>/firmware/zmk-config/modules/crypto/tinycrypt/lib/include -I<repo>/firmware/zmk-config/zmk/app/module/include -I<repo>/firmware/zmk-config/zmk/app/module/drivers/sensor/battery/. -fno-strict-aliasing -Os -imacros <repo>/firmware/zmk-config/build/zephyr/include/generated/autoconf.h -fno-printf-return-value -fno-common -g -gdwarf-4 -fdiagnostics-color=always -mcpu=cortex-m4 -mthumb -mabi=aapcs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mfp16-format=ieee --sysroot=/opt/zephyr-sdk-0.16.9/arm-zephyr-eabi/arm-zephyr-eabi -imacros <repo>/firmware/zmk-config/zephyr/include/zephyr/toolchain/zephyr_stdint.h -Wall -Wformat -Wformat-security -Wno-format-zero-length -Wno-pointer-sign -Wpointer-arith -Wexpansion-to-defined -Wno-unused-but-set-variable -Werror=implicit-int -fno-pic -fno-pie -fno-asynchronous-unwind-tables -ftls-model=local-exec -fno-reorder-functions --param=min-pagesize=0 -fno-defer-pop -fmacro-prefix-map=<repo>/firmware/zmk-config/zmk/app=CMAKE_SOURCE_DIR -fmacro-prefix-map=<repo>/firmware/zmk-config/zephyr=ZEPHYR_BASE -fmacro-prefix-map=<repo>/firmware/zmk-config=WEST_TOPDIR -ffunction-sections -fdata-sections --specs=picolibc.specs -std=c99 -Wfatal-errors -MD -MT modules/tmag5273_nub/CMakeFiles/..__..__zmk-modules__tmag5273_nub.dir/src/tmag5273_nub.c.obj -MF modules/tmag5273_nub/CMakeFiles/..__..__zmk-modules__tmag5273_nub.dir/src/tmag5273_nub.c.obj.d -o modules/tmag5273_nub/CMakeFiles/..__..__zmk-modules__tmag5273_nub.dir/src/tmag5273_nub.c.obj -c <repo>/firmware/zmk-modules/tmag5273_nub/src/tmag5273_nub.c
+<repo>/firmware/zmk-modules/tmag5273_nub/src/tmag5273_nub.c:300:21: error: expected expression before ';' token
+  300 | int nopekit_probe = ;
+      |                     ^
+compilation terminated due to -Wfatal-errors.
+[278/322] Linking C static library zephyr/drivers/kscan/libdrivers__kscan.a
+[279/322] Building C object zephyr/kernel/CMakeFiles/kernel.dir/main_weak.c.obj
+[280/322] Building C object zephyr/kernel/CMakeFiles/kernel.dir/busy_wait.c.obj
+[281/322] Building C object modules/hal_nordic/nrfx/CMakeFiles/modules__hal_nordic__nrfx.dir<repo>/firmware/zmk-config/modules/hal/nordic/nrfx/drivers/src/nrfx_twi_twim.c.obj
+[282/322] Building C object zephyr/kernel/CMakeFiles/kernel.dir/banner.c.obj
+[283/322] Building C object zephyr/kernel/CMakeFiles/kernel.dir/errno.c.obj
+[284/322] Building C object modules/module/drivers/sensor/battery/CMakeFiles/..__zmk__app__module__drivers__sensor__battery.dir/battery_voltage_divider.c.obj
+[285/322] Building C object zephyr/kernel/CMakeFiles/kernel.dir/kheap.c.obj
+[286/322] Building C object zephyr/kernel/CMakeFiles/kernel.dir/fatal.c.obj
+[287/322] Building C object zephyr/kernel/CMakeFiles/kernel.dir/mem_slab.c.obj
+[288/322] Building C object zephyr/kernel/CMakeFiles/kernel.dir/init.c.obj
+[289/322] Building C object zephyr/drivers/usb/device/CMakeFiles/drivers__usb__device.dir/usb_dc_nrfx.c.obj
+[290/322] Building C object modules/hal_nordic/nrfx/CMakeFiles/modules__hal_nordic__nrfx.dir<repo>/firmware/zmk-config/modules/hal/nordic/nrfx/drivers/src/nrfx_usbd.c.obj
+[291/322] Building C object modules/hal_nordic/nrfx/CMakeFiles/modules__hal_nordic__nrfx.dir<repo>/firmware/zmk-config/modules/hal/nordic/nrfx/drivers/src/nrfx_twim.c.obj
+[292/322] Building C object modules/hal_nordic/nrfx/CMakeFiles/modules__hal_nordic__nrfx.dir<repo>/firmware/zmk-config/modules/hal/nordic/nrfx/drivers/src/nrfx_gpiote.c.obj
+ninja: build stopped: subcommand failed.
+FATAL ERROR: command exited with status 1: /usr/local/bin/cmake --build <repo>/firmware/zmk-config/build

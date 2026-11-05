@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# firmware-zmk's baseline CI: ZMK's corne, left half, on a nice!nano v2, built as a
+# self-contained step. zmk.ci_step reads the one `west build` step below and
+# config/west.yml; zmk.build runs that step's own argv. (GitHub reads workflows from
+# .github/workflows/; this one sits in github/workflows/ because nopekit keys a
+# pack's controls by a walk of selftest/ that skips dot-directories.)
+name: Build corne
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: zmkfirmware/zmk-build-arm:stable
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: West init + update
+        run: |
+          west init -l config
+          west update
+          west zephyr-export
+
+      - name: Build corne_left
+        run: west build -s zmk/app -p always -b nice_nano_v2 -- -DSHIELD=corne_left -DZMK_CONFIG="${GITHUB_WORKSPACE}/config"

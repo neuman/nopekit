@@ -1,0 +1,66 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# zmk-west: the one edge between firmware-zmk and ZMK's build image.
+#
+#   zmk-west --init <dir>              make a ZMK v0.3.0 west workspace in <dir> (network
+#                                      on, about 80 s and 2.1 GB) and copy this file into it
+#   zmk-west <project> <out> <cmd...>  run <cmd> in the image on that workspace: no network,
+#                                      the workspace and <project> read-only, <out> writable,
+#                                      the container named zmk-west-<basename of out>
+#   zmk-west --self                    print this file's bytes
+#
+# The workspace is the directory this file's real path is in, so a symlink on PATH
+# finds it from any HOME. The gates compare this file's bytes (--self) with the
+# pack's own bin/zmk-west, so the image digest, the mounts and --network none below
+# are what every verdict was made with. --self, never an open by the gate: an open
+# keyed the verdict by where the workspace sits on each machine.
+#
+# --name: a gate that times out kills only this process, the docker client, and
+# the container went on building into a directory the gate then removed. The gate
+# kills the container by this name.
+#
+# --mount, never -v: -v makes a missing source a root-owned empty directory and
+# exits 0; --mount exits 125. XDG_CACHE_HOME: without it Zephyr writes its cache
+# under the read-only ZEPHYR_BASE and CMake stops after the version line.
+# CMAKE_PREFIX_PATH: without it find_package(Zephyr) fails. <project> and <out>
+# keep their host paths inside, so CI's absolute ${GITHUB_WORKSPACE} paths and the
+# log's paths are host paths; -w /zmk makes CI's -s zmk/app resolve as in CI's
+# west topdir.
+set -e
+# zmkfirmware/zmk-build-arm:stable as pulled when the pack was written (October
+# 2026; image created 2025-10-02T17:07:35Z, Zephyr SDK 0.16.9). Pinned, not the
+# floating :stable that CI runs: a later push would change the compiler under a
+# cached verdict. Held equal to gates/_zmk.py's IMAGE by tests/test_firmware_zmk.py.
+IMAGE=zmkfirmware/zmk-build-arm@sha256:edb1c953438c6f720ddb79c3762f3972013b7fbbaf4fff3592fc869983e7afc5
+ZMK_REVISION=v0.3.0
+self=$(readlink -f "$0")
+WS=$(dirname "$self")
+if [ "$1" = "--self" ]; then
+    exec cat "$self"
+fi
+if [ "$1" = "--init" ]; then
+    [ -n "$2" ] || { echo "usage: zmk-west --init <dir>" >&2; exit 2; }
+    mkdir -p "$2"
+    dir=$(readlink -f "$2")
+    docker run --rm --pull=never --user "$(id -u):$(id -g)" -e HOME=/tmp \
+        --mount "type=bind,src=$dir,dst=/zmk" -w /zmk "$IMAGE" sh -c \
+        "west init -m https://github.com/zmkfirmware/zmk --mr $ZMK_REVISION --mf app/west.yml . && west update --narrow -o=--depth=1 && west config zephyr.base zephyr"
+    cp "$self" "$dir/zmk-west"
+    chmod 755 "$dir/zmk-west"
+    echo "zmk-west: workspace ready; put $dir/zmk-west on PATH"
+    exit 0
+fi
+if [ ! -d "$WS/.west" ]; then
+    echo "zmk-west: no ZMK workspace at $WS; run zmk-west --init <dir>" >&2
+    exit 127
+fi
+[ $# -ge 3 ] || { echo "usage: zmk-west <project> <out> <cmd...>" >&2; exit 2; }
+project=$1; out=$2; shift 2
+name=zmk-west-$(basename "$out" | tr -c 'A-Za-z0-9_.\n-' '-')
+exec docker run --rm --pull=never --network=none --name "$name" --user "$(id -u):$(id -g)" \
+    -e HOME=/tmp -e XDG_CACHE_HOME=/tmp \
+    -e CMAKE_PREFIX_PATH=/zmk/zephyr/share/zephyr-package/cmake \
+    --mount "type=bind,src=$WS,dst=/zmk,readonly" \
+    --mount "type=bind,src=$project,dst=$project,readonly" \
+    --mount "type=bind,src=$out,dst=$out" \
+    -w /zmk "$IMAGE" "$@"
