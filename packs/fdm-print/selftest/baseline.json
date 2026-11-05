@@ -39,6 +39,12 @@
   "max_bridge_mm": 30.0,
   "max_cantilever_mm": 2.0,
 
+  "slicer_presets": {
+    "machine": "selftest/orca/machine.json",
+    "process": "selftest/orca/process.json",
+    "filament": "selftest/orca/filament.json"
+  },
+
   "_aliases": {
     "part_bbox_mm": ["bbox_mm", "bbox", "footprint_mm"],
     "part_volume_mm3": ["volume_mm3", "solid_volume_mm3"],
@@ -101,6 +107,7 @@
     "overhang_area_allow_frac": "Fraction of total surface area allowed past the overhang limit, 0-1. 0.005 is small enough that a real unsupported region trips it and large enough that tessellation slivers do not.",
     "bridge_ceiling_deg": "Angle at which a downward face stops being an overhang to support and becomes a ceiling to bridge, degrees. At or past 80 it belongs to fdm.bridge_span, below it to fdm.overhang.",
     "max_bridge_mm": "Longest unsupported horizontal span the machine will bridge acceptably, mm. 30 is where a well-cooled bridge is still flat enough to build on. This part's ceiling spans 18 mm because the chamfers ate the rest. Applies to a ceiling anchored on OPPOSITE sides, where the strand is pulled taut between two landings.",
+    "slicer_presets": "The three COMPLETE OrcaSlicer preset files fdm.slice slices with - {machine, process, filament}, paths relative to the project root (here the pack root). Each states every setting it means, is 'from': 'system' with 'instantiation': 'true', and its process and filament name the machine in compatible_printers; the gate does not resolve a vendor profile's 'inherits' chain. Written for this pack by hand, with no text from Orca's own profiles: a 220 x 220 x 250 mm machine with a 0.4 mm nozzle, and a process that matches the numbers above (0.2 mm layers, 0.42 mm lines, 3 walls, 35% infill, a 5 mm outer brim, no support, no arc fitting). The verdict names the three files' 'name' and evidence holds their sha256; a key Orca does not echo into the G-code's configuration is an error, never ignored, unless Orca 2.4.2's own source renames it (the new name must be echoed) or retires it (named in the evidence). fdm.slice reads max_bridge_mm too, the limit fdm.bridge_span reads.",
     "max_cantilever_mm": "Longest unsupported horizontal projection off a SINGLE anchor, mm. 2.0 - a cantilevered strand has no second landing to pull against, so it droops and curls from the first pass instead of pulling straight, and a couple of millimetres is what cools before it sags. A bridge limit applied to a cantilever passes a shelf hanging in mid-air; this part has no cantilevered ceiling at all."
   }
 }

@@ -1,0 +1,13 @@
+{
+  "type": "machine",
+  "name": "nopekit fdm-print baseline 220 0.4",
+  "from": "system",
+  "instantiation": "true",
+  "printer_technology": "FFF",
+  "gcode_flavor": "marlin2",
+  "printable_area": ["0x0", "220x0", "220x220", "0x220"],
+  "printable_height": "250",
+  "nozzle_diameter": ["0.4"],
+  "printer_variant": "0.4",
+  "layer_change_gcode": "G92 E0"
+}

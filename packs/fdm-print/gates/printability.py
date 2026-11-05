@@ -194,7 +194,7 @@ VOLUME_KEYS = ("part_volume_mm3", "volume_mm3", "solid_volume_mm3")
 MIN_WALL_KEYS = ("part_min_wall_mm", "min_wall_mm", "thinnest_wall_mm",
                  "min_feature_mm", "min_section_mm")
 LOAD_AXIS_KEYS = ("load_axis", "primary_load_axis", "load_direction")
-BUILD_AXIS_KEYS = ("build_axis", "layer_normal", "print_axis")
+BUILD_AXIS_KEYS = _PARTS.BUILD_AXIS_KEYS
 
 
 def _look(ctx: GateContext, names: Sequence[str], default: Any = _MISSING) -> Any:
@@ -311,40 +311,9 @@ def _floats(value: Any, n: int) -> list[float] | None:
     return out if len(out) == n else None
 
 
-#: Axis NAMES this pack accepts wherever it wants a direction. Both gates that
-#: read a direction take a vector; a name is the spelling everybody reaches for
-#: first, and refusing it silently is the failure below.
-AXIS_NAMES: dict[str, list[float]] = {
-    "x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0], "z": [0.0, 0.0, 1.0],
-}
-
-
-def _direction(value: Any) -> list[float] | None:
-    """A direction from an ``[x, y, z]`` vector OR an axis name, else None.
-
-    Accepted: ``[0, 0, 1]``, ``"z"``, ``"+Z"``, ``"-y"``, ``"z_axis"``.
-
-    The string form is here because the vector-only version produced the worst
-    kind of message. A project set ``load_axis: "z"``, which is what a person
-    writes, and the gate reported *"the projection has no load_axis /
-    primary_load_axis"* — which reads as "you did not set it" to the one reader
-    who knows they did, and sends them looking in the model for a key that is
-    already there. A value the gate cannot read and a value that is absent are
-    different findings and must not share a sentence. See :func:`_direction_problem`
-    for what the unreadable case says now.
-    """
-    if isinstance(value, str):
-        text = value.strip().lower().replace(" ", "").replace("-axis", "").replace("_axis", "")
-        sign = 1.0
-        if text[:1] in "+-":
-            sign = -1.0 if text[0] == "-" else 1.0
-            text = text[1:]
-        if text[-1:] in "+-" and len(text) == 2:      # "z-" as well as "-z"
-            sign = -1.0 if text[-1] == "-" else sign
-            text = text[:-1]
-        base = AXIS_NAMES.get(text)
-        return [sign * c for c in base] if base else None
-    return _floats(value, 3)
+#: The axis names and the parser, one copy for the pack: ``fdm_print_parts.py``.
+AXIS_NAMES = _PARTS.AXIS_NAMES
+_direction = _PARTS.direction
 
 
 def _direction_problem(name: str, value: Any) -> str:

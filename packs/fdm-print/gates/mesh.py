@@ -74,6 +74,8 @@ PARTS = _load_path(os.path.join(os.path.dirname(_HERE), "fdm_print_parts.py"))
 # module: two copies would each carry their own ``MAX_PART_LOCATORS`` and their
 # own idea of what a ``PartOutcome`` is, and the drift would be silent (rule 2).
 FOLD = _load_path(os.path.join(_HERE, "fdm_print_fold.py"))
+#: The mesh loader, shared with ``gates/slicer.py`` (``_mesh_file.py`` says why).
+MESH_FILE = _load_path(os.path.join(_HERE, "_mesh_file.py"))
 
 #: How many faces get a pin before the gate stops drawing them. A part that needs
 #: support usually has thousands of faces past the limit; pinning them all paints
@@ -160,12 +162,9 @@ degree. Rejected: 0 (the perfect-bridge case sits exactly on the boundary and
 floating point puts it on either side of it) and 45 (wide enough to let a genuine
 corner ledge, whose two perpendicular walls span 90 deg, be scored as a bridge)."""
 
-BED_TOLERANCE_MM = 0.05
-"""How close to the lowest point a face must be to count as sitting ON the bed.
-
-This exclusion is not cosmetic. The bottom face of any part is, geometrically, a
-90 deg overhang facing straight down; without excluding it every solid ever
-modelled fails the overhang gate and the gate becomes noise."""
+#: How close to the lowest point a face must be to count as sitting on the bed.
+#: Shared with ``gates/slicer.py`` through ``fdm_print_parts``, where it is documented.
+BED_TOLERANCE_MM = PARTS.BED_TOLERANCE_MM
 
 _MISSING = object()
 
@@ -189,38 +188,11 @@ def _skip(gate_id: str, reason: str) -> Verdict:
     return Verdict(gate=gate_id, passed=False, skipped=True, skip_reason=reason)
 
 
-#: Axis NAMES accepted anywhere this pack wants a direction, alongside the
-#: ``[x, y, z]`` vector form. ``build_axis: "z"`` is what a person writes, and a
-#: reader who writes it must not be told the key is missing.
-AXIS_NAMES = {"x": (1.0, 0.0, 0.0), "y": (0.0, 1.0, 0.0), "z": (0.0, 0.0, 1.0)}
-
-#: Where the build direction is stated, primary spelling first. Resolved
-#: pack-scoped first (``fdm.build_axis``) by ``GateContext.param``.
-BUILD_AXIS_KEYS = ("build_axis", "layer_normal", "print_axis")
-
-
-def _direction(value: Any) -> list[float] | None:
-    """A direction from an ``[x, y, z]`` vector OR an axis name, else None.
-
-    Accepted: ``[0, 0, 1]``, ``"z"``, ``"+Z"``, ``"-y"``. Kept in step with
-    ``gates/printability.py``'s ``_direction`` — two gates in one pack disagreeing
-    about what ``build_axis: "z"`` means would be worse than neither accepting it.
-    """
-    if isinstance(value, str):
-        text = value.strip().lower().replace(" ", "").replace("-axis", "").replace("_axis", "")
-        sign = 1.0
-        if text[:1] in "+-":
-            sign = -1.0 if text[0] == "-" else 1.0
-            text = text[1:]
-        base = AXIS_NAMES.get(text)
-        return [sign * c for c in base] if base else None
-    if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
-        return None
-    try:
-        out = [float(v) for v in value]
-    except (TypeError, ValueError):
-        return None
-    return out if len(out) == 3 else None
+#: The build direction's keys, its axis names and its parser: one copy in
+#: ``fdm_print_parts.py`` for every gate in this pack (``direction`` says why).
+AXIS_NAMES = PARTS.AXIS_NAMES
+BUILD_AXIS_KEYS = PARTS.BUILD_AXIS_KEYS
+_direction = PARTS.direction
 
 
 def _build_axis(ctx: GateContext):
@@ -238,34 +210,9 @@ def _build_axis(ctx: GateContext):
     return tuple(c / n for c in vec)
 
 
-def _parse_mesh(path: str):
-    """``(mesh, defect, empty)`` for the file at ``path``, or None when there is none.
-
-    The loader :func:`_read_mesh` hands the spine's memo, so it runs once per
-    file per sweep and every gate that asks after that gets the same answer.
-    ``defect`` is decided here, with the parse, because it is a property of the
-    file and both gates want it. ``empty`` is the reason when the file parsed to
-    no faces at all; ``mesh`` and ``defect`` are None then.
-
-    Module-level on purpose: the memo is keyed on the loader's identity, and a
-    function defined inside a gate body is a new object on every call, so it
-    would never hit. A missing file comes back as None rather than raising: its
-    absence is what the gate decides on, and asking through the memo is what
-    records the path as this gate's input either way.
-    """
-    if not os.path.isfile(path):
-        return None
-    import trimesh                                    # noqa: PLC0415 - lazy on purpose
-
-    loaded = trimesh.load_mesh(path, process=True)
-    if isinstance(loaded, trimesh.Scene):
-        try:
-            loaded = loaded.dump(concatenate=True)
-        except TypeError:                              # older trimesh
-            loaded = trimesh.util.concatenate(loaded.dump())
-    if getattr(loaded, "faces", None) is None or len(loaded.faces) == 0:
-        return None, None, f"{os.path.basename(path)} loaded with no faces"
-    return loaded, _solid_defect(loaded, os.path.basename(path)), None
+#: The loader the sweep's memo keys on, shared with ``gates/slicer.py`` so the two
+#: read each part once per sweep (``_mesh_file.parse_mesh`` says why).
+_parse_mesh = MESH_FILE.parse_mesh
 
 
 def _read_mesh(ctx: GateContext, raw: str, label: str):
@@ -353,47 +300,7 @@ def _load_mesh(ctx: GateContext, gate_id: str):
     return mesh, resolved, None
 
 
-def _solid_defect(mesh, name: str) -> str | None:
-    """A one-line description of why this mesh is not a solid, or None.
-
-    **Why this FAILS the gate rather than skipping it.** Every number both mesh
-    gates produce is read off ``face_normals``, and a face normal only means
-    "outward" if the winding says so. Flip the winding and the signed volume goes
-    negative, every overhang angle comes out mirrored, and a part covered in 70
-    deg overhangs reports ``worst face 0.0 deg`` — a confident green about a
-    quantity that was never measured. That is not "the gate could not run", which
-    is what a skip means; it is a defect in the artifact the project handed over,
-    and it is exactly the kind of finding a readiness report exists to carry.
-
-    The pack's own fixture builder has asserted this on the solids it generates
-    since the day it was written, with a comment explaining that mirrored normals
-    would make a control "work" for the wrong reason. The project's mesh gets the
-    same check, for the same reason.
-
-    ``is_winding_consistent`` is deliberately NOT part of the test: an STL is a
-    soup of independent triangles, and a perfectly good solid comes back from the
-    round trip with that flag false while ``is_watertight`` and a positive signed
-    volume both hold. Testing it would fail honest meshes, and a gate that fails
-    honest input gets switched off.
-    """
-    import numpy as np                                 # noqa: PLC0415
-
-    if not mesh.is_watertight:
-        edges = np.sort(mesh.edges, axis=1)
-        _, counts = np.unique(edges, axis=0, return_counts=True)
-        open_edges = int((counts != 2).sum())
-        return (f"{name} is not watertight: {open_edges} edge(s) are not shared by "
-                f"exactly two faces, so it has holes or self-intersects. Inside and "
-                f"outside are undefined on such a mesh, which makes every face "
-                f"normal — and so every overhang and bridge number below — "
-                f"meaningless. Repair the mesh or re-export it as a solid")
-    if mesh.volume <= 0:
-        return (f"{name} has non-positive signed volume ({mesh.volume:.1f} mm^3): its "
-                f"faces are wound inside out. Every overhang angle would come out "
-                f"mirrored, so a part that is nothing but steep overhangs reports "
-                f"0.0 deg and passes. Flip the normals (trimesh: fix_normals) and "
-                f"re-export")
-    return None
+_solid_defect = MESH_FILE.solid_defect
 
 
 def _face_angles(mesh, axis):

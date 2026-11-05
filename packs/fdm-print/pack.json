@@ -1,7 +1,7 @@
 {
   "name": "fdm-print",
-  "version": "0.1.0",
-  "description": "Validates that a part is printable on a filament machine: bed fit with brim, wall thickness, overhang, bridge span, layer-direction loading and print time.",
+  "version": "0.2.0",
+  "description": "Validates that a part is printable on a filament machine: bed fit with brim, wall thickness, overhang, bridge span, layer-direction loading, print time, and a slice on OrcaSlicer.",
   "settles": [
     "bed fit",
     "bridge span",
@@ -13,6 +13,7 @@
     "overhang angle",
     "print time",
     "process model validity",
+    "slicer refusal",
     "support requirement",
     "unit sanity",
     "wall thickness"
@@ -24,7 +25,8 @@
     "printability",
     "structural",
     "cost",
-    "process-validity"
+    "process-validity",
+    "slicer"
   ],
   "provides_gates": [
     "fdm.bed_fit",
@@ -33,18 +35,21 @@
     "fdm.min_wall",
     "fdm.overhang",
     "fdm.print_time_est",
-    "fdm.process_model_valid"
+    "fdm.process_model_valid",
+    "fdm.slice"
   ],
   "provides_views": [
     "print_part"
   ],
   "provides_generators": [],
-  "requires_tools": [],
+  "requires_tools": [
+    "orca-slicer"
+  ],
   "requires_python": [
     "trimesh",
     "numpy"
   ],
-  "max_tier": 1,
+  "max_tier": 2,
   "lenses": [
     "part orientation",
     "support removal access",
