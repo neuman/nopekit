@@ -8,10 +8,38 @@ absolute from the deck's directory. The verdict is one `.meas` result, named by
 
 ## What it refuses
 
+Before ngspice runs, on the deck's text:
+
+- **An option name ngspice does not know.** ngspice-42 takes `.options tmep=127`
+  without a word and runs at 27 C, exit 0; and it reads every card that begins
+  `.opt` as `.options` (`.optoins`, `.opts`). An `option` or `options` command in
+  a `.control` block is as silent (`option tmep=127` ran at 27 C, exit 0). Every
+  name on every such card and command, in the deck and each file it `.include`s,
+  must be in `NGSPICE_OPTIONS`
+  (`gates/pcb.py`: the simulator's own table, read off the ngspice-42 binary, and
+  the front-end variables of the manual's `.options` chapter). A valid name left
+  off reads as an error naming it, never a pass. Option values are not checked.
+- **A measure two `.meas` cards define**, in the deck and its includes together.
+  ngspice prints a value for each, and the gate reads the first: with a card
+  whose window is past the run put before a good one, it printed 0 and then
+  4.8325 V, and a guard that checked only one card let the 0 through.
+- **A `.meas tran` window outside the run.** The `.meas` that defines
+  `pcb_spice_measure` must be in the deck itself, and its literal FROM, TO and AT
+  must lie inside 0 .. tstop of the deck's literal `.tran`
+  (0 <= FROM < TO <= tstop). MIN over 5-6 ms of a 4 ms run reads 0.000000e+00 with
+  exit 0; `to=4` is 4 seconds. Numbers are read as ngspice reads them (`m` milli,
+  `meg` mega, letters after the suffix dropped). A bound in `{braces}` cannot be
+  shown and errors. `.meas ac` and `.meas dc` windows are not checked.
+
+After it runs:
+
 - **A line ngspice ignored.** ngspice warns (`Warning: 'r1 a 0' is not a valid
   resistor instance line, ignored!`) and solves the rest: a different circuit.
   Any `Warning: ... ignored` is an error here.
 - **Any `Error:` line, or an exit other than 0.**
+- **A command ngspice does not have.** In a `.control` block, `opt temp=127`
+  prints `opt: no such command available in ngspice`, is skipped, and the run
+  exits 0.
 - **A measurement ngspice could not make** (`.meas tran x when v(out)=3 failed!`:
   the waveform never crossed). ngspice exits 0 and prints no value; the gate
   errors, because nothing was shown, rather than fail.

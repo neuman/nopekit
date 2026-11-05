@@ -2409,11 +2409,17 @@ SLOW_WALK = {
 class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     """(C12, R-4's detector for the mutation clause) The restated aimed walk
     over every bundled pack gate on its own baseline: no conclusive mutation
-    passes an honest bundled gate — measured 45 gates with a conclusive
-    mutation, 7 walked with none, 27 with no boundary (a value exactly at its
-    limit, mostly a defect count 0 against 0, or no value: aero-openfoam's two
-    tier-0 checks) where trimesh, numpy, omc, kicad-cli, ngspice, cadquery and
-    OpenFOAM v2606 are present — and the planted drifted-limit gate is one hit.
+    passes an honest bundled gate. The integrated registry has 93 gates.
+    The measured split for 91 of them is 49 conclusive, 10 walked with none,
+    32 with no boundary. The two ccx gates have no measured classification yet;
+    they are walked whenever ccx is present and held to the same no-pass rule.
+    The total always includes them, available or not.
+
+    Relative to the original 79: SIMP adds volume (conclusive), an input guard
+    (no boundary) and the two ccx gates; PCB adds two conclusive, one with none
+    and one with no boundary; ZMK adds one with none and three with no boundary;
+    fdm.slice adds one conclusive and cad.clearance one with none. These are the
+    branch reviews' measurements, not totals guessed from only one branch.
     Full suite only (~12 s without pcb-kicad's and the OpenFOAM packs' tools,
     about 7.5 min with them before aero-openfoam: their opaque gates re-run
     kicad-cli, ngspice, OpenCascade and OpenFOAM for every rung; cfd-openfoam's
@@ -2441,6 +2447,14 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
 
     def test_no_conclusive_mutation_passes_a_bundled_gate(self):
         kinds = collections.Counter()
+        # The branches had each counted only their own additions. Their measured
+        # split covers 91 gates; nobody measured the two ccx walks. They still
+        # run below when available, and a conclusive pass still fails the test.
+        # Exclude only their unknown classifications from the pinned split, never
+        # from the walk, its no-pass assertion or the 93-gate inventory.
+        unmeasured = {"simp.displacement", "simp.stress"}
+        unmeasured_kinds = collections.Counter()
+        unavailable_known = 0
         passes = []
         unavailable = 0
         trimmed: dict = {}
@@ -2456,6 +2470,7 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
                 registered.add(spec.id)
                 if not gates_mod.availability(spec)[0]:
                     unavailable += 1
+                    unavailable_known += spec.id not in unmeasured
                     continue
                 good = packs_mod.baseline_context(pack_dir, out_dir=self.tmp())
                 slow = SLOW_WALK.get(spec.id)
@@ -2473,9 +2488,14 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
                           file=sys.stderr, flush=True)
                 if v0 is None:
                     kinds["no-boundary"] += 1
+                    if spec.id in unmeasured:
+                        unmeasured_kinds["no-boundary"] += 1
                     continue
                 landing = [w for w in walked if w.kind == "lands"]
-                kinds["conclusive" if landing else "none-conclusive"] += 1
+                kind = "conclusive" if landing else "none-conclusive"
+                kinds[kind] += 1
+                if spec.id in unmeasured:
+                    unmeasured_kinds[kind] += 1
                 for w in landing:
                     after, run = aimed(spec, fn, good, v0, w, margin=MARGIN)
                     if run[0] == "pass":
@@ -2489,11 +2509,10 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
                                  (SLOW_WALK[gid].walked, SLOW_WALK[gid].not_walked))
         print(f"\nbundled walk: {len(registered)} registered; "
               f"{dict(kinds)}; {unavailable} unavailable", file=sys.stderr, flush=True)
-        # SIMP adds four: one input guard, volume and two static measurements.
-        self.assertEqual(sum(kinds.values()) + unavailable, 83, kinds)
-        if not unavailable:
-            self.assertEqual(dict(kinds), {"conclusive": 48, "none-conclusive": 7,
-                                           "no-boundary": 28})
+        self.assertEqual(sum(kinds.values()) + unavailable, 93, kinds)
+        if not unavailable_known:
+            self.assertEqual(dict(kinds - unmeasured_kinds),
+                             {"conclusive": 49, "none-conclusive": 10, "no-boundary": 32})
 
     def test_the_planted_drifted_limit_is_one_hit(self):
         spec = GateSpec(id="beam.drifted", claims=["x"], tier=Tier.INSTANT,

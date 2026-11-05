@@ -1,7 +1,7 @@
 {
   "name": "pcb-kicad",
-  "version": "0.1.0",
-  "description": "Checks a KiCad board and its schematic: DRC, ERC, schematic parity, connectivity, pin names, IPC-2221 trace heating, a fab's limits, ngspice measurements, and fit in its enclosure.",
+  "version": "0.2.0",
+  "description": "Checks a KiCad board and its schematic: DRC with its custom rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, LiPo cell protection.",
   "settles": [
     "design rule violations",
     "pcb design rule check",
@@ -43,7 +43,16 @@
     "enclosure fit",
     "part taller than its cavity",
     "component collides with the lid",
-    "board to case clearance"
+    "board to case clearance",
+    "footprint land agrees with the vendor drawing",
+    "land pattern",
+    "pad positions on the datasheet drawing",
+    "charger thermal and timer protection",
+    "battery charger thermistor",
+    "fuse protects its conductor",
+    "short-circuit protection of a conductor",
+    "deep-discharge cutoff",
+    "cell undervoltage protection"
   ],
   "claim_classes": [
     "pcb",
@@ -67,7 +76,12 @@
     "circuit-simulation",
     "enclosure-fit",
     "packaging",
-    "interference"
+    "interference",
+    "land-pattern",
+    "battery-safety",
+    "charge-protection",
+    "overcurrent-protection",
+    "deep-discharge"
   ],
   "provides_gates": [
     "pcb.board_readable",
@@ -79,7 +93,11 @@
     "pcb.parity",
     "pcb.fab_rules",
     "pcb.spice",
-    "pcb.enclosure_fit"
+    "pcb.enclosure_fit",
+    "pcb.land_pattern",
+    "pcb.charge_protection",
+    "pcb.fuse_conductor",
+    "pcb.discharge_cutoff"
   ],
   "provides_generators": [],
   "provides_proposers": [
@@ -88,6 +106,12 @@
       "basis": "established",
       "description": "Routes a KiCad board with Freerouting (headless, one thread) and proposes the routed copy; the DRC gates judge it once adopted.",
       "run": "proposers/autoroute.py"
+    },
+    {
+      "id": "pcb.schematic_from_board",
+      "basis": "model-only",
+      "description": "Writes a KiCad schematic from a board's pad nets on KiCad's stock symbols, so ERC and parity can run; parity checks it once adopted.",
+      "run": "proposers/schematic_from_board.py"
     }
   ],
   "requires_tools": [
