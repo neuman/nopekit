@@ -31,6 +31,8 @@ from nopekit.util import NopekitError
 #: SPEC §5.4's table, pinned as data: every bundled evaluator's basis. A change is
 #: a decision, recorded in SPEC.md §8's phase-2 list, never a drift.
 BUNDLED_BASES: dict[str, str] = {
+    "simp.case_valid": "model-only",
+    **{g: "established" for g in ("simp.volume", "simp.displacement", "simp.stress")},
     **{g: "sourced" for g in ("beam.deflection", "beam.deflection_ratio",
                               "beam.bending_stress", "beam.shear_stress", "beam.buckling",
                               "beam.bearing", "beam.model_validity")},

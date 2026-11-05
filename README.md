@@ -156,6 +156,26 @@ You work through this in conversation. The agent operates the tools; the project
 5. **Review what is ready.** The report separates current checks from assumptions, unresolved claims and physical tests. Changing the design invalidates affected evidence. Each milestone names what must be established before you spend on a prototype or fabrication.
 6. **Build, measure and feed the results back.** Export reruns the required checks before producing a package. Record what happened to the real article; a physical failure becomes evidence for the next design. A simulation pass alone never establishes how the built object behaves.
 
+### Run checks and read the results
+
+A check, or **gate**, evaluates a specific claim against the current inputs. Results are recorded with their provenance. A result may be useful without being a pass: it can reveal a failure, expose a missing capability, or show that an earlier result is now stale.
+
+Here are the important distinctions:
+
+| Status | What it means |
+|---|---|
+| **Checked** | A qualified gate passed on the inputs that apply to the current candidate. This is evidence for the claim the gate tests—not a guarantee that the whole product works. |
+| **Failing** | A gate found a problem with the current candidate. Use the detail to decide what to change or investigate. |
+| **Gap** | No suitable qualified gate currently settles the claim. The claim remains unresolved. |
+| **Open** | A gate exists, but hasn't produced a current result for the inputs. |
+| **Stale** | A gate passed earlier, but something it depended on has changed. The old result doesn't establish the claim for the current candidate. |
+| **Skipped** | The gate was skipped, often because a required tool or dependency is missing. Nothing was established by that run. |
+| **Skipped (errored)** | The gate crashed. Treat the result as unresolved, not as a pass. |
+| **Pending build / physical** | The claim needs evidence from building or testing the real thing. Software checks cannot substitute for that evidence. |
+| **Assumed** | The project is relying on something that has not yet been established by a qualifying check. |
+
+The key habit is to ask: **What exactly does this result establish, and what does it leave open?** A clean CAD check isn't proof that a physical part will behave as intended. A simulation result isn't a real-world measurement. A claim with no check isn't checked just because the design looks plausible.
+
 <details>
 <summary>Useful commands when you want to inspect the project directly</summary>
 
@@ -165,7 +185,7 @@ You work through this in conversation. The agent operates the tools; the project
 | `nopekit check` | Run the project's gates. |
 | `nopekit report` | Readiness and the evidence behind it. |
 | `nopekit why <name>` | Why a parameter, claim, requirement or decision is there. |
-| `nopekit gap --propose` | Missing evidence and packs that might help. |
+| `nopekit gap --propose` | Claims whose mechanism has yet to run, and packs that might help. |
 | `nopekit doctor` | Diagnose the environment, model and records. |
 | `nopekit site serve --watch --detach` | Open a local server that watches project changes. |
 | `nopekit site serve --stop` | Stop the detached server. |

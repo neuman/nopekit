@@ -947,6 +947,7 @@ class ControlsAreSealed(unittest.TestCase):
 #: that gains or loses an edge turns ``test_the_edges_are_these`` red instead of
 #: quietly re-defining what the isolation test checks.
 EDGES: dict[str, list[tuple[str, str]]] = {
+    "topology-simp": [(d, "simp.case_valid") for d in ("simp.displacement", "simp.stress")],
     "beam-analytic": [
         ("beam.deflection", "beam.model_validity"),
         ("beam.deflection_ratio", "beam.model_validity"),
@@ -1413,7 +1414,7 @@ class ControlsAreIsolated(unittest.TestCase):
             if edges:
                 declared[name] = sorted(edges)
         self.assertEqual(declared, {name: sorted(e) for name, e in EDGES.items()})
-        self.assertEqual(sum(len(e) for e in declared.values()), 43)
+        self.assertEqual(sum(len(e) for e in declared.values()), 45)
         registry = gates_mod.Registry()
         gates_mod.load_project_gates(os.path.join(REPO, "examples", "bracket"), registry)
         self.assertEqual(sorted(_declared_edges(registry)), sorted(BRACKET_EDGES))

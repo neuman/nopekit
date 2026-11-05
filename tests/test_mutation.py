@@ -2487,10 +2487,13 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
             with self.subTest(gate=gid):
                 self.assertEqual((walked, left),
                                  (SLOW_WALK[gid].walked, SLOW_WALK[gid].not_walked))
-        self.assertEqual(sum(kinds.values()) + unavailable, 79, kinds)
+        print(f"\nbundled walk: {len(registered)} registered; "
+              f"{dict(kinds)}; {unavailable} unavailable", file=sys.stderr, flush=True)
+        # SIMP adds four: one input guard, volume and two static measurements.
+        self.assertEqual(sum(kinds.values()) + unavailable, 83, kinds)
         if not unavailable:
-            self.assertEqual(dict(kinds), {"conclusive": 45, "none-conclusive": 7,
-                                           "no-boundary": 27})
+            self.assertEqual(dict(kinds), {"conclusive": 48, "none-conclusive": 7,
+                                           "no-boundary": 28})
 
     def test_the_planted_drifted_limit_is_one_hit(self):
         spec = GateSpec(id="beam.drifted", claims=["x"], tier=Tier.INSTANT,

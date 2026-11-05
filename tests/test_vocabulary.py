@@ -414,7 +414,7 @@ def readme_status_lines() -> list[str]:
     the output" until README's rewrite on 2026-10-16.)"""
     with open(os.path.join(_env.REPO, "README.md"), encoding="utf-8") as fh:
         text = fh.read()
-    section = text.split("### 4. Run checks and read the results", 1)[1].split("\n### ", 1)[0]
+    section = text.split("### Run checks and read the results", 1)[1].split("\n### ", 1)[0]
     return [ln for ln in section.splitlines() if ln.strip()]
 
 
