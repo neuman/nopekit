@@ -153,7 +153,14 @@ class EntriesAreDeterministic(_env.EnvCase):
                                      _cache_bytes(where)))
 
                 label, code, data, first = runs[0]
-                self.assertTrue(first, f"{name}: the first run wrote no entry at all")
+                # Firmware is the first pack whose every gate needs an external
+                # tool. Requiring an entry even without ZMK contradicted the
+                # availability contract: skipped gates must write nothing. The
+                # per-gate checks below still account for every exact skip.
+                has_available_gate = specs is None or any(
+                    gates.availability(spec)[0] for spec in specs)
+                self.assertEqual(bool(first), has_available_gate,
+                                 f"{name}: cache presence disagrees with availability")
                 for other, other_code, other_data, got in runs[1:]:
                     self.assertEqual(other_code, code, f"{name}: exit {code} in {label}, "
                                                        f"{other_code} in {other}")
