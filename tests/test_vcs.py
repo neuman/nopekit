@@ -24,6 +24,8 @@ Run:  PYTHONPATH=src python3 -m unittest discover -s tests -p test_vcs.py -v
 """
 from __future__ import annotations
 
+import ast
+import hashlib
 import json
 import os
 import pathlib
@@ -528,6 +530,416 @@ class TheWritingHalf(_env.EnvCase):
         self._git(["checkout", "-q", "--detach"], repo)
         self.assertEqual(vcs.operation(repo), "detached")
         self.assertIsNone(vcs.operation(self._not_a_repo()))
+
+
+#: The variables a pre-receive hook exports for the quarantine (git 2.34.1,
+#: observed from inside a real hook): the pushed objects' directory, the main
+#: store as its alternate, and the quarantine path itself. `vcs._STRIPPED`
+#: removes all three; `objects=` puts back exactly the first two.
+QUARANTINE_VARS = ("GIT_QUARANTINE_PATH", "GIT_OBJECT_DIRECTORY",
+                   "GIT_ALTERNATE_OBJECT_DIRECTORIES")
+
+#: The sha1 empty tree, recomputed from git's object header rather than
+#: copied: `hashlib.sha1(b"tree 0\0").hexdigest()`.
+EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+
+
+class TheQuarantineIsAnExplicitPassthrough(_env.EnvCase):
+    """Eddy milestone 0: inside pre-receive the pushed objects are visible only
+    through `GIT_OBJECT_DIRECTORY` and `GIT_ALTERNATE_OBJECT_DIRECTORIES`, and
+    `vcs` strips both. The carve-out is an argument, never an environment read:
+    `objects=` sets exactly those two on the stripped environment for that one
+    call, at the values passed, and `GIT_QUARANTINE_PATH` still never reaches
+    git. Without it nothing a hook exported reaches git, as before."""
+
+    setUp = VcsIsTheOnlyGitEdge.setUp
+    _git = VcsIsTheOnlyGitEdge._git
+    _fake_git = VcsIsTheOnlyGitEdge._fake_git
+
+    def test_objects_sets_exactly_two_variables(self):
+        where = self.tmp()
+        record = os.path.join(where, "record.jsonl")
+        bindir = self._fake_git(
+            "import json, os, sys\n"
+            f"open({record!r}, 'a').write(json.dumps({{'argv': sys.argv[1:], "
+            "'env': dict(os.environ), "
+            "'stdin': sys.stdin.read() if not sys.stdin.isatty() else ''}) + '\\n')\n"
+            "print('sha1')")
+        local = []
+        if shutil.which("git") is not None:
+            local = self._git(["rev-parse", "--local-env-vars"], where).split()
+            self.assertIn("GIT_OBJECT_DIRECTORY", local, "git no longer lists the quarantine's")
+        names = sorted({*QUARANTINE_VARS, *local})
+        planted = {name: "planted" for name in names}
+        planted["PATH"] = bindir
+        # What a hook receives: the quarantine under the repository's objects/,
+        # and the main store as its alternate.
+        quarantine = vcs.ObjectDirs(directory=os.path.join(where, "objects", "incoming-1"),
+                                    alternates=os.path.join(where, "objects"))
+        with mock.patch.dict(os.environ, planted):
+            self.assertEqual(vcs.object_format(where), "sha1")
+            self.assertEqual(vcs.object_format(where, objects=quarantine), "sha1")
+            # A read that feeds stdin takes the carve-out through the same door.
+            self.assertIsNone(vcs.object_sizes(where, ["0" * 40], objects=quarantine),
+                              "the stand-in's answer is not batch-check output")
+        with open(record, encoding="utf-8") as fh:
+            calls = [json.loads(line) for line in fh]
+        self.assertEqual(len(calls), 3, calls)
+        without, with_objects, with_stdin = calls
+        self.assertEqual(without["argv"], ["-C", where, "rev-parse", "--show-object-format"])
+        self.assertEqual(sorted(n for n in names if n in without["env"]), [],
+                         "a planted quarantine variable reached git with no objects= given")
+        for call in (with_objects, with_stdin):
+            reached = {n: call["env"][n] for n in names if n in call["env"]}
+            self.assertEqual(reached, {"GIT_OBJECT_DIRECTORY": quarantine.directory,
+                                       "GIT_ALTERNATE_OBJECT_DIRECTORIES": quarantine.alternates},
+                             "objects= sets exactly the two, at the values passed")
+            self.assertNotIn("GIT_QUARANTINE_PATH", call["env"])
+            for name, value in SPEC_SET.items():
+                self.assertEqual(call["env"].get(name), value, name)
+        self.assertEqual(with_stdin["argv"][2:4],
+                         ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"])
+        self.assertEqual(with_stdin["stdin"], "0" * 40 + "\n", "the oids go on stdin")
+
+    def test_the_variables_are_named_only_where_stripped_or_set(self):
+        """The hook script hands the quarantine to the CLI as flags; the spine
+        reads no `GIT_*` variable to find it — an environment read here would be
+        indistinguishable from the leak `_STRIPPED` closes. In `vcs.py` the
+        three names occur as string constants in exactly two places: the strip
+        list, and `_ask`'s two assignments onto the stripped environment."""
+        with open(vcs.__file__, encoding="utf-8") as fh:
+            module = ast.parse(fh.read())
+        owners: set[str] = set()
+        for node in module.body:
+            lines = sorted(n.lineno for n in ast.walk(node)
+                           if isinstance(n, ast.Constant) and n.value in QUARANTINE_VARS)
+            if not lines:
+                continue
+            if isinstance(node, ast.Assign) and isinstance(node.targets[0], ast.Name):
+                owners.add(node.targets[0].id)
+            else:
+                owners.add(getattr(node, "name", f"line {lines[0]}"))
+        self.assertEqual(owners, {"_STRIPPED", "_ask"})
+
+
+class TheReceiveReads(_env.EnvCase):
+    """Eddy milestone 0: the reads `nopekit validate` and the pre-receive hook
+    ask. Each on a repository built through `_env.git`: `-z` and
+    length-prefixed output read exactly (a file name holding a newline stays
+    one name; a blob that looks like a batch header is one blob), git's own
+    trailer reading, the first-parent chain and not the merge's other side,
+    `None` outside a repository, on a `missing` line, on the wrong object
+    type, on a hung git — and on a bad sha without a process started."""
+
+    setUp = VcsIsTheOnlyGitEdge.setUp
+    _require_git = VcsIsTheOnlyGitEdge._require_git
+    _git = VcsIsTheOnlyGitEdge._git
+    _repo = VcsIsTheOnlyGitEdge._repo
+    _commit = VcsIsTheOnlyGitEdge._commit
+    _not_a_repo = VcsIsTheOnlyGitEdge._not_a_repo
+    _fake_git = VcsIsTheOnlyGitEdge._fake_git
+
+    ODD = "we ird\nname.json"           # a newline and a space: -z keeps it one name
+    MISSING = "0" * 39 + "1"
+
+    def _claim(self, repo: str, files: dict[str, str], message: str,
+               trailers: tuple[str, ...] = ()) -> str:
+        for rel, text in files.items():
+            _write(os.path.join(repo, rel), text)
+        if files:
+            self._git(["add", "--", *files], repo)
+        args = ["commit", "-q", "--allow-empty", "-m", message]
+        for trailer in trailers:
+            args += ["--trailer", trailer]
+        self._git(args, repo, identity=True,
+                  env={"GIT_AUTHOR_DATE": "2021-01-01T00:00:00Z",
+                       "GIT_COMMITTER_DATE": "2021-01-01T00:00:00Z"})
+        return self._git(["rev-parse", "HEAD"], repo).strip()
+
+    def _line(self) -> tuple[str, dict[str, str]]:
+        """A -> B -> C on the line, D on a side branch from A, M = merge(C, D):
+        M's first parent is C, and D is on no first-parent chain of M."""
+        repo = self._repo({"a.txt": "a\n", "d/b.txt": "b\n", self.ODD: "{}\n"})
+        a = self._git(["rev-parse", "HEAD"], repo).strip()
+        branch = self._git(["symbolic-ref", "--short", "HEAD"], repo).strip()
+        b = self._claim(repo, {"a.txt": "a2\n"}, "second\n\nNope-Kind: candidate in the middle\n\nprose last",
+                        ())
+        c = self._claim(repo, {"c.txt": "c\n"}, "third",
+                        ("Nope-Schema: 1", "Nope-Kind: candidate", "Nope-Name: D.2",
+                         "Signed-off-by: x <x@nopekit.invalid>"))
+        self._git(["checkout", "-q", "-b", "side", a], repo)
+        # side.txt holds d/b.txt's bytes: one blob at two paths.
+        d = self._claim(repo, {"side.txt": "b\n"}, "side work", ("Nope-Kind: evidence",))
+        self._git(["checkout", "-q", branch], repo)
+        self._git(["merge", "-q", "--no-ff", "-m", "merge side", "side"], repo, identity=True)
+        m = self._git(["rev-parse", "HEAD"], repo).strip()
+        self._git(["update-ref", "refs/heads/cand/x", m], repo)
+        return repo, {"a": a, "b": b, "c": c, "d": d, "m": m}
+
+    def test_the_repository_and_its_refs(self):
+        repo, shas = self._line()
+        self.assertEqual(vcs.object_format(repo), "sha1")
+        self.assertEqual(vcs.empty_tree(repo), EMPTY_TREE_SHA1)
+        self.assertEqual(hashlib.sha1(b"tree 0\0").hexdigest(), EMPTY_TREE_SHA1)
+        self.assertIs(vcs.commit_exists(repo, shas["m"]), True)
+        self.assertIs(vcs.commit_exists(repo, self.MISSING), False)
+        tree = vcs.tree_of(repo, shas["m"])
+        self.assertIs(vcs.commit_exists(repo, tree), False, "a tree is not a commit")
+        tips = vcs.ref_tips(repo, "refs/heads/cand/")
+        self.assertEqual(tips, {"refs/heads/cand/x": shas["m"]})
+        self.assertIn("refs/heads/side", vcs.ref_tips(repo, "refs/"))
+        self.assertEqual(vcs.ref_tips(repo, "refs/none/"), {})
+        self.assertIsNone(vcs.ref_tips(repo, "--all"), "a prefix is never an option")
+        self.assertIs(vcs.ref_exists(repo, "refs/heads/cand/x"), True)
+        self.assertIs(vcs.ref_exists(repo, "refs/heads/spec"), False)
+        self.assertIsNone(vcs.ref_exists(repo, "-q"))
+        trees = vcs.ref_trees(repo, "refs/heads/cand/x", limit=10)
+        self.assertEqual(trees[0], tree)
+        self.assertEqual(len(trees), 4, "M, C, B, A along the first parent; never D")
+        self.assertEqual(vcs.ref_trees(repo, "refs/heads/cand/x", limit=2), trees[:2])
+        self.assertEqual(vcs.ref_trees(repo, "refs/heads/spec", limit=10), [],
+                         "an absent spec branch is a valid start")
+
+    def test_the_chain_is_the_first_parent(self):
+        repo, shas = self._line()
+        chain = vcs.first_parents(repo, shas["m"], limit=10)
+        self.assertEqual(chain, [shas["m"], shas["c"], shas["b"], shas["a"]])
+        self.assertNotIn(shas["d"], chain)
+        over = vcs.first_parents(repo, shas["m"], limit=2)
+        self.assertEqual(len(over), 3, "limit + 1 rows, so len > limit says over the bound")
+        self.assertEqual(vcs.first_parents(repo, shas["a"], limit=0), [shas["a"]])
+        union = vcs.line_commits(repo, [shas["m"], shas["d"]], limit=100)
+        self.assertEqual(sorted(union), sorted(shas.values()))
+        self.assertEqual(vcs.line_commits(repo, [], limit=100), [])
+        commits = vcs.commit_objects(repo, [shas["m"], shas["a"], shas["c"]])
+        self.assertEqual(set(commits), {shas["m"], shas["a"], shas["c"]})
+        self.assertEqual(commits[shas["m"]].parents, (shas["c"], shas["d"]))
+        self.assertEqual(commits[shas["a"]].parents, ())
+        self.assertEqual(commits[shas["m"]].tree, vcs.tree_of(repo, shas["m"]))
+        self.assertEqual(commits[shas["c"]].message,
+                         b"third\n\nNope-Schema: 1\nNope-Kind: candidate\nNope-Name: D.2\n"
+                         b"Signed-off-by: x <x@nopekit.invalid>\n")
+        self.assertIsInstance(commits[shas["c"]].message, bytes)
+        self.assertEqual(vcs.commit_objects(repo, []), {})
+
+    def test_trailers_are_gits_reading(self):
+        repo, shas = self._line()
+        read = vcs.trailer_lines(repo, [shas["a"], shas["b"], shas["c"], shas["d"]])
+        self.assertEqual(read[shas["a"]], [])
+        self.assertEqual(read[shas["b"]], [], "a Nope- line in a middle paragraph is prose to git; "
+                         "the validator's raw scan refuses it, this read never invents it")
+        self.assertEqual(read[shas["c"]], [("Nope-Schema", "1"), ("Nope-Kind", "candidate"),
+                                           ("Nope-Name", "D.2"),
+                                           ("Signed-off-by", "x <x@nopekit.invalid>")])
+        self.assertEqual(read[shas["d"]], [("Nope-Kind", "evidence")])
+        self.assertEqual(vcs.trailer_lines(repo, []), {})
+        self.assertIsNone(vcs.trailer_lines(repo, [self.MISSING]), "a bad object is no answer")
+
+    def test_trees_blobs_and_diffs_are_exact(self):
+        repo, shas = self._line()
+        tree = vcs.tree_of(repo, shas["m"])
+        self.assertEqual(tree, self._git(["rev-parse", "HEAD^{tree}"], repo).strip())
+        top = vcs.tree_entries(repo, tree)
+        self.assertEqual([e.path for e in top], ["a.txt", "c.txt", "d", "side.txt", self.ODD])
+        sub = next(e for e in top if e.path == "d")
+        self.assertEqual((sub.mode, sub.type, sub.size), ("040000", "tree", None))
+        listing = vcs.tree_listing(repo, tree)
+        self.assertEqual([e.path for e in listing],
+                         ["a.txt", "c.txt", "d/b.txt", "side.txt", self.ODD])
+        self.assertTrue(all(e.type == "blob" and e.mode == "100644" for e in listing))
+        self.assertEqual([e.size for e in listing], [3, 2, 2, 2, 3])
+
+        # A tree no checkout makes: a symlink, a gitlink, and a file that became a link.
+        target = self._git(["hash-object", "-w", "--stdin"], repo, input="a.txt").strip()
+        self._git(["update-index", "--add", "--cacheinfo", f"120000,{target},link"], repo)
+        self._git(["update-index", "--add", "--cacheinfo", f"160000,{shas['a']},sub"], repo)
+        self._git(["update-index", "--add", "--cacheinfo", f"120000,{target},a.txt"], repo)
+        self._git(["update-index", "--force-remove", "c.txt"], repo)
+        odd_oid = next(e.oid for e in listing if e.path == self.ODD)
+        _write(os.path.join(repo, self.ODD), "{}\n\n")
+        self._git(["update-index", "--", self.ODD], repo)
+        made = self._git(["write-tree"], repo).strip()
+        by_path = {e.path: e for e in vcs.tree_entries(repo, made)}
+        self.assertEqual((by_path["link"].mode, by_path["link"].type, by_path["link"].size),
+                         ("120000", "blob", 5))
+        self.assertEqual((by_path["sub"].mode, by_path["sub"].type, by_path["sub"].oid,
+                          by_path["sub"].size), ("160000", "commit", shas["a"], None))
+        self.assertEqual([e.path for e in vcs.tree_listing(repo, made)],
+                         ["a.txt", "d/b.txt", "link", "side.txt", "sub", self.ODD],
+                         "a recursive listing has the gitlink and no subtree row")
+        changes = {c.path: c for c in vcs.tree_diff(repo, tree, made)}
+        self.assertEqual({p: c.status for p, c in changes.items()},
+                         {"a.txt": "T", "c.txt": "D", "link": "A", "sub": "A", self.ODD: "M"})
+        self.assertEqual((changes["a.txt"].old_mode, changes["a.txt"].new_mode), ("100644", "120000"))
+        self.assertEqual((changes["c.txt"].new_mode, changes["c.txt"].new_oid), ("000000", "0" * 40))
+        self.assertEqual(changes[self.ODD].old_oid, odd_oid)
+        self.assertEqual(vcs.tree_diff(repo, made, made), [])
+        self.assertEqual({c.status for c in vcs.tree_diff(repo, EMPTY_TREE_SHA1, tree)}, {"A"})
+        self.assertEqual(len(vcs.tree_diff(repo, EMPTY_TREE_SHA1, tree)), 5)
+
+        found = vcs.blobs(repo, [e.oid for e in listing])
+        self.assertEqual(found[odd_oid], b"{}\n")
+        self.assertEqual(len(found), 4, "one blob serves two paths; it is read once")
+        sizes = vcs.object_sizes(repo, [tree, shas["m"], odd_oid, self.MISSING])
+        self.assertEqual(sizes[odd_oid], ("blob", 3))
+        self.assertEqual(sizes[shas["m"]][0], "commit")
+        self.assertEqual(sizes[tree][0], "tree")
+        self.assertNotIn(self.MISSING, sizes, "a missing object is left out, named by the caller")
+        raw = vcs.tree_objects(repo, [made])
+        self.assertEqual([(m, n) for m, n, _o in raw[made]],
+                         [("120000", "a.txt"), ("40000", "d"), ("120000", "link"),
+                          ("100644", "side.txt"), ("160000", "sub"), ("100644", self.ODD)],
+                         "modes as the tree stores them (40000, not 040000), names exact")
+        self.assertEqual(dict((n, o) for _m, n, o in raw[made])["sub"], shas["a"])
+        self.assertEqual(vcs.blobs(repo, []), {})
+        self.assertEqual(vcs.object_sizes(repo, []), {})
+        self.assertEqual(vcs.tree_objects(repo, []), {})
+
+    def test_new_objects_are_the_pushs_own(self):
+        repo, shas = self._line()
+        new = vcs.new_objects(repo, shas["m"], exclude=[shas["a"]])
+        oids = {oid for oid, _p in new}
+        for sha in ("m", "c", "b", "d"):
+            self.assertIn(shas[sha], oids, f"{sha} is reachable from M and not from A")
+        self.assertNotIn(shas["a"], oids)
+        a_tree = vcs.tree_of(repo, shas["a"])
+        self.assertNotIn(a_tree, oids)
+        by_oid = dict(new)
+        self.assertEqual(by_oid[shas["m"]], "", "a commit has no path")
+        self.assertEqual(by_oid[vcs.tree_of(repo, shas["m"])], "", "the root tree's path is empty")
+        c_blob = next(e.oid for e in vcs.tree_listing(repo, vcs.tree_of(repo, shas["m"]))
+                      if e.path == "c.txt")
+        self.assertEqual(by_oid[c_blob], "c.txt")
+        whole = vcs.new_objects(repo, shas["a"], exclude=[])
+        self.assertIn(shas["a"], dict(whole))
+        odd_oid = next(e.oid for e in vcs.tree_listing(repo, a_tree) if e.path == self.ODD)
+        self.assertEqual(dict(whole)[odd_oid], "we ird",
+                         "rev-list stops a name at its first newline (no -z on 2.34): "
+                         "the name is a label, never a path a rule judges")
+        self.assertEqual(vcs.new_objects(repo, shas["m"], exclude=[shas["m"]]), [])
+
+    def test_batch_output_is_read_by_length(self):
+        """A blob whose bytes look like a `cat-file --batch` header is one blob:
+        the header's size is what is read, never the next newline."""
+        repo = self._repo({"a.txt": "a\n"})
+        header_like = f"\n{EMPTY_TREE_SHA1} blob 3\nabc\n"
+        oid = self._git(["hash-object", "-w", "--stdin"], repo, input=header_like).strip()
+        self.assertEqual(vcs.blobs(repo, [oid]), {oid: header_like.encode()})
+        self.assertEqual(vcs.object_sizes(repo, [oid]), {oid: ("blob", len(header_like))})
+
+    def test_a_missing_object_or_the_wrong_type_is_none(self):
+        repo, shas = self._line()
+        tree = vcs.tree_of(repo, shas["m"])
+        blob = vcs.tree_listing(repo, tree)[0].oid
+        self.assertIsNone(vcs.blobs(repo, [blob, self.MISSING]), "one missing, no answer")
+        self.assertIsNone(vcs.blobs(repo, [tree]), "a tree is not a blob")
+        self.assertIsNone(vcs.commit_objects(repo, [shas["m"], self.MISSING]))
+        self.assertIsNone(vcs.commit_objects(repo, [blob]))
+        self.assertIsNone(vcs.tree_objects(repo, [tree, self.MISSING]))
+        self.assertIsNone(vcs.tree_objects(repo, [blob]))
+        self.assertIsNone(vcs.tree_of(repo, self.MISSING))
+        self.assertIsNone(vcs.tree_of(repo, blob), "a blob has no tree")
+        self.assertIsNone(vcs.tree_entries(repo, self.MISSING))
+        self.assertIsNone(vcs.tree_listing(repo, blob))
+        self.assertIsNone(vcs.tree_diff(repo, tree, self.MISSING))
+        self.assertIsNone(vcs.first_parents(repo, self.MISSING, limit=5))
+        self.assertIsNone(vcs.line_commits(repo, [shas["m"], self.MISSING], limit=5))
+        self.assertIsNone(vcs.new_objects(repo, self.MISSING, exclude=[]))
+        self.assertIsNone(vcs.new_objects(repo, shas["m"], exclude=[self.MISSING]))
+
+    def test_none_outside_a_repository(self):
+        plain = self._not_a_repo()
+        sha = "a" * 40
+        calls = {
+            "object_format": lambda: vcs.object_format(plain),
+            "commit_exists": lambda: vcs.commit_exists(plain, sha),
+            "first_parents": lambda: vcs.first_parents(plain, sha, limit=1),
+            "line_commits": lambda: vcs.line_commits(plain, [sha], limit=1),
+            "ref_tips": lambda: vcs.ref_tips(plain, "refs/"),
+            "ref_exists": lambda: vcs.ref_exists(plain, "refs/heads/x"),
+            "ref_trees": lambda: vcs.ref_trees(plain, "refs/heads/x", limit=1),
+            "commit_objects": lambda: vcs.commit_objects(plain, [sha]),
+            "trailer_lines": lambda: vcs.trailer_lines(plain, [sha]),
+            "tree_of": lambda: vcs.tree_of(plain, sha),
+            "tree_entries": lambda: vcs.tree_entries(plain, sha),
+            "tree_listing": lambda: vcs.tree_listing(plain, sha),
+            "tree_diff": lambda: vcs.tree_diff(plain, sha, sha),
+            "blobs": lambda: vcs.blobs(plain, [sha]),
+            "object_sizes": lambda: vcs.object_sizes(plain, [sha]),
+            "new_objects": lambda: vcs.new_objects(plain, sha, exclude=[]),
+            "tree_objects": lambda: vcs.tree_objects(plain, [sha]),
+        }
+        for name, call in calls.items():
+            with self.subTest(call=name):
+                self.assertIsNone(call())
+        # `hash-object` is git's one question that needs no repository: it
+        # answers sha1's empty tree anywhere. The validator asks `object_format`
+        # first, which is None here, so no push is judged on it.
+        self.assertEqual(vcs.empty_tree(plain), EMPTY_TREE_SHA1)
+
+    def test_a_hung_git_is_none_and_the_timeout_keyword_is_this_calls(self):
+        project = self.tmp()
+        bindir = self._fake_git("import time\ntime.sleep(60)")
+        sha = "a" * 40
+        calls = {
+            "object_format": lambda: vcs.object_format(project),
+            "commit_exists": lambda: vcs.commit_exists(project, sha),
+            "first_parents": lambda: vcs.first_parents(project, sha, limit=1),
+            "ref_tips": lambda: vcs.ref_tips(project, "refs/"),
+            "ref_trees": lambda: vcs.ref_trees(project, "refs/heads/x", limit=1),
+            "blobs": lambda: vcs.blobs(project, [sha]),
+            "trailer_lines": lambda: vcs.trailer_lines(project, [sha]),
+            "empty_tree": lambda: vcs.empty_tree(project),
+        }
+        with mock.patch.dict(os.environ, {"PATH": bindir}), \
+                mock.patch.object(vcs, "VCS_TIMEOUT_S", 0.3):
+            for name, call in calls.items():
+                with self.subTest(call=name):
+                    started = time.perf_counter()
+                    self.assertIsNone(call())
+                    elapsed = time.perf_counter() - started
+                    self.assertGreaterEqual(elapsed, 0.25, f"{name} returned in {elapsed:.2f}s")
+                    self.assertLess(elapsed, 20, f"{name} waited {elapsed:.1f}s")
+        # `timeout=` is for this call: the module's 10 s stays, the call waits 0.3.
+        with mock.patch.dict(os.environ, {"PATH": bindir}):
+            started = time.perf_counter()
+            self.assertEqual(vcs._ask(project, ["rev-parse", "HEAD"], timeout=0.3),
+                             (None, b"", b"timeout"))
+            self.assertLess(time.perf_counter() - started, 5)
+
+    def test_a_bad_sha_never_reaches_git(self):
+        """`_HEX_OID` before argv: `HEAD`, a short id, a path, an option — each
+        answers None with no process started, so a pusher's string is never a
+        revision expression git evaluates."""
+        repo = self.tmp()
+        good = "a" * 40
+        bad = ("HEAD", "a" * 39, "A" * 40, "../x", "-q", "", good + "^{commit}", "0" * 41)
+        with mock.patch.object(vcs, "_ask", side_effect=AssertionError("git was started")):
+            for sha in bad:
+                with self.subTest(sha=sha):
+                    self.assertIsNone(vcs.commit_exists(repo, sha))
+                    self.assertIsNone(vcs.first_parents(repo, sha, limit=1))
+                    self.assertIsNone(vcs.line_commits(repo, [good, sha], limit=1))
+                    self.assertIsNone(vcs.commit_objects(repo, [sha]))
+                    self.assertIsNone(vcs.trailer_lines(repo, [good, sha]))
+                    self.assertIsNone(vcs.tree_of(repo, sha))
+                    self.assertIsNone(vcs.tree_entries(repo, sha))
+                    self.assertIsNone(vcs.tree_listing(repo, sha))
+                    self.assertIsNone(vcs.tree_diff(repo, good, sha))
+                    self.assertIsNone(vcs.tree_diff(repo, sha, good))
+                    self.assertIsNone(vcs.blobs(repo, [sha]))
+                    self.assertIsNone(vcs.object_sizes(repo, [sha]))
+                    self.assertIsNone(vcs.new_objects(repo, sha, exclude=[]))
+                    self.assertIsNone(vcs.new_objects(repo, good, exclude=[sha]))
+                    self.assertIsNone(vcs.tree_objects(repo, [sha]))
+            # A lone string is its characters, which are not shas; a limit
+            # that is not a count is no count.
+            self.assertIsNone(vcs.blobs(repo, good))
+            self.assertIsNone(vcs.first_parents(repo, good, limit=-1))
+            self.assertIsNone(vcs.line_commits(repo, [good], limit="10"))
+            self.assertIsNone(vcs.ref_trees(repo, "refs/heads/x", limit=True))
+            self.assertIsNone(vcs.ref_tips(repo, ""))
+            self.assertIsNone(vcs.ref_exists(repo, "--verify"))
 
 
 if __name__ == "__main__":

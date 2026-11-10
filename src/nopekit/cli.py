@@ -32,10 +32,13 @@ CI:
     1   a gate-level verdict says stop  — `check` with a blocking critical claim,
         `gate selftest` with a control that did not fire, a pack gate that
         failed its own baseline, or no control exercised at all (unless
-        `--allow-empty`), `doctor` with a hard failure. This is what makes
+        `--allow-empty`), `doctor` with a hard failure, `validate` with a push
+        a rule refuses. This is what makes
         `nopekit check` usable as a pre-spend gate: it exits non-zero *while
         anything critical is unproven*, not only when something failed.
-    2   the user did something the tool cannot act on (NopekitError, bad args)
+    2   the user did something the tool cannot act on (NopekitError, bad args);
+        `validate` could not judge the push at all — git did not answer (E07),
+        a malformed line, no such repository — and the hook declines on it too
     130 interrupted
 
 One design note worth stating because it is load-bearing and not obvious: gates
@@ -73,7 +76,7 @@ from typing import Any, Callable, Iterable, Mapping, NamedTuple
 
 from . import __version__
 from . import (artifacts, claims, decisions, derivation, gates, graph, milestones, modelio,
-               packs, page, prose, report, rounds, site, store, vcs, verdicts)
+               packs, page, prose, receive, report, rounds, site, store, vcs, verdicts)
 from .models import (
     ArtifactKind,
     Claim,
@@ -98,6 +101,7 @@ from .util import (
     atomic_write_text,
     human_bytes,
     human_duration,
+    printable,
     read_json,
     rel,
     seal,
@@ -641,8 +645,10 @@ def _load(root: str) -> Ledger:
 #: Commands after which the index is NOT rebuilt. `doctor` reports on the
 #: project and never writes a byte of it (it compares the index with the records
 #: instead). `init` never writes a `ledger.json` (spec §3.15): a new project's
-#: first index comes from its first command, like every later one.
-_INDEX_UNTOUCHED = frozenset({"doctor", "init"})
+#: first index comes from its first command, like every later one. `validate`
+#: (Eddy milestone 0) runs against a repository, bare or not, that is no
+#: project of the cwd's: nothing to index, and nothing it may write.
+_INDEX_UNTOUCHED = frozenset({"doctor", "init", "validate"})
 
 #: How many times `_touch_index` rebuilds when the records move underneath it.
 #: The rebuild takes no lock — `status` must stay usable while a tier-2 `check`
@@ -10143,6 +10149,100 @@ def _junit_flag(parser: argparse.ArgumentParser, what: str) -> None:
                              f"{report.JUNIT_DEFAULT}; a PATH must end in .xml)")
 
 
+def _validate_label(ref: str) -> str:
+    """``cand/<name>``, ``draft/<name>``, ``main`` — the ref as the summary line
+    names it; a ref outside the layout keeps its full name."""
+    kind, name = receive.classify_ref(ref)
+    return f"{kind}/{name}" if kind in ("cand", "draft") else name
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    """`nopekit validate REPO (REF OLD NEW | --stdin)`: what Eddy's pre-receive
+    hook will say of a push (Eddy milestone 0, `docs/EDDY_CONTRACT.md`).
+
+    Shaped like `cmd_packs_validate`: `receive.validate_push` returns the
+    report and this handler prints it — one line per refusal and per note
+    (`receive.format_line`), then a summary per ref. `-C` is inherited from
+    `common` and ignored: `store.find_root` walks up to `.nopekit/project.json`
+    and stops at `.git`, and a bare repository has neither, so the repository
+    is the positional; this handler never calls `_root`, `require_root` or
+    `_load`, and `validate` is in `_INDEX_UNTOUCHED`. It reads no `GIT_*`
+    variable: `--objects`/`--alternates` build the `vcs.ObjectDirs` the hook
+    script read from its environment and handed over as flags. `new` may be
+    `HEAD` and `old` may be `0`, so the agent types `nopekit validate .
+    refs/heads/cand/x 0 HEAD` before pushing. Under `--stdin` (the hook's form)
+    the `accepted:` line is withheld, so no line a hostile tree could forge — a
+    path holding `accepted:` — imitates it; every other line passes through
+    `util.printable`.
+
+    Exit codes keep the module docstring's: 0 accepted (notes or not), 1
+    refused, 2 could not validate (E07, a malformed argument, no such
+    repository). The hook declines on 1 and 2.
+    """
+    repo = os.path.abspath(args.repo)
+    if not os.path.isdir(repo):
+        raise NopekitError(f"{args.repo}: no such directory")
+    updates: list[tuple[str, str, str]] = []
+    if args.stdin:
+        if args.ref or args.old or args.new:
+            raise NopekitError("--stdin reads the push's lines from stdin; give no REF OLD NEW")
+        for line in sys.stdin.read().splitlines():
+            words = line.split()
+            if not words:
+                continue
+            if len(words) != 3:
+                raise NopekitError(f"not a pre-receive line: {printable(line)!r} (expected "
+                                   f"<old> <new> <ref>)")
+            updates.append((words[0], words[1], words[2]))
+    else:
+        if not (args.ref and args.old and args.new):
+            raise NopekitError("validate takes REPO REF OLD NEW, or REPO --stdin")
+        new = args.new
+        if new == "HEAD":
+            head = vcs.git_head(repo)
+            if head is None:
+                raise NopekitError(f"{args.repo}: HEAD names no commit")
+            new = head
+        old = "0" * len(new) if args.old == "0" else args.old
+        updates.append((old, new, args.ref))
+    objects = vcs.ObjectDirs(args.objects, args.alternates or "") if args.objects else None
+    report = receive.validate_push(repo, updates, objects=objects, pusher=args.by or "")
+
+    if args.json:
+        _dump({"refs": [{"ref": found.ref, "old": found.old, "new": found.new,
+                         "refusals": [item._asdict() for item in found.refusals],
+                         "notes": [item._asdict() for item in found.notes],
+                         "commits": [{"sha": c.sha, "kind": c.kind, "name": c.name}
+                                     for c in found.commits],
+                         "spec_tree": found.spec_tree, "accepted_spec": found.accepted_spec}
+                        for found in report.refs],
+               "unanswered": report.unanswered, "pusher": report.pusher,
+               "ok": report.accepted})
+        return 2 if report.unanswered else (0 if report.accepted else 1)
+    for found in report.refs:
+        for item in found.refusals:
+            _say(receive.format_line(item))
+        for item in found.notes:
+            _say(receive.format_line(item))
+        label = printable(_validate_label(found.ref))
+        if found.refusals:
+            _say(f"refused: {len(found.refusals)} problem(s) on {label}; nothing landed — a "
+                 f"pre-receive hook refuses the whole push")
+        elif not args.stdin:
+            if receive.is_zero(found.new):
+                _say(f"accepted: {label} deleted")
+            else:
+                waiting = ""
+                if found.accepted_spec is False and found.spec_tree:
+                    waiting = (f", awaiting acceptance of its gates "
+                               f"(spec {found.spec_tree[:12]})")
+                _say(f"accepted: {label} at {found.new[:12]}{waiting}")
+    if report.unanswered:
+        _say(report.unanswered)
+        return 2
+    return 0 if report.accepted else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The whole command surface.
 
@@ -10559,6 +10659,28 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("doctor", parents=[common],
                        help="environment, model, packs, gates and ledger integrity")
     p.set_defaults(func=cmd_doctor)
+
+    # -- validate (Eddy milestone 0) ---------------------------------------- #
+    p = sub.add_parser("validate", parents=[common],
+                       help="validate a push the way Eddy's pre-receive hook does: refs, "
+                            "trailers, trees, the state file, the object scan; executes "
+                            "nothing, writes nothing")
+    p.add_argument("repo", help="a bare or non-bare repository (never -C's project walk: a "
+                                "bare repository has no .nopekit/project.json and no .git to "
+                                "stop at)")
+    p.add_argument("ref", nargs="?", help="the full ref, refs/heads/cand/<name>")
+    p.add_argument("old", nargs="?", help="the ref's tip before the push, or 0 for a new ref")
+    p.add_argument("new", nargs="?", help="the commit pushed, or HEAD")
+    p.add_argument("--stdin", action="store_true",
+                   help="read pre-receive's \"<old> <new> <ref>\" lines from stdin (the hook's "
+                        "form; the accepted: line is withheld)")
+    p.add_argument("--objects", metavar="DIR",
+                   help="GIT_OBJECT_DIRECTORY as the hook received it: the quarantine")
+    p.add_argument("--alternates", default="", metavar="DIRS",
+                   help="GIT_ALTERNATE_OBJECT_DIRECTORIES as the hook received it")
+    p.add_argument("--by", default="", metavar="LOGIN",
+                   help="the signed-in pusher (NOPE_PUSHER); recorded, judged by no rule yet")
+    p.set_defaults(func=cmd_validate)
 
     _tag_subparsers(parser)
     return parser

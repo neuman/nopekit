@@ -258,6 +258,12 @@ stays until you `git rm` it.
 On a fresh clone `nopekit round` writes nothing and `git status`
 stays clean.
 
+`spec/packs.json` (`{"schema": 1, "packs": {}}`: the bracket pins no pack) is the
+spec's one real file under Eddy (`docs/EDDY_CONTRACT.md`): the pre-receive hook
+reads it to hold the pinned packs and the live list in `.nopekit/project.json` to
+the same names. It is not a record — no digest moves with it, the index never
+lists it, and committing it regenerated nothing above.
+
 The bracket lists no `people` in `.nopekit/project.json`, on purpose: `nopekit round
 --commit`, and the plugin's Stop hook that runs it, commits a round only as a person
 listed there, so a round run here, inside nopekit's own repository, never commits.

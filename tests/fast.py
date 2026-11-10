@@ -13,6 +13,13 @@ least one violation test of every invariant runs every iteration, and a break
 that only a test in ``LEFT_FOR_THE_GATE`` sees is caught by the escalation rule
 below or by the full suite, not here.
 
+Eddy milestone 0 (the validator and the pre-receive hook) adds one pure class,
+test_receive.TheContractIsTheRuleTable (the doc table against receive.RULES and
+NOTES, the test-method bijection, the ignore-block derivation, the empty tree;
+measured 2026-11-09 at 0.1 s alone, no repository built), and leaves every push —
+in process or through the real hook — to the full suite; the tier was over
+budget before it (142.0 s wall for 726 tests at load 1-2, the same tree with the
+git edge's change) and this adds nothing an iteration would notice.
 The budget is 90 s as ONE process on an otherwise idle machine. Issue #15's P1.1 (the
 evidence bound by content) added two rows (~3 s: the A, B, A sequence and one check)
 and left its other seven to the gate. Measured on 2026-10-21 as two interleaved pairs
@@ -1120,6 +1127,12 @@ FAST: list[str] = [
     # The motorBike design's P5: every scale of aero-openfoam's `_scales.SCALES`
     # built from a summary alone, in process (~0.05 s: no build, no tool).
     "test_figures.TheScaleIsAPackConstant.test_every_aero_scale_is_a_pack_constant",
+    # Eddy milestone 0: the rule table is one list — `receive.RULES`/`NOTES`, the
+    # contract's table and the hostile tests — and this class holds the three
+    # equal, in process, with no repository (~0.1 s). Every push through the
+    # real hook, and every in-process push of the hostile classes, is the full
+    # suite's: the tier is over budget and takes no e2e push.
+    "test_receive.TheContractIsTheRuleTable",
 ]
 
 

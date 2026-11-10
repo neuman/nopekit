@@ -1685,7 +1685,11 @@ def _touched_records(before: dict, after: dict) -> list[str]:
 #: command. `check --no-record` and `gate selftest --no-record` are the dry runs.
 #: Not here: `site serve` (a server that does not return; `--detach`, which starts
 #: one that outlives the command, and `--stop` are swept for records by
-#: test_serve) and `site vendor` (the network); P3.1's `ask --next` joins when it
+#: test_serve), `site vendor` (the network) and `validate` (Eddy milestone 0:
+#: it takes a repository, bare or not, never a project root, so a sweep that
+#: runs in one does not fit it; that it writes nothing in the repository it
+#: reads — only a scratch directory outside it, gone afterwards — is
+#: test_receive.TheValidatorWritesNothing); P3.1's `ask --next` joins when it
 #: exists — a strengthening, never an edit of what is here (PLAN §4.6).
 _NON_SHIM: tuple[tuple[tuple[str, ...], bool], ...] = (
     (("status",), False), (("status", "--json"), False),

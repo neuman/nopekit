@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Eddy's pre-receive hook: ``nopekit validate --stdin`` with the quarantine
+handed over and a crash read as a refusal. The inverse of ``hooks/stop.py``'s
+exit contract: that hook never fails the turn, this one never accepts what it
+could not judge.
+
+Installed by Eddy's image as ``<bare>/hooks/pre-receive`` (mode 0755), by a
+symlink or a two-line sh shim (``#!/bin/sh`` / ``exec python3
+/opt/nopekit/server/pre-receive "$@"``), beside ``receive.fsckObjects=true``
+and ``transfer.fsckObjects=true`` on the repository. What git gives it
+(verified on git 2.34.1 by a real push): stdin lines ``<old> <new> <ref>``;
+``GIT_DIR=.`` with the cwd the repository; ``GIT_QUARANTINE_PATH``,
+``GIT_OBJECT_DIRECTORY`` (``objects/incoming-XXXX``, where the pushed objects
+sit until the hook accepts) and ``GIT_ALTERNATE_OBJECT_DIRECTORIES``
+(``objects/``); stdout and stderr both reach the client prefixed ``remote: ``;
+a non-zero exit shows ``! [remote rejected] … (pre-receive hook declined)``.
+
+The script reads those variables here, at the edge, and hands them to the CLI
+as flags: nothing in the spine reads the environment, and ``vcs`` strips both
+variables from every git call it makes (the carve-out in its docstring), so a
+validator run outside a hook would read the main store and answer for the
+wrong objects. Hence the first rule below: with no ``GIT_OBJECT_DIRECTORY``
+this is not a pre-receive hook, and the push is refused rather than judged
+against the wrong store — with one carve-out. Git builds the quarantine only
+when it unpacked objects, and a DELETE-ONLY push sends none: it reaches the
+hook with ``GIT_DIR`` set and no ``GIT_OBJECT_DIRECTORY`` (verified on 2.34.1,
+the deletion of a ref that never existed included, which arrives as two zero
+ids). So a push whose every line is a deletion is judged, with ``GIT_DIR``
+set, against the main store — a deletion reads no object, and the main store
+is all there is. Anything else without a quarantine is refused. What slipped
+through before the carve-out: every deletion of a draft was refused as "not a
+pre-receive hook" (``tests/test_receive.py``'s E03-through-git case and
+``test_draft_takes_anything_but_a_secret`` pin the two sides; a delete-only
+line with neither variable set is refused, pinned beside them).
+``NOPE_PUSHER`` is reserved for Eddy's SSH/HTTP front end (the signed-in
+login); it is passed as ``--by`` and recorded, with no rule in milestone 0.
+
+Run as a script, never ``-m`` (``hooks/stop.py``'s lesson: ``-m`` puts the cwd
+first on ``sys.path``, and the cwd here is a bare repository anyone pushed to).
+The lines below drop every empty or relative entry, put this checkout's
+``src`` first, and turn anything that escapes — a failed import's
+``SystemExit`` included, hence ``BaseException`` — into one line and exit 1: a
+crash is never an acceptance. ``run`` takes no argument: a pre-receive hook is
+given none (``hooks/stop.py``'s ``run(argv)`` selects a host; this one has one).
+"""
+import os
+import sys
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC = os.path.join(os.path.dirname(_HERE), "src")
+sys.path[:] = [_SRC] + [e for e in sys.path if e and os.path.isabs(e) and e not in (_HERE, _SRC)]
+
+
+def _deletion(line: str) -> bool:
+    """A pre-receive line whose ``new`` is all zeros: a ref being deleted."""
+    words = line.split()
+    return len(words) == 3 and set(words[1]) == {"0"}
+
+
+def run() -> int:
+    try:
+        lines = sys.stdin.read()
+        objects = os.environ.get("GIT_OBJECT_DIRECTORY", "")
+        # What slipped through: git sets up the quarantine only when it unpacked
+        # objects, so a DELETE-ONLY push reaches the hook with GIT_DIR and no
+        # GIT_OBJECT_DIRECTORY, and the rule below refused every deletion of a
+        # draft as "not a pre-receive hook". A deletion reads no object: with
+        # GIT_DIR set (git sets it for every hook) and every line a deletion,
+        # the push is judged against the main store, which is all there is.
+        given = [line for line in lines.splitlines() if line.split()]
+        delete_only = bool(given) and all(_deletion(line) for line in given)
+        if not objects and not (delete_only and os.environ.get("GIT_DIR")):
+            sys.stderr.write("nopekit validate: no GIT_OBJECT_DIRECTORY, so this is not a "
+                             "pre-receive hook; the push is refused\n")
+            return 1
+        repo = os.path.abspath(os.environ.get("GIT_DIR") or ".")
+        args = ["validate", repo, "--stdin"]
+        if objects:
+            args += ["--objects", objects,
+                     "--alternates", os.environ.get("GIT_ALTERNATE_OBJECT_DIRECTORIES", "")]
+        if os.environ.get("NOPE_PUSHER"):
+            args += ["--by", os.environ["NOPE_PUSHER"]]
+        import io
+        sys.stdin = io.StringIO(lines)           # the lines, read once above, handed on whole
+        from nopekit.cli import main
+        return main(args)
+    except BaseException as exc:  # noqa: BLE001 — a SystemExit from a failed import included
+        first = (str(exc).splitlines() or [""])[0]
+        sys.stderr.write(f"nopekit validate crashed ({type(exc).__name__}: {first}); "
+                         "the push is refused — a crash is never an acceptance\n")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(run())

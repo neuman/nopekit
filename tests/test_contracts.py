@@ -871,7 +871,7 @@ REMOVED_NAMES += tuple(
 REMOVED_NAME_DOCS = (
     "README.md", "CLAUDE.md", "CONTRIBUTING.md", "METHOD.md",
     "docs/SPINE_CONTRACT.md", "docs/PACK_FORMAT.md", "docs/SITE_CONTRACT.md",
-    "docs/EXTENSION_PROTOCOL.md",
+    "docs/EXTENSION_PROTOCOL.md", "docs/EDDY_CONTRACT.md",
 )
 REMOVED_NAME_GLOBS = ("skills/*/SKILL.md", "packs/*/PACK.md", "packs/*/references/*.md")
 

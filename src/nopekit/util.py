@@ -665,18 +665,27 @@ class FileDigests:
 #: project already holds would refuse every command, R-10, and the commit
 #: message, an evidence path or git's own identity reach a terminal too);
 #: stripping the bytes (the reader would never learn the text holds them).
-_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩]")
+#: And the surrogates ``os.fsdecode`` makes of bytes that are not UTF-8
+#: (U+DC80..U+DCFF, ``surrogateescape``), each escaped as the byte it stands
+#: for: a stdout that uses the same error handler writes the byte BACK, so a
+#: tree name holding 0x9b — an 8-bit CSI — reached the pusher's terminal raw
+#: through the pre-receive hook (review of Eddy milestone 0), matched by no
+#: code point above.
+_UNPRINTABLE = re.compile("[\x00-\x1f\x7f-\x9f‪-‮⁦-⁩\udc80-\udcff]")
 
 
 def printable(text: Any) -> str:
     """``text`` as ONE terminal line that says what it holds: whitespace runs,
     newlines included, collapsed to one space, and every remaining control
-    character escaped as visible ``\\xNN`` (``\\uNNNN`` past ``\\xff``) —
-    never interpreted by the terminal that prints it."""
+    character escaped as visible ``\\xNN`` (``\\uNNNN`` past ``\\xff``; a
+    surrogate-escaped byte as that byte's ``\\xNN``) — never interpreted by
+    the terminal that prints it."""
     joined = " ".join(str(text if text is not None else "").split())
 
     def escaped(match: "re.Match[str]") -> str:
         point = ord(match.group(0))
+        if 0xDC80 <= point <= 0xDCFF:
+            return f"\\x{0x80 + (point - 0xDC80):02x}"
         return f"\\x{point:02x}" if point <= 0xFF else f"\\u{point:04x}"
 
     return _UNPRINTABLE.sub(escaped, joined)

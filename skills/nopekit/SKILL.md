@@ -225,7 +225,6 @@ does not mean true: it means every evaluator passed on the current inputs.
 **Never simulate a physical claim.** No CFD run makes a printed seam watertight.
 
 ## Commands
-
 ```
 nopekit init                    # the project layout, a git repository, the person in people
 nopekit status                  # where the project is, in one screen
@@ -249,6 +248,7 @@ nopekit packs skills            # the live packs' PACK.md, lenses and skills: re
 nopekit model [trace]           # the model as nopekit sees it; trace: what each choice moves
 nopekit site serve --watch --detach   # the live site, its own process; --stop stops it
 nopekit doctor                  # what is wrong, and what to do; writes nothing
+nopekit validate <repo> <ref> <old> <new>   # what Eddy's pre-receive hook will say of a push; writes nothing
 ```
 
 ## Reference

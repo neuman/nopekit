@@ -1160,6 +1160,9 @@ NOT_A_STATUS_RENDERER: dict[tuple[str, ...], str] = {
     ("site", "stamp"): "writes the as_of digest into site/content prose; prints the digest, "
                        "never a status word",
     ("site", "badge"): "writes the README's Made-with-nopekit block; reads no verdict",
+    # Eddy milestone 0.
+    ("validate",): "judges a push by its refs, trailers, trees and digests; loads an entry "
+                   "only for its shape, never for a claim's status, and prints no claim",
 }
 
 

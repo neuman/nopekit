@@ -29,6 +29,7 @@ __version__ = "0.1.0"
 _SUBMODULES = frozenset({
     "models", "util", "store", "modelio", "gates", "claims",
     "artifacts", "packs", "decisions", "report", "site", "cli",
+    "receive",
 })
 
 #: names that live in a module other than `models`. NopekitError is here

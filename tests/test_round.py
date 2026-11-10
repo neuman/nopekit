@@ -199,9 +199,21 @@ _RECORD_ACCESS = frozenset({"read", "state", "write", "path_of", "ROUND_REL", "R
 #: commit also holds ("rounds 2 to 3 were not committed") — never a status.
 #: `_round_label` reads the record's round number alone, to label a trace
 #: "traced at round N" (architecture phase 3b, decision 39) — never a status.
+#: Eddy milestone 0: `receive` holds the state file a pushed tree carries —
+#: `rounds.read` on a MATERIALISED COPY of that tree, from `state_file_problems`
+#: alone, to say whether the record is that tree's own (present, sealed, computed
+#: from the tree's records and verdict cache, in rendered form, its round above
+#: the previous claiming commit's): the question `_round_state` asks for `status`
+#: and `doctor`, never a status. Its module level names the file once
+#: (`STATE_REL = rounds.ROUND_REL`, the path every tree rule judges). No other
+#: `receive` function reaches `read`, `state`, `write` or `path_of`
+#: (`_RECEIVE_HELD`, held below): a reader of the record for truth would sit in
+#: the walk, not in the one function that holds it.
 _RECORD_ACCESS_ALLOWED = frozenset({("cli", "cmd_round"), ("cli", "_round_run"),
                                     ("cli", "_round_commit"), ("cli", "_round_state"),
-                                    ("cli", "build_parser"), ("cli", "_round_label")})
+                                    ("cli", "build_parser"), ("cli", "_round_label"),
+                                    ("receive", "state_file_problems"), ("receive", "<module>")})
+_RECEIVE_HELD = frozenset({"read", "state", "write", "path_of"})
 
 
 def round_reader_problems(sources: dict[str, str]) -> list[str]:
@@ -241,11 +253,17 @@ def _module_problems(name: str, source: str) -> tuple[str, ...]:
                                     f"{', '.join(a.name for a in node.names)} from rounds")
         elif isinstance(node, ast.Import):
             imports |= {alias.name.rsplit(".", 1)[-1] for alias in node.names}
-    if "rounds" in imports and name not in ("cli", "rounds"):
+    # Eddy milestone 0: `receive` imports `rounds` to hold a pushed tree's state
+    # file (`_RECORD_ACCESS_ALLOWED`'s note); `claims` or `report` importing it
+    # is still a reader of the record for truth.
+    if "rounds" in imports and name not in ("cli", "rounds", "receive"):
         problems.append(f"{name}: imports rounds")
     for func, attr, line in _uses(tree):
         if attr in _RECORD_ACCESS and (name, func) not in _RECORD_ACCESS_ALLOWED:
             problems.append(f"{name}:{line}: {func} reaches rounds.{attr}")
+        if name == "receive" and attr in _RECEIVE_HELD and func != "state_file_problems":
+            problems.append(f"{name}:{line}: {func} reaches rounds.{attr}; only "
+                            f"state_file_problems holds the state file")
     return tuple(problems)
 
 

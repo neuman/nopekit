@@ -74,6 +74,43 @@ contract of their own, because a write is not a question:
 
 Three reads serve the writes (``changed_paths``, ``staged_paths``,
 ``operation``); they follow the read half's rules.
+
+Reading a push (Eddy milestone 0)
+---------------------------------
+``nopekit validate`` and Eddy's pre-receive hook judge a push by what git
+holds — refs, commits, trailers, trees, blobs, the objects new to the push —
+so the read half gains the reads under "reading a push" below. They ask about
+a repository that may be BARE: ``-C <bare>`` with ``GIT_DIR`` stripped finds
+it, because a bare repository is its own git directory (verified from inside a
+real pre-receive hook on git 2.34.1). None of them writes: ``empty_tree``
+hashes with ``hash-object`` and no ``-w``, and ``cat-file``, ``ls-tree``,
+``diff-tree``, ``rev-list``, ``for-each-ref``, ``show-ref``, ``log`` and
+``rev-parse`` are questions. Each keeps the read half's rules — argv form,
+the clean environment, the timeout, never raising, ``None`` on any failure —
+and adds two of its own: every object id is validated against ``_HEX_OID``
+BEFORE it reaches argv, so a bad sha answers ``None`` without starting git and
+can never be read as an option or a revision expression; and output is ``-z``
+or length-prefixed (``cat-file --batch``'s ``<oid> <type> <size>`` header),
+never a line git might quote or truncate — except ``rev-list --objects``,
+which has no ``-z`` on 2.34 and stops a name at its first newline; its name
+is a label for a message and never a path a rule judges.
+
+**The quarantine carve-out.** Inside pre-receive the pushed objects are
+visible only through ``GIT_OBJECT_DIRECTORY`` (the quarantine) and
+``GIT_ALTERNATE_OBJECT_DIRECTORIES`` (the main store), and ``_STRIPPED``
+removes both, with ``GIT_QUARANTINE_PATH``: with them stripped, ``git -C
+<bare> cat-file -t <new>`` answers "could not get object info" (verified by a
+real push on git 2.34.1). So every read of a push takes an explicit
+``objects: ObjectDirs | None``, and ``_ask`` sets exactly those two variables
+on the STRIPPED environment for that one call. Nothing in the spine reads the
+variables: the hook script reads them and hands them to the CLI as flags.
+Rejected: loosening ``_STRIPPED`` for the two — every other caller would then
+answer for the OUTER repository when run from a hook, the trap this docstring
+opens with, reopened for the one caller that must not fall into it; and
+reading the variables inside ``_ask`` when ``objects`` is ``None`` — an
+environment read in the spine that no test could tell from the leak, and
+``tests/_env`` strips them anyway, so no in-process row would ever have seen
+the quarantine.
 """
 from __future__ import annotations
 
@@ -105,6 +142,29 @@ __all__ = [
     "operation",
     "add",
     "commit",
+    # reading a push (Eddy milestone 0): nopekit validate and the pre-receive hook
+    "ObjectDirs",
+    "TreeEntry",
+    "Change",
+    "CommitObject",
+    "object_format",
+    "commit_exists",
+    "first_parents",
+    "line_commits",
+    "ref_tips",
+    "ref_exists",
+    "ref_trees",
+    "commit_objects",
+    "trailer_lines",
+    "tree_of",
+    "tree_entries",
+    "tree_listing",
+    "tree_diff",
+    "blobs",
+    "object_sizes",
+    "new_objects",
+    "tree_objects",
+    "empty_tree",
 ]
 
 
@@ -130,7 +190,12 @@ VCS_TIMEOUT_S = 10
 #:
 #: * which repository: GIT_DIR, GIT_WORK_TREE, GIT_IMPLICIT_WORK_TREE,
 #:   GIT_COMMON_DIR, GIT_PREFIX, GIT_NAMESPACE, GIT_CEILING_DIRECTORIES (a
-#:   foreign ceiling can stop discovery short of the project's ``.git``);
+#:   foreign ceiling can stop discovery short of the project's ``.git``),
+#:   GIT_INTERNAL_SUPER_PREFIX (git 2.34 lists it in ``--local-env-vars``: the
+#:   superproject's prefix a submodule sub-git is handed — what slipped
+#:   through: the list above was drawn from git 2.43, which had dropped it, and
+#:   the clean-environment test was red on a 2.34 machine for exactly that one
+#:   name until Eddy milestone 0 added it);
 #: * which index and objects: GIT_INDEX_FILE, GIT_OBJECT_DIRECTORY,
 #:   GIT_ALTERNATE_OBJECT_DIRECTORIES, GIT_GRAFT_FILE, GIT_SHALLOW_FILE,
 #:   GIT_NO_REPLACE_OBJECTS, GIT_REPLACE_REF_BASE, GIT_QUARANTINE_PATH (a
@@ -148,7 +213,7 @@ VCS_TIMEOUT_S = 10
 #: learn a list git changes a few times a decade and that a test already pins).
 _STRIPPED = frozenset({
     "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_COMMON_DIR",
-    "GIT_PREFIX", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES",
+    "GIT_PREFIX", "GIT_NAMESPACE", "GIT_CEILING_DIRECTORIES", "GIT_INTERNAL_SUPER_PREFIX",
     "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
     "GIT_GRAFT_FILE", "GIT_SHALLOW_FILE", "GIT_NO_REPLACE_OBJECTS",
     "GIT_REPLACE_REF_BASE", "GIT_QUARANTINE_PATH",
@@ -179,7 +244,10 @@ def _environment() -> dict[str, str]:
 
 
 def _ask(root: str | os.PathLike[str], args: Sequence[str], *,
-         literal_pathspecs: bool = False) -> tuple[int | None, bytes, bytes]:
+         literal_pathspecs: bool = False,
+         stdin_bytes: bytes | None = None,
+         objects: ObjectDirs | None = None,
+         timeout: float | None = None) -> tuple[int | None, bytes, bytes]:
     """``git -C root <args>``: ``(returncode, stdout, stderr)``; ``(None, b"",
     b"timeout")`` when it did not finish and ``(None, b"", b"")`` when it did
     not start. The one place a read-only git process starts.
@@ -187,30 +255,49 @@ def _ask(root: str | os.PathLike[str], args: Sequence[str], *,
     ``--literal-pathspecs`` for calls that take paths: a file literally named
     ``*.stl`` or ``:(top)x`` is a path, not a pattern that quietly matches
     something else.
+
+    Eddy milestone 0: ``stdin_bytes`` is written to git's stdin and the pipe
+    closed (``cat-file --batch``'s oids, ``hash-object --stdin``'s bytes);
+    with none, stdin stays ``DEVNULL``, so a question never waits on input.
+    ``objects`` sets ``GIT_OBJECT_DIRECTORY`` and
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES`` on the STRIPPED environment, for this
+    call only (the quarantine carve-out in the module docstring). ``timeout``
+    replaces ``VCS_TIMEOUT_S`` for this call.
     """
+    limit = VCS_TIMEOUT_S if timeout is None else timeout
     try:
         argv = ["git", "-C", os.fspath(root)]
         if literal_pathspecs:
             argv.append("--literal-pathspecs")
         argv.extend(os.fspath(a) for a in args)
+        env = _environment()
+        if objects is not None:
+            env["GIT_OBJECT_DIRECTORY"] = os.fspath(objects.directory)
+            env["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = os.fspath(objects.alternates)
+        feed = ({"input": bytes(stdin_bytes)} if stdin_bytes is not None
+                else {"stdin": subprocess.DEVNULL})
         proc = subprocess.run(
-            argv, env=_environment(), stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            timeout=VCS_TIMEOUT_S, check=False)
+            argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            timeout=limit, check=False, **feed)
     except subprocess.TimeoutExpired:
         return None, b"", b"timeout"
     except Exception:  # noqa: BLE001 — never raises: see the module docstring
         # FileNotFoundError (no git), PermissionError (a noexec PATH entry),
         # ValueError (a NUL byte in a path), TypeError (a path that is not
-        # one). Each means "git did not answer", which is the answer.
+        # one, an ObjectDirs member that is not a path). Each means "git did
+        # not answer", which is the answer.
         return None, b"", b""
     return proc.returncode, proc.stdout, proc.stderr
 
 
 def _git(root: str | os.PathLike[str], args: Sequence[str], *,
-         literal_pathspecs: bool = False) -> bytes | None:
+         literal_pathspecs: bool = False,
+         stdin_bytes: bytes | None = None,
+         objects: ObjectDirs | None = None,
+         timeout: float | None = None) -> bytes | None:
     """``git -C root <args>``'s stdout, or ``None`` for any failure at all."""
-    code, out, _err = _ask(root, args, literal_pathspecs=literal_pathspecs)
+    code, out, _err = _ask(root, args, literal_pathspecs=literal_pathspecs,
+                           stdin_bytes=stdin_bytes, objects=objects, timeout=timeout)
     return out if code == 0 else None
 
 
@@ -469,6 +556,634 @@ def commit_times(root: str | os.PathLike[str], relpaths: Iterable[str]) -> dict[
             result[original] = _iso(real)
     return result
 
+
+# --------------------------------------------------------------------------- #
+# reading a push (Eddy milestone 0): nopekit validate and the pre-receive hook
+# --------------------------------------------------------------------------- #
+class ObjectDirs(NamedTuple):
+    """The object stores a pre-receive hook is handed, passed to a read
+    explicitly (the carve-out in the module docstring): ``directory`` is
+    ``GIT_OBJECT_DIRECTORY`` as the hook received it — the quarantine the
+    pushed objects sit in until the hook accepts — and ``alternates`` is
+    ``GIT_ALTERNATE_OBJECT_DIRECTORIES``, the main store, in git's
+    ``os.pathsep``-joined form; ``""`` for none."""
+
+    directory: str
+    alternates: str = ""
+
+
+class TreeEntry(NamedTuple):
+    """One ``ls-tree -l`` record: ``mode`` (``100644``, ``100755``, ``120000``
+    a symlink, ``040000`` a tree, ``160000`` a gitlink), ``type`` (``blob``,
+    ``tree``, ``commit``), ``oid``, ``size`` (``None`` for a tree or a gitlink,
+    which ``-l`` prints as ``-``) and ``path`` relative to the tree asked
+    about, exact: ``-z`` keeps a name with a newline one name."""
+
+    mode: str
+    type: str
+    oid: str
+    size: int | None
+    path: str
+
+
+class Change(NamedTuple):
+    """One ``diff-tree -r --no-renames`` record: ``status`` ``A``, ``M``,
+    ``D`` or ``T`` (a type change — a file that became a symlink or a
+    gitlink); modes and oids are git's raw ones, ``000000`` and all zeros on
+    the side that has no entry."""
+
+    status: str
+    path: str
+    old_mode: str
+    new_mode: str
+    old_oid: str
+    new_oid: str
+
+
+class CommitObject(NamedTuple):
+    """A commit as ``cat-file --batch`` serves it: its ``tree``, its
+    ``parents`` in order (the first is the first parent — the one a line is
+    made of), and ``message``, the raw bytes after the first blank line,
+    undecoded: a control byte or an encoding a trailer parser would smooth
+    over is still there for the validator to refuse."""
+
+    sha: str
+    tree: str
+    parents: tuple[str, ...]
+    message: bytes
+
+
+def _oid(value: object) -> str | None:
+    """``value`` as a full object id, or ``None``. Checked BEFORE argv: a sha
+    is the one input a pusher chooses that these reads hand to git, and
+    ``-C``, ``--not`` or ``^{commit}`` beside an unchecked one is an option
+    or a revision expression git would honour."""
+    return value if isinstance(value, str) and _HEX_OID.match(value) else None
+
+
+def _oids(values: object) -> list[str] | None:
+    """Every entry of ``values`` as a full object id, in order, or ``None``
+    when any is not (a lone string is its characters, which fail)."""
+    try:
+        items = list(values)
+    except TypeError:
+        return None
+    out: list[str] = []
+    for value in items:
+        oid = _oid(value)
+        if oid is None:
+            return None
+        out.append(oid)
+    return out
+
+
+def _count(limit: object) -> int | None:
+    """``limit`` as a non-negative ``int`` for ``--max-count``, or ``None``."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 0:
+        return None
+    return limit
+
+
+def _ref_arg(ref: object) -> str | None:
+    """A ref or a ref prefix fit for argv: a string that cannot be read as an
+    option. Shape beyond that is the caller's rule, not this edge's."""
+    return ref if isinstance(ref, str) and ref and not ref.startswith("-") else None
+
+
+def _stdin_lines(oids: Sequence[str]) -> bytes:
+    return b"".join(oid.encode("ascii") + b"\n" for oid in oids)
+
+
+def _batch(out: bytes) -> list[tuple[str, str, bytes]] | None:
+    """``cat-file --batch`` output as ``[(oid, type, content)]`` — the
+    length-prefixed form, so a blob holding ``"\\n<oid> blob 3\\n"`` is one
+    blob, not two. A ``<oid> missing`` line is ``(oid, "missing", b"")``;
+    anything that does not parse makes the whole answer ``None``."""
+    items: list[tuple[str, str, bytes]] = []
+    pos, end = 0, len(out)
+    while pos < end:
+        newline = out.find(b"\n", pos)
+        if newline < 0:
+            return None
+        header = out[pos:newline].split(b" ")
+        pos = newline + 1
+        try:
+            oid = _oid(header[0].decode("ascii"))
+        except UnicodeDecodeError:
+            return None
+        if oid is None:
+            return None
+        if len(header) == 2 and header[1] in (b"missing", b"ambiguous"):
+            items.append((oid, "missing", b""))
+            continue
+        if len(header) != 3:
+            return None
+        try:
+            kind = header[1].decode("ascii")
+            size = int(header[2])
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if size < 0 or pos + size >= end or out[pos + size:pos + size + 1] != b"\n":
+            return None
+        items.append((oid, kind, out[pos:pos + size]))
+        pos += size + 1
+    return items
+
+
+def _cat_file(root: str | os.PathLike[str], oids: Sequence[str], want: str, *,
+              objects: ObjectDirs | None) -> dict[str, bytes] | None:
+    """``{oid: content}`` for ``oids`` through one ``cat-file --batch``; a
+    ``missing`` line or an object of another type than ``want`` makes the
+    whole answer ``None`` — the caller asked for blobs (or commits, or trees)
+    and was handed something else, which is not a partial answer but a
+    wrong one."""
+    out = _git(root, ["cat-file", "--batch"], stdin_bytes=_stdin_lines(oids), objects=objects)
+    if out is None:
+        return None
+    items = _batch(out)
+    if items is None:
+        return None
+    found: dict[str, bytes] = {}
+    for oid, kind, content in items:
+        if kind != want:
+            return None
+        found[oid] = content
+    return found
+
+
+def _parse_commit(sha: str, raw: bytes) -> CommitObject | None:
+    head, sep, message = raw.partition(b"\n\n")
+    if not sep:
+        return None
+    tree: str | None = None
+    parents: list[str] = []
+    for line in head.split(b"\n"):
+        # A continuation line (gpgsig's, mergetag's) starts with a space and
+        # is no header; a header this does not know is passed over.
+        try:
+            if line.startswith(b"tree "):
+                if tree is not None:
+                    return None
+                tree = _oid(line[5:].decode("ascii"))
+                if tree is None:
+                    return None
+            elif line.startswith(b"parent "):
+                parent = _oid(line[7:].decode("ascii"))
+                if parent is None:
+                    return None
+                parents.append(parent)
+        except UnicodeDecodeError:
+            return None
+    if tree is None:
+        return None
+    return CommitObject(sha, tree, tuple(parents), message)
+
+
+def _parse_tree(raw: bytes, hash_bytes: int) -> list[tuple[str, str, str]] | None:
+    """A raw tree object: ``<mode> <name>\\0<raw oid>`` repeated, the oid
+    ``hash_bytes`` long (20 for sha1, 32 for sha256)."""
+    entries: list[tuple[str, str, str]] = []
+    pos, end = 0, len(raw)
+    while pos < end:
+        space = raw.find(b" ", pos)
+        nul = raw.find(b"\0", space + 1) if space >= 0 else -1
+        if space < 0 or nul < 0 or nul + 1 + hash_bytes > end:
+            return None
+        try:
+            mode = raw[pos:space].decode("ascii")
+        except UnicodeDecodeError:
+            return None
+        if not mode or not mode.isdigit():
+            return None
+        name = os.fsdecode(raw[space + 1:nul])
+        oid = raw[nul + 1:nul + 1 + hash_bytes].hex()
+        entries.append((mode, name, oid))
+        pos = nul + 1 + hash_bytes
+    return entries
+
+
+def _ls_tree(out: bytes) -> list[TreeEntry] | None:
+    """``ls-tree -z -l`` records: ``<mode> <type> <oid> <size>\\t<path>\\0``,
+    the size right-aligned and ``-`` for a tree or a gitlink."""
+    entries: list[TreeEntry] = []
+    for record in out.split(b"\0"):
+        if not record:
+            continue
+        meta, sep, path = record.partition(b"\t")
+        fields = meta.split()
+        if not sep or len(fields) != 4:
+            return None
+        try:
+            mode, kind, oid_text, size_text = (f.decode("ascii") for f in fields)
+        except UnicodeDecodeError:
+            return None
+        oid = _oid(oid_text)
+        if oid is None or kind not in ("blob", "tree", "commit"):
+            return None
+        size: int | None = None
+        if size_text != "-":
+            try:
+                size = int(size_text)
+            except ValueError:
+                return None
+            if size < 0:
+                return None
+        entries.append(TreeEntry(mode, kind, oid, size, os.fsdecode(path)))
+    return entries
+
+
+def _hex_lines(out: bytes | None) -> list[str] | None:
+    """Every line of ``out`` as an object id; ``None`` when one is not."""
+    if out is None:
+        return None
+    found: list[str] = []
+    for line in out.split(b"\n"):
+        if not line:
+            continue
+        try:
+            oid = _oid(line.decode("ascii"))
+        except UnicodeDecodeError:
+            return None
+        if oid is None:
+            return None
+        found.append(oid)
+    return found
+
+
+def object_format(root: str | os.PathLike[str], *,
+                  objects: ObjectDirs | None = None) -> str | None:
+    """``"sha1"`` or ``"sha256"`` — the repository's hash (``rev-parse
+    --show-object-format``), which decides the empty tree's id and the width
+    of every oid a tree holds; ``None`` outside a repository."""
+    text = _text(_git(root, ["rev-parse", "--show-object-format"], objects=objects))
+    return text if text in ("sha1", "sha256") else None
+
+
+def commit_exists(root: str | os.PathLike[str], sha: str, *,
+                  objects: ObjectDirs | None = None) -> bool | None:
+    """Whether ``sha`` names a commit the repository (or the quarantine) holds:
+    ``True`` on exit 0 with the same id echoed back, ``False`` on exit 1 (no
+    such object, or one that is not a commit), ``None`` otherwise — a bad
+    sha included, without starting git."""
+    oid = _oid(sha)
+    if oid is None:
+        return None
+    code, out, _err = _ask(root, ["rev-parse", "--verify", "--quiet", f"{oid}^{{commit}}"],
+                           objects=objects)
+    if code == 0:
+        return True if _text(out) == oid else None
+    return False if code == 1 else None
+
+
+def first_parents(root: str | os.PathLike[str], tip: str, *, limit: int,
+                  objects: ObjectDirs | None = None) -> list[str] | None:
+    """The first-parent chain from ``tip`` (``rev-list --first-parent``),
+    newest first with ``tip`` itself at row 0, at most ``limit + 1`` long, so
+    the caller reads ``len > limit`` as "over the bound" without a second
+    walk; ``None`` on any failure. The chain is what a line IS under Eddy: a
+    merge whose second parent is the old tip is not on it, which is how E04
+    refuses what ``merge-base --is-ancestor`` would have called a
+    fast-forward."""
+    oid, count = _oid(tip), _count(limit)
+    if oid is None or count is None:
+        return None
+    return _hex_lines(_git(root, ["rev-list", "--first-parent", f"--max-count={count + 1}", oid],
+                           objects=objects))
+
+
+def line_commits(root: str | os.PathLike[str], tips: Sequence[str], *, limit: int,
+                 objects: ObjectDirs | None = None) -> list[str] | None:
+    """The union of the first-parent chains of every ``tips`` entry, at most
+    ``limit`` commits in all, in one ``rev-list --first-parent`` walk; ``[]``
+    for no tips, without starting git."""
+    oids, count = _oids(tips), _count(limit)
+    if oids is None or count is None:
+        return None
+    if not oids:
+        return []
+    return _hex_lines(_git(root, ["rev-list", "--first-parent", f"--max-count={count}", *oids],
+                           objects=objects))
+
+
+def ref_tips(root: str | os.PathLike[str], prefix: str, *,
+             objects: ObjectDirs | None = None) -> dict[str, str] | None:
+    """``{refname: oid}`` for every ref under ``prefix`` (``refs/heads/cand/``,
+    ``refs/``): ``for-each-ref`` with a NUL between name and id, so each pair
+    is read exactly; ``{}`` when none; ``None`` on failure or a ``prefix``
+    that could be read as an option."""
+    pattern = _ref_arg(prefix)
+    if pattern is None:
+        return None
+    out = _git(root, ["for-each-ref", "--format=%(refname)%00%(objectname)", pattern],
+               objects=objects)
+    if out is None:
+        return None
+    tips: dict[str, str] = {}
+    for line in out.split(b"\n"):
+        if not line:
+            continue
+        name, sep, oid_bytes = line.partition(b"\0")
+        try:
+            oid = _oid(oid_bytes.decode("ascii"))
+        except UnicodeDecodeError:
+            return None
+        if not sep or not name or oid is None:
+            return None
+        tips[os.fsdecode(name)] = oid
+    return tips
+
+
+def ref_exists(root: str | os.PathLike[str], ref: str) -> bool | None:
+    """Whether the full ``ref`` (``refs/heads/spec``) exists: ``show-ref
+    --verify --quiet``'s exit 0 / 1; ``None`` otherwise."""
+    name = _ref_arg(ref)
+    if name is None:
+        return None
+    code, _out, _err = _ask(root, ["show-ref", "--verify", "--quiet", name])
+    if code == 0:
+        return True
+    return False if code == 1 else None
+
+
+def ref_trees(root: str | os.PathLike[str], ref: str, *, limit: int,
+              objects: ObjectDirs | None = None) -> list[str] | None:
+    """The tree id of every commit on ``ref``'s first-parent chain, newest
+    first, at most ``limit`` (``log --first-parent --format=%T``); ``[]``
+    when `ref_exists` says the ref is absent (an empty ``spec`` branch is a
+    valid start); ``None`` on failure. Pinned against ``log.showSignature``
+    as every ``log`` read here is: a gpg line would read as no tree."""
+    name, count = _ref_arg(ref), _count(limit)
+    if name is None or count is None:
+        return None
+    present = ref_exists(root, name)
+    if present is None:
+        return None
+    if not present:
+        return []
+    return _hex_lines(_git(root, ["-c", "log.showSignature=false", "log", "--first-parent",
+                                  "--format=%T", f"--max-count={count}", name, "--"],
+                           objects=objects))
+
+
+def commit_objects(root: str | os.PathLike[str], shas: Sequence[str], *,
+                   objects: ObjectDirs | None = None) -> dict[str, CommitObject] | None:
+    """``{sha: CommitObject}`` for ``shas`` through one ``cat-file --batch``
+    (the shas on stdin, one per line); a ``missing`` line, an object that is
+    not a commit, or a commit that does not parse makes the whole answer
+    ``None``. ``{}`` for no shas, without starting git."""
+    oids = _oids(shas)
+    if oids is None:
+        return None
+    if not oids:
+        return {}
+    raw = _cat_file(root, oids, "commit", objects=objects)
+    if raw is None:
+        return None
+    found: dict[str, CommitObject] = {}
+    for sha, content in raw.items():
+        parsed = _parse_commit(sha, content)
+        if parsed is None:
+            return None
+        found[sha] = parsed
+    return found
+
+
+#: ``trailer_lines``'s log format: \x01<sha>\n<git's trailer block>\x02 per
+#: commit. The two control bytes are refused in any message the validator
+#: trusts (E12 reads the raw message first), and a block holding either here
+#: does not parse — the whole answer is ``None``, never a trailer misread.
+_TRAILER_FORMAT = "%x01%H%x0a%(trailers:only,unfold)%x02"
+
+
+def trailer_lines(root: str | os.PathLike[str], shas: Sequence[str], *,
+                  objects: ObjectDirs | None = None) -> dict[str, list[tuple[str, str]]] | None:
+    """``{sha: [(key, value), ...]}`` — git's OWN reading of each commit's
+    trailer block (``%(trailers:only,unfold)``: the last paragraph when every
+    line of it is a trailer, folded continuation lines joined), each line
+    split at its first ``:`` and both halves stripped; ``[]`` for a commit
+    with no block; ``None`` when a block does not parse or git did not
+    answer. The validator compares this with its own scan of the raw message,
+    so a ``Nope-`` line git reads as prose is refused rather than read two
+    ways. ``{}`` for no shas, without starting git."""
+    oids = _oids(shas)
+    if oids is None:
+        return None
+    if not oids:
+        return {}
+    out = _git(root, ["-c", "log.showSignature=false", "log", "--no-walk=unsorted", "--stdin",
+                      f"--format={_TRAILER_FORMAT}"],
+               stdin_bytes=_stdin_lines(oids), objects=objects)
+    if out is None or not out.startswith(b"\x01"):
+        return None
+    found: dict[str, list[tuple[str, str]]] = {}
+    for chunk in out.split(b"\x01")[1:]:
+        if not chunk.endswith(b"\x02\n") or chunk.count(b"\x02") != 1:
+            return None
+        head, sep, block = chunk[:-2].partition(b"\n")
+        try:
+            sha = _oid(head.decode("ascii"))
+        except UnicodeDecodeError:
+            return None
+        if not sep or sha is None:
+            return None
+        lines: list[tuple[str, str]] = []
+        for line in block.split(b"\n"):
+            if not line:
+                continue
+            key, colon, value = line.partition(b":")
+            if not colon:
+                return None
+            lines.append((os.fsdecode(key).strip(), os.fsdecode(value).strip()))
+        found[sha] = lines
+    return found
+
+
+def tree_of(root: str | os.PathLike[str], sha: str, *,
+            objects: ObjectDirs | None = None) -> str | None:
+    """The tree id of commit ``sha`` (``rev-parse --verify --quiet
+    <sha>^{tree}``); ``None`` for no such commit or any failure."""
+    oid = _oid(sha)
+    if oid is None:
+        return None
+    return _oid(_text(_git(root, ["rev-parse", "--verify", "--quiet", f"{oid}^{{tree}}"],
+                           objects=objects)))
+
+
+def tree_entries(root: str | os.PathLike[str], tree: str, *,
+                 objects: ObjectDirs | None = None) -> list[TreeEntry] | None:
+    """The top-level entries of ``tree`` (``ls-tree -z -l``, not recursive):
+    its files, its subtrees (size ``None``) and its gitlinks."""
+    oid = _oid(tree)
+    if oid is None:
+        return None
+    out = _git(root, ["ls-tree", "-z", "-l", oid], objects=objects)
+    return None if out is None else _ls_tree(out)
+
+
+def tree_listing(root: str | os.PathLike[str], tree: str, *,
+                 objects: ObjectDirs | None = None) -> list[TreeEntry] | None:
+    """Every blob, symlink and gitlink under ``tree`` (``ls-tree -r -z -l``),
+    with mode, oid, size and full path; subtrees themselves are not rows."""
+    oid = _oid(tree)
+    if oid is None:
+        return None
+    out = _git(root, ["ls-tree", "-r", "-z", "-l", oid], objects=objects)
+    return None if out is None else _ls_tree(out)
+
+
+def tree_diff(root: str | os.PathLike[str], a: str, b: str, *,
+              objects: ObjectDirs | None = None) -> list[Change] | None:
+    """What changed from tree ``a`` to tree ``b`` (``diff-tree -r -z
+    --no-renames``), as raw ``:<oldmode> <newmode> <oldoid> <newoid> <S>``
+    records: never a rename or a copy, so a file moved reads as ``D`` and
+    ``A`` and a rule on one path sees it. ``a`` may be the empty tree, which
+    makes every entry of ``b`` an ``A``."""
+    old, new = _oid(a), _oid(b)
+    if old is None or new is None:
+        return None
+    out = _git(root, ["diff-tree", "-r", "-z", "--no-renames", old, new], objects=objects)
+    if out is None:
+        return None
+    tokens = out.split(b"\0")
+    if tokens and not tokens[-1]:
+        tokens.pop()
+    if len(tokens) % 2:
+        return None
+    changes: list[Change] = []
+    for meta, path in zip(tokens[::2], tokens[1::2]):
+        fields = meta.split(b" ")
+        if len(fields) != 5 or not fields[0].startswith(b":"):
+            return None
+        try:
+            old_mode, new_mode, old_oid, new_oid, status = (f.decode("ascii") for f in fields)
+        except UnicodeDecodeError:
+            return None
+        old_mode = old_mode[1:]
+        if (_oid(old_oid) is None or _oid(new_oid) is None or len(status) != 1
+                or not old_mode.isdigit() or not new_mode.isdigit()):
+            return None
+        changes.append(Change(status, os.fsdecode(path), old_mode, new_mode, old_oid, new_oid))
+    return changes
+
+
+def blobs(root: str | os.PathLike[str], oids: Sequence[str], *,
+          objects: ObjectDirs | None = None) -> dict[str, bytes] | None:
+    """``{oid: bytes}`` for ``oids`` through one ``cat-file --batch``; a
+    ``missing`` line or an object that is not a blob makes the whole answer
+    ``None``. ``{}`` for no oids, without starting git."""
+    wanted = _oids(oids)
+    if wanted is None:
+        return None
+    if not wanted:
+        return {}
+    return _cat_file(root, wanted, "blob", objects=objects)
+
+
+def object_sizes(root: str | os.PathLike[str], oids: Sequence[str], *,
+                 objects: ObjectDirs | None = None) -> dict[str, tuple[str, int]] | None:
+    """``{oid: (type, size)}`` through one ``cat-file --batch-check`` — the
+    sizes without the bytes, so the object scan hashes nothing it has not
+    yet bounded. A ``missing`` line is left out: the caller names it (E11).
+    ``{}`` for no oids, without starting git."""
+    wanted = _oids(oids)
+    if wanted is None:
+        return None
+    if not wanted:
+        return {}
+    out = _git(root, ["cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+               stdin_bytes=_stdin_lines(wanted), objects=objects)
+    if out is None:
+        return None
+    sizes: dict[str, tuple[str, int]] = {}
+    for line in out.split(b"\n"):
+        if not line:
+            continue
+        fields = line.split(b" ")
+        try:
+            oid = _oid(fields[0].decode("ascii"))
+            if oid is None:
+                return None
+            if len(fields) == 2 and fields[1] in (b"missing", b"ambiguous"):
+                continue
+            if len(fields) != 3:
+                return None
+            kind, size = fields[1].decode("ascii"), int(fields[2])
+        except (UnicodeDecodeError, ValueError):
+            return None
+        if size < 0:
+            return None
+        sizes[oid] = (kind, size)
+    return sizes
+
+
+def new_objects(root: str | os.PathLike[str], new: str, *, exclude: Sequence[str],
+                objects: ObjectDirs | None = None) -> list[tuple[str, str]] | None:
+    """``[(oid, path)]`` for every object — commit, tree, blob — reachable
+    from ``new`` and from none of ``exclude`` (``rev-list --objects <new>
+    --not <exclude>...``): the push's new objects when ``exclude`` is every
+    other ref tip. ``path`` is the name rev-list printed, ``""`` for a commit
+    and for the root tree, and a LABEL: rev-list prints a blob once, at the
+    first name it saw it under, stops a name at its first newline (no ``-z``
+    on 2.34), and names only new objects — an old blob at a new name is seen
+    through `tree_objects`, never here. Why ``exclude`` and not ``--all``:
+    inside pre-receive ``--all`` is the pre-push ref state, but outside a hook
+    (the CLI before pushing, every in-process test) the ref already points at
+    ``new`` and ``--all`` lists nothing."""
+    oid, others = _oid(new), _oids(exclude)
+    if oid is None or others is None:
+        return None
+    args = ["rev-list", "--objects", oid]
+    if others:
+        args += ["--not", *others]
+    out = _git(root, args, objects=objects)
+    if out is None:
+        return None
+    found: list[tuple[str, str]] = []
+    for line in out.split(b"\n"):
+        if not line:
+            continue
+        head, _sep, name = line.partition(b" ")
+        try:
+            item = _oid(head.decode("ascii"))
+        except UnicodeDecodeError:
+            return None
+        if item is None:
+            return None
+        found.append((item, os.fsdecode(name)))
+    return found
+
+
+def tree_objects(root: str | os.PathLike[str], oids: Sequence[str], *,
+                 objects: ObjectDirs | None = None) -> dict[str, list[tuple[str, str, str]]] | None:
+    """``{tree oid: [(mode, name, oid)]}`` for ``oids`` through one ``cat-file
+    --batch``, each raw tree parsed here (``<mode> <name>\\0<raw oid>``; the
+    oid's width from the repository's hash). For the name scan: every entry
+    of every NEW tree, so a blob the repository already held, placed at
+    ``.aws/credentials`` by a new tree, is seen at that name. A ``missing``
+    line or an object that is not a tree makes the whole answer ``None``;
+    ``{}`` for no oids, without starting git."""
+    wanted = _oids(oids)
+    if wanted is None:
+        return None
+    if not wanted:
+        return {}
+    raw = _cat_file(root, wanted, "tree", objects=objects)
+    if raw is None:
+        return None
+    trees: dict[str, list[tuple[str, str, str]]] = {}
+    for oid, content in raw.items():
+        entries = _parse_tree(content, len(oid) // 2)
+        if entries is None:
+            return None
+        trees[oid] = entries
+    return trees
+
+
+def empty_tree(root: str | os.PathLike[str]) -> str | None:
+    """The empty tree's id for the repository's hash (``hash-object -t tree
+    --stdin`` fed nothing; no ``-w``, so nothing is written): the previous
+    tree of a line's first claiming commit."""
+    return _oid(_text(_git(root, ["hash-object", "-t", "tree", "--stdin"], stdin_bytes=b"")))
 
 
 # --------------------------------------------------------------------------- #

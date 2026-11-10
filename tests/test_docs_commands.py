@@ -73,6 +73,7 @@ EXPLICIT_FILES = (
     "README.md", "CLAUDE.md", "CONTRIBUTING.md", "METHOD.md",
     "docs/EXTENSION_PROTOCOL.md", "docs/PACK_FORMAT.md",
     "docs/SITE_CONTRACT.md", "docs/SPINE_CONTRACT.md",
+    "docs/EDDY_CONTRACT.md",   # Eddy milestone 0: the agent's pre-flight is a command here
 )
 
 #: Globbed because every file they match ships to an agent as instructions.
@@ -83,7 +84,9 @@ SHIPPED_GLOBS = ("skills/*/SKILL.md", "packs/*/PACK.md", "packs/*/references/*.m
 #: 2026-09-27 on the checkpoint-1.1 tree, before the S-10 fixes: 141 commands in
 #: 41 files; the floor sits well below it so a docs rewrite does not trip it,
 #: and far above zero so a broken extractor does. *Rejected:* "at least one" (a
-#: regex that matches only README's first line would pass).
+#: regex that matches only README's first line would pass). Re-measured 2026-11-09
+#: when `docs/EDDY_CONTRACT.md` joined the list (Eddy milestone 0): 257 commands in
+#: 69 files, 12 of them in that document; the floor stays.
 MIN_COMMANDS = 80
 
 
@@ -519,7 +522,8 @@ class DocsCommandsParse(unittest.TestCase):
             f"extractor has gone blind, and a blind checker passes everything")
 
     def test_the_file_list_is_explicit(self):
-        """docs/ contributes exactly the four named contracts, however many other
+        """docs/ contributes exactly the five named contracts (the four of 1.1 and,
+        from Eddy milestone 0, `docs/EDDY_CONTRACT.md`), however many other
         documents sit beside them (the plan quotes `pack new` as a defect)."""
         files = doc_files()
         in_docs = sorted(f for f in files if f.startswith("docs/"))

@@ -553,6 +553,10 @@ Each fact has one home; everything else that shows it is an output of that home.
   say only whether it is current, behind or edited by hand. And `site/data/` and
   `site/assets/`, baked by `site build` (clock-free, written only when their bytes
   differ), where a project publishes its page.
+- **The pinned packs** — `spec/packs.json` (Eddy milestone 0): tracked, written by the
+  agent, read by Eddy's hook as the fourth entry of a candidate's spec tree beside its
+  claims, requirements and milestones, and not a record — no digest reads it and no
+  committed output moves when it changes (`docs/EDDY_CONTRACT.md`, section 5).
 
 `docs/SPINE_CONTRACT.md` ("Where facts live", then `store.py`'s section) has the
 layout in full, with each writer.
@@ -566,6 +570,7 @@ layout in full, with each writer.
 | `src/nopekit/milestones.py` | the boundary that spends: a milestone's closure, the export's refusals and judgment, disagreements, the test card, the package |
 | `src/nopekit/verdicts.py` | the per-gate verdict cache: what a gate read (`ParamTrace`, `LedgerView`, the audit hook), portable digests and the spine digest, rho, cache and control entries, freshness, admission at the gate's current version, the one resolver every reader uses, the sweep `check` runs, and `last_check.json` |
 | `src/nopekit/vcs.py` | the only git edge: a read half (argv form, a clean environment, a timeout, never raises) and a writing half (`init_repo`, `add`, `commit`) under its own contract |
+| `src/nopekit/receive.py` | Eddy's push validator (`nopekit validate`, milestone 0): the ref layout, the trailer schema, each claiming commit's tree and its diff against the previous claiming commit, the state file's five checks, the object scan, and the rule table (`RULES`, `NOTES`) the contract mirrors; executes nothing from the tree, starts no git process itself, writes nothing in the repository, fails closed |
 | `src/nopekit/derivation.py` | the trace: each choice moved ±10% in copies, what moved, the order it infers, amber, the background start (non-spine, clock-free) |
 | `src/nopekit/graph.py` | the typed falsification graph (SPEC 19): nodes and typed edges from the records, the registry and the served verdict entries, and the status tokens beside it — what the round record holds and the site's map draws |
 | `src/nopekit/page.py` | the two pages' baked data (SPEC 28-33, 40): the map's layout from the graph and the groups, `map.json` and `page.json`, the floor, next steps, the evidence plan, the stamps, and invariant 14's checker |
@@ -576,6 +581,7 @@ layout in full, with each writer.
 | `.claude-plugin/`, `.codex-plugin/`, `.cursor-plugin/` | one plugin, three hosts: a manifest each, held to one name, version (`VERSION`) and description by `tests/test_plugin.py` (`OnePluginThreeHosts`); `marketplace.json` serves Claude Code and Codex |
 | `skills/` | the skills every host loads (`nopekit`, `pack-authoring`); `agents/openai.yaml` is each one's Codex listing |
 | `hooks/` | the plugin's Stop hook: `hooks.json` (Claude Code's format, which Codex reads too) and `cursor-hooks.json` (Cursor's, `stop.py --cursor`); `stop.py` runs `nopekit round --hook`, which commits each round, with the session's cwd kept off the import path |
+| `server/` | Eddy's pre-receive hook, `pre-receive`: `nopekit validate --stdin` with the quarantine handed over as flags and a crash read as a refusal — the inverse of the Stop hook's exit contract. Installed in the bare repository by Eddy's image; never a plugin host's |
 | `AGENTS.md` | Codex's and Cursor's way in: it points here |
 | `examples/bracket/` | the reference project — zero dependencies, runs the whole loop |
 | `tests/` | the honesty invariants and the pack gate-on-the-gates |
@@ -590,6 +596,7 @@ layout in full, with each writer.
 | `docs/EXTENSION_PROTOCOL.md` | how an agent grows a capability nobody prebaked |
 | `docs/PACK_FORMAT.md` | the pack contract |
 | `docs/SITE_CONTRACT.md` | the site: view kinds, locators, `state.json` |
+| `docs/EDDY_CONTRACT.md` | the layout contract with Eddy: refs, trailers, the candidate tree, the spec tree, evidence, the state file, the rule table (`receive.RULES`, held equal by a test), the object scan, the hook, the file browser's routes, and what the hook cannot see |
 | `docs/SPINE_CONTRACT.md` | internal: where facts live, each module's public surface, and the limits — what the spine cannot see |
 | `docs/SPEC.md` | the architecture as decided on 2026-10-14: terms, what stays, each decision with its reason, the layout, the site, the sequence of work. The only plan. Ids like `D-14`, `S-60`, `P2.5b` in code comments refer to the retired plan, readable at commit `a00d0e5` |
 

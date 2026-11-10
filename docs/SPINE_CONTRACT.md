@@ -53,6 +53,8 @@ is `cli.py`'s.
 | a figure a bound viewgen drew from one verdict entry, with its sidecar (`<view>.view.json`: each file's sha256, the recipe digest, the caption, the colour scale) (issue #15) | `site/assets/figures/<gate id>/<rho16>-<out8>/` | tracked | `site build` (`site._bound_pass`), once the spine checked it |
 | a bound figure's 3D file for an entry no export re-ran, and a bound viewgen's scratch (issue #15) | `site/assets/live/<gate id>/<entry>/`, `.nopekit/out/figures/<gate id>/<entry>/<view>/` | ignored | `site build`; the live file is named only in `site/data/build.json`'s `live_figures` |
 | a detached live server: its pid, address and URL; the lock it holds for its life; its log (the acceptance run after phase 3b) | `.nopekit/out/serve.json`, `.nopekit/out/serve.lock`, `.nopekit/out/serve.log` | ignored | the server `site serve --detach` starts, which removes its record as it stops; `site serve --stop` removes a stale one |
+| the spec's pinned packs: each pack's repository and commit (Eddy milestone 0; `docs/EDDY_CONTRACT.md`) | `spec/packs.json` — `{"schema": 1, "packs": {"<name>": {"repo", "commit"}}}`, read strictly by `receive.packs_problems`; NOT a record: no digest moves with it and the index never lists it; the fourth entry of the spec tree beside `claims/`, `requirements/` and `milestones/` | tracked | the agent, editing the file; the hook holds it to `.nopekit/project.json`'s `packs` at every push (E34, E35) |
+| Eddy's pre-receive hook: `nopekit validate --stdin` with the quarantine handed over, a crash read as a refusal (Eddy milestone 0) | `server/pre-receive` in this repository; installed by Eddy's image as `<bare>/hooks/pre-receive`; writes nothing in the repository it judges; refuses any push without a quarantine but a delete-only one (git builds none when it unpacked nothing), which it judges against the main store with `GIT_DIR` set | tracked | nopekit's authors; never a project's |
 
 The index and `last_check.json` are the whole project in two reads (D-06); neither
 is read for truth by any spine code, and the index never holds a status, a coverage
@@ -495,6 +497,44 @@ def operation(root) -> str | None                # read: "" | merge | rebase | c
 def add(root, relpaths) -> Wrote                 # --literal-pathspecs add --all, paths on stdin
 def commit(root, relpaths, subject, body) -> Wrote   # -c user.useConfigOnly=true commit --only,
                                                  #   paths on stdin; oid = HEAD after
+# reading a push (Eddy milestone 0): nopekit validate and the pre-receive hook. `repo` may be bare.
+class ObjectDirs(NamedTuple): directory: str; alternates: str = ""   # GIT_OBJECT_DIRECTORY (the quarantine) and
+                                                 #   GIT_ALTERNATE_OBJECT_DIRECTORIES (the main store), as the hook got them
+class TreeEntry(NamedTuple): mode: str; type: str; oid: str; size: int | None; path: str   # ls-tree -l; size None for tree/commit
+class Change(NamedTuple): status: str; path: str; old_mode: str; new_mode: str; old_oid: str; new_oid: str   # diff-tree: A M D T
+class CommitObject(NamedTuple): sha: str; tree: str; parents: tuple[str, ...]; message: bytes   # raw bytes after the first blank line
+def object_format(repo, *, objects=None) -> str | None          # rev-parse --show-object-format: "sha1" | "sha256"
+def commit_exists(repo, sha, *, objects=None) -> bool | None    # rev-parse --verify --quiet <sha>^{commit}: True on exit 0
+                                                 #   with the sha echoed back; False on exit 1; else None
+def first_parents(repo, tip, *, limit, objects=None) -> list[str] | None   # rev-list --first-parent --max-count=<limit+1> <tip>:
+                                                 #   newest first, tip at row 0; len > limit reads "over the bound"
+def line_commits(repo, tips, *, limit, objects=None) -> list[str] | None   # the union of every tip's first-parent chain,
+                                                 #   at most limit; [] for no tips, no process
+def ref_tips(repo, prefix, *, objects=None) -> dict[str, str] | None   # for-each-ref %(refname)%00%(objectname) <prefix>;
+                                                 #   {} for none; None for a prefix that reads as an option
+def ref_exists(repo, ref) -> bool | None         # show-ref --verify --quiet <ref>: exit 0 / 1 / else None
+def ref_trees(repo, ref, *, limit, objects=None) -> list[str] | None   # log --first-parent --format=%T --max-count=<limit> <ref> --;
+                                                 #   [] when ref_exists is False (an absent spec is a start)
+def commit_objects(repo, shas, *, objects=None) -> dict[str, CommitObject] | None   # cat-file --batch, shas on stdin; a
+                                                 #   missing line or a non-commit makes the whole answer None; {} for none
+def trailer_lines(repo, shas, *, objects=None) -> dict[str, list[tuple[str, str]]] | None   # log --no-walk=unsorted --stdin
+                                                 #   --format=%x01%H%x0a%(trailers:only,unfold)%x02: git's own reading of each
+                                                 #   block, each line split at its first ":" and stripped; [] for no block;
+                                                 #   None when a block does not parse
+def tree_of(repo, sha, *, objects=None) -> str | None           # rev-parse --verify --quiet <sha>^{tree}
+def tree_entries(repo, tree, *, objects=None) -> list[TreeEntry] | None   # ls-tree -z -l <tree>: the top level
+def tree_listing(repo, tree, *, objects=None) -> list[TreeEntry] | None   # ls-tree -r -z -l <tree>: every blob, symlink, gitlink
+def tree_diff(repo, a, b, *, objects=None) -> list[Change] | None   # diff-tree -r -z --no-renames <a> <b>; a may be the empty tree
+def blobs(repo, oids, *, objects=None) -> dict[str, bytes] | None   # cat-file --batch; a missing line or a non-blob -> None
+def object_sizes(repo, oids, *, objects=None) -> dict[str, tuple[str, int]] | None   # cat-file --batch-check=%(objectname)
+                                                 #   %(objecttype) %(objectsize); a missing line is left out (the caller names it)
+def new_objects(repo, new, *, exclude, objects=None) -> list[tuple[str, str]] | None   # rev-list --objects <new> --not <exclude>...:
+                                                 #   (oid, the name rev-list printed or ""), every object reachable from new
+                                                 #   and from none of exclude
+def tree_objects(repo, oids, *, objects=None) -> dict[str, list[tuple[str, str, str]]] | None   # cat-file --batch over trees,
+                                                 #   each parsed here as <mode> <name>\0<raw oid> -> (mode, name, oid hex);
+                                                 #   the mode as the tree stores it (40000, not 040000)
+def empty_tree(repo) -> str | None               # hash-object -t tree --stdin fed b"" (no -w: nothing written)
 ```
 Argv form with `-C root`, never a shell string. The environment strips `GIT_DIR`,
 `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
@@ -540,6 +580,48 @@ it mid-commit, leaving `index.lock`). `changed_paths` asks `diff` rather than
 It keeps the trailing `/` with which `ls-files --others` names an untracked nested
 repository, so `rounds.stage_plan` names it and never stages it: stripped,
 `generators/cadlib` read as a file and a round committed a gitlink (review of phase 6).
+
+**Reading a push** (Eddy milestone 0). `nopekit validate` and the pre-receive hook
+(`receive.py`) judge a push by what git holds, through the reads above the writing
+half's end, over a repository that may be bare: `-C <bare>` with `GIT_DIR` stripped
+finds it, because a bare repository is its own git directory (verified from inside a
+real pre-receive hook on git 2.34.1). None of them writes — `empty_tree` is
+`hash-object` with no `-w` — and each keeps the read half's rules and adds two: every
+object id is validated by `_HEX_OID` *before* it reaches argv, so a bad sha (`HEAD`, a
+short id, a path, an option, `<sha>^{commit}`) is `None` with no process started and
+never a revision expression git evaluates; and output is `-z` or length-prefixed
+(`cat-file --batch`'s `<oid> <type> <size>` header, so a blob that looks like a header
+is one blob) — except `rev-list --objects`, which has no `-z` on 2.34 and stops a name
+at its first newline: `new_objects` returns that name as a label for a message, never a
+path a rule judges (the rules read `tree_listing` and `tree_objects`). **The quarantine
+carve-out:** inside pre-receive the pushed objects are visible only through
+`GIT_OBJECT_DIRECTORY` (the quarantine) and `GIT_ALTERNATE_OBJECT_DIRECTORIES` (the
+main store), and `_STRIPPED` removes both, with `GIT_QUARANTINE_PATH` — stripped,
+`git -C <bare> cat-file -t <new>` answers "could not get object info". So every read
+of a push takes `objects: ObjectDirs | None`, and `_ask` — which gains `stdin_bytes`
+(git's stdin, else `DEVNULL`), `objects` and `timeout` (this call's, else
+`VCS_TIMEOUT_S`), every older caller unchanged — sets exactly those two variables on
+the stripped environment for that one call. Nothing in the spine reads the variables:
+the hook script reads them and hands them to the CLI as flags
+(`test_vcs.TheQuarantineIsAnExplicitPassthrough`). *Rejected:* loosening `_STRIPPED`
+for the two (every other caller would then answer for the OUTER repository when run
+from a hook — the trap this section opens with, reopened for the one caller that must
+not fall into it); reading the variables inside `_ask` when `objects` is `None` (an
+environment read in the spine that no test could tell from the leak, and `tests/_env`
+strips them anyway, so no in-process row would ever have seen the quarantine).
+`_STRIPPED` also gains `GIT_INTERNAL_SUPER_PREFIX`, which git 2.34 lists in
+`rev-parse --local-env-vars` and 2.43 (the list's source) had dropped: the
+clean-environment test was red on a 2.34 machine for exactly that name.
+`trailer_lines` is git's OWN reading of a trailer block (`%(trailers:only,unfold)`,
+the last paragraph when every line of it is a trailer); the validator scans the raw
+`CommitObject.message` beside it, so a `Nope-` line git reads as prose is refused
+rather than read two ways, and a block holding the format's `\x01`/`\x02` separators
+does not parse — the answer is `None`, never a trailer misread. `new_objects` takes
+`exclude` and never `--all`: inside pre-receive `--all` is the pre-push ref state, but
+outside a hook (the CLI the agent runs before pushing, every in-process test) the ref
+already points at `new` and `--all` would list nothing. Both `log` reads carry
+`-c log.showSignature=false`, the pin `history` and `commit_times` carry: a gpg line
+would read as no tree, or no trailer block.
 
 ### `store.py`  (deps: models, util)
 Persistence: where a project lives on disk. **Never imports `modelio` or `verdicts`**
@@ -4162,6 +4244,107 @@ and the scratch keeps what finished. **Amber** runs `verdicts.sweep(record=False
 and is read back per claim against the current acceptance and evaluator digests; it
 moves no status (`claims.py` never imports this module).
 
+### `receive.py`  (deps: vcs, store, rounds, verdicts, derivation, packs, modelio, site, util)
+What Eddy's pre-receive hook says of a push (Eddy milestone 0; `docs/EDDY_CONTRACT.md`
+is the contract, with the rule table this module's `RULES` and `NOTES` are the one
+source of): the validator behind `nopekit validate` and `server/pre-receive`. It judges
+a push by what git holds — refs, commits, trailers, trees, blobs, the objects new to
+the push — through `vcs`'s push reads alone, and never says *checked*: a verdict
+entry is loaded for its shape, its digest and its rho only (invariant 12). It executes
+nothing from the tree, starts no git process itself (`test_meta.NoGitOutsideVcs`),
+reads no clock (`test_meta.CLOCKLESS_MODULES`) and no environment variable (the CLI
+edge and the hook script hand the quarantine in as a `vcs.ObjectDirs`), writes only
+under a `tempfile.mkdtemp` directory prefixed `nopekit-validate-` outside the
+repository, removed in a `finally`, and fails closed: any `None` from `vcs` is E07 and
+exit 2, and the hook declines on any non-zero exit, its own crash included. It imports
+`rounds` to hold the state file a pushed tree carries — `rounds.read` on a materialised
+copy of that tree, from `state_file_problems` alone, never for a status
+(`test_round.NothingReadsTheRoundRecordForTruth`). Not a `SPINE_MODULES` member: no
+verdict keys on it. It reaches three private `vcs` names — `_ask` (E07's diagnostic
+`rev-parse`), `_HEX_OID` and `_ref_arg` (the argument checks) — beside four private
+`verdicts` names (`_load_entry`, `_load_control`, `_digest_of`, `_ledger_now`) and
+`store`'s two ignore blocks; milestone 1 promotes them together, with the cache
+regeneration CLAUDE.md names, so a rename inside an edge cannot break the validator
+with no contract line to catch it.
+```python
+SCHEMA = 1; KINDS = ("candidate", "evidence", "act"); AGENTS = ("designer", "reviewer")
+ACTS = ("accept-gates", "approve-print", "measure", "prefer", "publish")
+TRAILER_KEYS: tuple[str, ...]; ACT_ONLY_KEYS: tuple[str, ...]   # the closed Nope-* schema
+REQUIRED_KEYS: dict[str, tuple[str, ...]]                  # per kind: candidate, evidence
+MAX_VALUE_CHARS = 200; NOPE_LINE: re.Pattern              # the raw-message scan behind E16
+CAND_PREFIX = "refs/heads/cand/"; DRAFT_PREFIX = "refs/heads/draft/"
+MAIN = "refs/heads/main"; SPEC = "refs/heads/spec"; PUBLISHED = "refs/heads/published"
+LINE_NAME: re.Pattern; TRIGGER: re.Pattern                # a line's name; <gate id>/<rho16>-<out8>
+STATE_REL = rounds.ROUND_REL; PROJECT_REL = f"{store.NOPEKIT_DIR}/{store.PROJECT_NAME}"   # every .nopekit/ path from its home
+VERDICTS_PREFIX = f"{store.NOPEKIT_DIR}/{store.VERDICTS_NAME}/"; TRACE_PREFIX = f"{store.NOPEKIT_DIR}/{derivation.TRACE_DIR}/"
+PACKS_REL = "spec/packs.json"; SPEC_DIR = "spec/"
+SPEC_ENTRIES = ("claims", "requirements", "milestones")   # + packs.json: the spec tree
+NOPEKIT_KEPT: tuple[str, ...]                             # the closed list under .nopekit/
+SEALED_DIRS = ("results",) + store.SEALED_KINDS           # results: sealed on write_record's own branch
+TRACE_NAME: re.Pattern                                    # derivation's two file names, mirrored for E29
+EVIDENCE_ADDS = rounds.ROUND_NAMED_BY_NOPEKIT             # == (VERDICTS_PREFIX, TRACE_PREFIX), a pure test holds it:
+                                                          #   what an evidence commit may add, the scan's exempt subtrees
+ATTRIBUTES_REFUSED = ("export-ignore", "export-subst", "ident", "eol=crlf")
+OUTPUT_PATTERNS: tuple[str, ...]      # the three ignore blocks' lines, rooted (E28)
+MAX_BLOB_BYTES = rounds.ROUND_MAX_BYTES; MAX_PUSH_BYTES = 512 * 1024 * 1024
+MATERIALISE_MAX_FILES = 20_000; MATERIALISE_MAX_BYTES = rounds.ROUND_MAX_BYTES
+WALK_LIMIT = 10_000; PREVIOUS_CLAIMING_LIMIT = 10_000; BATCH = 2_000
+MAX_JSON_DEPTH = 32                   # a materialised JSON file nested deeper is refused before any reader opens it
+EMPTY_TREE: dict[str, str]                                # {"sha1": ..., "sha256": ...}
+class Rule(NamedTuple): id; applies; refuses; message
+RULES: tuple[Rule, ...]; NOTES: tuple[Rule, ...]          # E01..E44, N01..N04: the one list
+class Refusal(NamedTuple): rule; where; message
+class Note(NamedTuple): rule; where; message
+class Commit(NamedTuple): sha; kind; name; trailers; tree; parents
+class RefReport(NamedTuple): ref; old; new; refusals; notes; commits; spec_tree; accepted_spec
+class Report(NamedTuple): refs; unanswered; pusher       # .accepted: no E07, no refusal
+def validate_push(repo, updates, *, objects=None, pusher="") -> Report
+def classify_ref(ref) -> tuple[str, str]                 # (cand|draft|main|spec|published|other, name)
+def is_zero(sha) -> bool
+def message_problem(message) -> str | None               # E12's tail on the raw bytes: a control byte, or not UTF-8;
+                                                         #   such a message is never handed to git's trailer reader
+def trailer_problems(sha, message, parsed) -> tuple[str, dict[str, str], list[Refusal]]  # E12..E21
+def tree_id(entries, algo) -> str                        # git's tree oid, pure (oracle: git mktree)
+def spec_tree_id(repo, sha, *, objects=None) -> tuple[str | None, list[str]]
+def packs_problems(raw) -> tuple[list[str], dict[str, dict[str, str]]]   # spec/packs.json, strictly
+def nesting_problem(raw) -> str | None                   # "not strict JSON (nested deeper than N levels)", else None:
+                                                         #   run on every materialised JSON file before its reader
+def tree_problems(listing, top, attributes) -> list[str]  # E25..E29, "<id> <tail>" each
+def diff_problems(kind, changes) -> list[str]             # E36, E37
+def materialise(repo, listing, *, objects=None) -> tuple[str, list[str]]   # (tmpdir, E30)
+def record_problems(tmp, *, listing=()) -> list[str]      # E32: store.load's words verbatim
+def sealed_problems(kind, before, after) -> list[str]     # E33: the old chain a prefix of the new
+def entry_problems(tmp, added, *, ledger=None, listing=(), hashes=None) -> tuple[list[str], list[str]]
+def state_file_problems(tmp, previous_round, state_changed) -> list[str]   # E40..E44 (E41 too for a round below 1)
+def secret_name(path, *, is_tree=False) -> str | None    # rounds.secret_name, its cache exemption narrowed to the
+                                                         #   paths nopekit writes there (a gate's directory, an entry, a trace file)
+def object_problems(repo, new, *, exclude, objects=None) -> list[Refusal]  # E08..E11
+def format_line(item) -> str                             # "<id> <where>: <message>", printable
+```
+**The walk.** Each ref in git's order: the layout (E01–E05; a case twin among the
+repository's lines or earlier in the same push), deletion (E03; a line of two zero
+ids is the deletion of a ref that does not exist, accepted on `draft/*`), existence
+(E24 on a line whose `new` is a tag or a tree), the object scan before any blob is
+read (E08–E11: sizes by `batch-check`, names from every new tree's entries, the cache
+subtrees exempt only where the path is one nopekit writes), then for `cand/*` the
+first-parent chain (`old` on it or E04; at most `WALK_LIMIT` new commits or E06), the
+new commits read once (E12–E21; a message E12 refuses on its raw bytes is read no
+further and never handed to git's trailer reader), the tip (E24), the previous
+claiming commit found below the push, and each new claiming commit oldest first: its
+tree (E25–E29), the materialised copy bounded first (E30), its JSON files' nesting
+(`MAX_JSON_DEPTH`, each too-deep file under its own rule, the copy read no further)
+and read strictly (E31–E33), the spec (E34, E35, N01), the diff against the
+previous claiming commit's tree — never its parent's (E36, E37) — every added entry's
+own reader, rho and static (E38, E39, N02–N04), and the state file (E40–E44). Helpers
+return `"<id> <tail>"` strings; the walk turns them into `Refusal`s in rule order.
+**The half of the state file it holds**: present, `rounds.read` says `ok`, computed from
+this tree's records and verdict cache (`store.records_digest`, `rounds.verdicts_digest`
+over exactly the files they walk), the bytes `rounds.render` of `rounds.sealed` would
+write, and a round above the previous claiming commit's when the blob moved.
+`computed_from.design` and `.trace` need the model loaded and are the renderer's
+(milestone 1), as is the body regenerated whole with `check --force` at tier 0. What
+the hook cannot see is in the limits below.
+
 ### `cli.py`  (deps: everything)
 `argparse`, subcommands, `main(argv=None) -> int`, and `build_parser()` — the whole
 command surface as one `argparse.ArgumentParser`, so a test can check a command
@@ -5359,6 +5542,38 @@ after the acceptance run"). No spine module moved, and `site.py`'s code did not 
   a `server` object; `doctor`'s `site` row names a running server.
 
 ## Limits: what the spine cannot see, named
+
+- **What the hook cannot see (Eddy milestone 0; `docs/EDDY_CONTRACT.md` says each in
+  full).** `receive` judges a push without executing anything from the tree, so: a
+  **forged PASS at the honest rho** — `check` run, its FAIL's reads copied, the outcome
+  flipped, digest and name recomputed, `round` run — proves malformed, misnamed,
+  wrong-digest, rho-inconsistent and tree-disagreeing entries wrong and lets this one
+  through, since `reads.params`, `reads.model` and `code.digest` need the model and the
+  gate modules executed; regenerating the state file reproduces the forged tokens byte
+  for byte. Closed only by `export`'s re-execution (invariant 12) and by a renderer that
+  runs `check --force` at tier 0 in a sandbox (milestone 1); until then the UI labels
+  every token "run by the agent". A **resealed round record with true digests** passes
+  the hook (seal and both digests hold); the renderer's whole-bytes regeneration catches
+  it. The **sealed chains** (`results/`, `exports/`, `preferences/`) extended by a
+  process that recomputes the seal pass the prefix rule, as this page's own limit says;
+  nothing binds the pusher to the `who` of an entry (`NOPE_PUSHER` is reserved and
+  recorded, no rule). A **project's own evaluators are not in the contract**: `gates/`,
+  `selftest/`, `params/` and `model_entry` sit outside the four spec entries, so a
+  candidate rewrites the gate that judges a claim without the spec moving; in milestone
+  0 only pack evaluators pinned by `spec/packs.json` are accepted evaluators, and folding
+  `gates/` and `selftest/` into `SPEC_ENTRIES` is a one-constant change. The state file
+  is **machine-dependent where the resolution is** (a solver present on the agent's
+  machine and absent from the image); the renderer must mark, never refuse. **Two
+  outcomes at one rho** are noted (N04), never refused. **Secrets by content** under an
+  innocent name pass (names only, `rounds.py`'s documented choice). **Growth across
+  pushes** is bounded per push (`MAX_BLOB_BYTES`, `MAX_PUSH_BYTES`), never per
+  repository. **Trace and amber files** are admitted by name shape and their reader's
+  strict parse; their key needs the model. **Acts' own path** (`update-ref` inside the
+  bare repository) has no hook and no test in milestone 0. **A line that predates the
+  hook** has unvalidated commits below its tip. **Trailer heuristics drift** between git
+  versions surfaces as E16 refusals of honest commits — loud, not silent. **A push of
+  several refs** is all-or-nothing and an object new to two refs is scanned twice: over-
+  refusing or over-scanning, never an acceptance of something unscanned.
 
 - **`people` guards against surprise, not against the agent (architecture phase 6).**
   It is a key of `.nopekit/project.json`, which the agent edits like every record: it

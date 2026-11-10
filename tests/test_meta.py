@@ -886,7 +886,12 @@ CLOCKLESS_MODULES = ("store", "gates", "modelio", "verdicts", "vcs",
                      "page", "prose",
                      # Architecture phase 3b: the trace's bytes must not move with
                      # the time it ran (durations are perf_counter's, CLI-only).
-                     "derivation")
+                     "derivation",
+                     # Eddy milestone 0: the validator judges a push by what git
+                     # holds; one that read the clock could refuse on Tuesday what
+                     # it accepted on Monday, and the hook's answer must be the
+                     # tree's own.
+                     "receive")
 
 
 def _clock_findings(source: str, filename: str = "<planted>") -> list[str]:
