@@ -1,0 +1,56 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+"""Eddy's post-receive hook: one JSON line per ref a push moved, appended to
+the thing's event log, and one line back to the pusher saying where to look.
+
+Installed by ``server/eddy.py`` as ``<bare>/hooks/post-receive``, a two-line
+``sh`` shim that hands this script the event log's path as its one argument.
+Git runs it after the refs have moved, so its exit code changes nothing: it
+always exits 0, and a failure to write the event is one line to the pusher
+(the push has landed either way). What it reads: stdin lines ``<old> <new>
+<ref>``; ``NOPE_PUSHER`` (the token's login, set by the server);
+``EDDY_URL`` (the address the pusher reached, for the link); ``GIT_DIR``.
+
+Run as a script, never ``-m`` (``server/pre-receive``'s lesson). It imports
+nothing from nopekit: there is nothing here to judge.
+"""
+import datetime
+import json
+import os
+import sys
+
+
+def run(argv: list) -> int:
+    try:
+        events = argv[1]
+        thing = os.path.basename(os.path.abspath(os.environ.get("GIT_DIR") or "."))
+        thing = thing[:-4] if thing.endswith(".git") else thing
+        at = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+        rows = []
+        for line in sys.stdin.read().splitlines():
+            words = line.split()
+            if len(words) == 3:
+                rows.append({"schema": 1, "at": at, "thing": thing, "old": words[0],
+                             "new": words[1], "ref": words[2],
+                             "by": os.environ.get("NOPE_PUSHER", "")})
+        os.makedirs(os.path.dirname(events), exist_ok=True)
+        with open(events, "a", encoding="utf-8") as fh:
+            fh.write("".join(json.dumps(row, sort_keys=True) + "\n" for row in rows))
+        url = os.environ.get("EDDY_URL", "")
+        for row in rows:
+            name = row["ref"][len("refs/heads/"):] if row["ref"].startswith("refs/heads/") else row["ref"]
+            if set(row["new"]) == {"0"}:
+                print(f"eddy: {name} deleted")
+            elif url and name.startswith("cand/"):
+                print(f"eddy: {name} landed at {row['new'][:12]}; see it at {url}/#/p/{thing}")
+            else:
+                print(f"eddy: {name} landed at {row['new'][:12]}")
+    except BaseException as exc:  # noqa: BLE001 — the push landed; say why the event did not
+        first = (str(exc).splitlines() or [""])[0]
+        sys.stderr.write(f"eddy: the push landed, but its event was not recorded "
+                         f"({type(exc).__name__}: {first})\n")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv))

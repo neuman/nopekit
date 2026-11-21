@@ -14,14 +14,16 @@ agent works in a full local clone with the nopekit plugin. It commits freely, ru
 checks and solvers locally, and pushes. The push is the one place a move can be seen,
 so the hook that judges the push is the log, and nothing escapes it.
 
-Milestone 0 ships two things and nothing else:
+Milestone 0 shipped two things:
 
 - `nopekit validate`, a library (`src/nopekit/receive.py`) and a command that judge a
   push by its refs, its trailers, its trees, its digests and its objects;
 - `server/pre-receive`, the hook that runs it.
 
-No act, no renderer and no page change land in this milestone. Until acts land,
-measurements, exports and preferences keep nopekit's sealed chains (`results/`,
+Milestone 1 adds the server that runs them (section 14): `server/eddy.py`, git over
+HTTP through that hook, and the screens. No act and no renderer land with it: a
+candidate's views are drawn from the baked files its own commit holds. Until acts
+land, measurements, exports and preferences keep nopekit's sealed chains (`results/`,
 `exports/`, `preferences/`).
 
 What the validator does and does not do:
@@ -572,9 +574,10 @@ the server's keeper reads the hook's log; nothing landed either time.
 
 ## 11. The UI's file browser
 
-Milestone 1's surface, fixed now so the hook's reads serve it. Every route is read-only
-over `vcs` reads, and none computes a status: what a route says of a commit is what
-`nopekit validate` would print for it, and a token is a baked one or none.
+Served by `server/eddy.py` (section 14) as data: every route below answers JSON but
+`raw`, which answers the blob's bytes. Every route is read-only over `vcs` reads, and
+none computes a status: what a route says of a commit is what `nopekit validate` would
+print for it (`commit/<sha>?validate=1`), and a token is a baked one or none.
 
 - `GET /r/<thing>/tree/<sha>[/<path>]` → `ls-tree -l` of that tree: mode, type, oid,
   size, name; the commit's kind and `Nope-Name`; whether its spec tree is on `spec`.
@@ -679,3 +682,99 @@ test where one can be written.
 13. **A push of several refs** is all-or-nothing, and an object new to two refs is
     scanned twice; both are over-refusing or over-scanning, never an acceptance of
     something unscanned.
+
+## 14. The server
+
+`server/eddy.py` is Eddy as one standard-library process: it keeps each thing's bare
+repository under its own data directory, independent of any other host, and serves git,
+the screens and the push events over HTTP. It is not the spine: it starts
+`git http-backend` itself, because a push streams for minutes and `vcs`'s ten-second,
+never-raise contract is not for that. Every read the screens make goes through `vcs`.
+
+**The data directory** (`--root`, default `$EDDY_ROOT` or `~/.eddy`):
+
+| path | what |
+|---|---|
+| `repos/<thing>.git` | a thing's bare repository, created under the hook: `receive.fsckObjects`, `transfer.fsckObjects`, `http.receivepack`, `HEAD` at `main`, and the two shims of section 10 (`hooks/pre-receive`, `hooks/post-receive`), rewritten at every start so a moved checkout or a new image points at its own scripts |
+| `events/<thing>.jsonl` | one JSON line per ref a push moved (`server/post-receive`): `at`, `ref`, `old`, `new`, `by`. A refused push leaves none |
+| `tokens.json` | who may push: each token's login, an id and its SHA-256, mode 0600. The token itself is printed once and never kept |
+
+A thing's name is lower-case letters, digits and `-`, at most 64: the directory's and
+the URL's `<thing>.git`.
+
+**Git.** `/<thing>.git/info/refs?service=…`, `/git-upload-pack` and `/git-receive-pack`
+are handed to `git http-backend`, so a push over HTTP reaches `server/pre-receive`
+exactly as section 10 describes, and a refusal reaches the pusher as `remote:` lines.
+Dumb HTTP is refused: it serves objects with no `receive-pack`, so with no hook. A
+request over `receive.MAX_PUSH_BYTES` and 64 MiB is refused before the hook runs.
+
+**Tokens.** Every git route and every data route needs a token: `Authorization: Bearer
+<token>`, or HTTP basic with the token as the password. The login a push is recorded
+under is the token's, never the user name typed beside it, and it reaches the hook as
+`NOPE_PUSHER`. `--public-read` opens clone, fetch and the screens to anyone who reaches
+the port; a push always needs a token. Plain HTTP carries the token in the clear: the
+default address is loopback, and anything wider belongs behind TLS.
+
+**The screens** are one page (`server/static/`) drawn from the data routes: section 11's,
+and these.
+
+- `GET /r/<thing>/family` → the family tree: every candidate on every line, newest
+  first, each with its parent (the nearest candidate below it on its line's chain),
+  the working commits between them, its latest evidence commit (`head`, the tree the
+  views read), its mark, and whether it carries a thumbnail and baked page data. A
+  commit two lines share belongs to the line it sits nearest the tip of.
+- `GET /r/<thing>/boxes/<sha>` → that commit's boxes, each manifest read strictly; one
+  out of shape is listed under `problems` and not shown.
+- `GET /r/<thing>/box/<sha>/<id>/<name>` → one file of a box, with its own content
+  type, under `sandbox allow-scripts` and a policy that loads nothing from outside the
+  box's folder. The one place a tree's HTML runs.
+- `GET /r/<thing>/events` → the push events as a server-sent event stream;
+  `/r/<thing>/activity` → the same rows as data.
+- `GET /api/things`, `POST /api/things` (`{"name": "<thing>"}`, a token) → the things;
+  create one under the hook.
+- `GET /api/packs[/<name>]` → the packs the server's nopekit bundles, read without
+  running one: `pack.json`, and each gate's declaration parsed from its source.
+- `GET /agent.md` → the agent's guide to pushing to this server, its address filled in.
+
+**What a candidate's commit carries for the screens.** None of it is held by the hook
+(schema 1 is frozen, section 3); a candidate without it lands, and the screen says what
+is missing.
+
+| path | what | read as |
+|---|---|---|
+| `site/data/page.json`, `map.json`, `state.json` | the baked page data, as `nopekit site build` writes it (`nopekit round` rebuilds it) | the engineering and marketing views. The page formats and draws; it takes no worst-of, compares no value with a limit and sorts by no status. A bar's colour is its claim's baked token |
+| `site/thumb.png` (or `.jpg`, `.webp`) | one static picture of the candidate | the tree's box, and what shows when a live view cannot load |
+| `site/boxes/<id>/box.json` and its files | a box the agent supplies: `{"schema": 1, "kind": "image"\|"video"\|"custom", "src", "thumbnail", "section", "view"?, "about"?, "title"?, "caption"?, "aspect"?}` | drawn in its section with a yellow outline. A custom box is one HTML document in a sandboxed frame; it posts `{eddy: "ready"}` to its parent when it has drawn, and its thumbnail stays in front until then |
+| `eddy/marks.json` at the tip of `main` | `{"schema": 1, "marks": {"<Nope-Name>": "selected"\|"proposal"\|"not-selected"}}`, written by the agent | the tree's colours, and the candidate a project opens on. A mark changes after its candidate's commit is made, so it cannot live in that commit, and an evidence commit adds nothing but evidence (E36) |
+
+**Run it.**
+
+```sh
+python3 server/eddy.py token <login>     # prints a token, once
+python3 server/eddy.py new <thing>       # a bare repository under the hook
+python3 server/eddy.py serve             # http://127.0.0.1:8765/
+```
+
+or as the image, whose git is the 2.34.1 the hook was verified on:
+
+```sh
+docker build -f server/Dockerfile -t eddy .
+docker run -d --name eddy --restart unless-stopped -p 127.0.0.1:8765:8765 -v eddy-data:/srv/eddy eddy
+docker exec eddy eddy token <login>
+```
+
+**Limits of the server**, beside section 13's:
+
+1. **The views say what the agent baked.** `site/data/` is committed by the agent and
+   the hook does not hold it to the tree's records, so a candidate can carry page data
+   computed from another design. The footer of every view says the statuses are the
+   agent's own run. Closed by the renderer (section 7), which regenerates the data from
+   the tree.
+2. **A box is the agent's code.** It runs in the person's browser, sandboxed: a unique
+   origin, no network beyond its own folder, no access to the page around it. It can
+   still draw anything, a false status included; the standard views beside it are the
+   ones that read the data.
+3. **No act.** Nothing in the screens changes a repository; marks are the agent's
+   record of what the person said, bound to no person.
+4. **Plain HTTP.** A token on a non-loopback address is readable on the wire.
+

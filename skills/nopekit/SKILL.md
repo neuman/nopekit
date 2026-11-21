@@ -248,7 +248,7 @@ nopekit packs skills            # the live packs' PACK.md, lenses and skills: re
 nopekit model [trace]           # the model as nopekit sees it; trace: what each choice moves
 nopekit site serve --watch --detach   # the live site, its own process; --stop stops it
 nopekit doctor                  # what is wrong, and what to do; writes nothing
-nopekit validate <repo> <ref> <old> <new>   # what Eddy's pre-receive hook will say of a push; writes nothing
+nopekit validate <repo> <ref> <old> <new>   # what an Eddy server will say of a push; with one, `curl <its address>/agent.md` and follow it
 ```
 
 ## Reference

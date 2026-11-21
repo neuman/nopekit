@@ -1,0 +1,6 @@
+# The Eddy image (server/Dockerfile) copies src/, packs/ and server/ only.
+*
+!src/
+!packs/
+!server/
+**/__pycache__
