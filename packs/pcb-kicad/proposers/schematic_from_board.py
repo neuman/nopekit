@@ -14,6 +14,14 @@ global label of its pad's net on each connected pin end. Once a person adopts it
 EXISTING ``pcb.erc`` and ``pcb.parity`` judge it, and ``pcb.parity`` is the check on
 this writer: a label it put on the wrong pin is a difference KiCad reports.
 
+**Every unit of a multi-unit symbol is placed** (a dual op-amp's two halves and its
+power unit, a quad gate's four gates and its supply, a dual MOSFET's two FETs), each
+in its own cell under the part's one ref, and each pad's net goes on the pin of its
+number in the unit that draws it; a pin every unit draws (unit 0) takes its label,
+or its no-connect flag, on every unit. Body style 1 only (``_schematic.unit_pins``).
+(What slipped through: the writer refused every part with more than one unit, so a
+board with one had no schematic, and ``pcb.erc`` and ``pcb.parity`` skipped there.)
+
 **What the person states, in the symbols file** (JSON, never inferred):
 
 - ``symbols``: ``{ref or glob: "Lib:Symbol"}``. An exact ref wins, then the globs
@@ -26,22 +34,26 @@ this writer: a label it put on the wrong pin is a difference KiCad reports.
 - ``power_flags``: ``[net]``, the nets fed from off the board; each gets one
   ``power:PWR_FLAG``.
 - ``library``: ``[directory]`` of more ``.kicad_sym`` files, from the project root,
-  searched before ``$KICAD9_SYMBOL_DIR`` and ``/usr/share/kicad/symbols``.
+  searched before KiCad's own (:data:`STOCK_VARS`, then :data:`STOCK_PATHS`).
 
 **It refuses, exits 2, writes nothing and names every problem** when a footprint
-matches no symbol, a pad with a net has no pin of its number, one pad number carries
-two nets, a symbol is not found, a symbol has more than one unit, or a statement
-names a pad or a net the board does not have.
+matches no symbol, a pad with a net has no pin of its number in any unit, one pad
+number carries two nets, a symbol is not found, or a statement names a pad or a net
+the board does not have.
 
 **What it writes** under ``$NOPEKIT_PROPOSAL_DIR``: ``<stem>.kicad_sch``, the
 symbols flattened into ``lib_symbols`` as eeschema caches them, each Footprint field
 the board's footprint name verbatim (parity compares it exactly: a nickname added,
 or the field emptied, gave a footprint_symbol_mismatch for every part on a 4-layer
 board, measured), in_bom and dnp from the footprint's attributes, every id a
-``uuid5`` so the bytes repeat; ``sym-lib-table``, only the libraries used; and
-``<stem>.schematic.json``, the symbol per ref, the refs on generic symbols, the
-pins left open with no statement, the flagged nets and the sha256 of each
-``.kicad_sym`` read. Standard library and the pack's reader only; no pcbnew.
+``uuid5`` so the bytes repeat; ``sym-lib-table``, only the libraries used, a stock
+one named by the path variable KiCad defines for it (:func:`stock_variable`); and
+``<stem>.schematic.json``, the symbol per ref, each multi-unit part's unit map
+(``{unit: [pins]}``), the refs on generic symbols, the pins left open with no
+statement, the flagged nets, the variable the stock libraries are named by and the
+sha256 of each ``.kicad_sym`` read. Standard library and the pack's reader only; no
+pcbnew. It asks ``kicad-cli version`` for KiCad's release only when it read the
+stock symbols from a fixed path.
 """
 from __future__ import annotations
 
@@ -50,6 +62,9 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -59,9 +74,40 @@ import _schematic as W                                             # noqa: E402
 
 K = W.K
 
-#: Where the stock symbols are, after the symbols file's own ``library``
-#: directories: KiCad 9's own variable, then the Linux package's path.
-STOCK_DIRS = (os.environ.get("KICAD9_SYMBOL_DIR", ""), "/usr/share/kicad/symbols")
+#: The path variables that name KiCad's own symbol directory, searched in this
+#: order after the symbols file's own ``library`` directories: KiCad 10's, KiCad
+#: 9's (each installer sets its own, and KiCad defines it for its own run when the
+#: environment does not), and KiCad 5's unversioned name, which an older setup
+#: may still export. A directory found through one is written in the
+#: sym-lib-table as ``${THAT_VARIABLE}``. Rejected: KICAD8_SYMBOL_DIR and older
+#: (those releases cannot open what this writer writes, format 20250114, KiCad
+#: 9's). (What slipped through: the writer read KICAD9_SYMBOL_DIR alone, and wrote
+#: ``${KICAD9_SYMBOL_DIR}`` into every table, so a KiCad 10 install read nothing.)
+STOCK_VARS = ("KICAD10_SYMBOL_DIR", "KICAD9_SYMBOL_DIR", "KICAD_SYMBOL_DIR")
+
+#: Where an installer puts the stock symbols when no variable says, searched after
+#: :data:`STOCK_VARS`: the Linux packages' path (Debian, Ubuntu, Fedora and Arch
+#: all install there), the macOS app bundle's, and the Windows installer's for
+#: KiCad 10 and 9. (What slipped through: only the Linux path was known, so on
+#: macOS and Windows every symbol read "not found" until a person set a variable.)
+#: Rejected: a search of the disk (slow, and it finds old releases' libraries).
+STOCK_PATHS = (
+    "/usr/share/kicad/symbols",
+    "/Applications/KiCad/KiCad.app/Contents/SharedSupport/symbols",
+    r"C:\Program Files\KiCad\10.0\share\kicad\symbols",
+    r"C:\Program Files\KiCad\9.0\share\kicad\symbols",
+)
+
+#: Where kicad-cli is when it is not on PATH: inside the macOS app bundle.
+MAC_KICAD_CLI = "/Applications/KiCad/KiCad.app/Contents/MacOS/kicad-cli"
+
+#: KiCad 9's variable, written for a fixed directory when no kicad-cli answers
+#: its version: the release whose schematic format this writer writes, so the
+#: release that can open the file. The summary says it was not read.
+FALLBACK_VARIABLE = "KICAD9_SYMBOL_DIR"
+
+_RELEASE_DIR = re.compile(r"KiCad[\\/](\d+)\.\d+[\\/]")
+_VERSION = re.compile(r"^(\d+)\.\d+")
 
 #: The keys a symbols file may hold. Any other is refused: a misspelled
 #: ``no_conect`` would leave every open pin unstated, silently.
@@ -90,8 +136,46 @@ def _sha256(path: str) -> str:
         return hashlib.sha256(fh.read()).hexdigest()
 
 
-def build(board_path: str, spec: dict, root: str):
+def _pin_order(number: str) -> tuple:
+    """Pin numbers in reading order: 1, 2, 10, then A1, B2."""
+    return (not number.isdigit(), int(number) if number.isdigit() else 0, number)
+
+
+def stock_dirs(environ) -> list[tuple[str, str | None]]:
+    """``(directory, the variable that names it, or None)`` of each place KiCad's
+    own symbols may be, in search order."""
+    found = [(environ[v], v) for v in STOCK_VARS if environ.get(v)]
+    return found + [(p, None) for p in STOCK_PATHS]
+
+
+def stock_variable(path: str) -> tuple[str, str]:
+    """``(variable, how it was found)`` that names the fixed directory ``path`` in a
+    sym-lib-table. KiCad defines ``KICAD<major>_SYMBOL_DIR`` as its own symbol
+    directory for every run, so the major release decides the name: read off a
+    Windows install's release folder, else from ``kicad-cli version``, else
+    :data:`FALLBACK_VARIABLE`, said so."""
+    m = _RELEASE_DIR.search(path)
+    if m:
+        return f"KICAD{m.group(1)}_SYMBOL_DIR", f"the release folder of {path}"
+    for cli in (shutil.which("kicad-cli"), MAC_KICAD_CLI):
+        if not cli or not os.path.isfile(cli):
+            continue
+        try:
+            proc = subprocess.run([cli, "version"], capture_output=True, text=True,
+                                  timeout=30, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        said = (proc.stdout or "").strip()
+        m = _VERSION.match(said)
+        if proc.returncode == 0 and m:
+            return f"KICAD{m.group(1)}_SYMBOL_DIR", f"kicad-cli version {said}"
+    return FALLBACK_VARIABLE, ("no kicad-cli answered its version, so KiCad 9's name, the "
+                               "release whose format this file is; not read from KiCad")
+
+
+def build(board_path: str, spec: dict, root: str, environ=None):
     """``(schematic tree, sym-lib-table text, summary, problems)`` for the board."""
+    environ = os.environ if environ is None else environ
     problems: list[str] = []
     unknown = sorted(set(spec) - set(KEYS))
     if unknown:
@@ -102,7 +186,9 @@ def build(board_path: str, spec: dict, root: str):
     flags = [str(net) for net in (spec.get("power_flags") or [])]
     extra = [d if os.path.isabs(d) else os.path.join(root, d)
              for d in (spec.get("library") or [])]
-    dirs = [d for d in (*extra, *STOCK_DIRS) if d]
+    stock = stock_dirs(environ)
+    dirs = [d for d in (*extra, *(d for d, _v in stock)) if d]
+    variable_of = {d: v for d, v in reversed(stock)}
 
     tree = K.load_tree(board_path)
     board = K.board_from_tree(tree)
@@ -129,14 +215,15 @@ def build(board_path: str, spec: dict, root: str):
                     problems.append(f"{lib_id}: {path} holds no symbol {name!r}")
                     return None
                 read[path] = _sha256(path)
-                lib_dirs[lib] = d
+                lib_dirs.setdefault(lib, d)
                 libs[lib_id] = sym
                 return sym
         problems.append(f"{lib_id}: no {lib}.kicad_sym in {dirs}")
         return None
 
     items: list = []
-    summary = {"symbols": {}, "generic": [], "open_unstated": {}, "power_flags": flags}
+    summary = {"symbols": {}, "units": {}, "generic": [], "open_unstated": {},
+               "power_flags": flags}
     board_nets = {p.net for fp in board.footprints for p in fp.pads if p.net}
     for net in flags:
         if net not in board_nets:
@@ -152,11 +239,8 @@ def build(board_path: str, spec: dict, root: str):
         sym = library(lib_id)
         if sym is None:
             continue
-        if len(W.units(sym)) > 1:
-            problems.append(f"{fp.ref}: {lib_id} has {len(W.units(sym))} units; this writer "
-                            f"places one unit per part")
-            continue
-        pins = W.pins(sym)
+        units = W.unit_pins(sym)
+        pins = {number: xy for drawn in units.values() for number, xy in drawn.items()}
         by_pad: dict[str, set[str]] = {}
         for pad in fp.pads:
             if pad.number:
@@ -177,37 +261,46 @@ def build(board_path: str, spec: dict, root: str):
                 problems.append(f"no_connect names {fp.ref} pad {number}, which carries "
                                 f"{nets[0]}")
         summary["symbols"][fp.ref] = lib_id
+        if len(units) > 1:
+            summary["units"][fp.ref] = {u: sorted(drawn, key=_pin_order)
+                                        for u, drawn in units.items()}
         if lib_id.split(":", 1)[0].startswith("Connector_Generic"):
             summary["generic"].append(fp.ref)
-
-        xs = [p[0] for p in pins.values()] or [0.0]
-        ys = [p[1] for p in pins.values()] or [0.0]
-        w, h = (max(xs) - min(xs)) + 30.0, (max(ys) - min(ys)) + 20.0
-        if x0 + w > ROW_MM:
-            x0, y0, row_h = 25.4, y0 + row_h, 0.0
-        x, y = _snap(x0 - min(xs) + 10.0), _snap(y0 + max(ys) + 10.0)
-        x0, row_h = x0 + w, max(row_h, h)
         a = attrs.get(fp.ref, set())
-        items.append(W.placed(lib_id, fp.ref, fp.value, fp.lib_id, x, y, sorted(pins),
-                              f"{stem}:symbol:{fp.ref}", project=stem, root_uuid=root_uuid,
-                              in_bom="exclude_from_bom" not in a, dnp="dnp" in a))
-        # Two pins a symbol stacks on one point (a TVS array's two COM) take one
-        # label: KiCad joins them there, and a second label of the same net there
-        # has the same uuid5. (What slipped through, when the baseline's part
-        # changed to one with stacked pins: the file held one id twice, and ERC
-        # and parity passed it.)
-        labelled: set[tuple[float, float, str]] = set()
-        for number, (px, py) in sorted(pins.items()):
-            ex, ey = x + px, y - py                  # the sheet's y runs down
-            nets = sorted(n for n in by_pad.get(number, ()) if n)
-            if nets:
-                if (ex, ey, nets[0]) not in labelled:
-                    labelled.add((ex, ey, nets[0]))
-                    items.append(W.global_label(nets[0], ex, ey, left=px < 0))
-            elif number in open_stated.get(fp.ref, []):
-                items.append(W.no_connect(ex, ey, f"{stem}:nc:{fp.ref}:{number}"))
-            else:
-                summary["open_unstated"].setdefault(fp.ref, []).append(number)
+        unstated = summary["open_unstated"]
+        first = next(iter(units))
+        for unit, drawn in units.items():
+            # Unit 1 keeps the ids a one-unit part had, so a board with no
+            # multi-unit part writes the bytes it wrote before.
+            tag = "" if unit == first else f":unit{unit}"
+            xs = [p[0] for p in drawn.values()] or [0.0]
+            ys = [p[1] for p in drawn.values()] or [0.0]
+            w, h = (max(xs) - min(xs)) + 30.0, (max(ys) - min(ys)) + 20.0
+            if x0 + w > ROW_MM:
+                x0, y0, row_h = 25.4, y0 + row_h, 0.0
+            x, y = _snap(x0 - min(xs) + 10.0), _snap(y0 + max(ys) + 10.0)
+            x0, row_h = x0 + w, max(row_h, h)
+            items.append(W.placed(lib_id, fp.ref, fp.value, fp.lib_id, x, y, sorted(pins),
+                                  f"{stem}:symbol:{fp.ref}{tag}", project=stem,
+                                  root_uuid=root_uuid, in_bom="exclude_from_bom" not in a,
+                                  dnp="dnp" in a, unit=int(unit)))
+            # Two pins a symbol stacks on one point (a TVS array's two COM) take
+            # one label: KiCad joins them there, and a second label of the same
+            # net there has the same uuid5. (What slipped through, when the
+            # baseline's part changed to one with stacked pins: the file held one
+            # id twice, and ERC and parity passed it.)
+            labelled: set[tuple[float, float, str]] = set()
+            for number, (px, py) in sorted(drawn.items()):
+                ex, ey = x + px, y - py              # the sheet's y runs down
+                nets = sorted(n for n in by_pad.get(number, ()) if n)
+                if nets:
+                    if (ex, ey, nets[0]) not in labelled:
+                        labelled.add((ex, ey, nets[0]))
+                        items.append(W.global_label(nets[0], ex, ey, left=px < 0))
+                elif number in open_stated.get(fp.ref, []):
+                    items.append(W.no_connect(ex, ey, f"{stem}:nc:{fp.ref}:{number}{tag}"))
+                elif number not in unstated.get(fp.ref, []):
+                    unstated.setdefault(fp.ref, []).append(number)
 
     if flags:
         flag = library("power:PWR_FLAG")
@@ -218,16 +311,25 @@ def build(board_path: str, spec: dict, root: str):
                                   f"{stem}:flag:{net}", project=stem, root_uuid=root_uuid))
             items.append(W.global_label(net, fx, fy, left=False))
 
-    rows = []
+    rows, named_by, fixed = [], {}, {}
     for lib, d in sorted(lib_dirs.items()):
         if d in extra:
             uri = "${KIPRJMOD}/" + os.path.relpath(os.path.join(d, lib + ".kicad_sym"),
                                                    os.path.dirname(board_path)).replace(os.sep, "/")
         else:
-            uri = "${KICAD9_SYMBOL_DIR}/" + lib + ".kicad_sym"
+            var = variable_of.get(d)
+            if var is not None:
+                named_by.setdefault(var, "set in the environment")
+            else:
+                if d not in fixed:           # one kicad-cli run per directory
+                    fixed[d] = stock_variable(d)
+                var, how = fixed[d]
+                named_by.setdefault(var, how)
+            uri = "${" + var + "}/" + lib + ".kicad_sym"
         rows.append(f'\t(lib (name "{lib}")(type "KiCad")(uri "{uri}")(options "")(descr ""))')
     table = "(sym_lib_table\n\t(version 7)\n" + "\n".join(rows) + "\n)\n"
     summary["libraries"] = {os.path.basename(p): digest for p, digest in sorted(read.items())}
+    summary["stock_variables"] = named_by
     sch = W.sheet(root_uuid, [libs[k] for k in sorted(libs)], items, paper="A0")
     return sch, table, summary, problems
 
@@ -287,8 +389,10 @@ def main(argv: list[str]) -> int:
         json.dump(summary, fh, indent=2, sort_keys=True)
         fh.write("\n")
     left = sum(len(v) for v in summary["open_unstated"].values())
+    multi = (f"; {len(summary['units'])} multi-unit part(s), every unit placed"
+             if summary["units"] else "")
     print(f"pcb.schematic_from_board: {len(summary['symbols'])} part(s) on "
-          f"{len({v for v in summary['symbols'].values()})} symbol(s); "
+          f"{len({v for v in summary['symbols'].values()})} symbol(s){multi}; "
           f"{len(summary['generic'])} on a generic symbol; {left} pin(s) open with no "
           f"statement (ERC will name them)")
     return 0
