@@ -42,6 +42,14 @@ the gate, board body included; the nearest part's distance is the verdict, again
 Baseline: nearest part J1 (and J2), its pin tips 2.365 mm under the lid, against 1
 mm. Raised 3 mm (`raised_board`), both headers share 0.931 mm^3 with the lid.
 
+## What it does not see
+
+A part that passes through an opening cut for it (a knob, a button cap, a light
+pipe) shares no volume with the enclosure, and with the opening cut wide enough
+it keeps its clearance too, so it reads clear however far it stands proud of the
+face. How far a part should reach is a design statement the solids do not hold:
+a lens (`lenses.md`, "A part taller than its cavity"), or a physical claim.
+
 ## Cost
 
 About 1 s for the export and 3 s for the geometry on the baseline, most of it

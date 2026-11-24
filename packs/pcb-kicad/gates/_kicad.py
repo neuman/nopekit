@@ -591,9 +591,10 @@ def reported_as(constraint: str) -> tuple[str, ...]:
 #: silk minimum (zeroed in the fab run, so only real overlaps remain), and that
 #: finding is ``pcb.drc``'s. So :func:`fab_findings` leaves a ``silk_overlap`` to
 #: ``pcb.drc`` only when it can show that no item is a pad. (What slipped through:
-#: on a real 4-layer board the fab run counted 18 silk-on-silk overlaps, the same
-#: 18 ``pcb.drc`` reported, as past JLCPCB's limits: 190 findings where 172 were
-#: the fab's. The baseline has no silk on silk, so its selftest could not see it.)
+#: on a real 4-layer board the fab run counted every silk-on-silk overlap
+#: ``pcb.drc`` reported a second time, as past JLCPCB's limits, beside the
+#: findings that were the fab's. The baseline has no silk on silk, so its selftest
+#: could not see it.)
 SILK_TO_PAD = "A.Type == 'Pad' || B.Type == 'Pad'"
 
 _UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
@@ -924,10 +925,10 @@ def footprint_land(tree: list, ref: str) -> tuple[list[LandPad], list[str]]:
     each pad's centre in the footprint's own frame as seen from the top.
 
     KiCad 9 writes a pad's ``at`` local to its footprint, and on a footprint
-    flipped to ``B.Cu`` with y negated (SW90's pad 2 is (-0.75, -1.95) on the
-    board and (-0.75, 1.95) in its library: measured), so y is negated back. The
-    size is read as written: only the centres are fitted, and the limit reads
-    min(w, h), which no rotation moves.
+    flipped to ``B.Cu`` with y negated (the baseline's SOT-23-6 flipped in pcbnew
+    9.0.9: pad 1, (-1.1375, -0.95) in its library, is (-1.1375, 0.95) on the
+    board: measured), so y is negated back. The size is read as written: only the
+    centres are fitted, and the limit reads min(w, h), which no rotation moves.
     Raises KeyError for a ref the board lacks."""
     for fp in children(tree, "footprint"):
         if footprint_ref(fp)[0] != ref:

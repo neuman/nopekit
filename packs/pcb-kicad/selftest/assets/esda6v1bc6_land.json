@@ -1,0 +1,14 @@
+{
+  "part": "ESDA6V1BC6 (SOT23-6L)",
+  "source": "STMicroelectronics' recommended SOT23-6L footprint, 'Footprint recommendations, dimensions in mm': pads 0.60 x 1.20 on a 0.95 mm pitch, 3.50 mm over both rows and 2.30 mm between the rows' centres. Re-read on 2026-11-23 from Figure 13 of ST's ESDA6V1-5SC6Y datasheet (DocID029995 Rev 3, May 2017), the same SOT23-6L package from the same vendor; the ESDA6V1BC6's own datasheet could not be fetched to re-read, so read its footprint figure before trusting a fail here. Pin functions as KiCad's Power_Protection:ESDA6V1BC6 symbol names them, so they pair with the board's pin names: 1 TVS1, 2 COM, 3 TVS2, 4 TVS3, 5 COM, 6 TVS4.",
+  "view": "top",
+  "y_axis": "up",
+  "pads": [
+    {"number": "1", "function": "TVS1", "x": -0.95, "y": -1.15, "w": 0.6, "h": 1.2},
+    {"number": "2", "function": "COM", "x": 0.0, "y": -1.15, "w": 0.6, "h": 1.2},
+    {"number": "3", "function": "TVS2", "x": 0.95, "y": -1.15, "w": 0.6, "h": 1.2},
+    {"number": "4", "function": "TVS3", "x": 0.95, "y": 1.15, "w": 0.6, "h": 1.2},
+    {"number": "5", "function": "COM", "x": 0.0, "y": 1.15, "w": 0.6, "h": 1.2},
+    {"number": "6", "function": "TVS4", "x": -0.95, "y": 1.15, "w": 0.6, "h": 1.2}
+  ]
+}

@@ -20,7 +20,7 @@ circuit that works. Nothing here has seen the board powered.
 | Gate | Tier | Basis | Settles |
 |---|---|---|---|
 | `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-9 file whose every track names a defined net (the guard) |
-| `pcb.pin_names` | 0 | sourced | pins the library gives one name (an ESD array's `I/O1`, a part's several `GND`) carry one net; the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
+| `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net; the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
 | `pcb.land_pattern` | 0 | model-only | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function, one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
 | `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221; the detail names the hottest stretch |
 | `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing, at every severity by default, and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something |
@@ -150,16 +150,20 @@ Read this before you write a claim. Every one of these has passed a "0 violation
 - **Current through vias, pads and pours.** `pcb.net_width` judges tracks only. A
   via carries its own current limit; a pour is wider than any track and is not
   judged at all, so a net carried mostly by a pour reads pessimistically.
-- **What happens when someone plugs in the wrong thing.** A 16-way ribbon fits a
-  20-way connector with 4 mm of slop and can put battery on ground. That is a
-  mechanical fact with an electrical result, and no check here sees it.
+- **What happens when someone plugs in the wrong thing.** A narrower ribbon can
+  seat in a wider housing and put the battery on ground. That is a mechanical fact
+  with an electrical result, and no check here sees it: an expert-judgment claim,
+  and `lenses.md`, "A connector that fits the wrong cable".
 - **RF, signal integrity, EMC.** Antenna detuning, impedance, crosstalk, return
   paths: not modelled.
 - **Fit beyond the solids.** `pcb.enclosure_fit` checks the parts' 3D models
   against the enclosure's solid at one placement. A model drawn wrong, a cable's
   bend radius, a plug's mating clearance, a tolerance stack, assembly order, a
   lid that flexes: none of them is in two solids. A part with no model skips
-  the gate rather than pass it.
+  the gate rather than pass it. And a part that passes through an opening cut
+  for it (a knob, a button, a light pipe) reads clear, however far it stands
+  proud of the face: the gate measures shared volume and clearance, not how far
+  a part should reach. That is `lenses.md`, "A part taller than its cavity".
 - **Whether the SPICE deck is the circuit.** ngspice solves the deck it is given.
   The deck is someone's model, typed by hand; `pcb.spice` refuses a run that
   dropped a line, an option name ngspice does not know, a command it does not
@@ -273,9 +277,9 @@ body may touch (standoffs) but not cut in.
 "pcb_enclosure_step": "cad/out/enclosure.step",
 "pcb_board_placement": {"x": 2.0, "y": 17.0, "z": 4.0, "rot_z_deg": 0},
 "pcb_enclosure_clearance_mm": 1.0,
-"pcb_land_drawings": {"SW90": "hardware/lands/msk12c02.json"},
-"pcb_cell": {"board": "hardware/left.kicad_pcb", "ref": "J4", "value": "JST-PH-2", "pin": "1",
-             "min_v": 3.0, "pcm_cutoff_min_v": 2.75, "source": "the cell's datasheet"},
+"pcb_land_drawings": {"U3": "hardware/lands/u3.json"},
+"pcb_cell": {"board": "hardware/main.kicad_pcb", "ref": "BT1", "value": "CELL", "pin": "1",
+             "min_v": 3.0, "pcm_cutoff_min_v": 2.5, "source": "the cell's datasheet"},
 "pcb_cutoffs": []
 ```
 

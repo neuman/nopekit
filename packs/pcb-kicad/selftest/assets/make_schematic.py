@@ -6,15 +6,18 @@ first, then links each footprint on the board to its symbol here, so
 schematic KiCad's ERC passes.
 
 **Symbols come from KiCad's installed library**, copied into the file's
-``lib_symbols`` the way eeschema caches them (a derived symbol such as
-USBLC6-2SC6, which ``extends`` USBLC6-2P6, is flattened into one), so the
-schematic carries every pin's name and electrical type without the library.
+``lib_symbols`` the way eeschema caches them (a derived symbol, one that
+``extends`` another, is flattened into one), so the schematic carries every pin's
+name and electrical type without the library.
 
 **Connections are labels and power symbols on pin ends**, no wires: the data
 pair on global labels ``DP`` and ``DM`` (a global label's net is its own name,
-as the board's nets are), GND and VBUS on KiCad's power symbols. Each power net
-carries one PWR_FLAG, the schematic's statement that something outside drives
-it (the USB host); without it ERC reads two power inputs with no source.
+as the board's nets are), GND and VBUS on KiCad's power symbols. Each label
+points away from its part, out along its pin, so U1's four labels stand side by
+side above it. Two pins stacked on one point (U1's two ``COM``) take one power
+symbol. Each power net carries one PWR_FLAG, the schematic's statement that
+something outside drives it (the USB host); without it ERC reads two power inputs
+with no source.
 
 Every UUID is a ``uuid5`` of a fixed name, so two runs write the same bytes.
 """
@@ -43,7 +46,7 @@ ROOT_UUID = uid("sheet:root")
 PARTS = [
     ("J1", "USB_IN", "Connector_Generic", "Conn_01x04",
      "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical", (63.5, 88.9)),
-    ("U1", "USBLC6-2SC6", "Power_Protection", "USBLC6-2SC6",
+    ("U1", "ESDA6V1BC6", "Power_Protection", "ESDA6V1BC6",
      "Package_TO_SOT_SMD:SOT-23-6", (127.0, 88.9)),
     ("J2", "USB_OUT", "Connector_Generic", "Conn_01x04",
      "Connector_PinHeader_2.54mm:PinHeader_1x04_P2.54mm_Vertical", (190.5, 88.9)),
@@ -53,7 +56,7 @@ PARTS = [
 NETS = {
     "J1": {"1": "DP", "2": "GND", "3": "DM", "4": "VBUS"},
     "J2": {"1": "DP", "2": "GND", "3": "DM", "4": "VBUS"},
-    "U1": {"1": "DP", "6": "DP", "3": "DM", "4": "DM", "2": "GND", "5": "VBUS"},
+    "U1": {"1": "DP", "6": "DP", "3": "DM", "4": "DM", "2": "GND", "5": "GND"},
 }
 
 POWER_NETS = ("GND", "VBUS")
@@ -75,6 +78,35 @@ def _library_symbol(lib: str, name: str) -> list:
 _pins = W.pins
 _global_label = W.global_label
 
+#: Which way a label points, from the angle KiCad gives the pin: the direction
+#: from its connection point into the part's body. A label points the other way.
+_AWAY = {0: "left", 90: "down", 180: "right", 270: "up"}
+
+
+def _pin_angles(lib_sym: list) -> dict[str, int]:
+    """{pin number: the angle in its ``at``}, 0, 90, 180 or 270."""
+    found: dict[str, int] = {}
+
+    def walk(node):
+        for x in node:
+            if isinstance(x, list):
+                if K.head(x) == "pin":
+                    at = K.child(x, "at")
+                    found[str(K.value(x, "number"))] = int(float(at[3]) if len(at) > 3 else 0)
+                walk(x)
+    walk(lib_sym)
+    return found
+
+
+def _label(net: str, x: float, y: float, away: str) -> list:
+    """A global label on a pin end, pointing ``away`` from the part."""
+    node = _global_label(net, x, y, left=away == "left")
+    if away in ("up", "down"):
+        K.child(node, "at")[3] = "90" if away == "up" else "270"
+        if away == "down":
+            K.child(K.child(node, "effects"), "justify")[1] = "right"
+    return node
+
 
 def _placed(lib_id, ref, value, footprint, x, y, pins, key, angle=0):
     return W.placed(lib_id, ref, value, footprint, x, y, pins, key, project=PROJECT,
@@ -90,20 +122,24 @@ def build() -> list:
 
     items: list = []
     sym_uuids = symbol_uuids()
-    ends: dict[tuple[str, str], tuple[float, float]] = {}
+    ends: dict[tuple[str, str], tuple[float, float, str]] = {}
     for ref, val, lib, sym, fp, (x, y) in PARTS:
         pins = _pins(libs[f"{lib}:{sym}"])
+        angles = _pin_angles(libs[f"{lib}:{sym}"])
         node = _placed(f"{lib}:{sym}", ref, val, fp, x, y, sorted(pins), f"symbol:{ref}")
         assert K.value(node, "uuid") == sym_uuids[ref]
         items.append(node)
         for num, (px, py) in pins.items():
-            ends[(ref, num)] = (x + px, y - py)       # the sheet's y runs down
+            # the sheet's y runs down
+            ends[(ref, num)] = (x + px, y - py, _AWAY[angles[num] % 360])
 
     n_pwr = n_flg = 0
-    for (ref, num), (x, y) in sorted(ends.items()):
+    done: set[tuple[float, float, str]] = set()
+    for (ref, num), (x, y, away) in sorted(ends.items()):
         net = NETS[ref].get(num)
-        if net is None:
+        if net is None or (x, y, net) in done:
             continue
+        done.add((x, y, net))
         if net in POWER_NETS:
             n_pwr += 1
             items.append(_placed(f"power:{net}", f"#PWR0{n_pwr}", net, "", x, y, ["1"],
@@ -113,8 +149,7 @@ def build() -> list:
                 items.append(_placed("power:PWR_FLAG", f"#FLG0{n_flg}", "PWR_FLAG", "",
                                      x, y, ["1"], f"flag:{net}"))
         else:
-            centre_x = dict((r, xy[0]) for r, *_rest, xy in PARTS)[ref]
-            items.append(_global_label(net, x, y, left=x < centre_x))
+            items.append(_label(net, x, y, away))
 
     return W.sheet(ROOT_UUID, list(libs.values()), items)
 

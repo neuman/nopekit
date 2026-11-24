@@ -67,6 +67,10 @@ take to close it. A green DRC answers none of them.
   the models.
 - What moves after assembly: a plug pushed in, a button pressed, a battery that
   swells, a lid that flexes? The fit is one placement of rigid solids.
+- Which parts pass through an opening in the case: a knob, a button cap, a light
+  pipe, a connector face? How far should each stand proud of the face, and how far
+  does it? `pcb.enclosure_fit` reads a part through an opening cut for it as
+  clear, however far it reaches: it measures shared volume and clearance.
 
 ## A simulation of a different circuit
 

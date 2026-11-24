@@ -4,9 +4,9 @@
 board's pad nets) share. A helper, not a proposer: its name starts with ``_``.
 
 **Symbols come from KiCad's installed library**, copied into the file's
-``lib_symbols`` the way eeschema caches them (a derived symbol such as USBLC6-2SC6,
-which ``extends`` USBLC6-2P6, is flattened into one), so the schematic carries every
-pin's name and electrical type without the library.
+``lib_symbols`` the way eeschema caches them (a derived symbol, one that ``extends``
+another, is flattened into one), so the schematic carries every pin's name and
+electrical type without the library.
 
 **Connections are global labels on pin ends**, no wires: a global label's net is its
 own name, as a board's nets are.

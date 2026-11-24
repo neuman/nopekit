@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """pcb-kicad, run on real boards: what its selftest could not see.
 
-What slipped through: the pack's first run on two real boards (script-generated,
-4 layers, 87 and 114 footprints, no schematic) found three faults in the pack,
-none of which its baseline exercises, and the review of their fixes found more.
+What slipped through: the pack's first run on real boards (script-generated,
+4 layers, about a hundred footprints each, no schematic) found three faults in the
+pack, none of which its baseline exercises, and the review of their fixes found
+more.
 
 - ``pcb.fab_rules`` counted silk on silk as past the fab's limits. KiCad reports
   silk on silk as ``silk_overlap``, the type the fab's silk-to-pad rule reports
-  under, so the 18 overlaps ``pcb.drc`` found were counted again: 190 findings
-  where 172 were the fab's. Its detail line read "Silkscreen overlap" three times,
+  under, so every overlap ``pcb.drc`` found was counted again, beside the
+  findings that were the fab's. Its detail line read "Silkscreen overlap" three times,
   so nobody could see that no copper was past a limit. The baseline has no silk on
   silk. The first fix matched a pad on the file's text alone, and in review a
   silk line across a pad with no id, an uppercase id or a legacy stamp passed,
@@ -466,8 +467,8 @@ class ALocalClearanceNeverRelaxesTheFab(unittest.TestCase):
     KiCad holds an override to."""
 
     SEGMENT = "\t\t(start 4 6.54)\n\t\t(end 13.8625 7.81)\n\t\t(width 0.25)"
-    PAD1 = '\t\t\t(pintype "passive")\n\t\t\t(uuid "98a522d3-a31a-41b6-97e5-ddabad051743")'
-    U1 = '\t\t(uuid "70a4bc33-beb2-419e-8f2d-627f2d44a86b")\n\t\t(at 15 7.81)'
+    PAD1 = '\t\t\t(pintype "passive")\n\t\t\t(uuid "7372cdbb-0e58-490c-95c6-be877509477d")'
+    U1 = '\t\t(uuid "115dd51a-0341-43d9-b8b8-9e756f67ffa9")\n\t\t(at 15 7.81)'
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="nopekit-pcb-override-")
@@ -549,7 +550,8 @@ class TheHottestTrackIsNamed(unittest.TestCase):
     """``pcb.net_width``'s line names the hottest stretch (its width, the layers it
     runs on, its length along the copper, the same copper once) and up to four
     stretches as hot, then how many more; never "narrowest". Expected lengths are
-    worked here from the tracks' ends, not read back from the reader the gate uses."""
+    worked here from the tracks' ends, not read back from the reader the gate uses.
+    On the baseline VBUS runs on B.Cu as one track, and GND on both sides."""
 
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix="nopekit-pcb-width-")
@@ -562,19 +564,19 @@ class TheHottestTrackIsNamed(unittest.TestCase):
         return [s for s in K.children(tree, "segment")
                 if K.value(s, "net") == code and str(K.value(s, "layer")) == layer]
 
-    def _vbus(self, layer: str) -> float:
-        """The length of the baseline's VBUS segments on ``layer``, from their ends."""
+    def _length(self, net: str, layer: str) -> float:
+        """The length of the baseline's ``net`` segments on ``layer``, from their ends."""
         total = 0.0
-        for seg in self._segments(TREE, _net_code(TREE, "VBUS"), layer):
+        for seg in self._segments(TREE, _net_code(TREE, net), layer):
             (x0, y0), (x1, y1) = ((float(K.child(seg, e)[1]), float(K.child(seg, e)[2]))
                                   for e in ("start", "end"))
             total += math.hypot(x1 - x0, y1 - y0)
         return total
 
-    def _width(self, edit=None) -> str:
+    def _width(self, edit=None, net: str = "VBUS") -> str:
         tree = K.load_tree(BOARD)
         if edit:
-            edit(tree, _net_code(tree, "VBUS"))
+            edit(tree, _net_code(tree, net))
         board = os.path.join(self.dir, "w.kicad_pcb")
         with open(board, "w", encoding="utf-8") as fh:
             fh.write(K.dump(tree))
@@ -586,10 +588,11 @@ class TheHottestTrackIsNamed(unittest.TestCase):
     def test_the_baseline_names_both_nets_of_its_tie(self):
         """VBUS and GND both carry 0.5 A on 0.25 mm outer copper: equally hot."""
         detail = self._width()
-        both = self._vbus("F.Cu") + self._vbus("B.Cu")
+        gnd = self._length("GND", "F.Cu") + self._length("GND", "B.Cu")
         self.assertTrue(detail.startswith(
-            f"VBUS: hottest track 0.25 mm on B.Cu, F.Cu ({both:.1f} mm) rises "), detail)
-        self.assertIn("; as hot: GND 0.25 mm on B.Cu, F.Cu (", detail)
+            f"VBUS: hottest track 0.25 mm on B.Cu ({self._length('VBUS', 'B.Cu'):.1f} mm) "
+            f"rises "), detail)
+        self.assertIn(f"; as hot: GND 0.25 mm on B.Cu, F.Cu ({gnd:.1f} mm)", detail)
 
     def test_a_stretch_hotter_only_past_the_printed_digit_is_named_too(self):
         """GND at 0.501 A runs a hair hotter than VBUS at 0.5 A on the same copper.
@@ -601,19 +604,25 @@ class TheHottestTrackIsNamed(unittest.TestCase):
         self.params["pcb_net_currents_a"] = {"VBUS": 0.5, "GND": 0.501}
         detail = self._width()
         self.assertTrue(detail.startswith("GND: hottest track 0.25 mm on B.Cu, F.Cu ("), detail)
-        self.assertIn("; as hot: VBUS 0.25 mm on B.Cu, F.Cu (", detail)
+        self.assertIn("; as hot: VBUS 0.25 mm on B.Cu (", detail)
 
     def test_past_four_ties_the_line_counts_the_rest(self):
-        """Every net at 0.5 A, and one segment of each moved inside at the width
-        that heats as 0.25 mm outside: eight stretches as hot. The line names four
-        after the first, counts the other three, and the evidence lists all eight."""
+        """Every net at 0.5 A, and one segment of each net that runs as more than
+        one moved inside at the width that heats as 0.25 mm outside: seven
+        stretches as hot (VBUS, one track, stays outside). The line names four
+        after the first, counts the other two, and the evidence lists all seven."""
         rise = K.temp_rise_c(0.5, 0.25, 1.0, True)
         inner = round(K.width_for_rise_mm(0.5, rise, 0.5, False), 4)
         self.assertEqual(round(K.temp_rise_c(0.5, inner, 0.5, False), 1), round(rise, 1))
         nets = ("DM", "DP", "GND", "VBUS")
+        split = ("DM", "DP", "GND")
         self.params["pcb_net_currents_a"] = dict.fromkeys(nets, 0.5)
         tree = K.load_tree(BOARD)
-        for net in nets:
+        self.assertEqual(len([s for s in K.children(tree, "segment")
+                              if K.value(s, "net") == _net_code(tree, "VBUS")]), 1,
+                         "the baseline's VBUS runs as more than one track now: move one "
+                         "of its segments inside too, and count eight")
+        for net in split:
             code = _net_code(tree, net)
             seg = next(s for s in K.children(tree, "segment") if K.value(s, "net") == code)
             K.child(seg, "layer")[1] = K.Q("In1.Cu")
@@ -624,11 +633,12 @@ class TheHottestTrackIsNamed(unittest.TestCase):
         verdict = _run(self.registry, "pcb.net_width", self.dir,
                        dict(self.params, pcb_board=board))
         self.assertEqual(verdict.detail.count("; as hot: "), 4, verdict.detail)
-        self.assertIn("; and 3 more stretch(es) as hot (evidence: as_hot)", verdict.detail)
+        self.assertIn("; and 2 more stretch(es) as hot (evidence: as_hot)", verdict.detail)
         with open(verdict.evidence[0], encoding="utf-8") as fh:
             as_hot = json.load(fh)["as_hot"]
         self.assertEqual(sorted((h["net"], h["side"]) for h in as_hot),
-                         sorted((n, side) for n in nets for side in ("inner", "outer")))
+                         sorted([(n, side) for n in split for side in ("inner", "outer")]
+                                + [("VBUS", "outer")]))
 
     def test_a_tie_outside_the_fitted_range_is_named_with_its_net(self):
         """GND at 36 A on a track wide enough to heat as VBUS's 0.5 A on 0.25 mm:
@@ -648,39 +658,43 @@ class TheHottestTrackIsNamed(unittest.TestCase):
                       detail)
 
     def test_a_wider_inner_track_is_the_hottest(self):
-        """VBUS's front copper moved inside and widened to 0.3 mm: 0.25 mm still runs
+        """GND's front copper moved inside and widened to 0.3 mm: 0.25 mm still runs
         on the back, and the 0.3 mm inner track is the hotter. "Narrowest 0.3 mm"
         would be false."""
         def edit(tree, code):
             for seg in self._segments(tree, code, "F.Cu"):
                 K.child(seg, "layer")[1] = K.Q("In1.Cu")
                 K.child(seg, "width")[1] = "0.3"
-        detail = self._width(edit)
+        detail = self._width(edit, net="GND")
         self.assertTrue(detail.startswith(
-            f"VBUS: hottest track 0.3 mm on In1.Cu ({self._vbus('F.Cu'):.1f} mm) rises "), detail)
+            f"GND: hottest track 0.3 mm on In1.Cu ({self._length('GND', 'F.Cu'):.1f} mm) "
+            f"rises "), detail)
         self.assertIn("IPC-2221 internal", detail)
 
     def test_the_same_width_inside_is_named_apart_from_outside(self):
-        """VBUS's front copper moved inside at its 0.25 mm: the back's 0.25 mm is
-        the cooler copper and is no part of the hottest stretch."""
+        """GND's front copper moved inside at its 0.25 mm: the back's 0.25 mm, GND's
+        and VBUS's, is the cooler copper and is no part of the hottest stretch."""
         def edit(tree, code):
             for seg in self._segments(tree, code, "F.Cu"):
                 K.child(seg, "layer")[1] = K.Q("In1.Cu")
-        detail = self._width(edit)
+        detail = self._width(edit, net="GND")
         self.assertTrue(detail.startswith(
-            f"VBUS: hottest track 0.25 mm on In1.Cu ({self._vbus('F.Cu'):.1f} mm) rises "), detail)
+            f"GND: hottest track 0.25 mm on In1.Cu ({self._length('GND', 'F.Cu'):.1f} mm) "
+            f"rises "), detail)
         self.assertNotIn("B.Cu", detail)
 
     def test_a_wider_track_on_the_same_side_is_no_part_of_it(self):
-        """VBUS's back copper widened to 0.5 mm: only the front's 0.25 mm is hottest
-        (and as hot as GND's)."""
+        """GND's back copper widened to 0.5 mm: only its front's 0.25 mm is as hot
+        as VBUS's back, and the wider copper on the same side is no part of it."""
         def edit(tree, code):
             for seg in self._segments(tree, code, "B.Cu"):
                 K.child(seg, "width")[1] = "0.5"
-        detail = self._width(edit)
+        detail = self._width(edit, net="GND")
         self.assertTrue(detail.startswith(
-            f"VBUS: hottest track 0.25 mm on F.Cu ({self._vbus('F.Cu'):.1f} mm) rises "), detail)
-        self.assertIn("; as hot: GND 0.25 mm on B.Cu, F.Cu (", detail)
+            f"VBUS: hottest track 0.25 mm on B.Cu ({self._length('VBUS', 'B.Cu'):.1f} mm) "
+            f"rises "), detail)
+        self.assertIn(f"; as hot: GND 0.25 mm on F.Cu ({self._length('GND', 'F.Cu'):.1f} mm)",
+                      detail)
 
     def test_an_arc_is_measured_along_it_and_counted_once(self):
         """A 0.2 mm half-circle of radius 2 mm on VBUS, written twice: 2 pi mm of
@@ -1077,8 +1091,8 @@ class PinNamesComeFromTheSchematic(unittest.TestCase):
 
     def test_stripped_boards_read_the_same_through_the_schematic(self):
         tree = K.load_tree(BOARD)
-        net = K.child(_pad(tree, "U1", "6"), "net")
-        net[1:] = [_net_code(tree, "DM"), K.Q("DM")]
+        net = K.child(_pad(tree, "U1", "5"), "net")
+        net[1:] = [_net_code(tree, "VBUS"), K.Q("VBUS")]
         split = K.dump(tree) + "\n"
         for name, text, outcome in (("baseline", _board_text(), "pass"),
                                     ("split_pin_pair", split, "fail")):
@@ -1091,37 +1105,37 @@ class PinNamesComeFromTheSchematic(unittest.TestCase):
                                  self._pin_names(text, schematic=False).outcome)
                 verdict = self._pin_names(stripped, schematic=False)
                 self.assertEqual(verdict.outcome, "skipped", verdict.render())
-        self.assertIn("U1 I/O1: DM on 6, DP on 1",
+        self.assertIn("U1 COM: GND on 2, VBUS on 5",
                       self._pin_names(_strip_pin_names(split), schematic=True).detail)
 
 
 def _lib_name_schematic() -> str:
     """The baseline schematic with U1's symbol cached under a ``lib_name``, as
     eeschema writes a placed symbol that differs from its library: the cache
-    entry ``USBLC6-2SC6_1``, its units ``USBLC6-2SC6_1_<unit>_<style>``, and
-    ``(lib_name "USBLC6-2SC6_1")`` on the placed symbol (kicad-cli 9.0.9's ERC
+    entry ``ESDA6V1BC6_1``, its units ``ESDA6V1BC6_1_<unit>_<style>``, and
+    ``(lib_name "ESDA6V1BC6_1")`` on the placed symbol (kicad-cli 9.0.9's ERC
     reads it with 0 violations: measured)."""
     with open(os.path.join(ASSETS, "esd_guard.kicad_sch"), encoding="utf-8") as fh:
         tree = K.parse(fh.read())
     for sym in K.children(K.child(tree, "lib_symbols"), "symbol"):
-        if str(sym[1]) == "Power_Protection:USBLC6-2SC6":
-            sym[1] = K.Q("USBLC6-2SC6_1")
+        if str(sym[1]) == "Power_Protection:ESDA6V1BC6":
+            sym[1] = K.Q("ESDA6V1BC6_1")
             for unit in K.children(sym, "symbol"):
-                unit[1] = K.Q(str(unit[1]).replace("USBLC6-2SC6_", "USBLC6-2SC6_1_", 1))
+                unit[1] = K.Q(str(unit[1]).replace("ESDA6V1BC6_", "ESDA6V1BC6_1_", 1))
     for sym in K.children(tree, "symbol"):
-        if str(K.value(sym, "lib_id")) == "Power_Protection:USBLC6-2SC6":
-            sym.insert(1, ["lib_name", K.Q("USBLC6-2SC6_1")])
+        if str(K.value(sym, "lib_id")) == "Power_Protection:ESDA6V1BC6":
+            sym.insert(1, ["lib_name", K.Q("ESDA6V1BC6_1")])
     return K.dump(tree) + "\n"
 
 
 class APartCachedUnderItsLibNameKeepsItsNames(unittest.TestCase):
     """In review: names looked up by ``lib_id`` alone read none for a part KiCad
     caches under ``lib_name``, and erased its pads' pinfunction with them, so the
-    ESD array's shorted I/O1 pair, which the pads alone had shown, passed."""
+    ESD array's shorted pin pair, which the pads alone had shown, passed."""
 
     def test_the_split_pair_fails_with_and_without_pinfunction(self):
         tree = K.load_tree(BOARD)
-        K.child(_pad(tree, "U1", "6"), "net")[1:] = [_net_code(tree, "DM"), K.Q("DM")]
+        K.child(_pad(tree, "U1", "5"), "net")[1:] = [_net_code(tree, "VBUS"), K.Q("VBUS")]
         split = K.dump(tree) + "\n"
         for name, text in (("pinfunction", split), ("stripped", _strip_pin_names(split))):
             with self.subTest(board=name):
@@ -1133,7 +1147,7 @@ class APartCachedUnderItsLibNameKeepsItsNames(unittest.TestCase):
                 verdict = _run(_registry(), "pcb.pin_names", root,
                                dict(_baseline(), pcb_board=board))
                 self.assertEqual(verdict.outcome, "fail", verdict.render())
-                self.assertIn("U1 I/O1: DM on 6, DP on 1", verdict.detail)
+                self.assertIn("U1 COM: GND on 2, VBUS on 5", verdict.detail)
 
 
 @unittest.skipIf(os.name == "nt", "the stand-in kicad-cli is a #! script")
@@ -1205,7 +1219,7 @@ class TheWriterRefusesWhatAPersonMustState(unittest.TestCase):
         del symbols["symbols"]["U1"]
         proc = _proposer(BOARD, symbols, out, root)
         self.assertEqual(proc.returncode, 2, proc.stderr)
-        self.assertIn("U1 (USBLC6-2SC6, footprint Package_TO_SOT_SMD:SOT-23-6) matches no "
+        self.assertIn("U1 (ESDA6V1BC6, footprint Package_TO_SOT_SMD:SOT-23-6) matches no "
                       "symbol", proc.stderr)
         self.assertEqual(os.listdir(out), [])
 
@@ -1264,7 +1278,7 @@ class AWrittenSchematicIsJudgedByKiCad(unittest.TestCase):
                          for p in K.children(s, "property")))
         x, y = float(K.child(u1, "at")[1]), float(K.child(u1, "at")[2])
         lib = next(s for s in K.children(K.child(tree, "lib_symbols"), "symbol")
-                   if str(s[1]) == "Power_Protection:USBLC6-2SC6")
+                   if str(s[1]) == "Power_Protection:ESDA6V1BC6")
         pins = {}
 
         def walk(node):
@@ -1295,6 +1309,138 @@ class AWrittenSchematicIsJudgedByKiCad(unittest.TestCase):
         self.assertEqual(os.listdir(out), [])
 
 
+@unittest.skipIf(SYMBOLS is None, "needs KiCad's stock symbols")
+class AStackedPinTakesOneLabel(unittest.TestCase):
+    """U1's two COM pins sit on one point of its symbol. The writer puts one GND
+    label there, and no id in the file repeats; nor in the baseline's own
+    schematic. (What slipped through, when the baseline's part changed to one with
+    stacked pins: the written file held one label's uuid5 twice, and KiCad's ERC
+    and parity passed it.)"""
+
+    def test_one_label_on_the_stacked_pins_and_no_id_twice(self):
+        root = tempfile.mkdtemp(prefix="nopekit-pcb-stacked-")
+        self.addCleanup(shutil.rmtree, root, True)
+        out = os.path.join(root, "out")
+        os.makedirs(out)
+        board = _board_copy(root, _board_text())
+        proc = _proposer(board, _esd_symbols(), out, root)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        for path in (os.path.join(out, "b.kicad_sch"),
+                     os.path.join(ASSETS, "esd_guard.kicad_sch")):
+            with self.subTest(schematic=os.path.basename(os.path.dirname(path))):
+                with open(path, encoding="utf-8") as fh:
+                    text = fh.read()
+                ids = re.findall(r'\(uuid "([^"]+)"\)', text)
+                self.assertEqual(sorted(i for i in set(ids) if ids.count(i) > 1), [])
+        with open(os.path.join(out, "b.kicad_sch"), encoding="utf-8") as fh:
+            written = K.parse(fh.read())
+        lib = next(sym for sym in K.children(K.child(written, "lib_symbols"), "symbol")
+                   if str(sym[1]) == "Power_Protection:ESDA6V1BC6")
+        ends = {}
+
+        def walk(node):
+            for c in node:
+                if isinstance(c, list):
+                    if K.head(c) == "pin":
+                        at = K.child(c, "at")
+                        ends[str(K.value(c, "number"))] = (float(at[1]), float(at[2]))
+                    walk(c)
+        walk(lib)
+        self.assertEqual(ends["2"], ends["5"], "the library no longer stacks COM")
+        u1 = next(sym for sym in K.children(written, "symbol")
+                  if any(len(p) > 2 and p[1] == "Reference" and p[2] == "U1"
+                         for p in K.children(sym, "property")))
+        x, y = float(K.child(u1, "at")[1]), float(K.child(u1, "at")[2])
+        point = (x + ends["2"][0], y - ends["2"][1])
+        there = [str(lab[1]) for lab in K.children(written, "global_label")
+                 if abs(float(K.child(lab, "at")[1]) - point[0]) < 1e-6
+                 and abs(float(K.child(lab, "at")[2]) - point[1]) < 1e-6]
+        self.assertEqual(there, ["GND"])
+
+
+#: A one-symbol schematic around a derived stock symbol, as the pack's writer
+#: caches it: run in a child, because the writer's module puts the pack's gates/
+#: on sys.path and switches bytecode off for the process that imports it. Every
+#: pin carries a no-connect flag. Prints what the cached symbol holds.
+_DERIVED = r"""
+import json, os, sys
+sys.dont_write_bytecode = True
+proposers, symbols, out, lib, child, parent = sys.argv[1:7]
+sys.path.insert(0, proposers)
+import _schematic as W
+K = W.K
+sym = W.library_symbol(symbols, lib, child)
+root = W.uid("derived:root")
+pins = W.pins(sym)
+x = y = 101.6
+items = [W.placed(f"{lib}:{child}", "U1", child, "", x, y, sorted(pins), "derived:U1",
+                  project="d", root_uuid=root)]
+items += [W.no_connect(x + px, y - py, f"derived:nc:{n}")
+          for n, (px, py) in sorted(pins.items())]
+with open(os.path.join(out, "d.kicad_sch"), "w", encoding="utf-8") as fh:
+    fh.write(K.dump(W.sheet(root, [sym], items)) + "\n")
+heads = [K.head(x) for x in sym if isinstance(x, list)]
+print(json.dumps({
+    "name": str(sym[1]), "extends": K.value(sym, "extends"),
+    "value": next(str(p[2]) for p in K.children(sym, "property") if p[1] == "Value"),
+    "units": [str(u[1]) for u in K.children(sym, "symbol")],
+    "properties_first": heads.index("symbol") > max(i for i, h in enumerate(heads)
+                                                    if h == "property"),
+    "pins": W.pins(sym), "parent_pins": W.pins(W.library_symbol(symbols, lib, parent))}))
+"""
+
+
+@unittest.skipIf(SYMBOLS is None, "needs KiCad's stock symbols")
+class ADerivedSymbolIsFlattenedAsEeschemaCachesIt(unittest.TestCase):
+    """A stock symbol that ``extends`` another is cached flattened: its own name
+    and properties, its parent's body and pins, the units renamed to it. KiCad's
+    ERC, at every severity, finds nothing in a schematic that holds it. (What
+    slipped through, in this pack's ORIGINS scrub: the baseline's old ESD array
+    was the only derived symbol any test read, so the swap to a part that extends
+    nothing left the flattening unexercised. NCP349MNAE extends NCP349MN in
+    KiCad 9's Power_Protection library.)"""
+
+    LIB, CHILD, PARENT = "Power_Protection", "NCP349MNAE", "NCP349MN"
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-pcb-derived-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        proc = _env.run([sys.executable, "-c", _DERIVED, os.path.join(PACK, "proposers"),
+                         SYMBOLS, self.root, self.LIB, self.CHILD, self.PARENT],
+                        cwd=self.root)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.cached = json.loads(proc.stdout)
+
+    def test_the_cache_is_the_child_on_its_parents_body(self):
+        c = self.cached
+        self.assertEqual(c["name"], f"{self.LIB}:{self.CHILD}")
+        self.assertIsNone(c["extends"])
+        self.assertEqual(c["value"], self.CHILD)
+        self.assertTrue(c["units"])
+        self.assertTrue(all(u.startswith(self.CHILD + "_") for u in c["units"]), c["units"])
+        self.assertTrue(c["properties_first"])
+        self.assertTrue(c["pins"])
+        self.assertEqual(c["pins"], c["parent_pins"])
+
+    @unittest.skipIf(shutil.which("kicad-cli") is None, "ERC needs the real kicad-cli")
+    def test_erc_finds_nothing_in_it(self):
+        shutil.copyfile(os.path.join(ASSETS, "esd_guard.kicad_pro"),
+                        os.path.join(self.root, "d.kicad_pro"))
+        with open(os.path.join(self.root, "sym-lib-table"), "w", encoding="utf-8") as fh:
+            fh.write(f'(sym_lib_table\n\t(version 7)\n\t(lib (name "{self.LIB}")(type "KiCad")'
+                     f'(uri "${{KICAD9_SYMBOL_DIR}}/{self.LIB}.kicad_sym")(options "")'
+                     f'(descr ""))\n)\n')
+        report = os.path.join(self.root, "erc.json")
+        proc = _env.run(["kicad-cli", "sch", "erc", "--severity-all", "--format", "json",
+                         "-o", report, os.path.join(self.root, "d.kicad_sch")], cwd=self.root,
+                        env={"KICAD9_SYMBOL_DIR": SYMBOLS})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(report, encoding="utf-8") as fh:
+            found = [(v["type"], v["description"]) for sheet in json.load(fh)["sheets"]
+                     for v in sheet["violations"]]
+        self.assertEqual(found, [])
+
+
 class TheLandIsPairedByFunction(unittest.TestCase):
     """pcb.land_pattern pairs pads by pin function, never by number."""
 
@@ -1303,7 +1449,7 @@ class TheLandIsPairedByFunction(unittest.TestCase):
         self.fit = self.registry.get("pcb.land_pattern")[1].__globals__["_land_fit"]
 
     def test_an_led_numbered_the_other_way_fits_by_its_cathode(self):
-        """JLC's LED C2286 numbers its cathode pad 2; KiCad's LED_0603 numbers it 1.
+        """An LED whose vendor numbers its cathode pad 2; KiCad's LED_0603 numbers it 1.
         Turned 90 degrees, the drawing fits the land with no residual, cathode on
         cathode."""
         board = [("K", K.LandPad("1", -0.7875, 0.0, 0.875, 0.95)),
@@ -1323,7 +1469,7 @@ class TheLandIsPairedByFunction(unittest.TestCase):
         if schematic:
             shutil.copyfile(os.path.join(ASSETS, "esd_guard.kicad_sch"),
                             os.path.join(root, "b.kicad_sch"))
-        drawings = drawings or {"U1": os.path.join(ASSETS, "usblc6_land.json")}
+        drawings = drawings or {"U1": os.path.join(ASSETS, "esda6v1bc6_land.json")}
         return _run(self.registry, "pcb.land_pattern", root,
                     dict(_baseline(), pcb_board=board, pcb_land_drawings=drawings))
 
@@ -1347,7 +1493,7 @@ class TheLandIsPairedByFunction(unittest.TestCase):
         self.assertEqual(verdict.outcome, "pass", verdict.render())
 
     def test_a_drawing_that_does_not_say_its_y_axis_is_refused(self):
-        with open(os.path.join(ASSETS, "usblc6_land.json"), encoding="utf-8") as fh:
+        with open(os.path.join(ASSETS, "esda6v1bc6_land.json"), encoding="utf-8") as fh:
             record = json.load(fh)
         del record["y_axis"]
         root = tempfile.mkdtemp(prefix="nopekit-pcb-land-")
@@ -1389,8 +1535,8 @@ class ThePowerRulesReadTheirRecords(unittest.TestCase):
             with self.subTest(start=start, limit=limit):
                 got = math.sqrt(self.power.adiabatic_s(1.0, 1.0, start, limit))
                 self.assertAlmostEqual(got, k, delta=0.05)
-        # The ribbon conductor that slipped through: 0.0245 mm^2, 25 -> 105 C, 8 A.
-        self.assertAlmostEqual(self.power.adiabatic_s(8.0, 0.0245, 25, 105), 0.1287, places=4)
+        # references/power.md's worked point: 0.03 mm^2, 25 -> 85 C, 10 A.
+        self.assertAlmostEqual(self.power.adiabatic_s(10.0, 0.03, 25, 85), 0.0956, places=4)
 
     def _run(self, gid: str, **records):
         params = dict(self.params, **records)
@@ -1519,11 +1665,11 @@ class ThePowerRulesReadTheirRecords(unittest.TestCase):
                 self.assertIn("newer than", verdict.error)
 
     def test_a_pcm_alone_below_the_minimum_fails_and_says_so(self):
-        cell = dict(self.params["pcb_cell"], min_v=3.0, pcm_cutoff_min_v=2.75)
+        cell = dict(self.params["pcb_cell"], min_v=3.0, pcm_cutoff_min_v=2.5)
         verdict = self._run("pcb.discharge_cutoff", pcb_cell=cell, pcb_cutoffs=[])
         self.assertEqual(verdict.outcome, "fail", verdict.render())
-        self.assertEqual(verdict.measured, 2.75)
-        self.assertIn("the cell's PCM opens at 2.75 V, below its 3 V minimum; no part on "
+        self.assertEqual(verdict.measured, 2.5)
+        self.assertIn("the cell's PCM opens at 2.5 V, below its 3 V minimum; no part on "
                       "the board cuts the cell off", verdict.detail)
 
 

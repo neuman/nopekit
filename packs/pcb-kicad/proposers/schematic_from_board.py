@@ -36,9 +36,9 @@ names a pad or a net the board does not have.
 **What it writes** under ``$NOPEKIT_PROPOSAL_DIR``: ``<stem>.kicad_sch``, the
 symbols flattened into ``lib_symbols`` as eeschema caches them, each Footprint field
 the board's footprint name verbatim (parity compares it exactly: a nickname added,
-or the field emptied, gave 114 footprint_symbol_mismatch on a 4-layer board,
-measured), in_bom and dnp from the footprint's attributes, every id a ``uuid5`` so
-the bytes repeat; ``sym-lib-table``, only the libraries used; and
+or the field emptied, gave a footprint_symbol_mismatch for every part on a 4-layer
+board, measured), in_bom and dnp from the footprint's attributes, every id a
+``uuid5`` so the bytes repeat; ``sym-lib-table``, only the libraries used; and
 ``<stem>.schematic.json``, the symbol per ref, the refs on generic symbols, the
 pins left open with no statement, the flagged nets and the sha256 of each
 ``.kicad_sym`` read. Standard library and the pack's reader only; no pcbnew.
@@ -191,11 +191,19 @@ def build(board_path: str, spec: dict, root: str):
         items.append(W.placed(lib_id, fp.ref, fp.value, fp.lib_id, x, y, sorted(pins),
                               f"{stem}:symbol:{fp.ref}", project=stem, root_uuid=root_uuid,
                               in_bom="exclude_from_bom" not in a, dnp="dnp" in a))
+        # Two pins a symbol stacks on one point (a TVS array's two COM) take one
+        # label: KiCad joins them there, and a second label of the same net there
+        # has the same uuid5. (What slipped through, when the baseline's part
+        # changed to one with stacked pins: the file held one id twice, and ERC
+        # and parity passed it.)
+        labelled: set[tuple[float, float, str]] = set()
         for number, (px, py) in sorted(pins.items()):
             ex, ey = x + px, y - py                  # the sheet's y runs down
             nets = sorted(n for n in by_pad.get(number, ()) if n)
             if nets:
-                items.append(W.global_label(nets[0], ex, ey, left=px < 0))
+                if (ex, ey, nets[0]) not in labelled:
+                    labelled.add((ex, ey, nets[0]))
+                    items.append(W.global_label(nets[0], ex, ey, left=px < 0))
             elif number in open_stated.get(fp.ref, []):
                 items.append(W.no_connect(ex, ey, f"{stem}:nc:{fp.ref}:{number}"))
             else:

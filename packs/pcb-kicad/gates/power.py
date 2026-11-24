@@ -29,13 +29,12 @@ slipped through, in review: an NTC, a cutoff and its series resistor marked dnp 
 read as fitted; ``"safety_timer": "false"``, a string, read as a timer; a negative
 area squared away; a cutoff with an empty source counted.)
 
-**What slipped through** (a two-board keyboard with a 1-cell LiPo, its boards made
-by a generator, every design rule and the netlist clean): the charger, an
-MCP73831, has no thermistor input and no safety timer (DS20001984H); the PPTC
-fuse is guaranteed to trip in 0.2 s only at 8 A, where the 0.0245 mm^2 ribbon
-conductor it protects reaches its 105 C rating in about 129 ms; and nothing on
-either board cuts the cell off when it runs down, so only the cell's own PCM, at
-2.75 V, stands under a cell rated to 3.0 V.
+**What slipped through** (a generated design with a 1-cell lithium battery, every
+design rule and the netlist clean): the charger had no thermistor input and no
+safety timer; the PPTC fuse was guaranteed to trip only at a current where the
+thin conductor it protected reached its rating first; and nothing on the boards
+cut the cell off when it ran down, so only the cell's own PCM stood under it, and
+the PCM opened below the cell's rated minimum.
 """
 from __future__ import annotations
 
@@ -57,9 +56,9 @@ K = _load_path(os.path.join(_HERE, "_kicad.py"))
 #: (90 -> 250 C) (tests/test_pcb_kicad.py). Adiabatic: no heat leaves the
 #: conductor, which holds for faults under about 5 s, so a trip time past
 #: ADIABATIC_MAX_S is refused. Copper only. Rejected: IPC-2152's steady-state
-#: curves (they say what a track carries for hours, not for 0.2 s); a fusing
-#: formula such as Onderdonk's (it says when copper melts, past every
-#: insulation's rating).
+#: curves (they say what a track carries for hours, not for a fault's fraction of
+#: a second); a fusing formula such as Onderdonk's (it says when copper melts,
+#: past every insulation's rating).
 K_COPPER = 226.0
 BETA_COPPER_C = 234.5
 
