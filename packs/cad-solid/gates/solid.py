@@ -1679,7 +1679,7 @@ def clash(ctx: GateContext) -> Verdict:
                   f"{tol_shown} / "
                   f"{first['depth_tolerance_mm']:g} mm tolerance: {first['why']}")
         # THE PAYOFF. Two pins per interfering pair, each naming the other part and
-        # carrying the shared volume, so `back_left interferes with grip_lid_left by
+        # carrying the shared volume, so `carriage interferes with guide_roller by
         # 0.41 mm^3` stops being a sentence somebody has to go and act on and
         # becomes two parts lit up in the viewer at the pose where it happens.
         #

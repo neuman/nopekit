@@ -7,8 +7,8 @@ The site has two jobs and the second one is why it exists:
 2. **Debug the thing** — spin it, pull it apart, and see the latest gate results
    *anchored to the geometry they are about*.
 
-A readiness report says ``cad.clash: 1 interfering pair — back_left /
-grip_lid_left, 0.41 mm^3``. That is a sentence somebody has to go and act on.
+A readiness report says ``cad.clash: 1 interfering pair — carriage /
+guide_roller, 0.41 mm^3``. That is a sentence somebody has to go and act on.
 The same verdict carrying two :class:`~nopekit.models.Locator` records lights
 both parts up in the viewer, and the reader is looking at the problem a second
 later. Everything in this module exists to keep that link intact from the gate
@@ -1620,8 +1620,8 @@ _ROUND = 4
 
 #: Separator between a mover name and a node's role within it. A double
 #: underscore, not a single one, because single underscores are ordinary inside
-#: part names — ``back_left`` is one part, ``grip_lid_left__screw_boss`` is a
-#: feature of ``grip_lid_left`` — and a grouper that split on the first ``_``
+#: part names — ``guide_roller`` is one part, ``guide_roller__axle`` is a
+#: feature of ``guide_roller`` — and a grouper that split on the first ``_``
 #: would shatter every multi-word part into a mover of its own.
 MOVER_SEPARATOR = "__"
 
@@ -1926,9 +1926,9 @@ def locator_problems(views: Iterable[View], verdicts: Iterable[Verdict]) -> list
 
     Returns one record per bad locator::
 
-        {"gate": "cad.clash", "view": "assembly", "target": "back_left",
+        {"gate": "cad.clash", "view": "assembly", "target": "carriage",
          "severity": "unknown-target",
-         "problem": "view 'assembly' declares no node 'back_left'"}
+         "problem": "view 'assembly' declares no node 'carriage'"}
     """
     by_id = {v.id: v for v in views}
     namespaces = {vid: _view_targets(view) for vid, view in by_id.items()}

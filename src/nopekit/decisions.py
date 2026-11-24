@@ -10,7 +10,7 @@ that earn their keep are the negative ones:
 
     the wider trace was tried first and the router could not close that net
     a rigid hook was tried and rejected — it snapped in the 3-point bend
-    do not fit the narrower ribbon: it floats in the housing with 4 mm of slop
+    do not fit the shorter screw: it strips the boss at the first service
 
 None of those can be recovered from the CAD, the git history, or anybody's
 memory two months later. Without them every fresh context window re-litigates
@@ -24,7 +24,7 @@ Two functions carry the weight:
   returns a dense block — current value, whether it is derived and from what,
   the rationale, **every** rejected alternative, the gates that protect it and
   how they last ran, the input artifacts that ground it, and the decisions that
-  moved it. An agent calls `why` instead of reading the 1,672 lines, which is
+  moved it. An agent calls `why` instead of reading thousands of lines, which is
   the difference between one screen of context and a third of a window.
 
 Nothing here reads the clock (contract rule 3): `add` takes `when` from the
@@ -116,10 +116,9 @@ def _coerce_rejected(items: Iterable[Any] | None) -> list[Rejection]:
     parsed without importing the model, but every form goes through the same
     gate: **a rejected alternative with no reason is refused.** "the wider trace
     was tried" is worthless; "the wider trace was tried and the router could not
-    close that net through the congested corridor" is the whole reason this log
-    exists. Letting the reasonless form through would fill the log with lines that
-    look like provenance and answer nothing, and the next agent would re-try it
-    anyway.
+    close that net" is the whole reason this log exists. Letting the reasonless
+    form through would fill the log with lines that look like provenance and
+    answer nothing, and the next agent would re-try it anyway.
     """
     out: list[Rejection] = []
     for item in items or ():
@@ -207,7 +206,7 @@ def add(
     Newest first is the storage order as well as the render order. The log is
     read top-down by someone asking "what changed lately?", and an append-only
     tail means the answer is always at the bottom of a file that only grows —
-    at 1,672 lines that is a scroll nobody does.
+    at a few thousand lines that is a scroll nobody does.
 
     The id is `slugify(title)`, deduped against ids already in the ledger
     (`iter_suffix_unique`). Slug rather than a number because a decision is
@@ -1594,7 +1593,8 @@ def why(ledger: Ledger, name: str, *, view: Any = None,
     derives from, the rationale, **every** alternative that was rejected and the
     concrete reason each lost, which gates protect it and how they last ran,
     which input artifacts ground it, and the decisions that moved it — instead
-    of reading a 1,672-line log and a ledger to reconstruct the same thing.
+    of reading a log of thousands of lines and a ledger to reconstruct the same
+    thing.
 
     `view` is `modelio.param_view`'s output (the list, or one `ParamView`). With
     it, the parameters ARE the views — `param_view` has already folded every

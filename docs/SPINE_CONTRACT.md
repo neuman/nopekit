@@ -3063,7 +3063,7 @@ under GROUNDED BY). `add` takes rejections as dicts with `type`, `by`, `returns_
 `input`, held to `store.rejection_problem`; `render_log` adds each loser's type and
 condition as written, never a live state.
 `why` is the context-window win: an agent pulls one parameter's full history
-instead of reading a 1,672-line decision log.
+instead of reading a decision log of thousands of lines.
 
 ### `report.py`  (deps: models, util, store, claims, artifacts, verdicts, modelio)
 ```python

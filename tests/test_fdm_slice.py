@@ -3,11 +3,11 @@
 
 What slipped through before the gate: fdm-print read only the mesh, and Orca 2.4.2,
 run by hand, sliced an 80 mm unsupported bridge with return code 0, "Success." and
-no warning; a printed part's 80 mm tunnel roof sliced the same way and then failed
-in print. It also dropped a part 15 mm above the bed to the bed and said nothing, and
-sliced a preset with a misspelled key without the key. Each case below is one of
-those, or a way the gate's own reading could be wrong (a bridge over support read
-as free, a run cut into segments, arcs, another part's G-code).
+no warning, though a span that long sags in print. It also dropped a part 15 mm
+above the bed to the bed and said nothing, and sliced a preset with a misspelled
+key without the key. Each case below is one of those, or a way the gate's own
+reading could be wrong (a bridge over support read as free, a run cut into
+segments, arcs, another part's G-code).
 
 The cases run the real gate through a stand-in ``orca-slicer`` on PATH
 (``tests/_orca_standin.py``) that writes result.json and a synthetic G-code in
