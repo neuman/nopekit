@@ -72,18 +72,23 @@ SUPPORTED_ORCA = ("2.4.2",)
 #: libraries (references/slicer.md); 120 s covers a cold container start.
 HELP_TIMEOUT_S = 120
 
-#: Per part. Measured: 0.6 s for the pack's clamp and arch, 2.7 s for a 50k-face
-#: printed part, plus the container start. Past it the run is errored, never a fail.
+#: Per part. Measured: 0.6 s for the pack's clamp and arch, plus the container
+#: start. 600 s leaves room for a part of many more faces and a cold container
+#: (``HELP_TIMEOUT_S``). The first runs also timed a part from outside the pack; it
+#: was not measured again on the pack's probes (no OrcaSlicer 2.4.2 on the machine
+#: that removed it), so no figure from it is given here. Past it the run is
+#: errored, never a fail.
 SLICE_TIMEOUT_S = 600
 
 #: Return codes that are Orca's judgment of the PART on this machine: a FAIL, in
 #: Orca's own words. Read in ``src/libslic3r/Utils.hpp`` and ``src/OrcaSlicer.cpp``
-#: at tag v2.4.2. -50 was measured (a 300 mm bar and a 300 mm box on a 220 mm
-#: machine, and a part in its assembly frame with ``--arrange 0``); -52 ("Some
-#: objects are located over the boundary of the heated bed") and -102 (G-code in
-#: an unprintable area) were read, not triggered. Every other nonzero code (-51
-#: bad parameters, -5 a bad preset file, -17 a process not compatible with the
-#: printer, a signal) is the tool not working: errored, never a fail.
+#: at tag v2.4.2. -50 was measured on a 300 mm bar and a 300 mm box on a 220 mm
+#: machine; a third case, on a part from outside the pack, was not measured again
+#: and is not given here. -52 ("Some objects are located over the boundary of the
+#: heated bed") and -102 (G-code in an unprintable area) were read, not triggered.
+#: Every other nonzero code (-51 bad parameters, -5 a bad preset file, -17 a
+#: process not compatible with the printer, a signal) is the tool not working:
+#: errored, never a fail.
 REFUSALS = {-50: "CLI_NO_SUITABLE_OBJECTS", -52: "CLI_OBJECTS_PARTLY_INSIDE",
             -102: "CLI_GCODE_PATH_IN_UNPRINTABLE_AREA"}
 
@@ -186,10 +191,15 @@ ORCA_RETIRED = frozenset({
 NOT_THE_PART = ("Brim", "Skirt", "Custom", "Prime tower", "Wipe tower")
 
 #: How far the extents of the part's own extrusions may be from the mesh's, mm,
-#: per axis. Measured: |delta| 0.41-0.45 mm in X and Y (one outer line width: the
-#: wall's centre line runs half a width inside the surface on each side) on a cube,
-#: an 80 mm bridge and a 50k-face part; 0.00 in Z on 4 parts. Rejected: 0.5, too
-#: close to 0.45.
+#: per axis. What it allows for: the outer wall's centre line runs half a line
+#: width inside the surface on each side, so in X and Y the extrusions span about
+#: one line width less than the mesh (the pack's process preset sets
+#: ``line_width`` 0.42 mm), and in Z they reach the mesh's top. The readings that
+#: first showed this were taken on a cube and an 80 mm bridge together with parts
+#: from outside the pack; they were not measured again on the pack's probes alone
+#: (no OrcaSlicer 2.4.2 on the machine that removed them), so no figure from them
+#: is given here. *Rejected:* 0.5, too close to one line width: a wider wall line
+#: would read as another part.
 EXTENT_TOL_MM = 1.0
 
 #: The toolpath roles the bridge reader measures: every extrusion Orca lays over
@@ -198,12 +208,15 @@ EXTENT_TOL_MM = 1.0
 #: and prints as walls typed ``Overhang wall``, with no ``Bridge`` line (the gate
 #: read 0.0, fdm.bridge_span 80.0; read with this set, 79.85 mm); and a closed
 #: 90 mm block at 0% infill roofs its hollow with ``Internal Bridge`` (0.0, now
-#: 87.06 mm). The two other roles add runs where something is printed beneath
-#: too, and these read short, not as a span: an overhang wall at the tip of a
-#: support, and a roof line across the gap between two lines of sparse infill.
-#: The earlier runs that first checked this held parts from outside the pack. They
-#: were not measured again on the pack's own probes (no OrcaSlicer 2.4.2 on the
-#: machine that removed them), so no number from them is given here.
+#: 87.06 mm). The two other roles also lay lines where something is printed
+#: beneath: an overhang wall at the tip of a support, and a roof line across the
+#: gap between two lines of sparse infill. Where nothing is printed within a cell
+#: below such a line, the reader reads that stretch as a free run, short or long:
+#: over sparse support tips a person must look at the slicer's preview ("does NOT
+#: settle" in ``slice_part``). The earlier runs that first checked this held parts
+#: from outside the pack. They were not measured again on the pack's own probes
+#: (no OrcaSlicer 2.4.2 on the machine that removed them), so no number from them
+#: is given here.
 BRIDGE_ROLES = frozenset({"Bridge", "Internal Bridge", "Overhang wall"})
 
 #: The grid the bridge reader marks printed material on, mm, about one line width
@@ -215,11 +228,18 @@ BRIDGE_ROLES = frozenset({"Bridge", "Internal Bridge", "Overhang wall"})
 #: comparison also held parts from outside the pack; they were not measured again
 #: on the pack's own probes, so no number from them is given here.
 CELL_MM = 0.5
-#: How finely a bridge line is walked, mm: half a cell, so no cell along a line is
-#: stepped over. *Rejected:* 0.5, a whole cell: a step can then pass over the one
-#: held cell that ends a run, and two spans read as one. A finer step only makes
-#: the walk longer. The spans this was first compared on were not measured again on
-#: the pack's own probes, so no figure from them is given here.
+#: How finely a bridge line is walked, mm: half a cell. A point is held when a cell
+#: of the 3 x 3 block around it was printed below, so a line that crosses a held
+#: block puts a step in it. A line that only cuts a block's corner, on a chord
+#: shorter than the step, can pass it at any step: two spans then read as one,
+#: long, which is the safe side. Measured with this reader on 3000 random 20 mm
+#: lines, each with one printed cell up to 1.2 mm to the side, against a 0.01 mm
+#: walk, three seeds: of the lines the cell split, 0.25 joined about 4%, 0.5
+#: 7-8% and 0.1 about 1%, and a joined run read up to 10 mm long. *Rejected:* 0.5,
+#: which joins twice as often; 0.1, which joins less but walks every bridge line in
+#: 2.5 times as many steps. The spans this was first compared on held parts from
+#: outside the pack and were not measured again on the pack's own probes, so no
+#: figure from them is given here.
 STEP_MM = 0.25
 #: A run ends at a turn sharper than 30 deg (cos 30 = 0.866): a run is one span,
 #: and the next line of a zig-zag is another. A zig-zag turns by close to 180 deg,
@@ -616,8 +636,10 @@ def _worst_run(g: dict) -> tuple[float, tuple, float]:
     Measured against drawn spans: 9.91 for 10 mm, 79.96 for 80, 18.02 for the
     baseline clamp's 18 mm ceiling, 89.96 for the 90 mm arch, 79.85 for an 80 mm
     bar printed as overhang walls; 0.0 on ``Bridge`` lines over support. On a part
-    printed on support, an overhang wall at the tip of a support can still read a
-    short free run (see "does NOT settle" in ``slice_part``).
+    printed on support, a line at the tip of a support with nothing printed within
+    a cell below it reads as a free run, short or long: it was not measured again
+    on the pack's probes, and a person must look at the slicer's preview there (see
+    "does NOT settle" in ``slice_part``).
     *Rejected:* the longest Bridge segment (on a part whose bridges are all
     supported, it reads the whole first layer over a support as one free span:
     Orca types that layer Bridge); a free run with no one-cell neighbourhood (it
@@ -801,8 +823,9 @@ def slice_part(ctx: GateContext) -> Verdict:
     First, ``slicer_presets`` is read strictly: the default triple, and a group per
     part name or glob (``_assign`` says which group a part takes). A key it does not
     know, a group short of a role, a key that reaches no part and a part two globs
-    claim are errors, and then no part is sliced. A part no group names, with no
-    default triple, is skipped.
+    claim are errors, a preset file that is missing is a skip, and with any of
+    these no part is sliced; a part out of print pose still fails beside it. A part
+    no group names, with no default triple, is skipped.
 
     Per part, in this order: the mesh must be in print pose (its lowest point at
     z = 0); the slicer's ``--help`` banner must name a supported version; Orca
@@ -829,23 +852,31 @@ def slice_part(ctx: GateContext) -> Verdict:
     if axis is not None and not _plus_z(axis):
         return _skip(f"build_axis is {axis!r}: Orca slices along +Z, so the mesh must be "
                      f"exported in print pose with +Z up")
+    # A statement the gate cannot read, or a preset file it cannot load, is held
+    # here, not returned: it decides which triple a part slices on, never whether a
+    # part is in print pose. What slipped through with it returned at once: a part
+    # 15 mm above the bed beside a misspelled "filamnet", a group short of a role or
+    # a missing preset file read errored or skipped, a known failure filed under
+    # the statement's word; only a key that reached no part (``_assign``) was held.
     presets, bail = _presets(ctx)
-    if bail is not None:
-        return bail
 
     parts = PARTS.part_set(ctx)
     if parts.problem:
-        return _skip(parts.problem)
+        return bail if bail is not None else _skip(parts.problem)
     if not (parts and PARTS.has_geometry(parts)):
         raw = PARTS.mesh_path(ctx)
         if not raw:
-            return _skip("the projection has no mesh_path and no mesh_paths set: the "
-                         "slicer needs the exported part")
+            return bail if bail is not None else _skip(
+                "the projection has no mesh_path and no mesh_paths set: the slicer needs "
+                "the exported part")
         parts = PARTS.PartSet(parts=(PARTS.Part(name=PARTS.mover(ctx), raw=raw),),
                               source="mesh_path")
 
-    chosen, refused = _assign((p.name for p in parts), [k for k in presets if k is not None],
-                              parts.source)
+    if presets is None:
+        chosen, refused = {}, [bail.error or bail.skip_reason or "slicer_presets not read"]
+    else:
+        chosen, refused = _assign((p.name for p in parts),
+                                  [k for k in presets if k is not None], parts.source)
     outcomes, failed, errored, evidence, todo = [], [], [], [], []
     for part in parts:
         path = part.raw if os.path.isabs(part.raw) else os.path.join(ctx.root or os.curdir, part.raw)
@@ -861,6 +892,8 @@ def slice_part(ctx: GateContext) -> Verdict:
             failed.append((part.name, f"not in print pose: z-min {zmin:.2f} mm; the "
                                       f"slicer drops it to the bed and says nothing"))
             continue
+        if presets is None:
+            continue                        # no triple to slice on: named below
         group = chosen.get(part.name)
         if group not in presets:
             outcomes.append(FOLD.skipped_part(
@@ -875,7 +908,8 @@ def slice_part(ctx: GateContext) -> Verdict:
     if refused:
         # A key that reaches no part may be a misspelled name, and then any part may
         # be on the wrong triple: none is sliced. A part that failed above still
-        # fails, with the statement named beside it.
+        # fails, with the statement named beside it. A statement the gate could not
+        # read (``bail``) is here too, as its one problem.
         todo = []
 
     version = ""
@@ -892,7 +926,7 @@ def slice_part(ctx: GateContext) -> Verdict:
                 return _skip(f"{ORCA} --help says {banner[:80]!r}; this gate is measured on "
                              f"OrcaSlicer {', '.join(SUPPORTED_ORCA)} only")
             todo = []
-    shown = sorted(used or presets, key=lambda g: (g is not None, g or ""))
+    shown = sorted(used or presets or (), key=lambda g: (g is not None, g or ""))
     several = len(shown) > 1
     for part, mesh, group in todo:
         said = f" on presets {_label(group)}" if several else ""
@@ -909,7 +943,9 @@ def slice_part(ctx: GateContext) -> Verdict:
         evidence.append(file)
 
     head = f"OrcaSlicer {version}" if version else "no slicer run"
-    if several:
+    if not shown:
+        short = bound = head                # slicer_presets not read
+    elif several:
         # The groups go last in a FAIL's detail, after the parts: the detail is cut
         # at 480 characters, and the part that failed is the part worth keeping.
         short = f"{head}, presets by part"
@@ -923,7 +959,8 @@ def slice_part(ctx: GateContext) -> Verdict:
     # What slipped through with the order the other way: part A out of print pose
     # and part B's run timed out read errored, so the claim read Skipped where A
     # had already failed (gates/fdm_print_fold.py orders it this way too). A
-    # statement the gate cannot read is named the same way.
+    # statement the gate cannot read is named the same way, and after the FAIL it
+    # is returned in its own word: an error stays an error, a skip a skip.
     if failed:
         also = (f"; {len(errored)} part(s) errored, first {errored[0]}" if errored else "")
         also += (f"; no other part sliced: {refused[0]}" if refused else "")
@@ -936,6 +973,8 @@ def slice_part(ctx: GateContext) -> Verdict:
                        locators=[Locator(view=PARTS.VIEW_ID, target=PARTS.node(n), kind="part",
                                          label=w[:120])
                                  for n, w in failed[:FOLD.MAX_PART_LOCATORS] if n])
+    if bail is not None:
+        return bail
     if refused:
         return _error("; ".join(refused[:2]) + (f" (and {len(refused) - 2} more)"
                                                 if len(refused) > 2 else "")

@@ -569,11 +569,18 @@ It is read strictly, and each of these is ERRORED, with no part sliced:
 | a group with a key other than the three roles, or short of one | a group names all three and takes none from the default: a part's triple from two places would move when the default moves |
 | a key that names no part, or a glob that matches none | named with the closest part name: a misspelled name sends that part back to the default triple, which is the silent mode the groups close |
 | a part two globs match, with no group under its own name | name the part, or narrow a glob: the gate does not pick one |
+| a role that holds a group, or a value that is not a path (a list, a number) | a role takes one path; a part named like a role takes a glob that matches it (`"machin[e]"`) |
 
-A part that fails before the slicer runs (not in print pose) still FAILS beside
-such an error, and the error is named in its detail. The verdict, the per-part
-table and each part's `fdm-slice.json` (`preset_group`: the key, or `null` for the
-default) name the presets each part sliced on.
+A default triple short of a role, and a preset file that does not exist, are a
+SKIP, and no part is sliced either. A part that fails before the slicer runs (not
+in print pose) still FAILS beside every one of these, and beside a project that
+states no `slicer_presets` at all: the presets decide which triple a part slices
+on, never whether it is in print pose. The problem is named in the FAIL's detail;
+with no part out of pose, the gate returns the problem in its own word, ERRORED or
+SKIPPED. Only a missing `max_bridge_mm` and a build axis other than +Z skip before
+any part is read. The verdict, the per-part table and each part's `fdm-slice.json`
+(`preset_group`: the key, or `null` for the default) name the presets each part
+sliced on.
 
 ## Where to look next
 

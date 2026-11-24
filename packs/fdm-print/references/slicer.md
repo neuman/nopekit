@@ -44,7 +44,8 @@ exec docker run --rm -i --network none --user "$(id -u):$(id -g)" -e HOME=/tmp \
 ```
 
 That is machine setup, not pack code. Measured with such a wrapper: 0.6 s per slice
-for the pack's controls, 2.7 s for a 50k-face part, plus the container start.
+for the pack's controls, plus the container start. A part of many more faces takes
+longer; the gate allows 600 s a part (`SLICE_TIMEOUT_S`).
 
 ## Writing the three presets
 

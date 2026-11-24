@@ -9,14 +9,17 @@ key without the key. Each case below is one of those, or a way the gate's own
 reading could be wrong (a bridge over support read as free, a run cut into
 segments, arcs, another part's G-code). Since fdm-print 0.2.1 a part may slice on a
 preset group of its own: the classes from ``PresetGroupsAreChosenPerPart`` on hold
-which group a part takes, and that a statement the gate cannot read slices nothing.
+which group a part takes, and that a statement the gate cannot read slices nothing
+and never hides a part out of print pose.
 
 The cases run the real gate through a stand-in ``orca-slicer`` on PATH
 (``tests/_orca_standin.py``) that writes result.json and a synthetic G-code in
 Orca 2.4.2's shapes, with toolpaths this file draws. No Orca output is committed.
 One class slices the pack's own controls on a real OrcaSlicer, where one is on
-PATH. Without trimesh (the CI-like container) every case asserts the gate's
-availability skip instead.
+PATH. Without trimesh (the CI-like container) every case that runs the gate asserts
+its availability skip instead; ``PresetGroupsAreChosenPerPart`` and
+``AStatementIsReadStrictlyEverywhere`` call the gate's readers as functions, and
+run on every machine.
 
 Run:  PYTHONPATH=src python3 -m unittest tests.test_fdm_slice -v
 """
@@ -494,6 +497,129 @@ class PresetGroupsAreChosenPerPart(unittest.TestCase):
                                     '(did you mean "Lid"?)'])
 
 
+class AStatementIsReadStrictlyEverywhere(unittest.TestCase):
+    """What ``slicer_presets`` says (``_statement``), as a function on a bare
+    context: ``(default, groups, None)``, or ``(None, None, verdict)``. What slipped
+    through: every case of the strict reader ran through the gate, which without
+    trimesh (CI) stops at the availability skip, so a reader that took any
+    statement and returned the three roles merged with CI green. This class needs
+    no mesh and no slicer, and runs on every machine."""
+
+    DEFAULT = {"machine": "m.json", "process": "p.json", "filament": "f.json"}
+    GROUP = {"machine": "m.json", "process": "s.json", "filament": "f.json"}
+
+    @classmethod
+    def setUpClass(cls):
+        cls.statement = staticmethod(_registry().get(GATE)[1].__globals__["_statement"])
+
+    def _read(self, presets):
+        return self.statement(gates_mod.GateContext(params={"slicer_presets": presets}))
+
+    def test_a_default_and_its_groups_are_read(self):
+        other = dict(self.GROUP, filament="tpu.json")
+        default, groups, bail = self._read({**self.DEFAULT, "hinge_*": self.GROUP,
+                                            "gasket": other})
+        self.assertIsNone(bail)
+        self.assertEqual(default, self.DEFAULT)
+        self.assertEqual(groups, {"hinge_*": self.GROUP, "gasket": other})
+
+    def test_groups_alone_need_no_default(self):
+        default, groups, bail = self._read({"*": self.GROUP})
+        self.assertIsNone(bail)
+        self.assertEqual((default, groups), ({}, {"*": self.GROUP}))
+
+    def test_a_path_object_is_a_path(self):
+        import pathlib                              # noqa: PLC0415 - this case only
+
+        default, _groups, bail = self._read(dict(self.DEFAULT,
+                                                 machine=pathlib.PurePosixPath("m.json")))
+        self.assertIsNone(bail)
+        self.assertEqual(default["machine"], "m.json")
+
+    def test_each_problem_is_an_error_that_names_it(self):
+        short = {"machine": "m.json", "process": "s.json"}
+        cases = {
+            "misspelled role": ({**self.DEFAULT, "filamnet": "f.json"},
+                                'slicer_presets has an unknown key "filamnet" (did you '
+                                'mean "filament"?): it takes machine, process and filament'),
+            "a part name with a path, not a group": (
+                {**self.DEFAULT, "lid": "s.json"}, 'slicer_presets has an unknown key "lid"'),
+            "group short of a role": ({**self.DEFAULT, "hinge_*": short},
+                                      'slicer_presets["hinge_*"] names no filament preset: '
+                                      'a group names all three, and takes none from the '
+                                      'default'),
+            "a role left empty in a group": ({"hinge_*": dict(self.GROUP, process="")},
+                                             'slicer_presets["hinge_*"] names no process '
+                                             'preset'),
+            "unknown key in a group": ({**self.DEFAULT,
+                                        "lid": {**self.GROUP, "proces": "x.json"}},
+                                       'slicer_presets["lid"] has an unknown key "proces" '
+                                       '(did you mean "process"?): a group takes machine, '
+                                       'process and filament'),
+            "a role as a group": ({**self.DEFAULT, "machine": self.GROUP},
+                                  'slicer_presets.machine is a group, but machine is a '
+                                  'preset role and takes a path; a part named machine takes '
+                                  'a glob that matches it, such as "machin[e]"'),
+            "a list for a path": ({**self.DEFAULT,
+                                   "hinge_*": {**self.GROUP, "filament": ["a.json"]}},
+                                  'slicer_presets["hinge_*"].filament is a list, not a path '
+                                  'to a preset file'),
+            "a number for a role": ({**self.DEFAULT, "process": 3},
+                                    "slicer_presets.process is a number, not a path to a "
+                                    "preset file"),
+        }
+        for label, (presets, words) in cases.items():
+            with self.subTest(label):
+                default, groups, bail = self._read(presets)
+                self.assertIsNone(default)
+                self.assertIsNone(groups)
+                self.assertEqual(bail.outcome, "error", bail.render())
+                self.assertIn(words, bail.error)
+
+    def test_a_triple_short_of_a_role_is_skipped(self):
+        cases = {
+            "no slicer_presets": (None, "no slicer_presets: the slicer gate binds its "
+                                        "verdict to a named preset"),
+            "an empty statement": ({}, "slicer_presets names no machine preset; all three "
+                                       "are needed"),
+            "a default short of a role": ({"machine": "m.json", "process": "p.json"},
+                                          "names no filament preset; all three are needed"),
+            "an empty role": (dict(self.DEFAULT, filament=""), "names no filament preset"),
+            "a short default beside a group": ({"machine": "m.json", "lid": self.GROUP},
+                                               "names no process preset"),
+        }
+        for label, (presets, words) in cases.items():
+            with self.subTest(label):
+                default, groups, bail = self._read(presets)
+                self.assertIsNone(default)
+                self.assertTrue(bail.skipped and not bail.passed, bail.render())
+                self.assertIn(words, bail.skip_reason)
+
+    def test_no_key_order_moves_the_reading(self):
+        """The verdict cache digests ``slicer_presets`` with its keys sorted, so two
+        statements that differ only in key order must read alike, a problem
+        included: the first one named must not hang on the order written."""
+        short = {"machine": "m.json", "process": "s.json"}
+        tpu = dict(short, filament="t.json")
+        pairs = {
+            "a good statement": ({**self.DEFAULT, "lid": self.GROUP, "hinge_*": tpu},
+                                 {"hinge_*": tpu, "lid": self.GROUP, **self.DEFAULT}),
+            "two bad keys": ({"lid": short, **self.DEFAULT, "filamnet": "x.json"},
+                             {"filamnet": "x.json", **self.DEFAULT, "lid": short}),
+            "two bad keys in a group": ({"lid": {"proces": "x.json", "machin": "y.json",
+                                                 "filament": "f.json"}},
+                                        {"lid": {"machin": "y.json", "proces": "x.json",
+                                                 "filament": "f.json"}}),
+        }
+        for label, (one, two) in pairs.items():
+            with self.subTest(label):
+                first, second = self._read(one), self._read(two)
+                self.assertEqual(first[:2], second[:2])
+                if first[2] is not None or second[2] is not None:
+                    self.assertEqual(first[2].error, second[2].error)
+                    self.assertTrue(first[2].error, first[2].render())
+
+
 class _GroupCase(_SliceCase):
     """Two parts, ``lid`` and ``hinge_pin``, each the box with an 80 mm bridge. The
     stand-in prints the bridge free on the baseline process and held on
@@ -629,6 +755,11 @@ class AStatementTheGateCannotReadIsAnError(_GroupCase):
                 self.assertEqual(errors[0], errors[1])
 
     def test_a_part_out_of_pose_still_fails_beside_it(self):
+        """Every problem with the statement, and a missing preset file, is held
+        until each part's pose is read. What slipped through: only a key that
+        reached no part was held; a misspelled role, a group short of a role and a
+        missing file returned before any part was read, so a part 15 mm above the
+        bed read errored or skipped where this file promised the FAIL."""
         if not self.available:
             self._run({})                           # asserts the availability skip
             return
@@ -638,12 +769,43 @@ class AStatementTheGateCannotReadIsAnError(_GroupCase):
         box.apply_translation([BOX[0] / 2, BOX[1] / 2, BOX[2] / 2 + 15.0])
         floating = os.path.join(self.dir, "floating.stl")
         box.export(floating)
-        v = self._run(self.mode, {
-            "slicer_presets": {**self.default, "hinge_pn": self.on_supports},
-            "mesh_path": None, "mesh_paths": {"lid": floating, "hinge_pin": self._mesh()}})
-        self.assertEqual(v.outcome, "fail", v.render())
-        self.assertIn("lid: not in print pose", v.detail)
-        self.assertIn('no other part sliced: slicer_presets["hinge_pn"]', v.detail)
+        short = {"machine": self.default["machine"], "process": self.supports}
+        missing = dict(self.on_supports, process=os.path.join(self.dir, "nowhere.json"))
+        cases = {
+            "unknown part name": ({**self.default, "hinge_pn": self.on_supports},
+                                  'slicer_presets["hinge_pn"] names no part'),
+            "misspelled role": ({**self.default, "filamnet": self.default["filament"]},
+                                'slicer_presets has an unknown key "filamnet"'),
+            "group short of a role": ({**self.default, "hinge_*": short},
+                                      'slicer_presets["hinge_*"] names no filament preset'),
+            "a missing preset file": ({**self.default, "hinge_*": missing},
+                                      'slicer_presets["hinge_*"].process points at'),
+            "no slicer_presets": (None, "no slicer_presets"),
+        }
+        for label, (presets, words) in cases.items():
+            with self.subTest(label):
+                v = self._run(self.mode, {
+                    "slicer_presets": presets, "mesh_path": None,
+                    "mesh_paths": {"lid": floating, "hinge_pin": self._mesh()}})
+                self.assertEqual(v.outcome, "fail", v.render())
+                self.assertIn("1 of 2 part(s) in `mesh_paths` fail", v.detail)
+                self.assertIn("lid: not in print pose", v.detail)
+                self.assertIn(f"no other part sliced: {words}", v.detail)
+                self.assertEqual(self._slices(), 0)
+
+
+class AMissingPresetFileSlicesNothing(_GroupCase):
+    """A group whose preset file does not exist is a skip that names the file, and
+    no part is sliced: the default's parts too, as with every statement problem."""
+
+    def test_a_missing_file_in_a_group_is_skipped(self):
+        nowhere = os.path.join(self.dir, "nowhere.json")
+        v = self._parts({**self.default, "hinge_*": dict(self.on_supports, process=nowhere)})
+        if v is None:
+            return
+        self.assertTrue(v.skipped and not v.passed, v.render())
+        self.assertIn(f'slicer_presets["hinge_*"].process points at {nowhere}, which does '
+                      f'not exist', v.skip_reason)
         self.assertEqual(self._slices(), 0)
 
 
