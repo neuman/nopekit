@@ -227,14 +227,16 @@ def schematic_drift(ctx):
 def under_fab_width(ctx):
     """pcb.fab_rules — the D+ track from J1 to U1 pin 1 narrowed to 85% of the
     fab's minimum track width for the baseline's layer count and copper, read
-    from the same fab file the gate reads. KiCad's default rules have no minimum
-    width, so ``pcb.drc`` passes this board; the fab cannot etch it."""
+    from the same fab file and service the gate reads. KiCad's default rules
+    have no minimum width, so ``pcb.drc`` passes this board; the fab cannot etch
+    it."""
     def edit(tree, params):
         with open(os.path.join(_PACK_DIR, "gates", "fab", f"{params['pcb_fab']}.json"),
                   encoding="utf-8") as fh:
             fab = json.load(fh)
         table = K.fab_table(fab, K.copper_layer_count(tree),
-                            float(params.get("pcb_copper_oz_outer", 1.0)))
+                            float(params.get("pcb_copper_oz_outer", 1.0)),
+                            params.get("pcb_fab_service"))
         width = round(K.fab_rule_min(table, "track_width") * 0.85, 4)
         K.child(_segment_from(tree, "DP", *J1_DP), "width")[1] = f"{width:g}"
     return _variant(ctx, "under_fab_width", edit)

@@ -21,7 +21,9 @@ a part or changes a value stales the records instead of reading them on trust.
 
 **Read as strictly as the board.** A record may name a board ``pcb.board_readable``
 never reads, so each rule refuses a board this reader cannot vouch for itself
-(``_kicad.board_problems``), as an error. A part marked do-not-populate or left out
+(``_kicad.board_problems``), as an error, and skips a board newer than the reader
+was checked through, as the guard does (``_kicad.reader_ceiling``): a limit of the
+reader, never a crash. A part marked do-not-populate or left out
 of the BOM (``_kicad.NOT_FITTED``) is not on the built board, and no rule counts it.
 A record's numbers are held to their kind: ``safety_timer`` a JSON true or false, an
 area, a current or a trip time above 0, a ``source`` that says something. (What
@@ -92,6 +94,12 @@ class RecordError(ValueError):
     """A record the gate cannot read as one for this design."""
 
 
+class ReaderLimit(RecordError):
+    """The board a record names is newer than any format the reader was checked
+    through: the rule skips with the guard's own words. (What slipped through:
+    a KiCad 10 board read as an error, a crash, beside the guard's skip.)"""
+
+
 def _checked(rec, label: str, fields: tuple[str, ...]) -> dict:
     """``rec``, held to being a record with ``fields`` and a ``source``. Raises
     RecordError on anything else: a datasheet fact with no source is a number
@@ -115,7 +123,8 @@ def _record(ctx: GateContext, key: str, fields: tuple[str, ...]) -> dict | None:
 def _board(ctx: GateContext, rec: dict) -> tuple[str, object]:
     """``(path, Board)`` of the board a record names (``board``, else
     ``pcb_board``), read through ``ctx.load_file`` so the file is keyed, and
-    refused as ``pcb.board_readable`` would fail it."""
+    refused as ``pcb.board_readable`` would fail it (RecordError) or skip it
+    (ReaderLimit)."""
     rel = rec.get("board") or ctx.param("pcb_board")
     if not rel:
         raise RecordError("the record names no board, and there is no pcb_board")
@@ -123,9 +132,11 @@ def _board(ctx: GateContext, rec: dict) -> tuple[str, object]:
     if not os.path.isfile(path):
         raise RecordError(f"no board at {path}")
     try:
-        _version, problems = K.board_problems(ctx.load_file(path, loader=K.load_tree))
+        version, problems = K.board_problems(ctx.load_file(path, loader=K.load_tree))
     except (K.KicadFormatError, UnicodeDecodeError) as exc:
-        problems = [f"it does not parse: {exc}"]
+        version, problems = None, [f"it does not parse: {exc}"]
+    if K.reader_ceiling(version):
+        raise ReaderLimit(f"the board {os.path.basename(path)}: {K.reader_ceiling(version)}")
     if problems:
         raise RecordError(f"the board {os.path.basename(path)} is not one this reader can "
                           f"vouch for: {'; '.join(problems)}")
@@ -235,6 +246,8 @@ def charge_protection(ctx: GateContext) -> Verdict:
             if ntc is None:
                 raise RecordError(f"the pcb_charger record is for another design: the "
                                   f"board has no {rec['ntc_ref']}")
+    except ReaderLimit as exc:
+        return _skip(gid, str(exc))
     except RecordError as exc:
         return _error(gid, str(exc))
     missing = []
@@ -334,6 +347,8 @@ def fuse_conductor(ctx: GateContext) -> Verdict:
                               f"and every time must be above 0")
         if not area > 0:
             raise RecordError(f"pcb_conductor's area_mm2 must be above 0: {cond['area_mm2']!r}")
+    except ReaderLimit as exc:
+        return _skip(gid, str(exc))
     except RecordError as exc:
         return _error(gid, str(exc))
     except (TypeError, ValueError) as exc:
@@ -454,6 +469,8 @@ def discharge_cutoff(ctx: GateContext) -> Verdict:
                     raise RecordError(f"the {label} record is for another design: the board "
                                       f"has no {rec['series_ref']}")
             parts.append((rec, _part(board, rec, label, [rec["sense_pin"]]), series, ""))
+    except ReaderLimit as exc:
+        return _skip(gid, str(exc))
     except RecordError as exc:
         return _error(gid, str(exc))
     except (TypeError, ValueError) as exc:

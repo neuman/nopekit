@@ -1,6 +1,6 @@
 {
   "name": "pcb-kicad",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Checks a KiCad board and its schematic: DRC with its custom rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, LiPo cell protection.",
   "settles": [
     "design rule violations",
@@ -34,7 +34,7 @@
     "minimum drill size",
     "annular ring",
     "silkscreen text height",
-    "manufacturable at jlcpcb",
+    "manufacturable at the named fab",
     "simulated circuit measurement",
     "spice simulation",
     "supply droop",
