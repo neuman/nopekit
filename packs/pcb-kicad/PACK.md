@@ -5,7 +5,8 @@ own design rule check, connectivity, electrical rules check and schematic parity
 the library's pin names against the board's nets, trace heating per IPC-2221, a
 fab's published limits, a measurement ngspice makes on the project's circuit
 deck, the populated board's fit in its enclosure, each footprint's land against
-its vendor's drawing, and four rules for a board that charges or carries a cell.
+its vendor's drawing, four rules for a board that charges or carries a cell, the
+wrong ways its connectors can meet, and each USB-C receptacle's termination.
 
 **Before you trust a Checked claim from this pack,** know what it is: a board that
 breaks none of KiCad's rules, with every connection made, no part shorting two of
@@ -34,6 +35,8 @@ circuit that works. Nothing here has seen the board powered.
 | `pcb.charge_limits` | 0 | sourced | the charger's guaranteed maximum charge voltage per cell and current, as one ratio to the cell's datasheet limits, and an overcharge stop independent of the charger that senses the cell and opens its path (per cell for two or more in series) |
 | `pcb.fault_current` | 0 | sourced | every conductor in `pcb_conductors` is guarded across the fault range: its protector's interrupt rating, the overload band (I2 <= 1.45 Iz, by analogy with IEC 60364-4-43) and IEC 60949's adiabatic limit at every trip point the cell can reach; a fuse, PTC, eFuse, protector FETs on either side or an in-pack PCM |
 | `pcb.discharge_cutoff` | 0 | sourced | the highest per-cell cutoff that senses the cell (directly, through a named chain, or across a mating) and opens a switch in its path, or sits in the pack, is at or above the cell's minimum voltage |
+| `pcb.mismate` | 0 | model-only | no wrong way a mating's record states (a reversed plug, a narrower cable, an offset header, a rotated header, the other FFC type, a plug slid in, a plug that bridges contacts), nor its own map, joins a source to its return or to another source; a reversed cell is blocked or limited; every connector that carries a source is named by a mating |
+| `pcb.usbc_receptacle` | 0 | sourced | each USB-C receptacle's CC pins are terminated apart, as its role asks (one Rd or Rp each, in the Type-C specification's band, or a named controller), a source switches VBUS through a part with a control pin, each USB 2.0 data pin is on a net with D+ apart from D-, and, where `pcb.pin_names` cannot see them, the VBUS, GND, A6/B6 and A7/B7 pins are each bussed |
 
 The tier-0 gates read the board with this pack's own reader (`gates/_kicad.py`,
 standard library only), so they run without KiCad, CI included. The tier-1 gates
@@ -51,21 +54,26 @@ on a board this reader cannot vouch for they are not run, and read Skipped,
 `prerequisite failed`. On a board newer than the reader was checked through (a
 KiCad 10 file) the guard skips, and they read Skipped, `prerequisite not
 established`: a newer format is a limit of the reader, not a defect in the
-board. The battery rules read the boards their records name, which the guard may
-never read, so each makes the guard's own checks on its board: it errors on one
-that fails them, and skips a newer one with the guard's words.
+board. The battery, mis-mating and USB-C rules read the boards their records
+name, which the guard may never read, so each makes the guard's own checks on its
+board: it errors on one that fails them, and skips a newer one with the guard's
+words.
 
 **Which verdicts are this pack's own code.** KiCad decides DRC, ERC, parity and
 whether each custom rule is live; ngspice decides the number. This pack's code
-decides three things: pin-name agreement (a comparison of names the library
+decides five things: pin-name agreement (a comparison of names the library
 gives), the land fit (`gates/_kicad.py`'s `rigid_fit`, and its limit: model-only),
-and the four battery rules (pad-net lookups and published formulas on records a
-person enters). Each has a known-bad control it fails on: `split_pin_pair`,
+the four battery rules (pad-net lookups and published formulas on records a
+person enters), the mis-mating rule (its own rule on the modes a person states:
+model-only) and the USB-C rule (pad nets against the Type-C specification's
+tables). Each has a known-bad control it fails on: `split_pin_pair`,
 `mirrored_land` (1.9 mm against 0.3 mm), `ntc_swapped` (a 100 kOhm NTC in the
 10 kOhm's place: -64.83 K), `lfp_cell` (a LiFePO4 cell on the 4.2 V charger:
-1.1595), `fuse_trips_late` (a PTC of twice the trip current: 0.725) and
+1.1595), `fuse_trips_late` (a PTC of twice the trip current: 0.725),
 `cutoff_drives_nothing` (the protector's DO on a net of its own: 2.30 V against
-2.5 V). Each control makes one change, and moves only its own rule.
+2.5 V), `ground_beside_vbus` (GND moved beside VBUS on both FFC housings: 1
+hazard against 0) and `shared_cc` (one CC net for both pins: 1 violation against
+0). Each control makes one change, and moves only its own rule.
 
 **The battery rules read records, bound to the design.** `pcb_batteries`,
 `pcb_protectors`, `pcb_conductors` and `pcb_matings` are each an object keyed by
@@ -80,10 +88,20 @@ typical number is refused: give [min, max]. A field that takes one number
 (`v_max`, `v_min`, `trip_a`) takes the guaranteed bound, never the typical: the
 rule cannot tell them apart. Chemistry picks which rules apply, never a number:
 every limit is the cell's own, from its datasheet. `pcb_matings` joins two
-connectors' nets pin by pin, so an element on another board counts. The
-baseline's records name `selftest/assets/power_board.kicad_pcb` (made by
-`make_power_board.py`: placed, netted, not routed), which only these four rules
-read. `references/battery.md` holds every field.
+connectors' nets pin by pin, so an element on another board counts; a mating's
+far side may also be a battery's pigtail or something outside every board, and
+its `modes` say the wrong ways it can meet. `pcb_usbc` gives each USB-C
+receptacle's role, and `pcb_rails` the nets a regulator or an outside supply
+drives. A `pcb_matings` record is read whole by every rule that reads it, so a
+mating any of them refuses is refused by all. The other records are read by
+each rule for what it uses: only `pcb.usbc_receptacle` holds a `pcb_usbc`
+record to its role's keys (`pcb.mismate` reads its pins), and a
+`pcb_protectors` function is read by the rules that judge it (a
+`reverse_block` only by `pcb.mismate`, for a battery mating that states
+`reversed`). The baseline's records name
+`selftest/assets/power_board.kicad_pcb` (made by `make_power_board.py`: placed,
+netted, not routed), which only these six rules read. `references/battery.md`,
+`references/mismate.md` and `references/usb-c.md` hold every field.
 
 ## The proposer: `pcb.autoroute`
 
@@ -165,10 +183,31 @@ Read this before you write a claim. Every one of these has passed a "0 violation
 - **Current through vias, pads and pours.** `pcb.net_width` judges tracks only. A
   via carries its own current limit; a pour is wider than any track and is not
   judged at all, so a net carried mostly by a pour reads pessimistically.
-- **What happens when someone plugs in the wrong thing.** A narrower ribbon can
-  seat in a wider housing and put the battery on ground. That is a mechanical fact
-  with an electrical result, and no check here sees it: an expert-judgment claim,
-  and `lenses.md`, "A connector that fits the wrong cable".
+- **A wrong fit nobody stated.** `pcb.mismate` judges the wrong ways a
+  mating's record states (a narrower ribbon in a wider housing that puts the
+  cell on ground, a reversed pigtail, a rotated header), and the pinouts on the
+  boards. It reads records of which connectors and cables meet and the boards'
+  pad nets; it sees no mechanical part. It cannot see a mode nobody stated (the
+  coverage rule forces a statement for every connector that carries a source,
+  not the completeness of its modes), a keyed housing forced past its key, a
+  cable from another product, a source that lands on a GPIO or a data pin
+  (listed, not judged), a part the wrong voltage damages through a signal pin,
+  or the arc as a plug goes in. A source that meets another source's return
+  only through a part (a fuse, a FET) is read as two nets. Two copies of one
+  board file read as one board. Settle a fit it cannot see with an
+  expert-judgment claim, and `lenses.md`, "A connector that fits the wrong
+  cable".
+- **USB-C beyond its termination.** `pcb.usbc_receptacle` judges CC per pin and
+  per role, a source's VBUS switch and the two rows of USB 2.0 data. It does not
+  judge SuperSpeed lanes, USB Power Delivery, VCONN, SBU, a controller's own Rd
+  or Rp (its datasheet's), whether the device draws more than the source
+  advertises, an open VBUS or GND pad, or what drives the VBUS switch's control
+  pin and when (firmware that turns VBUS on before a sink attaches, or a
+  pull-up nothing pulls down). Same pin name, same net (the four VBUS, the four
+  GND, A6 and B6) is `pcb.pin_names`' on `pcb_board`, where the pads name those
+  pins alike; on any other board, or with the pads not so named, this rule
+  checks it. A resistor `others` names beside a CC termination is taken on its
+  why: what lies beyond it is not read.
 - **RF, signal integrity, EMC.** Antenna detuning, impedance, crosstalk, return
   paths: not modelled.
 - **Fit beyond the solids.** `pcb.enclosure_fit` checks the parts' 3D models
@@ -268,11 +307,13 @@ what it asserts.
 | `copper-connectivity` | `pcb.unconnected` |
 | `netlist` | `pcb.unconnected`, `pcb.pin_names`, `pcb.erc`, `pcb.parity` |
 | `land-pattern` | `pcb.land_pattern` |
-| `battery-safety` | `pcb.charge_temperature`, `pcb.charge_limits`, `pcb.fault_current`, `pcb.discharge_cutoff` |
+| `battery-safety` | `pcb.charge_temperature`, `pcb.charge_limits`, `pcb.fault_current`, `pcb.discharge_cutoff`, `pcb.mismate` |
 | `charge-protection`, `charge-temperature` | `pcb.charge_temperature` |
 | `charge-limits`, `charge-voltage`, `charge-current` | `pcb.charge_limits` |
 | `overcurrent-protection` | `pcb.fault_current` |
 | `deep-discharge` | `pcb.discharge_cutoff` |
+| `mismate`, `connector-keying` | `pcb.mismate` |
+| `usb-c`, `charging-interface` | `pcb.usbc_receptacle` |
 | `schematic`, `electrical-rules` | `pcb.erc` |
 | `schematic-parity` | `pcb.parity` |
 | `pin-map`, `short-circuit` | `pcb.pin_names` |
@@ -307,7 +348,10 @@ smaller side of the smaller pad of the worst pair.
 is compared with it, against 0), ratios against 1.0 (`pcb.charge_limits`, the
 charger's worst corner over the cell's limit; `pcb.fault_current`, the least of
 three protection margins), and volts (`pcb.discharge_cutoff`, the highest
-counted cutoff against the cell's minimum).
+counted cutoff against the cell's minimum). `pcb.mismate` counts hazards, each
+pair of source nodes once however many wrong ways make it, and
+`pcb.usbc_receptacle` counts violations, each against 0; resistances are in
+ohms, written as a board writes them (5.1k).
 
 **`pcb.enclosure_fit` judges the populated board in the enclosure's frame.** The
 board is first as `kicad-cli pcb export step --user-origin 0x0mm` writes it: the
@@ -343,12 +387,21 @@ body may touch (standoffs) but not cut in.
                             "source": "the cell's datasheet, its revision and section"}},
 "pcb_protectors": {"pcm": {"battery": "cell", "kind": "pack-pcm", "where": "in-pack",
                            "functions": {"overdischarge_v": {"v_min": 2.9, "per_cell": true}},
-                           "source": "the pack's drawing"}}
+                           "source": "the pack's drawing"}},
+"pcb_matings": {"cell": {"a": {"ref": "BT1", "value": "BATT"}, "b": {"battery": "cell"},
+                         "modes": ["reversed"], "source": "an unkeyed two-pin pigtail"},
+                "usb": {"a": {"ref": "J1", "value": "USB-C"}, "b": {"external": "a charger"},
+                        "modes": [], "source": "Type-C: both orientations are correct"}},
+"pcb_usbc": {"usb": {"ref": "J1", "value": "USB-C", "role": "sink", "usb2": true,
+                     "reads_rp": false, "cc_resistor_tol_pct": 1,
+                     "source": "5.1k 1 % on each CC pin; draws default power only"}}
 ```
 
 `selftest/baseline.json`'s `_notes` give every key's fields, and its records
-show a charger, a protector, a PTC, a wire and a flex; `references/battery.md`
-says what each rule reads from them.
+show a charger, a protector, a PTC, a wire, four matings (a flex a narrower cable
+also fits, the cell's keyed housing, the USB-C receptacle and the wire) and a
+USB-C sink; `references/battery.md`, `references/mismate.md` and
+`references/usb-c.md` say what each rule reads from them.
 
 Each family skips without its keys: no fab named, no deck, no enclosure, no
 placement or no clearance is a skip that says which key, never a default.
@@ -394,6 +447,10 @@ back under 1 C or over 100 C, look at the units first.
 - `references/spice.md`: what `pcb.spice` runs, refuses and reads.
 - `references/battery.md`: the four battery rules on the baseline's own parts,
   the records, the NTC arithmetic, IEC 60949 and where every number comes from.
+- `references/mismate.md`: the modes, what counts as a source and a hazard, the
+  coverage rule, a reversed cell, and what the rule cannot see.
+- `references/usb-c.md`: the roles, the Rd and Rp bands with their tables, and
+  what the EU's common-charger rule covers.
 - `references/what-slipped-through.md`: the defects the source pipeline's checks
   passed, and which gate here answers each.
 - `references/installing.md`: getting `kicad-cli` (KiCad 9), ngspice, CadQuery,

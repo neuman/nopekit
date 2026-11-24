@@ -50,8 +50,13 @@ take to close it. A green DRC answers none of them.
 
 - For each connector: what else fits it? A narrower ribbon in a wider housing, a
   reversed keyed plug forced in, a cable from the previous revision. Where does
-  each wrong fit put power? Pin order is a safety decision.
+  each wrong fit put power? Pin order is a safety decision. `pcb.mismate` judges
+  the fits a mating's `modes` state, and nothing else: is every fit you found in
+  a record?
 - Is there a fuse between the cell and anything a wrong cable could reach?
+- Which wrong fit puts a source on a signal pin? `pcb.mismate` lists each one in
+  its evidence and does not judge it: read the part's absolute maximum on that
+  pin.
 
 ## Parts not in the library
 

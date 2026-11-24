@@ -35,8 +35,13 @@ footprint, its pin names copied from KiCad's stock symbol:
   the cutoff rule passed it.)
 - J6 is the wire out, on VSYS.
 - J10 and J11 are 8-position FFC housings (Hirose FH12, ``Conn_01x08``),
-  positions 1 GND, 2 and 3 the USB pair, 5 VBUS, 7 and 8 two signals, 4 and 6
-  open.
+  positions 1 GND, 2 SIG_A, 4 SIG_B, 5 VBUS, 7 SIG_C and 8 SIG_D, 3 and 6
+  open. A 6-way cable seated in them up to two positions off never puts VBUS on
+  GND (``pcb.mismate``), even through the loop the two housings make on one
+  board: an open position breaks every chain from 1 to 5. (What slipped
+  through the board's first cut: the USB pair sat on 2 and 3, and a cable two
+  positions off joined J10's GND to J11's D- and J10's D- to J11's VBUS, one
+  copper net on this board: VBUS on GND.)
 
 The refs, values and nets are this file's own; no part of the parent device's
 battery path is here (docs/ORIGINS.md).
@@ -89,11 +94,11 @@ PARTS = [
     ("J11", "FFC_8P", "Connector_Generic:Conn_01x08", _FFC, (34.0, 33.0)),
 ]
 
-_FFC_NETS = {"1": "GND", "2": "USB_DP", "3": "USB_DM", "5": "VBUS", "7": "SIG_C",
+_FFC_NETS = {"1": "GND", "2": "SIG_A", "4": "SIG_B", "5": "VBUS", "7": "SIG_C",
              "8": "SIG_D"}
 
 #: ref -> {pad: net}. U1's STAT1, STAT2 and PG are left open (no LEDs here), and
-#: so are J1's SBU pins and the FFC housings' positions 4 and 6.
+#: so are J1's SBU pins and the FFC housings' positions 3 and 6.
 NETS = {
     "J1": {**{p: "VBUS" for p in ("A4", "A9", "B4", "B9")},
            **{p: "GND" for p in ("A1", "A12", "B1", "B12", "S1")},
