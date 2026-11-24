@@ -19,15 +19,15 @@ circuit that works. Nothing here has seen the board powered.
 
 | Gate | Tier | Basis | Settles |
 |---|---|---|---|
-| `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-9 file whose every track names a defined net (the guard) |
-| `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net; the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
-| `pcb.land_pattern` | 0 | model-only | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function, one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
+| `pcb.board_readable` | 0 | model-only | the board is a KiCad 6-9 file whose every track names a defined net (the guard); nets read by code and by name; a newer file is skipped, never failed |
+| `pcb.pin_names` | 0 | sourced | pins the library gives one name (a TVS array's two `COM`, a part's several `GND`) carry one net, except the ends of a series element stated per ref (`pcb_pin_names_series`); the names from the schematic's symbols where one sits beside the board, else the pads' `pinfunction` |
+| `pcb.land_pattern` | 0 | model-only | each footprint `pcb_land_drawings` names fits its vendor's drawing: pads paired by pin function (anchored on the pads of a function of their own when the pairings are too many to try), one rigid fit with no mirror, every centre within half its smaller pad's smaller side |
 | `pcb.net_width` | 0 | sourced | every track of each named net stays inside its temperature-rise limit, IPC-2221; the detail names the hottest stretch |
 | `pcb.drc` | 1 | established | `kicad-cli pcb drc` finds nothing, at every severity by default, and every custom rule in the board's `.kicad_dru`, and every property its conditions read, is shown to select something |
 | `pcb.unconnected` | 1 | established | KiCad finds no connection the netlist asks for and the copper does not make |
 | `pcb.erc` | 1 | established | `kicad-cli sch erc` finds nothing in the schematic, at every severity by default |
 | `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement) |
-| `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the fab's published minimums as the only custom rules finds nothing past them |
+| `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the named fab's published minimums, for the service the board is ordered on, as the only custom rules finds nothing past them; a dielectric or via kind the service does not list skips |
 | `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know (on a `.options` card or an `option` command), a measure two `.meas` cards define, or a `.meas tran` window outside the run, is refused first |
 | `pcb.enclosure_fit` | 1 | established | the board, every part's 3D model in place, shares no volume with the enclosure, and each part keeps its clearance (OpenCascade) |
 | `pcb.charge_protection` | 0 | sourced | the charger in `pcb_charger` has its THERM pin wired to the NTC (and not tied to its own pins), and a safety timer |
@@ -47,9 +47,12 @@ each on a small board; the fit about 4 s) and skip where they do not.
 
 `pcb.pin_names`, `pcb.net_width` and `pcb.land_pattern` need `pcb.board_readable`:
 on a board this reader cannot vouch for they are not run, and read Skipped,
-`prerequisite failed`. The power rules read the boards their records name, which
-the guard may never read, so each makes the guard's own checks on its board and
-errors on one that fails them.
+`prerequisite failed`. On a board newer than the reader was checked through (a
+KiCad 10 file) the guard skips, and they read Skipped, `prerequisite not
+established`: a newer format is a limit of the reader, not a defect in the
+board. The power rules read the boards their records name, which the guard may
+never read, so each makes the guard's own checks on its board: it errors on one
+that fails them, and skips a newer one with the guard's words.
 
 **Which verdicts are this pack's own code.** KiCad decides DRC, ERC, parity and
 whether each custom rule is live; ngspice decides the number. This pack's code
@@ -182,10 +185,26 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   `track_width` rule that selects only vias is live); and a real property that
   sits on no item of this board (a via rule on a board with no vias) is a false
   error.
+- **A board saved by KiCad 10.** KiCad 10 writes board format 20260206, with
+  nets by name and no net codes. The reader reads nets by name, but it was
+  checked against KiCad 9 boards only: this pack was written where only KiCad
+  9.0.9 was installed, and no board saved by KiCad 10 is committed as a fixture.
+  Until one is, a KiCad 10 board reads Skipped on the tier-0 gates and the power
+  rules ("this reader was checked through board format 20241229 (KiCad 9.0)"),
+  never Checked and never Failing. The tier-1 gates are KiCad's own answer and
+  run on it; `pcb.fab_rules` reads its stackup and vias with this reader, by the
+  words KiCad 10's source writes (`blind`, `buried`, `micro`).
 - **The land beyond its centres.** `pcb.land_pattern` judges pad centres in the
   top view, one rigid fit; pad sizes, paste, courtyard and pads the drawing omits
   (mounting pads) are not judged, so a pad of the wrong size, or turned 90 degrees
-  on the right centre, passes. The drawing is a person's transcription.
+  on the right centre, passes. The drawing is a person's transcription. A part
+  that repeats so many functions that both the full search and the anchored one
+  pass 5040 pairings (a ground row of eight, a ball grid) errors: split a function
+  the part repeats.
+- **A series pair on a person's word.** `pcb_pin_names_series` clears a two-net
+  pin name on the ref it names, as the person states it, with its source. The
+  gate holds the pair to the part (the only two pins of that name), never to the
+  datasheet: a statement written to clear a real short clears it.
 - **The cell beyond its records.** The power rules are as true as the records a
   person enters from the datasheets. `pcb.fuse_conductor` judges the adiabatic
   short-circuit points only, no overload (I2 <= 1.45 Iz), one conductor carrying
@@ -199,7 +218,10 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   edge clearance, silkscreen text, and silkscreen to pad (silk on silk is
   `pcb.drc`'s). Board size, mask webs, panelisation and the fab's
   own DFM review are not in it, and a fab's page changes: the file says the day
-  it was read.
+  it was read. A flex, rigid-flex or HDI board skips on the bundled JLCPCB file,
+  whose one service is FR-4 with through vias: a fab file with a service that
+  lists its dielectric and vias judges it. A board that states no stackup is read
+  as KiCad's default FR4 core, as the job file KiCad hands the fab says.
 - **Anything about a built board.** Assembly, solder, first power-up: physical
   claims, Pending build until a person records a result.
 
@@ -273,13 +295,15 @@ body may touch (standoffs) but not cut in.
 "pcb_net_currents_a": {"VBUS": 0.5, "VBAT": 1.2, "GND": 1.2},
 "pcb_temp_rise_limit_c": 10.0,
 "pcb_copper_oz_outer": 1.0,
-"pcb_fab": "jlcpcb",
+"pcb_fab": "jlcpcb", "pcb_fab_service": "standard",
 "pcb_spice_deck": "hardware/sim/vbus.cir",
 "pcb_spice_measure": "vbus_min", "pcb_spice_min": 4.75, "pcb_spice_units": "V",
 "pcb_enclosure_step": "cad/out/enclosure.step",
 "pcb_board_placement": {"x": 2.0, "y": 17.0, "z": 4.0, "rot_z_deg": 0},
 "pcb_enclosure_clearance_mm": 1.0,
 "pcb_land_drawings": {"U3": "hardware/lands/u3.json"},
+"pcb_pin_names_series": {"FL1": {"pairs": [["1", "8"], ["2", "7"]],
+                                 "source": "the filter array's datasheet, channel table"}},
 "pcb_cell": {"board": "hardware/main.kicad_pcb", "ref": "BT1", "value": "CELL", "pin": "1",
              "min_v": 3.0, "pcm_cutoff_min_v": 2.5, "source": "the cell's datasheet"},
 "pcb_cutoffs": []

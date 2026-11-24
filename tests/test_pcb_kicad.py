@@ -532,18 +532,21 @@ class ASilkRuleIsSilkToPad(unittest.TestCase):
         self.assertIn("above 0", str(caught.exception))
 
     def test_every_bundled_fab_file_writes(self):
+        """Every row of every service of every bundled fab file (0.3.0: a fab
+        file lists its services, each with its own common rules and rows)."""
         fab_dir = os.path.join(PACK, "gates", "fab")
         for name in sorted(os.listdir(fab_dir)):
             if not name.endswith(".json"):
                 continue
             with open(os.path.join(fab_dir, name), encoding="utf-8") as fh:
                 fab = json.load(fh)
-            for row in fab["tables"]:
-                with self.subTest(fab=name, row=row["name"]):
-                    rules = list(fab.get("common", [])) + list(row["rules"])
-                    text = K.dru_text({"name": row["name"], "rules": rules}, "fab")
-                    if any(r["constraint"] == "silk_clearance" for r in rules):
-                        self.assertIn(f'(condition "{K.SILK_TO_PAD}")', text)
+            for service in K.fab_services(fab):
+                for row in service["tables"]:
+                    with self.subTest(fab=name, service=service["name"], row=row["name"]):
+                        rules = list(service["common"]) + list(row["rules"])
+                        text = K.dru_text({"name": row["name"], "rules": rules}, "fab")
+                        if any(r["constraint"] == "silk_clearance" for r in rules):
+                            self.assertIn(f'(condition "{K.SILK_TO_PAD}")', text)
 
 
 class TheHottestTrackIsNamed(unittest.TestCase):
@@ -1665,16 +1668,30 @@ class ThePowerRulesReadTheirRecords(unittest.TestCase):
 
     def test_a_board_the_guard_would_fail_errors(self):
         """A record may name a board pcb.board_readable never reads (pcb_board is
-        another board), so each rule makes the guard's checks itself."""
+        another board), so each rule makes the guard's checks itself: a board
+        older than KiCad 6 errors, and one newer than the reader was checked
+        through skips with the guard's own words (0.3.0: it errored, a crash
+        beside the guard's skip, on every board KiCad 10 saved)."""
+        def older(tree):
+            K.child(tree, "version")[1] = "20171130"
+
         def newer(tree):
             K.child(tree, "version")[1] = "20991231"
-        records = self._repoint(self._board(newer))
+        records = self._repoint(self._board(older))
         for gid in ("pcb.charge_protection", "pcb.fuse_conductor", "pcb.discharge_cutoff"):
-            with self.subTest(gate=gid):
+            with self.subTest(gate=gid, board="older than KiCad 6"):
                 verdict = self._run(gid, **records)
                 self.assertEqual(verdict.outcome, "error", verdict.render())
                 self.assertIn("not one this reader can vouch for", verdict.error)
-                self.assertIn("newer than", verdict.error)
+                self.assertIn("older than", verdict.error)
+        records = self._repoint(self._board(newer))
+        for gid in ("pcb.charge_protection", "pcb.fuse_conductor", "pcb.discharge_cutoff"):
+            with self.subTest(gate=gid, board="newer than the reader"):
+                verdict = self._run(gid, **records)
+                self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                self.assertIn("this reader was checked through board format 20241229 "
+                              "(KiCad 9.0); the file is format 20991231",
+                              verdict.skip_reason)
 
     def test_a_pcm_alone_below_the_minimum_fails_and_says_so(self):
         cell = dict(self.params["pcb_cell"], min_v=3.0, pcm_cutoff_min_v=2.5)
@@ -1683,6 +1700,674 @@ class ThePowerRulesReadTheirRecords(unittest.TestCase):
         self.assertEqual(verdict.measured, 2.5)
         self.assertIn("the cell's PCM opens at 2.5 V, below its 3 V minimum; no part on "
                       "the board cuts the cell off", verdict.detail)
+
+
+
+# --------------------------------------------------------------------------- #
+# 0.3.0: the readers. A newer board skips, nets read by name, the land fit is
+# anchored past the full search, a fab service lists what it builds, and a
+# series pair is stated per ref.
+# --------------------------------------------------------------------------- #
+def _by_name(text: str, version: str = "20260206") -> str:
+    """The board as KiCad 10 writes it from format 20251028 (its 10.0 source,
+    ``pcb_io_kicad_sexpr.cpp``: every pad, track, via and zone writes ``(net
+    "<name>")``, and the board writes no net table): the table dropped, every
+    code replaced by its name, a zone's ``net_name`` dropped. No KiCad 10 is
+    installed where this pack was written, so this is the source's form, not a
+    saved file: the reason the reader's ceiling stays at KiCad 9."""
+    tree = K.parse(text)
+    codes = {str(n[1]): str(n[2]) for n in K.children(tree, "net") if len(n) >= 3}
+    tree[:] = [x for x in tree if not (isinstance(x, list) and K.head(x) == "net")]
+
+    def walk(node):
+        for x in node:
+            if isinstance(x, list):
+                if K.head(x) == "net" and len(x) >= 2 and not isinstance(x[1], K.Q):
+                    x[1:] = [K.Q(codes[str(x[1])])]
+                walk(x)
+    walk(tree)
+    for zone in K.children(tree, "zone"):
+        zone[:] = [x for x in zone if not (isinstance(x, list) and K.head(x) == "net_name")]
+    K.child(tree, "version")[1] = version
+    return K.dump(tree) + "\n"
+
+
+def _with_zone(text: str) -> str:
+    """The baseline with a GND pour on B.Cu, as KiCad 9 writes a zone's net:
+    by code, and by name in ``net_name``."""
+    tree = K.parse(text)
+    tree.append(["zone", ["net", _net_code(tree, "GND")], ["net_name", K.Q("GND")],
+                 ["layer", K.Q("B.Cu")], ["uuid", K.Q("00000000-0000-4000-8000-0000000000bb")]])
+    return K.dump(tree) + "\n"
+
+
+def _version(text: str, version: str) -> str:
+    return text.replace("(version 20241229)", f"(version {version})", 1)
+
+
+def _ctx(root: str, params: dict, tier: int = 0) -> gates_mod.GateContext:
+    return gates_mod.GateContext(
+        root=root, ledger=Ledger(meta=ProjectMeta(name="pcb")), model=None,
+        params=dict(params), out_dir=os.path.join(root, "out"), tier=tier,
+        log=lambda _m: None, extra={})
+
+
+class ANewerBoardIsSkippedNeverFailed(unittest.TestCase):
+    """A board newer than the reader was checked through is a limit of the
+    reader: the guard skips, the gates that need it are not established, and
+    the power rules skip with the same words. Older than KiCad 6, and a track
+    on a code the table does not define, still fail. (What slipped through:
+    every board KiCad 10 saved read FAIL, as a defective design.)"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-pcb-newer-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.registry = _registry()
+
+    def _board(self, text: str, stem: str = "b") -> str:
+        return _board_copy(self.root, text, stem=stem)
+
+    def test_the_guard_skips_and_its_dependents_are_not_established(self):
+        board = self._board(_by_name(_board_text()))
+        verdicts = gates_mod.run_all(
+            self.registry, _ctx(self.root, dict(_baseline(), pcb_board=board)), max_tier=0,
+            only=["pcb.pin_names", "pcb.net_width", "pcb.land_pattern"])
+        by_id = {v.gate: v for v in verdicts}
+        guard = by_id["pcb.board_readable"]
+        self.assertEqual(guard.outcome, "skipped", guard.render())
+        self.assertIn("this reader was checked through board format 20241229 (KiCad 9.0); "
+                      "the file is format 20260206", guard.skip_reason)
+        self.assertIn("not a defect in the board", guard.skip_reason)
+        for gid in ("pcb.pin_names", "pcb.net_width", "pcb.land_pattern"):
+            with self.subTest(gate=gid):
+                self.assertEqual(by_id[gid].outcome, "skipped", by_id[gid].render())
+                self.assertEqual(by_id[gid].skip_reason,
+                                 "prerequisite not established: pcb.board_readable (skipped)")
+
+    def test_older_than_kicad_6_and_an_orphaned_code_still_fail(self):
+        tree = K.load_tree(BOARD)
+        code = _net_code(tree, "VBUS")
+        tree.remove(next(n for n in K.children(tree, "net") if str(n[1]) == code))
+        for name, text, said in (
+                ("KiCad 5", _version(_board_text(), "20171130"), "older than 20211014 (KiCad 6)"),
+                ("orphaned code", K.dump(tree) + "\n",
+                 f"name net code(s) [{code}] that the net table does not define")):
+            with self.subTest(board=name):
+                verdict = _run(self.registry, "pcb.board_readable", self.root,
+                               dict(_baseline(), pcb_board=self._board(text, stem="old")))
+                self.assertEqual(verdict.outcome, "fail", verdict.render())
+                self.assertIn(said, verdict.detail)
+
+    def test_the_orphan_check_is_only_for_formats_that_write_codes(self):
+        """KiCad 10 writes no net table from 20251028; a check that read it would
+        call every track orphaned. Before it, an orphan is still found."""
+        tree = K.load_tree(BOARD)
+        code = _net_code(tree, "VBUS")
+        tree.remove(next(n for n in K.children(tree, "net") if str(n[1]) == code))
+        K.child(tree, "version")[1] = str(K.NET_CODES_DROPPED - 1)
+        _v, problems = K.board_problems(tree)
+        self.assertTrue(any("does not define" in p for p in problems), problems)
+        K.child(tree, "version")[1] = str(K.NET_CODES_DROPPED)
+        _v, problems = K.board_problems(tree)
+        self.assertEqual(problems, [K.reader_ceiling(K.NET_CODES_DROPPED)])
+        self.assertEqual(K.board_problems(K.parse(_by_name(_board_text())))[1],
+                         [K.reader_ceiling(20260206)])
+
+    def test_the_ceiling_stays_at_kicad_9_until_a_kicad_10_board_is_committed(self):
+        """Only KiCad 9.0.9 was installed where this reader was written, so no
+        board KiCad 10 saved could be checked against it: an accepted gap
+        (PACK.md). Raise the ceiling with such a board as a fixture, never on the
+        10.0 source alone."""
+        self.assertEqual(K.MAX_BOARD_VERSION, 20241229)
+        self.assertEqual(K.reader_ceiling(20241229), "")
+        self.assertEqual(K.reader_ceiling(None), "")
+
+
+class NetsAreReadByNameAsByCode(unittest.TestCase):
+    """The baseline written as KiCad 10 writes nets (by name, no table) reads the
+    same pads, tracks, zones and pin-name conflicts as the baseline itself."""
+
+    def test_the_same_board_either_way(self):
+        coded_text = _with_zone(_board_text())
+        coded = K.board_from_tree(K.parse(coded_text))
+        named = K.board_from_tree(K.parse(_by_name(coded_text)))
+        self.assertEqual(named.nets, {}, "a KiCad 10 board has no net table")
+        self.assertEqual(coded.net_names, ["DM", "DP", "GND", "VBUS"])
+        self.assertEqual(named.net_names, coded.net_names)
+        self.assertEqual([(f.ref, [(p.number, p.net, p.pinfunction) for p in f.pads])
+                          for f in named.footprints],
+                         [(f.ref, [(p.number, p.net, p.pinfunction) for p in f.pads])
+                          for f in coded.footprints])
+        self.assertEqual([(t.net, t.layer, t.width_mm, t.shape) for t in named.tracks],
+                         [(t.net, t.layer, t.width_mm, t.shape) for t in coded.tracks])
+        self.assertEqual(named.zone_nets, ["GND"])
+        self.assertEqual(coded.zone_nets, ["GND"])
+        self.assertEqual(K.pad_nets_by_id(K.parse(_by_name(coded_text))),
+                         K.pad_nets_by_id(K.parse(coded_text)))
+        self.assertTrue(all(t.net for t in named.tracks), "every baseline track has a net")
+
+
+#: KiCad 9.0.9's ``Connector_USB.pretty/USB_C_Receptacle_GCT_USB4105-xx-A_16P_
+#: TopMnt_Horizontal.kicad_mod`` (file version 20221018): every numbered pad,
+#: its centre and size as the file writes them. A1 and B12, A4 and B9, A9 and B4,
+#: A12 and B1 are stacked. The two unnumbered NPTH pegs are left out, as the
+#: gate leaves them. (Not the parent device's receptacle.)
+USBC_PADS = [
+    ("A1", -3.2, -3.68, 0.6, 1.15), ("A4", -2.4, -3.68, 0.6, 1.15),
+    ("A5", -1.25, -3.68, 0.3, 1.15), ("A6", -0.25, -3.68, 0.3, 1.15),
+    ("A7", 0.25, -3.68, 0.3, 1.15), ("A8", 1.25, -3.68, 0.3, 1.15),
+    ("A9", 2.4, -3.68, 0.6, 1.15), ("A12", 3.2, -3.68, 0.6, 1.15),
+    ("B1", 3.2, -3.68, 0.6, 1.15), ("B4", 2.4, -3.68, 0.6, 1.15),
+    ("B5", 1.75, -3.68, 0.3, 1.15), ("B6", 0.75, -3.68, 0.3, 1.15),
+    ("B7", -0.75, -3.68, 0.3, 1.15), ("B8", -1.75, -3.68, 0.3, 1.15),
+    ("B9", -2.4, -3.68, 0.6, 1.15), ("B12", -3.2, -3.68, 0.6, 1.15),
+    ("S1", -4.32, -3.105, 1.0, 2.1), ("S1", -4.32, 1.075, 1.0, 1.8),
+    ("S1", 4.32, -3.105, 1.0, 2.1), ("S1", 4.32, 1.075, 1.0, 1.8),
+]
+
+#: KiCad 9.0.9's ``Connector:USB_C_Receptacle_USB2.0_16P``: each pin's name.
+USBC_NAMES = {"A1": "GND", "A12": "GND", "B1": "GND", "B12": "GND",
+              "A4": "VBUS", "A9": "VBUS", "B4": "VBUS", "B9": "VBUS",
+              "A5": "CC1", "B5": "CC2", "A6": "D+", "B6": "D+", "A7": "D-", "B7": "D-",
+              "A8": "SBU1", "B8": "SBU2", "S1": "SHIELD"}
+
+#: KiCad 9.0.9's ``Power_Protection:IP4252CZ8``, a four-channel EMI filter
+#: array: each channel's two ends carry one name.
+IP4252_NAMES = {"1": "CH1", "2": "CH2", "3": "CH3", "4": "CH4",
+                "5": "CH4", "6": "CH3", "7": "CH2", "8": "CH1", "9": "GND"}
+
+FOOTPRINTS = next((d for d in (os.environ.get("KICAD9_FOOTPRINT_DIR", ""),
+                               "/usr/share/kicad/footprints")
+                   if d and os.path.isdir(os.path.join(d, "Connector_USB.pretty"))), None)
+
+
+def _library_pins(lib: str, name: str) -> dict:
+    with open(os.path.join(SYMBOLS, f"{lib}.kicad_sym"), encoding="utf-8") as fh:
+        tree = K.parse(fh.read())
+    sym = next(s for s in K.children(tree, "symbol") if str(s[1]) == name)
+    pins = {}
+
+    def walk(node):
+        for x in node:
+            if isinstance(x, list):
+                if K.head(x) == "pin":
+                    pins[str(K.value(x, "number"))] = str(K.value(x, "name"))
+                walk(x)
+    walk(sym)
+    return pins
+
+
+class TheStockTablesAreKiCads(unittest.TestCase):
+    """The tables above, read again from KiCad's own libraries where they are
+    installed, so a library that moves a pad or renames a pin is caught."""
+
+    @unittest.skipIf(SYMBOLS is None, "needs KiCad's stock symbols")
+    def test_the_pin_names(self):
+        self.assertEqual(_library_pins("Connector", "USB_C_Receptacle_USB2.0_16P"), USBC_NAMES)
+        self.assertEqual(_library_pins("Power_Protection", "IP4252CZ8"), IP4252_NAMES)
+
+    @unittest.skipIf(FOOTPRINTS is None, "needs KiCad's stock footprints")
+    def test_the_usb_c_pads(self):
+        with open(os.path.join(FOOTPRINTS, "Connector_USB.pretty",
+                               "USB_C_Receptacle_GCT_USB4105-xx-A_16P_TopMnt_Horizontal"
+                               ".kicad_mod"), encoding="utf-8") as fh:
+            fp = K.parse(fh.read())
+        pads = [(str(p[1]), float(K.child(p, "at")[1]), float(K.child(p, "at")[2]),
+                 float(K.child(p, "size")[1]), float(K.child(p, "size")[2]))
+                for p in K.children(fp, "pad") if str(p[1])]
+        self.assertEqual(pads, USBC_PADS)
+
+
+def _usbc_board(edit=None) -> list:
+    """The receptacle's land as ``_land_fit`` takes it: ``[(name, LandPad)]``,
+    ``edit({number: [x, y]})`` applied to the centres first."""
+    centres = [[x, y] for _n, x, y, _w, _h in USBC_PADS]
+    if edit is not None:
+        edit(USBC_PADS, centres)
+    return [(USBC_NAMES[n], K.LandPad(n, c[0], c[1], w, h))
+            for (n, _x, _y, w, h), c in zip(USBC_PADS, centres)]
+
+
+def _usbc_drawing(fit_globals) -> list:
+    """The receptacle's drawing as a vendor prints it: turned 90 degrees, its
+    origin at the mating face, y up, each pad by function. Its numbers differ
+    from the footprint's in the order it lists a repeated function, which the
+    fit must not care about."""
+    pads = []
+    for i, (n, x, y, w, h) in enumerate(USBC_PADS):
+        # Turned 90 degrees (x, y) -> (-y, x), moved, then y up for the record.
+        vx, vy = -y + 1.0, x - 2.0
+        pads.append({"number": f"P{len(USBC_PADS) - i}", "function": USBC_NAMES[n],
+                     "x": round(vx, 6), "y": round(-vy, 6), "w": h, "h": w})
+    vendor = fit_globals["_drawing"]({"view": "top", "y_axis": "up", "pads": pads})
+    assert isinstance(vendor, list), vendor
+    return vendor
+
+
+class TheLandFitIsAnchoredPastTheFullSearch(unittest.TestCase):
+    """A part that repeats many functions had more pairings than the full search
+    tries, and errored. Past that count the fit is anchored on the pads of a
+    function of their own; pads are still never paired by number."""
+
+    def setUp(self):
+        self.registry = _registry()
+        self.globals = self.registry.get("pcb.land_pattern")[1].__globals__
+        self.fit = self.globals["_land_fit"]
+
+    def test_a_usb_c_16p_receptacle_fits_where_it_errored(self):
+        groups = {}
+        for n, *_rest in USBC_PADS:
+            groups[USBC_NAMES[n]] = groups.get(USBC_NAMES[n], 0) + 1
+        tries = math.prod(math.factorial(c) for c in groups.values())
+        self.assertEqual(tries, 55296)
+        self.assertGreater(tries, self.globals["MAX_ASSIGNMENTS"], "the full search errored")
+        fit = self.fit("J10", _usbc_board(), _usbc_drawing(self.globals))
+        self.assertIsInstance(fit, dict, fit)
+        self.assertEqual(fit["search"], "anchored on 4 pad(s) of a function of their own, "
+                                        "76 assignment(s) of the rest")
+        self.assertLess(fit["worst"]["residual_mm"], 1e-6)
+        self.assertAlmostEqual(abs(fit["rotation_deg"]), 90.0, places=6)
+        self.assertTrue(all(p["function"] == USBC_NAMES[p["board_pad"]] for p in fit["pairs"]))
+
+    def test_a_usb_c_land_with_its_cc_pads_mirrored_fails(self):
+        def mirrored(pads, centres):
+            for c in centres:
+                c[0] = -c[0]
+
+        def cc_swapped(pads, centres):
+            at = {n: i for i, (n, *_r) in enumerate(pads)}
+            centres[at["A5"]][0], centres[at["B5"]][0] = (centres[at["B5"]][0],
+                                                          centres[at["A5"]][0])
+        for name, edit in (("the land drawn mirrored", mirrored), ("CC1 and CC2 swapped",
+                                                                  cc_swapped)):
+            with self.subTest(land=name):
+                fit = self.fit("J10", _usbc_board(edit), _usbc_drawing(self.globals))
+                self.assertIsInstance(fit, dict, fit)
+                self.assertTrue(fit["search"].startswith("anchored"), fit["search"])
+                w = fit["worst"]
+                self.assertGreater(w["residual_mm"], w["limit_mm"], fit)
+
+    def test_the_anchored_search_agrees_with_the_full_search(self):
+        """Eight pads, two of a function of their own and three pairs: 8
+        assignments in full, 6 anchored. Under a cap of 7 the anchored search
+        runs, and reads as the full one does on the land and on its mirror."""
+        names = ["A", "B", "G", "G", "V", "V", "D", "D"]
+        at = [(-1.5, -1.0), (-0.5, -1.0), (0.5, -1.0), (1.5, -1.0),
+              (1.5, 1.0), (0.5, 1.0), (-0.5, 1.0), (-1.5, 1.0)]
+        board = [(f, K.LandPad(str(i + 1), x, y, 0.4, 0.8))
+                 for i, (f, (x, y)) in enumerate(zip(names, at))]
+        drawing = [{"number": str(i + 1), "function": f, "x": -y + 0.3, "y": x - 0.2,
+                    "w": 0.8, "h": 0.4} for i, (f, (x, y)) in enumerate(zip(names, at))]
+        mirror = [(f, K.LandPad(p.number, -p.x, p.y, p.w, p.h)) for f, p in board]
+        for land, pads in (("good", board), ("mirrored", mirror)):
+            with self.subTest(land=land):
+                full = self.fit("U9", pads, drawing)
+                with mock.patch.dict(self.globals, {"MAX_ASSIGNMENTS": 7}):
+                    anchored = self.fit("U9", pads, drawing)
+                self.assertEqual(full["search"], "every assignment (8)")
+                self.assertTrue(anchored["search"].startswith("anchored on 2 pad(s)"),
+                                anchored["search"])
+                passed = [f["worst"]["residual_mm"] <= f["worst"]["limit_mm"]
+                          for f in (full, anchored)]
+                self.assertEqual(passed, [land == "good"] * 2, (full, anchored))
+        self.assertAlmostEqual(full["worst"]["residual_mm"], anchored["worst"]["residual_mm"],
+                               places=6)
+
+    def test_too_few_anchors_still_errors(self):
+        """Past the full search with fewer than two pads of a function of their
+        own, nothing fixes the fit: the error stands, and says to split one."""
+        board = [("G", K.LandPad(str(i), float(i), 0.0, 0.4, 0.8)) for i in range(8)]
+        drawing = [{"number": str(i), "function": "G", "x": float(i), "y": 0.0,
+                    "w": 0.4, "h": 0.8} for i in range(8)]
+        why = self.fit("U9", board, drawing)
+        self.assertIsInstance(why, str)
+        self.assertIn("fewer than two of its functions sit on one pad alone", why)
+        self.assertIn("split a function the part repeats", why)
+
+    def test_pairing_by_number_is_for_registration_only(self):
+        """The hook pairs by number when asked (a keep-out drawn around a
+        module's numbered pads). On the baseline's U1 against its drawing
+        renumbered 1<->3 and 4<->6, functions kept, pairing by function fits and
+        pairing by number misfits. Anything else is refused."""
+        pads, _unnumbered = K.footprint_land(TREE, "U1")
+        names = {p.number: p.pinfunction for fp in K.board_from_tree(TREE).footprints
+                 if fp.ref == "U1" for p in fp.pads}
+        board = [(names[p.number], p) for p in pads]
+        with open(os.path.join(ASSETS, "esda6v1bc6_land.json"), encoding="utf-8") as fh:
+            record = json.load(fh)
+        swap = {"1": "3", "3": "1", "4": "6", "6": "4"}
+        for pad in record["pads"]:
+            pad["number"] = swap.get(pad["number"], pad["number"])
+        drawing = self.globals["_drawing"](record)
+        by_function = self.fit("U1", board, drawing)
+        by_number = self.fit("U1", board, drawing, pair_by="number")
+        self.assertEqual((by_function["paired_by"], by_number["paired_by"]),
+                         ("function", "number"))
+        self.assertLessEqual(by_function["worst"]["residual_mm"],
+                             by_function["worst"]["limit_mm"], by_function)
+        self.assertGreater(by_number["worst"]["residual_mm"], by_number["worst"]["limit_mm"],
+                           by_number)
+        with self.assertRaises(ValueError):
+            self.fit("U1", board, drawing, pair_by="position")
+
+    def test_the_gate_pairs_by_function_never_by_number(self):
+        """The baseline's drawing renumbered 1<->3 and 4<->6, its functions kept:
+        the gate passes it (a pairing by number would put pad 1 on pad 3)."""
+        with open(os.path.join(ASSETS, "esda6v1bc6_land.json"), encoding="utf-8") as fh:
+            record = json.load(fh)
+        swap = {"1": "3", "3": "1", "4": "6", "6": "4"}
+        for pad in record["pads"]:
+            pad["number"] = swap.get(pad["number"], pad["number"])
+        root = tempfile.mkdtemp(prefix="nopekit-pcb-land-")
+        self.addCleanup(shutil.rmtree, root, True)
+        drawing = os.path.join(root, "renumbered.json")
+        with open(drawing, "w", encoding="utf-8") as fh:
+            json.dump(record, fh)
+        board = _board_copy(root, _board_text())
+        verdict = _run(self.registry, "pcb.land_pattern", root,
+                       dict(_baseline(), pcb_board=board, pcb_land_drawings={"U1": drawing}))
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+
+    def test_a_mirrored_land_still_fails_through_the_gate(self):
+        """The known-bad control's change, made here: U1's pads 1<->3 and 4<->6
+        swapped, numbers and names kept."""
+        tree = K.load_tree(BOARD)
+        pads = {str(p[1]): p for p in K.children(_footprint(tree, "U1"), "pad")}
+        for a, b in (("1", "3"), ("4", "6")):
+            at_a, at_b = K.child(pads[a], "at"), K.child(pads[b], "at")
+            at_a[1:3], at_b[1:3] = list(at_b[1:3]), list(at_a[1:3])
+        root = tempfile.mkdtemp(prefix="nopekit-pcb-land-")
+        self.addCleanup(shutil.rmtree, root, True)
+        board = _board_copy(root, K.dump(tree) + "\n")
+        verdict = _run(self.registry, "pcb.land_pattern", root, dict(
+            _baseline(), pcb_board=board,
+            pcb_land_drawings={"U1": os.path.join(ASSETS, "esda6v1bc6_land.json")}))
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, 1.9, verdict.render())
+
+
+#: The vias pcbnew 9.0.9 wrote for a blind via (F.Cu to In1.Cu), a buried one
+#: (In1.Cu to In2.Cu, which it also writes ``blind``) and a microvia (measured:
+#: ``pcbnew.SaveBoard`` on the baseline made four-layer).
+VIAS_9 = {
+    "blind": '(via blind (at 5 12) (size 0.45) (drill 0.2) (layers "F.Cu" "In1.Cu") (net 4) '
+             '(uuid "1ecca1b2-cac7-4fca-9c08-bbb6c2daf091"))',
+    "buried": '(via blind (at 7 12) (size 0.45) (drill 0.2) (layers "In1.Cu" "In2.Cu") (net 0) '
+              '(uuid "15a587ce-5e1e-4fba-9963-c10ce6ca9441"))',
+    "micro": '(via micro (at 9 12) (size 0.45) (drill 0.2) (layers "F.Cu" "In1.Cu") (net 0) '
+             '(uuid "1603216d-a635-4af1-9dc7-fffb45567255"))',
+}
+
+
+def _stackup(*materials: str) -> str:
+    """The baseline with a stated two-layer stackup, its one core in
+    ``materials`` (more than one: KiCad's sublayers, ``addsublayer``), in the
+    form KiCad 9.0.9's demos write it."""
+    core = ['(layer "dielectric 1" (type "core") (thickness 1.51) '
+            f'(material "{materials[0]}") (epsilon_r 4.5) (loss_tangent 0.02)']
+    for m in materials[1:]:
+        core.append(f' addsublayer (thickness 0.05) (material "{m}") (epsilon_r 3.5) '
+                    f'(loss_tangent 0.01)')
+    stack = ('(stackup (layer "F.SilkS" (type "Top Silk Screen")) '
+             '(layer "F.Mask" (type "Top Solder Mask") (color "Green") (thickness 0.01) '
+             '(material "Liquid Ink")) '
+             '(layer "F.Cu" (type "copper") (thickness 0.035)) '
+             + "".join(core) + ') '
+             '(layer "B.Cu" (type "copper") (thickness 0.035)) '
+             '(copper_finish "None") (dielectric_constraints no))')
+    text = _board_text()
+    anchor = "\t(setup\n"
+    assert text.count(anchor) == 1
+    return text.replace(anchor, anchor + "\t\t" + stack + "\n", 1)
+
+
+def _with_via(kind: str) -> str:
+    text = _board_text()
+    anchor = "\t(segment\n"
+    i = text.index(anchor)
+    return text[:i] + "\t" + VIAS_9[kind] + "\n" + text[i:]
+
+
+@unittest.skipIf(os.name == "nt", "the stand-in kicad-cli is a #! script")
+class AFabServiceListsWhatItBuilds(unittest.TestCase):
+    """A board whose stackup names a dielectric, or that holds a via kind, its
+    service does not list skips, naming the gap, before kicad-cli runs. Several
+    services and none named skips, naming them."""
+
+    setUp = TheFabCountsOnlyItsOwnFindings.setUp
+    _fab = TheFabCountsOnlyItsOwnFindings._fab
+
+    def _fab_file(self, services: list, name: str = "fab.json") -> str:
+        with open(os.path.join(PACK, "gates", "fab", "jlcpcb.json"), encoding="utf-8") as fh:
+            standard = json.load(fh)["services"][0]
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({"fab": "Fixture Fab", "source": "a fixture", "read": "2026-11-24",
+                       "services": [dict(standard, **s) for s in services]}, fh)
+        return path
+
+    def test_the_baseline_reads_as_kicads_default_stackup(self):
+        verdict = self._fab([])
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertTrue(verdict.detail.startswith("JLCPCB standard (1-2 layers, 1 oz"),
+                        verdict.detail)
+        self.assertIn("; the board: dielectric FR4 (KiCad's default: the board states no "
+                      "stackup), 1 through via(s)", verdict.detail)
+
+    def test_a_stated_fr4_stackup_runs(self):
+        for spelled in ("FR4", "FR-4", "fr4"):
+            with self.subTest(material=spelled):
+                board = _board_copy(self.dir, _stackup(spelled), stem="fr4")
+                verdict = self._fab([], board=board)
+                self.assertEqual(verdict.outcome, "pass", verdict.render())
+                self.assertIn(f"; the board: dielectric {spelled}, 1 through via(s)",
+                              verdict.detail)
+
+    def test_a_dielectric_the_service_does_not_list_skips(self):
+        for name, materials, gap in (("polyimide", ("Polyimide",), "dielectric Polyimide"),
+                                     ("a polyimide sublayer", ("FR4", "Polyimide"),
+                                      "dielectric Polyimide"),
+                                     ("a high-Tg laminate", ("FR408-HR",), "dielectric FR408-HR")):
+            with self.subTest(board=name):
+                board = _board_copy(self.dir, _stackup(*materials), stem="flex")
+                verdict = self._fab([], board=board, runs=0)
+                self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                self.assertIn(f"the board has {gap}, which JLCPCB's standard service does "
+                              f"not list (it builds FR4; through vias)", verdict.skip_reason)
+                self.assertNotIn("dielectric FR4,", verdict.skip_reason)
+
+    def test_a_via_kind_the_service_does_not_list_skips(self):
+        for kind in ("blind", "buried", "micro"):
+            with self.subTest(via=kind):
+                board = _board_copy(self.dir, _with_via(kind), stem=kind)
+                self.assertEqual(K.via_kinds(K.load_tree(board))[kind], 1)
+                verdict = self._fab([], board=board, runs=0)
+                self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                self.assertIn(f"the board has 1 {kind} via(s), which JLCPCB's standard "
+                              f"service does not list", verdict.skip_reason)
+
+    def test_a_service_that_lists_them_judges_the_board(self):
+        fab = self._fab_file([{"name": "hdi", "materials": ["FR4", "Polyimide"],
+                               "via_types": ["through", "blind", "buried", "micro"]}])
+        self.params["pcb_fab"] = fab
+        self.params["pcb_fab_service"] = "hdi"
+        board = _board_copy(self.dir, _stackup("Polyimide"), stem="flex")
+        verdict = self._fab([], board=board)
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertTrue(verdict.detail.startswith("Fixture Fab hdi ("), verdict.detail)
+
+    def test_several_services_and_none_named_skips_naming_them(self):
+        fab = self._fab_file([{"name": "standard"},
+                              {"name": "flex", "materials": ["Polyimide"]}])
+        self.params["pcb_fab"] = fab
+        del self.params["pcb_fab_service"]
+        verdict = self._fab([], runs=0)
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("Fixture Fab publishes limits for several services (standard, flex) "
+                      "and there is no pcb_fab_service", verdict.skip_reason)
+        self.params["pcb_fab_service"] = "standard"
+        self.assertEqual(self._fab([]).outcome, "pass")
+
+    def test_one_service_needs_no_name(self):
+        del self.params["pcb_fab_service"]
+        self.assertEqual(self._fab([]).outcome, "pass")
+
+    def test_a_service_the_file_lacks_or_a_file_with_none_errors(self):
+        self.params["pcb_fab_service"] = "rigid-flex"
+        verdict = self._fab([], runs=0)
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("the fab file has no service 'rigid-flex': it lists standard",
+                      verdict.error)
+        with open(os.path.join(PACK, "gates", "fab", "jlcpcb.json"), encoding="utf-8") as fh:
+            service = json.load(fh)["services"][0]
+        old = os.path.join(self.dir, "old.json")
+        with open(old, "w", encoding="utf-8") as fh:
+            json.dump({"fab": "Old Fab", "common": service["common"],
+                       "tables": service["tables"]}, fh)
+        self.params.update(pcb_fab=old, pcb_fab_service="standard")
+        verdict = self._fab([], runs=0)
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("the fab file lists no services (it holds common and tables at the "
+                      "top, the shape before services", verdict.error)
+
+
+class AFabFileIsReadStrictly(unittest.TestCase):
+    """A service is held to its shape: a word where a list belongs, a via kind
+    KiCad does not write, a missing key or a name given twice is refused."""
+
+    def test_each_bad_shape_is_refused(self):
+        with open(os.path.join(PACK, "gates", "fab", "jlcpcb.json"), encoding="utf-8") as fh:
+            good = json.load(fh)
+        svc = good["services"][0]
+        self.assertEqual(K.fab_services(good), good["services"])
+        for name, fab, said in (
+                ("materials as a word", {"services": [dict(svc, materials="FR4")]},
+                 "materials must list the dielectrics"),
+                ("a via kind KiCad does not write", {"services": [dict(svc, via_types=["laser"])]},
+                 "via_types ['laser'] must list some of"),
+                ("no tables", {"services": [{k: v for k, v in svc.items() if k != "tables"}]},
+                 "services[0] has no tables"),
+                ("a name twice", {"services": [svc, svc]}, "names a service twice"),
+                ("no services", {"fab": "X"}, "the fab file lists no services:")):
+            with self.subTest(case=name):
+                with self.assertRaises(ValueError) as caught:
+                    K.fab_services(fab)
+                self.assertIn(said, str(caught.exception))
+
+
+def _with_filter(text: str, refs=("U3",), names=None) -> str:
+    """The baseline with KiCad's IP4252CZ8 placed as each of ``refs``, each
+    channel's two ends on two nets (``<ref>_K<n>`` in, ``<ref>_K<n>F`` out) and
+    its pad 9 on GND, every pad carrying the stock symbol's pin name (``names``
+    overrides some): an EMI filter on four key lines. Only the tier-0 reader
+    reads it."""
+    tree = K.parse(text)
+    nets = K.children(tree, "net")
+    code = max(int(n[1]) for n in nets)
+    added = []
+
+    def net(name: str) -> str:
+        nonlocal code
+        for n in nets + added:
+            if str(n[2]) == name:
+                return str(n[1])
+        code += 1
+        added.append(["net", str(code), K.Q(name)])
+        return str(code)
+    for ref in refs:
+        pads = []
+        for number, stock in IP4252_NAMES.items():
+            name = (names or {}).get(number, stock)
+            if stock == "GND":
+                where = "GND"
+            else:
+                ch = stock[2:]
+                where = f"{ref}_K{ch}" if int(number) <= 4 else f"{ref}_K{ch}F"
+            pads.append(["pad", K.Q(number), "smd", "rect", ["at", "0", "0"],
+                         ["size", "0.2", "0.4"], ["layers", K.Q("F.Cu")],
+                         ["net", net(where), K.Q(where)], ["pinfunction", K.Q(name)],
+                         ["pintype", K.Q("passive")]])
+        tree.append(["footprint",
+                     K.Q("Package_SON:Nexperia_HUSON-8_USON-8-1EP_1.35x1.7mm_P0.4mm_EP0.4x1.2mm"),
+                     ["layer", K.Q("F.Cu")], ["at", "20", "12"],
+                     ["property", K.Q("Reference"), K.Q(ref)],
+                     ["property", K.Q("Value"), K.Q("IP4252CZ8")],
+                     ["attr", "smd"], *pads])
+    at = tree.index(nets[-1]) + 1
+    tree[at:at] = added
+    return K.dump(tree) + "\n"
+
+
+class ASeriesPairIsStatedPerRef(unittest.TestCase):
+    """KiCad's IP4252CZ8 names both ends of each channel alike (CH1 on pins 1
+    and 8). With input and output on two nets it reads four shorts, until its
+    pairs are stated for its ref; a pair stated on another ref clears nothing,
+    and a pair the part does not give one name is a record for another
+    design."""
+
+    PAIRS = [["1", "8"], ["2", "7"], ["3", "6"], ["4", "5"]]
+    SOURCE = "Nexperia IP4252CZ8 datasheet: channel n runs from pin n to pin 9-n"
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-pcb-series-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.registry = _registry()
+
+    def _names(self, series, refs=("U3",), names=None):
+        board = _board_copy(self.root, _with_filter(_board_text(), refs, names))
+        return _run(self.registry, "pcb.pin_names", self.root,
+                    dict(_baseline(), pcb_board=board, pcb_pin_names_series=series))
+
+    def test_unstated_it_fails_and_stated_it_passes(self):
+        verdict = self._names({})
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 4), verdict.render())
+        self.assertIn("U3 CH1: U3_K1 on 1, U3_K1F on 8", verdict.detail)
+        verdict = self._names({"U3": {"pairs": self.PAIRS, "source": self.SOURCE}})
+        self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0), verdict.render())
+        self.assertIn("4 stated series pair(s) carry two nets, as pcb_pin_names_series "
+                      "says: U3 CH1 (1/8), U3 CH2 (2/7), U3 CH3 (3/6), U3 CH4 (4/5)",
+                      verdict.detail)
+        self.assertTrue(verdict.detail.startswith("every other repeated pin name carries "
+                                                  "one net"), verdict.detail)
+
+    def test_a_pair_stated_on_another_ref_still_fails(self):
+        verdict = self._names({"U4": {"pairs": self.PAIRS, "source": self.SOURCE}},
+                              refs=("U3", "U4"))
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 4), verdict.render())
+        self.assertIn("U3 CH1", verdict.detail)
+        self.assertNotIn("U4 CH1:", verdict.detail)
+
+    def test_a_record_for_another_design_errors(self):
+        for name, series, said in (
+                ("pins named apart", {"U3": {"pairs": [["1", "2"]], "source": self.SOURCE}},
+                 "U3 pins 1 and 2 are named CH1 and CH2, not one name"),
+                ("a ref the board lacks", {"U9": {"pairs": self.PAIRS, "source": self.SOURCE}},
+                 "the board has no U9"),
+                ("a pad the part lacks", {"U3": {"pairs": [["1", "10"]], "source": self.SOURCE}},
+                 "U3 has no pad 10"),
+                ("a name on more pins than the pair",
+                 {"U3": {"pairs": [["1", "8"]], "source": self.SOURCE}},
+                 "U3 names pins 1, 7, 8 CH1, and a series pair is the only two pins of "
+                 "its name")):
+            with self.subTest(case=name):
+                three = {"7": "CH1"} if name == "a name on more pins than the pair" else None
+                verdict = self._names(series, names=three)
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn("the record is for another design", verdict.error)
+                self.assertIn(said, verdict.error)
+
+    def test_a_record_read_loosely_errors(self):
+        for name, series, said in (
+                ("no source", {"U3": {"pairs": self.PAIRS, "source": ""}}, "source is empty"),
+                ("a misspelled key", {"U3": {"pair": self.PAIRS, "source": self.SOURCE}},
+                 "unknown key(s) ['pair']"),
+                ("not pairs", {"U3": {"pairs": [["1", "8", "2"]], "source": self.SOURCE}},
+                 "a list of [pin, pin]"),
+                ("not a map", [["1", "8"]], "is not {ref:")):
+            with self.subTest(case=name):
+                verdict = self._names(series)
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn(said, verdict.error)
 
 
 if __name__ == "__main__":

@@ -2,61 +2,70 @@
   "fab": "JLCPCB",
   "source": "https://jlcpcb.com/capabilities/pcb-capabilities",
   "read": "2026-10-17",
-  "_note": "Each min_mm is the page's own number, quoted beside it as read on that day. Where the page gives a recommended and an absolute minimum, the absolute minimum is used: this is the fab's floor, not good practice. Standard FR-4 service only; the page's cost-adder options (0.1 mm drills on boards 1 mm thick or less) are not assumed. Board size, soldermask web and BGA pads are not checked: KiCad has no constraint for the first, and the other two depend on the finish and mask colour ordered.",
-  "common": [
-    {"name": "via_hole", "constraint": "hole_size", "condition": "A.Type == 'Via'", "min_mm": 0.15,
-     "quote": "Min. Via hole size/diameter: 0.15/0.25mm"},
-    {"name": "via_diameter", "constraint": "via_diameter", "condition": "A.Type == 'Via'", "min_mm": 0.25,
-     "quote": "Min. Via hole size/diameter: 0.15/0.25mm"},
-    {"name": "pth_hole", "constraint": "hole_size", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.15,
-     "quote": "Multilayer: 0.15 - 6.3 mm (PTH); 2-layer: 0.15mm hole size"},
-    {"name": "npth_hole", "constraint": "hole_size", "condition": "A.Type == 'Pad' && A.Pad_Type == 'NPTH, mechanical'", "min_mm": 0.50,
-     "quote": "Min. Non-plated holes: 0.50mm"},
-    {"name": "hole_to_hole", "constraint": "hole_to_hole", "min_mm": 0.45,
-     "quote": "Pad Hole-to-Hole Spacing: 0.45mm"},
-    {"name": "via_hole_to_hole", "constraint": "hole_to_hole", "condition": "A.Type == 'Via' && B.Type == 'Via'", "min_mm": 0.20,
-     "quote": "Via Hole-to-Hole Spacing: 0.2mm"},
-    {"name": "edge_clearance", "constraint": "edge_clearance", "min_mm": 0.20,
-     "quote": "Copper clearance from routed board edges: >=0.2 mm"},
-    {"name": "silk_text_height", "constraint": "text_height", "layer": "?.Silkscreen", "min_mm": 1.0,
-     "quote": "Minimum text height: 40 mil (1.0mm)"},
-    {"name": "silk_text_thickness", "constraint": "text_thickness", "layer": "?.Silkscreen", "min_mm": 0.15,
-     "quote": "Minimum Line Width: >=0.15mm (silkscreen)"},
-    {"name": "silk_to_pad", "constraint": "silk_clearance", "condition": "A.Type == 'Pad' || B.Type == 'Pad'", "min_mm": 0.15,
-     "quote": "The Minimum Distance Between Pad and Silkscreen is 0.15mm."}
-  ],
-  "tables": [
-    {"name": "1-2 layers, 1 oz", "layers": [1, 2], "oz": [0, 1.0], "rules": [
-      {"name": "track_width", "constraint": "track_width", "min_mm": 0.10,
-       "quote": "1- and 2-layer: 0.10 / 0.10 mm (4 / 4 mil)"},
-      {"name": "clearance", "constraint": "clearance", "min_mm": 0.10,
-       "quote": "1- and 2-layer: 0.10 / 0.10 mm (4 / 4 mil)"},
-      {"name": "pth_annular", "constraint": "annular_width", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.18,
-       "quote": "2-layer: 1 oz: Recommended 0.25 mm or above; absolute minimum 0.18 mm"}
-    ]},
-    {"name": "1-2 layers, 2 oz", "layers": [1, 2], "oz": [1.0, 2.0], "rules": [
-      {"name": "track_width", "constraint": "track_width", "min_mm": 0.16,
-       "quote": "Min. trace width/spacing (2 oz), 1- and 2-layer: 0.16 / 0.16 mm (6.5 / 6.5 mil)"},
-      {"name": "clearance", "constraint": "clearance", "min_mm": 0.16,
-       "quote": "Min. trace width/spacing (2 oz), 1- and 2-layer: 0.16 / 0.16 mm (6.5 / 6.5 mil)"},
-      {"name": "pth_annular", "constraint": "annular_width", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.254,
-       "quote": "Annular ring, 2 oz: 0.254 mm+"}
-    ]},
-    {"name": "multilayer, 1 oz", "layers": [3, 64], "oz": [0, 1.0], "rules": [
-      {"name": "track_width", "constraint": "track_width", "min_mm": 0.09,
-       "quote": "Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs."},
-      {"name": "clearance", "constraint": "clearance", "min_mm": 0.09,
-       "quote": "Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs."},
-      {"name": "pth_annular", "constraint": "annular_width", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.15,
-       "quote": "Multilayer: 1 oz: Recommended 0.20 mm or above; absolute minimum 0.15 mm"}
-    ]},
-    {"name": "multilayer, 2 oz", "layers": [3, 64], "oz": [1.0, 2.0], "rules": [
-      {"name": "track_width", "constraint": "track_width", "min_mm": 0.15,
-       "quote": "Min. trace width/spacing (2 oz), Multilayer: 0.15 / 0.15 mm (6 / 6 mil)"},
-      {"name": "clearance", "constraint": "clearance", "min_mm": 0.15,
-       "quote": "Min. trace width/spacing (2 oz), Multilayer: 0.15 / 0.15 mm (6 / 6 mil)"},
-      {"name": "pth_annular", "constraint": "annular_width", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.254,
-       "quote": "Annular ring, 2 oz: 0.254 mm+"}
-    ]}
+  "_note": "Each min_mm is the page's own number, quoted beside it as read on that day. Where the page gives a recommended and an absolute minimum, the absolute minimum is used: this is the fab's floor, not good practice. One service, the standard FR-4 one; the page's cost-adder options (0.1 mm drills on boards 1 mm thick or less) are not assumed. Board size, soldermask web and BGA pads are not checked: KiCad has no constraint for the first, and the other two depend on the finish and mask colour ordered.",
+  "services": [
+    {
+      "name": "standard",
+      "materials": ["FR4"],
+      "via_types": ["through"],
+      "read": "2026-11-24",
+      "quote": "Materials: 'FR-4: Grade A laminates from suppliers including Nan Ya, KB, Shengyi and etc.' Vias: 'Standard options include mechanical drilling, regular trace/space, and common surface finishes with faster lead times.' and 'Advanced options such as blind/buried vias, HDI (laser vias), heavy copper (up to 3oz), and tight impedance control ... typically require DFM review'. So the standard service is FR-4 with mechanically drilled through vias; blind, buried and laser microvias are another service, with limits of their own (blind via diameter 0.075-0.15 mm; buried 0.15-0.55 mm) that this file does not hold. Aluminium, copper-core, Rogers/PTFE and flex boards are other services on other pages.",
+      "common": [
+        {"name": "via_hole", "constraint": "hole_size", "condition": "A.Type == 'Via'", "min_mm": 0.15,
+         "quote": "Min. Via hole size/diameter: 0.15/0.25mm"},
+        {"name": "via_diameter", "constraint": "via_diameter", "condition": "A.Type == 'Via'", "min_mm": 0.25,
+         "quote": "Min. Via hole size/diameter: 0.15/0.25mm"},
+        {"name": "pth_hole", "constraint": "hole_size", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.15,
+         "quote": "Multilayer: 0.15 - 6.3 mm (PTH); 2-layer: 0.15mm hole size"},
+        {"name": "npth_hole", "constraint": "hole_size", "condition": "A.Type == 'Pad' && A.Pad_Type == 'NPTH, mechanical'", "min_mm": 0.50,
+         "quote": "Min. Non-plated holes: 0.50mm"},
+        {"name": "hole_to_hole", "constraint": "hole_to_hole", "min_mm": 0.45,
+         "quote": "Pad Hole-to-Hole Spacing: 0.45mm"},
+        {"name": "via_hole_to_hole", "constraint": "hole_to_hole", "condition": "A.Type == 'Via' && B.Type == 'Via'", "min_mm": 0.20,
+         "quote": "Via Hole-to-Hole Spacing: 0.2mm"},
+        {"name": "edge_clearance", "constraint": "edge_clearance", "min_mm": 0.20,
+         "quote": "Copper clearance from routed board edges: >=0.2 mm"},
+        {"name": "silk_text_height", "constraint": "text_height", "layer": "?.Silkscreen", "min_mm": 1.0,
+         "quote": "Minimum text height: 40 mil (1.0mm)"},
+        {"name": "silk_text_thickness", "constraint": "text_thickness", "layer": "?.Silkscreen", "min_mm": 0.15,
+         "quote": "Minimum Line Width: >=0.15mm (silkscreen)"},
+        {"name": "silk_to_pad", "constraint": "silk_clearance", "condition": "A.Type == 'Pad' || B.Type == 'Pad'", "min_mm": 0.15,
+         "quote": "The Minimum Distance Between Pad and Silkscreen is 0.15mm."}
+      ],
+      "tables": [
+        {"name": "1-2 layers, 1 oz", "layers": [1, 2], "oz": [0, 1.0], "rules": [
+          {"name": "track_width", "constraint": "track_width", "min_mm": 0.10,
+           "quote": "1- and 2-layer: 0.10 / 0.10 mm (4 / 4 mil)"},
+          {"name": "clearance", "constraint": "clearance", "min_mm": 0.10,
+           "quote": "1- and 2-layer: 0.10 / 0.10 mm (4 / 4 mil)"},
+          {"name": "pth_annular", "constraint": "annular_width", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.18,
+           "quote": "2-layer: 1 oz: Recommended 0.25 mm or above; absolute minimum 0.18 mm"}
+        ]},
+        {"name": "1-2 layers, 2 oz", "layers": [1, 2], "oz": [1.0, 2.0], "rules": [
+          {"name": "track_width", "constraint": "track_width", "min_mm": 0.16,
+           "quote": "Min. trace width/spacing (2 oz), 1- and 2-layer: 0.16 / 0.16 mm (6.5 / 6.5 mil)"},
+          {"name": "clearance", "constraint": "clearance", "min_mm": 0.16,
+           "quote": "Min. trace width/spacing (2 oz), 1- and 2-layer: 0.16 / 0.16 mm (6.5 / 6.5 mil)"},
+          {"name": "pth_annular", "constraint": "annular_width", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.254,
+           "quote": "Annular ring, 2 oz: 0.254 mm+"}
+        ]},
+        {"name": "multilayer, 1 oz", "layers": [3, 64], "oz": [0, 1.0], "rules": [
+          {"name": "track_width", "constraint": "track_width", "min_mm": 0.09,
+           "quote": "Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs."},
+          {"name": "clearance", "constraint": "clearance", "min_mm": 0.09,
+           "quote": "Multilayer: 0.09 / 0.09 mm (3.5 / 3.5 mil). 3 mil is acceptable in BGA fan-outs."},
+          {"name": "pth_annular", "constraint": "annular_width", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.15,
+           "quote": "Multilayer: 1 oz: Recommended 0.20 mm or above; absolute minimum 0.15 mm"}
+        ]},
+        {"name": "multilayer, 2 oz", "layers": [3, 64], "oz": [1.0, 2.0], "rules": [
+          {"name": "track_width", "constraint": "track_width", "min_mm": 0.15,
+           "quote": "Min. trace width/spacing (2 oz), Multilayer: 0.15 / 0.15 mm (6 / 6 mil)"},
+          {"name": "clearance", "constraint": "clearance", "min_mm": 0.15,
+           "quote": "Min. trace width/spacing (2 oz), Multilayer: 0.15 / 0.15 mm (6 / 6 mil)"},
+          {"name": "pth_annular", "constraint": "annular_width", "condition": "A.Type == 'Pad' && A.Pad_Type == 'Through-hole'", "min_mm": 0.254,
+           "quote": "Annular ring, 2 oz: 0.254 mm+"}
+        ]}
+      ]
+    }
   ]
 }

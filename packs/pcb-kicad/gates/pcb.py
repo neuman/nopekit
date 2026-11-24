@@ -2,14 +2,14 @@
 """pcb-kicad — gates for a printed circuit board drawn in KiCad.
 
     pcb.board_readable   tier 0  the board is a KiCad file this reader knows (the guard)
-    pcb.pin_names        tier 0  pins the library gives one name carry one net (names from the schematic, else the pads)
+    pcb.pin_names        tier 0  pins the library gives one name carry one net, but stated series pairs
     pcb.land_pattern     tier 0  each named footprint's land fits its vendor's drawing, pads paired by function
     pcb.net_width        tier 0  every track of each current-carrying net, IPC-2221
     pcb.drc              tier 1  KiCad's design rule check, every severity, every custom rule probed
     pcb.unconnected      tier 1  KiCad's count of connections the copper never makes
     pcb.erc              tier 1  KiCad's electrical rules check of the schematic
     pcb.parity           tier 1  KiCad's comparison of the board with its schematic
-    pcb.fab_rules        tier 1  KiCad's DRC with a fab's published minimums as its rules
+    pcb.fab_rules        tier 1  KiCad's DRC with the fab's published minimums for the board's service
     pcb.spice            tier 1  one .meas of ngspice on the project's deck, against a band
     pcb.enclosure_fit    tier 1  the populated board's 3D models against the enclosure
 
@@ -144,13 +144,22 @@ _NO_BOARD = ("no pcb_board: the .kicad_pcb this pack checks, relative to the pro
 def board_readable(ctx: GateContext) -> Verdict:
     """The validity guard: whether the tier-0 gates' numbers mean anything.
 
-    It fails when the board is a file this reader was not written for (older than
-    KiCad 6, newer than KiCad 9), does not parse, or has tracks or pads whose net
-    code the net table does not define. In each case ``pcb.net_width`` would read
-    a net's tracks wrongly or not at all, and a net with no tracks found reads as
-    nothing to judge, which is a pass by omission. ``pcb.pin_names`` and
-    ``pcb.net_width`` need it. KiCad's own gates do not: KiCad reads the file
-    itself.
+    It fails when the board is older than KiCad 6, does not parse, or has tracks or
+    vias whose net code the net table does not define (formats before KiCad 10's
+    20251028, which write codes). In each case ``pcb.net_width`` would read a
+    net's tracks wrongly or not at all, and a net with no tracks found reads as
+    nothing to judge, which is a pass by omission. ``pcb.pin_names``,
+    ``pcb.net_width`` and ``pcb.land_pattern`` need it. KiCad's own gates do not:
+    KiCad reads the file itself.
+
+    It skips a file newer than the newest format this reader was checked through
+    (``_kicad.reader_ceiling``): a newer format is a limit of the reader, not a
+    defect in the board, so the gates that need this one read Skipped,
+    "prerequisite not established", never Failing. (What slipped through: a newer
+    file read FAIL, so every board saved by current KiCad read as a defective
+    file, a claim on this guard as Failing and every gate that needs it as
+    "prerequisite failed".) Nets are read by code and by name, as KiCad 10 writes
+    them; the ceiling moves only when a KiCad 10 board passes the reader.
     """
     gid = "pcb.board_readable"
     path = _board_path(ctx)
@@ -165,9 +174,13 @@ def board_readable(ctx: GateContext) -> Verdict:
     version, problems = K.board_problems(tree)
     if version is None:
         return Verdict(gate=gid, passed=False, detail=problems[0])
+    ceiling = K.reader_ceiling(version)
+    if ceiling:
+        return _skip(gid, f"{ceiling}: a newer format is a limit of this reader, not a "
+                          f"defect in the board, so nothing on it is judged here")
     board = K.board_from_tree(tree)
     copper = sorted({t.layer for t in board.tracks})
-    detail = (f"KiCad board version {version}: {len(board.nets)} net(s), "
+    detail = (f"KiCad board version {version}: {len(board.net_names)} net(s), "
               f"{len(board.footprints)} footprint(s), {len(board.tracks)} track(s) on "
               f"{', '.join(copper) or 'no layer'}")
     return Verdict(gate=gid, passed=not problems,
@@ -233,6 +246,64 @@ def _pad_names(ctx: GateContext, board) -> tuple[dict[str, dict[str, str]], set[
     return names, set(placed) & set(names)
 
 
+#: The keys of one entry of ``pcb_pin_names_series``.
+_SERIES_KEYS = ("pairs", "source")
+
+
+def _series_pairs(ctx: GateContext, board, names: dict) -> dict | str:
+    """``pcb_pin_names_series`` read as ``{(ref, name): (pin, pin)}``, or why it is
+    refused.
+
+    The record is ``{ref: {pairs: [[pin, pin], ...], source}}``: on that ref, each
+    pair is the two ends of one series element (a filter array's channel), which
+    the library names alike although the part does not join them. Each pair must
+    name two pads of the ref that the part gives one name, and no other pad of the
+    ref may carry that name: a pair names the two ends of one element, and a third
+    pin of that name would be joined to one of them inside, which no statement
+    can say. Anything else is "the record is for another design". (Rejected:
+    ``pcb_pin_names_ignore``, which would hide every conflict on that name on every
+    part; a pair stated for a name, not a ref, which would clear another part's
+    real short.)"""
+    record = ctx.param("pcb_pin_names_series", {})
+    if not isinstance(record, dict):
+        return "pcb_pin_names_series is not {ref: {pairs: [[pin, pin]], source}}"
+    by_ref = {fp.ref: fp for fp in board.footprints}
+    out: dict[tuple[str, str], tuple[str, str]] = {}
+    for ref, entry in sorted(record.items()):
+        label = f"pcb_pin_names_series[{ref!r}]"
+        if not isinstance(entry, dict):
+            return f"{label} is not a JSON object with pairs and a source"
+        unknown = sorted(set(entry) - set(_SERIES_KEYS))
+        if unknown:
+            return f"{label} has unknown key(s) {unknown}: it takes {list(_SERIES_KEYS)}"
+        if not str(entry.get("source") or "").strip():
+            return f"{label}'s source is empty: say where the part's series pairs come from"
+        pairs = entry.get("pairs")
+        if not isinstance(pairs, list) or not pairs or not all(
+                isinstance(p, list) and len(p) == 2 for p in pairs):
+            return f"{label}'s pairs must be a list of [pin, pin]"
+        if ref not in by_ref:
+            return f"{label}: the record is for another design: the board has no {ref}"
+        pads = names.get(ref, {})
+        for a, b in (tuple(str(x) for x in p) for p in pairs):
+            missing = [x for x in (a, b) if x not in pads]
+            if missing or a == b:
+                return (f"{label}: the record is for another design: {ref} has no pad "
+                        f"{', '.join(missing) or a + ' paired with itself'}")
+            na, nb = (pads[a] or "").strip(), (pads[b] or "").strip()
+            if not na or na != nb:
+                return (f"{label}: the record is for another design: {ref} pins {a} and "
+                        f"{b} are named {na or '(no name)'} and {nb or '(no name)'}, not "
+                        f"one name")
+            same = sorted(n for n, name in pads.items() if (name or "").strip() == na)
+            if same != sorted([a, b]):
+                return (f"{label}: the record is for another design: {ref} names pins "
+                        f"{', '.join(same)} {na}, and a series pair is the only two pins "
+                        f"of its name")
+            out[(ref, na)] = tuple(sorted([a, b]))
+    return out
+
+
 @gate(
     id="pcb.pin_names",
     basis="sourced",
@@ -269,9 +340,17 @@ def pin_names(ctx: GateContext) -> Verdict:
     (``pcb_pin_names_ignore``) because an unused pin may legitimately sit on any
     net; a generic connector's ``Pin_1``... are each one pin's, and never conflict.
 
+    ``pcb_pin_names_series`` states, per ref, the pairs of pins that are the two
+    ends of one series element although the library names them alike (an EMI
+    filter array names both ends of a channel ``CH1``): each stated pair may carry
+    two nets (:func:`_series_pairs`). A pair stated on one ref clears nothing on
+    another.
+
     What slipped through: the source pipeline's board carried no pinfunction, so
     this gate skipped on it, and two nets on two pins its ESD array joins inside
-    went to a person to find.
+    went to a person to find. And, in the review for handheld boards, every filter
+    array whose symbol names both ends of a channel alike read FAIL, with nothing a
+    person could state but an ignore that hid the name on every part.
     """
     gid = "pcb.pin_names"
     path = _board_path(ctx)
@@ -283,21 +362,31 @@ def pin_names(ctx: GateContext) -> Verdict:
     except (K.KicadFormatError, UnicodeDecodeError, FileNotFoundError) as exc:
         return Verdict(gate=gid, passed=False,
                        error=f"the schematic beside the board cannot be read: {exc}")
+    series = _series_pairs(ctx, board, names)
+    if isinstance(series, str):
+        return Verdict(gate=gid, passed=False, error=series)
     # A copy with the names in it: the board ``ctx.load_file`` hands out is shared
     # by every gate that loads it, and is never written to.
     named_board = dataclasses.replace(board, footprints=[
         dataclasses.replace(fp, pads=[dataclasses.replace(p, pinfunction=names[fp.ref].get(
             p.number, "")) for p in fp.pads]) for fp in board.footprints])
     ignore = ctx.param("pcb_pin_names_ignore", list(K.NO_FUNCTION_NAMES))
-    conflicts, named, fps_named = K.pin_name_conflicts(named_board, ignore)
+    found, named, fps_named = K.pin_name_conflicts(named_board, ignore)
     if named == 0:
         return _skip(gid, "no pin names: no pad carries a pinfunction and no schematic "
                           "places this board's parts, so there is nothing to compare its "
                           "nets against")
+    conflicts = [c for c in found if (c[0], c[1]) not in series]
+    stated = [c for c in found if (c[0], c[1]) in series]
     ev = _evidence(ctx, "pin_names", {
         "footprints": len(board.footprints), "footprints_with_pin_names": fps_named,
         "named_from_schematic": sorted(from_schematic),
         "named_pads": named, "ignored_names": list(ignore),
+        "series_pairs": [{"ref": r, "name": n, "pins": list(p)}
+                         for (r, n), p in sorted(series.items())],
+        "series_source": {r: str(e["source"]) for r, e in sorted(
+            ctx.param("pcb_pin_names_series", {}).items())},
+        "two_nets_as_stated": [{"ref": r, "name": n, "nets": by} for r, n, by in stated],
         "conflicts": [{"ref": r, "name": n, "nets": by} for r, n, by in conflicts]})
     if conflicts:
         worst = "; ".join(f"{r} {n}: " + ", ".join(f"{net} on {'/'.join(p)}"
@@ -306,8 +395,13 @@ def pin_names(ctx: GateContext) -> Verdict:
         detail = (f"{len(conflicts)} pin name(s) carry more than one net, a short "
                   f"through the part: {worst}")
     else:
-        detail = (f"every repeated pin name carries one net ({named} named pad(s) on "
-                  f"{fps_named} of {len(board.footprints)} footprint(s))")
+        detail = (f"every {'other ' if stated else ''}repeated pin name carries one net "
+                  f"({named} named pad(s) on {fps_named} of {len(board.footprints)} "
+                  f"footprint(s))")
+    if stated:
+        detail += (f"; {len(stated)} stated series pair(s) carry two nets, as "
+                   f"pcb_pin_names_series says: " + ", ".join(
+                       f"{r} {n} ({'/'.join(series[(r, n)])})" for r, n, _by in stated))
     return Verdict(gate=gid, passed=not conflicts, measured=len(conflicts), limit=0,
                    comparator="<=", units="pin names", detail=detail, evidence=ev)
 
@@ -315,11 +409,29 @@ def pin_names(ctx: GateContext) -> Verdict:
 # --------------------------------------------------------------------------- #
 # a footprint's land against its vendor's drawing
 # --------------------------------------------------------------------------- #
-#: The most pad assignments the land fit tries: the product, over each function
-#: several pads share (MP, GND, COM), of its count factorial. 5040 is 7!, a
-#: ground row of seven pads; a part past it errors rather than guess. Rejected:
-#: a greedy nearest-pad pairing, which a land drawn mirrored can satisfy.
+#: The most pad assignments the land fit tries. Every assignment is tried, each
+#: with its own fit, while the product, over each function several pads share
+#: (MP, GND, COM), of its count factorial stays within it. Past it the fit is
+#: anchored (:func:`_land_fit`), and the anchored search costs the SUM of those
+#: factorials, held to the same number. 5040 is 7!, a ground row of seven pads; a
+#: part past it either way errors rather than guess. (What slipped through: with
+#: the product alone, KiCad's stock USB-C 16P receptacle, whose symbol repeats GND
+#: x4, VBUS x4, D+ x2 and D- x2 and whose footprint repeats S1 x4, came to
+#: 4!*4!*2*2*4! = 55,296 pairings, so every board with one errored; the anchored
+#: search tries 4!+4!+2+2+4! = 76.) Rejected: a greedy nearest-pad pairing, which
+#: a land drawn mirrored can satisfy; a higher cap (the product grows faster than
+#: any cap a check run can afford).
 MAX_ASSIGNMENTS = 5040
+
+#: How :func:`_land_fit` may pair a board pad with a drawing's pad. ``function``,
+#: the pin name, is the land's: ``pcb.land_pattern`` pairs by nothing else, since a
+#: footprint may number a pad the other way from its vendor (an LED whose vendor
+#: numbers its cathode 2) and still be right. ``number`` registers a drawing that
+#: carries no functions onto a footprint (a keep-out drawn around a module's
+#: numbered pads), never to judge a land. Rejected: number-first pairing for the
+#: land (it reads FAIL when a footprint numbers a same-function row differently
+#: from the vendor, which is harmless).
+PAIRINGS = ("function", "number")
 
 #: The keys of one pad in a drawing record.
 _LAND_KEYS = ("number", "function", "x", "y", "w", "h")
@@ -350,45 +462,119 @@ def _drawing(record) -> list[dict] | str:
     return pads
 
 
-def _land_fit(ref: str, board_pads: list, vendor: list) -> dict | str:
+def _pairing(groups: list, fb: dict, perm) -> tuple[list, list]:
+    """``(point pairs, meta)`` of one assignment: each group's board pads with
+    the drawing pads ``perm`` gives it, in order. A pair carries the drawing
+    pad's centre first, the board pad's second; meta is ``(key, board pad number,
+    drawing pad number, limit mm)``, the limit half the smaller side of the
+    smaller of the two pads."""
+    pairs, meta = [], []
+    for key, assigned in zip(groups, perm):
+        for b, v in zip(fb[key], assigned):
+            pairs.append(((v["x"], v["y"]), (b.x, b.y)))
+            meta.append((key, b.number, v["number"], min(b.w, b.h, v["w"], v["h"]) / 2.0))
+    return pairs, meta
+
+
+def _judged(res: list, meta: list) -> tuple[float, int]:
+    """``(worst residual over its limit, index of that pad)``."""
+    worst = max(range(len(res)), key=lambda i: res[i] / meta[i][3])
+    return res[worst] / meta[worst][3], worst
+
+
+def _land_fit(ref: str, board_pads: list, vendor: list,
+              pair_by: str = "function") -> dict | str:
     """Pair ``board_pads`` ([(function, LandPad)]) with ``vendor`` pads by
-    function, every assignment within a repeated function tried, and fit each
-    assignment rigidly; the one whose worst pad is least past its limit is kept.
-    Returns the fit, or why it cannot be made."""
+    ``pair_by`` (:data:`PAIRINGS`: the function, else the pad number) and fit the
+    drawing onto the land rigidly, no mirror. Returns the fit, or why it cannot be
+    made.
+
+    Where every assignment within the repeated keys costs no more than
+    :data:`MAX_ASSIGNMENTS`, each is tried, each with its own fit, and the one
+    whose worst pad is least past its limit is kept. Past it, the fit is anchored:
+    the rigid transform is fitted on the pads whose key is on one pad alone (a
+    land drawn mirrored still misfits them); with that transform fixed, the
+    repeated keys no longer depend on each other, so each one's pads are assigned
+    on their own, the assignment whose worst pad is least past its limit; then
+    the drawing is fitted once more on every pair and judged as before. With
+    fewer than two anchors, or a sum past the cap, it errors. Every assignment the
+    full search could afford is still tried in full, so no land that fitted before
+    the anchored search existed reads differently now.
+
+    The fit's ``function`` fields hold the key it paired by, which
+    ``paired_by`` names.
+    """
+    if pair_by not in PAIRINGS:
+        raise ValueError(f"pair_by {pair_by!r}: pads pair by one of {list(PAIRINGS)}")
+    word = "function" if pair_by == "function" else "number"
     fb: dict[str, list] = {}
     fv: dict[str, list] = {}
     for f, pad in board_pads:
-        fb.setdefault(f, []).append(pad)
+        fb.setdefault(pad.number if pair_by == "number" else f, []).append(pad)
     for pad in vendor:
-        fv.setdefault(pad["function"], []).append(pad)
+        fv.setdefault(pad[pair_by], []).append(pad)
     for f, pads in fv.items():
         if f not in fb:
-            return f"{ref}: the drawing's function {f} is on no pad of the board's footprint"
+            return f"{ref}: the drawing's {word} {f} is on no pad of the board's footprint"
         if len(fb[f]) != len(pads):
-            return (f"{ref}: the drawing has {len(pads)} pad(s) of function {f}, the board "
+            return (f"{ref}: the drawing has {len(pads)} pad(s) of {word} {f}, the board "
                     f"{len(fb[f])}")
     groups = sorted(fv)
-    tries = math.prod(math.factorial(len(fv[f])) for f in groups)
-    if tries > MAX_ASSIGNMENTS:
-        return (f"{ref}: {tries} ways to pair its repeated functions, past "
-                f"{MAX_ASSIGNMENTS}: split a function the part repeats (GND_1, GND_2)")
     if sum(len(fv[f]) for f in groups) < 2:
-        return f"{ref}: fewer than two pads pair by function, and one pad fixes no land"
-    best = None
-    for perm in itertools.product(*(itertools.permutations(fv[f]) for f in groups)):
-        pairs, meta = [], []
-        for f, assigned in zip(groups, perm):
-            for b, v in zip(fb[f], assigned):
-                pairs.append(((v["x"], v["y"]), (b.x, b.y)))
-                meta.append((f, b.number, v["number"],
-                             min(b.w, b.h, v["w"], v["h"]) / 2.0))
+        return f"{ref}: fewer than two pads pair by {word}, and one pad fixes no land"
+    tries = math.prod(math.factorial(len(fv[f])) for f in groups)
+    search = f"every assignment ({tries})"
+    if tries <= MAX_ASSIGNMENTS:
+        best = None
+        for perm in itertools.product(*(itertools.permutations(fv[f]) for f in groups)):
+            pairs, meta = _pairing(groups, fb, perm)
+            angle, res = K.rigid_fit(pairs)
+            key, worst = _judged(res, meta)
+            if best is None or key < best[0] - 1e-12:
+                best = (key, angle, res, meta, worst)
+        _key, angle, res, meta, worst = best
+    else:
+        anchors = [f for f in groups if len(fv[f]) == 1]
+        repeated = [f for f in groups if len(fv[f]) > 1]
+        cost = sum(math.factorial(len(fv[f])) for f in repeated)
+        if len(anchors) < 2 or cost > MAX_ASSIGNMENTS:
+            why = (f"fewer than two of its {word}s sit on one pad alone to anchor the fit"
+                   if len(anchors) < 2 else
+                   f"{cost} ways even with the fit anchored on its {len(anchors)} pad(s) "
+                   f"of a {word} of their own")
+            return (f"{ref}: {tries} ways to pair its repeated {word}s, past "
+                    f"{MAX_ASSIGNMENTS}, and {why}: split a function the part repeats "
+                    f"(GND_1, GND_2)")
+        anchor_pairs = [((fv[f][0]["x"], fv[f][0]["y"]), (fb[f][0].x, fb[f][0].y))
+                        for f in anchors]
+        cx = sum(a[0] for a, _ in anchor_pairs) / len(anchors)
+        cy = sum(a[1] for a, _ in anchor_pairs) / len(anchors)
+        if max(math.hypot(a[0] - cx, a[1] - cy) for a, _ in anchor_pairs) < 1e-9:
+            return (f"{ref}: its {len(anchors)} pad(s) of a {word} of their own sit on one "
+                    f"point, which fixes no rotation to anchor the fit")
+        _theta, carry = K.rigid_transform(anchor_pairs)
+        chosen = []
+        for f in groups:
+            if len(fv[f]) == 1:
+                chosen.append(tuple(fv[f]))
+                continue
+            pick = None
+            for perm in itertools.permutations(fv[f]):
+                res = [math.dist(carry((v["x"], v["y"])), (b.x, b.y))
+                       for b, v in zip(fb[f], perm)]
+                lims = [min(b.w, b.h, v["w"], v["h"]) / 2.0 for b, v in zip(fb[f], perm)]
+                key = (max(r / lim for r, lim in zip(res, lims)), sum(r * r for r in res))
+                if pick is None or key[0] < pick[0][0] - 1e-12 or (
+                        abs(key[0] - pick[0][0]) <= 1e-12 and key[1] < pick[0][1] - 1e-12):
+                    pick = (key, perm)
+            chosen.append(pick[1])
+        pairs, meta = _pairing(groups, fb, chosen)
         angle, res = K.rigid_fit(pairs)
-        worst = max(range(len(res)), key=lambda i: res[i] / meta[i][3])
-        key = res[worst] / meta[worst][3]
-        if best is None or key < best[0] - 1e-12:
-            best = (key, angle, res, meta, worst)
-    _key, angle, res, meta, worst = best
-    return {"ref": ref, "rotation_deg": round(angle, 3),
+        _key, worst = _judged(res, meta)
+        search = (f"anchored on {len(anchors)} pad(s) of a {word} of their own, "
+                  f"{cost} assignment(s) of the rest")
+    return {"ref": ref, "paired_by": pair_by, "search": search,
+            "rotation_deg": round(angle, 3),
             "rms_mm": round(math.sqrt(sum(r * r for r in res) / len(res)), 4),
             "worst": {"function": meta[worst][0], "board_pad": meta[worst][1],
                       "drawing_pad": meta[worst][2], "residual_mm": round(res[worst], 4),
@@ -433,7 +619,11 @@ def land_pattern(ctx: GateContext) -> Verdict:
     still put a function on the wrong pad (an LED whose vendor numbers its cathode
     pad 2, so a land paired by number fits upside down), and a switch's land drawn
     from another part's drawing put its middle pad well off where the vendor's
-    sits. DRC and the netlist accept both.
+    sits. DRC and the netlist accept both. And a part that repeats many functions
+    (a USB-C receptacle: GND, VBUS, D+, D-, the shield) had more pairings than the
+    full search can try, and errored on every board: past that count the fit is
+    anchored on the pads of a function of their own (:func:`_land_fit`), still
+    never by number.
 
     ``pcb_land_drawings`` is ``{ref: drawing record}``, each a JSON file from the
     project root: ``{part, source, view: "top", y_axis: "up"|"down", pads:
@@ -507,11 +697,12 @@ def land_pattern(ctx: GateContext) -> Verdict:
     w = worst["worst"]
     ev = _evidence(ctx, "land_pattern", {"fits": fits, "notes": notes})
     passed = w["residual_mm"] <= w["limit_mm"]
+    anchored = (f" ({worst['search']})" if worst["search"].startswith("anchored") else "")
     detail = (f"{worst['ref']} pad {w['board_pad']} ({w['function']}) sits {w['residual_mm']:g} mm "
               f"from the drawing's pad {w['drawing_pad']} after the best rigid fit (no "
               f"mirror) vs {w['limit_mm']:g} mm (half its smaller pad's smaller side); RMS "
-              f"{worst['rms_mm']:g} mm over {len(worst['pairs'])} pad(s) paired by function, "
-              f"rotation {worst['rotation_deg']:g} deg")
+              f"{worst['rms_mm']:g} mm over {len(worst['pairs'])} pad(s) paired by function"
+              f"{anchored}, rotation {worst['rotation_deg']:g} deg")
     if len(fits) > 1:
         detail += f"; {len(fits)} footprint(s) fitted: " + ", ".join(
             f"{f['ref']} {f['worst']['residual_mm']:g}/{f['worst']['limit_mm']:g} mm"
@@ -1226,10 +1417,28 @@ def _zeroed_project(src: str | None, dst: str, table: dict) -> set[str]:
     return raised
 
 
+def _service_gaps(tree: list, service: dict) -> tuple[list[str], list[str]]:
+    """``(gaps, what the board is built of)``: the gaps are each dielectric the
+    board's stackup names and each via kind it holds that ``service`` does not
+    list (``_kicad.stackup_dielectrics``, ``_kicad.via_kinds``)."""
+    materials, stated = K.stackup_dielectrics(tree)
+    kinds = K.via_kinds(tree)
+    offered = {K.material_key(m) for m in service["materials"]}
+    gaps = [f"dielectric {m or '(unnamed)'}" for m in materials
+            if K.material_key(m) not in offered]
+    gaps += [f"{kinds[k]} {k} via(s)" for k in K.VIA_KINDS
+             if kinds[k] and k not in service["via_types"]]
+    built = [f"dielectric {', '.join(m or '(unnamed)' for m in materials) or '(none named)'}"
+             + ("" if stated else " (KiCad's default: the board states no stackup)")]
+    built += [f"{kinds[k]} {k} via(s)" for k in K.VIA_KINDS if kinds[k]]
+    return gaps, built
+
+
 @gate(
     id="pcb.fab_rules",
     basis="sourced",
-    title="The board stays inside its fab's published limits",
+    title=("The board stays inside the named fab's published limits for the service it "
+           "is ordered on"),
     claims=["pcb", "manufacturability", "fab-limits"],
     tier=Tier.BUILD,
     settles="fab capability limits",
@@ -1248,8 +1457,17 @@ def fab_rules(ctx: GateContext) -> Verdict:
 
     ``pcb_fab`` names the fab: ``jlcpcb`` (``gates/fab/jlcpcb.json``, each number
     quoted from the fab's capability page with the day it was read), or a path,
-    from the project root, to a file of the same shape. The row is picked by the
-    board's copper layer count and ``pcb_copper_oz_outer``. The rules are written
+    from the project root, to a file of the same shape. A fab file lists the
+    services it publishes limits for, each with the dielectrics and via kinds it
+    builds; ``pcb_fab_service`` names the one the board is ordered on, and may be
+    left out when the file has one. A board whose stackup names a dielectric, or
+    that holds a via kind, the service does not list skips, naming the gap: a
+    polyimide flex or a microvia board is never judged on a rigid FR-4 service's
+    rows. (What slipped through, in the review for handheld boards: a flex or
+    rigid-flex wearable and an HDI board with microvias were held to the standard
+    FR-4 rows, and could read PASS on rules that are not their process.) The row
+    is picked by the board's copper layer count and ``pcb_copper_oz_outer``. The
+    rules are written
     as the staged board's ``.kicad_dru`` and the staged project's own minimums are
     zeroed (its minimum clearance set to the fab's), so a finding of a
     constrained type is the fab's, except silk on silk: KiCad reports it as
@@ -1285,16 +1503,36 @@ def fab_rules(ctx: GateContext) -> Verdict:
                        error=f"pcb_fab {fab_name!r}: no fab file at {fab_path} "
                              f"(bundled: {', '.join(known)})")
     fab = ctx.load_file(fab_path, loader=_load_json)
+    who = fab.get("fab", fab_name)
+    wanted = ctx.param("pcb_fab_service")
+    try:
+        service = K.fab_service(fab, None if wanted is None else str(wanted))
+    except ValueError as exc:
+        return Verdict(gate=gid, passed=False, error=f"pcb_fab {fab_name!r}: {exc}")
+    if service is None:
+        listed = ", ".join(str(s["name"]) for s in K.fab_services(fab))
+        return _skip(gid, f"{who} publishes limits for several services ({listed}) and "
+                          f"there is no pcb_fab_service: which one this board is ordered "
+                          f"on is a purchasing decision this pack will not guess")
     if not os.path.isfile(path):
         return Verdict(gate=gid, passed=False, detail=f"no board at {path}")
     tree = ctx.load_file(path, loader=K.load_tree)
+    gaps, built = _service_gaps(tree, service)
+    if gaps:
+        return _skip(gid, f"the board has {', '.join(gaps)}, which {who}'s "
+                          f"{service['name']} service does not list (it builds "
+                          f"{', '.join(service['materials'])}; "
+                          f"{', '.join(service['via_types'])} vias): its limits are for "
+                          f"another process, so the board is not judged on them. Name a "
+                          f"service that lists them (pcb_fab_service), or a fab file "
+                          f"that does (pcb_fab)")
     layers = K.copper_layer_count(tree)
     oz = ctx.param("pcb_copper_oz_outer")
     oz_note = "" if oz is not None else " [pack default]"
     oz = DEFAULT_OZ_OUTER if oz is None else float(oz)
-    table = K.fab_table(fab, layers, oz)
+    table = K.fab_table(fab, layers, oz, str(service["name"]))
     if table is None:
-        return _skip(gid, f"{fab.get('fab', fab_name)} publishes no limits for a "
+        return _skip(gid, f"{who}'s {service['name']} service publishes no limits for a "
                           f"{layers}-layer board at {oz:g} oz in {fab_path}")
     staged = _stage(ctx, gid, path, board=True, schematic=False)
     if isinstance(staged, Verdict):
@@ -1328,7 +1566,7 @@ def fab_rules(ctx: GateContext) -> Verdict:
     # Grouped by type with the fab rule's name, never the first descriptions: on a
     # real board those were "Silkscreen overlap" three times over, and a person
     # could not read from the line that nothing past the fab's limits was copper.
-    detail = (f"{fab.get('fab', fab_name)} ({table['name']}{oz_note}, read "
+    detail = (f"{who} {service['name']} ({table['name']}{oz_note}, read "
               f"{fab.get('read', '?')}): "
               + (f"{len(fab_found)} finding(s) past its limits: "
                  f"{K.fab_kinds(fab_found, table)}" if fab_found
@@ -1351,6 +1589,9 @@ def fab_rules(ctx: GateContext) -> Verdict:
         detail += (f"; {sum(waived.values())} other finding(s) of a type the project "
                    f"ignores ({kinds}), raised for this run only: pcb.drc does not "
                    f"see them")
+    # What the service was chosen against, said last: a pass on a board read as
+    # KiCad's default stackup says so, never as if the board had stated FR4.
+    detail += f"; the board: {', '.join(built)}"
     return Verdict(gate=gid, passed=not fab_found, measured=len(fab_found), limit=0,
                    comparator="<=", units="findings", detail=detail, evidence=ev)
 

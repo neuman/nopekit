@@ -25,8 +25,10 @@ above 0, `safety_timer` a JSON true or false (the string `"false"` would read as
 true), and a `source` that says something, each cutoff's too.
 
 Two more refusals come from the board. A board `pcb.board_readable` would fail
-(newer than KiCad 9, older than KiCad 6, a track on an undefined net) is an error
-here too: a record may name a board the guard never reads. And a part marked do
+(older than KiCad 6, a track on an undefined net) is an error here too: a record
+may name a board the guard never reads. A board newer than the reader was checked
+through (a KiCad 10 file) skips here, with the guard's own words, as the guard
+does: a limit of the reader, never a crash. And a part marked do
 not populate or left out of the BOM (`dnp`, `exclude_from_bom`) is not on the built
 board: no rule counts it, and a charger, an NTC, a fuse, a cutoff or a series part
 marked so reads as missing.

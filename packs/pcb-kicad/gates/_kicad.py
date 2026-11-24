@@ -19,6 +19,13 @@ each footprint's reference, its attributes (whether it is fitted) and its pads
 each copper track's net, width, layer and length. Zones are counted, not modelled: a net carried by a pour as well as
 by tracks is reported as such, never judged on the pour.
 
+**Nets by code and by name.** KiCad 6 to 9 write a net table (``(net 3 "DP")``)
+and name a track's net by its code (``(net 3)``). KiCad 10 stopped writing codes
+at board format 20251028: every pad, track, via and zone names its net
+(``(net "DP")``), and the file holds no table. The reader takes both, so the gates
+see the same nets either way. It is checked against KiCad 9 boards only
+(:data:`MAX_BOARD_VERSION`): a newer file is skipped, never read on trust.
+
 **The formula.** :func:`temp_rise_c` is IPC-2221's trace-heating curve fit,
 cited in ``references/ipc-2221.md`` with the range it was fitted over.
 """
@@ -212,15 +219,26 @@ class Track:
 @dataclass
 class Board:
     version: str
-    nets: dict[int, str]
+    nets: dict[int, str]        # the net table by code; empty where the file writes none
     footprints: list[Footprint]
     tracks: list[Track]
     vias: int
     zone_nets: list[str]        # one entry per copper zone, its net name
 
+    @property
+    def net_names(self) -> list[str]:
+        """Every net the board names, by name, sorted: the table's, and any a pad,
+        track or zone names. "" (no net) is not one. A KiCad 10 board writes no
+        table (format 20251028 on), so a count of its table would read 0 nets."""
+        names = set(self.nets.values()) | set(self.zone_nets)
+        names |= {p.net for fp in self.footprints for p in fp.pads}
+        names |= {t.net for t in self.tracks}
+        return sorted(n for n in names if n)
+
 
 def _net_name(item, nets: dict[int, str]) -> str:
-    """``(net 3 "DP")`` (a pad), ``(net 3)`` (a track, by code) or ``(net "DP")``."""
+    """``(net 3 "DP")`` (a pad, KiCad 6-9), ``(net 3)`` (a track, by code, KiCad
+    6-9) or ``(net "DP")`` (anything, by name, KiCad 10)."""
     if item is None or len(item) < 2:
         return ""
     first = item[1]
@@ -343,28 +361,65 @@ def load_tree(path: str) -> list:
 
 #: The newest board file version this reader was written and checked against:
 #: KiCad 9.0's (``(version 20241229)``, unchanged through 9.0.9). A newer file may
-#: have moved what the reader looks for (KiCad has changed how a track names its net
-#: before), so the guard fails closed on it rather than read it on trust. Rejected:
-#: accepting any version (a reader that silently finds no tracks on a new format
-#: reports a clean board); a ceiling per minor release (the format version, not the
-#: application's, is what moves).
+#: have moved what the reader looks for (KiCad 10 stopped writing net codes and
+#: split the via types), so the guard skips it rather than read it on trust: a
+#: newer format is a limit of this reader, not a defect in the board. It moves to
+#: KiCad 10's 20260206 only when a board saved by KiCad 10.0.x is committed as a
+#: reader fixture and passes the pack's readers; this pack was written on a
+#: machine with KiCad 9.0.9 alone, so no such board exists yet (an accepted gap,
+#: PACK.md). Rejected: accepting any version (a reader that silently finds no
+#: tracks on a new format reports a clean board); raising it on the 10.0 source
+#: alone (the source says what KiCad writes, not that this reader reads it);
+#: failing a newer file (the earlier rule: every board saved by current KiCad read
+#: FAIL, a wrong FAIL across the whole category); a ceiling per minor release (the
+#: format version, not the application's, is what moves).
 MAX_BOARD_VERSION = 20241229
 
 #: The oldest: KiCad 6 (``20211014``), the first S-expression board format with
 #: ``pinfunction`` on pads. KiCad 5's is a different file and is refused.
 MIN_BOARD_VERSION = 20211014
 
+#: The first board format with no net codes: KiCad 10.0's source
+#: (``pcb_io_kicad_sexpr.h``: "20251028 // Stop writing netcodes; they're an
+#: internal implementation detail", read 2026-11-24). From it on, every pad,
+#: track, via and zone names its net by name and the file holds no net table, so
+#: the orphaned-code check applies only to formats before it: a file with no codes
+#: has none to orphan, and a check that read its empty table would call every
+#: track orphaned.
+NET_CODES_DROPPED = 20251028
+
+#: The format that split KiCad's via types into blind, buried and through (the
+#: same header: "20250926 // Split via types into blind/buried/through"). Before
+#: it, KiCad wrote ``(via blind ...)`` for a blind via and a buried one alike
+#: (KiCad 9.0.9, measured: a via from In1.Cu to In2.Cu saved as ``blind``), so
+#: :func:`via_kinds` tells them apart by the via's layers, never by the word, and
+#: reads both formats the same way.
+VIA_TYPES_SPLIT = 20250926
+
+
+def reader_ceiling(version: int | None) -> str:
+    """Why this reader will not judge a board of file format ``version``, or ""
+    when it was checked through that format. The one place the words are made:
+    ``pcb.board_readable`` skips on them, and so do the power rules on a board a
+    record names."""
+    if version is None or version <= MAX_BOARD_VERSION:
+        return ""
+    return (f"this reader was checked through board format {MAX_BOARD_VERSION} "
+            f"(KiCad 9.0); the file is format {version}")
+
 
 def board_problems(tree: list) -> tuple[int | None, list[str]]:
     """``(file version, why this reader cannot vouch for the board)``: what
-    ``pcb.board_readable`` fails on, and what the power rules refuse a board for,
+    ``pcb.board_readable`` judges, and what the power rules refuse a board for,
     since a record may name a board the guard never reads. The version is None
     when the file is not a board or states no version, and the one problem says
     which.
 
-    A board newer than KiCad 9 or older than KiCad 6, or one whose tracks or vias
-    name a net code its table does not define, is one whose nets this reader may
-    read wrongly or not at all."""
+    A board newer than KiCad 9 (:func:`reader_ceiling`, listed here too, so a
+    caller that does not ask for the ceiling still refuses it) or older than
+    KiCad 6, or one whose tracks or vias name a net code its table does not
+    define, is one whose nets this reader may read wrongly or not at all. The
+    code check applies only before :data:`NET_CODES_DROPPED`."""
     if head(tree) != "kicad_pcb":
         return None, [f"not a KiCad board: the file starts ({head(tree)} ...)"]
     raw_version = value(tree, "version", default="")
@@ -373,12 +428,13 @@ def board_problems(tree: list) -> tuple[int | None, list[str]]:
     except (TypeError, ValueError):
         return None, [f"no readable (version ...) in the board: {raw_version!r}"]
     problems = []
-    if version > MAX_BOARD_VERSION:
-        problems.append(f"file version {version} is newer than {MAX_BOARD_VERSION} "
-                        f"(KiCad 9.0), the newest this reader was checked against")
+    if reader_ceiling(version):
+        problems.append(reader_ceiling(version))
     if version < MIN_BOARD_VERSION:
         problems.append(f"file version {version} is older than {MIN_BOARD_VERSION} "
                         f"(KiCad 6), the first with library pin names on pads")
+    if version >= NET_CODES_DROPPED:
+        return version, problems
     defined = {int(n[1]) for n in children(tree, "net")
                if len(n) >= 2 and str(n[1]).lstrip("-").isdigit()}
     orphans: Counter = Counter()
@@ -553,6 +609,131 @@ def copper_layer_count(tree: list) -> int:
                and str(item[1]).endswith(".Cu"))
 
 
+#: The dielectric KiCad builds a board on when the file states no stackup: what
+#: ``kicad-cli pcb export gerbers`` 9.0.9 writes into the job file it hands the
+#: fab for the baseline, which states none ("Material": "FR4", measured). A board
+#: KiCad's own new-board template makes states no stackup until someone opens the
+#: stackup editor, the baseline among them. Rejected: skipping a board that states
+#: none (a wrong SKIP on most boards in the category); reading it as no material
+#: at all (no fab service could then list it).
+DEFAULT_DIELECTRIC = "FR4"
+
+
+def stackup_dielectrics(tree: list) -> tuple[list[str], bool]:
+    """``(materials, stated)``: each dielectric material the board's stackup
+    names, in file order, once each, and whether the file states a stackup.
+
+    A dielectric is a stackup layer KiCad names ``dielectric N`` (its core or
+    prepreg; KiCad fixes that name, while its type is free text). Every
+    ``(material ...)`` in it is read, so a layer KiCad splits into sublayers
+    (``addsublayer``) gives each of its materials. With no ``(stackup ...)`` in
+    ``(setup ...)`` the board is KiCad's default: ``[DEFAULT_DIELECTRIC]`` and
+    ``stated`` False. A solder mask's own material is not a dielectric of the
+    board and is not read."""
+    stackup = child(child(tree, "setup") or [], "stackup")
+    if stackup is None:
+        return [DEFAULT_DIELECTRIC], False
+    found: list[str] = []
+    for layer in children(stackup, "layer"):
+        if len(layer) < 2 or not str(layer[1]).lower().startswith("dielectric"):
+            continue
+        for mat in children(layer, "material"):
+            name = str(mat[1]) if len(mat) > 1 else ""
+            if name not in found:
+                found.append(name)
+    return found, True
+
+
+#: The via kinds a fab service can list, in the order a line names them.
+VIA_KINDS = ("through", "blind", "buried", "micro")
+
+
+def via_kinds(tree: list) -> Counter:
+    """How many vias of each kind (:data:`VIA_KINDS`) the board holds.
+
+    No word after ``via`` is a through via; ``micro`` is a microvia. A via
+    written ``blind`` or ``buried`` is blind when one of its two layers is an
+    outer one (``F.Cu``, ``B.Cu``) and buried when neither is: KiCad before
+    format 20250926 wrote ``blind`` for both (:data:`VIA_TYPES_SPLIT`)."""
+    kinds: Counter = Counter()
+    for via in children(tree, "via"):
+        word = str(via[1]) if len(via) > 1 and not isinstance(via[1], list) else ""
+        if word == "micro":
+            kinds["micro"] += 1
+        elif word in ("blind", "buried"):
+            ends = [str(x) for x in (child(via, "layers") or [])[1:]]
+            kinds["blind" if any(e in OUTER_LAYERS for e in ends) else "buried"] += 1
+        else:
+            kinds["through"] += 1
+    return kinds
+
+
+def material_key(name: str) -> str:
+    """A dielectric's name for comparison: case and punctuation dropped, so
+    KiCad's ``FR4`` and a fab page's ``FR-4`` are one material, and ``FR408-HR``
+    is another."""
+    return re.sub(r"[^0-9a-z]", "", str(name).casefold())
+
+
+#: The keys of one service in a fab file.
+SERVICE_KEYS = ("name", "materials", "via_types", "common", "tables")
+
+
+def fab_services(fab: dict) -> list[dict]:
+    """The services a fab file publishes limits for, each held to its shape.
+
+    A fab file lists ``services``: each with a ``name``, the dielectric
+    ``materials`` and the ``via_types`` (:data:`VIA_KINDS`) it builds, its
+    ``common`` rules and its ``tables`` of rows. Raises ValueError naming what is
+    wrong: a file in the shape before services (``common`` and ``tables`` at the
+    top) says nothing about which process its numbers are for, and is refused
+    with the move named, never read as one service of any material."""
+    services = fab.get("services")
+    if not isinstance(services, list) or not services:
+        moved = (" (it holds common and tables at the top, the shape before services: "
+                 "move them into one service and say its materials and via types)"
+                 if "tables" in fab else "")
+        raise ValueError(f"the fab file lists no services{moved}: each service names the "
+                         f"materials and via types its limits are for "
+                         f"(references/fab-limits.md)")
+    names = []
+    for i, svc in enumerate(services):
+        if not isinstance(svc, dict):
+            raise ValueError(f"the fab file's services[{i}] is not a JSON object")
+        missing = [k for k in SERVICE_KEYS if k not in svc]
+        if missing:
+            raise ValueError(f"the fab file's services[{i}] has no {', '.join(missing)}")
+        mats, vias = svc["materials"], svc["via_types"]
+        if not isinstance(mats, list) or not mats or not all(
+                isinstance(m, str) and m.strip() for m in mats):
+            raise ValueError(f"service {svc['name']!r}: materials must list the dielectrics "
+                             f"it builds, by name")
+        if not isinstance(vias, list) or not vias or any(v not in VIA_KINDS for v in vias):
+            raise ValueError(f"service {svc['name']!r}: via_types {vias!r} must list some "
+                             f"of {list(VIA_KINDS)}")
+        if not isinstance(svc["common"], list) or not isinstance(svc["tables"], list):
+            raise ValueError(f"service {svc['name']!r}: common and tables must be lists")
+        names.append(str(svc["name"]))
+    if len(set(names)) != len(names):
+        raise ValueError(f"the fab file names a service twice: {names}")
+    return services
+
+
+def fab_service(fab: dict, name: str | None) -> dict | None:
+    """The service ``name`` of a fab file, the only one when ``name`` is None,
+    or None when the file has several and ``name`` is None (the caller skips,
+    naming them). Raises ValueError for a name the file does not hold, or for a
+    file :func:`fab_services` refuses."""
+    services = fab_services(fab)
+    if name is None:
+        return services[0] if len(services) == 1 else None
+    for svc in services:
+        if str(svc["name"]) == str(name):
+            return svc
+    raise ValueError(f"the fab file has no service {name!r}: it lists "
+                     f"{', '.join(str(s['name']) for s in services)}")
+
+
 #: The DRC violation type each custom-rule constraint reports under, read off
 #: kicad-cli 9.0.9's JSON reports (one deliberate breach of each). A finding of
 #: any other type in the fab run is not the fab's: it is ``pcb.drc``'s.
@@ -708,16 +889,21 @@ def fab_kinds(found: list, table: dict) -> str:
                      for kind, n in counts.most_common())
 
 
-def fab_table(fab: dict, layers: int, oz: float) -> dict | None:
+def fab_table(fab: dict, layers: int, oz: float, service: str | None = None) -> dict | None:
     """The row of a fab file (``gates/fab/<name>.json``) for a board of
-    ``layers`` copper layers at ``oz`` ounces outer copper, with the file's
-    common rules prepended, or None when the fab publishes no row for it. A
-    row's ``layers`` is inclusive both ends; its ``oz`` is ``(lo, hi]``."""
-    for row in fab.get("tables", []):
+    ``layers`` copper layers at ``oz`` ounces outer copper, in the service
+    :func:`fab_service` picks for ``service``, with that service's common rules
+    prepended, or None when it publishes no row for the board (or the file has
+    several services and ``service`` is None). A row's ``layers`` is inclusive
+    both ends; its ``oz`` is ``(lo, hi]``."""
+    svc = fab_service(fab, service)
+    if svc is None:
+        return None
+    for row in svc["tables"]:
         lo_l, hi_l = row["layers"]
         lo_oz, hi_oz = row["oz"]
         if lo_l <= layers <= hi_l and lo_oz < oz <= hi_oz:
-            return {"name": row["name"], "rules": list(fab.get("common", [])) + list(row["rules"])}
+            return {"name": row["name"], "rules": list(svc["common"]) + list(row["rules"])}
     return None
 
 
@@ -947,10 +1133,10 @@ def footprint_land(tree: list, ref: str) -> tuple[list[LandPad], list[str]]:
     raise KeyError(ref)
 
 
-def rigid_fit(pairs: list[tuple[tuple[float, float], tuple[float, float]]]):
+def rigid_transform(pairs: list[tuple[tuple[float, float], tuple[float, float]]]):
     """The rotation and translation that best carry the first point of each pair
     onto the second, least squares, with no mirror (a mirror would hide a land
-    drawn mirrored): ``(degrees, [residual mm per pair])``.
+    drawn mirrored), as a function of a point: ``(radians, carry)``.
 
     Closed form in 2D (Kabsch): with both sets centred, the angle is
     ``atan2(sum(u x w), sum(u . w))``."""
@@ -966,7 +1152,15 @@ def rigid_fit(pairs: list[tuple[tuple[float, float], tuple[float, float]]]):
         cross += ux * wy - uy * wx
     theta = math.atan2(cross, dot)
     c, s = math.cos(theta), math.sin(theta)
-    residuals = [math.hypot(c * (px - ax) - s * (py - ay) + bx - qx,
-                            s * (px - ax) + c * (py - ay) + by - qy)
-                 for (px, py), (qx, qy) in pairs]
+
+    def carry(point: tuple[float, float]) -> tuple[float, float]:
+        px, py = point
+        return c * (px - ax) - s * (py - ay) + bx, s * (px - ax) + c * (py - ay) + by
+    return theta, carry
+
+
+def rigid_fit(pairs: list[tuple[tuple[float, float], tuple[float, float]]]):
+    """:func:`rigid_transform`'s fit, judged: ``(degrees, [residual mm per pair])``."""
+    theta, carry = rigid_transform(pairs)
+    residuals = [math.dist(carry(p), q) for p, q in pairs]
     return math.degrees(theta), residuals
