@@ -2155,6 +2155,77 @@ and while building it:
 - **Phase 2, built in P0.2 and P2.1:** a solver history is CSV evidence,
   never JSON (a JSON history puts thousands of unit-less numbers into the prose pool).
 
+**Packs for handheld electronics, made general** (2026-11-23, branch
+`general-packs`). The handheld cut of 2026-11-05 (fdm-print 0.2.0, cad-solid 0.2.0,
+pcb-kicad 0.2.0, firmware-zmk 0.1.0) was written for one device. The author's rule:
+a pack on main works across a broad category of designs, here handheld and portable
+electronics (controllers, wearables, keyboards, remotes, sensor tags, trackers,
+e-readers). One firmware, one charger topology, one fab or one module is a profile,
+a baseline or a record inside a general pack, never the pack. "A gate earns its
+place" still holds: fewer, sharper gates. The design came from two independent
+designs per area, a judge per area and a critic across the five; the full designs
+are kept outside the repository with the branch's history.
+
+- **firmware-zmk is deleted; `firmware-ci` replaces it** (scope `fw`).
+  `fw.ci_job` (tier 0) reads the CI workflow and fails a CI that can read green on
+  a failed build (`continue-on-error`, `|| true`, `set +e`, a pipe under a shell
+  with no pipefail). `fw.build` (tier 1, established) replays that workflow with
+  act in its own containers, on a copy of the tree. `fw.image_fits` compares the
+  bytes the image writes with a region from a cited record (bootloader layout,
+  datasheet, partition table), never the build's own linker script. `fw.sleep_wake`
+  checks that an image that can enter deep sleep arms a wake source (ESP-IDF and
+  ZMK first; every other stack skips by name). ZMK becomes one wake profile, one
+  design line and two CI templates. *Rejected:* per-stack build recipes (they skip
+  PlatformIO, Arduino, QMK, the Pico SDK and STM32Cube); pinning, watchdog,
+  brown-out and sleep-current gates (accepted risks or lenses).
+- **No radio pack.** Transmit power becomes `fw.tx_power` in firmware-ci, read from
+  the `.config` or `sdkconfig` the replay returns, against the setting the module's
+  grant was tested at. The antenna keep-out becomes `pcb.antenna_keepout` in
+  pcb-kicad. Antenna to enclosure metal is a lens and a physical claim (a range test
+  in the hand). *Rejected:* a one-gate `radio-firmware` pack with a configure
+  proposer (a pack with no prerequisite edge, and a second home for the build).
+- **`hand-ergonomics` is a new pack** (scope `ergo`). `ergo.digit_reach` (tier 0,
+  sourced, stdlib) computes, for each control, the worst-sex share of subjects who
+  reach it from its grip, from per-subject ANSUR 1988 hand data (public domain),
+  shipped as a derived table with its hashes. `ergo.layout_agrees` (tier 1,
+  model-only) checks the declared layout against the exported scene, on cad-solid's
+  node names. The proposer `ergo.reach_envelope` writes reach maps and design
+  ranges. A person holding a print has the final say: the scaffold ends reach in a
+  physical claim tested by a small-reach and a large-reach tester. *Rejected:* a
+  thumb functional-area model fitted on 20 people and one tablet (not a sourced
+  screen yet); a holding-moment gate (its only limit is the print it would replace).
+- **thermal-analytic gains `thermal.skin_temperature`**: the average temperature of
+  a sealed, fanless handheld's surface from its worst-case dissipation, against a
+  touch limit. *Rejected:* `thermal.charge_window` (a hand-typed record of what
+  `pcb.charge_temperature` reads off the board, so a part swap would not re-run it).
+- **pcb-kicad's power rules take plural records and any protection topology.**
+  `pcb.charge_temperature` replaces `pcb.charge_protection`: charging stops outside
+  each cell's window at the tolerance corners of its sensing network, wherever the
+  cutoff lives (charger, pack protection board, BMS, fuel gauge).
+  `pcb.charge_limits`, `pcb.fault_current` (replaces `pcb.fuse_conductor`) and a
+  general `pcb.discharge_cutoff` follow. New: `pcb.mismate` (a foreseeable
+  mis-mating that joins a source to its return), `pcb.usbc_receptacle` (CC
+  termination and role rules; same-name pins stay with `pcb.pin_names`) and
+  `pcb.antenna_keepout`. The readers grow: KiCad 10 boards, land patterns paired
+  by function, and a fab-service guard. `cad.wall_thickness` reads a minimum per
+  part and process; fdm-print slices with presets per part.
+- **The ORIGINS scrub.** The cut named the parent's parts, refdes, rule names and
+  stories in packs, docs, spine docstrings and README pictures. They go; each lesson
+  stays as a generic story. `FORBIDDEN` grows last, with tokens unique to the
+  parent only.
+- **Packaging.** The wheel's globs missed the KiCad, SPICE and OpenFOAM baselines;
+  a test now checks that every tracked file under `packs/` is bundled.
+- **The holdout.** Before merge, every new or changed pack runs against outside
+  open designs that played no part in writing it (an ESP-IDF handheld, a Zephyr
+  watch, an Arduino watch). A wrong FAIL or SKIP is overfit and is fixed. Their
+  files are never committed (some are GPL).
+- **Order**, one commit each: P1 the docs and docstring scrub; P2 packaging; P3 the
+  pcb-kicad scrub; T1 skin temperature; C1 the wall per part; D1 slicer presets per
+  part; E1 hand-ergonomics' reach; P4 the readers; F1 firmware-ci; F2
+  `fw.tx_power`; P5 the power rules; P6 mismate and USB-C; E2 `ergo.layout_agrees`;
+  P7 enclosure fit; P8 the antenna keep-out; P9 the proposers; Z1 README pictures
+  from each pack's own baseline and `FORBIDDEN`; Z2 the holdout.
+
 ## 9. Retired
 
 `docs/PLAN.md`, `docs/PLAN-v0.14.md`, `docs/plan/phase-1.md` to `phase-5.md`,
