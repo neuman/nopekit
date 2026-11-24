@@ -2373,6 +2373,44 @@ are kept outside the repository with the branch's history.
   clone keyed new entries; the names are copied and a test holds the copy); the
   design's `control__<id>` names (the site's explode merges them into one part); a
   `needs` edge (a tier inversion).
+- **F2, built: `fw.tx_power`** (firmware-ci, tier 1, needs `fw.build`, sourced,
+  tag `ble-tx-power`). It reads the `.config` or `sdkconfig` the replayed build
+  resolved (and the one ESP-IDF's build record names, because ESP-IDF rewrites
+  sdkconfig only when the configure step changes it), never a second build.
+  Profiles from a closed table checked against sources: Zephyr's controller,
+  nRF Connect SDK's SoftDevice Controller, ESP32-C3/S3's controller; any other
+  stack skips by name. With a run-time path (dynamic control, LE Power Control, a
+  setter call in the repository's sources, an advertising set's requested power)
+  the setting is judged at the highest option the config lists. The limit is the
+  setting the module's grant was tested at, and it is the claim's. With a
+  front-end module a literal is judged as asked for, not capped at the SoC's
+  ceiling (the power is the antenna's). *Rejected:* a configure proposer and a
+  separate radio pack; reading every sdkconfig back (a tracked one the job never
+  configured would stand in for the build's); reading a setter's line only after
+  a `#define` check (calls under `#if` and after `#endif` were dropped).
+- **P6, built: `pcb.mismate`** (model-only) **and `pcb.usbc_receptacle`**
+  (sourced; pcb-kicad, 17 gates). A mating's wrong ways are stated (`modes`) on
+  P5's `pcb_matings`, read whole by every rule; a hazard is two nodes of one
+  source on one net, or a source on another source or its return, protected only
+  beyond a named fault element. The USB-C rule holds CC termination, the role
+  rules and D+ apart from D- to the Type-C specification (Release 2.0, the newest
+  usb.org serves as plain PDF; `gates/usbc.json` cites its tables). USB-C bussing
+  has one home where it can see: `pcb.pin_names` on `pcb_board`, the USB-C rule
+  for every other receptacle. *Rejected:* `polarity_guaranteed` on the battery
+  record (the mating's modes are the one statement); a parser for mismate only
+  (two readings of one record); comparing `v_max` to find one rail.
+- **P7, built: `pcb.enclosure_fit` generalised.** The limit is the claim's
+  (tag `enclosure-fit`, `>=` in mm); `pcb_enclosure_clearance_mm` is refused,
+  naming the move. One rotation about x, then y, then z; several boards in
+  `pcb_enclosure_fits` keyed by id, fitted against each other when their
+  enclosure files hold the same bytes; a contact is one part against one feature
+  with a reason and a region no larger than twice the limit around the part; a
+  part with no model takes a box at a declared height. *Rejected:* the parameter
+  beside the claim (two limits that can disagree); a flip flag or a raw matrix;
+  `{ref: reason}` contacts (the "part against anything" pattern that once hid an
+  interference); grouping boards by path string (`./` split a group, and an
+  overlap passed). Known wrong FAIL, stated: mated board-to-board connectors whose
+  vendor models overlap by design.
 
 ## 9. Retired
 
