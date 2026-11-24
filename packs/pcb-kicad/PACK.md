@@ -191,13 +191,19 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   9.0.9 was installed, and no board saved by KiCad 10 is committed as a fixture.
   Until one is, a KiCad 10 board reads Skipped on the tier-0 gates and the power
   rules ("this reader was checked through board format 20241229 (KiCad 9.0)"),
-  never Checked and never Failing. The tier-1 gates are KiCad's own answer and
-  run on it; `pcb.fab_rules` reads its stackup and vias with this reader, by the
-  words KiCad 10's source writes (`blind`, `buried`, `micro`).
+  never Checked and never Failing. `pcb.fab_rules` skips it for the same reason:
+  its service guard reads the stackup and vias with this reader. The other
+  gates that run kicad-cli on the board are KiCad's own answer, and run on it
+  only with a kicad-cli that reads its format. KiCad 9.0.9's kicad-cli does not:
+  it prints "Failed to load board" and exits 3, so those gates read errored,
+  never Checked.
 - **The land beyond its centres.** `pcb.land_pattern` judges pad centres in the
   top view, one rigid fit; pad sizes, paste, courtyard and pads the drawing omits
   (mounting pads) are not judged, so a pad of the wrong size, or turned 90 degrees
-  on the right centre, passes. The drawing is a person's transcription. A part
+  on the right centre, passes. A land whose paired pads all sit on one line is
+  its own mirror image turned a half turn, so its mirror is not seen: a drawing
+  of a one-row part that omits its mounting pads is such a land. The drawing is
+  a person's transcription. A part
   that repeats so many functions that both the full search and the anchored one
   pass 5040 pairings (a ground row of eight, a ball grid) errors: split a function
   the part repeats.

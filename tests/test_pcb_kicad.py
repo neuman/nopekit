@@ -1851,7 +1851,7 @@ class NetsAreReadByNameAsByCode(unittest.TestCase):
 #: TopMnt_Horizontal.kicad_mod`` (file version 20221018): every numbered pad,
 #: its centre and size as the file writes them. A1 and B12, A4 and B9, A9 and B4,
 #: A12 and B1 are stacked. The two unnumbered NPTH pegs are left out, as the
-#: gate leaves them. (Not the parent device's receptacle.)
+#: gate leaves them.
 USBC_PADS = [
     ("A1", -3.2, -3.68, 0.6, 1.15), ("A4", -2.4, -3.68, 0.6, 1.15),
     ("A5", -1.25, -3.68, 0.3, 1.15), ("A6", -0.25, -3.68, 0.3, 1.15),
@@ -2176,6 +2176,33 @@ class AFabServiceListsWhatItBuilds(unittest.TestCase):
                               f"not list (it builds FR4; through vias)", verdict.skip_reason)
                 self.assertNotIn("dielectric FR4,", verdict.skip_reason)
 
+    def test_a_default_stackup_is_said_as_the_default_in_the_skip(self):
+        """A board that states no stackup is read as KiCad's FR4: the skip says
+        so, never that the board has FR4 (the review of P4)."""
+        fab = self._fab_file([{"name": "flex", "materials": ["Polyimide"]}])
+        self.params.update(pcb_fab=fab, pcb_fab_service="flex")
+        verdict = self._fab([], runs=0)
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("the board has dielectric FR4 (KiCad's default: the board states no "
+                      "stackup), which Fixture Fab's flex service does not list",
+                      verdict.skip_reason)
+
+    def test_a_board_newer_than_the_reader_skips_before_the_guard_reads_it(self):
+        """The guard reads the stackup and vias with the pack's reader, so a file
+        newer than it was checked through skips as at pcb.board_readable, and
+        kicad-cli never runs (the review of P4: the guard read it on trust)."""
+        for name, text in (("KiCad 10, a polyimide stackup", _by_name(_stackup("Polyimide"))),
+                           ("KiCad 10, no stackup", _by_name(_board_text()))):
+            with self.subTest(board=name):
+                board = _board_copy(self.dir, text, stem="k10")
+                verdict = self._fab([], board=board, runs=0)
+                self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                self.assertTrue(verdict.skip_reason.startswith(
+                    "this reader was checked through board format 20241229 (KiCad 9.0); "
+                    "the file is format 20260206: the service guard reads the board's "
+                    "stackup and vias with this pack's reader"), verdict.skip_reason)
+                self.assertNotIn("the board has", verdict.skip_reason)
+
     def test_a_via_kind_the_service_does_not_list_skips(self):
         for kind in ("blind", "buried", "micro"):
             with self.subTest(via=kind):
@@ -2329,6 +2356,12 @@ class ASeriesPairIsStatedPerRef(unittest.TestCase):
                       verdict.detail)
         self.assertTrue(verdict.detail.startswith("every other repeated pin name carries "
                                                   "one net"), verdict.detail)
+
+    def test_the_title_names_the_exception(self):
+        """A stated pair passes with two nets on one name, so a title that said
+        "one net" said more than the gate checked (the review of P4)."""
+        title = self.registry.get("pcb.pin_names")[0].title
+        self.assertTrue(title.endswith("carry one net, except stated series pairs"), title)
 
     def test_a_pair_stated_on_another_ref_still_fails(self):
         verdict = self._names({"U4": {"pairs": self.PAIRS, "source": self.SOURCE}},

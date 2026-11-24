@@ -24,7 +24,13 @@ and name a track's net by its code (``(net 3)``). KiCad 10 stopped writing codes
 at board format 20251028: every pad, track, via and zone names its net
 (``(net "DP")``), and the file holds no table. The reader takes both, so the gates
 see the same nets either way. It is checked against KiCad 9 boards only
-(:data:`MAX_BOARD_VERSION`): a newer file is skipped, never read on trust.
+(:data:`MAX_BOARD_VERSION`): ``pcb.board_readable``, the power rules and
+``pcb.fab_rules``'s service guard skip a newer file (:func:`reader_ceiling`), and
+the other tier-0 gates need the guard. Two tier-1 gates still read a newer file
+with it: ``pcb.parity`` for the pads that have no net, once kicad-cli has loaded
+the board, and ``pcb.enclosure_fit`` for each part's 3D model. (What slipped
+through, in the review of P4: this paragraph said a newer file is never read on
+trust, while the service guard read a KiCad 10 file's stackup and vias.)
 
 **The formula.** :func:`temp_rise_c` is IPC-2221's trace-heating curve fit,
 cited in ``references/ipc-2221.md`` with the range it was fitted over.
@@ -401,7 +407,8 @@ def reader_ceiling(version: int | None) -> str:
     """Why this reader will not judge a board of file format ``version``, or ""
     when it was checked through that format. The one place the words are made:
     ``pcb.board_readable`` skips on them, and so do the power rules on a board a
-    record names."""
+    record names and ``pcb.fab_rules`` before its service guard reads the
+    stackup."""
     if version is None or version <= MAX_BOARD_VERSION:
         return ""
     return (f"this reader was checked through board format {MAX_BOARD_VERSION} "

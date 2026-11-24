@@ -307,7 +307,7 @@ def _series_pairs(ctx: GateContext, board, names: dict) -> dict | str:
 @gate(
     id="pcb.pin_names",
     basis="sourced",
-    title="Pins the library gives one name carry one net",
+    title="Pins the library gives one name carry one net, except stated series pairs",
     claims=["pcb", "pin-map", "netlist", "short-circuit"],
     tier=Tier.INSTANT,
     settles="library pin-name agreement",
@@ -322,7 +322,8 @@ def _series_pairs(ctx: GateContext, board, names: dict) -> dict | str:
     ),
 )
 def pin_names(ctx: GateContext) -> Verdict:
-    """Every pin name a footprint repeats carries one net.
+    """Every pin name a footprint repeats carries one net, except a series pair
+    stated for its ref.
 
     A library symbol gives two pins one name when the part joins them inside: a
     TVS array's ``COM`` is pins 2 and 5, a regulator's ``GND`` is its tab and a
@@ -350,7 +351,10 @@ def pin_names(ctx: GateContext) -> Verdict:
     this gate skipped on it, and two nets on two pins its ESD array joins inside
     went to a person to find. And, in the review for handheld boards, every filter
     array whose symbol names both ends of a channel alike read FAIL, with nothing a
-    person could state but an ignore that hid the name on every part.
+    person could state but an ignore that hid the name on every part. In the
+    review of that change, the title still said "one net" while a stated pair
+    passed with two, so every reader that shows the title said more than the gate
+    checked: the title names the exception.
     """
     gid = "pcb.pin_names"
     path = _board_path(ctx)
@@ -492,12 +496,18 @@ def _land_fit(ref: str, board_pads: list, vendor: list,
     Where every assignment within the repeated keys costs no more than
     :data:`MAX_ASSIGNMENTS`, each is tried, each with its own fit, and the one
     whose worst pad is least past its limit is kept. Past it, the fit is anchored:
-    the rigid transform is fitted on the pads whose key is on one pad alone (a
-    land drawn mirrored still misfits them); with that transform fixed, the
-    repeated keys no longer depend on each other, so each one's pads are assigned
-    on their own, the assignment whose worst pad is least past its limit; then
-    the drawing is fitted once more on every pair and judged as before. With
-    fewer than two anchors, or a sum past the cap, it errors. Every assignment the
+    the rigid transform is fitted on the pads whose key is on one pad alone; with
+    that transform fixed, the repeated keys no longer depend on each other, so
+    each one's pads are assigned on their own, the assignment whose worst pad is
+    least past its limit; then the drawing is fitted once more on every pair and
+    judged as before. The anchors fix the rotation and the offset only; the last
+    fit, on every pair, is what finds a mirror, and only where those pads do not
+    all sit on one line. Two anchors, or anchors on one line (a USB-C
+    receptacle's CC1, CC2, SBU1 and SBU2 sit on one row), fit their own mirror
+    image with no residual, since a mirror of points on one line is a half turn
+    and an offset. (What slipped through, in the review of P4: this docstring
+    said a land drawn mirrored misfits the anchors.) With fewer than
+    two anchors, or a sum past the cap, it errors. Every assignment the
     full search could afford is still tried in full, so no land that fitted before
     the anchored search existed reads differently now.
 
@@ -1420,16 +1430,22 @@ def _zeroed_project(src: str | None, dst: str, table: dict) -> set[str]:
 def _service_gaps(tree: list, service: dict) -> tuple[list[str], list[str]]:
     """``(gaps, what the board is built of)``: the gaps are each dielectric the
     board's stackup names and each via kind it holds that ``service`` does not
-    list (``_kicad.stackup_dielectrics``, ``_kicad.via_kinds``)."""
+    list (``_kicad.stackup_dielectrics``, ``_kicad.via_kinds``).
+
+    A board that states no stackup is read as KiCad's default dielectric, and
+    both lists say so. (What slipped through, in the review of P4: only the pass
+    said it, so a polyimide flex board whose stackup was never opened skipped on
+    "the board has dielectric FR4", a material its file does not hold.)"""
     materials, stated = K.stackup_dielectrics(tree)
     kinds = K.via_kinds(tree)
     offered = {K.material_key(m) for m in service["materials"]}
-    gaps = [f"dielectric {m or '(unnamed)'}" for m in materials
+    default = "" if stated else " (KiCad's default: the board states no stackup)"
+    gaps = [f"dielectric {m or '(unnamed)'}{default}" for m in materials
             if K.material_key(m) not in offered]
     gaps += [f"{kinds[k]} {k} via(s)" for k in K.VIA_KINDS
              if kinds[k] and k not in service["via_types"]]
     built = [f"dielectric {', '.join(m or '(unnamed)' for m in materials) or '(none named)'}"
-             + ("" if stated else " (KiCad's default: the board states no stackup)")]
+             + default]
     built += [f"{kinds[k]} {k} via(s)" for k in K.VIA_KINDS if kinds[k]]
     return gaps, built
 
@@ -1465,7 +1481,9 @@ def fab_rules(ctx: GateContext) -> Verdict:
     polyimide flex or a microvia board is never judged on a rigid FR-4 service's
     rows. (What slipped through, in the review for handheld boards: a flex or
     rigid-flex wearable and an HDI board with microvias were held to the standard
-    FR-4 rows, and could read PASS on rules that are not their process.) The row
+    FR-4 rows, and could read PASS on rules that are not their process.) The
+    guard reads the stackup and vias with this pack's reader, so a board newer
+    than the reader was checked through skips (``_kicad.reader_ceiling``). The row
     is picked by the board's copper layer count and ``pcb_copper_oz_outer``. The
     rules are written
     as the staged board's ``.kicad_dru`` and the staged project's own minimums are
@@ -1517,6 +1535,22 @@ def fab_rules(ctx: GateContext) -> Verdict:
     if not os.path.isfile(path):
         return Verdict(gate=gid, passed=False, detail=f"no board at {path}")
     tree = ctx.load_file(path, loader=K.load_tree)
+    # The service guard reads the stackup and the vias with this pack's reader, so
+    # a file newer than the reader was checked through skips here as it does at
+    # pcb.board_readable: a newer format may have moved the stackup, and a reader
+    # that finds none reads KiCad's default FR4 and holds a flex board to rigid
+    # rows. (What slipped through, in the review of P4: the guard read a KiCad 10
+    # file's stackup and vias on trust, while the reader's own docstring said a
+    # newer file is never read on trust.) Rejected: reading a newer file by the
+    # words KiCad 10's source writes (the design's first reading; the source says
+    # what KiCad writes, not that this reader reads it, as MAX_BOARD_VERSION's own
+    # rejection says); skipping only where no gap is found (the gap named would
+    # come from the same unchecked reader).
+    ceiling = K.reader_ceiling(K.board_problems(tree)[0])
+    if ceiling:
+        return _skip(gid, f"{ceiling}: the service guard reads the board's stackup and "
+                          f"vias with this pack's reader, so the board is not judged on "
+                          f"{who}'s limits")
     gaps, built = _service_gaps(tree, service)
     if gaps:
         return _skip(gid, f"the board has {', '.join(gaps)}, which {who}'s "
