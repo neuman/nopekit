@@ -5985,7 +5985,7 @@ def cmd_why(args: argparse.Namespace) -> int:
 def cmd_decide(args: argparse.Namespace) -> int:
     """Record a decision — including, above all, what LOST and why.
 
-    `--rejected "0.5 mm|the router could not close that net"` is the highest-value
+    `--rejected "4.0 mm|it deflected 3.75 mm, 7.5x the limit"` is the highest-value
     thing this whole system stores. Without it every fresh context window
     re-proposes every settled number. A rejection with no reason is refused by
     `decisions.add`, which is why the flag takes a pair.
@@ -10393,8 +10393,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--summary", required=True)
     p.add_argument("--rejected", action=_RejectedFlag, dest="rejection_parts",
                    metavar="VALUE|WHY",
-                   help='what lost and the concrete reason: "0.5 mm|the router could not '
-                        'close"; the flags below apply to the --rejected before them')
+                   help='what lost and the concrete reason: "4.0 mm|it deflected 3.75 mm, '
+                        '7.5x the limit"; the flags below apply to the --rejected before them')
     p.add_argument("--type", action=_RejectionPart, dest="rejection_parts",
                    metavar="TYPE", help=said_decide["type_help"])
     p.add_argument("--by", action=_RejectionPart, dest="rejection_parts", metavar="NAME",
@@ -10470,7 +10470,12 @@ def build_parser() -> argparse.ArgumentParser:
     # `--write` and `--entry` are unchanged.
     model_sub = p.add_subparsers(dest="model_command", metavar="<sub>")
     said = report.HUMAN["trace"]
-    t = model_sub.add_parser("trace", parents=[common], help=said["help"])
+    # argparse reads a help string as a %-format: the sentence's "-10% and
+    # +10%" is escaped here, at the parser, and stays a sentence in HUMAN. (What slipped
+    # through phase 3b: `nopekit model --help` crashed, "TypeError: not enough
+    # arguments for format string"; tests/test_docs_commands.EveryHelpPrints.)
+    t = model_sub.add_parser("trace", parents=[common],
+                             help=said["help"].replace("%", "%%"))
     t.add_argument("--choices", action="append", default=None, metavar="A,B",
                    help=said["choices_help"])
     t.add_argument("--workers", type=int, default=None,

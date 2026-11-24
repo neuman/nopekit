@@ -143,8 +143,8 @@ against the cell's 0..45 C: 1.53 K of headroom, on the hot side. The cold edge
 lies below the B pair, and the detail says so. A coarser grade of the same NTC
 does not move its nominal curve: R25 5 % and B 3 % leave 0.17 K, and R25 10 %
 charges the cell to 45.97 C (-0.97 K). `ntc_swapped` puts a 100 kOhm NTC of
-the same B in TH1's place, on the board and in its record: charging is then
-allowed from 54.75 C to 109.83 C, -64.83 K.
+the same B in TH1's place, on the board, the schematic and its record: charging
+is then allowed from 54.75 C to 109.83 C, -64.83 K.
 
 The AMI option's safety timer is disabled (DS22005B, "Timer Period 0 hours").
 It passes: IEC 62368-1 M.4.2 measures the charge voltage, current and cell
@@ -289,7 +289,12 @@ THERM, C2 and C3 its bypass capacitors; BT1 the cell's keyed two-pin housing; F1
 the PTC; U2 the protector, R5 and C1 its RC, R4 on VM, Q1 its FETs; J6 the wire
 out; J10 and J11 two 8-position FFC housings, joined by the `flex` mating (GND
 on 1, VBUS on 5, and 3 and 6 open, so a 6-way cable two positions off never puts
-VBUS on GND: `references/mismate.md`). The
+VBUS on GND: `references/mismate.md`). Its schematic,
+`power_board.kicad_sch` (`make_power_schematic.py`), places every part on the
+symbol the board took its pin names from, TH1 on `Device:Thermistor_NTC`, so the
+known-good reads the defeat check's symbol. A known-bad copy of the board that
+swaps a part, or changes only a record, carries the schematic beside it, the
+part swapped there too; one that moves a net carries none. The
 cell's numbers come from LG Chem's MJ1 specification (LRB-PS-CY3500_MJ1, rev 1,
 2016-06-30), U1's from Microchip's DS22005B (2009); the protector, the PCM, the
 PTC, the NTC, the wire's rating and the short-circuit current are fixture

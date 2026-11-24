@@ -56,7 +56,9 @@ from __future__ import annotations
 
 import argparse
 import ast
+import contextlib
 import glob
+import io
 import os
 import re
 import textwrap
@@ -708,6 +710,61 @@ class SpineStringsParse(unittest.TestCase):
         self.assertEqual(string_commands("nopekit readiness — x", self.parser), [])
         self.assertEqual(string_commands("nopekit chek", self.parser, typeset=True),
                          [(0, ["chek"])])
+
+
+# --------------------------------------------------------------------------- #
+# Every --help prints
+# --------------------------------------------------------------------------- #
+def help_paths(parser: argparse.ArgumentParser, path: tuple = ()) -> list[tuple]:
+    """Every command path the parser holds, ``()`` (the top level) first: each
+    subcommand, and each of its own, down to the leaves."""
+    out = [path]
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for name, sub in action.choices.items():
+                out += help_paths(sub, (*path, name))
+    return out
+
+
+def help_exit(argv: list[str], main=cli.main) -> tuple:
+    """``(exit code, what it raised or "")`` of ``<argv> --help`` through ``main``
+    (``nopekit``'s own by default), run in this process with its output thrown
+    away."""
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            return main([*argv, "--help"]), ""
+        except SystemExit as exc:
+            return int(exc.code or 0), ""
+        except Exception as exc:                # noqa: BLE001 - the finding itself
+            return None, f"{type(exc).__name__}: {exc}"
+
+
+class EveryHelpPrints(unittest.TestCase):
+    """`nopekit <path> --help` exits 0 for every command path the parser holds.
+    What slipped through architecture phase 3b: `model trace`'s help said "-10%
+    and +10%", argparse read the `%` as a format, and `nopekit model --help`
+    crashed with "TypeError: not enough arguments for format string". Nothing
+    asked for that help, so nothing turned red."""
+
+    def test_every_help_exits_zero(self):
+        paths = help_paths(cli.build_parser())
+        self.assertIn(("model", "trace"), paths)
+        self.assertGreater(len(paths), 40, "the walk found almost no commands")
+        failed = {" ".join(path) or "<top>": got for path in paths
+                  for got in [help_exit(list(path))] if got != (0, "")}
+        self.assertEqual(failed, {})
+
+    def test_a_planted_percent_is_caught(self):
+        """The bug's shape: a subcommand's help with a bare ``%`` crashes its
+        PARENT's help, and its own help prints."""
+        parser = argparse.ArgumentParser(prog="nopekit")
+        sub = parser.add_subparsers(dest="command")
+        sub.add_parser("ok", help="moves 10%% of a choice")
+        sub.add_parser("bad", help="moves 10% of a choice")
+        self.assertEqual(help_paths(parser), [(), ("ok",), ("bad",)])
+        self.assertEqual([help_exit(list(path), parser.parse_args)[0]
+                          for path in help_paths(parser)], [None, 0, 0])
+        self.assertIn("TypeError", help_exit([], parser.parse_args)[1])
 
 
 if __name__ == "__main__":

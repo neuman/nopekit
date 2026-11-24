@@ -100,7 +100,9 @@ record to its role's keys (`pcb.mismate` reads its pins), and a
 `reverse_block` only by `pcb.mismate`, for a battery mating that states
 `reversed`). The baseline's records name
 `selftest/assets/power_board.kicad_pcb` (made by `make_power_board.py`: placed,
-netted, not routed), which only these six rules read. `references/battery.md`,
+netted, not routed), which only these six rules read, and its schematic
+`power_board.kicad_sch` sits beside it (`make_power_schematic.py`), where
+`pcb.charge_temperature` reads the NTC's symbol. `references/battery.md`,
 `references/mismate.md` and `references/usb-c.md` hold every field.
 
 ## The proposer: `pcb.autoroute`

@@ -30,6 +30,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -378,29 +379,70 @@ def _ran_in(runs_on: str) -> str:
 #: processes, behind an advisory lock outside every project. *Rejected:* renaming
 #: the workflow in the copy (an edit to the file CI runs); a lock in the project
 #: (two projects that hold one workflow name collide just the same); a name prefix
-#: (act 0.2.97 has no flag for one). The limit: the lock is under ``$HOME``, so two
-#: processes with different homes (a test's own home beside a person's check) can
-#: still collide, and the collision reads errored by the signal rule in ``judge``,
-#: never as a verdict.
-LOCK = os.path.join("~", ".cache", "nopekit", "firmware-ci", "replay.lock")
+#: (act 0.2.97 has no flag for one).
+#:
+#: **The lock is the user's, not the home's**: ``<LOCK_ROOT>/nopekit-<uid>/``
+#: ``firmware-ci-replay.lock``, the system's temp root keyed by the uid, so every
+#: process of this user on this machine queues on one lock, whatever ``HOME`` or
+#: ``TMPDIR`` says. What slipped through F1 and F2: the lock was
+#: ``~/.cache/nopekit/firmware-ci/replay.lock``, so a test's temporary home beside
+#: a person's check, or two test runs, took two locks, and the collision above
+#: came back (measured on the merged branch: one replay's container removed
+#: mid-build, the other read "RWLayer ... unexpectedly nil"). *Rejected:*
+#: ``tempfile.gettempdir()`` (it reads ``TMPDIR``, which a test run sets to its
+#: own directory: two runs, two locks); ``$XDG_RUNTIME_DIR`` (an environment
+#: variable too, which a test's clean environment drops, and absent on WSL and
+#: on CI); one lock for the whole machine (a file one user creates, another
+#: cannot open). The directory is made ``0700`` and used only while it is a
+#: directory this uid owns, never a link: ``/tmp`` is everyone's, and a path
+#: another user made first is not a lock of ours. Then, or where the temp root
+#: cannot be written, the lock falls back to ``HOME_LOCK``, the old place. The
+#: limits: there, and between two users of one Docker daemon, two replays can
+#: still collide, and the collision reads errored by the signal rule in
+#: ``judge``, never as a verdict. The lock waits as long as the replay ahead of
+#: it runs; each replay's own ``TIMEOUT_S`` bounds that.
+LOCK_ROOT = "/tmp"
+LOCK_NAME = "firmware-ci-replay.lock"
+HOME_LOCK = os.path.join("~", ".cache", "nopekit", "firmware-ci", "replay.lock")
+
+
+def lock_path(root: str | None = None) -> str:
+    """The replay lock of this user on this machine, under ``root`` (default
+    :data:`LOCK_ROOT`): it reads the uid and no environment variable."""
+    return os.path.join(root or LOCK_ROOT, f"nopekit-{os.getuid()}", LOCK_NAME)
+
+
+def _open_lock() -> int:
+    """A descriptor on the lock file: the user's own (:func:`lock_path`) when its
+    directory is a directory this uid owns, else :data:`HOME_LOCK`."""
+    flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+    path = lock_path()
+    try:
+        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        st = os.lstat(os.path.dirname(path))
+        if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+            return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError:
+        pass
+    path = os.path.expanduser(HOME_LOCK)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return os.open(path, flags, 0o600)
 
 
 class _one_replay_at_a_time:
     def __enter__(self):
-        self.fh = None
+        self.fd = None
         try:
             import fcntl
         except ImportError:                                  # not a POSIX host
             return self
-        path = os.path.expanduser(LOCK)
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        self.fh = open(path, "a", encoding="utf-8")
-        fcntl.flock(self.fh, fcntl.LOCK_EX)
+        self.fd = _open_lock()
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
         return self
 
     def __exit__(self, *exc):
-        if self.fh is not None:
-            self.fh.close()                                  # releases the lock
+        if self.fd is not None:
+            os.close(self.fd)                                # releases the lock
         return False
 
 

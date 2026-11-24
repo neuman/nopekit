@@ -41,6 +41,7 @@ import struct
 import sys
 import tempfile
 import textwrap
+import threading
 import unittest
 from unittest import mock
 
@@ -710,12 +711,18 @@ class TheCopyIsWhatTheNextCommitHolds(unittest.TestCase):
 # the whole replay, through a stand-in act and docker
 # --------------------------------------------------------------------------- #
 class _StandIn(unittest.TestCase):
-    """A bin directory with ``act`` and ``docker`` stand-ins first on PATH, and a
-    HOME of the test's own, so the replay's lock and caches land nowhere real."""
+    """A bin directory with ``act`` and ``docker`` stand-ins first on PATH, a HOME
+    of the test's own, and the replay lock's root in the test's own directory, so
+    the replay's lock and caches land nowhere real. (The real lock is every
+    process's of this user, whatever HOME says: a stand-in act starts no
+    container, and a test of it never waits on a person's replay.)"""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="fw-standin-")
         self.addCleanup(shutil.rmtree, self.tmp, True)
+        root = mock.patch.object(R, "LOCK_ROOT", self.tmp)
+        root.start()
+        self.addCleanup(root.stop)
         self.bin = os.path.join(self.tmp, "bin")
         os.makedirs(self.bin)
         for tool in ("act", "docker"):
@@ -923,6 +930,86 @@ class TheActVersionIsPinned(_StandIn):
         self.assertEqual(verdict.outcome, "pass", verdict.render())
         self.assertEqual([os.path.basename(p) for p in verdict.evidence],
                          ["log.txt", "images.json", "toolchain.json"])
+
+
+#: A replay's critical section with no replay in it: the lock held for a second
+#: under ``<argv[2]>``, its entry and exit appended to ``argv[3]`` with this
+#: process's HOME.
+_LOCK_CHILD = r"""
+import os, sys, time
+from nopekit.modelio import load_path
+R = load_path(sys.argv[1])
+R.LOCK_ROOT = sys.argv[2]
+with R._one_replay_at_a_time():
+    for word, wait in (("enter", 1.0), ("exit", 0.0)):
+        with open(sys.argv[3], "a", encoding="utf-8") as fh:
+            fh.write(f"{word} {os.environ['HOME']}\n")
+        time.sleep(wait)
+"""
+
+
+@unittest.skipUnless(hasattr(os, "getuid") and importlib.util.find_spec("fcntl"),
+                     "not a POSIX host: the replays take no lock")
+class TheReplayLockIsTheUsers(unittest.TestCase):
+    """One replay at a time for every process of this user on this machine,
+    whatever HOME says. (What slipped through F1 and F2: the lock lived under
+    ``$HOME``, so a test's temporary home beside a person's check took a second
+    lock, and act removed one replay's container mid-build: "RWLayer ...
+    unexpectedly nil".)"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="fw-lock-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    def test_two_homes_queue_on_one_lock(self):
+        log = os.path.join(self.tmp, "log")
+        homes = [os.path.join(self.tmp, "home-a"), os.path.join(self.tmp, "home-b")]
+        done = {}
+
+        def child(home: str) -> None:
+            os.makedirs(home)
+            done[home] = _env.run([sys.executable, "-c", _LOCK_CHILD,
+                                   os.path.join(PACK, "gates", "_replay.py"), self.tmp, log],
+                                  cwd=self.tmp, home=home, timeout=60)
+        threads = [threading.Thread(target=child, args=(home,)) for home in homes]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        for home in homes:
+            self.assertEqual(done[home].returncode, 0, done[home].stderr)
+        with open(log, encoding="utf-8") as fh:
+            lines = [ln.split() for ln in fh if ln.strip()]
+        self.assertEqual([w for w, _home in lines], ["enter", "exit", "enter", "exit"],
+                         f"the two homes held the lock at once: {lines}")
+        self.assertEqual((lines[0][1], lines[2][1]), (lines[1][1], lines[3][1]))
+        self.assertEqual(sorted({h for _w, h in lines}), homes)
+
+    def test_the_lock_reads_the_uid_and_no_environment(self):
+        paths = set()
+        for home, tmp in (("/home-a", "/tmp-a"), ("/home-b", "/tmp-b")):
+            with mock.patch.dict(os.environ, {"HOME": home, "TMPDIR": tmp,
+                                              "XDG_RUNTIME_DIR": tmp}):
+                paths.add(R.lock_path())
+        self.assertEqual(paths, {os.path.join("/tmp", f"nopekit-{os.getuid()}",
+                                              "firmware-ci-replay.lock")})
+
+    def test_a_directory_that_is_not_this_users_is_never_the_lock(self):
+        """/tmp is everyone's: a link where the directory goes (or a directory
+        another user made) is not a lock of ours, and the lock falls back to
+        HOME's, the old place."""
+        elsewhere = os.path.join(self.tmp, "elsewhere")
+        home = os.path.join(self.tmp, "home")
+        os.makedirs(elsewhere)
+        os.makedirs(home)
+        os.symlink(elsewhere, os.path.join(self.tmp, f"nopekit-{os.getuid()}"))
+        with mock.patch.object(R, "LOCK_ROOT", self.tmp), \
+                mock.patch.dict(os.environ, {"HOME": home}):
+            with R._one_replay_at_a_time():
+                pass
+        self.assertEqual(os.listdir(elsewhere), [])
+        self.assertTrue(os.path.isfile(os.path.join(home, ".cache", "nopekit", "firmware-ci",
+                                                    "replay.lock")))
 
 
 # --------------------------------------------------------------------------- #
