@@ -60,6 +60,10 @@ The single most common way a geometry check lies is by being true.
   steps can step straight over an interference that occupies 2°.
 - What about the pose it reaches when something fails — the lid dropped rather than
   lowered, the arm at its hard stop, the cable pulled taut?
+- Does it take something in — a dock, cradle or clamp for a removable item? Open the
+  capture feature to its widest, put the largest item it must take at the capture
+  feature, and tilt it along its insertion path. Drawn in place it fits; did you
+  export the pose on the way in?
 - Which parts move relative to each other under *no* control at all: a cable, a
   wire loom, a compressed foam, a gasket that extrudes when compressed?
 - If the answer is "we checked the CAD default pose", the answer is that you have

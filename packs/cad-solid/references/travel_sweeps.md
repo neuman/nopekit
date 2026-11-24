@@ -28,6 +28,7 @@ A minimum set for one degree of freedom:
 | **Past** each hard stop, by the over-travel a hand can apply | What it actually reaches. Hard stops are made of plastic |
 | Even steps across the range | The interference in the middle that neither extreme shows |
 | The assembly pose | Often outside the operating range entirely, and the one that has to work exactly once |
+| The loading pose | A dock, cradle or clamp at its widest opening, with the largest item it must take at its capture feature, tilted along its insertion path. The item fits when drawn in place; this is where it hits the frame on the way in |
 | Any latched, folded or stowed state | A separate configuration, not a pose on the same axis |
 
 Two degrees of freedom need the **grid**, not the two axes separately. A part that
