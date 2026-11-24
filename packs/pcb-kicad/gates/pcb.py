@@ -72,6 +72,7 @@ and where the board sits in it are the project's to say.
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import itertools
 import json
 import math
@@ -2012,6 +2013,34 @@ _COURTYARD_ITEMS = ("fp_line", "fp_rect", "fp_poly", "fp_circle", "fp_arc")
 #: kicad-cli places it as it places any model.
 HEIGHT_DIR = "nopekit-heights"
 
+#: How far past its part's own box (the part's bounding box as placed, in the
+#: enclosure's frame) a contact region may take out enclosure material, in the
+#: claim's limits. Material more than one limit past the box cannot come within
+#: the limit of the part, so a region needs no reach there, and a region that
+#: reaches there excuses the part against whatever is there. In the review of
+#: P7, a region 0.1 mm short of the enclosure's whole box excused each header
+#: against the walls and the floor as well as the lid it named: the review's run
+#: read pass at 2.465 mm, against the 0.1 mm skin the region left. The second
+#: limit is room to draw in: the material just past a region drawn to exactly
+#: one limit sits at the limit, so a region would have to end on that line to
+#: 0.001 mm (measured on the baseline's lid over J1 at z 5.8: a region 0.035 mm
+#: short of it left the lid 0.965 mm from the pins, against 1.0). Two limits
+#: give a window as wide as the limit. *Rejected:* the region
+#: holding the enclosure's whole box (the P7 guard: a region 0.1 mm short of it
+#: passed); a share of the enclosure's volume (a small region near the part can
+#: still cover two features, and no share is a number anyone could defend); a
+#: fixed reach in mm (a wall's thickness is the project's, and a fixed number
+#: means a different thing beside a 0.2 mm limit and a 5 mm one); clipping the
+#: region quietly to the reach (the record stays as wide as it was drawn, and a
+#: part that moves toward a wall inside it is excused there).
+REGION_REACH_LIMITS = 2.0
+
+#: The tolerance on that reach, mm. The refusal prints the reach to 0.001 mm, so a
+#: region copied from it can stand 0.0005 mm proud; OpenCascade's optimal box is
+#: exact to its own tolerance, 1e-7 mm. *Rejected:* 0 (a region copied from the
+#: refusal could be refused on the printed digit).
+REGION_REACH_TOL_MM = 1e-3
+
 
 class _FitError(ValueError):
     """A fit record the gate cannot read: the gate errors, naming it."""
@@ -2272,6 +2301,7 @@ class _Fit:
     parts: list = dataclasses.field(default_factory=list)
     models: dict = dataclasses.field(default_factory=dict)
     tree: list | None = None
+    enclosure_id: str = ""      # the sha256 of the enclosure file's bytes
 
     def name(self, ref: str) -> str:
         return f"{self.id}:{ref}" if self.id else ref
@@ -2394,10 +2424,11 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
     fit.models = models
     unmodelled = sorted(r for r in fit.parts if not models.get(r) and r not in fit.heights)
     if unmodelled:
+        # Held to the 200 characters a skip reason keeps: at 207 the last choice,
+        # pcb_enclosure_bodiless, was cut off (seen in the review of P7).
         return (f"{label}{len(unmodelled)} placed part(s) name no 3D model: "
-                f"{', '.join(unmodelled[:8])}. The fit cannot see a body the board does not "
-                f"describe: give each a model, state its height in pcb_part_heights_mm, or "
-                f"list a part with no body in pcb_enclosure_bodiless")
+                f"{', '.join(unmodelled[:8])}. Give each a model, state its height in "
+                f"pcb_part_heights_mm, or list a part with no body in pcb_enclosure_bodiless")
     return None
 
 
@@ -2422,7 +2453,7 @@ def _board_contacts(fits: list[_Fit]) -> dict:
                                     f"called {rec['fit']!r}"
                                     + ("" if fit.id else " (a contact with another board "
                                        "needs pcb_enclosure_fits)"))
-                if other.enclosure != fit.enclosure:
+                if other.enclosure_id != fit.enclosure_id:
                     raise _FitError(f"{fit.name(ref)} against {feature}: {other.id} is in "
                                     f"another enclosure")
                 if other.tree is not None and rec["ref"] != BODY and rec["ref"] not in other.parts:
@@ -2433,6 +2464,78 @@ def _board_contacts(fits: list[_Fit]) -> dict:
                     if q not in pairs[a.key][p][b.key]:
                         pairs[a.key][p][b.key].append(q)
     return pairs
+
+
+def _xyz(v) -> str:
+    return "(" + ", ".join(f"{round(c, 3):g}" for c in v) + ")"
+
+
+def _region_refusal(fit: _Fit, parts: dict, enclosure_bbox,
+                    limit: float) -> tuple[str, str] | None:
+    """Why ``fit``'s contact regions cannot stand as measured, as ``(error,
+    detail)``, or None. The error is what to do, short enough for the 200
+    characters a verdict's error keeps; the detail has the boxes it read.
+
+    ``parts`` is the geometry's answer for the board (``_fit.py``: each part
+    with a region carries its box as placed and, for each region, the box of the
+    enclosure material it took out). A region is refused when it holds the
+    enclosure's whole box; when a part's regions together take out all of the
+    enclosure (its distance to the rest came back None, and before the review of
+    P7 such a part was left out of the verdict: judged against nothing); and when
+    the material it takes out reaches more than :data:`REGION_REACH_LIMITS` of the
+    claim's limits past the part's own box. Inside that reach a region is the
+    person's statement of the feature: one drawn over two features excuses both."""
+    blo, bhi = enclosure_bbox
+    reach = REGION_REACH_LIMITS * max(limit, 0.0)
+    for ref, feats in sorted(fit.contacts.items()):
+        regions = {f: rec["region_mm"] for f, rec in feats.items() if "region_mm" in rec}
+        if not regions:
+            continue
+        who = fit.name(ref)
+        for feat, (lo, hi) in sorted(regions.items()):
+            if all(lo[i] <= blo[i] and hi[i] >= bhi[i] for i in range(3)):
+                return (f"{who} against {feat}: its region holds the whole enclosure, so it "
+                        f"excuses the part against anything. Draw the region around the "
+                        f"feature it touches",
+                        f"the region is {_xyz(lo)} to {_xyz(hi)} mm; the enclosure's box is "
+                        f"{_xyz(blo)} to {_xyz(bhi)} mm")
+        row = (parts.get(ref) or {}).get("enclosure")
+        if row is None:
+            continue                # not in the export: named as missing, not judged
+        if row.get("clearance_mm") is None:
+            return (f"{who}: its regions ({', '.join(sorted(regions))}) take out all of the "
+                    f"enclosure, so they excuse it against anything. Draw each region "
+                    f"around the feature it touches",
+                    "; ".join(f"{feat} is {_xyz(lo)} to {_xyz(hi)} mm"
+                              for feat, (lo, hi) in sorted(regions.items())))
+        plo, phi = row["bbox"]
+        rlo = [v - reach for v in plo]
+        rhi = [v + reach for v in phi]
+        for feat, (lo, hi) in sorted(regions.items()):
+            got = row["excused"][feat].get("material_bbox")
+            if got is None:
+                continue            # no enclosure material in it: it excuses nothing
+            mlo, mhi = got
+            if all(mlo[i] >= rlo[i] - REGION_REACH_TOL_MM
+                   and mhi[i] <= rhi[i] + REGION_REACH_TOL_MM for i in range(3)):
+                continue
+            detail = (f"{who} against {feat}: the region takes out enclosure material from "
+                      f"{_xyz(mlo)} to {_xyz(mhi)} mm. {ref}'s own box, as placed, is "
+                      f"{_xyz(plo)} to {_xyz(phi)} mm, and a region may reach {reach:g} mm "
+                      f"past it ({REGION_REACH_LIMITS:g} times the claim's limit). Material "
+                      f"farther away cannot come within the limit of {ref}: a region that "
+                      f"holds it would excuse {ref} against any feature there")
+            clo = [round(max(lo[i], rlo[i]), 3) for i in range(3)]
+            chi = [round(min(hi[i], rhi[i]), 3) for i in range(3)]
+            if not all(a < b for a, b in zip(clo, chi)):
+                return (f"{who} against {feat}: the region holds no material within "
+                        f"{reach:g} mm of {ref}'s own box ({REGION_REACH_LIMITS:g} times the "
+                        f"claim's limit), so it excuses nothing. Remove it, or draw it where "
+                        f"{ref} touches", detail)
+            return (f"{who} against {feat}: the region reaches more than {reach:g} mm past "
+                    f"{ref}'s own box ({REGION_REACH_LIMITS:g} times the claim's limit). "
+                    f"Draw it within {json.dumps([clo, chi])}", detail)
+    return None
 
 
 def _helper(mode: str, request: str, cwd: str, timeout: float, log: str):
@@ -2562,7 +2665,8 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
     placement (:data:`PLACEMENT_KEYS`) turns it about x, then y, then z, as one
     3x3 rotation, then moves it, into the enclosure's frame. One board is stated
     by ``pcb_board`` and the singular keys; several by ``pcb_enclosure_fits``,
-    and boards that name one enclosure file are fitted against each other too.
+    and boards whose enclosure files hold the same bytes, however each path is
+    spelled, are fitted against each other too.
 
     **A part the fit cannot see is a skip, never a pass.** kicad-cli leaves out,
     silently and with exit 0, every part whose 3D model it cannot find (KiCad's
@@ -2606,8 +2710,20 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
             return Verdict(gate=gid, passed=False, detail=f"no board at {fit.board}")
         if not os.path.isfile(fit.enclosure):
             return Verdict(gate=gid, passed=False, detail=f"no enclosure at {fit.enclosure}")
-    for enclosure in sorted({f.enclosure for f in fits}):
-        ctx.load_file(enclosure)
+    # Boards are in one enclosure when their enclosure files hold the same
+    # bytes. (What slipped through in P7: the group was the path as written, so
+    # cad/enc.step and ./cad/enc.step were two enclosures, each board was fitted
+    # against the enclosure alone, and two boards that shared 11.3 mm^3 read
+    # pass.) *Rejected:* realpath or os.path.samefile (a verdict's key holds the
+    # bytes at each path, not which file a link names: a copy turned into a link
+    # to its original would keep a pass that never fitted the boards together,
+    # against invariant 7); normpath (a link still splits the group). The cost:
+    # two copies of one file are one enclosure (enclosure-fit.md, "What it does
+    # not see").
+    digests = {path: hashlib.sha256(ctx.load_file(path)).hexdigest()
+               for path in sorted({f.enclosure for f in fits})}
+    for fit in fits:
+        fit.enclosure_id = digests[fit.enclosure]
     skips: list[str] = []
     errors: list[str] = []
     try:
@@ -2642,8 +2758,9 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
     judged_parts = 0
     groups: dict[str, list] = {}
     for key, (fit, step, log) in exported.items():
-        groups.setdefault(fit.enclosure, []).append((fit, step, log))
-    for enclosure, members in sorted(groups.items()):
+        groups.setdefault(fit.enclosure_id, []).append((fit, step, log))
+    for members in sorted(groups.values(), key=lambda m: m[0][0].enclosure):
+        enclosure = members[0][0].enclosure
         first_stage = os.path.dirname(members[0][1])
         boards = []
         for fit, step, _log in members:
@@ -2668,35 +2785,40 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
         with open(report, "w", encoding="utf-8") as fh:
             json.dump(result, fh, indent=2, sort_keys=True)
         ev = [report, *ev, *(step for _f, step, _l in members)]
-        (blo, bhi) = result["enclosure_bbox"]
         names = {fit.key: fit for fit, _s, _l in members}
         for fit, _step, _log in members:
             label = f"fit {fit.id}: " if fit.id else ""
-            for ref, feats in fit.contacts.items():
-                for feat, rec in feats.items():
-                    lo, hi = rec.get("region_mm", (None, None))
-                    if lo is not None and all(lo[i] <= blo[i] and hi[i] >= bhi[i]
-                                              for i in range(3)):
-                        return Verdict(gate=gid, passed=False,
-                                       error=f"{fit.name(ref)} against {feat}: its region holds "
-                                             f"the whole enclosure, so it excuses the part "
-                                             f"against anything. Draw the region around the "
-                                             f"feature it touches")
             measured_parts = result["boards"][fit.key]["parts"]
+            refused = _region_refusal(fit, measured_parts, result["enclosure_bbox"], acc.limit)
+            if refused:
+                return Verdict(gate=gid, passed=False, evidence=ev, error=refused[0],
+                               detail=refused[1])
+            # A board with a part missing from its export is still judged on what
+            # arrived, and named as not judged. A shape that is there can only come
+            # nearer to something when a missing one is added, never farther, so
+            # its collision or its gap under the limit is a fail; its pass is not
+            # one. (What slipped through in P7: a pair of boards is measured once,
+            # under the first, and a board with a missing part was dropped with its
+            # pair rows, so the same records read fail or skip by the order of
+            # their keys.)
             missing = sorted(r for r in fit.parts if r not in measured_parts)
             boxed = [r for r in missing if r in fit.heights]
+            unfound = [r for r in missing if r not in fit.heights]
             if boxed:
                 errors.append(f"{label}the declared-height box of {', '.join(boxed[:8])} did "
                               f"not reach kicad-cli's export")
-                continue
-            if missing:
-                skips.append(f"{label}kicad-cli exported no body for {', '.join(missing[:8])}: "
-                             f"their 3D models were not found (it leaves a missing model out "
-                             f"with exit 0). Install KiCad's 3D library, keep the models "
-                             f"beside the board as ${{KIPRJMOD}}/..., or state the part's "
-                             f"height in pcb_part_heights_mm")
-                continue
-            judged_parts += len(fit.parts)
+            if unfound:
+                # Every part here names a model: one with neither skipped before the
+                # export, and one with both is refused (_read_board). So the advice
+                # is to hide the model as well as to state a height. (What slipped
+                # through in P7: the advice was to state a height alone, which the
+                # next run refused; and at 241 characters, past the 200 a skip
+                # reason keeps, that advice was cut off before it was shown.)
+                skips.append(f"{label}kicad-cli left out {', '.join(unfound[:8])}: it did not "
+                             f"find their 3D models. Install KiCad's 3D library, keep each "
+                             f"model beside the board, or hide it and state a height in "
+                             f"pcb_part_heights_mm")
+            judged_parts += sum(1 for r in fit.parts if r in measured_parts)
             for name, row in sorted(measured_parts.items()):
                 enc = row["enclosure"]
                 who = fit.name(name)
@@ -2743,7 +2865,9 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
     if len(fits) == 1 and not fits[0].id:
         detail += f" ({judged_parts} part(s) placed at {_placed_at(fits[0].place)})"
     else:
-        detail += (f" ({len(exported)} board(s): "
+        apart = (f" in {len(groups)} enclosure files, each board fitted against the "
+                 f"others in its own" if len(groups) > 1 else "")
+        detail += (f" ({len(exported)} board(s){apart}: "
                    + "; ".join(f"{f.id} at {_placed_at(f.place)}" for f, _s, _l in
                                exported.values()) + ")")
     if excused:

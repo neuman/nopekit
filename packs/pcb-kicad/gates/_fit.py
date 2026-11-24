@@ -21,7 +21,9 @@ beside it. The shared volume is always measured against all of the enclosure and
 all of the other board: a contact excuses closeness, never a collision. (What
 slipped through elsewhere: an allow-list entry for "this part against anything"
 hid a real interference. Here a contact names its feature, and shared volume
-still counts.)
+still counts.) A part with a region also gets its box as placed, and each region
+the box of the enclosure material it took out, so the gate can hold a region to
+what the part can reach.
 
 ``boxes``: writes a box STEP for each part fitted at a declared height. The box
 is in the footprint's own model frame, so kicad-cli places it as it places any
@@ -113,6 +115,16 @@ def _shared(shape, other) -> float:
     return common.Volume() if common.Solids() else 0.0
 
 
+def _bbox(shape, solid: bool = True):
+    """``[[xmin, ymin, zmin], [xmax, ymax, zmax]]`` of ``shape``, mm (OpenCascade's
+    optimal box), or None when it holds no solid and ``solid`` asks for one. A
+    part's box is taken whatever it is made of: a vendor model can be shells."""
+    if shape is None or solid and not shape.Solids():
+        return None
+    bb = shape.BoundingBox()
+    return [[bb.xmin, bb.ymin, bb.zmin], [bb.xmax, bb.ymax, bb.zmax]]
+
+
 def _distance(shape, other):
     """The least distance between the two, mm, or None when ``other`` holds no
     solid (a region with no enclosure material in it, or nothing left)."""
@@ -162,9 +174,12 @@ def fit(req: dict) -> dict:
                 for feature, (lo, hi) in sorted(mine.items()):
                     box = _box(lo, hi)
                     rest = rest.cut(box)
-                    excused[feature] = {"clearance_mm": _distance(shape, enclosure.intersect(box))}
+                    inside = enclosure.intersect(box)
+                    excused[feature] = {"clearance_mm": _distance(shape, inside),
+                                        "material_bbox": _bbox(inside)}
                 row["clearance_mm"] = _distance(shape, rest)
                 row["excused"] = excused
+                row["bbox"] = _bbox(shape, solid=False)
             else:
                 row["clearance_mm"] = shape.distance(enclosure)
             rows[name] = {"enclosure": row, "boards": {}}

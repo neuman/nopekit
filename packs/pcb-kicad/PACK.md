@@ -326,11 +326,14 @@ enclosure's own axes: face down is `rot_x_deg` 180), then moves it by `x`, `y`,
 frame. The verdict is the nearest distance, in mm, against the limit of the claim
 tagged `enclosure-fit` (`>=`); any shared volume fails it, and a board body may
 touch the enclosure (standoffs) but not cut in. `pcb_enclosure_fits` states
-several boards, and boards in one enclosure keep the limit from each other, their
-bodies included. `pcb_enclosure_contacts` names a part that touches one feature
-by design: a region of the enclosure (`region_mm`, a box in its frame) or a shape
-of another board (`<fit>:<ref>`). Its distance to that feature is listed and left
-out; against the rest it keeps the limit, and shared volume still fails it.
+several boards, and boards in one enclosure (enclosure files with the same bytes,
+however each path is spelled) keep the limit from each other, their bodies
+included. `pcb_enclosure_contacts` names a part that touches one feature by
+design: a region of the enclosure (`region_mm`, a box in its frame, that takes
+out material no further than twice the claim's limit past the part's own box) or
+a shape of another board (`<fit>:<ref>`). Its distance to that feature is listed
+and left out; against the rest it keeps the limit, and shared volume still fails
+it.
 `pcb_part_heights_mm` gives a part with no model its courtyard's box, raised to a
 stated height. `references/enclosure-fit.md` has each in full.
 

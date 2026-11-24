@@ -36,11 +36,24 @@ walk raises the board until the pins near the lid, and the gate must fail that.
 `pcb_enclosure_fits` holds one entry per board, keyed by an id: `{board,
 enclosure_step, placement, bodiless, contacts, heights}`, each field as the
 singular key it stands for. It replaces the singular keys, and stating both is
-refused. Each board is fitted against its enclosure. Boards that name the same
-enclosure file are also fitted against each other: every shape of one keeps the
-limit from every shape of the other, the bodies included, and a shared volume
-fails. The verdict is the worst over every board, and a board that could not be
-judged (a skip or an error) is named beside a fail, never in place of it.
+refused. Each board is fitted against its enclosure. Boards whose enclosure
+files hold the same bytes are in one enclosure, however each path is spelled
+(`cad/enc.step`, `./cad/enc.step`, an absolute path, a link, a copy), and are
+also fitted against each other: every shape of one keeps the limit from every
+shape of the other, the bodies included, and a shared volume fails. Until the
+review of P7 the group was the path as written, so `./cad/enc.step` was another
+enclosure and two boards that collided read pass. The group is not the file that
+a link names: a verdict's key holds the bytes at each path, not where a link
+points. The verdict says when the boards are in more than one enclosure file.
+
+The verdict is the worst over every board, and a board that could not be judged
+(a skip or an error) is named beside a fail, never in place of it. A board with a
+part missing from its export is judged on the shapes that arrived and named as
+not judged: a shape that is there can only come nearer to something when a
+missing one is added, so its fail is a fail and its pass is not. (Each pair of
+boards is measured once, under the first; until the review of P7 a board with a
+missing part was dropped with its pair rows, and the same records read fail or
+skip by the order of their keys.)
 
 ## What kicad-cli leaves out
 
@@ -54,7 +67,9 @@ with nothing on the board. The gate therefore:
    has no declared height;
 2. reads the export with OpenCascade's XCAF reader, which keeps each component's
    name (KiCad names each part's model by its reference), and skips, naming them,
-   if any placed part did not arrive.
+   if any placed part did not arrive. Such a part names a model, so the skip
+   says to install the library, keep the model beside the board, or hide the
+   model and state a height: a part that names a model and a height is refused.
 
 `pcb_enclosure_bodiless` lists, by reference, parts that truly have no body to fit
 (an antenna drawn in copper). A model referenced as `${KIPRJMOD}/...` is copied
@@ -94,10 +109,28 @@ cutout, a light pipe, a cell on foam. A feature is:
   `"<fit>:<ref>"` or `"<fit>:board"`: one contact holds both ways.
 
 The part keeps the limit against every other feature, and any shared volume still
-fails it: a contact excuses closeness, never a collision. A ref with no feature, a
-feature with no reason, and a region that holds the whole enclosure are refused.
-An allow-list entry for one part against anything once hid a real interference;
-a contact here cannot excuse its part against a feature it does not name.
+fails it: a contact excuses closeness, never a collision. A ref with no feature
+and a feature with no reason are refused. An allow-list entry for one part
+against anything once hid a real interference, so a region is held to what its
+part can reach:
+
+- the enclosure material it takes out must lie within twice the claim's limit of
+  the part's own box (its bounding box as placed, in the enclosure's frame).
+  Material farther away cannot come within the limit of the part, so a region
+  needs no reach there; the second limit is room to draw in. A region that
+  reaches farther is refused, and the error gives the region cut to that reach.
+  A region with no material near the part excuses nothing and is refused too;
+- a region that holds the enclosure's whole box is refused, and so are regions
+  that together take out all of the enclosure (the part would be judged against
+  nothing).
+
+What this holds, and no more: a region excuses its part only against material
+near that part. Inside the reach the region is the person's statement of the
+feature: a region drawn over two features near the part (the lid and the wall
+beside it) excuses both, and only the record says which feature was meant. Until
+the review of P7 only the whole-box test stood, and a region 0.1 mm short of the
+enclosure's box excused each header against the walls and the floor as well as
+the lid it named.
 
 ## What it measures
 
@@ -128,6 +161,11 @@ here so a person can read the shared volume against the drawing.
 
 One limit for every board: the claim tagged `enclosure-fit` states one condition,
 and claims with that tag that state different ones make the gate error.
+
+Two copies of one enclosure file are one enclosure. A project with two housings
+of one design, a board in each, gets its boards fitted together in one frame: a
+wrong FAIL where they overlap. Export each housing as its own solid (two files
+with different bytes), or check them in two projects.
 
 ## Cost
 
