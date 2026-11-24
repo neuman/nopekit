@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# firmware-ci's baseline CI: one job that builds the app in ESP-IDF v5.5.6's image,
+# pinned by digest. (GitHub reads workflows from .github/workflows/; this one sits in
+# github/workflows/ because nopekit keys a pack's controls by a walk of selftest/
+# that skips dot-directories.)
+name: Build firmware
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: espressif/idf@sha256:bf72fe7a15c22849a9a94147301165a545fb8905d97c176cf748e3e4614cac84
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+      - name: Build
+        env:
+          IDF_COMPONENT_MANAGER: "0"
+        run: . $IDF_PATH/export.sh && idf.py build
