@@ -97,12 +97,17 @@ reader will otherwise assume is covered.
 - **What sits inside a handheld:** the cell's temperature at its rated charge
   ambient, a charger's or an LDO's junction, transients (a burst, a warm-up),
   and abnormal or single-fault heating (TS2 limits under a fault).
-- **The charger's temperature cutoffs.** No bundled gate computes them yet.
-  pcb-kicad's `pcb.charge_protection` checks only that the charger's THERM pin
-  is wired to an NTC and that the part has a safety timer: it computes no
-  cutoff temperature. pcb-kicad's `pcb.charge_temperature`, which will compute
-  them off the board, is planned and not built. Until then, settle a cutoff
-  claim with `claim physical` or a project gate.
+- **The charger's temperature cutoffs.** This pack does not compute them.
+  pcb-kicad's `pcb.charge_temperature` does, off the board: the temperatures at
+  which charging is still allowed, at the tolerance corners of the comparator's
+  trips, the NTC (its R/T table, else its B equation) and every resistor in the
+  network, against the cell's charge window, as headroom in K. It counts a stop
+  in the charger, in a protector or BMS that acts on the charger, or in the
+  pack, and it skips a window set by firmware. It does not judge how well the
+  NTC follows the cell: settle that with `claim physical` at the window's
+  edges. Take the linear charger's `i_max_a` from `pcb.charge_limits`' detail
+  line, the charger's current at its worst corner, so a PROG change moves both
+  verdicts.
 
 When the cheap gate cannot answer and the design has stopped moving, see
 `references/limits.md` for which tier-2 tool to reach for and what it costs.

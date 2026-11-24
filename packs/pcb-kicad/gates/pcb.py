@@ -13,8 +13,8 @@
     pcb.spice            tier 1  one .meas of ngspice on the project's deck, against a band
     pcb.enclosure_fit    tier 1  the populated board's 3D models against the enclosure
 
-    (gates/power.py holds the three LiPo rules: pcb.charge_protection,
-    pcb.fuse_conductor, pcb.discharge_cutoff.)
+    (gates/power.py holds the four battery rules: pcb.charge_temperature,
+    pcb.charge_limits, pcb.fault_current, pcb.discharge_cutoff.)
 
 **Where each verdict comes from.** The tier-1 gates are a tool's own answer:
 ``kicad-cli pcb drc``'s or ``sch erc``'s exit code and its report's count (basis

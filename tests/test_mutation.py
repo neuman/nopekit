@@ -2409,9 +2409,9 @@ SLOW_WALK = {
 class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     """(C12, R-4's detector for the mutation clause) The restated aimed walk
     over every bundled pack gate on its own baseline: no conclusive mutation
-    passes an honest bundled gate. The integrated registry has 95 gates.
-    The measured split for 93 of them is 51 conclusive, 10 walked with none,
-    32 with no boundary. The two ccx gates have no measured classification yet;
+    passes an honest bundled gate. The integrated registry has 96 gates.
+    The measured split for 94 of them is 53 conclusive, 10 walked with none,
+    31 with no boundary. The two ccx gates have no measured classification yet;
     they are walked whenever ccx is present and held to the same no-pass rule.
     The total always includes them, available or not.
 
@@ -2436,6 +2436,20 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     lands) and shell_length_m never lands. The leaves inside heat_sources are
     reached only because it is an object keyed by name: as the list its design
     drew, it was one opaque leaf.
+    pcb-kicad's power rules (general-packs P5) replace two conclusive gates and
+    one with no boundary with four conclusive, measured alone on 2026-11-24:
+    pcb.charge_protection counted missing protections against 0 (its baseline
+    sat on its limit: no boundary); pcb.charge_temperature lands on eight
+    leaves (the cell's window, the NTC's R25, B and their tolerances, the
+    charger's trip voltages and bias current), pcb.charge_limits on four (the
+    cell's upper charge voltage and current, the charger's regulation voltage,
+    the PROG constant), pcb.fault_current on six and pcb.discharge_cutoff on
+    the cell's minimum. The charger's regulation voltage landed only after
+    P5's review, measured alone on 2026-11-24: the typo bound had been held
+    on the charger's worst corner, so its walk errored at 4.89 V per cell
+    before it could land.
+    Their records are objects keyed by id for the reason heat_sources is: as
+    lists, every number in them would be one opaque leaf.
     Full suite only (~12 s without pcb-kicad's and the OpenFOAM packs' tools,
     about 7.5 min with them before aero-openfoam: their opaque gates re-run
     kicad-cli, ngspice, OpenCascade and OpenFOAM for every rung; cfd-openfoam's
@@ -2464,10 +2478,10 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     def test_no_conclusive_mutation_passes_a_bundled_gate(self):
         kinds = collections.Counter()
         # The branches had each counted only their own additions. Their measured
-        # split covers 93 gates; nobody measured the two ccx walks. They still
+        # split covers 94 gates; nobody measured the two ccx walks. They still
         # run below when available, and a conclusive pass still fails the test.
         # Exclude only their unknown classifications from the pinned split, never
-        # from the walk, its no-pass assertion or the 95-gate inventory.
+        # from the walk, its no-pass assertion or the 96-gate inventory.
         unmeasured = {"simp.displacement", "simp.stress"}
         unmeasured_kinds = collections.Counter()
         unavailable_known = 0
@@ -2525,10 +2539,10 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
                                  (SLOW_WALK[gid].walked, SLOW_WALK[gid].not_walked))
         print(f"\nbundled walk: {len(registered)} registered; "
               f"{dict(kinds)}; {unavailable} unavailable", file=sys.stderr, flush=True)
-        self.assertEqual(sum(kinds.values()) + unavailable, 95, kinds)
+        self.assertEqual(sum(kinds.values()) + unavailable, 96, kinds)
         if not unavailable_known:
             self.assertEqual(dict(kinds - unmeasured_kinds),
-                             {"conclusive": 51, "none-conclusive": 10, "no-boundary": 32})
+                             {"conclusive": 53, "none-conclusive": 10, "no-boundary": 31})
 
     def test_the_planted_drifted_limit_is_one_hit(self):
         spec = GateSpec(id="beam.drifted", claims=["x"], tier=Tier.INSTANT,
