@@ -45,7 +45,8 @@ person's hand.
 
 - Print the **first full shell**, both handles and the whole face, with a dummy cap at
   every control: the right height, at the declared `at`. A handle alone does not test
-  the width or the centre controls.
+  the width or the centre controls. `ergo.layout_agrees` must pass on the exported
+  scene first, so the print is the layout the screen judged.
 - Export it, so the result binds to what was printed: `nopekit export reach-first-print`.
   The export's test card prints the article's hash and the command that records a
   result on it.

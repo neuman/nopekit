@@ -88,6 +88,10 @@ BUNDLED_BASES: dict[str, str] = {
     # definitions (TR89-044 (125), (129), (130)); the girth term and the 20 deg
     # posture tolerance are the pack's, named in its PACK.md.
     "ergo.digit_reach": "sourced",
+    # general-packs E2: two representations of one design held to agree, with
+    # tessellation tolerances (0.5 mm, 1.0 mm) that are pack constants; no
+    # outside source says what agreement is enough.
+    "ergo.layout_agrees": "model-only",
 }
 
 #: The bracket's own evaluators (a project, per gate).

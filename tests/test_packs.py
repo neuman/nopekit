@@ -299,18 +299,22 @@ def _scratch_pack(case: unittest.TestCase, *, baseline: dict, fixture: str = "to
 #: and ``convection``'s own control (``fan_stopped``) fails it. The edge
 #: ``steady_state_temp -> <guard>`` lands once the Biot half of ``time_constant``
 #: is its own evaluator (a pack follow-up).
-#: hand-ergonomics (general-packs E1) has one gate, ``ergo.digit_reach``, so no
-#: edge can exist inside the pack. Its validity guard is the spine's operating
-#: context on the survey's range (handle 25-50 mm, users 17 and older): outside
-#: it a pass reads Gap, which is what a guard gate's edge would give. The input
-#: guard the design adds next (``ergo.layout_agrees``, the layout against the
-#: exported scene) is tier 1 above a tier-0 analysis, so the registry refuses it
-#: as a prerequisite; it covers the reach claim's tag instead. The keyword test
-#: holds the gate's description to saying so ("validity regime").
+#: hand-ergonomics (general-packs E1, E2) has two gates and no edge between
+#: them. ``ergo.digit_reach``'s validity guard on the survey's range (handle
+#: 25-50 mm, users 17 and older) is the spine's operating context: outside it a
+#: pass reads Gap, which is what a guard gate's edge would give. Its input guard,
+#: ``ergo.layout_agrees`` (E2: the declared layout against the exported scene),
+#: is tier 1 above a tier-0 analysis, so the registry refuses it as a
+#: prerequisite (a tier inversion); it covers the reach claim's tag instead, so
+#: the claim waits for both. An edge would not be isolated either:
+#: ``face_cluster_out_of_reach`` moves the declared layout only, so the guard would
+#: fail it. The keyword test holds both descriptions to saying so ("validity
+#: regime", "validity guard of digit_reach's inputs").
 NO_EDGE_YET = {"thermal-analytic": "no gate is a pure validity guard yet: time_constant "
                                    "also measures, h_agreement compares representations",
-               "hand-ergonomics": "the operating context is the validity guard; the input "
-                                  "guard is tier 1 above a tier-0 analysis"}
+               "hand-ergonomics": "the operating context is digit_reach's validity guard; "
+                                  "its input guard, layout_agrees, is tier 1 above a tier-0 "
+                                  "analysis, so it covers the reach tag, not a needs edge"}
 
 
 def _keyword_guards(registry: gates_mod.Registry) -> list[str]:
