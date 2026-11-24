@@ -1,5 +1,5 @@
 {
-  "_description": "firmware-ci's own ESP-IDF app (selftest/assets/esp-sleep): an ESP32-S3 with 4 MB of flash that starts its BLE stack (NimBLE), arms a button wake on GPIO0 through ext0 and enters deep sleep. Its CI (github/workflows/build.yml) builds it in one container job, in ESP-IDF v5.5.6's image pinned by digest, with no masking. Its partition table is ESP-IDF's two-OTA rows (factory, ota_0 and ota_1 of 1 MB). act 0.2.97 replays it in 40-49 s; the image is 0x7b6d0 B, 48.2 % of the smallest app slot. selftest/assets/esp-sleep/LICENSE says where each file is from.",
+  "_description": "firmware-ci's own ESP-IDF app (selftest/assets/esp-sleep): an ESP32-S3 with 4 MB of flash that starts its BLE stack (NimBLE), arms a button wake on GPIO0 through ext0 and enters deep sleep. Its CI (github/workflows/build.yml) builds it in one container job, in ESP-IDF v5.5.6's image pinned by digest, with no masking. Its partition table is ESP-IDF's two-OTA rows (factory, ota_0 and ota_1 of 1 MB). act 0.2.97 replays it in 40-49 s; the image is 0x7b6d0 B, 48.21 % of the smallest app slot, which fw.image_fits reports rounded up as 48.3 %. selftest/assets/esp-sleep/LICENSE says where each file is from.",
 
   "firmware_ci_workflow": "selftest/assets/esp-sleep/github/workflows/build.yml",
   "firmware_ci_job": "build",

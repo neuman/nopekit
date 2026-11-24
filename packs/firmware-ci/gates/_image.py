@@ -416,11 +416,29 @@ def esp_slots(csv_text: str, offset: int = 0x8000) -> list[tuple[str, int, int]]
 # --------------------------------------------------------------------------- #
 @dataclass
 class Fit:
-    """One image against its region: the measured flash use in %, the problems that
-    fail with no limit, and the line the verdict says."""
+    """One image against its region: the measured flash use in %, whether its bytes
+    fit, the problems that fail with no limit, and the line the verdict says."""
     measured: float | None = None
     problems: list = field(default_factory=list)
     said: str = ""
+    #: Decided on bytes, never on ``measured``: see :func:`percent_up`.
+    fits: bool = True
+
+
+def percent_up(used: int, size: int) -> float:
+    """``used`` in % of ``size``, rounded **up** to 0.1 %, in integer arithmetic.
+
+    What slipped through ``round(100 * used / size, 1)`` (review of F1): an image
+    up to 0.05 % past its slot read 100.0 and passed ``<= 100``. On a 1 MiB slot
+    that is 524 B the slot cannot hold, and ``judge_esp`` said so in its detail
+    while the gate passed. A claim's headroom read the same way: a true 85.04 %
+    read 85.0 and was Checked against ``<= 85 %``. Rounded up, the figure is never
+    under the true one, so the spine's cross-check cannot pass what the bytes do
+    not; and ``percent_up(used, size) <= 100`` holds exactly when ``used <= size``.
+    *Rejected:* a finer figure (0.01 % still hides 104 B a MiB, and the same
+    rounding question comes back); round-half kept for the figure beside a byte
+    test for the pass (a headroom claim still reads the rounded-down figure)."""
+    return -(-1000 * used // size) / 10
 
 
 def judge_esp(image: bytes, name: str, slots: list[tuple[str, int, int]],
@@ -435,11 +453,11 @@ def judge_esp(image: bytes, name: str, slots: list[tuple[str, int, int]],
         raise ImageFault(f"{name} is not an ESP app image (its first byte is not 0xE9), "
                          f"so it cannot be judged against an ESP partition table")
     smallest = min(slots, key=lambda s: (s[2], s[0]))
-    used = round(100.0 * len(image) / smallest[2], 1)
+    used = percent_up(len(image), smallest[2])
     short = [s for s in slots if s[2] < len(image)]
     said = (f"{name} {len(image)} B in the smallest app slot {smallest[0]} "
             f"({smallest[2]:#x} B) of {csv_rel}: {used} % flash use")
-    fit = Fit(measured=used, said=said)
+    fit = Fit(measured=used, said=said, fits=not short)
     if short:
         fit.said += (f"; {', '.join(s[0] for s in short)} cannot take it, so an update "
                      f"into {'it' if len(short) == 1 else 'them'} cannot be written")
@@ -447,9 +465,12 @@ def judge_esp(image: bytes, name: str, slots: list[tuple[str, int, int]],
 
 
 def judge_slot(image: bytes, name: str, slot: int) -> Fit:
-    used = round(100.0 * len(image) / slot, 1)
-    return Fit(measured=used, said=f"{name} {len(image)} B in a {slot:#x} B slot: "
-                                   f"{used} % flash use")
+    used = percent_up(len(image), slot)
+    fit = Fit(measured=used, said=f"{name} {len(image)} B in a {slot:#x} B slot: "
+                                  f"{used} % flash use", fits=len(image) <= slot)
+    if not fit.fits:
+        fit.said += f"; {len(image) - slot} B past the slot"
+    return fit
 
 
 def writes_of(image: bytes, name: str) -> tuple[list[tuple[int, bytes]], Elf | None]:
@@ -501,14 +522,14 @@ def judge_address(image: bytes, name: str, mm: MemoryMap, elf: Elf | None = None
         fit.problems.append(f"{name} writes no byte inside the app region {app}")
         fit.measured = None
     else:
-        fit.measured = round(100.0 * (counted_end - app.start) / app.size, 1)
+        fit.measured = percent_up(counted_end - app.start, app.size)
     if mm.vector_at is not None:
         if elf is not None and elf.machine != EM_ARM:
             raise ImageFault(f"vector_at is stated, and {name} is an ELF for machine "
                              f"{elf.machine}, not Arm: the vector check is Cortex-M's")
         fit.problems += _vector_problems(writes, mm)
     if elf is not None and mm.ram:
-        fit.problems += _ram_problems(elf, mm.ram)
+        fit.problems += _ram_problems(elf, mm)
     others = [r for r in mm.other
               if any(r.start <= a < r.end or a <= r.start < b for a, b in ranges(writes))]
     fit.said = (f"{name}: {fit.measured} % flash use of app {app}"
@@ -558,17 +579,51 @@ def _vector_problems(writes: list[tuple[int, bytes]], mm: MemoryMap) -> list[str
     return out
 
 
-def _ram_problems(elf: Elf, ram: tuple) -> list[str]:
-    """An allocated segment (by VMA, ``p_memsz`` with ``.bss``) that starts in a
-    stated RAM bank and runs past its end: firmware built for a bigger part than
-    the one the map names."""
+#: The SRAM region of the Arm M-profile system address map (ARM DDI 0403, B3.1,
+#: "The system address map"; the same in Armv8-M, ARM DDI 0553): the addresses
+#: where a Cortex-M part puts its on-chip RAM.
+ARM_SRAM = Region(0x20000000, 0x20000000, "Arm SRAM region")
+
+
+def _ram_problems(elf: Elf, mm: MemoryMap) -> list[str]:
+    """Each allocated segment (by VMA, ``p_memsz`` with ``.bss``) must lie inside
+    one stated region: a RAM bank, the flash, or an ``other`` range.
+
+    One that starts in a stated bank and runs past its end fails, and so does one
+    in the Arm SRAM region (an Arm ELF) that no stated region holds: firmware built
+    for a bigger part than the one the map names. What slipped through the first
+    rule alone (review of F1): a segment that starts at or past a bank's end
+    (``.noinit`` or the stacks of a build for the 128 KB part, above a stated
+    64 KB bank) was in no bank, so no rule read it, and the gate passed. A segment
+    anywhere else that no stated region holds is errored, as a byte in no stated
+    region is: it may be a RAM the map leaves out (CCM, a TCM, external SDRAM), and
+    the pack cannot say which. *Rejected:* failing every segment outside the stated
+    banks (on a non-Arm part, or outside the SRAM region, an address past a bank is
+    not known to be RAM); a span from the lowest bank to the highest (with banks
+    at 0x10000000 and 0x20000000 it holds 256 MB that is not RAM, and with one
+    bank it is that bank, so the case that slipped through stays unread)."""
+    stated = mm.ram + mm.other + tuple(r for r in (mm.flash, mm.app) if r is not None)
     out = []
     for _paddr, vaddr, _filesz, memsz, _flags, _b in elf.loads:
         if memsz <= 0:
             continue
-        for bank in ram:
-            if bank.start <= vaddr < bank.end and vaddr + memsz > bank.end:
-                out.append(f"a segment at {vaddr:#x} of {memsz} B runs {vaddr + memsz - bank.end} "
-                           f"B past the RAM bank {bank}: the firmware is built for a "
-                           f"bigger part than the one the map states")
+        lo, hi = vaddr, vaddr + memsz
+        if any(r.start <= lo and hi <= r.end for r in stated):
+            continue
+        bank = next((b for b in mm.ram if b.start <= lo < b.end), None)
+        if bank is not None:
+            out.append(f"a segment at {vaddr:#x} of {memsz} B runs {hi - bank.end} "
+                       f"B past the RAM bank {bank}: the firmware is built for a "
+                       f"bigger part than the one the map states")
+        elif elf.machine == EM_ARM and ARM_SRAM.start <= lo < ARM_SRAM.end and \
+                not any(r.start <= lo < r.end for r in stated):
+            out.append(f"a segment at {vaddr:#x} of {memsz} B lies in the Arm SRAM "
+                       f"region and in no stated RAM bank "
+                       f"({', '.join(map(str, mm.ram))}): the firmware is built for a "
+                       f"bigger part than the one the map states")
+        else:
+            raise ImageFault(f"a segment at {vaddr:#x}..{hi - 1:#x} lies in no region the "
+                             f"map states (ram {', '.join(map(str, mm.ram))}, flash "
+                             f"{mm.flash}{', other ' + ', '.join(map(str, mm.other)) if mm.other else ''}): "
+                             f"state the memory it uses in ram or other")
     return out

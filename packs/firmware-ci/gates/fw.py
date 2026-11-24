@@ -237,13 +237,14 @@ _NO_MAP = ("no app_memory_map: the region the bootloader or partition table give
     ),
 )
 def image_fits(ctx: GateContext) -> Verdict:
-    """Flash use in % of the region: on the address route, the highest byte the
-    image writes past the app's start; on the size routes, the file against the
-    slot (an ESP partition table's smallest app partition, read by ESP-IDF's own
-    parser). Limit 100, the region's own bound; a claim's headroom (``flash use <=
-    85 %``) is held by the spine's cross-check. Fails with no limit: bytes in flash
-    outside the app, a vector table not where the bootloader jumps, a RAM segment
-    past a stated bank."""
+    """Flash use in % of the region, rounded up to 0.1 %: on the address route,
+    the highest byte the image writes past the app's start; on the size routes,
+    the file against the slot (an ESP partition table's smallest app partition,
+    read by ESP-IDF's own parser). Limit 100, the region's own bound, and the pass
+    is decided on bytes; a claim's headroom (``flash use <= 85 %``) is held by the
+    spine's cross-check. Fails with no limit: bytes in flash outside the app, a
+    vector table not where the bootloader jumps, a RAM segment past a stated bank
+    or in the Arm SRAM region outside every stated bank."""
     gid = "fw.image_fits"
     path = _workflow(ctx)
     if path is None:
@@ -284,8 +285,12 @@ def image_fits(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, error=str(exc))
     if fit.problems:
         return Verdict(gate=gid, passed=False, detail="; ".join(fit.problems))
-    return Verdict(gate=gid, passed=fit.measured <= 100.0, measured=fit.measured,
-                   limit=100.0, comparator="<=", units="%", detail=fit.said)
+    # The pass is the bytes' (``fit.fits``), and the figure is rounded up, so the
+    # two agree: what slipped through a figure rounded to the nearest 0.1 % is in
+    # ``_image.percent_up``.
+    return Verdict(gate=gid, passed=fit.fits and fit.measured <= 100.0,
+                   measured=fit.measured, limit=100.0, comparator="<=", units="%",
+                   detail=fit.said)
 
 
 @gate(

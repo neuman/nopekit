@@ -57,6 +57,27 @@ class Job:
     image: str              # the job's container image, or ""
     runs_on: str
     matrix: bool
+    #: Each step's id as act reports it (``stepID``), by index: the step's own
+    #: ``id:``, else its index. What slipped through the index alone (review of
+    #: F1): act 0.2.97 logs a step that has an ``id:`` under that id, so a build
+    #: step with ``id: build`` (common, for its outputs) "never ran", and the
+    #: documented route of naming the step by its id in ``firmware_ci_step`` led
+    #: there; a failed step before it with an id was never named.
+    ids: tuple = ()
+
+    def act_id(self, at: int) -> str:
+        """The ``stepID`` act logs for step ``at``."""
+        return self.ids[at] if at < len(self.ids) else str(at)
+
+
+def _act_ids(steps: list) -> tuple:
+    """Each step's ``stepID`` under act 0.2.97 (``newJobExecutor``: a step with no
+    ``id:`` gets its index)."""
+    out = []
+    for at, step in enumerate(steps):
+        sid = step.get("id") if isinstance(step, dict) else None
+        out.append(str(sid) if sid not in (None, "") else str(at))
+    return tuple(out)
 
 
 #: The closed list of build commands (a ``run:`` step that holds one is the build
@@ -83,16 +104,33 @@ BUILD_COMMANDS = (
 _SEGMENT = re.compile(r"&&|\|\||[;|()]")
 _LEAD = re.compile(r"\s*(?:(?:then|do|else|sudo|time|exec|nice|env|!)\s+|[A-Za-z_]\w*=\S*\s+)*")
 
-#: ``|| true``, ``|| :``, ``|| exit 0`` and ``|| echo`` after the build command:
-#: the line's status is then the fallback's, whatever the build did.
-_OR_MASK = re.compile(r"\|\|\s*(?:true\b|:(?=\s|$|;)|exit\s+0\b|echo\b)")
+#: ``|| true``, ``|| :``, ``|| exit 0`` and ``|| echo`` after the build command, in
+#: its own list: the list's status is then the fallback's, whatever the build did.
+#: *Rejected:* every ``||`` fallback that does not fail (``|| idf.py fullclean
+#: build`` is a retry, and its own failure fails the step).
+_OR_MASK = re.compile(r"(?:true|:|exit\s+0|echo)(?:\s|$)")
 
-#: A pipe after the build command (one ``|``, not ``||``): under a shell with no
-#: pipefail, the pipeline's status is its last command's.
-_PIPE_AFTER = re.compile(r"(?<!\|)\|(?!\|)")
+#: A status the next command can read: ``$?`` and ``PIPESTATUS`` (``$PIPESTATUS``
+#: is its element 0). After a pipeline only ``PIPESTATUS`` holds the build's.
+_STATUS = re.compile(r"\$\?|\$\{\?\}|\$\{?PIPESTATUS\b")
+_PIPESTATUS = re.compile(r"\$\{?PIPESTATUS\b")
 
-#: A status check after the build: ``$?``, ``PIPESTATUS``, ``exit $?``.
-_STATUS_CHECK = re.compile(r"\$\?|\$\{\?\}|PIPESTATUS")
+#: ``rc=$?`` or ``rc=${PIPESTATUS[0]}``: the status kept for a later check.
+_CAPTURE = re.compile(r"(?:(?:local|export|declare|readonly|typeset)\s+)?([A-Za-z_]\w*)=([\"']?)(\$\?|\$\{\?\}|\$\{?PIPESTATUS(?:\[\d+\])?\}?)\2$")
+
+#: What stops the step with a failure: ``exit`` with any status but 0 (a bare
+#: ``exit`` exits with the last command's), ``false``, ``return`` but ``return 0``.
+_FAILS = re.compile(r"(?<![\w.$-])(?:exit(?!\s+0(?:\s|$|;))(?=\s|$|;)|false(?=\s|$|;)"
+                    r"|return(?!\s+0(?:\s|$|;))(?=\s|$|;))")
+
+#: A test command: under ``-e`` a failed test stops the step.
+_TEST = re.compile(r"(?:\[\[?|test)\s")
+
+#: ``set -e`` and its kin, and ``set -o errexit``: the last before a build decides
+#: whether its failure stops the script; ``set -o pipefail`` the same for a pipe.
+_ERREXIT = re.compile(r"(?:^|[;&|(\s])set\s+(?:([+-])[A-Za-z]*e[A-Za-z]*(?![\w-])"
+                      r"|([+-])o\s+errexit\b)")
+_PIPEFAIL = re.compile(r"(?:^|[;&|(\s])set\s+([+-])[A-Za-z]*o\s+pipefail\b")
 
 #: What a step that runs docker inside the job looks like. The replay mounts no
 #: docker socket into jobs (``--container-daemon-socket -``), so such a step cannot
@@ -155,30 +193,34 @@ def _run_defaults(doc: dict, job: dict) -> dict:
     return merged
 
 
-def _build_in(line: str) -> tuple[str, int, int] | None:
-    """``(name, start, end)`` of the first build command that starts a command in
-    ``line``, or ``None``."""
+def _builds_in(line: str) -> list[tuple[str, int, int]]:
+    """``(name, start, end)`` of each build command that starts a command in
+    ``line``."""
     if line.lstrip().startswith("#"):
-        return None
-    bounds = [0] + [m.end() for m in _SEGMENT.finditer(line)]
-    for at in bounds:
+        return []
+    out = []
+    for at in [0] + [m.end() for m in _SEGMENT.finditer(line)]:
         lead = _LEAD.match(line, at)
         pos = lead.end() if lead else at
         for name, rx in BUILD_COMMANDS:
             m = rx.match(line, pos)
             if m:
-                return name, m.start(), m.end()
-    return None
+                out.append((name, m.start(), m.end()))
+                break
+    return out
+
+
+def _build_in(line: str) -> tuple[str, int, int] | None:
+    """``(name, start, end)`` of the first build command in ``line``, or ``None``."""
+    found = _builds_in(line)
+    return found[0] if found else None
 
 
 def _build_commands(run: str) -> list[tuple[str, int, int, int]]:
-    """``(name, line index, start, end)`` of each line of ``run`` that builds."""
-    found = []
-    for i, line in enumerate(_lines(run)):
-        hit = _build_in(line)
-        if hit:
-            found.append((hit[0], i, hit[1], hit[2]))
-    return found
+    """``(name, line index, start, end)`` of each build command in ``run``, every
+    one on a line: the masking rules read each (``_masked``)."""
+    return [(name, i, start, end) for i, line in enumerate(_lines(run))
+            for name, start, end in _builds_in(line)]
 
 
 def _step_name(step: dict, at: int) -> str:
@@ -264,7 +306,7 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
                           f"in a container job instead (references/ci-templates.md, "
                           f"ESP-IDF)")
         return Job(rel, jid, at, name, f"uses: {uses}", "", image, runs_on,
-                   _matrix(body))
+                   _matrix(body), _act_ids(steps))
     shell = _shell(build, defaults, name)
     run = str(build.get("run") or "")
     if _EXPR in run and re.search(r"\$\{\{[^}]*\}\}", run) and not _build_commands(run):
@@ -279,7 +321,8 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
     problem = _masked(run, found, shell, name)
     if problem:
         return Fail(problem)
-    return Job(rel, jid, at, name, command, shell, image, runs_on, _matrix(body))
+    return Job(rel, jid, at, name, command, shell, image, runs_on, _matrix(body),
+               _act_ids(steps))
 
 
 def _docker_anywhere(rel: str, jobs: dict) -> None:
@@ -369,50 +412,188 @@ def _lines(run: str) -> list[str]:
     return [ln.strip() for ln in run.replace("\\\n", " ").splitlines()]
 
 
+#: The separators a shell command line splits at, longest first. ``|&`` is bash's
+#: pipe of both streams.
+_SEPS = ("&&", "||", "|&", ";", "|", "&", "\n")
+_LIST_SEPS = ("&&", "||", "|", "|&")
+
+
+def _pieces(text: str) -> list[tuple[str, str | None]]:
+    """``text`` as ``[(command, separator after it)]``, split at the separators
+    outside quotes, ``$( )``, ``( )`` and ``{ }``, with comments left out. A line
+    that ends in ``&&``, ``||`` or ``|`` runs on to the next, as the shell reads it.
+    Not a shell parser: a heredoc's body reads as commands."""
+    out, buf, i, n, depth, quote = [], [], 0, len(text), 0, None
+
+    def word_start(at: int) -> bool:
+        return at == 0 or text[at - 1] in " \t\n;&|("
+
+    while i < n:
+        c = text[i]
+        if quote:
+            buf.append(c)
+            if quote == '"' and c == "\\" and i + 1 < n:
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            buf += [c, text[i + 1]]
+            i += 2
+            continue
+        if c in "'\"":
+            quote = c
+        elif c == "#" and word_start(i):
+            end = text.find("\n", i)
+            i = n if end < 0 else end
+            continue
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            depth = max(0, depth - 1)
+        elif c == "{" and word_start(i) and text[i + 1:i + 2] in (" ", "\t", "\n"):
+            depth += 1
+        elif c == "}" and word_start(i):
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            sep = next((x for x in _SEPS if text.startswith(x, i)), None)
+            # ``2>&1``, ``>&2`` and ``&>file`` are redirections, not ``&``.
+            if sep == "&" and (text[i - 1:i] in ("<", ">") or text[i + 1:i + 2] == ">"):
+                sep = None
+            if sep is not None:
+                out.append(("".join(buf).strip(), sep))
+                buf = []
+                i += len(sep)
+                if sep in _LIST_SEPS:
+                    while i < n and text[i] in " \t\n":
+                        i += 1
+                continue
+        buf.append(c)
+        i += 1
+    out.append(("".join(buf).strip(), None))
+    return [(cmd, sep) for cmd, sep in out if cmd]
+
+
+def _bare(cmd: str) -> str:
+    """``cmd`` with what its quotes hold blanked: ``echo "exit 1"`` exits nothing."""
+    return re.sub(r"'[^']*'|\"(?:\\.|[^\"\\])*\"", lambda m: " " * len(m.group(0)), cmd)
+
+
+def _and_or(pieces: list, at: int) -> int:
+    """The index of the last piece of the and-or list that starts at ``at``."""
+    end = at
+    while end + 1 < len(pieces) and pieces[end][1] in _LIST_SEPS:
+        end += 1
+    return end
+
+
+def _stops(pieces: list, at: int, errexit: bool) -> bool:
+    """Whether the check at ``pieces[at]`` stops the step with a failure when the
+    build failed: an ``exit``, ``false`` or ``return`` in its own list (``[ $? -eq 0 ]
+    || exit 1``) or in the block of the ``if`` it opens, or, under ``-e``, a test
+    that ends its list (``[ ${PIPESTATUS[0]} -eq 0 ]``)."""
+    end = _and_or(pieces, at)
+    if any(_FAILS.search(_bare(cmd)) for cmd, _sep in pieces[at:end + 1]):
+        return True
+    cmd = pieces[at][0]
+    if re.match(r"(?:if|elif)\s", cmd):
+        depth = 0
+        for body, _sep in pieces[at:]:
+            if re.match(r"if\s", body):
+                depth += 1
+            if _FAILS.search(_bare(body)):
+                return True
+            if re.match(r"fi(?:\s|$)", body):
+                depth -= 1
+                if depth <= 0:
+                    return False
+        return False
+    return errexit and end == at and _TEST.match(cmd) is not None
+
+
+def _checked(later: list, errexit: bool, pipe: bool) -> bool:
+    """Whether the first command after the build's list checks the build's status
+    and fails the step on it, directly or through a variable that keeps it
+    (``rc=$?`` and a later ``exit $rc``). What slipped through any mention of
+    ``$?`` on any later line (review of F1): ``echo "build exited $?"`` after
+    ``set +e`` counted as a check, and the step read the echo's status."""
+    if not later:
+        return False
+    status = _PIPESTATUS if pipe else _STATUS
+    first = later[0][0]
+    kept = _CAPTURE.match(first)
+    if kept and status.search(kept.group(3)):
+        var = re.compile(r"\$\{?" + re.escape(kept.group(1)) + r"\b")
+        return any(var.search(cmd) and _stops(later, at, errexit)
+                   for at, (cmd, _sep) in enumerate(later) if at > 0)
+    return status.search(first) is not None and _stops(later, 0, errexit)
+
+
 def _masked(run: str, found: list, shell: str, name: str) -> str | None:
-    """Why a failed build in this step can read green, or ``None``."""
-    if not found:
-        return None
+    """Why a failed build in this step can read green, or ``None``. Every build
+    command in the step is read, each with the commands after it: those later in
+    its line (after a ``;``) and on the lines below.
+
+    What slipped through reading the first build command's line alone (review of
+    F1): a second ``west build`` piped into ``tee`` on the next line, and ``idf.py
+    build && echo built; echo done`` (the commands after the ``;`` were not "later"),
+    both green on a failed build under GitHub's ``bash -e {0}``."""
     lines = _lines(run)
-    _cmd, at, _start, end = found[0]
-    line = lines[at]
-    tail = line[end:]
-    if _OR_MASK.search(tail):
+    script = "\n".join(lines)
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line) + 1)
+    for _cmd, at, start, _end in found:
+        problem = _masked_at(script, starts[at] + start, lines[at], shell, name)
+        if problem:
+            return problem
+    return None
+
+
+def _masked_at(script: str, offset: int, line: str, shell: str, name: str) -> str | None:
+    """The masking rules for the build command at ``offset`` in ``script``."""
+    pieces = _pieces(script[offset:])
+    if not pieces:
+        return None
+    end = _and_or(pieces, 0)
+    own, later = pieces[:end + 1], pieces[end + 1:]
+    if any(sep == "||" and _OR_MASK.match(nxt) for (_c, sep), (nxt, _s) in zip(own, own[1:])):
         return (f"step {name!r}: {line!r} falls back to a command that succeeds, so the "
                 f"step reads green whatever the build did")
-    later = [ln for ln in lines[at + 1:] if ln and not ln.startswith("#")]
     errexit = re.search(r"(?:^|\s)-\w*e", shell) is not None
-    before = "\n".join(lines[:at])
-    # `set -e`, `set +e`, `set -eo pipefail`, `set -euo pipefail`: the last one before
-    # the build decides whether a failed build stops the script.
-    set_e = [m.group(1) for m in re.finditer(r"(?:^|[;&\s])set\s+([+-])[A-Za-z]*e", before)]
+    before = script[:offset]
+    set_e = [m.group(1) or m.group(2) for m in _ERREXIT.finditer(before)]
     if set_e:
         errexit = set_e[-1] == "-"
-    checked = any(_STATUS_CHECK.search(ln) for ln in later) or \
-        re.search(r"\|\|\s*(?:exit\s+[1-9$]|false\b|return\b)", tail)
+    checked = _checked(later, errexit, pipe=False) or any(
+        sep == "||" and _FAILS.search(_bare(nxt))
+        for (_c, sep), (nxt, _s) in zip(own, own[1:]))
     if not errexit and later and not checked:
         why = "after `set +e`" if set_e else f"under {shell!r}, which has no -e"
-        return (f"step {name!r} runs the build {why} and then {later[0]!r}, with no "
-                f"status check: the step's status is the last command's, so a failed "
-                f"build reads green")
+        return (f"step {name!r} runs the build {why} and then {later[0][0]!r}, with no "
+                f"status check that fails the step: the step's status is the last "
+                f"command's, so a failed build reads green")
     # `-e` does not stop the shell on a command before the last `&&` of a list
     # (bash(1) and POSIX sh, "set -e": "any command executed in a && or || list
     # except the command following the final && or ||"). So `idf.py build && echo
-    # built`, then another line, runs on after a failed build, and the step reads
-    # the last line's status. Found in review of F1, beyond the design's four forms:
-    # the same documented behaviour as the default shell's missing pipefail.
-    in_list = re.split(r";|(?<!\|)\|(?!\|)", tail)[0]
-    if "&&" in in_list and later and not checked:
+    # built`, then another command, runs on after a failed build, and the step reads
+    # the last command's status. Found in review of F1, beyond the design's four
+    # forms: the same documented behaviour as the default shell's missing pipefail.
+    if any(sep == "&&" for _c, sep in own[:-1]) and later and not checked:
         return (f"step {name!r} runs the build before an `&&` ({line!r}) and then "
-                f"{later[0]!r}: -e does not stop the shell on a command before the "
+                f"{later[0][0]!r}: -e does not stop the shell on a command before the "
                 f"last `&&`, so the step's status is the last command's and a failed "
                 f"build reads green")
-    pipe = _PIPE_AFTER.search(tail)
-    if pipe:
-        pipefail = "pipefail" in shell or re.search(r"set\s+-\w*o\s+pipefail|set\s+-o\s+pipefail",
-                                                    before)
-        pipestatus = any("PIPESTATUS" in ln for ln in [line] + later)
-        if not pipefail and not pipestatus:
+    if pieces[0][1] in ("|", "|&"):
+        signs = [m.group(1) for m in _PIPEFAIL.finditer(before)]
+        pipefail = signs[-1] == "-" if signs else "pipefail" in shell
+        # PIPESTATUS holds the build's status only up to the next command: after
+        # `| tee log && echo ok` it is echo's, and `| tee log || exit 1` reads tee's.
+        piped = all(sep in ("|", "|&") for _c, sep in pieces[:end])
+        if not pipefail and not (piped and _checked(later, errexit, pipe=True)):
             return (f"step {name!r} pipes the build ({line!r}) under {shell!r}, which has "
                     f"no pipefail: the pipeline's status is its last command's, so a "
                     f"failed build reads green")

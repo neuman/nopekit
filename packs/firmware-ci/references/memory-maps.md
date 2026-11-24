@@ -19,9 +19,18 @@ On the address route the gate also fails, with no limit: a byte in `flash` but
 outside `app` (it would overwrite the bootloader, the settings or the other slot); a
 `vector_at` with no image bytes there, an initial stack pointer in no stated RAM bank
 (the top of a bank counts: a full-descending stack starts one past its end), or a
-reset vector without the Thumb bit or outside `app`; and an ELF segment that starts
-in a stated RAM bank and runs past its end. Bytes in an `other` range (external XIP
-flash, a second bank) are reported, not counted. Bytes in no stated range are errored.
+reset vector without the Thumb bit or outside `app`. Where `ram` is stated, each ELF
+segment, by its run address with `.bss`, must lie inside one stated region (a RAM
+bank, `flash` or an `other` range): one that starts in a bank and runs past its end
+fails, and so does one in the Arm SRAM region (0x20000000-0x3fffffff, ARM DDI 0403
+B3.1) that no stated region holds. A segment anywhere else that no stated region
+holds is errored: state every RAM the firmware uses (CCM, a TCM, external SDRAM) in
+`ram` or `other`. Bytes in an `other` range (external XIP flash, a second bank) are
+reported, not counted. Bytes in no stated range are errored.
+
+Flash use is rounded up to 0.1 %, and the pass is decided on bytes: an image one
+byte past its region fails, and a headroom claim never reads a figure under the
+true one.
 
 ## MCUboot
 

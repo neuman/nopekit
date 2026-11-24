@@ -191,6 +191,47 @@ class TheGuardReadsTheWorkflow(unittest.TestCase):
             self.assertEqual((proc.returncode, proc.stdout), (0, "after\n"),
                              "the documented behaviour the rule rests on")
 
+    def test_every_build_command_and_every_command_after_it_is_read(self):
+        """What slipped through reading the first build command's line alone (review
+        of F1): a second build on the next line, piped or with a fallback, and the
+        commands after a ``;`` on the build's own line."""
+        two = "west build -b x -d build/left\nwest build -b x -d build/right"
+        self._fails(_workflow(two + " 2>&1 | tee right.log"), "which has no pipefail")
+        self._fails(_workflow(two + " || true"), "falls back to a command that succeeds")
+        self._passes(_workflow(two))
+        self._fails(_workflow("idf.py build && echo built; echo done"), "before an `&&`")
+        self._fails(_workflow("set +e\nidf.py build; echo done"), "after `set +e`")
+        self._passes(_workflow("idf.py build; ls build | grep bin"))
+        self._passes(_workflow('west build -b x -- -DOVERLAY_CONFIG="a.conf;b.conf"\n'
+                               'echo done'), )
+        if shutil.which("bash"):
+            proc = subprocess.run(["bash", "-e", "-c", "false && echo built; echo done"],
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            self.assertEqual((proc.returncode, proc.stdout), (0, "done\n"),
+                             "the `;` shape reads green on a failed command")
+
+    def test_only_a_check_that_fails_the_step_counts(self):
+        """What slipped through any ``$?`` on a later line: ``echo "build exited
+        $?"`` after ``set +e`` counted as a status check, and the step read the
+        echo's status."""
+        self._fails(_workflow('set +e\nidf.py build\necho "build exited $?"'),
+                    "with no status check that fails the step")
+        self._fails(_workflow("set +e\nidf.py build\nif [ $? -ne 0 ]; then echo no; fi\n"
+                              "echo done"), "after `set +e`")
+        self._fails(_workflow("set +e\nidf.py build; echo done; exit $?"), "after `set +e`")
+        self._fails(_workflow("idf.py build | tee b.log\necho done\nexit ${PIPESTATUS[0]}"),
+                    "which has no pipefail")
+        self._fails(_workflow("idf.py build | tee b.log || exit 1"), "which has no pipefail")
+        for run in ("set +e\nidf.py build; exit $?",
+                    "set +e\nidf.py build\n[ $? -eq 0 ] || exit 1\necho done",
+                    "set +e\nidf.py build\nif [ $? -ne 0 ]; then\n  exit 1\nfi\necho done",
+                    "set +e\nidf.py build || { echo failed; exit 1; }\necho done",
+                    "idf.py build | tee b.log; exit ${PIPESTATUS[0]}",
+                    "idf.py build | tee b.log\n[ ${PIPESTATUS[0]} -eq 0 ]",
+                    "idf.py build | tee b.log\nrc=${PIPESTATUS[0]}\necho x\nexit $rc"):
+            with self.subTest(run=run):
+                self._passes(_workflow(run))
+
     def test_defaults_are_resolved_per_setting(self):
         """A job's ``working-directory`` leaves the workflow's ``shell: bash``
         standing, as GitHub resolves it: the pipe then runs with pipefail."""
@@ -291,6 +332,26 @@ class TheGuardReadsTheWorkflow(unittest.TestCase):
 def _log(name: str) -> str:
     with open(os.path.join(LOGS, name), encoding="utf-8") as fh:
         return fh.read()
+
+
+#: The workflow ``tests/fw_logs/act_step_ids.jsonl`` was recorded from (act 0.2.97,
+#: debian:bookworm, the replay's own flags): steps with an ``id:`` and one without.
+STEP_IDS = """name: b
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container: debian:bookworm
+    steps:
+      - name: Prep
+        id: prep
+        run: echo prepared
+      - name: Build
+        id: bld
+        run: mkdir -p build && head -c 64 /dev/zero > build/app.bin && echo built
+      - name: Upload
+        run: echo uploaded
+"""
 
 
 def _job(**over):
@@ -433,6 +494,32 @@ class TheBuildIsJudgedOnItsOwnLines(unittest.TestCase):
         self._fails(result, "the file you flash (build/sleeper.bin) is not what job build "
                             "builds: it wrote build/app.bin", image_glob="build/sleeper.bin")
 
+    def test_a_step_act_logs_by_its_id_is_found(self):
+        """act 0.2.97 logs a step that has an ``id:`` under that id, not its index
+        (``act_step_ids.jsonl``, recorded from :data:`STEP_IDS`). What slipped
+        through matching the index alone (review of F1): such a build step "never
+        ran", and a failed step before it with an id was never named."""
+        repo = tempfile.mkdtemp(prefix="fw-ids-")
+        self.addCleanup(shutil.rmtree, repo, True)
+        if not HAS_YAML:
+            self.skipTest(NO_YAML)
+        job = C.choose(C.load(_write(repo, "github/workflows/build.yml", STEP_IDS)),
+                       step="bld")
+        self.assertEqual((job.index, job.ids, job.command), (1, ("prep", "bld", "2"),
+                                                             "the named step"))
+        result = _recorded("act_step_ids.jsonl", {"build/app.bin": bytes(64)})
+        self.assertEqual([s["id"] for s in result["entries"][0]["steps"]
+                          if s["stage"] == "Main"], [["prep"], ["bld"], ["2"]])
+        passed, detail = R.judge(result, job, "build/app.bin")
+        self.assertTrue(passed, detail)
+        self.assertEqual(detail, "job build: step 'Build' (the named step) passed in "
+                                 "debian:bookworm; wrote build/app.bin; later steps not "
+                                 "judged: Upload (success)")
+        R.main_step(result["entries"][0], "prep")["result"] = "failure"
+        with self.assertRaises(R.ToolFault) as caught:
+            R.judge(result, job, "build/app.bin")
+        self.assertIn("step 'Prep' before the build failed", str(caught.exception))
+
     def test_steps_after_the_build_are_named_not_judged(self):
         result = _step_result("", "success", files=BIN)
         result["entries"][0]["steps"].append({"stage": "Main", "id": ["2"], "name": "Upload",
@@ -549,6 +636,34 @@ class TheCopyIsWhatTheNextCommitHolds(unittest.TestCase):
         self.assertEqual(R.listing(repo), self._expected())
         self._copies(repo)
 
+    def test_a_symlink_is_copied_as_the_link(self):
+        """What slipped through ``os.path.isdir`` (review of F1): it follows a link,
+        so a tracked ``ext -> ../outside`` was copied whole from outside the
+        repository, where a GitHub checkout holds a dangling link."""
+        outside = os.path.join(self.tmp, "outside")
+        _write(outside, "deep/data.txt", "not in the repository\n")
+        for in_tree in (True, False):
+            with self.subTest(in_tree=in_tree):
+                repo = self._app(os.path.join(self.tmp, f"repo{in_tree}"))
+                os.symlink(os.path.join("..", "outside"), os.path.join(repo, "ext"))
+                os.symlink("CMakeLists.txt", os.path.join(repo, "alias.txt"))
+                if in_tree:
+                    self.assertEqual(_git("init", "-q", cwd=repo).returncode, 0)
+                self.assertEqual(R.listing(repo), ["CMakeLists.txt", "alias.txt", "ext"]
+                                 + self._expected()[1:])
+                copy = os.path.join(self.tmp, f"c{in_tree}", "repo")
+                trace = verdicts_mod.GateTrace()
+                with verdicts_mod.tracing(trace):
+                    copied = R._copy(repo, copy)
+                self.assertEqual((copied["ext"], copied["alias.txt"]),
+                                 ("-> " + os.path.join("..", "outside"), "-> CMakeLists.txt"))
+                self.assertTrue(os.path.islink(os.path.join(copy, "ext")))
+                self.assertEqual(os.readlink(os.path.join(copy, "alias.txt")), "CMakeLists.txt")
+                self.assertFalse(os.path.exists(os.path.join(copy, "ext", "deep")),
+                                 "the link dangles in the copy, as on the runner")
+                self.assertFalse([p for p in trace.files_read if p.startswith(outside)],
+                                 "nothing outside the repository is read")
+
     def _copies(self, repo: str):
         copy, home = os.path.join(self.tmp, "c", "repo"), os.path.join(self.tmp, "c", "home")
         trace = verdicts_mod.GateTrace()
@@ -647,6 +762,26 @@ class TheReplayRunsActAsDesigned(_StandIn):
         self.assertTrue(R.judge(result, _job(), "build/sleeper.bin")[0])
         self.assertFalse(os.path.exists(os.path.dirname(act[1]["argv"][
             act[1]["argv"].index("-C") + 1])), "the copy is removed")
+
+    def test_an_image_the_job_rebuilt_byte_for_byte_is_read_back(self):
+        """What slipped through "its bytes differ from the copy's" (review of F1): a
+        tracked image that a reproducible build wrote again, byte for byte, was
+        left out, and fw.build failed with "it wrote no image". A tracked image the
+        job never touched is still left out."""
+        path = self.app()
+        app = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+        same = b"\xe9" + bytes(63)
+        for rel in ("dist/app.bin", "dist/old.bin"):
+            os.makedirs(os.path.join(app, "dist"), exist_ok=True)
+            with open(os.path.join(app, *rel.split("/")), "wb") as fh:
+                fh.write(same)
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY, "sleep": 0.05,
+                   "write": {"dist/app.bin": {"head": "e9", "size": 64}}})
+        result = self.replay(path)
+        self.assertEqual(sorted(result["files"]), ["dist/app.bin"])
+        self.assertEqual(result["files"]["dist/app.bin"], same)
+        self.assertTrue(R.judge(result, _job(), "dist/app.bin")[0])
 
     def test_a_timeout_stops_the_job_containers(self):
         self.mode({"sleep": 5})
@@ -874,6 +1009,34 @@ class TheImageIsReadByItsFormat(unittest.TestCase):
         fit = self._fit(image)
         self.assertIn("runs 4096 B past the RAM bank 0x20000000..0x2001ffff", fit.problems[0])
 
+    def test_a_segment_past_every_stated_bank_fails_or_is_errored(self):
+        """What slipped through "starts in a bank and runs past it" alone (review of
+        F1): a segment that starts at a bank's end (a build for the 128 KB part
+        above a stated 64 KB bank) was in no bank, and the gate passed. In the Arm
+        SRAM region it fails; anywhere else no stated region holds, it is errored."""
+        one = I.parse_map({"flash": MAP["flash"], "app": {"start": "0x08010000",
+                                                          "size": "0x70000"},
+                           "ram": [{"start": "0x20000000", "size": "0x10000"}],
+                           "other": MAP["other"]})
+        code = (0x08010000, 0x08010000, vectors(0x20010000, 0x08010101), 64)
+        fit = self._fit(elf32(loads=[code, (0x08010040, 0x20000000, bytes(16), 0x10000),
+                                     (0x08010050, 0x20010000, b"", 0x8000)]), one)
+        self.assertEqual(len(fit.problems), 1, fit.problems)
+        self.assertIn("a segment at 0x20010000 of 32768 B lies in the Arm SRAM region and "
+                      "in no stated RAM bank (0x20000000..0x2000ffff)", fit.problems[0])
+        self.assertEqual(self._fit(elf32(loads=[code, (0x08010040, 0x20000000, bytes(16),
+                                                       0x10000)]), one).problems, [])
+        self.assertEqual(self._fit(elf32(loads=[code, (0x90000000, 0x90000000, bytes(16),
+                                                       16)]), one).problems, [],
+                         "a segment in an `other` range is held by it")
+        for machine, vaddr in ((I.EM_ARM, 0x10000000), (243, 0x20010000)):
+            with self.subTest(machine=machine, vaddr=hex(vaddr)):
+                with self.assertRaises(I.ImageFault) as caught:
+                    self._fit(elf32(machine=machine, loads=[
+                        code, (0x08010050, vaddr, b"", 0x100)]), one)
+                self.assertIn(f"a segment at {vaddr:#x}..{vaddr + 0xff:#x} lies in no "
+                              f"region the map states", str(caught.exception))
+
     def test_a_bin_is_placed_at_the_app_start(self):
         fit = self._fit(vectors(0x20020000, 0x08010101) + bytes(0x38000 - 64))
         self.assertEqual((fit.problems, fit.measured), ([], 50.0))
@@ -932,7 +1095,8 @@ class TheEspSlotIsTheSmallestAppPartition(unittest.TestCase):
                                                  ("ota_0", 0x10, 0x100000),
                                                  ("ota_1", 0x11, 0x100000)])
         fit = I.judge_esp(self.image, "build/sleeper.bin", I.esp_slots(self.csv), "p.csv")
-        self.assertEqual(fit.measured, 48.2)
+        self.assertEqual((fit.measured, fit.fits), (48.3, True),
+                         "48.21 %, rounded up to 0.1 %")
 
     def test_the_short_slot_control(self):
         """The known-bad's image size lies in (0x20000, 0x100000), so only ota_1 is
@@ -941,8 +1105,30 @@ class TheEspSlotIsTheSmallestAppPartition(unittest.TestCase):
         short = self.csv.replace("ota_1,    app,  ota_1,   ,        1M,",
                                  "ota_1,    app,  ota_1,   ,        0x20000,")
         fit = I.judge_esp(self.image, "build/sleeper.bin", I.esp_slots(short), "p.csv")
-        self.assertEqual(fit.measured, 385.7)
+        self.assertEqual((fit.measured, fit.fits), (385.8, False),
+                         "385.71 %, rounded up to 0.1 %")
         self.assertIn("ota_1 cannot take it", fit.said)
+
+    def test_one_byte_past_the_slot_fails(self):
+        """What slipped through ``round(..., 1)`` (review of F1): an image up to
+        0.05 % past its slot read 100.0 and passed ``<= 100``, while the detail said
+        the slot could not take it; a true 85.04 % read 85.0 beside a ``<= 85 %``
+        claim."""
+        slots = I.esp_slots(self.csv)
+        for extra, measured, fits in ((-1, 100.0, True), (0, 100.0, True), (1, 100.1, False),
+                                      (500, 100.1, False)):
+            with self.subTest(extra=extra):
+                image = b"\xe9" + bytes(0x100000 + extra - 1)
+                esp = I.judge_esp(image, "a.bin", slots, "p.csv")
+                slot = I.judge_slot(image, "a.bin", 0x100000)
+                self.assertEqual((esp.measured, esp.fits), (measured, fits))
+                self.assertEqual((slot.measured, slot.fits), (measured, fits))
+        self.assertEqual(I.percent_up(8504, 10000), 85.1)
+        self.assertEqual(I.percent_up(8500, 10000), 85.0)
+        for size in (0x20000, 0x100000, 1000003):
+            for used in range(size - 3000, size + 3000, 7):
+                self.assertEqual(I.percent_up(used, size) <= 100.0, used <= size, (used, size))
+                self.assertGreaterEqual(I.percent_up(used, size), 100.0 * used / size)
 
     def test_tee_slots_are_left_out_and_a_broken_table_is_errored(self):
         tee = self.csv + "tee_0,    app,  tee_0,   ,        0x10000,\n"
@@ -1117,7 +1303,18 @@ class TheGatesReadOneReplay(unittest.TestCase):
     def test_flash_use_is_a_percentage_against_the_regions_own_bound(self):
         v = self._run("fw.image_fits", self._files())
         self.assertEqual((v.passed, v.measured, v.limit, v.comparator, v.units),
-                         (True, 48.2, 100.0, "<=", "%"))
+                         (True, 48.3, 100.0, "<=", "%"))
+
+    def test_an_image_past_its_slot_by_a_few_bytes_fails(self):
+        """Review of F1: 0x100000 + 500 B read 100.0 % and passed."""
+        files = self._files()
+        for size, passed, measured in ((0x100000, True, 100.0), (0x100000 + 500, False, 100.1)):
+            for mm in ({"app": {"size": "0x100000"}}, None):
+                with self.subTest(size=size, map=mm):
+                    files["build/sleeper.bin"] = b"\xe9" + bytes(size - 1)
+                    v = self._run("fw.image_fits", files,
+                                  {"app_memory_map": mm} if mm else None)
+                    self.assertEqual((v.passed, v.measured), (passed, measured), v.detail)
 
     def test_the_wake_rule_reads_the_elf_the_job_wrote(self):
         self.assertTrue(self._run("fw.sleep_wake", self._files(
@@ -1183,7 +1380,8 @@ class TheRealReplay(unittest.TestCase):
                     spec, fn, host, trace=None, out_dir=out))
                 self.assertEqual(bad.outcome, "fail", bad.render())
                 if gid == "fw.image_fits":
-                    self.assertEqual((good.measured, bad.measured), (48.2, 385.7))
+                    self.assertEqual((good.measured, bad.measured), (48.3, 385.8),
+                                     "48.21 % and 385.71 %, rounded up to 0.1 %")
 
 
 if __name__ == "__main__":

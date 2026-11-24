@@ -29,12 +29,18 @@ A gate whose prerequisite did not pass reads Skipped.
 - **`fw.ci_job`** chooses the job (`firmware_ci_job`, else the one job that runs a
   build command it knows) and the build step (`firmware_ci_step`, else the one step
   that runs `west build`, `idf.py build`, `pio run`, `arduino-cli compile`, `qmk
-  compile`, `make`, `cmake --build` or `ninja`). It **fails** a CI that can read green
-  on a failed build: `continue-on-error: true` on the job or the step; the build
-  followed by `|| true`, `|| :`, `|| exit 0` or `|| echo`; `set +e`, or a custom shell
-  with no `-e`, then another command and no status check; the build before an `&&`,
-  then another line (`-e` does not stop on a command before the last `&&`); a pipe
-  after the build under a shell with no pipefail. An unspecified shell runs `bash -e {0}` (or `sh -e
+  compile`, `make`, `cmake --build` or `ninja`). It reads every build command in that
+  step, each with the commands after it: later on its line (after a `;`) and on the
+  lines below. It **fails** a CI that can read green on a failed build:
+  `continue-on-error: true` on the job or the step; the build followed by `|| true`,
+  `|| :`, `|| exit 0` or `|| echo`; `set +e`, or a custom shell with no `-e`, then
+  another command and no status check; the build before an `&&`, then another
+  command (`-e` does not stop on a command before the last `&&`); a pipe after the
+  build under a shell with no pipefail. A status check counts only when it is the
+  next command and fails the step: `exit $?`, `[ $? -eq 0 ] || exit 1`, an `if` on
+  `$?` that exits, `rc=$?` and a later `exit $rc`, or after a pipe the same on
+  `${PIPESTATUS[0]}`; under `-e`, a bare test on it counts too. `echo "exited $?"`
+  does not. An unspecified shell runs `bash -e {0}` (or `sh -e
   {0}`), which has no pipefail. `shell: bash` has it. It is **errored**, never failed,
   on a shape the replay cannot run: a Windows, macOS or self-hosted runner with no
   container, docker inside the job (`espressif/esp-idf-ci-action`), a shell that is
@@ -48,11 +54,15 @@ A gate whose prerequisite did not pass reads Skipped.
   abort), on such a line in a step that read success (masked), on ZMK's `Unable to
   locate ZMK config at:` warning, and on a `firmware_image` the job did not write.
 - **`fw.image_fits`** compares the bytes the image writes with a region from a cited
-  record. It reports flash use in %, limit 100, and the spine's cross-check holds a
+  record. It reports flash use in %, rounded up to 0.1 %, limit 100. The pass is
+  decided on bytes: one byte past the slot fails. The spine's cross-check holds a
   claim's headroom (`flash use <= 85 %`). It **fails** with no limit on bytes in
   flash outside the app region, on a vector table that is not at the start the
-  bootloader jumps to, and on a RAM segment that runs past a stated bank (firmware
-  built for a bigger part than the one the map names).
+  bootloader jumps to, and, where `ram` is stated, on an ELF segment (by its run
+  address, `.bss` included) that starts in a stated bank and runs past its end, or
+  that lies in the Arm SRAM region (0x20000000-0x3fffffff) outside every stated
+  bank: firmware built for a bigger part than the one the map names. A segment
+  that no stated region holds anywhere else is errored.
 - **`fw.sleep_wake`** reads only what the image shows. ESP-IDF family: a deep-sleep
   entry with no deep-sleep wake enable linked **fails**; UART, GPIO, Wi-Fi, BT and USB
   wakes are light-sleep only and never count. ZMK: deep sleep needs `wakeup-source` on
@@ -73,7 +83,7 @@ Keys use scope `fw` and are read with `ctx.param`, so `fw.<key>` beats the bare 
 |---|---|
 | `firmware_ci_workflow` | the workflow that builds the firmware, from the project root; every gate skips without it |
 | `firmware_ci_job` | the job id (optional) |
-| `firmware_ci_step` | the build step's name or id, when its command is not on the list (optional) |
+| `firmware_ci_step` | the build step's name or `id:`, when its command is not on the list (optional); act logs a step with an `id:` under it |
 | `firmware_image` | the file the device receives, a glob in the job's workspace (`build/*.bin`: `*` stays inside one directory, `**/` crosses any number) |
 | `firmware_elf` | the ELF in the job's workspace, a glob |
 | `app_memory_map` | the region, one of three shapes (below) |
@@ -126,8 +136,10 @@ trace cannot see into, so they run again on every check at tier 1 or above.
 - act differs from GitHub: runner images, secrets, caches and `if:` contexts. A
   JavaScript action fails in a job image with no `node`. In bind mode a matrix's
   entries share one workspace in turn, so `fw.image_fits` and `fw.sleep_wake` are
-  errored on a matrix job. Each difference shows as errored or in the detail, never
-  as a pass GitHub would not give.
+  errored on a matrix job. A tracked symlink is copied as the link, never followed,
+  so one to a directory outside the repository dangles in the replay as it does on
+  the runner. Each difference shows as errored or in the detail, never as a pass
+  GitHub would not give.
 - Dependencies the job fetches live (west, the component manager, PlatformIO).
   Two checks of one tree can differ when an upstream moves.
 - ZMK's reusable `build-user-config` workflow: it builds outside its workspace, and

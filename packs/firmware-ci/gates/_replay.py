@@ -17,9 +17,10 @@ design's real state. A design fails only on a line from :data:`DESIGN_LINES`.
 edit to any of them moves the key. act, docker and git are subprocesses, so the
 gates that read the replay are opaque and re-run at every check at tier 1 or
 above. The copy, the files the job wrote into it and its removal are touched only
-through subprocesses (the read-back and the removal) or by writes this run made
-itself: a read of a temporary path would key every entry by a random name, and no
-two checks would write the same entry (tests/test_determinism).
+through subprocesses (the copy's symlinks, its snapshot, the read-back and the
+removal) or by writes this run made itself: a read of a temporary path would key
+every entry by a random name, and no two checks would write the same entry
+(tests/test_determinism).
 """
 from __future__ import annotations
 
@@ -79,13 +80,24 @@ TIMEOUT_S = 1800
 #: anyway; leaving them out also keeps them out of every job container.
 EXCLUDED = frozenset({".git", ".nopekit", ".actrc", ".secrets", ".env", ".vars", ".input"})
 
-#: The files read back from the job's workspace when the replay created or changed
-#: them: images (ELF, BIN, Intel HEX, UF2) and the configuration the wake and
-#: transmit rules read (Zephyr's ``.config`` and ``zephyr.dts``, ESP-IDF's
-#: ``sdkconfig``). Capped: past it the replay is errored, never cut short. Never
-#: from a ``CMakeFiles/`` directory: CMake's compiler probes write
-#: ``CMakeDetermineCompilerABI_C.bin`` and its kin there (four on the baseline,
-#: measured), which no device receives and the detail listed as images.
+#: The files read back from the job's workspace when the job wrote them: images
+#: (ELF, BIN, Intel HEX, UF2) and the configuration the wake and transmit rules
+#: read (Zephyr's ``.config`` and ``zephyr.dts``, ESP-IDF's ``sdkconfig``). Capped:
+#: past it the replay is errored, never cut short. Never from a ``CMakeFiles/``
+#: directory: CMake's compiler probes write ``CMakeDetermineCompilerABI_C.bin`` and
+#: its kin there (four on the baseline, measured), which no device receives and the
+#: detail listed as images.
+#:
+#: "Wrote" is read from each file's inode, change time, modification time and size
+#: (``lstat``) against a snapshot taken after the copy and before act starts. What
+#: slipped through the first rule, "its bytes differ from the copy's" (review of
+#: F1): a repository that tracks its release image at the path the job writes,
+#: rebuilt byte for byte by a reproducible build (the baseline's own
+#: ``CONFIG_APP_REPRODUCIBLE_BUILD``), was left out, and ``fw.build`` failed a sound
+#: design with "it wrote no image". A tracked image the job never touched keeps
+#: its snapshot, so it still never stands in for one the job built. *Rejected:*
+#: always reading back ``firmware_image`` (a committed image the job never wrote
+#: would then pass as the job's); the content rule (above).
 OUTPUT_SUFFIXES = (".elf", ".bin", ".hex", ".uf2")
 OUTPUT_NAMES = (".config", "zephyr.dts", "sdkconfig")
 #: The baseline wrote 7.5 MB of images (its ELF 6.4 MB, with debug information);
@@ -152,12 +164,17 @@ TOOL_FAULT_LINES = tuple(re.compile(p, re.M) for p in (
 _DURATION = re.compile(r"\s*\[(?:\d+h)?(?:\d+m)?[\d.]+(?:µs|us|ms|ns|s)\]")
 _CMAKE_DURATION = re.compile(r"^(-- (?:Configuring|Generating) done) \([\d.]+s\)", re.M)
 
+#: The snapshot (``snap``) and the read-back (``read``), in a subprocess (see the
+#: module's docstring). A symlink is read only when it resolves inside the copy:
+#: one the repository tracks may name a path on this machine that the runner does
+#: not have.
 _COLLECT = r"""
-import base64, hashlib, json, os, sys
-copy, cap = sys.argv[1], int(sys.argv[2])
-before = json.load(sys.stdin)
-suffixes, names = tuple(sys.argv[3].split(",")), tuple(sys.argv[4].split(","))
-found, total = {}, 0
+import base64, json, os, sys
+mode, copy, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
+suffixes, names = tuple(sys.argv[4].split(",")), tuple(sys.argv[5].split(","))
+before = json.load(sys.stdin) if mode == "read" else {}
+inside = os.path.realpath(copy) + os.sep
+stats, found, total = {}, {}, 0
 for here, dirs, files in os.walk(copy):
     dirs[:] = sorted(d for d in dirs if d not in (".git", "CMakeFiles"))
     for name in sorted(files):
@@ -166,18 +183,38 @@ for here, dirs, files in os.walk(copy):
         path = os.path.join(here, name)
         rel = os.path.relpath(path, copy).replace(os.sep, "/")
         try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        stamp = [st.st_ino, st.st_ctime_ns, st.st_mtime_ns, st.st_size]
+        if mode == "snap":
+            stats[rel] = stamp
+            continue
+        if before.get(rel) == stamp:
+            continue
+        if os.path.islink(path) and not os.path.realpath(path).startswith(inside):
+            continue
+        try:
             with open(path, "rb") as fh:
                 data = fh.read()
         except OSError:
-            continue
-        if before.get(rel) == hashlib.sha256(data).hexdigest():
             continue
         total += len(data)
         if total > cap:
             print(json.dumps({"oversize": total}))
             sys.exit(0)
         found[rel] = base64.b64encode(data).decode("ascii")
-print(json.dumps({"files": found}))
+print(json.dumps({"stats": stats} if mode == "snap" else {"files": found}))
+"""
+
+#: The copy's symlinks, made in a subprocess: ``os.symlink`` here would be a read
+#: of what each link names, a path under a random temporary directory, and no two
+#: checks would key alike (the module's docstring).
+_LINK = r"""
+import json, os, sys
+for target, dst in json.load(sys.stdin):
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    os.symlink(target, dst)
 """
 
 _REMOVE = "import shutil, sys; shutil.rmtree(sys.argv[1], ignore_errors=True)"
@@ -242,8 +279,9 @@ def replay(path: str, job: str) -> dict:
     # and the chown below must still give the job's files back.
     image = _job_image(path, job)
     try:
-        before = _copy(repo, copy)
+        _copy(repo, copy)
         _git_init(copy, home)
+        before = _snapshot(copy)
         event = os.path.join(tmp, "event.json")
         with open(event, "w", encoding="utf-8") as fh:
             json.dump({"ref": "refs/heads/main"}, fh)
@@ -375,11 +413,14 @@ def listing(repo: str) -> list[str]:
         tracked = []
         for here, dirs, files in os.walk(repo):
             dirs[:] = sorted(d for d in dirs if d not in EXCLUDED and d != "__pycache__")
-            for name in sorted(files):
+            # A symlink to a directory is listed as the link, as git tracks it; the
+            # walk never follows it.
+            names = files + [d for d in dirs if os.path.islink(os.path.join(here, d))]
+            for name in sorted(names):
                 rel = os.path.relpath(os.path.join(here, name), repo)
                 tracked.append(rel.replace(os.sep, "/"))
     out = []
-    for rel in sorted(set(tracked)):
+    for rel in sorted(set(p.rstrip("/") for p in tracked)):
         if any(part in EXCLUDED for part in rel.split("/")):
             continue
         out.append(rel)
@@ -387,23 +428,45 @@ def listing(repo: str) -> list[str]:
 
 
 def _copy(repo: str, copy: str) -> dict:
-    """Copy what :func:`listing` names into ``copy``; ``{rel: sha256}`` of each file.
-    Each file is opened and read here, so it is a read of every gate that loads the
-    replay: a source edit moves their key. A listed directory (a submodule's
-    gitlink) is copied whole, by the walk's rules."""
-    before = {}
+    """Copy what :func:`listing` names into ``copy``: ``{rel: sha256}`` of each
+    file, ``{rel: "-> <target>"}`` of each symlink. Each file is opened and read
+    here, so it is a read of every gate that loads the replay: a source edit moves
+    their key. A listed directory (a submodule's gitlink) is copied whole, by the
+    walk's rules. A symlink is made again as the same link, never followed.
+
+    What slipped through ``os.path.isdir`` alone (review of F1): it follows a
+    link, so a tracked ``ext -> ../outside`` was copied whole as a directory, from
+    outside the repository. A GitHub checkout holds the link itself, dangling on
+    the runner, so the replay built on files CI never sees, and copied a tree of
+    any size on every check."""
+    copied, links = {}, []
+    _copy_into(repo, copy, "", copied, links)
+    os.makedirs(copy, exist_ok=True)
+    if links:
+        proc = subprocess.run([sys.executable, "-I", "-c", _LINK],
+                              input=json.dumps(links), stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True, timeout=120)
+        if proc.returncode != 0:
+            raise ToolFault(f"making the copy's symlinks exited {proc.returncode}: "
+                            f"{proc.stderr.strip()[-200:]}")
+    return copied
+
+
+def _copy_into(repo: str, copy: str, prefix: str, copied: dict, links: list) -> None:
     for rel in listing(repo):
         src = os.path.join(repo, *rel.split("/"))
+        dst = os.path.join(copy, *rel.split("/"))
+        if os.path.islink(src):
+            target = os.readlink(src)
+            links.append([target, dst])
+            copied[prefix + rel] = f"-> {target}"
+            continue
         if os.path.isdir(src):
-            for sub in listing(src):
-                before.update(_copy_one(src, os.path.join(copy, *rel.split("/")), sub,
-                                        prefix=rel + "/"))
+            _copy_into(src, dst, prefix + rel + "/", copied, links)
             continue
         if not os.path.isfile(src):
             continue                                          # tracked, deleted since
-        before.update(_copy_one(repo, copy, rel))
-    os.makedirs(copy, exist_ok=True)
-    return before
+        copied.update(_copy_one(repo, copy, rel, prefix))
 
 
 def _copy_one(repo: str, copy: str, rel: str, prefix: str = "") -> dict:
@@ -506,18 +569,32 @@ def parse(stdout: str, scrub=lambda s: s) -> tuple[list, list]:
     return out, loose
 
 
-def _collect(copy: str, before: dict) -> tuple[dict, int]:
-    """``({rel: bytes}, oversize)`` of each output file the job created or changed,
-    read back by a subprocess (see the module's docstring)."""
-    proc = subprocess.run([sys.executable, "-I", "-c", _COLLECT, copy, str(OUTPUT_CAP),
-                           ",".join(OUTPUT_SUFFIXES), ",".join(OUTPUT_NAMES)],
-                          input=json.dumps(before), stdout=subprocess.PIPE,
+def _run_collect(mode: str, copy: str, before: dict | None = None) -> dict:
+    proc = subprocess.run([sys.executable, "-I", "-c", _COLLECT, mode, copy,
+                           str(OUTPUT_CAP), ",".join(OUTPUT_SUFFIXES),
+                           ",".join(OUTPUT_NAMES)],
+                          input=json.dumps(before or {}), stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True, timeout=300)
     try:
-        found = json.loads(proc.stdout.strip().splitlines()[-1])
+        return json.loads(proc.stdout.strip().splitlines()[-1])
     except (ValueError, IndexError) as exc:
-        raise ToolFault(f"reading the job's files back exited {proc.returncode}: "
+        what = "reading the job's files back" if mode == "read" else \
+            "the copy's snapshot"
+        raise ToolFault(f"{what} exited {proc.returncode}: "
                         f"{proc.stderr.strip()[-200:]}") from exc
+
+
+def _snapshot(copy: str) -> dict:
+    """``{rel: [inode, ctime_ns, mtime_ns, size]}`` of each output-named file in the
+    copy before act starts (``OUTPUT_SUFFIXES``' comment)."""
+    return _run_collect("snap", copy)["stats"]
+
+
+def _collect(copy: str, before: dict) -> tuple[dict, int]:
+    """``({rel: bytes}, oversize)`` of each output file the job wrote: every one
+    whose ``lstat`` differs from ``before`` (:func:`_snapshot`), read back by a
+    subprocess (see the module's docstring)."""
+    found = _run_collect("read", copy, before)
     if "oversize" in found:
         return {}, int(found["oversize"])
     return {rel: base64.b64decode(b64) for rel, b64 in found["files"].items()}, 0
@@ -583,9 +660,18 @@ def _label(entry: dict) -> str:
     return f" ({', '.join(f'{k}={v}' for k, v in sorted(matrix.items()))})" if matrix else ""
 
 
-def main_step(entry: dict, index: int) -> dict | None:
-    return next((s for s in entry["steps"] if s["stage"] == "Main" and s["id"][:1] == [str(index)]),
+def main_step(entry: dict, sid) -> dict | None:
+    """The Main stage of the step act logged as ``stepID`` ``[sid]``: the step's own
+    ``id:``, else its index (``_ci.Job.act_id``)."""
+    return next((s for s in entry["steps"] if s["stage"] == "Main" and s["id"][:1] == [str(sid)]),
                 None)
+
+
+def _position(job, sid: str) -> int | None:
+    """The index in the job's steps of the step act logged as ``sid``."""
+    if sid in job.ids:
+        return job.ids.index(sid)
+    return int(sid) if sid.isdigit() and not job.ids else None
 
 
 def _last_words(entry: dict, step: dict | None = None) -> str:
@@ -617,12 +703,12 @@ def judge(result: dict, job, image_glob: str | None = None,
             raise ToolFault(f"act could not set up job {job.job}{label}: "
                             f"{_last_words(entry, setup)}")
         for i in range(job.index):
-            step = main_step(entry, i)
+            step = main_step(entry, job.act_id(i))
             if step is not None and step["result"] == "failure" and i not in tolerated:
                 raise ToolFault(f"step {step['name']!r} before the build failed in job "
                                 f"{job.job}{label}: the pack cannot tell a manifest error "
                                 f"from a network fault ({_last_words(entry, step)})")
-        build = main_step(entry, job.index)
+        build = main_step(entry, job.act_id(job.index))
         if build is None or build["result"] is None:
             raise ToolFault(f"the build step {job.name!r} never ran in job {job.job}{label}: "
                             f"{_last_words(entry, build)}")
@@ -669,9 +755,10 @@ def judge(result: dict, job, image_glob: str | None = None,
         return False, (f"the file you flash ({image_glob}) is not what job {job.job} builds: "
                        f"it wrote {', '.join(images) or 'no image'}")
     later = []
-    for step in sorted((s for s in entries[0]["steps"] if s["stage"] == "Main"
-                        and s["id"][0].isdigit() and int(s["id"][0]) > job.index),
-                       key=lambda s: int(s["id"][0])):
+    placed = [(_position(job, s["id"][0]), s) for s in entries[0]["steps"]
+              if s["stage"] == "Main" and s["id"]]
+    for _at, step in sorted(((at, s) for at, s in placed if at is not None and at > job.index),
+                            key=lambda p: p[0]):
         later.append(f"{step['name']} ({step['result'] or 'not run'})")
     where = f" in {_short(job.image)}" if job.image else ""
     many = f", {len(entries)} matrix entries" if len(entries) > 1 else ""
@@ -731,7 +818,7 @@ def evidence(result: dict, job, out_path) -> list[str]:
     log = out_path("firmware-ci", "build", "log.txt")
     with open(log, "w", encoding="utf-8") as fh:
         for entry in entries:
-            step = main_step(entry, job.index)
+            step = main_step(entry, job.act_id(job.index))
             fh.write(f"== job {entry['job']}{_label(entry)}, step {job.name!r}: "
                      f"{(step or {}).get('result')}\n")
             fh.write((step or {}).get("log", ""))
