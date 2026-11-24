@@ -2325,6 +2325,54 @@ are kept outside the repository with the branch's history.
   `pcb.pin_names` takes series pairs stated per ref. *Rejected:* raising the
   ceiling on the 10.0 source alone; failing a newer file (a wrong FAIL on every
   current board); number-first pairing.
+- **A record's numbers sit in objects keyed by id, never in lists** (T1, P5, E1).
+  The mutation walk, the spine's mutation pass and the trace push only an
+  object's leaves; a list is one opaque leaf, so no number in it was ever
+  falsified (measured on T1's first form).
+- **F1, built: `firmware-ci`** (firmware-zmk and its tests and logs deleted). The
+  baseline is an ESP32-S3 ESP-IDF v5.5.6 app with BLE on from the start, 48.3% of
+  its smallest 1 MB slot. The two design lines once taken from parent logs are
+  re-recorded on neutral boards. The image readers are standard library (ELF,
+  UF2, Intel HEX); flash use is rounded up to 0.1% and the pass is decided on
+  bytes. The replay copy walks a tree that is ignored or outside any work tree,
+  then runs `git init` on the copy; one replay runs at a time (act names a
+  container by workflow and job only, and a second replay removed the first's
+  mid-build); another act version skips and names the install line. The guard
+  reads every build command and what follows it, after `;` too, and counts a
+  status check only when it fails the step. `fw.build` matches a step by act's id
+  for it, and decides "the job wrote it" from lstat, not content (a reproducible
+  build rewrites the same bytes). *Rejected:* pyelftools and intelhex (both image
+  gates would skip on CI); accepting ZMK's reusable workflow unmeasured (the guard
+  refuses it, and the templates hold one self-contained ZMK job); an upload step
+  in the baseline (espressif/idf has no node; `--bind` brings files back); a
+  rounded figure judged against 100 (an image 0.05% over its slot passed).
+- **P5, built: the power rules** (pcb-kicad, 15 gates).
+  `pcb.charge_temperature` replaces `pcb.charge_protection`, `pcb.fault_current`
+  replaces `pcb.fuse_conductor`, `pcb.charge_limits` is new and
+  `pcb.discharge_cutoff` keeps its id; the shared readers are `gates/_power.py`.
+  Records are plural and keyed by id (`pcb_batteries`, `pcb_protectors`,
+  `pcb_conductors`, `pcb_matings`). Headroom is in K against 0. Firmware is named
+  and skipped in every rule, and a skip never hides another cell's fail. The
+  fixture's cell and charger figures are re-read from real datasheets; the fuse,
+  protector and pack board are fixture values; the refdes roles are new (BT1,
+  J10/J11). A typo bound holds the cell's record whole, and only the floor on a
+  typed charger value (a typo low there is the one that reads as a pass).
+  *Rejected:* lists for the records; a margin in degC (read as zero-limit);
+  failing a firmware-only stop (firmware is unseen, not absent); moving
+  `spice_number` (it reads 1M as a milliohm).
+- **E2, built: `ergo.layout_agrees`** (tier 1, model-only), the validity guard of
+  `ergo.digit_reach`'s inputs, on the tags `digit-reach` and `control-layout`. It
+  holds the declared layout to the drawn scene: the control set both ways (part
+  `ctl-<id>`), each cap within 0.5 mm of its declared point, each grip centre
+  within 0.5 mm of the drawn handle's axis, and each handle's section no wider
+  than the declared diameter + 1.0 mm (one-sided). The scene is a GLB or
+  cad-solid's mesh map, named as cad-solid's assembly view names it. On the
+  baseline, a button drawn 3 mm up the face reads 97.96% on the declared layout
+  and 94.33% on the drawn one. *Rejected:* loading cad-solid's naming module (its
+  absolute path entered the code digest where cad-solid was not live, so every
+  clone keyed new entries; the names are copied and a test holds the copy); the
+  design's `control__<id>` names (the site's explode merges them into one part); a
+  `needs` edge (a tier inversion).
 
 ## 9. Retired
 
