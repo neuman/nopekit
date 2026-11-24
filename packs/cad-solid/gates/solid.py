@@ -97,9 +97,13 @@ MIN_WALL_KEYS = ("process_min_wall_mm", "min_wall_mm")
 #: design). The verdict cache digests a map with its keys sorted, so a reorder
 #: would change which minimum governs and leave the verdict's key unchanged: a
 #: stale pass served as current (invariant 7). So two patterns that match one part
-#: must state the same minimum, or the part is refused. *Rejected:* a list form
-#: that carries an order (a second record shape for one fact), and regular
-#: expressions (a reader cannot check one by eye).
+#: must state the same minimum, or the part is refused. A pattern that matches
+#: only exempt parts judges nothing and is refused; one that also matches a
+#: judged part governs that part. *Rejected:* a list form that carries an order
+#: (a second record shape for one fact), regular expressions (a reader cannot
+#: check one by eye), and refusing every pattern that matches an exempt part (a
+#: pattern that governs real parts would be refused because one bought part
+#: shares its prefix).
 MIN_WALL_BY_PART_KEYS = ("process_min_wall_mm_by_part",)
 
 #: ``{part: reason}``: parts that are not judged. The detail names them. Exact
@@ -1040,6 +1044,9 @@ def _read_wall_rules(names: list, global_min: float | None, global_key: str,
       blanket exemption is a silencer;
     * one part named both exempt and with its own minimum or box: which one
       governs is a guess;
+    * a pattern that matches only exempt parts: it judges nothing, so the
+      minimum its author wrote is dropped. A pattern that also matches a judged
+      part governs that part, and the exempt parts stay not judged;
     * two patterns that match one part with different minimums (see
       ``MIN_WALL_BY_PART_KEYS``);
     * an exception entry with a key outside ``WALL_EXCEPTION_FIELDS``, a missing
@@ -1091,8 +1098,19 @@ def _read_wall_rules(names: list, global_min: float | None, global_key: str,
             else:
                 exact[name] = float(value)
         elif _GLOB_CHARS & set(name):
-            if not any(fnmatch.fnmatchcase(part, name) for part in names):
+            matched = [part for part in names if fnmatch.fnmatchcase(part, name)]
+            if not matched:
                 refusals.append(f"{label} matches no part in the assembly")
+            elif all(part in exempted for part in matched):
+                # What slipped through (review of C1): only the exact-name form was
+                # refused. `{"cover_*": 0.3}` beside an exempt cover_glass was
+                # accepted, judged nothing, and the 0.3 mm the author wrote for the
+                # glass was dropped with no word.
+                refusals.append(
+                    f"{label} matches only exempt part(s) "
+                    f"{', '.join(map(repr, matched[:3]))}{'...' if len(matched) > 3 else ''}: "
+                    f"one says judge it, the other says do not, and the minimum judges "
+                    f"nothing. Delete one")
             else:
                 patterns[name] = float(value)
         else:
@@ -1207,12 +1225,29 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     then ``process_min_wall_mm``. A part in ``wall_exempt_parts`` is not cast
     from, and the detail names it; with every part exempt the gate skips. A ray
     that starts inside a ``wall_exceptions`` box of its part is judged against
-    that box's ``min_mm``, and the box and its reason go in the evidence. The
-    verdict reports the ray with the lowest thickness over its own minimum, across
-    every judged part: its thickness in mm, against its minimum. With one minimum
-    everywhere that is the thinnest wall, as before. What slipped through with one
-    minimum for every mesh, and why patterns carry no order, is at
-    ``MIN_WALL_BY_PART_KEYS``.
+    that box's ``min_mm``, and the box and its reason go in the evidence. The gate
+    passes only when every judged ray meets its own minimum. A pass reports the
+    thinnest wall of every judged part, in mm, against the minimum that wall was
+    held to, and the detail also names the wall nearest its own minimum when that
+    is another wall. A fail reports the ray with the lowest thickness over its own
+    minimum. With one minimum everywhere both are the thinnest wall, as before.
+    What slipped through with one minimum for every mesh, and why patterns carry
+    no order, is at ``MIN_WALL_BY_PART_KEYS``.
+
+    Why a pass reports the thinnest wall and not the worst ratio: this gate
+    settles ``minimum wall thickness`` in mm, and ``claims.cross_check`` compares
+    the value with a claim that states that quantity. What slipped through
+    (review of C1): a pass reported the worst ratio. Beside a 0.45 mm hinge held
+    to 0.4 mm, a 3.0 mm shell left the hinge as the worst ray and a claim ">= 1.2
+    mm" read Failing. Thinned to 1.25 mm, the shell held the worst ratio, the gate
+    reported 1.25 mm, and the same claim read Checked with the 0.45 mm hinge still
+    there. *Rejected:* a ratio in other units on a pass (a mm claim is then not
+    compared, and reads Checked by its tags beside the 0.45 mm wall); reading the
+    covered claims' acceptance conditions here (the gate then errors in every
+    project with no wall claim, and its controls need claims of their own). The
+    cost: on a pass, the verdict's margin is the thinnest wall's against its own
+    minimum, which can be larger than the margin of the wall nearest its own
+    minimum. The detail and the evidence name that wall.
 
     Every facet, never a subset. What slipped through while a 4000-ray budget
     cast from evenly spaced facets above that count (``wall_samples``): a
@@ -1343,7 +1378,14 @@ def wall_thickness(ctx: GateContext) -> Verdict:
 
     rows = []
     box_rows = []
-    worst = None                 # (ratio, thickness, minimum, part, point, source)
+    # Two rays across every judged part, each (key, thickness, minimum, part,
+    # point, source, ray): the one with the lowest thickness over its own minimum
+    # (key: that ratio), which decides the pass and is reported on a fail, and the
+    # thinnest (key: thickness, then the higher minimum), which is reported on a
+    # pass. The first part wins a tie in both, so with one minimum they are the
+    # same ray.
+    worst = None
+    thinnest = None
     for name in judged:
         mesh = meshes[name]
         origins, normals, eps, box_of = prepared[name]
@@ -1381,21 +1423,29 @@ def wall_thickness(ctx: GateContext) -> Verdict:
             )
         distances = travel[real] + eps
         hit_rows = np.asarray(index_ray)[real]
-        # The part's worst ray is the one thinnest FOR ITS OWN minimum, never the
-        # thinnest: a 0.45 mm hinge held to 0.4 mm is better off than a 1.3 mm
-        # wall held to 1.2 mm. With one minimum on the part the two are the same
-        # ray (argmin takes the first of equals in both).
+        # The part's worst ray is the one thinnest FOR ITS OWN minimum: a 0.45 mm
+        # hinge held to 0.4 mm is better off than a 1.3 mm wall held to 1.2 mm.
+        # It decides the pass. Its thinnest ray is the one a "minimum wall
+        # thickness" claim is about, and a tie goes to the higher minimum (the
+        # one nearer failing). With one minimum on the part the two are the same
+        # ray: argmin and the stable lexsort both take the first of equals.
         ratio = distances / ray_min[hit_rows]
         k = int(ratio.argmin())
+        t = int(np.lexsort((-ray_min[hit_rows], distances))[0])
         point = [round(float(c), 3) for c in origins[hit_rows[k]]]
         source = where_from(name, int(box_of[hit_rows[k]]))
-        rows.append({"part": name, "min_mm": float(distances.min()),
+        t_point = [round(float(c), 3) for c in origins[hit_rows[t]]]
+        t_source = where_from(name, int(box_of[hit_rows[t]]))
+        rows.append({"part": name, "min_mm": float(distances[t]),
+                     "min_minimum_mm": float(ray_min[hit_rows[t]]), "min_from": t_source,
+                     "at_mm": t_point,
                      "minimum_mm": part_min, "minimum_from": minimums[name][1],
                      "worst_mm": float(distances[k]),
                      "worst_minimum_mm": float(ray_min[hit_rows[k]]),
                      "worst_from": source, "worst_ratio": float(ratio[k]),
+                     "worst_at_mm": point,
                      "rays": int(n_faces), "hits": int(len(distances)),
-                     "faces": int(n_faces), "at_mm": point})
+                     "faces": int(n_faces)})
         for j, box in enumerate(own):
             in_box = box_of[hit_rows] == j
             box_rows.append({
@@ -1405,16 +1455,37 @@ def wall_thickness(ctx: GateContext) -> Verdict:
                 "thinnest_mm": float(distances[in_box].min()) if in_box.any() else None})
         if worst is None or float(ratio[k]) < worst[0]:
             worst = (float(ratio[k]), float(distances[k]),
-                     float(ray_min[hit_rows[k]]), name, point, source)
+                     float(ray_min[hit_rows[k]]), name, point, source,
+                     (name, int(hit_rows[k])))
+        t_key = (float(distances[t]), -float(ray_min[hit_rows[t]]))
+        if thinnest is None or t_key < thinnest[0]:
+            thinnest = (t_key, float(distances[t]), float(ray_min[hit_rows[t]]),
+                        name, t_point, t_source, (name, int(hit_rows[t])))
+
+    def summary(found: tuple) -> dict:
+        _key, mm, minimum, part, at, source, _ray = found
+        return {"part": part, "mm": mm, "minimum_mm": minimum, "from": source,
+                "at_mm": at, "ratio": mm / minimum}
 
     evidence = [_write(ctx, "wall_thickness.json", {
+        "thinnest": summary(thinnest), "nearest_its_minimum": summary(worst),
         "parts": rows, "boxes": box_rows, "exempt": dict(sorted(exempted.items())),
         "minimums": {name: {"mm": minimums[name][0], "from": minimums[name][1]}
                      for name in judged}})]
     sampled = sum(r["hits"] for r in rows)
     cast = sum(r["rays"] for r in rows)
-    _ratio, worst_value, worst_limit, worst_part, worst_point, worst_from = worst
+    _ratio, worst_value, worst_limit, worst_part, worst_point, worst_from, worst_ray = worst
     passed = worst_value >= worst_limit
+    # What the verdict reports (see the docstring): on a pass the thinnest wall,
+    # against the minimum it was held to, so a claim on "minimum wall thickness"
+    # in mm is compared with the thinnest wall there is. It meets that minimum,
+    # because every ray met its own. On a fail the worst ray, below its own.
+    if passed:
+        (_key, value, value_limit, value_part, value_point, value_from,
+         value_ray) = thinnest
+    else:
+        value, value_limit, value_part, value_point, value_from, value_ray = (
+            worst_value, worst_limit, worst_part, worst_point, worst_from, worst_ray)
 
     # The one gate in this pack that knows a POINT rather than a part: the thin
     # spot is where a ray started, in the same model coordinates the assembly GLB
@@ -1435,21 +1506,31 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         ]
 
     # With one minimum over every judged ray, the worst wall IS the thinnest one,
-    # and the line says so in the words it always used.
+    # and the line says so in the words it always used. A pass always reports the
+    # thinnest wall; a fail with more than one minimum says which wall it reports.
     one_minimum = not boxes and len({minimums[name][0] for name in judged}) == 1
-    head = "thinnest wall" if one_minimum else "worst wall against its own minimum:"
+    head = ("thinnest wall" if passed or one_minimum
+            else "worst wall against its own minimum:")
+    # On a pass, the wall nearest its own minimum is named beside the thinnest
+    # when it is another ray: the verdict's margin is the thinnest wall's, and a
+    # reader must see the smaller one. Its point is in the evidence, not here: the
+    # detail is capped at 500 characters and the exempt parts come after it.
+    nearest = (f"; nearest its own minimum: {worst_value:.3f} mm on {worst_part} vs "
+               f"{worst_limit:.3f} mm [{worst_from}]"
+               if passed and worst_ray != value_ray else "")
     shown = sorted(exempted)
     return Verdict(
         gate=gid,
         passed=passed,
-        measured=round(worst_value, 4),
-        limit=round(worst_limit, 4), comparator=">=",
+        measured=round(value, 4),
+        limit=round(value_limit, 4), comparator=">=",
         units="mm",
-        detail=f"{head} {worst_value:.3f} mm on {worst_part} at "
-               f"({', '.join(f'{c:g}' for c in worst_point)}) vs {worst_limit:.3f} mm "
-               f"minimum [{worst_from}] "
+        detail=f"{head} {value:.3f} mm on {value_part} at "
+               f"({', '.join(f'{c:g}' for c in value_point)}) vs {value_limit:.3f} mm "
+               f"minimum [{value_from}] "
                f"({sampled}/{cast} inward face-normal rays hit, one per face; a ray "
                f"sampler, not a proof)"
+               + nearest
                + (f"; exempt, not judged: {', '.join(shown[:4])}"
                   f"{f' and {len(shown) - 4} more' if len(shown) > 4 else ''}"
                   if shown else ""),

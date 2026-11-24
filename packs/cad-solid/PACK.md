@@ -207,7 +207,7 @@ assume, and the assumptions are expensive.
 | `cad.watertight` | 1 | open + non-manifold edges | 0, by definition of a solid | `selftest/bad_meshes.py:holed_box` — +Z facet deleted, 4 open edges |
 | `cad.is_volume` | 1 | parts that are not volumes | 0, by definition | `selftest/bad_meshes.py:flipped_facet` — one triangle wound backwards, still watertight |
 | `cad.degenerate_faces` | 1 | repairs needed (welds + drops) | 0 | `selftest/bad_meshes.py:sliver_pair` — one corner of a closed box emitted twice 1e-6 mm apart, a subset of its faces repointed at the copy, one face spanning the two |
-| `cad.wall_thickness` | 1 | the wall with the lowest thickness over its own minimum, one inward ray from every face of every part not exempt, mm | each part's own minimum: `process_min_wall_mm_by_part`, else `process_min_wall_mm` (or `min_wall_mm`); a `wall_exceptions` box's `min_mm` for a ray that starts in it | `selftest/bad_meshes.py:thin_plate` — a plate at a quarter of `process_min_wall_mm` |
+| `cad.wall_thickness` | 1 | the thinnest wall on a pass, and on a fail the wall furthest below its own minimum; one inward ray from every face of every part not exempt, mm | each part's own minimum: `process_min_wall_mm_by_part`, else `process_min_wall_mm` (or `min_wall_mm`); a `wall_exceptions` box's `min_mm` for a ray that starts in it | `selftest/bad_meshes.py:thin_plate` — a plate at a quarter of `process_min_wall_mm` |
 | `cad.clash` | 1 | interfering pairs | 0 pairs; per-pair volume **and** depth tolerance | `selftest/bad_meshes.py:overlapping_pair` — two valid boxes sharing 800 mm³ |
 | `cad.clearance` | 1 | least distance over the declared `clearance_pairs`, by manifold3d's `min_gap`, capped at a 10 mm search, mm. Claim tag `clearance` only | the claim tagged `clearance` (`>=`, in mm), read through `ctx.acceptance` | `selftest/bad_meshes.py:carriage_under_cover` — the carriage made taller, its top 0.01 mm under the cover; `cad.clash` passes it |
 | `cad.assembly_connected` | 1 | parts in no contact at all, groups not joined to the assembly, and the surface-to-surface gap on every DECLARED contact, mm | `max_mating_gap_mm` (or a per-entry `tol_mm`); coverage falls back to the pack's 0.05 mm tessellation floor when the projection states none | `selftest/bad_meshes.py:broken_chain` — the cover 3 mm off the rim it seats on, nothing else changed |
@@ -703,7 +703,8 @@ and judges each part against its own minimum:
    pattern (`fnmatch`, case kept). A part with neither takes `process_min_wall_mm`.
    Two patterns that match one part must state the same minimum: the verdict cache
    reads the map with its keys sorted, so an order between patterns would change the
-   verdict and not its key. Name the part to settle it.
+   verdict and not its key. Name the part to settle it. A pattern that also matches
+   an exempt part governs only the parts that are judged.
 2. **`wall_exempt_parts`**, `{part: reason}`. The part is not judged and the detail
    names it. With every part exempt the gate SKIPS. Exact names only: a pattern
    exempts parts nobody named.
@@ -711,25 +712,46 @@ and judges each part against its own minimum:
    `[[x0, y0, z0], [x1, y1, z1]]` in mm in the assembly frame, low corner first. A
    ray that starts inside the box is judged against `min_mm`. The box and its reason
    go in the evidence (`wall_thickness.json`), and in the detail when the box holds
-   the worst wall.
+   the reported wall.
 
-The verdict reports the ray with the lowest thickness over its own minimum: its
-thickness, against its minimum. A 1.3 mm wall held to 1.2 mm is reported before a
-0.45 mm hinge held to 0.4 mm. With one minimum everywhere that is the thinnest wall,
-and the detail says "thinnest wall" as it always did.
+The gate passes only when every judged ray meets its own minimum. What it reports:
+
+- **A pass reports the thinnest wall** of every judged part, in mm, against the
+  minimum that wall was held to. When another wall is nearer its own minimum, the
+  detail names it too: `thinnest wall 0.450 mm on battery_door ... vs 0.400 mm
+  minimum [wall_exceptions[0] box: ...]; nearest its own minimum: 1.250 mm on shell
+  vs 1.200 mm [process_min_wall_mm]`. The evidence holds both, as `thinnest` and
+  `nearest_its_minimum`.
+- **A fail reports the wall furthest below its own minimum**, against that minimum,
+  and pins it. With more than one minimum in use the detail says `worst wall against
+  its own minimum:`.
+- With one minimum everywhere both are the thinnest wall, and the detail says
+  "thinnest wall" as it always did.
+
+The gate settles `minimum wall thickness` in mm, so a claim on that quantity is
+cross-checked against the reported value. A pass reports the thinnest wall so that
+this check is true: a claim `>= 1.2 mm` reads Failing beside a 0.45 mm hinge, even
+when the hinge meets its box. Until the review of 0.3.0, a pass reported the wall
+nearest its own minimum. A 3.0 mm shell left the hinge as that wall and the claim
+read Failing; a shell thinned to 1.25 mm became that wall and the same claim read
+Checked, with the hinge still there. With a thin region on purpose, state the claim's
+limit at or below the lowest minimum in use (the hinge's 0.4 mm), or the claim is
+false and reads Failing. The verdict's margin on a pass is the thinnest wall's
+against its own minimum. The wall nearest its own minimum can have less: read it in
+the detail.
+
+An exempt part is outside the measurement, as a mesh that is not in `meshes` is. Its
+thickness is in no value this gate reports, and a claim on `minimum wall thickness`
+says nothing about it.
 
 Each record is read strictly. The gate FAILS, and names the entry, on: a key that
-names or matches no part; a minimum that is not a positive number; a part both exempt
-and given a minimum or a box; two patterns that disagree on one part; an exemption
-with no reason or written as a pattern; a box entry with any key but `part`,
-`box_mm`, `min_mm` and `reason` (the nearest one is suggested), a missing key, a
-malformed box, two boxes on one part that touch, or a box that holds no face of its
-part.
-
-A claim whose quantity is `minimum wall thickness` is cross-checked against the
-reported value. With minimums per part, state its limit at or below the lowest
-minimum in use (the hinge's 0.4 mm above), or a pass at 0.45 mm reads as a value
-the claim rejects.
+names or matches no part; a minimum that is not a positive number; a part named both
+exempt and with a minimum or a box; a pattern that matches only exempt parts (it
+judges nothing, so the minimum written for them would be dropped); two patterns that
+disagree on one part; an exemption with no reason or written as a pattern; a box
+entry with any key but `part`, `box_mm`, `min_mm` and `reason` (the nearest one is
+suggested), a missing key, a malformed box, two boxes on one part that touch, or a
+box that holds no face of its part.
 
 `max_mating_gap_mm` is a design decision in exactly the way `process_min_wall_mm` is
 — how far apart two parts that are supposed to touch may be before the joint is not a
