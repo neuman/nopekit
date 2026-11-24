@@ -2456,7 +2456,7 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     def test_no_conclusive_mutation_passes_a_bundled_gate(self):
         kinds = collections.Counter()
         # The branches had each counted only their own additions. Their measured
-        # split covers 91 gates; nobody measured the two ccx walks. They still
+        # split covers 92 gates; nobody measured the two ccx walks. They still
         # run below when available, and a conclusive pass still fails the test.
         # Exclude only their unknown classifications from the pinned split, never
         # from the walk, its no-pass assertion or the 94-gate inventory.

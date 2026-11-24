@@ -34,8 +34,10 @@ cooling, heated enclosures, insulation, and the skin of a sealed handheld.
 - **The average skin temperature of a sealed, fanless handheld** in its hottest
   power state, from its worst-case dissipation, against the touch limit its claim
   states. Controllers, remotes, keyboards, watches and bands, sensor tags, power
-  banks, e-readers: any sealed device cooled by still air. The AVERAGE only: a
-  FAIL is sound, a PASS says the shell can shed its power, and the peak over a
+  banks, e-readers: any sealed device cooled by still air. The AVERAGE only.
+  Inside the range its biases were measured in, they err hot: a PASS there is
+  the conservative verdict, and a FAIL can be a false fail. Some biases err
+  cold, outside that range or on a face that points down. The peak over a
   source stays a physical claim or a solver's (`references/handheld.md`).
 
 ## 2. What this pack CANNOT settle
@@ -94,8 +96,13 @@ reader will otherwise assume is covered.
   bedding. The skin model has no airflow: a vented or fan shell skips.
 - **What sits inside a handheld:** the cell's temperature at its rated charge
   ambient, a charger's or an LDO's junction, transients (a burst, a warm-up),
-  and abnormal or single-fault heating (TS2 limits under a fault). The charger's
-  thermistor cutoffs are pcb-kicad's, read off the board.
+  and abnormal or single-fault heating (TS2 limits under a fault).
+- **The charger's temperature cutoffs.** No bundled gate computes them yet.
+  pcb-kicad's `pcb.charge_protection` checks only that the charger's THERM pin
+  is wired to an NTC and that the part has a safety timer: it computes no
+  cutoff temperature. pcb-kicad's `pcb.charge_temperature`, which will compute
+  them off the board, is planned and not built. Until then, settle a cutoff
+  claim with `claim physical` or a project gate.
 
 When the cheap gate cannot answer and the design has stopped moving, see
 `references/limits.md` for which tier-2 tool to reach for and what it costs.

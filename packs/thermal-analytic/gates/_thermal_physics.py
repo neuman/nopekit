@@ -477,12 +477,17 @@ def shell_skin_temperature(power_w: float, ambient_k: float, area_m2: float,
       module's own correlations one vertical plate at that length gives 81-92% of
       the convection the top and bottom faces of a level flat device get (McAdams
       hot-face-up plus hot-face-down at L = A/P, for 160 x 80, 140 x 60 and
-      40 x 40 mm faces at dT 5-25 K), so it errs hot. And it has no Rayleigh band,
+      40 x 40 mm faces at dT 5-25 K), so in that range it errs hot. Outside it
+      the bias can reverse: 400 x 300 mm at dT 15-23 K, 500 x 350 mm at 25 K and
+      20 x 20 mm at 2 K get 1.5-6% more than the level device's faces; and
+      against a face that points down alone it gives 1.2-1.6x (review of T1,
+      which found "it errs hot" said with no range). And it has no Rayleigh band,
       so it refuses no small face. *Rejected:* faces per posture with McAdams'
       horizontal plates (five more records, and McAdams' bands refuse the small
       faces of a watch).
     * ``h_r`` is grey-body exchange with a large surround at the air temperature
-      (F = 1, eps2 = 1): the room's walls, not the sky.
+      (F = 1, eps2 = 1): the room's walls, not the sky, and not a hand or a body
+      warmer than the room, which takes less (that errs cold, unmeasured).
 
     It is the average over ``area_m2`` and never the peak over a source: a 2 mm
     polymer wall spreads heat about 6 mm (sqrt(k t / h) at k 0.2 W/mK, h 10

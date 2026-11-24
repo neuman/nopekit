@@ -10,6 +10,10 @@ electronics in a shell at half scale (65.84 C). These tests hold the rest:
   worst corner (1.125 W against the nominal 0.585 W);
 - the bias the convective length is chosen for: one vertical plate at the
   longest dimension gives 81-92% of a level device's top-and-bottom convection;
+  and the biases that err cold, with their sizes: outside that range, on a face
+  that points down, and what crediting the covered area would be worth;
+- the clause that says the value is the average and not the peak survives the
+  spine's 500-character cut, however many stages the hottest state names;
 - every refusal: a record stated wrongly is an error naming the field, a
   missing key or a vented shell is a skip before the claim is read, a claim on
   the wrong side or in other units is an error;
@@ -20,7 +24,10 @@ electronics in a shell at half scale (65.84 C). These tests hold the rest:
 What slipped through while the gate was designed, each held here: a heat-source
 list put every source's numbers out of the mutation walk's reach (a list is one
 opaque leaf), so the sources are an object keyed by name; and the charger's loss
-estimated at 5 V in and 3.7 V out is about half its worst corner.
+estimated at 5 V in and 3.7 V out is about half its worst corner. In review of
+T1: the docs said every bias errs hot, with no range, and called a FAIL sound,
+when a model that errs hot makes its PASS the conservative verdict; and the
+peak clause came last in the detail, so two LDOs cut its instruction off.
 
 Run:  PYTHONPATH=src python3 -m unittest discover -s tests -p test_thermal_handheld.py -v
 """
@@ -78,6 +85,8 @@ class _Case(_env.EnvCase):
         # A tuple, never a bare function on the class: a function stored there
         # becomes a bound method and takes the test case as its context.
         cls.pair = _registry().get(GID)
+        # The gate's own clause, never a copy typed here that could drift.
+        cls.clause = cls.pair[1].__globals__["AVERAGE_NOT_PEAK"]
 
     def ctx(self, params=None, claims=None) -> gates_mod.GateContext:
         return gates_mod.GateContext(
@@ -161,25 +170,100 @@ class TheArithmeticIsTheDesigns(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     P.shell_skin_temperature(1.0, ambient_k, self.OPEN_AREA, 0.16, 0.9)
 
+    def convection(self, a: float, b: float, dt: float) -> dict:
+        """h, W/m2K, of an a x b face at a rise ``dt``: one Churchill-Chu vertical
+        plate at the longest dimension (the model's), and McAdams hot-face-up and
+        hot-face-down at L = A/P, on the module's own correlations."""
+        props = P.fluid_properties("air", self.AMBIENT_K + dt / 2.0)
+        lv, lh = max(a, b), a * b / (2.0 * (a + b))
+        hv = (P.natural_nusselt("vertical_plate", P.rayleigh(dt, lv, props),
+                                props["pr"], dt)["nu"] * props["k"] / lv)
+        ra = P.rayleigh(dt, lh, props)
+        up = P.natural_nusselt("horizontal_plate_hot_up", ra, props["pr"], dt)
+        down = P.natural_nusselt("horizontal_plate_hot_down", ra, props["pr"], dt)
+        return {"vertical": hv, "up": up["nu"] * props["k"] / lh,
+                "down": down["nu"] * props["k"] / lh}
+
+    def level(self, a: float, b: float, dt: float) -> float:
+        """The model's convection over a level device's top-and-bottom mean."""
+        h = self.convection(a, b, dt)
+        return h["vertical"] / ((h["up"] + h["down"]) / 2.0)
+
+    def power_at(self, target_c: float, area: float, length: float) -> float:
+        """The power the model puts at an average of ``target_c``."""
+        lo, hi = 0.0, 100.0
+        for _ in range(100):
+            mid = (lo + hi) / 2.0
+            t_s = P.k_to_c(self.skin(mid, area=area, length=length)["t_s_k"])
+            lo, hi = (mid, hi) if t_s < target_c else (lo, mid)
+        return lo
+
     def test_the_convective_length_errs_hot(self):
         """One Churchill-Chu vertical plate at the longest dimension against
         McAdams hot-face-up plus hot-face-down at L = A/P, on the module's own
         correlations (outside McAdams' bands too: that is the point, the small
         faces of a watch are below them)."""
-        ratios = []
-        for a, b in ((0.160, 0.080), (0.140, 0.060), (0.040, 0.040)):
-            for dt in (5.0, 10.0, 15.0, 20.0, 25.0):
-                props = P.fluid_properties("air", self.AMBIENT_K + dt / 2.0)
-                lv, lh = max(a, b), a * b / (2.0 * (a + b))
-                hv = (P.natural_nusselt("vertical_plate", P.rayleigh(dt, lv, props),
-                                        props["pr"], dt)["nu"] * props["k"] / lv)
-                ra = P.rayleigh(dt, lh, props)
-                up = P.natural_nusselt("horizontal_plate_hot_up", ra, props["pr"], dt)
-                down = P.natural_nusselt("horizontal_plate_hot_down", ra, props["pr"], dt)
-                ratios.append(hv / ((up["nu"] + down["nu"]) * props["k"] / lh / 2.0))
+        ratios = [self.level(a, b, dt)
+                  for a, b in ((0.160, 0.080), (0.140, 0.060), (0.040, 0.040))
+                  for dt in (5.0, 10.0, 15.0, 20.0, 25.0)]
         self.assertGreaterEqual(min(ratios), 0.80)
         self.assertLessEqual(max(ratios), 0.925)
         self.assertLess(max(ratios), 1.0)      # always the cooler side: it errs hot
+
+    def test_outside_the_measured_range_it_can_err_cold(self):
+        """The numbers references/handheld.md section 1 gives for the biases that
+        err cold. What slipped through (review of T1): "it errs hot" was said
+        with no range, and on the module's own correlations it reverses for a
+        large square face, or a small face at a small rise."""
+        for (a, b, dt), more in (((0.400, 0.300, 15.0), 1.015), ((0.400, 0.300, 23.0), 1.03),
+                                 ((0.500, 0.350, 25.0), 1.06), ((0.020, 0.020, 2.0), 1.04)):
+            with self.subTest(face=(a, b), dt=dt):
+                self.assertGreater(self.level(a, b, dt), 1.0)
+                self.assertAlmostEqual(self.level(a, b, dt), more, delta=0.005)
+
+    def test_a_face_that_points_down_gets_more_than_hot_face_down(self):
+        """1.2-1.6x what hot-face-down alone gives, over the measured faces and
+        the large ones; a 160 x 80 mm face the model puts at 48 C is about
+        50.2 C under hot-face-down."""
+        ratios = [h["vertical"] / h["down"] for h in
+                  (self.convection(a, b, dt)
+                   for a, b in ((0.160, 0.080), (0.140, 0.060), (0.040, 0.040),
+                                (0.400, 0.300), (0.500, 0.350))
+                   for dt in (5.0, 15.0, 25.0))]
+        self.assertGreaterEqual(min(ratios), 1.2)
+        self.assertLessEqual(max(ratios), 1.6)
+        a, b = 0.160, 0.080
+        area, lh = a * b, a * b / (2.0 * (a + b))
+        power = self.power_at(48.0, area, 0.160)
+
+        def shed_down(t_s: float) -> float:
+            dt = t_s - self.AMBIENT_K
+            props = P.fluid_properties("air", (t_s + self.AMBIENT_K) / 2.0)
+            nu = P.natural_nusselt("horizontal_plate_hot_down", P.rayleigh(dt, lh, props),
+                                   props["pr"], dt)["nu"]
+            q_rad = P.radiation_exchange(t_s, self.AMBIENT_K, area, 0.90, 1.0)["q_w"]
+            return nu * props["k"] / lh * area * dt + q_rad
+
+        lo, hi = self.AMBIENT_K, self.AMBIENT_K + 200.0
+        for _ in range(100):
+            mid = (lo + hi) / 2.0
+            lo, hi = (mid, hi) if shed_down(mid) < power else (lo, mid)
+        self.assertAlmostEqual(P.k_to_c(lo), 50.2, delta=0.05)
+
+    def test_what_crediting_the_covered_area_would_be_worth(self):
+        """The covered area sheds nothing, which errs hot. Had the covered 35%
+        shed as the open area does: 4.2 K on the baseline (34.10 C against
+        38.26 C), and 7.1 K for the same shell at 48 C. That is the size of
+        one hot bias, and so of a FAIL it can make wrongly; before review of T1
+        the docs said "only within a few kelvin", with no measurement behind it."""
+        whole = 0.03904
+        baseline = P.k_to_c(self.skin(3.3493)["t_s_k"])
+        credited = P.k_to_c(self.skin(3.3493, area=whole)["t_s_k"])
+        self.assertAlmostEqual(credited, 34.10, places=2)
+        self.assertAlmostEqual(baseline - credited, 4.2, delta=0.05)
+        at_limit = self.power_at(48.0, self.OPEN_AREA, 0.160)
+        credited = P.k_to_c(self.skin(at_limit, area=whole)["t_s_k"])
+        self.assertAlmostEqual(48.0 - credited, 7.1, delta=0.05)
 
 
 # --------------------------------------------------------------------------- #
@@ -196,11 +280,36 @@ class TheGateJudgesTheHottestState(_Case):
         # Every linear stage in the hottest state is named with its corner.
         self.assertIn("'linear charger' 1.125 W = (5.5 - 3) V x 0.45 A", v.detail)
         self.assertIn("radiation 58% of the loss", v.detail)
-        self.assertTrue(v.detail.endswith("settle the peak by claim physical or a solver"))
+        # The clause comes right after the value, before any name a record types.
+        self.assertTrue(v.detail.startswith(f"average skin 38.26 C within <= 48 C, "
+                                            f"{self.clause}; "), v.detail)
         with open(v.evidence[0], encoding="utf-8") as fh:
             rows = fh.read()
         for state in ("use", "charge", "charge-in-use"):
             self.assertRegex(rows, rf"(?m)^{state} +\d")
+
+    def test_the_peak_clause_survives_the_spines_cut(self):
+        """The spine cuts a detail at 500 characters. What slipped through
+        (review of T1): the clause came last, and two LDOs added to the
+        hottest state cut "settle the peak by claim physical or a solver" off
+        it. Four LDOs, and then one source and one state with long names: the
+        detail is cut each time, and the clause is whole each time."""
+        params = _baseline()
+        for n in range(4):
+            params["heat_sources"][f"LDO {n} for the sensor rail"] = {
+                "linear": {"vin_max_v": 4.2, "vout_min_v": 3.3, "i_max_a": 0.2},
+                "states": ["charge-in-use"], "source": "datasheet, full load"}
+        long_name = _baseline()
+        long_name["heat_sources"]["linear charger"]["states"] = ["charge", "x" * 300]
+        long_name["heat_sources"]["system at full load"]["states"] = ["use", "x" * 300]
+        long_name["heat_sources"]["y" * 300] = long_name["heat_sources"].pop(
+            "system at full load")
+        for label, case in (("four LDOs", params), ("long names", long_name)):
+            with self.subTest(label):
+                v = self.run_with(case)
+                self.assertTrue(v.passed, v.error or v.detail)
+                self.assertTrue(v.detail.endswith("..."), v.detail)   # it was cut
+                self.assertIn(self.clause, v.detail)
 
     def test_a_state_named_twice_in_one_source_counts_once(self):
         params = _baseline()
@@ -238,6 +347,7 @@ class TheGateJudgesTheHottestState(_Case):
         self.assertIsNone(v.measured)
         self.assertIsNone(v.limit)
         self.assertIn("needs a film above the air table", v.detail)
+        self.assertIn(self.clause, v.detail)
 
     def test_a_bound_under_the_claims_limit_decides_nothing(self):
         params = self.edited(shell_area_m2=1.0e-4, shell_length_m=0.01)

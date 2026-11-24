@@ -1035,9 +1035,15 @@ SKIN_TAG = "average-skin-temperature"
 SKIN_UNITS = "degC"
 
 #: The sides of a limit this gate judges. An average skin temperature is a claim
-#: about at most: a FAIL is sound because the peak is never below the average,
-#: and every bias of the model errs hot. A claim about at least (a heated grip)
-#: would take those biases on the generous side, so it is refused.
+#: about at most. Inside the range the model's biases were measured in (a level
+#: device, faces 40-160 mm, a rise of 5-25 K) they overstate the average, so there
+#: a PASS is the conservative verdict and a FAIL can be a false fail. A claim
+#: about at least (a heated grip) would take those biases on the generous side,
+#: so it is refused. *Rejected:* "a FAIL is sound because the peak is never below
+#: the average, and every bias errs hot", the wording T1 shipped (review of T1):
+#: the peak bounds the TRUE average from above, not the modelled one; a model
+#: that errs hot fails a sound shell, not a bad one; and some biases err cold
+#: (``skin_temperature``'s docstring, ``references/handheld.md`` section 1).
 SKIN_COMPARATORS = ("<=", "<")
 
 #: What ``shell_cooling`` may say. Only ``sealed`` is judged: the model has no
@@ -1060,11 +1066,19 @@ SHELL_COOLING = ("sealed", "vented", "fan")
 _SOURCE_KEYS = ("w", "linear", "states", "source")
 _LINEAR_KEYS = ("vin_max_v", "vout_min_v", "i_max_a")
 
-#: The clause every skin verdict ends with, pass or fail: what the number is and
-#: is not. 6 mm is sqrt(k t / h) for a 2 mm wall at k 0.2 W/mK (PC/ABS) and the
+#: The clause every skin verdict says, pass or fail: what the number is and is
+#: not. 6 mm is sqrt(k t / h) for a 2 mm wall at k 0.2 W/mK (PC/ABS) and the
 #: baseline's h_c + h_r of about 10 W/m2K. *Rejected:* a ``shell_wall_m`` /
 #: ``shell_wall_k_w_mk`` pair to compute it per design (two keys whose only
 #: effect is this sentence).
+#:
+#: It comes right after the value, before any name a record types. The spine
+#: cuts a detail at 500 characters (``gates._DETAIL_MAX``), and each linear stage
+#: the detail names adds about 40-60. What slipped through (review of T1): the
+#: clause came last. Two LDOs added to the baseline's hottest state cut "settle
+#: the peak by claim physical or a solver" off a PASS, and three cut it back to
+#: "... polymer wall spreads...". *Rejected:* capping the named stages (a long
+#: source or state name, free words, still pushes a clause at the end out).
 AVERAGE_NOT_PEAK = ("the average over the uncovered shell, not the peak over a source "
                     "(a 2 mm polymer wall spreads heat about 6 mm): settle the peak by "
                     "claim physical or a solver")
@@ -1191,13 +1205,24 @@ def skin_temperature(ctx: GateContext) -> Verdict:
     ``component-temperature`` there is also covered by ``thermal.time_constant``,
     which skips without a lumped body, so such a claim reads Skipped.
 
-    The limits, for the reader. It judges the AVERAGE, never the peak: a FAIL is
-    sound, a PASS says only that the shell can shed its power. Its biases all err
-    hot (the covered area sheds nothing; one vertical plate gives 81-92% of a
-    level device's top-and-bottom convection), so a sound design fails wrongly
-    only within a few kelvin of its limit. It is steady state at the worst
-    sustained power: no transient, no fault, no airflow (a vented or fan-cooled
-    shell skips), no sun unless a source states it.
+    The limits, for the reader. It judges the AVERAGE, never the peak: the peak
+    over a source needs ``claim physical`` or a solver. Inside the range its
+    biases were measured in (a level device, faces 40-160 mm, a rise of 5-25 K)
+    they err hot: the covered area sheds nothing (had it shed as the open area
+    does, the baseline would read 4.2 K cooler, of a 13.3 K rise, and the same
+    shell at 48 C 7.1 K cooler), and one vertical plate gives 81-92% of a level
+    device's top-and-bottom convection. So there a PASS is the conservative
+    verdict for the average, and a FAIL says only that the model cannot show the
+    shell sheds its power: a sound shell can fail, by as much as those biases
+    are worth. Some biases err cold. Outside that range the vertical plate can
+    give up to 6% more convection than a level device's faces. On an uncovered
+    face that points down it gives 1.2-1.6x what hot-face-down alone gives (a
+    160 x 80 mm face the model puts at 48 C is about 50.2 C). And radiation goes
+    to a surround at the air temperature, not to a warmer hand or body (not
+    measured). ``references/handheld.md`` section 1 has the numbers, and
+    ``tests/test_thermal_handheld.py`` holds them. It is steady state at the
+    worst sustained power: no transient, no fault, no airflow (a vented or
+    fan-cooled shell skips), no sun unless a source states it.
     """
     gid = "thermal.skin_temperature"
     vals, missing = _need(ctx, "shell_area_m2", "shell_length_m", "shell_emissivity",
@@ -1297,8 +1322,9 @@ def skin_temperature(ctx: GateContext) -> Verdict:
         # No value and no limit: the bound is not a measurement, and a verdict
         # that reported it as one would read as a temperature the gate found.
         return Verdict(gate=gid, passed=False, evidence=evidence,
-                       detail=f"{said}, past the claim's {comparator} {acc.limit:g} "
-                              f"{SKIN_UNITS} at any value it could take; {AVERAGE_NOT_PEAK}")
+                       detail=f"average skin past the claim's {comparator} {acc.limit:g} "
+                              f"{SKIN_UNITS} at any value it could take, {AVERAGE_NOT_PEAK}; "
+                              f"{said}")
 
     measured = round(worst["t_s_c"], 2)                     # judged as reported
     passed = acc.holds(measured)
@@ -1306,16 +1332,20 @@ def skin_temperature(ctx: GateContext) -> Verdict:
     share = worst["q_rad_w"] / shed if shed > 0.0 else 0.0
     big = max(worst["members"], key=lambda s: s["w"])
     # Every linear stage in the hottest state is named with its corner, not only
-    # the largest source: the corner is the number a reader checks first.
+    # the largest source: the corner is the number a reader checks first. The
+    # list comes last, after every part of fixed length: it is the one part whose
+    # length a record decides, so the spine's cut takes its tail, and the
+    # evidence file keeps every stage's arithmetic (AVERAGE_NOT_PEAK's comment).
     named = [big] + [s for s in worst["members"] if s["arithmetic"] and s is not big]
     return Verdict(
         gate=gid, passed=passed, measured=measured, limit=acc.limit, comparator=comparator,
         units=SKIN_UNITS, evidence=evidence,
         detail=f"average skin {measured:.2f} C {'within' if passed else 'past'} {comparator} "
-               f"{acc.limit:g} C in state {worst['state']!r}: {worst['power_w']:.3f} W, "
-               + ", ".join(f"{'largest ' if s is big else ''}{s['name']!r} {s['w']:.3f} W"
-                           f"{s['arithmetic']}" for s in named) + "; "
-               f"{open_area:.5f} of {area:.5f} m2 uncovered, L {length:.3f} m, eps {eps:g}: "
+               f"{acc.limit:g} C, {AVERAGE_NOT_PEAK}; {open_area:.5f} of {area:.5f} m2 "
+               f"uncovered, L {length:.3f} m, eps {eps:g}, ambient {ambient_c:g} C: "
                f"h_c {worst['h_c']:.2f} + h_r {worst['h_r']:.2f} W/m2K, radiation "
-               f"{share:.0%} of the loss, ambient {ambient_c:g} C; {AVERAGE_NOT_PEAK}",
+               f"{share:.0%} of the loss; in state {worst['state']!r}: "
+               f"{worst['power_w']:.3f} W, "
+               + ", ".join(f"{'largest ' if s is big else ''}{s['name']!r} {s['w']:.3f} W"
+                           f"{s['arithmetic']}" for s in named),
     )

@@ -16,21 +16,43 @@ For each power state, the gate adds the sources in that state and solves
 for the average surface temperature `T_s`. The hottest state gives the value.
 
 - `A` is `shell_area_m2 x (1 - shell_covered_fraction)`. The covered part (a
-  hand, a strap, a desk) gets no credit. This errs hot.
+  hand, a strap, a desk) gets no credit. This errs hot. Had the covered 35% of
+  the baseline shed as the open area does, the baseline would read 4.2 K
+  cooler (34.10 C, not 38.26 C), and the same shell at 48 C would read 7.1 K
+  cooler.
 - `h_c` is Churchill-Chu for a vertical plate, at the shell's longest outside
   dimension (`shell_length_m`), with air properties at the film temperature.
   On this pack's own correlations, that gives 81-92% of the convection that the
   top and bottom faces of a level flat device get (McAdams hot-face-up plus
   hot-face-down at L = A/P, for 160 x 80, 140 x 60 and 40 x 40 mm faces at
-  dT 5-25 K). This errs hot. It has no Rayleigh band, so it refuses no small
-  face. `tests/test_thermal_handheld.py` holds the measurement.
+  dT 5-25 K). In that range this errs hot. It has no Rayleigh band, so it
+  refuses no small face.
 - `h_r` is grey-body radiation to a large surround at the air temperature
   (`shell_emissivity`, F = 1). That is a room's walls. Outdoors, the sky is
   colder and the sun is a heat source: state the sun as a source.
 
-The value is the AVERAGE. A FAIL is sound, because the peak is never below the
-average. A PASS says only that the shell can shed its power. The peak over a
-source needs a measurement or a solver (`references/limits.md`, section 9).
+Some biases err cold. These are the ones known:
+
+- Outside the measured range, the vertical plate can give more convection than
+  a level device's faces: 1.5% more for a 400 x 300 mm face at dT 15 K, 3% at
+  23 K, 6% for 500 x 350 mm at 25 K, and 4% for a 20 x 20 mm face at 2 K.
+- The model gives a face that points down (a tag under a shelf, its top face
+  covered) 1.2-1.6x the convection that hot-face-down gives it. A 160 x 80 mm
+  face that the model puts at 48 C is about 50.2 C.
+- The uncovered surface radiates partly to the hand or the body that holds it.
+  They are warmer than the room, so they take less heat than the model's
+  surround. This is not measured.
+
+`tests/test_thermal_handheld.py` holds every number in this section.
+
+The value is the AVERAGE. Inside the measured range its biases err hot, so a
+PASS there is the conservative verdict for an average claim. A FAIL says only
+that the model cannot show the shell sheds its power under those biases: a
+sound shell can fail. The covered-area credit alone is worth 4.2 K on the
+baseline and 7.1 K at 48 C. Outside the range, or on a face that points down, a
+PASS can be generous by the numbers above. The peak over a source is above the
+average, so a PASS says nothing about the peak. The peak needs a measurement or
+a solver (`references/limits.md`, section 9).
 
 A balance that needs a film above the air table (600 K) has no value. If the
 claim's limit is below that bound, the gate fails with no value. If the limit is
@@ -200,7 +222,13 @@ sealed fixture data, not a product.
   through `thermal.steady_state_temp` must be tagged `cooling` alone, or state a
   lumped body: `thermal.time_constant` also covers `component-temperature` and
   `steady-state-temperature`, and it skips without the `body_*` keys.
-- The charger's temperature cutoffs. They are pcb-kicad's: its power gates read
-  the thermistor network off the board, so a part swap re-runs them.
+- The charger's temperature cutoffs. No bundled gate computes them yet.
+  pcb-kicad's `pcb.charge_protection` checks only that the charger's THERM pin
+  is wired to an NTC and that the part has a safety timer. pcb-kicad's
+  `pcb.charge_temperature`, which will read the thermistor network off the
+  board, is planned and not built. Until then, settle a cutoff claim with
+  `claim physical` or a project gate. Do not give it a tag that
+  `pcb.charge_protection` covers (`pcb`, `battery-safety`,
+  `charge-protection`): that gate passes on the wiring alone.
 - Cell ageing. I2R rises as a cell ages: state the end-of-life resistance.
   Nothing checks that you did.
