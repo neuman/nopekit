@@ -141,3 +141,41 @@ sequence rather than a state.
   and the hot spot is what fails.
 - If the sensor falls off, opens, or shorts, what does the control do? "Full
   power" is a common and expensive default.
+
+## A handheld's skin and its dissipation
+
+A sealed handheld has one way to lose heat: its outside surface. Ask these before
+the shell size is fixed. `thermal.skin_temperature` answers the average; these
+questions find what it does not see.
+
+- **Which state is the hottest?** It is usually charging while in use: the
+  system at full load and the charger's loss at the same time. Name every state
+  the device can stay in for minutes, and give each source the states it is in.
+- **Is each source at its worst corner?** A linear stage loses
+  `(vin_max - vout_min) x i_max`. USB VBUS goes to 5.5 V at the connector. A
+  charger's output is lowest at its fast-charge entry voltage, and its current
+  is highest at the top of its tolerance. A loss estimated at 5 V in and 3.7 V
+  out is about half of the worst corner.
+- **Where is the peak?** The gate gives the average over the uncovered shell.
+  A 2 mm polymer wall spreads heat about 6 mm, so the skin over a charger or a
+  processor is much hotter than the average. Measure the peak with a
+  thermocouple on a print with the real parts or a heater, and record it with
+  `claim physical`.
+- **What is the shell's emissivity?** At handheld size, radiation is more than
+  half the loss. On the baseline, the same shell in bare metal (eps 0.10) runs
+  10.5 K hotter than in moulded plastic (eps 0.90). A glossy metallic paint is
+  closer to bare metal than to paint.
+- **How much of the shell is covered?** A hand, a strap or a desk covers part
+  of it. The gate gives that part no credit. Is the grip you assumed the grip
+  people use?
+- **What is the room?** State 25 C for an IEC 62368-1 TS1 claim. A device in a
+  pocket, a bag or under bedding is outside the still-air model: there the air
+  is not still and not at room temperature.
+- **Does the sun reach it?** Sun on the shell is a heat source: absorptance x
+  irradiance x projected area. `solar.irradiance` can give the irradiance.
+- **What else is at the skin temperature?** Inside a held device the parts sit
+  at the skin temperature or above, not at room temperature. Check the cell,
+  the adhesives and the polymer parts against their ratings at 35-50 C.
+- **Is the charger's current one number?** Take `i_max_a` from the same place
+  that sets the charger's programmed current. A second copy typed by hand
+  drifts when the board changes.

@@ -152,3 +152,24 @@ Before installing anything, write down:
 
 Then offer the human the choice with the real cost attached, and default to the
 cheap bound while the design is still moving.
+
+## 9. The peak skin temperature of a handheld
+
+**The gap.** `thermal.skin_temperature` gives the AVERAGE temperature of a
+sealed shell's uncovered surface. It does not give the peak over a source. A
+2 mm polymer wall spreads heat only about 6 mm, so the skin over a charger or a
+processor can be many kelvin above the average. A touch limit applies at the
+hottest point a person can touch.
+
+**Symptom.** A claim about the hottest point, a certifier's thermocouple, or a
+hot spot a person can feel.
+
+**Reach for.** Measurement first: a thermocouple at the hottest point of a print
+with the real parts (or a heater of the same power and footprint), in still air
+at the claim's ambient, recorded with `claim physical`. For a design that is
+still moving, a conduction solve of the wall with the board's sources (Elmer FEM
+or CalculiX, as in section 1) gives the spread.
+
+**Cost, honestly.** A print, a heater or a board, a thermocouple and an hour per
+iteration. The solve costs what section 1 says, and it still needs the contact
+between the parts and the wall, which section 5 says only a measurement gives.

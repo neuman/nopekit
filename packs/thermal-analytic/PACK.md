@@ -1,13 +1,13 @@
 # thermal-analytic
 
-Closed-form heat transfer and solar collection. Ten gates, all tier 0, all
+Closed-form heat transfer and solar collection. Eleven gates, all tier 0, all
 stdlib — no solver, no mesh, no network call, nothing to install. Every gate runs
 in under a millisecond, which is the point: heat transfer is where a design gets
 sanity-checked on every edit, and a twenty-minute CFD run in that loop means the
 check does not happen.
 
-It serves four kinds of problem with one vocabulary: solar thermal, electronics
-cooling, heated enclosures, and insulation.
+It serves five kinds of problem with one vocabulary: solar thermal, electronics
+cooling, heated enclosures, insulation, and the skin of a sealed handheld.
 
 ---
 
@@ -31,6 +31,14 @@ cooling, heated enclosures, and insulation.
   inputs produce.** The one cross-representation check this pack can make.
 - **Clear-sky irradiance on a tilted, oriented surface** — pure geometry plus a
   clear-sky model.
+- **The average skin temperature of a sealed, fanless handheld** in its hottest
+  power state, from its worst-case dissipation, against the touch limit its claim
+  states. Controllers, remotes, keyboards, watches and bands, sensor tags, power
+  banks, e-readers: any sealed device cooled by still air. The AVERAGE only.
+  Inside the range its biases were measured in, they err hot: a PASS there is
+  the conservative verdict, and a FAIL can be a false fail. Some biases err
+  cold, outside that range or on a face that points down. The peak over a
+  source stays a physical claim or a solver's (`references/handheld.md`).
 
 ## 2. What this pack CANNOT settle
 
@@ -79,6 +87,22 @@ reader will otherwise assume is covered.
 - **A loss coefficient that varies with temperature.** `collector_ul_w_m2k` is
   constant, so `solar.stagnation` over-estimates by an unquantified margin — the
   conservative direction, and still not a measurement.
+- **The peak skin temperature of a handheld.** `thermal.skin_temperature` gives
+  the average over the uncovered shell. A 2 mm polymer wall spreads heat about
+  6 mm, so the skin over a charger is much hotter than the average. Settle the
+  peak with `claim physical` (a thermocouple at the hottest point) or a solver
+  (`references/limits.md` section 9).
+- **A vented or fan-cooled handheld,** or one in a pocket, a bag or under
+  bedding. The skin model has no airflow: a vented or fan shell skips.
+- **What sits inside a handheld:** the cell's temperature at its rated charge
+  ambient, a charger's or an LDO's junction, transients (a burst, a warm-up),
+  and abnormal or single-fault heating (TS2 limits under a fault).
+- **The charger's temperature cutoffs.** No bundled gate computes them yet.
+  pcb-kicad's `pcb.charge_protection` checks only that the charger's THERM pin
+  is wired to an NTC and that the part has a safety timer: it computes no
+  cutoff temperature. pcb-kicad's `pcb.charge_temperature`, which will compute
+  them off the board, is planned and not built. Until then, settle a cutoff
+  claim with `claim physical` or a project gate.
 
 When the cheap gate cannot answer and the design has stopped moving, see
 `references/limits.md` for which tier-2 tool to reach for and what it costs.
@@ -97,10 +121,11 @@ When the cheap gate cannot answer and the design has stopped moving, see
 | `solar.collector_output` | 0 | useful heat, W | `collector_output_min_w` | the back insulation waterlogs and U_L rises |
 | `solar.stagnation` | 0 | absorber temperature with no flow, degC | `stagnation_limit_c` (seals and fluid) | the collector is *improved* — U_L falls and it stagnates hotter |
 | `solar.irradiance` | 0 | plane-of-array, W/m2 | `design_irradiance_min_w_m2` | the array is mounted facing away from the sun |
+| `thermal.skin_temperature` | 0 | average skin temperature of a sealed handheld, degC | **the claim** tagged `average-skin-temperature` | a pocket remake: the same electronics in the shell at half scale |
 
 Fixtures are in `selftest/bad_thermal.py`, one function each, each changing one
-physically meaningful quantity. Run `nopekit gate selftest` and watch all ten
-fail.
+physically meaningful quantity. Run `nopekit gate selftest` and watch all
+eleven fail.
 
 **Fixtures are sealed, and their severity is derived** — two properties, both
 needed. *Sealed*: each fixture builds its projection from
@@ -130,6 +155,25 @@ Stagnation used to be a third entry here, as a second inequality inside
 falsifies output raises `U_L`, which makes stagnation *safer* — see
 `references/collector-example.md` step 4.
 
+**Two limit conventions.** The first ten gates read their limit from a
+parameter (`temp_limit_c`, `wall_u_limit_w_m2k`, ...): they were written before
+a limit had a home in `claims/`, and moving them is a migration of its own.
+`thermal.skin_temperature` reads its limit from the claim it covers
+(`ctx.acceptance`), as a new gate must: write the claim with quantity `average
+skin temperature`, comparator `<=` or `<`, units `degC`, and the tag
+`average-skin-temperature`. Another side or other units is an error. A missing
+shell key is a skip that names it, before the claim is read, so a project with no
+handheld never reads errored. Its fixture hands the baseline's own claim `TH1`
+(`_claims`), never the host's.
+
+**Tag vocabulary for a handheld.** Write the peak touch claim apart from the
+average skin claim, with its own tags: `average-skin-temperature` is the only tag
+the skin gate covers, so a peak claim never reads Checked on an average. A
+charger-junction claim through `thermal.steady_state_temp` must be tagged
+`cooling` alone, or state a lumped body: `thermal.time_constant` also covers
+`component-temperature` and `steady-state-temperature`, and skips without the
+`body_*` keys, so the claim would read Skipped.
+
 **`thermal.time_constant` is the policeman.** It is the only gate here bound
 broadly, and deliberately: Biot above 0.1 means the body does not have *a*
 temperature, so the single-node result from `thermal.steady_state_temp` and the
@@ -145,6 +189,9 @@ measurement, which says nothing about the steady-state node — so making it
 unrelated fail. The edge lands once the Biot half is its own evaluator.
 `thermal.h_agreement` compares two representations rather than guarding one, and
 `thermal.convection`'s own control (`fan_stopped`) fails it.
+`thermal.skin_temperature` measures and guards nothing; it needs no guard here,
+because Churchill-Chu has no Rayleigh band, and a film outside the air table is
+its own refusal.
 
 ## 3b. Views
 
@@ -199,6 +246,9 @@ SI throughout, with three places where people get hurt:
   15-25 K above room). `collector_ambient_c` is outdoor air, and it is a separate
   key on purpose — sharing one "ambient" across a building and its outside is a
   units-grade error that reads as a perfectly plausible number.
+  `shell_ambient_c` is the room air a handheld is held in, a third key for the
+  same reason. State 25 for an IEC 62368-1 TS1 claim; the gate uses it as stated
+  and never rewrites it.
 
 Solar frames, stated once and meant literally:
 
@@ -280,6 +330,14 @@ before the arithmetic.
   wrong with the design yet; the model has stopped being one model.
 - **A U-value that looks too good.** Almost always a stack modelled without its
   framing. Use the `parallel` layer shape.
+- **`thermal.skin_temperature` errored, naming a field.** A record or the claim
+  is stated wrongly: a string where a number goes, both or neither of `w` and
+  `linear`, a source with no `source`, a linear stage whose `vin_max_v` is not
+  above its `vout_min_v`, or a claim that is not `<=`/`<` in `degC`. Fix the
+  record; the error says which one.
+- **`thermal.skin_temperature` green and the device hot in the hand.** The gate
+  gives the average. The hand feels the peak over the charger or the processor.
+  That is a physical claim, not a reason to distrust the average.
 
 ## 7. Where to look next
 
@@ -288,6 +346,9 @@ before the arithmetic.
 - `references/collector-example.md` — a flat-plate collector worked end to end.
 - `references/solar-model.md` — the clear-sky model, its coefficients, its error
   band, and the solar-time conversion.
+- `references/handheld.md` — the handheld skin model, its records, the worst
+  corner of a linear stage, and the IEC 62368-1 TS1 table with each source and
+  what is not confirmed.
 - `references/limits.md` — what this pack cannot tell you, and the tier-2 tools.
 - `lenses.md` — the adversarial review dimensions. Read before sizing anything.
 - `sourcing.md` — insulation, glazing, fluids, TIM and coatings as procurable

@@ -73,7 +73,8 @@ BUNDLED_BASES: dict[str, str] = {
     **{g: "sourced" for g in ("thermal.conduction", "thermal.convection", "thermal.radiation",
                               "thermal.fin_efficiency", "thermal.steady_state_temp",
                               "thermal.time_constant", "solar.collector_output",
-                              "solar.stagnation", "solar.irradiance")},
+                              "solar.stagnation", "solar.irradiance",
+                              "thermal.skin_temperature")},
     "thermal.h_agreement": "model-only",
 }
 
