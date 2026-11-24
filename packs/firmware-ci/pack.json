@@ -1,0 +1,58 @@
+{
+  "name": "firmware-ci",
+  "version": "0.1.0",
+  "description": "Replays the CI job that builds handheld firmware with act in its own containers, then checks the image fits its region and can wake from deep sleep.",
+  "settles": [
+    "firmware build",
+    "ci builds the firmware",
+    "ci build job",
+    "masked build failure",
+    "flash use",
+    "image fits its partition",
+    "ota slot size",
+    "app region",
+    "ram bank",
+    "deep sleep wake source",
+    "wakeup from deep sleep"
+  ],
+  "claim_classes": [
+    "firmware",
+    "firmware-build",
+    "ci-build",
+    "flash-fit",
+    "memory-fit",
+    "ota-slot",
+    "deep-sleep",
+    "wakeup-source"
+  ],
+  "provides_gates": [
+    "fw.ci_job",
+    "fw.build",
+    "fw.image_fits",
+    "fw.sleep_wake"
+  ],
+  "provides_generators": [],
+  "requires_tools": [
+    "act",
+    "docker",
+    "git"
+  ],
+  "requires_python": [
+    "yaml"
+  ],
+  "max_tier": 1,
+  "lenses": [
+    "the build CI never ran",
+    "the green tick on a masked failure",
+    "the region nobody confirmed",
+    "the OTA slot after next year's features",
+    "the wake pin the board routed",
+    "the sleep current nobody measured",
+    "the hang with no reset path",
+    "the dependency that floats"
+  ],
+  "authors": [],
+  "licence": "Apache-2.0",
+  "origin": "written from three faults in a battery handheld's firmware: its CI had never built it, its board definition's flash layout disagreed with the bootloader, and its deep sleep had no wake source. Its controls are the pack's own ESP-IDF app; no project's design came with it.",
+  "basis": "sourced"
+}

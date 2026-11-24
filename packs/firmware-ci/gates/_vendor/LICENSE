@@ -1,0 +1,47 @@
+Two files here are other projects' code, vendored unchanged and loaded by path
+(nopekit.modelio.load_path), never imported as packages.
+
+gen_esp32part.py
+  ESP-IDF's partition table tool, components/partition_table/gen_esp32part.py,
+  from https://github.com/espressif/esp-idf at tag v5.5.6 (commit
+  880a203ae603d08a94d06aa01e0d6761958e5e9e). sha256 of the file as vendored:
+  02f6c1c5f012393d47987ee64bc50ba319a2eda48cbcec754d8cfaf780cce529
+  SPDX-FileCopyrightText: 2016-2025 Espressif Systems (Shanghai) CO LTD
+  SPDX-License-Identifier: Apache-2.0 (http://www.apache.org/licenses/LICENSE-2.0)
+  fw.image_fits reads an ESP partition table with it, so the slot sizes are the
+  ones ESP-IDF's own build computes.
+
+dtlib.py
+  Zephyr's devicetree parser, scripts/dts/python-devicetree/src/devicetree/dtlib.py,
+  from https://github.com/zephyrproject-rtos/zephyr at tag v4.4.2 (commit
+  dccb09599635bdff17633fa7e9dab014b91dce90). sha256 of the file as vendored:
+  e4385636bde84b03453807af21ce5940f3c5c84b86daf7ffbbf1481af92f7489
+  fw.sleep_wake reads a build's zephyr.dts with it. Its licence follows.
+
+  Copyright (c) 2019, Nordic Semiconductor
+  SPDX-License-Identifier: BSD-3-Clause
+
+  Redistribution and use in source and binary forms, with or without
+  modification, are permitted provided that the following conditions are met:
+
+  1. Redistributions of source code must retain the above copyright notice, this
+     list of conditions and the following disclaimer.
+
+  2. Redistributions in binary form must reproduce the above copyright notice,
+     this list of conditions and the following disclaimer in the documentation
+     and/or other materials provided with the distribution.
+
+  3. Neither the name of the copyright holder nor the names of its contributors
+     may be used to endorse or promote products derived from this software
+     without specific prior written permission.
+
+  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+  ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+  WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+  DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+  FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+  DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+  SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+  OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+  OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.

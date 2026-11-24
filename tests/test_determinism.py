@@ -153,10 +153,12 @@ class EntriesAreDeterministic(_env.EnvCase):
                                      _cache_bytes(where)))
 
                 label, code, data, first = runs[0]
-                # Firmware is the first pack whose every gate needs an external
-                # tool. Requiring an entry even without ZMK contradicted the
-                # availability contract: skipped gates must write nothing. The
-                # per-gate checks below still account for every exact skip.
+                # Firmware was the first pack whose every gate needs an external
+                # tool (firmware-zmk; firmware-ci's guard needs PyYAML, its other
+                # three act and docker). Requiring an entry even without them
+                # contradicted the availability contract: skipped gates must write
+                # nothing. The per-gate checks below still account for every exact
+                # skip.
                 has_available_gate = specs is None or any(
                     gates.availability(spec)[0] for spec in specs)
                 self.assertEqual(bool(first), has_available_gate,

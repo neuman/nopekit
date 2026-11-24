@@ -2417,7 +2417,12 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
 
     Relative to the original 79: SIMP adds volume (conclusive), an input guard
     (no boundary) and the two ccx gates; PCB adds two conclusive, one with none
-    and one with no boundary; ZMK adds one with none and three with no boundary;
+    and one with no boundary; firmware adds one with none and three with no
+    boundary (firmware-zmk's four did; firmware-ci's four, which replaced them in
+    general-packs F1, do too, measured with act 0.2.97 on 2026-11-24:
+    fw.image_fits walked with none, its baseline's leaves all paths and its value
+    the partition table's, and fw.ci_job, fw.build and fw.sleep_wake with no
+    boundary, as they report no value);
     fdm.slice adds one conclusive and cad.clearance one with none; hand-ergonomics
     (general-packs E1) adds ergo.digit_reach, conclusive on hand_grip_diameter_mm
     (lands at 52 mm, the aimed run fails; its two lists are list leaves, not

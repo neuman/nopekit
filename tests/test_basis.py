@@ -47,9 +47,13 @@ BUNDLED_BASES: dict[str, str] = {
                               "pcb.charge_protection", "pcb.fuse_conductor",
                               "pcb.discharge_cutoff")},
     **{g: "model-only" for g in ("pcb.board_readable", "pcb.land_pattern")},
-    "zmk.ci_step": "model-only",
-    **{g: "established" for g in ("zmk.build", "zmk.tx_power")},
-    "zmk.wakeup_source": "sourced",
+    # general-packs F1: firmware-ci replaces firmware-zmk. The guard follows
+    # GitHub's documented shell and continue-on-error behaviour; the replay's
+    # verdict is the toolchain's own exit code in the job's container; the image
+    # and wake rules follow the bootloader's or partition table's cited layout and
+    # each stack's sleep documentation.
+    "fw.build": "established",
+    **{g: "sourced" for g in ("fw.ci_job", "fw.image_fits", "fw.sleep_wake")},
     "cfd.case_readable": "model-only",
     **{g: "model-only" for g in ("aero.case_readable", "aero.reference")},
     **{g: "sourced" for g in ("aero.regime", "aero.domain")},

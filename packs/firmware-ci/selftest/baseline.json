@@ -1,0 +1,20 @@
+{
+  "_description": "firmware-ci's own ESP-IDF app (selftest/assets/esp-sleep): an ESP32-S3 with 4 MB of flash that starts its BLE stack (NimBLE), arms a button wake on GPIO0 through ext0 and enters deep sleep. Its CI (github/workflows/build.yml) builds it in one container job, in ESP-IDF v5.5.6's image pinned by digest, with no masking. Its partition table is ESP-IDF's two-OTA rows (factory, ota_0 and ota_1 of 1 MB). act 0.2.97 replays it in 40-49 s; the image is 0x7b6d0 B, 48.21 % of the smallest app slot, which fw.image_fits reports rounded up as 48.3 %. selftest/assets/esp-sleep/LICENSE says where each file is from.",
+
+  "firmware_ci_workflow": "selftest/assets/esp-sleep/github/workflows/build.yml",
+  "firmware_ci_job": "build",
+  "firmware_image": "build/sleeper.bin",
+  "firmware_elf": "build/sleeper.elf",
+  "app_memory_map": {"esp_partition_table": "selftest/assets/esp-sleep/partitions.csv"},
+
+  "_notes": {
+    "firmware_ci_workflow": "The GitHub Actions workflow that builds the firmware, from the project root. The repository is the directory above its workflows/ directory's parent (.github/ in a real repository); act replays it on a copy of what the next commit would hold. Every gate skips without it.",
+    "firmware_ci_job": "The job id that builds. Optional: without it, the one job that runs a build command this pack knows (west build, idf.py build, pio run, arduino-cli compile, qmk compile, make, cmake --build, ninja).",
+    "firmware_image": "The file the device receives (.uf2, .hex, .bin or .elf), as a glob in the job's workspace. fw.build fails when the job writes no file it names; fw.image_fits needs it.",
+    "firmware_elf": "The ELF in the job's workspace, as a glob. fw.sleep_wake reads its symbols and the .config and zephyr.dts beside it; fw.image_fits reads its RAM segments and machine beside a UF2 or HEX image.",
+    "app_memory_map": "The region the bootloader or partition table leaves the app, from a cited record (the param record's source names the bootloader layout, the datasheet section or the partition table): {flash: {start, size}, app: {start, size, vector_at?}, ram?: [{start, size}], other?: [{name, start, size}]}, {app: {size}}, or {esp_partition_table: <csv path>, offset?}. Numbers are ints or \"0x…\" strings, in bytes. Never taken from the build.",
+    "firmware_ci_step": "Optional: the build step's name or id, when its command is not on the recognised list (a build inside ./build.sh).",
+    "deep_sleep_wakes_by_reset": "Optional: what resets the chip when reset is the intended wake, e.g. \"power button on EN\". It turns an ESP no-wake FAIL into a skip that asks for a physical claim. It never makes a pass."
+  },
+  "_aliases": {}
+}

@@ -98,11 +98,12 @@ nopekit = [
   # A pack's own ignore file. glob's `*` never matches a leading dot, so no
   # glob above ships it.
   "**/.gitignore",
-  # Added before the files arrive, so that later phases of general-packs only
-  # delete lines here: hand-ergonomics' scene meshes, and firmware-ci's ESP-IDF
-  # sources and defaults (its CMakeLists.txt matches `**/*.txt`).
+  # hand-ergonomics' scene meshes, and firmware-ci's ESP-IDF app: its C source and
+  # its defaults (its CMakeLists.txt matches `**/*.txt`). Without them the replay
+  # of its baseline builds nothing from the wheel.
   "**/*.glb", "**/*.c", "**/sdkconfig.defaults",
-  # firmware-zmk: the wrapper its gates compare byte for byte (no extension), and
-  # its baseline's ZMK files. Without them every build gate errors from the wheel.
-  "**/bin/*", "**/*.keymap", "**/*.conf", "**/LICENSE",
+  # A baseline's licence note (firmware-ci's app, beside the ESP-IDF rows it
+  # carries). firmware-zmk's `**/bin/*`, `**/*.keymap` and `**/*.conf` left with
+  # it (general-packs F1): no other pack ships such a file.
+  "**/LICENSE",
 ]
