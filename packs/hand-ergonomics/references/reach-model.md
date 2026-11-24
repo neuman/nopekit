@@ -19,7 +19,9 @@ For subject `i` holding grip `g`, the wrist point (the stylion, wrist straight) 
 A control at `P` is in reach when `|P - S_ig| <= WTT_i` for a thumb, or
 `|P - S_ig| <= WIF_i` for an index finger. A subject is accommodated when every judged
 control is in reach of one of the digits that presses it. The result is the share of
-the worse sex.
+the worse sex, floored to 0.01%: every claim holds it as `>=` or `>`, so the floor
+rounds toward the fail, and a share one subject short of the limit never rounds onto
+it.
 
 The survey measured wrist-centre of grip length with the dowel square to the fist and
 the fist in line with the forearm. So the gate refuses a grip whose hand axis is more
@@ -51,8 +53,12 @@ an approximate full-extension bound.
   so the true reach can pass the sphere.
 - **Generous** in direction: the sphere does not know the palm, the other fingers or
   the joint limits. A point behind the hand is "in reach" by the sphere and not by
-  the thumb. The gate judges controls the model placed where a thumb works; the
-  proposer cuts its fit counts to the distal side of the grip for this reason.
+  the thumb. So the gate refuses a judged control that lies behind the centre of a
+  grip it is pressed from, along that grip's hand axis, and the proposer cuts its fit
+  counts to the distal side of the grip. The same refusal catches a hand axis
+  declared from the hand to the wrist, or swapped with the handle axis: the 20 deg
+  test cannot see the axis's sign, and a reversed axis puts every wrist in front of
+  its grip, where the known-bad cluster read 100% in reach.
 
 Both length errors are smaller than the spread of reach beyond the grip in each sex
 (SD 5.6 to 5.8 mm). A control within a few mm of the edge for the limiting subjects is

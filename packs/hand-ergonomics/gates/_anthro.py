@@ -21,7 +21,9 @@ where ``G_g`` is the grip centre, ``u_g`` the unit hand axis (wrist to hand),
 A control at ``P`` is in reach of that subject's thumb when ``|P - S_ig| <=
 WTT_i`` (wrist-thumbtip length), and of the index finger when ``|P - S_ig| <=
 WIF_i`` (wrist-index finger length). A subject is accommodated only when every
-judged control is in reach of one of the digits that presses it.
+judged control is in reach of one of the digits that presses it. A judged control
+lies at or beyond the centre of each grip it is pressed from, along that grip's
+hand axis (:data:`DISTAL_MIN_MM`); one behind it is refused.
 
 **It counts subjects; it never adds percentiles.** What slipped through the
 percentile habit, measured on this table: the women's P5 of wrist-thumbtip minus
@@ -63,6 +65,25 @@ DOWEL_MM = 31.75
 #: square is not the posture the survey measured, and the anchor would be a guess
 #: presented as a measurement). An open question in PACK.md.
 HAND_AXIS_TOLERANCE_DEG = 20.0
+
+#: How far along the hand axis, from the grip centre, a control pressed from that
+#: grip must lie, mm: at the centre or beyond it, never behind. Behind the centre
+#: is under the palm, where no thumb or index finger of that hand presses, and
+#: the reach sphere counts it in reach of nearly everyone. What slipped through
+#: before this rule (review of E1): the 20 deg test does not depend on the axis's
+#: sign, so a hand axis declared hand to wrist, or swapped with the handle axis,
+#: put every wrist point in front of its grip. The known-bad cluster, which fails
+#: at 63%, read 100.0% with either slip, and btn_y moved 46 mm up the face read
+#: 0% as declared and 100% reversed. On the baseline the nearest judged control
+#: (stick_r) lies 4.2 mm beyond its grip centre, and the proposer's fit counts
+#: already cut thumb positions at this plane. Rejected: a tolerance behind the
+#: centre (a reversed axis would then pass a layout whose controls all sit near
+#: the grip, and no survey says how far behind the centre a digit presses); thumb
+#: pairs only (a reversed axis on an index-only layout puts the wrists in front
+#: of the bumpers, and they read reached by everyone); a check of the axis's sign
+#: against the device frame (a grip may be held from any side, so the frame gives
+#: no sign: only the controls pressed from it do).
+DISTAL_MIN_MM = 0.0
 
 #: The digits a control may name. ``thumb`` and ``index`` are judged; ``other``
 #: (a paddle under the middle finger) is counted and not judged, because no
@@ -273,6 +294,31 @@ def check_grip_ids(controls: list[Control], grips: dict[str, Grip]) -> None:
                                   f"grip declares ({', '.join(sorted(grips)) or 'none'})")
 
 
+def distal_mm(at: tuple, grip: Grip) -> float:
+    """How far ``at`` lies beyond ``grip``'s centre along its hand axis, mm
+    (negative: behind the centre, toward the wrist)."""
+    return sum((p - c) * u for p, c, u in zip(at, grip.centre, grip.hand_axis))
+
+
+def check_distal(controls: list[Control], grips: dict[str, Grip]) -> None:
+    """:class:`LayoutError` when a judged control lies behind the centre of a grip
+    it is judged from, along that grip's hand axis (:data:`DISTAL_MIN_MM`). Run
+    after :func:`check_grip_ids`. The reach rule puts the wrist behind the grip,
+    so a reversed hand axis puts the wrist in front of the controls: this is the
+    refusal that catches it. A control pressed only by ``other`` or after a
+    regrip is not judged, so it is not checked."""
+    for control in controls:
+        for grip_id, digit in control.pairs:
+            beyond = distal_mm(control.at, grips[grip_id])
+            # - 1e-9: floating noise on a control exactly in the centre's plane.
+            if beyond < DISTAL_MIN_MM - 1e-9:
+                raise LayoutError(
+                    f"control {control.id!r} lies {-beyond:.1f} mm behind grip "
+                    f"{grip_id!r}'s centre along its hand axis, under the palm, where no "
+                    f"{digit} of that hand presses it: check that hand_axis points from "
+                    f"the wrist to the hand and is not the handle axis")
+
+
 # --------------------------------------------------------------------------- #
 # the reach rule
 # --------------------------------------------------------------------------- #
@@ -329,6 +375,23 @@ def accommodation(subjects, controls: list[Control], grips: dict[str, Grip],
         if every:
             accommodated += 1
     return accommodated, per
+
+
+def share_pct(count: int, n: int) -> float:
+    """``count`` of ``n`` subjects as a percentage, floored to 0.01%: the value the
+    gate reports and judges, and its known-bad fixture computes.
+
+    Floored, because every claim the gate holds is ``>=`` or ``>``, so the floor
+    rounds toward the failing side. Integer division, so a share of exactly a
+    hundredth is never a float's hair under it. What slipped through (review of
+    E1): half-up to 0.01% read 1703 of 1774 men (95.998%) as 96.00 and passed
+    ``>= 96`` with 1704 needed, and 1943 of 2208 women (87.998%) as 88.00 against
+    ``>= 88``: one subject short, read as a pass. Rejected: half-up to 0.01% (that
+    slip) or to 0.1% (the design's: more room for the same slip); the exact float
+    (the verdict would carry 14 digits, and a two-digit detail line rounds it
+    half-up again for the reader); the count judged against ``ceil(limit * n /
+    100)`` beside a floored share (two rules where one does)."""
+    return (10000 * int(count) // int(n)) / 100.0
 
 
 def reach_index(subjects) -> dict:

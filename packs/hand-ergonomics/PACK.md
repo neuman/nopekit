@@ -29,8 +29,10 @@ Say these out loud. A reader will assume the pack covers them, and it does not.
   settles the feel. Mass and centre of mass are not modelled; ballast on a print
   shows them.
 - **Slab grips.** A phone, an e-reader or a flat remote is not a power grip on a
-  handle. Handles under 25 mm or over 50 mm read Gap, never a fail.
-- **Children.** The survey's youngest subject is 17. Users younger than that read Gap.
+  handle. Outside 25 to 50 mm a pass does not count (the claim reads Gap, or Assumed
+  under an owned `fallback`); a fail still counts.
+- **Children.** The survey's youngest subject is 17. For younger users a pass does not
+  count (Gap, or Assumed under an owned `fallback`); a fail still counts.
 - **Older users' joint range, other populations, gloves, force, fatigue, drop risk.**
   The population is the US Army of 1988. A market with smaller hands sets a higher
   limit or brings another dataset.
@@ -41,10 +43,12 @@ Say these out loud. A reader will assume the pack covers them, and it does not.
 
 | Gate | Tier | Measures | Limit from | Known-bad control |
 |---|---|---|---|---|
-| `ergo.digit_reach` | 0, stdlib | worst-sex share of subjects who reach every judged control, % | the claim tagged `digit-reach` (`>=` or `>`, in %) | `face_cluster_out_of_reach`: the four right-hand face buttons 10 mm up the face; 63.09% of women, 84.39% of men |
+| `ergo.digit_reach` | 0, stdlib | worst-sex share of subjects who reach every judged control, % | the claim tagged `digit-reach` (`>=` or `>`, in %) | `face_cluster_out_of_reach`: the four right-hand face buttons 10 mm up the face; 63.08% of women, 84.38% of men |
 
 The baseline (`selftest/baseline.json`) is a generic two-handled controller. It
-passes at 97.96% of women (btn_y limits) and 99.72% of men, against `>= 95%`.
+passes at 97.96% of women (btn_y limits) and 99.71% of men, against `>= 95%`. Each
+share is floored to 0.01% before it is judged, so a share one subject short of the
+limit never rounds onto it: 1703 of 1774 men is 95.99%, a fail against `>= 96`.
 
 **Operating context.** `hand_grip_diameter_mm` from 25 to 50 mm (the cylinders Kong
 and Lowe 2005 tested) and `hand_user_age_min_years` from 17. Outside it a pass does
@@ -56,8 +60,10 @@ the data's range" into Gap.
 **It skips** when the projection has no layout, or when no control is pressed from a
 grip by a thumb or index finger. **It errors** on a layout it cannot judge: a grip
 id that no grip declares, a zero or non-finite vector, a hand axis more than 20 deg
-from perpendicular to its handle, a regrip control with no reason, or a claim not
-held as `>=` or `>` in %.
+from perpendicular to its handle, a judged control behind the centre of a grip it is
+pressed from, along that grip's hand axis (under the palm; a hand axis declared from
+the hand to the wrist, or swapped with the handle axis, puts the controls there), a
+regrip control with no reason, or a claim not held as `>=` or `>` in %.
 
 ## The proposer
 
@@ -81,7 +87,7 @@ two context keys must be read under the spelling the spine judges.
 
 | Key | What |
 |---|---|
-| `hand_grips` | `[{id, centre, hand_axis, handle_axis}]`. `centre`: the point on the handle axis where the middle finger wraps, mm. `hand_axis`: wrist to hand with the wrist straight. `handle_axis`: the handle's long axis. Within 20 deg of perpendicular. |
+| `hand_grips` | `[{id, centre, hand_axis, handle_axis}]`. `centre`: the point on the handle axis where the middle finger wraps, mm. `hand_axis`: wrist to hand with the wrist straight; every judged control pressed from the grip lies at or beyond the centre along it. `handle_axis`: the handle's long axis. Within 20 deg of perpendicular. |
 | `hand_controls` | `[{id, at, operated_by, regrip_reason}]`. `at`: the centre of the pressed top surface, mm. `operated_by`: `[{grip, digit}]`, digit `thumb`, `index` or `other`. |
 | `hand_grip_diameter_mm` | the largest handle's perimeter / pi through its grip centre, mm. A larger value is conservative, so a device with two handles states the larger. |
 | `hand_user_age_min_years` | the youngest intended user, years. |
@@ -140,7 +146,9 @@ would collect evidence it does not assert.
 - **An understated handle.** A 50 mm handle declared as 36 mm reads 97.96% of women
   on the baseline; the truth is 83.92%. State the largest handle.
 - **Errored, not failing.** A hand axis 30 deg off square is a refusal: fix the
-  declared axes, do not loosen the claim.
+  declared axes, do not loosen the claim. So is a hand axis that points from the hand
+  to the wrist: it puts every wrist in front of its grip, and the gate refuses it
+  rather than count every subject in reach.
 - **Gap on a phone-shaped device.** Correct. Carry it with an owned `fallback` and the
   physical claim.
 

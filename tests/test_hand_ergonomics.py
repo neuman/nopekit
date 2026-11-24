@@ -8,16 +8,20 @@ and the place it would slip:
 * **The table is the survey** (``TheTableIsTheSurvey``): 2,208 women and 1,774 men,
   its sha256 is the provenance's, its means are TR89-044's, an edited table is
   refused, and the derivation refuses a file that is not the public one.
-* **The gate counts subjects** (``TheGateCountsSubjects``): the design's numbers
-  reproduce (97.96% and 99.72% on the baseline, 63.09% and 84.39% on the known-bad
-  cluster, 83.92% of women with a 50 mm handle), and the percentile pair (48 mm for
-  women) is not the subjects' own P5 (42 mm).
+* **The gate counts subjects** (``TheGateCountsSubjects``): the design's counts
+  reproduce (97.96% and 99.71% on the baseline, 63.08% and 84.38% on the known-bad
+  cluster, 83.92% of women with a 50 mm handle; the design read 99.72%, 63.09% and
+  84.39%, the same counts rounded half-up), the percentile pair (48 mm for women) is
+  not the subjects' own P5 (42 mm), and a share one subject short of the limit is
+  floored, never rounded onto it.
 * **It refuses what it cannot judge, and lists what it does not**
-  (``ItJudgesOnlyWhatIsPressedFromAGrip``).
+  (``ItJudgesOnlyWhatIsPressedFromAGrip``): a reversed or swapped hand axis included,
+  which the 20 deg test cannot see.
 * **Outside the survey a pass does not count** (``OutsideTheSurveyAPassDoesNotCount``),
   through ``check`` on the wrapped baseline.
 * **The proposer proposes** (``TheProposerWritesOnlyItsProposal``): two runs give the
-  same bytes, and nothing lands outside its directory.
+  same bytes, nothing lands outside its directory, and a boundary is the last whole
+  step that holds, below zero too.
 * **The scaffold reads** (``TheScaffoldIsRecords``).
 
 Full suite only (not ``tests/fast.py``): the wrapped-project class runs ``check``
@@ -32,6 +36,7 @@ import glob
 import hashlib
 import io
 import json
+import math
 import os
 import shutil
 import sys
@@ -191,14 +196,14 @@ class TheGateCountsSubjects(_Gate):
         good = self.run_on()
         self.assertEqual((good.outcome, good.measured, good.limit, good.comparator, good.units),
                          ("pass", 97.96, 95.0, ">=", "%"))
-        self.assertIn("worst-sex reach 97.96% (women; men 99.72%)", good.detail)
+        self.assertIn("worst-sex reach 97.96% (women; men 99.71%)", good.detail)
         self.assertIn("btn_y limits at 97.96%", good.detail)
         self.assertIn("11 judged, 1 regrip (power), 0 other", good.detail)
         self.assertIn("ANSUR 1988 2208 F / 1774 M", good.detail)
         bad = gates_mod.run_gate(self.spec, self.fn,
                                  FIXTURES.face_cluster_out_of_reach(self.baseline()))
-        self.assertEqual((bad.outcome, bad.measured), ("fail", 63.09))
-        self.assertIn("men 84.39%", bad.detail)
+        self.assertEqual((bad.outcome, bad.measured), ("fail", 63.08))
+        self.assertIn("men 84.38%", bad.detail)
 
     def test_an_understated_handle_hides_fourteen_points(self):
         params = self.params()
@@ -226,12 +231,43 @@ class TheGateCountsSubjects(_Gate):
             params["hand_controls"] = [{"id": "probe", "at": at,
                                         "operated_by": [{"grip": "right", "digit": "thumb"}]}]
             found = self.evidence(self.run_on(params, limit=1))
-            expected = round(100.0 * sum(1 for r in reach if r >= x) / len(women), 2)
+            expected = (10000 * sum(1 for r in reach if r >= x) // len(women)) / 100
             with self.subTest(x=x):
                 self.assertEqual(found["controls"]["probe"]["women_pct"], expected)
         # 48 mm, the percentile pair's "P5" (a limit 95% of women should reach),
-        # is reached by 74.55% of them: a quarter left out, not a twentieth.
+        # is reached by 74.54% of them (1646 of 2208): a quarter left out, not a
+        # twentieth.
         self.assertLess(found["controls"]["probe"]["women_pct"], 80.0)
+
+    def test_a_share_one_subject_short_is_floored_never_rounded_onto_the_limit(self):
+        """Review of E1: half-up to 0.01% read 1703 of 1774 men (95.998%) as 96.00,
+        a pass against ``>= 96`` with 1704 needed. The share is floored: the
+        failing side for every comparator the gate accepts."""
+        [claim] = self.baseline().ledger.claims
+        at = {limit: dataclasses.replace(claim.acceptance, limit=limit) for limit in (96, 88)}
+        for count, n, limit, floored in ((1703, 1774, 96, 95.99), (1943, 2208, 88, 87.99)):
+            with self.subTest(count=count, n=n):
+                self.assertEqual(round(100.0 * count / n, 2), limit, "half-up meets it")
+                self.assertEqual(A.share_pct(count, n), floored)
+                self.assertFalse(at[limit].holds(A.share_pct(count, n)))
+                self.assertTrue(at[limit].holds(A.share_pct(count + 1, n)))
+        self.assertEqual(A.share_pct(1774, 1774), 100.0)
+        self.assertEqual(A.share_pct(2163, 2208), 97.96)
+        # Through the gate: a probe 42 mm past the right grip on the dowel is reached
+        # by 2107 of 2208 women (95.4257%), the worse sex. Half-up read 95.43 and
+        # passed a claim of >= 95.43.
+        params = self.params()
+        grip = next(g for g in params["hand_grips"] if g["id"] == "right")
+        u = A.unit(grip["hand_axis"], "u")
+        params["hand_grip_diameter_mm"] = 31.75
+        params["hand_controls"] = [{"id": "probe", "at": [c + 42 * d for c, d in
+                                                          zip(grip["centre"], u)],
+                                    "operated_by": [{"grip": "right", "digit": "thumb"}]}]
+        found = self.run_on(params, limit=95.43)
+        self.assertEqual((found.outcome, found.measured), ("fail", 95.42), found.render())
+        self.assertEqual(self.evidence(found)["accommodated"]["women"]["reach_every_control"],
+                         2107)
+        self.assertEqual(self.run_on(params, limit=95.42).outcome, "pass")
 
     def test_a_mirrored_layout_reads_the_same(self):
         params = self.params()
@@ -323,6 +359,61 @@ class ItJudgesOnlyWhatIsPressedFromAGrip(_Gate):
                 found = self.run_on(edit(fn))
                 self.assertEqual(found.outcome, "error", found.render())
                 self.assertIn(said, found.error)
+
+    def test_a_reversed_or_swapped_hand_axis_is_refused_never_passed(self):
+        """Review of E1: the 20 deg test does not depend on the axis's sign. A hand
+        axis declared from the hand to the wrist, or swapped with the handle axis,
+        put every wrist in front of its grip, and the known-bad cluster (a fail at
+        63.08%) read a pass at 100.0%. A judged control behind its grip centre
+        along the hand axis is refused, which no reversed axis escapes here."""
+        bad = FIXTURES.face_cluster_out_of_reach(self.baseline())
+        self.assertEqual(gates_mod.run_gate(self.spec, self.fn, bad).outcome, "fail")
+
+        def reversed_(grip):
+            grip["hand_axis"] = [-c for c in grip["hand_axis"]]
+
+        def swapped(grip):
+            grip["hand_axis"], grip["handle_axis"] = grip["handle_axis"], grip["hand_axis"]
+
+        far = self.params()                      # btn_y 46 mm up the face: 0% as declared
+        self._control(far, "btn_y")["at"] = [37, 40, 3]
+        declared = self.run_on(far)
+        self.assertEqual((declared.outcome, declared.measured), ("fail", 0.0))
+        bumpers = self.params()                  # an index-only layout
+        bumpers["hand_controls"] = [c for c in bumpers["hand_controls"]
+                                    if c["id"] in ("bumper_l", "bumper_r")]
+        self.assertEqual(self.run_on(bumpers).outcome, "pass")
+        for layout, params in (("known-bad", bad.params), ("btn_y far", far),
+                               ("bumpers", bumpers)):
+            for name, slip in (("reversed", reversed_), ("swapped", swapped)):
+                edited = copy.deepcopy(dict(params))
+                for grip in edited["hand_grips"]:
+                    slip(grip)
+                ctx = dataclasses.replace(bad, params=edited)
+                with self.subTest(layout=layout, slip=name):
+                    found = gates_mod.run_gate(self.spec, self.fn, ctx)
+                    self.assertEqual(found.outcome, "error", found.render())
+                    self.assertIn("behind grip", found.error)
+                    self.assertIn("hand_axis points from the wrist to the hand", found.error)
+
+    def test_a_control_under_the_palm_is_refused(self):
+        params = self.params()
+        right = next(g for g in params["hand_grips"] if g["id"] == "right")
+        grip = A.parse_grips([right])["right"]
+        self._control(params, "stick_r")["at"] = [60, -60, -5]   # behind the centre
+        self.assertLess(A.distal_mm((60.0, -60.0, -5.0), grip), 0)
+        found = self.run_on(params)
+        self.assertEqual(found.outcome, "error", found.render())
+        self.assertIn("control 'stick_r' lies", found.error)
+        self.assertIn("behind grip 'right'", found.error)
+        # On its centre's plane is not behind it; a regrip control is never checked.
+        params = self.params()
+        on_plane = self._control(params, "stick_r")
+        on_plane["at"] = list(right["centre"])
+        self.assertNotEqual(self.run_on(params).outcome, "error")
+        params = self.params()
+        self._control(params, "power")["at"] = [60, -60, -5]
+        self.assertEqual(self.run_on(params).outcome, "pass")
 
     def test_a_claim_it_cannot_hold_is_refused(self):
         for kw in ({"comparator": "<="}, {"units": "percent"}):
@@ -463,6 +554,39 @@ class TheProposerWritesOnlyItsProposal(_env.EnvCase):
         self.assertEqual(proc.returncode, 2)
         self.assertIn("zero vector", proc.stderr)
         self.assertEqual(os.listdir(out), [])
+
+    def test_a_reversed_hand_axis_is_refused_with_nothing_written(self):
+        def reverse(design):
+            for grip in design["hand_grips"]:
+                grip["hand_axis"] = [-c for c in grip["hand_axis"]]
+        project = self.tmp()
+        self._layout(project, reverse)
+        out = self.tmp()
+        proc = self._run(project, out)
+        self.assertEqual(proc.returncode, 2)
+        self.assertIn("behind grip", proc.stderr)
+        self.assertEqual(os.listdir(out), [])
+
+    def test_a_boundary_is_the_last_whole_step_that_holds(self):
+        """Review of E1: ``_boundary`` rounded a negative boundary with ceil, toward
+        zero and past the last x seen true: -7.03 read -7.0, where the target may
+        already fail. It returns the last whole step that holds, at either sign.
+        The proposer is loaded in process; what its import changes in the test
+        process (its gates directory on the path, ``_anthro`` in the module
+        table, bytecode off) is put back."""
+        saved = (list(sys.path), sys.dont_write_bytecode, "_anthro" in sys.modules)
+        try:
+            proposer = load_path(PROPOSER)
+        finally:
+            sys.path[:], sys.dont_write_bytecode = saved[:2]
+            if not saved[2]:
+                sys.modules.pop("_anthro", None)
+        for edge in (-7.03, -0.1, 0.1, 7.03, 33.3):
+            with self.subTest(edge=edge):
+                found = proposer._boundary(lambda x, e=edge: x <= e, -60.0, 60.0, 0.25)
+                self.assertEqual(found, math.floor(edge / 0.25) * 0.25)
+        self.assertIsNone(proposer._boundary(lambda x: False, -60.0, 60.0, 0.25))
+        self.assertEqual(proposer._boundary(lambda x: True, -60.0, 60.0, 0.25), 60.0)
 
     def test_outside_propose_it_refuses(self):
         project = self.tmp()

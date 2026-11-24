@@ -96,8 +96,9 @@ test again before the board order.
 
 ## 5. After a fail
 
-- Read the verdict of `ergo.digit_reach` and `reach_map.json`: which control limits,
-  and how far can it move toward the wrist (`outward_mm`)?
+- Read the verdict of `ergo.digit_reach` and `reach_map.json`: which control limits?
+  `outward_mm` is how far it can move away from the wrist before the target fails. A
+  negative value is how far it must move toward the wrist to reach the target.
 - Move the control in the model, not in the layout file alone. Check, then reprint.
 - Never loosen the claim to fit the print. A lower limit is a decision about who the
   device is for; a person records it.

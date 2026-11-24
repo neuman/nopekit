@@ -78,10 +78,6 @@ def _evidence(ctx: GateContext, payload: dict) -> list[str]:
     return [path]
 
 
-def _pct(count: int, n: int) -> float:
-    return round(100.0 * count / n, 2)
-
-
 @gate(
     id=GID,
     basis="sourced",
@@ -99,7 +95,7 @@ def _pct(count: int, n: int) -> float:
     negative_control=NegativeControl(
         fixture="selftest/bad_layouts.py:face_cluster_out_of_reach",
         note="the baseline with the four right-hand face buttons moved 10 mm up the "
-             "face along the right hand's axis: 63.09% of women and 84.39% of men "
+             "face along the right hand's axis: 63.08% of women and 84.38% of men "
              "reach every control, against the baseline claim's >= 95%",
     ),
 )
@@ -110,8 +106,10 @@ def digit_reach(ctx: GateContext) -> Verdict:
     from a grip by a thumb or an index finger (checked before the claim is
     read). Errors on a layout it cannot judge: a grip id no grip declares, a zero
     or non-finite vector, a hand axis more than 20 deg from perpendicular to its
-    handle, a regrip control with no reason, a claim not held as ``>=`` or ``>``
-    in %."""
+    handle, a judged control behind the centre of its grip along the hand axis (a
+    reversed or swapped axis), a regrip control with no reason, a claim not held
+    as ``>=`` or ``>`` in %. Each share is floored to 0.01% before it is judged
+    (``_anthro.share_pct``)."""
     raw_controls = ctx.param("hand_controls")
     if raw_controls is None:
         return _skip("no hand_controls: the controls and the digits that press them "
@@ -141,6 +139,7 @@ def digit_reach(ctx: GateContext) -> Verdict:
     try:
         grips = A.parse_grips(raw_grips)
         A.check_grip_ids(controls, grips)
+        A.check_distal(controls, grips)
     except A.LayoutError as exc:
         return _error(str(exc))
     acc = ctx.acceptance(REACH_TAG)
@@ -155,14 +154,15 @@ def digit_reach(ctx: GateContext) -> Verdict:
     for sex in A.SEXES:
         counts[sex], per[sex] = A.accommodation(table.subjects[sex], controls, grips, d_mm)
     n = {sex: len(table.subjects[sex]) for sex in A.SEXES}
-    pct = {sex: _pct(counts[sex], n[sex]) for sex in A.SEXES}
+    pct = {sex: A.share_pct(counts[sex], n[sex]) for sex in A.SEXES}
     measured = min(pct.values())
     worst = [sex for sex in A.SEXES if pct[sex] == measured]
     worst_words = " and ".join(A.SEX_WORDS[s] for s in worst)
     others = [s for s in A.SEXES if s not in worst]
     beside = "".join(f"; {A.SEX_WORDS[s]} {pct[s]:.2f}%" for s in others)
 
-    per_pct = {c.id: {sex: _pct(per[sex][c.id], n[sex]) for sex in A.SEXES} for c in judged}
+    per_pct = {c.id: {sex: A.share_pct(per[sex][c.id], n[sex]) for sex in A.SEXES}
+               for c in judged}
     limiting = min(judged, key=lambda c: min(per_pct[c.id].values()))
     limiting_pct = min(per_pct[limiting.id].values())
     regrip = [c for c in controls if c.mode == "regrip"]

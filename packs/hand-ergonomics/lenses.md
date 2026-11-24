@@ -17,8 +17,9 @@ that will hold the thing.
 
 ## 2. The smallest hand in the range
 
-- Which control limits, and for whom? The verdict names it. How many mm can it move
-  toward the wrist (`reach_map.json`, `outward_mm`)?
+- Which control limits, and for whom? The verdict names it. How far can it move away
+  from the wrist before the target fails (`reach_map.json`, `outward_mm`)? A negative
+  value is how far it must move toward the wrist to reach the target.
 - Is the market the US Army of 1988? A market with smaller hands needs a higher limit
   or another dataset, not the same 95%.
 

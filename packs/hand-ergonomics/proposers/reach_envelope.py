@@ -27,8 +27,10 @@ their primary spelling (or scoped, ``ergo.<key>``): ``hand_grips``,
   grid on the face plane (``--grid`` mm, default 2; by default the plane z =
   the thumb controls' mean height, its s and t the device's x and y; ``--plane``
   for another) with the share of women and
-  of men who reach each node; for each control its share and how far it can move
-  outward (away from the wrist) before the worst sex falls below ``--target``.
+  of men who reach each node; for each control its share and ``outward_mm``,
+  how far it can move outward (away from the wrist) before the worst sex falls
+  below ``--target`` (negative: how far it must move toward the wrist to reach
+  it).
 - ``fit_counts.json`` (with ``--pitch``): for each pitch, the most nodes of a
   square grid that fit in each thumb's target region, cut to the face's extent
   when ``--face`` gives it. Reach, not the printer, caps how many keys of a size
@@ -167,14 +169,17 @@ class Population:
         self.n = {sex: len(table.subjects[sex]) for sex in A.SEXES}
         self.index = {sex: A.reach_index(table.subjects[sex]) for sex in A.SEXES}
 
+    def counts(self, controls, grips, diameter):
+        """``{sex: (accommodated, {control: count})}`` for the controls together."""
+        return {sex: A.accommodation(self.table.subjects[sex], controls, grips, diameter)
+                for sex in A.SEXES}
+
     def shares(self, controls, grips, diameter):
-        """``{sex: (accommodated %, {control: %})}`` for the controls together."""
-        out = {}
-        for sex in A.SEXES:
-            count, per = A.accommodation(self.table.subjects[sex], controls, grips, diameter)
-            out[sex] = (100.0 * count / self.n[sex],
-                        {k: 100.0 * v / self.n[sex] for k, v in per.items()})
-        return out
+        """``{sex: (accommodated %, {control: %})}`` for the controls together,
+        unrounded: what the searches compare with the target."""
+        return {sex: (100.0 * count / self.n[sex],
+                      {k: 100.0 * v / self.n[sex] for k, v in per.items()})
+                for sex, (count, per) in self.counts(controls, grips, diameter).items()}
 
     def worst(self, controls, grips, diameter):
         return min(v[0] for v in self.shares(controls, grips, diameter).values())
@@ -185,19 +190,32 @@ class Population:
 
 
 def _boundary(f, lo, hi, step):
-    """The largest x in [lo, hi] with f(x) true, f monotone (true, then false),
-    to ``step``; None when f(lo) is false; hi when f(hi) is true."""
+    """The largest whole multiple of ``step`` in [lo, hi] with f true, f monotone
+    (true, then false); None when f(lo) is false; hi when f(hi) is true. ``lo``
+    and ``hi`` are whole multiples of ``step``.
+
+    It bisects on the multiples themselves, so what it returns is a point f was
+    seen true at, whatever its sign. What slipped through (review of E1): the
+    bisection ran on the reals and rounded its last true x to a step, with ceil
+    when it was negative: toward zero and past that x (-7.03 read -7.0), so an
+    outward_mm or a spacing delta below zero was up to a step generous, at a
+    position where the target may already fail. Rejected: floor at either sign
+    on the real bisection (never generous, but up to two steps short, since the
+    bisection stopped a step from the edge)."""
+    k_lo, k_hi = round(lo / step), round(hi / step)
+    if k_lo * step != lo or k_hi * step != hi:
+        raise ValueError(f"_boundary: {lo:g} and {hi:g} are not whole steps of {step:g}")
     if not f(lo):
         return None
     if f(hi):
         return hi
-    while hi - lo > step:
-        mid = (lo + hi) / 2.0
-        if f(mid):
-            lo = mid
+    while k_hi - k_lo > 1:                    # f(k_lo * step) true, f(k_hi * step) false
+        mid = (k_lo + k_hi) // 2
+        if f(mid * step):
+            k_lo = mid
         else:
-            hi = mid
-    return math.floor(lo / step) * step if lo >= 0 else math.ceil(lo / step) * step
+            k_hi = mid
+    return k_lo * step
 
 
 # --------------------------------------------------------------------------- #
@@ -221,6 +239,7 @@ def _layout(path):
         controls = A.parse_controls(get("hand_controls"))
         grips = A.parse_grips(get("hand_grips"))
         A.check_grip_ids(controls, grips)
+        A.check_distal(controls, grips)
     except A.LayoutError as exc:
         raise Refused(str(exc))
     diameter = get("hand_grip_diameter_mm")
@@ -273,7 +292,7 @@ def reach_map(pop, controls, grips, diameter, plane, grid, target):
             rows[c.id] = {"judged": False,
                           "why": c.reason if c.mode == "regrip" else "pressed by another digit"}
             continue
-        shares = pop.shares([c], grips, diameter)
+        counts = pop.counts([c], grips, diameter)
         wrist = A.wrist_point(grips[c.pairs[0][0]], median_wcg, diameter)
         direction = _norm(_add(c.at, wrist, -1.0))
 
@@ -281,9 +300,9 @@ def reach_map(pop, controls, grips, diameter, plane, grid, target):
             moved = c._replace(at=_add(c.at, direction, x))
             return pop.worst([moved], grips, diameter) >= target
         out = _boundary(holds, -SEARCH_MM, SEARCH_MM, SEARCH_STEP_MM)
-        rows[c.id] = {"judged": True,
-                      "women_pct": _r(shares["F"][1][c.id], 2),
-                      "men_pct": _r(shares["M"][1][c.id], 2),
+        rows[c.id] = {"judged": True,       # floored as the gate reports it
+                      "women_pct": A.share_pct(counts["F"][1][c.id], pop.n["F"]),
+                      "men_pct": A.share_pct(counts["M"][1][c.id], pop.n["M"]),
                       "outward_mm": None if out is None else _r(out, 2),
                       "outward_direction": [_r(v, 4) for v in direction]}
     return {"s_mm": {"from": _r(s_lo), "to": _r(s_hi), "step": _r(grid)},
@@ -539,7 +558,8 @@ def main(argv):
         "_what": "the share of each sex whose digit reaches each node from each grip "
                  "(marginal: one point at a time; ergo.digit_reach counts every control at "
                  "once, which is never more), and for each control how far it can move "
-                 "outward, away from the wrist, before the worst sex falls below the target",
+                 "outward, away from the wrist, before the worst sex falls below the target "
+                 "(negative: how far it must move toward the wrist to reach the target)",
         **common, "plane": plane.describe(), "figure": figure, **mapped}, compact=True)
     _dump(os.path.join(args.out, "grip_spacing.json"), {
         "_what": "the widest symmetric grip spacing at which the centre controls, held where "

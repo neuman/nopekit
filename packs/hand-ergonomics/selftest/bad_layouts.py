@@ -37,7 +37,7 @@ A = load_path(os.path.join(_PACK_DIR, "gates", "_anthro.py"))
 #: How far past the limit the control must land: at or below 0.85 times a
 #: ``>=`` limit, the mutation walk's 15%. Large enough that no rounding moves it
 #: back inside; small enough that the named 10 mm is what runs on the shipped
-#: baseline (it lands at 63.09% against 80.75%).
+#: baseline (it lands at 63.08% against 80.75%).
 MARGIN = 0.85
 
 #: The named fault: the four face buttons of the right thumb moved 10 mm up the
@@ -66,7 +66,7 @@ def _worst_pct(params: dict, table) -> float:
     for sex in A.SEXES:
         subjects = table.subjects[sex]
         count, _per = A.accommodation(subjects, controls, grips, diameter)
-        shares.append(round(100.0 * count / len(subjects), 2))
+        shares.append(A.share_pct(count, len(subjects)))
     return min(shares)
 
 
@@ -80,7 +80,7 @@ def _moved(params: dict, direction: tuple, shift: float) -> dict:
 
 def face_cluster_out_of_reach(ctx):
     """ergo.digit_reach — the baseline with btn_a, btn_b, btn_x and btn_y moved
-    10 mm up the face (63.09% of women, 84.39% of men), or farther when the
+    10 mm up the face (63.08% of women, 84.38% of men), or farther when the
     baseline's limit is looser."""
     baseline = _read()
     params = {k: copy.deepcopy(v) for k, v in baseline.items() if not k.startswith("_")}
