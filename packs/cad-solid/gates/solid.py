@@ -23,6 +23,8 @@ model's.
 """
 from __future__ import annotations
 
+import difflib
+import fnmatch
 import json
 import math
 import os
@@ -78,6 +80,53 @@ COM_TOL_KEYS = ("assembly_com_tol_mm", "com_tol_mm")
 #: the reading, and a project that publishes its measured thinnest wall under the
 #: bare name hands this gate a limit it never chose.
 MIN_WALL_KEYS = ("process_min_wall_mm", "min_wall_mm")
+
+# What slipped through with one minimum for every mesh: an ordinary product read
+# FAIL on parts that are thin on purpose or not made by the process at all. A bought
+# board, cover glass, a flex circuit and a shield can have a vendor's thickness. A
+# living hinge, a snap finger and a button flexure are thin by design. A light pipe
+# made in SLA beside FDM shells has another process minimum. Each wrong FAIL is the
+# moment somebody lowers the one minimum, and a lowered minimum passes a thin wall
+# anywhere. So three records narrow the rule. Each is refused when it is malformed,
+# never ignored, and a refusal FAILS the gate, as in cad.clash.
+
+#: ``{part name or glob: mm}``: a part's own process minimum. A key that is a
+#: part's name is that part's. Otherwise a key with ``*``, ``?`` or ``[`` is a
+#: pattern (``fnmatchcase``). A part with neither falls back to
+#: ``process_min_wall_mm``. *Rejected:* patterns "in the order written" (the
+#: design). The verdict cache digests a map with its keys sorted, so a reorder
+#: would change which minimum governs and leave the verdict's key unchanged: a
+#: stale pass served as current (invariant 7). So two patterns that match one part
+#: must state the same minimum, or the part is refused. *Rejected:* a list form
+#: that carries an order (a second record shape for one fact), and regular
+#: expressions (a reader cannot check one by eye).
+MIN_WALL_BY_PART_KEYS = ("process_min_wall_mm_by_part",)
+
+#: ``{part: reason}``: parts that are not judged. The detail names them. Exact
+#: names only. *Rejected:* a pattern (it exempts parts nobody named: the wildcard
+#: that hides a defect in cad.clash), and a tiny per-part minimum (it reads as
+#: judged and passed; an exemption reads as not judged, and says so).
+WALL_EXEMPT_KEYS = ("wall_exempt_parts",)
+
+#: ``[{part, box_mm, min_mm, reason}]``: a region of one part judged at its own
+#: minimum. ``box_mm`` is ``[[x0, y0, z0], [x1, y1, z1]]`` in the assembly frame,
+#: x0 < x1, y0 < y1, z0 < z1. A ray that STARTS inside the box is judged against
+#: ``min_mm``. Every other ray of the part is judged against the part's minimum.
+#: *Rejected:* a lower minimum for the whole part (it passes a thin wall anywhere
+#: on the part, not only at the hinge), and judging a ray by where it lands or
+#: what it crosses (a ray from outside the box would take the box's minimum for a
+#: wall outside it).
+WALL_EXCEPTION_KEYS = ("wall_exceptions",)
+
+#: The only keys a ``wall_exceptions`` entry may carry. Any other is refused, with
+#: the nearest of these as a suggestion. What slipped through on the clearance
+#: pairs before they refused a number: a key the reader did not know was accepted
+#: and dropped, and the person who wrote it thought it was used.
+WALL_EXCEPTION_FIELDS = ("part", "box_mm", "min_mm", "reason")
+
+#: The characters that make a ``process_min_wall_mm_by_part`` key a pattern, as
+#: ``fnmatch`` reads them.
+_GLOB_CHARS = frozenset("*?[")
 
 
 # --------------------------------------------------------------------------- #
@@ -946,9 +995,185 @@ def _wall_hits(mesh: Any, start: Any, hit: Any) -> Any:
     return opposed | ~across_edge
 
 
+def _is_mm(value: Any) -> bool:
+    """A positive, finite number of mm. A bool is not a number here."""
+    return (isinstance(value, (int, float)) and not isinstance(value, bool)
+            and math.isfinite(value) and value > 0)
+
+
+def _box_corners(value: Any) -> tuple[list[float], list[float]] | None:
+    """``(lo, hi)`` from ``[[x0, y0, z0], [x1, y1, z1]]``, or ``None``.
+
+    The corners must come low first on every axis. *Rejected:* sorting them for
+    the author: a box written with one corner wrong is a box nobody checked, and a
+    reordered box can hold a region the author did not mean."""
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        return None
+    corners = []
+    for corner in value:
+        if not isinstance(corner, (list, tuple)) or len(corner) != 3:
+            return None
+        if not all(isinstance(c, (int, float)) and not isinstance(c, bool)
+                   and math.isfinite(c) for c in corner):
+            return None
+        corners.append([float(c) for c in corner])
+    lo, hi = corners
+    if not all(a < b for a, b in zip(lo, hi)):
+        return None
+    return lo, hi
+
+
+def _read_wall_rules(names: list, global_min: float | None, global_key: str,
+                     by_part: tuple, exempt: tuple, exceptions: tuple) -> tuple[dict, list]:
+    """``(rules, refusals)`` for ``cad.wall_thickness``. A refusal FAILS the gate.
+
+    ``by_part``, ``exempt`` and ``exceptions`` are each ``(value, key)`` as
+    ``first_pack_param_named`` returned them. ``rules`` holds ``exempt``
+    (``{part: reason}``), ``minimums`` (``{part: (mm, where it came from)}`` for
+    each judged part that has one) and ``boxes`` (``{part: [box]}``).
+
+    The refusals, and why each one is a FAIL and never a silent skip of the entry:
+
+    * an entry that names no part in the assembly, or a pattern that matches none:
+      a misspelt minimum leaves its part at another one, and nothing says so;
+    * an exemption with no reason, or one written as a pattern: an unexplained or
+      blanket exemption is a silencer;
+    * one part named both exempt and with its own minimum or box: which one
+      governs is a guess;
+    * two patterns that match one part with different minimums (see
+      ``MIN_WALL_BY_PART_KEYS``);
+    * an exception entry with a key outside ``WALL_EXCEPTION_FIELDS``, a missing
+      key, a malformed box, or a box that touches another box on the same part.
+
+    One more is the gate's, because it needs the faces: a box that holds no face
+    of its part judges nothing, and is refused there.
+    """
+    present = set(names)
+    refusals: list[str] = []
+
+    raw, key = exempt
+    key = key or WALL_EXEMPT_KEYS[0]
+    exempted: dict[str, str] = {}
+    if raw is not None and not isinstance(raw, dict):
+        refusals.append(f"{key} is {type(raw).__name__}; write {{part: reason}}")
+    for part, reason in (raw.items() if isinstance(raw, dict) else ()):
+        label = f"{key} entry {json.dumps(part, default=str)[:40]}"
+        if not isinstance(part, str) or not part.strip():
+            refusals.append(f"unreadable {label}: an exemption names one part")
+        elif part not in present:
+            if part in ("*", "any", "anything") or _GLOB_CHARS & set(part):
+                refusals.append(f"blanket {label} refused: an exemption names one part, "
+                                f"and a pattern exempts parts nobody named")
+            else:
+                refusals.append(f"{label} names no part in the assembly")
+        elif not isinstance(reason, str) or not reason.strip():
+            refusals.append(f"{label} has no reason: an exemption nobody explained is "
+                            f"one nobody can check or delete when the part changes")
+        else:
+            exempted[part] = reason.strip()
+
+    raw, key = by_part
+    by_key = key or MIN_WALL_BY_PART_KEYS[0]
+    exact: dict[str, float] = {}
+    patterns: dict[str, float] = {}
+    if raw is not None and not isinstance(raw, dict):
+        refusals.append(f"{by_key} is {type(raw).__name__}; write {{part or pattern: mm}}")
+    for name, value in (raw.items() if isinstance(raw, dict) else ()):
+        label = f"{by_key} entry {json.dumps(name, default=str)[:40]}"
+        if not isinstance(name, str) or not name.strip():
+            refusals.append(f"unreadable {label}")
+        elif not _is_mm(value):
+            refusals.append(f"{label} is {value!r}; a minimum is a positive number of mm")
+        elif name in present:
+            if name in exempted:
+                refusals.append(f"part {name!r} is in {by_key} and is exempt: one says "
+                                f"judge it, the other says do not. Delete one")
+            else:
+                exact[name] = float(value)
+        elif _GLOB_CHARS & set(name):
+            if not any(fnmatch.fnmatchcase(part, name) for part in names):
+                refusals.append(f"{label} matches no part in the assembly")
+            else:
+                patterns[name] = float(value)
+        else:
+            refusals.append(f"{label} names no part in the assembly")
+
+    minimums: dict[str, tuple[float, str]] = {}
+    for part in names:
+        if part in exempted:
+            continue
+        if part in exact:
+            minimums[part] = (exact[part], f"{by_key}[{part}]")
+            continue
+        hits = sorted((p, v) for p, v in patterns.items() if fnmatch.fnmatchcase(part, p))
+        if len({v for _, v in hits}) > 1:
+            refusals.append(
+                f"part {part!r} matches {by_key} patterns with different minimums ("
+                + ", ".join(f"{p!r} {v:g} mm" for p, v in hits[:3])
+                + "): the map has no order a verdict can be keyed on, so name the part")
+        elif hits:
+            minimums[part] = (hits[0][1], f"{by_key}[{hits[0][0]}]")
+        elif global_min is not None:
+            minimums[part] = (global_min, global_key)
+
+    raw, key = exceptions
+    key = key or WALL_EXCEPTION_KEYS[0]
+    boxes: dict[str, list[dict]] = {}
+    if raw is not None and not isinstance(raw, (list, tuple)):
+        refusals.append(f"{key} is {type(raw).__name__}; write a list of "
+                        f"{{{', '.join(WALL_EXCEPTION_FIELDS)}}}")
+    for index, entry in enumerate(raw if isinstance(raw, (list, tuple)) else ()):
+        label = f"{key}[{index}]"
+        if not isinstance(entry, dict):
+            refusals.append(f"{label} is {type(entry).__name__}; write "
+                            f"{{{', '.join(WALL_EXCEPTION_FIELDS)}}}")
+            continue
+        unknown = sorted(str(k) for k in entry if k not in WALL_EXCEPTION_FIELDS)
+        if unknown:
+            hints = [difflib.get_close_matches(k, WALL_EXCEPTION_FIELDS, n=1) for k in unknown]
+            refusals.append(f"{label} has unknown key(s) "
+                            + ", ".join(f"{k!r}" + (f" (did you mean {h[0]!r}?)" if h else "")
+                                        for k, h in zip(unknown, hints))
+                            + f"; an entry takes {', '.join(WALL_EXCEPTION_FIELDS)} only")
+            continue
+        missing = [k for k in WALL_EXCEPTION_FIELDS if k not in entry]
+        if missing:
+            refusals.append(f"{label} has no {', '.join(missing)}")
+            continue
+        part, corners = entry["part"], _box_corners(entry["box_mm"])
+        reason = entry["reason"]
+        if not isinstance(part, str) or part not in present:
+            refusals.append(f"{label} names part {part!r}, not in the assembly")
+        elif part in exempted:
+            refusals.append(f"{label} is a box on {part!r}, which is exempt: a box on a "
+                            f"part nobody judges. Delete one")
+        elif corners is None:
+            refusals.append(f"{label} box_mm is {json.dumps(entry['box_mm'], default=str)[:60]}; "
+                            f"write [[x0, y0, z0], [x1, y1, z1]] in mm in the assembly "
+                            f"frame, low corner first on every axis")
+        elif not _is_mm(entry["min_mm"]):
+            refusals.append(f"{label} min_mm is {entry['min_mm']!r}; a minimum is a "
+                            f"positive number of mm")
+        elif not isinstance(reason, str) or not reason.strip():
+            refusals.append(f"{label} has no reason: a thin region nobody explained is "
+                            f"one nobody can defend when the part changes")
+        else:
+            boxes.setdefault(part, []).append({
+                "label": label, "part": part, "lo": corners[0], "hi": corners[1],
+                "min_mm": float(entry["min_mm"]), "reason": reason.strip()})
+    for part, own in boxes.items():
+        for i, a in enumerate(own):
+            for b in own[i + 1:]:
+                if all(a["lo"][k] <= b["hi"][k] and b["lo"][k] <= a["hi"][k]
+                       for k in range(3)):
+                    refusals.append(f"{a['label']} and {b['label']} touch or overlap on "
+                                    f"{part!r}: a ray in both would have two minimums")
+    return {"exempt": exempted, "minimums": minimums, "boxes": boxes}, refusals
+
+
 @gate(
     id="cad.wall_thickness",
-    title="Thinnest wall found by inward ray casting, against the minimum",
+    title="Thinnest wall of each part, by inward ray casting, against its own minimum",
     claims=["geometry", "mesh", "cad", "manufacturability", "wall"],
     tier=Tier.BUILD,
     settles="minimum wall thickness",
@@ -976,7 +1201,18 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     to the first hit is the local thickness. Only a hit between adjacent planar
     surfaces across an acute edge is excluded (opposed thin folds still count).
     Tapered flanks that do not share an edge count regardless of their angle.
-    The minimum over all retained hits is reported.
+
+    Each part is judged against its own minimum: its exact name in
+    ``process_min_wall_mm_by_part`` first, then a pattern there that matches it,
+    then ``process_min_wall_mm``. A part in ``wall_exempt_parts`` is not cast
+    from, and the detail names it; with every part exempt the gate skips. A ray
+    that starts inside a ``wall_exceptions`` box of its part is judged against
+    that box's ``min_mm``, and the box and its reason go in the evidence. The
+    verdict reports the ray with the lowest thickness over its own minimum, across
+    every judged part: its thickness in mm, against its minimum. With one minimum
+    everywhere that is the thinnest wall, as before. What slipped through with one
+    minimum for every mesh, and why patterns carry no order, is at
+    ``MIN_WALL_BY_PART_KEYS``.
 
     Every facet, never a subset. What slipped through while a 4000-ray budget
     cast from evenly spaced facets above that count (``wall_samples``): a
@@ -1017,10 +1253,17 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     For a proof rather than a sample, the domain tool is a medial-axis or
     sphere-inscription analysis; ``references/mesh_hygiene.md`` says what that costs.
     """
+    gid = "cad.wall_thickness"
     limit, limit_key = ctx.first_pack_param_named(MIN_WALL_KEYS)
-    if not isinstance(limit, (int, float)) or isinstance(limit, bool) or limit <= 0:
+    by_part = ctx.first_pack_param_named(MIN_WALL_BY_PART_KEYS)
+    exempt = ctx.first_pack_param_named(WALL_EXEMPT_KEYS)
+    exceptions = ctx.first_pack_param_named(WALL_EXCEPTION_KEYS)
+    # A stated minimum that is not a positive number skips, as it always has. An
+    # absent one skips only when no part has a minimum of its own: a project that
+    # gives every part its own needs no fallback.
+    if (limit is not None and not _is_mm(limit)) or (limit is None and not by_part[0]):
         return _skipped(
-            "cad.wall_thickness",
+            gid,
             f"the projection does not define "
             f"{_spellings(ctx, MIN_WALL_KEYS)} as a positive number of mm "
             f"(read: {limit!r}) — the minimum wall is a PROCESS decision the model "
@@ -1029,37 +1272,93 @@ def wall_thickness(ctx: GateContext) -> Verdict:
             f"measured in a part; publish this one as process_min_wall_mm (or "
             f"cad.min_wall_mm) when both packs are installed",
         )
-    limit = float(limit)
+    global_min = float(limit) if limit is not None else None
+    global_key = limit_key or MIN_WALL_KEYS[0]
 
-    meshes, welded, skip = _load_all(ctx, "cad.wall_thickness")
+    meshes, welded, skip = _load_all(ctx, gid)
     if skip is not None:
         return skip
 
     import numpy as np
 
-    rows = []
-    worst_value = math.inf
-    worst_part = ""
-    worst_point: list[float] = []
-    for name, mesh in meshes.items():
+    names = list(meshes)
+    rules, refusals = _read_wall_rules(names, global_min, global_key,
+                                       by_part, exempt, exceptions)
+    exempted, minimums, boxes = rules["exempt"], rules["minimums"], rules["boxes"]
+    judged = [name for name in names if name not in exempted]
+
+    # Every part is checked closed, and every box is checked to hold a ray, before
+    # any ray is cast: a cast on the fallback caster can take minutes, and a
+    # refusal found after it costs them for nothing.
+    prepared = {}
+    for name in judged:
+        mesh = meshes[name]
         if not bool(getattr(mesh, "is_watertight", False)):
             return _skipped(
-                "cad.wall_thickness",
+                gid,
                 f"part {name!r} is not watertight, so a ray cast from inside it can "
                 f"escape and thickness is undefined — settle cad.watertight first",
             )
-
         centres = np.asarray(mesh.triangles_center, dtype=float)
         normals = np.asarray(mesh.face_normals, dtype=float)
-        n_faces = len(centres)
         eps = max(1e-6, float(getattr(mesh, "scale", 1.0)) * 1e-8)
         origins = centres - normals * eps
-        directions = -normals
+        # Which box each ray starts in, -1 for none. Boxes on one part never touch
+        # (refused above), so no ray is in two.
+        box_of = np.full(len(origins), -1, dtype=int)
+        for j, box in enumerate(boxes.get(name, ())):
+            inside = np.all((origins >= box["lo"]) & (origins <= box["hi"]), axis=1)
+            if not inside.any():
+                refusals.append(f"{box['label']} holds no face of {name!r}: it judges "
+                                f"nothing. The box is in the assembly frame, in mm")
+            box_of[inside] = j
+        prepared[name] = (origins, normals, eps, box_of)
 
-        locations, index_ray, index_tri = _cast_first_hit(mesh, origins, directions)
+    if refusals:
+        return Verdict(gate=gid, passed=False, measured=float(len(refusals)), limit=0.0,
+                       comparator="<=", units="refused entries",
+                       detail=f"{len(refusals)} wall entr(ies) refused: "
+                              + "; ".join(refusals[:3]))
+    if not judged:
+        return _skipped(gid, f"every part is exempt in {exempt[1] or WALL_EXEMPT_KEYS[0]} "
+                             f"({', '.join(sorted(exempted)[:4])}"
+                             f"{'...' if len(exempted) > 4 else ''}): no wall was judged")
+    unset = [name for name in judged if name not in minimums]
+    if unset:
+        return _skipped(
+            gid,
+            f"part(s) {', '.join(map(repr, unset[:4]))}{'...' if len(unset) > 4 else ''} "
+            f"have no minimum: no {MIN_WALL_BY_PART_KEYS[0]} entry names or matches "
+            f"them, and the projection does not define {_spellings(ctx, MIN_WALL_KEYS)}. "
+            f"The minimum wall is a PROCESS decision the model must carry, and this "
+            f"gate will not invent one",
+        )
+
+    def where_from(name: str, j: int) -> str:
+        if j < 0:
+            return minimums[name][1]
+        box = boxes[name][j]
+        reason = box["reason"]
+        return f"{box['label']} box: {reason[:60]}{'...' if len(reason) > 60 else ''}"
+
+    rows = []
+    box_rows = []
+    worst = None                 # (ratio, thickness, minimum, part, point, source)
+    for name in judged:
+        mesh = meshes[name]
+        origins, normals, eps, box_of = prepared[name]
+        n_faces = len(origins)
+        part_min = minimums[name][0]
+        own = boxes.get(name, [])
+        # Each ray's own minimum: its box's when it starts in one, else its part's.
+        ray_min = np.full(n_faces, part_min, dtype=float)
+        for j, box in enumerate(own):
+            ray_min[box_of == j] = box["min_mm"]
+
+        locations, index_ray, index_tri = _cast_first_hit(mesh, origins, -normals)
         if len(index_ray) == 0:
             return _skipped(
-                "cad.wall_thickness",
+                gid,
                 f"no inward ray hit anything on part {name!r} ({n_faces} rays) — the "
                 f"ray engine returned nothing, so no thickness was measured",
             )
@@ -1076,25 +1375,46 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         real = (travel > 10.0 * eps) & _wall_hits(mesh, index_ray, index_tri)
         if not real.any():
             return _skipped(
-                "cad.wall_thickness",
+                gid,
                 f"no inward ray on part {name!r} crossed a wall after excluding "
                 "acute-edge hits — the sampler measured nothing",
             )
         distances = travel[real] + eps
         hit_rows = np.asarray(index_ray)[real]
-        local_min = float(distances.min())
-        where = origins[hit_rows[int(distances.argmin())]]
-        rows.append({"part": name, "min_mm": local_min, "rays": int(n_faces),
-                     "hits": int(len(distances)), "faces": int(n_faces),
-                     "at_mm": [round(float(c), 3) for c in where]})
-        if local_min < worst_value:
-            worst_value = local_min
-            worst_part = name
-            worst_point = [round(float(c), 3) for c in where]
+        # The part's worst ray is the one thinnest FOR ITS OWN minimum, never the
+        # thinnest: a 0.45 mm hinge held to 0.4 mm is better off than a 1.3 mm
+        # wall held to 1.2 mm. With one minimum on the part the two are the same
+        # ray (argmin takes the first of equals in both).
+        ratio = distances / ray_min[hit_rows]
+        k = int(ratio.argmin())
+        point = [round(float(c), 3) for c in origins[hit_rows[k]]]
+        source = where_from(name, int(box_of[hit_rows[k]]))
+        rows.append({"part": name, "min_mm": float(distances.min()),
+                     "minimum_mm": part_min, "minimum_from": minimums[name][1],
+                     "worst_mm": float(distances[k]),
+                     "worst_minimum_mm": float(ray_min[hit_rows[k]]),
+                     "worst_from": source, "worst_ratio": float(ratio[k]),
+                     "rays": int(n_faces), "hits": int(len(distances)),
+                     "faces": int(n_faces), "at_mm": point})
+        for j, box in enumerate(own):
+            in_box = box_of[hit_rows] == j
+            box_rows.append({
+                "entry": box["label"], "part": name, "box_mm": [box["lo"], box["hi"]],
+                "min_mm": box["min_mm"], "reason": box["reason"],
+                "rays": int((box_of == j).sum()), "hits": int(in_box.sum()),
+                "thinnest_mm": float(distances[in_box].min()) if in_box.any() else None})
+        if worst is None or float(ratio[k]) < worst[0]:
+            worst = (float(ratio[k]), float(distances[k]),
+                     float(ray_min[hit_rows[k]]), name, point, source)
 
-    evidence = [_write(ctx, "wall_thickness.json", rows)]
+    evidence = [_write(ctx, "wall_thickness.json", {
+        "parts": rows, "boxes": box_rows, "exempt": dict(sorted(exempted.items())),
+        "minimums": {name: {"mm": minimums[name][0], "from": minimums[name][1]}
+                     for name in judged}})]
     sampled = sum(r["hits"] for r in rows)
     cast = sum(r["rays"] for r in rows)
+    _ratio, worst_value, worst_limit, worst_part, worst_point, worst_from = worst
+    passed = worst_value >= worst_limit
 
     # The one gate in this pack that knows a POINT rather than a part: the thin
     # spot is where a ray started, in the same model coordinates the assembly GLB
@@ -1104,27 +1424,35 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     # only the worst one is pinned. Pinning the runner-up on every part would
     # suggest a thickness map the gate did not produce.
     locators = []
-    if worst_value < limit and worst_part:
+    if not passed:
         movers = PARTS.movers(meshes)
         locators = [
             Locator(view=PARTS.VIEW_ID, target=movers.get(worst_part, worst_part),
                     kind="point", position=list(worst_point),
                     value=round(worst_value, 4),
-                    label=f"{worst_value:.3f} mm wall vs {limit:.3f} mm minimum "
-                          f"({cast} rays, one per face)")
+                    label=f"{worst_value:.3f} mm wall vs {worst_limit:.3f} mm minimum "
+                          f"[{worst_from}] ({cast} rays, one per face)")
         ]
 
+    # With one minimum over every judged ray, the worst wall IS the thinnest one,
+    # and the line says so in the words it always used.
+    one_minimum = not boxes and len({minimums[name][0] for name in judged}) == 1
+    head = "thinnest wall" if one_minimum else "worst wall against its own minimum:"
+    shown = sorted(exempted)
     return Verdict(
-        gate="cad.wall_thickness",
-        passed=worst_value >= limit,
+        gate=gid,
+        passed=passed,
         measured=round(worst_value, 4),
-        limit=round(limit, 4), comparator=">=",
+        limit=round(worst_limit, 4), comparator=">=",
         units="mm",
-        detail=f"thinnest wall {worst_value:.3f} mm on {worst_part} at "
-               f"({', '.join(f'{c:g}' for c in worst_point)}) vs {limit:.3f} mm minimum "
-               f"[{limit_key or MIN_WALL_KEYS[0]}] "
+        detail=f"{head} {worst_value:.3f} mm on {worst_part} at "
+               f"({', '.join(f'{c:g}' for c in worst_point)}) vs {worst_limit:.3f} mm "
+               f"minimum [{worst_from}] "
                f"({sampled}/{cast} inward face-normal rays hit, one per face; a ray "
-               f"sampler, not a proof)",
+               f"sampler, not a proof)"
+               + (f"; exempt, not judged: {', '.join(shown[:4])}"
+                  f"{f' and {len(shown) - 4} more' if len(shown) > 4 else ''}"
+                  if shown else ""),
         evidence=evidence,
         locators=locators,
     )

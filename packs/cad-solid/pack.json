@@ -1,6 +1,6 @@
 {
   "name": "cad-solid",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Validates that exported solids are real solids, that placed parts do not interfere, and that every part is held by something: watertightness, validity, clash, contact coverage, envelope, wall.",
   "settles": [
     "watertightness",

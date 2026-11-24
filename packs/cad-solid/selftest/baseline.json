@@ -37,6 +37,9 @@
     "assembly_com_target_mm": "Where the assembly's centre of mass is supposed to sit [X, Y, Z], mm - the centre of the mounting boss pattern. Falls back to com_target_mm.",
     "assembly_com_tol_mm": "Allowed distance from the measured centre of mass to its target, mm. Optional; cad.bounding reports 'com not checked' without it. Falls back to com_tol_mm.",
     "process_min_wall_mm": "Thinnest wall the PROCESS allows, mm - a limit, not a measurement. fdm-print's min_wall_mm is the thinnest section actually present in a part, so one bare key cannot be both the rule and the reading: a project that publishes its measured wall under the bare name hands this gate a threshold nobody chose. Falls back to min_wall_mm. 2.5 mm is an ordinary die-cast minimum at this size; the thinnest wall actually present is the 3.0 mm housing wall and floor. A process decision the model must carry - cad.wall_thickness refuses to invent one.",
+    "process_min_wall_mm_by_part": "{part name or pattern: mm} a part's own process minimum, read by cad.wall_thickness before process_min_wall_mm. A key that is a part's name is that part's; otherwise a key with *, ? or [ is a pattern (fnmatchcase). Two patterns that match one part must state the same minimum: the map has no order a verdict can be keyed on. Refused, and the gate FAILS: a key that names or matches no part, a minimum that is not a positive number, and a part that is also exempt. Empty here: all four parts are cast in one alloy and share the 2.5 mm minimum.",
+    "wall_exempt_parts": "{part: reason} parts cad.wall_thickness does not judge: a bought part with a vendor's thickness (a board, cover glass, a flex circuit, a shield can). The detail names each one; with every part exempt the gate SKIPS. Refused, and the gate FAILS: no reason, a pattern or a wildcard, a name not in the assembly. Empty here: every part is made by the casting process.",
+    "wall_exceptions": "[{part, box_mm, min_mm, reason}] a region of one part judged at its own minimum: a living hinge, a snap finger, a button flexure. box_mm is [[x0, y0, z0], [x1, y1, z1]] in the assembly frame, mm, low corner first. A ray that STARTS inside the box is judged against min_mm; every other ray of the part against the part's minimum. Refused, and the gate FAILS: any other key, a missing key, a malformed box, a box on an exempt part, two boxes on one part that touch, and a box that holds no face of its part. Empty here: the enclosure has no intended thin feature.",
     "clash_tolerance_mm3": "Default per-pair intersection volume treated as tessellation noise rather than interference, mm^3. 0.2 is the prismatic default: two planar faces meeting face-to-face resolve to slivers well under this.",
     "clash_tolerances_mm3": "{'a|b': mm^3} per-pair overrides of that tolerance. Empty on purpose - the one curved pair is already covered by organic_parts, and an override invented for a pair that does not need one is how a real interference gets hidden.",
     "clash_depth_tol_mm": "Default per-pair penetration DEPTH treated as tessellation noise rather than interference, mm. The other half of the clash test and the half that does not move with part size: a volume tolerance forgives a fixed volume, so the depth it forgives grows without bound as the contact area shrinks (0.2 mm^3 is a 0.5 mm pin driven 0.79 mm into a block). 0.01 mm is an ordinary exporter's linear deviation between two nominally coincident planar faces.",
@@ -68,6 +71,9 @@
   "assembly_com_tol_mm": 1.5,
 
   "process_min_wall_mm": 2.5,
+  "process_min_wall_mm_by_part": {},
+  "wall_exempt_parts": {},
+  "wall_exceptions": [],
 
   "clash_tolerance_mm3": 0.2,
   "clash_tolerances_mm3": {},
