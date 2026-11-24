@@ -124,7 +124,8 @@ def stale_scene(ctx):
     """ergo.layout_agrees — the baseline's declared layout against a scene one
     revision ahead of it: btn_y's cap drawn 3 mm farther up the face, away from the
     right wrist (3.00 mm against the gate's 0.5 mm). Nothing structural is wrong:
-    every control is drawn and declared and both handles are 36 mm. On the drawn
+    every control is drawn and declared, and both handles are 36 mm and on their
+    declared grip centres. On the drawn
     positions the reach gate would count 94.33% of women, under the baseline
     claim's 95%; on the declared ones it counts 97.96%.
 

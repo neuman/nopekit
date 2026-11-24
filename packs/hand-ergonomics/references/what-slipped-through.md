@@ -65,8 +65,17 @@ pack's baseline, btn_y drawn 3 mm farther up the face than declared turns a pass
 
 What the pack does about it: `ergo.layout_agrees` reads the exported scene and holds
 the layout to it: every control both ways, every cap within 0.5 mm, no handle thicker
-than declared. It covers the reach claim, so a reach pass on a stale layout never
-reads Checked.
+than declared, and each grip centre within 0.5 mm of its drawn handle's axis. It
+covers the reach claim, so a reach pass never reads Checked on a layout whose drawn
+controls, caps or handles the declaration does not match. The grip posture (where
+along the handle the hand holds, and the hand axis) is not in the scene: the testers
+settle it (GRIP-POSTURE).
+
+The first version of the guard held only the caps and the handle girth. It asked
+only that some section surround each grip centre, so a centre up to one handle radius
+off the drawn axis passed. Both handles drawn 10 mm back from the controls, with the
+layout not following, passed it at 0.00 mm, and the reach claim read Checked at
+97.96% of women where the drawn design reaches 68.52%.
 
 ## A mechanism nobody else ships
 

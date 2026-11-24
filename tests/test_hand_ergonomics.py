@@ -26,11 +26,15 @@ and the place it would slip:
 * **The scaffold reads** (``TheScaffoldIsRecords``).
 * **The layout is the drawn one** (``TheLayoutIsTheDrawnOne``, E2): every control
   both ways, every cap within 0.5 mm, no handle thicker than declared (one-sided,
-  read by the outer loop of the section, across two half shells), and the
-  refusals; the stale scene hides a reach fail (94.33% drawn, 97.96% declared).
+  read by the outer loop of the section, across two half shells, scaled back for
+  what a coarse export hides), every grip centre within 0.5 mm of its drawn
+  handle's axis, and the refusals; the stale scene hides a reach fail (94.33% drawn,
+  97.96% declared), and so do handles drawn 10 mm back (68.52% drawn).
 * **cad-solid's assembly is the scene** (``CadSolidsAssemblyIsTheScene``): its mesh
   map and the GLB its own ``assembly`` view writes both serve, on cad-solid's node
-  names, copied and held to cad-solid's own on the same names.
+  names, copied and held to cad-solid's own on the same names; and the mesh map's
+  keys are declared with cad-solid's meaning (``TheMeshMapKeysAreDeclared``), so
+  doctor reports fdm-print's ``parts``.
 * **The reach claim waits for both gates** (``TheReachClaimWaitsForBoth``), through
   ``check`` on the wrapped baseline.
 
@@ -722,6 +726,96 @@ class TheLayoutIsTheDrawnOne(_Layout):
         self.assertEqual((found.outcome, found.measured), ("fail", 1.0))
         self.assertIn("no drawn part surrounds grip right's centre", found.detail)
 
+    def test_a_handle_drawn_off_its_grip_centre_is_a_disagreement(self):
+        """Review of E2: the guard held only that some section surrounds each grip
+        centre, so a centre up to one handle radius off the drawn axis passed. Both
+        handles drawn back along the hand axis, the declared layout not following:
+        the reach gate still counts the declared grips."""
+        def drawn_back(shift):
+            moved = copy.deepcopy(_projects.pack_baseline("hand-ergonomics"))
+            for grip in moved["hand_grips"]:
+                hand = A.unit(grip["hand_axis"], "hand_axis")
+                grip["centre"] = [c - shift * u for c, u in zip(grip["centre"], hand)]
+            return moved
+
+        moved = drawn_back(10.0)
+        found = self.on_scene(BUILD.parts(moved))
+        self.assertEqual((found.outcome, found.measured, found.units),
+                         ("fail", 2.0, "disagreements"))
+        self.assertIn("grip left's centre is 10.00 mm off its drawn handle's axis (the "
+                      "centroid of its section), more than 0.5 mm", found.detail)
+        row = self.evidence(found)["grips"]["right"]
+        self.assertEqual(row["centre_off_mm"], 10.0)
+        self.assertEqual(row["section_diameter_mm"], 36.0, "the girth alone cannot see it")
+        # The baseline's hand axis is 0.01 deg off square to its handle axis, so the
+        # declared section plane meets the moved handle's axis 0.0015 mm along it.
+        [right] = [g for g in moved["hand_grips"] if g["id"] == "right"]
+        for drawn, expect in zip(row["drawn_centre"], right["centre"]):
+            self.assertAlmostEqual(drawn, expect, delta=0.01)
+        reach_spec, reach_fn = _registry().get(GID)
+        declared = gates_mod.run_gate(reach_spec, reach_fn, self.baseline())
+        actual = gates_mod.run_gate(reach_spec, reach_fn, dataclasses.replace(
+            self.baseline(), params=_projects.design_of(moved)))
+        self.assertEqual((declared.outcome, declared.measured), ("pass", 97.96))
+        self.assertEqual((actual.outcome, actual.measured), ("fail", 68.52))
+        near = self.on_scene(BUILD.parts(drawn_back(0.4)))
+        self.assertEqual((near.outcome, near.measured), ("pass", 0.0), near.detail)
+        self.assertIn("worst grip centre 0.40 mm off its handle's axis (left) vs <= 0.5 mm",
+                      near.detail)
+        self.assertEqual(self.on_scene(BUILD.parts(drawn_back(0.6))).outcome, "fail")
+
+    def test_a_coarse_handle_reads_its_true_diameter(self):
+        """Review of E2: a tessellated loop reads n sin(pi/n)/pi of its handle, 2.55%
+        short at 8 segments, and the stated bound (0.65%) held only from 16. An
+        8-segment 37.9 mm handle read 36.94 mm and passed a 36 mm declaration."""
+        import trimesh
+        baseline = _projects.pack_baseline("hand-ergonomics")
+        length = BUILD.HANDLE_TO_MM - BUILD.HANDLE_FROM_MM
+
+        def handles(diameter, segments):
+            meshes = self.meshes()
+            for grip in baseline["hand_grips"]:
+                axis, centre = BUILD.handle_placement(grip)
+                meshes[f"handle-{grip['id']}"] = BUILD._cylinder(diameter, length, segments,
+                                                                  axis, centre)
+            return meshes
+
+        thick = self.on_scene(handles(37.9, 8))
+        self.assertEqual((thick.outcome, thick.measured), ("fail", 2.0))
+        self.assertIn("grip left's section is 37.90 mm across, more than the declared 36 mm "
+                      "+ 1.0", thick.detail)
+        for segments, chorded in ((8, 35.0818), (6, 34.3775), (16, 35.7691)):
+            with self.subTest(segments=segments):
+                found = self.on_scene(handles(36.0, segments))
+                self.assertEqual(found.outcome, "pass", found.detail)
+                row = self.evidence(found)["grips"]["left"]
+                self.assertEqual(row["section_diameter_mm"], 36.0)
+                self.assertAlmostEqual(row["section_chorded_mm"], chorded, places=3)
+                self.assertAlmostEqual(row["section_steps"], float(segments), places=1)
+        # A handle with sharp edges reads as the round handle on its corners: a
+        # 30 mm square one is 38.20 mm by perimeter / pi and reads 42.43 mm. That is
+        # the conservative side (PACK.md says so), never a thinner handle.
+        meshes = self.meshes()
+        meshes["handle-right"] = self.right_handle(trimesh.creation.box(
+            extents=[30.0, 30.0, length]))
+        square = self.on_scene(meshes, hand_grip_diameter_mm=42)
+        self.assertEqual(square.outcome, "pass", square.detail)
+        self.assertEqual(self.evidence(square)["grips"]["right"]["section_diameter_mm"],
+                         42.43)
+        self.assertEqual(self.on_scene(meshes, hand_grip_diameter_mm=38.2).outcome, "fail")
+
+    def test_the_reach_gates_other_refusals_are_its_own(self):
+        """PACK.md: the guard runs the parsers, not ``check_grip_ids`` or the rule
+        that refuses a control behind its grip; on those the reach gate errors."""
+        params = self.params()
+        params["hand_controls"][3]["operated_by"][0]["grip"] = "rihgt"
+        reach_spec, reach_fn = _registry().get(GID)
+        reach = gates_mod.run_gate(reach_spec, reach_fn,
+                                   dataclasses.replace(self.baseline(), params=params))
+        self.assertEqual(reach.outcome, "error")
+        self.assertIn("names grip 'rihgt', which no grip declares", reach.error)
+        self.assertEqual(self.run_on(params).outcome, "pass")
+
     def test_the_guard_cannot_be_the_reach_gates_prerequisite(self):
         """Why it covers the tag instead of a ``needs`` edge (NO_EDGE_YET)."""
         registry = _registry()
@@ -849,6 +943,31 @@ class CadSolidsAssemblyIsTheScene(_Layout):
                                  "hand_layout_scene": os.path.join(here, drawn.src)})
             with self.subTest(stale=stale):
                 self.assertEqual((found.outcome, found.measured), expect, found.detail)
+
+
+class TheMeshMapKeysAreDeclared(unittest.TestCase):
+    """Review of E2: the guard read cad-solid's mesh map (``meshes``, ``solids``,
+    ``parts``, bare too) and the baseline declared none of them, so doctor could
+    not see that a bare ``parts`` is fdm-print's print set, each part in print
+    orientation. With the keys declared as cad-solid declares them, the clash is
+    reported, and cad-solid and hand-ergonomics agree on all three."""
+
+    def test_the_clash_with_fdm_prints_parts_is_reported(self):
+        found = {c.key: c for c in packs_mod.key_collisions(
+            ["hand-ergonomics", "fdm-print"], _env.REPO)}
+        self.assertIn("parts", found)
+        self.assertEqual(found["parts"].primary["hand-ergonomics"], "meshes")
+        self.assertEqual(found["parts"].primary["fdm-print"], "mesh_paths")
+
+    def test_cad_solid_and_this_pack_mean_one_thing_by_each(self):
+        """The negative control: the same words, the same meaning, no warning."""
+        vocabulary = packs_mod.key_vocabulary("hand-ergonomics", _env.REPO)
+        names = load_path(os.path.join(PACK, "gates", "_names.py"))
+        for key in names.MESH_KEYS:
+            self.assertEqual(vocabulary[key]["primary"], "meshes", key)
+        clashes = [c.key for c in packs_mod.key_collisions(["hand-ergonomics", "cad-solid"],
+                                                            _env.REPO)]
+        self.assertFalse(set(clashes) & set(names.MESH_KEYS), clashes)
 
 
 # --------------------------------------------------------------------------- #

@@ -4,8 +4,8 @@
 Tier 1, trimesh, numpy and manifold3d, under a second for a hand-held device. It
 is the validity guard of ``ergo.digit_reach``'s inputs. That gate counts subjects
 on the layout the model declares (``hand_controls``, ``hand_grips``,
-``hand_grip_diameter_mm``); this one reads the exported scene and checks that the
-declaration is the design:
+``hand_grip_diameter_mm``); this one reads the exported scene and checks the parts
+of that declaration the scene can show:
 
 1. **The controls, both ways.** Every declared control is drawn as a part
    ``ctl-<id>``, and every drawn ``ctl-*`` part is declared. A drawn control the
@@ -15,9 +15,16 @@ declaration is the design:
    of its declared ``at``.
 3. **No handle is thicker than declared.** At each grip, the section of the
    housing through the grip centre, square to the handle axis, is no wider than
-   ``hand_grip_diameter_mm`` plus :data:`GIRTH_TOL_MM`. One-sided: a larger
-   declared diameter puts every wrist farther back, which is conservative, so a
-   device with two different handles declares the larger and passes.
+   ``hand_grip_diameter_mm`` plus :data:`GIRTH_TOL_MM`, read as the round handle
+   its points lie on. One-sided: a larger declared diameter puts every wrist
+   farther back, which is conservative, so a device with two different handles
+   declares the larger and passes.
+4. **Each grip is on its handle.** In that section, the declared grip centre lies
+   within :data:`CENTRE_TOL_MM` of the drawn handle's axis, the centroid of the
+   section's outer loop.
+
+Where along the handle the hand holds, and the hand axis, are posture: the scene
+shows the handles, not the hand, so they stay a declaration (GRIP-POSTURE).
 
 **The scene, and the node names that are an interface.** The parts come from one
 of two places, first match:
@@ -65,7 +72,9 @@ NAMES = _load_path(os.path.join(_HERE, "_names.py"))
 GID = "ergo.layout_agrees"
 
 #: The claim tags this gate covers. ``digit-reach``: the reach claim waits for
-#: both gates, so a pass on a stale layout never reads Checked. ``control-layout``:
+#: both gates, so a reach pass never reads Checked on a layout whose drawn
+#: controls, caps, handle girth or handle position the declaration does not
+#: match (the grip posture stays a declaration, GRIP-POSTURE). ``control-layout``:
 #: a claim that the declared layout is the drawn design, for a project that holds
 #: it on its own. Rejected: a ``needs`` edge from ``ergo.digit_reach`` (the
 #: registry refuses a tier-1 prerequisite on a tier-0 gate, as a build system
@@ -94,14 +103,38 @@ POSITION_TOL_MM = 0.5
 #: How much wider than declared a handle's section may be, mm of diameter. One
 #: millimetre of diameter moves every wrist point 0.5 mm (the girth term is half
 #: the difference), the same as :data:`POSITION_TOL_MM`; on the baseline 37 mm
-#: declared as 36 mm moves the women's count by 0.55 points. A tessellated handle
-#: slices short, never long: a 96-segment 36 mm cylinder slices to 35.994 mm
-#: (reported 36.00, rounded up), a 16-segment one to 35.77 mm, so a coarse export
-#: can hide up to 0.65% of its diameter (an accepted limit, named in PACK.md).
-#: Rejected: 0.1 mm (a handle declared to the nearest millimetre fails); 5 mm (a
-#: 41 mm handle declared as 36 mm passes: 2.5 mm of wrist, and 2.58 points of
-#: women on the baseline).
+#: declared as 36 mm moves the women's count by 0.55 points. The section is read
+#: as the round handle its points lie on (:func:`_round_factor`), so an evenly
+#: tessellated export hides no girth from this tolerance. Rejected: 0.1 mm (a
+#: handle declared to the nearest millimetre fails); 5 mm (a 41 mm handle declared
+#: as 36 mm passes: 2.5 mm of wrist, and 2.58 points of women on the baseline).
 GIRTH_TOL_MM = 1.0
+
+#: How far the declared grip centre may lie from the drawn handle's axis, mm: the
+#: area centroid of the section's outer loop, in the plane through the centre
+#: square to the handle axis. A centre off by d moves every wrist point by d, as a
+#: cap off by d moves its control by d, so the tolerance is
+#: :data:`POSITION_TOL_MM`'s; on the baseline both handles drawn 0.5 mm back along
+#: the hand axis move the women's count by 0.55 points (97.96% to 97.41%). Where
+#: along the handle the hand holds is not in this plane: that is posture
+#: (GRIP-POSTURE), and the scene cannot show it. What slipped through (review of
+#: E2): the guard held only that some loop surrounds the centre, so a centre up to
+#: one handle radius off the drawn axis passed. Both handles drawn 10 mm back from
+#: the controls, the layout not following, passed at 0.00 mm, and the reach claim
+#: read Checked at 97.96% where the drawn design reaches 68.52%. Rejected: a share
+#: of the declared diameter (5% is 1.8 mm of wrist, 1.59 points of women: the wrist
+#: does not move less on a thick handle); the loop's bounding-box centre (it is
+#: not the centre of an asymmetric section, and moves with a fillet on one side);
+#: the vertex mean (it moves with how densely the exporter meshed one side).
+CENTRE_TOL_MM = POSITION_TOL_MM
+
+#: Consecutive section points closer than this, mm, are one point: a section
+#: united from two half shells keeps both shells' points where they meet, and a
+#: zero-length edge has no direction (its turn would be noise up to pi, and
+#: :func:`_even_steps` squares it). Far below any real edge (a 36 mm handle at
+#: 1,000,000 segments has 0.11 um edges) and far above float32's 1e-5 mm in the
+#: device frame.
+_SAME_POINT_MM = 1e-4
 
 #: The noise floor below which a disagreement is no disagreement, as decimals of a
 #: millimetre: a GLB stores float32, about 1e-5 mm at 100 mm from the origin, so a
@@ -310,9 +343,90 @@ def _contains_origin(loop) -> bool:
     return bool(np.count_nonzero(crosses & (at > 0)) % 2)
 
 
-def _section_diameter(housing: list, centre: tuple, axis: tuple) -> float | None:
-    """Perimeter / pi of the outer loop of the housing's section through
-    ``centre``, square to ``axis``; None when no loop surrounds the centre.
+def _even_steps(loop) -> float:
+    """The number of even steps the closed ``loop`` (n x 2) turns like: 4 pi^2 over
+    the sum of the squared turns at its points, after points closer than
+    :data:`_SAME_POINT_MM` are merged. An n-gon with even steps gives n back.
+
+    A section cuts a side face's diagonals as well as its long edges, so a
+    96-segment cylinder slices to 192 points, half of them on a chord between two
+    corners. Such a point does not turn, so it adds nothing to the sum: on the
+    committed GLB, float32 noise turns the 96 of them by 3e-6 rad at most, 2e-10
+    in all against the 0.41 the 96 real corners add. A loop with uneven steps
+    counts its coarse corners most, as the share it hides does. Rejected: counting
+    the points (the 192-point loop reads as 192 steps, and a coarse handle's
+    correction falls to a quarter); counting the points that turn by more than a threshold (on
+    the committed GLB, float32 noise turned 37 chord points past 1e-6 rad, so its
+    96-corner handles read as 133; a threshold above the noise, 1e-3 rad, sees no
+    corner on a mesh finer than 6,283 segments, and a handle there with two sharp
+    edges reads as a three-sided loop, 21% thick)."""
+    import numpy as np
+    kept = [loop[0]]
+    for p in loop[1:]:
+        if float(np.linalg.norm(p - kept[-1])) >= _SAME_POINT_MM:
+            kept.append(p)
+    while len(kept) > 1 and float(np.linalg.norm(kept[0] - kept[-1])) < _SAME_POINT_MM:
+        kept.pop()
+    pts = np.asarray(kept, dtype=float)
+    edges = np.roll(pts, -1, axis=0) - pts
+    heading = np.arctan2(edges[:, 1], edges[:, 0])
+    turn = (np.roll(heading, -1) - heading + math.pi) % (2.0 * math.pi) - math.pi
+    squared = float(np.dot(turn, turn))
+    return (4.0 * math.pi * math.pi / squared) if squared > 0 else math.inf
+
+
+def _round_factor(steps: float) -> float:
+    """``(pi / n) / sin(pi / n)``: what a loop of ``n`` even steps on a round handle
+    is scaled by to read the handle's own perimeter / pi.
+
+    A tessellated handle slices short: ``n`` corners on a circle of diameter D make
+    a loop whose perimeter / pi is ``D n sin(pi / n) / pi``, 0.64% short at 16
+    segments, 2.55% at 8 and 4.51% at 6. What slipped through (review of E2): the
+    stated bound, "up to 0.65%", held only at 16 segments and above, and an
+    8-segment 37.9 mm handle read 36.94 mm and passed a 36 mm declaration. Exact
+    for a handle exported at one angular step, as CAD exports a round face. A loop
+    fine in one part and coarse in another is an estimate, and a handle drawn as a
+    polygon reads as the round handle on its corners, which is larger
+    (conservative: a square handle reads 11% thick). Both are named in PACK.md.
+    Rejected: refusing a loop with few steps (a handle designed as a polygon would
+    be refused); twice the farthest point from the centroid (an oval handle's long
+    axis is not its perimeter / pi)."""
+    n = float(steps)
+    if not math.isfinite(n):
+        return 1.0                 # a loop that never turns: no chord to correct
+    n = max(n, 3.0)
+    return (math.pi / n) / math.sin(math.pi / n)
+
+
+def _loop_area(p) -> float:
+    """The signed area of the closed loop ``p`` (n x 2), the shoelace sum."""
+    import numpy as np
+    return 0.5 * float(np.dot(p[:, 0], np.roll(p[:, 1], -1))
+                       - np.dot(p[:, 1], np.roll(p[:, 0], -1)))
+
+
+def _loop_centroid(p) -> tuple:
+    """The area centroid of the closed loop ``p`` (n x 2), as a filled polygon."""
+    import numpy as np
+    x, y = p[:, 0], p[:, 1]
+    x2, y2 = np.roll(x, -1), np.roll(y, -1)
+    cross = x * y2 - x2 * y
+    six_area = 3.0 * float(cross.sum())
+    return (float(((x + x2) * cross).sum()) / six_area,
+            float(((y + y2) * cross).sum()) / six_area)
+
+
+def _section(housing: list, centre: tuple, axis: tuple) -> dict | None:
+    """The outer loop of the housing's section through ``centre``, square to
+    ``axis``; None when no loop surrounds the centre. Its keys:
+
+    * ``across``: the loop's perimeter / pi, scaled by :func:`_round_factor` for
+      its steps: the round handle it was cut from.
+    * ``chorded``: the loop's own perimeter / pi, before that scale.
+    * ``steps``: the even steps it turns like (:func:`_even_steps`).
+    * ``drawn_centre``: the loop's area centroid, the drawn handle's axis in this
+      plane, in the device frame.
+    * ``off``: how far ``centre`` lies from it.
 
     Each part that crosses the plane is sliced on its own and the sections are
     united in the plane, so a handle drawn as two half shells is one loop. Of the
@@ -343,13 +457,15 @@ def _section_diameter(housing: list, centre: tuple, axis: tuple) -> float | None
     around = [p for p in loops if _contains_origin(p)]
     if not around:
         return None
-
-    def area(p):
-        return abs(0.5 * float(np.dot(p[:, 0], np.roll(p[:, 1], -1))
-                               - np.dot(p[:, 1], np.roll(p[:, 0], -1))))
-
-    outer = max(around, key=area)
-    return float(np.linalg.norm(np.roll(outer, -1, axis=0) - outer, axis=1).sum()) / math.pi
+    outer = max(around, key=lambda p: abs(_loop_area(p)))
+    perimeter = float(np.linalg.norm(np.roll(outer, -1, axis=0) - outer, axis=1).sum())
+    chorded = perimeter / math.pi
+    steps = _even_steps(outer)
+    cx, cy = _loop_centroid(outer)
+    drawn = g + cx * rows[0] + cy * rows[1]
+    return {"across": chorded * _round_factor(steps), "chorded": chorded,
+            "steps": steps, "drawn_centre": tuple(float(v) for v in drawn),
+            "off": math.hypot(cx, cy)}
 
 
 def _normals(raw: list, controls: list) -> dict:
@@ -379,7 +495,8 @@ def _evidence(ctx: GateContext, payload: dict) -> list[str]:
     id=GID,
     basis="model-only",
     title="The declared layout is the drawn one: every drawn control declared, every cap "
-          "where the layout says, no handle thicker than declared",
+          "where the layout says, no handle thicker than declared, every grip on its "
+          "handle",
     claims=TAGS,
     tier=Tier.BUILD,
     settles="declared layout agreement",
@@ -387,8 +504,9 @@ def _evidence(ctx: GateContext, payload: dict) -> list[str]:
     description=(
         "The validity guard of digit_reach's inputs: the declared controls and handle "
         "diameter against the exported scene, on cad-solid's node names (part ctl-<id>). "
-        "The control set both ways, each cap within 0.5 mm of its declared position, and "
-        "no handle section wider than the declared diameter plus 1.0 mm (one-sided). It "
+        "The control set both ways, each cap within 0.5 mm of its declared position, no "
+        "handle section wider than the declared diameter plus 1.0 mm (one-sided), and each "
+        "grip centre within 0.5 mm of its drawn handle's axis. It "
         "covers the reach claim's tag, because the registry refuses a tier-1 prerequisite "
         "on a tier-0 gate."),
     negative_control=NegativeControl(
@@ -404,12 +522,16 @@ def layout_agrees(ctx: GateContext) -> Verdict:
     Skips when the projection declares no controls, publishes no scene, or draws
     no ``ctl-`` part (an export requirement, not a judgment of the design), and
     when a declared grip comes with no handle diameter. Errors on a layout it
-    cannot judge: what ``_anthro`` refuses, a control with no ``normal``, two
-    declared ids that name one part, and a part that crosses a grip's section and
-    is not a solid. Fails on any structural disagreement (a control drawn and not
-    declared or declared and not drawn, a grip centre no section surrounds, a
-    handle wider than declared), counted against 0; otherwise on the worst cap,
-    in mm, against :data:`POSITION_TOL_MM`."""
+    cannot judge: what ``_anthro``'s parsers refuse (``parse_controls``,
+    ``parse_grips``), a control with no ``normal``, two declared ids that name one
+    part, and a part that crosses a grip's section and is not a solid. The reach
+    gate's other refusals (a control that names a grip no grip declares, a judged
+    control behind its grip centre) are not run here: on those
+    ``ergo.digit_reach`` errors, so the reach claim is not Checked. Fails on any
+    structural disagreement (a control drawn and not declared or declared and not
+    drawn, a grip centre no section surrounds, a handle wider than declared, a
+    grip centre off its handle's axis), counted against 0; otherwise on the worst
+    cap, in mm, against :data:`POSITION_TOL_MM`."""
     raw_controls = ctx.param("hand_controls")
     if raw_controls is None:
         return _skip("no hand_controls: the controls whose drawn caps this gate checks "
@@ -477,20 +599,31 @@ def layout_agrees(ctx: GateContext) -> Verdict:
     for grip_id in sorted(grips):
         grip = grips[grip_id]
         try:
-            across = _section_diameter(housing, grip.centre, grip.handle_axis)
+            section = _section(housing, grip.centre, grip.handle_axis)
         except ValueError as exc:
             return _error(f"grip {grip_id}: {exc}: its handle's section cannot be measured "
                           f"(cad-solid's cad.is_volume says why)")
-        if across is None:
+        if section is None:
             problems.append(f"no drawn part surrounds grip {grip_id}'s centre in its section "
                             f"square to the handle axis")
             grip_rows[grip_id] = {"surrounds_centre": False}
             continue
-        across = _up(across)
-        grip_rows[grip_id] = {"surrounds_centre": True, "section_diameter_mm": across}
+        across = _up(section["across"])
+        off = _up(section["off"])
+        grip_rows[grip_id] = {"surrounds_centre": True, "section_diameter_mm": across,
+                              "section_chorded_mm": _r(section["chorded"]),
+                              "section_steps": (round(section["steps"], 1)
+                                                if math.isfinite(section["steps"]) else None),
+                              "declared_centre": list(grip.centre),
+                              "drawn_centre": [_r(v) for v in section["drawn_centre"]],
+                              "centre_off_mm": off}
         if across > allowed:
             problems.append(f"grip {grip_id}'s section is {across:.2f} mm across, more than "
                             f"the declared {float(diameter):g} mm + {GIRTH_TOL_MM:.1f}")
+        if off > CENTRE_TOL_MM:
+            problems.append(f"grip {grip_id}'s centre is {off:.2f} mm off its drawn handle's "
+                            f"axis (the centroid of its section), more than "
+                            f"{CENTRE_TOL_MM:g} mm")
 
     placed = [cid for cid, row in rows.items() if row["drawn"]]
     # The first of the worst in declared order: `max` keeps the first it meets.
@@ -503,6 +636,12 @@ def layout_agrees(ctx: GateContext) -> Verdict:
                             for gid, row in sorted(grip_rows.items()))
                   + f" across vs declared {float(diameter):g} mm + {GIRTH_TOL_MM:.1f}"
                   if grips else "no grip declared, no section checked")
+    centred = [gid for gid, row in sorted(grip_rows.items()) if row["surrounds_centre"]]
+    if centred:
+        # The first of the worst in sorted order, as for the caps.
+        far = max(centred, key=lambda gid: grip_rows[gid]["centre_off_mm"])
+        grip_words += (f"; worst grip centre {grip_rows[far]['centre_off_mm']:.2f} mm off its "
+                       f"handle's axis ({far}) vs <= {CENTRE_TOL_MM:g} mm")
     counts = (f"{len(placed)} of {len(controls)} controls drawn, "
               f"{len(drawn - set(declared))} drawn and not declared")
     source = f"{where}, {sum(len(v) for v in parts.values())} nodes"
@@ -525,6 +664,7 @@ def layout_agrees(ctx: GateContext) -> Verdict:
         "disagreements": problems,
         "position_tol_mm": POSITION_TOL_MM,
         "girth_tol_mm": GIRTH_TOL_MM,
+        "centre_tol_mm": CENTRE_TOL_MM,
     })
     return Verdict(gate=GID, passed=passed, measured=measured, limit=limit, comparator="<=",
                    units=units, detail=detail, evidence=evidence)

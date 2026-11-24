@@ -51,7 +51,8 @@ BODY_MAX = (75.0, 20.0, 0.0)
 HANDLE_FROM_MM = -8.0
 HANDLE_TO_MM = 30.0
 
-#: 96 segments: a 36 mm handle slices to 35.99 mm, inside the gate's 1.0 mm.
+#: 96 segments: a 36 mm handle slices to a 35.99 mm loop, which the gate scales
+#: back to 36.00 mm for its 96 even steps (``gates/layout.py``, ``_round_factor``).
 HANDLE_SEGMENTS = 96
 
 #: Each cap: a 9 mm disc 4 mm tall on its normal, the top centre at ``at``.
