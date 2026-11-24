@@ -161,9 +161,11 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   bend radius, a plug's mating clearance, a tolerance stack, assembly order, a
   lid that flexes: none of them is in two solids. A part with no model skips
   the gate rather than pass it. And a part that passes through an opening cut
-  for it (a knob, a button, a light pipe) reads clear, however far it stands
-  proud of the face: the gate measures shared volume and clearance, not how far
-  a part should reach. That is `lenses.md`, "A part taller than its cavity".
+  wide enough to keep `pcb_enclosure_clearance_mm` (a knob, a button, a light
+  pipe) reads clear, however far it stands proud of the face. A tighter opening
+  fails on clearance, and that fail still says nothing about how far the part
+  reaches: the gate measures shared volume and clearance, not how far a part
+  should reach. That is `lenses.md`, "A part taller than its cavity".
 - **Whether the SPICE deck is the circuit.** ngspice solves the deck it is given.
   The deck is someone's model, typed by hand; `pcb.spice` refuses a run that
   dropped a line, an option name ngspice does not know, a command it does not

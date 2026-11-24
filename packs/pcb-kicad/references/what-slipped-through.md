@@ -31,7 +31,7 @@ own clearance shortcut (hundreds of violations, reverted). These are what
 | A switch's land drawn from another part's drawing: its middle pad well off where the vendor's footprint puts it, every design rule clean | a later gap analysis | `pcb.land_pattern`, pads paired by function |
 | A charger with no thermistor input and no safety timer, a PPTC fuse guaranteed to trip only at a current where the thin conductor it protects reaches its rating first, and nothing to cut the cell off at its minimum | the same analysis | `pcb.charge_protection`, `pcb.fuse_conductor`, `pcb.discharge_cutoff` |
 | A narrower ribbon seats in a wider housing and can put the cell on ground | an agent's safety lens | not a gate: an expert-judgment claim (PACK.md, "cannot settle") |
-| A part through an opening cut for it stood proud of the face, on a board with 0 violations and 0 unconnected | the person, on sight | not a gate: `pcb.enclosure_fit` measures shared volume and clearance, so a part through an opening cut for it reads clear; `lenses.md`, "A part taller than its cavity" |
+| A part through an opening cut for it stood proud of the face, on a board with 0 violations and 0 unconnected | the person, on sight | not a gate: `pcb.enclosure_fit` measures shared volume and clearance, so a part through an opening wide enough to keep `pcb_enclosure_clearance_mm` reads clear however far it reaches, and a tighter opening fails on clearance, which says nothing about reach; `lenses.md`, "A part taller than its cavity" |
 
 ## What the autorouter showed
 

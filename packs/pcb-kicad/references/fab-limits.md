@@ -45,7 +45,7 @@ braced UUID lowercase and dashed. A pad with no id, a padded one, a braced stamp
 or any other text gets a random one; then every silk overlap is counted, and the
 line says why.
 
-What slipped through: on a real 4-layer board the fab run counted every
+What slipped through: on a board with silk on silk, the fab run counted every
 silk-on-silk overlap that `pcb.drc` also found as past JLCPCB's limits, beside the
 findings that were the fab's, and the detail line read "Silkscreen overlap"
 three times, so nobody could see that no copper was past a limit. The first fix

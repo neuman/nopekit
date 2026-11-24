@@ -470,9 +470,9 @@ def pin_name_conflicts(board: Board, ignore=NO_FUNCTION_NAMES):
     """Every footprint pin name that two or more different nets share.
 
     A library symbol gives two pads one name when the part joins them inside:
-    a flow-through ESD array's ``I/O1`` is pins 1 and 6, a regulator's ``GND``
-    is its tab and a pin. Put two different nets on them and the part shorts the
-    nets, which no design rule check can see, because the copper is legal.
+    a TVS array's ``COM`` is pins 2 and 5, a regulator's ``GND`` is its tab and
+    a pin. Put two different nets on them and the part shorts the nets, which no
+    design rule check can see, because the copper is legal.
 
     Returns ``(conflicts, named, footprints_named)``: conflicts as
     ``(ref, name, {net: [pad numbers]})``; ``named`` the count of pads that carry
@@ -591,7 +591,7 @@ def reported_as(constraint: str) -> tuple[str, ...]:
 #: silk minimum (zeroed in the fab run, so only real overlaps remain), and that
 #: finding is ``pcb.drc``'s. So :func:`fab_findings` leaves a ``silk_overlap`` to
 #: ``pcb.drc`` only when it can show that no item is a pad. (What slipped through:
-#: on a real 4-layer board the fab run counted every silk-on-silk overlap
+#: on a board with silk on silk, the fab run counted every silk-on-silk overlap
 #: ``pcb.drc`` reported a second time, as past JLCPCB's limits, beside the
 #: findings that were the fab's. The baseline has no silk on silk, so its selftest
 #: could not see it.)

@@ -762,7 +762,7 @@ SYMBOLS = next((d for d in (os.environ.get("KICAD9_SYMBOL_DIR", ""), "/usr/share
                 if d and os.path.isfile(os.path.join(d, "Device.kicad_sym"))), None)
 
 #: The words kicad-cli 9.0.9 gave an open pin's pad in a parity report, on a
-#: 4-layer board with a written schematic (measured): pcb.parity reads the
+#: generated board with a written schematic (measured): pcb.parity reads the
 #: ``(unconnected-(`` in them, KiCad's net name, which is not translated.
 OPEN_PIN_WORDS = "Pad missing net given by schematic (unconnected-(J1-SBU1-PadA8))."
 
@@ -1398,11 +1398,23 @@ class ADerivedSymbolIsFlattenedAsEeschemaCachesIt(unittest.TestCase):
     slipped through, in this pack's ORIGINS scrub: the baseline's old ESD array
     was the only derived symbol any test read, so the swap to a part that extends
     nothing left the flattening unexercised. NCP349MNAE extends NCP349MN in
-    KiCad 9's Power_Protection library.)"""
+    KiCad 9's Power_Protection library. And every assertion on the cache holds
+    for a symbol that was flat to begin with, when its pins match the parent's,
+    so the raw library is read first: in review, a library update that drew the
+    child standalone would have left this test green and the flattening untested
+    again.)"""
 
     LIB, CHILD, PARENT = "Power_Protection", "NCP349MNAE", "NCP349MN"
 
     def setUp(self):
+        with open(os.path.join(SYMBOLS, f"{self.LIB}.kicad_sym"), encoding="utf-8") as fh:
+            raw = K.parse(fh.read())
+        entry = next((s for s in K.children(raw, "symbol") if str(s[1]) == self.CHILD), None)
+        self.assertIsNotNone(entry, f"the stock {self.LIB} library no longer holds "
+                                    f"{self.CHILD}: pick another derived symbol")
+        self.assertEqual(str(K.value(entry, "extends")), self.PARENT,
+                         f"the stock {self.LIB} library no longer derives {self.CHILD} "
+                         f"from {self.PARENT}: pick another symbol that extends one")
         self.root = tempfile.mkdtemp(prefix="nopekit-pcb-derived-")
         self.addCleanup(shutil.rmtree, self.root, True)
         proc = _env.run([sys.executable, "-c", _DERIVED, os.path.join(PACK, "proposers"),

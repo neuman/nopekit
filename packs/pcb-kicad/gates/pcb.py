@@ -58,8 +58,10 @@ pipeline this pack was extracted from; references/what-slipped-through.md):
   cannot find, with exit 0: a part the fit cannot see is a skip here. Not this
   gate: a part that stood proud of the face, through the opening cut for it, was
   found by a person on sight. The fit measures shared volume and clearance, so a
-  part through an opening cut for it reads clear (lenses.md, "A part taller than
-  its cavity").
+  part through an opening wide enough to keep ``pcb_enclosure_clearance_mm``
+  reads clear however far it reaches, and a tighter opening fails on clearance,
+  which still says nothing about how far it reaches (lenses.md, "A part taller
+  than its cavity").
 
 **Missing inputs skip; they never default.** Which board, which nets carry how much
 current, how hot a trace may run, which fab, which deck and limit, which enclosure
@@ -607,10 +609,10 @@ def net_width(ctx: GateContext) -> Verdict:
     # same copper counted once; and every other stretch that reads as hot at the
     # precision the line prints (another net's, or the same net's at another width
     # or side) is named after it, up to TIES_NAMED. (What slipped through:
-    # on a real 4-layer board the line read "VBUS: narrowest 0.2 mm on In2.Cu",
-    # but VBUS ran on B.Cu at 0.2 mm too, and cooler, so the word gave a reader
-    # cause to widen the outer stretches, which would not lower the rise; a
-    # 0.25 mm inner track can be the hottest beside a 0.2 mm outer one, where
+    # the line named a net's narrowest track and one layer, where the same net
+    # ran at that width on an outer layer too, and cooler, so the word gave a
+    # reader cause to widen the outer stretch, which would not lower the rise;
+    # an inner track can be the hottest beside a narrower outer one, where
     # "narrowest" is false; and in a tie, as on the baseline's
     # VBUS and GND, the line named one net and not the other.)
     stretches: dict[tuple, list] = {}
@@ -890,13 +892,14 @@ def _probe_rules(ctx: GateContext, gid: str, path: str):
     :func:`_kicad.probe_rules`' probes appended to it (a syntax error then drops
     the probes too, which shows), in one kicad-cli run. A probe that fired 0 times
     there is run again alone, the project's file and that probe: several
-    assertion rules on one item can mask each other (Design 2 saw 75 fall to 56),
-    and only a probe still at 0 alone is dead. When no probe fires, a canary that
+    assertion rules on one item can mask each other (on a measured board, probes
+    fired fewer times together than alone), and only a probe still at 0 alone is
+    dead. When no probe fires, a canary that
     selects everything tells a file KiCad dropped from rules that select nothing.
     A rule whose condition reads B is probed on its A side, the ``&&`` terms that
     read A alone (``_kicad.probe_rules``), and dead when that side selects nothing;
     one with no such term is never called dead: still at 0 alone, it is said to be
-    not shown live. (Measured on a 4-layer board: a custom rule on one net whose
+    not shown live. (Measured on a generated board: a custom rule on one net whose
     condition read B inside an OR fired 0 times beside its token probes and dozens
     of times alone.) Live means the rule selects an item, not that its
     constraint can apply to one: a ``track_width`` rule that selects only vias is
@@ -1135,7 +1138,7 @@ def parity(ctx: GateContext) -> Verdict:
     # unconnected schematic pin's net ``unconnected-(<ref>-<pin>-Pad<n>)``, even
     # under a no-connect flag, and reports the pad it sits on, which has no net on
     # the board, as "Pad missing net given by schematic (unconnected-(...))". On a
-    # 4-layer board with a written schematic that was every difference parity
+    # generated board with a written schematic that was every difference parity
     # reported: measured. Counted as agreement only when every item is a pad the
     # board gives no net (matched by id, as the fab count is, never by the
     # translated words)
