@@ -320,6 +320,20 @@ class Design:
         name = next((p.net for p in fp.pads if p.number == str(pin)), "")
         return (path, name) if name else None
 
+    def land(self, path: str, fp) -> dict[str, tuple[float, float]]:
+        """The centre of each of ``fp``'s pads numbered 1..n on the board at
+        ``path``, in the footprint's own frame (``_kicad.footprint_land``),
+        two pads of one number at their mean: where a positional mode finds a
+        pad's partner, never from its number alone."""
+        tree = self.ctx.load_file(path, loader=K.load_tree)
+        pads, _unnumbered = K.footprint_land(tree, fp.ref)
+        at: dict[str, list[tuple[float, float]]] = {}
+        for p in pads:
+            if p.number.isdigit():
+                at.setdefault(p.number, []).append((p.x, p.y))
+        return {n: (sum(x for x, _ in xy) / len(xy), sum(y for _, y in xy) / len(xy))
+                for n, xy in at.items()}
+
     def node(self, path: str, name: str) -> tuple:
         """The global net of the net ``name`` on the board at ``path``."""
         return self._find((path, name))
@@ -417,13 +431,18 @@ class Design:
 # --------------------------------------------------------------------------- #
 
 #: The modes a mating takes as one word: ``reversed`` (the plug turned end for
-#: end in its housing: position i meets the one n+1-i would), ``rotate`` (a
-#: two-row header turned 180 degrees: on KiCad's zigzag numbering, odd pins on
-#: one row and even on the other, position i lands on n+1-i too, and the rule
-#: holds the count even) and ``flipped_type`` (the other FFC contact type, same
-#: side for opposite side: the order reverses at b's end only). The first two
-#: name different events with one arithmetic; both are kept so a record says
-#: which it means.
+#: end in its housing), ``rotate`` (a two-row header turned 180 degrees; the
+#: rule holds the count even) and ``flipped_type`` (the other FFC contact type,
+#: same side for opposite side: the order reverses at b's end only). Each
+#: lands a conductor on the pad its own pad's centre turns onto, 180 degrees
+#: about the middle of the footprint's numbered pads (:func:`turned`). The first
+#: two name different events with one arithmetic; both are kept so a record
+#: says which it means. Rejected: position i meets n+1-i, from the numbers.
+#: (What slipped through P6: that holds on KiCad's zigzag numbering and on a
+#: top-bottom one, and on a DIP's counter-clockwise numbering a turned header
+#: lands 1 on n/2+1, not on n, so a real hazard read as none; and on a
+#: footprint with a pad left out, 1, 2, 3 and 5, the reversed plug met 2 with
+#: 3 where it meets the empty slot.)
 MODE_WORDS = ("reversed", "rotate", "flipped_type")
 
 #: The modes a mating takes as ``{mode: value}``: ``narrower`` (an N-way cable
@@ -454,6 +473,80 @@ def positions(fp) -> list[str]:
     return sorted({p.number for p in fp.pads if p.number.isdigit()}, key=int)
 
 
+def gap(fp) -> str:
+    """Why ``fp``'s numbered pads are not 1..n with none left out, or "".
+    The positional arithmetic counts positions by pad number, so a pad left
+    out (a keyed housing's blocked position) would shift every position past
+    it. (What slipped through P6: :func:`positions` dropped the gap, and a
+    reversed 1, 2, 3, 5 met 2 with 3; P5 had refused it only by the accident
+    of a missing-pad check.)"""
+    p = positions(fp)
+    if p == [str(i) for i in range(1, len(p) + 1)]:
+        return ""
+    top = max(int(n) for n in p)
+    missing = [str(i) for i in range(1, top + 1) if str(i) not in p]
+    said = (f"has no pad {', '.join(missing[:6])}{', ...' if len(missing) > 6 else ''} "
+            f"among 1..{top}" if missing else f"numbers its pads {', '.join(p[:6])}"
+            f"{', ...' if len(p) > 6 else ''}, not 1..{len(p)}")
+    return f"{fp.ref} ({fp.value}) {said}"
+
+
+#: How near, mm, a pad's turned centre must land on another pad's centre to be
+#: that pad: 0.01 mm. KiCad writes a pad's place to 1 nm, and the finest
+#: connector pitch in its stock libraries is 0.3 mm, so a pad either lands on a
+#: partner to well inside this or misses it by a pitch. Rejected: 0.1 mm (a
+#: footprint drawn a tenth off its grid would pair pads that never meet).
+TURN_TOL_MM = 0.01
+
+
+def turned(d, path: str, fp, where: str) -> dict[str, str]:
+    """Each of ``fp``'s pads numbered 1..n and the pad it meets when the plug
+    turns 180 degrees: the pad at its centre's point reflection through the
+    middle of the numbered pads' extent. A pad that lands on no pad is
+    refused, naming it: a footprint that is not the same turned round is one
+    whose turned fit this rule cannot place."""
+    land = d.land(path, fp)
+    xs, ys = [x for x, _ in land.values()], [y for _, y in land.values()]
+    cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+    out = {}
+    for n, (x, y) in sorted(land.items(), key=lambda kv: int(kv[0])):
+        hit = [m for m, (u, v) in land.items()
+               if abs(u - (2 * cx - x)) <= TURN_TOL_MM and abs(v - (2 * cy - y)) <= TURN_TOL_MM]
+        if len(hit) != 1:
+            raise RecordError(f"{where}: {fp.ref} ({fp.value}) turned 180 degrees puts pad {n} "
+                              f"where it has no numbered pad, so this rule cannot place the "
+                              f"turned plug; if the housing stops it, state modes [] and why "
+                              f"in source")
+        out[n] = hit[0]
+    return out
+
+
+def zigzag(d, path: str, fp) -> bool:
+    """Whether ``fp``'s pads 1..n (n even) sit on KiCad's zigzag numbering, odd
+    pads on one row and even on the other: each odd pad and the even pad after
+    it one row step apart, each odd pad and the next odd pad one column step
+    apart, and the two steps not along one line. Checked on the pads' centres,
+    so a DIP's counter-clockwise numbering or a top-bottom one is not read as
+    zigzag."""
+    land = d.land(path, fp)
+    n = len(land)
+
+    def step(a: int, b: int) -> tuple[float, float]:
+        (xa, ya), (xb, yb) = land[str(a)], land[str(b)]
+        return xb - xa, yb - ya
+
+    def same(u, v) -> bool:
+        return abs(u[0] - v[0]) <= TURN_TOL_MM and abs(u[1] - v[1]) <= TURN_TOL_MM
+
+    if n < 4 or n % 2:
+        return False
+    row, col = step(1, 2), step(1, 3)
+    if abs(row[0] * col[1] - row[1] * col[0]) <= TURN_TOL_MM ** 2:
+        return False
+    return (all(same(step(k, k + 1), row) for k in range(1, n, 2))
+            and all(same(step(k, k + 2), col) for k in range(1, n - 1, 2)))
+
+
 class Mating:
     """One ``pcb_matings`` record, read strictly and bound to its connectors.
 
@@ -471,7 +564,10 @@ class Mating:
     What slipped through the branch's reader: a dict map's a pins were never
     held to a's pads, so a pin a regenerated board had renumbered joined
     nothing and no rule said so; and a straight map on a footprint whose pads
-    are not numbered 1..n (USB-C's A1..B12) joined nothing at all."""
+    are not numbered 1..n (USB-C's A1..B12) joined nothing at all.
+
+    ``turn`` holds, per end, each numbered pad's partner when that end's plug
+    turns 180 degrees (:func:`turned`), for the modes that turn it."""
 
     def __init__(self, d, mid: str, rec: dict):
         label = f"pcb_matings.{mid}"
@@ -503,7 +599,8 @@ class Mating:
                    else "the far side has no pads this pack reads")
             raise RecordError(f"{label}.map: a mating whose far side is {self.kind} takes no "
                               f"map ({why})")
-        self.modes = None if "modes" not in rec else self._modes(rec["modes"])
+        self.turn: dict[str, dict[str, str]] = {}
+        self.modes = None if "modes" not in rec else self._modes(d, rec["modes"])
 
     @property
     def name(self) -> str:
@@ -520,6 +617,17 @@ class Mating:
             if not numbered:
                 raise RecordError(f"{label}.map is {mapping}, and {fa.ref} ({fa.value}) has no "
                                   f"pads numbered 1..n: give {{a_pin: b_pin}}")
+            # Straight meets each pad with the pad of its own number, so a pad
+            # left out meets nothing, as it does. Reversed counts positions:
+            # a gap, or another count at b's end, moves every pairing.
+            if mapping == "reversed":
+                why = gap(fa) or gap(fb)
+                if not why and len(positions(fb)) != len(numbered):
+                    why = (f"{fa.ref} has {len(numbered)} positions and {fb.ref} "
+                           f"{len(positions(fb))}")
+                if why:
+                    raise RecordError(f"{label}.map is reversed, which meets position i with "
+                                      f"n+1-i, and {why}: give {{a_pin: b_pin}}")
             pairs = list(zip(numbered, numbered if mapping == "straight" else numbered[::-1]))
         elif isinstance(mapping, dict) and mapping:
             pairs = [(text(a, f"{label}.map key"), text(b, f"{label}.map[{a}]"))
@@ -538,7 +646,7 @@ class Mating:
                                   f"has no pad {b_pin} to meet {fa.ref} pad {a_pin}")
         return pairs
 
-    def _modes(self, modes) -> list[tuple]:
+    def _modes(self, d, modes) -> list[tuple]:
         label = f"{self.label}.modes"
         if not isinstance(modes, list):
             raise RecordError(f"{label} is {modes!r}: give a list of the ways it can meet "
@@ -566,10 +674,10 @@ class Mating:
             if name not in MODES_FOR[self.kind]:
                 raise RecordError(f"{where}: {name} is not judged on a mating whose far side is "
                                   f"{self.kind}; it takes {', '.join(MODES_FOR[self.kind])}")
-            out.append(self._mode(name, arg, mode, where))
+            out.append(self._mode(d, name, arg, mode, where))
         return out
 
-    def _mode(self, name: str, arg, mode, where: str) -> tuple:
+    def _mode(self, d, name: str, arg, mode, where: str) -> tuple:
         if self.kind == "battery":
             return (name,)
         fa = self.a[1]
@@ -597,6 +705,13 @@ class Mating:
         if not [c for c, _ in self.pairs if c in set(positions(fa))]:
             raise RecordError(f"{where}: {name} moves the plug along {fa.ref}'s pads numbered "
                               f"1..n, and the map puts no conductor on one")
+        side = self.b if name == "flipped_type" else self.a
+        why = gap(side[1])
+        if why:
+            raise RecordError(f"{where}: {name} counts positions by pad number, and {why}: the "
+                              f"left-out position is not on the board, so this rule cannot "
+                              f"place a plug across it; if the gap keys the housing against "
+                              f"this fit, state modes [] and why in source")
         if name == "rotate" and n % 2:
             raise RecordError(f"{where}: rotate is a two-row header turned 180 degrees, and "
                               f"{fa.ref} has {n} numbered pads, an odd count")
@@ -605,6 +720,9 @@ class Mating:
             if not all(bp in q for _c, bp in self.pairs):
                 raise RecordError(f"{where}: flipped_type reverses b's numbered pads, and the "
                                   f"map meets a pad of {self.b[1].ref} that is not numbered")
+        if name in ("reversed", "rotate", "flipped_type"):
+            end = "b" if name == "flipped_type" else "a"
+            self.turn[end] = turned(d, side[0], side[1], where)
         if name == "narrower":
             width = count(arg, f"{where}.narrower")
             if width >= n:
@@ -618,6 +736,14 @@ class Mating:
                 raise RecordError(f"{where}.rows is {rows!r}: give 1 or 2")
             if k * rows >= n:
                 raise RecordError(f"{where}.offset is {k}: past {fa.ref}'s {n} positions")
+            # A column is two numbers only on KiCad's zigzag numbering. (What
+            # slipped through P6: rows 2 shifted by two numbers on any
+            # footprint, a DIP-numbered one or a single row included.)
+            if rows == 2 and not zigzag(d, self.a[0], fa):
+                raise RecordError(f"{where}: offset with rows 2 moves the plug by columns of "
+                                  f"KiCad's zigzag numbering (odd pads on one row, even on the "
+                                  f"other), and {fa.ref} ({fa.value})'s pad centres are not on "
+                                  f"it")
             return (name, k, rows)
         return (name,)
 
@@ -634,13 +760,12 @@ class Mating:
         n = len(p)
         nominal = [[("a", c), ("b", bp)] for c, bp in self.pairs]
         if name in ("reversed", "rotate"):
-            groups = [[("a", p[n - 1 - idx[c]]), ("b", bp)] if c in idx else [("a", c), ("b", bp)]
-                      for c, bp in self.pairs]
+            turn = self.turn["a"]
+            groups = [[("a", turn.get(c, c)), ("b", bp)] for c, bp in self.pairs]
             return [("turned 180 degrees" if name == "rotate" else "reversed", groups)]
         if name == "flipped_type":
-            q = positions(self.b[1])
-            jdx = {pin: i for i, pin in enumerate(q)}
-            groups = [[("a", c), ("b", q[len(q) - 1 - jdx[bp]])] for c, bp in self.pairs]
+            turn = self.turn["b"]
+            groups = [[("a", c), ("b", turn[bp])] for c, bp in self.pairs]
             return [("with the other FFC contact type", groups)]
         if name == "narrower":
             width, m = mode[1], dict(self.pairs)
@@ -720,21 +845,40 @@ TYPEC_PINS = tuple(f"{row}{n}" for row in "AB" for n in range(1, 13))
 
 _TYPEC_NAME = re.compile(r"USB.?C|TYPE.?C", re.IGNORECASE)
 
+#: A ref that names a connector: J, P or CN and a number (IEEE 315's letters
+#: for a jack and a plug, and a common one for a connector, as ``pcb.mismate``'s
+#: coverage reads them), X and a number (IEC 81346-2's class for a connector),
+#: or USB and a number, which many projects give a USB connector.
+_CONNECTOR_REF = re.compile(r"^(J|P|CN|X|USB)\d+$")
+
 
 def typec_receptacle(fp) -> bool:
-    """Whether ``fp`` is a USB Type-C receptacle: two of its pads carry the pin
-    names CC1 and CC2 (KiCad's receptacle symbols name them so; its plug
-    symbol names them CC and VCONN), or its footprint's name says USB-C or
-    Type-C, not Plug, and it has pads A5 and B5. Rejected: pads A5 and B5
-    alone (a ball grid numbers its balls so, and every BGA would read as a
-    receptacle)."""
+    """Whether ``fp`` is a USB Type-C receptacle: a connector whose pads carry
+    the pin names CC1 and CC2 (KiCad's receptacle symbols name them so; its
+    plug symbol names them CC and VCONN), or a footprint whose name says USB-C
+    or Type-C, not Plug, with pads A5 and B5. A connector is a footprint from
+    KiCad's ``Connector*`` libraries, one whose name says USB-C or Type-C, or
+    one whose ref names a connector (:data:`_CONNECTOR_REF`).
+
+    Rejected: pads A5 and B5 alone (a ball grid numbers its balls so, and
+    every BGA would read as a receptacle). And any footprint whose pads carry
+    CC1 and CC2: KiCad 9.0.9's own ``Interface_USB`` symbols name a USB-C
+    controller's pins so (AP33771, CH236D, CYPD3177-24LQ, FUSB302BMPX,
+    FUSB303BTMX, FUSB307BMPX, IP2721, STUSB4500QTR, TUSB320/321/322I), and
+    pcbnew copies the names onto the pads. (What slipped through P6: a stock
+    FUSB302BMPX read as a receptacle that no record named, so
+    ``pcb.usbc_receptacle`` errored on every board with one, and no record
+    could clear it, since the part has no A5 or B5; and ``pcb.mismate`` read
+    its VBUS and GND pins as a receptacle's.) Rejected too: refusing a part
+    whose ref is U (every other part with CC1 and CC2 still read as one)."""
+    lib = fp.lib_id.split(":")[-1]
+    named_typec = bool(_TYPEC_NAME.search(lib)) and "PLUG" not in lib.upper()
     names = {p.pinfunction.strip().upper() for p in fp.pads}
     if {"CC1", "CC2"} <= names:
-        return True
-    lib = fp.lib_id.split(":")[-1]
+        return (named_typec or fp.lib_id.split(":")[0].startswith("Connector")
+                or bool(_CONNECTOR_REF.match(fp.ref)))
     numbers = {p.number for p in fp.pads}
-    return (bool(_TYPEC_NAME.search(lib)) and "PLUG" not in lib.upper()
-            and {"A5", "B5"} <= numbers)
+    return named_typec and {"A5", "B5"} <= numbers
 
 
 class UsbC:

@@ -36,7 +36,7 @@ circuit that works. Nothing here has seen the board powered.
 | `pcb.fault_current` | 0 | sourced | every conductor in `pcb_conductors` is guarded across the fault range: its protector's interrupt rating, the overload band (I2 <= 1.45 Iz, by analogy with IEC 60364-4-43) and IEC 60949's adiabatic limit at every trip point the cell can reach; a fuse, PTC, eFuse, protector FETs on either side or an in-pack PCM |
 | `pcb.discharge_cutoff` | 0 | sourced | the highest per-cell cutoff that senses the cell (directly, through a named chain, or across a mating) and opens a switch in its path, or sits in the pack, is at or above the cell's minimum voltage |
 | `pcb.mismate` | 0 | model-only | no wrong way a mating's record states (a reversed plug, a narrower cable, an offset header, a rotated header, the other FFC type, a plug slid in, a plug that bridges contacts), nor its own map, joins a source to its return or to another source; a reversed cell is blocked or limited; every connector that carries a source is named by a mating |
-| `pcb.usbc_receptacle` | 0 | sourced | each USB-C receptacle's CC pins are terminated apart, as its role asks (one Rd or Rp each, in the Type-C specification's band, or a named controller), a source switches VBUS, and USB 2.0 data reaches both rows with D+ apart from D- |
+| `pcb.usbc_receptacle` | 0 | sourced | each USB-C receptacle's CC pins are terminated apart, as its role asks (one Rd or Rp each, in the Type-C specification's band, or a named controller), a source switches VBUS through a part with a control pin, each USB 2.0 data pin is on a net with D+ apart from D-, and, where `pcb.pin_names` cannot see them, the VBUS, GND, A6/B6 and A7/B7 pins are each bussed |
 
 The tier-0 gates read the board with this pack's own reader (`gates/_kicad.py`,
 standard library only), so they run without KiCad, CI included. The tier-1 gates
@@ -92,8 +92,13 @@ connectors' nets pin by pin, so an element on another board counts; a mating's
 far side may also be a battery's pigtail or something outside every board, and
 its `modes` say the wrong ways it can meet. `pcb_usbc` gives each USB-C
 receptacle's role, and `pcb_rails` the nets a regulator or an outside supply
-drives. Every rule reads one record one way: a record any of them refuses is
-refused by all. The baseline's records name
+drives. A `pcb_matings` record is read whole by every rule that reads it, so a
+mating any of them refuses is refused by all. The other records are read by
+each rule for what it uses: only `pcb.usbc_receptacle` holds a `pcb_usbc`
+record to its role's keys (`pcb.mismate` reads its pins), and a
+`pcb_protectors` function is read by the rules that judge it (a
+`reverse_block` only by `pcb.mismate`, for a battery mating that states
+`reversed`). The baseline's records name
 `selftest/assets/power_board.kicad_pcb` (made by `make_power_board.py`: placed,
 netted, not routed), which only these six rules read. `references/battery.md`,
 `references/mismate.md` and `references/usb-c.md` hold every field.
@@ -196,9 +201,13 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   per role, a source's VBUS switch and the two rows of USB 2.0 data. It does not
   judge SuperSpeed lanes, USB Power Delivery, VCONN, SBU, a controller's own Rd
   or Rp (its datasheet's), whether the device draws more than the source
-  advertises, or firmware that turns VBUS on before a sink attaches. Same pin
-  name, same net (the four VBUS, the four GND, A6 and B6) is
-  `pcb.pin_names`', which needs the pads' names.
+  advertises, an open VBUS or GND pad, or what drives the VBUS switch's control
+  pin and when (firmware that turns VBUS on before a sink attaches, or a
+  pull-up nothing pulls down). Same pin name, same net (the four VBUS, the four
+  GND, A6 and B6) is `pcb.pin_names`' on `pcb_board`, where the pads name those
+  pins alike; on any other board, or with the pads not so named, this rule
+  checks it. A resistor `others` names beside a CC termination is taken on its
+  why: what lies beyond it is not read.
 - **RF, signal integrity, EMC.** Antenna detuning, impedance, crosstalk, return
   paths: not modelled.
 - **Fit beyond the solids.** `pcb.enclosure_fit` checks the parts' 3D models

@@ -48,17 +48,33 @@ Each mode is a physical event. The rule enumerates every placement it allows.
 
 | Mode | The event | The arithmetic |
 |---|---|---|
-| `reversed` | the plug turned end for end | position i meets what n+1-i would |
-| `rotate` | a two-row header turned 180 degrees | the same, on KiCad's zigzag numbering; the count must be even |
-| `flipped_type` | the other FFC contact type (same side for opposite side) | b's order reversed |
+| `reversed` | the plug turned end for end | each pad meets the pad its centre turns onto, 180 degrees about the middle of a's numbered pads |
+| `rotate` | a two-row header turned 180 degrees | the same; the count must be even |
+| `flipped_type` | the other FFC contact type (same side for opposite side) | b's pads turned the same way: b's order reversed |
 | `{narrower: N}` | an N-way cable in the n-way housings | every pair of end offsets in 0..n-N |
-| `{offset: k}` | a's unshrouded header off by up to k positions | shifts of -k..k but 0; `rows: 2` shifts by columns |
+| `{offset: k}` | a's unshrouded header off by up to k positions | shifts of -k..k but 0; `rows: 2` shifts by columns, on KiCad's zigzag numbering only |
 | `{slide: [pins]}` | an audio plug on its way in | a's contacts, the deepest first: each plug contact passes the shallower ones |
 | `{bridges: [[p, q]]}` | a wrong plug that shorts two of a's contacts | p and q joined, beside the nominal map |
 
 The modes that act on one housing act on `a`. When `b` can be off or slid too,
-state the mating a second time with its ends swapped. A positional mode needs
-pads numbered 1..n; `slide` and `bridges` take any pad names.
+state the mating a second time with its ends swapped. `slide` and `bridges`
+take any pad names. The positional modes need the housing's pads numbered 1..n
+with none left out: a gap (1, 2, 3 and 5) is refused, naming it, because the
+left-out position is not on the board and a plug turned or moved across it
+cannot be placed. If the gap keys the housing against that fit, the mating
+takes `modes: []`. A map of `reversed` needs the same, at both ends, and the
+same count. `straight` meets each pad with the pad of its own number, so a gap
+there meets nothing, as it does.
+
+The turned modes (`reversed`, `rotate`, `flipped_type`) find each pad's
+partner on the pad centres, never from its number: the point reflection
+through the middle of the numbered pads. So KiCad's zigzag numbering, a
+top-bottom one and a DIP's counter-clockwise one (where a turned header meets
+1 with n/2+1, not with n) all read as the copper does. A pad whose turned
+centre lands on no numbered pad (within 0.01 mm) is refused, naming it.
+`offset` with `rows: 2` shifts by two numbers, so it is refused on a footprint
+whose pad centres are not on KiCad's zigzag numbering. `narrower` and `offset`
+count positions in pad-number order along the row.
 
 ## Sources, hazards and protection
 
@@ -76,10 +92,17 @@ net:
 Two returns that meet are no hazard. A source that meets a signal is listed in
 the evidence, and not judged.
 
-A hazard is **raw** unless either node lies beyond a fault element. A protected
-hazard is named in the detail and does not fail: `pcb.fault_current` judges the
-element. The count is of raw hazards, each pair of nodes once, however many
-wrong ways make it.
+The loop of the source that drives a hazard decides whether it is **raw**.
+When the other node carries a terminal of that same source, the source's own
+loop closes there, and that pair decides: a cell's positive on its own return
+beyond a low-side switch is protected, whatever else (a receptacle's GND, a
+rail's return) shares that return; VBUS on its own receptacle's GND is raw.
+Only when the other node carries none of the source's own terminals does the
+source meet another source; then the hazard is raw unless either node lies
+beyond a fault element. The pair of nodes is raw when any source's loop is. A
+protected hazard is named in the detail and does not fail: `pcb.fault_current`
+judges the element. The count is of raw hazards, each pair of nodes once,
+however many wrong ways make it.
 
 ## The nominal map
 
@@ -145,6 +168,10 @@ The cell meets BT1 in a keyed housing (`modes: []`), J1 meets a charger's plug
   FET): the rule reads them as two nets;
 - two copies of one board file (the halves of a split keyboard drawn once): it
   reads them as one board;
+- a housing wider than its footprint's pads (the last positions drawn with no
+  pad): it reads the pads as the housing's positions;
+- `narrower` or `offset` on a footprint whose pad numbers do not run in order
+  along its row (a shield tab given the next number);
 - a USB Power Delivery contract above 5 V;
 - the arc as a plug goes in, and hot-plug damage.
 

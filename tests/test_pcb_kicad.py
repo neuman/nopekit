@@ -3280,6 +3280,11 @@ class AMisMatingIsJudgedByTheModesStated(_PowerCase):
         self.assertIn("flex's own map: J11 pad 1 (VBUS) meets J10 pad 1 (GND)", verdict.detail)
 
     def test_each_positional_mode(self):
+        """Each positional mode on the single-row FFC housings. ``rows: 2`` is
+        refused there: a column is two numbers only on KiCad's zigzag
+        numbering, which a single row is not (review of P6: it shifted J10 by
+        two numbers, a column it does not have, and failed on that).
+        APositionalModeReadsThePadCentres has the two-row arithmetic."""
         for modes, outcome, said in (
                 (["reversed"], "pass", "1 wrong way(s)"),
                 (["rotate"], "pass", "1 wrong way(s)"),
@@ -3287,11 +3292,74 @@ class AMisMatingIsJudgedByTheModesStated(_PowerCase):
                 ([{"offset": 2}], "pass", "4 wrong way(s)"),
                 ([{"offset": 4}], "fail", "J10 off by -4 positions: J11 pad 5 (VBUS) meets "
                                           "J10 pad 1 (GND)"),
-                ([{"offset": 2, "rows": 2}], "fail", "J10 off by -2 columns")):
+                ([{"offset": 2, "rows": 2}], "error", "offset with rows 2 moves the plug by "
+                                                      "columns of KiCad's zigzag numbering")):
             with self.subTest(modes=modes):
                 verdict = self.run_gate(self.GID, records=lambda p: _link(p, "straight", modes))
                 self.assertEqual(verdict.outcome, outcome, verdict.render())
+                self.assertIn(said, verdict.error if outcome == "error" else verdict.detail)
+
+    def test_a_footprint_with_a_pad_left_out_is_refused(self):
+        """J10 with its pad 4 taken off: the 6-way cable counts positions by
+        number, and the left-out position is not on the board, so the rule
+        refuses, naming the gap (review of P6: the positions skipped it, and
+        a reversed 1, 2, 3, 5 met 2 with 3 where it meets the empty slot)."""
+        def edit(t):
+            fp = _footprint(t, "J10")
+            fp.remove(_pad(t, "J10", "4"))
+        verdict = self.run_gate(self.GID, edit)
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("narrower counts positions by pad number, and J10 (FFC_8P) has no pad 4 "
+                      "among 1..8", verdict.error)
+        verdict = self.run_gate(self.GID, edit, lambda p: _link(p, "reversed", []))
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("map is reversed, which meets position i with n+1-i, and J10 (FFC_8P) "
+                      "has no pad 4 among 1..8", verdict.error)
+        # Straight meets each pad with the pad of its own number: the gap
+        # meets nothing, as it does, and the mating is judged.
+        verdict = self.run_gate(self.GID, edit, lambda p: _link(p, "straight", []))
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+
+    def test_a_short_through_its_own_fault_element_is_protected(self):
+        """Q1 stated as a FET trip at the cell's negative, so GND lies beyond
+        it, and the cell's + on J10 pad 8 bridged to J10 pad 1 (GND): the
+        cell's loop runs through Q1, so the hazard is protected, with J1 on
+        the board or not. Review of P6: J1's GND on the same net read the pair
+        raw, and the same short failed with J1 fitted and passed without it.
+        VBUS on GND, J1's own loop, stays raw beside Q1's protected GND."""
+        def trip(p):
+            p["pcb_protectors"]["protector"]["functions"]["trip"] = {
+                "kind": "fet", "terminal": "neg", "trip_a": 5.0, "trip_max_s": [[10.0, 0.01]],
+                "switch": {"ref": "Q1", "value": "FDS6890A", "path": ["1", "3"]}}
+            _link(p, "straight", [{"bridges": [["8", "1"]]}])
+
+        def no_j1(p):
+            trip(p)
+            p.pop("pcb_usbc")
+            p["pcb_matings"].pop("usb_in")
+
+        def cell_on_8(t):
+            _to_net(t, "J10", "8", "CELL_P")
+
+        def cell_on_8_no_j1(t):
+            cell_on_8(t)
+            K.child(_footprint(t, "J1"), "attr").append("dnp")
+        said = ("1 protected, judged by pcb.fault_current: flex, a plug that bridges 8-1 on "
+                "J10: J10 pad 8 (CELL_P) meets J10 pad 1 (GND)")
+        for name, edit, records in (("J1 fitted", cell_on_8, trip),
+                                    ("J1 not fitted", cell_on_8_no_j1, no_j1)):
+            with self.subTest(case=name):
+                verdict = self.run_gate(self.GID, edit, records)
+                self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0),
+                                 verdict.render())
                 self.assertIn(said, verdict.detail)
+
+        def vbus_on_gnd(p):
+            trip(p)
+            _link(p, "straight", [{"bridges": [["5", "1"]]}])
+        verdict = self.run_gate(self.GID, records=vbus_on_gnd)
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("J10 pad 5 (VBUS) meets J10 pad 1 (GND)", verdict.detail)
 
     def test_a_plug_slid_home_passes_every_contact(self):
         """Tip on VBUS (5), ring 1 open (3), ring 2 on SIG_C (7), sleeve on GND
@@ -3480,22 +3548,72 @@ class AUsbCReceptacleIsHeldToItsRole(_PowerCase):
         verdict = self.run_gate(self.GID)
         self.assertEqual((verdict.outcome, verdict.measured, verdict.units),
                          ("pass", 0, "violations"), verdict.render())
+        # J1 is on power_board, which pcb.pin_names never reads (pcb_board is
+        # esd_guard), so this rule checks its bussing too, and says so.
         self.assertIn("J1 (sink, USB 2.0): CC1 R1 5.1k and CC2 R2 5.1k to GND, at "
                       "5.049k..5.151k inside Rd 4.08k..6.12k (5.1k +-20 %, Table 4-25); "
-                      "D+ and D- on both rows", verdict.detail)
+                      "A6, B6, A7 and B7 each on a net, D+ apart from D-; VBUS (A4, A9, B4, "
+                      "B9), GND (A1, A12, B1, B12), D+ (A6, B6), D- (A7, B7) each on one net",
+                      verdict.detail)
 
     def test_a_sink_s_faults(self):
         for name, edit, said in (
                 ("shared CC", lambda t: _to_net(t, "J1", "B5", "CC1"),
                  "J1 CC1 and CC2 share one net (CC1)"),
                 ("B6 open", lambda t: _drop_net(t, "J1", "B6"), "J1 B6 (D+, pad B6) is open"),
-                ("D+ on D-", lambda t: _to_net(t, "J1", "B6", "USB_DM"),
-                 "J1 D+ and D- share USB_DM"),
                 ("CC open", lambda t: _drop_net(t, "J1", "A5"), "J1 CC1 (pad A5) is open"),
                 ("10k Rd", lambda t: _set_value(t, "R1", "10k"),
                  "J1 CC1's Rd R1 10k is 9.9k..10.1k at its tolerance, outside 4.08k..6.12k")):
             with self.subTest(case=name):
                 verdict = self.run_gate(self.GID, edit)
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1),
+                                 verdict.render())
+                self.assertIn(said, verdict.detail)
+        # B6 on D-'s net is two faults this rule now sees on a board
+        # pcb.pin_names does not read: D+ on D-, and the D+ pair split.
+        verdict = self.run_gate(self.GID, lambda t: _to_net(t, "J1", "B6", "USB_DM"))
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 2), verdict.render())
+        self.assertIn("J1 D+ and D- share USB_DM", verdict.detail)
+        self.assertIn("J1 D+ pins sit on 2 nets (A6 on USB_DP, B6 on USB_DM)", verdict.detail)
+
+    def test_bussing_where_pin_names_cannot_see_it(self):
+        """Review of P6: pcb.pin_names reads pcb_board alone, so J1 on
+        power_board with B6 on SIG_D, or B9 on SIG_A, passed with no rule
+        looking. This rule checks it there; on pcb_board, with the pads named
+        alike, it is pcb.pin_names' (which fails it), and with the names
+        stripped it is this rule's again."""
+        for name, edit, said in (
+                ("B6 on SIG_D", lambda t: _to_net(t, "J1", "B6", "SIG_D"),
+                 "J1 D+ pins sit on 2 nets (A6 on USB_DP, B6 on SIG_D)"),
+                ("B9 on SIG_A", lambda t: _to_net(t, "J1", "B9", "SIG_A"),
+                 "J1 VBUS pins sit on 2 nets (A4 on VBUS, A9 on VBUS, B4 on VBUS, B9 on "
+                 "SIG_A)")):
+            with self.subTest(case=name):
+                verdict = self.run_gate(self.GID, edit)
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1),
+                                 verdict.render())
+                self.assertIn(said, verdict.detail)
+                path = self.board(edit)
+
+                def on_pcb_board(p, path=path):
+                    p["pcb_board"] = path
+                verdict = self.run_gate(self.GID, records=on_pcb_board, board=path)
+                self.assertEqual(verdict.outcome, "pass", verdict.render())
+                self.assertIn("VBUS, GND and each data pair bussed: pcb.pin_names' check on "
+                              "this board", verdict.detail)
+                self.assertEqual(self.run_gate("pcb.pin_names", records=on_pcb_board,
+                                               board=path).outcome, "fail")
+
+                def unnamed(t, edit=edit):
+                    edit(t)
+                    for pad in K.children(_footprint(t, "J1"), "pad"):
+                        pad[:] = [x for x in pad if not (isinstance(x, list)
+                                                         and K.head(x) == "pinfunction")]
+                path = self.board(unnamed, stem="unnamed")
+
+                def unnamed_pcb_board(p, path=path):
+                    p["pcb_board"] = path
+                verdict = self.run_gate(self.GID, records=unnamed_pcb_board, board=path)
                 self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1),
                                  verdict.render())
                 self.assertIn(said, verdict.detail)
@@ -3523,36 +3641,85 @@ class AUsbCReceptacleIsHeldToItsRole(_PowerCase):
                     self.assertIn("outside 4.59k..5.61k (5.1k +-10 %, Table 4-25)",
                                   verdict.detail)
 
-    def _source(self, t) -> None:
-        """J1 as a source: R1 and R2 (56k) from CC to a 5 V rail V5, and F1's
-        place switching VBUS from V5."""
+    #: Q1's two FETs in series from V5 (S2) to VBUS (S1), gate 1 its control:
+    #: a back-to-back switch something turns off.
+    Q1_SWITCH = {"ref": "Q1", "value": "FDS6890A", "path": ["1", "3"], "control": "2"}
+    #: F1, a PTC, standing in for the switch: a source wired so is on whenever
+    #: its rail is.
+    F1_SWITCH = {"ref": "F1", "value": "PTC_FIXTURE_0A5", "path": ["1", "2"]}
+
+    def _source(self, t, through: str = "Q1") -> None:
+        """J1 as a source: R1 and R2 (56k) from CC to a 5 V rail V5, and VBUS
+        fed from V5 through Q1 (its gate 1 on PROT_DO), or through F1 alone."""
         _move_pad_net(t, "R1", "2", "V5")
         _to_net(t, "R2", "2", "V5")
-        _to_net(t, "F1", "1", "VBUS")
-        _to_net(t, "F1", "2", "V5")
+        if through == "Q1":
+            _to_net(t, "Q1", "1", "VBUS")
+            _to_net(t, "Q1", "3", "V5")
+        else:
+            _to_net(t, "F1", "1", "VBUS")
+            _to_net(t, "F1", "2", "V5")
         _set_value(t, "R1", "56k")
         _set_value(t, "R2", "56k")
 
-    def _as_source(self, current="default", switch=True):
+    def _as_source(self, current="default", switch=Q1_SWITCH):
         def records(p):
             u = self.usbc(p)
             u.pop("reads_rp")
             u.update(role="source", rp={"current": current, "rail_v": 5, "rail": "V5"})
-            if switch:
-                u["vbus_switch"] = {"ref": "F1", "value": "PTC_FIXTURE_0A5", "path": ["1", "2"]}
+            if switch is not None:
+                u["vbus_switch"] = dict(switch)
         return records
 
     def test_a_source(self):
         verdict = self.run_gate(self.GID, self._source, self._as_source())
         self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0), verdict.render())
         self.assertIn("to the 5 V rail V5", verdict.detail)
-        self.assertIn("VBUS switched by F1", verdict.detail)
+        self.assertIn("VBUS switched by Q1 FDS6890A, its control pin 2 on PROT_DO",
+                      verdict.detail)
         verdict = self.run_gate(self.GID, self._source, self._as_source("3A"))
         self.assertEqual((verdict.outcome, verdict.measured), ("fail", 2), verdict.render())
         self.assertIn("outside 9.5k..10.5k (10k +-5 %, Table 4-24)", verdict.detail)
-        verdict = self.run_gate(self.GID, self._source, self._as_source(switch=False))
+        verdict = self.run_gate(self.GID, self._source, self._as_source(switch=None))
         self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
         self.assertIn("J1 VBUS has no switch", verdict.detail)
+
+    def test_a_switch_is_a_part_something_turns_off(self):
+        """Review of P6: F1, a PTC, read "VBUS switched by F1", on a source
+        whose VBUS is on whenever its rail is (4.4.2's fault). A two-pad part
+        fails; a switch's control pin tied to GND, VBUS or its supply, or open,
+        fails; a switch named with no control pin is refused."""
+        verdict = self.run_gate(self.GID, lambda t: self._source(t, "F1"),
+                                self._as_source(switch=self.F1_SWITCH))
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("F1 PTC_FIXTURE_0A5 has 2 pads: a two-terminal part (a fuse, a PTC, a "
+                      "resistor, a ferrite) cannot switch", verdict.detail)
+        for name, net, said in (("GND", "GND", "is on GND, GND: tied there"),
+                                ("VBUS", "VBUS", "is on VBUS, VBUS: tied there"),
+                                ("its supply", "V5", "is on V5, its supply: tied there")):
+            with self.subTest(control_on=name):
+                def edit(t, net=net):
+                    self._source(t)
+                    _to_net(t, "Q1", "2", net)
+                verdict = self.run_gate(self.GID, edit, self._as_source())
+                self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1),
+                                 verdict.render())
+                self.assertIn(f"Q1's control pin 2 {said}", verdict.detail)
+
+        def open_gate(t):
+            self._source(t)
+            _drop_net(t, "Q1", "2")
+        verdict = self.run_gate(self.GID, open_gate, self._as_source())
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("Q1's control pin 2 is open", verdict.detail)
+        no_control = {k: v for k, v in self.Q1_SWITCH.items() if k != "control"}
+        verdict = self.run_gate(self.GID, self._source, self._as_source(switch=no_control))
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("vbus_switch has no control", verdict.error)
+        on_path = dict(self.Q1_SWITCH, control="3")
+        verdict = self.run_gate(self.GID, self._source, self._as_source(switch=on_path))
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("vbus_switch.control is 3, one of its path pins", verdict.error)
 
     def test_an_rd_on_a_source(self):
         """The baseline's Rd left in place on a source: each runs to GND, so
@@ -3596,6 +3763,69 @@ class AUsbCReceptacleIsHeldToItsRole(_PowerCase):
             self.usbc(p)["others"] = [{"ref": "R1", "value": "5.1k",
                                        "why": "a dead-battery Rd the controller switches out"}]
         self.assertEqual(self.run_gate(self.GID, beside, declared).outcome, "pass")
+
+    def test_a_resistor_beside_the_rd_named_in_others(self):
+        """Review of P6: a sink that reads the advertisement through a series
+        resistor into an ADC (R3 here, from CC1 to PROG) could not be stated to
+        pass: others was refused without cc_by. Named in others it is kept out
+        of the count; a resistor to GND named there is refused, since it is in
+        parallel with the Rd."""
+        def edit(t):
+            _to_net(t, "R3", "2", "CC1")
+
+        def reads(p):
+            self.usbc(p).update(reads_rp=True)
+        verdict = self.run_gate(self.GID, edit, reads)
+        self.assertEqual((verdict.outcome, verdict.measured), ("fail", 1), verdict.render())
+        self.assertIn("R3 3k runs from J1 CC1 to PROG: a sink terminates CC only to GND",
+                      verdict.detail)
+
+        def named(p):
+            reads(p)
+            self.usbc(p)["others"] = [{"ref": "R3", "value": "3k",
+                                       "why": "a series resistor into the ADC that reads CC1"}]
+        verdict = self.run_gate(self.GID, edit, named)
+        self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0), verdict.render())
+        self.assertIn("inside Rd 4.59k..5.61k (5.1k +-10 %, Table 4-25); R3 beside it, named "
+                      "in others with why (not counted)", verdict.detail)
+
+        def parallel(p):
+            reads(p)
+            self.usbc(p)["others"] = [{"ref": "R1", "value": "5.1k", "why": "a second Rd"}]
+        verdict = self.run_gate(self.GID, records=parallel)
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("others names R1, which runs from J1 CC1 to GND: a resistor to GND, VBUS "
+                      "or the Rp rail terminates or pulls CC", verdict.error)
+
+    def test_a_controller_is_no_receptacle(self):
+        """Review of P6: KiCad 9.0.9's FUSB302BMPX names its pins CC1 and CC2,
+        and pcbnew copies the names onto the pads, so the controller read as a
+        receptacle no record named: this rule errored, with no record that
+        could clear it, and pcb.mismate read its VBUS and GND as a
+        receptacle's. The pin names count on a connector only."""
+        helpers = self.helpers
+        # FUSB302BMPX, Interface_USB.kicad_sym in KiCad 9.0.9: its pins by
+        # number, on Package_DFN_QFN:WQFN-14-1EP_2.5x2.5mm_P0.5mm_EP1.45x1.45mm.
+        names = {"1": "CC2", "2": "VBUS", "3": "VDD", "4": "VDD", "5": "INT_N", "6": "SCL",
+                 "7": "SDA", "8": "GND", "9": "GND", "10": "CC1", "11": "CC1",
+                 "12": "VCONN", "13": "VCONN", "14": "CC2", "15": "GND"}
+        pads = [K.Pad(number=n, net="", pinfunction=f, pintype="") for n, f in names.items()]
+        qfn = "Package_DFN_QFN:WQFN-14-1EP_2.5x2.5mm_P0.5mm_EP1.45x1.45mm"
+        for ref, lib, found in (("U2", qfn, False), ("IC1", qfn, False),
+                                ("J3", qfn, True), ("USB1", "Project:Recept_16P", True),
+                                ("U9", "Connector_USB:Recept_16P", True),
+                                ("U9", "Project:USB_C_Receptacle_16P", True)):
+            with self.subTest(ref=ref, lib=lib):
+                fp = K.Footprint(ref=ref, value="", lib_id=lib, pads=pads)
+                self.assertEqual(helpers.typec_receptacle(fp), found)
+
+        def controller(t):
+            K.child(_pad(t, "U2", "4"), "pinfunction")[1] = K.Q("CC1")
+            K.child(_pad(t, "U2", "5"), "pinfunction")[1] = K.Q("CC2")
+        verdict = self.run_gate(self.GID, controller)
+        self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0), verdict.render())
+        verdict = self.run_gate("pcb.mismate", controller)
+        self.assertEqual((verdict.outcome, verdict.measured), ("pass", 0), verdict.render())
 
     def test_a_footprint_numbered_otherwise_takes_a_pins_map(self):
         def edit(t):
@@ -3672,6 +3902,102 @@ class AUsbCReceptacleIsHeldToItsRole(_PowerCase):
             found[name[:-10]] = helpers.typec_receptacle(fp)
         self.assertEqual(sum(found.values()), 22, found)
         self.assertFalse(any(v for k, v in found.items() if "Plug" in k), found)
+
+
+class _Drawn:
+    """What ``Mating`` asks of a ``Design``, for footprints drawn here as pad
+    centres alone: the positional arithmetic with no board file."""
+
+    def __init__(self, **land):
+        self.at = land
+        self.fps = {ref: K.Footprint(ref=ref, value="H", lib_id="Connector:H",
+                                     pads=[K.Pad(number=n, net=f"N{n}", pinfunction="",
+                                                 pintype="") for n in at])
+                    for ref, at in land.items()}
+
+    def board(self, rec, label):
+        return "drawn"
+
+    def part(self, path, ref, value, label, need=()):
+        return self.fps[str(ref)]
+
+    def land(self, path, fp):
+        return self.at[fp.ref]
+
+
+def _zigzag(n: int, pitch: float = 2.54) -> dict:
+    """A 2-row header on KiCad's zigzag numbering: odd pads on one row."""
+    return {str(k): (((k - 1) // 2) * pitch, ((k - 1) % 2) * pitch) for k in range(1, n + 1)}
+
+
+def _dip(n: int, pitch: float = 2.54, width: float = 7.62) -> dict:
+    """A 2-row footprint on a DIP's counter-clockwise numbering: 1..n/2 down
+    one row, the rest back up the other."""
+    return {str(k): ((0.0, (k - 1) * pitch) if k <= n // 2 else (width, (n - k) * pitch))
+            for k in range(1, n + 1)}
+
+
+def _row(numbers, pitch: float = 2.54) -> dict:
+    return {str(k): ((int(k) - 1) * pitch, 0.0) for k in numbers}
+
+
+class APositionalModeReadsThePadCentres(unittest.TestCase):
+    """Review of P6: the turned modes met position i with n+1-i from the pad
+    numbers, offset with rows 2 shifted by two numbers, and a pad left out
+    was skipped, on any footprint. A DIP-numbered header turned 180 degrees
+    meets 1 with n/2+1, and a reversed 1, 2, 3, 5 meets 2 with the empty
+    slot. Each is read on the pad centres now, or refused, naming why."""
+
+    def setUp(self):
+        self.P = load_path(os.path.join(PACK, "gates", "_power.py"))
+
+    def mating(self, d, modes, mapping="straight"):
+        return self.P.Mating(d, "m", {"a": {"ref": "J1", "value": "H"},
+                                      "b": {"ref": "J2", "value": "H"},
+                                      "map": mapping, "modes": modes, "source": "drawn"})
+
+    def met(self, m, i=0) -> dict:
+        """``{b pin: a pin}`` of the ``i``-th way its first mode meets."""
+        _what, groups = m.instances(m.modes[0])[i]
+        return {dict(g)["b"]: dict(g).get("a") for g in groups}
+
+    def test_a_turned_header_meets_the_pad_its_centre_turns_onto(self):
+        for name, land, want in (
+                ("zigzag", _zigzag(8), {"1": "8", "2": "7", "3": "6", "4": "5"}),
+                ("DIP", _dip(8), {"1": "5", "2": "6", "3": "7", "4": "8"}),
+                ("one row", _row(range(1, 6)), {"1": "5", "2": "4", "3": "3"})):
+            for mode in ("rotate", "reversed"):
+                if name == "one row" and mode == "rotate":
+                    continue                    # an odd count is refused for rotate
+                with self.subTest(numbering=name, mode=mode):
+                    m = self.mating(_Drawn(J1=land, J2=land), [mode])
+                    got = self.met(m)
+                    self.assertEqual({k: got[k] for k in want}, want)
+
+    def test_offset_by_columns_needs_zigzag_numbering(self):
+        m = self.mating(_Drawn(J1=_zigzag(8), J2=_zigzag(8)), [{"offset": 1, "rows": 2}])
+        ways = {what: i for i, (what, _g) in enumerate(m.instances(m.modes[0]))}
+        self.assertEqual(self.met(m, ways["J1 off by +1 column"])["1"], "3")
+        with self.assertRaisesRegex(self.P.RecordError, "pad centres are not on it"):
+            self.mating(_Drawn(J1=_dip(8), J2=_dip(8)), [{"offset": 1, "rows": 2}])
+
+    def test_a_gap_or_a_pad_with_no_partner_is_refused(self):
+        gapped = _row(["1", "2", "3", "5"])
+        full = _row(range(1, 6))
+        with self.assertRaisesRegex(self.P.RecordError, r"J1 \(H\) has no pad 4 among 1..5"):
+            self.mating(_Drawn(J1=gapped, J2=gapped), ["reversed"])
+        with self.assertRaisesRegex(self.P.RecordError, r"J1 \(H\) has no pad 4 among 1..5"):
+            self.mating(_Drawn(J1=gapped, J2=gapped), [], mapping="reversed")
+        with self.assertRaisesRegex(self.P.RecordError, r"J2 \(H\) has no pad 4 among 1..5"):
+            self.mating(_Drawn(J1=full, J2=gapped), ["flipped_type"],
+                        mapping={"1": "1", "2": "2", "3": "3", "5": "5"})
+        with self.assertRaisesRegex(self.P.RecordError, "J1 has 4 positions and J2 6"):
+            self.mating(_Drawn(J1=_row(range(1, 5)), J2=_row(range(1, 7))), [],
+                        mapping="reversed")
+        skewed = dict(_row(range(1, 5)), **{"4": (7.62, 0.5)})
+        with self.assertRaisesRegex(self.P.RecordError, "turned 180 degrees puts pad 2 where "
+                                                        "it has no numbered pad"):
+            self.mating(_Drawn(J1=skewed, J2=skewed), ["reversed"])
 
 
 def _drop_net(tree, ref: str, number: str) -> None:

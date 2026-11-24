@@ -1649,31 +1649,54 @@ def _terminals(d, batteries: dict, protectors: list, usbcs: list, rails: list):
 
 def _hazards(terms: list, nets: _Nets, *, nominal: bool) -> dict:
     """``{frozenset(two nodes): (raw, terminal, terminal)}`` for each pair of
-    terminals ``nets`` puts on one net that is a hazard: two nodes of one
-    source, or a source node on another source's node (two returns meeting is
-    none). On the nominal map, two sources at one voltage are one rail. Raw
-    unless either node lies beyond a fault element."""
+    nodes ``nets`` puts on one net that is a hazard (:func:`_loop`)."""
     by_root: dict = {}
     for t in terms:
-        by_root.setdefault(nets.find(t.node), []).append(t)
+        by_root.setdefault(nets.find(t.node), {}).setdefault(t.node, []).append(t)
     out: dict = {}
-    for ts in by_root.values():
-        for i, t1 in enumerate(ts):
-            for t2 in ts[i + 1:]:
-                if t1.node == t2.node:
-                    continue
-                if t1.group == t2.group:
-                    if t1.level == t2.level:
-                        continue
-                elif not t1.level and not t2.level:
-                    continue
-                elif nominal and t1.level and t2.level and t1.vkey == t2.vkey:
-                    continue
-                key = frozenset((t1.node, t2.node))
-                raw = not (t1.protected or t2.protected)
-                if key not in out or (raw and not out[key][0]):
-                    out[key] = (raw, t1, t2)
+    for by_node in by_root.values():
+        nodes = sorted(by_node)
+        for i, n1 in enumerate(nodes):
+            for n2 in nodes[i + 1:]:
+                found = _loop(by_node[n1], by_node[n2], nominal=nominal)
+                if found is not None:
+                    out[frozenset((n1, n2))] = found
     return out
+
+
+def _loop(here: list, there: list, *, nominal: bool):
+    """``(raw, terminal, terminal)`` when two nodes on one net are a hazard,
+    else None: ``here`` and ``there`` are the terminals on each node.
+
+    Each source with a node on one side drives a loop. When the other side
+    carries a terminal of that same source at another level, the source's own
+    loop closes there, and that pair decides (a cell's + on its own return
+    beyond a low-side switch is protected, whatever else shares that return;
+    VBUS on its own receptacle's GND is raw). Only when it carries none does
+    the source meet another source's node or return (two returns meeting is
+    none; on the nominal map, two sources at one voltage are one rail). A
+    pair is raw unless either of its nodes lies beyond a fault element; the
+    node pair is raw when any source's loop is.
+
+    What slipped through P6: protection was decided per pair of terminals and
+    a raw pair won the node pair, so a fitted USB-C receptacle's GND beside the
+    cell's return beyond a low-side FET turned the cell's + on that net raw: a
+    short whose loop runs through the FET failed, and passed with the
+    receptacle left off."""
+    found = []
+    for side, other in ((here, there), (there, here)):
+        for group in sorted({t.group for t in side if t.level}):
+            mine = [t for t in side if t.group == group]
+            pairs = [(s, o) for s in mine for o in other
+                     if o.group == group and o.level != s.level]
+            if not pairs:
+                pairs = [(s, o) for s in mine if s.level for o in other
+                         if o.group != group
+                         and not (nominal and o.level and s.vkey == o.vkey)]
+            found += [(not (s.protected or o.protected), s, o) for s, o in pairs]
+    if not found:
+        return None
+    return min(found, key=lambda f: (not f[0], f[1].label, f[2].label))
 
 
 def _named(d, node) -> str:
@@ -1813,8 +1836,10 @@ def mismate(ctx: GateContext) -> Verdict:
     meeting is none). On the nominal map two sources at one voltage are one
     rail, never a hazard; it is checked first, so a regenerated board whose pin
     order no longer matches the cable is caught on the correct cable. A hazard
-    beyond a fault element is named as protected, and pcb.fault_current judges
-    that element; it does not fail here. A source meeting a signal is listed in
+    whose source's own loop runs through a fault element (or, where the
+    source meets another source, a pair of which either node lies beyond one)
+    is named as protected, and pcb.fault_current judges that element; it does
+    not fail here (:func:`_loop`). A source meeting a signal is listed in
     the evidence and not judged. A battery whose pigtail can be ``reversed`` is
     a hazard unless a ``reverse_block`` in series counts (on the board, nothing
     ahead of it that its record does not declare), and protected when a fuse
