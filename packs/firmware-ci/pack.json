@@ -1,7 +1,7 @@
 {
   "name": "firmware-ci",
   "version": "0.1.0",
-  "description": "Replays the CI job that builds handheld firmware with act in its own containers, then checks the image fits its region and can wake from deep sleep.",
+  "description": "Replays the CI job that builds handheld firmware with act in its own containers, then checks the image's region, its deep-sleep wake and its BLE transmit setting.",
   "settles": [
     "firmware build",
     "ci builds the firmware",
@@ -13,7 +13,9 @@
     "app region",
     "ram bank",
     "deep sleep wake source",
-    "wakeup from deep sleep"
+    "wakeup from deep sleep",
+    "bluetooth le transmit power setting",
+    "ble tx power"
   ],
   "claim_classes": [
     "firmware",
@@ -23,13 +25,15 @@
     "memory-fit",
     "ota-slot",
     "deep-sleep",
-    "wakeup-source"
+    "wakeup-source",
+    "ble-tx-power"
   ],
   "provides_gates": [
     "fw.ci_job",
     "fw.build",
     "fw.image_fits",
-    "fw.sleep_wake"
+    "fw.sleep_wake",
+    "fw.tx_power"
   ],
   "provides_generators": [],
   "requires_tools": [
@@ -49,10 +53,11 @@
     "the wake pin the board routed",
     "the sleep current nobody measured",
     "the hang with no reset path",
+    "the setting the grant was tested at",
     "the dependency that floats"
   ],
   "authors": [],
   "licence": "Apache-2.0",
-  "origin": "written from three faults in a battery handheld's firmware: its CI had never built it, its board definition's flash layout disagreed with the bootloader, and its deep sleep had no wake source. Its controls are the pack's own ESP-IDF app; no project's design came with it.",
+  "origin": "written from four faults in a battery handheld's firmware: its CI had never built it, its board definition's flash layout disagreed with the bootloader, its deep sleep had no wake source, and nothing compared its Bluetooth transmit setting with the setting its radio module was tested at. Its controls are the pack's own ESP-IDF app; no project's design came with it.",
   "basis": "sourced"
 }

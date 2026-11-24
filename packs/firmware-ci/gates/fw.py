@@ -6,14 +6,16 @@ containers, and what the image that job writes shows.
     fw.build       tier 1  that job, replayed with act, builds the firmware from this tree
     fw.image_fits  tier 1  the image lies inside the region its memory map names
     fw.sleep_wake  tier 1  where the image can enter deep sleep, it arms a deep-sleep wake
+    fw.tx_power    tier 1  the highest BLE transmit setting the image can reach is inside
+                           the setting its radio's grant was tested at
 
 **One mechanism for every stack.** The build is the CI's own job, run by act in
 the job's own containers on a copy of what the next commit would hold: Zephyr, NCS,
 ZMK, ESP-IDF, Arduino, PlatformIO, the Pico SDK, QMK and STM32 make builds take the
 same path. ``fw.ci_job`` is the replay's validity guard: each way it fails means a
-replay's green would not describe the build. ``fw.build`` needs it, and the two
+replay's green would not describe the build. ``fw.build`` needs it, and the three
 readers need ``fw.build``; a gate whose prerequisite did not pass reads Skipped.
-One replay per sweep: the three tier-1 gates share it through ``ctx.load_file``.
+One replay per sweep: the four tier-1 gates share it through ``ctx.load_file``.
 
 **What slipped through, and which gate it is for** (references/what-slipped-through.md):
 
@@ -30,12 +32,17 @@ One replay per sweep: the three tier-1 gates share it through ``ctx.load_file``.
   slot is too small.
 - ``fw.sleep_wake``: deep sleep was turned on and no source could wake the chip.
   The build passed.
+- ``fw.tx_power``: a firmware's Bluetooth transmit setting was raised, and nothing
+  compared it with the setting its radio module was tested at. The claim meant to
+  guard it compared the setting with the grant's measured output, another
+  quantity, so it could neither show nor rule out the fault.
 
 **Missing inputs skip; they never default.** Which workflow, which image and which
 region are the project's to say. The region is never taken from the build.
 """
 from __future__ import annotations
 
+import json
 import os
 import posixpath
 
@@ -48,6 +55,7 @@ C = _load_path(os.path.join(_HERE, "_ci.py"))
 R = _load_path(os.path.join(_HERE, "_replay.py"))
 I = _load_path(os.path.join(_HERE, "_image.py"))
 W = _load_path(os.path.join(_HERE, "_wake.py"))
+T = _load_path(os.path.join(_HERE, "_tx.py"))
 
 _TOOLS = ["act", "docker", "git"]
 _PY = ["yaml"]
@@ -348,3 +356,127 @@ def sleep_wake(ctx: GateContext) -> Verdict:
     if wake.outcome == "skip":
         return _skip(gid, wake.said)
     return Verdict(gate=gid, passed=wake.outcome == "pass", detail=f"{name}: {wake.said}")
+
+
+@gate(
+    id="fw.tx_power",
+    basis="sourced",
+    title="The highest Bluetooth LE transmit setting the image can reach is inside the "
+          "setting its radio's grant was tested at",
+    description="Reads the .config or sdkconfig the replayed build resolved: Zephyr's "
+                "LL controller, NCS's SoftDevice Controller or ESP-IDF's BLE controller "
+                "(ESP32-C3/S3); a run-time path moves the judged setting to the highest "
+                "option Kconfig offered the SoC. Every other stack skips by name.",
+    claims=[T.TAG],
+    tier=Tier.BUILD,
+    settles="bluetooth le transmit power setting",
+    requires_tools=_TOOLS,
+    requires_python=_PY,
+    # Prerequisite fw.build: a setting of firmware that does not build, or not from
+    #    CI's job, is not the design's. Isolated: the known-bad builds with exit 0,
+    #    at ESP-IDF's default level.
+    needs=["fw.build"],
+    negative_control=NegativeControl(
+        fixture="selftest/bad_variants.py:tx_line_removed",
+        note="the TX level line removed from sdkconfig.defaults: ESP-IDF's default, "
+             "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9 (+9 dBm), against the baseline "
+             "claim's 7 dBm, the nearest step past it",
+    ),
+)
+def tx_power(ctx: GateContext) -> Verdict:
+    """The setting the stack resolved, judged against the claim tagged
+    ``ble-tx-power``: the setting the radio's grant was tested at (47 CFR
+    15.204(c)(2), "at its maximum available output power level"), never the
+    grant's listed output. A run-time path (``*_DYNAMIC_CONTROL``, LE Power
+    Control, or a setter call in the repository's C sources) moves the judged
+    value to the ceiling, the highest option Kconfig offered the SoC; a setter
+    whose level is a literal is judged at that literal. Where the ceiling cannot
+    be known, a setting that alone passes reads undetermined (skipped) and names
+    the conducted measurement. A config this pack reads no profile for skips by
+    name; a controller in another image or chip skips unless a config of this
+    build holds one this pack reads."""
+    gid = "fw.tx_power"
+    path = _workflow(ctx)
+    if path is None:
+        return _skip(gid, _NO_WORKFLOW)
+    try:
+        _job_, result = _built(ctx, path)
+        found = T.configs(result)
+        readings, others = [], []
+        for rel, text in found.items():
+            got = T.classify(rel, text)
+            if isinstance(got, T.Other):
+                others.append(got)
+            elif got is not None:
+                readings.append(got)
+        if readings:
+            repo, _rel = C.locate(path)
+            code = T.sources(repo, R.listing)
+            judged = [T.judge(r, [c for rel, text in code.items()
+                                  for c in T.scan(rel, text, r.profile)])
+                      for r in readings]
+    except R.WrongAct as exc:
+        return _skip(gid, str(exc))
+    except (R.ToolFault, T.TxFault, C.Refused, OSError) as exc:
+        return Verdict(gate=gid, passed=False, error=str(exc))
+    unread = [o for o in others if o.kind == "unread"]
+    if not readings:
+        if not found:
+            return _skip(gid, "the job wrote no .config or sdkconfig: a stack with no "
+                              "Kconfig (Arduino, PlatformIO's Arduino core, the Pico SDK, "
+                              "QMK) has no build-time setting this pack reads; a conducted "
+                              "measurement settles it (nopekit claim physical)")
+        if not others:
+            return _skip(gid, f"no Bluetooth in {', '.join(found)}: this build has no BLE "
+                              f"controller to judge")
+        shown = unread + [o for o in others if o.kind != "unread"]
+        return _skip(gid, "; ".join(f"{o.file}: {o.said}" for o in shown))
+    acc = ctx.acceptance(T.TAG)
+    comparator = acc.comparator.value
+    if str(acc.units or "").strip() != T.UNITS or comparator not in T.COMPARATORS:
+        return Verdict(gate=gid, passed=False, error=(
+            f"the claim tagged {T.TAG} states {comparator} {acc.limit:g} {acc.units!r}; this "
+            f"gate judges a transmit setting at most ({' or '.join(T.COMPARATORS)}) in "
+            f"{T.UNITS}, the setting the radio's grant was tested at: state the limit so"))
+    said = "; ".join(j.said for j in judged)
+    # Each config's outcome: a floor past the limit fails whatever the ceiling; an
+    # unknown ceiling above a floor that passes is undetermined, never a pass.
+    failed, undetermined, passed = [], [], []
+    for j in judged:
+        if not acc.holds(j.floor):
+            failed.append(j.floor)
+        elif j.value is None:
+            undetermined.append(j)
+        elif not acc.holds(j.value):
+            failed.append(j.value)
+        else:
+            passed.append(j.value)
+    if failed:
+        return Verdict(gate=gid, passed=False, measured=max(failed), limit=acc.limit,
+                       comparator=comparator, units=T.UNITS, detail=said,
+                       evidence=_tx_evidence(ctx, judged, acc))
+    if unread:
+        return _skip(gid, f"{said}; and " + "; ".join(f"{o.file}: {o.said}" for o in unread))
+    if undetermined:
+        return _skip(gid, f"undetermined: {said}; settle it with a conducted measurement at "
+                          f"the highest setting the firmware can reach (nopekit claim "
+                          f"physical)")
+    return Verdict(gate=gid, passed=True, measured=max(passed), limit=acc.limit,
+                   comparator=comparator, units=T.UNITS, detail=said,
+                   evidence=_tx_evidence(ctx, judged, acc))
+
+
+def _tx_evidence(ctx: GateContext, judged: list, acc) -> list[str]:
+    """``tx_power.json``: each config read, its setting, its ceiling and what can
+    raise it, and the value judged, under the gate's out directory."""
+    rows = [{"file": j.reading.file, "profile": j.reading.profile.key,
+             "target": j.reading.target, "setting": j.reading.setting_said,
+             "setting_dbm": j.reading.setting, "ceiling_dbm": j.reading.ceiling,
+             "raisers": list(j.reading.raisers), "front_end_module": j.reading.fem,
+             "floor_dbm": j.floor, "judged_dbm": j.value, "said": j.said} for j in judged]
+    out = ctx.out_path("firmware-ci", "tx_power", "tx_power.json")
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump({"limit": acc.limit, "comparator": acc.comparator.value,
+                   "units": T.UNITS, "configs": rows}, fh, indent=1, sort_keys=True)
+        fh.write("\n")
+    return [out]

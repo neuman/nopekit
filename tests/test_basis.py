@@ -55,9 +55,14 @@ BUNDLED_BASES: dict[str, str] = {
     # GitHub's documented shell and continue-on-error behaviour; the replay's
     # verdict is the toolchain's own exit code in the job's container; the image
     # and wake rules follow the bootloader's or partition table's cited layout and
-    # each stack's sleep documentation.
+    # each stack's sleep documentation. F2: fw.tx_power reads the stack's own
+    # Kconfig resolution by rules cited to each stack's Kconfig and sources; its
+    # setter scan is the pack's own and only moves a verdict toward a fail or a
+    # skip, so the gate stays sourced (zmk.tx_power, which it replaces, was
+    # established: it judged one symbol and no setter).
     "fw.build": "established",
-    **{g: "sourced" for g in ("fw.ci_job", "fw.image_fits", "fw.sleep_wake")},
+    **{g: "sourced" for g in ("fw.ci_job", "fw.image_fits", "fw.sleep_wake",
+                              "fw.tx_power")},
     "cfd.case_readable": "model-only",
     **{g: "model-only" for g in ("aero.case_readable", "aero.reference")},
     **{g: "sourced" for g in ("aero.regime", "aero.domain")},

@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # firmware-ci's baseline: an ESP32-S3 with 4 MB of flash, IDF's two-OTA partition
-# rows, BLE on (NimBLE host), and a build whose bytes hold no path and no clock.
+# rows, BLE on (NimBLE host) at a +6 dBm default transmit level, and a build whose
+# bytes hold no path and no clock. fw.tx_power's known-bad removes the level line,
+# so the controller takes ESP-IDF's own default, +9 dBm.
 CONFIG_IDF_TARGET="esp32s3"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
@@ -8,3 +10,4 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 CONFIG_APP_REPRODUCIBLE_BUILD=y
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P6=y

@@ -17,7 +17,11 @@ every machine:
   and the act version pin, which skips and names the install line (critic 5.3);
 - the image routes on ELF, UF2, Intel HEX and BIN bytes built here, the ESP route
   through ESP-IDF's own partition parser, and the wake rules on symbol lists and
-  trimmed devicetrees.
+  trimmed devicetrees;
+- the transmit rule (``_tx``) on configs recorded from real Kconfig runs
+  (``tests/fw_configs/``, ``FW_CONFIGS``), its setter scan on sources written here,
+  and the gate on a replay handed to it, with the sdkconfig an ESP-IDF build
+  record names read back through the stand-in.
 
 The real replays run in ``TheRealReplay`` where act 0.2.97, docker and the pinned
 ESP-IDF image are present, and are skipped, saying not walked, elsewhere.
@@ -34,13 +38,13 @@ import re
 import shutil
 import stat
 import struct
-import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
 from unittest import mock
 
+import _env
 from nopekit import gates as gates_mod
 from nopekit import packs as packs_mod
 from nopekit import verdicts as verdicts_mod
@@ -51,19 +55,45 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK = os.path.join(REPO, "packs", "firmware-ci")
 LOGS = os.path.join(REPO, "tests", "fw_logs")
 STANDIN = os.path.join(REPO, "tests", "_act_standin.py")
+#: Configs written by the stacks' own Kconfig, cut to the lines the transmit rule
+#: can read (``CONFIG_BT*``, the board or target, the SoC series, ``CONFIG_MPSL*``):
+#: Kconfig writes one symbol a line, so a cut keeps each line as the tool wrote it.
+#: Recorded on 2026-11-24:
+#:
+#: - ``zephyr_*.config``: Zephyr 3.5.0 (ZMK v0.3.0's west workspace) in
+#:   zmkfirmware/zmk-build-arm, ``west build -p always -b <board> -d <dir>
+#:   zephyr/samples/bluetooth/<sample> --cmake-only``, offline: peripheral_hr and
+#:   hci_pwr_ctrl (which turns on dynamic control) on nrf52dk_nrf52832, and
+#:   peripheral_hr on nrf5340dk_nrf5340_cpuapp (a host whose controller is the
+#:   network core's).
+#: - ``esp32*.sdkconfig``: espressif/idf v5.5.6 (the baseline's image, by digest),
+#:   ``idf.py reconfigure`` on the pack's baseline app: as committed (+6 dBm), with
+#:   the TX level line removed (ESP-IDF's default, +9 dBm), and with its target set
+#:   to esp32c6 (the BT_LE family, which this pack does not read yet).
+#:
+#: NCS's SoftDevice Controller has no recorded config: no NCS workspace was at
+#: hand, and its rows (``NCS_SDC``) are written from sdk-nrf v3.4.2's Kconfig and
+#: radio_nrf5_txp.h (``_tx.PROFILES``' comment), as test lines, not a recording.
+FW_CONFIGS = os.path.join(REPO, "tests", "fw_configs")
 C = load_path(os.path.join(PACK, "gates", "_ci.py"))
 R = load_path(os.path.join(PACK, "gates", "_replay.py"))
 I = load_path(os.path.join(PACK, "gates", "_image.py"))
 W = load_path(os.path.join(PACK, "gates", "_wake.py"))
+T = load_path(os.path.join(PACK, "gates", "_tx.py"))
 HAS_YAML = importlib.util.find_spec("yaml") is not None
 HAS_GIT = shutil.which("git") is not None
 NO_YAML = "PyYAML is not importable here: the guard reads workflows with it, so its rules are not walked"
 
-GATES = ("fw.ci_job", "fw.build", "fw.image_fits", "fw.sleep_wake")
+GATES = ("fw.ci_job", "fw.build", "fw.image_fits", "fw.sleep_wake", "fw.tx_power")
 #: The copy path the committed act excerpts were recorded under (tests/fw_logs/).
 RECORDED_COPY = "/tmp/nopekit-fw-k2c9w0ra/repo"
 IDF_IMAGE = ("espressif/idf@sha256:"
              "bf72fe7a15c22849a9a94147301165a545fb8905d97c176cf748e3e4614cac84")
+
+
+def _config(name: str) -> str:
+    with open(os.path.join(FW_CONFIGS, name), encoding="utf-8") as fh:
+        return fh.read()
 
 
 def _registry() -> gates_mod.Registry:
@@ -186,8 +216,8 @@ class TheGuardReadsTheWorkflow(unittest.TestCase):
         self._passes(_workflow("idf.py build && echo built || exit 1\nls build"))
         self._passes(_workflow("idf.py build; echo a && echo b\nls build"))
         if shutil.which("bash"):
-            proc = subprocess.run(["bash", "-e", "-c", "false && echo x; echo after"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = _env.run(["bash", "-e", "-c", "false && echo x; echo after"],
+                            cwd=tempfile.gettempdir())
             self.assertEqual((proc.returncode, proc.stdout), (0, "after\n"),
                              "the documented behaviour the rule rests on")
 
@@ -205,8 +235,8 @@ class TheGuardReadsTheWorkflow(unittest.TestCase):
         self._passes(_workflow('west build -b x -- -DOVERLAY_CONFIG="a.conf;b.conf"\n'
                                'echo done'), )
         if shutil.which("bash"):
-            proc = subprocess.run(["bash", "-e", "-c", "false && echo built; echo done"],
-                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            proc = _env.run(["bash", "-e", "-c", "false && echo built; echo done"],
+                            cwd=tempfile.gettempdir())
             self.assertEqual((proc.returncode, proc.stdout), (0, "done\n"),
                              "the `;` shape reads green on a failed command")
 
@@ -578,12 +608,10 @@ class TheBuildIsJudgedOnItsOwnLines(unittest.TestCase):
 # the copy
 # --------------------------------------------------------------------------- #
 def _git(*args, cwd):
-    return subprocess.run(["git", *args], cwd=cwd, stdout=subprocess.PIPE,
-                          stderr=subprocess.PIPE, text=True,
-                          env=dict(os.environ, GIT_CONFIG_NOSYSTEM="1",
-                                   GIT_CONFIG_GLOBAL=os.devnull,
-                                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
-                                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t"))
+    """``git`` through ``_env.git``: no global config and a synthetic identity.
+    What slipped through F1: a bare ``subprocess.run`` here inherited this machine's
+    HOME and agent variables (test_meta.NoSubprocessOutsideRun)."""
+    return _env.git(list(args), cwd=cwd, identity=True)
 
 
 APP = {"CMakeLists.txt": "x\n", "main/main.c": "int x;\n", ".env": "SECRET=1\n",
@@ -782,6 +810,41 @@ class TheReplayRunsActAsDesigned(_StandIn):
         self.assertEqual(sorted(result["files"]), ["dist/app.bin"])
         self.assertEqual(result["files"]["dist/app.bin"], same)
         self.assertTrue(R.judge(result, _job(), "dist/app.bin")[0])
+
+    def test_the_sdkconfig_a_build_record_names_is_read_back(self):
+        """What slipped through "the files the job wrote" alone (general-packs F2):
+        ESP-IDF leaves a tracked sdkconfig as it was when its configure step
+        resolves it unchanged (measured with espressif/idf v5.5.6), so the job
+        "wrote" none and the transmit rule had no config. The build record names it,
+        and it is read back; a tracked sdkconfig no record names, and a name
+        outside the copy, are not."""
+        path = self.app()
+        app = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+        for rel in ("sdkconfig", "other/sdkconfig"):
+            _write(app, rel, "CONFIG_BT_ENABLED=y\n")
+        outside = os.path.join(self.tmp, "outside", "sdkconfig")
+        _write(self.tmp, "outside/sdkconfig", "CONFIG_BT_ENABLED=y\n")
+        record = json.dumps({"config_file": "{copy}/sdkconfig", "build_dir": "{copy}/build"})
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY, "sleep": 0.05,
+                   "write": {"build/sleeper.bin": {"head": "e9", "size": 64},
+                             "build/project_description.json": {"text": record},
+                             "build/bootloader/project_description.json": {
+                                 "text": json.dumps({"config_file": outside})}}})
+        result = self.replay(path)
+        self.assertEqual(sorted(result["files"]), ["build/sleeper.bin"],
+                         "a build record is read, not handed on as a file the job wrote")
+        self.assertEqual(result["configs"], {"sdkconfig": b"CONFIG_BT_ENABLED=y\n"})
+        self.assertEqual(sorted(T.configs(result)), ["sdkconfig"])
+        self.mode({"log": os.path.join(LOGS, "act_esp_short_ota_slot.jsonl"),
+                   "copy_in_log": RECORDED_COPY,
+                   "write": {"build/sleeper.bin": {"head": "e9", "size": 64},
+                             "sdkconfig": {"text": "CONFIG_BT_ENABLED=y\n# rewritten\n"},
+                             "build/project_description.json": {"text": record}}})
+        result = self.replay(path)
+        self.assertEqual((sorted(result["files"]), result["configs"]),
+                         (["build/sleeper.bin", "sdkconfig"], {}),
+                         "a config the job rewrote is a file it wrote, read once")
 
     def test_a_timeout_stops_the_job_containers(self):
         self.mode({"sleep": 5})
@@ -1259,6 +1322,233 @@ class TheZmkRuleReadsTheDevicetree(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# the transmit rule, on recorded configs
+# --------------------------------------------------------------------------- #
+def _swap(text: str, old: str, new: str) -> str:
+    """``text`` with the one line ``old`` replaced by ``new`` (``""`` drops it)."""
+    lines = text.splitlines()
+    if lines.count(old) != 1:
+        raise AssertionError(f"{old!r} is not one line of the config")
+    at = lines.index(old)
+    lines[at:at + 1] = [new] if new else []
+    return "\n".join(lines) + "\n"
+
+
+#: NCS's SoftDevice Controller as sdk-nrf v3.4.2's Kconfig writes it on an nRF52832
+#: (the options Zephyr's choice offers that SoC, as the recorded LL config lists
+#: them): ``BT_CTLR_TX_PWR_ANTENNA`` is 0, so the choice is visible.
+NCS_SDC = "\n".join([
+    'CONFIG_BOARD="nrf52dk_nrf52832"', "CONFIG_BT=y", "CONFIG_BT_LL_SOFTDEVICE=y",
+    "# CONFIG_BT_LL_SW_SPLIT is not set", "CONFIG_BT_CTLR_TX_PWR_ANTENNA=0",
+    "# CONFIG_BT_CTLR_TX_PWR_PLUS_4 is not set", "CONFIG_BT_CTLR_TX_PWR_PLUS_3=y",
+    "# CONFIG_BT_CTLR_TX_PWR_0 is not set", "# CONFIG_BT_CTLR_TX_PWR_MINUS_4 is not set",
+    "# CONFIG_BT_CTLR_TX_PWR_MINUS_8 is not set", "# CONFIG_BT_CTLR_TX_PWR_MINUS_12 is not set",
+    "# CONFIG_BT_CTLR_TX_PWR_MINUS_16 is not set", "# CONFIG_BT_CTLR_TX_PWR_MINUS_20 is not set",
+    "# CONFIG_BT_CTLR_TX_PWR_MINUS_40 is not set", "CONFIG_BT_CTLR_TX_PWR_DBM=3",
+    "# CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL is not set",
+    "# CONFIG_BT_CTLR_LE_POWER_CONTROL is not set", "# CONFIG_MPSL_FEM is not set"]) + "\n"
+
+
+class TheTransmitRuleReadsTheConfig(unittest.TestCase):
+    """``_tx.classify`` and ``_tx.judge``: the setting each profile reads, the
+    ceiling the config lists, what can raise the power, and the stacks it skips
+    by name."""
+
+    def _read(self, name: str, text: str | None = None):
+        got = T.classify(name, _config(name) if text is None else text)
+        self.assertIsInstance(got, T.Reading, got)
+        return got
+
+    def test_zephyrs_ll_on_a_recorded_config(self):
+        r = self._read("zephyr_nrf52832_peripheral_hr.config")
+        self.assertEqual((r.profile.key, r.setting, r.setting_said, r.ceiling, r.raisers,
+                          r.target),
+                         ("zephyr-ll", 0.0, "CONFIG_BT_CTLR_TX_PWR_0=y", 4.0, (),
+                          "nrf52dk_nrf52832"))
+        j = T.judge(r, [])
+        self.assertEqual((j.floor, j.value), (0.0, 0.0))
+        self.assertIn("ceiling +4 dBm; no run-time path", j.said)
+
+    def test_dynamic_control_is_judged_at_the_ceiling_kconfig_offered(self):
+        """hci_pwr_ctrl turns on CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL: a host can set
+        any level the SoC has, so the image can reach +4 dBm, the highest option the
+        config lists for the nRF52832, whatever its 0 dBm default says."""
+        j = T.judge(self._read("zephyr_nrf52832_hci_pwr_ctrl.config"), [])
+        self.assertEqual((j.floor, j.value), (0.0, 4.0))
+        self.assertIn("CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL can raise it to the ceiling: "
+                      "judged at +4 dBm", j.said)
+
+    def test_the_esp_controller_on_the_baselines_recorded_sdkconfigs(self):
+        good = self._read("esp32s3_baseline.sdkconfig")
+        bad = self._read("esp32s3_default.sdkconfig")
+        self.assertEqual((good.profile.key, good.setting, good.ceiling, good.target),
+                         ("esp-bt-ctrl", 6.0, 20.0, "esp32s3"))
+        self.assertEqual((bad.setting, bad.setting_said),
+                         (9.0, "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9=y"))
+        self.assertEqual(T.judge(good, []).value, 6.0)
+
+    def test_ncs_reads_the_choice_or_the_antenna_value_and_never_both(self):
+        """sdk-nrf v3.4.2 radio_nrf5_txp.h: the choice's level when
+        CONFIG_BT_CTLR_TX_PWR_ANTENNA is 0, the antenna value otherwise, which hides
+        the choice, so the config then lists no ceiling."""
+        r = self._read("ncs", NCS_SDC)
+        self.assertEqual((r.profile.key, r.setting, r.ceiling), ("ncs-sdc", 3.0, 4.0))
+        antenna = NCS_SDC.replace("CONFIG_BT_CTLR_TX_PWR_ANTENNA=0",
+                                  "CONFIG_BT_CTLR_TX_PWR_ANTENNA=2")
+        antenna = "\n".join(ln for ln in antenna.splitlines()
+                            if not re.match(r"(# )?CONFIG_BT_CTLR_TX_PWR_(PLUS|MINUS|0)",
+                                            ln)) + "\n"
+        r = self._read("ncs", antenna)
+        self.assertEqual((r.setting, r.ceiling), (2.0, None))
+        self.assertIn("antenna-referenced", r.setting_said)
+        self.assertEqual(T.judge(r, []).value, 2.0, "no path: the setting is judged")
+        with_path = antenna.replace("# CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL is not set",
+                                    "CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL=y")
+        j = T.judge(self._read("ncs", with_path), [])
+        self.assertEqual((j.floor, j.value), (2.0, None), "a path with no ceiling")
+        self.assertIn("lists no ceiling", j.said)
+        with self.assertRaises(T.TxFault):
+            T.classify("ncs", antenna + "CONFIG_BT_CTLR_TX_PWR_PLUS_3=y\n")
+
+    def test_a_front_end_module_beside_a_path_leaves_the_ceiling_unknown(self):
+        text = NCS_SDC.replace("# CONFIG_MPSL_FEM is not set", "CONFIG_MPSL_FEM=y")
+        self.assertEqual(T.judge(self._read("ncs", text), []).value, 3.0,
+                         "a front-end module alone moves nothing")
+        text = text.replace("# CONFIG_BT_CTLR_LE_POWER_CONTROL is not set",
+                            "CONFIG_BT_CTLR_LE_POWER_CONTROL=y")
+        j = T.judge(self._read("ncs", text), [])
+        self.assertEqual((j.floor, j.value), (3.0, None))
+        self.assertIn("front-end module", j.said)
+
+    def test_a_config_with_no_option_chosen_or_two_is_errored(self):
+        text = _config("esp32s3_baseline.sdkconfig")
+        none = _swap(text, "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P6=y",
+                     "# CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P6 is not set")
+        two = _swap(text, "# CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9 is not set",
+                    "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9=y")
+        for case in (none, two):
+            with self.assertRaises(T.TxFault):
+                T.classify("sdkconfig", case)
+
+    def test_every_other_stack_is_named(self):
+        esp = _config("esp32s3_baseline.sdkconfig")
+        cases = {
+            "zephyr_nrf5340_cpuapp_peripheral_hr.config": ("elsewhere", "CONFIG_BT_RPMSG=y"),
+            "esp32c6_ble.sdkconfig": ("unread", "BT_LE controller family"),
+        }
+        for name, (kind, said) in cases.items():
+            with self.subTest(config=name):
+                got = T.classify(name, _config(name))
+                self.assertEqual(got.kind, kind, got)
+                self.assertIn(said, got.said)
+        planted = {
+            "controller disabled": (_swap(_swap(esp, "CONFIG_BT_CONTROLLER_ENABLED=y",
+                                                "# CONFIG_BT_CONTROLLER_ENABLED is not set"),
+                                          "# CONFIG_BT_CONTROLLER_DISABLED is not set",
+                                          "CONFIG_BT_CONTROLLER_DISABLED=y"), "elsewhere"),
+            "controller only": (_swap(esp, "# CONFIG_BT_CONTROLLER_ONLY is not set",
+                                      "CONFIG_BT_CONTROLLER_ONLY=y"), "unread"),
+            "an ESP-IDF controller with no default level": (
+                "\n".join(ln for ln in esp.splitlines()
+                          if "DFT_TX_POWER_LEVEL" not in ln) + "\n", "unread"),
+            "a Zephyr host on another driver": ("CONFIG_BT=y\nCONFIG_BT_ESP32=y\n", "unread"),
+            "a Zephyr host over UART": ("CONFIG_BT=y\nCONFIG_BT_H4=y\n", "elsewhere"),
+        }
+        for label, (text, kind) in planted.items():
+            with self.subTest(case=label):
+                self.assertEqual(T.classify("c", text).kind, kind)
+        self.assertIsNone(T.classify("c", "# CONFIG_BT is not set\nCONFIG_SERIAL=y\n"))
+        self.assertIsNone(T.classify("c", "# CONFIG_BT_ENABLED is not set\n"))
+
+    def test_the_options_listed_are_the_options_offered(self):
+        """Kconfig leaves out an option whose ``depends on`` fails: Zephyr's choice
+        has options up to +21 dBm, and the nRF52832's config lists none above
+        +4 dBm, so its ceiling is +4 dBm."""
+        values, unset = T.kconfig(_config("zephyr_nrf52832_peripheral_hr.config"))
+        listed = sorted(T._zephyr_dbm(n) for n in list(values) + list(unset)
+                        if T._zephyr_dbm(n) is not None)
+        self.assertEqual(listed, [-40, -20, -16, -12, -8, -4, 0, 3, 4])
+
+
+class TheSetterScanReadsTheSources(unittest.TestCase):
+    """``_tx.scan``: a setter call in the repository's own C sources, with its
+    literal level when it has one; nothing in a comment, a string or a
+    declaration."""
+
+    ESP = T.PROFILES[2]
+    SDC = T.PROFILES[1]
+
+    def test_a_call_and_its_literal_level(self):
+        code = ("void f(void)\n{\n    ESP_ERROR_CHECK(esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV,\n"
+                "                                         ESP_PWR_LVL_P12));\n"
+                "    esp_ble_tx_power_set_enhanced(ESP_BLE_ENHANCED_PWR_TYPE_CONN, h,"
+                " ESP_PWR_LVL_P21);\n}\n")
+        calls = T.scan("main/radio.c", code, self.ESP)
+        self.assertEqual([(c.line, c.name, c.dbm) for c in calls],
+                         [(3, "esp_ble_tx_power_set", 12.0),
+                          (5, "esp_ble_tx_power_set_enhanced", 20.0)])
+        self.assertEqual(calls[0].said,
+                         "main/radio.c:3 esp_ble_tx_power_set(... ESP_PWR_LVL_P12)")
+
+    def test_comments_strings_and_declarations_are_not_calls(self):
+        code = ('// esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P20);\n'
+                '/* esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV,\n   ESP_PWR_LVL_P20); */\n'
+                'static const char *m = "esp_ble_tx_power_set(x)";\n'
+                'esp_err_t esp_ble_tx_power_set(esp_ble_power_type_t t, esp_power_level_t l);\n'
+                'extern esp_err_t esp_ble_tx_power_set_enhanced(int, uint16_t, int);\n')
+        self.assertEqual(T.scan("main/a.c", code, self.ESP), [])
+
+    def test_a_level_that_is_not_a_literal_and_a_name_used_bare(self):
+        code = ("int g(esp_power_level_t lvl)\n"
+                "{ return esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, lvl); }\n"
+                "static setter_t s = esp_ble_tx_power_set;\n"
+                "#define RAISE() esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P9)\n"
+                "#define SETTER esp_ble_tx_power_set_enhanced\n"
+                "void h(void) { esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P7); }\n")
+        calls = T.scan("main/b.c", code, self.ESP)
+        self.assertEqual([(c.line, c.dbm) for c in calls],
+                         [(2, None), (3, None), (4, 9.0), (5, None), (6, None)],
+                         "an unknown level name is no literal")
+        self.assertIn("named, not called", calls[1].said)
+
+    def test_the_sdc_setters(self):
+        code = ("void f(void) {\n    sdc_default_tx_power_set(8);\n"
+                "    sdc_default_tx_power_set((int8_t)-4);\n"
+                "    sdc_hci_cmd_vs_zephyr_write_tx_power(&p);\n}\n")
+        calls = T.scan("src/main.c", code, self.SDC)
+        self.assertEqual([(c.name, c.dbm) for c in calls],
+                         [("sdc_default_tx_power_set", 8.0), ("sdc_default_tx_power_set", -4.0),
+                          ("sdc_hci_cmd_vs_zephyr_write_tx_power", None)])
+        self.assertEqual(T.scan("src/main.c", code, T.PROFILES[0]), [],
+                         "Zephyr's LL has no setter: its path is Kconfig's")
+
+    def test_a_setter_moves_the_judged_value_up_never_down(self):
+        r = T.classify("sdkconfig", _config("esp32s3_baseline.sdkconfig"))
+        call = functools.partial(T.Call, "main/main.c", 9, "esp_ble_tx_power_set")
+        cases = [([call(0.0, "low")], 6.0, 6.0),
+                 ([call(12.0, "high")], 12.0, 12.0),
+                 ([call(None, "var")], 6.0, 20.0),
+                 ([call(0.0, "low"), call(None, "var")], 6.0, 20.0)]
+        for calls, floor, value in cases:
+            with self.subTest(calls=[c.said for c in calls]):
+                j = T.judge(r, calls)
+                self.assertEqual((j.floor, j.value), (floor, value))
+        sdc = T.classify("ncs", NCS_SDC)
+        j = T.judge(sdc, [T.Call("src/main.c", 2, "sdc_default_tx_power_set", 8.0, "lit")])
+        self.assertEqual((j.floor, j.value), (4.0, 4.0),
+                         "a literal past the ceiling is clamped to it, as the controller does")
+
+    def test_the_sources_are_what_the_replay_copies(self):
+        tmp = tempfile.mkdtemp(prefix="fw-src-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        _write(tmp, "main/main.c", "int x;\n")
+        _write(tmp, "main/radio.h", "int y;\n")
+        _write(tmp, "README.md", "esp_ble_tx_power_set\n")
+        _write(tmp, ".nopekit/out/main.c", "int z;\n")
+        self.assertEqual(sorted(T.sources(tmp, R.listing)), ["main/main.c", "main/radio.h"])
+
+
+# --------------------------------------------------------------------------- #
 # the gates, on a recorded replay
 # --------------------------------------------------------------------------- #
 @unittest.skipUnless(HAS_YAML, NO_YAML)
@@ -1345,6 +1635,167 @@ class TheGatesReadOneReplay(unittest.TestCase):
         self.assertIn("matches no file the job wrote", v.error)
 
 
+@unittest.skipUnless(HAS_YAML, NO_YAML)
+class TheTxGateReadsOneReplay(unittest.TestCase):
+    """``fw.tx_power`` on a replay handed to ``ctx.load_file``: the config the job
+    wrote or the one its build record names, the claim's limit in the claim's
+    units, and the skips by name."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.registry = _registry()
+        with open(os.path.join(PACK, "selftest", "baseline.json"), encoding="utf-8") as fh:
+            cls.claims = packs_mod.baseline_claims(json.load(fh))
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="fw-tx-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.app = os.path.join(self.tmp, "esp-sleep")
+        shutil.copytree(os.path.join(PACK, "selftest", "assets", "esp-sleep"), self.app)
+
+    def _run(self, *, files=None, configs=None, claims=None, through_spine=False):
+        result = _recorded("act_esp_short_ota_slot.jsonl",
+                           {"build/sleeper.bin": b"\xe9" + bytes(15), **(files or {})})
+        result["configs"] = configs or {}
+        real = gates_mod.GateContext.load_file
+
+        def load_file(self_, path, loader=None):
+            if isinstance(loader, functools.partial):
+                return result
+            return real(self_, path, loader)
+
+        spec, fn = self.registry.get("fw.tx_power")
+        ctx = gates_mod.GateContext(
+            root=self.tmp, ledger=Ledger(claims=self.claims if claims is None else claims),
+            params={"firmware_ci_workflow": os.path.join(self.app, "github", "workflows",
+                                                         "build.yml"),
+                    "firmware_ci_job": "build", "firmware_image": "build/sleeper.bin"},
+            out_dir=os.path.join(self.tmp, "out"), tier=1, log=lambda _m: None, extra={})
+        with mock.patch.object(gates_mod.GateContext, "load_file", load_file):
+            if not through_spine:
+                return fn(ctx)
+            # act and docker are stand-ins' here: the spine's own checks of a pass
+            # are what this run is for, not the availability before them.
+            with mock.patch.object(gates_mod, "availability", lambda _spec: (True, "")):
+                return gates_mod.run_gate(spec, fn, ctx)
+
+    def _sdk(self, name: str) -> bytes:
+        return _config(name).encode("utf-8")
+
+    def test_the_setting_against_the_claims_limit_in_its_own_units(self):
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")})
+        self.assertEqual((v.passed, v.measured, v.limit, v.comparator, v.units),
+                         (True, 6.0, 7.0, "<=", "dBm"), v.detail)
+        self.assertIn("sdkconfig (ESP-IDF's BLE controller, esp32s3): "
+                      "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P6=y, +6 dBm; ceiling +20 dBm; "
+                      "no run-time path", v.detail)
+        self.assertEqual([os.path.basename(p) for p in v.evidence], ["tx_power.json"])
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_default.sdkconfig")})
+        self.assertEqual((v.passed, v.measured), (False, 9.0), v.detail)
+
+    def test_the_sdkconfig_the_build_record_names_counts_as_the_jobs(self):
+        """A tracked sdkconfig that the configure step left as it was (ESP-IDF
+        rewrites it only on a change) reaches the gate through ``configs``."""
+        v = self._run(configs={"sdkconfig": self._sdk("esp32s3_default.sdkconfig")})
+        self.assertEqual((v.passed, v.measured), (False, 9.0), v.detail)
+
+    def test_a_setter_in_the_repositorys_sources_moves_the_judged_value(self):
+        main = os.path.join(self.app, "main", "main.c")
+        with open(main, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(main, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("    esp_deep_sleep_start();\n",
+                                  "    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, "
+                                  "ESP_PWR_LVL_N0);\n    esp_deep_sleep_start();\n"))
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")})
+        self.assertEqual((v.passed, v.measured), (True, 6.0), "a lower level moves nothing")
+        with open(main, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("    esp_deep_sleep_start();\n",
+                                  "    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, lvl);\n"
+                                  "    esp_deep_sleep_start();\n"))
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")})
+        self.assertEqual((v.passed, v.measured), (False, 20.0), v.detail)
+        self.assertIn("main/main.c:", v.detail)
+        self.assertIn("can raise it to the ceiling: judged at +20 dBm", v.detail)
+
+    def test_an_unknown_ceiling_over_a_passing_setting_is_undetermined(self):
+        text = NCS_SDC.replace("CONFIG_BT_CTLR_TX_PWR_ANTENNA=0", "CONFIG_BT_CTLR_TX_PWR_ANTENNA=2")
+        text = "\n".join(ln for ln in text.splitlines()
+                         if not re.match(r"(# )?CONFIG_BT_CTLR_TX_PWR_(PLUS|MINUS|0)", ln))
+        text = text.replace("# CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL is not set",
+                            "CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL=y") + "\n"
+        v = self._run(files={"build/zephyr/.config": text.encode()})
+        self.assertTrue(v.skipped and not v.passed, v)
+        self.assertIn("undetermined:", v.skip_reason)
+        self.assertIn("nopekit claim physical", v.skip_reason)
+        past = text.replace("CONFIG_BT_CTLR_TX_PWR_ANTENNA=2", "CONFIG_BT_CTLR_TX_PWR_ANTENNA=8")
+        v = self._run(files={"build/zephyr/.config": past.encode()})
+        self.assertEqual((v.passed, v.skipped, v.measured), (False, False, 8.0),
+                         "a setting past the limit fails whatever the ceiling")
+
+    def test_stacks_it_does_not_read_skip_by_name(self):
+        cases = {
+            "no config": ({}, "wrote no .config or sdkconfig"),
+            "no Bluetooth": ({"build/zephyr/.config": b"# CONFIG_BT is not set\n"},
+                             "no Bluetooth in build/zephyr/.config"),
+            "BT_LE family": ({"sdkconfig": self._sdk("esp32c6_ble.sdkconfig")},
+                             "BT_LE controller family"),
+            "host only": ({"build/zephyr/.config":
+                           self._sdk("zephyr_nrf5340_cpuapp_peripheral_hr.config")},
+                          "CONFIG_BT_RPMSG=y"),
+        }
+        for label, (files, said) in cases.items():
+            with self.subTest(case=label):
+                v = self._run(files=files)
+                self.assertTrue(v.skipped and not v.passed, v)
+                self.assertIn(said, v.skip_reason)
+
+    def test_a_host_beside_its_controllers_image_is_judged_on_the_controller(self):
+        """Sysbuild writes one config per image: the app core's host-only one
+        names no setting, and the network core's is judged."""
+        v = self._run(files={
+            "build/app/zephyr/.config": self._sdk("zephyr_nrf5340_cpuapp_peripheral_hr.config"),
+            "build/net/zephyr/.config": self._sdk("zephyr_nrf52832_peripheral_hr.config")})
+        self.assertEqual((v.passed, v.measured), (True, 0.0), v.detail)
+        v = self._run(files={
+            "build/a/zephyr/.config": self._sdk("zephyr_nrf52832_peripheral_hr.config"),
+            "sdkconfig": self._sdk("esp32c6_ble.sdkconfig")})
+        self.assertTrue(v.skipped, "a controller no profile reads beside a pass is no pass")
+        v = self._run(files={
+            "build/a/zephyr/.config": self._sdk("zephyr_nrf52832_hci_pwr_ctrl.config"),
+            "sdkconfig": self._sdk("esp32s3_default.sdkconfig")})
+        self.assertEqual((v.passed, v.measured), (False, 9.0), "the worst config fails")
+
+    def test_a_claim_in_other_units_or_a_floor_is_errored(self):
+        for acc, said in (({"quantity": "q", "comparator": "<=", "limit": 5.0, "units": "mW"},
+                           "'mW'"),
+                          ({"quantity": "q", "comparator": ">=", "limit": 0.0, "units": "dBm"},
+                           ">= 0")):
+            with self.subTest(acc=acc):
+                claim = packs_mod.baseline_claims({"_claims": [
+                    {"id": "TX", "statement": "s", "kind": "measurable", "acceptance": acc,
+                     "tags": ["ble-tx-power"]}]})
+                v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")},
+                              claims=claim)
+                self.assertFalse(v.passed)
+                self.assertIn(said, v.error)
+
+    def test_no_claim_tagged_is_errored_and_a_pass_is_held_to_its_claim(self):
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")},
+                      claims=[], through_spine=True)
+        self.assertEqual(v.outcome, "error", v.render())
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")},
+                      through_spine=True)
+        self.assertEqual(v.outcome, "pass", v.render())
+
+    def test_a_config_that_contradicts_itself_is_errored(self):
+        two = _swap(_config("esp32s3_baseline.sdkconfig"),
+                    "# CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9 is not set",
+                    "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9=y")
+        v = self._run(files={"sdkconfig": two.encode()})
+        self.assertIn("2 options set", v.error)
+
+
 # --------------------------------------------------------------------------- #
 # the real replay
 # --------------------------------------------------------------------------- #
@@ -1364,8 +1815,7 @@ class TheRealReplay(unittest.TestCase):
             R.act_version()
         except (R.WrongAct, R.ToolFault) as exc:
             self.skipTest(f"not walked: {exc}")
-        image = subprocess.run(["docker", "image", "inspect", IDF_IMAGE], stdout=subprocess.DEVNULL,
-                               stderr=subprocess.DEVNULL)
+        image = _env.run(["docker", "image", "inspect", IDF_IMAGE], cwd=tempfile.gettempdir())
         if image.returncode != 0:
             self.skipTest(f"not walked: {IDF_IMAGE} is not pulled")
         out = tempfile.mkdtemp(prefix="fw-real-")
@@ -1382,6 +1832,9 @@ class TheRealReplay(unittest.TestCase):
                 if gid == "fw.image_fits":
                     self.assertEqual((good.measured, bad.measured), (48.3, 385.8),
                                      "48.21 % and 385.71 %, rounded up to 0.1 %")
+                if gid == "fw.tx_power":
+                    self.assertEqual((good.measured, bad.measured), (6.0, 9.0),
+                                     "the stated +6 dBm, and ESP-IDF's default +9 dBm")
 
 
 if __name__ == "__main__":

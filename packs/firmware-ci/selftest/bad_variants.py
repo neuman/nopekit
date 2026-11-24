@@ -7,17 +7,17 @@ fixture is broken, and a green verdict from it means nothing.
 
 **Sealed.** Every fixture starts from this pack's own ``selftest/baseline.json`` and
 ``selftest/assets/esp-sleep``, never from the host's projection or repository, and
-hands the gate the baseline's own claims (none: no gate reads an acceptance
-condition). Each copy goes under the CALLER's ``out_dir``
+hands the gate the baseline's own claims (``_claims``: the TX claim
+``fw.tx_power`` reads). Each copy goes under the CALLER's ``out_dir``
 (``<out_dir>/firmware-ci/known-bad/<fixture>/esp-sleep``), never into this
 directory, so the proof never depends on whether the pack is writable. That
 directory is git-ignored in a project and in no work tree in pack mode: the
 replay walks it (``_replay.listing``).
 
-**Each one measured** with act 0.2.97 in espressif/idf v5.5.6: the three that reach
+**Each one measured** with act 0.2.97 in espressif/idf v5.5.6: the four that reach
 the replay build with the workflow unchanged, so ``fw.ci_job`` passes
-``unresolved_symbol``; ``short_ota_slot`` and ``no_wake_source`` build with exit 0,
-so ``fw.build`` passes them.
+``unresolved_symbol``; ``short_ota_slot``, ``no_wake_source`` and
+``tx_line_removed`` build with exit 0, so ``fw.build`` passes them.
 """
 from __future__ import annotations
 
@@ -103,3 +103,14 @@ def no_wake_source(ctx):
     return _variant(ctx, "no_wake_source", [
         ("main/main.c", "    rtc_gpio_pullup_en(GPIO_NUM_0);\n", ""),
         ("main/main.c", "    esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, 0);\n", "")])
+
+
+def tx_line_removed(ctx):
+    """fw.tx_power — the TX level line removed from sdkconfig.defaults. Kconfig
+    then takes ESP-IDF's own default, ``CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P9``
+    (+9 dBm, components/bt/controller/esp32c3/Kconfig.in at v5.5.6, which the
+    S3 sources), past the baseline claim's 7 dBm. The build passes: nothing in a
+    build compares a setting with a grant. A person makes this change when they
+    delete a line and do not know that it set anything."""
+    return _variant(ctx, "tx_line_removed", [(
+        "sdkconfig.defaults", "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P6=y\n", "")])

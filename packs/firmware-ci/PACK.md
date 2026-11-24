@@ -1,12 +1,14 @@
 # firmware-ci
 
 Replay the **CI job that builds the firmware** with act, in the job's own containers,
-and read three facts from what it writes: the build passed, the image fits its region,
-and an image that can enter deep sleep can wake. The object judged is the image the
-named CI job writes into its workspace when act replays it, on a copy of the files
-the next commit would hold. Addresses and sizes are in bytes. Flash use is in % of
-the region that the bootloader or the partition table leaves the app. RAM banks come
-from the part's datasheet.
+and read four facts from what it writes: the build passed, the image fits its region,
+an image that can enter deep sleep can wake, and the highest Bluetooth LE transmit
+setting the image can reach is inside the setting its radio's grant was tested at.
+The object judged is the image and the Kconfig output the named CI job writes into
+its workspace when act replays it, on a copy of the files the next commit would hold.
+Addresses and sizes are in bytes. Flash use is in % of the region that the bootloader
+or the partition table leaves the app. RAM banks come from the part's datasheet. A
+transmit setting is in dBm.
 
 One mechanism serves every stack that builds in a GitHub Actions job on Linux:
 Zephyr, NCS, ZMK, ESP-IDF, Arduino, PlatformIO, the Pico SDK, QMK and STM32 make or
@@ -21,9 +23,10 @@ is not the pack.
 | `fw.build` | 1 | `firmware-build` | established: the toolchain's exit code in the job's own container, as act reports it | `main.c` calls a helper that no source defines |
 | `fw.image_fits` | 1 | `flash-fit`, `memory-fit`, `ota-slot` | sourced: the bootloader's layout, the datasheet or the ESP partition table | `ota_1` cut to 0x20000, below the image |
 | `fw.sleep_wake` | 1 | `deep-sleep`, `wakeup-source` | sourced: ESP-IDF's Sleep Modes guide, ZMK's low-power docs | the ext0 wake line removed |
+| `fw.tx_power` | 1 | `ble-tx-power` | sourced: the stack's own Kconfig resolution, by rules cited to its Kconfig and sources | the TX level line removed, so ESP-IDF's default +9 dBm applies |
 
 `fw.ci_job` is the replay's validity guard. It reads the workflow in about 0.03 s,
-before a container starts. `fw.build` needs it, and the two readers need `fw.build`.
+before a container starts. `fw.build` needs it, and the three readers need `fw.build`.
 A gate whose prerequisite did not pass reads Skipped.
 
 - **`fw.ci_job`** chooses the job (`firmware_ci_job`, else the one job that runs a
@@ -68,6 +71,25 @@ A gate whose prerequisite did not pass reads Skipped.
   wakes are light-sleep only and never count. ZMK: deep sleep needs `wakeup-source` on
   each scanned kscan, and each listed soft-off wake device needs it too. Every other
   stack skips by name, with its reason.
+- **`fw.tx_power`** reads the `.config` (Zephyr, NCS, ZMK) or `sdkconfig` (ESP-IDF)
+  that the replayed build resolved: every one the job wrote, and the sdkconfig that
+  ESP-IDF's build record (`project_description.json`) names, which ESP-IDF leaves
+  as it was when a tracked sdkconfig is current. Never a build directory on this
+  machine, and never a second build. Three profiles, from a closed table: Zephyr's
+  LL controller (`CONFIG_BT_CTLR_TX_PWR_*`), NCS's SoftDevice Controller (the same
+  choice, or `CONFIG_BT_CTLR_TX_PWR_ANTENNA` when it is not 0) and ESP-IDF's BLE
+  controller on ESP32-C3 and ESP32-S3 (`CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_*`, default
+  +9 dBm). A run-time path moves the judged value to the **ceiling**, the highest
+  option Kconfig offered the SoC: `CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL`, LE Power
+  Control, or a setter call in the repository's C sources (`esp_ble_tx_power_set`,
+  `esp_ble_tx_power_set_enhanced`, `sdc_default_tx_power_set`,
+  `sdc_hci_cmd_vs_zephyr_write_tx_power`). A setter whose level is a literal is
+  judged at that literal. It **fails** when the judged setting is past the claim's
+  limit. Where the ceiling cannot be known (an antenna-referenced NCS setting, a
+  front-end module), a setting that alone passes is skipped as undetermined and
+  names the conducted measurement. Any other stack skips by name: ESP-IDF's BT_LE
+  family (ESP32-C2, C5, C6, C61, H2), the ESP32's BTDM controller, a host whose
+  controller is in another image or chip, and a stack with no Kconfig.
 
 A tool fault is errored, never a fail: a step before the build that fails, act or
 docker stopping, a timeout (1800 s), a compiler the machine stopped (OOM, an internal
@@ -77,7 +99,8 @@ list does not hold.
 ## Model projection
 
 Keys use scope `fw` and are read with `ctx.param`, so `fw.<key>` beats the bare key.
-`selftest/baseline.json` has a `_notes` line for each.
+`selftest/baseline.json` has a `_notes` line for each. `fw.tx_power` reads no key
+of its own: the workflow chooses the build, and the claim holds the limit.
 
 | Key | Meaning |
 |---|---|
@@ -117,6 +140,14 @@ reaches flash through the cache, so it takes the ESP or slot shape only.
   "units": "%"}`; `memory-fit`, `ota-slot`.
 - `deep-sleep`, `wakeup-source`: the image arms a deep-sleep wake. A wake on real
   hardware is a physical claim.
+- `ble-tx-power`, with `{"quantity": "bluetooth le transmit power setting",
+  "comparator": "<=", "limit": <dBm>, "units": "dBm"}`. The limit is the setting the
+  radio module's grant was tested at, from its test report or integration manual (47
+  CFR 15.204(c)(2): tested "at its maximum available output power level"). It is
+  never the grant's listed output, which is what that setting measured after the
+  module's losses. With NCS and a front-end module, the setting is
+  antenna-referenced, and the statement says so. A LoRa, Wi-Fi or Thread power
+  claim never carries this tag.
 
 ## Tools and installation
 
@@ -124,7 +155,7 @@ reaches flash through the cache, so it takes the ESP or slot shape only.
 exactly; another version reads Skipped and names the install line), `docker` and
 `git` on PATH, and the job's images already pulled. `references/installing.md` has
 the steps and the checksum. The baseline's replay took 40-49 s on seven cores. The
-three tier-1 gates share one replay per check. They read through subprocesses the
+four tier-1 gates share one replay per check. They read through subprocesses the
 trace cannot see into, so they run again on every check at tier 1 or above.
 
 ## What this pack cannot settle
@@ -149,6 +180,15 @@ trace cannot see into, so they run again on every check at tier 1 or above.
   workflow of about 15 lines from `references/ci-templates.md`.
 - Runtime stack and heap use, OTA image validity, signing and rollback, partitions
   that overlap inside the app region, a watchdog and a brown-out level.
+- The conducted or radiated output, antenna gain, EIRP and regional limits: the gate
+  judges a setting against a setting. A conducted measurement at the highest
+  reachable setting is a physical claim (`nopekit claim physical`); it is also the
+  route for every stack the gate skips.
+- A transmit setter reached by indirection: a library outside the repository, a
+  Zephyr or NCS module, a raw HCI command (an advertising set's requested power, a
+  vendor command) from the app or an external host. The scan reads the names in
+  the repository's own C and C++ files, and a call the build does not compile
+  still counts.
 - Design lines for PlatformIO, Arduino, QMK, ESP-IDF's partition check and generic
   GCC errors read errored until their log excerpts are committed.
 - Profiles other than the baseline's (ZMK, the address route, the vector check) are
@@ -162,10 +202,13 @@ trace cannot see into, so they run again on every check at tier 1 or above.
 - `references/memory-maps.md`: how to state `app_memory_map` for each bootloader.
 - `references/wake-rules.md` and `references/signatures.md`: the rule tables and the
   closed lists, each line with its committed log excerpt.
+- `references/tx-power.md`: the transmit profiles, the ceiling rule and the setter
+  scan, each with its source.
 - `references/what-slipped-through.md`: the faults this pack was written for.
 - `lenses.md`: what a reviewer should ask of a firmware build.
 
 The baseline is the pack's own ESP-IDF app (`selftest/assets/esp-sleep`): an
-ESP32-S3 that starts BLE, arms a button wake and sleeps, built in ESP-IDF v5.5.6's
-image pinned by digest. `selftest/assets/esp-sleep/LICENSE` says where each file is
+ESP32-S3 that starts BLE at a +6 dBm default transmit level, arms a button wake and
+sleeps, built in ESP-IDF v5.5.6's image pinned by digest. Its `_claims` hold one
+calibration claim, TX, at 7 dBm: a value for the control, not any module's grant. `selftest/assets/esp-sleep/LICENSE` says where each file is
 from.

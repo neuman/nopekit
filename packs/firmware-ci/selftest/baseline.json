@@ -1,11 +1,22 @@
 {
-  "_description": "firmware-ci's own ESP-IDF app (selftest/assets/esp-sleep): an ESP32-S3 with 4 MB of flash that starts its BLE stack (NimBLE), arms a button wake on GPIO0 through ext0 and enters deep sleep. Its CI (github/workflows/build.yml) builds it in one container job, in ESP-IDF v5.5.6's image pinned by digest, with no masking. Its partition table is ESP-IDF's two-OTA rows (factory, ota_0 and ota_1 of 1 MB). act 0.2.97 replays it in 40-49 s; the image is 0x7b6d0 B, 48.21 % of the smallest app slot, which fw.image_fits reports rounded up as 48.3 %. selftest/assets/esp-sleep/LICENSE says where each file is from.",
+  "_description": "firmware-ci's own ESP-IDF app (selftest/assets/esp-sleep): an ESP32-S3 with 4 MB of flash that starts its BLE stack (NimBLE), sets its default BLE transmit level to +6 dBm in sdkconfig.defaults, arms a button wake on GPIO0 through ext0 and enters deep sleep. Its CI (github/workflows/build.yml) builds it in one container job, in ESP-IDF v5.5.6's image pinned by digest, with no masking. Its partition table is ESP-IDF's two-OTA rows (factory, ota_0 and ota_1 of 1 MB). act 0.2.97 replays it in 40-49 s; the image is 0x7b6d0 B, 48.21 % of the smallest app slot, which fw.image_fits reports rounded up as 48.3 %. selftest/assets/esp-sleep/LICENSE says where each file is from.",
 
   "firmware_ci_workflow": "selftest/assets/esp-sleep/github/workflows/build.yml",
   "firmware_ci_job": "build",
   "firmware_image": "build/sleeper.bin",
   "firmware_elf": "build/sleeper.elf",
   "app_memory_map": {"esp_partition_table": "selftest/assets/esp-sleep/partitions.csv"},
+
+  "_claims": [
+    {
+      "id": "TX",
+      "statement": "The highest Bluetooth LE transmit setting the firmware can reach is at most 7 dBm",
+      "kind": "measurable",
+      "acceptance": {"quantity": "bluetooth le transmit power setting", "comparator": "<=", "limit": 7.0, "units": "dBm"},
+      "tags": ["ble-tx-power"],
+      "rationale": "a calibration value for this pack's control, not any module's grant: 7 dBm sits between the ESP32-S3's +6 and +9 dBm steps, so the known-bad's default (+9 dBm) is the nearest step past it, and a gate that rounds the limit up to a step still fails it. A project's claim states the setting its radio's grant was tested at, from the test report or the integration manual, never the grant's listed output."
+    }
+  ],
 
   "_notes": {
     "firmware_ci_workflow": "The GitHub Actions workflow that builds the firmware, from the project root. The repository is the directory above its workflows/ directory's parent (.github/ in a real repository); act replays it on a copy of what the next commit would hold. Every gate skips without it.",

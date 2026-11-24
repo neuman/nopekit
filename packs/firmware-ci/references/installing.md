@@ -1,8 +1,9 @@
 # Installing the tools
 
 `fw.ci_job` needs Python and PyYAML (`pip install pyyaml`). `fw.build`,
-`fw.image_fits` and `fw.sleep_wake` need `act`, `docker` and `git` on PATH, and the
-images the job runs in already pulled. Without them they read Skipped, never passed.
+`fw.image_fits`, `fw.sleep_wake` and `fw.tx_power` need `act`, `docker` and `git` on
+PATH, and the images the job runs in already pulled. Without them they read Skipped,
+never passed.
 
 Linux with docker only. Your user must be in the `docker` group. No step needs
 sudo. macOS and Windows are untested.
@@ -53,9 +54,10 @@ PYTHONPATH=src python3 -m nopekit gate selftest --pack firmware-ci
 ```
 
 The path is relative to a nopekit checkout. This replays the pack's baseline and its
-three known-bad copies that reach the build. Each of the four gates must say its
+four known-bad copies that reach the build. Each of the five gates must say its
 known-good passed and its known-bad failed. One replay took 40-49 s on seven cores;
-`pack validate` runs about eleven of them.
+`pack validate` runs fifteen of them (counted on 2026-11-24, about 20 min on a
+loaded machine).
 
 ## What the replay does
 
