@@ -34,6 +34,7 @@ Run:  PYTHONPATH=src:tests python3 -m unittest tests.test_pcb_kicad -v
 """
 from __future__ import annotations
 
+import copy
 import json
 import math
 import os
@@ -760,7 +761,7 @@ class TheTagTableIsTheGates(unittest.TestCase):
 # 0.2.0: what each gate passed over in silence, and the five it gained
 # --------------------------------------------------------------------------- #
 DECK = os.path.join(ASSETS, "vbus_droop.cir")
-POWER_BOARD = os.path.join(ASSETS, "lipo_charger.kicad_pcb")
+POWER_BOARD = os.path.join(ASSETS, "power_board.kicad_pcb")
 SYMBOLS = next((d for d in (os.environ.get("KICAD9_SYMBOL_DIR", ""), "/usr/share/kicad/symbols")
                 if d and os.path.isfile(os.path.join(d, "Device.kicad_sym"))), None)
 
@@ -1529,19 +1530,77 @@ def _move_pad_net(tree, ref: str, number: str, net_name: str) -> None:
     K.child(_pad(tree, ref, number), "net")[1:] = [node[1], K.Q(net_name)]
 
 
-class ThePowerRulesReadTheirRecords(unittest.TestCase):
-    """The three LiPo rules: IEC 60949's arithmetic, and records held to the board."""
+def _power_params(board: str = POWER_BOARD) -> dict:
+    """The baseline's params, every power record pointed at ``board``."""
+    params = copy.deepcopy(_baseline())
+    for key in ("pcb_batteries", "pcb_protectors", "pcb_conductors", "pcb_matings"):
+        for rec in params[key].values():
+            for item in ([rec["a"], rec["b"]] if key == "pcb_matings" else [rec]):
+                if "board" in item:
+                    item["board"] = board
+    return params
+
+
+def _set_value(tree, ref: str, value: str) -> None:
+    for prop in K.children(_footprint(tree, ref), "property"):
+        if len(prop) >= 3 and prop[1] == "Value":
+            prop[2] = K.Q(value)
+            return
+    raise KeyError(ref)
+
+
+#: A schematic that places one symbol, ``TH1``, on ``lib_id``: all the
+#: defeat check reads (KiCad 9's root sheet form, cut to what is read).
+_ONE_SYMBOL_SCH = """(kicad_sch
+  (version 20250114)
+  (generator "eeschema")
+  (uuid "00000000-0000-4000-8000-0000000000a1")
+  (paper "A4")
+  (lib_symbols)
+  (symbol
+    (lib_id "{lib_id}")
+    (at 100 100 0)
+    (uuid "00000000-0000-4000-8000-0000000000a2")
+    (property "Reference" "TH1" (at 100 95 0))
+    (property "Value" "NTC 10k B4250" (at 100 105 0))
+  )
+)
+"""
+
+
+class _PowerCase(unittest.TestCase):
+    """Runs the battery rules on the baseline's power board, or on a copy of it
+    edited by a test, with the baseline's records or a test's edit of them."""
 
     def setUp(self):
         self.registry = _registry()
         self.power = load_path(os.path.join(PACK, "gates", "power.py"))
-        params = _baseline()
-        for key in ("pcb_cell", "pcb_charger", "pcb_fuse", "pcb_conductor"):
-            params[key] = dict(params[key], board=POWER_BOARD)
-        params["pcb_cutoffs"] = [dict(r, board=POWER_BOARD) for r in params["pcb_cutoffs"]]
-        self.params = params
+        self.helpers = load_path(os.path.join(PACK, "gates", "_power.py"))
         self.root = tempfile.mkdtemp(prefix="nopekit-pcb-power-")
         self.addCleanup(shutil.rmtree, self.root, True)
+
+    def board(self, edit=None, stem: str = "edited") -> str:
+        tree = K.load_tree(POWER_BOARD)
+        if edit is not None:
+            edit(tree)
+        path = os.path.join(self.root, stem + ".kicad_pcb")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(K.dump(tree) + "\n")
+        return path
+
+    def run_gate(self, gid: str, edit=None, records=None, board: str | None = None):
+        params = _power_params(board or (self.board(edit) if edit else POWER_BOARD))
+        if records is not None:
+            records(params)
+        return _run(self.registry, gid, self.root, params)
+
+
+POWER_GATES = ("pcb.charge_temperature", "pcb.charge_limits", "pcb.fault_current",
+               "pcb.discharge_cutoff")
+
+
+class ThePowerRulesReadTheirRecords(_PowerCase):
+    """Records held to the board and read strictly; the baseline's values."""
 
     def test_the_formula_gives_iecs_k_factors(self):
         """k = K sqrt(ln((limit + beta) / (start + beta))): IEC 60364-5-54's table."""
@@ -1550,157 +1609,742 @@ class ThePowerRulesReadTheirRecords(unittest.TestCase):
             with self.subTest(start=start, limit=limit):
                 got = math.sqrt(self.power.adiabatic_s(1.0, 1.0, start, limit))
                 self.assertAlmostEqual(got, k, delta=0.05)
-        # references/power.md's worked point: 0.03 mm^2, 25 -> 85 C, 10 A.
+        # references/battery.md's worked point: 0.03 mm^2, 25 -> 85 C, 10 A.
         self.assertAlmostEqual(self.power.adiabatic_s(10.0, 0.03, 25, 85), 0.0956, places=4)
 
-    def _run(self, gid: str, **records):
-        params = dict(self.params, **records)
-        return _run(self.registry, gid, self.root, params)
+    def test_the_baseline_passes_each_at_its_value(self):
+        """The design's numbers, recomputed: 5.34..43.47 C against 0..45 C; 4.232 V
+        of 4.25 V; 1.45 x 1 A against a 1 A trip; 2.85 V against 2.5 V."""
+        for gid, measured, units, said in (
+                ("pcb.charge_temperature", 1.53, "K", "charging allowed 5.34..43.47 C"),
+                ("pcb.charge_limits", 0.9958, "ratio", "holds 4.232 V of the cell's 4.25 V"),
+                ("pcb.fault_current", 1.45, "ratio", "trips by 1 A, against 1.45 x 1 A"),
+                ("pcb.discharge_cutoff", 2.85, "V", "cuts it off at 2.85 V per cell")):
+            with self.subTest(gate=gid):
+                verdict = self.run_gate(gid)
+                self.assertEqual(verdict.outcome, "pass", verdict.render())
+                self.assertEqual((verdict.measured, verdict.units), (measured, units))
+                self.assertIn(said, verdict.detail)
+
+    def test_a_charger_with_no_safety_timer_passes(self):
+        """The branch failed every charger with no timer; IEC 62368-1 M.4.2 asks
+        for none. The baseline's MCP73833-AMI has its timer disabled."""
+        self.assertIs(_baseline()["pcb_protectors"]["charger"]["functions"]["safety_timer"],
+                      False)
+        self.assertEqual(self.run_gate("pcb.charge_temperature").outcome, "pass")
 
     def test_a_record_for_another_design_errors(self):
-        for gid, key, change, said in (
-                ("pcb.fuse_conductor", "pcb_fuse", {"value": "MF-MSMF050"},
-                 "board's F1 is MF-MSMF075"),
-                ("pcb.charge_protection", "pcb_charger", {"ref": "U9"}, "the board has no U9"),
-                ("pcb.discharge_cutoff", "pcb_cell", {"pin": "7"}, "has no pad 7")):
+        def fuse_value(p):
+            p["pcb_protectors"]["fuse"]["value"] = "PTC_OTHER"
+
+        def charger_ref(p):
+            p["pcb_protectors"]["charger"]["ref"] = "U9"
+
+        def battery_pin(p):
+            p["pcb_batteries"]["main"]["terminals"]["pos"] = "7"
+        for gid, records, said in (
+                ("pcb.fault_current", fuse_value, "'s F1 is PTC_FIXTURE_0A5, the record's "
+                                                  "PTC_OTHER"),
+                ("pcb.charge_temperature", charger_ref, "has no U9"),
+                ("pcb.discharge_cutoff", battery_pin, "has no pad 7")):
             with self.subTest(gate=gid):
-                verdict = self._run(gid, **{key: dict(self.params[key], **change)})
+                verdict = self.run_gate(gid, records=records)
                 self.assertEqual(verdict.outcome, "error", verdict.render())
-                self.assertIn("record is for another design", verdict.error)
+                self.assertIn("is for another design", verdict.error)
                 self.assertIn(said, verdict.error)
 
-    def _board(self, edit) -> str:
-        tree = K.load_tree(POWER_BOARD)
-        edit(tree)
-        path = os.path.join(self.root, "edited.kicad_pcb")
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(K.dump(tree) + "\n")
-        return path
+    def test_a_record_read_loosely_errors(self):
+        """An unknown key names the nearest known one; a list of records, a
+        typical-only threshold, an empty source and a flag spelled as a word are
+        refused."""
+        def misspelt(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_temp"]["ntc"]["r25_tol"] = 1
 
-    def _repoint(self, path: str) -> dict:
-        out = {k: dict(self.params[k], board=path)
-               for k in ("pcb_cell", "pcb_charger", "pcb_fuse", "pcb_conductor")}
-        out["pcb_cutoffs"] = [dict(r, board=path) for r in self.params["pcb_cutoffs"]]
-        return out
+        def as_list(p):
+            p["pcb_batteries"] = list(p["pcb_batteries"].values())
 
-    def test_therm_tied_to_ground_is_no_thermistor(self):
-        def edit(tree):
-            gnd = _net_code(tree, "GND")
-            K.child(_pad(tree, "U1", "8"), "net")[1:] = [gnd, K.Q("GND")]
-        verdict = self._run("pcb.charge_protection", **self._repoint(self._board(edit)))
-        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        def typical(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_temp"]["sense"]["cold_v"] = 1.23
 
-    def test_a_fuse_beside_the_path_is_not_between(self):
-        def edit(tree):
-            K.child(_pad(tree, "J3", "1"), "net")[1:] = [_net_code(tree, "VCELL"), K.Q("VCELL")]
-        verdict = self._run("pcb.fuse_conductor", **self._repoint(self._board(edit)))
-        self.assertEqual(verdict.outcome, "fail", verdict.render())
-        self.assertIn("F1 is not between the cell and J3", verdict.detail)
+        def no_source(p):
+            p["pcb_protectors"]["protector"]["source"] = " "
 
-    def test_a_cutoff_sensing_the_cells_return_never_counts(self):
-        """In review: the series part was inferred, the cell's own connector J2
-        (VCELL, GND) among the candidates, so a cutoff whose VDD sat on ground read
-        as sensing the cell "through J2", and so did a record naming a VSS pin."""
-        cut = self.params["pcb_cutoffs"][0]
-
-        def vdd_on_gnd(tree):
-            K.child(_pad(tree, "U2", "2"), "net")[1:] = [_net_code(tree, "GND"), K.Q("GND")]
-        moved = self._repoint(self._board(vdd_on_gnd))
-        for name, cutoffs in (
-                ("VSS pin named", [dict(cut, sense_pin="3")]),
-                ("series part is the cell", [dict(cut, series_ref="J2")]),
-                ("series part is the cap", [dict(cut, series_ref="C1")]),
-                ("no series part named", [dict(cut, series_ref=None)]),
-                ("VDD on ground", [dict(c, series_ref=None) for c in moved["pcb_cutoffs"]])):
-            with self.subTest(case=name):
-                params = moved if name == "VDD on ground" else {}
-                verdict = self._run("pcb.discharge_cutoff",
-                                    **dict(params, pcb_cutoffs=cutoffs))
-                self.assertEqual(verdict.outcome, "fail", verdict.render())
-                self.assertIn("nothing cuts the cell off", verdict.detail)
+        def worded(p):
+            p["pcb_protectors"]["charger"]["functions"]["safety_timer"] = "false"
+        for gid, records, said in (
+                ("pcb.charge_temperature", misspelt, "unknown key 'r25_tol' (did you mean "
+                                                     "'r25_tol_pct'?)"),
+                ("pcb.fault_current", as_list, "pcb_batteries is a list"),
+                ("pcb.charge_temperature", typical, "is one number, 1.23: give the datasheet "
+                                                    "[min, max]"),
+                ("pcb.discharge_cutoff", no_source, "pcb_protectors.protector's source is "
+                                                    "empty"),
+                ("pcb.charge_limits", worded, "give true or false")):
+            with self.subTest(gate=gid, said=said):
+                verdict = self.run_gate(gid, records=records)
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn(said, verdict.error)
 
     def test_a_part_not_fitted_is_not_counted(self):
-        """In review: dnp on TH1, U2 or R1 left each rule passing."""
-        for gid, ref in (("pcb.charge_protection", "TH1"), ("pcb.charge_protection", "U1"),
-                         ("pcb.discharge_cutoff", "U2"), ("pcb.discharge_cutoff", "R1"),
-                         ("pcb.fuse_conductor", "F1")):
+        """dnp on the NTC, the charger, the cutoff, its RC resistor or the fuse."""
+        for gid, ref, said in (("pcb.charge_temperature", "TH1", "TH1 ("),
+                               ("pcb.charge_temperature", "U1", "U1 ("),
+                               ("pcb.discharge_cutoff", "U2", "U2 ("),
+                               ("pcb.discharge_cutoff", "R5", "R5 ("),
+                               ("pcb.fault_current", "F1", "F1 (")):
             for attr in K.NOT_FITTED:
                 with self.subTest(gate=gid, ref=ref, attr=attr):
                     def edit(tree):
                         K.child(_footprint(tree, ref), "attr").append(attr)
-                    verdict = self._run(gid, **self._repoint(self._board(edit)))
+                    verdict = self.run_gate(gid, edit)
                     self.assertEqual(verdict.outcome, "fail", verdict.render())
-                    self.assertIn(f"{ref} (", verdict.detail)
+                    self.assertIn(said, verdict.detail)
                     self.assertIn("marked not fitted", verdict.detail)
 
-    def test_an_ntc_with_one_end_open_senses_nothing(self):
-        """In review: TH1's pad 2 on no net read as "two nets", a pass."""
-        for name, edit in (
-                ("no net", lambda t: _pad(t, "TH1", "2").remove(K.child(_pad(t, "TH1", "2"),
-                                                                       "net"))),
-                ("a net of its own", lambda t: _move_pad_net(t, "TH1", "2", "TH_FAR"))):
-            with self.subTest(case=name):
-                verdict = self._run("pcb.charge_protection", **self._repoint(self._board(edit)))
-                self.assertEqual(verdict.outcome, "fail", verdict.render())
-                self.assertIn("TH1's other pad", verdict.detail)
-
-    def test_a_record_read_loosely_errors(self):
-        """In review: "false" as a string read as a timer, a negative area squared
-        away, and a cutoff with an empty source counted."""
-        for gid, key, change, said in (
-                ("pcb.charge_protection", "pcb_charger", {"safety_timer": "false"},
-                 "give true or false"),
-                ("pcb.fuse_conductor", "pcb_conductor", {"area_mm2": -0.081},
-                 "area_mm2 must be above 0"),
-                ("pcb.fuse_conductor", "pcb_fuse", {"trip_max_s": [[8.0, 0.0]]},
-                 "must be above 0"),
-                ("pcb.discharge_cutoff", "pcb_cutoffs", {"source": ""},
-                 "pcb_cutoffs[0]'s source is empty"),
-                ("pcb.discharge_cutoff", "pcb_cutoffs", {"series_ref": "R9"},
-                 "the board has no R9")):
-            with self.subTest(gate=gid, change=change):
-                rec = self.params[key]
-                rec = ([dict(rec[0], **change)] if isinstance(rec, list)
-                       else dict(rec, **change))
-                verdict = self._run(gid, **{key: rec})
-                self.assertEqual(verdict.outcome, "error", verdict.render())
-                self.assertIn(said, verdict.error)
-
-    def test_a_board_the_guard_would_fail_errors(self):
-        """A record may name a board pcb.board_readable never reads (pcb_board is
-        another board), so each rule makes the guard's checks itself: a board
-        older than KiCad 6 errors, and one newer than the reader was checked
-        through skips with the guard's own words (0.3.0: it errored, a crash
-        beside the guard's skip, on every board KiCad 10 saved)."""
-        def older(tree):
-            K.child(tree, "version")[1] = "20171130"
-
-        def newer(tree):
-            K.child(tree, "version")[1] = "20991231"
-        records = self._repoint(self._board(older))
-        for gid in ("pcb.charge_protection", "pcb.fuse_conductor", "pcb.discharge_cutoff"):
+    def test_a_board_the_guard_would_fail_errors_and_a_newer_one_skips(self):
+        """A record may name a board pcb.board_readable never reads, so each rule
+        makes the guard's checks itself: older than KiCad 6 errors, and newer
+        than the reader was checked through skips, in the guard's own words."""
+        older = self.board(lambda t: K.child(t, "version").__setitem__(1, "20171130"), "old")
+        newer = self.board(lambda t: K.child(t, "version").__setitem__(1, "20991231"), "new")
+        for gid in POWER_GATES:
             with self.subTest(gate=gid, board="older than KiCad 6"):
-                verdict = self._run(gid, **records)
+                verdict = self.run_gate(gid, board=older)
                 self.assertEqual(verdict.outcome, "error", verdict.render())
                 self.assertIn("not one this reader can vouch for", verdict.error)
                 self.assertIn("older than", verdict.error)
-        records = self._repoint(self._board(newer))
-        for gid in ("pcb.charge_protection", "pcb.fuse_conductor", "pcb.discharge_cutoff"):
             with self.subTest(gate=gid, board="newer than the reader"):
-                verdict = self._run(gid, **records)
+                verdict = self.run_gate(gid, board=newer)
                 self.assertEqual(verdict.outcome, "skipped", verdict.render())
                 self.assertIn("this reader was checked through board format 20241229 "
                               "(KiCad 9.0); the file is format 20991231",
                               verdict.skip_reason)
 
-    def test_a_pcm_alone_below_the_minimum_fails_and_says_so(self):
-        cell = dict(self.params["pcb_cell"], min_v=3.0, pcm_cutoff_min_v=2.5)
-        verdict = self._run("pcb.discharge_cutoff", pcb_cell=cell, pcb_cutoffs=[])
-        self.assertEqual(verdict.outcome, "fail", verdict.render())
-        self.assertEqual(verdict.measured, 2.5)
-        self.assertIn("the cell's PCM opens at 2.5 V, below its 3 V minimum; no part on "
-                      "the board cuts the cell off", verdict.detail)
+    def test_no_battery_skips_and_says_so(self):
+        for gid in POWER_GATES:
+            with self.subTest(gate=gid):
+                verdict = self.run_gate(gid, records=lambda p: p.pop("pcb_batteries"))
+                self.assertEqual(verdict.outcome, "skipped", verdict.render())
+                self.assertIn("no pcb_batteries", verdict.skip_reason)
 
+    def test_a_board_value_is_read_as_a_resistor_is_labelled(self):
+        """``1M`` is a megohm on a resistor (it is a milliohm to SPICE, which is
+        why pcb.py's spice_number is not reused); ``4k7`` is RKM; a value with a
+        tolerance in it is refused, never guessed."""
+        r = self.helpers.resistance
+        for text, ohms in (("2k", 2000.0), ("4k7", 4700.0), ("1M", 1e6), ("330", 330.0),
+                           ("330R", 330.0), ("4R7", 4.7), ("5.1k", 5100.0), ("1M5", 1.5e6),
+                           ("100 ohm", 100.0), ("10K", 10000.0)):
+            with self.subTest(value=text):
+                self.assertAlmostEqual(r(text), ohms)
+        for text in ("10k 1%", "PTC_FIXTURE_0A5", "", "k"):
+            with self.subTest(value=text):
+                self.assertIsNone(r(text))
+
+
+class ChargingStopsOutsideTheWindow(_PowerCase):
+    """pcb.charge_temperature: the window at the corners, wherever the stop lives."""
+
+    GID = "pcb.charge_temperature"
+
+    @staticmethod
+    def _ntc(p) -> dict:
+        return p["pcb_protectors"]["charger"]["functions"]["charge_temp"]["ntc"]
+
+    def test_headroom_is_a_difference_in_k_a_claim_compares(self):
+        """Reported in K, not C: a claim of headroom stated in K is compared with
+        it (the critique's grafted point), and one stated in C is not."""
+        from nopekit import claims as claims_mod
+        from nopekit.models import Acceptance, Claim, Comparator
+        verdict = self.run_gate(self.GID)
+        self.assertEqual(verdict.units, "K")
+        for units, limit, state in (("K", 1.0, "holds"), ("K", 2.0, "fails"),
+                                    ("C", 1.0, "not-compared")):
+            claim = Claim(id="CT1", statement="headroom", tags=["charge-temperature"],
+                          acceptance=Acceptance(quantity="charge temperature headroom",
+                                                comparator=Comparator.GE, limit=limit,
+                                                units=units))
+            with self.subTest(units=units, limit=limit):
+                self.assertEqual(claims_mod.cross_check(claim, verdict).state, state)
+
+    def test_the_b_pair_is_flagged_when_extrapolated(self):
+        """The cold edge, 5.34 C, is below the record's B25/85 pair: the detail
+        says so, and that the B equation reads a cold trip warm there."""
+        verdict = self.run_gate(self.GID)
+        self.assertIn("the cold edge, 5.34 C, is below the B pair 25/85 C, where the B "
+                      "equation extrapolates and reads a cold trip warm", verdict.detail)
+        self.assertNotIn("the hot edge", verdict.detail)
+
+    def test_the_rt_table_comes_first(self):
+        """The maker's table, when given, is read in place of the B equation (here
+        a table the B equation itself wrote, so the edges agree), and nothing is
+        flagged as extrapolated. A table that stops short of a trip errors."""
+        beta = 4250.0
+
+        def table(lo, hi, step):
+            return [[t, round(10000 * math.exp(beta * (1 / (t + 273.15) - 1 / 298.15)), 3)]
+                    for t in range(lo, hi + 1, step)]
+
+        def with_table(p):
+            self._ntc(p)["rt_table_c_ohm"] = table(-40, 125, 5)
+        verdict = self.run_gate(self.GID, records=with_table)
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertIn("the maker's R/T table", verdict.detail)
+        self.assertNotIn("extrapolates", verdict.detail)
+        self.assertAlmostEqual(verdict.measured, 1.53, delta=0.05)
+
+        def short_table(p):
+            self._ntc(p)["rt_table_c_ohm"] = table(20, 60, 5)
+        verdict = self.run_gate(self.GID, records=short_table)
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("lies outside the NTC's R/T table, 20..60 C: give rows that bracket it",
+                      verdict.error)
+
+    def test_the_ntc_s_grade_is_read(self):
+        """thermal-analytic's grade case, grafted: the same network built from a
+        coarser grade of the same NTC. Its nominal curve, and so every check
+        made at nominal, does not move; at the corners the headroom shrinks from
+        1.53 K (1 %) to 0.17 K (R25 5 %, B 3 %), and a 10 % part charges the cell
+        past its 45 C."""
+        def grade(r25, beta):
+            def records(p):
+                self._ntc(p).update(r25_tol_pct=r25, beta_tol_pct=beta)
+            return records
+        for r25, beta, outcome, headroom in ((1, 1, "pass", 1.53), (5, 3, "pass", 0.17),
+                                             (10, 3, "fail", -0.97)):
+            with self.subTest(r25_tol_pct=r25, beta_tol_pct=beta):
+                verdict = self.run_gate(self.GID, records=grade(r25, beta))
+                self.assertEqual(verdict.outcome, outcome, verdict.render())
+                self.assertEqual(verdict.measured, headroom)
+                self.assertIn("on the hot side", verdict.detail)
+
+    def test_a_fixed_resistor_where_the_ntc_goes_fails(self):
+        """The datasheets' own way to switch THERM off: a 10 kOhm resistor where
+        the NTC goes. Its value is an NTC's to a BOM; only the symbol tells, so the
+        schematic beside the board is read. A custom thermistor symbol passes."""
+        board = self.board(stem="with_sch")
+        for lib_id, outcome in (("Device:R", "fail"), ("Device:R_Small", "fail"),
+                                ("Device:Thermistor_NTC", "pass"),
+                                ("Project_Lib:NTC_0603", "pass")):
+            with self.subTest(lib_id=lib_id):
+                with open(board[:-len(".kicad_pcb")] + ".kicad_sch", "w",
+                          encoding="utf-8") as fh:
+                    fh.write(_ONE_SYMBOL_SCH.format(lib_id=lib_id))
+                verdict = self.run_gate(self.GID, board=board)
+                self.assertEqual(verdict.outcome, outcome, verdict.render())
+                if outcome == "fail":
+                    self.assertIsNone(verdict.measured)
+                    self.assertIn(f"TH1 is a fixed resistor ({lib_id})", verdict.detail)
+                else:
+                    self.assertNotIn("was not read", verdict.detail)
+
+    def test_an_ntc_off_the_therm_net_or_tied_off_senses_nothing(self):
+        """The branch's ntc_unwired, kept as a test: TH1's THERM pad on a net of
+        its own; THERM tied to the charger's own VSS; TH1's far end on a net
+        nothing else reaches."""
+        def therm_on_gnd(tree):
+            K.child(_pad(tree, "U1", "8"), "net")[1:] = [_net_code(tree, "GND"), K.Q("GND")]
+        for name, edit, said in (
+                ("NTC unwired", lambda t: _move_pad_net(t, "TH1", "1", "TH_OPEN"),
+                 "reaches no pad of TH1"),
+                ("THERM on VSS", therm_on_gnd, "tied to its own pad(s) 5"),
+                ("far end open", lambda t: _move_pad_net(t, "TH1", "2", "TH_FAR"),
+                 "which no other part reaches")):
+            with self.subTest(case=name):
+                verdict = self.run_gate(self.GID, edit)
+                self.assertEqual(verdict.outcome, "fail", verdict.render())
+                self.assertIsNone(verdict.measured)
+                self.assertIn(said, verdict.detail)
+
+    def test_an_undeclared_part_on_the_sense_net_errors(self):
+        """A resistor across the NTC moves every trip, and its value is not the
+        record's: it must be named, or declared with why it carries nothing."""
+        def extra(tree):
+            K.child(_pad(tree, "C3", "1"), "net")[1:] = [_net_code(tree, "THERM"),
+                                                         K.Q("THERM")]
+        path = self.board(extra)
+        verdict = self.run_gate(self.GID, board=path)
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("C3 on the sense network (THERM) is not in the record", verdict.error)
+
+        def declared(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_temp"]["network"] = {
+                "others": [{"ref": "C3", "value": "10uF", "why": "a filter capacitor"}]}
+        self.assertEqual(self.run_gate(self.GID, records=declared, board=path).outcome, "pass")
+
+    def test_a_pack_ntc_on_the_battery_s_therm_pin_counts(self):
+        """A pack with its NTC inside: the charger's THERM reaches it through the
+        connector's thermistor pin. Here J10 stands for the pack's connector (top
+        on 5, return on 1, thermistor on 8, moved onto THERM), and the NTC is the
+        pack's record. The flex to J11 joins THERM to J11's position 8 too: a
+        mating's connector is a conductor, not a part on the sense network."""
+        def records(p):
+            bat = p["pcb_batteries"]["main"]
+            bat["terminals"] = {"ref": "J10", "value": "FFC_8P", "pos": "5", "neg": "1",
+                                "therm": "8"}
+            bat["ntc"] = {"r25_ohm": 10000, "r25_tol_pct": 1, "beta_k": 4250,
+                          "beta_pair_c": [25, 85], "beta_tol_pct": 1}
+            self._ntc(p).clear()
+            self._ntc(p)["battery_therm"] = True
+
+        def therm_pin(tree):
+            # TH1 off the board's THERM net, and J10's position 8 on it: only
+            # the pack's NTC is there.
+            _move_pad_net(tree, "TH1", "1", "TH_GONE")
+            K.child(_pad(tree, "J10", "8"), "net")[1:] = [_net_code(tree, "THERM"),
+                                                          K.Q("THERM")]
+        verdict = self.run_gate(self.GID, therm_pin, records)
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(verdict.measured, 1.53)
+        self.assertIn("on the pack's NTC", verdict.detail)
+
+    def test_a_divider_reads_its_pullup_off_the_board(self):
+        """The ratio kind: TS on a divider, the NTC low, the trip as fractions of
+        the reference. R3 (3k) stands for the pull-up here, moved onto THERM."""
+        def pull_up(tree):
+            K.child(_pad(tree, "R3", "1"), "net")[1:] = [_net_code(tree, "THERM"),
+                                                         K.Q("THERM")]
+            K.child(_pad(tree, "R3", "2"), "net")[1:] = [_net_code(tree, "VBUS"),
+                                                         K.Q("VBUS")]
+
+        def ratio(p):
+            ct = p["pcb_protectors"]["charger"]["functions"]["charge_temp"]
+            ct["sense"] = {"pin": "8", "kind": "ratio", "pullup_ref": "R3",
+                           "pullup_tol_pct": 1, "cold_frac": [0.80, 0.82],
+                           "hot_frac": [0.40, 0.42]}
+        verdict = self.run_gate(self.GID, pull_up, ratio)
+        self.assertIn(verdict.outcome, ("pass", "fail"), verdict.render())
+        self.assertIsNotNone(verdict.measured)
+        # R = R_pu f / (1 - f) at the corners: 3k at 0.80 to 0.82 is 11.9..13.8 kOhm
+        # cold and 2.0..2.2 kOhm hot; both edges then lie inside -40..150 C.
+        self.assertIn("charging allowed", verdict.detail)
+
+    def test_firmware_alone_skips_and_a_fail_beside_it_still_fails(self):
+        """Firmware is named, never counted: a cell whose only stop is firmware
+        skips; with a board element that fails beside it, the rule fails."""
+        def firmware_only(p):
+            p["pcb_protectors"]["charger"]["functions"].pop("charge_temp")
+            p["pcb_protectors"]["mcu"] = {"battery": "main", "kind": "gauge",
+                                          "where": "firmware",
+                                          "functions": {"charge_temp": {}},
+                                          "source": "a register window, set at boot"}
+        verdict = self.run_gate(self.GID, records=firmware_only)
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("only firmware stops charging", verdict.skip_reason)
+        self.assertIn("mcu (firmware)", verdict.skip_reason)
+
+        def beside(p):
+            p["pcb_protectors"]["mcu"] = {"battery": "main", "kind": "gauge",
+                                          "where": "firmware",
+                                          "functions": {"charge_temp": {}},
+                                          "source": "a register window, set at boot"}
+        verdict = self.run_gate(self.GID, lambda t: _move_pad_net(t, "TH1", "1", "TH_OPEN"),
+                                beside)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+
+    def test_a_cell_held_by_firmware_never_hides_another_cell_s_fail(self):
+        """Two cells: a second one on J10 whose charger and window are firmware's.
+        Beside the baseline's cell it skips; beside a coarser NTC (R25 10 %, B
+        3 %) that charges the first cell past 45 C, the rule fails at that
+        cell's headroom. (What
+        slipped through the first cut: the skip came before the other cell was
+        judged.)"""
+        def second(grade):
+            def records(p):
+                p["pcb_batteries"]["second"] = {
+                    "board": p["pcb_batteries"]["main"]["board"],
+                    "terminals": {"ref": "J10", "value": "FFC_8P", "pos": "5", "neg": "1"},
+                    "chemistry": "li-polymer", "series": 1, "parallel": 1,
+                    "cell": {"charge_temp_c": [0, 45]}, "source": "a second cell"}
+                p["pcb_protectors"]["mcu"] = {"battery": "second", "kind": "charger",
+                                              "where": "firmware",
+                                              "functions": {"charge_temp": {}},
+                                              "source": "a PMIC's register window"}
+                self._ntc(p).update(r25_tol_pct=grade[0], beta_tol_pct=grade[1])
+            return records
+        verdict = self.run_gate(self.GID, records=second((1, 1)))
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("second: mcu (firmware)", verdict.skip_reason)
+        verdict = self.run_gate(self.GID, records=second((10, 3)))
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, -0.97)
+        self.assertIn("firmware only, not judged: second: mcu (firmware)", verdict.detail)
+
+    def test_the_most_protective_element_sets_each_edge(self):
+        """A pack element with a narrower window sets the hot edge; the board's
+        charger still sets the cold one."""
+        def pack_window(p):
+            p["pcb_protectors"]["pack_pcm"]["functions"]["charge_temp"] = {
+                "window_c": {"cold_c": [-5, -2], "hot_c": [38, 41]}}
+        verdict = self.run_gate(self.GID, records=pack_window)
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(verdict.measured, 4.0)
+        self.assertIn("charging allowed 5.34..41.00 C", verdict.detail)
+        self.assertIn("hot edge pack_pcm (in-pack), on its datasheet's word", verdict.detail)
+
+
+class TheChargerIsHeldToTheCell(_PowerCase):
+    """pcb.charge_limits: the charger's worst corner against the cell, and a
+    single-fault overcharge stop beside it."""
+
+    GID = "pcb.charge_limits"
+
+    def test_a_small_prog_resistor_charges_a_small_cell_too_hard(self):
+        """A 400 mAh cell at 1 C beside PROG 1k: 1100 V / 990 ohm is 1.111 A."""
+        def small_cell(p):
+            p["pcb_batteries"]["main"]["cell"]["charge_a_max"] = 0.4
+        verdict = self.run_gate(self.GID, records=small_cell)
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertIn(f"0.3704 A of its 0.4 A ({1100 / 2970 / 0.4:.4f})", verdict.detail)
+        verdict = self.run_gate(self.GID, lambda t: _set_value(t, "R3", "1k"), small_cell)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, round(1100 / 990 / 0.4, 4))
+        self.assertIn("current set by R3 1k", verdict.detail)
+
+    def test_an_hv_variant_stales_the_record_and_then_fails(self):
+        """A variant letter swap is another design: the record's value no longer
+        binds. With the record moved too, 4.382 V is past the cell's 4.25 V."""
+        hv = "MCP73833-NVI/MF"
+        verdict = self.run_gate(self.GID, lambda t: _set_value(t, "U1", hv))
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("is for another design", verdict.error)
+
+        def moved(p):
+            c = p["pcb_protectors"]["charger"]
+            c["value"] = hv
+            c["functions"]["charge_v"]["v_reg_v"] = [4.318, 4.382]
+        verdict = self.run_gate(self.GID, lambda t: _set_value(t, "U1", hv), moved)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, round(4.382 / 4.25, 4))
+
+    def test_nothing_independent_of_the_charger_fails(self):
+        """No pack PCM and no protector overcharge: the charger alone holds the
+        cell, and a single fault in it overcharges. And U2's CO driving nothing
+        leaves it uncounted."""
+        def charger_alone(p):
+            p["pcb_protectors"].pop("pack_pcm")
+            p["pcb_protectors"]["protector"]["functions"].pop("overcharge_v")
+        verdict = self.run_gate(self.GID, records=charger_alone)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIsNone(verdict.measured)
+        self.assertIn("nothing independent of the charger stops an overcharge", verdict.detail)
+
+        def pcm_gone(p):
+            p["pcb_protectors"].pop("pack_pcm")
+        verdict = self.run_gate(self.GID, lambda t: _move_pad_net(t, "U2", "5", "CO_OPEN"),
+                                pcm_gone)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIn("it drives nothing", verdict.detail)
+
+    def test_a_firmware_overcharge_stop_is_named_and_skipped_never_counted(self):
+        """Only firmware stands beside the charger: the rule cannot see it, so it
+        skips, naming it, as every battery rule treats firmware. Beside a board
+        element that does not count, the rule still fails."""
+        def firmware(p):
+            p["pcb_protectors"].pop("pack_pcm")
+            p["pcb_protectors"]["protector"]["functions"].pop("overcharge_v")
+            p["pcb_protectors"]["mcu"] = {"battery": "main", "kind": "gauge",
+                                          "where": "firmware",
+                                          "functions": {"overcharge_v": {
+                                              "v_max": 4.3, "per_cell": True}},
+                                          "source": "an ADC check that stops the charger"}
+        verdict = self.run_gate(self.GID, records=firmware)
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("main: the overcharge stop mcu (firmware)", verdict.skip_reason)
+
+        def beside(p):
+            p["pcb_protectors"].pop("pack_pcm")
+            p["pcb_protectors"]["mcu"] = {"battery": "main", "kind": "gauge",
+                                          "where": "firmware",
+                                          "functions": {"overcharge_v": {
+                                              "v_max": 4.3, "per_cell": True}},
+                                          "source": "an ADC check that stops the charger"}
+        verdict = self.run_gate(self.GID, lambda t: _move_pad_net(t, "U2", "5", "CO_OPEN"),
+                                beside)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIn("mcu (firmware) is firmware, which this rule cannot see",
+                      verdict.detail)
+
+    def test_a_two_cell_pack_needs_a_per_cell_stop(self):
+        """Two cells in series on J10 (top on pin 5, tap on 7, return on 1): a
+        pack-level overcharge bounds no single cell, so only a per-cell element
+        counts."""
+        def two_cell(per_cell):
+            def records(p):
+                p["pcb_batteries"]["main"].update(series=2)
+                p["pcb_batteries"]["main"]["terminals"] = {
+                    "ref": "J10", "value": "FFC_8P", "pos": "5", "neg": "1", "taps": ["7"]}
+                for pid in ("protector", "fuse"):
+                    p["pcb_protectors"].pop(pid)
+                p["pcb_conductors"] = {}
+                c = p["pcb_protectors"]["charger"]
+                c["functions"].pop("charge_temp")
+                c["functions"]["charge_v"] = {"v_reg_v": [8.336, 8.464], "per_cell": False}
+                p["pcb_protectors"]["pack_pcm"]["functions"]["overcharge_v"]["per_cell"] = per_cell
+            return records
+        verdict = self.run_gate(self.GID, records=two_cell(False))
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIn("holds the pack, not each cell", verdict.detail)
+        verdict = self.run_gate(self.GID, records=two_cell(True))
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(verdict.measured, round(8.464 / 2 / 4.25, 4))
+
+    def test_a_charger_on_a_primary_cell_fails(self):
+        def primary(p):
+            p["pcb_batteries"]["main"]["chemistry"] = "li-primary"
+        verdict = self.run_gate(self.GID, records=primary)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIsNone(verdict.measured)
+        self.assertIn("charges a li-primary cell, which must never be charged", verdict.detail)
+
+    def test_firmware_set_charging_skips_and_a_typo_errors(self):
+        def firmware(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_v"] = {"per_cell": False,
+                                                                       "set_by": "firmware"}
+        verdict = self.run_gate(self.GID, records=firmware)
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("U1 MCP73833-AMI/UN's charge voltage", verdict.skip_reason)
+
+        def typo(p):
+            p["pcb_batteries"]["main"]["cell"]["upper_charge_v"] = 42.5
+        verdict = self.run_gate(self.GID, records=typo)
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("42.5 V per cell, outside 1.5-4.6 V", verdict.error)
+
+    def test_a_divider_is_read_at_its_corners(self):
+        """An adjustable charger: Vfb (1 + Rtop / Rbot), the resistors off the
+        board at their tolerance. R4 (2.7k) over R1 (5.1k) stand in."""
+        def divider(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_v"] = {
+                "divider": {"vfb_v": [2.7, 2.73], "top_ref": "R4", "bottom_ref": "R1",
+                            "tol_pct": 1}, "per_cell": False}
+        verdict = self.run_gate(self.GID, records=divider)
+        v = 2.73 * (1 + 2700 * 1.01 / (5100 * 0.99))
+        self.assertEqual(verdict.measured, round(v / 4.25, 4))
+        self.assertIn("voltage set by R4 2.7k over R1 5.1k", verdict.detail)
+
+
+class EveryConductorIsGuarded(_PowerCase):
+    """pcb.fault_current: interrupt, overload band and short circuit, any
+    protector topology."""
+
+    GID = "pcb.fault_current"
+
+    def test_a_thin_conductor_fails_the_short_circuit_point(self):
+        """The branch's thin_conductor, kept as a test: the wire's area derived so
+        that IEC 60949 puts it at its limit in the PTC's trip time / 1.15."""
+        p0 = _baseline()
+        cond = p0["pcb_conductors"]["wire_out"]
+        amps, t_max = p0["pcb_protectors"]["fuse"]["functions"]["trip"]["trip_max_s"][0]
+        area = round(self.power.area_for_s(t_max / 1.15, amps, cond["start_c"],
+                                           cond["limit_c"]), 5)
+
+        def thin(p):
+            p["pcb_conductors"]["wire_out"]["area_mm2"] = area
+        verdict = self.run_gate(self.GID, records=thin)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertAlmostEqual(verdict.measured, 1 / 1.15, places=3)
+        self.assertIn("trips by 100 ms at 8 A", verdict.detail)
+
+    def test_a_trip_point_the_cell_cannot_reach_fails(self):
+        """A small cell whose least fault current, 5 A, never reaches the PTC's
+        only guaranteed point, 8 A."""
+        def weak(p):
+            p["pcb_batteries"]["main"]["cell"]["short_a"] = [5.0, 40.0]
+        verdict = self.run_gate(self.GID, records=weak)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIsNone(verdict.measured)
+        self.assertIn("nothing guarantees a trip at the current main can drive (5 A at "
+                      "the least", verdict.detail)
+
+    def test_a_low_interrupt_rating_fails(self):
+        def low(p):
+            p["pcb_protectors"]["fuse"]["functions"]["trip"]["interrupt_a"] = 30.0
+        verdict = self.run_gate(self.GID, records=low)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, 0.75)
+        self.assertIn("interrupts 30 A of 40 A", verdict.detail)
+
+    def test_a_fuse_beside_the_path_is_not_between(self):
+        def edit(tree):
+            K.child(_pad(tree, "J6", "1"), "net")[1:] = [_net_code(tree, "CELL_P"),
+                                                         K.Q("CELL_P")]
+        verdict = self.run_gate(self.GID, edit)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIsNone(verdict.measured)
+        self.assertIn("F1 is not between main and J6 pin 1", verdict.detail)
+
+    def test_low_side_fets_guard_and_an_undeclared_tap_is_named(self):
+        """Protector FETs in the negative lead (the branch read them FAIL). U2's VSS
+        and C1 sit on the cell's negative ahead of Q1: a sound design may, so they
+        are refused until declared, never failed."""
+        def low_side(ahead):
+            def records(p):
+                trip = {"kind": "fet", "terminal": "neg",
+                        "switch": {"ref": "Q1", "value": "FDS6890A", "path": ["1", "3"]},
+                        "trip_a": 1.2, "trip_max_s": [[8.0, 0.01]]}
+                if ahead:
+                    trip["ahead"] = [{"ref": "U2", "value": "PROT_1S_FIXTURE",
+                                      "why": "the protector's own supply"},
+                                     {"ref": "C1", "value": "100nF",
+                                      "why": "its supply capacitor"}]
+                p["pcb_protectors"]["protector"]["functions"]["trip"] = trip
+                p["pcb_conductors"]["wire_out"]["protected_by"] = ["protector"]
+            return records
+        verdict = self.run_gate(self.GID, records=low_side(False))
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("C1, U2 on main's neg net (CELL_N) taps the cell ahead of Q1",
+                      verdict.error)
+        verdict = self.run_gate(self.GID, records=low_side(True))
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(verdict.measured, round(1.45 / 1.2, 4))
+
+    def test_the_best_protector_guards_each_band(self):
+        """Two protectors on one conductor: the PTC covers the overload band, the
+        low-side FETs the short circuit; each band takes the better one."""
+        def both(p):
+            p["pcb_protectors"]["protector"]["functions"]["trip"] = {
+                "kind": "fet", "terminal": "neg",
+                "switch": {"ref": "Q1", "value": "FDS6890A", "path": ["1", "3"]},
+                "trip_a": 4.0, "trip_max_s": [[8.0, 0.001]],
+                "ahead": [{"ref": "U2", "value": "PROT_1S_FIXTURE", "why": "its supply"},
+                          {"ref": "C1", "value": "100nF", "why": "its supply capacitor"}]}
+            p["pcb_conductors"]["wire_out"]["protected_by"] = ["fuse", "protector"]
+        verdict = self.run_gate(self.GID, records=both)
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(verdict.measured, 1.45)
+
+    def test_a_track_is_rated_by_ipc_2221(self):
+        """A track conductor: its continuous rating is IPC-2221's at the stated
+        rise on its narrowest stretch, in the project's copper."""
+        def edit(tree):
+            tree.append(["segment", ["start", "33", "8"], ["end", "40", "8"],
+                         ["width", "0.3"], ["layer", K.Q("F.Cu")],
+                         ["net", _net_code(tree, "VSYS")],
+                         ["uuid", K.Q("00000000-0000-4000-8000-0000000000c1")]])
+
+        def track(p):
+            p["pcb_conductors"]["wire_out"] = {
+                "battery": "main", "board": p["pcb_batteries"]["main"]["board"],
+                "kind": "track", "net": "VSYS", "continuous_rise_c": 20.0,
+                "start_c": 40.0, "limit_c": 130.0, "protected_by": ["fuse"],
+                "source": "a 0.3 mm outer track, 20 C rise; FR-4 to 130 C"}
+        verdict = self.run_gate(self.GID, records=track, board=self.board(edit))
+        amps = (K.K_EXTERNAL * 20.0 ** K.EXP_DT
+                * ((0.3 / K.MM_PER_MIL) * K.MIL_PER_OZ) ** K.EXP_AREA)
+        area = 0.3 * K.MIL_PER_OZ * K.MM_PER_MIL
+        short = self.power.adiabatic_s(8.0, area, 40.0, 130.0) / 0.1
+        least = round(min(2.0, 1.45 * amps / 1.0, short), 4)
+        self.assertEqual(verdict.measured, least)
+        self.assertEqual(verdict.outcome, "pass" if least >= 1.0 else "fail")
+        self.assertIn("VSYS's 0.3 mm track on F.Cu", verdict.detail)
+
+
+class TheCutoffMustOpenThePath(_PowerCase):
+    """pcb.discharge_cutoff: a cutoff counts only when it senses the cell and
+    drives a switch in its path."""
+
+    GID = "pcb.discharge_cutoff"
+
+    def test_a_cutoff_that_senses_nothing_leaves_the_pcm(self):
+        """The branch's cutoff_unwired, kept as a test: R5's VSYS pad on a net of
+        its own, so U2 senses nothing the cell drives."""
+        verdict = self.run_gate(self.GID, lambda t: _move_pad_net(t, "R5", "1", "R5_OPEN"))
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, 2.3)
+        self.assertIn("U2 does not sense the cell through F1, R5", verdict.detail)
+
+    def test_a_sense_pin_on_the_return_or_a_wrong_chain_never_counts(self):
+        """In the branch's review: the series part was inferred, the cell's own
+        connector among the candidates, and a VSS pin read as a sense pin."""
+        def sense(**s):
+            def records(p):
+                for fn in ("overdischarge_v", "overcharge_v"):
+                    p["pcb_protectors"]["protector"]["functions"][fn]["sense"] = s
+            return records
+        for name, records, said in (
+                ("VSS named", sense(pin="3"), "pad 3 is on the cell's return"),
+                ("through the connector", sense(pin="2", through=["BT1", "R5"]),
+                 "BT1 is the battery's own connector"),
+                ("through the capacitor", sense(pin="2", through=["C1"]),
+                 "C1's pads sit on"),
+                ("no chain", sense(pin="2"), "(through names no chain)")):
+            with self.subTest(case=name):
+                verdict = self.run_gate(self.GID, records=records)
+                self.assertEqual(verdict.outcome, "fail", verdict.render())
+                self.assertEqual(verdict.measured, 2.3)
+                self.assertIn(said, verdict.detail)
+
+    def test_a_cutoff_across_a_mating_counts(self):
+        """The cutoff on a daughterboard: a copy of the board whose BT1 meets the
+        main board's BT1 pin for pin. Without the mating it senses another net."""
+        main = self.board(stem="main")
+        daughter = self.board(stem="daughter")
+
+        def split(mated):
+            def records(p):
+                for pid in ("protector",):
+                    p["pcb_protectors"][pid]["board"] = daughter
+                p["pcb_matings"] = ({"link": {"a": {"board": main, "ref": "BT1",
+                                                    "value": "CELL"},
+                                              "b": {"board": daughter, "ref": "BT1",
+                                                    "value": "CELL"},
+                                              "map": "straight", "source": "a soldered link"}}
+                                    if mated else {})
+            return records
+        verdict = self.run_gate(self.GID, records=split(True), board=main)
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(verdict.measured, 2.85)
+        verdict = self.run_gate(self.GID, records=split(False), board=main)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, 2.3)
+
+    def test_a_reversed_mating_joins_pin_n_to_the_last_but_n(self):
+        """``reversed``: an 8-way flex whose two ends face opposite ways joins
+        position 1 to 8. Joined so, J10's GND meets J11's SIG_D."""
+        d = self.helpers.Design(_ctx(self.root, _power_params()))
+        rec = {"flex": {"a": {"board": POWER_BOARD, "ref": "J10", "value": "FFC_8P"},
+                        "b": {"board": POWER_BOARD, "ref": "J11", "value": "FFC_8P"},
+                        "map": "reversed", "source": "flipped"}}
+        d.matings(rec)
+        self.assertTrue(d.same(d.node(POWER_BOARD, "GND"), d.node(POWER_BOARD, "SIG_D")))
+        self.assertFalse(d.same(d.node(POWER_BOARD, "GND"), d.node(POWER_BOARD, "VSYS")))
+
+    def test_two_cells_count_only_a_per_cell_cutoff(self):
+        def two_cell(per_cell):
+            def records(p):
+                p["pcb_batteries"]["main"].update(series=2)
+                p["pcb_batteries"]["main"]["terminals"] = {
+                    "ref": "J10", "value": "FFC_8P", "pos": "5", "neg": "1", "taps": ["7"]}
+                p["pcb_protectors"].pop("protector")
+                p["pcb_protectors"]["pack_pcm"]["functions"]["overdischarge_v"].update(
+                    per_cell=per_cell, v_min=2.8)
+            return records
+        verdict = self.run_gate(self.GID, records=two_cell(False))
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIn("holds the pack, not each cell", verdict.detail)
+        verdict = self.run_gate(self.GID, records=two_cell(True))
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(verdict.measured, 2.8)
+
+    def test_firmware_alone_skips_and_a_primary_cell_is_not_judged(self):
+        def firmware(p):
+            p["pcb_protectors"].pop("protector")
+            p["pcb_protectors"].pop("pack_pcm")
+            p["pcb_protectors"]["mcu"] = {"battery": "main", "kind": "gauge",
+                                          "where": "firmware",
+                                          "functions": {"overdischarge_v": {
+                                              "v_min": 3.0, "per_cell": True}},
+                                          "source": "an ADC check before sleep"}
+        verdict = self.run_gate(self.GID, records=firmware)
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("only firmware cuts the cell off", verdict.skip_reason)
+
+        def primary(p):
+            p["pcb_batteries"]["main"]["chemistry"] = "alkaline"
+        verdict = self.run_gate(self.GID, records=primary)
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("main (alkaline) not judged", verdict.skip_reason)
 
 
 # --------------------------------------------------------------------------- #

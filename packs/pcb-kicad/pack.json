@@ -1,7 +1,7 @@
 {
   "name": "pcb-kicad",
   "version": "0.3.0",
-  "description": "Checks a KiCad board and its schematic: DRC with its custom rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, LiPo cell protection.",
+  "description": "Checks a KiCad board and its schematic: DRC with custom rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, battery charge and fault protection.",
   "settles": [
     "design rule violations",
     "pcb design rule check",
@@ -47,9 +47,18 @@
     "footprint land agrees with the vendor drawing",
     "land pattern",
     "pad positions on the datasheet drawing",
-    "charger thermal and timer protection",
+    "charge temperature window",
+    "charge temperature headroom",
     "battery charger thermistor",
+    "thermistor network at its tolerance corners",
+    "charge voltage",
+    "charge current",
+    "charger within the cell's datasheet limits",
+    "overcharge under a single fault",
+    "fault protection of a conductor",
     "fuse protects its conductor",
+    "overload band",
+    "fuse interrupt rating",
     "short-circuit protection of a conductor",
     "deep-discharge cutoff",
     "cell undervoltage protection"
@@ -80,6 +89,10 @@
     "land-pattern",
     "battery-safety",
     "charge-protection",
+    "charge-temperature",
+    "charge-limits",
+    "charge-voltage",
+    "charge-current",
     "overcurrent-protection",
     "deep-discharge"
   ],
@@ -95,8 +108,9 @@
     "pcb.spice",
     "pcb.enclosure_fit",
     "pcb.land_pattern",
-    "pcb.charge_protection",
-    "pcb.fuse_conductor",
+    "pcb.charge_temperature",
+    "pcb.charge_limits",
+    "pcb.fault_current",
     "pcb.discharge_cutoff"
   ],
   "provides_generators": [],
@@ -131,7 +145,8 @@
     "a connector that fits the wrong cable",
     "parts not in the library",
     "a part taller than its cavity",
-    "a simulation of a different circuit"
+    "a simulation of a different circuit",
+    "a cell nobody charged hot or cold"
   ],
   "authors": [],
   "licence": "Apache-2.0",

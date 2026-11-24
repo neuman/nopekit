@@ -5,7 +5,7 @@ own design rule check, connectivity, electrical rules check and schematic parity
 the library's pin names against the board's nets, trace heating per IPC-2221, a
 fab's published limits, a measurement ngspice makes on the project's circuit
 deck, the populated board's fit in its enclosure, each footprint's land against
-its vendor's drawing, and three rules for a board that carries a LiPo cell.
+its vendor's drawing, and four rules for a board that charges or carries a cell.
 
 **Before you trust a Checked claim from this pack,** know what it is: a board that
 breaks none of KiCad's rules, with every connection made, no part shorting two of
@@ -30,9 +30,10 @@ circuit that works. Nothing here has seen the board powered.
 | `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the named fab's published minimums, for the service the board is ordered on, as the only custom rules finds nothing past them; a dielectric or via kind the service does not list skips |
 | `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know (on a `.options` card or an `option` command), a measure two `.meas` cards define, or a `.meas tran` window outside the run, is refused first |
 | `pcb.enclosure_fit` | 1 | established | the board, every part's 3D model in place, shares no volume with the enclosure, and each part keeps its clearance (OpenCascade) |
-| `pcb.charge_protection` | 0 | sourced | the charger in `pcb_charger` has its THERM pin wired to the NTC (and not tied to its own pins), and a safety timer |
-| `pcb.fuse_conductor` | 0 | sourced | the fuse in `pcb_fuse` sits between the cell and the conductor in `pcb_conductor`, which IEC 60949 says does not reach its limit before the fuse's guaranteed trip time |
-| `pcb.discharge_cutoff` | 0 | sourced | the highest cutoff over the cell (its PCM, or a fitted part sensing the cell's net directly or through the series part its record names) is at or above the cell's minimum voltage |
+| `pcb.charge_temperature` | 0 | sourced | charging stops outside each cell's charge temperature window at the tolerance corners of its sensing network (the comparator's datasheet trips, the NTC's R/T table or B equation, every resistor), wherever the stop lives: the charger, a protector or BMS that acts on it, or the pack; headroom in K |
+| `pcb.charge_limits` | 0 | sourced | the charger's guaranteed maximum charge voltage per cell and current, as one ratio to the cell's datasheet limits, and an overcharge stop independent of the charger that senses the cell and opens its path (per cell for two or more in series) |
+| `pcb.fault_current` | 0 | sourced | every conductor in `pcb_conductors` is guarded across the fault range: its protector's interrupt rating, the overload band (I2 <= 1.45 Iz, by analogy with IEC 60364-4-43) and IEC 60949's adiabatic limit at every trip point the cell can reach; a fuse, PTC, eFuse, protector FETs on either side or an in-pack PCM |
+| `pcb.discharge_cutoff` | 0 | sourced | the highest per-cell cutoff that senses the cell (directly, through a named chain, or across a mating) and opens a switch in its path, or sits in the pack, is at or above the cell's minimum voltage |
 
 The tier-0 gates read the board with this pack's own reader (`gates/_kicad.py`,
 standard library only), so they run without KiCad, CI included. The tier-1 gates
@@ -50,7 +51,7 @@ on a board this reader cannot vouch for they are not run, and read Skipped,
 `prerequisite failed`. On a board newer than the reader was checked through (a
 KiCad 10 file) the guard skips, and they read Skipped, `prerequisite not
 established`: a newer format is a limit of the reader, not a defect in the
-board. The power rules read the boards their records name, which the guard may
+board. The battery rules read the boards their records name, which the guard may
 never read, so each makes the guard's own checks on its board: it errors on one
 that fails them, and skips a newer one with the guard's words.
 
@@ -58,20 +59,29 @@ that fails them, and skips a newer one with the guard's words.
 whether each custom rule is live; ngspice decides the number. This pack's code
 decides three things: pin-name agreement (a comparison of names the library
 gives), the land fit (`gates/_kicad.py`'s `rigid_fit`, and its limit: model-only),
-and the three power rules
-(pad-net lookups and IEC 60949's formula on records a person enters). Each has a
-known-bad control it fails on: `split_pin_pair`, `mirrored_land` (1.9 mm against
-0.3 mm), `ntc_unwired`, `thin_conductor` (the area at which the formula puts the
-conductor at its limit in the trip time / 1.15) and `cutoff_unwired`.
+and the four battery rules (pad-net lookups and published formulas on records a
+person enters). Each has a known-bad control it fails on: `split_pin_pair`,
+`mirrored_land` (1.9 mm against 0.3 mm), `ntc_swapped` (a 100 kOhm NTC in the
+10 kOhm's place: -64.83 K), `lfp_cell` (a LiFePO4 cell on the 4.2 V charger:
+1.1595), `fuse_trips_late` (a PTC of twice the trip current: 0.725) and
+`cutoff_drives_nothing` (the protector's DO on a net of its own: 2.30 V against
+2.5 V). Each control makes one change, and moves only its own rule.
 
-**The power rules read records, bound to the design.** `pcb_cell`, `pcb_charger`,
-`pcb_fuse`, `pcb_conductor` and `pcb_cutoffs` each name the board (`board`, else
-`pcb_board`), and the ref, value and pins they describe, with a `source`. A ref the
-board lacks, another value on that ref, or a pin with no pad is an error ("the
-record is for another design"), so a generator that moves a part or a value
-stales them. The baseline's records name `selftest/assets/lipo_charger.kicad_pcb`
-(made by `make_power_board.py`: placed, netted, not routed), which only these
-three rules read.
+**The battery rules read records, bound to the design.** `pcb_batteries`,
+`pcb_protectors`, `pcb_conductors` and `pcb_matings` are each an object keyed by
+id, so a design with a cell in each half, or one protector IC that does four
+jobs, is stated once and read by every rule. Each record names its board
+(`board`, else `pcb_board`), and the ref, value and pins it describes, with a
+`source`. A ref the board lacks, another value on that ref, or a pin with no pad
+is an error ("the record is for another design"), so a generator that moves a
+part or a value stales them. An unknown key is refused, naming the nearest known
+one, and a datasheet threshold given as one typical number is refused: give
+[min, max]. Chemistry picks which rules apply, never a number: every limit is the
+cell's own, from its datasheet. `pcb_matings` joins two connectors' nets pin by
+pin, so an element on another board counts. The baseline's records name
+`selftest/assets/power_board.kicad_pcb` (made by `make_power_board.py`: placed,
+netted, not routed), which only these four rules read. `references/battery.md`
+holds every field.
 
 ## The proposer: `pcb.autoroute`
 
@@ -211,14 +221,22 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   pin name on the ref it names, as the person states it, with its source. The
   gate holds the pair to the part (the only two pins of that name), never to the
   datasheet: a statement written to clear a real short clears it.
-- **The cell beyond its records.** The power rules are as true as the records a
-  person enters from the datasheets. `pcb.fuse_conductor` judges the adiabatic
-  short-circuit points only, no overload (I2 <= 1.45 Iz), one conductor carrying
-  the whole fault; its verdict turns on `limit_c`. `pcb.discharge_cutoff` reads
-  the cell's board alone (a cutoff on another board reads as absent), and never
-  the FET path a cutoff drives or a cutoff in firmware. `pcb.charge_protection`
-  accepts only a THERM pin wired to an NTC with a safety timer: a charger
-  protected another way (a supervisor that floats PROG) reads FAIL.
+- **The cell beyond its records.** The battery rules are as true as the records a
+  person enters from the datasheets, and these stay out of reach:
+  - the NTC's thermal coupling to the cell: a board NTC far from the cell senses
+    the board. Settle it with a physical claim at the window's edges;
+  - a window, a charge voltage or a cutoff set by firmware or a register: the
+    rules name it and skip;
+  - JEITA's reduced-rate zones: only the outer window is judged;
+  - the single-fault overcharge element's threshold: its presence and its copper
+    are judged, its number is printed (no general source gives a cell's
+    single-fault voltage limit);
+  - an in-pack PCM's circuit, counted on its datasheet's word;
+  - IEC 60364-4-43's I2 <= 1.45 Iz is written for building installations: here it
+    is a stated analogy, and `pcb.fault_current` turns on `continuous_a` and
+    `limit_c`, so their sources matter most;
+  - one conductor carries the whole fault: contacts in parallel get no credit;
+  - a lithium primary cell charged by another rail (UL 1642): a lens, not a rule.
 - **Everything the fab checks.** `pcb.fab_rules` holds the minimums the fab
   publishes and KiCad can test: widths, spacing, drills, via pads, annular rings,
   edge clearance, silkscreen text, and silkscreen to pad (silk on silk is
@@ -248,9 +266,10 @@ what it asserts.
 | `copper-connectivity` | `pcb.unconnected` |
 | `netlist` | `pcb.unconnected`, `pcb.pin_names`, `pcb.erc`, `pcb.parity` |
 | `land-pattern` | `pcb.land_pattern` |
-| `battery-safety` | `pcb.charge_protection`, `pcb.fuse_conductor`, `pcb.discharge_cutoff` |
-| `charge-protection` | `pcb.charge_protection` |
-| `overcurrent-protection` | `pcb.fuse_conductor` |
+| `battery-safety` | `pcb.charge_temperature`, `pcb.charge_limits`, `pcb.fault_current`, `pcb.discharge_cutoff` |
+| `charge-protection`, `charge-temperature` | `pcb.charge_temperature` |
+| `charge-limits`, `charge-voltage`, `charge-current` | `pcb.charge_limits` |
+| `overcurrent-protection` | `pcb.fault_current` |
 | `deep-discharge` | `pcb.discharge_cutoff` |
 | `schematic`, `electrical-rules` | `pcb.erc` |
 | `schematic-parity` | `pcb.parity` |
@@ -281,9 +300,12 @@ drawing is printed, `"down"` as a footprint is): read the wrong way, a land is
 mirrored, and the fit allows no mirror. The verdict is mm against half the
 smaller side of the smaller pad of the worst pair.
 
-**The power rules judge the boards their records name**: counts of missing
-protections against 0, seconds (IEC 60949's adiabatic time against the fuse's
-guaranteed trip time), volts (the highest cutoff against the cell's minimum).
+**The battery rules judge the boards their records name**: kelvin of headroom
+(`pcb.charge_temperature`, a difference of temperatures, so a claim stated in K
+is compared with it, against 0), ratios against 1.0 (`pcb.charge_limits`, the
+charger's worst corner over the cell's limit; `pcb.fault_current`, the least of
+three protection margins), and volts (`pcb.discharge_cutoff`, the highest
+counted cutoff against the cell's minimum).
 
 **`pcb.enclosure_fit` judges the populated board in the enclosure's frame.** The
 board is first as `kicad-cli pcb export step --user-origin 0x0mm` writes it: the
@@ -310,13 +332,21 @@ body may touch (standoffs) but not cut in.
 "pcb_land_drawings": {"U3": "hardware/lands/u3.json"},
 "pcb_pin_names_series": {"FL1": {"pairs": [["1", "8"], ["2", "7"]],
                                  "source": "the filter array's datasheet, channel table"}},
-"pcb_cell": {"board": "hardware/main.kicad_pcb", "ref": "BT1", "value": "CELL", "pin": "1",
-             "min_v": 3.0, "pcm_cutoff_min_v": 2.5, "source": "the cell's datasheet"},
-"pcb_cutoffs": []
+"pcb_batteries": {"cell": {"board": "hardware/main.kicad_pcb",
+                            "terminals": {"ref": "BT1", "value": "BATT", "pos": "1", "neg": "2"},
+                            "chemistry": "li-polymer", "series": 1, "parallel": 1,
+                            "cell": {"upper_charge_v": 4.25, "discharge_v_min": 2.8,
+                                     "charge_a_max": 0.8, "charge_temp_c": [0, 45],
+                                     "short_a": [8, 30]},
+                            "source": "the cell's datasheet, its revision and section"}},
+"pcb_protectors": {"pcm": {"battery": "cell", "kind": "pack-pcm", "where": "in-pack",
+                           "functions": {"overdischarge_v": {"v_min": 2.9, "per_cell": true}},
+                           "source": "the pack's drawing"}}
 ```
 
-`selftest/baseline.json`'s `_notes` give every key's fields; `pcb_charger`,
-`pcb_fuse` and `pcb_conductor` are records of the same kind.
+`selftest/baseline.json`'s `_notes` give every key's fields, and its records
+show a charger, a protector, a PTC, a wire and a flex; `references/battery.md`
+says what each rule reads from them.
 
 Each family skips without its keys: no fab named, no deck, no enclosure, no
 placement or no clearance is a skip that says which key, never a default.
@@ -360,8 +390,8 @@ back under 1 C or over 100 C, look at the units first.
 - `references/enclosure-fit.md`: the frames, what kicad-cli leaves out, and what
   the fit measures.
 - `references/spice.md`: what `pcb.spice` runs, refuses and reads.
-- `references/power.md`: the three LiPo rules, IEC 60949, the records and where
-  their numbers come from.
+- `references/battery.md`: the four battery rules on the baseline's own parts,
+  the records, the NTC arithmetic, IEC 60949 and where every number comes from.
 - `references/what-slipped-through.md`: the defects the source pipeline's checks
   passed, and which gate here answers each.
 - `references/installing.md`: getting `kicad-cli` (KiCad 9), ngspice, CadQuery,

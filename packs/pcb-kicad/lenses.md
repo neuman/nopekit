@@ -81,6 +81,22 @@ take to close it. A green DRC answers none of them.
 - Where did each value come from: a datasheet, a measurement, a guess? A cable's
   resistance and a regulator's output impedance are the usual guesses.
 
+## A cell nobody charged hot or cold
+
+- Is the NTC on the cell, or on the board? `pcb.charge_temperature` reads the
+  network's numbers, never its place. A board NTC far from the cell senses the
+  board: test the window's edges with the cell in a chamber, or state an expert
+  judgment of the coupling.
+- What ends a charge that never finishes? A charger with no timer and no
+  termination on a cell that never reaches it charges forever. Read the
+  charger's termination and the load it carries while it charges.
+- Can another rail charge a primary cell? A lithium coin cell beside a supply,
+  through a diode that leaks or a part that back-feeds it, is charged by
+  accident (UL 1642 asks for two blocking elements). No rule here sees it.
+- Is the protector's output driving anything? Follow DO and CO to a gate.
+  `pcb.discharge_cutoff` follows the one the record names; a second protector
+  nobody recorded is in no rule.
+
 ## Before the money is spent
 
 - Is `pcb_fab` the fab you will order from, and was its file read recently? A

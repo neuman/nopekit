@@ -6,8 +6,8 @@ its schematic.
 own fixture is broken, and a green verdict from it means nothing.
 
 **Sealed.** Every fixture starts from this pack's own ``selftest/baseline.json``
-and ``selftest/assets/esd_guard.*``, never from the host's projection or the
-host's board, and hands the gate an empty ledger. A control whose severity
+and ``selftest/assets/esd_guard.*`` or ``power_board.kicad_pcb``, never from the
+host's projection or the host's board, and hands the gate an empty ledger. A control whose severity
 depended on the host's board would fire in some projects and not in others.
 
 **Generated, from the limit the gate judges by.** Each bad project is the baseline
@@ -40,8 +40,18 @@ MARGIN = 1.15
 
 _PATH_KEYS = ("pcb_board", "pcb_spice_deck", "pcb_enclosure_step")
 
-#: The power rules' records, each naming the board it is for (``board``).
-_POWER_KEYS = ("pcb_cell", "pcb_charger", "pcb_fuse", "pcb_conductor", "pcb_cutoffs")
+#: The power rules' records, ``{id: record}`` each, every record naming the
+#: board it is for (``board``; a mating names one per side).
+_POWER_KEYS = ("pcb_batteries", "pcb_protectors", "pcb_conductors", "pcb_matings")
+
+
+def _power_records(params: dict):
+    """Every power record, and every mating side: each dict that names a board."""
+    for key in _POWER_KEYS:
+        for rec in params.get(key, {}).values():
+            for item in ([rec["a"], rec["b"]] if key == "pcb_matings" else [rec]):
+                if "board" in item:
+                    yield item
 
 
 def _baseline() -> dict:
@@ -54,9 +64,8 @@ def _baseline() -> dict:
             params[key] = os.path.join(_PACK_DIR, str(params[key]))
     params["pcb_land_drawings"] = {ref: os.path.join(_PACK_DIR, rel)
                                    for ref, rel in params["pcb_land_drawings"].items()}
-    for key in _POWER_KEYS:
-        for rec in (params[key] if isinstance(params[key], list) else [params[key]]):
-            rec["board"] = os.path.join(_PACK_DIR, rec["board"])
+    for rec in _power_records(params):
+        rec["board"] = os.path.join(_PACK_DIR, rec["board"])
     return params
 
 
@@ -295,19 +304,18 @@ def mirrored_land(ctx):
 
 
 def _power_variant(ctx, name: str, edit=None, records=None) -> object:
-    """A context whose power records name a copy of ``lipo_charger.kicad_pcb``
+    """A context whose power records name a copy of ``power_board.kicad_pcb``
     with ``edit(tree)`` applied, and ``records(params)`` applied to the records."""
     params = _baseline()
-    src = params["pcb_cell"]["board"]
+    src = params["pcb_batteries"]["main"]["board"]
     board = ctx.out_path("pcb-kicad", "known-bad", name, os.path.basename(src))
     tree = K.load_tree(src)
     if edit is not None:
         edit(tree)
     with open(board, "w", encoding="utf-8") as fh:
         fh.write(K.dump(tree) + "\n")
-    for key in _POWER_KEYS:
-        for rec in (params[key] if isinstance(params[key], list) else [params[key]]):
-            rec["board"] = board
+    for rec in _power_records(params):
+        rec["board"] = board
     if records is not None:
         records(params)
     return dataclasses.replace(ctx, params=params, ledger=Ledger())
@@ -332,34 +340,83 @@ def _move_pad(tree, ref: str, number: str, net_name: str) -> None:
     raise KeyError(f"{ref} pad {number}")
 
 
-def ntc_unwired(ctx):
-    """pcb.charge_protection — TH1's THERM-side pad moved to a net of its own: the
-    charger's THERM pin then sees no thermistor, as a board whose NTC footprint
-    was placed and never wired would."""
-    return _power_variant(ctx, "ntc_unwired", lambda t: _move_pad(t, "TH1", "1", "TH_OPEN"))
+def _set_value(tree, ref: str, value: str) -> None:
+    """``ref``'s Value field on the board set to ``value``: a part swapped in
+    the same footprint, as a BOM substitution swaps it."""
+    for prop in K.children(_footprint(tree, ref), "property"):
+        if len(prop) >= 3 and prop[1] == "Value":
+            prop[2] = K.Q(value)
+            return
+    raise KeyError(f"{ref} has no Value")
 
 
-def thin_conductor(ctx):
-    """pcb.fuse_conductor — the wire's area derived with the gate's own formula so
-    that IEC 60949 puts it at its limit in the fuse's guaranteed trip time divided
-    by ``MARGIN``: lifting the trip time or the limit cannot turn the control into
-    a pass without moving the area with it."""
-    power = load_path(os.path.join(_PACK_DIR, "gates", "power.py"))
+#: ``ntc_swapped``'s NTC: ten times the baseline's R25, the same B. A 100 kOhm
+#: part in a 10 kOhm footprint is the substitution a BOM tool offers as a
+#: drop-in (same package, same B), and the commonest NTC value after 10 kOhm.
+SWAPPED_R25_OHM = 100000
+SWAPPED_VALUE = "NTC 100k B4250"
 
+
+def ntc_swapped(ctx):
+    """pcb.charge_temperature — TH1 swapped for a 100 kOhm NTC of the same B, on
+    the board and in its record, as a BOM substitution swaps it: the footprint,
+    the nets and every other part as they were. DRC, ERC and parity all accept
+    it. The charger's trip resistances are fixed, so its window moves about 50
+    K warmer: charging is allowed from about 55 C to about 110 C, past the
+    cell's 45 C."""
     def records(params):
-        cond, fuse = params["pcb_conductor"], params["pcb_fuse"]
-        amps, t_max = (float(v) for v in fuse["trip_max_s"][0])
-        area = power.area_for_s(t_max / MARGIN, amps, float(cond["start_c"]),
-                                float(cond["limit_c"]))
-        cond["area_mm2"] = round(area, 5)
-        if power.adiabatic_s(amps, cond["area_mm2"], float(cond["start_c"]),
-                             float(cond["limit_c"])) >= t_max:
-            raise AssertionError("thin_conductor: the derived area does not cross the limit")
-    return _power_variant(ctx, "thin_conductor", records=records)
+        ntc = params["pcb_protectors"]["charger"]["functions"]["charge_temp"]["ntc"]
+        ntc["value"], ntc["r25_ohm"] = SWAPPED_VALUE, SWAPPED_R25_OHM
+    return _power_variant(ctx, "ntc_swapped", lambda t: _set_value(t, "TH1", SWAPPED_VALUE),
+                          records)
 
 
-def cutoff_unwired(ctx):
-    """pcb.discharge_cutoff — R1's cell-side pad moved to a net of its own: the
-    protector U2 senses a net the cell never drives, and nothing cuts the cell
-    off (its record has no PCM)."""
-    return _power_variant(ctx, "cutoff_unwired", lambda t: _move_pad(t, "R1", "1", "R1_OPEN"))
+#: ``lfp_cell``'s cell: a LiFePO4 cell's upper charge voltage. Battery
+#: University BU-205 (read 2026-11-24): LiFePO4 is charged to 3.65 V, where the
+#: cobalt and manganese lithium-ion cells take 4.20 V.
+LFP_UPPER_CHARGE_V = 3.65
+
+
+def lfp_cell(ctx):
+    """pcb.charge_limits — the baseline's cell record changed to a LiFePO4 cell
+    of the same size (chemistry lifepo4, upper charge voltage 3.65 V) on the same
+    board and charger: a cell swap the connector accepts. The charger's 4.232 V
+    at its worst corner is 16% past the cell's 3.65 V. The board is the
+    baseline's, unchanged."""
+    def records(params):
+        cell = params["pcb_batteries"]["main"]
+        cell["chemistry"] = "lifepo4"
+        cell["cell"]["upper_charge_v"] = LFP_UPPER_CHARGE_V
+    return _power_variant(ctx, "lfp_cell", records=records)
+
+
+#: ``fuse_trips_late``'s PTC: twice the baseline's hold and trip current, the
+#: same trip time and the same interrupt rating, so only the overload band
+#: moves.
+LATE_VALUE = "PTC_FIXTURE_1A0"
+
+
+def fuse_trips_late(ctx):
+    """pcb.fault_current — F1 swapped for a PTC of twice the hold and trip
+    current, on the board and in its record. Its trip time at 8 A and its
+    interrupt rating are the baseline's, so the short-circuit and interrupt
+    checks do not move; the wire's 1.45 x 1 A is now below the PTC's 2 A trip,
+    so between 1.45 A and 2 A the wire heats past its rating and nothing
+    trips."""
+    def records(params):
+        fuse = params["pcb_protectors"]["fuse"]
+        fuse["value"] = LATE_VALUE
+        trip = fuse["functions"]["trip"]
+        trip["hold_a"], trip["trip_a"] = trip["hold_a"] * 2, trip["trip_a"] * 2
+    return _power_variant(ctx, "fuse_trips_late", lambda t: _set_value(t, "F1", LATE_VALUE),
+                          records)
+
+
+def cutoff_drives_nothing(ctx):
+    """pcb.discharge_cutoff — U2's DO pad moved to a net of its own: U2 still
+    senses the cell through F1 and R5, and its DO now drives nothing, so the
+    only cutoff left is the pack's PCM, whose 2.30 V is below the cell's 2.5 V.
+    The branch's own known-good board was this defect, and its cutoff rule
+    passed it."""
+    return _power_variant(ctx, "cutoff_drives_nothing",
+                          lambda t: _move_pad(t, "U2", "4", "PROT_DO_OPEN"))

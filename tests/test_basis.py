@@ -43,9 +43,13 @@ BUNDLED_BASES: dict[str, str] = {
     "cad.clearance": "established",
     **{g: "established" for g in ("pcb.drc", "pcb.unconnected", "pcb.erc", "pcb.parity",
                                   "pcb.spice", "pcb.enclosure_fit")},
+    # general-packs P5: charge_temperature replaces charge_protection and
+    # fault_current replaces fuse_conductor, both sourced as before;
+    # charge_limits is new and sourced (each limit a cell or charger datasheet
+    # value in a record, against a published bound).
     **{g: "sourced" for g in ("pcb.pin_names", "pcb.net_width", "pcb.fab_rules",
-                              "pcb.charge_protection", "pcb.fuse_conductor",
-                              "pcb.discharge_cutoff")},
+                              "pcb.charge_temperature", "pcb.charge_limits",
+                              "pcb.fault_current", "pcb.discharge_cutoff")},
     **{g: "model-only" for g in ("pcb.board_readable", "pcb.land_pattern")},
     "zmk.ci_step": "model-only",
     **{g: "established" for g in ("zmk.build", "zmk.tx_power")},

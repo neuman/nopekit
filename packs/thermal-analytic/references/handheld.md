@@ -222,13 +222,14 @@ sealed fixture data, not a product.
   through `thermal.steady_state_temp` must be tagged `cooling` alone, or state a
   lumped body: `thermal.time_constant` also covers `component-temperature` and
   `steady-state-temperature`, and it skips without the `body_*` keys.
-- The charger's temperature cutoffs. No bundled gate computes them yet.
-  pcb-kicad's `pcb.charge_protection` checks only that the charger's THERM pin
-  is wired to an NTC and that the part has a safety timer. pcb-kicad's
-  `pcb.charge_temperature`, which will read the thermistor network off the
-  board, is planned and not built. Until then, settle a cutoff claim with
-  `claim physical` or a project gate. Do not give it a tag that
-  `pcb.charge_protection` covers (`pcb`, `battery-safety`,
-  `charge-protection`): that gate passes on the wiring alone.
+- The charger's temperature cutoffs. pcb-kicad's `pcb.charge_temperature`
+  computes them off the board: it reads the charger's comparator trips (their
+  datasheet [min, max]), the NTC's value, R/T table or B constant and their
+  tolerances, and every resistor in the network, and finds the window in which
+  charging is still allowed at the worst corners. It judges that window
+  against the cell's charge window, as headroom in K, and it fails a fixed
+  resistor where the NTC goes. Tag a cutoff claim `charge-temperature`, and
+  state any headroom in K: the gate's value is a difference of temperatures. It
+  does not judge the NTC's coupling to the cell, nor a window set in firmware.
 - Cell ageing. I2R rises as a cell ages: state the end-of-life resistance.
   Nothing checks that you did.

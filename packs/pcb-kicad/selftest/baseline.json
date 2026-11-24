@@ -1,5 +1,5 @@
 {
-  "_description": "A USB data-line protector on a 30 x 15 mm two-layer board: J1 (4-pin header in), U1 (ESDA6V1BC6, a four-channel TVS array: the KiCad library's own symbol and SOT-23-6 footprint), J2 (4-pin header out). Both headers carry D+, GND, D-, VBUS on pins 1-4; each data line flows through U1, D+ in on pin 1 and out on pin 6, D- on 3 and 4, a TVS channel to ground at each, and both COM pins (2 and 5), which the part joins inside, are on GND. Tracks 0.25 mm on KiCad's default rules. It passes kicad-cli pcb drc at every severity with nothing unconnected, carries the library's pin names on every pad, and runs VBUS and GND at 0.5 A. Its schematic, esd_guard.kicad_sch, is the same circuit on KiCad's stock symbols, every footprint on the board linked to its symbol: it passes kicad-cli sch erc at every severity and matches the board exactly. The project's own sym-lib-table and fp-lib-table name the stock libraries, so ERC reads the same on a host whose KiCad was never configured. selftest/assets/make_baseline.py made all of it, and says how. vbus_droop.cir models the VBUS path from the host through the cable and the board to J2 under a 0.5 A step, and dips to 4.83 V against USB 2.0's 4.75 V. esd_guard.kicad_dru holds one custom rule (usb_pair: the data pair at least 0.2 mm wide), which the 0.25 mm tracks keep and pcb.drc's probes show live; esd_guard.symbols.json is the statement pcb.schematic_from_board writes the same circuit from. esda6v1bc6_land.json is ST's recommended SOT23-6L land, numbered by function, which KiCad's SOT-23-6 fits to 0.0125 mm. lipo_charger.kicad_pcb (make_power_board.py) is a second board, placed and netted but not routed, that only the three LiPo rules read: an MCP73833 charger with its THERM on an NTC, an MF-MSMF075 between the cell and a 28 AWG wire, and an AP9101CK cutoff sensing the cell through 330 ohm. enclosure.step is a closed 2 mm box around the populated board, its lid 2.365 mm over the header pins; the footprints' 3D models are KiCad's own, kept in selftest/assets/3d/ so the fit sees the same parts on every host.",
+  "_description": "A USB data-line protector on a 30 x 15 mm two-layer board: J1 (4-pin header in), U1 (ESDA6V1BC6, a four-channel TVS array: the KiCad library's own symbol and SOT-23-6 footprint), J2 (4-pin header out). Both headers carry D+, GND, D-, VBUS on pins 1-4; each data line flows through U1, D+ in on pin 1 and out on pin 6, D- on 3 and 4, a TVS channel to ground at each, and both COM pins (2 and 5), which the part joins inside, are on GND. Tracks 0.25 mm on KiCad's default rules. It passes kicad-cli pcb drc at every severity with nothing unconnected, carries the library's pin names on every pad, and runs VBUS and GND at 0.5 A. Its schematic, esd_guard.kicad_sch, is the same circuit on KiCad's stock symbols, every footprint on the board linked to its symbol: it passes kicad-cli sch erc at every severity and matches the board exactly. The project's own sym-lib-table and fp-lib-table name the stock libraries, so ERC reads the same on a host whose KiCad was never configured. selftest/assets/make_baseline.py made all of it, and says how. vbus_droop.cir models the VBUS path from the host through the cable and the board to J2 under a 0.5 A step, and dips to 4.83 V against USB 2.0's 4.75 V. esd_guard.kicad_dru holds one custom rule (usb_pair: the data pair at least 0.2 mm wide), which the 0.25 mm tracks keep and pcb.drc's probes show live; esd_guard.symbols.json is the statement pcb.schematic_from_board writes the same circuit from. esda6v1bc6_land.json is ST's recommended SOT23-6L land, numbered by function, which KiCad's SOT-23-6 fits to 0.0125 mm. power_board.kicad_pcb (make_power_board.py) is a second board, placed and netted but not routed, that only the four battery rules read: a USB-C receptacle in, an MCP73833-AMI/UN charger with its THERM on an NTC and PROG on 3k, a PTC between the cell's connector BT1 and VSYS, a one-cell protector sensing the cell through the PTC and 330 ohm and driving a dual N-MOSFET in the cell's negative lead, a wire out, and two 8-position FFC housings. enclosure.step is a closed 2 mm box around the populated board, its lid 2.365 mm over the header pins; the footprints' 3D models are KiCad's own, kept in selftest/assets/3d/ so the fit sees the same parts on every host.",
 
   "pcb_board": "selftest/assets/esd_guard.kicad_pcb",
 
@@ -30,16 +30,63 @@
 
   "pcb_land_drawings": {"U1": "selftest/assets/esda6v1bc6_land.json"},
 
-  "pcb_cell": {"board": "selftest/assets/lipo_charger.kicad_pcb", "ref": "J2", "value": "CELL", "pin": "1", "min_v": 2.75, "pcm_cutoff_min_v": null,
-               "source": "the baseline's cell: a 1-cell LiPo whose datasheet gives a 2.75 V discharge cut-off, with no protection circuit of its own (pcm_cutoff_min_v null). A sealed fixture value, not a product's."},
-  "pcb_charger": {"board": "selftest/assets/lipo_charger.kicad_pcb", "ref": "U1", "value": "MCP73833", "thermistor_pin": "8", "ntc_ref": "TH1", "safety_timer": true,
-                  "source": "Microchip MCP73833/4 datasheet (DS22005): THERM is pin 8 of the MSOP-10 (KiCad's MCP73833-xxx-UN symbol, read), and the part has a safety timer that ends a charge that never finishes (recalled from DS22005; re-read it before relying on it)"},
-  "pcb_fuse": {"board": "selftest/assets/lipo_charger.kicad_pcb", "ref": "F1", "value": "MF-MSMF075", "trip_max_s": [[8.0, 0.2]],
-               "source": "Bourns MF-MSMF series datasheet (REV. BE): MF-MSMF075, maximum time to trip 0.2 s at 8.0 A"},
-  "pcb_conductor": {"board": "selftest/assets/lipo_charger.kicad_pcb", "ref": "J3", "value": "WIRE_OUT", "pins": ["1"], "area_mm2": 0.0810, "start_c": 70.0, "limit_c": 160.0,
-                    "source": "28 AWG solid copper, 0.0810 mm^2 (ASTM B258), PVC insulated: 70 C in service, 160 C its short-circuit limit (IEC 60364-5-54's k = 115 pair)"},
-  "pcb_cutoffs": [{"board": "selftest/assets/lipo_charger.kicad_pcb", "ref": "U2", "value": "AP9101CK", "sense_pin": "2", "series_ref": "R1", "threshold_min_v": 2.85,
-                   "source": "Diodes Inc. AP9101C datasheet: VDD is pin 2 of SOT-23-5 (KiCad's AP9101CK symbol, read); a variant with a 2.90 V overdischarge detection voltage at +-50 mV, so 2.85 V at the least (recalled; re-read the option table before relying on it)"}],
+  "pcb_batteries": {
+    "main": {"board": "selftest/assets/power_board.kicad_pcb",
+             "terminals": {"ref": "BT1", "value": "CELL", "pos": "1", "neg": "2"},
+             "chemistry": "li-ion", "series": 1, "parallel": 1,
+             "cell": {"upper_charge_v": 4.25, "discharge_v_min": 2.5, "charge_a_max": 3.35,
+                      "charge_temp_c": [0, 45], "short_a": [10.0, 40.0]},
+             "source": "a one-cell pack on an LG INR18650 MJ1 cell, its protection board in the pack and a two-wire pigtail to BT1. LG Chem product specification LRB-PS-CY3500_MJ1, rev 1, 2016-06-30, read 2026-11-24: 2.4 max charge voltage 4.2 +- 0.05 V (upper_charge_v 4.25), 2.5 max charge current 1.0 C, 3350 mA, 2.6 end voltage (cut off) 2.5 V, 2.9 charge 0 ~ 45 C. short_a is a fixture estimate, not measured: the cell (4.2.1: at most 40 mOhm initial AC impedance), the pack's FETs and the pigtail in series, 10 A at the least and 40 A at the most"}
+  },
+  "pcb_protectors": {
+    "charger": {"battery": "main", "kind": "charger", "where": "board", "board": "selftest/assets/power_board.kicad_pcb",
+                "ref": "U1", "value": "MCP73833-AMI/UN",
+                "functions": {
+                  "charge_v": {"v_reg_v": [4.168, 4.232], "per_cell": false},
+                  "charge_a": {"prog": {"ref": "R3", "k_v": [900, 1100], "r_tol_pct": 1}},
+                  "charge_temp": {
+                    "sense": {"pin": "8", "kind": "current", "i_a": [4.7e-5, 5.3e-5],
+                              "cold_v": [1.20, 1.26], "hot_v": [0.235, 0.265]},
+                    "ntc": {"ref": "TH1", "value": "NTC 10k B4250", "r25_ohm": 10000, "r25_tol_pct": 1,
+                            "beta_k": 4250, "beta_pair_c": [25, 85], "beta_tol_pct": 1}},
+                  "safety_timer": false},
+                "source": "Microchip MCP73833/4 datasheet DS22005B (2009), read 2026-11-24: THERM is pin 8 of the MSOP-10 (KiCad's MCP73833-xxx-UN symbol); VREG 4.168-4.232 V for the 4.20 V option; IREG = 1000 V / RPROG, 900-1100 mA at PROG 1.0 kOhm (k_v 900-1100 V); ITHERM 47-53 uA, VT1 1.20-1.26 V, VT2 0.235-0.265 V; the AMI option is 4.20 V with its timer disabled (0 hours). R3 is 1 %. TH1 is a fixture NTC, 10 kOhm +- 1 %, B25/85 4250 K +- 1 %, not a product's"},
+    "protector": {"battery": "main", "kind": "protector", "where": "board", "board": "selftest/assets/power_board.kicad_pcb",
+                  "ref": "U2", "value": "PROT_1S_FIXTURE",
+                  "functions": {
+                    "overcharge_v": {"v_max": 4.35, "per_cell": true,
+                                     "sense": {"pin": "2", "through": ["F1", "R5"]},
+                                     "acts": {"pin": "5", "switch": {"ref": "Q1", "value": "FDS6890A",
+                                                                     "control": "4", "path": ["1", "3"]}}},
+                    "overdischarge_v": {"v_min": 2.85, "per_cell": true,
+                                        "sense": {"pin": "2", "through": ["F1", "R5"]},
+                                        "acts": {"pin": "4", "switch": {"ref": "Q1", "value": "FDS6890A",
+                                                                        "control": "2", "path": ["1", "3"]}}}},
+                  "source": "fixture values, not a product's: a one-cell protector on KiCad's AP9101CK symbol pins (VM 1, VDD 2, VSS 3, DO 4, CO 5), overcharge detection 4.35 V at the most, overdischarge detection 2.85 V at the least; VDD through F1 and R5 (330 ohm) from the cell; DO and CO on the gates of Q1 (KiCad's FDS6890A symbol: S1 1, G1 2, S2 3, G2 4), whose sources sit on the cell's negative and on ground"},
+    "pack_pcm": {"battery": "main", "kind": "pack-pcm", "where": "in-pack",
+                 "functions": {"overcharge_v": {"v_max": 4.3, "per_cell": true},
+                               "overdischarge_v": {"v_min": 2.3, "per_cell": true}},
+                 "source": "fixture values, not a product's: the pack's own protection board, overcharge 4.30 V at the most, overdischarge 2.30 V at the least, as a pack drawing would state them"},
+    "fuse": {"battery": "main", "kind": "ptc", "where": "board", "board": "selftest/assets/power_board.kicad_pcb",
+             "ref": "F1", "value": "PTC_FIXTURE_0A5",
+             "functions": {"trip": {"kind": "ptc", "terminal": "pos", "path_pins": ["1", "2"],
+                                    "hold_a": 0.5, "trip_a": 1.0, "trip_max_s": [[8.0, 0.1]],
+                                    "interrupt_a": 80.0}},
+             "source": "fixture values, not a product's: a PTC that holds 0.5 A, trips by 1.0 A, trips within 0.1 s at 8 A, and breaks 80 A"}
+  },
+  "pcb_conductors": {
+    "wire_out": {"battery": "main", "board": "selftest/assets/power_board.kicad_pcb", "kind": "wire",
+                 "ref": "J6", "value": "WIRE_OUT", "pins": ["1"],
+                 "area_mm2": 0.129, "start_c": 70.0, "limit_c": 160.0, "continuous_a": 1.0,
+                 "protected_by": ["fuse"],
+                 "source": "26 AWG solid copper, 0.405 mm across, 0.129 mm^2 (ASTM B258), PVC insulated: 70 C in service and 160 C its short-circuit limit (IEC 60364-5-54's k = 115 pair); continuous_a 1.0 A is a fixture rating, not a standard's"}
+  },
+  "pcb_matings": {
+    "flex": {"a": {"board": "selftest/assets/power_board.kicad_pcb", "ref": "J10", "value": "FFC_8P"},
+             "b": {"board": "selftest/assets/power_board.kicad_pcb", "ref": "J11", "value": "FFC_8P"},
+             "map": "straight",
+             "source": "fixture: an 8-way FFC from J10 to J11, contacts on the same side at both ends, so position n meets position n"}
+  },
 
   "_notes": {
     "_units": "Millimetres for every length (KiCad's file unit), amperes, degrees C of rise above ambient, ounces of copper per square foot (1 oz = 35 um = 1.378 mil).",
@@ -68,10 +115,9 @@
     "pcb_pin_names_ignore": "Pin names pcb.pin_names never compares: unused-pin names, which may sit on any net, and KiCad's hidden-name placeholder. Every other repeated name must carry one net.",
     "pcb_pin_names_series": "{ref: {pairs: [[pin, pin]], source}}: on that ref, each pair is the two ends of one series element that the library names alike (an EMI filter array names both ends of a channel CH1), so it may carry two nets. A pair must name the only two pins of the ref that carry its name, or the gate errors: the record is for another design. A pair stated on one ref clears nothing on another. Empty here: the ESD array's two COM pins are one node inside the part, not a series pair.",
     "pcb_land_drawings": "{ref: drawing record} for pcb.land_pattern, each a JSON file from the project root: {part, source, view: \"top\", y_axis: \"up\" (as printed) or \"down\" (as a KiCad footprint), pads: [{number, function, x, y, w, h}]} in mm. The baseline holds U1 to ST's recommended SOT23-6L land; KiCad's SOT-23-6 fits it to 0.0125 mm.",
-    "pcb_cell": "The cell the power rules protect: its connector's ref, value and positive pin on the board named by board (else pcb_board), min_v (the datasheet's lowest discharge voltage) and pcm_cutoff_min_v (the lowest voltage the cell's own protection circuit opens at, null for none). The baseline's power records name lipo_charger.kicad_pcb, a board only these three tier-0 rules read.",
-    "pcb_charger": "The charger: ref, value, thermistor_pin (its THERM pin, null when the part has none), ntc_ref (the NTC wired to it) and safety_timer (JSON true or false: whether the datasheet gives the part a charge timer). pcb.charge_protection.",
-    "pcb_fuse": "The fuse in the cell path: ref, value and trip_max_s, the datasheet's guaranteed [amperes, maximum seconds to trip] points. pcb.fuse_conductor judges each.",
-    "pcb_conductor": "The conductor the fuse protects: ref, value, pins (all on the net the fuse feeds), area_mm2 of ONE conductor (parallel contacts get no credit), start_c (its temperature in service) and limit_c (what its insulation or rating allows in a fault). The verdict turns on limit_c: say where it comes from.",
-    "pcb_cutoffs": "The parts that cut the cell off: [{ref, value, sense_pin, series_ref (the one two-pad part between the cell's net and the sense pin, such as the datasheet's series resistor on VDD; null when the sense pin sits on the cell's net), threshold_min_v (the datasheet's lowest detection voltage), source}]. An empty list is a statement that there are none."
+    "pcb_batteries": "{id: record}, one per battery (an object keyed by id, not a list: the mutation walk reaches an object's leaves, and other records point at the ids). Each: board (else pcb_board); terminals {ref, value, pos, neg, therm (the pack's thermistor pin, or null), taps (for two or more cells in series, the junction pins from the lowest up)}; chemistry (li-ion, li-polymer, lifepo4, lto, nimh, li-primary or alkaline: it picks which rules apply, never a number); series and parallel (whole numbers); cell, each value per cell from the cell's datasheet: upper_charge_v (the upper limit charging voltage, with its tolerance), discharge_v_min, charge_a_max, charge_temp_c [lo, hi] (the widest window any charge is allowed in) and short_a [least, most] or internal_resistance_ohm [least, most]; ntc (the pack's NTC: r25_ohm, r25_tol_pct, and rt_table_c_ohm [[C, ohm], ...] or beta_k, beta_pair_c and beta_tol_pct); source. A rule that needs a value the record lacks errors, naming it. The baseline's records name power_board.kicad_pcb, a board only these four tier-0 rules read.",
+    "pcb_protectors": "{id: record}, one per protecting element, holding every function it serves. Each: battery (an id in pcb_batteries); kind (charger, protector, pack-pcm, bms, gauge, fuse, ptc, efuse or blocking: a charger stops its own charge, every other kind says how it acts); where (board, in-pack or firmware: an in-pack element counts on its datasheet's word, firmware is named and never counted); board, ref and value when on the board; functions, any of: charge_v {v_reg_v [min, max] or divider {vfb_v, top_ref, bottom_ref, tol_pct}, per_cell, set_by}, charge_a {a_max, or prog {ref, k_v [min, max], r_tol_pct}, set_by}, charge_temp {sense {pin, kind current with i_a, cold_v, hot_v, or kind ratio with pullup_ref, pullup_tol_pct, cold_frac, hot_frac}, ntc {ref, value, r25_ohm, r25_tol_pct, rt_table_c_ohm or beta_k, beta_pair_c, beta_tol_pct} or {battery_therm: true}, network {series_ref, parallel_ref, tol_pct, others}, acts {pin, to {ref, pin}}; in the pack: window_c {cold_c, hot_c}}, overcharge_v {v_max, per_cell, sense, acts}, overdischarge_v {v_min, per_cell, sense {pin, through [refs]} or {taps}, acts {pin, switch {ref, value, control, path}}}, trip {kind fuse, ptc, fet, efuse or pcm, terminal pos or neg, path_pins or switch, hold_a, trip_a, trip_max_s [[A, s]], interrupt_a, ahead [{ref, value, why}]}, safety_timer (evidence only); source. Every datasheet threshold is [min, max]: one typical number is refused.",
+    "pcb_conductors": "{id: record}, each a conductor a cell can drive a fault through: battery; board; kind (wire, ffc, contact or track); for a track, net and continuous_rise_c (its rating is IPC-2221 at that rise, on its narrowest stretch); otherwise ref, value, pins (all on one net), area_mm2 of ONE conductor (parallel contacts get no credit) and continuous_a; start_c (its temperature in service) and limit_c (what its insulation allows in a fault); protected_by (the protector ids that guard it); source. pcb.fault_current turns on limit_c and continuous_a: say where each comes from.",
+    "pcb_matings": "{id: record}, each a connector that meets another: a and b, each {board, ref, value}; map (straight, reversed, or {a_pin: b_pin}); source. The power rules join the two pads' nets, so an element on another board counts."
   }
 }
