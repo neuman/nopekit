@@ -2254,6 +2254,77 @@ are kept outside the repository with the branch's history.
   Wherever the prose says a part through an opening reads clear, it gives the
   condition: only an opening wide enough to keep the clearance reads clear. The
   power board is P5's.
+- **No selection by key order** (C1 and D1, each found alone). The design said
+  "globs in the order written". A parameter's digest sorts its keys, so two
+  statements that differ only in order share one cache key, and an order that
+  decided the result would serve one statement's verdict for the other (invariant
+  7). An exact name wins; otherwise the patterns that match a part must agree (C1)
+  or only one may match (D1), and anything else is refused.
+- **T1, built: `thermal.skin_temperature`** (thermal-analytic 0.2.0, tier 0,
+  sourced, stdlib). For each power state it adds the state's heat sources and
+  solves P = A (h_c + h_r)(T_s - T_a) for the average skin of a sealed shell:
+  Churchill-Chu at the longest dimension, grey-body radiation to the room, no
+  credit for the covered area, a linear stage at its worst corner
+  (vin_max - vout_min) x i_max. The hottest state gives the value; the limit is
+  the claim's, on the tag `average-skin-temperature` only. Inside its measured
+  range (a level device, faces 40-160 mm, rise 5-25 K) the model errs hot, so a
+  PASS is the conservative verdict and a FAIL can be false; outside it, or on a
+  face that points down, some biases err cold, and the docs give their sizes. The
+  peak is `claim physical`'s or a solver's, and the detail says so before anything
+  the 500-character cut could take. `heat_sources` is an object keyed by name.
+  *Rejected:* a list of records (measured: the mutation walk and the trace push
+  only object leaves, so no source number was ever falsified); the touch-limit
+  table as a pack constant (the limit is the claim's); broad tags such as
+  `skin-temperature` (a peak claim would read Checked on an average); an operating
+  context on length alone (the bias also turns on the rise, which the gate
+  computes). Until P5 lands, no bundled gate computes a charger's cutoff
+  temperatures, and the docs say so.
+- **C1, built: `cad.wall_thickness` per part** (cad-solid 0.3.0).
+  `process_min_wall_mm_by_part`, `wall_exempt_parts {part: reason}` (every part
+  exempt: Skipped) and `wall_exceptions [{part, box_mm, min_mm, reason}]` (a ray
+  that starts in the box is held to its minimum). A pass reports the thinnest
+  judged wall against the minimum it was held to, because the gate settles
+  `minimum wall thickness` in mm and a claim on it is cross-checked; the detail
+  also names the wall nearest its own minimum. A fail reports the wall furthest
+  below its own. *Rejected:* the design's worst ratio on a pass (a mm claim read
+  Checked beside a thinner wall); exemption by pattern; a tiny minimum in place
+  of an exemption; a lower minimum for a whole part in place of a box. The
+  populated board stays out of `meshes`; a pouch cell's swelling allowance is a
+  `cad.clearance` recipe, not a gate.
+- **D1, built: `fdm.slice` takes a preset group per part** (fdm-print 0.2.1). A
+  part slices on the group under its own name, else the one glob that matches,
+  else the default; a group names all three roles. Every statement problem waits
+  until the parts are read, so a part out of print pose still FAILS. *Rejected:*
+  partial groups that borrow a role from the default (a part's triple from two
+  places); a key that names no part read as harmless (a misspelling sends the
+  part back to the default). The readings once taken on the parent's parts are
+  generic statements now, not measured again: OrcaSlicer 2.4.2 is not installed
+  here.
+- **E1, built: `hand-ergonomics`** with `ergo.digit_reach` (tier 0, sourced,
+  stdlib), the proposer `ergo.reach_envelope`, the scaffold (REACH, GRIP-POSTURE,
+  REACH-HELD; milestones `reach-first-print`, `reach-board-order`) and the
+  reach-testing skill. The table ships 3,982 subjects of ANSUR 1988, and the
+  loader refuses a table whose sha256 is not the one its provenance names. A share
+  is floored to 0.01% before it is judged, toward the failing side of every claim
+  the gate holds. *Rejected:* half-up rounding (1703 of 1774 men read 96.00% and
+  passed >= 96 one subject short); aliases for any key; a mechanism evaluator on
+  REACH-HELD (every project would start with a warning). The pack has no
+  prerequisite edge and says why in `NO_EDGE_YET`; pack skills are now parsed by
+  the doc-command tests.
+- **P4, built: the pcb-kicad readers** (0.3.0). A board newer than the reader's
+  ceiling (KiCad 9's format 20241229) reads Skipped with the guard's words; the
+  gates that need the guard read "prerequisite not established", the power rules
+  and `pcb.fab_rules` skip the same way. Nets are read by name as well as by code.
+  The ceiling does not move: only KiCad 9.0.9 is installed, so no KiCad 10 board
+  could be saved and checked (an accepted gap; KiCad 9's kicad-cli refuses a
+  format-20260206 board, so its board gates read errored on one). `_land_fit`
+  keeps the full search up to 5040 assignments and past that anchors on pads with
+  a function of their own (KiCad's USB-C 16P fits in 76 tries), with a `pair_by`
+  hook for drawing registration only. A fab file lists `services`; a dielectric or
+  via kind the named service does not list skips and names the gap.
+  `pcb.pin_names` takes series pairs stated per ref. *Rejected:* raising the
+  ceiling on the 10.0 source alone; failing a newer file (a wrong FAIL on every
+  current board); number-first pairing.
 
 ## 9. Retired
 
