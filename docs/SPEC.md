@@ -2225,6 +2225,35 @@ are kept outside the repository with the branch's history.
   `fw.tx_power`; P5 the power rules; P6 mismate and USB-C; E2 `ergo.layout_agrees`;
   P7 enclosure fit; P8 the antenna keep-out; P9 the proposers; Z1 README pictures
   from each pack's own baseline and `FORBIDDEN`; Z2 the holdout.
+- **P1, built: the scrub outside pcb-kicad and firmware-zmk.** Every clash and
+  locator example in the docs uses cad-solid's own baseline names (carriage,
+  guide_roller, cover). *Rejected:* fresh names (a second vocabulary beside the
+  pack's controls). The parent's stories in METHOD.md, the lenses and the spine's
+  docstrings become generic stories that keep the lesson; spine edits are
+  docstrings only, so the bracket cache stands. fdm-print's baseline presets keep a
+  common 220 x 220 mm bed and PETG: a printer class, not a design value, and the
+  slicer controls were measured on them. Kept as generic and reviewed: the
+  readiness sentence of rule 9 (the method's template) and the routing example of
+  rule 3. Left for later: fdm.slice's provenance readings taken on the parent's
+  parts (D1 re-measures them on the pack's probes) and the example strings in
+  `decisions.py` and `decide --help` (Z1).
+- **P2, built: packaging.** The wheel ships every tracked file under `packs/`;
+  `tests/test_packaging.py` holds it, with the same functions setuptools uses
+  (`glob` from the root, then `fnmatch` for exclusions), and also requires
+  `nopekit.bundled` to be a built package. OpenFOAM cases ship by their three
+  directories, anchored at `<pack>/selftest/assets/<case>/`, one level deep.
+  *Rejected:* `**/*` (ships a contributor's caches and a solver run left in a
+  case); `**/0/*` at any depth (it shipped `processor*/` and `postProcessing/`);
+  each dictionary by name (misses a field a case adds).
+- **P3, built: the pcb-kicad scrub.** The ESD baseline is ST's ESDA6V1BC6 from
+  KiCad's stock library, with the same footprint, model, enclosure and ref.
+  *Rejected:* SRV05-4 and ESDA6V1-5SC6 (no repeated pin name, so the pin_names
+  control plants nothing), SN65220 (its GND pins are drawn apart), SP0505BAHT
+  (five cathodes named K that are not one node). The parent's board lines, counts,
+  widths and rule names are gone from prose and tests; the DRC rule is renamed.
+  Wherever the prose says a part through an opening reads clear, it gives the
+  condition: only an opening wide enough to keep the clearance reads clear. The
+  power board is P5's.
 
 ## 9. Retired
 
