@@ -30,17 +30,28 @@ its pack PCM has both in another. A rule reads the function it judges.
 take every rule; nimh takes the charge temperature and the fault current;
 li-primary and alkaline take the fault current, and a charger that names one
 fails. Every limit is the cell's own datasheet value. One wide bound refuses a
-typo: a per-cell charge voltage outside 1.5-4.6 V, a charge current outside
-0.001-50 A.
+typo in the cell's record: a per-cell charge voltage outside 1.5-4.6 V, a charge
+current outside 0.001-50 A. On a charger it refuses only a typed value below it
+(`v_reg_v`'s max, `a_max`): low, a typo would read as a pass. A charger above it
+is a real overcharge (a 2S charger on a 1S cell, a PROG of "10" typed for
+"10k"), and a value read off the board is the design: each fails at its ratio.
 
 **Bound and strict.** A ref the board lacks, another value on that ref, or a
 named pin with no pad is an error: "the record is for another design". The board
 file is keyed, so a regenerated part stales the verdict, and a moved value
 refuses the record. An unknown key is refused, naming the nearest known one. A
-datasheet threshold given as one number is refused: give [min, max]; for a value
-the datasheet gives only as typical, state [typ-x, typ+x] and say in `source`
-that x is your assumption. A flag is a JSON true or false (the string "false"
-reads as true). A `source` must say something.
+field that takes a datasheet [min, max] refuses one number: the comparator's
+`i_a`, `cold_v`, `hot_v`, `cold_frac` and `hot_frac`, `v_reg_v`, `vfb_v`, `k_v`,
+an in-pack `window_c`, and the cell's `charge_temp_c`, `short_a` and
+`internal_resistance_ohm`. For a value the datasheet gives only as typical,
+state [typ-x, typ+x] and say in `source` that x is your assumption. A field that
+takes one number takes the datasheet's guaranteed bound on the side that
+protects less, never its typical. The rule cannot tell the two apart, so this is
+your word: `overcharge_v.v_max` is the most detection voltage,
+`overdischarge_v.v_min` the least, `a_max` the most charge current, `trip_a` the
+current by which the part is sure to trip, `trip_max_s` the longest time at each
+current, and `interrupt_a` the current it is rated to break. A flag is a JSON
+true or false (the string "false" reads as true). A `source` must say something.
 
 Two more refusals come from the board. A board `pcb.board_readable` would fail
 (older than KiCad 6, a track on an undefined net) is an error here: a record may
@@ -102,12 +113,14 @@ resistor read off the board and taken at both ends of `network.tol_pct`. The
 NTC is its maker's R/T table when the record gives one (ln R against 1/T
 between the two bracketing rows), else its B equation, R25 exp(B (1/T - 1/T25)).
 R25 and B each go to both ends of their tolerance; with a table, the B
-tolerance scales the table's own exponent. A B constant is fitted on two
-temperatures (B25/50, B25/85): away from them the equation drifts, and B rises
-with temperature, so below its pair the equation puts a cold trip warmer than
-the part trips. The detail says when an edge lies outside the B pair; a table
-comes first for that reason. A trip outside a table's rows is an error, not a
-guess.
+tolerance scales the table's own exponent. `beta_tol_pct` is required with a
+table too, because a maker's curve spreads away from 25 C: an omitted one is an
+error, never 0. For an exact table, state 0 and say why in `source`. A B
+constant is fitted on two temperatures (B25/50, B25/85): away from them the
+equation drifts, and B rises with temperature, so below its pair the equation
+puts a cold trip warmer than the part trips. The detail says when an edge lies
+outside the B pair; a table comes first for that reason. A trip outside a
+table's rows is an error, not a guess.
 
 **The edges.** At every corner the trip temperature is found by bisection on
 -40..150 C (a table's own range with a table), to 0.0001 K. The lowest
@@ -159,10 +172,13 @@ pack-level stop bounds no single cell. With none, the rule fails with no value.
 With only a firmware stop there, the rule names it and skips. The element's
 threshold is printed, not judged: no general source gives a cell's
 single-fault voltage limit, and a protector's threshold sits above the charge
-voltage by design.
+voltage by design. The charger's own overcharge stop is named and never
+counted, and it moves no verdict: it is not independent of the charger.
 
-A charger set by firmware skips, naming it. NiMH has no constant-voltage phase
-and is not judged.
+A charge voltage or current set by firmware is named and not judged. The
+charger's other function still is, so the rule skips only when nothing it can
+see fails: a firmware current beside a 4.232 V charger on a 3.65 V cell fails.
+NiMH has no constant-voltage phase and is not judged.
 
 **On the baseline.** U1's 4.20 V option regulates at 4.168-4.232 V; the cell, an
 LG INR18650 MJ1, takes 4.2 +- 0.05 V (its specification, 2.4): 4.232 / 4.25 =

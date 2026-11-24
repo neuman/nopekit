@@ -18,12 +18,16 @@ and PACK.md says so.
 
 **Chemistry picks rules, never numbers.** Every limit is the cell's own, from
 its datasheet record: a LiFePO4 cell's 3.65 V and an HV cell's 4.45 V are both
-the record's word. One wide bound refuses a typo (a per-cell voltage outside
-1.5-4.6 V, a current outside 0.001-50 A) and moves no verdict on a real cell.
+the record's word. One wide bound refuses a typo in the cell's record (a
+per-cell voltage outside 1.5-4.6 V, a current outside 0.001-50 A) and moves no
+verdict on a real cell. A charger's typed voltage and current are refused only
+below it, and a value read off the board never: a charger above it is a real
+overcharge, and it fails at its ratio.
 
 **Firmware is named, never counted.** A cutoff, a window or a charge voltage set
 by firmware or a register is not on the copper: the rule skips, naming it,
-unless something it can see fails.
+unless something it can see fails. Each function is judged on its own, so a
+firmware current never hides a voltage the board sets.
 
 **What slipped through** the three rules these replace (the review of the
 branch's 0.2.0 cut): a charger with no safety timer read FAIL, though IEC
@@ -83,10 +87,23 @@ OVERLOAD_FACTOR = 1.45
 #: HV cell's (4.45 V), with room either side. It moves no verdict on a real
 #: cell; it refuses "42.5" typed for "4.25". Rejected: a table per chemistry (it
 #: read FAIL on HV cells at 4.35-4.45 V, which a 4.2 V table did not know).
+#:
+#: Held whole on the cell's record only. On a charger it holds only its floor,
+#: and only on a typed number (``v_reg_v``'s max, ``a_max``): a typo low there
+#: is the one typo that reads as a pass. A charger above the band is a real
+#: overcharge, and a value read off the board is the design, so each is judged
+#: at its ratio. (What slipped through this rule's first cut: the whole band
+#: was held on the charger's worst corner per cell, so a 2S charger on a 1S
+#: cell, 8.464 V, and a PROG of "10" typed for "10k", 111 A, read "a typo?", an
+#: error that told the person to fix a record that was right, not a fail at
+#: 1.99 and 33. Rejected: the floor on a value read off the board, where a low
+#: value is the board's own and charges no cell too hard.)
 CELL_V_PLAUSIBLE = (1.5, 4.6)
 
 #: A charge current outside this band is a typo: a milliamp is below any
-#: charger's regulated current, and 50 A is past any handheld's.
+#: charger's regulated current, and 50 A is past any handheld's. Held as
+#: :data:`CELL_V_PLAUSIBLE` is: whole on the cell, its floor on a typed
+#: ``a_max``.
 CHARGE_A_PLAUSIBLE = (0.001, 50.0)
 
 LITHIUM = ("li-ion", "li-polymer", "lifepo4", "lto")
@@ -822,8 +839,10 @@ def charge_limits(ctx: GateContext) -> Verdict:
     (another part, or in the pack) must sense the cell and open its path, per
     cell for two or more in series; with none the rule fails with no value, and
     with only firmware there it skips, naming it. Its threshold is printed, not
-    judged. A charger set by firmware is named and skipped; NiMH has no constant-voltage phase and is not judged; a charger on
-    a primary cell fails."""
+    judged. A charge voltage or current set by firmware is named and not
+    judged, and the charger's other function still is: the rule skips only
+    when nothing it can see fails. NiMH has no constant-voltage phase and is
+    not judged; a charger on a primary cell fails."""
     gid = "pcb.charge_limits"
     try:
         got = _design(ctx, gid)
@@ -850,15 +869,21 @@ def charge_limits(ctx: GateContext) -> Verdict:
             _plausible_a(i_cell, f"{b.label}.cell.charge_a_max")
             i_pack = i_cell * b.parallel
             for c in chargers:
-                got_c = _charger(d, c, b)
-                if isinstance(got_c, str):
-                    blind.append(f"{b.id}: {got_c}")
-                    continue
-                v_cell, i_max, how = got_c
-                rows.append((max(v_cell / ulcv, i_max / i_pack), b, c,
-                             f"{b.id}: {c.name} holds {v_cell:.4g} V of the cell's {ulcv:g} V "
-                             f"({v_cell / ulcv:.4f}) and {i_max:.4g} A of its {i_pack:g} A "
-                             f"({i_max / i_pack:.4f}){how}"))
+                v_cell, i_max, how, firmware = _charger(d, c, b)
+                if firmware:
+                    blind.append(f"{b.id}: {firmware}")
+                seen = []
+                if v_cell is not None:
+                    seen.append((v_cell / ulcv, f"{v_cell:.4g} V of the cell's {ulcv:g} V "
+                                                f"({v_cell / ulcv:.4f})"))
+                if i_max is not None:
+                    whose = "its" if seen else "the cell's"
+                    seen.append((i_max / i_pack, f"{i_max:.4g} A of {whose} {i_pack:g} A "
+                                                 f"({i_max / i_pack:.4f})"))
+                if seen:
+                    rows.append((max(r for r, _w in seen), b, c,
+                                 f"{b.id}: {c.name} holds "
+                                 f"{' and '.join(w for _r, w in seen)}{how}"))
             ov = _single_fault(b, protectors, chargers)
             if ov.startswith("FAIL:"):
                 faults.append(f"{b.id}: {ov[len('FAIL:'):]}")
@@ -878,12 +903,17 @@ def charge_limits(ctx: GateContext) -> Verdict:
         "chargers": [{"battery": b.id, "charger": c.id, "ratio": r, "said": line}
                      for r, b, c, line in rows],
         "faults": faults, "firmware": blind, "notes": notes})
-    said = "; ".join([r[3] for r in rows] + notes)
+    said = "; ".join([r[3] for r in rows] + notes
+                     + ([f"set by firmware, not judged: {'; '.join(blind)}"] if blind else []))
     if faults:
         return Verdict(gate=gid, passed=False, measured=None, limit=1.0, comparator="<=",
                        units="ratio", evidence=ev,
                        detail="; ".join(faults) + (f"; {said}" if said else ""))
     value = round(max(r[0] for r in rows), 4) if rows else None
+    # Firmware skips only beside nothing that fails: a skip would hide a fail
+    # the rule can see. (What slipped through this rule's first cut: a charger
+    # with a firmware current returned before its voltage was read, so a
+    # 4.232 V charger on a 3.65 V LiFePO4 cell read Skipped, not Failing.)
     if blind and (value is None or value <= 1.0):
         return Verdict(gate=gid, passed=False, skipped=True, evidence=ev,
                        skip_reason=f"set by firmware, which this rule cannot see: "
@@ -892,21 +922,45 @@ def charge_limits(ctx: GateContext) -> Verdict:
                    units="ratio", detail=said, evidence=ev)
 
 
-def _plausible_v(v: float, label: str) -> None:
-    if not CELL_V_PLAUSIBLE[0] <= v <= CELL_V_PLAUSIBLE[1]:
-        raise RecordError(f"{label} is {v:g} V per cell, outside {CELL_V_PLAUSIBLE[0]:g}-"
-                          f"{CELL_V_PLAUSIBLE[1]:g} V, where no lithium cell charges: a typo?")
+def _plausible_v(v: float, label: str, *, floor_only: bool = False) -> None:
+    lo, hi = CELL_V_PLAUSIBLE
+    if floor_only and v < lo:
+        raise RecordError(f"{label} is {v:g} V, below {lo:g} V, where no lithium cell "
+                          f"charges: a typo?")
+    if not floor_only and not lo <= v <= hi:
+        raise RecordError(f"{label} is {v:g} V per cell, outside {lo:g}-{hi:g} V, where no "
+                          f"lithium cell charges: a typo?")
 
 
-def _plausible_a(a: float, label: str) -> None:
-    if not CHARGE_A_PLAUSIBLE[0] <= a <= CHARGE_A_PLAUSIBLE[1]:
-        raise RecordError(f"{label} is {a:g} A, outside {CHARGE_A_PLAUSIBLE[0]:g}-"
-                          f"{CHARGE_A_PLAUSIBLE[1]:g} A: a typo?")
+def _plausible_a(a: float, label: str, *, floor_only: bool = False) -> None:
+    lo, hi = CHARGE_A_PLAUSIBLE
+    if floor_only and a < lo:
+        raise RecordError(f"{label} is {a:g} A, below {lo:g} A: a typo?")
+    if not floor_only and not lo <= a <= hi:
+        raise RecordError(f"{label} is {a:g} A, outside {lo:g}-{hi:g} A: a typo?")
 
 
-def _charger(d, c: Protector, b: Battery) -> tuple | str:
-    """``(volts per cell, amperes, words)`` a charger can reach at its worst
-    corner, or the words naming what firmware sets."""
+def _set_by_firmware(f: dict, label: str, values: tuple) -> bool:
+    """Whether a charge function says firmware sets it. One that says so and
+    also gives a value is refused: which of the two the charger holds is not
+    on the copper, and the value would be read or dropped without a word."""
+    if f.get("set_by") is None:
+        return False
+    P.word(f["set_by"], f"{label}.set_by", ("firmware",))
+    given = [k for k in values if k in f]
+    if given:
+        raise RecordError(f"{label} is set_by firmware and gives {', '.join(given)}: give "
+                          f"one")
+    return True
+
+
+def _charger(d, c: Protector, b: Battery) -> tuple:
+    """``(volts per cell, amperes, words, firmware)`` a charger can reach at its
+    worst corner. Each function is read on its own: one set by firmware is None
+    and named in ``firmware`` ("" when none is), and the other is still read
+    off the record and the board. (What slipped through this rule's first cut:
+    a firmware ``set_by`` on either function returned before the other was
+    read, so a voltage the board set was never judged.)"""
     for key, what in (("charge_v", "voltage"), ("charge_a", "current")):
         if key not in c.functions:
             raise RecordError(f"{c.label} charges {b.id} and has no functions.{key}: its "
@@ -914,18 +968,30 @@ def _charger(d, c: Protector, b: Battery) -> tuple | str:
     cv = P.keys(c.functions["charge_v"], c.fn("charge_v"), ("per_cell",),
                 ("v_reg_v", "divider", "set_by"))
     ca = P.keys(c.functions["charge_a"], c.fn("charge_a"), (), ("a_max", "prog", "set_by"))
-    firmware = [what for what, f, key in (("charge voltage", cv, "charge_v"),
-                                          ("charge current", ca, "charge_a"))
-                if f.get("set_by") is not None
-                and P.word(f["set_by"], f"{c.fn(key)}.set_by", ("firmware",))]
-    if firmware:
-        return f"{c.name}'s {' and '.join(firmware)}"
     per_cell = P.flag(cv["per_cell"], f"{c.fn('charge_v')}.per_cell")
+    firmware, how, v_cell, i_max = [], "", None, None
+    if _set_by_firmware(cv, c.fn("charge_v"), ("v_reg_v", "divider")):
+        firmware.append("charge voltage")
+    else:
+        v_cell, said = _charge_v(d, c, cv, per_cell, b)
+        how += said
+    if _set_by_firmware(ca, c.fn("charge_a"), ("a_max", "prog")):
+        firmware.append("charge current")
+    else:
+        i_max, said = _charge_a(d, c, ca)
+        how += said
+    return v_cell, i_max, how, (f"{c.name}'s {' and '.join(firmware)}" if firmware else "")
+
+
+def _charge_v(d, c: Protector, cv: dict, per_cell: bool, b: Battery) -> tuple[float, str]:
+    """``(volts per cell, words)``: the charger's guaranteed maximum
+    regulation voltage, typed or read off its divider."""
     if ("v_reg_v" in cv) == ("divider" in cv):
         raise RecordError(f"{c.fn('charge_v')}: give v_reg_v [min, max] or a divider, one")
     how = ""
     if "v_reg_v" in cv:
         v_max = P.band(cv["v_reg_v"], f"{c.fn('charge_v')}.v_reg_v")[1]
+        _plausible_v(v_max, f"{c.fn('charge_v')}.v_reg_v's max", floor_only=True)
     else:
         if c.fp is None:
             raise RecordError(f"{c.fn('charge_v')}.divider: the divider is on the board, and "
@@ -938,12 +1004,18 @@ def _charger(d, c: Protector, b: Battery) -> tuple | str:
         bot, r_bot = _resistor(d, c.path, dv["bottom_ref"], f"{label}.bottom_ref")
         v_max = vfb[1] * (1 + r_top * (1 + tol) / (r_bot * (1 - tol)))
         how += f"; voltage set by {top.ref} {top.value} over {bot.ref} {bot.value}"
-    v_cell = v_max if per_cell else v_max / b.series
-    _plausible_v(v_cell, f"{c.fn('charge_v')}, per cell,")
+    return (v_max if per_cell else v_max / b.series), how
+
+
+def _charge_a(d, c: Protector, ca: dict) -> tuple[float, str]:
+    """``(amperes, words)``: the charger's guaranteed maximum charge current,
+    typed or read off its PROG resistor."""
     if ("a_max" in ca) == ("prog" in ca):
         raise RecordError(f"{c.fn('charge_a')}: give a_max or prog, one")
+    how = ""
     if "a_max" in ca:
         i_max = P.num(ca["a_max"], f"{c.fn('charge_a')}.a_max", gt=0.0)
+        _plausible_a(i_max, f"{c.fn('charge_a')}.a_max", floor_only=True)
     else:
         if c.fp is None:
             raise RecordError(f"{c.fn('charge_a')}.prog: the resistor is on the board, and "
@@ -955,24 +1027,30 @@ def _charger(d, c: Protector, b: Battery) -> tuple | str:
         rp, r = _resistor(d, c.path, pg["ref"], f"{label}.ref")
         i_max = k_v[1] / (r * (1 - tol))
         how += f"; current set by {rp.ref} {rp.value}"
-    _plausible_a(i_max, f"{c.fn('charge_a')}")
-    return v_cell, i_max, how
+    return i_max, how
 
 
 def _single_fault(b: Battery, protectors: list, chargers: list) -> str:
     """The overcharge elements independent of every charger, as words;
     ``"FIRMWARE:<names>"`` when only firmware stands there (named and skipped,
     as every rule here treats firmware); or ``"FAIL:<why>"`` when nothing does,
-    or when an element on the board or in the pack does not count."""
+    or when an element that could have counted does not (not fitted, not
+    sensing the cell, opening nothing, or holding the pack, not each cell).
+
+    The charger's own overcharge stop is named and moves nothing: it is never
+    independent of the charger, so it could never count. (What slipped through
+    this rule's first cut: it was listed with the elements that failed to
+    count, and a firmware-only stop that skipped read FAIL once a person
+    recorded the charger's own battery OVP beside it.)"""
     charger_refs = {(c.path, c.fp.ref) for c in chargers if c.fp is not None}
-    counted, why_not, firmware = [], [], []
+    counted, why_not, firmware, itself = [], [], [], []
     for p in protectors:
         if p.battery is not b or "overcharge_v" not in p.functions:
             continue
         v_max = P.num(P.obj(p.functions["overcharge_v"], p.fn("overcharge_v")).get("v_max"),
                       f"{p.fn('overcharge_v')}.v_max", gt=0.0)
         if p in chargers or (p.fp is not None and (p.path, p.fp.ref) in charger_refs):
-            why_not.append(f"{p.name} is the charger itself")
+            itself.append(f"{p.name} is the charger itself")
             continue
         if p.where == "firmware":
             firmware.append(p.name)
@@ -985,8 +1063,10 @@ def _single_fault(b: Battery, protectors: list, chargers: list) -> str:
     if counted:
         return ", ".join(counted) + " (thresholds printed, not judged)"
     if firmware and not why_not:
-        return "FIRMWARE:" + ", ".join(firmware)
-    why_not += [f"{name} is firmware, which this rule cannot see" for name in firmware]
+        return ("FIRMWARE:" + ", ".join(firmware)
+                + (f" (not counted: {'; '.join(itself)})" if itself else ""))
+    why_not = itself + why_not + [f"{name} is firmware, which this rule cannot see"
+                                  for name in firmware]
     tail = f" (not counted: {'; '.join(why_not)})" if why_not else ""
     return ("FAIL:nothing independent of the charger stops an overcharge: no overcharge_v "
             "element senses the cell and opens its path" + tail)

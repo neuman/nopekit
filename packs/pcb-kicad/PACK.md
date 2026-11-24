@@ -75,13 +75,15 @@ jobs, is stated once and read by every rule. Each record names its board
 `source`. A ref the board lacks, another value on that ref, or a pin with no pad
 is an error ("the record is for another design"), so a generator that moves a
 part or a value stales them. An unknown key is refused, naming the nearest known
-one, and a datasheet threshold given as one typical number is refused: give
-[min, max]. Chemistry picks which rules apply, never a number: every limit is the
-cell's own, from its datasheet. `pcb_matings` joins two connectors' nets pin by
-pin, so an element on another board counts. The baseline's records name
-`selftest/assets/power_board.kicad_pcb` (made by `make_power_board.py`: placed,
-netted, not routed), which only these four rules read. `references/battery.md`
-holds every field.
+one. A datasheet range (a comparator's trips, a regulation voltage) given as one
+typical number is refused: give [min, max]. A field that takes one number
+(`v_max`, `v_min`, `trip_a`) takes the guaranteed bound, never the typical: the
+rule cannot tell them apart. Chemistry picks which rules apply, never a number:
+every limit is the cell's own, from its datasheet. `pcb_matings` joins two
+connectors' nets pin by pin, so an element on another board counts. The
+baseline's records name `selftest/assets/power_board.kicad_pcb` (made by
+`make_power_board.py`: placed, netted, not routed), which only these four rules
+read. `references/battery.md` holds every field.
 
 ## The proposer: `pcb.autoroute`
 
@@ -226,7 +228,7 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   - the NTC's thermal coupling to the cell: a board NTC far from the cell senses
     the board. Settle it with a physical claim at the window's edges;
   - a window, a charge voltage or a cutoff set by firmware or a register: the
-    rules name it and skip;
+    rules name it and skip, unless something they can see fails;
   - JEITA's reduced-rate zones: only the outer window is judged;
   - the single-fault overcharge element's threshold: its presence and its copper
     are judged, its number is printed (no general source gives a cell's

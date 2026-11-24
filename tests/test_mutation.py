@@ -2436,9 +2436,13 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     pcb.charge_protection counted missing protections against 0 (its baseline
     sat on its limit: no boundary); pcb.charge_temperature lands on eight
     leaves (the cell's window, the NTC's R25, B and their tolerances, the
-    charger's trip voltages and bias current), pcb.charge_limits on three (the
-    cell's upper charge voltage and current, the PROG constant),
-    pcb.fault_current on six and pcb.discharge_cutoff on the cell's minimum.
+    charger's trip voltages and bias current), pcb.charge_limits on four (the
+    cell's upper charge voltage and current, the charger's regulation voltage,
+    the PROG constant), pcb.fault_current on six and pcb.discharge_cutoff on
+    the cell's minimum. The charger's regulation voltage landed only after
+    P5's review, measured alone on 2026-11-24: the typo bound had been held
+    on the charger's worst corner, so its walk errored at 4.89 V per cell
+    before it could land.
     Their records are objects keyed by id for the reason heat_sources is: as
     lists, every number in them would be one opaque leaf.
     Full suite only (~12 s without pcb-kicad's and the OpenFOAM packs' tools,

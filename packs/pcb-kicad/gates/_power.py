@@ -442,14 +442,20 @@ class NTC:
     equation's corner when the table is one. (A B constant fits two points:
     away from them the B equation drifts, and below its pair it reads a cold
     trip warm, so the table comes first, and the detail says when a trip lies
-    outside the B pair.)"""
+    outside the B pair.)
+
+    ``beta_tol_pct`` is required with a table too: a maker's table spreads away
+    from 25 C as its B does. A person who means an exact table states 0 and
+    says why in ``source``. (What slipped through this rule's first cut: a
+    table with no ``beta_tol_pct`` read as a B tolerance of 0, where the B
+    equation refused the same omission; a B4250 table at R25 8 % passed at
+    +0.14 K, and failed at -0.52 K once its B 3 % was stated.)"""
 
     def __init__(self, rec: dict, label: str):
         keys(rec, label, ("r25_ohm", "r25_tol_pct"),
              ("beta_k", "beta_pair_c", "beta_tol_pct", "rt_table_c_ohm", "ref", "value"))
         self.r25 = num(rec["r25_ohm"], f"{label}.r25_ohm", gt=0.0)
         self.r25_tol = pct(rec["r25_tol_pct"], f"{label}.r25_tol_pct")
-        self.beta_tol = pct(rec.get("beta_tol_pct", 0.0), f"{label}.beta_tol_pct")
         self.table = None
         if rec.get("rt_table_c_ohm") is not None:
             rows = rec["rt_table_c_ohm"]
@@ -469,14 +475,17 @@ class NTC:
             self.model = "the maker's R/T table"
         elif rec.get("beta_k") is not None:
             self.beta = num(rec["beta_k"], f"{label}.beta_k", gt=0.0)
-            if "beta_tol_pct" not in rec:
-                raise RecordError(f"{label} has no beta_tol_pct: the B constant's tolerance")
             self.pair = band(rec.get("beta_pair_c"), f"{label}.beta_pair_c", positive=False)
             self.model = (f"the B equation, B{self.pair[0]:g}/{self.pair[1]:g} "
                           f"{self.beta:g} K")
         else:
             raise RecordError(f"{label} gives neither rt_table_c_ohm nor beta_k: give the "
                               f"maker's R/T table, or its B constant and the pair it is for")
+        if "beta_tol_pct" not in rec:
+            raise RecordError(f"{label} has no beta_tol_pct: the B constant's tolerance, "
+                              f"which spreads the curve away from 25 C, a table's too (state "
+                              f"0 only for an exact table, and say why in source)")
+        self.beta_tol = pct(rec["beta_tol_pct"], f"{label}.beta_tol_pct")
 
     @property
     def span_c(self) -> tuple[float, float]:

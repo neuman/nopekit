@@ -1800,6 +1800,39 @@ class ChargingStopsOutsideTheWindow(_PowerCase):
         self.assertIn("lies outside the NTC's R/T table, 20..60 C: give rows that bracket it",
                       verdict.error)
 
+    def test_a_table_states_its_b_tolerance(self):
+        """A maker's table spreads away from 25 C as its B does, so a table with
+        no beta_tol_pct errors, as the B equation's record does. The same B4250
+        table at R25 8 %: B 3 % charges the cell to 45.52 C (-0.52 K); B 0 %,
+        stated for an exact table, reads 0.14 K. (What slipped through the first
+        cut: an omitted beta_tol_pct read as 0 on a table, and so passed.)"""
+        beta = 4250.0
+        rows = [[t, round(10000 * math.exp(beta * (1 / (t + 273.15) - 1 / 298.15)), 3)]
+                for t in range(-40, 126, 5)]
+
+        def table(beta_tol):
+            def records(p):
+                ntc = self._ntc(p)
+                for k in ("beta_k", "beta_pair_c", "beta_tol_pct"):
+                    ntc.pop(k)
+                ntc.update(rt_table_c_ohm=rows, r25_tol_pct=8)
+                if beta_tol is not None:
+                    ntc["beta_tol_pct"] = beta_tol
+            return records
+        for beta_tol, outcome, headroom in ((3, "fail", -0.52), (0, "pass", 0.14)):
+            with self.subTest(beta_tol_pct=beta_tol):
+                verdict = self.run_gate(self.GID, records=table(beta_tol))
+                self.assertEqual(verdict.outcome, outcome, verdict.render())
+                self.assertEqual(verdict.measured, headroom)
+                self.assertIn("the maker's R/T table", verdict.detail)
+        for name, records in (("table", table(None)),
+                              ("B equation", lambda p: self._ntc(p).pop("beta_tol_pct"))):
+            with self.subTest(omitted_on=name):
+                verdict = self.run_gate(self.GID, records=records)
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn("charge_temp.ntc has no beta_tol_pct: the B constant's "
+                              "tolerance", verdict.error)
+
     def test_the_ntc_s_grade_is_read(self):
         """thermal-analytic's grade case, grafted: the same network built from a
         coarser grade of the same NTC. Its nominal curve, and so every check
@@ -1900,24 +1933,52 @@ class ChargingStopsOutsideTheWindow(_PowerCase):
 
     def test_a_divider_reads_its_pullup_off_the_board(self):
         """The ratio kind: TS on a divider, the NTC low, the trip as fractions of
-        the reference. R3 (3k) stands for the pull-up here, moved onto THERM."""
+        the reference. R3 (3k) stands for the pull-up here, moved onto THERM.
+
+        By hand: R = R_pu f / (1 - f) at the corners of f and R_pu. Cold, 3k
+        +1 % at 0.82 is 13803 ohm, the highest trip; the NTC at R25 -1 % and B
+        -1 % (its lowest curve below 25 C) reaches it at 18.14 C, the lowest
+        temperature any corner still charges at. Hot, 3k -1 % at 0.40 is 1980
+        ohm, the lowest trip; at R25 +1 % and B -1 % (its highest curve above
+        25 C) it is reached at 63.92 C. So 18.14..63.92 C against 0..45 C:
+        -18.92 K, on the hot side. (What slipped through the first cut of this
+        test: it took either outcome and pinned no value, so (1 - f) / f, or
+        the corners swapped, stayed green.)"""
         def pull_up(tree):
             K.child(_pad(tree, "R3", "1"), "net")[1:] = [_net_code(tree, "THERM"),
                                                          K.Q("THERM")]
             K.child(_pad(tree, "R3", "2"), "net")[1:] = [_net_code(tree, "VBUS"),
                                                          K.Q("VBUS")]
 
-        def ratio(p):
-            ct = p["pcb_protectors"]["charger"]["functions"]["charge_temp"]
-            ct["sense"] = {"pin": "8", "kind": "ratio", "pullup_ref": "R3",
-                           "pullup_tol_pct": 1, "cold_frac": [0.80, 0.82],
-                           "hot_frac": [0.40, 0.42]}
-        verdict = self.run_gate(self.GID, pull_up, ratio)
-        self.assertIn(verdict.outcome, ("pass", "fail"), verdict.render())
-        self.assertIsNotNone(verdict.measured)
-        # R = R_pu f / (1 - f) at the corners: 3k at 0.80 to 0.82 is 11.9..13.8 kOhm
-        # cold and 2.0..2.2 kOhm hot; both edges then lie inside -40..150 C.
-        self.assertIn("charging allowed", verdict.detail)
+        def ratio(cold, hot, tol=1):
+            def records(p):
+                ct = p["pcb_protectors"]["charger"]["functions"]["charge_temp"]
+                ct["sense"] = {"pin": "8", "kind": "ratio", "pullup_ref": "R3",
+                               "pullup_tol_pct": tol, "cold_frac": cold, "hot_frac": hot}
+                if tol == 0:
+                    self._ntc(p).update(r25_tol_pct=0, beta_tol_pct=0)
+            return records
+        board = self.board(pull_up)
+        verdict = self.run_gate(self.GID, records=ratio([0.80, 0.82], [0.40, 0.42]),
+                                board=board)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, -18.92)
+        self.assertIn("charging allowed 18.14..63.92 C", verdict.detail)
+        self.assertIn("-18.92 K of headroom on the hot side", verdict.detail)
+
+        # A known boundary: every tolerance 0, so every corner is the nominal
+        # curve, and each fraction is the one the 10k B4250 NTC under 3k gives
+        # at 1 C and at 44 C, R / (R + R_pu). The edges land on those two
+        # temperatures, 1 K inside each side of the cell's window.
+        def frac(t_c):
+            r = 10000 * math.exp(4250 * (1 / (t_c + 273.15) - 1 / 298.15))
+            return r / (r + 3000)
+        f1, f44 = frac(1.0), frac(44.0)
+        verdict = self.run_gate(self.GID, records=ratio([f1, f1], [f44, f44], tol=0),
+                                board=board)
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertEqual(verdict.measured, 1.0)
+        self.assertIn("charging allowed 1.00..44.00 C", verdict.detail)
 
     def test_firmware_alone_skips_and_a_fail_beside_it_still_fails(self):
         """Firmware is named, never counted: a cell whose only stop is firmware
@@ -2065,6 +2126,35 @@ class TheChargerIsHeldToTheCell(_PowerCase):
         self.assertIn("mcu (firmware) is firmware, which this rule cannot see",
                       verdict.detail)
 
+    def test_the_charger_s_own_stop_moves_nothing(self):
+        """The charger's own battery OVP is never independent of the charger, so
+        it could never count, and recording it moves no verdict: beside a
+        firmware-only stop the rule still skips, and alone it fails as no stop
+        does. Either way it is named. (What slipped through the first cut: it
+        was listed with the elements that failed to count, and the firmware
+        skip turned into a FAIL.)"""
+        def stops(firmware):
+            def records(p):
+                p["pcb_protectors"].pop("pack_pcm")
+                p["pcb_protectors"]["protector"]["functions"].pop("overcharge_v")
+                p["pcb_protectors"]["charger"]["functions"]["overcharge_v"] = {
+                    "v_max": 4.4, "per_cell": True}
+                if firmware:
+                    p["pcb_protectors"]["mcu"] = {
+                        "battery": "main", "kind": "gauge", "where": "firmware",
+                        "functions": {"overcharge_v": {"v_max": 4.3, "per_cell": True}},
+                        "source": "an ADC check that stops the charger"}
+            return records
+        verdict = self.run_gate(self.GID, records=stops(True))
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("main: the overcharge stop mcu (firmware)", verdict.skip_reason)
+        self.assertIn("U1 MCP73833-AMI/UN is the charger itself", verdict.skip_reason)
+        verdict = self.run_gate(self.GID, records=stops(False))
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIsNone(verdict.measured)
+        self.assertIn("nothing independent of the charger stops an overcharge", verdict.detail)
+        self.assertIn("U1 MCP73833-AMI/UN is the charger itself", verdict.detail)
+
     def test_a_two_cell_pack_needs_a_per_cell_stop(self):
         """Two cells in series on J10 (top on pin 5, tap on 7, return on 1): a
         pack-level overcharge bounds no single cell, so only a per-cell element
@@ -2110,6 +2200,74 @@ class TheChargerIsHeldToTheCell(_PowerCase):
         verdict = self.run_gate(self.GID, records=typo)
         self.assertEqual(verdict.outcome, "error", verdict.render())
         self.assertIn("42.5 V per cell, outside 1.5-4.6 V", verdict.error)
+
+        def both(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_v"]["set_by"] = "firmware"
+        verdict = self.run_gate(self.GID, records=both)
+        self.assertEqual(verdict.outcome, "error", verdict.render())
+        self.assertIn("charge_v is set_by firmware and gives v_reg_v: give one", verdict.error)
+
+    def test_a_firmware_function_never_hides_one_the_board_sets(self):
+        """Each charge function is judged on its own. The lfp_cell control's
+        LiFePO4 cell with the charger's current set by firmware still fails on
+        the voltage the record and the board give, 4.232 / 3.65; a firmware
+        voltage beside a PROG resistor that drives a 200 mA cell at 0.3704 A
+        fails on the current. The firmware function is named in both. (What
+        slipped through the first cut: a firmware set_by on either function
+        returned before the other was read, and both read Skipped.)"""
+        def lfp_firmware_current(p):
+            p["pcb_batteries"]["main"]["chemistry"] = "lifepo4"
+            p["pcb_batteries"]["main"]["cell"]["upper_charge_v"] = 3.65
+            p["pcb_protectors"]["charger"]["functions"]["charge_a"] = {"set_by": "firmware"}
+
+        def small_cell_firmware_voltage(p):
+            p["pcb_batteries"]["main"]["cell"]["charge_a_max"] = 0.2
+            p["pcb_protectors"]["charger"]["functions"]["charge_v"] = {"per_cell": False,
+                                                                       "set_by": "firmware"}
+        for records, measured, held, named in (
+                (lfp_firmware_current, round(4.232 / 3.65, 4),
+                 "holds 4.232 V of the cell's 3.65 V (1.1595)", "charge current"),
+                (small_cell_firmware_voltage, round(1100 / 2970 / 0.2, 4),
+                 "holds 0.3704 A of the cell's 0.2 A (1.8519)", "charge voltage")):
+            with self.subTest(firmware=named):
+                verdict = self.run_gate(self.GID, records=records)
+                self.assertEqual(verdict.outcome, "fail", verdict.render())
+                self.assertEqual(verdict.measured, measured)
+                self.assertIn(held, verdict.detail)
+                self.assertIn(f"set by firmware, not judged: main: U1 MCP73833-AMI/UN's "
+                              f"{named}", verdict.detail)
+
+    def test_a_real_overcharge_fails_at_its_ratio_never_as_a_typo(self):
+        """The typo bound is the cell record's. A 2S charger on the 1S cell (a
+        cell-count mistake) and a PROG of "10" typed for "10k" on the board are
+        real overcharges: each fails at its ratio, 8.464 / 4.25 and 1100 V /
+        9.9 ohm over 3.35 A. On a charger only a typed value below the bound's
+        floor is refused, the one typo that would read as a pass. (What slipped
+        through the first cut: the whole bound was held on the charger's worst
+        corner per cell, and both overcharges read "a typo?".)"""
+        def two_s(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_v"]["v_reg_v"] = [8.336, 8.464]
+        verdict = self.run_gate(self.GID, records=two_s)
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, round(8.464 / 4.25, 4))
+        self.assertIn("holds 8.464 V of the cell's 4.25 V", verdict.detail)
+        verdict = self.run_gate(self.GID, lambda t: _set_value(t, "R3", "10"))
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertEqual(verdict.measured, round(1100 / 9.9 / 3.35, 4))
+        self.assertIn("current set by R3 10", verdict.detail)
+
+        def low_v(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_v"]["v_reg_v"] = [0.4168,
+                                                                                  0.4232]
+
+        def low_a(p):
+            p["pcb_protectors"]["charger"]["functions"]["charge_a"] = {"a_max": 0.0004}
+        for records, said in ((low_v, "v_reg_v's max is 0.4232 V, below 1.5 V"),
+                              (low_a, "a_max is 0.0004 A, below 0.001 A")):
+            with self.subTest(said=said):
+                verdict = self.run_gate(self.GID, records=records)
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn(said, verdict.error)
 
     def test_a_divider_is_read_at_its_corners(self):
         """An adjustable charger: Vfb (1 + Rtop / Rbot), the resistors off the

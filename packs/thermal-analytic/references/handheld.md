@@ -227,9 +227,11 @@ sealed fixture data, not a product.
   datasheet [min, max]), the NTC's value, R/T table or B constant and their
   tolerances, and every resistor in the network, and finds the window in which
   charging is still allowed at the worst corners. It judges that window
-  against the cell's charge window, as headroom in K, and it fails a fixed
-  resistor where the NTC goes. Tag a cutoff claim `charge-temperature`, and
-  state any headroom in K: the gate's value is a difference of temperatures. It
-  does not judge the NTC's coupling to the cell, nor a window set in firmware.
+  against the cell's charge window, as headroom in K. Where a schematic sits
+  beside the board, it fails a fixed resistor's symbol where the NTC goes;
+  with no schematic, it says the symbol was not read. Tag a cutoff claim
+  `charge-temperature`, and state any headroom in K: the gate's value is a
+  difference of temperatures. It does not judge the NTC's coupling to the cell,
+  nor a window set in firmware.
 - Cell ageing. I2R rises as a cell ages: state the end-of-life resistance.
   Nothing checks that you did.
