@@ -1,11 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 """thermal-analytic — closed-form heat transfer and solar collection, tier 0.
 
-Ten gates, no dependencies beyond the standard library, all of them sub-second.
+Eleven gates, no dependencies beyond the standard library, all of them sub-second.
 Each reads its numbers from ``ctx.params`` — the model's projection — and never
 re-derives a quantity the model already owns (rule 2). The physics lives in
 ``_thermal_physics.py`` so that a disputed number can be reproduced at a REPL
 without a GateContext.
+
+**Two limit conventions, and why.** The first ten gates read their limit from a
+parameter (``temp_limit_c``, ``wall_u_limit_w_m2k``, ...): they were written
+before a limit had a home in ``claims/``, and moving them is a migration of its
+own. ``thermal.skin_temperature`` reads its limit from the claim it covers
+(``ctx.acceptance``), as PACK_FORMAT requires of a new gate: the touch limit a
+design must meet is the claim author's choice, and a second copy of it in the
+projection would let the two disagree. *Rejected:* the IEC 62368-1 TS1 table as a
+constant here (its worn row, its 25 C reference and its table number rest on
+secondary sources and change by edition; ``references/handheld.md`` holds it for
+the claim author).
 
 **Two habits this module keeps, and why.**
 
@@ -30,6 +41,7 @@ binds to those gates' tags on purpose.
 """
 from __future__ import annotations
 
+import math
 import os
 import sys
 
@@ -1001,4 +1013,309 @@ def h_agreement(ctx: GateContext) -> Verdict:
                f"{corr['correlation']} ({mode} {geometry}, L={length:.3f} m, "
                f"Tfilm={film_k:.1f} K): {drift * 100:.1f}% {direction} against a "
                f"{tol * 100:.0f}% tolerance{band}",
+    )
+
+
+# --------------------------------------------------------------------------- #
+# handheld — the average skin temperature of a sealed, fanless shell
+# --------------------------------------------------------------------------- #
+#: The one tag the skin gate covers and reads its limit from, narrow on purpose.
+#: *Rejected:* ``touch-temperature``, ``skin-temperature`` and ``burn-hazard``:
+#: a claim about the PEAK tagged so would read Checked on an average, and the peak
+#: over a charger is what a certifier's thermocouple finds. Narrow for a second
+#: reason too: this gate reads the claim its tag names, so under a broad tag a
+#: project that states the shell keys and writes no such claim would read errored
+#: on every claim the broad tag reaches.
+SKIN_TAG = "average-skin-temperature"
+
+#: The units this gate's arithmetic reports in, and the only units it accepts on
+#: the claim: the pack's spelling for a temperature at the boundary (every ``_c``
+#: key). *Rejected:* "C" or "°C" as synonyms (the spine compares units as
+#: written, so a synonym would read as other units at the cross-check).
+SKIN_UNITS = "degC"
+
+#: The sides of a limit this gate judges. An average skin temperature is a claim
+#: about at most: a FAIL is sound because the peak is never below the average,
+#: and every bias of the model errs hot. A claim about at least (a heated grip)
+#: would take those biases on the generous side, so it is refused.
+SKIN_COMPARATORS = ("<=", "<")
+
+#: What ``shell_cooling`` may say. Only ``sealed`` is judged: the model has no
+#: airflow, so it would fail a sound vented or fan-cooled shell. *Rejected:* a
+#: default of ``sealed`` (the one word that decides whether the model applies is
+#: the one a reader must see stated).
+SHELL_COOLING = ("sealed", "vented", "fan")
+
+#: The keys of one ``heat_sources`` entry and of its ``linear`` record. A key
+#: outside them is refused, as a record reader refuses one: a ``duty`` or a
+#: ``derate`` this gate never reads is a number its author thinks counted.
+#:
+#: ``heat_sources`` is an object keyed by the source's name, never a list of
+#: records. The mutation walk, the spine's mutation pass and the trace push only
+#: the leaves of nested objects: inside a list every number is one opaque
+#: structure, so with a list no source's watts or charger corner would be
+#: falsified or traced. *Rejected:* a list of ``{name, ...}`` records (the shape
+#: the design drew, before that was measured: the walk reached the shell's
+#: numbers and none of the sources').
+_SOURCE_KEYS = ("w", "linear", "states", "source")
+_LINEAR_KEYS = ("vin_max_v", "vout_min_v", "i_max_a")
+
+#: The clause every skin verdict ends with, pass or fail: what the number is and
+#: is not. 6 mm is sqrt(k t / h) for a 2 mm wall at k 0.2 W/mK (PC/ABS) and the
+#: baseline's h_c + h_r of about 10 W/m2K. *Rejected:* a ``shell_wall_m`` /
+#: ``shell_wall_k_w_mk`` pair to compute it per design (two keys whose only
+#: effect is this sentence).
+AVERAGE_NOT_PEAK = ("the average over the uncovered shell, not the peak over a source "
+                    "(a 2 mm polymer wall spreads heat about 6 mm): settle the peak by "
+                    "claim physical or a solver")
+
+
+def _error(gate_id: str, message: str) -> Verdict:
+    """A record or a claim stated wrongly: an error, louder than a skip, because
+    the model said something and said it wrong (invariant 2)."""
+    return Verdict(gate=gate_id, passed=False, error=message)
+
+
+def _finite(value, what: str) -> float:
+    """``value`` as a finite float, or ValueError naming ``what``. A bool, a
+    string and None are refused: ``float("1e3")`` and ``float(True)`` both
+    succeed, and an area typed as "true" is not a measurement."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{what} is {value!r}, not a number")
+    out = float(value)
+    if not math.isfinite(out):
+        raise ValueError(f"{what} is {value!r}, not a finite number")
+    return out
+
+
+def _heat_sources(raw) -> list[dict]:
+    """The ``heat_sources`` records, checked: an object of ``{name: record}``,
+    each record with exactly one of ``w`` (W) or ``linear`` ({vin_max_v,
+    vout_min_v, i_max_a}), a non-empty list of ``states`` and a non-empty
+    ``source``. Raises ValueError naming the source and the field. The shape of
+    pcb-kicad's checked records (a record with a source, refused whole when
+    malformed), copied and not imported: packs are sealed from each other."""
+    if not isinstance(raw, dict) or not raw:
+        # The instruction first: an error is cut at 200 characters, and the
+        # value's repr would push it out.
+        raise ValueError(f"heat_sources must be a non-empty object of {{name: {{w | linear, "
+                         f"states, source}}}} records, not {raw!r}")
+    out: list[dict] = []
+    for name, entry in raw.items():
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError(f"heat_sources has a source with no name ({name!r})")
+        where = f"heat_sources[{name.strip()!r}]"
+        if not isinstance(entry, dict):
+            raise ValueError(f"{where} is a {type(entry).__name__}, not a record")
+        stray = sorted(str(k) for k in set(entry) - set(_SOURCE_KEYS))
+        if stray:
+            raise ValueError(f"{where} has keys this gate does not read: {', '.join(stray)}")
+        if ("w" in entry) == ("linear" in entry):
+            raise ValueError(f"{where} states {'both' if 'w' in entry else 'neither'} of w and "
+                             f"linear: state exactly one")
+        if "w" in entry:
+            watts = _finite(entry["w"], f"{where} w")
+            if watts < 0.0:
+                raise ValueError(f"{where} w is {watts:g}; a heat source sheds heat into the "
+                                 f"shell (>= 0 W)")
+            arithmetic = ""
+        else:
+            lin = entry["linear"]
+            if not isinstance(lin, dict):
+                raise ValueError(f"{where} linear is {lin!r}, not a {{vin_max_v, vout_min_v, "
+                                 f"i_max_a}} record")
+            stray = sorted(str(k) for k in set(lin) - set(_LINEAR_KEYS))
+            absent = [k for k in _LINEAR_KEYS if k not in lin]
+            if stray or absent:
+                raise ValueError(f"{where} linear must state exactly vin_max_v, vout_min_v and "
+                                 f"i_max_a" + (f"; it lacks {', '.join(absent)}" if absent else "")
+                                 + (f"; it adds {', '.join(stray)}" if stray else ""))
+            vin, vout, amps = (_finite(lin[k], f"{where} linear.{k}") for k in _LINEAR_KEYS)
+            try:
+                watts = P.linear_dissipation(vin, vout, amps)
+            except ValueError as exc:
+                raise ValueError(f"{where} linear: {exc}") from None
+            arithmetic = f" = ({vin:g} - {vout:g}) V x {amps:g} A"
+        states = entry.get("states")
+        if (not isinstance(states, list) or not states
+                or not all(isinstance(s, str) and s.strip() for s in states)):
+            raise ValueError(f"{where} states is {states!r}; state a non-empty list of state "
+                             f"labels (free words: 'use', 'charge', 'charge-in-use')")
+        source = entry.get("source")
+        if not isinstance(source, str) or not source.strip():
+            raise ValueError(f"{where} has no source: a dissipation nobody can trace to a "
+                             f"datasheet or a measurement is a guess")
+        labels: list[str] = []
+        for label in states:
+            if label.strip() not in labels:      # a label named twice counts once
+                labels.append(label.strip())
+        out.append({"name": name.strip(), "w": watts, "arithmetic": arithmetic,
+                    "states": labels})
+    return out
+
+
+@gate(
+    id="thermal.skin_temperature",
+    title="Average skin temperature of a sealed, fanless handheld from its worst-case "
+          "dissipation",
+    claims=[SKIN_TAG],
+    tier=Tier.INSTANT,
+    settles="average skin temperature",
+    negative_control=NegativeControl(
+        fixture="selftest/bad_thermal.py:shell_shrunk",
+        note="a pocket remake: the same electronics in the shell at half scale (area "
+             "x0.25, convective length x0.5), and smaller still if half scale would not "
+             "put the hottest state MARGIN past the baseline claim's limit. Power, "
+             "emissivity, grip and ambient are unchanged",
+    ),
+)
+def skin_temperature(ctx: GateContext) -> Verdict:
+    """The steady average temperature of a sealed, fanless shell's uncovered
+    surface in its hottest power state, against the limit of the claim tagged
+    ``average-skin-temperature``.
+
+    For each state label a heat source names, P_s is the sum of the sources in
+    that state: a ``w`` entry as stated, a ``linear`` entry at its worst corner,
+    (vin_max_v - vout_min_v) x i_max_a. Then P_s = A (h_c + h_r)(T_s - T_a) is
+    solved for T_s (``_thermal_physics.shell_skin_temperature``): Churchill-Chu at
+    the longest outside dimension, grey-body radiation to the room. A is the
+    shell's area less ``shell_covered_fraction`` (a hand, a strap, a desk), which
+    is credited nothing. The hottest state gives the value.
+
+    What slips through without it: the pack's only route to a shell's
+    temperature was a ``thermal.steady_state_temp`` node with a hand-carried
+    1/(hA), the ambient taken on trust and the charger's loss typed at nominal
+    input and nominal cell voltage (5 V in, 3.7 V out). That is about half the
+    loss at the worst corner (5.5 V in, a 3.0 V fast-charge entry), in the state
+    where the shell runs hottest, charging while in use. And a claim tagged
+    ``component-temperature`` there is also covered by ``thermal.time_constant``,
+    which skips without a lumped body, so such a claim reads Skipped.
+
+    The limits, for the reader. It judges the AVERAGE, never the peak: a FAIL is
+    sound, a PASS says only that the shell can shed its power. Its biases all err
+    hot (the covered area sheds nothing; one vertical plate gives 81-92% of a
+    level device's top-and-bottom convection), so a sound design fails wrongly
+    only within a few kelvin of its limit. It is steady state at the worst
+    sustained power: no transient, no fault, no airflow (a vented or fan-cooled
+    shell skips), no sun unless a source states it.
+    """
+    gid = "thermal.skin_temperature"
+    vals, missing = _need(ctx, "shell_area_m2", "shell_length_m", "shell_emissivity",
+                          "shell_covered_fraction", "shell_cooling", "shell_ambient_c",
+                          "heat_sources")
+    if missing:
+        # Before the acceptance (cad.clearance's order): a project with no
+        # handheld reads skipped here, never errored for a claim it never wrote.
+        return _skip(gid, missing,
+                     "a sealed shell's outside area, longest outside dimension, emissivity, "
+                     "covered fraction, cooling ('sealed'), the room air it is judged in, and "
+                     "heat_sources {name: {w | linear {vin_max_v, vout_min_v, i_max_a}, "
+                     "states, source}}")
+    cooling = vals["shell_cooling"]
+    word = cooling.strip().lower() if isinstance(cooling, str) else None
+    if word not in SHELL_COOLING:
+        return _error(gid, f"shell_cooling is {cooling!r}; state one of "
+                           f"{', '.join(map(repr, SHELL_COOLING))}")
+    if word != "sealed":
+        return Verdict(gate=gid, passed=False, skipped=True,
+                       skip_reason=f"shell_cooling is {word!r}: outside the sealed-shell model, "
+                                   f"which has no airflow and would fail a sound {word} shell; "
+                                   f"a forced-convection model or a solver settles it")
+    try:
+        area = _finite(vals["shell_area_m2"], "shell_area_m2")
+        length = _finite(vals["shell_length_m"], "shell_length_m")
+        eps = _finite(vals["shell_emissivity"], "shell_emissivity")
+        covered = _finite(vals["shell_covered_fraction"], "shell_covered_fraction")
+        ambient_c = _finite(vals["shell_ambient_c"], "shell_ambient_c")
+        if not area > 0.0:
+            raise ValueError(f"shell_area_m2 is {area:g}; it must be > 0")
+        if not length > 0.0:
+            raise ValueError(f"shell_length_m is {length:g}; it must be > 0")
+        if not 0.0 < eps <= 1.0:
+            raise ValueError(f"shell_emissivity is {eps:g}; it must be in (0, 1], and it has "
+                             f"no default (a moulded or painted shell about 0.9, bare metal "
+                             f"0.05-0.1)")
+        if not 0.0 <= covered < 1.0:
+            raise ValueError(f"shell_covered_fraction is {covered:g}; it must be in [0, 1): "
+                             f"a shell covered whole sheds nothing in this model")
+        sources = _heat_sources(vals["heat_sources"])
+    except ValueError as exc:
+        return _error(gid, str(exc))
+    ambient_k = P.c_to_k(ambient_c)
+    table = P.fluid_properties("air", ambient_k)
+    if not table["table_lo_k"] <= ambient_k < table["table_hi_k"]:
+        return _error(gid, f"shell_ambient_c is {ambient_c:g} C, outside the air table "
+                           f"({P.k_to_c(table['table_lo_k']):.2f} to "
+                           f"{P.k_to_c(table['table_hi_k']):.2f} C): no film temperature can be "
+                           f"computed")
+
+    acc = ctx.acceptance(SKIN_TAG)
+    comparator = acc.comparator.value
+    if str(acc.units or "").strip() != SKIN_UNITS or comparator not in SKIN_COMPARATORS:
+        return _error(gid, f"the claim tagged {SKIN_TAG} states {comparator} {acc.limit:g} "
+                           f"{acc.units!r}; this gate judges an average skin temperature at "
+                           f"most ({' or '.join(SKIN_COMPARATORS)}) in {SKIN_UNITS}: state "
+                           f"the limit so")
+
+    open_area = area * (1.0 - covered)
+    order: list[str] = []
+    for source in sources:
+        order += [label for label in source["states"] if label not in order]
+    rows = []
+    for state in order:
+        members = [s for s in sources if state in s["states"]]
+        power = sum(s["w"] for s in members)
+        solved = P.shell_skin_temperature(power, ambient_k, open_area, length, eps)
+        rows.append({"state": state, "power_w": power, "members": members,
+                     "t_s_c": P.k_to_c(solved["t_s_k"]), **solved})
+    worst = max(rows, key=lambda r: r["t_s_k"])            # the first, on a tie
+
+    lines = [f"sealed shell: {area:.5f} m2, {covered:.0%} covered -> {open_area:.5f} m2 "
+             f"sheds; L {length:.3f} m; eps {eps:g}; ambient {ambient_c:g} C",
+             f"{'state':24} {'P W':>8} {'T_s C':>8} {'Ra':>10} {'h_c':>6} {'h_r':>6}  "
+             f"film"]
+    for r in rows:
+        lines.append(f"{r['state'][:24]:24} {r['power_w']:8.4f} {r['t_s_c']:8.2f} "
+                     f"{r['ra']:10.3g} {r['h_c']:6.2f} {r['h_r']:6.2f}  "
+                     f"{'ok' if r['film_ok'] else 'ABOVE THE AIR TABLE (a lower bound)'}")
+    lines.append("sources:")
+    for s in sources:
+        lines.append(f"  {s['name']}: {s['w']:.4f} W{s['arithmetic']} in "
+                     f"{', '.join(s['states'])}")
+    evidence = _write(ctx, "skin_states.txt", "\n".join(lines) + "\n")
+
+    if not worst["film_ok"]:
+        bound = P.k_to_c(worst["t_hi_k"])
+        said = (f"state {worst['state']!r} needs a film above the air table: the shell "
+                f"cannot shed {worst['power_w']:.3f} W over {open_area:.5f} m2 below an "
+                f"average of {bound:.0f} C")
+        if acc.holds(bound):
+            return _error(gid, f"the air table cannot decide it: state {worst['state']!r} "
+                               f"needs an average above {bound:.0f} C to shed "
+                               f"{worst['power_w']:.3f} W, and the claim's {comparator} "
+                               f"{acc.limit:g} {SKIN_UNITS} lies above that")
+        # No value and no limit: the bound is not a measurement, and a verdict
+        # that reported it as one would read as a temperature the gate found.
+        return Verdict(gate=gid, passed=False, evidence=evidence,
+                       detail=f"{said}, past the claim's {comparator} {acc.limit:g} "
+                              f"{SKIN_UNITS} at any value it could take; {AVERAGE_NOT_PEAK}")
+
+    measured = round(worst["t_s_c"], 2)                     # judged as reported
+    passed = acc.holds(measured)
+    shed = worst["q_conv_w"] + worst["q_rad_w"]
+    share = worst["q_rad_w"] / shed if shed > 0.0 else 0.0
+    big = max(worst["members"], key=lambda s: s["w"])
+    # Every linear stage in the hottest state is named with its corner, not only
+    # the largest source: the corner is the number a reader checks first.
+    named = [big] + [s for s in worst["members"] if s["arithmetic"] and s is not big]
+    return Verdict(
+        gate=gid, passed=passed, measured=measured, limit=acc.limit, comparator=comparator,
+        units=SKIN_UNITS, evidence=evidence,
+        detail=f"average skin {measured:.2f} C {'within' if passed else 'past'} {comparator} "
+               f"{acc.limit:g} C in state {worst['state']!r}: {worst['power_w']:.3f} W, "
+               + ", ".join(f"{'largest ' if s is big else ''}{s['name']!r} {s['w']:.3f} W"
+                           f"{s['arithmetic']}" for s in named) + "; "
+               f"{open_area:.5f} of {area:.5f} m2 uncovered, L {length:.3f} m, eps {eps:g}: "
+               f"h_c {worst['h_c']:.2f} + h_r {worst['h_r']:.2f} W/m2K, radiation "
+               f"{share:.0%} of the loss, ambient {ambient_c:g} C; {AVERAGE_NOT_PEAK}",
     )

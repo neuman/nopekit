@@ -424,6 +424,108 @@ def radiation_exchange(t1_k: float, t2_k: float, area1_m2: float, eps1: float,
 
 
 # --------------------------------------------------------------------------- #
+# a sealed shell in still air
+# --------------------------------------------------------------------------- #
+def linear_dissipation(vin_max_v: float, vout_min_v: float, i_max_a: float) -> float:
+    """The loss of a linear stage (a linear charger, an LDO) at its worst corner, W:
+
+        P = (vin_max_v - vout_min_v) * i_max_a
+
+    The worst corner, by name, because the nominal one is about half of it. TI's
+    SLUAAG9 (BQ2517x tips) says the IC's dissipation "is greatest during fast
+    charge with a low battery voltage and a high input voltage", and USB 2.0 and
+    3.1 let VBUS reach 5.5 V at the connector (TI TPS25821 datasheet, power supply
+    recommendations). What slipped through without the corner: a charger's loss
+    estimated at 5 V in and 3.7 V out, mid-charge, is 1.3 V of headroom against
+    2.5 V at 5.5 V in and a 3.0 V fast-charge entry. *Rejected:* a nominal entry
+    with a derating factor (a factor is a number nobody can trace to a datasheet).
+    """
+    if not vin_max_v > vout_min_v:
+        raise ValueError(f"vin_max_v {vin_max_v!r} must be above vout_min_v {vout_min_v!r}: "
+                         f"a linear stage drops voltage, it does not raise it")
+    if not i_max_a > 0.0:
+        raise ValueError(f"i_max_a must be > 0, got {i_max_a!r}")
+    return (vin_max_v - vout_min_v) * i_max_a
+
+
+def _shell_loss(t_s_k: float, ambient_k: float, area_m2: float, length_m: float,
+                emissivity: float) -> dict[str, Any]:
+    """Heat a shell at ``t_s_k`` sheds to still air and surroundings at
+    ``ambient_k``: natural convection plus grey-body radiation, W and W/m^2K."""
+    dt = t_s_k - ambient_k
+    props = fluid_properties("air", (t_s_k + ambient_k) / 2.0)
+    ra = rayleigh(dt, length_m, props)
+    corr = natural_nusselt("vertical_plate", ra, props["pr"], dt)
+    h_c = corr["nu"] * props["k"] / length_m
+    h_r = radiation_exchange(t_s_k, ambient_k, area_m2, emissivity, 1.0)["h_rad"]
+    return {"h_c": h_c, "h_r": h_r, "ra": ra, "q_conv_w": h_c * area_m2 * dt,
+            "q_rad_w": h_r * area_m2 * dt}
+
+
+def shell_skin_temperature(power_w: float, ambient_k: float, area_m2: float,
+                           length_m: float, emissivity: float) -> dict[str, Any]:
+    """The steady AVERAGE surface temperature of a sealed shell that sheds
+    ``power_w`` to still air and to surroundings at ``ambient_k``:
+
+        P = A * (h_c + h_r) * (T_s - T_a)
+
+    solved for ``T_s`` by bisection (both h rise with ``T_s``, so the loss is
+    monotone and the root is unique).
+
+    * ``h_c`` is Churchill-Chu for a vertical plate at ``length_m`` (the shell's
+      longest outside dimension), air properties at the film temperature. On this
+      module's own correlations one vertical plate at that length gives 81-92% of
+      the convection the top and bottom faces of a level flat device get (McAdams
+      hot-face-up plus hot-face-down at L = A/P, for 160 x 80, 140 x 60 and
+      40 x 40 mm faces at dT 5-25 K), so it errs hot. And it has no Rayleigh band,
+      so it refuses no small face. *Rejected:* faces per posture with McAdams'
+      horizontal plates (five more records, and McAdams' bands refuse the small
+      faces of a watch).
+    * ``h_r`` is grey-body exchange with a large surround at the air temperature
+      (F = 1, eps2 = 1): the room's walls, not the sky.
+
+    It is the average over ``area_m2`` and never the peak over a source: a 2 mm
+    polymer wall spreads heat about 6 mm (sqrt(k t / h) at k 0.2 W/mK, h 10
+    W/m^2K), so the peak over a charger sits well above this number.
+
+    ``film_ok`` is False when the balance needs a film above the air table: the
+    shell cannot shed ``power_w`` below an average of ``t_hi_k``, which is then
+    returned as ``t_s_k`` (a lower bound, not a value). Raises ValueError when the
+    ambient is outside the air table (no film can be computed) or a geometric input
+    is out of range.
+    """
+    if not power_w >= 0.0:
+        raise ValueError(f"power must be >= 0, got {power_w!r}")
+    if not area_m2 > 0.0 or not length_m > 0.0:
+        raise ValueError(f"area {area_m2!r} and length {length_m!r} must both be > 0")
+    if not 0.0 < emissivity <= 1.0:
+        raise ValueError(f"emissivity must be in (0, 1], got {emissivity!r}")
+    props = fluid_properties("air", ambient_k)
+    lo_k, hi_k = props["table_lo_k"], props["table_hi_k"]
+    if not lo_k <= ambient_k < hi_k:
+        raise ValueError(f"ambient {ambient_k:.2f} K is outside the air table "
+                         f"({lo_k:.0f}-{hi_k:.0f} K): no film temperature can be computed")
+    t_lo, t_hi = float(ambient_k), 2.0 * hi_k - float(ambient_k)
+    top = _shell_loss(t_hi, ambient_k, area_m2, length_m, emissivity)
+    if top["q_conv_w"] + top["q_rad_w"] < power_w:
+        return {"t_s_k": t_hi, "t_hi_k": t_hi, "film_ok": False, **top}
+    # 200 halvings is far past a float's precision over a 700 K bracket; the loop
+    # stops as soon as the bracket stops shrinking.
+    for _ in range(200):
+        mid = (t_lo + t_hi) / 2.0
+        if mid in (t_lo, t_hi):
+            break
+        got = _shell_loss(mid, ambient_k, area_m2, length_m, emissivity)
+        if got["q_conv_w"] + got["q_rad_w"] < power_w:
+            t_lo = mid
+        else:
+            t_hi = mid
+    t_s = (t_lo + t_hi) / 2.0
+    return {"t_s_k": t_s, "t_hi_k": 2.0 * hi_k - float(ambient_k), "film_ok": True,
+            **_shell_loss(t_s, ambient_k, area_m2, length_m, emissivity)}
+
+
+# --------------------------------------------------------------------------- #
 # fins
 # --------------------------------------------------------------------------- #
 def straight_fin(k: float, thickness_m: float, length_m: float, width_m: float,

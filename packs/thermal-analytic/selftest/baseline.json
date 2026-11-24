@@ -1,5 +1,12 @@
 {
-  "_description": "A 2.4 m2 glazed flat-plate solar thermal preheat installation at 40 N: one aluminium-absorber collector on a 40 deg south-facing roof, and the insulated outdoor plant cabinet under it that carries the pump station. Design point is a clear midsummer noon (day 172, solar noon) with 35 C outdoor air. The collector runs 1157 W useful at 51.7% efficiency from 932 W/m2 plane-of-array and stagnates at 192 C against a 210 C seal-and-glycol ceiling; the selective absorber (eps 0.10) sheds 106 W to a 15 C sky. The cabinet is a 0.42 W/m2K panel enclosure whose internal air sits at 45 C worst case; inside it a brazed-aluminium plate-fin heat exchanger moves the glycol loop into the store (glycol-side h 1100 W/m2K, fin effectiveness 20.5 against a ceiling of 26), and the pump-controller board dissipates 25 W through a junction-case-pad-heatsink path totalling 1.68 K/W to reach 87 C against a 110 C junction limit. The heatsink is a 120 x 80 mm 6061-T6 extrusion in 2.5 m/s of fan air (h 17.7 W/m2K, Bi 1.9e-4, tau 246 s). Every gate here is describing the same installation: the cabinet air the electronics sees (ambient_c, 45 C) and the outdoor air the collector sees (collector_ambient_c, 35 C) are the same day, ten kelvin apart. Units: SI throughout - m, m2, m3, W, K/W, m2K/W, degC at the boundary.",
+  "_description": "A 2.4 m2 glazed flat-plate solar thermal preheat installation at 40 N: one aluminium-absorber collector on a 40 deg south-facing roof, and the insulated outdoor plant cabinet under it that carries the pump station. Design point is a clear midsummer noon (day 172, solar noon) with 35 C outdoor air. The collector runs 1157 W useful at 51.7% efficiency from 932 W/m2 plane-of-array and stagnates at 192 C against a 210 C seal-and-glycol ceiling; the selective absorber (eps 0.10) sheds 106 W to a 15 C sky. The cabinet is a 0.42 W/m2K panel enclosure whose internal air sits at 45 C worst case; inside it a brazed-aluminium plate-fin heat exchanger moves the glycol loop into the store (glycol-side h 1100 W/m2K, fin effectiveness 20.5 against a ceiling of 26), and the pump-controller board dissipates 25 W through a junction-case-pad-heatsink path totalling 1.68 K/W to reach 87 C against a 110 C junction limit. The heatsink is a 120 x 80 mm 6061-T6 extrusion in 2.5 m/s of fan air (h 17.7 W/m2K, Bi 1.9e-4, tau 246 s). Every gate here is describing the same installation: the cabinet air the electronics sees (ambient_c, 45 C) and the outdoor air the collector sees (collector_ambient_c, 35 C) are the same day, ten kelvin apart. The installation's handheld commissioning terminal is part of the same story: a sealed 160 x 80 x 28 mm moulded PC/ABS shell held in one hand in 25 C room air, whose hottest state is charging over USB while in use (3.349 W, 1.125 W of it the linear charger at its worst corner), at an average skin of 38.26 C against the 48 C its claim TH1 states. Units: SI throughout - m, m2, m3, W, K/W, m2K/W, degC at the boundary.",
+
+  "_claims": [
+    {"id": "TH1", "statement": "The commissioning terminal's average skin temperature is at most 48 C in its hottest sustained state, held in one hand in 25 C room air", "kind": "measurable",
+     "acceptance": {"quantity": "average skin temperature", "comparator": "<=", "limit": 48.0, "units": "degC"},
+     "tags": ["average-skin-temperature"],
+     "rationale": "IEC 62368-1 TS1 for a surface held from 1 min to 8 h is 48 C for metal and for plastic (UL's 2010 IEC 62368-1 technical brief on touch temperature limits); a claim on the average, so the peak over the charger stays a physical claim"}
+  ],
 
   "wall_layers": [
     {"name": "outer steel skin", "thickness_m": 0.0015, "k_w_mk": 50.0},
@@ -75,9 +82,29 @@
   "clearness_number": 1.0,
   "design_irradiance_min_w_m2": 800.0,
 
+  "shell_area_m2": 0.03904,
+  "shell_length_m": 0.160,
+  "shell_emissivity": 0.90,
+  "shell_covered_fraction": 0.35,
+  "shell_cooling": "sealed",
+  "shell_ambient_c": 25.0,
+  "heat_sources": {
+    "system at full load": {"w": 2.20, "states": ["use", "charge-in-use"],
+      "source": "fixture: the terminal's stated power budget at full load (display at full brightness, radio, processor)"},
+    "cell I2R discharging": {"w": 0.0768, "states": ["use"],
+      "source": "fixture: 0.80 A sustained discharge squared x 0.12 ohm, the cell's end-of-life internal resistance"},
+    "linear charger": {"linear": {"vin_max_v": 5.50, "vout_min_v": 3.00, "i_max_a": 0.45},
+      "states": ["charge", "charge-in-use"],
+      "source": "fixture: VBUS up to 5.5 V at the connector (USB 2.0 and 3.1, TI TPS25821 datasheet); 3.0 V, where this charger enters fast charge; 0.45 A, its programmed fast-charge current at the top of its regulation tolerance; worst corner per TI SLUAAG9"},
+    "cell I2R charging": {"w": 0.0243, "states": ["charge", "charge-in-use"],
+      "source": "fixture: 0.45 A charge current squared x 0.12 ohm, the cell's end-of-life internal resistance"},
+    "system idle while charging": {"w": 0.30, "states": ["charge"],
+      "source": "fixture: the terminal's stated idle budget with the display off"}
+  },
+
   "_notes": {
     "_units": "SI. Lengths m, areas m2, volumes m3, power W, irradiance W/m2, h and U W/m2K, k W/mK, density kg/m3, cp J/kgK, time s, angles degrees. Every key ending _c is degrees CELSIUS and every key ending _k or _k_w is kelvin or K/W; the pack converts to absolute kelvin internally and radiation is the fourth power of the absolute one.",
-    "_two_ambients": "ambient_c (45 C) is the air INSIDE the plant cabinet, which is what the electronics actually sees. collector_ambient_c (35 C) is outdoor air. They are separate keys on purpose: one shared 'ambient' across an enclosure and its outside is a units-grade error that reads as a perfectly plausible number.",
+    "_three_ambients": "ambient_c (45 C) is the air INSIDE the plant cabinet, which is what the electronics actually sees. collector_ambient_c (35 C) is outdoor air. shell_ambient_c (25 C) is the room air the handheld terminal is held in. They are separate keys on purpose: one shared 'ambient' across an enclosure, its outside and a room is a units-grade error that reads as a perfectly plausible number.",
     "_two_resistances": "m2K/W is PER UNIT AREA and belongs to wall stacks (surface_film_r_m2k_w, the U-value). K/W is ABSOLUTE and belongs to a component path (resistance_path_k_w). They differ by an area and the unit suffix is the only warning.",
 
     "wall_layers": "The cabinet wall as a resistance stack, outside to inside. A series layer is {name, thickness_m, k_w_mk} -> R = t/k. A co-planar layer is {name, thickness_m, parallel:[{name, k_w_mk, area_fraction}]} and adds in CONDUCTANCE: the GRP edge ribs are 5% of the area and carry 40.7% of the heat through that plane (PIR 0.95*0.023/0.080 = 0.2731 W/m2K against GRP 0.05*0.30/0.080 = 0.1875, so the ribs are 0.1875/0.4606 of the conductance at a twentieth of the area). Modelling the core as insulation alone gives R = 0.17 + 0.00003 + 0.080/0.023 + 0.04615 = 3.694 m2K/W and would report U=0.27 instead of 0.42 - a 35% understatement of the loss, from the one detail a section drawing shows and a one-dimensional stack does not.",
@@ -130,7 +157,7 @@
     "collector_ul_w_m2k": "Overall collector loss coefficient U_L, W/m2K, referred to aperture area. 4.5 for a glazed, back-insulated plate. It is the slope of the efficiency curve and the denominator of the stagnation temperature - which is why improving it cuts both ways.",
     "irradiance_w_m2": "Plane-of-array irradiance at the design hour, W/m2. 932 is exactly what solar.irradiance computes for this site, day, hour and orientation, so the two solar gates are describing one roof. poa_irradiance_w_m2 is accepted as a synonym.",
     "collector_inlet_c": "Fluid temperature ENTERING the collector, degC. 55 C store return late in a summer day - the loss term is U_L*(T_in - T_amb), so inlet temperature, not outlet, is what costs output.",
-    "collector_ambient_c": "OUTDOOR air temperature, degC. Deliberately not the same key as ambient_c (45 C cabinet air) - see _two_ambients.",
+    "collector_ambient_c": "OUTDOOR air temperature, degC. Deliberately not the same key as ambient_c (45 C cabinet air) - see _three_ambients.",
     "collector_output_min_w": "Useful heat the design needs, W. The gate FAILS below it. 1000 W is the preheat duty; the collector delivers 1157 W at eta = 0.517.",
     "stagnation_limit_c": "What the seals, heat-transfer fluid and absorber coating survive with no flow at all, degC. REQUIRED by solar.stagnation, which refuses to invent it. 210 C is EPDM gaskets with inhibited propylene glycol - the glycol is usually the binding limit, degrading irreversibly around 120-140 C, and 210 assumes an accepted fluid-replacement interval after a stagnation event. T_stag = T_amb + tau_alpha*G/U_L = 192 C here, and it depends on neither area nor flow: the better the collector, the hotter it stagnates. U_L is held constant with absorber temperature, which makes 192 C a CONSERVATIVE bound by an unquantified margin, since a real U_L climbs as the plate gets hot.",
 
@@ -143,7 +170,15 @@
     "clearness_number": "ASHRAE clearness number CN, dimensionless, scaling the beam. 1.0 is the model's sea-level reference atmosphere; ~0.95 for humid coastal air, ~1.05 at altitude.",
     "design_irradiance_min_w_m2": "Plane-of-array irradiance the design assumes is available at the design hour, W/m2. The gate FAILS below it - it is checking the GEOMETRY, not the weather.",
 
+    "shell_area_m2": "Whole outside area of the terminal's closed shell, m2, from CAD: 2(lw + lh + wh) = 2(0.160 x 0.080 + 0.160 x 0.028 + 0.080 x 0.028) = 0.03904 for its 160 x 80 x 28 mm box.",
+    "shell_length_m": "The shell's longest outside dimension, m: the convective length. thermal.skin_temperature applies Churchill-Chu for a vertical plate at this length to the whole uncovered area; on this pack's own correlations that is 81-92% of the convection the top and bottom faces of a level flat device get, so it errs hot.",
+    "shell_emissivity": "Outside infrared emissivity of the shell, 0-1, with no default. 0.90 for moulded PC/ABS; painted about 0.9, anodised about 0.8, bare metal 0.05-0.1. At handheld size radiation is more than half the loss (58% in the hottest state here), so the same shell in bare metal at 0.10 runs at 48.78 C, 10.5 K hotter.",
+    "shell_covered_fraction": "Share of the outside area under a hand, a strap or a desk, 0 to below 1. It is credited NOTHING, which errs hot: 0.35 is a one-hand grip around the back and the sides, leaving 0.02538 m2 to shed the heat.",
+    "shell_cooling": "'sealed', 'vented' or 'fan'. Only 'sealed' is judged; the other two skip, because a still-air model would fail a sound vented or fan-cooled shell.",
+    "shell_ambient_c": "The room air the claim is made in, degC, and the temperature of the walls the shell radiates to. 25 C, the reference ambient that secondary sources give for IEC 62368-1 touch limits: state 25 for a TS1 claim (references/handheld.md). Not ambient_c and not collector_ambient_c - see _three_ambients.",
+    "heat_sources": "Every source of heat inside the shell, each at its worst SUSTAINED case, keyed by its name: {name: {w (W) or linear {vin_max_v, vout_min_v, i_max_a}, states, source}}. An object and not a list, so a mutation walk and the trace can push each source's numbers. States are free labels; the gate sums the sources in each state and judges the hottest. A linear stage (a linear charger, an LDO) is stated at its worst corner: vin_max_v the highest input (USB VBUS reaches 5.5 V), vout_min_v the lowest output (a charger's fast-charge entry voltage), i_max_a the programmed current at the top of its tolerance. A switching stage is a w entry at its datasheet loss; sun on the shell is a w entry (absorptance x irradiance x projected area). Here: use 2.2768 W -> 34.46 C, charge 1.4493 W -> 31.34 C, charge-in-use 3.3493 W -> 38.26 C. The linear charger is 1.125 W at its worst corner, against 0.585 W at 5.0 V in and 3.7 V out: the nominal estimate is about half.",
+
     "_model_is_clear_sky": "solar.irradiance is an ASHRAE clear-day model, roughly +-10% on beam against measured clear-day data at mid-latitudes near sea level. It has no opinion at all about cloud and therefore cannot produce kWh/year. It answers 'is the orientation right?' and nothing else.",
-    "_not_covered": "No humidity, condensation, freezing or any phase change. No transient temperature DISTRIBUTION - one time constant on one lumped body is the whole transient capability. No flow field: recirculation, stalled ducts, fan curves and re-ingested hot air are all outside a Nusselt correlation. Contact resistance is supplied, never predicted. No thermal stress or expansion. No two-stream heat exchangers or pressure drop - fin_h_w_m2k here is an input, not something this pack can compute."
+    "_not_covered": "No humidity, condensation, freezing or any phase change. No transient temperature DISTRIBUTION - one time constant on one lumped body is the whole transient capability. No flow field: recirculation, stalled ducts, fan curves and re-ingested hot air are all outside a Nusselt correlation. Contact resistance is supplied, never predicted. No thermal stress or expansion. No two-stream heat exchangers or pressure drop - fin_h_w_m2k here is an input, not something this pack can compute. No PEAK skin temperature over a source: thermal.skin_temperature gives the handheld's average, and the peak is a physical claim or a solver's."
   }
 }
