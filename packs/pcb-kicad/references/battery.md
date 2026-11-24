@@ -15,10 +15,10 @@ leaf). Each record names the board it is for (`board`, from the project root;
 
 | Key | Each record holds | Read by |
 |---|---|---|
-| `pcb_batteries` | `terminals` {ref, value, pos, neg, therm, taps}, `chemistry`, `series`, `parallel`, `cell` {upper_charge_v, discharge_v_min, charge_a_max, charge_temp_c, short_a or internal_resistance_ohm}, `ntc` (a pack NTC) | all four |
-| `pcb_protectors` | `battery`, `kind`, `where` (board, in-pack, firmware), ref and value on a board, `functions` {charge_v, charge_a, charge_temp, overcharge_v, overdischarge_v, trip, safety_timer} | all four |
+| `pcb_batteries` | `terminals` {ref, value, pos, neg, therm, taps}, `chemistry`, `series`, `parallel`, `cell` {upper_charge_v, discharge_v_min, charge_a_max, charge_temp_c, short_a or internal_resistance_ohm}, `ntc` (a pack NTC) | all four, and `pcb.mismate` (its terminals) |
+| `pcb_protectors` | `battery`, `kind`, `where` (board, in-pack, firmware), ref and value on a board, `functions` {charge_v, charge_a, charge_temp, overcharge_v, overdischarge_v, trip, reverse_block, safety_timer} | all four; `pcb.mismate` reads trip and reverse_block |
 | `pcb_conductors` | `battery`, `kind` (wire, ffc, contact, track), ref, value and pins, or a track's net; `area_mm2`, `start_c`, `limit_c`, `continuous_a` or a track's `continuous_rise_c`; `protected_by` | `pcb.fault_current` |
-| `pcb_matings` | `a` and `b`, each {board, ref, value}; `map` (straight, reversed, or {a_pin: b_pin}) | all four |
+| `pcb_matings` | `a` {board, ref, value}; `b` another connector, `{battery: id}` or `{external: text}`; `map` (straight, reversed, or {a_pin: b_pin}) for two connectors; `modes` (references/mismate.md) | all four, `pcb.mismate` and `pcb.usbc_receptacle` |
 
 `selftest/baseline.json`'s `_notes` list every field.
 
@@ -64,7 +64,11 @@ board, and no rule counts it.
 two nets become one. So a protector on a daughterboard that senses the cell
 through a flex counts, and a fuse on the far side of a board-to-board link
 guards the conductor beyond it. A mating's connector is a conductor, never a
-part that taps a net.
+part that taps a net. Only a mating between two connectors joins nets: a
+battery's pigtail meets the connector its record already names, and an external
+side has no pads here, so its connector is a part like any other (what lies
+beyond it may tap the net). Every rule reads a mating whole, `modes` included,
+so a record one rule refuses, every rule refuses.
 
 **Firmware is named, never counted.** An element `where: firmware` (a gauge's
 register window, an MCU's ADC check) is not on the copper. A rule whose only
@@ -283,7 +287,9 @@ pcbnew 9.0.9 from KiCad's stock footprints, placed and netted, not routed: J1 a
 USB-C receptacle with 5.1k on each CC pin; U1 the charger, R3 on PROG, TH1 on
 THERM, C2 and C3 its bypass capacitors; BT1 the cell's keyed two-pin housing; F1
 the PTC; U2 the protector, R5 and C1 its RC, R4 on VM, Q1 its FETs; J6 the wire
-out; J10 and J11 two 8-position FFC housings, joined by the `flex` mating. The
+out; J10 and J11 two 8-position FFC housings, joined by the `flex` mating (GND
+on 1, VBUS on 5, and 3 and 6 open, so a 6-way cable two positions off never puts
+VBUS on GND: `references/mismate.md`). The
 cell's numbers come from LG Chem's MJ1 specification (LRB-PS-CY3500_MJ1, rev 1,
 2016-06-30), U1's from Microchip's DS22005B (2009); the protector, the PCM, the
 PTC, the NTC, the wire's rating and the short-circuit current are fixture

@@ -51,6 +51,12 @@ BUNDLED_BASES: dict[str, str] = {
                               "pcb.charge_temperature", "pcb.charge_limits",
                               "pcb.fault_current", "pcb.discharge_cutoff")},
     **{g: "model-only" for g in ("pcb.board_readable", "pcb.land_pattern")},
+    # general-packs P6: usbc_receptacle holds CC termination to the Type-C
+    # specification's Rd and Rp tables (Release 2.0, Tables 4-24 and 4-25);
+    # mismate is this pack's own rule on the wrong fits a person states, with
+    # no outside source for which ones count.
+    "pcb.usbc_receptacle": "sourced",
+    "pcb.mismate": "model-only",
     # general-packs F1: firmware-ci replaces firmware-zmk. The guard follows
     # GitHub's documented shell and continue-on-error behaviour; the replay's
     # verdict is the toolchain's own exit code in the job's container; the image

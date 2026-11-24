@@ -1,7 +1,7 @@
 {
   "name": "pcb-kicad",
   "version": "0.3.0",
-  "description": "Checks a KiCad board and its schematic: DRC with custom rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, battery charge and fault protection.",
+  "description": "KiCad board and schematic checks: DRC with custom rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, battery protection, mis-mating, USB-C.",
   "settles": [
     "design rule violations",
     "pcb design rule check",
@@ -61,7 +61,12 @@
     "fuse interrupt rating",
     "short-circuit protection of a conductor",
     "deep-discharge cutoff",
-    "cell undervoltage protection"
+    "cell undervoltage protection",
+    "connector mis-mating",
+    "wrong cable in a connector",
+    "reversed battery",
+    "usb-c cc termination",
+    "usb-c data in both orientations"
   ],
   "claim_classes": [
     "pcb",
@@ -94,7 +99,11 @@
     "charge-voltage",
     "charge-current",
     "overcurrent-protection",
-    "deep-discharge"
+    "deep-discharge",
+    "mismate",
+    "connector-keying",
+    "usb-c",
+    "charging-interface"
   ],
   "provides_gates": [
     "pcb.board_readable",
@@ -111,7 +120,9 @@
     "pcb.charge_temperature",
     "pcb.charge_limits",
     "pcb.fault_current",
-    "pcb.discharge_cutoff"
+    "pcb.discharge_cutoff",
+    "pcb.mismate",
+    "pcb.usbc_receptacle"
   ],
   "provides_generators": [],
   "provides_proposers": [

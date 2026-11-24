@@ -40,9 +40,11 @@ MARGIN = 1.15
 
 _PATH_KEYS = ("pcb_board", "pcb_spice_deck", "pcb_enclosure_step")
 
-#: The power rules' records, ``{id: record}`` each, every record naming the
-#: board it is for (``board``; a mating names one per side).
-_POWER_KEYS = ("pcb_batteries", "pcb_protectors", "pcb_conductors", "pcb_matings")
+#: The power rules' records, and the mis-mating and USB-C rules', ``{id:
+#: record}`` each, every record naming the board it is for (``board``; a mating
+#: names one per side, and a battery or external far side names none).
+_POWER_KEYS = ("pcb_batteries", "pcb_protectors", "pcb_conductors", "pcb_matings",
+               "pcb_usbc", "pcb_rails")
 
 
 def _power_records(params: dict):
@@ -420,3 +422,42 @@ def cutoff_drives_nothing(ctx):
     passed it."""
     return _power_variant(ctx, "cutoff_drives_nothing",
                           lambda t: _move_pad(t, "U2", "4", "PROT_DO_OPEN"))
+
+
+def _swap_pad_nets(tree, ref: str, a: str, b: str) -> None:
+    """``ref``'s pads ``a`` and ``b`` trade nets: the pin order a generator's
+    rotation flip writes, the copper otherwise as it was."""
+    pads = {str(p[1]): p for p in K.children(_footprint(tree, ref), "pad")}
+    na, nb = K.child(pads[a], "net"), K.child(pads[b], "net")
+    na[1:], nb[1:] = list(nb[1:]), list(na[1:])
+
+
+def ground_beside_vbus(ctx):
+    """pcb.mismate — on both FFC housings, J10 and J11, the nets of positions 1
+    and 7 trade places, so GND sits at 7, two positions from VBUS at 5, where
+    the baseline keeps it at 1. One change, the pin order, as a generator's
+    rotation flip makes it: the straight map still meets GND with GND, so DRC,
+    ERC, parity and the nominal map all accept it. The flex record states that
+    a 6-way cable also seats in the 8-way housings; seated two positions off,
+    it puts J10's VBUS on J11's GND."""
+    def edit(tree):
+        for ref in ("J10", "J11"):
+            _swap_pad_nets(tree, ref, "1", "7")
+    return _power_variant(ctx, "ground_beside_vbus", edit)
+
+
+def shared_cc(ctx):
+    """pcb.usbc_receptacle — J1's CC2 pad (B5) moved onto CC1's net, so R1's
+    5.1 kOhm serves both CC pins and R2 hangs on a net of its own. DRC, ERC and
+    parity accept it, and so does a charger on a plain C-to-C cable; a source
+    with an e-marked cable reads the cable's Ra beside the shared Rd and powers
+    nothing (Type-C R2.0 Table 4-10). The defect a widely sold single-board
+    computer shipped and fixed in a revision."""
+    def edit(tree):
+        cc1 = _net_code(tree, "CC1")
+        for pad in K.children(_footprint(tree, "J1"), "pad"):
+            if str(pad[1]) == "B5":
+                K.child(pad, "net")[1:] = [str(cc1), K.Q("CC1")]
+                return
+        raise KeyError("J1 pad B5")
+    return _power_variant(ctx, "shared_cc", edit)

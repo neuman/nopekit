@@ -1,10 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
-"""pcb-kicad — four rules for a board that charges or carries a cell.
+"""pcb-kicad — four rules for a board that charges or carries a cell, and one for
+the ways its connectors can meet wrong.
 
     pcb.charge_temperature  tier 0  charging stops outside each cell's window, at the sensing network's tolerance corners
     pcb.charge_limits       tier 0  the charger's guaranteed maximum voltage and current against the cell's, and an overcharge stop beside it
     pcb.fault_current       tier 0  every conductor a cell can drive a fault through is protected across the fault range
     pcb.discharge_cutoff    tier 0  something opens the cell's path before any cell runs below its minimum
+    pcb.mismate             tier 0  no stated mis-mating of a connector, cable or cell joins a source to its return or to another source
+
+``pcb.mismate`` is model-only: its hazards are this pack's own rule on the
+modes a person states, with no outside source for which wrong fits count (its
+own docstring says what it reads and what it cannot see).
 
 **Where each verdict comes from.** This pack's own code, on two kinds of input:
 the boards' pad nets, read with the pack's reader (``_kicad.py``), and the
@@ -43,6 +49,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 
 from nopekit.gates import gate, GateContext
 from nopekit.modelio import load_path as _load_path
@@ -113,8 +120,17 @@ CHEMISTRIES = LITHIUM + ("nimh",) + PRIMARY
 KINDS = ("charger", "protector", "pack-pcm", "bms", "gauge", "fuse", "ptc", "efuse",
          "blocking")
 WHERE = ("board", "in-pack", "firmware")
+#: ``reverse_block`` is read by ``pcb.mismate`` only: a series element that
+#: blocks a reversed cell (a diode, an ideal-diode FET), placed as a trip is.
 FUNCTIONS = ("charge_v", "charge_a", "charge_temp", "overcharge_v", "overdischarge_v",
-             "trip", "safety_timer")
+             "trip", "reverse_block", "safety_timer")
+
+#: The trips ``pcb.mismate`` counts as limiting a reversed cell's current: a
+#: fuse and a PTC open on current whichever way it flows. Rejected: protector
+#: FETs (their controller runs from the cell, which is now backwards, and a
+#: body diode conducts) and an eFuse (some block reverse current and some do
+#: not: one that does is stated as a reverse_block).
+REVERSE_LIMITERS = ("fuse", "ptc")
 
 #: KiCad's stock symbols for a fixed resistor (``Device.kicad_sym``, 9.0.9).
 #: The datasheets' way to switch a charger's thermistor input off is a fixed
@@ -1270,9 +1286,13 @@ def _track_capacity(ctx, t, rise: float) -> tuple[float, float, str]:
     return amps, t.width_mm * thick_mil * K.MM_PER_MIL, f"{t.width_mm:g} mm track on {t.layer}"
 
 
-def _trip(d, p: Protector, b: Battery, cond_net, what: str) -> dict | str:
-    """A protector's trip with its place on the copper held: the parsed trip, or
-    why it does not guard the conductor."""
+def _trip_place(d, p: Protector, b: Battery, what: str) -> dict | str:
+    """A protector's trip parsed, with its place on the copper: the parsed trip
+    (and, on a board, its footprint, its path pins, the terminal's net and the
+    net it feeds, ``far``, through ``far_pin``), or why it guards nothing. An
+    in-pack PCM is counted on its datasheet's word and has no place here.
+    ``pcb.fault_current`` holds the result to a conductor; ``pcb.mismate``
+    reads which nets lie beyond it."""
     label = p.fn("trip")
     t = P.keys(p.functions["trip"], label, ("kind", "terminal", "trip_a", "trip_max_s"),
                ("path_pins", "switch", "hold_a", "interrupt_a", "ahead"))
@@ -1326,18 +1346,23 @@ def _trip(d, p: Protector, b: Battery, cond_net, what: str) -> dict | str:
     term = b.net(b.pos if terminal == "pos" else b.neg)
     a, z = (d.net(p.path, fp, pin) for pin in pins)
     if d.same(a, term) and not d.same(z, term):
-        far = z
+        far, far_pin = z, pins[1]
     elif d.same(z, term) and not d.same(a, term):
-        far = a
+        far, far_pin = a, pins[0]
     else:
         return (f"{fp.ref} is not on {b.id}'s {terminal} terminal: its path pins sit on "
                 f"{d.label(a)} and {d.label(z)}, the terminal on {d.label(term)}")
-    if terminal == "pos" and not d.same(cond_net, far):
-        return (f"{fp.ref} is not between {b.id} and {what}: it feeds {d.label(far)}, and "
-                f"the conductor is on {d.label(cond_net)}")
-    if terminal == "neg" and d.same(cond_net, term):
-        return f"{what} is on {b.id}'s return ahead of {fp.ref}, which does not guard it"
-    ahead = t.get("ahead") or []
+    out.update(record=t, label=label, fp=fp, terminal=terminal, term=term, far=far,
+               far_pin=far_pin)
+    return out
+
+
+def _ahead(d, p: Protector, b: Battery, place: dict) -> list[str]:
+    """The parts on the terminal's net ahead of the element ``place`` describes
+    (a trip's or a reverse block's) that its record does not declare in
+    ``ahead`` with why: each sees the cell before the element does."""
+    label, fp = place["label"], place["fp"]
+    ahead = place["record"].get("ahead") or []
     if not isinstance(ahead, list):
         raise RecordError(f"{label}.ahead: give [{{ref, value, why}}]")
     declared = {fp.ref}
@@ -1345,9 +1370,24 @@ def _trip(d, p: Protector, b: Battery, cond_net, what: str) -> dict | str:
         P.keys(rec, f"{label}.ahead[{i}]", ("ref", "value", "why"))
         P.text(rec["why"], f"{label}.ahead[{i}].why")
         declared.add(d.part(p.path, rec["ref"], rec["value"], f"{label}.ahead[{i}]").ref)
-    taps = _others(d, p.path, declared, term, b)
+    return _others(d, p.path, declared, place["term"], b)
+
+
+def _trip(d, p: Protector, b: Battery, cond_net, what: str) -> dict | str:
+    """A protector's trip with its place on the copper held: the parsed trip, or
+    why it does not guard the conductor."""
+    out = _trip_place(d, p, b, what)
+    if isinstance(out, str) or out["kind"] == "pcm":
+        return out
+    fp, terminal, term, far = out["fp"], out["terminal"], out["term"], out["far"]
+    if terminal == "pos" and not d.same(cond_net, far):
+        return (f"{fp.ref} is not between {b.id} and {what}: it feeds {d.label(far)}, and "
+                f"the conductor is on {d.label(cond_net)}")
+    if terminal == "neg" and d.same(cond_net, term):
+        return f"{what} is on {b.id}'s return ahead of {fp.ref}, which does not guard it"
+    taps = _ahead(d, p, b, out)
     if taps:
-        raise RecordError(f"{label}: {', '.join(taps)} on {b.id}'s {terminal} net "
+        raise RecordError(f"{out['label']}: {', '.join(taps)} on {b.id}'s {terminal} net "
                           f"({d.label(term)}) taps the cell ahead of {fp.ref}; declare each "
                           f"in ahead with why, or move it behind the protector")
     return out
@@ -1457,3 +1497,525 @@ def discharge_cutoff(ctx: GateContext) -> Verdict:
                                    f"this rule cannot see it")
     return Verdict(gate=gid, passed=worst[0] >= worst[1], measured=worst[0], limit=worst[1],
                    comparator=">=", units="V", detail="; ".join(lines) + tail, evidence=ev)
+
+
+# --------------------------------------------------------------------------- #
+# mis-mating
+# --------------------------------------------------------------------------- #
+
+#: A Type-C VBUS net's voltage, for the nominal map only: 5 V, USB's default
+#: bus voltage (Type-C R2.0 4.4.2 holds the default VBUS to the USB 2.0 and 3.2
+#: specifications'). Two receptacles' VBUS, or a VBUS and a rail stated at 5 V,
+#: that the nominal map joins are one rail. A PD contract above 5 V is
+#: negotiated, and not judged (references/mismate.md). Rejected: 5.5 V, the
+#: range's top (a 5 V rail stated at its nominal would read as another
+#: voltage).
+VBUS_NOMINAL_V = 5.0
+
+#: A footprint the coverage rule asks a mating of: its library is a connector's
+#: or a battery's (KiCad's ``Connector*`` libraries and ``Battery``), or its ref
+#: is J, P, CN or BT and a number (IEEE 315's letters for a jack, a plug and a
+#: battery; CN is a common one for a connector). JP is left out by the number:
+#: a solder jumper is no mating. A test point (``TestPoint``) is no mating.
+CONNECTOR_LIBS = ("Connector", "Battery")
+_CONNECTOR_REF = re.compile(r"^(J|P|CN|BT)\d+$")
+
+
+class _Terminal:
+    """One node a source drives: a battery's terminal or tap, a net beyond a
+    fault element, a Type-C VBUS or GND, a rail or its return. ``level`` is its
+    place in its source, 0 the return; ``vkey`` says which voltage a source
+    node is, so the nominal map may join two at one voltage into one rail."""
+
+    __slots__ = ("node", "group", "level", "protected", "vkey", "label")
+
+    def __init__(self, node, group, level, protected, vkey, label):
+        self.node, self.group, self.level = node, group, level
+        self.protected, self.vkey, self.label = protected, vkey, label
+
+
+class _Nets:
+    """A union-find over board nets ``(board path, name)``: the nets one way
+    of mating makes."""
+
+    def __init__(self, pairs=()):
+        self.parent: dict = {}
+        for a, b in pairs:
+            self.join(a, b)
+
+    def find(self, node):
+        self.parent.setdefault(node, node)
+        while self.parent[node] != node:
+            self.parent[node] = self.parent[self.parent[node]]
+            node = self.parent[node]
+        return node
+
+    def join(self, a, b) -> None:
+        if a is None or b is None:
+            return
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[max(ra, rb)] = min(ra, rb)
+
+
+class _Rail:
+    """One ``pcb_rails`` record: a net a regulator or an outside supply drives,
+    its return, and its nominal voltage. A net a cell drives is the battery's,
+    carried by the matings, and is never stated again as a rail."""
+
+    def __init__(self, d, rid: str, rec: dict):
+        label = f"pcb_rails.{rid}"
+        P.keys(rec, label, ("net", "nominal_v", "return", "source"), ("board",))
+        P.source(rec, label)
+        self.id = rid
+        self.v = P.num(rec["nominal_v"], f"{label}.nominal_v", gt=0.0)
+        path = d.board(rec, label)
+        names = set(d.boards[path].net_names)
+        for key in ("net", "return"):
+            name = P.text(rec[key], f"{label}.{key}")
+            if name not in names:
+                raise RecordError(f"{label} is for another design: {os.path.basename(path)} has "
+                                  f"no net {name}")
+        if str(rec["net"]) == str(rec["return"]):
+            raise RecordError(f"{label}: its net and its return are both {rec['net']}")
+        self.node, self.ret = (path, str(rec["net"])), (path, str(rec["return"]))
+
+
+def _terminals(d, batteries: dict, protectors: list, usbcs: list, rails: list):
+    """Every node a source drives, and the notes on the elements that protect
+    none (a fuse not fitted, a trip not on its terminal)."""
+    terms, notes, packs = [], [], set()
+    for p in protectors:
+        if "trip" not in p.functions:
+            continue
+        place = _trip_place(d, p, p.battery, "its load")
+        if isinstance(place, str):
+            notes.append(place)
+        elif place["kind"] == "pcm":
+            packs.add(p.battery.id)
+        else:
+            b, fp = p.battery, place["fp"]
+            node = P.Design.pad_node(p.path, fp, place["far_pin"])
+            if node is not None:
+                terms.append(_Terminal(node, ("battery", b.id),
+                                       b.series if place["terminal"] == "pos" else 0, True,
+                                       ("battery", b.id),
+                                       f"{_named(d, node)} (beyond {fp.ref})"))
+    for b in batteries.values():
+        nodes = [b.neg, *b.taps, b.pos]
+        for level, pin in enumerate(nodes):
+            node = P.Design.pad_node(b.path, b.fp, pin)
+            if node is None:
+                continue
+            what = ("+" if level == len(nodes) - 1 else "-" if level == 0 else f"tap {level}")
+            # An in-pack PCM that trips guards every node the pack brings out.
+            terms.append(_Terminal(node, ("battery", b.id), level, b.id in packs,
+                                   ("battery", b.id), f"{b.id}'s {what}"))
+    named = set()
+    for u in usbcs:
+        named.add((u.path, u.fp.ref))
+        for spec in u.specs(P.TYPEC_VBUS):
+            terms.append(_Terminal(u.node(spec), ("usbc", u.id), 1, False,
+                                   ("v", VBUS_NOMINAL_V), f"{u.fp.ref}'s VBUS"))
+        for spec in u.specs(P.TYPEC_GND):
+            terms.append(_Terminal(u.node(spec), ("usbc", u.id), 0, False, None,
+                                   f"{u.fp.ref}'s GND"))
+    # A receptacle no record names still brings VBUS in: read by its pads'
+    # names (Type-C's, or the pins' VBUS and GND), so a project that states
+    # no pcb_usbc does not hide its VBUS from every mis-mating.
+    for path, board in sorted(d.boards.items()):
+        for fp in board.footprints:
+            if not fp.fitted or (path, fp.ref) in named or not P.typec_receptacle(fp):
+                continue
+            group = ("usbc", f"{os.path.basename(path)}:{fp.ref}")
+            for pad in fp.pads:
+                fn = pad.pinfunction.strip().upper()
+                level = (1 if pad.number in P.TYPEC_VBUS or fn == "VBUS" else
+                         0 if pad.number in P.TYPEC_GND or fn == "GND" else None)
+                if level is not None and pad.net:
+                    terms.append(_Terminal((path, pad.net), group, level, False,
+                                           ("v", VBUS_NOMINAL_V) if level else None,
+                                           f"{fp.ref}'s {'VBUS' if level else 'GND'}"))
+    for r in rails:
+        terms.append(_Terminal(r.node, ("rail", r.id), 1, False, ("v", r.v), f"rail {r.id}"))
+        terms.append(_Terminal(r.ret, ("rail", r.id), 0, False, None, f"rail {r.id}'s return"))
+    seen, out = set(), []
+    for t in terms:
+        if t.node is not None and (t.node, t.group, t.level) not in seen:
+            seen.add((t.node, t.group, t.level))
+            out.append(t)
+    return out, notes
+
+
+def _hazards(terms: list, nets: _Nets, *, nominal: bool) -> dict:
+    """``{frozenset(two nodes): (raw, terminal, terminal)}`` for each pair of
+    terminals ``nets`` puts on one net that is a hazard: two nodes of one
+    source, or a source node on another source's node (two returns meeting is
+    none). On the nominal map, two sources at one voltage are one rail. Raw
+    unless either node lies beyond a fault element."""
+    by_root: dict = {}
+    for t in terms:
+        by_root.setdefault(nets.find(t.node), []).append(t)
+    out: dict = {}
+    for ts in by_root.values():
+        for i, t1 in enumerate(ts):
+            for t2 in ts[i + 1:]:
+                if t1.node == t2.node:
+                    continue
+                if t1.group == t2.group:
+                    if t1.level == t2.level:
+                        continue
+                elif not t1.level and not t2.level:
+                    continue
+                elif nominal and t1.level and t2.level and t1.vkey == t2.vkey:
+                    continue
+                key = frozenset((t1.node, t2.node))
+                raw = not (t1.protected or t2.protected)
+                if key not in out or (raw and not out[key][0]):
+                    out[key] = (raw, t1, t2)
+    return out
+
+
+def _named(d, node) -> str:
+    """A board net's own name, and its board's when the design has two: never
+    the name the nominal joins gave its root, which a wrong mating is judged
+    without. (What slipped through this rule's first cut: a pin-order flip
+    whose straight map joined VBUS to GND printed both pins as GND.)"""
+    if node is None:
+        return "no net"
+    path, name = node
+    return f"{name} ({os.path.basename(path)})" if len(d.boards) > 1 else name
+
+
+def _contact(d, m, side: str, pin: str) -> str:
+    path, fp = m.a if side == "a" else m.b
+    return f"{fp.ref} pad {pin} ({_named(d, P.Design.pad_node(path, fp, pin))})"
+
+
+def _met(d, m, groups, base: _Nets, t1, t2) -> str:
+    """Which contacts of a wrong mating put ``t1`` and ``t2`` on one net: the
+    conductor that touches both, else the two terminals by name. The source
+    node is said first."""
+    t1, t2 = sorted((t1, t2), key=lambda t: (-t.level, t.label))
+    r1, r2 = base.find(t1.node), base.find(t2.node)
+    for g in groups:
+        roots = []
+        for side, pin in g:
+            path, fp = m.a if side == "a" else m.b
+            node = P.Design.pad_node(path, fp, pin)
+            roots.append(base.find(node) if node else None)
+        if r1 in roots and r2 in roots:
+            c1, c2 = g[roots.index(r1)], g[roots.index(r2)]
+            return f"{_contact(d, m, *c1)} meets {_contact(d, m, *c2)}"
+    return f"{t1.label} meets {t2.label}"
+
+
+def _reverse_block(d, p: Protector, b: Battery) -> tuple[bool, str]:
+    """``(counts, who or why not)`` for ``p``'s ``reverse_block``: on the board,
+    fitted, one path pin on the battery terminal's net and one off it, and no
+    part the record does not declare ``ahead`` on that net before it."""
+    label = p.fn("reverse_block")
+    t = P.keys(p.functions["reverse_block"], label, ("terminal",),
+               ("path_pins", "switch", "ahead"))
+    if p.where != "board":
+        raise RecordError(f"{label}: {p.name} is {p.where}; a reverse block sits on the "
+                          f"board, behind the pigtail that reverses (where: board)")
+    terminal = P.word(t["terminal"], f"{label}.terminal", ("pos", "neg"))
+    if ("switch" in t) == ("path_pins" in t):
+        raise RecordError(f"{label}: give its path_pins [p, q], or its switch {{ref, value, "
+                          f"path}}, one of the two")
+    if "switch" in t:
+        sw = P.keys(t["switch"], f"{label}.switch", ("ref", "value", "path"))
+        pins = P.pins(sw["path"], f"{label}.switch.path", 2)
+        fp = d.part(p.path, sw["ref"], sw["value"], f"{label}.switch", pins)
+    else:
+        pins = P.pins(t["path_pins"], f"{label}.path_pins", 2)
+        fp = d.part(p.path, p.fp.ref, p.fp.value, label, pins)
+    if not fp.fitted:
+        return False, P.not_fitted(fp)
+    term = b.net(b.pos if terminal == "pos" else b.neg)
+    a, z = (d.net(p.path, fp, pin) for pin in pins)
+    if not (d.same(a, term) != d.same(z, term)):
+        return False, (f"{fp.ref} is not on {b.id}'s {terminal} terminal: its path pins sit on "
+                       f"{d.label(a)} and {d.label(z)}")
+    taps = _ahead(d, p, b, {"label": label, "fp": fp, "record": t, "term": term})
+    if taps:
+        return False, (f"{', '.join(taps)} on {b.id}'s {terminal} net sees the reversed cell "
+                       f"ahead of {fp.ref}")
+    return True, f"{fp.ref} {fp.value}"
+
+
+def _reversed(d, m, b: Battery, protectors: list) -> tuple[str, str]:
+    """``(verdict, line)`` for a battery whose pigtail can be reversed:
+    ``blocked`` by a reverse block, ``limited`` by a fuse or PTC at its
+    terminal with nothing ahead of it, or ``open``. An element in the pack is
+    no reverse protection: it sits before the pigtail that reverses."""
+    blocks, limits, why_not = [], [], []
+    for p in (p for p in protectors if p.battery is b):
+        if "reverse_block" in p.functions:
+            ok, said = _reverse_block(d, p, b)
+            (blocks if ok else why_not).append(said)
+        if "trip" not in p.functions:
+            continue
+        place = _trip_place(d, p, b, "its load")
+        if isinstance(place, str):
+            why_not.append(place)
+        elif place["kind"] == "pcm":
+            why_not.append(f"{p.name} is in the pack, before the pigtail that reverses")
+        elif place["kind"] not in REVERSE_LIMITERS:
+            why_not.append(f"{place['fp'].ref} is a {place['kind']}, which a reversed cell "
+                           f"defeats")
+        else:
+            taps = _ahead(d, p, b, place)
+            if taps:
+                why_not.append(f"{', '.join(taps)} sees the reversed cell ahead of "
+                               f"{place['fp'].ref}")
+            else:
+                limits.append(f"{place['fp'].ref} ({place['kind']})")
+    head = f"{m.id}: {b.id} reversed in {m.a[1].ref}"
+    tail = f" (not counted: {'; '.join(why_not)})" if why_not else ""
+    if blocks:
+        return "blocked", f"{head} is blocked by {', '.join(blocks)}"
+    if limits:
+        return "limited", (f"{head}: nothing blocks it, and {', '.join(limits)} limits its "
+                           f"current (pcb.fault_current judges that){tail}")
+    return "open", f"{head}: nothing blocks it or limits its current{tail}"
+
+
+@gate(
+    id="pcb.mismate",
+    basis="model-only",
+    title="No stated mis-mating of a connector, cable or cell joins a source to its return or "
+          "to another source",
+    claims=["pcb", "battery-safety", "mismate", "connector-keying"],
+    tier=Tier.INSTANT,
+    settles="connector mis-mating",
+    negative_control=NegativeControl(
+        fixture="selftest/bad_boards.py:ground_beside_vbus",
+        note="the power baseline with the nets of positions 1 and 7 swapped on both FFC "
+             "housings, as a generator's rotation flip reorders them: a 6-way cable two "
+             "positions off in the 8-way housings puts VBUS on GND",
+    ),
+)
+def mismate(ctx: GateContext) -> Verdict:
+    """For each mating in ``pcb_matings``, every wrong way its record says it
+    can meet, and the nominal map itself: the hazards, each a pair of nodes a
+    source drives that the mating puts on one net.
+
+    **Sources.** Each battery's terminals and taps; each net beyond a fault
+    element (``pcb_protectors``' trip: a fuse's far side is a protected source,
+    a low-side switch's far side a protected return); each Type-C receptacle's
+    VBUS and GND (``pcb_usbc``, and any receptacle its pads name); each
+    ``pcb_rails`` net and its return.
+
+    **Hazards.** Two nodes of one source on one net (a cell's + on its -, VBUS
+    on its GND), or a source's node on another source's node (two returns
+    meeting is none). On the nominal map two sources at one voltage are one
+    rail, never a hazard; it is checked first, so a regenerated board whose pin
+    order no longer matches the cable is caught on the correct cable. A hazard
+    beyond a fault element is named as protected, and pcb.fault_current judges
+    that element; it does not fail here. A source meeting a signal is listed in
+    the evidence and not judged. A battery whose pigtail can be ``reversed`` is
+    a hazard unless a ``reverse_block`` in series counts (on the board, nothing
+    ahead of it that its record does not declare), and protected when a fuse
+    or PTC at its terminal limits the current; an in-pack PCM is neither.
+
+    **Coverage.** Every fitted connector (a ``Connector*`` or ``Battery``
+    library, or a ref J, P, CN or BT and a number) with a pad on a source's net
+    must be named by a mating, ``modes: []`` included: an unnamed one errors,
+    naming it. A mating with no ``modes`` errors: the person says how else it
+    can meet, or that nothing can.
+
+    measured is the count of raw hazards, each pair of nodes once however many
+    wrong matings make it, against 0. What it reads is the records' word: the
+    modes a person states, the pinouts on the boards. It cannot see a mode
+    nobody stated, a keyed housing forced, a source on a GPIO, or arcing as a
+    plug goes in (PACK.md)."""
+    gid = "pcb.mismate"
+    try:
+        recs = P.records(ctx, "pcb_matings")
+        if not recs:
+            return _skip(gid, "no pcb_matings: which connectors, cables and cells meet, and in "
+                              "which wrong ways they can, are records a person enters")
+        d = P.Design(ctx)
+        batteries = {bid: Battery(d, bid, rec)
+                     for bid, rec in sorted((P.records(ctx, "pcb_batteries") or {}).items())}
+        protectors = [Protector(d, pid, rec, batteries)
+                      for pid, rec in sorted((P.records(ctx, "pcb_protectors") or {}).items())]
+        usbcs = [P.UsbC(d, uid, rec)
+                 for uid, rec in sorted((P.records(ctx, "pcb_usbc") or {}).items())]
+        rails = [_Rail(d, rid, rec)
+                 for rid, rec in sorted((P.records(ctx, "pcb_rails") or {}).items())]
+        d.matings(recs)
+        for m in d.mates:
+            if m.modes is None:
+                raise RecordError(f"{m.label} has no modes: say in which wrong ways it can "
+                                  f"meet, [] when it cannot, and why in source")
+            if m.kind == "battery":
+                bat = batteries.get(m.b)
+                if bat is None:
+                    raise RecordError(f"{m.label}.b.battery is {m.b!r}, which pcb_batteries "
+                                      f"does not hold")
+                if (m.a[0], m.a[1].ref) != (bat.path, bat.fp.ref):
+                    raise RecordError(f"{m.label}: battery {m.b}'s terminals are on "
+                                      f"{bat.fp.ref}, not {m.a[1].ref}")
+        terms, notes = _terminals(d, batteries, protectors, usbcs, rails)
+        if not any(t.level for t in terms):
+            return _skip(gid, "no source: no battery, no USB-C receptacle and no rail in the "
+                              "records or on the boards they name, so no mating can join one "
+                              "to its return")
+        result = _judge(d, terms, batteries, protectors)
+    except ReaderLimit as exc:
+        return _skip(gid, str(exc))
+    except RecordError as exc:
+        return _error(gid, str(exc))
+    raw = [h for h in result["hazards"] if h["raw"]]
+    kept = [h for h in result["hazards"] if not h["raw"]]
+    ev = _evidence(ctx, "mismate", {
+        "boards": sorted(d.boards),
+        "matings": result["matings"],
+        "sources": sorted({t.label for t in terms if t.level}),
+        "hazards": [{k: v for k, v in h.items() if k != "key"} for h in raw],
+        "protected": [{k: v for k, v in h.items() if k != "key"} for h in kept],
+        "reversed_batteries": result["reversed"],
+        "source_meets_signal": result["signal"],
+        "fault_elements_not_counted": notes})
+    judged = sum(len(m["ways"]) for m in result["matings"])
+    head = (f"{len(raw)} hazard(s): " + "; ".join(h["said"] for h in raw[:3])
+            + ("; ..." if len(raw) > 3 else "") if raw else
+            f"no stated mis-mating joins a source to its return or another source "
+            f"({judged} wrong way(s) of {len(result['matings'])} mating(s), and each nominal map)")
+    tail = ""
+    if kept:
+        tail += (f"; {len(kept)} protected, judged by pcb.fault_current: "
+                 + "; ".join(h["said"] for h in kept[:3]))
+    blocked = [r["said"] for r in result["reversed"] if r["verdict"] == "blocked"]
+    if blocked:
+        tail += f"; {'; '.join(blocked)}"
+    if result["signal"]:
+        tail += (f"; {len(result['signal'])} source-to-signal join(s) listed in the evidence, "
+                 f"not judged")
+    return Verdict(gate=gid, passed=not raw, measured=len(raw), limit=0, comparator="<=",
+                   units="hazards", detail=head + tail, evidence=ev)
+
+
+def _ends(m) -> frozenset:
+    """The connectors a mating joins, ``(board path, ref)`` each."""
+    far = {(m.b[0], m.b[1].ref)} if m.kind == "board" else {(m.kind, m.b)}
+    return frozenset({(m.a[0], m.a[1].ref)} | far)
+
+
+def _judge(d, terms: list, batteries: dict, protectors: list) -> dict:
+    """The nominal maps, the coverage, every stated wrong mating and every
+    reversible battery, judged."""
+    boards = [m for m in d.mates if m.kind == "board"]
+
+    def pairs_of(m) -> list:
+        (pa, fa), (pb, fb) = m.a, m.b
+        return [(P.Design.pad_node(pa, fa, x), P.Design.pad_node(pb, fb, y))
+                for x, y in m.pairs]
+
+    found: dict = {}
+
+    def keep(key, raw, said, where):
+        h = found.get(key)
+        if h is None:
+            found[key] = {"key": key, "raw": raw, "said": said, "ways": [where]}
+        else:
+            h["ways"].append(where)
+            if raw and not h["raw"]:
+                h.update(raw=True, said=said)
+
+    # The nominal maps, one mating at a time, so each hazard names the map that
+    # made it.
+    nominal = _Nets()
+    seen = _hazards(terms, nominal, nominal=True)
+    for key, (raw, t1, t2) in seen.items():
+        t1, t2 = sorted((t1, t2), key=lambda t: (-t.level, t.label))
+        keep(key, raw, f"{t1.label} meets {t2.label} on the boards as drawn", "as drawn")
+    for m in boards:
+        before = _Nets()
+        before.parent = dict(nominal.parent)
+        for a, b in pairs_of(m):
+            nominal.join(a, b)
+        for key, (raw, t1, t2) in _hazards(terms, nominal, nominal=True).items():
+            if key not in seen:
+                seen[key] = (raw, t1, t2)
+                groups = [[("a", x), ("b", y)] for x, y in m.pairs]
+                keep(key, raw, f"{m.id}'s own map: {_met(d, m, groups, before, t1, t2)}",
+                     f"{m.id} as mapped")
+    # Coverage: every connector that carries a source is named by a mating.
+    source_roots = {nominal.find(t.node) for t in terms if t.level}
+    declared = {(m.a[0], m.a[1].ref) for m in d.mates}
+    declared |= {(m.b[0], m.b[1].ref) for m in boards}
+    missing = []
+    for path, board in sorted(d.boards.items()):
+        for fp in board.footprints:
+            if not fp.fitted or (path, fp.ref) in declared:
+                continue
+            if not (fp.lib_id.split(":")[0].startswith(CONNECTOR_LIBS)
+                    or _CONNECTOR_REF.match(fp.ref)):
+                continue
+            carries = sorted({p.net for p in fp.pads
+                              if p.net and nominal.find((path, p.net)) in source_roots})
+            if carries:
+                where = f", {os.path.basename(path)}" if len(d.boards) > 1 else ""
+                missing.append(f"{fp.ref} ({fp.value}{where}) carries {', '.join(carries)}")
+    if missing:
+        raise RecordError(f"no pcb_matings record names {'; '.join(missing)}: each connector "
+                          f"that carries a source needs one, saying in which wrong ways it can "
+                          f"meet ([] when it cannot, and why in source)")
+    # Every stated wrong way.
+    matings, signal = [], set()
+    terminal_nodes = {t.node for t in terms}
+    for m in d.mates:
+        ways = []
+        # A mating stated again with its ends swapped (a mode that acts on b's
+        # housing) is the same cable: its nominal map is no part of this one's
+        # wrong ways, or a cable both seated and off would join every position.
+        ends = _ends(m)
+        others = [pair for o in boards if _ends(o) != ends for pair in pairs_of(o)]
+        for mode in m.modes:
+            for what, groups in m.instances(mode):
+                ways.append(what)
+                base = _Nets(others)
+                nets = _Nets(others)
+                for g in groups:
+                    nodes = []
+                    for side, pin in g:
+                        path, fp = m.a if side == "a" else m.b
+                        nodes.append(P.Design.pad_node(path, fp, pin))
+                    nodes = [n for n in nodes if n is not None]
+                    for n in nodes[1:]:
+                        nets.join(nodes[0], n)
+                where = f"{m.id}, {what}"
+                for key, (raw, t1, t2) in _hazards(terms, nets, nominal=False).items():
+                    if nominal.find(t1.node) == nominal.find(t2.node):
+                        continue                # the nominal map's, judged above
+                    keep(key, raw, f"{where}: {_met(d, m, groups, base, t1, t2)}", where)
+                for t in terms:
+                    if not t.level:
+                        continue
+                    root = nets.find(t.node)
+                    for node in list(nets.parent):
+                        if (node not in terminal_nodes and nets.find(node) == root
+                                and nominal.find(node) != nominal.find(t.node)):
+                            signal.add((t.label, _named(d, node)))
+        if m.kind == "battery" and ("reversed",) in m.modes:
+            ways.append("reversed")
+        matings.append({"mating": m.id, "kind": m.kind, "a": m.a[1].ref,
+                        "modes": [P.describe(x) for x in m.modes], "ways": ways,
+                        "source": m.source})
+    # A battery whose pigtail can be reversed.
+    rev = []
+    for m in d.mates:
+        if m.kind != "battery" or ("reversed",) not in m.modes:
+            continue
+        verdict, said = _reversed(d, m, batteries[m.b], protectors)
+        rev.append({"mating": m.id, "battery": m.b, "verdict": verdict, "said": said})
+        if verdict != "blocked":
+            keep(("reversed", m.b), verdict == "open", said, f"{m.id}, reversed")
+    hazards = sorted(found.values(), key=lambda h: (not h["raw"], h["said"]))
+    return {"hazards": [{**h, "ways": sorted(set(h["ways"]))} for h in hazards],
+            "matings": matings, "reversed": rev,
+            "signal": [{"source": s, "meets": n} for s, n in sorted(signal)]}

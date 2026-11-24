@@ -1,0 +1,35 @@
+{
+  "_what": "The USB Type-C termination values pcb.usbc_receptacle holds a receptacle's CC resistors to, each quoted from its table. A value here is the specification's band for the termination itself: the resistor's own tolerance (the record's cc_resistor_tol_pct) must keep it inside.",
+  "specification": "Universal Serial Bus Type-C Cable and Connector Specification, Release 2.0, August 2019 (USB 3.0 Promoter Group, published by USB-IF)",
+  "url": "https://www.usb.org/sites/default/files/USB%20Type-C%20Spec%20R2.0%20-%20August%202019.pdf",
+  "read": "2026-11-24",
+  "section": "4.11.1 Termination Parameters",
+  "_releases": "Release 2.0 was read: it is the newest release usb.org serves as a plain PDF. Later releases (2.3 and on) ship as zip archives and were not read here; re-read Tables 4-24 and 4-25 there before changing a value.",
+  "rd": {
+    "table": "Table 4-25 Sink CC Termination (Rd) Requirements",
+    "quote": "Rd Implementation / Nominal value / Can detect power capability? / Max voltage on pin: +-20% voltage clamp, 1.1 V, No, 1.32 V; +-20% resistor to GND, 5.1 kOhm, No, 2.18 V; +-10% resistor to GND, 5.1 kOhm, Yes, 2.04 V",
+    "nominal_ohm": 5100,
+    "tol_pct": {
+      "default_power": 20,
+      "reads_rp": 10
+    }
+  },
+  "rp": {
+    "table": "Table 4-24 Source CC Termination (Rp) Requirements",
+    "quote": "Source Advertisement / Current Source to 1.7-5.5 V / Resistor pull-up to 4.75-5.5 V / Resistor pull-up to 3.3 V +-5%: Default USB Power, 80 uA +-20%, 56 kOhm +-20% (Note 1), 36 kOhm +-20%; 1.5 A @ 5 V, 180 uA +-8%, 22 kOhm +-5%, 12 kOhm +-5%; 3.0 A @ 5 V, 330 uA +-8%, 10 kOhm +-5%, 4.7 kOhm +-5%. Note 1: 56 kOhm +-5% for an Rp in the Type-C plug of a legacy cable assembly or adapter, which is not a receptacle.",
+    "rails": {
+      "5": {
+        "rail": "resistor pull-up to 4.75-5.5 V",
+        "default": {"ohm": 56000, "tol_pct": 20},
+        "1.5A": {"ohm": 22000, "tol_pct": 5},
+        "3A": {"ohm": 10000, "tol_pct": 5}
+      },
+      "3.3": {
+        "rail": "resistor pull-up to 3.3 V +-5%",
+        "default": {"ohm": 36000, "tol_pct": 20},
+        "1.5A": {"ohm": 12000, "tol_pct": 5},
+        "3A": {"ohm": 4700, "tol_pct": 5}
+      }
+    }
+  }
+}
