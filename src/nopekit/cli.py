@@ -5985,10 +5985,10 @@ def cmd_why(args: argparse.Namespace) -> int:
 def cmd_decide(args: argparse.Namespace) -> int:
     """Record a decision — including, above all, what LOST and why.
 
-    `--rejected "0.5 mm|the router could not close that net through the congested
-    corridor"` is the highest-value thing this whole system stores. Without it
-    every fresh context window re-proposes every settled number. A rejection with
-    no reason is refused by `decisions.add`, which is why the flag takes a pair.
+    `--rejected "0.5 mm|the router could not close that net"` is the highest-value
+    thing this whole system stores. Without it every fresh context window
+    re-proposes every settled number. A rejection with no reason is refused by
+    `decisions.add`, which is why the flag takes a pair.
 
     A shim (spec §3.15): under the lock it migrates a legacy ledger first, then
     writes exactly one record, `decisions/<slug>.json`. It no longer regenerates

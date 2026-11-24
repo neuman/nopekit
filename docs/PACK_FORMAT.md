@@ -1100,7 +1100,7 @@ Rules:
   two bodies are one sub-assembly. Assembly order is intent, not geometry. Pass
   `overrides=` to correct it — they merge per mover, so fixing two parts costs two
   entries, and nodes group by the `__` in `lid__boss_a` (a double underscore,
-  because single ones are ordinary inside part names like `back_left`).
+  because single ones are ordinary inside part names like `guide_roller`).
 
 ### Figures bound to a verdict (`evidence_of`, `recipe`, `BoundContext`)
 
@@ -1293,11 +1293,11 @@ and starts being a debugger:
 ```python
 return Verdict(
     gate="cad.clash", passed=False,
-    detail="1 interfering pair: back_left / grip_lid_left 0.41 mm^3",
+    detail="1 interfering pair: carriage / guide_roller 0.41 mm^3",
     locators=[
-        Locator(view="assembly", target="back_left",
-                label="0.41 mm^3 into grip_lid_left", value=0.41),
-        Locator(view="assembly", target="grip_lid_left"),
+        Locator(view="assembly", target="carriage",
+                label="0.41 mm^3 into guide_roller", value=0.41),
+        Locator(view="assembly", target="guide_roller"),
     ],
 )
 ```

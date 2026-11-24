@@ -7,7 +7,7 @@ Every nopekit project can build a **static site that serves two jobs at once**:
    *anchored to the geometry they are about*.
 
 The second job is the one that justifies the code. A readiness report tells you
-`cad.clash: 1 interfering pair — back_left / grip_lid_left, 0.41 mm³`. The site
+`cad.clash: 1 interfering pair — carriage / guide_roller, 0.41 mm³`. The site
 shows you the two parts, lit up, at the pose where it happens. One of those is a
 sentence you have to go and act on; the other is the problem, on screen.
 
@@ -218,11 +218,11 @@ A gate that knows **where** a problem is attaches `Locator`s to its verdict:
 ```python
 return Verdict(
     gate="cad.clash", passed=False,
-    detail="1 interfering pair: back_left / grip_lid_left 0.41 mm^3",
+    detail="1 interfering pair: carriage / guide_roller 0.41 mm^3",
     locators=[
-        Locator(view="assembly", target="back_left",
-                label="0.41 mm^3 into grip_lid_left", value=0.41),
-        Locator(view="assembly", target="grip_lid_left"),
+        Locator(view="assembly", target="carriage",
+                label="0.41 mm^3 into guide_roller", value=0.41),
+        Locator(view="assembly", target="guide_roller"),
     ],
 )
 ```
@@ -303,16 +303,16 @@ model and a model that teaches.
 
 ```jsonc
 [
-  { "id": "clamp",
-    "title": "Expanding tray with soft grippers",
-    "oneLiner": "The part clamps between the arms, held by toothed pads.",
+  { "id": "carriage",
+    "title": "Carriage on one guide roller",
+    "oneLiner": "The carriage runs on the roller and stops against the housing.",
     "blurb": "Two sentences on why it is this way and what it costs. The thing a reader wants at the moment they are looking straight at the part.",
-    "anchors": ["tray__0", "gripper_left__vc"],
+    "anchors": ["carriage__0", "guide_roller__0"],
     "view": "assembly",
-    "href": "docs/decisions.md#v3-expanding-clamp",
+    "href": "docs/decisions.md#carriage-on-one-roller",
     "linkLabel": "decisions.md",
-    "claims": ["C4"],
-    "params": ["clamp_span_mm"] }
+    "claims": ["C1"],
+    "params": ["roller_d_mm"] }
 ]
 ```
 
@@ -322,7 +322,7 @@ work, it is exactly what an agent that just did the design is positioned to do, 
 project whose annotations are thin has a site that spins prettily and says nothing.
 
 `claims` and `params` are the hooks back into the ledger: an annotation can pull its
-own evidence, so the pin that explains the clamp also shows the claim that governs it
+own evidence, so the pin that explains the carriage also shows the claim that governs it
 and the parameter's rejected alternatives.
 
 `nopekit site build` reports annotations whose anchors do not resolve, the same way
@@ -396,9 +396,9 @@ was the one a reader of the contract would never look for.
                   "evidence_assets": [ "assets/evidence/…/deflection.json" ], … } ],
   "views":    [ { "id": "assembly", "kind": "model3d", "src": "assets/assembly.glb", … },
                 { "id": "sweep", "kind": "table", "data": {}, "data_url": "data/views/sweep.json", … } ],
-  "locator_problems": [ { "gate": "cad.clash", "view": "assembly", "target": "back_left",
+  "locator_problems": [ { "gate": "cad.clash", "view": "assembly", "target": "carriage",
                           "severity": "unknown-target",
-                          "problem": "view 'assembly' declares no node 'back_left'" } ],
+                          "problem": "view 'assembly' declares no node 'carriage'" } ],
   "params":   [ { "name": "thickness", "value": 7.0, "units": "mm",
                   "rationale": …, "derived_from": [ ], "source": "", "grounded_by": [ ],
                   "tags": [ ], "home": "model/bracket.py Config.thickness", "record": "",

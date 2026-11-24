@@ -1,7 +1,7 @@
 # Adversarial lenses — solid geometry
 
 Run these before anything is cut, printed or ordered. Each one is a separate pass
-with a separate question; the point is to find the four numbers that need to move
+with a separate question; the point is to find the numbers that need to move
 while moving them is still free.
 
 A geometry check that runs green at nominal, at one pose, on parts considered one

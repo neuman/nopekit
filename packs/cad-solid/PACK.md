@@ -558,7 +558,7 @@ part "guide roller"  ->  mover "guide_roller"  ->  node "guide_roller__0"
   site accepts a mover name as a locator target.
 - **Part names are sanitised** to letters, digits, `-`, `.` and `_`, with runs of
   `_` collapsed. The collapse is load-bearing: `__` is the mover separator, so a
-  part called `lid  left` would otherwise become a *body of the mover* `lid`,
+  part called `end  cap` would otherwise become a *body of the mover* `end`,
   silently merging two parts into one exploded group. A collision after
   sanitisation takes a visible `-2` suffix rather than sharing a node.
 - Both sides compute this from `cad_solid_parts.py`, never from two copies of the
@@ -623,7 +623,7 @@ params = {
     "clash_tolerances_mm3": {"housing|lid": 3.0},                    # optional, per pair
     "clash_depth_tol_mm": 0.01,                                      # optional override
     "clash_depth_tols_mm": {"housing|lid": 0.05},                    # optional, per pair
-    "organic_parts": ["grip"],                                       # optional
+    "organic_parts": ["handle"],                                     # optional
     "sliding_fits": [["rail", "carriage"]],                          # optional
     "clash_allow": [{"pair": ["housing", "lid"], "reason": "0.1 mm press fit, intended",
                      "role": "required"}],       # role is read by cad.assembly_connected

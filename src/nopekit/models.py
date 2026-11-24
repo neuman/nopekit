@@ -428,10 +428,9 @@ class Rejected(Record):
     """An alternative that was tried or considered and did NOT win.
 
     This is the single highest-value field in the whole system. A record like 'the
-    wider trace was tried first and the router could not close that net through the
-    congested corridor' means no future context window ever wastes a cycle
-    re-proposing it. Without this, every fresh agent re-litigates every settled
-    number.
+    wider trace was tried first and the router could not close that net' means no
+    future context window ever wastes a cycle re-proposing it. Without this, every
+    fresh agent re-litigates every settled number.
     """
 
     value: str                       # rendered value, e.g. "0.5 mm"
@@ -539,7 +538,7 @@ class Param(Record):
     units: str = ""
     rationale: str = ""              # why THIS value; the physics, not the restatement
     rejected: list[Rejected] = field(default_factory=list)
-    source: str = ""                 # "datasheet: TI SLYS045C Fig 6-2" / "inputs/sketches/hull.png"
+    source: str = ""                 # "datasheet: <part> rev C, Fig 6" / "inputs/sketches/hull.png"
     grounded_by: list[str] = field(default_factory=list)   # InputArtifact ids, or an assumption claim's id: the value IS that assumption
     gates: list[str] = field(default_factory=list)         # gate ids that protect it
     derived_from: list[str] = field(default_factory=list)  # other param names
@@ -1378,7 +1377,7 @@ class Locator(Record):
     """WHERE a verdict applies, so the site can show you instead of telling you.
 
     This is the mechanism that turns a project page into a debugging tool. A clash
-    gate that reports "back_left interferes with grip_lid_left by 0.41 mm^3" is a
+    gate that reports "carriage interferes with guide_roller by 0.41 mm^3" is a
     sentence you have to go and act on by hand. The same verdict carrying two
     locators lights both parts up in the assembly viewer, at the pose where it
     happens, and the reader is looking at the problem a second later.

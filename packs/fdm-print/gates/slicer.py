@@ -7,7 +7,7 @@ on the machine, and whether it warns about the part. The rest is glue, and each
 piece is here because Orca 2.4.2 was seen to say "Success." over it:
 
 - an 80 mm unsupported bridge slices with return code 0, ``Success.`` and no
-  warning (and so did the 80 mm tunnel roof of a part that then failed in print);
+  warning, though a span that long sags in print;
 - a part whose lowest point is 15 mm above the bed is dropped to the bed and
   sliced, with no warning;
 - a misspelled preset key (``enable_suport``) slices ``Success.`` and is simply
@@ -87,11 +87,12 @@ SETTINGS_ID = {"machine": "printer_settings_id", "process": "print_settings_id",
                "filament": "filament_settings_id"}
 
 #: Preset keys Orca does not echo into the G-code's CONFIG_BLOCK because they
-#: describe the file, not a setting. Measured on the pack's presets and on a
-#: complete Ender-3 V2 / PETG set: none of these is in the block. The three
-#: ``*_settings_id`` keys are echoed, but as the preset's ``name``, and are checked
-#: against it (``SETTINGS_ID``). Every other key must be echoed, or Orca did not
-#: use it: a misspelled ``enable_suport`` slices "Success." and is not in the block.
+#: describe the file, not a setting. Measured on the pack's presets and on one
+#: complete, flattened printer and filament set: none of these is in the block.
+#: The three ``*_settings_id`` keys are echoed, but as the preset's ``name``, and
+#: are checked against it (``SETTINGS_ID``). Every other key must be echoed, or
+#: Orca did not use it: a misspelled ``enable_suport`` slices "Success." and is
+#: not in the block.
 PRESET_META_KEYS = frozenset({
     "type", "name", "from", "instantiation", "setting_id", "filament_id",
     "compatible_printers", *SETTINGS_ID.values()})
@@ -324,7 +325,8 @@ def _echoed(value: str) -> str:
 
 def _unset(value: Any) -> bool:
     """``"nil"`` (or a list of them) is a filament preset's "not overridden": Orca
-    does not echo it. Measured on the Ender-3 V2 PETG preset (13 keys)."""
+    does not echo it. Measured on a complete, flattened filament preset (13 such
+    keys)."""
     items = value if isinstance(value, list) else [value]
     return bool(items) and all(str(v).strip() == "nil" for v in items)
 

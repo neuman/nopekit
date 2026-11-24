@@ -400,7 +400,7 @@ export function createStage(state, app) {
   }
 
   /** Every target of the same verdict, not only the one clicked. A clash is a
-   *  RELATIONSHIP: framing just `back_left` shows a part with nothing obviously
+   *  RELATIONSHIP: framing just `carriage` shows a part with nothing obviously
    *  wrong with it, and framing both parts shows the overlap. */
   function siblingTargets(verdict, viewId) {
     return (verdict.locators || [])
