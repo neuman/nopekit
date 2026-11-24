@@ -49,9 +49,12 @@ for the pack's controls, 2.7 s for a 50k-face part, plus the container start.
 ## Writing the three presets
 
 `slicer_presets` names three JSON files — `machine`, `process`, `filament` — and the
-verdict names each file's `name` and holds its sha256. Each must be **complete**:
-the gate binds the bytes of the three files, so a preset that leans on a vendor
-parent (`inherits`) slices with settings no bound file shows. Each file:
+verdict names each file's `name` and holds its sha256. A part that prints on
+supports, in another material or on another printer takes a group of its own: a
+key with its name or a glob, holding its own three files (`PACK.md`, "Preset groups
+per part"). Each file must be **complete**: the gate binds the bytes of the files,
+so a preset that leans on a vendor parent (`inherits`) slices with settings no
+bound file shows. Each file:
 
 - states `"type"` (`machine`, `process` or `filament`), a `"name"`,
   `"from": "system"` and `"instantiation": "true"`;
@@ -84,4 +87,5 @@ by hand for its baseline machine; they are a shape to copy, not a printer profil
 `fdm.slice` reads its limit from `max_bridge_mm`, the key `fdm.bridge_span` reads.
 Supports belong in the process preset: a project that prints with supports on the
 build plate says so there, and the gate then reads every bridge over that support
-as held.
+as held. When only some parts print on supports, give those parts a group whose
+process turns support on, and leave the rest on the default triple.

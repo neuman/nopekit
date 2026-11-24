@@ -7,7 +7,9 @@ no warning, though a span that long sags in print. It also dropped a part 15 mm
 above the bed to the bed and said nothing, and sliced a preset with a misspelled
 key without the key. Each case below is one of those, or a way the gate's own
 reading could be wrong (a bridge over support read as free, a run cut into
-segments, arcs, another part's G-code).
+segments, arcs, another part's G-code). Since fdm-print 0.2.1 a part may slice on a
+preset group of its own: the classes from ``PresetGroupsAreChosenPerPart`` on hold
+which group a part takes, and that a statement the gate cannot read slices nothing.
 
 The cases run the real gate through a stand-in ``orca-slicer`` on PATH
 (``tests/_orca_standin.py``) that writes result.json and a synthetic G-code in
@@ -434,6 +436,215 @@ class TheBuildAxisIsThePacksParse(_SliceCase):
                 self.assertEqual(v.outcome, "pass", v.render())
         v = self._run({"body": _bridge_body(support=True)}, {"build_axis": "y"})
         self.assertTrue(v.skipped, v.render())
+
+
+#: The preset groups' own names for the stand-in's ``bodies``.
+SUPPORTS = "nopekit fdm-print test 0.20 PETG supports"
+
+
+class PresetGroupsAreChosenPerPart(unittest.TestCase):
+    """Which group a part slices on (``_assign``), as a function: an exact name,
+    else the one glob that matches, else the default (None). It reads no key order:
+    the verdict cache digests ``slicer_presets`` with its keys sorted, so an order
+    that chose would let one statement's verdict be served for another. A key that
+    reaches no part is a problem, never a quiet fall-back to the default: a
+    misspelled part name sent that part to the global triple, the silent mode the
+    groups exist to close."""
+
+    PARTS = ["lid", "hinge_pin", "hinge_cap", "gasket"]
+
+    @classmethod
+    def setUpClass(cls):
+        cls.assign = staticmethod(_registry().get(GATE)[1].__globals__["_assign"])
+
+    def test_an_exact_name_then_one_glob_then_the_default(self):
+        chosen, problems = self.assign(self.PARTS, ["hinge_*", "hinge_cap", "lid"],
+                                       "mesh_paths")
+        self.assertEqual(problems, [])
+        self.assertEqual(chosen, {"lid": "lid", "hinge_pin": "hinge_*",
+                                  "hinge_cap": "hinge_cap", "gasket": None})
+
+    def test_two_globs_on_one_part_is_a_problem_in_either_order(self):
+        seen = []
+        for keys in (["hinge_*", "*_pin"], ["*_pin", "hinge_*"]):
+            with self.subTest(keys=keys):
+                chosen, problems = self.assign(self.PARTS, keys, "mesh_paths")
+                self.assertEqual(len(problems), 1, problems)
+                self.assertIn('part hinge_pin is matched by 2 globs in slicer_presets '
+                              '("*_pin", "hinge_*")', problems[0])
+                self.assertEqual(chosen["hinge_cap"], "hinge_*")
+                seen.append((chosen, problems))
+        self.assertEqual(seen[0], seen[1])
+
+    def test_an_unknown_part_name_is_a_problem_that_names_the_closest(self):
+        chosen, problems = self.assign(self.PARTS, ["hinge_pn"], "mesh_paths")
+        self.assertEqual(problems, ['slicer_presets["hinge_pn"] names no part in '
+                                    '`mesh_paths` (did you mean "hinge_pin"?)'])
+        self.assertIsNone(chosen["hinge_pin"])
+
+    def test_a_glob_that_matches_no_part_is_a_problem(self):
+        _chosen, problems = self.assign(self.PARTS, ["gaskt*"], "mesh_paths")
+        self.assertEqual(problems, ['slicer_presets["gaskt*"] matches no part in '
+                                    '`mesh_paths`'])
+
+    def test_case_counts(self):
+        chosen, problems = self.assign(["Lid"], ["lid", "L*"], "mesh_path")
+        self.assertEqual(chosen, {"Lid": "L*"})
+        self.assertEqual(problems, ['slicer_presets["lid"] names no part in `mesh_path` '
+                                    '(did you mean "Lid"?)'])
+
+
+class _GroupCase(_SliceCase):
+    """Two parts, ``lid`` and ``hinge_pin``, each the box with an 80 mm bridge. The
+    stand-in prints the bridge free on the baseline process and held on
+    ``SUPPORTS``, a copy of it with support on."""
+
+    def setUp(self):
+        super().setUp()
+        with open(os.path.join(PACK, "selftest", "orca", "process.json"), encoding="utf-8") as fh:
+            preset = json.load(fh)
+        preset.update(name=SUPPORTS, enable_support="1")
+        self.supports = os.path.join(self.dir, "supports.json")
+        with open(self.supports, "w", encoding="utf-8") as fh:
+            json.dump(preset, fh)
+        base = _baseline()["slicer_presets"]
+        self.default = dict(base)
+        self.on_supports = dict(base, process=self.supports)
+        self.mode = {"body": _bridge_body(), "bodies": {SUPPORTS: _bridge_body(support=True)}}
+
+    def _parts(self, presets: dict, **mode):
+        params = {"slicer_presets": presets}
+        if self.available:
+            path = self._mesh()
+            params.update(mesh_path=None, mesh_paths={"lid": path, "hinge_pin": path})
+        return self._run(dict(self.mode, **mode), params)
+
+    def _evidence(self, part: str) -> dict:
+        with open(os.path.join(self.dir, "out", "fdm-slice", part, "fdm-slice.json"),
+                  encoding="utf-8") as fh:
+            return json.load(fh)
+
+
+class APartSlicesOnItsOwnGroup(_GroupCase):
+    def test_one_global_triple_judges_the_hinge_on_a_print_nobody_makes(self):
+        v = self._parts(self.default)
+        if v is None:
+            return
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("2 of 2 past the limit", v.detail)
+
+    def test_the_hinges_group_puts_it_on_supports(self):
+        v = self._parts(dict(self.default, **{"hinge_*": self.on_supports}))
+        if v is None:
+            return
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("1 of 2 past the limit (lid)", v.detail)
+        self.assertIn("presets by part: default ", v.detail)
+        hinge, lid = self._evidence("hinge_pin"), self._evidence("lid")
+        self.assertEqual((hinge["preset_group"], hinge["worst_span_mm"]), ("hinge_*", 0.0))
+        self.assertEqual(hinge["presets"]["process"]["name"], SUPPORTS)
+        self.assertIsNone(lid["preset_group"])
+        self.assertNotEqual(lid["presets"]["process"]["name"], SUPPORTS)
+        with open(self.supports, "rb") as want, \
+                open(os.path.join(self.dir, "out", "fdm-slice", "hinge_pin", "process.json"),
+                     "rb") as got:
+            self.assertEqual(got.read(), want.read(), "the hinge was handed another process")
+        self.assertEqual(self._slices(), 2)
+
+    def test_a_glob_for_every_part_needs_no_default(self):
+        v = self._parts({"*": self.on_supports})
+        if v is None:
+            return
+        self.assertEqual(v.outcome, "pass", v.render())
+        self.assertEqual(v.measured, 0.0)
+        self.assertIn(f"'{SUPPORTS}'", v.detail)
+        self.assertIn('of "*"', v.detail)
+
+    def test_a_part_no_group_names_with_no_default_is_skipped(self):
+        v = self._parts({"hinge_*": self.on_supports})
+        if v is None:
+            return
+        self.assertTrue(v.skipped and not v.passed, v.render())
+        self.assertIn("lid (no group in slicer_presets names it", v.skip_reason)
+        self.assertEqual(self._slices(), 1)
+
+
+class AStatementTheGateCannotReadIsAnError(_GroupCase):
+    """Each is errored, and no part is sliced: a key the gate does not read could
+    put any part on the wrong triple."""
+
+    def test_each_is_errored_and_slices_nothing(self):
+        short = {"machine": self.default["machine"], "process": self.supports}
+        cases = {
+            "misspelled role": ({**self.default, "filamnet": self.default["filament"]},
+                                'unknown key "filamnet" (did you mean "filament"?)'),
+            "group short of a role": ({**self.default, "hinge_*": short},
+                                      'slicer_presets["hinge_*"] names no filament preset: '
+                                      'a group names all three, and takes none from the '
+                                      'default'),
+            "unknown key in a group": ({**self.default,
+                                        "lid": {**self.on_supports, "proces": "x.json"}},
+                                       'slicer_presets["lid"] has an unknown key "proces" '
+                                       '(did you mean "process"?)'),
+            "a role as a group": ({**self.default, "machine": self.on_supports},
+                                  "slicer_presets.machine is a group"),
+            "a list for a path": ({**self.default,
+                                   "hinge_*": {**self.on_supports, "filament": ["a.json"]}},
+                                  'slicer_presets["hinge_*"].filament is a list, not a path'),
+            "unknown part name": ({**self.default, "hinge_pn": self.on_supports},
+                                  'slicer_presets["hinge_pn"] names no part in '
+                                  '`mesh_paths` (did you mean "hinge_pin"?)'),
+            "a glob on nothing": ({**self.default, "gasket_*": self.on_supports},
+                                  'slicer_presets["gasket_*"] matches no part'),
+            "two globs": ({**self.default, "hinge_*": self.on_supports,
+                           "*_pin": self.on_supports}, "matched by 2 globs"),
+        }
+        for label, (presets, words) in cases.items():
+            with self.subTest(label):
+                v = self._parts(presets)
+                if v is None:
+                    return
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn(words, v.error)
+                self.assertEqual(self._slices(), 0)
+
+    def test_the_error_does_not_hang_on_key_order(self):
+        short = {"machine": self.default["machine"], "process": self.supports}
+        pairs = {
+            "two globs": ({"hinge_*": self.on_supports, "*_pin": self.on_supports,
+                           **self.default},
+                          {**self.default, "*_pin": self.on_supports,
+                           "hinge_*": self.on_supports}),
+            "two bad keys": ({"lid": short, **self.default, "filamnet": "x.json"},
+                             {"filamnet": "x.json", **self.default, "lid": short}),
+        }
+        for label, (one, two) in pairs.items():
+            with self.subTest(label):
+                errors = []
+                for presets in (one, two):
+                    v = self._parts(presets)
+                    if v is None:
+                        return
+                    errors.append(v.error)
+                self.assertEqual(errors[0], errors[1])
+
+    def test_a_part_out_of_pose_still_fails_beside_it(self):
+        if not self.available:
+            self._run({})                           # asserts the availability skip
+            return
+        import trimesh                              # noqa: PLC0415 - tools present only
+
+        box = trimesh.creation.box(extents=BOX)
+        box.apply_translation([BOX[0] / 2, BOX[1] / 2, BOX[2] / 2 + 15.0])
+        floating = os.path.join(self.dir, "floating.stl")
+        box.export(floating)
+        v = self._run(self.mode, {
+            "slicer_presets": {**self.default, "hinge_pn": self.on_supports},
+            "mesh_path": None, "mesh_paths": {"lid": floating, "hinge_pin": self._mesh()}})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("lid: not in print pose", v.detail)
+        self.assertIn('no other part sliced: slicer_presets["hinge_pn"]', v.detail)
+        self.assertEqual(self._slices(), 0)
 
 
 class TheRealSlicer(unittest.TestCase):
