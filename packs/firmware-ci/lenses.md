@@ -41,6 +41,17 @@ take to close it. A green replay answers none of them.
 - What does the board draw in deep sleep? A peripheral left on drains the cell in a
   week, and no static reading sees it. Measure it and record a physical claim.
 
+## The setting the grant was tested at
+
+- Which setting does the module's test report or integration manual give for its
+  grant? Is that the number in the `ble-tx-power` claim, and not the grant's listed
+  output?
+- Does anything raise the power at run time: a phone app, a host over HCI, a library
+  call? The build shows the default and the paths it can see, not every caller.
+- Did the antenna, its feed or a front-end module change since the grant? A setting
+  inside the grant says nothing of a new antenna's gain. Measure it and record a
+  physical claim.
+
 ## The hang with no reset path
 
 - If the firmware hangs in a sealed device, what resets it? A watchdog that is

@@ -15,7 +15,9 @@ What it does is set by ``mode.json`` beside it, which the test writes:
   path the excerpt was recorded under) replaced by the real copy; ``stderr``,
   ``exit`` and ``sleep`` (seconds before anything is written).
 - ``write``: ``{rel: {"size": n, "head": "<hex>"}}``, files the "job" writes into the
-  copy, ``head`` first and zero bytes after.
+  copy, ``head`` first and zero bytes after; or ``{rel: {"text": "..."}}``, written as
+  UTF-8 with ``{copy}`` replaced by the copy's path (a build record that names a
+  file in the workspace, as ESP-IDF's ``project_description.json`` does).
 
 Each call is logged to ``calls`` beside it as one JSON object: the tool, its argv,
 the environment the replay set, and, for ``act push``, what the copy held (its
@@ -25,7 +27,6 @@ Not a test module: its name starts with ``_``, as tests/_env.py's does.
 """
 import json
 import os
-import subprocess
 import sys
 import time
 
@@ -63,15 +64,40 @@ copy = opt("-C")
 files = sorted(os.path.relpath(os.path.join(d, f), copy).replace(os.sep, "/")
                for d, _dirs, names in os.walk(copy) if ".git" not in d.split(os.sep)
                for f in names)
-head = subprocess.run(["git", "-C", copy, "rev-parse", "HEAD"], stdout=subprocess.PIPE,
-                      stderr=subprocess.DEVNULL, text=True)
-log({"tool": "act", "argv": ARGS, "files": files, "commit": head.returncode == 0,
+
+
+def has_commit(repo):
+    """Whether ``repo``'s HEAD names a commit, read from ``.git`` itself: a git
+    subprocess here would run outside tests/_env.run (test_meta.
+    NoSubprocessOutsideRun, which this file broke in F1)."""
+    try:
+        with open(os.path.join(repo, ".git", "HEAD"), encoding="utf-8") as fh:
+            head = fh.read().strip()
+    except OSError:
+        return False
+    if not head.startswith("ref: "):
+        return bool(head)
+    ref = head[len("ref: "):]
+    if os.path.isfile(os.path.join(repo, ".git", *ref.split("/"))):
+        return True
+    try:
+        with open(os.path.join(repo, ".git", "packed-refs"), encoding="utf-8") as fh:
+            return any(line.split()[-1:] == [ref] for line in fh)
+    except OSError:
+        return False
+
+
+log({"tool": "act", "argv": ARGS, "files": files, "commit": has_commit(copy),
      "env": {k: os.environ.get(k) for k in ("HOME", "XDG_CONFIG_HOME",
                                             "ACT_DISABLE_VERSION_CHECK")}})
 time.sleep(MODE.get("sleep", 0))
 for rel, spec in (MODE.get("write") or {}).items():
     path = os.path.join(copy, *rel.split("/"))
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    if "text" in spec:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(spec["text"].replace("{copy}", copy))
+        continue
     first = bytes.fromhex(spec.get("head", ""))
     with open(path, "wb") as fh:
         fh.write(first + b"\x00" * max(0, spec.get("size", len(first)) - len(first)))

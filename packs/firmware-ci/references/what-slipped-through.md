@@ -1,6 +1,6 @@
 # What slipped through
 
-firmware-ci was written from three faults in a battery handheld's firmware. Each one
+firmware-ci was written from four faults in a battery handheld's firmware. Each one
 reached a release with every other check green. The stories are generic: no design
 of that device came with the pack.
 
@@ -45,6 +45,19 @@ sleep, and nothing would wake it until the cell ran flat. The build passed.
 enable linked, and a ZMK build with deep sleep needs `wakeup-source` on each scanned
 kscan.
 
+## A transmit setting nobody compared
+
+The firmware's Bluetooth transmit setting was raised, and nothing compared the new
+setting with the setting the radio module's grant was tested at. The claim meant to
+guard it compared the setting with the output the grant lists, which is what the
+tested setting measured after the module's losses. Those are two quantities, so the
+check could neither show nor rule out the fault. The build passed, and nothing on the
+board changed.
+
+`fw.tx_power` reads the setting the build resolved and judges it against the claim's
+limit, the setting the grant was tested at. A run-time path that can raise the power
+is judged at the highest setting Kconfig offered the SoC.
+
 ## What the design review caught before this pack shipped
 
 - A build that the machine stopped (the OOM killer under `FAILED: ….obj`) read as a
@@ -58,3 +71,13 @@ kscan.
   control read errored. The copy now walks such a tree.
 - An act version check that errored, so the claim read as a crash. Another version
   now reads Skipped and names the install line.
+- A transmit setter under `#if CONFIG_...`, `#ifdef` or after `#endif`, read as a
+  declaration: the scan took the directive's last word for a type. A +20 dBm call
+  read "no run-time path", and the gate passed at the +6 dBm default. The type word
+  must now be on the name's own line, on a line that is not a directive.
+- An advertising set's power, filed as indirection. ESP-IDF says it has priority
+  over the default on ESP32-C3/S3, and the call is in the app's own sources. A set
+  that asks for +20 dBm passed at +6 dBm. The scan now reads the set's member.
+- A front-end module's literal capped at the SoC's options. With a module, NCS's
+  level is antenna-referenced, and the SoC's options do not cap it.
+  `sdc_default_tx_power_set(20)` read +8 dBm and passed a 10 dBm grant.

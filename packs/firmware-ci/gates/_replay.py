@@ -100,6 +100,18 @@ EXCLUDED = frozenset({".git", ".nopekit", ".actrc", ".secrets", ".env", ".vars",
 #: would then pass as the job's); the content rule (above).
 OUTPUT_SUFFIXES = (".elf", ".bin", ".hex", ".uf2")
 OUTPUT_NAMES = (".config", "zephyr.dts", "sdkconfig")
+#: ESP-IDF's build record, which every configure step writes into its build
+#: directory: its ``config_file`` names the sdkconfig that build resolved. The
+#: read-back reads that file whether or not the job rewrote it, into ``configs``.
+#: What slipped through "the files the job wrote" alone (general-packs F2,
+#: measured with espressif/idf v5.5.6): ESP-IDF rewrites an sdkconfig only when
+#: the configure step changes it, so a project that tracks a current sdkconfig
+#: got none back, and ``fw.tx_power`` would have skipped every such build. The
+#: record names the file, so an sdkconfig of an app the job did not build is never
+#: read as its config. *Rejected:* reading back every ``sdkconfig`` (a tracked one
+#: the job never configured would stand in for the build's); a second build to
+#: write it (the replay is CI's own build, run once).
+BUILD_RECORDS = ("project_description.json",)
 #: The baseline wrote 7.5 MB of images (its ELF 6.4 MB, with debug information);
 #: 64 MiB leaves a build with several ELF files room. *Rejected:* no cap (every
 #: byte goes through one JSON line on a pipe and into memory).
@@ -172,13 +184,29 @@ _COLLECT = r"""
 import base64, json, os, sys
 mode, copy, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 suffixes, names = tuple(sys.argv[4].split(",")), tuple(sys.argv[5].split(","))
+records = tuple(sys.argv[6].split(","))
 before = json.load(sys.stdin) if mode == "read" else {}
-inside = os.path.realpath(copy) + os.sep
-stats, found, total = {}, {}, 0
+root = os.path.realpath(copy)
+inside = root + os.sep
+stats, found, configs, named, total = {}, {}, {}, [], 0
+
+def take(path):
+    global total
+    try:
+        with open(path, "rb") as fh:
+            data = fh.read()
+    except OSError:
+        return None
+    total += len(data)
+    if total > cap:
+        print(json.dumps({"oversize": total}))
+        sys.exit(0)
+    return base64.b64encode(data).decode("ascii")
+
 for here, dirs, files in os.walk(copy):
     dirs[:] = sorted(d for d in dirs if d not in (".git", "CMakeFiles"))
     for name in sorted(files):
-        if not (name.endswith(suffixes) or name in names):
+        if not (name.endswith(suffixes) or name in names or name in records):
             continue
         path = os.path.join(here, name)
         rel = os.path.relpath(path, copy).replace(os.sep, "/")
@@ -194,17 +222,29 @@ for here, dirs, files in os.walk(copy):
             continue
         if os.path.islink(path) and not os.path.realpath(path).startswith(inside):
             continue
-        try:
-            with open(path, "rb") as fh:
-                data = fh.read()
-        except OSError:
+        if name in records:
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    said = json.load(fh).get("config_file")
+            except (OSError, ValueError, AttributeError):
+                continue
+            if isinstance(said, str) and said:
+                named.append(said)
             continue
-        total += len(data)
-        if total > cap:
-            print(json.dumps({"oversize": total}))
-            sys.exit(0)
-        found[rel] = base64.b64encode(data).decode("ascii")
-print(json.dumps({"stats": stats} if mode == "snap" else {"files": found}))
+        data = take(path)
+        if data is not None:
+            found[rel] = data
+for said in named:
+    real = os.path.realpath(said)
+    if not real.startswith(inside) or not os.path.isfile(real):
+        continue
+    rel = os.path.relpath(real, root).replace(os.sep, "/")
+    if rel in found or rel in configs:
+        continue
+    data = take(real)
+    if data is not None:
+        configs[rel] = data
+print(json.dumps({"stats": stats} if mode == "snap" else {"files": found, "configs": configs}))
 """
 
 #: The copy's symlinks, made in a subprocess: ``os.symlink`` here would be a read
@@ -267,14 +307,17 @@ def act_version() -> str:
 def replay(path: str, job: str) -> dict:
     """Job ``job`` of the workflow at ``path``, replayed by act on a copy of its
     repository, and everything the gates read of it: each step's result and
-    scrubbed output, per matrix entry, and the bytes of each image and
-    configuration file the job wrote into its workspace."""
+    scrubbed output, per matrix entry, the bytes of each image and
+    configuration file the job wrote into its workspace (``files``), and of each
+    sdkconfig an ESP-IDF build record names that the job left as it was
+    (``configs``, ``BUILD_RECORDS``)."""
     act_version()
     repo, rel = CI.locate(path)
     tmp = tempfile.mkdtemp(prefix="nopekit-fw-")
     copy, home = os.path.join(tmp, "repo"), os.path.join(tmp, "home")
     result = {"workflow": rel, "job": job, "rc": None, "timeout": False, "entries": [],
-              "act": [], "files": {}, "oversize": 0, "toolchain": {}, "cleanup": ""}
+              "act": [], "files": {}, "configs": {}, "oversize": 0, "toolchain": {},
+              "cleanup": ""}
     # The image the job runs in, read before act starts: a timeout returns early,
     # and the chown below must still give the job's files back.
     image = _job_image(path, job)
@@ -311,7 +354,7 @@ def replay(path: str, job: str) -> dict:
         result["entries"], act_lines = parse(proc.stdout, scrub)
         result["act"] = act_lines + [scrub(ln) for ln in proc.stderr.splitlines() if ln.strip()]
         result["toolchain"] = _toolchain(image or RUNNER_IMAGES["ubuntu-latest"])
-        result["files"], result["oversize"] = _collect(copy, before)
+        result["files"], result["configs"], result["oversize"] = _collect(copy, before)
     finally:
         result["cleanup"] = _release(tmp, image)
     return result
@@ -572,7 +615,7 @@ def parse(stdout: str, scrub=lambda s: s) -> tuple[list, list]:
 def _run_collect(mode: str, copy: str, before: dict | None = None) -> dict:
     proc = subprocess.run([sys.executable, "-I", "-c", _COLLECT, mode, copy,
                            str(OUTPUT_CAP), ",".join(OUTPUT_SUFFIXES),
-                           ",".join(OUTPUT_NAMES)],
+                           ",".join(OUTPUT_NAMES), ",".join(BUILD_RECORDS)],
                           input=json.dumps(before or {}), stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True, timeout=300)
     try:
@@ -585,19 +628,23 @@ def _run_collect(mode: str, copy: str, before: dict | None = None) -> dict:
 
 
 def _snapshot(copy: str) -> dict:
-    """``{rel: [inode, ctime_ns, mtime_ns, size]}`` of each output-named file in the
-    copy before act starts (``OUTPUT_SUFFIXES``' comment)."""
+    """``{rel: [inode, ctime_ns, mtime_ns, size]}`` of each output-named file and
+    build record in the copy before act starts (``OUTPUT_SUFFIXES``' comment)."""
     return _run_collect("snap", copy)["stats"]
 
 
-def _collect(copy: str, before: dict) -> tuple[dict, int]:
-    """``({rel: bytes}, oversize)`` of each output file the job wrote: every one
-    whose ``lstat`` differs from ``before`` (:func:`_snapshot`), read back by a
-    subprocess (see the module's docstring)."""
+def _collect(copy: str, before: dict) -> tuple[dict, dict, int]:
+    """``({rel: bytes}, {rel: bytes}, oversize)``: each output file the job wrote
+    (every one whose ``lstat`` differs from ``before``, :func:`_snapshot`), and
+    each config file a build record the job wrote names that the job left as it
+    was (``BUILD_RECORDS``), read back by a subprocess (see the module's
+    docstring)."""
     found = _run_collect("read", copy, before)
     if "oversize" in found:
-        return {}, int(found["oversize"])
-    return {rel: base64.b64decode(b64) for rel, b64 in found["files"].items()}, 0
+        return {}, {}, int(found["oversize"])
+    return ({rel: base64.b64decode(b64) for rel, b64 in found["files"].items()},
+            {rel: base64.b64decode(b64) for rel, b64 in found.get("configs", {}).items()},
+            0)
 
 
 def _toolchain(image: str) -> dict:
