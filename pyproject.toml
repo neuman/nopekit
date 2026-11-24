@@ -59,9 +59,41 @@ nopekit = [
 # how `bomlib.py` (a pack-root helper) silently failed to ship and every gate in
 # that pack died on import from the wheel. Ship everything a pack contains, by
 # extension, at any depth.
+#
+# The list still drifted: until general-packs P2 it shipped no KiCad board, SPICE
+# deck, Modelica model or OpenFOAM case, so the wheel held the pcb-kicad,
+# openmodelica, cfd-openfoam and aero-openfoam baselines without the files they
+# read. `tests/test_packaging.py` now walks `git ls-files packs/` and
+# names each tracked file no glob here ships. `**/*` was rejected: setuptools
+# globs the tree as it is on disk, so it would ship a contributor's
+# `__pycache__/` and a solver run left in a case directory, and its `*` still
+# skips a dotfile.
 "nopekit.bundled" = [
   "**/*.py", "**/*.json", "**/*.md", "**/*.txt",
   "**/*.stl", "**/*.step", "**/*.csv", "**/*.yaml", "**/*.yml",
+  # KiCad: the board, its project, schematic and custom rules, and the two
+  # library tables (no extension) that KiCad reads from the board's directory.
+  "**/*.kicad_pcb", "**/*.kicad_pro", "**/*.kicad_sch", "**/*.kicad_dru",
+  "**/fp-lib-table", "**/sym-lib-table",
+  # ngspice decks and OpenModelica models.
+  "**/*.cir", "**/*.mo",
+  # OpenFOAM: a case is extensionless dictionaries in three directories, the
+  # three that the packs' stage copies from (`CASE_DIRS`, `gates/_tool.py`). One
+  # level only, as the stage does, so `constant/polyMesh/` and the time
+  # directories of a run left in place stay out. Each dictionary by name was
+  # rejected: a field file is named by its variable (U, p, k, omega), so a case
+  # that adds a field would not ship it.
+  "**/0/*", "**/constant/*", "**/system/*",
+  # ParaView: the renderer control's dataset (`views/fixture/strip.vtk`) and the
+  # environment file that `references/rendering.md` installs from.
+  "**/*.vtk", "**/*.lock",
+  # A pack's own ignore file. glob's `*` never matches a leading dot, so no
+  # glob above ships it.
+  "**/.gitignore",
+  # Added before the files arrive, so that later phases of general-packs only
+  # delete lines here: hand-ergonomics' scene meshes, and firmware-ci's ESP-IDF
+  # sources and defaults (its CMakeLists.txt matches `**/*.txt`).
+  "**/*.glb", "**/*.c", "**/sdkconfig.defaults",
   # firmware-zmk: the wrapper its gates compare byte for byte (no extension), and
   # its baseline's ZMK files. Without them every build gate errors from the wheel.
   "**/bin/*", "**/*.keymap", "**/*.conf", "**/LICENSE",
