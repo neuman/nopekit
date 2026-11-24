@@ -20,6 +20,20 @@ What slipped through before 0.2.0:
   ``fit`` read Checked on that pass. ``cad.clearance`` measures the gap with
   manifold3d against the claim's own limit.
 
+What slipped through before 0.3.0:
+
+- ``cad.wall_thickness`` held every mesh to one minimum. An assembly with a bought
+  part (cover glass, a board), a part thin on purpose (a living hinge) or a part made
+  by another process (an SLA light pipe) read FAIL, and the only way out was to lower
+  the one minimum, which passes a thin wall anywhere. Each part now takes its own
+  minimum, an exempt part is named and not judged, and a box holds one region of a
+  part to its own minimum. The records are strict: a malformed entry FAILS.
+- In review of that change: a pass reported the wall with the lowest thickness over
+  its own minimum, in mm, under "minimum wall thickness". A claim on that quantity
+  read Checked at a 1.25 mm shell beside a 0.45 mm hinge. A pass now reports the
+  thinnest wall. And a minimum written as a pattern that matched only an exempt part
+  was dropped with no word; it is refused now, as the exact name was.
+
 The meshes are built here and handed to the gates in ``ctx.extra["meshes"]``, the
 channel the pack's fixtures use. Without trimesh or manifold3d (the CI-like
 container) every case asserts the gate's availability skip instead.
@@ -34,6 +48,7 @@ import shutil
 import tempfile
 import unittest
 
+from nopekit import claims as claims_mod
 from nopekit import gates as gates_mod
 from nopekit import packs as packs_mod
 from nopekit.models import Claim, Ledger
@@ -189,6 +204,361 @@ class ATaperedRibIsStillAWall(_Case):
                         self.assertLess(v.measured, 1.0)
                         self.assertTrue(v.locators)
                     mesh = mesh.subdivide()
+
+
+# --------------------------------------------------------------------------- #
+# cad.wall_thickness: a minimum per part, exempt parts, boxes (0.3.0)
+# --------------------------------------------------------------------------- #
+#: The fallback minimum every wall case below states.
+MIN_WALL = {"process_min_wall_mm": 1.2}
+
+
+def _plates(**thickness) -> dict:
+    """One 20 x 20 mm plate per part, ``thickness`` mm thick, 40 mm apart."""
+    return {name: _box((20.0, 20.0, t), (40.0 * i, 0.0, 0.0))
+            for i, (name, t) in enumerate(thickness.items())}
+
+
+#: The region of the door that holds its hinge, in the assembly frame, mm.
+HINGE_BOX = [[27.0, -11.0, -1.0], [33.0, 11.0, 1.0]]
+
+
+def _door(hinge: float, fin: float | None = None):
+    """One part: a 2 mm door, a 4 mm wide hinge strip ``hinge`` mm thick at x = 30
+    (inside ``HINGE_BOX``) and, when given, a fin ``fin`` mm thick at x = 50
+    (outside it). Three closed shells in one mesh, so the part is watertight."""
+    import trimesh                                  # noqa: PLC0415 - tools present only
+
+    shells = [_box((20.0, 20.0, 2.0), (0.0, 0.0, 0.0)),
+              _box((4.0, 20.0, hinge), (30.0, 0.0, 0.0))]
+    if fin is not None:
+        shells.append(_box((4.0, 20.0, fin), (50.0, 0.0, 0.0)))
+    return trimesh.util.concatenate(shells)
+
+
+def _hinge(**overrides) -> dict:
+    """The ``wall_exceptions`` entry that holds the door's hinge to 0.4 mm."""
+    entry = {"part": "door", "box_mm": HINGE_BOX, "min_mm": 0.4,
+             "reason": "living hinge of the battery door, printed flat"}
+    entry.update(overrides)
+    return entry
+
+
+class _WallCase(_Case):
+    GATE = "cad.wall_thickness"
+
+    def _evidence(self, v) -> dict:
+        with open(v.evidence[0], encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def assertRefused(self, v, text: str):
+        self.assertEqual((v.outcome, v.units), ("fail", "refused entries"), v.render())
+        self.assertIn(text, v.detail)
+
+
+class TheBaselineCarriesNoWallRule(_WallCase):
+    """The pack's own controls with the three keys empty: the known-good reads its
+    3.0 mm walls against the one 2.5 mm minimum in the words it always used, and
+    thin_plate still fails."""
+
+    def test_the_known_good_passes_and_thin_plate_fails(self):
+        if self._skipped_here():
+            return
+        spec, fn = self.registry.get(self.GATE)
+        host = gates_mod.GateContext(root=self.dir, out_dir=self.dir, extra={"pack_dir": PACK})
+        good = gates_mod.run_gate(spec, fn, gates_mod.run_good_fixture(
+            spec, fn, host, trace=None, out_dir=self.dir))
+        self.assertEqual(good.outcome, "pass", good.render())
+        self.assertEqual((good.measured, good.limit), (3.0, 2.5))
+        self.assertTrue(good.detail.startswith("thinnest wall 3.000 mm"), good.detail)
+        self.assertIn("[process_min_wall_mm]", good.detail)
+        bad = gates_mod.run_gate(spec, fn, gates_mod.run_fixture(
+            spec, fn, host, trace=None, out_dir=self.dir))
+        self.assertEqual(bad.outcome, "fail", bad.render())
+        self.assertAlmostEqual(bad.measured, 2.5 / 4, places=3)
+
+
+class AMinimumPerPart(_WallCase):
+    """One minimum for every mesh failed a light pipe made in SLA beside FDM shells.
+    Each part now takes its own: its exact name, then a pattern, then the fallback."""
+
+    def test_a_part_takes_its_own_minimum(self):
+        if self._skipped_here():
+            return
+        meshes = _plates(shell=2.0, sla_light_pipe=0.8)
+        v = self._run(self.GATE, meshes, MIN_WALL)
+        self.assertEqual((v.outcome, v.measured, v.limit), ("fail", 0.8, 1.2), v.render())
+        v = self._run(self.GATE, meshes,
+                      dict(MIN_WALL, process_min_wall_mm_by_part={"sla_*": 0.6}))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("pass", 0.8, 0.6), v.render())
+        self.assertIn("process_min_wall_mm_by_part[sla_*]", v.detail)
+        self.assertEqual(self._evidence(v)["minimums"]["shell"],
+                         {"mm": 1.2, "from": "process_min_wall_mm"})
+
+    def test_a_pass_reports_the_thinnest_wall_and_names_the_nearest(self):
+        """1.3 mm against 1.2 mm is nearer its limit than 0.8 mm against 0.6 mm, but
+        the gate settles "minimum wall thickness": a pass reports the 0.8 mm wall.
+        Until the review of C1 it reported 1.3 mm, and a claim ">= 1.0 mm" read
+        that beside the 0.8 mm wall (AWallClaimReadsTheThinnestWall)."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, _plates(shell=1.3, sla_light_pipe=0.8),
+                      dict(MIN_WALL, process_min_wall_mm_by_part={"sla_*": 0.6}))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("pass", 0.8, 0.6), v.render())
+        self.assertTrue(v.detail.startswith("thinnest wall 0.800 mm on sla_light_pipe"),
+                        v.detail)
+        self.assertIn("nearest its own minimum: 1.300 mm on shell vs 1.200 mm "
+                      "[process_min_wall_mm]", v.detail)
+        evidence = self._evidence(v)
+        self.assertEqual((evidence["thinnest"]["part"], evidence["thinnest"]["minimum_mm"]),
+                         ("sla_light_pipe", 0.6))
+        self.assertEqual((evidence["nearest_its_minimum"]["part"],
+                          evidence["nearest_its_minimum"]["minimum_mm"]), ("shell", 1.2))
+
+    def test_a_fail_reports_the_wall_furthest_below_its_own_minimum(self):
+        """1.1 mm against 1.2 mm fails; 0.8 mm against 0.6 mm does not. The fail
+        reports the wall that failed, and pins it."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, _plates(shell=1.1, sla_light_pipe=0.8),
+                      dict(MIN_WALL, process_min_wall_mm_by_part={"sla_*": 0.6}))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("fail", 1.1, 1.2), v.render())
+        self.assertTrue(v.detail.startswith("worst wall against its own minimum: 1.100 mm "
+                                            "on shell"), v.detail)
+        self.assertNotIn("nearest its own minimum", v.detail)
+        self.assertEqual(v.locators[0].target, "shell")
+
+    def test_an_exact_name_beats_a_pattern(self):
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, _plates(shell=2.0, sla_light_pipe=0.8), dict(
+            MIN_WALL, process_min_wall_mm_by_part={"sla_*": 0.6, "sla_light_pipe": 1.0}))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("fail", 0.8, 1.0), v.render())
+        self.assertIn("process_min_wall_mm_by_part[sla_light_pipe]", v.detail)
+        self.assertTrue(v.locators)
+
+    def test_two_patterns_that_disagree_are_refused(self):
+        """The cache digests the map with its keys sorted, so an order between
+        patterns could move the verdict without moving its key."""
+        if self._skipped_here():
+            return
+        meshes = _plates(shell=2.0, sla_light_pipe=0.8)
+        v = self._run(self.GATE, meshes, dict(
+            MIN_WALL, process_min_wall_mm_by_part={"sla_*": 0.6, "*_pipe": 0.7}))
+        self.assertRefused(v, "different minimums")
+        v = self._run(self.GATE, meshes, dict(
+            MIN_WALL, process_min_wall_mm_by_part={"sla_*": 0.6, "*_pipe": 0.6}))
+        self.assertEqual((v.outcome, v.limit), ("pass", 0.6), v.render())
+
+    def test_an_entry_that_judges_no_part_is_refused(self):
+        if self._skipped_here():
+            return
+        meshes = _plates(shell=2.0, sla_light_pipe=0.8)
+        for entry, text in (({"sla_lightpipe": 0.6}, "names no part in the assembly"),
+                            ({"resin_*": 0.6}, "matches no part in the assembly"),
+                            ({"sla_*": 0}, "a minimum is a positive number of mm"),
+                            ({"sla_*": True}, "a minimum is a positive number of mm")):
+            with self.subTest(entry=entry):
+                v = self._run(self.GATE, meshes,
+                              dict(MIN_WALL, process_min_wall_mm_by_part=entry))
+                self.assertRefused(v, text)
+
+    def test_a_part_with_a_minimum_of_its_own_needs_no_fallback(self):
+        if self._skipped_here():
+            return
+        meshes = _plates(shell=2.0, sla_light_pipe=0.8)
+        unset = {"process_min_wall_mm": None}
+        v = self._run(self.GATE, meshes, dict(
+            unset, process_min_wall_mm_by_part={"shell": 1.2, "sla_*": 0.6}))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("pass", 0.8, 0.6), v.render())
+        v = self._run(self.GATE, meshes,
+                      dict(unset, process_min_wall_mm_by_part={"sla_*": 0.6}))
+        self.assertTrue(v.skipped and not v.passed, v.render())
+        self.assertIn("'shell'", v.skip_reason)
+        v = self._run(self.GATE, meshes, unset)
+        self.assertTrue(v.skipped and not v.passed, v.render())
+        self.assertIn("does not define", v.skip_reason)
+
+
+class AnExemptPart(_WallCase):
+    """Bought cover glass is 0.5 mm because its vendor made it so. Exempt, it is
+    named in the detail and not judged; it is never passed at a minimum of zero."""
+
+    GLASS = {"cover_glass": "bought glass; its vendor sets its thickness"}
+
+    def test_an_exempt_part_is_named_and_not_judged(self):
+        if self._skipped_here():
+            return
+        meshes = _plates(shell=2.0, cover_glass=0.5)
+        v = self._run(self.GATE, meshes, MIN_WALL)
+        self.assertEqual((v.outcome, v.measured), ("fail", 0.5), v.render())
+        v = self._run(self.GATE, meshes, dict(MIN_WALL, wall_exempt_parts=self.GLASS))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("pass", 2.0, 1.2), v.render())
+        self.assertIn("exempt, not judged: cover_glass", v.detail)
+        evidence = self._evidence(v)
+        self.assertEqual(evidence["exempt"], self.GLASS)
+        self.assertEqual([r["part"] for r in evidence["parts"]], ["shell"])
+
+    def test_every_part_exempt_skips(self):
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, _plates(cover_glass=0.5),
+                      dict(MIN_WALL, wall_exempt_parts=self.GLASS))
+        self.assertTrue(v.skipped and not v.passed, v.render())
+        self.assertIn("every part is exempt", v.skip_reason)
+
+    def test_a_silent_or_blanket_exemption_is_refused(self):
+        if self._skipped_here():
+            return
+        meshes = _plates(shell=2.0, cover_glass=0.5)
+        for params, text in (
+                ({"wall_exempt_parts": {"cover_glass": " "}}, "has no reason"),
+                ({"wall_exempt_parts": {"cover_*": "bought"}}, "blanket"),
+                ({"wall_exempt_parts": {"*": "bought"}}, "blanket"),
+                ({"wall_exempt_parts": {"glass": "bought"}}, "names no part"),
+                ({"wall_exempt_parts": ["cover_glass"]}, "write {part: reason}"),
+                ({"wall_exempt_parts": self.GLASS,
+                  "process_min_wall_mm_by_part": {"cover_glass": 0.4}}, "Delete one"),
+                # Review of C1: the pattern form was accepted, judged nothing, and the
+                # 0.3 mm its author wrote for the glass was dropped with no word.
+                ({"wall_exempt_parts": self.GLASS,
+                  "process_min_wall_mm_by_part": {"cover_*": 0.3}},
+                 "matches only exempt part(s) 'cover_glass'")):
+            with self.subTest(params=params):
+                self.assertRefused(self._run(self.GATE, meshes, dict(MIN_WALL, **params)),
+                                   text)
+
+    def test_a_pattern_that_also_matches_a_judged_part_governs_it(self):
+        """``cover_*`` matches the exempt glass and the judged frame: the frame takes
+        its 0.8 mm, and the glass stays named and not judged."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, _plates(shell=2.0, cover_glass=0.5, cover_frame=0.9),
+                      dict(MIN_WALL, wall_exempt_parts=self.GLASS,
+                           process_min_wall_mm_by_part={"cover_*": 0.8}))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("pass", 0.9, 0.8), v.render())
+        self.assertIn("on cover_frame", v.detail)
+        self.assertIn("exempt, not judged: cover_glass", v.detail)
+
+
+class ABoxHoldsAHinge(_WallCase):
+    """A living hinge is thin on purpose. Lowering the door's minimum to the hinge's
+    would pass a thin wall anywhere on the door; a box holds only the hinge."""
+
+    def test_a_box_holds_a_hinge_to_its_own_minimum(self):
+        if self._skipped_here():
+            return
+        door = {"door": _door(hinge=0.45)}
+        v = self._run(self.GATE, door, MIN_WALL)
+        self.assertEqual((v.outcome, v.measured, v.limit), ("fail", 0.45, 1.2), v.render())
+        v = self._run(self.GATE, door, dict(MIN_WALL, wall_exceptions=[_hinge()]))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("pass", 0.45, 0.4), v.render())
+        self.assertIn("wall_exceptions[0] box: living hinge", v.detail)
+        box = self._evidence(v)["boxes"][0]
+        self.assertEqual((box["entry"], box["box_mm"], box["min_mm"], box["reason"]),
+                         ("wall_exceptions[0]", HINGE_BOX, 0.4, _hinge()["reason"]))
+        self.assertAlmostEqual(box["thinnest_mm"], 0.45, places=3)
+
+    def test_a_thinner_hinge_still_fails_in_its_box(self):
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, {"door": _door(hinge=0.3)},
+                      dict(MIN_WALL, wall_exceptions=[_hinge()]))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("fail", 0.3, 0.4), v.render())
+        self.assertIn("living hinge", v.locators[0].label)
+
+    def test_a_wall_outside_the_box_is_judged_at_the_part_minimum(self):
+        """The fin is 0.8 mm: thicker than the hinge's 0.4 mm and outside its box."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, {"door": _door(hinge=0.45, fin=0.8)},
+                      dict(MIN_WALL, wall_exceptions=[_hinge()]))
+        self.assertEqual((v.outcome, v.measured, v.limit), ("fail", 0.8, 1.2), v.render())
+        self.assertIn("[process_min_wall_mm]", v.detail)
+        self.assertTrue(48.0 <= v.locators[0].position[0] <= 52.0, v.locators)  # the fin
+
+    def test_an_exception_entry_is_strict(self):
+        if self._skipped_here():
+            return
+        door = {"door": _door(hinge=0.45)}
+        hinge = _hinge()
+        lid = dict(hinge, box_mm=[[27.0, -11.0, 0.5], [33.0, 11.0, 2.0]])
+        for entries, extra, text in (
+                ([dict(hinge, tol_mm=0.1)], {}, "unknown key(s) 'tol_mm'"),
+                ([{k: v for k, v in dict(hinge, min=0.4).items() if k != "min_mm"}], {},
+                 "did you mean 'min_mm'?"),
+                ([{k: v for k, v in hinge.items() if k != "reason"}], {}, "has no reason"),
+                ([dict(hinge, reason="")], {}, "has no reason"),
+                ([dict(hinge, part="lid")], {}, "not in the assembly"),
+                ([dict(hinge, box_mm=[HINGE_BOX[1], HINGE_BOX[0]])], {},
+                 "low corner first"),
+                ([dict(hinge, box_mm=[[100.0] * 3, [101.0] * 3])], {}, "holds no face"),
+                ([dict(hinge, min_mm=-0.4)], {}, "positive number of mm"),
+                ([hinge, lid], {}, "touch or overlap"),
+                ([hinge], {"wall_exempt_parts": {"door": "bought"}}, "which is exempt"),
+                (hinge, {}, "write a list")):
+            with self.subTest(text=text):
+                v = self._run(self.GATE, door,
+                              dict(MIN_WALL, wall_exceptions=entries, **extra))
+                self.assertRefused(v, text)
+
+
+def _wall_claim(limit: float) -> Claim:
+    """A claim the gate's tags cover, on the quantity it settles, in mm."""
+    return Claim.from_dict({"id": "W1", "statement": "no wall is thinner than the limit",
+                            "kind": "measurable", "tags": ["wall"],
+                            "acceptance": {"quantity": "minimum wall thickness",
+                                           "comparator": ">=", "limit": limit,
+                                           "units": "mm"}})
+
+
+class AWallClaimReadsTheThinnestWall(_WallCase):
+    """The gate settles "minimum wall thickness" in mm, so a claim on that quantity
+    is compared with its value (``claims.cross_check``). What slipped through (review
+    of C1): a pass reported the wall with the lowest thickness over its own minimum.
+    Beside a 0.45 mm hinge held to 0.4 mm, a 3.0 mm shell left the hinge as that wall
+    and a claim ">= 1.2 mm" read Failing; thinned to 1.25 mm, the shell became that
+    wall, the gate reported 1.25 mm, and the claim read Checked with the hinge still
+    there. Making the design worse turned Failing into Checked."""
+
+    def _door_and_shell(self, shell: float):
+        return self._run(self.GATE,
+                         {"door": _door(hinge=0.45),
+                          "shell": _box((20.0, 20.0, shell), (0.0, 60.0, 0.0))},
+                         dict(MIN_WALL, wall_exceptions=[_hinge()]))
+
+    def test_a_thinner_shell_never_turns_failing_into_checked(self):
+        if self._skipped_here():
+            return
+        claim = _wall_claim(1.2)
+        for shell in (3.0, 1.25):
+            with self.subTest(shell=shell):
+                v = self._door_and_shell(shell)
+                self.assertEqual((v.outcome, v.measured, v.limit), ("pass", 0.45, 0.4),
+                                 v.render())
+                self.assertEqual(claims_mod.cross_check(claim, v).state, "fails",
+                                 v.render())
+        self.assertIn("nearest its own minimum: 1.250 mm on shell", v.detail)
+
+    def test_a_claim_at_the_lowest_minimum_holds(self):
+        """A claim that says what is true reads it: the hinge is the thinnest wall,
+        and it is above 0.4 mm."""
+        if self._skipped_here():
+            return
+        v = self._door_and_shell(1.25)
+        self.assertEqual(claims_mod.cross_check(_wall_claim(0.4), v).state, "holds",
+                         v.render())
+
+    def test_a_minimum_per_part_is_compared_at_the_thinnest_part(self):
+        """The plates case: 0.8 mm held to 0.6 mm beside 1.25 mm held to 1.2 mm, and a
+        claim ">= 1.0 mm". The 0.8 mm wall is there, so the claim fails."""
+        if self._skipped_here():
+            return
+        v = self._run(self.GATE, _plates(shell=1.25, sla_light_pipe=0.8),
+                      dict(MIN_WALL, process_min_wall_mm_by_part={"sla_*": 0.6}))
+        self.assertEqual((v.outcome, v.measured), ("pass", 0.8), v.render())
+        self.assertEqual(claims_mod.cross_check(_wall_claim(1.0), v).state, "fails",
+                         v.render())
 
 
 #: The declared pair every clearance case measures.
