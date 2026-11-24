@@ -129,8 +129,9 @@ def _segment_from(tree, net: str, x: float, y: float):
 J1_DP, J1_DM = (4.0, 4.0), (4.0, 9.08)
 
 #: Where U1 pin 6's connection point sits on the baseline schematic, mm:
-#: make_schematic.py's U1 at (127, 88.9), its pin 6 at (5.08, 0) in the symbol.
-U1_PIN6_SCH = (132.08, 88.9)
+#: make_schematic.py's U1 at (127, 88.9), its pin 6 at (5.08, 7.62) in the symbol
+#: (y up there, down on the sheet).
+U1_PIN6_SCH = (132.08, 81.28)
 
 
 def _label_at(tree, x: float, y: float):
@@ -144,19 +145,19 @@ def _label_at(tree, x: float, y: float):
 
 
 def split_pin_pair(ctx):
-    """pcb.pin_names — U1 pin 6 moved from D+ to D-.
+    """pcb.pin_names — U1 pin 5 moved from GND to VBUS.
 
-    The USBLC6-2SC6 joins pins 1 and 6 inside (both ``I/O1``). With D+ on pin 1
-    and D- on pin 6 the part shorts the data pair. The tracks are untouched, so
-    the copper stays legal: only the pad's net changes, as it would on a board
-    whose netlist assigned pins by number from a misread datasheet.
+    The ESDA6V1BC6 joins pins 2 and 5 inside (both ``COM``). With pin 2 on GND
+    and pin 5 on VBUS the part shorts the supply to ground. The tracks are
+    untouched: only the pad's net changes, as it would on a board whose netlist
+    assigned pins by number from a misread datasheet.
     """
     def edit(tree, _params):
-        dm = _net_code(tree, "DM")
+        vbus = _net_code(tree, "VBUS")
         for pad in K.children(_footprint(tree, "U1"), "pad"):
-            if str(pad[1]) == "6":
+            if str(pad[1]) == "5":
                 net = K.child(pad, "net")
-                net[1:] = [str(dm), K.Q("DM")]
+                net[1:] = [str(vbus), K.Q("VBUS")]
     return _variant(ctx, "split_pin_pair", edit)
 
 
@@ -193,8 +194,8 @@ def open_net(ctx):
 
 
 def orphaned_net(ctx):
-    """pcb.board_readable — VBUS dropped from the board's net table, so its tracks,
-    via and pads name a net code the board no longer defines."""
+    """pcb.board_readable — VBUS dropped from the board's net table, so its track
+    and pads name a net code the board no longer defines."""
     def edit(tree, _params):
         code = str(_net_code(tree, "VBUS"))
         for n in K.children(tree, "net"):
@@ -282,7 +283,7 @@ def mirrored_land(ctx):
     number, net and pin name kept: the SOT-23-6 land drawn mirrored, as a
     footprint drawn from a bottom view is. The netlist and the copper rules
     cannot see it; paired by function and fitted with no mirror, pad 1 sits
-    1.9 mm from where ST's drawing puts I/O1."""
+    1.9 mm from where ST's drawing puts TVS1."""
     def edit(tree, _params):
         pads = {str(p[1]): p for p in K.children(_footprint(tree, "U1"), "pad")}
         for a, b in (("1", "3"), ("4", "6")):

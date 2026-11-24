@@ -135,6 +135,6 @@
   ],
   "authors": [],
   "licence": "Apache-2.0",
-  "origin": "extracted from an autonomous board pipeline that generated, routed and DRC-checked two 4-layer boards headlessly; its chat logs and history showed which checks caught real defects and which passed defects a person later found. The KiCad knowledge is generic (file format, kicad-cli, the stock libraries); no project's design came with it.",
+  "origin": "extracted from an autonomous board pipeline that generated, routed and DRC-checked multilayer boards headlessly; its chat logs and history showed which checks caught real defects and which passed defects a person later found. The KiCad knowledge is generic (file format, kicad-cli, the stock libraries); no project's design came with it.",
   "basis": "established"
 }

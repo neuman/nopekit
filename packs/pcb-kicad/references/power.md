@@ -38,8 +38,9 @@ NTC, the NTC's other pad on a net some other part reaches (a pad on no net, or o
 a net of its own, senses nothing), and no other pad of the charger itself on the
 THERM net (a tie to its own VSS or VDD switches the input off, and a THERM on
 ground would otherwise read as wired to the NTC's ground side); (b) a safety
-timer. The MCP73831 has neither (DS20001984H): its SOT-23-5 pins are STAT, VSS,
-VBAT, VDD and PROG. The MCP73833 (DS22005) has both, THERM on pin 8 of the MSOP-10.
+timer. A small linear charger whose whole pinout is status, ground, battery,
+supply and the current-setting pin has neither. The MCP73833 (DS22005) has both,
+THERM on pin 8 of the MSOP-10.
 
 ## `pcb.fuse_conductor`
 
@@ -54,11 +55,12 @@ formula gives IEC 60364-5-54's k factors (115 for 70 -> 160 C, 143 for 90 -> 250
 C). The fuse's two pads must sit one on the cell pin's net and one on the
 conductor's, or the gate fails: the fuse is not in that path.
 
-Worked: a 20-way FFC's one conductor, 0.0245 mm^2, 25 -> 105 C, at 8 A: 128.7 ms,
-against an MF-MSMF075's guaranteed 0.2 s there (Bourns, REV. BE). At 160 C it is
-200.7 ms, a pass by 0.3%: the verdict turns on `limit_c`, so its source matters
-most. Two contacts in parallel would pass at an even split (about 515 ms), and get
-no credit: a fault does not split evenly.
+Worked, on illustration values (no part's datasheet): one conductor of 0.03 mm^2
+from 25 C, against a fuse guaranteed to trip in 0.1 s at 10 A. To an 85 C limit
+it takes 95.6 ms, a fail by 4%; to 105 C, 123.5 ms, a pass. The verdict turns on
+`limit_c`, so its source matters most. Two such conductors in parallel would pass
+at an even split (382.5 ms to 85 C), and get no credit: a fault does not split
+evenly.
 
 ## `pcb.discharge_cutoff`
 

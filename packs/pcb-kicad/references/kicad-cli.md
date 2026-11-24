@@ -110,7 +110,8 @@ item in the board's middle was missed).
 one, measured on a 4-layer board:
 
 - The Footprint field must be the board's footprint name exactly: a library
-  nickname added, or the field emptied, gave 114 `footprint_symbol_mismatch`.
+  nickname added, or the field emptied, gave a `footprint_symbol_mismatch` for
+  every part.
   A footprint name with no nickname reads as `footprint_link_issues` in ERC (a
   warning): the generator writes nicknames, or a person waives that type in the
   `.kicad_pro`.
@@ -122,7 +123,8 @@ one, measured on a 4-layer board:
 
 ## Cost and opacity
 
-About 0.7 s for the baseline board, about 2.3 s for a 4-layer 115-footprint board.
+About 0.7 s for the baseline board, about 2.3 s for a 4-layer board of about a
+hundred footprints.
 The subprocess reads files the trace cannot see, so the gates are opaque: never
 served from the cache, re-run on every check where kicad-cli exists, skipped where
 it does not.

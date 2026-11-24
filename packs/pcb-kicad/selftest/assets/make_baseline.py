@@ -8,11 +8,18 @@ make it again and diff.
 Needs KiCad 9's ``pcbnew`` module and its stock libraries (/usr/share/kicad).
 
 **The circuit.** A USB data-line protector between two 4-pin headers: J1 in, U1
-(USBLC6-2SC6, the KiCad library's own symbol and SOT-23-6 footprint), J2 out. The
-part is chosen for the defect it lets a control plant: its library symbol names
-pins 1 and 6 ``I/O1`` and pins 3 and 4 ``I/O2``, because inside the part each pair
-is one conductor. Wire D+ to pin 1 and D- to pin 6 and the part shorts the data
-pair, on copper that passes every design rule.
+(ESDA6V1BC6, a four-channel TVS array: the KiCad library's own symbol and SOT-23-6
+footprint), J2 out. Each data line enters on one side of U1 and leaves on the
+other, D+ on pins 1 and 6, D- on pins 3 and 4, a TVS channel to ground at each pin.
+The part is chosen for the defect it lets a control plant: its library symbol
+names pins 2 and 5 ``COM`` and stacks them, because inside the part the two are one
+node. Put pin 2 on GND and pin 5 on VBUS, and the part shorts the supply to
+ground, on copper that passes every design rule. Rejected, from the same stock
+library and package: SRV05-4 and ESDA6V1-5SC6 (no pin name repeats, so the control
+could plant nothing), SN65220 (its two GND pins are drawn apart, not stacked as one
+node) and SP0505BAHT (it names five separate cathodes ``K``, a repeat that is not
+one node). No gate here judges a line's capacitance: the part is a fixture's
+choice, not advice for a USB 2.0 port.
 
 **Pin names come from the library, not from this file.** Each pad's
 ``pinfunction`` is read out of KiCad's installed ``.kicad_sym`` for the symbol
@@ -22,10 +29,11 @@ then skips: it has nothing to compare against.
 
 **The layout** is hand-placed so a reader can check it: both headers on the 2.54 mm
 grid at x 4 and 26, U1 centred between header pins 2 and 3, the data pair and the
-left ground on F.Cu, VBUS and the right ground on B.Cu through the headers' plated
-holes, and one via beside U1 pin 5. Tracks 0.25 mm on KiCad's default rules
-(0.2 mm clearance). It must pass ``kicad-cli pcb drc --severity-all`` with no
-violation and nothing unconnected; the script runs that check and exits 1 if not.
+left ground on F.Cu, VBUS and the ground between the headers on B.Cu through the
+headers' plated holes, and one ground via beside U1 pin 5 down to it. Tracks
+0.25 mm on KiCad's default rules (0.2 mm clearance). It must pass ``kicad-cli pcb
+drc --severity-all`` with no violation and nothing unconnected; the script runs
+that check and exits 1 if not.
 """
 from __future__ import annotations
 
@@ -56,39 +64,44 @@ VIA_MM, VIA_DRILL_MM = 0.6, 0.3
 PARTS = [
     ("J1", "USB_IN", "Connector_Generic", "Conn_01x04",
      "Connector_PinHeader_2.54mm", "PinHeader_1x04_P2.54mm_Vertical", (4.0, 4.0)),
-    ("U1", "USBLC6-2SC6", "Power_Protection", "USBLC6-2SC6",
+    ("U1", "ESDA6V1BC6", "Power_Protection", "ESDA6V1BC6",
      "Package_TO_SOT_SMD", "SOT-23-6", (15.0, 7.81)),
     ("J2", "USB_OUT", "Connector_Generic", "Conn_01x04",
      "Connector_PinHeader_2.54mm", "PinHeader_1x04_P2.54mm_Vertical", (26.0, 4.0)),
 ]
 
-#: ref -> {pad: net}. Both headers: 1 D+, 2 GND, 3 D-, 4 VBUS. U1 flows through:
-#: D+ in on pin 1 and out on pin 6 (both I/O1), D- on 3 and 4 (both I/O2).
+#: ref -> {pad: net}. Both headers: 1 D+, 2 GND, 3 D-, 4 VBUS. U1 flows each line
+#: through: D+ in on pin 1 and out on pin 6, D- on 3 and 4, a TVS channel at each;
+#: both COM pins (2 and 5) on GND.
 NETS = {
     "J1": {"1": "DP", "2": "GND", "3": "DM", "4": "VBUS"},
     "J2": {"1": "DP", "2": "GND", "3": "DM", "4": "VBUS"},
-    "U1": {"1": "DP", "6": "DP", "3": "DM", "4": "DM", "2": "GND", "5": "VBUS"},
+    "U1": {"1": "DP", "6": "DP", "3": "DM", "4": "DM", "2": "GND", "5": "GND"},
 }
 
+#: The ground via beside U1 pin 5, and where its stub meets the back ground track.
 VIA = (17.6, 7.81)
+GND_TEE = (VIA[0], 6.54)
 
 #: (net, layer, [(ref, pad) or (x, y), ...]) polylines between pad centres.
 ROUTES = [
     ("DP", "F.Cu", [("J1", "1"), ("U1", "1")]),
     ("DP", "F.Cu", [("U1", "6"), ("J2", "1")]),
-    # The part joins pins 1 and 6 (and 3 and 4) inside, and KiCad 9.0's footprint
-    # has no way to say so from Python (jumper pad groups are not exposed), so DRC
-    # reads each pair as two islands of one net. A tie under the body, between the
-    # pad rows, is what a real layout draws; it clears pins 2 and 5 by 0.5 mm.
+    # Pins 1 and 6 (and 3 and 4) are two TVS channels on one line, not one
+    # conductor, so the line itself must cross: a tie under the body, between the
+    # pad rows, as a real layout draws it. It clears pins 2 and 5 by 0.5 mm.
     ("DP", "F.Cu", [("U1", "1"), ("U1", "6")]),
     ("DM", "F.Cu", [("U1", "3"), ("U1", "4")]),
     ("GND", "F.Cu", [("J1", "2"), ("U1", "2")]),
     ("DM", "F.Cu", [("J1", "3"), ("U1", "3")]),
     ("DM", "F.Cu", [("U1", "4"), ("J2", "3")]),
-    ("VBUS", "F.Cu", [("U1", "5"), VIA]),
-    ("VBUS", "B.Cu", [VIA, (VIA[0], 11.62), ("J2", "4")]),
-    ("VBUS", "B.Cu", [(VIA[0], 11.62), ("J1", "4")]),
-    ("GND", "B.Cu", [("J1", "2"), ("J2", "2")]),
+    # The two COM pins are one node inside the part, and KiCad 9.0's footprint has
+    # no way to say so from Python (jumper pad groups are not exposed), so DRC
+    # reads them as two islands of GND: pin 5 takes its own via to the back ground.
+    ("GND", "F.Cu", [("U1", "5"), VIA]),
+    ("GND", "B.Cu", [VIA, GND_TEE]),
+    ("GND", "B.Cu", [("J1", "2"), GND_TEE, ("J2", "2")]),
+    ("VBUS", "B.Cu", [("J1", "4"), ("J2", "4")]),
 ]
 
 OUTLINE = [(0.0, 0.0), (30.0, 0.0), (30.0, 15.0), (0.0, 15.0)]
@@ -96,7 +109,8 @@ OUTLINE = [(0.0, 0.0), (30.0, 0.0), (30.0, 15.0), (0.0, 15.0)]
 
 def library_pin_names(lib: str, symbol: str) -> dict[str, tuple[str, str]]:
     """{pin number: (name, electrical type)} from KiCad's installed symbol,
-    following one ``extends`` (USBLC6-2SC6 extends USBLC6-2P6)."""
+    following one ``extends`` (a derived symbol keeps its parent's pins: the
+    stock library's NCP349MNAE extends NCP349MN)."""
     tree = K.load_tree(os.path.join(SYMBOLS, lib + ".kicad_sym"))
     syms = {str(s[1]): s for s in K.children(tree, "symbol")}
     sym = syms[symbol]
@@ -202,7 +216,7 @@ def main() -> int:
     via.SetPosition(pcbnew.VECTOR2I(mm(VIA[0]), mm(VIA[1])))
     via.SetWidth(mm(VIA_MM))
     via.SetDrill(mm(VIA_DRILL_MM))
-    via.SetNet(nets["VBUS"])
+    via.SetNet(nets["GND"])
     board.Add(via)
 
     for a, b in zip(OUTLINE, OUTLINE[1:] + OUTLINE[:1]):

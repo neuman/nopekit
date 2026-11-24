@@ -33,29 +33,35 @@ pairing, fit and limit are this pack's own: model-only.
 pipeline this pack was extracted from; references/what-slipped-through.md):
 
 - ``pcb.drc``: every gate in that pipeline ran at error severity, so a warning could
-  never fail it. The pin-1 warning on a ribbon connector was 21.4 mm of silk on an
-  8 mm strip, and its fab would have clipped it. This gate runs every severity, and
-  a waiver is KiCad's own exclusion, recorded in the project file.
+  never fail it. A pin-1 warning label was longer than the strip of board it sat
+  on, and the fab would have clipped it. This gate runs every severity, and a
+  waiver is KiCad's own exclusion, recorded in the project file.
 - ``pcb.drc``, ``pcb.unconnected``: the fab export there ignored kicad-cli's exit code
   and read a report file another script also wrote, so a failed run could pass on a
   stale one. These read the exit code and the report this run wrote, and a
   disagreement between the two is an error.
 - ``pcb.net_width``: a power width was set in code that never reached the board, and
-  the battery path shipped at 0.2 mm for weeks of "0 violations, 0 unconnected". No
-  rule check can see a width nobody asked for.
-- ``pcb.pin_names``: an ESD array's flow-through pins were wired D+ to pin 1 and D- to
-  pin 6, which the part joins inside. The copper was legal; a person reading the
+  the battery path shipped at the default width for weeks of "0 violations, 0
+  unconnected". No rule check can see a width nobody asked for.
+- ``pcb.pin_names``: two pins that a part joins inside were wired to two different
+  nets, a short through the part. The copper was legal; a person reading the
   datasheet found it.
 - ``pcb.drc``, ``pcb.spice``: each passed over a tool's silence. KiCad takes a
   misspelled property in a custom rule, or a rules file it cannot parse, with exit
   0 and no word; ngspice takes an option name it does not know, and measures a
   window past the end of the run as 0 V. Each is now an error.
 - ``pcb.land_pattern``: a footprint's pad numbers can agree with a datasheet's while
-  its functions do not (JLC's LED C2286 numbers its cathode pad 2), so pads are
-  paired by function, and a land drawn mirrored fails a fit that allows no mirror.
-- ``pcb.enclosure_fit``: a joystick routed onto both boards stood 6 mm proud of the
-  face, found by a person on sight. And kicad-cli's STEP export drops a part whose
-  3D model it cannot find, with exit 0: a part the fit cannot see is a skip here.
+  its functions do not (an LED whose vendor numbers its cathode pad 2, where KiCad's
+  footprint numbers it 1), so pads are paired by function, and a land drawn
+  mirrored fails a fit that allows no mirror.
+- ``pcb.enclosure_fit``: kicad-cli's STEP export drops a part whose 3D model it
+  cannot find, with exit 0: a part the fit cannot see is a skip here. Not this
+  gate: a part that stood proud of the face, through the opening cut for it, was
+  found by a person on sight. The fit measures shared volume and clearance, so a
+  part through an opening wide enough to keep ``pcb_enclosure_clearance_mm``
+  reads clear however far it reaches, and a tighter opening fails on clearance,
+  which still says nothing about how far it reaches (lenses.md, "A part taller
+  than its cavity").
 
 **Missing inputs skip; they never default.** Which board, which nets carry how much
 current, how hot a trace may run, which fab, which deck and limit, which enclosure
@@ -89,8 +95,9 @@ SEVERITY_FLAGS = {"all": "--severity-all", "error": "--severity-error",
 #: when it found nothing. Any other code is kicad-cli failing, never a verdict.
 EXIT_CLEAN, EXIT_VIOLATIONS = 0, 5
 
-#: Two minutes for a DRC: a 4-layer 115-footprint board takes about 2 s, so only a
-#: hang reaches it. A timeout is a skip (nothing was shown), never a fail.
+#: Two minutes for a DRC: a 4-layer board of about a hundred footprints takes about
+#: 2 s, so only a hang reaches it. A timeout is a skip (nothing was shown), never a
+#: fail.
 DEFAULT_DRC_TIMEOUT_S = 120.0
 
 #: Copper weight when the project states none: 1 oz outer, 0.5 oz inner, what a
@@ -184,10 +191,10 @@ def _pad_names(ctx: GateContext, board) -> tuple[dict[str, dict[str, str]], set[
     the same names either way. Refs starting ``#`` (power symbols, flags) place no
     part. A placed symbol finds its cache entry by its ``lib_name`` when it has
     one, else by its ``lib_id``: KiCad caches a symbol edited away from its library
-    as ``lib_name`` ("USBLC6-2SC6_1"). A pad the symbol gives no name keeps its
+    as ``lib_name`` ("<symbol>_1"). A pad the symbol gives no name keeps its
     pinfunction: a name is never erased. (What slipped through, in review: looked
-    up by ``lib_id`` alone, such a part read no names at all, and its shorted
-    ``I/O1`` pair, which its pads' pinfunction had shown, passed.) Raises
+    up by ``lib_id`` alone, such a part read no names at all, and its shorted pin
+    pair, which its pads' pinfunction had shown, passed.) Raises
     :class:`_kicad.KicadFormatError` or FileNotFoundError on a schematic or sheet
     that cannot be read."""
     names = {fp.ref: {p.number: p.pinfunction for p in fp.pads} for fp in board.footprints}
@@ -239,16 +246,16 @@ def _pad_names(ctx: GateContext, board) -> tuple[dict[str, dict[str, str]], set[
     needs=["pcb.board_readable"],
     negative_control=NegativeControl(
         fixture="selftest/bad_boards.py:split_pin_pair",
-        note="the baseline board with U1 pin 6 moved from D+ to D-: the ESD array's "
-             "two I/O1 pins now carry the two data lines, which the part joins inside",
+        note="the baseline board with U1 pin 5 moved from GND to VBUS: the ESD array's "
+             "two COM pins now carry the supply and ground, which the part joins inside",
     ),
 )
 def pin_names(ctx: GateContext) -> Verdict:
     """Every pin name a footprint repeats carries one net.
 
     A library symbol gives two pins one name when the part joins them inside: a
-    flow-through ESD array's ``I/O1`` is pins 1 and 6, a regulator's ``GND`` is its
-    tab and a pin. KiCad copies those names onto the board's pads as
+    TVS array's ``COM`` is pins 2 and 5, a regulator's ``GND`` is its tab and a
+    pin. KiCad copies those names onto the board's pads as
     ``pinfunction`` when the board is updated from its schematic. Two different
     nets on one name is a short through the part, on copper every design rule
     accepts.
@@ -263,8 +270,8 @@ def pin_names(ctx: GateContext) -> Verdict:
     net; a generic connector's ``Pin_1``... are each one pin's, and never conflict.
 
     What slipped through: the source pipeline's board carried no pinfunction, so
-    this gate skipped on it, and its ESD array's D+ on pin 1 and D- on pin 6 (one
-    ``I/O1`` inside the part) went to a person to find.
+    this gate skipped on it, and two nets on two pins its ESD array joins inside
+    went to a person to find.
     """
     gid = "pcb.pin_names"
     path = _board_path(ctx)
@@ -309,7 +316,7 @@ def pin_names(ctx: GateContext) -> Verdict:
 # a footprint's land against its vendor's drawing
 # --------------------------------------------------------------------------- #
 #: The most pad assignments the land fit tries: the product, over each function
-#: several pads share (MP, GND, I/O1), of its count factorial. 5040 is 7!, a
+#: several pads share (MP, GND, COM), of its count factorial. 5040 is 7!, a
 #: ground row of seven pads; a part past it errors rather than guess. Rejected:
 #: a greedy nearest-pad pairing, which a land drawn mirrored can satisfy.
 MAX_ASSIGNMENTS = 5040
@@ -423,10 +430,10 @@ def land_pattern(ctx: GateContext) -> Verdict:
     size, or turned 90 degrees on the right centre, passes (PACK.md).
 
     What slipped through: a footprint whose pad numbers match the datasheet's can
-    still put a function on the wrong pad (JLC's LED C2286 numbers its cathode
-    pad 2, so a land paired by number fits upside down), and a power switch's land
-    drawn from a different drawing put its middle pad 1.5 mm from where the
-    vendor's sits. DRC and the netlist accept both.
+    still put a function on the wrong pad (an LED whose vendor numbers its cathode
+    pad 2, so a land paired by number fits upside down), and a switch's land drawn
+    from another part's drawing put its middle pad well off where the vendor's
+    sits. DRC and the netlist accept both.
 
     ``pcb_land_drawings`` is ``{ref: drawing record}``, each a JSON file from the
     project root: ``{part, source, view: "top", y_axis: "up"|"down", pads:
@@ -602,11 +609,11 @@ def net_width(ctx: GateContext) -> Verdict:
     # same copper counted once; and every other stretch that reads as hot at the
     # precision the line prints (another net's, or the same net's at another width
     # or side) is named after it, up to TIES_NAMED. (What slipped through:
-    # on a real 4-layer board the line read "VBUS: narrowest 0.2 mm on In2.Cu
-    # rises 61.2 C", but 48 mm of VBUS on B.Cu is 0.2 mm too and runs cooler, so
-    # the word gave a reader cause to widen the outer stretches, which would not
-    # lower the rise; a 0.25 mm inner track can be the hottest beside a 0.2 mm
-    # outer one, where "narrowest" is false; and in a tie, as on the baseline's
+    # the line named a net's narrowest track and one layer, where the same net
+    # ran at that width on an outer layer too, and cooler, so the word gave a
+    # reader cause to widen the outer stretch, which would not lower the rise;
+    # an inner track can be the hottest beside a narrower outer one, where
+    # "narrowest" is false; and in a tie, as on the baseline's
     # VBUS and GND, the line named one net and not the other.)
     stretches: dict[tuple, list] = {}
     for r in rows:
@@ -885,15 +892,16 @@ def _probe_rules(ctx: GateContext, gid: str, path: str):
     :func:`_kicad.probe_rules`' probes appended to it (a syntax error then drops
     the probes too, which shows), in one kicad-cli run. A probe that fired 0 times
     there is run again alone, the project's file and that probe: several
-    assertion rules on one item can mask each other (Design 2 saw 75 fall to 56),
-    and only a probe still at 0 alone is dead. When no probe fires, a canary that
+    assertion rules on one item can mask each other (on a measured board, probes
+    fired fewer times together than alone), and only a probe still at 0 alone is
+    dead. When no probe fires, a canary that
     selects everything tells a file KiCad dropped from rules that select nothing.
     A rule whose condition reads B is probed on its A side, the ``&&`` terms that
     read A alone (``_kicad.probe_rules``), and dead when that side selects nothing;
     one with no such term is never called dead: still at 0 alone, it is said to be
-    not shown live. (Measured on a 4-layer board: ``gnd_pad_edge``, ``A.NetName ==
-    'GND' && (A.Type == 'Pad' || B.Type == 'Pad')``, fired 0 times beside its token
-    probes and 43 alone.) Live means the rule selects an item, not that its
+    not shown live. (Measured on a generated board: a custom rule on one net whose
+    condition read B inside an OR fired 0 times beside its token probes and dozens
+    of times alone.) Live means the rule selects an item, not that its
     constraint can apply to one: a ``track_width`` rule that selects only vias is
     live (PACK.md).
     Cost: one more kicad-cli run, about 1.3 s on a 4-layer board."""
@@ -1130,9 +1138,10 @@ def parity(ctx: GateContext) -> Verdict:
     # unconnected schematic pin's net ``unconnected-(<ref>-<pin>-Pad<n>)``, even
     # under a no-connect flag, and reports the pad it sits on, which has no net on
     # the board, as "Pad missing net given by schematic (unconnected-(...))". On a
-    # 4-layer board with a written schematic that was every one of 14 differences:
-    # measured. Counted as agreement only when every item is a pad the board gives
-    # no net (matched by id, as the fab count is, never by the translated words)
+    # generated board with a written schematic that was every difference parity
+    # reported: measured. Counted as agreement only when every item is a pad the
+    # board gives no net (matched by id, as the fab count is, never by the
+    # translated words)
     # and the words hold KiCad's net name, which is not translated. A pad WITH a
     # net against an unconnected-( net is still a difference.
     no_net = {i for i, net in K.pad_nets_by_id(ctx.load_file(path, loader=K.load_tree)).items()
