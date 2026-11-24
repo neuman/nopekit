@@ -412,9 +412,7 @@ def tx_power(ctx: GateContext) -> Verdict:
         if readings:
             repo, _rel = C.locate(path)
             code = T.sources(repo, R.listing)
-            judged = [T.judge(r, [c for rel, text in code.items()
-                                  for c in T.scan(rel, text, r.profile)])
-                      for r in readings]
+            judged = [T.judge(r, T.scan_sources(code, r.profile)) for r in readings]
     except R.WrongAct as exc:
         return _skip(gid, str(exc))
     except (R.ToolFault, T.TxFault, C.Refused, OSError) as exc:

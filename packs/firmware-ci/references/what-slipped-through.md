@@ -71,3 +71,13 @@ is judged at the highest setting Kconfig offered the SoC.
   control read errored. The copy now walks such a tree.
 - An act version check that errored, so the claim read as a crash. Another version
   now reads Skipped and names the install line.
+- A transmit setter under `#if CONFIG_...`, `#ifdef` or after `#endif`, read as a
+  declaration: the scan took the directive's last word for a type. A +20 dBm call
+  read "no run-time path", and the gate passed at the +6 dBm default. The type word
+  must now be on the name's own line, on a line that is not a directive.
+- An advertising set's power, filed as indirection. ESP-IDF says it has priority
+  over the default on ESP32-C3/S3, and the call is in the app's own sources. A set
+  that asks for +20 dBm passed at +6 dBm. The scan now reads the set's member.
+- A front-end module's literal capped at the SoC's options. With a module, NCS's
+  level is antenna-referenced, and the SoC's options do not cap it.
+  `sdc_default_tx_power_set(20)` read +8 dBm and passed a 10 dBm grant.

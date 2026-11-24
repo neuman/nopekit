@@ -29,16 +29,22 @@ Control) or a setter call in the repository's own C sources. With a path, the
 judged value is the ceiling, the highest option Kconfig offered this SoC (the
 options the file lists, chosen or ``is not set``), because that is the maximum
 the firmware makes available. A setter whose level is a literal is judged at
-that literal. Where the ceiling cannot be known (an antenna-referenced NCS
-setting hides the choice; a front-end module adds gain), a setting that alone
-passes reads undetermined, and names the conducted measurement that settles it.
+that literal, capped at the ceiling as the controller caps it. With a front-end
+module (NCS ``CONFIG_MPSL_FEM``) the level is antenna-referenced and the SoC's
+options do not cap it, so a literal is judged as it is asked for. Where the
+ceiling cannot be known (an antenna-referenced NCS setting hides the choice; a
+front-end module adds gain), a path beside a setting that alone passes reads
+undetermined, and names the conducted measurement that settles it.
 
 **The setter scan is the pack's own** (model-only, and documented so): a text
 scan of the C and C++ files the next commit holds, comments and string literals
 blanked. It can only make a verdict more conservative: it moves the judged value
-up, to a literal or to the ceiling, or to undetermined. A call reached by
-indirection (a library outside the repository, a module, an HCI command an
-external host sends) is not seen; a call the build does not compile still counts.
+up, to a literal or to the ceiling, or to undetermined. An advertising set's
+power is a member of the struct its call is handed (:data:`EXT_ADV`): the scan
+reads every write to that member in the sources (:func:`scan_sources`). A call
+reached by indirection (a library outside the repository, a module, an HCI
+command an external host sends) is not seen; a call the build does not compile
+still counts.
 """
 from __future__ import annotations
 
@@ -99,7 +105,8 @@ class Profile(NamedTuple):
     option: object
     #: Kconfig symbols that, set ``y``, compile in a way to raise the power at run time.
     raisers: tuple
-    #: Setter function -> the index of its level argument (``None``: never a literal).
+    #: Setter function -> where its level is: the index of an argument, a
+    #: :class:`Member` of the struct the call is handed, or ``None`` (never a literal).
     setters: dict
     #: How a literal level reads: ``"esp"`` (``ESP_LEVELS``) or ``"int"`` (dBm).
     literal: str
@@ -123,6 +130,48 @@ def _esp_dbm(name: str) -> int | None:
     return int(m.group(2)) * (1 if m.group(1) == "P" else -1)
 
 
+class Member(NamedTuple):
+    """A level that a call reads from a member of the struct it is handed, not
+    from an argument: the member's name, and the struct types whose initializer
+    can set it (``struct`` optional before each)."""
+    name: str
+    types: tuple
+
+
+#: An advertising set's requested power, the HCI command's Advertising_TX_Power,
+#: which the controller applies to that set at or below the request.
+#:
+#: - ESP-IDF v5.5.6 Bluedroid, ``esp_ble_gap_ext_adv_set_params``: the member's
+#:   comment in components/bt/host/bluedroid/api/include/api/esp_gap_ble_api.h says
+#:   "For this advertising set, priority is higher than esp_ble_tx_power_set(),
+#:   esp_ble_tx_power_set_enhanced(), and menuconfig default TX power
+#:   (CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL)", and names ESP32-C3/ESP32-S3, which round
+#:   the request down to a 3 dB step.
+#: - ESP-IDF v5.5.6 NimBLE, ``ble_gap_ext_adv_configure``: nimble/host/src/ble_gap.c
+#:   copies ``params->tx_power`` into the command.
+#:
+#: Both were read in the image the baseline pins. *Rejected:* filing them under
+#: indirection (as F2 first did: each is a call in the repository's own sources,
+#: and a +20 dBm set beside a +6 dBm default passed); judging every such call at
+#: the ceiling (every ESP-IDF advertising-set example states its member as a
+#: literal, mostly 127, so each would fail at +20 dBm for nothing).
+EXT_ADV = Member("tx_power", ("esp_ble_gap_ext_adv_params_t", "ble_gap_ext_adv_params"))
+#: The same command through the SoftDevice Controller's own API (sdk-nrfxlib v3.4.2
+#: softdevice_controller/include/sdc_hci_cmd_le.h, v1 and v2): "The Controller
+#: shall choose a power level lower than or equal to the one specified by the
+#: Host." Whether it can exceed the default was not measured, so the request is
+#: judged. Zephyr's own host asks for no level (subsys/bluetooth/host/adv.c sets
+#: ``BT_HCI_LE_ADV_TX_POWER_NO_PREF``), so only a call by hand reaches it.
+SDC_EXT_ADV = Member("adv_tx_power", ("sdc_hci_cmd_le_set_ext_adv_params_t",
+                                      "sdc_hci_cmd_le_set_ext_adv_params_v2_t"))
+#: Advertising_TX_Power 127: the host asks for no level, and the controller keeps
+#: its own (ESP-IDF's ``EXT_ADV_TX_PWR_NO_PREFERENCE``, esp_gap_ble_api.h; NimBLE's
+#: periodic advertising walkthrough at v5.5.6: "tells the controller to use its
+#: default TX power"). It moves nothing.
+NO_PREFERENCE = 127
+_NO_PREFERENCE_NAMES = ("EXT_ADV_TX_PWR_NO_PREFERENCE",)
+
+
 #: The closed table, first match wins.
 #:
 #: - **zephyr-ll**, Zephyr's own controller (ZMK's too): ``choice BT_CTLR_TX_PWR``
@@ -138,11 +187,13 @@ def _esp_dbm(name: str) -> int | None:
 #:   radio_nrf5_txp.h then sets ``RADIO_TXP_DEFAULT`` to the antenna value, which
 #:   hci_driver.c hands to ``sdc_default_tx_power_set``. ``BT_LL_SOFTDEVICE``
 #:   selects ``BT_CTLR_LE_POWER_CONTROL_SUPPORT``, so LE Power Control can be on.
+#:   An advertising set's power reaches it only by a call by hand (:data:`SDC_EXT_ADV`).
 #: - **esp-bt-ctrl**, ESP-IDF's BLE controller on ESP32-C3 and ESP32-S3:
 #:   ``choice BT_CTRL_DFT_TX_POWER_LEVEL`` (components/bt/controller/esp32c3/
 #:   Kconfig.in at v5.5.6, which esp32s3/Kconfig.in sources), default ``P9``, +9 dBm.
 #:   No Kconfig option raises it; ``esp_ble_tx_power_set`` and
-#:   ``esp_ble_tx_power_set_enhanced`` do (esp_bt.h).
+#:   ``esp_ble_tx_power_set_enhanced`` do (esp_bt.h), and so does an advertising
+#:   set's power (:data:`EXT_ADV`), with Bluedroid or NimBLE.
 #:
 #: *Rejected:* ESP-IDF's BT_LE family (ESP32-C2, C5, C6, C61, H2) and the ESP32's
 #: BTDM controller, until each is checked against its own Kconfig; Wi-Fi (a build
@@ -153,10 +204,14 @@ PROFILES = (
             {}, "int"),
     Profile("ncs-sdc", "NCS's SoftDevice Controller", _zephyr_dbm,
             ("CONFIG_BT_CTLR_TX_PWR_DYNAMIC_CONTROL", "CONFIG_BT_CTLR_LE_POWER_CONTROL"),
-            {"sdc_default_tx_power_set": 0, "sdc_hci_cmd_vs_zephyr_write_tx_power": None},
+            {"sdc_default_tx_power_set": 0, "sdc_hci_cmd_vs_zephyr_write_tx_power": None,
+             "sdc_hci_cmd_le_set_ext_adv_params": SDC_EXT_ADV,
+             "sdc_hci_cmd_le_set_ext_adv_params_v2": SDC_EXT_ADV},
             "int"),
     Profile("esp-bt-ctrl", "ESP-IDF's BLE controller", _esp_dbm, (),
-            {"esp_ble_tx_power_set": 1, "esp_ble_tx_power_set_enhanced": 2}, "esp"),
+            {"esp_ble_tx_power_set": 1, "esp_ble_tx_power_set_enhanced": 2,
+             "esp_ble_gap_ext_adv_set_params": EXT_ADV, "ble_gap_ext_adv_configure": EXT_ADV},
+            "esp"),
 )
 
 #: Zephyr HCI drivers whose controller is in another image or chip (zephyr
@@ -259,8 +314,13 @@ def _reading(file: str, profile: Profile, values: dict, unset: frozenset) -> Rea
 # --------------------------------------------------------------------------- #
 #: The files the scan reads: C and C++ sources and headers, and Arduino sketches.
 SOURCE_SUFFIXES = (".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".ino")
-#: A word before a name that still makes it a call (``return esp_ble_tx_power_set(``).
-_CALL_WORDS = frozenset({"return", "else", "do", "case"})
+#: A word before a name that still makes it a use: a keyword that starts or joins
+#: an expression, never a type (``return esp_ble_tx_power_set(``; iso646.h's and
+#: C++'s ``if (on and esp_ble_tx_power_set(``). *Rejected:* reading any other word
+#: as an operator (a type is a word too, and a declaration is the one form the scan
+#: passes over).
+_CALL_WORDS = frozenset({"return", "else", "do", "case",
+                         "and", "or", "not", "xor", "bitand", "bitor", "compl"})
 
 
 class Call(NamedTuple):
@@ -307,10 +367,21 @@ def blank(text: str) -> str:
 
 def _declared(text: str, at: int) -> bool:
     """Whether the name at ``at`` is declared or defined there, not used: the token
-    before it is a type's word (``esp_err_t esp_ble_tx_power_set(``), on a line that
-    is not a ``#define``."""
+    just before it, on the name's own line, is a word that can name a type
+    (``esp_err_t esp_ble_tx_power_set(``), and that line is not a preprocessor
+    directive.
+
+    The word must be on the name's line. F2's scan walked back over newlines, so
+    it read the last word of a directive as a type: after ``#if CONFIG_LONG_RANGE``,
+    ``#ifdef X`` or ``#endif``, the call on the next line was passed over as a
+    declaration, and a +20 dBm setter read "no run-time path". A declaration whose
+    type is alone on the line before now counts as a use: its level is a
+    parameter's name, never a literal, so it can only move the verdict up. A ``*``
+    or ``&`` before the name makes it a use too (``on && esp_ble_tx_power_set(``
+    was passed over the same way): every setter here returns a status, never a
+    pointer or a reference, so no declaration of one has either."""
     j = at - 1
-    while j >= 0 and text[j] in " \t\r\n*&":
+    while j >= 0 and text[j] in " \t":
         j -= 1
     if j < 0 or not (text[j].isalnum() or text[j] == "_"):
         return False
@@ -319,8 +390,22 @@ def _declared(text: str, at: int) -> bool:
         k -= 1
     if text[k + 1:j + 1] in _CALL_WORDS:
         return False
-    line = text[text.rfind("\n", 0, at) + 1:at]
-    return re.match(r"\s*#\s*define\b", line) is None
+    return not _directive(text, at)
+
+
+def _directive(text: str, at: int) -> bool:
+    """Whether ``at`` is on a preprocessor directive's logical line: one that
+    starts with ``#``, or one that a backslash continues from such a line."""
+    start = text.rfind("\n", 0, at) + 1
+    while start > 0:
+        end = start - 1                       # the newline that ends the line before
+        if end > 0 and text[end - 1] == "\r":
+            end -= 1
+        if end > 0 and text[end - 1] == "\\":
+            start = text.rfind("\n", 0, end) + 1
+        else:
+            break
+    return text[start:at].lstrip().startswith("#")
 
 
 def _arguments(text: str, open_at: int) -> list[str] | None:
@@ -354,10 +439,12 @@ def _literal(arg: str, how: str) -> float | None:
     return float(int(m.group(1))) if m else None
 
 
-def scan(file: str, text: str, profile: Profile) -> list[Call]:
+def scan(file: str, text: str, profile: Profile, levels: dict | None = None) -> list[Call]:
     """Every use of ``profile``'s setters in one source: a call, with its literal
     level when it has one, or a bare name (an address taken, a macro alias), which
-    is never a literal."""
+    is never a literal. A call whose level is a :class:`Member` takes it from
+    ``levels`` (``{member name: Level}``, :func:`scan_sources` reads them); with
+    none, its level is no literal."""
     if not profile.setters:
         return []
     code = blank(text)
@@ -373,13 +460,165 @@ def scan(file: str, text: str, profile: Profile) -> list[Call]:
         if rest:
             args = _arguments(code, m.end() + rest.end() - 1)
             at = profile.setters[name]
-            if args is not None and at is not None and at < len(args):
+            if isinstance(at, Member):
+                level = (levels or {}).get(at.name)
+                if level is None:
+                    shown = f"{name}(...), its {at.name} not read"
+                else:
+                    dbm, shown = level.dbm, f"{name}(...), {level.said}"
+            elif args is not None and at is not None and at < len(args):
                 dbm = _literal(args[at], profile.literal)
                 shown = f"{name}(... {' '.join(args[at].split())[:40]})"
             else:
                 shown = f"{name}(...)"
         found.append(Call(file, line, name, dbm, f"{file}:{line} {shown}"))
     return found
+
+
+class Level(NamedTuple):
+    """The level a :class:`Member` asks for, read from the whole repository."""
+    #: The highest literal written to the member, or ``None``: a write the scan
+    #: cannot read as a literal.
+    dbm: float | None
+    said: str               # ``tx_power = 20 at main/adv.c:12``
+
+
+def scan_sources(code: dict[str, str], profile: Profile) -> list[Call]:
+    """:func:`scan` over every source in ``code`` (``{rel: text}``, from
+    :func:`sources`), each :class:`Member` level read once from all of them."""
+    blanked = {rel: blank(code[rel]) for rel in sorted(code)}
+    members = {at for at in profile.setters.values() if isinstance(at, Member)}
+    levels = {m.name: member_level(blanked, m) for m in sorted(members)}
+    return [c for rel in blanked for c in scan(rel, code[rel], profile, levels)]
+
+
+_MEMBER_INT = re.compile(r"^(?:\(\s*\w+\s*\)\s*)?\(?\s*([+-]?)\s*(0[xX][0-9a-fA-F]+|\d+)"
+                         r"\s*\)?$")
+#: A prefix ``++``, ``--`` or ``&`` before a member access, up to the member's name.
+_PREFIXED = (r"(\+\+|--|&)\s*[A-Za-z_]\w*(?:\s*(?:\.|->)\s*[A-Za-z_]\w*|\s*\[[^\]\n]*\])*"
+             r"\s*(?:\.|->)\s*")
+
+
+def _member_literal(value: str) -> float | None:
+    """A member's value as C writes a literal: decimal, octal or hex, signed, cast
+    or in parentheses, or the no-preference name; ``None`` otherwise."""
+    if re.match(r"^\(?\s*(" + "|".join(_NO_PREFERENCE_NAMES) + r")\s*\)?$", value):
+        return float(NO_PREFERENCE)
+    m = _MEMBER_INT.match(value)
+    if m is None:
+        return None
+    digits = m.group(2)
+    base = 16 if digits[:2] in ("0x", "0X") else 8 if len(digits) > 1 and digits[0] == "0" \
+        else 10
+    try:
+        number = int(digits, base)
+    except ValueError:                        # ``09``: no C literal
+        return None
+    return float(-number if m.group(1) == "-" else number)
+
+
+def _expression(text: str, start: int) -> str:
+    """The expression that starts at ``start``: up to a top-level ``,`` or ``;``,
+    or the bracket that closes the one it sits in."""
+    depth = 0
+    for i in range(start, len(text)):
+        c = text[i]
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                return text[start:i].strip()
+            depth -= 1
+        elif c in ",;" and depth == 0:
+            return text[start:i].strip()
+    return text[start:].strip()
+
+
+def _items(body: str) -> list[str]:
+    """The top-level, comma-separated items of an initializer's body."""
+    items, depth, start = [], 0, 0
+    for i, c in enumerate(body):
+        if c in "([{":
+            depth += 1
+        elif c in ")]}":
+            depth -= 1
+        elif c == "," and depth == 0:
+            items.append(body[start:i])
+            start = i + 1
+    items.append(body[start:])
+    return [s.strip() for s in items if s.strip()]
+
+
+def _by_position(body: str) -> bool:
+    """Whether an initializer's body (an array's, element by element) sets a
+    member by its position rather than by its name. ``{0}`` and ``{}`` clear the
+    struct, and set no member by position."""
+    items = _items(body)
+    inner = [re.sub(r"^\[[^\]]*\]\s*=\s*", "", s) for s in items]
+    if inner and all(s.startswith("{") and s.endswith("}") for s in inner):
+        return any(_by_position(s[1:-1]) for s in inner)       # an array of structs
+    return items not in ([], ["0"]) and not all(s.startswith(".") for s in items)
+
+
+def member_level(blanked: dict[str, str], member: Member) -> Level:
+    """The highest level any write to ``member`` asks for in the repository's
+    sources (``{rel: text}``, comments and strings blanked).
+
+    Every write to a member of that name counts, whatever struct holds it: the
+    scan cannot tell structs apart, and a write it reads that was not the call's
+    only moves the verdict up. 127 asks for no level. A struct cleared and never
+    written asks for 0 dBm, so 0 dBm always counts. The level is not a literal
+    when a write is not one (a variable, an expression, ``+=``, ``++``), when the
+    member's address is taken, or when a struct of the call's types is initialized
+    by position, which sets the member without naming it."""
+    best, said = 0.0, f"{member.name} 0 dBm, as a cleared struct asks"
+    name = re.escape(member.name)
+    write = re.compile(r"(?:\.|->)\s*" + name + r"\b\s*(<<=|>>=|\+\+|--|[-+*/%&|^]?=(?!=))")
+    address = re.compile(_PREFIXED + name + r"\b")
+    types = "|".join(re.escape(t) for t in member.types)
+    positional = re.compile(r"\b(?:struct\s+)?(" + types + r")\b\s*(?:\)\s*\{|[^;{}()=]*=\s*\{)")
+    for rel, code in blanked.items():
+        for m in write.finditer(code):
+            if m.group(1) != "=":
+                return Level(None, f"{member.name} {m.group(1)} at {_where(rel, code, m.start())}")
+            value = _expression(code, m.end())
+            v = _member_literal(value)
+            shown = " ".join(value.split())[:40]
+            if v is None:
+                return Level(None, f"{member.name} = {shown} at {_where(rel, code, m.start())}")
+            if v != NO_PREFERENCE and v > best:
+                best, said = v, f"{member.name} = {shown} at {_where(rel, code, m.start())}"
+        for m in address.finditer(code):
+            op = m.group(1)
+            before = code[:m.start()].rstrip()
+            if op == "&" and before and (before[-1].isalnum() or before[-1] in "_)]&"):
+                continue                      # a binary ``&``, not an address taken
+            return Level(None, f"{member.name} {'address taken' if op == '&' else op} "
+                               f"at {_where(rel, code, m.start())}")
+        for m in positional.finditer(code):
+            body = _braced(code, m.end() - 1)
+            if body is None or _by_position(body):
+                return Level(None, f"{m.group(1)} initialized by position at "
+                                   f"{_where(rel, code, m.start())}, its {member.name} not named")
+    return Level(best, said)
+
+
+def _where(rel: str, code: str, pos: int) -> str:
+    return f"{rel}:{code.count(chr(10), 0, pos) + 1}"
+
+
+def _braced(text: str, open_at: int) -> str | None:
+    """The body of the brace block whose ``{`` is at ``open_at``, or ``None`` when
+    it is not closed."""
+    depth = 0
+    for i in range(open_at, len(text)):
+        if text[i] in "([{":
+            depth += 1
+        elif text[i] in ")]}":
+            depth -= 1
+            if depth == 0:
+                return text[open_at + 1:i]
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -408,14 +647,26 @@ def judge(reading: Reading, calls: list[Call]) -> Judged:
     literal = [c for c in calls if c.dbm is not None]
     if literal:
         top = max(literal, key=lambda c: c.dbm)
-        level = top.dbm if reading.ceiling is None else min(top.dbm, reading.ceiling)
+        # The SoC's options cap a literal, as the controller caps it, only with no
+        # front-end module. With one, NCS's level is antenna-referenced and the
+        # SoC's and the module's gains are split to reach it (sdk-nrfxlib v3.4.2
+        # softdevice_controller/CHANGELOG.rst, NCS v2.1.0, KRKNWK-13714: "To achieve
+        # higher output powers on the antenna, the user must call the appropriate
+        # API"; Zephyr's BT_CTLR_TX_PWR_ANTENNA help). F2 capped it anyway, so
+        # sdc_default_tx_power_set(20) beside a +8 dBm SoC read +8 and passed a
+        # 10 dBm grant. *Rejected:* undetermined for a literal over the SoC's
+        # ceiling (the setting is the request, and the request is known).
+        capped = reading.ceiling is not None and not reading.fem
+        level = min(top.dbm, reading.ceiling) if capped else top.dbm
         if level > floor:
             floor = level
             said.append(f"{top.said} sets {dbm(level)}")
     raised = list(reading.raisers) + [c.said for c in calls if c.dbm is None]
     value: float | None = floor
     if reading.ceiling is not None:
-        said.append(f"ceiling {dbm(reading.ceiling)}")
+        said.append(f"ceiling {dbm(reading.ceiling)}" if not reading.fem else
+                    f"the SoC's ceiling {dbm(reading.ceiling)}, before the front-end "
+                    f"module's gain")
     if raised:
         what = raised[0] + (f" and {len(raised) - 1} more" if len(raised) > 1 else "")
         if reading.fem:

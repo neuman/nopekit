@@ -84,12 +84,18 @@ A gate whose prerequisite did not pass reads Skipped.
   Control, or a setter call in the repository's C sources (`esp_ble_tx_power_set`,
   `esp_ble_tx_power_set_enhanced`, `sdc_default_tx_power_set`,
   `sdc_hci_cmd_vs_zephyr_write_tx_power`). A setter whose level is a literal is
-  judged at that literal. It **fails** when the judged setting is past the claim's
+  judged at that literal, capped at the ceiling; with a front-end module the level
+  is antenna-referenced, and it is judged as asked for. An advertising set's power
+  (`esp_ble_gap_ext_adv_set_params`, `ble_gap_ext_adv_configure`,
+  `sdc_hci_cmd_le_set_ext_adv_params`) is the member of the struct the call is
+  handed: the scan reads every write to that member in the sources, and judges the
+  highest literal (127, no preference, moves nothing) or, when a write is not a
+  literal, the ceiling. It **fails** when the judged setting is past the claim's
   limit. Where the ceiling cannot be known (an antenna-referenced NCS setting, a
-  front-end module), a setting that alone passes is skipped as undetermined and
-  names the conducted measurement. Any other stack skips by name: ESP-IDF's BT_LE
-  family (ESP32-C2, C5, C6, C61, H2), the ESP32's BTDM controller, a host whose
-  controller is in another image or chip, and a stack with no Kconfig.
+  front-end module), a path beside a setting that alone passes is skipped as
+  undetermined and names the conducted measurement. Any other stack skips by name:
+  ESP-IDF's BT_LE family (ESP32-C2, C5, C6, C61, H2), the ESP32's BTDM controller, a
+  host whose controller is in another image or chip, and a stack with no Kconfig.
 
 A tool fault is errored, never a fail: a step before the build that fails, act or
 docker stopping, a timeout (1800 s), a compiler the machine stopped (OOM, an internal
@@ -185,10 +191,12 @@ trace cannot see into, so they run again on every check at tier 1 or above.
   reachable setting is a physical claim (`nopekit claim physical`); it is also the
   route for every stack the gate skips.
 - A transmit setter reached by indirection: a library outside the repository, a
-  Zephyr or NCS module, a raw HCI command (an advertising set's requested power, a
-  vendor command) from the app or an external host. The scan reads the names in
-  the repository's own C and C++ files, and a call the build does not compile
-  still counts.
+  Zephyr or NCS module, an HCI command that an external host sends or that an app
+  builds by hand for the Zephyr host (`bt_hci_cmd_create`). The scan reads the
+  names in the repository's own C and C++ files, and a call the build does not
+  compile still counts. An advertising set's power is read by its member's name: a
+  struct filled by copying bytes, or initialized by position through a type alias,
+  is not read.
 - Design lines for PlatformIO, Arduino, QMK, ESP-IDF's partition check and generic
   GCC errors read errored until their log excerpts are committed.
 - Profiles other than the baseline's (ZMK, the address route, the vector check) are

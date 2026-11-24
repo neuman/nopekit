@@ -1420,6 +1420,24 @@ class TheTransmitRuleReadsTheConfig(unittest.TestCase):
         self.assertEqual((j.floor, j.value), (3.0, None))
         self.assertIn("front-end module", j.said)
 
+    def test_a_front_end_module_leaves_a_literal_uncapped(self):
+        """With a front-end module NCS's level is antenna-referenced, and the SoC's
+        options do not cap it (sdk-nrfxlib's CHANGELOG, NCS v2.1.0). F2 capped the
+        literal at the SoC's +4 dBm, so a firmware that asks for +20 dBm at the
+        antenna passed a 10 dBm grant."""
+        text = NCS_SDC.replace("# CONFIG_MPSL_FEM is not set", "CONFIG_MPSL_FEM=y")
+        lit = [T.Call("src/main.c", 2, "sdc_default_tx_power_set", 20.0,
+                      "src/main.c:2 sdc_default_tx_power_set(... 20)")]
+        j = T.judge(self._read("ncs", text), lit)
+        self.assertEqual((j.floor, j.value), (20.0, 20.0))
+        self.assertIn("sets +20 dBm; the SoC's ceiling +4 dBm, before the front-end "
+                      "module's gain", j.said)
+        j = T.judge(self._read("ncs", NCS_SDC), lit)
+        self.assertEqual((j.floor, j.value), (4.0, 4.0), "with no module, the SoC caps it")
+        low = [lit[0]._replace(dbm=2.0)]
+        self.assertEqual(T.judge(self._read("ncs", text), low).value, 3.0,
+                         "a literal under the setting moves nothing")
+
     def test_a_config_with_no_option_chosen_or_two_is_errored(self):
         text = _config("esp32s3_baseline.sdkconfig")
         none = _swap(text, "CONFIG_BT_CTRL_DFT_TX_POWER_LEVEL_P6=y",
@@ -1497,6 +1515,29 @@ class TheSetterScanReadsTheSources(unittest.TestCase):
                 'esp_err_t esp_ble_tx_power_set(esp_ble_power_type_t t, esp_power_level_t l);\n'
                 'extern esp_err_t esp_ble_tx_power_set_enhanced(int, uint16_t, int);\n')
         self.assertEqual(T.scan("main/a.c", code, self.ESP), [])
+        # Inverted: the word before the name on another line, the last word of a
+        # directive, or one an operator joins, is no type. F2's scan walked back over
+        # newlines and read CONFIG_LONG_RANGE, X and endif as types, so a +20 dBm
+        # call under an #if read as a declaration and the gate passed at +6 dBm.
+        call = "    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P20);\n"
+        cases = {
+            "after #if": "void app_main(void)\n{\n#if CONFIG_LONG_RANGE\n" + call + "#endif\n}\n",
+            "after #ifdef": "void app_main(void)\n{\n#ifdef X\n" + call + "#endif\n}\n",
+            "after #endif": "void app_main(void)\n{\n#if 0\n#endif\n" + call + "}\n",
+            "after a continued #if": ("void app_main(void)\n{\n#if defined(A) && \\\n    B\n"
+                                      + call + "#endif\n}\n"),
+            "after &&": ("void f(void)\n{\n    if (on && esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_"
+                         "DEFAULT, ESP_PWR_LVL_P20)) {}\n}\n"),
+            "after and": ("void f(void) { if (on and esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT,"
+                          " ESP_PWR_LVL_P20)) {} }\n"),
+        }
+        for label, text in cases.items():
+            with self.subTest(case=label):
+                self.assertEqual([c.dbm for c in T.scan("main/a.c", text, self.ESP)], [20.0])
+        split = "esp_err_t\nesp_ble_tx_power_set(esp_ble_power_type_t t, esp_power_level_t l);\n"
+        self.assertEqual([c.dbm for c in T.scan("main/a.c", split, self.ESP)], [None],
+                         "a type on the line before is not read: a use with no literal, "
+                         "which can only move the verdict up")
 
     def test_a_level_that_is_not_a_literal_and_a_name_used_bare(self):
         code = ("int g(esp_power_level_t lvl)\n"
@@ -1521,6 +1562,64 @@ class TheSetterScanReadsTheSources(unittest.TestCase):
                           ("sdc_hci_cmd_vs_zephyr_write_tx_power", None)])
         self.assertEqual(T.scan("src/main.c", code, T.PROFILES[0]), [],
                          "Zephyr's LL has no setter: its path is Kconfig's")
+
+    def test_an_advertising_sets_power_is_read_from_its_member(self):
+        """ESP-IDF v5.5.6: an advertising set's ``tx_power`` has priority over the
+        Kconfig default on ESP32-C3/S3 (esp_gap_ble_api.h), with Bluedroid's
+        ``esp_ble_gap_ext_adv_set_params`` or NimBLE's ``ble_gap_ext_adv_configure``.
+        F2 read neither call, so a +20 dBm set beside a +6 dBm default passed."""
+        r = T.classify("sdkconfig", _config("esp32s3_baseline.sdkconfig"))
+        bluedroid = ("static esp_ble_gap_ext_adv_params_t adv = {\n"
+                     "    .type = ESP_BLE_GAP_SET_EXT_ADV_PROP_LEGACY_IND,\n"
+                     "    .peer_addr = {0},\n    .tx_power = 20,\n};\n"
+                     "void f(void) { esp_ble_gap_ext_adv_set_params(0, &adv); }\n")
+        nimble = ("void f(void)\n{\n    struct ble_gap_ext_adv_params params;\n"
+                  "    memset(&params, 0, sizeof(params));\n    params.tx_power = 0x14;\n"
+                  "    ble_gap_ext_adv_configure(1, &params, NULL, on_gap, NULL);\n}\n")
+        cases = {
+            "Bluedroid, a literal": (bluedroid, 20.0, 20.0, "tx_power = 20 at main/adv.c:4"),
+            "NimBLE, a hex literal": (nimble, 20.0, 20.0, "tx_power = 0x14 at main/adv.c:5"),
+            "no preference (127)": (bluedroid.replace("= 20,", "= EXT_ADV_TX_PWR_NO_PREFERENCE,"),
+                                    6.0, 6.0, "as a cleared struct asks"),
+            "no preference (0x7f)": (nimble.replace("0x14", "0x7f"), 6.0, 6.0, "cleared"),
+            "never written: cleared, 0 dBm": (nimble.replace("    params.tx_power = 0x14;\n", ""),
+                                              6.0, 6.0, "cleared"),
+            "a variable": (nimble.replace("0x14", "level"), 6.0, 20.0, "tx_power = level"),
+            "a compound assignment": (nimble.replace("= 0x14", "+= 3"), 6.0, 20.0, "tx_power +="),
+            "its address taken": (nimble.replace("params.tx_power = 0x14;",
+                                                 "pick(&params.tx_power);"),
+                                  6.0, 20.0, "address taken"),
+            "initialized by position": (
+                "static esp_ble_gap_ext_adv_params_t adv = {1, 0x20, 0x20, 7, 0, 0, {0}, 0, 9};\n"
+                "void f(void) { esp_ble_gap_ext_adv_set_params(0, &adv); }\n",
+                6.0, 20.0, "initialized by position"),
+            "an array, each named": (
+                "esp_ble_gap_ext_adv_params_t s[2] = {{.tx_power = 3}, {.tx_power = 127}};\n"
+                "void f(void) { esp_ble_gap_ext_adv_set_params(0, &s[0]); }\n",
+                6.0, 6.0, "tx_power = 3 at main/adv.c:1"),
+        }
+        for label, (text, floor, value, said) in cases.items():
+            with self.subTest(case=label):
+                calls = T.scan_sources({"main/adv.c": text}, self.ESP)
+                self.assertEqual(len(calls), 1, calls)
+                self.assertIn(said, calls[0].said)
+                j = T.judge(r, calls)
+                self.assertEqual((j.floor, j.value), (floor, value), j.said)
+        # Every write in the repository counts, whatever file holds it: the struct
+        # the call is handed can be filled anywhere.
+        calls = T.scan_sources({"main/adv.c": "void f(void) { esp_ble_gap_ext_adv_set_params"
+                                              "(0, &adv); }\n",
+                                "main/cfg.c": "esp_ble_gap_ext_adv_params_t adv = "
+                                              "{ .tx_power = 18 };\n"}, self.ESP)
+        self.assertEqual([(c.file, c.dbm) for c in calls], [("main/adv.c", 18.0)])
+        alone = T.scan("main/adv.c", bluedroid, self.ESP)
+        self.assertEqual([c.dbm for c in alone], [None],
+                         "the call alone, its member not read, is a path with no literal")
+        self.assertIn("its tx_power not read", alone[0].said)
+        sdc = ("static sdc_hci_cmd_le_set_ext_adv_params_t p = { .adv_tx_power = 8 };\n"
+               "void g(void) { sdc_hci_cmd_le_set_ext_adv_params(&p, &rsp); }\n")
+        self.assertEqual([c.dbm for c in T.scan_sources({"src/adv.c": sdc}, self.SDC)], [8.0],
+                         "the SoftDevice Controller's own call, by hand")
 
     def test_a_setter_moves_the_judged_value_up_never_down(self):
         r = T.classify("sdkconfig", _config("esp32s3_baseline.sdkconfig"))
@@ -1717,6 +1816,35 @@ class TheTxGateReadsOneReplay(unittest.TestCase):
         self.assertEqual((v.passed, v.measured), (False, 20.0), v.detail)
         self.assertIn("main/main.c:", v.detail)
         self.assertIn("can raise it to the ceiling: judged at +20 dBm", v.detail)
+
+    def test_a_call_under_an_if_and_an_advertising_sets_power_reach_the_gate(self):
+        """Review of F2: the gate passed at the +6 dBm default beside a +20 dBm
+        setter under ``#if``, and beside an advertising set asking for +18 dBm in a
+        header of the repository's own."""
+        main = os.path.join(self.app, "main", "main.c")
+        with open(main, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(main, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("    esp_deep_sleep_start();\n",
+                                  "#if CONFIG_LONG_RANGE\n    esp_ble_tx_power_set("
+                                  "ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P20);\n#endif\n"
+                                  "    esp_deep_sleep_start();\n"))
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")})
+        self.assertEqual((v.passed, v.measured), (False, 20.0), v.detail)
+        self.assertIn("main/main.c:", v.detail)
+        with open(main, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("    esp_deep_sleep_start();\n",
+                                  "    esp_ble_gap_ext_adv_set_params(0, &ADV);\n"
+                                  "    esp_deep_sleep_start();\n"))
+        _write(self.app, "main/adv.h", "static esp_ble_gap_ext_adv_params_t ADV = {\n"
+                                       "    .tx_power = 18,\n};\n")
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")})
+        self.assertEqual((v.passed, v.measured), (False, 18.0), v.detail)
+        self.assertIn("tx_power = 18 at main/adv.h:2 sets +18 dBm", v.detail)
+        _write(self.app, "main/adv.h", "static esp_ble_gap_ext_adv_params_t ADV = {\n"
+                                       "    .tx_power = EXT_ADV_TX_PWR_NO_PREFERENCE,\n};\n")
+        v = self._run(files={"sdkconfig": self._sdk("esp32s3_baseline.sdkconfig")})
+        self.assertEqual((v.passed, v.measured), (True, 6.0), "no preference moves nothing")
 
     def test_an_unknown_ceiling_over_a_passing_setting_is_undetermined(self):
         text = NCS_SDC.replace("CONFIG_BT_CTLR_TX_PWR_ANTENNA=0", "CONFIG_BT_CTLR_TX_PWR_ANTENNA=2")
