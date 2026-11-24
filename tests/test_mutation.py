@@ -2418,7 +2418,10 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     Relative to the original 79: SIMP adds volume (conclusive), an input guard
     (no boundary) and the two ccx gates; PCB adds two conclusive, one with none
     and one with no boundary; ZMK adds one with none and three with no boundary;
-    fdm.slice adds one conclusive and cad.clearance one with none. These are the
+    fdm.slice adds one conclusive and cad.clearance one with none; hand-ergonomics
+    (general-packs E1) adds ergo.digit_reach, conclusive on hand_grip_diameter_mm
+    (lands at 52 mm, the aimed run fails; its two lists are list leaves, not
+    walked, and the age moves nothing). These are the
     branch reviews' measurements, not totals guessed from only one branch.
     thermal.skin_temperature (general-packs T1) adds one conclusive, measured
     alone on 2026-11-24: eight leaves land and fail (shell_ambient_c,

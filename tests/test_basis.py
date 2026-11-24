@@ -76,6 +76,10 @@ BUNDLED_BASES: dict[str, str] = {
                               "solar.stagnation", "solar.irradiance",
                               "thermal.skin_temperature")},
     "thermal.h_agreement": "model-only",
+    # general-packs E1: a count of ANSUR 1988 subjects through the survey's own
+    # definitions (TR89-044 (125), (129), (130)); the girth term and the 20 deg
+    # posture tolerance are the pack's, named in its PACK.md.
+    "ergo.digit_reach": "sourced",
 }
 
 #: The bracket's own evaluators (a project, per gate).

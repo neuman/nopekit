@@ -1,0 +1,52 @@
+{
+  "name": "hand-ergonomics",
+  "version": "0.1.0",
+  "description": "Checks that a hand-held device's controls are within reach of the hands, counting ANSUR 1988 subjects one by one; proposes reach maps and design ranges.",
+  "settles": [
+    "thumb reach",
+    "finger reach",
+    "control reach",
+    "reach accommodation",
+    "digit reach accommodation",
+    "hand size accommodation",
+    "button placement",
+    "5th to 95th percentile"
+  ],
+  "claim_classes": [
+    "ergonomics",
+    "human-factors",
+    "reach",
+    "handheld",
+    "anthropometry"
+  ],
+  "provides_gates": [
+    "ergo.digit_reach"
+  ],
+  "provides_proposers": [
+    {
+      "id": "ergo.reach_envelope",
+      "basis": "sourced",
+      "description": "Maps where each grip's thumb and index finger reach, as a share of ANSUR 1988 subjects; counts controls of a pitch in reach; gives grip spacing and design ranges.",
+      "run": "proposers/reach_envelope.py"
+    }
+  ],
+  "provides_views": [],
+  "provides_generators": [],
+  "requires_tools": [],
+  "requires_python": [],
+  "max_tier": 0,
+  "lenses": [
+    "whose hand held the print",
+    "the smallest hand in the range",
+    "the grip you assumed",
+    "centre controls on a two-handed device",
+    "the width nobody questioned",
+    "what stands proud of the face",
+    "the largest insert in its open pose",
+    "two shipped products first",
+    "which controls were marked regrip"
+  ],
+  "licence": "Apache-2.0",
+  "origin": "built by the extension protocol from ANSUR 1988 (per-subject public files, NATICK/TR-89/044) and ANSUR II, after a hand-held device's printed enclosure that passed every geometry check was rejected in the hand",
+  "basis": "sourced"
+}

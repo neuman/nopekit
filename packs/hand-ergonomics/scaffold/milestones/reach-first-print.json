@@ -1,0 +1,6 @@
+{
+  "description": "Print the first full shell, with a dummy cap at every control, for the reach test: the reach claim only",
+  "requires": [
+    "REACH"
+  ]
+}

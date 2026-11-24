@@ -76,7 +76,11 @@ EXPLICIT_FILES = (
 )
 
 #: Globbed because every file they match ships to an agent as instructions.
-SHIPPED_GLOBS = ("skills/*/SKILL.md", "packs/*/PACK.md", "packs/*/references/*.md")
+#: ``packs/*/skills/*/SKILL.md`` joined in general-packs E1, with the first pack
+#: skill (hand-ergonomics' ``reach-testing``): `nopekit packs skills` prints it to
+#: the agent, and its `claim physical` lines were parsed by nothing before.
+SHIPPED_GLOBS = ("skills/*/SKILL.md", "packs/*/PACK.md", "packs/*/references/*.md",
+                 "packs/*/skills/*/SKILL.md")
 
 #: The fewest commands the real file list must yield. A checker that extracts
 #: nothing passes everything, so the count is asserted, not assumed. Measured

@@ -873,7 +873,10 @@ REMOVED_NAME_DOCS = (
     "docs/SPINE_CONTRACT.md", "docs/PACK_FORMAT.md", "docs/SITE_CONTRACT.md",
     "docs/EXTENSION_PROTOCOL.md",
 )
-REMOVED_NAME_GLOBS = ("skills/*/SKILL.md", "packs/*/PACK.md", "packs/*/references/*.md")
+#: ``packs/*/skills/*/SKILL.md`` too (general-packs E1): a pack skill is printed to the
+#: agent by `nopekit packs skills`, so a removed name misleads from it as much.
+REMOVED_NAME_GLOBS = ("skills/*/SKILL.md", "packs/*/PACK.md", "packs/*/references/*.md",
+                      "packs/*/skills/*/SKILL.md")
 
 
 def _removed_pattern(name: str) -> re.Pattern:

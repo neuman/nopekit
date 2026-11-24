@@ -1,0 +1,7 @@
+{
+  "description": "The reach part of the order that freezes the control positions: the count and the held print. Add the board's own claims before you spend",
+  "requires": [
+    "REACH",
+    "REACH-HELD"
+  ]
+}

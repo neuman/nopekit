@@ -1,0 +1,8 @@
+{
+  "statement": "Each handle is held with the middle finger at the declared grip centre and the hand along the declared hand axis",
+  "kind": "assumption",
+  "rationale": "every wrist point in the reach count sits behind the declared grip; a hand that holds the handle elsewhere moves every reach with it",
+  "mechanism": {
+    "how": "Watch the two testers of REACH-HELD pick up the first full print without being told how: a hand that settles away from the marked grip centre, or along another axis, fails this"
+  }
+}
