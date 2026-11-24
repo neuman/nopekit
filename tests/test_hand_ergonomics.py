@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
-"""hand-ergonomics (general-packs E1): ``ergo.digit_reach`` and ``ergo.reach_envelope``.
+"""hand-ergonomics (general-packs E1, E2): ``ergo.digit_reach``, ``ergo.layout_agrees``
+and ``ergo.reach_envelope``.
 
 The pack counts ANSUR 1988 subjects, one by one, whose thumb or index finger reaches
 every control pressed from a grip. Each class holds one thing the design promised
@@ -23,9 +24,20 @@ and the place it would slip:
   same bytes, nothing lands outside its directory, and a boundary is the last whole
   step that holds, below zero too.
 * **The scaffold reads** (``TheScaffoldIsRecords``).
+* **The layout is the drawn one** (``TheLayoutIsTheDrawnOne``, E2): every control
+  both ways, every cap within 0.5 mm, no handle thicker than declared (one-sided,
+  read by the outer loop of the section, across two half shells), and the
+  refusals; the stale scene hides a reach fail (94.33% drawn, 97.96% declared).
+* **cad-solid's assembly is the scene** (``CadSolidsAssemblyIsTheScene``): its mesh
+  map and the GLB its own ``assembly`` view writes both serve, on cad-solid's node
+  names, copied and held to cad-solid's own on the same names.
+* **The reach claim waits for both gates** (``TheReachClaimWaitsForBoth``), through
+  ``check`` on the wrapped baseline.
 
-Full suite only (not ``tests/fast.py``): the wrapped-project class runs ``check``
-three times. The rest is in process and runs in a few seconds.
+The layout classes need trimesh, NumPy and manifold3d, as the gate does, and are
+skipped, saying so, where they are absent; the wrapped projects then assert the
+claim reads Skipped. Full suite only (not ``tests/fast.py``): the wrapped-project
+classes run ``check`` several times. The rest is in process and runs in seconds.
 """
 from __future__ import annotations
 
@@ -50,14 +62,33 @@ from nopekit import packs as packs_mod
 from nopekit import store
 from nopekit.modelio import load_path
 from nopekit.models import ClaimKind
+from nopekit.util import NopekitError
 
 PACK = os.path.join(_env.REPO, "packs", "hand-ergonomics")
 DATA = os.path.join(PACK, "gates", "data")
 A = load_path(os.path.join(PACK, "gates", "_anthro.py"))
 DERIVE = load_path(os.path.join(DATA, "derive_hand_table.py"))
 FIXTURES = load_path(os.path.join(PACK, "selftest", "bad_layouts.py"))
+BUILD = load_path(os.path.join(PACK, "selftest", "make_handheld_glb.py"))
 PROPOSER = os.path.join(PACK, "proposers", "reach_envelope.py")
 GID = "ergo.digit_reach"
+LAYOUT = "ergo.layout_agrees"
+
+
+def _mesh_libraries() -> bool:
+    """trimesh, NumPy and manifold3d, as ``ergo.layout_agrees`` requires them."""
+    try:
+        import manifold3d  # noqa: F401
+        import numpy  # noqa: F401
+        import trimesh  # noqa: F401
+    except Exception:                                    # noqa: BLE001
+        return False
+    return True
+
+
+MESH_LIBRARIES = _mesh_libraries()
+NEEDS_MESH = unittest.skipUnless(MESH_LIBRARIES, "needs trimesh, numpy and manifold3d, as "
+                                                 "ergo.layout_agrees does")
 
 
 def _provenance() -> dict:
@@ -457,33 +488,399 @@ class OutsideTheSurveyAPassDoesNotCount(_Gate):
         self.assertIn("youngest age not stated", found.detail)
 
     def test_check_reads_gap_outside_and_failing_on_a_fail(self):
+        """``check --tier 1``: the claim tagged digit-reach is covered by both gates
+        (E2), so the layout guard must run too. Where it cannot (no trimesh, as on
+        CI), the claim reads Skipped beside the pass outside the context: a skip
+        is louder than a Gap (invariant 1), and a fail still reads Failing."""
+        layout_runs = gates_mod.availability(_registry().get(LAYOUT)[0])[0]
         project = _projects.wrap_pack_baseline("hand-ergonomics",
                                                os.path.join(self.tmp(), "w"))
-        proc = _env.nopekit(["check"], cwd=project)
-        self.assertEqual(proc.returncode, 0, proc.stdout[-2000:] + proc.stderr[-2000:])
+        proc = _env.nopekit(["check", "--tier", "1"], cwd=project)
+        self.assertEqual(proc.returncode, 0 if layout_runs else 1,
+                         proc.stdout[-2000:] + proc.stderr[-2000:])
         model = os.path.join(project, "model", "wrap.py")
         with open(model, encoding="utf-8") as fh:
             text = fh.read()
         self.assertEqual(text.count("'hand_grip_diameter_mm': 36,"), 1)
         with open(model, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text.replace("'hand_grip_diameter_mm': 36,", "'hand_grip_diameter_mm': 60,"))
-        claim_path = os.path.join(project, "claims", "G1.json")
-        with open(claim_path, encoding="utf-8") as fh:
-            claim = json.load(fh)
+        # G1 is the reach gate's claim and G2 the guard's; both carry the tag
+        # digit-reach, so the limit moves on both, or the reach gate reads two
+        # conditions for one tag and errors.
+        claims = {}
+        for cid in ("G1", "G2"):
+            with open(os.path.join(project, "claims", f"{cid}.json"), encoding="utf-8") as fh:
+                claims[cid] = json.load(fh)
+            self.assertIn("digit-reach", claims[cid]["tags"])
 
         def status(limit):
-            claim["acceptance"]["limit"] = limit
-            with open(claim_path, "w", encoding="utf-8") as fh:
-                json.dump(claim, fh, indent=2)
-            _env.nopekit(["check"], cwd=project)
+            for cid, claim in claims.items():
+                claim["acceptance"]["limit"] = limit
+                with open(os.path.join(project, "claims", f"{cid}.json"), "w",
+                          encoding="utf-8") as fh:
+                    json.dump(claim, fh, indent=2)
+            _env.nopekit(["check", "--tier", "1"], cwd=project)
             proc = _env.nopekit(["status", "--json"], cwd=project)
             return json.loads(proc.stdout)["statuses"]["G1"]
 
         outside = status(50.0)
-        self.assertEqual((outside["key"], outside["cause"]), ("gap", "outside-context"))
-        self.assertIn("hand_grip_diameter_mm = 60", outside["reason"])
+        if layout_runs:
+            self.assertEqual((outside["key"], outside["cause"]), ("gap", "outside-context"))
+            self.assertIn("hand_grip_diameter_mm = 60", outside["reason"])
+        else:
+            self.assertEqual((outside["key"], outside["cause"]), ("skipped", "skipped"))
+            self.assertIn(f"{LAYOUT} : requires python", outside["reason"])
         failing = status(95.0)
         self.assertEqual((failing["key"], failing["cause"]), ("failing", "failed"))
+
+
+# --------------------------------------------------------------------------- #
+class _Layout(_env.EnvCase):
+    """Runs ``ergo.layout_agrees`` in process on the pack's baseline, edited."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        spec, fn = _registry().get(LAYOUT)
+        cls.spec, cls.fn = spec, staticmethod(fn)
+
+    def baseline(self):
+        return packs_mod.baseline_context(PACK, out_dir=self.tmp())
+
+    def params(self) -> dict:
+        return copy.deepcopy(_projects.design_of(_projects.pack_baseline("hand-ergonomics")))
+
+    def run_on(self, params=None, *, root=None):
+        ctx = self.baseline()
+        if params is not None:
+            ctx = dataclasses.replace(ctx, params=params)
+        if root is not None:
+            ctx = dataclasses.replace(ctx, root=root)
+        return gates_mod.run_gate(self.spec, self.fn, ctx)
+
+    def evidence(self, verdict) -> dict:
+        [path] = verdict.evidence
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+
+    def meshes(self, *, stale=False, diameter=None) -> dict:
+        """The baseline's parts, ``{part: mesh}``, as the builder draws them."""
+        baseline = _projects.pack_baseline("hand-ergonomics")
+        if diameter is not None:
+            baseline = {**baseline, "hand_grip_diameter_mm": diameter}
+        return BUILD.parts(baseline, stale=stale)
+
+    def scene_file(self, meshes: dict) -> str:
+        """``meshes`` written as cad-solid's view writes a scene; its absolute path."""
+        path = os.path.join(self.tmp(), "scene.glb")
+        with open(path, "wb") as fh:
+            fh.write(BUILD.scene_of(meshes).export(file_type="glb"))
+        return path
+
+    def on_scene(self, meshes: dict, **edits):
+        return self.run_on({**self.params(), "hand_layout_scene": self.scene_file(meshes),
+                            **edits})
+
+    def right_handle(self, mesh):
+        """``mesh``, made along z about the origin, placed as the right handle."""
+        import numpy as np
+        import trimesh
+        grip = next(g for g in _projects.pack_baseline("hand-ergonomics")["hand_grips"]
+                    if g["id"] == "right")
+        axis, centre = BUILD.handle_placement(grip)
+        mesh.apply_transform(trimesh.geometry.align_vectors([0.0, 0.0, 1.0],
+                                                            np.asarray(axis)))
+        mesh.apply_translation(np.asarray(centre))
+        return mesh
+
+
+@NEEDS_MESH
+class TheLayoutIsTheDrawnOne(_Layout):
+    """The three checks, each shown to fail where it should and pass where the
+    design says it must (an asymmetric pair of handles, a hollow handle, a
+    handle in two shells)."""
+
+    def test_the_baseline_scene_agrees_and_the_stale_one_does_not(self):
+        good = self.run_on()
+        self.assertEqual((good.outcome, good.measured, good.limit, good.comparator, good.units),
+                         ("pass", 0.0, 0.5, "<=", "mm"))
+        self.assertIn("12 of 12 controls drawn, 0 drawn and not declared", good.detail)
+        self.assertIn("left 36.00 mm, right 36.00 mm across vs declared 36 mm + 1.0",
+                      good.detail)
+        self.assertIn("hand_layout_scene selftest/meshes/handheld.glb, 15 nodes", good.detail)
+        bad = gates_mod.run_gate(self.spec, self.fn, FIXTURES.stale_scene(self.baseline()))
+        self.assertEqual((bad.outcome, bad.measured, bad.units), ("fail", 3.0, "mm"))
+        self.assertIn("worst cap 3.00 mm off (btn_y, node ctl-btn_y__0)", bad.detail)
+        found = self.evidence(bad)
+        self.assertEqual(found["disagreements"], [], "nothing structural is wrong")
+        self.assertEqual(found["controls"]["btn_y"]["nodes"], ["ctl-btn_y__0"])
+
+    def test_the_stale_scene_hides_a_reach_fail(self):
+        """Why the guard exists: the reach gate counts the declared layout."""
+        reach_spec, reach_fn = _registry().get(GID)
+        declared = gates_mod.run_gate(reach_spec, reach_fn, self.baseline())
+        params = self.params()
+        drawn = BUILD.stale_at(_projects.pack_baseline("hand-ergonomics"))
+        for control in params["hand_controls"]:
+            if control["id"] == "btn_y":
+                control["at"] = drawn
+        actual = gates_mod.run_gate(reach_spec, reach_fn,
+                                    dataclasses.replace(self.baseline(), params=params))
+        self.assertEqual((declared.outcome, declared.measured), ("pass", 97.96))
+        self.assertEqual((actual.outcome, actual.measured), ("fail", 94.33))
+        params["hand_layout_scene"] = FIXTURES.STALE_SCENE
+        moved = self.run_on(params)
+        self.assertEqual((moved.outcome, moved.measured), ("pass", 0.0),
+                         "a layout that follows the drawing agrees with it")
+
+    def test_the_committed_scenes_are_the_baselines(self):
+        """``make_handheld_glb.py``'s output, compared as geometry: GLB bytes are not
+        stable across trimesh versions, a part's place and size are."""
+        import numpy as np
+        import trimesh
+        baseline = _projects.pack_baseline("hand-ergonomics")
+        for path, stale in ((BUILD.GOOD, False), (BUILD.STALE, True)):
+            built = BUILD.scene(baseline, stale=stale)
+            committed = trimesh.load(path, force="scene")
+            with self.subTest(scene=os.path.basename(path)):
+                self.assertEqual(sorted(committed.graph.nodes_geometry),
+                                 sorted(built.graph.nodes_geometry))
+                for node in built.graph.nodes_geometry:
+                    a = built.geometry[built.graph[node][1]]
+                    b = committed.geometry[committed.graph[node][1]]
+                    np.testing.assert_allclose(b.bounds, a.bounds, atol=1e-4, err_msg=node)
+                    np.testing.assert_allclose(b.centroid, a.centroid, atol=1e-4,
+                                               err_msg=node)
+                    self.assertAlmostEqual(b.volume, a.volume, delta=1e-2, msg=node)
+
+    def test_a_control_missing_from_either_side_is_a_disagreement(self):
+        params = self.params()
+        params["hand_controls"] = [c for c in params["hand_controls"] if c["id"] != "btn_y"]
+        found = self.run_on(params)
+        self.assertEqual((found.outcome, found.measured, found.limit, found.units),
+                         ("fail", 1.0, 0.0, "disagreements"))
+        self.assertIn("part ctl-btn_y (ctl-btn_y__0) is drawn and not declared in "
+                      "hand_controls", found.detail)
+        params = self.params()
+        params["hand_controls"].append({"id": "btn_z", "at": [46, -30, 3], "normal": [0, 0, 1],
+                                        "operated_by": [{"grip": "right", "digit": "thumb"}]})
+        found = self.run_on(params)
+        self.assertEqual((found.outcome, found.measured), ("fail", 1.0))
+        self.assertIn("control btn_z is declared and not drawn (no part ctl-btn_z, node "
+                      "ctl-btn_z__0)", found.detail)
+
+    def test_a_handle_thicker_than_declared_fails_and_a_larger_declaration_passes(self):
+        thin = self.run_on({**self.params(), "hand_grip_diameter_mm": 34})
+        self.assertEqual((thin.outcome, thin.measured, thin.units),
+                         ("fail", 2.0, "disagreements"))
+        self.assertIn("grip left's section is 36.00 mm across, more than the declared 34 mm "
+                      "+ 1.0", thin.detail)
+        self.assertEqual(self.run_on({**self.params(), "hand_grip_diameter_mm": 35}).outcome,
+                         "pass", "36.00 is the declared 35 mm + 1.0, not more")
+        self.assertEqual(self.run_on({**self.params(), "hand_grip_diameter_mm": 50}).outcome,
+                         "pass", "one-sided: a larger declared handle is conservative")
+        meshes = self.meshes()
+        meshes["handle-right"] = self.meshes(diameter=44)["handle-right"]
+        lopsided = self.on_scene(meshes)
+        self.assertEqual((lopsided.outcome, lopsided.measured), ("fail", 1.0))
+        self.assertIn("grip right's section is 44.00 mm across", lopsided.detail)
+        self.assertEqual(self.on_scene(meshes, hand_grip_diameter_mm=44).outcome, "pass",
+                         "two different handles pass when the larger is declared")
+
+    def test_a_hollow_handle_is_read_by_its_outer_loop(self):
+        import trimesh
+        meshes = self.meshes()
+        meshes["handle-right"] = self.right_handle(trimesh.creation.annulus(
+            r_min=15.0, r_max=18.0, height=38.0, sections=96))
+        self.assertEqual(self.on_scene(meshes).outcome, "pass")
+        thin = self.on_scene(meshes, hand_grip_diameter_mm=30)
+        self.assertEqual(thin.outcome, "fail", "the cavity's 30 mm loop is not the handle")
+        self.assertIn("grip right's section is 36.00 mm across", thin.detail)
+
+    def test_a_handle_in_two_shells_is_one_section(self):
+        """Two shells split 5 mm off the axis: the larger alone surrounds the centre
+        and reads about 32 mm; united in the plane they read the 36 mm handle."""
+        import manifold3d
+        import numpy as np
+        import trimesh
+        whole = manifold3d.Manifold.cylinder(38.0, 18.0, 18.0, 96, True)
+        shells = []
+        for half in whole.split_by_plane((1.0, 0.0, 0.0), 5.0):
+            out = half.to_mesh()
+            shells.append(self.right_handle(trimesh.Trimesh(
+                np.asarray(out.vert_properties)[:, :3], np.asarray(out.tri_verts))))
+        meshes = self.meshes()
+        meshes["handle-right"], meshes["handle-right-shell"] = shells
+        self.assertEqual(self.on_scene(meshes).outcome, "pass")
+        thin = self.on_scene(meshes, hand_grip_diameter_mm=34)
+        self.assertIn("grip right's section is 36.00 mm across", thin.detail)
+
+    def test_a_grip_centre_outside_its_handle_is_a_disagreement(self):
+        params = self.params()
+        params["hand_grips"][1]["centre"] = [85, -50, -18]
+        found = self.run_on(params)
+        self.assertEqual((found.outcome, found.measured), ("fail", 1.0))
+        self.assertIn("no drawn part surrounds grip right's centre", found.detail)
+
+    def test_the_guard_cannot_be_the_reach_gates_prerequisite(self):
+        """Why it covers the tag instead of a ``needs`` edge (NO_EDGE_YET)."""
+        registry = _registry()
+        spec, fn = registry.get(GID)
+        with self.assertRaises(NopekitError) as cm:
+            registry.register(dataclasses.replace(spec, needs=[LAYOUT]), fn, replace=True)
+        self.assertIn("costlier than its dependent", str(cm.exception))
+
+    def test_skips_and_refusals(self):
+        def edited(fn):
+            params = self.params()
+            fn(params)
+            return self.run_on(params)
+
+        cases = [
+            ("no controls", lambda p: p.pop("hand_controls"), "skipped", "no hand_controls"),
+            ("empty", lambda p: p.update(hand_controls=[]), "skipped", "declares no control"),
+            ("no scene", lambda p: p.pop("hand_layout_scene"), "skipped",
+             "no scene: the projection publishes neither hand_layout_scene"),
+            ("unreadable", lambda p: p.update(hand_layout_scene="selftest/meshes/none.glb"),
+             "skipped", "could not be read"),
+            ("no diameter", lambda p: p.pop("hand_grip_diameter_mm"), "skipped",
+             "no hand_grip_diameter_mm"),
+            ("no normal", lambda p: p["hand_controls"][3].pop("normal"), "error",
+             "control 'btn_a' has no normal"),
+            ("zero normal", lambda p: p["hand_controls"][3].update(normal=[0, 0, 0]),
+             "error", "zero vector"),
+            ("one part, two ids", lambda p: p["hand_controls"].append(
+                {"id": "btn y", "at": [37, -6, 3], "normal": [0, 0, 1],
+                 "operated_by": [{"grip": "right", "digit": "thumb"}]}),
+             "error", "both name part ctl-btn_y"),
+            ("bad diameter", lambda p: p.update(hand_grip_diameter_mm="36"), "error",
+             "it is a handle diameter in mm"),
+        ]
+        for name, fn, outcome, words in cases:
+            with self.subTest(case=name):
+                found = edited(fn)
+                self.assertEqual(found.outcome, outcome, found)
+                self.assertIn(words, found.skip_reason or found.error or "")
+        housing = {k: v for k, v in self.meshes().items() if not k.startswith("ctl-")}
+        found = self.on_scene(housing)
+        self.assertEqual(found.outcome, "skipped")
+        self.assertIn("draws no part named ctl-<id>", found.skip_reason)
+        meshes = self.meshes()
+        handle = meshes["handle-right"]
+        handle.update_faces(list(range(len(handle.faces) - 4)))      # four faces gone
+        found = self.on_scene(meshes)
+        self.assertEqual(found.outcome, "error")
+        # The section plane is unbounded: square to the shared handle axis, it
+        # passes through both grips, so the left grip's section meets it first.
+        self.assertIn("node handle-right__0 crosses the section and manifold3d built no "
+                      "solid from it", found.error)
+
+
+@NEEDS_MESH
+class CadSolidsAssemblyIsTheScene(_Layout):
+    """A project that publishes cad-solid's assembly gets the guard with no extra
+    export: the mesh map itself, or the GLB cad-solid's ``assembly`` view writes
+    from it, on cad-solid's node names (copied into ``gates/_names.py``, and held
+    to cad-solid's own here)."""
+
+    def write_parts(self, meshes: dict) -> dict:
+        here = self.tmp()
+        out = {}
+        for name, mesh in meshes.items():
+            path = os.path.join(here, f"{name}.stl")
+            mesh.export(path)
+            out[name] = path
+        return out
+
+    def test_the_copied_names_are_cad_solids(self):
+        """``gates/_names.py`` against cad-solid's ``cad_solid_parts.py``, on names
+        that exercise every rule: punctuation, ``__`` runs, an empty result, a
+        collision and its suffix, an unsorted list."""
+        names = load_path(os.path.join(PACK, "gates", "_names.py"))
+        cad = load_path(os.path.join(_env.REPO, "packs", "cad-solid", "cad_solid_parts.py"))
+        corpus = ["ctl-btn_y", "ctl-btn y", "ctl-btn__y", "end  cap", "back-left", "back left",
+                  "???", "", "bracket.v3", "_lid_", "ctl-stick_l", "housing", "ctl-ä", "a__0"]
+        for name in corpus:
+            self.assertEqual(names.sanitise(name), cad.sanitise(name), name)
+        for order in (corpus, list(reversed(corpus)), corpus[::2] + corpus[1::2]):
+            self.assertEqual(names.movers(order), cad.movers(order))
+        for body in (0, 1, 7):
+            self.assertEqual(names.node("ctl-btn_y", body), cad.node("ctl-btn_y", body))
+        self.assertEqual(names.MESH_KEYS, cad.MESH_KEYS)
+        module = sys.modules[self.fn.__module__]
+        self.assertFalse(hasattr(module, "PARTS"), "the gate reads no other pack's code")
+
+    def test_a_copy_that_drifts_is_caught(self):
+        """The test above, shown to fail: a copy that kept ``_`` runs."""
+        names = load_path(os.path.join(PACK, "gates", "_names.py"))
+        cad = load_path(os.path.join(_env.REPO, "packs", "cad-solid", "cad_solid_parts.py"))
+
+        def drifted(name):
+            return "".join(c if c in names._KEEP else "_" for c in str(name)).strip("_") or "part"
+
+        self.assertNotEqual(drifted("end  cap"), cad.sanitise("end  cap"))
+        self.assertEqual(names.sanitise("end  cap"), cad.sanitise("end  cap"))
+
+    def test_the_mesh_map_serves_with_no_extra_export(self):
+        bare = {k: v for k, v in self.params().items() if k != "hand_layout_scene"}
+        good, stale = self.write_parts(self.meshes()), self.write_parts(self.meshes(stale=True))
+        for key in ("meshes", "cad.meshes", "solids"):
+            with self.subTest(key=key):
+                found = self.run_on({**bare, key: good})
+                self.assertEqual((found.outcome, found.measured), ("pass", 0.0), found.detail)
+                self.assertEqual(self.evidence(found)["controls"]["btn_y"]["nodes"],
+                                 ["ctl-btn_y__0"])
+                moved = self.run_on({**bare, key: stale})
+                self.assertEqual((moved.outcome, moved.measured), ("fail", 3.0))
+
+    def test_the_assembly_views_own_glb_is_a_scene(self):
+        from nopekit import site as site_mod
+        registry = site_mod.ViewRegistry()
+        site_mod.load_viewgens(os.path.join(_env.REPO, "packs", "cad-solid", "views"),
+                               registry, pack="cad-solid", root=_env.REPO)
+        _spec, view = registry.get("assembly")
+        for stale, expect in ((False, ("pass", 0.0)), (True, ("fail", 3.0))):
+            here = self.tmp()
+            ctx = site_mod.ViewContext(root=here, assets_dir=os.path.join(here, "assets"),
+                                       params={"meshes": self.write_parts(
+                                           self.meshes(stale=stale))})
+            drawn = view(ctx)
+            found = self.run_on({**self.params(),
+                                 "hand_layout_scene": os.path.join(here, drawn.src)})
+            with self.subTest(stale=stale):
+                self.assertEqual((found.outcome, found.measured), expect, found.detail)
+
+
+# --------------------------------------------------------------------------- #
+class TheReachClaimWaitsForBoth(_env.EnvCase):
+    """Through ``check --tier 1`` on the wrapped baseline: with the scene one
+    revision ahead of the layout, the reach gate still passes at 97.96% and the
+    claim reads Failing on the guard's fail. Where the guard cannot run, the
+    claim reads Skipped, never Checked (invariant 1)."""
+
+    def test_a_reach_pass_on_a_stale_layout_is_never_checked(self):
+        layout_runs = gates_mod.availability(_registry().get(LAYOUT)[0])[0]
+        project = _projects.wrap_pack_baseline("hand-ergonomics",
+                                               os.path.join(self.tmp(), "w"))
+        model = os.path.join(project, "model", "wrap.py")
+        with open(model, encoding="utf-8") as fh:
+            text = fh.read()
+        scene = "'hand_layout_scene': 'selftest/meshes/handheld.glb'"
+        self.assertEqual(text.count(scene), 1)
+        with open(model, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text.replace(scene, scene.replace("handheld.glb", "handheld_stale.glb")))
+        proc = _env.nopekit(["check", "--tier", "1", "--json"], cwd=project)
+        self.assertEqual(proc.returncode, 1, proc.stdout[-2000:] + proc.stderr[-2000:])
+        rows = {row["gate"]: row for row in json.loads(proc.stdout)["verdicts"]}
+        self.assertEqual((rows[GID]["outcome"], rows[GID]["measured"]), ("pass", 97.96))
+        status = json.loads(_env.nopekit(["status", "--json"], cwd=project).stdout)["statuses"]
+        if layout_runs:
+            self.assertEqual((rows[LAYOUT]["outcome"], rows[LAYOUT]["measured"]), ("fail", 3.0))
+            self.assertEqual((status["G1"]["key"], status["G1"]["cause"]), ("failing", "failed"))
+            self.assertIn(LAYOUT, status["G1"]["reason"])
+        else:
+            self.assertEqual(rows[LAYOUT]["outcome"], "skipped")
+            self.assertEqual(status["G1"]["key"], "skipped")
 
 
 # --------------------------------------------------------------------------- #
@@ -614,10 +1011,12 @@ class TheScaffoldIsRecords(unittest.TestCase):
         self.assertEqual(claims["GRIP-POSTURE"].kind, ClaimKind.ASSUMPTION)
         self.assertEqual(claims["REACH-HELD"].kind, ClaimKind.PHYSICAL)
         self.assertEqual(claims["REACH-HELD"].resolves, ["GRIP-POSTURE"])
-        spec, _fn = _registry().get(GID)
-        self.assertTrue(set(spec.claims) & set(claims["REACH"].tags))
-        self.assertFalse(set(spec.claims) & set(claims["REACH-HELD"].tags),
-                         "a skip of the gate must never block the only way to settle it")
+        for gid in (GID, LAYOUT):
+            spec, _fn = _registry().get(gid)
+            self.assertTrue(set(spec.claims) & set(claims["REACH"].tags), gid)
+            self.assertIn(gid, claims["REACH"].evaluators)
+            self.assertFalse(set(spec.claims) & set(claims["REACH-HELD"].tags),
+                             f"a skip of {gid} must never block the only way to settle it")
         milestones = {m.id: m for m in (store.read_record(p, "milestones") for p in sorted(
             glob.glob(os.path.join(PACK, "scaffold", "milestones", "*.json"))))}
         self.assertEqual({k: m.requires for k, m in milestones.items()},

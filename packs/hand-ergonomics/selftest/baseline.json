@@ -1,5 +1,5 @@
 {
-  "_description": "A generic two-handled controller, computed for this pack and held in the device frame (x to the right as the user sees the face, y toward the top edge, z out of the face toward the user, mm). The body is 150 x 60 x 22 mm (x -75..75, y -40..20, z -22..0), with a 36 mm handle under each end, gripped at (+/-60, -50, -18). Each thumb works a stick, a pad or a cluster of four buttons and a small key near the middle; each index finger works a bumper on the top edge; a power key in the middle of the top edge is pressed after a regrip. Mirror-symmetric about x = 0. The users are 18 and older. ergo.digit_reach counts 97.96% of the 2,208 women and 99.71% of the 1,774 men of ANSUR 1988 reaching every judged control (btn_y limits for the women), against the claim's >= 95%.",
+  "_description": "A generic two-handled controller, computed for this pack and held in the device frame (x to the right as the user sees the face, y toward the top edge, z out of the face toward the user, mm). The body is 150 x 60 x 22 mm (x -75..75, y -40..20, z -22..0), with a 36 mm handle under each end, gripped at (+/-60, -50, -18). Each thumb works a stick, a pad or a cluster of four buttons and a small key near the middle; each index finger works a bumper on the top edge; a power key in the middle of the top edge is pressed after a regrip. Mirror-symmetric about x = 0. The users are 18 and older. ergo.digit_reach counts 97.96% of the 2,208 women and 99.71% of the 1,774 men of ANSUR 1988 reaching every judged control (btn_y limits for the women), against the claim's >= 95%. selftest/meshes/handheld.glb draws it (selftest/make_handheld_glb.py builds it from this file): ergo.layout_agrees finds every cap at its declared position and both handles 36 mm across.",
 
   "hand_grips": [
     {"id": "left", "centre": [-60, -50, -18], "hand_axis": [0.25, 0.75, -0.60], "handle_axis": [0, -0.625, -0.781]},
@@ -7,22 +7,23 @@
   ],
 
   "hand_controls": [
-    {"id": "stick_l", "at": [-40, -11, 8], "operated_by": [{"grip": "left", "digit": "thumb"}]},
-    {"id": "dpad", "at": [-26, -35, 3], "operated_by": [{"grip": "left", "digit": "thumb"}]},
-    {"id": "view", "at": [-18, -21, 1], "operated_by": [{"grip": "left", "digit": "thumb"}]},
-    {"id": "btn_a", "at": [37, -24, 3], "operated_by": [{"grip": "right", "digit": "thumb"}]},
-    {"id": "btn_b", "at": [46, -15, 3], "operated_by": [{"grip": "right", "digit": "thumb"}]},
-    {"id": "btn_x", "at": [28, -15, 3], "operated_by": [{"grip": "right", "digit": "thumb"}]},
-    {"id": "btn_y", "at": [37, -6, 3], "operated_by": [{"grip": "right", "digit": "thumb"}]},
-    {"id": "stick_r", "at": [26, -35, 8], "operated_by": [{"grip": "right", "digit": "thumb"}]},
-    {"id": "menu", "at": [18, -21, 1], "operated_by": [{"grip": "right", "digit": "thumb"}]},
-    {"id": "bumper_l", "at": [-52, 20, -10], "operated_by": [{"grip": "left", "digit": "index"}]},
-    {"id": "bumper_r", "at": [52, 20, -10], "operated_by": [{"grip": "right", "digit": "index"}]},
-    {"id": "power", "at": [0, 20, -8], "operated_by": [], "regrip_reason": "pressed once per session, by either hand"}
+    {"id": "stick_l", "at": [-40, -11, 8], "normal": [0, 0, 1], "operated_by": [{"grip": "left", "digit": "thumb"}]},
+    {"id": "dpad", "at": [-26, -35, 3], "normal": [0, 0, 1], "operated_by": [{"grip": "left", "digit": "thumb"}]},
+    {"id": "view", "at": [-18, -21, 1], "normal": [0, 0, 1], "operated_by": [{"grip": "left", "digit": "thumb"}]},
+    {"id": "btn_a", "at": [37, -24, 3], "normal": [0, 0, 1], "operated_by": [{"grip": "right", "digit": "thumb"}]},
+    {"id": "btn_b", "at": [46, -15, 3], "normal": [0, 0, 1], "operated_by": [{"grip": "right", "digit": "thumb"}]},
+    {"id": "btn_x", "at": [28, -15, 3], "normal": [0, 0, 1], "operated_by": [{"grip": "right", "digit": "thumb"}]},
+    {"id": "btn_y", "at": [37, -6, 3], "normal": [0, 0, 1], "operated_by": [{"grip": "right", "digit": "thumb"}]},
+    {"id": "stick_r", "at": [26, -35, 8], "normal": [0, 0, 1], "operated_by": [{"grip": "right", "digit": "thumb"}]},
+    {"id": "menu", "at": [18, -21, 1], "normal": [0, 0, 1], "operated_by": [{"grip": "right", "digit": "thumb"}]},
+    {"id": "bumper_l", "at": [-52, 20, -10], "normal": [0, 1, 0], "operated_by": [{"grip": "left", "digit": "index"}]},
+    {"id": "bumper_r", "at": [52, 20, -10], "normal": [0, 1, 0], "operated_by": [{"grip": "right", "digit": "index"}]},
+    {"id": "power", "at": [0, 20, -8], "normal": [0, 1, 0], "operated_by": [], "regrip_reason": "pressed once per session, by either hand"}
   ],
 
   "hand_grip_diameter_mm": 36,
   "hand_user_age_min_years": 18,
+  "hand_layout_scene": "selftest/meshes/handheld.glb",
 
   "_claims": [
     {
@@ -36,9 +37,10 @@
 
   "_notes": {
     "hand_grips": "Where each hand holds the device, a list of {id, centre, hand_axis, handle_axis} in the device frame. centre: the point on the handle's axis where the middle finger wraps it, mm. hand_axis: the direction from the wrist to the hand with the wrist straight (any length; made unit). handle_axis: the handle's long axis (any length). The hand axis must lie within 20 deg of perpendicular to the handle axis: wrist-centre of grip length was measured with the handle square to the fist. Every judged control pressed from the grip lies at or beyond its centre along the hand axis; one behind it (under the palm, or a hand axis declared from the hand to the wrist) is refused.",
-    "hand_controls": "Every control a hand presses, a list of {id, at, operated_by, regrip_reason}. at: the centre of the pressed top surface, mm, device frame. operated_by: the grips and digits that press it without a regrip, [{grip, digit}] with digit thumb, index or other; a thumb or index control is judged, an other-only control (a paddle under the middle finger) is counted and not judged. A control pressed only after a regrip has operated_by [] and must say why in regrip_reason; it is listed, not judged.",
+    "hand_controls": "Every control a hand presses, a list of {id, at, normal, operated_by, regrip_reason}. at: the centre of the pressed top surface, mm, device frame. operated_by: the grips and digits that press it without a regrip, [{grip, digit}] with digit thumb, index or other; a thumb or index control is judged, an other-only control (a paddle under the middle finger) is counted and not judged. A control pressed only after a regrip has operated_by [] and must say why in regrip_reason; it is listed, not judged. normal: the direction the cap is pressed, out of the surface it stands on (any length; made unit); ergo.layout_agrees finds the drawn cap's top along it, and digit_reach does not read it.",
     "hand_grip_diameter_mm": "The largest handle's perimeter divided by pi, through its grip centre, mm. Operating context 25 to 50 mm (the cylinders Kong and Lowe 2005 tested): outside it a pass does not count. A larger value puts every wrist farther back, so a device with two different handles states the larger. No alias: the spine judges the context on the spelling the gate read.",
     "hand_user_age_min_years": "The youngest intended user, years. Operating context 17 and over (ANSUR 1988's subjects are 17 to 51): a pass for children does not count, and an absent value reads as outside the context. No alias.",
+    "hand_layout_scene": "The exported scene ergo.layout_agrees holds the layout to: a GLB or glTF path in the device frame, mm, its nodes named by cad-solid's scheme <part>__<body> (cad-solid's assembly view writes it so). Each control is part ctl-<id> (node ctl-<id>__0); every other part is the housing. Without it the gate reads cad-solid's mesh map (meshes, solids or parts) and names its parts the same way.",
     "_claims": "the claim the baseline was calibrated against. ergo.digit_reach reads its limit from the claim tagged digit-reach (ctx.acceptance), as a share of subjects in %. 95% is the usual human-factors target (design for all but the 5% of smallest hands); the baseline passes at 97.96% and the known-bad cluster, moved 10 mm up the face, fails at 63.08%. Each share is floored to 0.01% before it is judged.",
     "_aliases": "none. The context keys take none by rule, and the two lists name their object; bare spellings such as controls or grips would collide with other packs' vocabularies."
   },

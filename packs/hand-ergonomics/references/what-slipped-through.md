@@ -56,6 +56,18 @@ What the pack does about it: a pose for cad-solid's sweep (`travel_sweeps.md`, t
 loading pose) and a lens here (lens 7). It is a mechanism pose, not a hand
 measurement, so cad-solid's clash and clearance gates check it.
 
+## A layout one revision behind the drawing
+
+A reach screen judges the layout the model declares. When a control moves in the CAD
+and the layout file does not follow, the screen counts the old position. On this
+pack's baseline, btn_y drawn 3 mm farther up the face than declared turns a pass at
+97.96% of women into a fail at 94.33%, and nothing on the screen moves.
+
+What the pack does about it: `ergo.layout_agrees` reads the exported scene and holds
+the layout to it: every control both ways, every cap within 0.5 mm, no handle thicker
+than declared. It covers the reach claim, so a reach pass on a stale layout never
+reads Checked.
+
 ## A mechanism nobody else ships
 
 A grip mechanism was designed from first principles before anyone looked at what two

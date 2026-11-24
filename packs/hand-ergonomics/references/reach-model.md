@@ -41,6 +41,13 @@ no term (every handle read as the dowel) the count is 99.14%, and with the handl
 declared as 36 mm it is 97.96%. A device with two different handles states the larger
 diameter: that puts every wrist farther back, which is conservative.
 
+`ergo.layout_agrees` holds the declared diameter to the drawn handles: at each grip,
+the outer loop of the housing's section through the grip centre, square to the handle
+axis, is at most the declared diameter + 1.0 mm across (perimeter / pi). One
+millimetre of diameter moves every wrist point 0.5 mm, the same as the gate's
+tolerance on a cap. The check is one-sided, so a larger declared diameter passes: it
+is the conservative side of this term.
+
 ## The error, either way
 
 Wrist-thumbtip length is measured with the thumb straight and in line with the

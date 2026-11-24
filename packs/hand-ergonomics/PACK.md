@@ -7,11 +7,16 @@ control sits. `ergo.digit_reach` counts the people in a measured population whos
 thumb or index finger reaches every control pressed from a grip. The population is
 ANSUR 1988: 2,208 women and 1,774 men of the US Army, aged 17 to 51, measured one by
 one. The pack ships their hand lengths, subject by subject, in `gates/data/`.
+`ergo.layout_agrees` holds that declared layout to the exported scene, so the count
+is about the drawn design.
 
 ## What this pack settles
 
 - **Reach.** Can the claim's share of each sex press every control without a regrip?
   The answer is a count of subjects, never a sum of percentiles.
+- **The layout is the drawn one.** Every drawn control is declared and every
+  declared control is drawn, each cap is where the layout says, and no handle is
+  thicker than the declared diameter. The reach claim waits for this too.
 - **Where a control can go** (the proposer). A map of each thumb's reach, how many
   keys of a pitch fit in reach, how wide the grips can spread before the centre
   controls drop out, and design ranges for hand size, thumb breadth and a wrist band.
@@ -36,14 +41,24 @@ Say these out loud. A reader will assume the pack covers them, and it does not.
 - **Older users' joint range, other populations, gloves, force, fatigue, drop risk.**
   The population is the US Army of 1988. A market with smaller hands sets a higher
   limit or brings another dataset.
-- **Whether the layout is the drawn design.** The gate judges the layout the model
-  declares. A layout one revision behind the CAD is judged as declared.
+- **A design with no exported scene, or no mesh library.** `ergo.layout_agrees`
+  skips with no scene, with no part named `ctl-<id>`, and where trimesh, NumPy or
+  manifold3d is missing. It covers the reach claim, so the claim reads Skipped until
+  the scene is published and the libraries are installed (`pip install trimesh numpy
+  manifold3d`). This is the cost of a reach pass that is about the drawn design.
+- **Grip posture, or where the hand really holds.** The scene shows the handles, not
+  the hand. The grip centre and the hand axis stay a declaration, owned by
+  GRIP-POSTURE and settled by the testers.
+- **A coarse export of a handle.** A tessellated handle slices short: a 16-segment
+  36 mm cylinder reads 35.77 mm. So a coarse export can hide up to 0.65% of a
+  handle's diameter.
 
 ## Gates
 
 | Gate | Tier | Measures | Limit from | Known-bad control |
 |---|---|---|---|---|
 | `ergo.digit_reach` | 0, stdlib | worst-sex share of subjects who reach every judged control, % | the claim tagged `digit-reach` (`>=` or `>`, in %) | `face_cluster_out_of_reach`: the four right-hand face buttons 10 mm up the face; 63.08% of women, 84.38% of men |
+| `ergo.layout_agrees` | 1, trimesh + NumPy + manifold3d | the worst cap's distance from its declared position, mm; or, on a structural disagreement, the count of them | pack constants: 0.5 mm, and the declared diameter + 1.0 mm | `stale_scene`: the baseline layout against a scene with btn_y's cap 3 mm farther up the face; 3.00 mm |
 
 The baseline (`selftest/baseline.json`) is a generic two-handled controller. It
 passes at 97.96% of women (btn_y limits) and 99.71% of men, against `>= 95%`. Each
@@ -54,8 +69,9 @@ limit never rounds onto it: 1703 of 1774 men is 95.99%, a fail against `>= 96`.
 and Lowe 2005 tested) and `hand_user_age_min_years` from 17. Outside it a pass does
 not count (the claim reads Gap, or Assumed under an owned `fallback`) and a fail
 still counts. An absent age reads as outside. The context is the survey's validity
-regime: the pack has no separate guard gate, because the spine already turns "out of
-the data's range" into Gap.
+regime: the pack has no gate that guards the survey's range, because the spine already
+turns "out of the data's range" into Gap. The guard of the reach gate's inputs is
+`ergo.layout_agrees`, below.
 
 **It skips** when the projection has no layout, or when no control is pressed from a
 grip by a thumb or index finger. **It errors** on a layout it cannot judge: a grip
@@ -64,6 +80,66 @@ from perpendicular to its handle, a judged control behind the centre of a grip i
 pressed from, along that grip's hand axis (under the palm; a hand axis declared from
 the hand to the wrist, or swapped with the handle axis, puts the controls there), a
 regrip control with no reason, or a claim not held as `>=` or `>` in %.
+
+## The layout guard
+
+`ergo.layout_agrees` is the validity guard of `ergo.digit_reach`'s inputs. The reach
+gate counts subjects on the layout the model declares; this gate reads the exported
+scene and checks three things:
+
+1. **The controls, both ways.** Each declared control is drawn as a part `ctl-<id>`,
+   and each drawn `ctl-*` part is declared. A drawn control the layout leaves out is
+   never judged for reach.
+2. **Each cap's position.** The top of each control's part along its declared
+   `normal` lies within 0.5 mm of its declared `at`.
+3. **No handle thicker than declared.** At each grip, the outer loop of the housing's
+   section through the grip centre, square to the handle axis, is no more than the
+   declared diameter + 1.0 mm across (perimeter / pi). One-sided: a device with two
+   different handles declares the larger, and passes. A grip centre that no section
+   surrounds is a disagreement too.
+
+Any missing, extra or too-thick item is a structural disagreement: the verdict is
+their count against 0. Otherwise it is the worst cap, in mm, against 0.5 mm. On the
+baseline every cap is 0.00 mm off and both handles read 36.00 mm.
+
+Why it matters, on the baseline: with btn_y drawn 3 mm farther up the face than
+declared, the reach gate counts 97.96% of women on the declared layout, and the drawn
+design reaches 94.33%, under the claim's 95%. A 50 mm handle declared as 36 mm
+reads 97.96% where the truth is 83.92%. The registry refuses this gate as a `needs`
+prerequisite of the reach gate (a tier-1 guard above a tier-0 analysis), so it
+covers the tag `digit-reach` instead: the reach claim waits for both. The inner
+loop's `nopekit check` runs tier 0 only, so the reach claim waits until
+`nopekit check --tier 1` has run the guard; a tier-0 check then keeps its verdict,
+and an edit to the layout or the scene makes it Stale until tier 1 runs again.
+
+**The scene, first match:**
+
+- `hand_layout_scene`: one GLB or glTF file in the device frame, mm. Node transforms
+  apply.
+- otherwise cad-solid's mesh map (`meshes`, `solids` or `parts`, read under the scope
+  `ergo.`, then `cad.`, then bare), read and named as cad-solid's `assembly` view
+  reads and names it. A project that already publishes cad-solid's assembly gets this
+  gate with no extra export.
+
+**The node names are cad-solid's interface** (`packs/cad-solid/cad_solid_parts.py`).
+`gates/_names.py` copies its functions, and a test holds the copy to cad-solid's on
+the same names: loaded from cad-solid, its path would enter this gate's code digest
+as one machine's path wherever cad-solid is not live. A node is `<part>__<body>`; its
+part is the text before `__`, as the site reads it. Each control is the part `ctl-<id>`, so its
+first body is the node `ctl-<id>__0`. Every other part is the housing. A part name is
+sanitised as cad-solid sanitises it (`ctl-btn y` reads as `ctl-btn_y`).
+
+```
+control "btn_y"  ->  part "ctl-btn_y"  ->  node "ctl-btn_y__0"
+```
+
+**It skips** with no `hand_controls`, no scene, no part named `ctl-<id>`, or a declared
+grip and no `hand_grip_diameter_mm`: each is an export not yet made, not a judgment of
+the design. **It errors** on a layout `ergo.digit_reach` would refuse, on a control
+with no `normal`, on two control ids that name one part after sanitising, and on a
+housing part that is not a solid and crosses the plane of a grip's section (cad-solid's
+`cad.is_volume` says why). The plane is unbounded, so a broken part far from the
+handle is refused too: its section could be part of the loop.
 
 ## The proposer
 
@@ -88,9 +164,10 @@ two context keys must be read under the spelling the spine judges.
 | Key | What |
 |---|---|
 | `hand_grips` | `[{id, centre, hand_axis, handle_axis}]`. `centre`: the point on the handle axis where the middle finger wraps, mm. `hand_axis`: wrist to hand with the wrist straight; every judged control pressed from the grip lies at or beyond the centre along it. `handle_axis`: the handle's long axis. Within 20 deg of perpendicular. |
-| `hand_controls` | `[{id, at, operated_by, regrip_reason}]`. `at`: the centre of the pressed top surface, mm. `operated_by`: `[{grip, digit}]`, digit `thumb`, `index` or `other`. |
+| `hand_controls` | `[{id, at, normal, operated_by, regrip_reason}]`. `at`: the centre of the pressed top surface, mm. `normal`: the direction it is pressed, out of the surface it stands on (only `ergo.layout_agrees` reads it). `operated_by`: `[{grip, digit}]`, digit `thumb`, `index` or `other`. |
 | `hand_grip_diameter_mm` | the largest handle's perimeter / pi through its grip centre, mm. A larger value is conservative, so a device with two handles states the larger. |
 | `hand_user_age_min_years` | the youngest intended user, years. |
+| `hand_layout_scene` | the exported scene, a GLB or glTF path in the device frame, nodes `<part>__<body>`. Optional: cad-solid's mesh map serves without it. |
 
 A control pressed only after a regrip has `operated_by: []` and must say why in
 `regrip_reason`; it is listed and not judged. A control pressed only by `other` (a
@@ -117,7 +194,8 @@ button 100 mm from the wrist is easy, one at 120 mm loses many women.
 
 | Tag | Use it for |
 |---|---|
-| `digit-reach` | a claim that a share of a population reaches every control from its grip |
+| `digit-reach` | a claim that a share of a population reaches every control from its grip; both gates cover it |
+| `control-layout` | a claim that the declared layout is the drawn design; `ergo.layout_agrees` covers it |
 
 Tag the reach claim `digit-reach` and nothing broader. A claim tagged `ergonomics`
 would collect evidence it does not assert.
@@ -151,6 +229,12 @@ would collect evidence it does not assert.
   rather than count every subject in reach.
 - **Gap on a phone-shaped device.** Correct. Carry it with an owned `fallback` and the
   physical claim.
+- **A stale layout.** The layout file moved and the CAD did not, or the reverse.
+  `ergo.layout_agrees` names the control and its node. Move the control in the model,
+  export again, and let both gates run; do not edit the layout file alone.
+- **A reach claim that reads Skipped.** Look at `ergo.layout_agrees`'s reason: no
+  scene, no `ctl-<id>` part, or no mesh library. Name the control parts, publish the
+  scene or install the libraries. Do not drop the tag.
 
 ## Open questions
 
@@ -159,6 +243,9 @@ would collect evidence it does not assert.
 - Worst sex (as now) or a pooled share at a mix the person states?
 - A slab-grip anchor for v0.2, from the 2014 functional-area model, once its own
   worked example is reproduced (`references/reach-model.md`).
+- Should `ergo.layout_agrees` light up the disagreeing control on cad-solid's
+  `assembly` view? A locator to another pack's view dangles where cad-solid is not
+  live, so it names the node in its detail and attaches none.
 
 ## Where to look next
 

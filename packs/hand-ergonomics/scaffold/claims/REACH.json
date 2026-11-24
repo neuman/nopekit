@@ -12,9 +12,10 @@
     "digit-reach"
   ],
   "mechanism": {
-    "how": "For each ANSUR 1988 subject, the wrist sits behind each declared grip by the subject's wrist-centre of grip length; a control is in reach when it lies within the subject's wrist-thumbtip (thumb) or wrist-index finger (index finger) length; the share of the worse sex who reach every judged control",
+    "how": "For each ANSUR 1988 subject, the wrist sits behind each declared grip by the subject's wrist-centre of grip length; a control is in reach when it lies within the subject's wrist-thumbtip (thumb) or wrist-index finger (index finger) length; the share of the worse sex who reach every judged control, on a declared layout that ergo.layout_agrees holds to the exported scene",
     "evaluators": [
-      "ergo.digit_reach"
+      "ergo.digit_reach",
+      "ergo.layout_agrees"
     ]
   }
 }

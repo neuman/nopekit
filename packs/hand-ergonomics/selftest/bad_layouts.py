@@ -1,6 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 """Known-bad fixtures for hand-ergonomics. One physical change each.
 
+* ``face_cluster_out_of_reach`` (``ergo.digit_reach``): the right thumb's four face
+  buttons moved up the face until the worst sex is under the baseline's limit.
+* ``stale_scene`` (``ergo.layout_agrees``): the baseline layout against a scene in
+  which btn_y's cap is drawn 3 mm farther up the face than declared.
+
 `nopekit gate selftest` requires every gate to FAIL here. A gate that passes its
 own fixture is broken, and a green verdict from it means nothing.
 
@@ -106,3 +111,28 @@ def face_cluster_out_of_reach(ctx):
                                  f"to {MARGIN} x {limit:g}%: the claim's limit is too low "
                                  f"for a reach control to fail")
     return dataclasses.replace(ctx, params=moved, ledger=Ledger(claims=claims))
+
+
+#: The known-bad scene, built with the known-good one by ``make_handheld_glb.py``
+#: from this baseline. An absolute path into this pack: relative, it would resolve
+#: against the host project's root in a check run, where no ``selftest/meshes/``
+#: exists, and the control would skip instead of fail.
+STALE_SCENE = os.path.join(_PACK_DIR, "selftest", "meshes", "handheld_stale.glb")
+
+
+def stale_scene(ctx):
+    """ergo.layout_agrees — the baseline's declared layout against a scene one
+    revision ahead of it: btn_y's cap drawn 3 mm farther up the face, away from the
+    right wrist (3.00 mm against the gate's 0.5 mm). Nothing structural is wrong:
+    every control is drawn and declared and both handles are 36 mm. On the drawn
+    positions the reach gate would count 94.33% of women, under the baseline
+    claim's 95%; on the declared ones it counts 97.96%.
+
+    The limits this fails are pack constants in ``gates/layout.py``, not a claim's,
+    so the shift is a literal: a tolerance raised past 3 mm would make this
+    control pass, and ``gate selftest`` goes red."""
+    baseline = _read()
+    params = {k: copy.deepcopy(v) for k, v in baseline.items() if not k.startswith("_")}
+    params["hand_layout_scene"] = STALE_SCENE
+    return dataclasses.replace(ctx, params=params,
+                               ledger=Ledger(claims=packs.baseline_claims(baseline)))

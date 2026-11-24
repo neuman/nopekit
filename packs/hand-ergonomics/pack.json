@@ -1,7 +1,7 @@
 {
   "name": "hand-ergonomics",
   "version": "0.1.0",
-  "description": "Checks that a hand-held device's controls are within reach of the hands, counting ANSUR 1988 subjects one by one; proposes reach maps and design ranges.",
+  "description": "Checks that a hand-held device's controls are within reach, counting ANSUR 1988 subjects one by one, on a layout that matches the drawn scene; proposes reach maps.",
   "settles": [
     "thumb reach",
     "finger reach",
@@ -10,7 +10,9 @@
     "digit reach accommodation",
     "hand size accommodation",
     "button placement",
-    "5th to 95th percentile"
+    "5th to 95th percentile",
+    "control layout",
+    "declared layout agreement"
   ],
   "claim_classes": [
     "ergonomics",
@@ -20,7 +22,8 @@
     "anthropometry"
   ],
   "provides_gates": [
-    "ergo.digit_reach"
+    "ergo.digit_reach",
+    "ergo.layout_agrees"
   ],
   "provides_proposers": [
     {
@@ -33,8 +36,12 @@
   "provides_views": [],
   "provides_generators": [],
   "requires_tools": [],
-  "requires_python": [],
-  "max_tier": 0,
+  "requires_python": [
+    "trimesh",
+    "numpy",
+    "manifold3d"
+  ],
+  "max_tier": 1,
   "lenses": [
     "whose hand held the print",
     "the smallest hand in the range",
