@@ -4,7 +4,7 @@ Checks a printed circuit board drawn in KiCad 6 to 9, and its schematic: KiCad's
 own design rule check, connectivity, electrical rules check and schematic parity,
 the library's pin names against the board's nets, trace heating per IPC-2221, a
 fab's published limits, a measurement ngspice makes on the project's circuit
-deck, the populated board's fit in its enclosure, each footprint's land against
+deck, the populated boards' fit in their enclosure, each footprint's land against
 its vendor's drawing, four rules for a board that charges or carries a cell, the
 wrong ways its connectors can meet, and each USB-C receptacle's termination.
 
@@ -30,7 +30,7 @@ circuit that works. Nothing here has seen the board powered.
 | `pcb.parity` | 1 | established | KiCad finds no difference between the board and its schematic: parts, values, footprints, pad nets (an open pin on a pad with no net is agreement) |
 | `pcb.fab_rules` | 1 | sourced | KiCad's DRC with the named fab's published minimums, for the service the board is ordered on, as the only custom rules finds nothing past them; a dielectric or via kind the service does not list skips |
 | `pcb.spice` | 1 | established | a `.meas` result of `ngspice -b` on the project's deck stays inside `pcb_spice_min` / `pcb_spice_max`; an option name ngspice does not know (on a `.options` card or an `option` command), a measure two `.meas` cards define, or a `.meas tran` window outside the run, is refused first |
-| `pcb.enclosure_fit` | 1 | established | the board, every part's 3D model in place, shares no volume with the enclosure, and each part keeps its clearance (OpenCascade) |
+| `pcb.enclosure_fit` | 1 | established | each board, every part's 3D model (or declared height) in place and turned to any orientation, shares no volume with its enclosure or with another board in it, and each part keeps the clearance of the claim tagged `enclosure-fit`, but against a feature a by-design contact names (OpenCascade) |
 | `pcb.charge_temperature` | 0 | sourced | charging stops outside each cell's charge temperature window at the tolerance corners of its sensing network (the comparator's datasheet trips, the NTC's R/T table or B equation, every resistor), wherever the stop lives: the charger, a protector or BMS that acts on it, or the pack; headroom in K |
 | `pcb.charge_limits` | 0 | sourced | the charger's guaranteed maximum charge voltage per cell and current, as one ratio to the cell's datasheet limits, and an overcharge stop independent of the charger that senses the cell and opens its path (per cell for two or more in series) |
 | `pcb.fault_current` | 0 | sourced | every conductor in `pcb_conductors` is guarded across the fault range: its protector's interrupt rating, the overload band (I2 <= 1.45 Iz, by analogy with IEC 60364-4-43) and IEC 60949's adiabatic limit at every trip point the cell can reach; a fuse, PTC, eFuse, protector FETs on either side or an in-pack PCM |
@@ -211,15 +211,21 @@ Read this before you write a claim. Every one of these has passed a "0 violation
 - **RF, signal integrity, EMC.** Antenna detuning, impedance, crosstalk, return
   paths: not modelled.
 - **Fit beyond the solids.** `pcb.enclosure_fit` checks the parts' 3D models
-  against the enclosure's solid at one placement. A model drawn wrong, a cable's
-  bend radius, a plug's mating clearance, a tolerance stack, assembly order, a
-  lid that flexes: none of them is in two solids. A part with no model skips
-  the gate rather than pass it. And a part that passes through an opening cut
-  wide enough to keep `pcb_enclosure_clearance_mm` (a knob, a button, a light
-  pipe) reads clear, however far it stands proud of the face. A tighter opening
-  fails on clearance, and that fail still says nothing about how far the part
-  reaches: the gate measures shared volume and clearance, not how far a part
-  should reach. That is `lenses.md`, "A part taller than its cavity".
+  against the enclosure's solid, and against the other boards in it, at one
+  placement. A model drawn wrong, a cable's bend radius, a plug's mating
+  clearance, a tolerance stack, assembly order, a lid that flexes: none of them
+  is in two solids. A part with no model skips the gate rather than pass it,
+  unless the project states its height; the courtyard's box at that height is
+  then all the fit sees of it. And a part that passes through an opening cut
+  wide enough to keep the claim's clearance (a knob, a button, a light pipe)
+  reads clear, however far it stands proud of the face; so does one whose
+  contact against the opening is declared. A tighter opening fails on
+  clearance, and that fail still says nothing about how far the part reaches:
+  the gate measures shared volume and clearance, not how far a part should
+  reach. That is `lenses.md`, "A part taller than its cavity". Two models that
+  overlap by design (a mated pair whose vendor models interpenetrate) read as a
+  collision, and no contact excuses one: a wrong FAIL, read against the drawing.
+  One condition judges every board: the claim tagged `enclosure-fit`.
 - **Whether the SPICE deck is the circuit.** ngspice solves the deck it is given.
   The deck is someone's model, typed by hand; `pcb.spice` refuses a run that
   dropped a line, an option name ngspice does not know, a command it does not
@@ -243,8 +249,9 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   Until one is, a KiCad 10 board reads Skipped on the tier-0 gates and the power
   rules ("this reader was checked through board format 20241229 (KiCad 9.0)"),
   never Checked and never Failing. `pcb.fab_rules` skips it for the same reason:
-  its service guard reads the stackup and vias with this reader. The other
-  gates that run kicad-cli on the board are KiCad's own answer, and run on it
+  its service guard reads the stackup and vias with this reader, and so does
+  `pcb.enclosure_fit`, which reads each part's model and courtyard with it. The
+  other gates that run kicad-cli on the board are KiCad's own answer, and run on it
   only with a kicad-cli that reads its format. KiCad 9.0.9's kicad-cli does not:
   it prints "Failed to load board" and exits 3, so those gates read errored,
   never Checked.
@@ -353,14 +360,26 @@ pair of source nodes once however many wrong ways make it, and
 `pcb.usbc_receptacle` counts violations, each against 0; resistances are in
 ohms, written as a board writes them (5.1k).
 
-**`pcb.enclosure_fit` judges the populated board in the enclosure's frame.** The
+**`pcb.enclosure_fit` judges the populated boards in the enclosure's frame.** A
 board is first as `kicad-cli pcb export step --user-origin 0x0mm` writes it: the
 board file's (0, 0) at the origin, x right, **y up (KiCad's y negated)**, z up from
-the board's bottom face. `pcb_board_placement` turns it `rot_z_deg` about z, then
-moves it by `x`, `y`, `z` mm. The enclosure's STEP is its material (walls and lid),
-in mm, in its own frame. The verdict is the nearest part's distance, in mm,
-against `pcb_enclosure_clearance_mm`; any shared volume fails it, and the board
-body may touch (standoffs) but not cut in.
+the board's bottom face. `pcb_board_placement` turns it `rot_x_deg` about x, then
+`rot_y_deg` about y, then `rot_z_deg` about z (one 3x3 rotation, about the
+enclosure's own axes: face down is `rot_x_deg` 180), then moves it by `x`, `y`,
+`z` mm. The enclosure's STEP is its material (walls and lid), in mm, in its own
+frame. The verdict is the nearest distance, in mm, against the limit of the claim
+tagged `enclosure-fit` (`>=`); any shared volume fails it, and a board body may
+touch the enclosure (standoffs) but not cut in. `pcb_enclosure_fits` states
+several boards, and boards in one enclosure (enclosure files with the same bytes,
+however each path is spelled) keep the limit from each other, their bodies
+included. `pcb_enclosure_contacts` names a part that touches one feature by
+design: a region of the enclosure (`region_mm`, a box in its frame, that takes
+out material no further than twice the claim's limit past the part's own box) or
+a shape of another board (`<fit>:<ref>`). Its distance to that feature is listed
+and left out; against the rest it keeps the limit, and shared volume still fails
+it.
+`pcb_part_heights_mm` gives a part with no model its courtyard's box, raised to a
+stated height. `references/enclosure-fit.md` has each in full.
 
 ## Pointing a project at its board
 
@@ -373,8 +392,10 @@ body may touch (standoffs) but not cut in.
 "pcb_spice_deck": "hardware/sim/vbus.cir",
 "pcb_spice_measure": "vbus_min", "pcb_spice_min": 4.75, "pcb_spice_units": "V",
 "pcb_enclosure_step": "cad/out/enclosure.step",
-"pcb_board_placement": {"x": 2.0, "y": 17.0, "z": 4.0, "rot_z_deg": 0},
-"pcb_enclosure_clearance_mm": 1.0,
+"pcb_board_placement": {"x": 2.0, "y": 17.0, "z": 4.0, "rot_x_deg": 0, "rot_z_deg": 90},
+"pcb_enclosure_contacts": {"J5": {"cutout": {"region_mm": [[-1, 2, 4], [3, 12, 9]],
+                                             "reason": "the receptacle's shell seats in its cutout"}}},
+"pcb_part_heights_mm": {"SW2": {"h": 3.5, "source": "the switch's datasheet, seated height"}},
 "pcb_land_drawings": {"U3": "hardware/lands/u3.json"},
 "pcb_pin_names_series": {"FL1": {"pairs": [["1", "8"], ["2", "7"]],
                                  "source": "the filter array's datasheet, channel table"}},
@@ -403,8 +424,11 @@ also fits, the cell's keyed housing, the USB-C receptacle and the wire) and a
 USB-C sink; `references/battery.md`, `references/mismate.md` and
 `references/usb-c.md` say what each rule reads from them.
 
-Each family skips without its keys: no fab named, no deck, no enclosure, no
-placement or no clearance is a skip that says which key, never a default.
+Each family skips without its keys: no fab named, no deck, no enclosure or no
+placement is a skip that says which key, never a default. The enclosure's
+clearance is the claim's (tagged `enclosure-fit`, `>=` in mm): with an enclosure
+and no such claim the gate errors, and `pcb_enclosure_clearance_mm`, where the
+limit was before, is refused.
 
 The board's `.kicad_pro` (rules, net classes, ERC and DRC exclusions),
 `.kicad_dru` (custom rules) and `.kicad_sch` (the root schematic, with every sheet
@@ -442,8 +466,9 @@ back under 1 C or over 100 C, look at the units first.
   reports, parity.
 - `references/fab-limits.md`: how `pcb.fab_rules` turns a fab's page into rules,
   JLCPCB's numbers, and how to add a fab.
-- `references/enclosure-fit.md`: the frames, what kicad-cli leaves out, and what
-  the fit measures.
+- `references/enclosure-fit.md`: the limit, the frames and the rotation, several
+  boards, what kicad-cli leaves out, declared heights, contacts by design, and
+  what the fit measures.
 - `references/spice.md`: what `pcb.spice` runs, refuses and reads.
 - `references/battery.md`: the four battery rules on the baseline's own parts,
   the records, the NTC arithmetic, IEC 60949 and where every number comes from.

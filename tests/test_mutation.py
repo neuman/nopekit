@@ -2464,6 +2464,12 @@ class TheWalkFindsNoConclusivePassOnBundledGates(_env.EnvCase):
     rules beside them kept their landings (8, 4, 6 and 1) after the baseline
     gained matings and a USB-C record and its FFC signals moved; a mode
     such as ``{"narrower": 6}`` sits in a list, one opaque leaf, not walked.
+    pcb.enclosure_fit (general-packs P7) stays conclusive, on another leaf,
+    measured alone on 2026-11-24. Before, it landed only on
+    pcb_enclosure_clearance_mm (x3), which moved the limit, not the design.
+    That limit is now the claim's, so the baseline's enclosure was redrawn
+    with the board 4 mm up: the placement's z lands at x1.5, and the aimed run
+    (z 5.52) fails at 0.845 mm against 1.0. The split does not move.
     Full suite only (~12 s without pcb-kicad's and the OpenFOAM packs' tools,
     about 7.5 min with them before aero-openfoam: their opaque gates re-run
     kicad-cli, ngspice, OpenCascade and OpenFOAM for every rung; cfd-openfoam's
