@@ -135,7 +135,7 @@ Read this section before you trust a green sweep from this pack.
 | `fdm.print_time_est` | 0 | estimated hours and grams | hours > `max_print_time_h` **or** grams > `max_filament_g` | `crawling_speed` — the speed, solved from the gate's own model, that lands the part 15% past the project's time ceiling |
 | `fdm.overhang` | 1 | area past the overhang limit, as a fraction of surface — **one part or the whole set** | fraction > allowance; mesh not a solid; `overhang_limit_deg` ≥ `bridge_ceiling_deg` | `steep_cone` — a cone stood on its apex, 70° half angle |
 | `fdm.bridge_span` | 1 | longest unsupported horizontal span, per ceiling region, classified bridge / cantilever / unanchored — **one part or the whole set** | span > `max_bridge_mm` (bridge), > `max_cantilever_mm` (cantilever), any span at all (unanchored); mesh not a solid | `long_bridge` — a PLATE of three parts whose middle one is an arch spanning 3× the limit between two real anchors |
-| `fdm.slice` | 2 | the longest unsupported run of Bridge lines in the toolpaths OrcaSlicer 2.4.2 wrote, on the project's three presets — **one part or the whole set**. Claim tag `slicer` only | span > `max_bridge_mm`; Orca refuses the part (-50, -52, -102) or warns about it; the mesh is not in print pose; the G-code's extents are not the mesh's | `long_bridge` — the same plate: Orca slices the 90 mm arch "Success." with no warning |
+| `fdm.slice` | 2 | the longest unsupported run of Bridge lines in the toolpaths OrcaSlicer 2.4.2 wrote, on the three presets the project names for each part — **one part or the whole set**. Claim tag `slicer` only | span > `max_bridge_mm`; Orca refuses the part (-50, -52, -102) or warns about it; the mesh is not in print pose; the G-code's extents are not the mesh's | `long_bridge` — the same plate: Orca slices the 90 mm arch "Success." with no warning |
 
 Thresholds and their provenance live inline in `gates/printability.py` and
 `gates/mesh.py` as module constants with docstrings — the brim allowance, the
@@ -245,7 +245,7 @@ pack.
 | Part mesh | `mesh_path` | `stl_path`, `part_mesh`, `geometry_path` | the exported mesh **in print orientation, bed at z=0** |
 | Build direction | `build_axis` | `layer_normal`, `print_axis` | `[x, y, z]` vector **or an axis name**: `"z"`, `"+Z"`, `"-y"` |
 | Load direction | `load_axis` | `primary_load_axis`, `load_direction` | same two shapes. `load_axis: "z"` used to report *"the projection has no load_axis"*, which reads as "you did not set it" to the one person who knows they did; a value that is present and unreadable now says so, and says what shape it wants |
-| Slicer presets | `slicer_presets` | — | `{machine, process, filament}`: paths to three complete OrcaSlicer preset files, read by `fdm.slice` only. It SKIPS without them and never writes one |
+| Slicer presets | `slicer_presets` | — | `{machine, process, filament}`: paths to three complete OrcaSlicer preset files, read by `fdm.slice` only, and a group per part name or glob (see [Preset groups per part](#preset-groups-per-part)). It SKIPS without them and never writes one |
 
 The full list, with a unit and a sentence for each key, is
 `selftest/baseline.json` — every key any gate here reads, on a design they all
@@ -499,9 +499,9 @@ below tier 2. It settles `bridge span`, the string `fdm.bridge_span` settles, so
 claim on that quantity with a tighter limit is held against both gates.
 
 It needs `slicer_presets` — `{machine, process, filament}`, paths to three complete
-OrcaSlicer preset files — and `max_bridge_mm`. It invents neither: without them it
-SKIPS. `references/slicer.md` says how to install Orca 2.4.2 user-space and how to
-write a complete preset.
+OrcaSlicer preset files, or a group per part (below) — and `max_bridge_mm`. It
+invents neither: without them it SKIPS. `references/slicer.md` says how to install
+Orca 2.4.2 user-space and how to write a complete preset.
 
 Each guard is a silent mode measured on Orca 2.4.2, which said "Success." over all
 of them:
@@ -510,7 +510,7 @@ of them:
 |---|---|
 | sliced an 80 mm unsupported bridge, no warning | FAIL at ~80 mm, read off the bridge lines that have nothing printed under them |
 | printed an 80 mm bar 2 mm wide as `Overhang wall` only, and an 87 mm roof over 0% infill as `Internal Bridge`, with no `Bridge` line | the same reader on all three roles: FAIL at 79.85 and 87.06 mm |
-| typed the first layer over a support `Bridge` too (a supported part read 150 mm by its longest Bridge line) | a bridge point is held when any cell within 0.5 mm of it was printed less than two layers plus the support gap below it |
+| typed the first layer over a support `Bridge` too (the longest Bridge line reads a part whose bridges are all supported as one long free span) | a bridge point is held when any cell within 0.5 mm of it was printed less than two layers plus the support gap below it |
 | dropped a part 15 mm above the bed to the bed | FAIL before the slicer runs: not in print pose |
 | sliced a preset with `enable_suport` misspelled, without the key | ERRORED: a preset key not in the G-code's configuration was not used. A key Orca 2.4.2's own source renames (`wall_infill_order`) must reach the block under its new name; one it retires (`adaptive_layer_height`) is named in the evidence |
 | refused the part (-50, -52, -102) | FAIL in Orca's own words |
@@ -522,9 +522,65 @@ of them:
 
 What it reads is measured, not exact: 9.91 mm for a drawn 10 mm bridge, 79.96 for
 80, 89.96 for 90 — 0.04-0.09 mm short, the unsafe side and small. Over the sparse
-tips of tree supports it may read long (36.9 mm on one tree-supported part, not yet
-judged by a person); look at the slicer's preview there. Orca is AGPL-3.0: the pack
-runs it as a subprocess and carries none of its text, its profiles included.
+tips of tree supports it may read long, because between two tips nothing is printed
+within a cell below the bridge line; look at the slicer's preview there. (The
+figures first read on supported parts came from parts outside the pack and are not
+given: OrcaSlicer 2.4.2 was not on the machine that removed them, so they were not
+measured again on the pack's own probes.) Orca is AGPL-3.0: the pack runs it as a
+subprocess and carries none of its text, its profiles included.
+
+### Preset groups per part
+
+One triple does not fit every part. A part that must print on supports, in another
+material or on another printer was judged on the one global triple, so its verdict
+was about a print nobody would make. So `slicer_presets` also maps a part's name,
+or a glob, to a group of its own:
+
+```json
+"slicer_presets": {
+  "machine":  "presets/printer.json",
+  "process":  "presets/petg-0.20.json",
+  "filament": "presets/petg.json",
+  "hinge_pin": {"machine": "presets/printer.json", "process": "presets/petg-0.20-supports.json",
+                "filament": "presets/petg.json"},
+  "gasket_*":  {"machine": "presets/printer.json", "process": "presets/tpu-0.20.json",
+                "filament": "presets/tpu.json"}
+}
+```
+
+A part slices on, in this order:
+
+1. the group whose key is its name, as the verdict names it (the key of
+   `mesh_paths`, made safe for the viewer: `hinge pin` is `hinge_pin`);
+2. else the one group whose glob (`*`, `?`, `[...]`, case counts) matches it;
+3. else the default triple, the three paths at the top;
+4. else nothing: the part is not sliced and is named in a SKIP.
+
+The default triple is optional when a group names every part (`"*"` is a glob
+too). The order reads no key order: the verdict cache keys `slicer_presets` with
+its keys sorted, so two statements that differ only in key order must mean one
+thing.
+
+It is read strictly, and each of these is ERRORED, with no part sliced:
+
+| Statement | Why it is refused |
+|---|---|
+| a key that is not a role, a part name or a glob with a group (`"filamnet": "..."`) | named with the closest role: a misspelled role read as nothing leaves the triple short |
+| a group with a key other than the three roles, or short of one | a group names all three and takes none from the default: a part's triple from two places would move when the default moves |
+| a key that names no part, or a glob that matches none | named with the closest part name: a misspelled name sends that part back to the default triple, which is the silent mode the groups close |
+| a part two globs match, with no group under its own name | name the part, or narrow a glob: the gate does not pick one |
+| a role that holds a group, or a value that is not a path (a list, a number) | a role takes one path; a part named like a role takes a glob that matches it (`"machin[e]"`) |
+
+A default triple short of a role, and a preset file that does not exist, are a
+SKIP, and no part is sliced either. A part that fails before the slicer runs (not
+in print pose) still FAILS beside every one of these, and beside a project that
+states no `slicer_presets` at all: the presets decide which triple a part slices
+on, never whether it is in print pose. The problem is named in the FAIL's detail;
+with no part out of pose, the gate returns the problem in its own word, ERRORED or
+SKIPPED. Only a missing `max_bridge_mm` and a build axis other than +Z skip before
+any part is read. The verdict, the per-part table and each part's `fdm-slice.json`
+(`preset_group`: the key, or `null` for the default) name the presets each part
+sliced on.
 
 ## Where to look next
 
@@ -538,7 +594,7 @@ runs it as a subprocess and carries none of its text, its profiles included.
   under test flips to FAIL. `selftest/baseline_mesh.py` is the source of the solid
   it points at.
 - `references/slicer.md` — installing OrcaSlicer 2.4.2 user-space, and writing
-  the three complete presets `fdm.slice` binds its verdict to.
+  the complete presets `fdm.slice` binds its verdict to.
 - `references/orientation.md` — how to choose the print orientation, and why it is
   the single decision that moves strength, finish, support and time at once.
 - `references/geometry_rules.md` — the numeric rules of thumb: holes, threads,

@@ -1,6 +1,6 @@
 {
   "name": "fdm-print",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Validates that a part is printable on a filament machine: bed fit with brim, wall thickness, overhang, bridge span, layer-direction loading, print time, and a slice on OrcaSlicer.",
   "settles": [
     "bed fit",
