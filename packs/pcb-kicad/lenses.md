@@ -64,15 +64,20 @@ take to close it. A green DRC answers none of them.
 
 - Does every placed part have a 3D model, and is it the part you will buy? A
   generic model of the wrong height fits on screen. `pcb.enclosure_fit` sees only
-  the models.
+  the models, and a declared height only as the courtyard's box at that height:
+  is the height the datasheet's seated maximum, and is the courtyard the part?
 - What moves after assembly: a plug pushed in, a button pressed, a battery that
   swells, a lid that flexes? The fit is one placement of rigid solids.
 - Which parts pass through an opening in the case: a knob, a button cap, a light
   pipe, a connector face? How far should each stand proud of the face, and how far
   does it? `pcb.enclosure_fit` measures shared volume and clearance. A part
-  through an opening wide enough to keep `pcb_enclosure_clearance_mm` reads clear,
+  through an opening wide enough to keep the claim's clearance reads clear,
   however far it reaches. A tighter opening fails on clearance, and that fail
-  still says nothing about how far the part reaches.
+  still says nothing about how far the part reaches. A contact declared for the
+  part against the opening excuses its closeness, so it reads clear then too.
+- Is each declared contact still true? Each one names a part, one feature and a
+  reason. When the part or the case moves, read the listed distance against the
+  reason.
 
 ## A simulation of a different circuit
 

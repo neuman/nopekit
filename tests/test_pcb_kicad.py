@@ -35,12 +35,14 @@ Run:  PYTHONPATH=src:tests python3 -m unittest tests.test_pcb_kicad -v
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import math
 import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -50,7 +52,7 @@ import _env
 from nopekit import gates as gates_mod
 from nopekit import packs as packs_mod
 from nopekit.modelio import load_path
-from nopekit.models import Ledger, ProjectMeta
+from nopekit.models import Claim, Ledger, ProjectMeta
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PACK = os.path.join(REPO, "packs", "pcb-kicad")
@@ -3203,6 +3205,445 @@ class ASeriesPairIsStatedPerRef(unittest.TestCase):
                 verdict = self._names(series)
                 self.assertEqual(verdict.outcome, "error", verdict.render())
                 self.assertIn(said, verdict.error)
+
+
+
+# --------------------------------------------------------------------------- #
+# general-packs P7: the boards in their enclosure
+# --------------------------------------------------------------------------- #
+#: Whether the fit can run here: kicad-cli exports the board, and CadQuery (in
+#: the interpreter the gate starts its helper with) measures it.
+FIT_TOOLS = (shutil.which("kicad-cli") is not None
+             and importlib.util.find_spec("cadquery") is not None)
+FIT_SKIP = "needs kicad-cli and CadQuery: the fit exports the board and measures it"
+
+#: The claim a fit test reads its limit from: the baseline's own (``_claims``,
+#: FIT1), at another limit when a test says so.
+def _fit_claim(limit: float = 1.0, units: str = "mm", comparator: str = ">=") -> Claim:
+    return Claim.from_dict({
+        "id": "FIT1", "statement": "every part keeps its gap from the enclosure",
+        "kind": "measurable", "tags": ["enclosure-fit"],
+        "acceptance": {"quantity": "board fit in its enclosure", "comparator": comparator,
+                       "limit": limit, "units": units}})
+
+
+def _fit_ctx(out: str, params: dict, claim: Claim | None = None) -> gates_mod.GateContext:
+    """The baseline's own project (paths resolve in the pack) with ``params``
+    over its projection, and the claim tagged enclosure-fit as the ledger."""
+    return gates_mod.GateContext(
+        root=PACK, ledger=Ledger(meta=ProjectMeta(name="fit"),
+                                 claims=[claim or _fit_claim()]),
+        model=None, params=params, out_dir=out, tier=1, log=lambda _m: None, extra={})
+
+
+#: Writes a STEP of solids for a test enclosure, in a child as the gate's own
+#: geometry runs: a ``shell`` is a closed box of ``wall`` mm around the cavity
+#: ``lo``-``hi``, a ``block`` is the box ``lo``-``hi``.
+_STEP_SCRIPT = r"""
+import json, sys
+import cadquery as cq
+spec = json.loads(sys.argv[1])
+def box(lo, hi):
+    return (cq.Workplane("XY").box(*(h - l for l, h in zip(lo, hi)), centered=False)
+            .translate(tuple(lo)))
+kind, lo, hi, wall = spec["solid"]
+shape = box(lo, hi)
+if kind == "shell":
+    shape = box([v - wall for v in lo], [v + wall for v in hi]).cut(shape)
+cq.exporters.export(shape, spec["out"])
+"""
+
+
+def _enclosure_step(path: str, kind: str, lo, hi, wall: float = 2.0) -> str:
+    subprocess.run([sys.executable, "-c", _STEP_SCRIPT,
+                    json.dumps({"solid": [kind, list(lo), list(hi), wall], "out": path})],
+                   check=True, capture_output=True, timeout=120)
+    return path
+
+
+def _variant_board(root: str, edit) -> str:
+    """The baseline board with ``edit(tree)`` applied, as ``<root>/b.kicad_pcb``,
+    its project file and its 3D models beside it (``${KIPRJMOD}/3d``)."""
+    tree = K.load_tree(BOARD)
+    edit(tree)
+    path = _board_copy(root, K.dump(tree) + "\n")
+    if not os.path.isdir(os.path.join(root, "3d")):
+        shutil.copytree(os.path.join(ASSETS, "3d"), os.path.join(root, "3d"))
+    return path
+
+
+def _drop_model(ref: str):
+    def edit(tree):
+        fp = _footprint(tree, ref)
+        fp[:] = [x for x in fp if not (isinstance(x, list) and K.head(x) == "model")]
+    return edit
+
+
+class TheFitIsPureArithmeticWhereItCanBe(unittest.TestCase):
+    """The placement's rotation and a declared height's box, without KiCad: the
+    pieces the fit hands kicad-cli and OpenCascade."""
+
+    def setUp(self):
+        self.g = _registry().get("pcb.enclosure_fit")[1].__globals__
+
+    def test_one_rotation_about_x_then_y_then_z(self):
+        rot = self.g["_rotation"]
+        zero = {"rot_x_deg": 0.0, "rot_y_deg": 0.0, "rot_z_deg": 0.0}
+        self.assertEqual(rot(zero), [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        self.assertEqual(rot(dict(zero, rot_x_deg=180.0)),
+                         [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+                         "face down: y and z reversed, written as whole numbers")
+        # About x first, then z: the board's z (its pins) ends on +x, its x on +y.
+        # In the other order its pins would end on -y.
+        m = rot(dict(zero, rot_x_deg=90.0, rot_z_deg=90.0))
+        self.assertEqual(m, [[0.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+        m = rot(dict(zero, rot_x_deg=30.0, rot_y_deg=-50.0, rot_z_deg=125.0))
+        for i in range(3):
+            for j in range(3):
+                dot = sum(m[k][i] * m[k][j] for k in range(3))
+                self.assertAlmostEqual(dot, 1.0 if i == j else 0.0, places=12)
+
+    def test_the_height_box_is_the_courtyards_in_the_footprints_frame(self):
+        box = self.g["_courtyard_box"]
+        self.assertEqual(box(_footprint(TREE, "U1")), (-2.05, -1.7, 2.05, 1.7))
+        # Flipped to B.Cu, KiCad stores the courtyard with y negated: the box is
+        # read back into the library frame, as footprint_land reads pads.
+        tree = K.load_tree(BOARD)
+        fp = _footprint(tree, "J1")
+        front = box(fp)
+        K.child(fp, "layer")[1] = K.Q("B.Cu")
+        for item in fp:
+            if isinstance(item, list) and K.value(item, "layer") == "F.CrtYd":
+                K.child(item, "layer")[1] = K.Q("B.CrtYd")
+                for key in ("start", "end"):
+                    K.child(item, key)[2] = str(-float(K.child(item, key)[2]))
+        self.assertEqual(box(fp), front)
+        self.assertEqual(front, (-1.8, -1.8, 1.8, 9.4))
+        # A part with no courtyard on its own side has no box.
+        K.child(fp, "layer")[1] = K.Q("F.Cu")
+        self.assertIsNone(box(fp))
+
+    def test_an_arc_adds_the_extremes_it_passes(self):
+        arc = self.g["_arc_points"]
+        # A half circle of radius 1 over the top (y up in this arithmetic):
+        # it passes (0, 1), not (0, -1).
+        pts = arc((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0))
+        ys = [round(p[1], 9) for p in pts]
+        self.assertEqual((min(ys), max(ys)), (0.0, 1.0))
+        pts = arc((1.0, 0.0), (0.0, -1.0), (-1.0, 0.0))
+        ys = [round(p[1], 9) for p in pts]
+        self.assertEqual((min(ys), max(ys)), (-1.0, 0.0))
+
+
+class AFitRecordIsReadStrictly(unittest.TestCase):
+    """Each refusal comes before any tool runs, so these need no KiCad: the gate
+    function is called as the registry holds it."""
+
+    def setUp(self):
+        self.out = tempfile.mkdtemp(prefix="nopekit-fit-records-")
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.fn = _registry().get("pcb.enclosure_fit")[1]
+
+    def _verdict(self, claim=None, **params):
+        return self.fn(_fit_ctx(self.out, dict(_baseline(), **params), claim))
+
+    def test_the_old_limit_is_refused_naming_the_claim(self):
+        """A limit is the claim's. Dropped silently, the old key would read as a
+        number the project thinks was used."""
+        v = self._verdict(pcb_enclosure_clearance_mm=1.0)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("pcb_enclosure_clearance_mm is retired", v.error)
+        self.assertIn("the claim tagged enclosure-fit", v.error)
+
+    def test_a_claim_in_other_terms_is_refused(self):
+        for claim in (_fit_claim(units="in"), _fit_claim(comparator="<=")):
+            with self.subTest(claim=claim.acceptance):
+                v = self._verdict(claim)
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn("(>=) in mm", v.error)
+
+    def test_a_contact_names_a_feature_and_says_why(self):
+        region = [[0, -17, 16], [8, 2, 19]]
+        for name, contacts, said in (
+                ("a ref alone", {"J1": {}}, "never a part against anything"),
+                ("no reason", {"J1": {"lid": {"region_mm": region}}}, "has no reason"),
+                ("no region", {"J1": {"lid": {"reason": "seats on it"}}}, "has no region_mm"),
+                ("a misspelled key", {"J1": {"lid": {"reason": "x", "region": region}}},
+                 "unknown key 'region' (did you mean 'region_mm'?)"),
+                ("a box inside out", {"J1": {"lid": {"reason": "x",
+                                                     "region_mm": [[8, 2, 19], [0, -17, 16]]}}},
+                 "each low corner must be below its high one"),
+                ("a part the board lacks", {"J9": {"lid": {"reason": "x", "region_mm": region}}},
+                 "a contact names J9: the board has no such part"),
+                ("another board, one fit", {"J1": {"lower:J2": {"reason": "mates"}}},
+                 "needs pcb_enclosure_fits"),
+                ("the body against the enclosure",
+                 {"board": {"lid": {"reason": "x", "region_mm": region}}},
+                 "the board body may already touch the enclosure")):
+            with self.subTest(case=name):
+                v = self._verdict(pcb_enclosure_contacts=contacts)
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn(said, v.error)
+
+    def test_a_height_is_one_body_with_a_source(self):
+        for name, heights, said in (
+                ("a part with a model", {"U1": {"h": 1.0, "source": "datasheet"}},
+                 "U1 names a 3D model"),
+                ("no source", {"U1": {"h": 1.0, "source": " "}}, "source is empty"),
+                ("no height", {"U1": {"h": 0, "source": "datasheet"}}, "a height is above 0 mm"),
+                ("a flag", {"U1": {"h": True, "source": "datasheet"}}, "give a number")):
+            with self.subTest(case=name):
+                v = self._verdict(pcb_part_heights_mm=heights)
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn(said, v.error)
+
+    def test_a_placement_states_where_and_turns_only_what_it_says(self):
+        for name, place, said in (
+                ("no z", {"x": 0, "y": 0}, "has no z"),
+                ("the old flip word", {"x": 0, "y": 0, "z": 4, "flip": True},
+                 "unknown key 'flip'"),
+                ("a word for a number", {"x": 0, "y": 0, "z": "4"}, "give a number")):
+            with self.subTest(case=name):
+                v = self._verdict(pcb_board_placement=place)
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn(said, v.error)
+
+    def test_each_fit_is_stated_once(self):
+        fits = {"main": {"board": _baseline()["pcb_board"],
+                         "enclosure_step": _baseline()["pcb_enclosure_step"],
+                         "placement": {"x": 0, "y": 0, "z": 4}}}
+        v = self._verdict(pcb_enclosure_fits=fits)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("state each fit once", v.error)
+        params = {k: val for k, val in _baseline().items()
+                  if k not in ("pcb_enclosure_step", "pcb_board_placement",
+                               "pcb_enclosure_bodiless")}
+        for name, bad, said in (
+                ("an id with a space", {"main board": fits["main"]}, "a fit's id is letters"),
+                ("no placement", {"main": {k: x for k, x in fits["main"].items()
+                                           if k != "placement"}}, "has no placement"),
+                ("a list", [fits["main"]], "not an object keyed by fit id")):
+            with self.subTest(case=name):
+                v = self.fn(_fit_ctx(self.out, dict(params, pcb_enclosure_fits=bad)))
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn(said, v.error)
+
+    def test_a_newer_board_is_skipped_in_the_guards_words(self):
+        """Held to the reader's ceiling before any model is read (noted in the
+        review of P4: this gate read a newer file's footprints on trust)."""
+        root = tempfile.mkdtemp(prefix="nopekit-fit-newer-")
+        self.addCleanup(shutil.rmtree, root, True)
+        board = _board_copy(root, _version(_board_text(), "20260206"))
+        v = self._verdict(pcb_board=board)
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn("this reader was checked through board format 20241229 (KiCad 9.0); "
+                      "the file is format 20260206", v.skip_reason)
+        self.assertIn("not a defect in the board", v.skip_reason)
+
+    def test_a_part_with_neither_model_nor_height_still_skips_named(self):
+        root = tempfile.mkdtemp(prefix="nopekit-fit-nomodel-")
+        self.addCleanup(shutil.rmtree, root, True)
+        v = self._verdict(pcb_board=_variant_board(root, _drop_model("U1")))
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn("1 placed part(s) name no 3D model: U1", v.skip_reason)
+        self.assertIn("pcb_part_heights_mm", v.skip_reason)
+
+
+@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+class TheFitTakesItsLimitAndContactsFromTheRecords(unittest.TestCase):
+    """The baseline board in the baseline enclosure, raised until its pins come
+    near the lid: the claim's limit judges it, and a by-design contact excuses
+    one part against one region of the enclosure, never against the rest.
+
+    The baseline's pins are 2.365 mm under the lid at z 4. At z 5.8 they are
+    0.565 mm under it; at z 7 they run 0.635 mm into it."""
+
+    LID_OVER_J1 = [[0.0, -17.0, 16.0], [8.0, 2.0, 19.0]]
+    LID_OVER_J2 = [[22.0, -17.0, 16.0], [30.0, 2.0, 19.0]]
+    FLOOR_UNDER_J2 = [[20.0, -17.0, -2.0], [30.0, 2.0, 0.5]]
+
+    def setUp(self):
+        self.out = tempfile.mkdtemp(prefix="nopekit-fit-contacts-")
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.registry = _registry()
+
+    def _run(self, z: float = 4.0, contacts=None, claim=None):
+        params = dict(_baseline(), pcb_board_placement={"x": 0.0, "y": 0.0, "z": z})
+        if contacts is not None:
+            params["pcb_enclosure_contacts"] = contacts
+        out = tempfile.mkdtemp(dir=self.out)
+        return gates_mod.run_gate(*self.registry.get("pcb.enclosure_fit"),
+                                  _fit_ctx(out, params, claim))
+
+    def _contact(self, region, reason="seats against it by design"):
+        return {"reason": reason, "region_mm": region}
+
+    def test_the_limit_is_the_claims(self):
+        """The same 2.365 mm against the claim at 2.0 and at 3.0: the value never
+        moves with the limit, the verdict does."""
+        at_2 = self._run(claim=_fit_claim(2.0))
+        at_3 = self._run(claim=_fit_claim(3.0))
+        self.assertEqual((at_2.outcome, at_2.measured, at_2.limit), ("pass", 2.365, 2.0),
+                         at_2.render())
+        self.assertEqual((at_3.outcome, at_3.measured, at_3.limit), ("fail", 2.365, 3.0),
+                         at_3.render())
+        self.assertIn("vs >= 3 mm (the claim tagged enclosure-fit)", at_3.detail)
+
+    def test_a_contact_excuses_one_part_against_one_region_only(self):
+        near = self._run(z=5.8)
+        self.assertEqual((near.outcome, near.measured), ("fail", 0.565), near.render())
+        one = self._run(z=5.8, contacts={"J1": {"lid_j1": self._contact(self.LID_OVER_J1)}})
+        self.assertEqual((one.outcome, one.measured), ("fail", 0.565), one.render())
+        self.assertIn("nearest J2 is 0.565 mm", one.detail)
+        self.assertIn("declared contact(s): J1 to lid_j1 0.565 mm", one.detail)
+        # J2 excused against the floor under it, not the lid over it: the lid
+        # still judges it. A contact is (ref, feature), never a ref alone.
+        other = self._run(z=5.8, contacts={
+            "J1": {"lid_j1": self._contact(self.LID_OVER_J1)},
+            "J2": {"floor_j2": self._contact(self.FLOOR_UNDER_J2)}})
+        self.assertEqual((other.outcome, other.measured), ("fail", 0.565), other.render())
+        self.assertIn("nearest J2 is 0.565 mm", other.detail)
+        both = self._run(z=5.8, contacts={
+            "J1": {"lid_j1": self._contact(self.LID_OVER_J1)},
+            "J2": {"lid_j2": self._contact(self.LID_OVER_J2)}})
+        self.assertEqual(both.outcome, "pass", both.render())
+        self.assertGreater(both.measured, 3.0, "each pin keeps its gap from the rest of the lid")
+        self.assertIn("J2 to lid_j2 0.565 mm", both.detail)
+
+    def test_a_contact_never_excuses_a_collision(self):
+        v = self._run(z=7.0, contacts={
+            "J1": {"lid_j1": self._contact(self.LID_OVER_J1)},
+            "J2": {"lid_j2": self._contact(self.LID_OVER_J2)}})
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("2 collision(s)", v.detail)
+        self.assertIn("J1 shares 0.931 mm^3 with the enclosure", v.detail)
+
+    def test_a_region_that_holds_the_whole_enclosure_is_refused(self):
+        v = self._run(z=5.8, contacts={"J2": {"everything": self._contact(
+            [[-50.0, -50.0, -50.0], [50.0, 50.0, 50.0]])}})
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("its region holds the whole enclosure", v.error)
+
+
+@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+class BoardsSitInAnyOrientationAndBesideEachOther(unittest.TestCase):
+    """Boards placed in a roomy box (cavity x -10..80, y -30..10, z 0..30): face
+    down, on an edge, and two side by side, where each board is held to the
+    claim against the other as against the enclosure."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="nopekit-fit-boards-")
+        cls.box = _enclosure_step(os.path.join(cls.tmp, "box.step"), "shell",
+                                  (-10.0, -30.0, 0.0), (80.0, 10.0, 30.0))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, True)
+
+    def setUp(self):
+        self.registry = _registry()
+
+    def _run(self, params: dict):
+        out = tempfile.mkdtemp(dir=self.tmp)
+        base = {k: v for k, v in _baseline().items()
+                if k not in ("pcb_enclosure_step", "pcb_board_placement",
+                             "pcb_enclosure_bodiless")}
+        return gates_mod.run_gate(*self.registry.get("pcb.enclosure_fit"),
+                                  _fit_ctx(out, dict(base, **params)))
+
+    def _one(self, place: dict):
+        return self._run({"pcb_enclosure_step": self.box, "pcb_board_placement": place})
+
+    def test_face_down(self):
+        """rot_x 180 reverses y and z: the pins (z -1.405..10.135 on the board)
+        hang down, their tips 2.0 mm above the floor at z 12.135."""
+        v = self._one({"x": 10.0, "y": -20.0, "z": 12.135, "rot_x_deg": 180.0})
+        self.assertEqual((v.outcome, v.measured), ("pass", 2.0), v.render())
+        self.assertIn("is 2 mm from the enclosure", v.detail)
+        self.assertIn("turned x 180 deg", v.detail)
+
+    def test_on_an_edge_turned_about_x_then_z(self):
+        """rot_x 90 then rot_z 90: the pins point +x, their tips 3.0 mm from the
+        +x wall. Turned about z first, they would point -y, nowhere near it."""
+        v = self._one({"x": 66.865, "y": -25.0, "z": 20.0, "rot_x_deg": 90.0,
+                       "rot_z_deg": 90.0})
+        self.assertEqual((v.outcome, v.measured), ("pass", 3.0), v.render())
+
+    def _two(self, gap: float, contacts=None):
+        def fit(x):
+            return {"board": _baseline()["pcb_board"], "enclosure_step": self.box,
+                    "placement": {"x": x, "y": 0.0, "z": 4.0}}
+        fits = {"left": fit(0.0), "right": fit(30.0 + gap)}
+        if contacts:
+            fits["left"]["contacts"] = contacts
+        return self._run({"pcb_enclosure_fits": fits})
+
+    def test_two_boards_are_held_to_the_claim_against_each_other(self):
+        """Side by side, the bodies ``gap`` apart: the nearest pair of shapes
+        is the two bodies (each board's pins sit 2.73 mm in from its edge), and
+        against the enclosure the pin tails keep 2.595 mm from the floor."""
+        apart = self._two(2.0)
+        self.assertEqual((apart.outcome, apart.measured), ("pass", 2.0), apart.render())
+        self.assertIn("2 board(s)", apart.detail)
+        close = self._two(0.5)
+        self.assertEqual((close.outcome, close.measured), ("fail", 0.5), close.render())
+        self.assertIn("nearest left:board is 0.5 mm from board right", close.detail)
+        touching = self._two(-0.5)
+        self.assertEqual(touching.outcome, "fail", touching.render())
+        self.assertIn("left:board shares 11.3 mm^3 with board right (right:board 11.3 mm^3)",
+                      touching.detail)
+
+    def test_a_contact_between_boards_is_one_shape_against_one_shape(self):
+        excused = self._two(0.5, {"board": {"right:board": {"reason": "the edges seat "
+                                                                      "against each other"}}})
+        self.assertEqual((excused.outcome, excused.measured), ("pass", 2.595),
+                         excused.render())
+        self.assertIn("left:board to right:board 0.5 mm", excused.detail)
+        # Excused against the other board's J1 only: its body still judges it.
+        scoped = self._two(0.5, {"board": {"right:J1": {"reason": "a pin rests on it"}}})
+        self.assertEqual((scoped.outcome, scoped.measured), ("fail", 0.5), scoped.render())
+        collided = self._two(-0.5, {"board": {"right:board": {"reason": "seated"}}})
+        self.assertEqual(collided.outcome, "fail", collided.render())
+        self.assertIn("collision(s)", collided.detail)
+
+
+@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
+class APartWithNoModelIsFittedAtItsDeclaredHeight(unittest.TestCase):
+    """U1 with its model removed, under a block 0.8 mm above where a 1.55 mm
+    body would reach (its model's own height). The declared height decides the
+    gap: no height skips, 1.55 mm fails at 0.8 mm, 1.0 mm passes at 1.35 mm."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="nopekit-fit-heights-")
+        # KiCad 9.0.9 seats a model at z 1.595 on this 1.6 mm board (measured).
+        top = 1.595 + 1.55 + 0.8
+        cls.block = _enclosure_step(os.path.join(cls.tmp, "block.step"), "block",
+                                    (13.0, -9.5, top), (17.0, -6.2, top + 2.0))
+        cls.board = _variant_board(cls.tmp, _drop_model("U1"))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, True)
+
+    def _run(self, heights=None):
+        params = dict(_baseline(), pcb_board=self.board, pcb_enclosure_step=self.block,
+                      pcb_board_placement={"x": 0.0, "y": 0.0, "z": 0.0})
+        if heights is not None:
+            params["pcb_part_heights_mm"] = heights
+        return gates_mod.run_gate(*_registry().get("pcb.enclosure_fit"),
+                                  _fit_ctx(tempfile.mkdtemp(dir=self.tmp), params))
+
+    def test_the_height_decides_the_gap(self):
+        none = self._run()
+        self.assertEqual(none.outcome, "skipped", none.render())
+        self.assertIn("name no 3D model: U1", none.skip_reason)
+        tall = self._run({"U1": {"h": 1.55, "source": "the part's seated height"}})
+        self.assertEqual((tall.outcome, tall.measured), ("fail", 0.8), tall.render())
+        self.assertIn("nearest U1 is 0.8 mm", tall.detail)
+        low = self._run({"U1": {"h": 1.0, "source": "the part's seated height"}})
+        self.assertEqual((low.outcome, low.measured), ("pass", 1.35), low.render())
 
 
 if __name__ == "__main__":

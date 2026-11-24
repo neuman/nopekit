@@ -26,11 +26,13 @@ at board format 20251028: every pad, track, via and zone names its net
 see the same nets either way. It is checked against KiCad 9 boards only
 (:data:`MAX_BOARD_VERSION`): ``pcb.board_readable``, the power rules and
 ``pcb.fab_rules``'s service guard skip a newer file (:func:`reader_ceiling`), and
-the other tier-0 gates need the guard. Two tier-1 gates still read a newer file
-with it: ``pcb.parity`` for the pads that have no net, once kicad-cli has loaded
-the board, and ``pcb.enclosure_fit`` for each part's 3D model. (What slipped
-through, in the review of P4: this paragraph said a newer file is never read on
-trust, while the service guard read a KiCad 10 file's stackup and vias.)
+the other tier-0 gates need the guard. ``pcb.enclosure_fit`` skips a newer
+file too, before it reads a part's 3D model or courtyard (general-packs P7). One
+tier-1 gate still reads a newer file with it: ``pcb.parity``, for the pads that
+have no net, once kicad-cli has loaded the board. (What slipped through, in the
+review of P4: this paragraph said a newer file is never read on trust, while the
+service guard read a KiCad 10 file's stackup and vias. The same review noted
+that the fit read its footprints and models.)
 
 **The formula.** :func:`temp_rise_c` is IPC-2221's trace-heating curve fit,
 cited in ``references/ipc-2221.md`` with the range it was fitted over.
@@ -407,8 +409,8 @@ def reader_ceiling(version: int | None) -> str:
     """Why this reader will not judge a board of file format ``version``, or ""
     when it was checked through that format. The one place the words are made:
     ``pcb.board_readable`` skips on them, and so do the power rules on a board a
-    record names and ``pcb.fab_rules`` before its service guard reads the
-    stackup."""
+    record names, ``pcb.fab_rules`` before its service guard reads the stackup,
+    and ``pcb.enclosure_fit`` before it reads a part's model or courtyard."""
     if version is None or version <= MAX_BOARD_VERSION:
         return ""
     return (f"this reader was checked through board format {MAX_BOARD_VERSION} "

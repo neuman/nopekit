@@ -7,8 +7,10 @@ own fixture is broken, and a green verdict from it means nothing.
 
 **Sealed.** Every fixture starts from this pack's own ``selftest/baseline.json``
 and ``selftest/assets/esd_guard.*`` or ``power_board.kicad_pcb``, never from the
-host's projection or the host's board, and hands the gate an empty ledger. A control whose severity
-depended on the host's board would fire in some projects and not in others.
+host's projection or the host's board. It hands the gate an empty ledger, or,
+for ``pcb.enclosure_fit``, which reads its limit from a claim, the baseline's own
+claims (``_claims``): never the host's. A control whose severity depended on the
+host's board or claims would fire in some projects and not in others.
 
 **Generated, from the limit the gate judges by.** Each bad project is the baseline
 board or schematic parsed by the pack's own reader, one thing changed, and written
@@ -27,7 +29,7 @@ import os
 import shutil
 
 from nopekit.modelio import load_path
-from nopekit.models import Ledger
+from nopekit.models import Claim, Ledger
 
 _PACK_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _BASELINE_PATH = os.path.join(_PACK_DIR, "selftest", "baseline.json")
@@ -67,6 +69,16 @@ def _baseline() -> dict:
     for rec in _power_records(params):
         rec["board"] = os.path.join(_PACK_DIR, rec["board"])
     return params
+
+
+def _claims_ledger() -> Ledger:
+    """The claims the baseline states under ``_claims``, as the known-good
+    control's ledger holds them (``packs.baseline_context``): a control that
+    reads its limit from a claim (``pcb.enclosure_fit``, tagged enclosure-fit)
+    reads the pack's own, never the host's."""
+    with open(_BASELINE_PATH, encoding="utf-8") as fh:
+        rows = json.load(fh).get("_claims") or []
+    return Ledger(claims=[Claim.from_dict(row) for row in rows])
 
 
 #: The baseline project's library tables, copied beside every variant with its
@@ -284,9 +296,9 @@ def raised_board(ctx):
     part that collides is one whose 3D model came from KiCad's library."""
     params = _baseline()
     place = dict(params["pcb_board_placement"])
-    place["z"] = float(place.get("z", 0.0)) + RAISE_MM
+    place["z"] = float(place["z"]) + RAISE_MM
     params["pcb_board_placement"] = place
-    return dataclasses.replace(ctx, params=params, ledger=Ledger())
+    return dataclasses.replace(ctx, params=params, ledger=_claims_ledger())
 
 
 def mirrored_land(ctx):
