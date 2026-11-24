@@ -304,12 +304,12 @@ model and a model that teaches.
 ```jsonc
 [
   { "id": "carriage",
-    "title": "Carriage on one guide roller",
-    "oneLiner": "The carriage runs on the roller and stops against the housing.",
+    "title": "Carriage stopped by the guide roller",
+    "oneLiner": "The carriage slides between the housing walls and stops against the roller.",
     "blurb": "Two sentences on why it is this way and what it costs. The thing a reader wants at the moment they are looking straight at the part.",
     "anchors": ["carriage__0", "guide_roller__0"],
     "view": "assembly",
-    "href": "docs/decisions.md#carriage-on-one-roller",
+    "href": "docs/decisions.md#roller-end-stop",
     "linkLabel": "decisions.md",
     "claims": ["C1"],
     "params": ["roller_d_mm"] }
