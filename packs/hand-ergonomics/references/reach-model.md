@@ -75,10 +75,11 @@ an approximate full-extension bound.
   its grip, where the known-bad cluster read 100% in reach.
 
 Both length errors are smaller than the spread of reach beyond the grip in each sex
-(SD 5.6 to 5.8 mm). A control within a few mm of the edge for the limiting subjects is
-the testers' to settle, not the screen's. **Rejected:** a slack added to the radius,
-or a tighter rule from a thumb-pad or base-joint model. No public survey measures
-either offset, and a guessed correction launders an assumption into a number.
+(SD 5.6 to 5.8 mm). The testers check a control within a few mm of the edge for the
+limiting subjects: a miss in their hands fails REACH-HELD, and a press does not clear
+a fail of the count. **Rejected:** a slack added to the radius, or a tighter rule from
+a thumb-pad or base-joint model. No public survey measures either offset, and a
+guessed correction launders an assumption into a number.
 
 ## Controls that are not judged
 
@@ -130,8 +131,12 @@ What a slab device gets:
   beyond the grip, press every control on the first full print without a regrip
   (`skills/reach-testing/SKILL.md`). A person records it. This is the reach claim of
   a slab device; REACH, the count, is left out.
-- **The layout guard, in part.** `ergo.layout_agrees` holds every control and cap to
-  the scene. It measures no section at a slab grip.
+- **The layout guard, through a claim of its own.** `ergo.layout_agrees` covers the
+  tags `digit-reach` and `control-layout`, and REACH was the claim that carried one.
+  With REACH left out, the guard runs as a row, covers no claim, and its fail moves
+  no status. A claim tagged `control-layout` (PACK.md gives it) makes it count: it
+  holds every control the testers press, and every cap, to the scene. It measures no
+  section at a slab grip.
 - **The testers' numbers.** The proposer writes `design_range.json` alone: the design
   ranges, the testers' thresholds and a tester's percentile.
 

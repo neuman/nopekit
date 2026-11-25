@@ -94,8 +94,8 @@ mechanism that would settle it, and the requirements it serves:
 
 | Kind | Settled by | `by` | The person it names |
 |---|---|---|---|
-| `measurable` | an automated evaluator, from the model | `closed_form`, `solver`, `datasheet` | none |
-| `physical` | a measurement on a built article, or its authority's judgment | `measurement`, `human` | `authority` under `human` |
+| `measurable` | an automated evaluator, from the model | `closed_form`, `solver`, `datasheet` | `owner` when it carries a `fallback` (why it may be carried outside its evaluators' operating contexts); otherwise none |
+| `physical` | a measurement on a built article, or its authority's judgment | `measurement`, `human` | under `measurement`, whoever records the result (git's identity, in no field), and `owner` with a `fallback`; `authority` under `human` |
 | `assumption` | accepted for now, with a reason and an owner who records it | `none`, `human` | `owner` under `none` (or no `by`); `human` makes it an expert judgment, and its person is its `authority` |
 
 Give each claim the narrowest `tags`: an evaluator covers a claim by its id or a shared
@@ -143,7 +143,7 @@ command; from your shell it records nothing that counts:
 
 ```sh
 nopekit claim physical C5 pass --evidence photos/c5.jpg --detail "<what was seen>"
-nopekit claim physical C6 assume                     # an assumption's owner records it
+nopekit claim physical C6 assume                     # an owner records an assumption or a fallback
 nopekit claim physical C7 pass --authority "<name>"  # an authority's judgment
 nopekit prefer <decision>                            # a preference against an alternative
 nopekit export <milestone> --proceed --why "..."     # going ahead over an unresolved claim

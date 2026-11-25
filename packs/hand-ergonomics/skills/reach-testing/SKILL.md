@@ -50,10 +50,16 @@ tester's age with the values.
 - Print the **first full shell**, both handles and the whole face, with a dummy cap at
   every control: the right height, at the declared `at`. A handle alone does not test
   the width or the centre controls. `ergo.layout_agrees` must pass on the exported
-  scene first, so the print is the layout the screen judged.
+  scene first, so the print is the layout the screen judged. On a slab device it
+  holds the controls and caps only, and it counts only through a claim tagged
+  `control-layout` (PACK.md, Claims and milestones).
 - Export it, so the result binds to what was printed: `nopekit export reach-first-print`.
   The export's test card prints the article's hash and the command that records a
   result on it.
+- On a slab device, reach-first-print requires no claim of this pack. Keep it with the
+  shell's own claims in it, and export it as above. Or, with no such milestone, do not
+  export: the person records the result in step 4 without `--article`. It then binds
+  to the design as it is when they record it, and reads Stale when the design moves.
 - Mark the declared grip centre on each handle, where the middle finger wraps. On a
   slab, mark where each hand holds the edge.
 
@@ -83,6 +89,8 @@ In their own shell, with the article hash the export printed:
 ```
 nopekit claim physical REACH-HELD pass --measured 0 --evidence evidence/reach-held.jpg --detail "tester 1 reach beyond grip 43 mm, tester 2 64 mm, grips as declared, 2026-11-20" --article <hex>
 ```
+
+With no export (a slab device's first print, step 2), leave out `--article`.
 
 A miss is a fail, and it keeps counting after every later edit:
 

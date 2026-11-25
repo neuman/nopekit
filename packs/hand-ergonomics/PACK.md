@@ -42,10 +42,12 @@ Say these out loud. A reader will assume the pack covers them, and it does not.
   grips, so the reach claim reads Skipped. A slab device gets a physical reach test
   instead: two testers press every control on the first full print (REACH-HELD in
   `scaffold/`, the protocol in `skills/reach-testing/SKILL.md`). It states no
-  `hand_grip_diameter_mm`. `ergo.layout_agrees` still holds every control and cap to
-  the scene, and measures no section at a slab grip. The proposer writes the design
-  ranges and the testers' percentile only. Copy GRIP-POSTURE and REACH-HELD, not
-  REACH (Claims and milestones, below).
+  `hand_grip_diameter_mm`. `ergo.layout_agrees` still runs: it holds every control
+  and cap to the scene, and measures no section at a slab grip. But REACH was the
+  claim it covered. With REACH left out, the guard covers no claim and its fail moves
+  no status, until you add a claim tagged `control-layout`. The proposer writes the
+  design ranges and the testers' percentile only. Copy GRIP-POSTURE and REACH-HELD,
+  not REACH, and add the layout claim (Claims and milestones, below).
 - **Children.** The survey's youngest subject is 17. For younger users a pass does not
   count (Gap, or Assumed under an owned `fallback`); a fail still counts.
 - **A wide cap.** A control is a point (Keys, below): a space bar is judged at its
@@ -234,10 +236,15 @@ key named: a key that no gate reads changes nothing, and its author thinks it do
 count judges the control there. A wide cap (a space bar, a long rocker) is judged at
 its centre. If it actuates anywhere along its length, that is conservative: its
 nearest point is never farther from the wrist than its centre. If it fails at its
-centre and its near end actuates, the count cannot say so; the testers settle it
-(REACH-HELD). An extent is not read, and `extent` is refused: whether a wide cap
-actuates at its end is a fact of its switch and its stabiliser, which no scene
-shows, and a stated extent would pass on a number that nothing holds.
+centre, the fail stands, even where its near end actuates. The count cannot see the
+near end, and REACH-HELD does not clear the fail: it resolves GRIP-POSTURE, and only
+REACH's evaluators settle REACH. Move the cap toward the wrist until its centre is in
+reach. Or go ahead with the cap where it is: a person records that decision at the
+spend, in their own shell (`nopekit export <milestone> --proceed --why "..."`), and the
+export record names REACH and its status. An extent is not read, and `extent` is
+refused: whether a wide cap actuates at its end is a fact of its switch and its
+stabiliser, which no scene shows, and a stated extent would pass on a number that
+nothing holds.
 
 ## The physics in one paragraph
 
@@ -249,10 +256,11 @@ point, and of the index finger within the wrist-index finger length. This is an
 approximate full-extension envelope. The thumb pad presses a few mm short of the tip,
 which makes it generous. The thumb's base joint sits off the stylion's line, which can
 make it 1 to 3 mm short. Both errors are smaller than the 5.6 to 5.8 mm spread of
-reach beyond the grip in each sex. A control within a few mm of the edge is the
-testers' to settle. Typical numbers: reach beyond the grip (wrist-thumbtip minus
-wrist-centre of grip) is 42 mm at the women's P5 and 64 mm at the men's P95; a face
-button 100 mm from the wrist is easy, one at 120 mm loses many women.
+reach beyond the grip in each sex. The testers check a control within a few mm of
+the edge: a miss in their hands fails REACH-HELD, and a press does not clear a fail of
+the count. Typical numbers: reach beyond the grip (wrist-thumbtip minus wrist-centre
+of grip) is 42 mm at the women's P5 and 64 mm at the men's P95; a face button 100 mm
+from the wrist is easy, one at 120 mm loses many women.
 
 ## Tag vocabulary
 
@@ -268,13 +276,18 @@ would collect evidence it does not assert.
 
 `scaffold/` holds record files to copy into a project. `nopekit packs list --verbose`
 prints each pack's directory on the line under its name; call this one `<pack>`.
-Copy from it into the project's own `claims/` and `milestones/`, and rename an id the
-project already uses (a milestone names its claims by id):
+A record's id is its file name, and a plain `cp` overwrites a file of that name
+without a word. So list both sides first, and copy with `-i`, which asks before it
+overwrites:
 
 ```sh
-cp <pack>/scaffold/claims/*.json claims/
-cp <pack>/scaffold/milestones/*.json milestones/
+ls <pack>/scaffold/claims/ <pack>/scaffold/milestones/ claims/ milestones/
+cp -i <pack>/scaffold/claims/*.json claims/
+cp -i <pack>/scaffold/milestones/*.json milestones/
 ```
+
+Answer no to each clash. Copy that file under a new name, and use the new id where
+another record names it: a milestone's `requires` and REACH-HELD's `resolves`.
 
 - `claims/REACH.json`, measurable: at least 95% of each sex reach every control.
 - `claims/GRIP-POSTURE.json`, an assumption: the hands hold the grips as declared.
@@ -290,10 +303,32 @@ cp <pack>/scaffold/milestones/*.json milestones/
   claims to the board order before you spend.
 
 **On a slab device**, copy GRIP-POSTURE and REACH-HELD and leave REACH out: no count
-is made from a slab grip, so REACH would read Skipped. In GRIP-POSTURE's statement,
-write "edge" for "handle". Take REACH out of both milestones. The board order then
-requires REACH-HELD, and the first print requires no claim of this pack: put the
-shell's own claims in it, or leave it out.
+is made from a slab grip, so REACH would read Skipped for as long as it stands. In
+GRIP-POSTURE's statement, write "edge" for "handle". Write its `rationale` again too,
+before its owner records it (the record binds to the rationale it read): no wrist sits
+behind a grip in a count, so say what the marks are for. For example: "the testers
+hold the print at the marked grips; a hand that holds the edge elsewhere moves every
+reach with it". Take REACH out of both milestones. The board order then requires
+REACH-HELD. The first print requires no claim of this pack: put the shell's own claims
+in it, or leave it out and record REACH-HELD on the design
+(`skills/reach-testing/SKILL.md`, step 2).
+
+With REACH left out, no claim carries a tag that `ergo.layout_agrees` covers, so its
+fail moves no status. The testers press the controls that the layout declares. To hold
+those to the drawn ones, add this claim as `claims/LAYOUT.json`, and put it in the
+board order beside REACH-HELD. Tag it `control-layout` only: `digit-reach` brings in
+the reach count, which skips on a slab. The guard runs at tier 1, so the claim waits
+until `nopekit check --tier 1` has run it.
+
+```json
+{"statement": "Every drawn control is declared, every declared control is drawn, and each cap is within 0.5 mm of its declared position",
+ "kind": "measurable",
+ "acceptance": {"quantity": "declared layout agreement", "comparator": "<=", "limit": 0.5, "units": "mm"},
+ "rationale": "the testers press the controls that the layout declares, so a drawn control that the layout leaves out is never pressed",
+ "tags": ["control-layout"],
+ "mechanism": {"how": "ergo.layout_agrees reads the exported scene: each declared control is drawn as part ctl-<id>, each drawn ctl-* part is declared, and each cap top lies within 0.5 mm of its declared at",
+               "evaluators": ["ergo.layout_agrees"]}}
+```
 
 ## Common failure modes
 
@@ -311,9 +346,10 @@ shell's own claims in it, or leave it out.
   `kind: handle` with its own perimeter / pi as the diameter, puts every wrist far
   behind its grip, and the count fails. Outside 25 to 50 mm that fail still counts.
   `ergo.layout_agrees` shows it too: each end grip lies far off its section's
-  centroid. Declare `kind: slab`: the count skips, and REACH-HELD settles reach. Do
-  not declare a real handle a slab to escape a fail: the reach claim then reads
-  Skipped, and only the testers can settle it.
+  centroid. Declare `kind: slab` and leave REACH out: REACH-HELD settles reach. Do
+  not declare a real handle a slab to escape a fail: REACH then reads Skipped for as
+  long as it stands. REACH-HELD does not settle it, and a milestone that requires
+  REACH is not ready.
 - **A stale layout.** The layout file moved and the CAD did not, or the reverse.
   `ergo.layout_agrees` names the control and its node, or the grip whose handle
   moved. Move the control in the model,
@@ -329,8 +365,8 @@ shell's own claims in it, or leave it out.
 - Is 20 deg the right tolerance between the hand axis and the handle axis? A natural
   power grip lies oblique across the palm, and a refusal reads louder than a fail.
 - Worst sex (as now) or a pooled share at a mix the person states?
-- A slab-grip anchor for v0.2, from the 2014 functional-area model, once its own
-  worked example is reproduced (`references/reach-model.md`).
+- A slab-grip anchor, from the 2014 functional-area model, once its own worked
+  example is reproduced (`references/reach-model.md`).
 - Should `ergo.layout_agrees` light up the disagreeing control on cad-solid's
   `assembly` view? A locator to another pack's view dangles where cad-solid is not
   live, so it names the node in its detail and attaches none.
