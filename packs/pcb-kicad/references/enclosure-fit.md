@@ -127,6 +127,19 @@ holdout round 2: a declared height was a box above the board alone, so eight
 switches' leads under the board, which a layer of the case was cut for, were
 never fitted, and a pass on declared heights said nothing of them.)
 
+A via in a footprint is not a lead hole. A plated hole marked
+`pad_prop_heatsink` (KiCad's mark for a heat-sink pad), or one whose pad opens
+no solder mask on either side (the mask covers it, so no lead goes in), gets no
+cylinder: the thermal vias under an SMD part's exposed pad, an edge-mount SMA's
+ground vias. In KiCad 9.0.9's library every plated pad of a through-hole
+footprint opens the mask. A via that opens the mask and carries no mark is
+still drawn as a lead: KiCad's `*_ThermalVias` power connectors put such vias
+beside their own pins, and a floor close under one may read a collision that
+the pin's own lead does not make. (What slipped through, review of J2: every
+plated hole was a lead hole, so a DFN at its declared height stood a 2.5 mm rod
+under the board at each of its six 0.2 mm thermal vias, and a floor 2 mm under
+a sound board read a collision.)
+
 A part whose model is not on this host is one that names none, or one whose
 every model is found nowhere here: `${KIPRJMOD}` is the board's folder, a
 variable the project names in `pcb_model_dirs` is its folder alone (below),
@@ -265,7 +278,8 @@ here so a person can read the shared volume against the drawing.
 
 A part fitted at its declared height is its outline and its leads, no more: a
 lead bent over under the board, a solder fillet wider than its hole, and a
-locating peg in a hole with no plating are not drawn. A part fitted from its
+locating peg in a hole with no plating are not drawn; a via that opens the mask
+and carries no heat-sink mark is drawn as a lead (above). A part fitted from its
 model is what its model draws, leads or none.
 
 One limit for every board: the claim tagged `enclosure-fit` states one condition,

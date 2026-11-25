@@ -3099,6 +3099,17 @@ HEIGHT_DIR = "nopekit-heights"
 #: holds it).
 LEAD_DEFAULT_MM = 2.5
 
+#: The suffix of a layer name that opens the solder mask (``F.Mask``,
+#: ``B.Mask``, ``*.Mask``): a plated hole whose pad names none is covered by
+#: the mask on both sides, a via, and holds no lead. Measured on the footprint
+#: library KiCad 9.0.9 installs (2026-11-25, read with this pack's parser):
+#: all 96188 plated pads of its ``through_hole`` footprints open the mask, and
+#: the 4675 plated pads that open none are all in ``smd`` footprints, net
+#: ties and printed antennas: thermal vias under an exposed pad, an edge-mount
+#: SMA's ground vias, a net tie's holes, an antenna's feed via. *Rejected:*
+#: the ``pad_prop_heatsink`` mark alone (1200 of those vias carry no mark).
+LEAD_MASK = ".Mask"
+
 #: How far past the board file's thickness KiCad's export puts the far face a
 #: lead stands past: kicad-cli 9.0.9 seats a part on top at z T - 0.005 and one
 #: underneath at -0.085 (measured on the baseline at 1.6 and 1.0 mm: 1.595 and
@@ -3597,11 +3608,34 @@ def _lead_holes(fp: list) -> list[tuple[float, float, float]]:
     diameter that holds the lead: the drill's (a lead fits its hole), an oval
     drill's longer side, and a drill offset from its pad's centre widened by
     twice the offset (the offset's turn with the pad is then not needed). A hole
-    with no plating (a mounting hole, a peg's) holds no lead."""
+    with no plating (a mounting hole, a peg's) holds no lead, and neither does
+    a via in a footprint: one marked ``pad_prop_heatsink`` (KiCad's word for a
+    heat-sink pad, a thermal via under an exposed pad) or one whose pad opens
+    no solder mask on either side (:data:`LEAD_MASK`: the mask covers it, so no
+    lead goes in).
+
+    What slipped through (review of J2): every plated hole was a lead hole, so
+    a DFN fitted at its declared height, whose footprint (``attr smd``) puts
+    six 0.2 mm thermal vias under its pad, stood a 2.5 mm rod under the board
+    at each via, named under "leads at the default", and a floor 2 mm below a
+    sound board read a collision. *Rejected:* every plated hole of an ``attr
+    smd`` footprint (a USB receptacle's shield tabs are plated, opened and
+    through the board); a hole inside an SMD pad of its own number (KiCad's
+    micro-B receptacles sit their shield tabs inside SMD lands of the shield's
+    number); a smallest drill (a USB-C receptacle in KiCad's library takes
+    its leads in 0.4 mm holes, its Mini-Fit Sr connectors' vias are 0.3 mm). A
+    via that opens the mask and carries no mark is still fitted as a lead:
+    KiCad's ``*_ThermalVias`` power connectors put such vias beside their own
+    pins (enclosure-fit.md, "Leads")."""
     back = str(K.value(fp, "layer", default="")) == "B.Cu"
     holes = []
     for pad in K.children(fp, "pad"):
         if len(pad) < 3 or str(pad[2]) != "thru_hole":
+            continue
+        if any(len(x) > 1 and str(x[1]) == "pad_prop_heatsink"
+               for x in K.children(pad, "property")):
+            continue
+        if not any(str(name).endswith(LEAD_MASK) for name in (K.child(pad, "layers") or [])[1:]):
             continue
         drill, at = K.child(pad, "drill"), K.child(pad, "at")
         if drill is None or at is None:

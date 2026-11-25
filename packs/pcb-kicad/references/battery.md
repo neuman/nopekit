@@ -206,9 +206,12 @@ not say "Thermistor". With no schematic, the detail says the symbol was not
 read.
 
 **A defeat needs no window and no NTC numbers.** A charger that nothing senses
-the cell for fails without the cell's `charge_temp_c`: the window is read only
-for the headroom, after the elements. With no defeat and no `charge_temp_c`,
-the rule skips, naming it. A charger whose record names only its sense
+the cell for fails without the cell's `charge_temp_c`: the window is needed
+only for the headroom, after the elements. With no defeat and no
+`charge_temp_c`, the rule skips, naming it. A `charge_temp_c` that is there
+and wrong (one number, `FILL:`, a min above its max) errors, as in every rule.
+(What slipped through, review of J2: this rule alone read a wrong window as a
+window not stated, and skipped.) A charger whose record names only its sense
 pin (`charge_temp: {"sense": {"pin": "11"}}`, no `ntc`) is judged on its copper
 and its schematic alone. It fails when its sense pin is tied to its own pad,
 reaches no other part, or sees only fixed resistors (by their schematic symbol)

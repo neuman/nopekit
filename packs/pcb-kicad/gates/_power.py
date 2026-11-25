@@ -472,16 +472,23 @@ MODES_FOR = {"board": MODE_WORDS + MODE_KEYS, "battery": ("reversed", "cell_reve
 
 #: The mode a battery of loose cells takes beside ``reversed``: one cell of a
 #: holder of two or more in series put in the wrong way round. The board then
-#: sees the string the right way round, at the voltage of two cells fewer; the
-#: hazard is the cell's own, driven backwards by the others (IEC 60086-5, the
-#: incorrect installation of a primary cell), which nothing on a board blocks.
-#: ``pcb.mismate`` names it and counts it, so a person settles it with a holder
-#: that keys each cell (and states the mode no more). What slipped through (a
-#: holdout run): nothing could state it, so an open two-AAA holder's most
-#: likely wrong way read as no hazard. *Rejected:* judging it as ``reversed``
-#: (that reverses the whole string, and a blocking diode answers it; nothing
-#: answers one cell turned); a lens alone (an open holder's likeliest wrong way
-#: belongs where a claim can fail on it).
+#: sees the string the right way round, at the voltage of two cells fewer (n -
+#: 2). The hazard is the cell's own, when a current is driven through it
+#: backwards (IEC 60086-5, the incorrect installation of a primary cell), and
+#: nothing on a board blocks that: from three or more in series (the load's
+#: own current), from a second string in parallel, or from a charger stated
+#: for the cell. Two cells alone cancel: the board sees 0 V, nothing flows,
+#: and ``pcb.mismate`` names the mode and counts no hazard (the rule is
+#: ``power._cell_turned``). Where it counts one, a person settles it with a
+#: holder that keys each cell (and states the mode no more). What slipped
+#: through (a holdout run): nothing could state the mode, so an open holder's
+#: most likely wrong way could never fail. Then (holdout round 2) every
+#: string of two or more counted it, so two AAA cells behind a series diode, a
+#: sound design, read Failing, and the project left the mode out to pass.
+#: *Rejected:* judging it as ``reversed`` (that reverses the whole string, and
+#: a blocking diode answers it; nothing answers one cell turned); a lens alone
+#: (an open holder's likeliest wrong way belongs where a claim can fail on it);
+#: a hazard on any string of two (the cells cancel).
 BATTERY_WORDS = ("cell_reversed",)
 
 

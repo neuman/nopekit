@@ -7628,6 +7628,26 @@ class ACellWithNoDatasheetIsJudgedThenSkipped(_PowerCase):
         self.assertEqual(v.outcome, "error", v.render())
         self.assertIn("discharge_v_min is 'FILL: from the sheet': give a number", v.error)
 
+    def test_a_window_that_is_there_and_wrong_errors(self):
+        """The charge window as one number, a FILL: the draft left and a band
+        whose min is above its max: each is an error naming the key, never the
+        skip a window left out earns. What slipped through (review of J2):
+        pcb.charge_temperature caught every record error on the window, so all
+        three read Skipped, "not stated, so not judged", where charge_limits
+        and discharge_cutoff error on the same typo."""
+        for name, window, said in (
+                ("one number", 45, "charge_temp_c is one number, 45"),
+                ("a FILL:", "FILL: from the sheet", "charge_temp_c is 'FILL: from the sheet'"),
+                ("a reversed band", [45, 0], "charge_temp_c is [45, 0]: its min is above "
+                                             "its max")):
+            with self.subTest(window=name):
+                def typo(p, window=window):
+                    p["pcb_batteries"]["main"]["cell"]["charge_temp_c"] = window
+                v = self.run_gate("pcb.charge_temperature", records=typo)
+                self.assertEqual(v.outcome, "error", v.render())
+                self.assertIn(said, v.error)
+                self.assertNotIn("not stated", v.error)
+
     def test_a_primary_cell_with_no_values_skips(self):
         """An alkaline cell stated {} on an unprotected wire: its fault range is
         not stated, a skip naming open_circuit_v's alternatives, never the
@@ -7941,6 +7961,50 @@ class ThePartSetHasNoTypeFilter(unittest.TestCase):
         self.assertIn("U1 states lead_mm and its footprint has no plated hole",
                       str(raised.exception))
 
+    def test_a_via_holds_no_lead(self):
+        """U1, all SMD, given six 0.2 mm thermal vias under it as KiCad's
+        ``*_ThermalVias`` footprints draw them: marked ``pad_prop_heatsink``,
+        or (most of the rest) opening no solder mask. Neither is a lead hole,
+        so U1 at its declared height gets no lead and a lead_mm there is still
+        refused. A shield tab on an SMD footprint, plated and opening the mask,
+        keeps its lead. What slipped through (review of J2): every plated hole
+        was a lead hole, so each via stood a 2.5 mm rod under the board, named
+        under "leads at the default"."""
+        root = tempfile.mkdtemp(prefix="nopekit-fit-vias-")
+        self.addCleanup(shutil.rmtree, root, True)
+
+        def pad(x, y, extra="", layers='"*.Cu"', number="7", drill="0.2"):
+            return K.parse(f'(pad "{number}" thru_hole circle (at {x} {y}) (size 0.5 0.5) '
+                           f'(drill {drill}) {extra} (layers {layers}))')
+
+        def vias(tree):
+            _drop_model("U1")(tree)
+            fp = _footprint(tree, "U1")
+            for i, (x, y) in enumerate(((-0.54, -0.925), (0.54, -0.925), (-0.54, 0.0),
+                                        (0.54, 0.0), (-0.54, 0.925), (0.54, 0.925))):
+                fp.append(pad(x, y, "(property pad_prop_heatsink)") if i % 2
+                          else pad(x, y))
+        board = _variant_board(root, vias)
+        ctx = _fit_ctx(tempfile.mkdtemp(dir=root), dict(_baseline(), pcb_board=board))
+        Fit, heights = self.g["_Fit"], self.g["_heights"]
+        place = {"x": 0.0, "y": 0.0, "z": 0.0, "rot_x_deg": 0.0, "rot_y_deg": 0.0,
+                 "rot_z_deg": 0.0}
+        smd = {"h": 1.0, "source": "datasheet"}
+        fit = Fit("", board, "e.step", place, set(), {}, heights({"U1": smd}, "h"))
+        self.assertIsNone(self.g["_read_board"](ctx, "pcb.enclosure_fit", fit))
+        self.assertNotIn("leads", fit.heights["U1"])
+        self.assertEqual(fit.default_leads, [])
+        fit = Fit("", board, "e.step", place, set(), {},
+                  heights({"U1": dict(smd, lead_mm=1.0)}, "h"))
+        with self.assertRaises(self.g["_FitError"]) as raised:
+            self.g["_read_board"](ctx, "pcb.enclosure_fit", fit)
+        self.assertIn("U1 states lead_mm and its footprint has no plated hole",
+                      str(raised.exception))
+        tab = ["footprint", K.Q("Connector_USB:shield"), ["layer", K.Q("F.Cu")], ["attr", "smd"],
+               pad(2.5, -1.4, layers='"*.Cu" "*.Mask"', number="6", drill="oval 0.85 0.55"),
+               pad(0.0, 0.0, "(property pad_prop_heatsink)", layers='"*.Cu" "*.Mask"')]
+        self.assertEqual(self.g["_lead_holes"](tab), [(2.5, -1.4, 0.85)])
+
     def test_an_untyped_part_at_its_height_may_seat_by_design(self):
         """What slipped through (review of H2): a footprint with no type and no
         model took a declared height and was fitted, and a contact on it read
@@ -8057,7 +8121,6 @@ class ABodiedPartOfAnyTypeIsFitted(unittest.TestCase):
 
 
 @unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
-@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
 class ADeclaredPartIsFittedWithItsLeadsAndItsShape(unittest.TestCase):
     """Holdout round 3. J2 with its model gone, at its declared height, over a
     floor 2 mm under the board: its leads hit the floor at the default 2.5 mm
@@ -8127,6 +8190,7 @@ class ADeclaredPartIsFittedWithItsLeadsAndItsShape(unittest.TestCase):
                 self.assertIn(f"nearest U1 is {gap:g} mm", v.detail)
 
 
+@unittest.skipUnless(FIT_TOOLS, FIT_SKIP)
 class ARefusedRegionCostsNoFullFit(unittest.TestCase):
     """Two regions drawn too wide, refused together, before the full fit runs:
     the evidence holds the refusals and no fit.json. What slipped through (a

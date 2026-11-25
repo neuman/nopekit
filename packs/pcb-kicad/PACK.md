@@ -625,8 +625,9 @@ fit, and every region refused is listed in one run with the box to draw.
 or one found nowhere here) its courtyard's box, or the outline its record
 states (`box_mm`, `circle_mm` for a round part, or `polygon_mm`), raised to a
 stated height, and a through-hole part its leads under the board: a cylinder
-the drill wide in each plated hole, to `lead_mm` past the far face (2.5 mm,
-IPC-A-610 class 2's longest, when unstated, and the verdict names the part).
+the drill wide in each plated hole (a via, marked as a heat sink or under the
+mask, takes none), to `lead_mm` past the far face (2.5 mm, IPC-A-610 class 2's
+longest, when unstated, and the verdict names the part).
 `pcb_model_dirs` (`{variable: folder}`, from the project root or absolute) names
 the folder a model path variable stands for:
 a model naming `${KICAD9_3DMODEL_DIR}`, or a variable of the project's own, is

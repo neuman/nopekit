@@ -510,7 +510,7 @@ def charge_temperature(ctx: GateContext) -> Verdict:
     senses the cell, or a charger whose record names only its sense pin sees
     only fixed resistors from its own pins (:func:`_sense_only`). With no
     defeat, a cell whose record has no ``charge_temp_c`` skips, naming it
-    (:class:`Unstated`)."""
+    (:class:`Unstated`); one whose ``charge_temp_c`` is there and wrong errors."""
     gid = "pcb.charge_temperature"
     try:
         got = _design(ctx, gid)
@@ -574,12 +574,18 @@ def _battery_window(ctx, d, b: Battery, protectors: list) -> dict:
     # input sees a fixed divider) fails without it. What slipped through (a
     # holdout run): the window was read first, so a design whose cell has no
     # datasheet could not be shown to have its charger's thermistor input tied
-    # off by two fixed resistors.
+    # off by two fixed resistors. Only a window left out waits (Unstated); one
+    # that is there and wrong (one number, a FILL: from the draft, a reversed
+    # band) errors here, as charge_limits and discharge_cutoff error on theirs.
+    # What slipped through (review of J2): this caught every RecordError, so
+    # once the missing window turned from an error into a skip, a malformed
+    # one read Skipped, "not stated, so not judged", a typo filed under a
+    # missing input's quieter word.
     try:
         lo, hi = b.value("charge_temp_c", "the widest window the cell's datasheet allows "
                                           "any charge in, in C")
         unstated = ""
-    except RecordError as exc:
+    except Unstated as exc:
         lo = hi = None
         unstated = str(exc)
     row = {"window_c": None if unstated else [lo, hi], "faults": [], "firmware": [],
