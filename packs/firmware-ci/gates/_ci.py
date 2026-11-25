@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 class Refused(Exception):
@@ -72,6 +72,13 @@ class Job:
     #: (``python3 build.py``, ``./build.sh``, ``bash scripts/x.sh``): the pass
     #: names them, so it never says more than the step's own lines show.
     unread: tuple = ()
+    #: The shell scripts of the repository this module read to find the build
+    #: (:func:`_search`), each judged by the masking rules: the pass names them.
+    read: tuple = ()
+    #: Why the build itself was not read, when it was not: the build runs inside
+    #: an action, or in a script this module does not read, or behind a command
+    #: it does not know. ``fw.ci_job`` then skips and says so, never passes.
+    blind: str = ""
 
     def act_id(self, at: int) -> str:
         """The ``stepID`` act logs for step ``at``."""
@@ -86,15 +93,18 @@ def _runs(steps: list) -> tuple:
 #: A command that runs a file of the repository through an interpreter, or by
 #: a path with a ``/`` in it: ``python3 x.py``, ``bash x.sh``, ``sh x.sh``,
 #: ``node x.js``, ``./x.sh``, ``scripts/x.sh`` (a bare ``idf.py`` is a tool on
-#: ``PATH``, not a file of the repository). The guard reads the step's own lines only, so a
-#: pass over such a step names the file it did not read. What slipped through
-#: "no masking" there (holdout review, a console's upstream workflow): the build
-#: step ran ``python3 <script>.py``, which runs ``docker build`` through
-#: ``subprocess.run(["bash", "-c", cmd])`` with no check, so a failed build exits
-#: 0, and the pass said "no masking". *Rejected:* reading the script (a Python
-#: or shell file is a program; the masking rules read GitHub's documented shell
-#: behaviour, not a language); refusing every script (a build in a script is
-#: sound, and ``firmware_ci_step`` exists for it).
+#: ``PATH``, not a file of the repository). Where the build command is in the
+#: step's own lines, a pass names each such file as not read. What slipped
+#: through "no masking" there (holdout review, a console's upstream workflow):
+#: the build step ran ``python3 <script>.py``, which runs ``docker build``
+#: through ``subprocess.run(["bash", "-c", cmd])`` with no check, so a failed
+#: build exits 0, and the pass said "no masking". Where the build command is not
+#: in the step's own lines, the guard reads the shell scripts the step runs
+#: (:func:`_search`), and a build it cannot read is a skip, never a pass (holdout
+#: review round 2). *Rejected:* reading a Python, JavaScript or Perl script (a
+#: program; the masking rules read the documented behaviour of a shell);
+#: refusing every script (a build in a script is sound, and
+#: ``firmware_ci_step`` exists for it).
 _SCRIPT = re.compile(r"(?:^|(?<=[\s;&|(]))(?:(?:python[\d.]*|bash|sh|zsh|node|perl|ruby)"
                      r"(?:\s+-\S+)*\s+([\w./-]+\.(?:py|sh|bash|js|pl|rb))"
                      r"|([\w.-]*/[\w./-]*\.(?:sh|bash|py))(?=\s|$|;))")
@@ -112,6 +122,156 @@ def _scripts(run: str) -> tuple:
             if name and not name.startswith("/") and name not in found:
                 found.append(name)
     return tuple(found)
+
+
+#: A command that runs a file: sourced (``. env.sh``, ``source env.sh``: its
+#: lines run in the caller's own shell, with its options), handed to an
+#: interpreter with its options (``bash -e x.sh``, ``python3 x.py``), or run by
+#: a path with a ``/`` in it (``./x.sh``, ``ci/x.sh``: its ``#!`` line chooses
+#: the shell). The guard reads such a file when the build step's own lines hold
+#: no build command (:func:`_search`).
+_CALL = re.compile(
+    r"(?:^|(?<=[\s;&|(]))(?:"
+    r"(?:\.|source)\s+(?P<src>[\w./-]+)"
+    r"|(?P<interp>python[\d.]*|bash|sh|dash|zsh|node|perl|ruby)"
+    r"(?P<flags>(?:\s+(?:-o\s+\w+|[-+][\w-]+))*)\s+(?P<ifile>[\w./-]+\.(?:py|sh|bash|js|pl|rb))"
+    r"|(?P<pfile>[\w.-]*/[\w./-]*\.(?:sh|bash|py))"
+    r")(?=\s|$|[;&|)])")
+
+#: The shells whose scripts the masking rules read: bash(1) and POSIX sh, as for
+#: a step's own lines. *Rejected:* zsh (``setopt`` and its own ``ERR_EXIT`` rules
+#: are not bash's); reading any file (a Python, JavaScript or Perl script is a
+#: program, and the rules read the documented behaviour of a shell).
+_READ_SHELLS = ("bash", "sh", "dash")
+_LANGUAGES = {"py": "a Python script", "js": "a JavaScript file", "pl": "a Perl script",
+              "rb": "a Ruby script"}
+
+
+def _script_calls(text: str) -> list[tuple]:
+    """``(name, line index, start, end, how, shell)`` of each file ``text`` runs
+    (:data:`_CALL`), in order: ``how`` is ``source``, ``interp`` or ``path``;
+    ``shell`` is the interpreter and its options for ``interp``."""
+    out = []
+    for i, line in enumerate(_lines(text)):
+        if line.startswith("#"):
+            continue
+        for m in _CALL.finditer(_bare(line)):
+            if m.group("src"):
+                out.append((m.group("src"), i, m.start(), m.end(), "source", ""))
+            elif m.group("ifile"):
+                shell = (m.group("interp") + " " + " ".join(m.group("flags").split())).strip()
+                out.append((m.group("ifile"), i, m.start(), m.end(), "interp", shell))
+            else:
+                out.append((m.group("pfile"), i, m.start(), m.end(), "path", ""))
+    return out
+
+
+def _script(repo: str, workdir: str, name: str, how: str, called: str,
+            caller: str) -> tuple[str, str, str]:
+    """``(path, shell, why not)`` of the file a call names: the shell it runs
+    under, or why the guard does not read it. ``workdir`` is the step's
+    ``working-directory`` (the repository when empty); a sourced file runs in
+    the ``caller``'s shell; a file run by its path runs under its ``#!`` line,
+    and with none, under a new shell with no options (bash(1), "COMMAND
+    EXECUTION")."""
+    if _EXPR in workdir:
+        return "", "", "is under a working-directory only GitHub can evaluate"
+    if name.startswith("/"):
+        return "", "", "is outside the repository"
+    root = os.path.realpath(repo)
+    path = os.path.normpath(os.path.join(repo, workdir, name))
+    if not (os.path.realpath(path) + os.sep).startswith(root + os.sep):
+        return "", "", "is outside the repository"
+    ext = name.rsplit(".", 1)[-1]
+    if how == "interp":
+        interp = called.split()[0]
+        if interp not in _READ_SHELLS:
+            what = "a zsh script" if interp == "zsh" else _LANGUAGES.get(ext, f"a {interp} file")
+            return "", "", f"is {what}, which this gate does not read"
+    elif how == "path" and ext in _LANGUAGES:
+        return "", "", f"is {_LANGUAGES[ext]}, which this gate does not read"
+    if not os.path.isfile(path):
+        return "", "", "is not in the repository"
+    if how == "source":
+        return path, caller, ""
+    if how == "interp":
+        return path, called, ""
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        first = fh.readline().strip()
+    if not first.startswith("#!"):
+        return path, "bash", ""
+    words = first[2:].split()
+    if words and os.path.basename(words[0]) == "env":
+        words = [w for w in words[1:] if w not in ("-S", "-i")]
+    interp = os.path.basename(words[0]) if words else ""
+    if interp not in _READ_SHELLS:
+        return "", "", f"runs under {interp or 'an empty #! line'}, which this gate does not read"
+    return path, " ".join([interp] + words[1:]), ""
+
+
+@dataclass
+class _Found:
+    """What :func:`_search` found: the build command and the script that holds
+    it, the scripts it read, and the calls it could not read, with why."""
+    command: str = ""
+    read: list = field(default_factory=list)
+    unread: list = field(default_factory=list)
+
+
+def _search(repo: str, workdir: str, text: str, shell: str, where: str, step: str,
+            seen: set) -> _Found | Fail:
+    """The build in the shell scripts ``text`` runs, each read and judged by the
+    masking rules, as are the lines that run it: :class:`Fail` when one masks.
+
+    The build step's own lines hold no build command this pack knows, so the
+    guard reads the shell scripts they run (and the scripts those run), in the
+    repository, under the shell each runs in: ``./build.sh`` under its ``#!``
+    line, ``bash -e x.sh`` under ``bash -e``, a sourced file under the step's own
+    shell. Each script is read once. A call that cannot be read is named with
+    why (:func:`_script`). What slipped through a pass over such a step (holdout
+    review round 2, a console's and a watch's upstream workflows): "no masking in
+    the step's own lines; <script>.py is not read" was a pass over a build the
+    guard never read. *Rejected:* following a ``cd`` to resolve a later call (the
+    directory may be a variable; a call that does not resolve from the step's
+    working directory is named, never guessed); reading a Python script or a
+    local action (each is a program, not a shell's documented behaviour)."""
+    found = _Found()
+    for name, at, start, end, how, called in _script_calls(text):
+        path, script_shell, why = _script(repo, workdir, name, how, called, shell)
+        if why:
+            found.unread.append((name, why))
+            continue
+        rel = os.path.relpath(path, repo).replace(os.sep, "/")
+        if rel in seen:
+            continue
+        seen.add(rel)
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            body = fh.read()
+        found.read.append(rel)
+        inner = f"{rel} (run by step {step!r})"
+        if _DOCKER_RUN.search(body):
+            raise Refused(f"{rel}, which step {step!r} runs, runs docker inside the job; the "
+                          f"replay mounts no docker socket into jobs. Run the build in a "
+                          f"container job instead (references/ci-templates.md)")
+        commands = _build_commands(body)
+        if commands:
+            problem = _masked(body, commands, script_shell, inner)
+            command = f"{commands[0][0]} in {rel}"
+        else:
+            sub = _search(repo, workdir, body, script_shell, inner, step, seen)
+            if isinstance(sub, Fail):
+                return sub
+            found.read += [r for r in sub.read if r not in found.read]
+            found.unread += sub.unread
+            if not sub.command:
+                continue
+            problem, command = None, sub.command
+        problem = problem or _masked(text, [(name, at, start, end)], shell, where)
+        if problem:
+            return Fail(problem)
+        found.command = command
+        return found
+    return found
 
 
 def _act_ids(steps: list) -> tuple:
@@ -278,11 +438,21 @@ def _step_name(step: dict, at: int) -> str:
     return run[0] if run else f"step {at}"
 
 
+#: How a refusal says a step is named in ``firmware_ci_step`` (:func:`_named`).
+#: What slipped through naming two handles of three (holdout review rounds 1
+#: and 2, a watch): an unnamed ``uses:`` step is named by its ``uses:`` value,
+#: and the refusals, the key table and the baseline's notes said only "its run's
+#: first line", so a person had nothing to name it by but ``_step_name``.
+HANDLE = ("its name, its id, or, with neither, the name act logs for it: its `uses:` "
+          "value, else its run's first line")
+
+
 def _named(step: dict, at: int, wanted: str) -> bool:
     """Whether ``firmware_ci_step`` ``wanted`` names this step: its ``name:``, its
-    ``id:``, or the name act logs for it (``_step_name``: for a step with no name
-    and no ``uses:``, its run's first line). What slipped through (holdout review,
-    a handheld): the run-line handle worked and no document said so."""
+    ``id:``, or the name act logs for it (``_step_name``: for a step with no name,
+    its ``uses:`` value, else its run's first line; :data:`HANDLE`). What slipped
+    through (holdout review, a handheld): the run-line handle worked and no
+    document said so."""
     return wanted in (str(step.get("name") or ""), str(step.get("id") or ""),
                       _step_name(step, at))
 
@@ -318,8 +488,7 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
         if len(candidates) != 1:
             said = (f"{len(candidates)} jobs build ({', '.join(map(str, candidates))})"
                     if candidates else
-                    f"no job has a step named {step!r} (by its name, its id, or, with "
-                    f"neither, its run's first line)" if step is not None else
+                    f"no job has a step named {step!r} ({HANDLE})" if step is not None else
                     "no job runs a build command this pack knows")
             raise Refused(f"{rel}: {said}; name the job in firmware_ci_job")
         jid = candidates[0]
@@ -355,7 +524,9 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
                           f"in a container job instead (references/ci-templates.md, "
                           f"ESP-IDF)")
         return Job(rel, jid, at, name, f"uses: {uses}", "", image, runs_on,
-                   _matrix(body), _act_ids(steps), _runs(steps))
+                   _matrix(body), _act_ids(steps), _runs(steps),
+                   blind=f"the build runs inside the action {uses}, and this gate does not "
+                         f"read the action's own steps")
     shell = _shell(build, defaults, name)
     run = str(build.get("run") or "")
     if _EXPR in run and re.search(r"\$\{\{[^}]*\}\}", run) and not _build_commands(run):
@@ -366,12 +537,33 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
                       f"docker socket into jobs. Run the build in a container job "
                       f"instead (references/ci-templates.md)")
     found = _build_commands(run)
-    command = found[0][0] if found else "the named step"
-    problem = _masked(run, found, shell, name)
-    if problem:
-        return Fail(problem)
-    return Job(rel, jid, at, name, command, shell, image, runs_on, _matrix(body),
-               _act_ids(steps), _runs(steps), _scripts(run))
+    if found:
+        problem = _masked(run, found, shell, f"step {name!r}")
+        if problem:
+            return Fail(problem)
+        return Job(rel, jid, at, name, found[0][0], shell, image, runs_on, _matrix(body),
+                   _act_ids(steps), _runs(steps), _scripts(run))
+    # No build command in the step's own lines: the shell scripts it runs are
+    # read (`_search`), and a build this gate cannot read is said (`blind`),
+    # never passed. What slipped through (holdout review round 2, a console's
+    # and a watch's upstream workflows): "no masking in the step's own lines;
+    # <script>.py is not read", a pass over a build the guard never read.
+    workdir = str(build.get("working-directory", defaults.get("working-directory")) or "")
+    search = _search(wf.repo, workdir, run, shell, f"step {name!r}", name, set())
+    if isinstance(search, Fail):
+        return search
+    unread = tuple(dict.fromkeys(n for n, _why in search.unread))
+    if search.command:
+        return Job(rel, jid, at, name, search.command, shell, image, runs_on, _matrix(body),
+                   _act_ids(steps), _runs(steps), unread, tuple(search.read))
+    said = [f"{n} {why}" for n, why in search.unread]
+    said += [f"{r} runs no build command this pack knows" for r in search.read]
+    first = next((ln for ln in _lines(run) if ln and not ln.startswith("#")), "")
+    blind = ("the build is not in the step's own lines, and this gate cannot read where it "
+             "runs: " + ("; ".join(said) if said else
+                         f"{first!r} is not a build command this pack knows"))
+    return Job(rel, jid, at, name, "the named step", shell, image, runs_on, _matrix(body),
+               _act_ids(steps), _runs(steps), unread, tuple(search.read), blind)
 
 
 def _docker_anywhere(rel: str, jobs: dict) -> None:
@@ -394,8 +586,8 @@ def _build_step(rel: str, jid: str, steps: list, wanted: str | None) -> int:
         hits = [i for i, s in enumerate(steps) if isinstance(s, dict) and _named(s, i, wanted)]
         if len(hits) != 1:
             raise Refused(f"firmware_ci_step names {wanted!r}, which matches "
-                          f"{len(hits)} steps of job {jid} in {rel} (a step is named by its "
-                          f"name, its id, or, with neither, its run's first line)")
+                          f"{len(hits)} steps of job {jid} in {rel} (a step is named by "
+                          f"{HANDLE})")
         return hits[0]
     hits = [i for i, s in enumerate(steps)
             if isinstance(s, dict) and isinstance(s.get("run"), str) and _build_commands(s["run"])]
@@ -403,8 +595,8 @@ def _build_step(rel: str, jid: str, steps: list, wanted: str | None) -> int:
         return hits[0]
     if not hits:
         raise Refused(f"job {jid} in {rel} runs no build command this pack knows (a build "
-                      f"in a script is sound); name the build step in firmware_ci_step (its "
-                      f"name, its id, or, with neither, its run's first line)")
+                      f"in a script is sound); name the build step in firmware_ci_step "
+                      f"({HANDLE})")
     names = ", ".join(repr(_step_name(steps[i], i)) for i in hits)
     raise Refused(f"job {jid} in {rel} builds in {len(hits)} steps ({names}); name the "
                   f"build step in firmware_ci_step")
@@ -583,7 +775,7 @@ def _checked(later: list, errexit: bool, pipe: bool) -> bool:
     return status.search(first) is not None and _stops(later, 0, errexit)
 
 
-def _masked(run: str, found: list, shell: str, name: str) -> str | None:
+def _masked(run: str, found: list, shell: str, where: str) -> str | None:
     """Why a failed build in this step can read green, or ``None``. Every build
     command in the step is read, each with the commands after it: those later in
     its line (after a ``;``) and on the lines below.
@@ -598,21 +790,23 @@ def _masked(run: str, found: list, shell: str, name: str) -> str | None:
     for line in lines:
         starts.append(starts[-1] + len(line) + 1)
     for _cmd, at, start, _end in found:
-        problem = _masked_at(script, starts[at] + start, lines[at], shell, name)
+        problem = _masked_at(script, starts[at] + start, lines[at], shell, where)
         if problem:
             return problem
     return None
 
 
-def _masked_at(script: str, offset: int, line: str, shell: str, name: str) -> str | None:
-    """The masking rules for the build command at ``offset`` in ``script``."""
+def _masked_at(script: str, offset: int, line: str, shell: str, where: str) -> str | None:
+    """The masking rules for the build command at ``offset`` in ``script``;
+    ``where`` names what holds it in the reason (``step 'Build'``, or a script
+    and the step that runs it)."""
     pieces = _pieces(script[offset:])
     if not pieces:
         return None
     end = _and_or(pieces, 0)
     own, later = pieces[:end + 1], pieces[end + 1:]
     if any(sep == "||" and _OR_MASK.match(nxt) for (_c, sep), (nxt, _s) in zip(own, own[1:])):
-        return (f"step {name!r}: {line!r} falls back to a command that succeeds, so the "
+        return (f"{where}: {line!r} falls back to a command that succeeds, so the "
                 f"step reads green whatever the build did")
     errexit = re.search(r"(?:^|\s)-\w*e", shell) is not None
     before = script[:offset]
@@ -624,7 +818,7 @@ def _masked_at(script: str, offset: int, line: str, shell: str, name: str) -> st
         for (_c, sep), (nxt, _s) in zip(own, own[1:]))
     if not errexit and later and not checked:
         why = "after `set +e`" if set_e else f"under {shell!r}, which has no -e"
-        return (f"step {name!r} runs the build {why} and then {later[0][0]!r}, with no "
+        return (f"{where} runs the build {why} and then {later[0][0]!r}, with no "
                 f"status check that fails the step: the step's status is the last "
                 f"command's, so a failed build reads green")
     # `-e` does not stop the shell on a command before the last `&&` of a list
@@ -634,7 +828,7 @@ def _masked_at(script: str, offset: int, line: str, shell: str, name: str) -> st
     # the last command's status. Found in review of F1, beyond the design's four
     # forms: the same documented behaviour as the default shell's missing pipefail.
     if any(sep == "&&" for _c, sep in own[:-1]) and later and not checked:
-        return (f"step {name!r} runs the build before an `&&` ({line!r}) and then "
+        return (f"{where} runs the build before an `&&` ({line!r}) and then "
                 f"{later[0][0]!r}: -e does not stop the shell on a command before the "
                 f"last `&&`, so the step's status is the last command's and a failed "
                 f"build reads green")
@@ -645,7 +839,7 @@ def _masked_at(script: str, offset: int, line: str, shell: str, name: str) -> st
         # `| tee log && echo ok` it is echo's, and `| tee log || exit 1` reads tee's.
         piped = all(sep in ("|", "|&") for _c, sep in pieces[:end])
         if not pipefail and not (piped and _checked(later, errexit, pipe=True)):
-            return (f"step {name!r} pipes the build ({line!r}) under {shell!r}, which has "
+            return (f"{where} pipes the build ({line!r}) under {shell!r}, which has "
                     f"no pipefail: the pipeline's status is its last command's, so a "
                     f"failed build reads green")
     return None

@@ -362,18 +362,23 @@ class TheGuardReadsTheWorkflow(unittest.TestCase):
 
 @unittest.skipUnless(HAS_YAML, NO_YAML)
 class TheGuardSaysWhatItRead(unittest.TestCase):
-    """``fw.ci_job``'s pass rests on the build step's own lines. What slipped
-    through "no masking" (holdout review, a console's upstream workflow): the
-    build ran in ``python3 <script>.py build``, the script ran docker through
-    ``bash -c`` with no status check, a failed build exited 0, and the pass
-    claimed more than the guard read."""
+    """``fw.ci_job``'s pass rests on the build step's own lines and the shell
+    scripts it read. What slipped through "no masking" (holdout review, a
+    console's upstream workflow): the build ran in ``python3 <script>.py build``,
+    the script ran docker through ``bash -c`` with no status check, a failed
+    build exited 0, and the pass claimed more than the guard read. And then
+    (holdout review round 2, that console and a watch): "no masking in the step's
+    own lines; the action's own steps are not read" was still a pass, over a
+    build the guard never read."""
 
     def setUp(self):
         self.repo = tempfile.mkdtemp(prefix="fw-ci-said-")
         self.addCleanup(shutil.rmtree, self.repo, True)
         self.spec, self.fn = _registry().get("fw.ci_job")
 
-    def _guard(self, steps: str, **params):
+    def _guard(self, steps: str, files: dict | None = None, **params):
+        for rel, text in (files or {}).items():
+            _write(self.repo, rel, text)
         path = _write(self.repo, ".github/workflows/build.yml",
                       _workflow(steps=steps, container=None))
         ctx = gates_mod.GateContext(root=self.repo, ledger=Ledger(),
@@ -382,30 +387,130 @@ class TheGuardSaysWhatItRead(unittest.TestCase):
                                     log=lambda _m: None, extra={})
         return self.fn(ctx)
 
-    def test_a_script_the_step_runs_is_named_as_not_read(self):
-        v = self._guard("      - name: Build Script\n        run: python3 tools/fw.py build\n",
-                        firmware_ci_step="Build Script")
-        self.assertTrue(v.passed, v.render())
-        self.assertTrue(v.detail.endswith("; no masking in the step's own lines; tools/fw.py "
-                                          "is not read"), v.detail)
-        v = self._guard("      - name: Build\n        run: ./ci/build.sh && bash ci/pack.sh\n",
-                        firmware_ci_step="Build")
-        self.assertIn("./ci/build.sh, ci/pack.sh are not read", v.detail)
+    def _skips(self, verdict, words: str):
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn(words, verdict.skip_reason)
+        self.assertIn("fw.build's replay still judges the build's own result",
+                      verdict.skip_reason)
+        self.assertNotIn(self.repo, verdict.skip_reason, "a reason names no absolute path")
 
-    def test_a_command_the_pack_knows_says_only_the_steps_lines(self):
+    def test_a_build_it_cannot_read_is_a_skip_never_a_pass(self):
+        """Inside an action, in a Python script, in a script the repository does
+        not hold, or behind a command this pack does not know: each a skip that
+        names what it could not read."""
+        self._skips(self._guard("      - name: Build Script\n"
+                                "        run: python3 tools/fw.py build\n",
+                                firmware_ci_step="Build Script"),
+                    "tools/fw.py is a Python script, which this gate does not read")
+        self._skips(self._guard("      - uses: vendor/compile-action@v3\n",
+                                firmware_ci_step="vendor/compile-action@v3"),
+                    "the build runs inside the action vendor/compile-action@v3, and this gate "
+                    "does not read the action's own steps")
+        self._skips(self._guard("      - name: Build\n        run: ./ci/build.sh && bash "
+                                "ci/pack.sh\n", firmware_ci_step="Build"),
+                    "./ci/build.sh is not in the repository; ci/pack.sh is not in the "
+                    "repository")
+        self._skips(self._guard("      - name: Build\n        run: fwtool --all\n",
+                                firmware_ci_step="Build"),
+                    "'fwtool --all' is not a build command this pack knows")
+        self._skips(self._guard("      - name: Build\n        run: ./ci/py.sh\n",
+                                {"ci/py.sh": "#!/usr/bin/env python3\nprint('built')\n"},
+                                firmware_ci_step="Build"),
+                    "./ci/py.sh runs under python3, which this gate does not read")
+        self._skips(self._guard("      - name: Build\n        run: ./ci/setup.sh\n",
+                                {"ci/setup.sh": "#!/bin/bash\necho ready\n"},
+                                firmware_ci_step="Build"),
+                    "ci/setup.sh runs no build command this pack knows")
+
+    def test_a_shell_script_the_step_runs_is_read(self):
+        """Read under the shell it runs in, by the same masking rules as the step's
+        own lines, and the line that runs it too (bash(1): a script run by its
+        path or by ``bash x.sh`` starts a new shell, with no ``-e`` unless its
+        ``#!`` line or the call says so; a sourced file runs in the step's own)."""
+        files = {"ci/build.sh": "#!/bin/bash\nset -e\ncd fw\nwest build -b x\n"}
+        v = self._guard("      - name: Build\n        run: ./ci/build.sh\n", files,
+                        firmware_ci_step="Build")
+        self.assertTrue(v.passed, v.render())
+        self.assertIn("(west build in ci/build.sh)", v.detail)
+        self.assertTrue(v.detail.endswith("; no masking in the step's own lines or in "
+                                          "ci/build.sh, which it runs"), v.detail)
+        v = self._guard("      - name: Build\n        run: ./ci/build.sh | tee b.log\n", files,
+                        firmware_ci_step="Build")
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("step 'Build' pipes the build ('./ci/build.sh | tee b.log') under "
+                      "'bash -e {0}', which has no pipefail", v.detail)
+        v = self._guard("      - name: Build\n        run: ./ci/build.sh\n",
+                        {"ci/build.sh": "#!/bin/bash\nwest build -b x\necho done\n"},
+                        firmware_ci_step="Build")
+        self.assertEqual(v.outcome, "fail", v.render())
+        self.assertIn("ci/build.sh (run by step 'Build') runs the build under 'bash', which "
+                      "has no -e", v.detail)
+        then = "make -j4\necho done\n"
+        for run, script, ok in (("bash -e ci/build.sh", then, True),
+                                ("bash ci/build.sh", then, False),
+                                ("./ci/build.sh", "#!/bin/sh -e\n" + then, True),
+                                ("./ci/build.sh", "#!/usr/bin/env -S bash -e\n" + then, True),
+                                (". ci/build.sh", then, True),
+                                ("bash ci/outer.sh", "#!/bin/sh -e\n" + then, True),
+                                ("bash ci/outer.sh", then, False)):
+            with self.subTest(run=run, script=script):
+                v = self._guard(f"      - name: Build\n        run: {run}\n",
+                                {"ci/build.sh": script, "ci/outer.sh": "./ci/build.sh\n"},
+                                firmware_ci_step="Build")
+                self.assertEqual(v.outcome, "pass" if ok else "fail", v.render())
+                if ok and "outer" in run:
+                    self.assertIn("or in ci/outer.sh, ci/build.sh, which it runs", v.detail)
+
+    def test_a_script_beside_the_build_command_is_named_as_not_read(self):
+        v = self._guard("      - name: Build\n        run: ./ci/env.sh && west build -b x\n")
+        self.assertTrue(v.passed, v.render())
+        self.assertTrue(v.detail.endswith("; no masking in the step's own lines; ./ci/env.sh "
+                                          "is not read"), v.detail)
         v = self._guard("      - name: Build\n        run: west build -b x\n")
         self.assertTrue(v.detail.endswith("; no masking in the step's own lines"), v.detail)
-        v = self._guard("      - name: Build\n        run: fwtool --all\n",
-                        firmware_ci_step="Build")
-        self.assertIn("what its command runs is not read", v.detail)
 
-    def test_an_unnamed_step_is_named_by_its_run_line(self):
+    def test_an_unnamed_step_is_named_by_its_run_line_or_its_uses(self):
         """Holdout review (a handheld): the handle act logs for an unnamed step,
-        its run's first line, worked and no document said so."""
+        its run's first line, worked and no document said so. Holdout review
+        rounds 1 and 2 (a watch): an unnamed ``uses:`` step's handle, its
+        ``uses:`` value, worked and no refusal said so."""
         v = self._guard("      - run: ./build.sh all\n", firmware_ci_step="./build.sh all")
-        self.assertTrue(v.passed, v.render())
+        self._skips(v, "./build.sh is not in the repository")
+        v = self._guard("      - uses: vendor/compile-action@v3\n",
+                        firmware_ci_step="vendor/compile-action@v3")
+        self._skips(v, "inside the action vendor/compile-action@v3")
         v = self._guard("      - run: ./build.sh all\n", firmware_ci_step="nope")
-        self.assertIn("or, with neither, its run's first line", v.error)
+        self.assertIn("or, with neither, the name act logs for it: its `uses:` value, else "
+                      "its run's first line", v.error)
+
+
+class ThePackSaysWhatEachReaderShows(unittest.TestCase):
+    """PACK.md says what a person sees where the code cannot say it. Holdout
+    review rounds 1 and 2 (a watch): ``nopekit gate show``'s ``last verdict``
+    printed a recorded pass as ``[skip] fw.build : requires act (not on PATH)``
+    in a shell without act. That is the spine's resolver applying that shell's
+    tools (invariant 1), not a lost verdict, and the spine stays as it is: the
+    pack says so. And a ``uses:`` step's handle in ``firmware_ci_step`` was in no
+    document, nor the lock's wait."""
+
+    def setUp(self):
+        with open(os.path.join(PACK, "PACK.md"), encoding="utf-8") as fh:
+            self.text = " ".join(fh.read().split())
+
+    def test_gate_show_in_a_shell_without_act_is_explained(self):
+        for words in ("`nopekit gate show fw.build` prints `last verdict` as the spine's "
+                      "resolver reads it in the shell you run it in",
+                      "`[skip] fw.build : requires act (not on PATH)`",
+                      "This is the spine's rule, not a lost verdict"):
+            with self.subTest(words=words):
+                self.assertIn(words, self.text)
+
+    def test_the_key_table_names_every_handle_and_the_lock_says_its_wait(self):
+        self.assertIn("the name act logs for it: its `uses:` value, else its run's first line",
+                      self.text)
+        self.assertIn(C.HANDLE, "its name, its id, or, with neither, the name act logs for "
+                                "it: its `uses:` value, else its run's first line")
+        self.assertIn("If it must wait, it prints on stderr which pid holds the lock", self.text)
 
 
 class EveryTemplateSaysWhetherItWasReplayed(unittest.TestCase):
@@ -614,10 +719,107 @@ class TheBuildIsJudgedOnItsOwnLines(unittest.TestCase):
                "-- Configuring incomplete, errors occurred!\n"
                "FATAL ERROR: command exited with status 1: cmake -B build\n")
         self._raises(_step_result(log), "on no line this pack knows as a design fault: "
-                                        "CMake Error at CMakeLists.txt:7 (find_package):")
+                                        "Could not find a package configuration file "
+                                        "provided by \"Zephyr\" (CMake Error at "
+                                        "CMakeLists.txt:7)")
         result = _step_result("", "success", before="failure")
         result["entries"][0]["steps"][1]["log"] = "fetching\nerror: pathspec 'v9' did not match\n"
         self._raises(result, "(error: pathspec 'v9' did not match)")
+
+    def test_a_cmake_error_is_quoted_by_its_message(self):
+        """Holdout review round 2 (an NCS watch): the reason quoted CMake's location
+        header, ``CMake Error at <repo>/zephyr/cmake/modules/kconfig.cmake:318
+        (message):``, a line in a Zephyr module, and the missing file CMake named
+        under it was only in log.txt. Recorded on the pack's own baseline with
+        ``SDKCONFIG_DEFAULTS`` naming a file the copy does not hold: CMake wraps the
+        message over three lines (act_esp_cmake_missing_file.jsonl)."""
+        result = _recorded("act_esp_cmake_missing_file.jsonl")
+        self.assertIn("CMake Error at /opt/esp/idf/tools/cmake/project.cmake:683 (message):\n"
+                      "  SDKCONFIG_DEFAULTS\n", R.main_step(result["entries"][0], 1)["log"])
+        with self.assertRaises(R.ToolFault) as caught:
+            R.judge(result, _job())
+        self.assertEqual(str(caught.exception),
+                         "the build step failed on no line this pack knows as a design fault: "
+                         "SDKCONFIG_DEFAULTS '<repo>/sdkconfig.release' does not exist. "
+                         "(CMake Error at /opt/esp/idf/tools/cmake/project.cmake:683)")
+        # A header with nothing under it is quoted as it is.
+        self._raises(_step_result("CMake Error at x.cmake:3 (message):\nnext\n"),
+                     "design fault: CMake Error at x.cmake:3 (message):")
+
+    def test_a_composite_action_is_read_with_its_own_steps(self):
+        """Holdout review round 2 (a watch): a build step that runs a composite
+        action is two records in act's log, the step's own, empty, and the
+        action's steps', which hold the output. The judge read the empty one: the
+        reason quoted act's ``Job failed``, and a compile error inside the action
+        could only read errored. Recorded on the pack's own baseline, built by a
+        composite action whose last line is ``echo "::error::idf.py build
+        failed"``: once with a missing defaults file, once with the
+        ``unresolved_symbol`` edit."""
+        result = _recorded("act_esp_composite_cmake.jsonl")
+        build = R.main_step(result["entries"][0], 1)
+        self.assertEqual(([s["id"] for s in build["inner"]],
+                          [s["action_step"] for s in build["inner"]]),
+                         ([["1", "0"], ["1", "1"]], ["Report", "Compile"]))
+        with self.assertRaises(R.ToolFault) as caught:
+            R.judge(result, _job())
+        said = str(caught.exception)
+        self.assertEqual(said, "the build step failed on no line this pack knows as a design "
+                               "fault: idf.py build failed (the action's own error); first "
+                               "cause in its output: SDKCONFIG_DEFAULTS "
+                               "'<repo>/sdkconfig.release' does not exist. (CMake Error at "
+                               "/opt/esp/idf/tools/cmake/project.cmake:683)")
+        self.assertNotIn("Job failed", said)
+        self._fails(_recorded("act_esp_composite_link.jsonl"),
+                    "the build fails: ld: esp-idf/main/libmain.a(main.c.obj):"
+                    "(.literal.app_main+0x0): undefined reference to `board_power_init'")
+        out = tempfile.mkdtemp(prefix="fw-composite-")
+        self.addCleanup(shutil.rmtree, out, True)
+
+        def out_path(*parts):
+            path = os.path.join(out, *parts)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            return path
+        log = R.evidence(result, _job(), out_path)[0]
+        with open(log, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count("step 'Build' (the build step): failure\n"), 1, text)
+        self.assertIn("== job build, step 'Build' (the build step), the action's step "
+                      "'Compile': failure\n", text)
+        self.assertIn("-- act:   \u2757  ::error::idf.py build failed", text)
+
+    def test_the_pass_names_the_declared_images_first(self):
+        """Holdout review round 2 (an NCS watch): the pass listed every image the
+        job wrote, sorted, so a test vector ``west update`` fetched came first,
+        and the spine cut the detail before the signed app image the readers judge.
+        The images ``firmware_image`` and ``firmware_elf`` name (read back whole)
+        come first now, and the rest apart."""
+        declared = {"build/app/zephyr/zephyr.signed.hex": b":00000001FF\n",
+                    "build/app/zephyr/zephyr.elf": b"\x7fELF"}
+        fetched = [f"deps/crypto/tests/vector{i}.bin" for i in range(5)] + \
+                  ["build/mcuboot/zephyr/zephyr.bin"]
+        result = _step_result("", "success", files=declared)
+        result["images"] += [{"name": n, "size": 1, "sha256": "0" * 64} for n in fetched]
+        passed, detail = R.judge(result, _job(), "build/app/zephyr/zephyr.signed.hex")
+        self.assertTrue(passed, detail)
+        self.assertTrue(detail.endswith("; wrote build/app/zephyr/zephyr.elf, "
+                                        "build/app/zephyr/zephyr.signed.hex; and 6 other images "
+                                        "(images.json lists each)"), detail)
+        result["images"] = [r for r in result["images"] if "vector" not in r["name"]
+                            or r["name"].endswith(("0.bin", "1.bin"))]
+        _passed, detail = R.judge(result, _job())
+        self.assertTrue(detail.endswith("; other images it wrote: "
+                                        "build/mcuboot/zephyr/zephyr.bin, "
+                                        "deps/crypto/tests/vector0.bin, "
+                                        "deps/crypto/tests/vector1.bin"), detail)
+        result["files"] = {}
+        result["images"] += [{"name": f"x/{i}.bin", "size": 1, "sha256": "0" * 64}
+                             for i in range(3)]
+        _passed, detail = R.judge(result, _job())
+        self.assertTrue(detail.endswith("; wrote 8 images (images.json lists each)"), detail)
+        passed, detail = R.judge(result, _job(), "build/app.bin")
+        self.assertFalse(passed)
+        self.assertTrue(detail.endswith("builds: it wrote 8 images (images.json lists each)"),
+                        detail)
 
     def test_an_install_over_empty_apt_lists_names_the_difference(self):
         """Holdout review (two projects): ``sudo apt-get install`` with no update
@@ -848,6 +1050,34 @@ class TheCopyIsWhatTheNextCommitHolds(unittest.TestCase):
         self.assertEqual(_git("init", "-q", cwd=repo).returncode, 0)
         _git("add", "CMakeLists.txt", cwd=repo)
         self.assertEqual(R.listing(repo), [".gitignore"] + self._expected())
+
+    def test_a_tracked_file_an_ignore_rule_matches_is_copied_and_committed(self):
+        """Holdout review round 2 (an NCS watch whose upstream force-adds a board
+        config that its ``.gitignore`` matches): the copy must hold what ``git
+        ls-files`` lists, a tracked file winning over an ignore rule, and so must
+        the copy's own commit, as GitHub's checkout does. What slipped through
+        ``git add -A`` in the copy: the file was on disk there and out of the
+        commit, so ``git ls-files`` and ``git clean -xdf`` in the job saw another
+        tree than CI's. An ignored file that is not tracked is in neither."""
+        repo = self._app(os.path.join(self.tmp, "repo"))
+        _write(repo, "fw/.gitignore", "*.conf\n")
+        _write(repo, "fw/config/release.conf", "CONFIG_RELEASE=y\n")
+        _write(repo, "fw/config/local.conf", "CONFIG_LOCAL=y\n")
+        self.assertEqual(_git("init", "-q", cwd=repo).returncode, 0)
+        self.assertEqual(_git("add", "-f", "fw/config/release.conf", cwd=repo).returncode, 0)
+        listed = R.listing(repo)
+        self.assertIn("fw/config/release.conf", listed)
+        self.assertNotIn("fw/config/local.conf", listed)
+        copy, home = os.path.join(self.tmp, "c", "repo"), os.path.join(self.tmp, "c", "home")
+        R._copy(repo, copy)
+        R._git_init(copy, home)
+        self.assertTrue(os.path.isfile(os.path.join(copy, "fw", "config", "release.conf")))
+        self.assertFalse(os.path.exists(os.path.join(copy, "fw", "config", "local.conf")))
+        committed = _git("ls-files", cwd=copy).stdout.split()
+        self.assertEqual(sorted(committed), sorted(listed),
+                         "the copy's commit holds what the listing named")
+        self.assertEqual(_git("status", "--porcelain", "--ignored", cwd=copy).stdout, "",
+                         "nothing in the copy is untracked or ignored")
 
     def test_an_ignored_directory_is_walked(self):
         outer = os.path.join(self.tmp, "project")
@@ -1216,6 +1446,83 @@ class OneReplayPerSweep(_StandIn):
         self.assertEqual(outcomes["fw.build"], "pass", outcomes)
 
 
+#: The composite action ``tests/fw_logs/act_esp_composite_*.jsonl`` were recorded
+#: with, on the pack's own baseline (its Build step's ``run:`` replaced by
+#: ``uses: ./ci/idf-build``).
+IDF_ACTION = """name: idf-build
+description: Build the ESP-IDF app in the workspace
+runs:
+  using: composite
+  steps:
+    - name: Report
+      shell: bash
+      run: echo "building with idf.py"
+    - name: Compile
+      shell: bash
+      run: |
+        . "$IDF_PATH/export.sh" > /dev/null
+        if ! idf.py build; then
+          echo "::error::idf.py build failed"
+          exit 1
+        fi
+"""
+
+
+@unittest.skipUnless(HAS_GIT and HAS_YAML, "git or PyYAML is missing: the gates do not run")
+class TheBuildIsReplayedWhereTheGuardCannotRead(_StandIn):
+    """Holdout review round 2 (a watch): the guard now skips a build inside an
+    action, never passes it, and says that fw.build's replay still judges the
+    build's own result. That sentence holds only if fw.build runs: the spine never
+    runs a gate whose prerequisite skipped, so fw.build no longer needs the guard,
+    and reads its choice itself. A guard that fails the CI still stops the replay."""
+
+    def _run(self, gid: str, path: str):
+        spec, fn = _registry().get(gid)
+        ctx = gates_mod.GateContext(root=self.tmp, ledger=Ledger(), params={
+            "firmware_ci_workflow": path, "firmware_ci_job": "build",
+            "firmware_ci_step": "Build"}, out_dir=os.path.join(self.tmp, "out"),
+            tier=int(spec.tier), log=lambda _m: None, extra={})
+        with mock.patch.dict(os.environ, self.env):
+            return gates_mod.run_gate(spec, fn, ctx)
+
+    def _pushes(self) -> int:
+        return len([c for c in self.calls() if c["tool"] == "act" and c["argv"][:1] == ["push"]])
+
+    def test_fw_build_needs_no_guard(self):
+        self.assertEqual(list(_registry().get("fw.build")[0].needs or ()), [])
+
+    def test_a_build_inside_an_action_is_skipped_by_the_guard_and_judged_by_the_replay(self):
+        path = self.app()
+        app = os.path.dirname(os.path.dirname(os.path.dirname(path)))
+        _write(app, "ci/idf-build/action.yml", IDF_ACTION)
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("run: . $IDF_PATH/export.sh && idf.py build",
+                                  "uses: ./ci/idf-build"))
+        guard = self._run("fw.ci_job", path)
+        self.assertEqual(guard.outcome, "skipped", guard.render())
+        self.assertIn("the build runs inside the action ./ci/idf-build", guard.skip_reason)
+        self.mode({"log": os.path.join(LOGS, "act_esp_composite_link.jsonl"),
+                   "copy_in_log": RECORDED_COPY, "exit": 1})
+        verdict = self._run("fw.build", path)
+        self.assertEqual(self._pushes(), 1, "the replay ran")
+        self.assertEqual(verdict.outcome, "fail", verdict.render())
+        self.assertIn("undefined reference to `board_power_init'", verdict.detail)
+
+    def test_a_ci_the_guard_fails_is_never_replayed(self):
+        path = self.app()
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(text.replace("idf.py build\n", "idf.py build 2>&1 | tee build.log\n"))
+        self.assertEqual(self._run("fw.ci_job", path).outcome, "fail")
+        verdict = self._run("fw.build", path)
+        self.assertEqual(verdict.outcome, "skipped", verdict.render())
+        self.assertIn("fw.ci_job fails this CI (step 'Build' pipes the build", verdict.skip_reason)
+        self.assertEqual(self._pushes(), 0, "a green replay of it would say nothing")
+
+
 @unittest.skipUnless(HAS_GIT and HAS_YAML, "git or PyYAML is missing: the gates do not run")
 class TheReplayLeavesNothing(_StandIn):
     """Holdout review (three projects): act keeps a failed job's container running
@@ -1366,6 +1673,21 @@ with R._one_replay_at_a_time():
 """
 
 
+#: A replay's critical section that says who it is: the lock held for three
+#: seconds under ``<argv[2]>`` with a holder record, its pid written to
+#: ``argv[3]`` once it holds the lock.
+_LOCK_HOLDER = r"""
+import os, sys, time
+from nopekit.modelio import load_path
+R = load_path(sys.argv[1])
+R.LOCK_ROOT = sys.argv[2]
+with R._one_replay_at_a_time({"repo": "/work/held-repo", "workflow": "w.yml", "job": "fw"}):
+    with open(sys.argv[3], "w", encoding="utf-8") as fh:
+        fh.write(str(os.getpid()))
+    time.sleep(3.0)
+"""
+
+
 @unittest.skipUnless(hasattr(os, "getuid") and importlib.util.find_spec("fcntl"),
                      "not a POSIX host: the replays take no lock")
 class TheReplayLockIsTheUsers(unittest.TestCase):
@@ -1402,6 +1724,50 @@ class TheReplayLockIsTheUsers(unittest.TestCase):
                          f"the two homes held the lock at once: {lines}")
         self.assertEqual((lines[0][1], lines[2][1]), (lines[1][1], lines[3][1]))
         self.assertEqual(sorted({h for _w, h in lines}), homes)
+
+    def test_a_wait_says_who_holds_the_lock(self):
+        """Holdout review rounds 1 and 2 (a watch): the lock blocked in silence,
+        and a check printed nothing while it queued behind two other projects'
+        replays. The lock is tried without blocking first; a replay that must wait
+        prints who holds it, from what the holder wrote into the lock, and that it
+        is waiting. An uncontended replay prints nothing."""
+        import io
+        ready = os.path.join(self.tmp, "ready")
+        done = {}
+
+        def child() -> None:
+            done["proc"] = _env.run([sys.executable, "-c", _LOCK_HOLDER,
+                                     os.path.join(PACK, "gates", "_replay.py"), self.tmp,
+                                     ready], cwd=self.tmp, timeout=60)
+        thread = threading.Thread(target=child)
+        thread.start()
+        self.addCleanup(thread.join)
+        said = ""
+        for _ in range(600):
+            if os.path.exists(ready):
+                with open(ready, encoding="utf-8") as fh:
+                    said = fh.read()
+                if said:
+                    break
+            threading.Event().wait(0.05)
+        holder_pid = int(said)
+        err = io.StringIO()
+        with mock.patch.object(R, "LOCK_ROOT", self.tmp), mock.patch.object(sys, "stderr", err):
+            with R._one_replay_at_a_time({"repo": "/work/mine", "workflow": "w.yml",
+                                          "job": "build"}):
+                with open(R.lock_path(self.tmp), encoding="utf-8") as fh:
+                    mine = json.loads(fh.read())
+        thread.join()
+        self.assertEqual(done["proc"].returncode, 0, done["proc"].stderr)
+        self.assertIn(f"firmware-ci: waiting for the replay lock {R.lock_path(self.tmp)}: pid "
+                      f"{holder_pid} holds it, replaying /work/held-repo (job fw)", err.getvalue())
+        self.assertEqual(mine, {"pid": os.getpid(), "repo": "/work/mine", "workflow": "w.yml",
+                                "job": "build"}, "the holder says who it is")
+        err = io.StringIO()
+        with mock.patch.object(R, "LOCK_ROOT", self.tmp), mock.patch.object(sys, "stderr", err):
+            with R._one_replay_at_a_time({"repo": "/work/mine"}):
+                pass
+        self.assertEqual(err.getvalue(), "", "a lock no one holds is taken in silence")
 
     def test_the_lock_reads_the_uid_and_no_environment(self):
         paths = set()

@@ -1011,12 +1011,14 @@ EDGES: dict[str, list[tuple[str, str]]] = {
     # own gates read the file themselves and need none.
     "pcb-kicad": [(d, "pcb.board_readable")
                   for d in ("pcb.pin_names", "pcb.net_width", "pcb.land_pattern")],
-    # The CI guard before the replay, and the replay before the three gates that
-    # read what it wrote: an image or a setting of firmware that does not build, or
-    # not from CI's own job, is not the design's (general-packs F1; firmware-zmk's
-    # three edges, three for three; F2 adds fw.tx_power's, which zmk.tx_power had).
-    "firmware-ci": [("fw.build", "fw.ci_job"),
-                    ("fw.image_fits", "fw.build"),
+    # The replay before the three gates that read what it wrote: an image or a
+    # setting of firmware that does not build, or not from CI's own job, is not
+    # the design's (general-packs F1; F2 adds fw.tx_power's, which zmk.tx_power
+    # had). fw.build's edge on the CI guard went in general-packs J3: the guard
+    # now skips a build it cannot read (inside an action, a Python script), and
+    # the spine never runs a gate whose prerequisite skipped, so fw.build reads
+    # the guard's choice itself and replays such a build.
+    "firmware-ci": [("fw.image_fits", "fw.build"),
                     ("fw.sleep_wake", "fw.build"),
                     ("fw.tx_power", "fw.build")],
     # A chain: nothing reaches a pressure drop past a guard that did not pass.
@@ -1461,10 +1463,10 @@ class ControlsAreIsolated(unittest.TestCase):
             if edges:
                 declared[name] = sorted(edges)
         self.assertEqual(declared, {name: sorted(e) for name, e in EDGES.items()})
-        # Base 45, one PCB edge, four firmware edges (firmware-ci's three, which
-        # replaced firmware-zmk's three in general-packs F1, and fw.tx_power's in F2)
-        # and two print/CAD edges.
-        self.assertEqual(sum(len(e) for e in declared.values()), 52)
+        # Base 45, one PCB edge, three firmware edges (firmware-ci's: F1 replaced
+        # firmware-zmk's three, F2 added fw.tx_power's, and J3 dropped fw.build's
+        # on the CI guard) and two print/CAD edges.
+        self.assertEqual(sum(len(e) for e in declared.values()), 51)
         registry = gates_mod.Registry()
         gates_mod.load_project_gates(os.path.join(REPO, "examples", "bracket"), registry)
         self.assertEqual(sorted(_declared_edges(registry)), sorted(BRACKET_EDGES))

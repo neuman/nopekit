@@ -13,7 +13,9 @@ containers, and what the image that job writes shows.
 the job's own containers on a copy of what the next commit would hold: Zephyr, NCS,
 ZMK, ESP-IDF, Arduino, PlatformIO, the Pico SDK, QMK and STM32 make builds take the
 same path. ``fw.ci_job`` is the replay's validity guard: each way it fails means a
-replay's green would not describe the build. ``fw.build`` needs it, and the three
+replay's green would not describe the build. ``fw.build`` reads the guard's choice
+itself (``_job``): it never replays a job the guard refuses or fails, and it
+replays one whose build the guard could not read, where the guard skips. The three
 readers need ``fw.build``; a gate whose prerequisite did not pass reads Skipped.
 One replay per sweep: the four tier-1 gates share it through ``ctx.load_file``
 (``_replay.loader``; measured in tests/test_firmware_ci, ``OneReplayPerSweep``).
@@ -85,16 +87,26 @@ def _workflow(ctx: GateContext) -> str | None:
     return rel if os.path.isabs(rel) else os.path.join(ctx.root, rel)
 
 
+class _GuardFails(R.ToolFault):
+    """The guard fails this CI: a green replay of it would say nothing. ``fw.build``
+    skips on it (the guard's verdict is the fail); a reader, which needs
+    ``fw.build``, never gets this far."""
+
+
 def _job(ctx: GateContext, path: str):
-    """``(job, workflow)`` as the guard chose it, or :class:`R.ToolFault` when the
-    guard would not pass: a build of something else says nothing."""
+    """``(job, workflow)`` as the guard chose it; :class:`R.ToolFault` when the
+    guard refuses the CI and :class:`_GuardFails` when it fails it: a build of
+    something else, or a green that hides a failed build, says nothing. A job
+    whose build the guard could not read (``job.blind``) is returned: the guard
+    skips, and the replay still judges the build's own result."""
     try:
         wf = ctx.load_file(path, loader=C.load)
         found = C.choose(wf, job=_opt(ctx, "firmware_ci_job"), step=_opt(ctx, "firmware_ci_step"))
     except C.Refused as exc:
         raise R.ToolFault(f"the CI job is refused ({exc}); fw.ci_job says so") from exc
     if isinstance(found, C.Fail):
-        raise R.ToolFault(f"the CI job does not stand ({found.reason}); fw.ci_job says so")
+        raise _GuardFails(f"fw.ci_job fails this CI ({found.reason}): a green replay would say "
+                          f"nothing, so it is not replayed")
     return found, wf
 
 
@@ -185,10 +197,14 @@ def ci_job(ctx: GateContext) -> Verdict:
     form of masking lets that step read green on a failed build:
     ``continue-on-error: true``, ``|| true``, ``set +e`` (or a shell with no
     ``-e``) before more commands, the build before an ``&&`` and then more
-    commands, or a pipe under a shell with no pipefail.
+    commands, or a pipe under a shell with no pipefail. Where the step's own
+    lines hold no build command, the shell scripts of the repository it runs are
+    read by the same rules.
 
     A shape the replay cannot run, and a job or step this gate cannot choose, is
-    errored: the CI may be sound, and the pack cannot say."""
+    errored: the CI may be sound, and the pack cannot say. A build this gate
+    cannot read (inside an action, a Python script, or a command it does not
+    know) is skipped, naming what it could not read: never a pass."""
     gid = "fw.ci_job"
     path = _workflow(ctx)
     if path is None:
@@ -200,22 +216,27 @@ def ci_job(ctx: GateContext) -> Verdict:
         return Verdict(gate=gid, passed=False, error=f"refused: {exc}")
     if isinstance(found, C.Fail):
         return Verdict(gate=gid, passed=False, detail=found.reason)
+    if found.blind:
+        return _skip(gid, f"{_describe(found)}: {found.blind}; so it cannot say whether a "
+                          f"failed build reads green there, and fw.build's replay still "
+                          f"judges the build's own result")
     return Verdict(gate=gid, passed=True, detail=f"{_describe(found)}; {_read(found)}")
 
 
 def _read(job) -> str:
-    """What the guard's pass rests on: the step's own lines, and what it did not
-    read. What slipped through "no masking" (holdout review, a console's
-    upstream workflow): the build ran in a Python script that discards docker's
-    exit status, and the pass claimed what only the step's own lines showed."""
+    """What the guard's pass rests on: the step's own lines, the shell scripts it
+    read to find the build, and what it did not read. What slipped through "no
+    masking" (holdout review, a console's upstream workflow): the build ran in a
+    Python script that discards docker's exit status, and the pass claimed what
+    only the step's own lines showed; and then (holdout review round 2, a watch
+    and that console) a pass whose build ran inside an action or a script the
+    guard did not read at all. Such a build is a skip now (``job.blind``)."""
     said = "no masking in the step's own lines"
-    if job.command.startswith("uses: "):
-        return f"{said}; the action's own steps are not read"
+    if job.read:
+        said += f" or in {', '.join(job.read)}, which it runs"
     if job.unread:
         verb = "is" if len(job.unread) == 1 else "are"
         return f"{said}; {', '.join(job.unread)} {verb} not read"
-    if job.command == "the named step":
-        return f"{said}; what its command runs is not read"
     return said
 
 
@@ -232,10 +253,16 @@ def _read(job) -> str:
     settles="firmware build",
     requires_tools=_TOOLS,
     requires_python=_PY,
-    # Prerequisite fw.ci_job: a job the guard refused or failed is not CI's build,
-    #    or its green says nothing. Isolated: the known-bad below leaves the
-    #    workflow as it was, so the guard passes it.
-    needs=["fw.ci_job"],
+    # No prerequisite: fw.build reads the guard's choice itself (``_job``). It
+    #    errors on a job the guard refuses and skips on one the guard fails, as
+    #    the ``needs`` edge did, and it replays a job whose build the guard could
+    #    not read, where the guard skips. Why the edge went (holdout review round
+    #    2): the guard passed a build inside an action or a Python script, over
+    #    lines that held no build, and now skips it; the spine never runs a gate
+    #    whose prerequisite skipped, so with the edge every such build would lose
+    #    fw.build and its three readers. *Rejected:* the edge with a guard that
+    #    passes such a build (a pass over lines it never read); the edge with the
+    #    skip (the replay, which judges the build's own result, would never run).
     negative_control=NegativeControl(
         fixture="selftest/bad_variants.py:unresolved_symbol",
         note="main.c declares `extern void board_power_init(void);` and calls it, and no "
@@ -256,6 +283,8 @@ def build(ctx: GateContext) -> Verdict:
     try:
         job, wf, result = _replayed(ctx, path)
     except R.WrongAct as exc:
+        return _skip(gid, str(exc))
+    except _GuardFails as exc:
         return _skip(gid, str(exc))
     except R.ToolFault as exc:
         return Verdict(gate=gid, passed=False, error=str(exc))
