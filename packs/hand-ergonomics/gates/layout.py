@@ -13,15 +13,26 @@ of that declaration the scene can show:
 2. **Where each cap is.** The top of each control's part along its declared
    ``normal`` (the direction it is pressed) lies within :data:`POSITION_TOL_MM`
    of its declared ``at``.
-3. **No handle is thicker than declared.** At each grip, the section of the
-   housing through the grip centre, square to the handle axis, is no wider than
-   ``hand_grip_diameter_mm`` plus :data:`GIRTH_TOL_MM`, read as the round handle
-   its points lie on. One-sided: a larger declared diameter puts every wrist
-   farther back, which is conservative, so a device with two different handles
-   declares the larger and passes.
-4. **Each grip is on its handle.** In that section, the declared grip centre lies
-   within :data:`CENTRE_TOL_MM` of the drawn handle's axis, the centroid of the
-   section's outer loop.
+3. **No handle is thicker than declared.** At each grip of kind ``handle``, the
+   section of the housing through the grip centre, square to the handle axis, is
+   no wider than ``hand_grip_diameter_mm`` plus :data:`GIRTH_TOL_MM`, read as the
+   round handle its points lie on. One-sided: a larger declared diameter puts
+   every wrist farther back, which is conservative, so a device with two
+   different handles declares the larger and passes.
+4. **Each handle grip is on its handle.** In that section, the declared grip
+   centre lies within :data:`CENTRE_TOL_MM` of the drawn handle's axis, the
+   centroid of the section's outer loop.
+
+A grip of kind ``slab`` has no handle to measure, and the reach gate counts no
+control pressed from it, so checks 3 and 4 skip it and the detail names it;
+checks 1 and 2 run on any device. What slipped through while they ran at every
+grip (holdout, general-packs H4): on a slab held at its short ends, the section
+square to the held edge is the whole device, so its centroid is the middle of
+the face. Both end grips read 66 mm off "their handle's axis", no end grip could
+ever pass, and the girth check asked for the slab's perimeter / pi, which failed
+the reach count. Rejected: a slab grip held to some loop surrounding its centre
+(nothing reads a slab grip's centre, and a board between two covers leaves air
+at mid-thickness, so a sound slab would read off the device).
 
 Where along the handle the hand holds, and the hand axis, are posture: the scene
 shows the handles, not the hand, so they stay a declaration (GRIP-POSTURE).
@@ -253,11 +264,12 @@ def _scene_bodies(ctx: GateContext) -> tuple[dict | None, str]:
         return parts, where
     sources, where = _mesh_map(ctx)
     if sources is None:
-        return None, ("no scene: the projection publishes neither hand_layout_scene (a GLB "
-                      "whose nodes are <part>__<body>) nor cad-solid's mesh map (meshes, "
-                      "solids or parts, scoped ergo. or cad.); publish one, with each "
-                      f"control drawn as part {CONTROL_PREFIX}<id> (PACK.md, the node "
-                      f"interface)")
+        # Under 200 characters with its remedy: the spine cuts a skip reason there,
+        # and the 290-character first wording lost what to publish (holdout finding
+        # D03). PACK.md's node interface says the rest.
+        return None, ("no scene: the projection publishes neither hand_layout_scene (a GLB, "
+                      "nodes <part>__<body>) nor cad-solid's mesh map (meshes, solids or "
+                      f"parts); draw each control as part {CONTROL_PREFIX}<id>")
     movers = NAMES.movers(sources)
     parts = {}
     for part in sorted(sources, key=str):
@@ -495,8 +507,8 @@ def _evidence(ctx: GateContext, payload: dict) -> list[str]:
     id=GID,
     basis="model-only",
     title="The declared layout is the drawn one: every drawn control declared, every cap "
-          "where the layout says, no handle thicker than declared, every grip on its "
-          "handle",
+          "where the layout says, no handle thicker than declared, every handle grip on "
+          "its handle",
     claims=TAGS,
     tier=Tier.BUILD,
     settles="declared layout agreement",
@@ -506,7 +518,8 @@ def _evidence(ctx: GateContext, payload: dict) -> list[str]:
         "diameter against the exported scene, on cad-solid's node names (part ctl-<id>). "
         "The control set both ways, each cap within 0.5 mm of its declared position, no "
         "handle section wider than the declared diameter plus 1.0 mm (one-sided), and each "
-        "grip centre within 0.5 mm of its drawn handle's axis. It "
+        "handle grip's centre within 0.5 mm of its drawn handle's axis; a slab grip has no "
+        "handle to measure. It "
         "covers the reach claim's tag, because the registry refuses a tier-1 prerequisite "
         "on a tier-0 gate."),
     negative_control=NegativeControl(
@@ -521,7 +534,8 @@ def layout_agrees(ctx: GateContext) -> Verdict:
 
     Skips when the projection declares no controls, publishes no scene, or draws
     no ``ctl-`` part (an export requirement, not a judgment of the design), and
-    when a declared grip comes with no handle diameter. Errors on a layout it
+    when a declared handle grip comes with no handle diameter. A slab grip is
+    named and not measured. Errors on a layout it
     cannot judge: what ``_anthro``'s parsers refuse (``parse_controls``,
     ``parse_grips``), a control with no ``normal``, two declared ids that name one
     part, and a part that crosses a grip's section and is not a solid. The reach
@@ -557,10 +571,12 @@ def layout_agrees(ctx: GateContext) -> Verdict:
         grips = A.parse_grips(raw_grips) if raw_grips is not None else {}
     except A.LayoutError as exc:
         return _error(str(exc))
-    if grips and diameter is None:
-        return _skip("no hand_grip_diameter_mm: the declared handle diameter each grip's "
-                     "drawn section is held to")
-    if grips and (not A._real(diameter) or not float(diameter) > 0):
+    handles = {gid: grip for gid, grip in grips.items() if grip.kind == A.HANDLE}
+    slabs = sorted(gid for gid in grips if gid not in handles)
+    if handles and diameter is None:
+        return _skip("no hand_grip_diameter_mm: the declared handle diameter each handle "
+                     "grip's drawn section is held to")
+    if handles and (not A._real(diameter) or not float(diameter) > 0):
         return _error(f"hand_grip_diameter_mm is {diameter!r}; it is a handle diameter in mm, "
                       f"more than 0")
 
@@ -594,10 +610,11 @@ def layout_agrees(ctx: GateContext) -> Verdict:
 
     housing = [(node, mesh) for mover in sorted(parts) if mover not in drawn
                for node, mesh in parts[mover]]
-    grip_rows: dict[str, dict] = {}
-    allowed = (float(diameter) + GIRTH_TOL_MM) if grips else None
-    for grip_id in sorted(grips):
-        grip = grips[grip_id]
+    grip_rows: dict[str, dict] = {gid: {"kind": grips[gid].kind, "section_checked": False}
+                                  for gid in slabs}
+    allowed = (float(diameter) + GIRTH_TOL_MM) if handles else None
+    for grip_id in sorted(handles):
+        grip = handles[grip_id]
         try:
             section = _section(housing, grip.centre, grip.handle_axis)
         except ValueError as exc:
@@ -606,11 +623,12 @@ def layout_agrees(ctx: GateContext) -> Verdict:
         if section is None:
             problems.append(f"no drawn part surrounds grip {grip_id}'s centre in its section "
                             f"square to the handle axis")
-            grip_rows[grip_id] = {"surrounds_centre": False}
+            grip_rows[grip_id] = {"kind": grip.kind, "surrounds_centre": False}
             continue
         across = _up(section["across"])
         off = _up(section["off"])
-        grip_rows[grip_id] = {"surrounds_centre": True, "section_diameter_mm": across,
+        grip_rows[grip_id] = {"kind": grip.kind, "surrounds_centre": True,
+                              "section_diameter_mm": across,
                               "section_chorded_mm": _r(section["chorded"]),
                               "section_steps": (round(section["steps"], 1)
                                                 if math.isfinite(section["steps"]) else None),
@@ -631,17 +649,22 @@ def layout_agrees(ctx: GateContext) -> Verdict:
     worst = rows[worst_id]["off_mm"] if worst_id else 0.0
     worst_words = (f"worst cap {worst:.2f} mm off ({worst_id}, node "
                    f"{rows[worst_id]['nodes'][0]})" if worst_id else "no cap drawn")
-    grip_words = (", ".join(f"{gid} {row['section_diameter_mm']:.2f} mm"
-                            if row["surrounds_centre"] else f"{gid} no section"
-                            for gid, row in sorted(grip_rows.items()))
+    grip_words = (", ".join(f"{gid} {grip_rows[gid]['section_diameter_mm']:.2f} mm"
+                            if grip_rows[gid]["surrounds_centre"] else f"{gid} no section"
+                            for gid in sorted(handles))
                   + f" across vs declared {float(diameter):g} mm + {GIRTH_TOL_MM:.1f}"
-                  if grips else "no grip declared, no section checked")
-    centred = [gid for gid, row in sorted(grip_rows.items()) if row["surrounds_centre"]]
+                  if handles else
+                  "no handle grip declared, no section checked" if slabs else
+                  "no grip declared, no section checked")
+    centred = [gid for gid in sorted(handles) if grip_rows[gid]["surrounds_centre"]]
     if centred:
         # The first of the worst in sorted order, as for the caps.
         far = max(centred, key=lambda gid: grip_rows[gid]["centre_off_mm"])
         grip_words += (f"; worst grip centre {grip_rows[far]['centre_off_mm']:.2f} mm off its "
                        f"handle's axis ({far}) vs <= {CENTRE_TOL_MM:g} mm")
+    if slabs:
+        grip_words += (f"; slab grip{'s' if len(slabs) > 1 else ''} {', '.join(slabs)}: no "
+                       f"handle measured")
     counts = (f"{len(placed)} of {len(controls)} controls drawn, "
               f"{len(drawn - set(declared))} drawn and not declared")
     source = f"{where}, {sum(len(v) for v in parts.values())} nodes"
@@ -660,7 +683,7 @@ def layout_agrees(ctx: GateContext) -> Verdict:
         "scene": where,
         "controls": rows,
         "grips": grip_rows,
-        "declared_diameter_mm": float(diameter) if grips else None,
+        "declared_diameter_mm": float(diameter) if handles else None,
         "disagreements": problems,
         "position_tol_mm": POSITION_TOL_MM,
         "girth_tol_mm": GIRTH_TOL_MM,

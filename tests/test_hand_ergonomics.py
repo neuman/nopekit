@@ -37,6 +37,14 @@ and the place it would slip:
   doctor reports fdm-print's ``parts``.
 * **The reach claim waits for both gates** (``TheReachClaimWaitsForBoth``), through
   ``check`` on the wrapped baseline.
+* **A slab grip gets no count** (H4, the holdout): a grip states its kind, and on a
+  control pressed from a slab grip the reach gate skips, naming the physical claim
+  (``ASlabGripGetsNoCount``, through ``check`` in ``ASlabReadsSkippedThroughCheck``),
+  the guard measures handles alone (``TheGuardMeasuresOnlyHandles``), and the
+  proposer writes the design ranges alone. A key no gate reads is refused, so a
+  control's ``extent`` is never dropped in silence
+  (``AGripStatesItsKindAndAControlIsAPoint``), and the docs say what each grip
+  gets (``ThePackSaysWhatEachGripGets``).
 
 The layout classes need trimesh, NumPy and manifold3d, as the gate does, and are
 skipped, saying so, where they are absent; the wrapped projects then assert the
@@ -539,6 +547,152 @@ class OutsideTheSurveyAPassDoesNotCount(_Gate):
 
 
 # --------------------------------------------------------------------------- #
+#: The cap the spine puts on a verdict's skip reason and error (``gates._one_line``
+#: at 200 characters; the detail gets 500). A remedy past it is cut from every
+#: reader (holdout finding D03: layout_agrees' no-scene skip lost its remedy).
+REASON_CAP = 200
+
+#: How the guard names a control's part: ``ctl-<id>``.
+CONTROL_PART = "ctl-"
+
+
+def _slab_layout(kind: str = "slab") -> dict:
+    """A slab held at its two short ends, as the holdout's handheld terminal and game
+    console board are (general-packs H4): a 140 x 60 x 12 mm body (x -70..70, y
+    -30..30, z -12..0), a grip 4 mm in from each short edge at mid-thickness with
+    the hand axis pointing in along x and the held edge along y, four thumb
+    buttons near each end, users 13 and older. Its handle diameter is the one
+    PACK.md asked of a slab before H4: the section's perimeter / pi, 96.77 mm."""
+    def buttons(side: int, grip: str) -> list:
+        return [{"id": f"{grip}_{n}", "at": [52.0 * side + dx * side, dy, 2.0],
+                 "normal": [0, 0, 1], "operated_by": [{"grip": grip, "digit": "thumb"}]}
+                for n, (dx, dy) in enumerate(((0, 8), (0, -8), (-8, 0), (8, 0)))]
+    return {
+        "hand_grips": [
+            {"id": "left", "kind": kind, "centre": [-66, 0, -6], "hand_axis": [1, 0, 0],
+             "handle_axis": [0, 1, 0]},
+            {"id": "right", "kind": kind, "centre": [66, 0, -6], "hand_axis": [-1, 0, 0],
+             "handle_axis": [0, 1, 0]}],
+        "hand_controls": buttons(-1, "left") + buttons(1, "right"),
+        "hand_grip_diameter_mm": round(2 * (140 + 12) / math.pi, 2),
+        "hand_user_age_min_years": 13,
+    }
+
+
+class ASlabGripGetsNoCount(_Gate):
+    """Holdout (general-packs H4): the reach rule puts the wrist behind a fist round
+    a handle, and a slab held at its short ends is no handle. Followed as PACK.md
+    said, a slab stated its perimeter / pi as the diameter (95 to 134 mm), the
+    count read 0 to 80%, and the fail counted outside the operating context: the
+    reach claim read Failing where PACK.md and reach-model.md promised Gap. A grip
+    now states its kind, and on a slab grip the gate makes no count: a skip that
+    names what is missing, never a fail and never "outside the context"."""
+
+    def test_a_slab_held_at_its_short_ends_skips_and_never_fails(self):
+        as_handle = self.run_on(_slab_layout("handle"))
+        self.assertEqual(as_handle.outcome, "fail", "a real 97 mm handle's fail still counts")
+        self.assertLess(as_handle.measured, 95.0)
+        for params in (_slab_layout(), {k: v for k, v in _slab_layout().items()
+                                        if k != "hand_grip_diameter_mm"}):
+            with self.subTest(diameter="hand_grip_diameter_mm" in params):
+                found = self.run_on(params)
+                self.assertEqual(found.outcome, "skipped", found.render())
+                self.assertIn("left, right", found.skip_reason)
+                self.assertIn("slab", found.skip_reason)
+                self.assertIn("REACH-HELD", found.skip_reason)
+                self.assertNotIn("outside", found.skip_reason)
+                self.assertLessEqual(len(found.skip_reason), REASON_CAP)
+                self.assertFalse(found.skip_reason.endswith("..."), "cut by the spine")
+
+    def test_one_judged_control_from_a_slab_grip_is_enough_to_skip(self):
+        params = self.params()
+        params["hand_grips"].append({"id": "cradle", "kind": "slab", "centre": [0, -20, -22],
+                                     "hand_axis": [0, 1, 0]})
+        found = self.run_on(params)
+        self.assertEqual((found.outcome, found.measured), ("pass", 97.96),
+                         "a slab grip no judged control is pressed from moves nothing")
+        params["hand_controls"][3]["operated_by"].append({"grip": "cradle", "digit": "thumb"})
+        found = self.run_on(params)
+        self.assertEqual(found.outcome, "skipped", found.render())
+        self.assertIn("cradle", found.skip_reason)
+
+    def test_a_slab_grip_needs_no_handle_axis_and_no_lean_rule(self):
+        """The 20 deg rule and the handle axis are the anchor's (a dowel square to the
+        fist); a slab grip is never anchored, so neither is asked of it. A value it
+        does give is still read strictly."""
+        loose = _slab_layout()
+        loose["hand_grips"][0].pop("handle_axis")
+        loose["hand_grips"][1]["hand_axis"] = [-1, 1, 0]       # 45 deg off the edge
+        self.assertEqual(self.run_on(loose).outcome, "skipped")
+        bad = _slab_layout()
+        bad["hand_grips"][0]["handle_axis"] = [0, 0, 0]
+        found = self.run_on(bad)
+        self.assertEqual(found.outcome, "error", found.render())
+        self.assertIn("zero vector", found.error)
+
+
+class AGripStatesItsKindAndAControlIsAPoint(_Gate):
+    """A grip states its kind, with no default: a default of handle gives the false
+    fail back to every person who never read the kinds. And a key the gates do not
+    read is refused, naming the nearest one: a control is a point, judged at ``at``,
+    and an ``extent`` (holdout finding D08: a wide cap is judged at its centre) was
+    dropped without a word."""
+
+    def test_a_grip_with_no_kind_or_another_kind_is_refused(self):
+        cases = {
+            "no kind": (lambda g: g.pop("kind"), ["states no kind", "'handle'", "'slab'"]),
+            "another kind": (lambda g: g.update(kind="power"), ["'power'", "'handle'"]),
+            "a misspelt key": (lambda g: g.update(knid=g.pop("kind")),
+                               ["'knid'", "did you mean 'kind'"]),
+        }
+        for name, (edit, said) in cases.items():
+            params = self.params()
+            edit(params["hand_grips"][0])
+            with self.subTest(case=name):
+                found = self.run_on(params)
+                self.assertEqual(found.outcome, "error", found.render())
+                for words in said:
+                    self.assertIn(words, found.error)
+                self.assertLessEqual(len(found.error), REASON_CAP)
+
+    def test_a_control_states_no_extent(self):
+        params = self.params()
+        params["hand_controls"][3]["extent"] = [12, 4]
+        found = self.run_on(params)
+        self.assertEqual(found.outcome, "error", found.render())
+        self.assertIn("'extent'", found.error)
+        self.assertIn("a control is a point", found.error)
+        self.assertLessEqual(len(found.error), REASON_CAP)
+        self.assertFalse(found.error.endswith("..."), "cut by the spine")
+
+
+class ASlabReadsSkippedThroughCheck(_env.EnvCase):
+    """``check --tier 1`` on the wrapped baseline with both grips declared slab: the
+    reach claim reads Skipped, naming the slab grips, where the holdout's read
+    Failing. The guard still runs and passes (every cap where declared)."""
+
+    def test_the_reach_claim_reads_skipped(self):
+        layout_runs = gates_mod.availability(_registry().get(LAYOUT)[0])[0]
+        project = _projects.wrap_pack_baseline("hand-ergonomics",
+                                               os.path.join(self.tmp(), "w"))
+        model = os.path.join(project, "model", "wrap.py")
+        with open(model, encoding="utf-8") as fh:
+            text = fh.read()
+        self.assertEqual(text.count("'kind': 'handle'"), 2)
+        with open(model, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(text.replace("'kind': 'handle'", "'kind': 'slab'")
+                     .replace("'hand_grip_diameter_mm': 36,", "'hand_grip_diameter_mm': 134,"))
+        proc = _env.nopekit(["check", "--tier", "1", "--json"], cwd=project)
+        rows = {row["gate"]: row for row in json.loads(proc.stdout)["verdicts"]}
+        self.assertEqual(rows[GID]["outcome"], "skipped", rows[GID])
+        status = json.loads(_env.nopekit(["status", "--json"], cwd=project).stdout)["statuses"]
+        self.assertEqual(status["G1"]["key"], "skipped", status["G1"])
+        if layout_runs:
+            self.assertEqual(rows[LAYOUT]["outcome"], "pass", rows[LAYOUT])
+            self.assertIn("slab", status["G1"]["reason"])
+
+
+# --------------------------------------------------------------------------- #
 class _Layout(_env.EnvCase):
     """Runs ``ergo.layout_agrees`` in process on the pack's baseline, edited."""
 
@@ -869,6 +1023,88 @@ class TheLayoutIsTheDrawnOne(_Layout):
         self.assertIn("node handle-right__0 crosses the section and manifold3d built no "
                       "solid from it", found.error)
 
+    def test_every_skip_keeps_its_remedy_inside_the_cut(self):
+        """Holdout finding D03: the spine cuts a skip reason at 200 characters, and
+        the no-scene skip (290) lost the clause that says what to publish."""
+        bare = {k: v for k, v in self.params().items() if k != "hand_layout_scene"}
+        found = self.run_on(bare)
+        self.assertEqual(found.outcome, "skipped")
+        self.assertLessEqual(len(found.skip_reason), REASON_CAP)
+        self.assertFalse(found.skip_reason.endswith("..."), "cut by the spine")
+        self.assertIn(f"{CONTROL_PART}<id>", found.skip_reason)
+
+
+@NEEDS_MESH
+class TheGuardMeasuresOnlyHandles(_Layout):
+    """Holdout (general-packs H4): on a slab held at its short ends the section
+    square to the held edge is the whole device, so its centroid is the middle of
+    the face, and both end grips read 66 mm off "their handle's axis": no end grip
+    could ever pass, and no honest diameter passed the girth check without
+    failing the reach count. The handle checks now run at handle grips alone; the
+    control set and every cap are checked on any device."""
+
+    def slab_scene(self, layout: dict, *, moved: str = "") -> str:
+        """The slab of :func:`_slab_layout` drawn: its body and a 9 mm cap at each
+        control (``moved`` drawn 3 mm along +y)."""
+        import trimesh
+        meshes = {"body": trimesh.creation.box(bounds=[[-70, -30, -12], [70, 30, 0]])}
+        for control in layout["hand_controls"]:
+            top = list(control["at"])
+            if control["id"] == moved:
+                top[1] += 3.0
+            centre = [c - BUILD.CAP_HEIGHT_MM / 2.0 * n for c, n in zip(top, control["normal"])]
+            meshes[f"{CONTROL_PART}{control['id']}"] = BUILD._cylinder(
+                BUILD.CAP_DIAMETER_MM, BUILD.CAP_HEIGHT_MM, BUILD.CAP_SEGMENTS,
+                control["normal"], centre)
+        return self.scene_file(meshes)
+
+    def test_a_slab_grip_has_no_handle_to_measure(self):
+        slab = _slab_layout()
+        slab.pop("hand_grip_diameter_mm")
+        slab["hand_layout_scene"] = self.slab_scene(slab)
+        found = self.run_on(slab)
+        self.assertEqual((found.outcome, found.measured, found.units), ("pass", 0.0, "mm"),
+                         found.detail)
+        self.assertIn("8 of 8 controls drawn", found.detail)
+        self.assertIn("slab grips left, right: no handle measured", found.detail)
+        self.assertEqual(self.evidence(found)["grips"]["left"],
+                         {"kind": "slab", "section_checked": False})
+        # As the holdout declared it: a handle, its perimeter / pi as the diameter.
+        handle = _slab_layout("handle")
+        handle["hand_layout_scene"] = slab["hand_layout_scene"]
+        found = self.run_on(handle)
+        self.assertEqual(found.outcome, "fail", found.detail)
+        self.assertIn("grip left's centre is 66.00 mm off its drawn handle's axis", found.detail)
+
+    def test_the_caps_and_the_control_set_are_still_held_on_a_slab(self):
+        slab = _slab_layout()
+        slab["hand_layout_scene"] = self.slab_scene(slab, moved="right_0")
+        found = self.run_on(slab)
+        self.assertEqual((found.outcome, found.measured), ("fail", 3.0), found.detail)
+        self.assertIn("worst cap 3.00 mm off (right_0", found.detail)
+        slab = _slab_layout()
+        slab["hand_layout_scene"] = self.slab_scene(slab)
+        slab["hand_controls"] = slab["hand_controls"][1:]
+        found = self.run_on(slab)
+        self.assertEqual((found.outcome, found.units), ("fail", "disagreements"), found.detail)
+        self.assertIn("part ctl-left_0 (ctl-left_0__0) is drawn and not declared", found.detail)
+
+    def test_a_handle_grip_beside_a_slab_grip_is_measured(self):
+        """The baseline's two handles with a slab grip added: the handles are held
+        to their sections as before, and the slab grip is named, not measured."""
+        params = self.params()
+        params["hand_grips"].append({"id": "cradle", "kind": "slab", "centre": [0, -20, -22],
+                                     "hand_axis": [0, 1, 0]})
+        found = self.run_on(params)
+        self.assertEqual(found.outcome, "pass", found.detail)
+        self.assertIn("left 36.00 mm, right 36.00 mm across vs declared 36 mm + 1.0",
+                      found.detail)
+        self.assertIn("slab grip cradle: no handle measured", found.detail)
+        thin = self.run_on({**params, "hand_grip_diameter_mm": 34})
+        self.assertEqual((thin.outcome, thin.measured), ("fail", 2.0), thin.detail)
+        params.pop("hand_grip_diameter_mm")
+        self.assertIn("no hand_grip_diameter_mm", self.run_on(params).skip_reason)
+
 
 @NEEDS_MESH
 class CadSolidsAssemblyIsTheScene(_Layout):
@@ -1104,6 +1340,28 @@ class TheProposerWritesOnlyItsProposal(_env.EnvCase):
         self.assertIsNone(proposer._boundary(lambda x: False, -60.0, 60.0, 0.25))
         self.assertEqual(proposer._boundary(lambda x: True, -60.0, 60.0, 0.25), 60.0)
 
+    def test_a_slab_layout_gets_the_design_ranges_alone(self):
+        """General-packs H4: the map, the fit counts and the grip spacing each put a
+        wrist behind a handle, and a slab grip has no source for that. What a slab
+        device does need from the proposer is the testers' percentiles for
+        REACH-HELD, which read no grip."""
+        project = self.tmp()
+        path = os.path.join(project, "layout.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump({k: v for k, v in _slab_layout().items()
+                       if k != "hand_grip_diameter_mm"}, fh)
+        out = self.tmp()
+        proc = self._run(project, out, "--pitch", "15", "--tester-wtt-mm", "112",
+                         "--tester-wcg-mm", "70")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(os.listdir(out)), ["design_range.json"])
+        with open(os.path.join(out, "design_range.json"), encoding="utf-8") as fh:
+            ranges = json.load(fh)
+        self.assertIn("left, right", ranges["not_made"])
+        self.assertIn("slab", ranges["not_made"])
+        self.assertTrue(ranges["tester"]["small_tester"])
+        self.assertIsNone(ranges["handle_diameter_mm"])
+
     def test_outside_propose_it_refuses(self):
         project = self.tmp()
         self._layout(project)
@@ -1141,6 +1399,78 @@ class TheScaffoldIsRecords(unittest.TestCase):
         self.assertEqual({k: m.requires for k, m in milestones.items()},
                          {"reach-first-print": ["REACH"],
                           "reach-board-order": ["REACH", "REACH-HELD"]})
+
+
+# --------------------------------------------------------------------------- #
+def _doc(*parts: str) -> str:
+    with open(os.path.join(PACK, *parts), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def _between(text: str, start: str, stop: str) -> str:
+    """The text from ``start`` to the first ``stop`` after it."""
+    at = text.index(start)
+    end = text.find(stop, at + len(start))
+    return text[at:] if end < 0 else text[at:end]
+
+
+class ThePackSaysWhatEachGripGets(unittest.TestCase):
+    """The holdout (general-packs H4) followed the docs to a wrong result. Each test
+    holds one sentence a person acted on to what the gates now do."""
+
+    def test_a_slab_reads_skipped_and_the_testers_settle_it(self):
+        """PACK.md said "Gap on a phone-shaped device. Correct." and reach-model.md
+        "the gate reads Gap"; the code read Failing. Both now say Skipped, and name
+        the physical claim that settles a slab's reach."""
+        pack, model = _doc("PACK.md"), _doc("references", "reach-model.md")
+        self.assertNotIn("Gap on a phone-shaped device", pack)
+        for name, section in (("PACK.md", _between(pack, "- **Slab grips.**", "\n- **")),
+                              ("reach-model.md", _between(model, "## Slab grips", "\n## "))):
+            with self.subTest(doc=name):
+                self.assertIn("Skipped", section)
+                self.assertIn("REACH-HELD", section)
+                self.assertIn("`kind: slab`", section)
+                self.assertNotIn("Gap", section, "a slab is no context breach: it skips")
+        skill = _doc("skills", "reach-testing", "SKILL.md")
+        self.assertIn("slab", skill.split("---")[1], "the skill's trigger names the skip")
+
+    def test_the_keys_table_names_every_kind_and_every_key(self):
+        pack = _doc("PACK.md")
+        grips = _between(pack, "| `hand_grips` |", "\n")
+        for kind in A.GRIP_KINDS:
+            self.assertIn(f"`{kind}`", grips, kind)
+        for key in A.GRIP_KEYS:
+            self.assertIn(key, grips, key)
+        controls = _between(pack, "| `hand_controls` |", "\n")
+        for key in A.CONTROL_KEYS:
+            self.assertIn(key, controls, key)
+        self.assertIn("**A control is a point.**", pack,
+                      "the refusal of a key such as extent says a control is a point")
+
+    def test_the_youngest_user_is_said_with_its_source(self):
+        """Holdout finding D09: PACK.md said only "the youngest intended user", and a
+        general consumer product had no rule for which age to state."""
+        row = _between(_doc("PACK.md"), "| `hand_user_age_min_years` |", "\n")
+        lo, _hi = _registry().get(GID)[0].operating_context["hand_user_age_min_years"]
+        self.assertIn(f"{lo:g}", row)
+        self.assertIn("label", row)
+        self.assertIn("rationale", row)
+
+    def test_the_scaffold_says_how_to_copy_it_and_whom_to_name(self):
+        """Holdout finding D09 and R27: copying the scaffold had no command, and an
+        assumption given ``by: human`` read Gap for want of an authority, because
+        the skill's table allowed it beside an owner."""
+        section = _between(_doc("PACK.md"), "## Claims and milestones to start from", "\n## ")
+        self.assertIn("nopekit packs list --verbose", section)
+        self.assertIn("cp ", section)
+        self.assertIn("slab", section)
+        self.assertIn("`authority`", section)
+        with open(os.path.join(_env.REPO, "skills", "nopekit", "SKILL.md"),
+                  encoding="utf-8") as fh:
+            skill = fh.read()
+        row = _between(skill, "| `assumption` |", "\n")
+        self.assertIn("`owner`", row)
+        self.assertIn("`authority`", row)
 
 
 if __name__ == "__main__":

@@ -48,6 +48,16 @@ their primary spelling (or scoped, ``ergo.<key>``): ``hand_grips``,
 A share on the map is **marginal**: the share that reaches that one point. The
 gate counts the subjects who reach every control at once, which is never more.
 Exit 2, writing nothing, on a layout the gate would refuse or a bad argument.
+
+**A layout with a slab grip** (``kind: slab``) gets ``design_range.json`` alone,
+with ``not_made`` saying why, and needs no ``hand_grip_diameter_mm``: the map,
+the fit counts and the grip spacing each put a wrist behind a handle, and a slab
+grip has no source for that (``_anthro.GRIP_KINDS``). What such a device does
+need is the testers' thresholds and percentile for its physical reach test,
+and those read no grip. Rejected: refusing the layout (the testers' percentile
+is the one thing here a slab device can use); a map for its handle grips alone
+(the spacing search moves both grips, and a slab grip's centre is posture,
+never measured).
 """
 from __future__ import annotations
 
@@ -239,13 +249,16 @@ def _layout(path):
         controls = A.parse_controls(get("hand_controls"))
         grips = A.parse_grips(get("hand_grips"))
         A.check_grip_ids(controls, grips)
+        slabs = sorted(gid for gid, grip in grips.items() if grip.kind != A.HANDLE)
+        if slabs:
+            return controls, grips, None, slabs
         A.check_distal(controls, grips)
     except A.LayoutError as exc:
         raise Refused(str(exc))
     diameter = get("hand_grip_diameter_mm")
     if not A._real(diameter) or not float(diameter) > 0:
         raise Refused(f"hand_grip_diameter_mm is {diameter!r}; it is a diameter in mm")
-    return controls, grips, float(diameter)
+    return controls, grips, float(diameter), []
 
 
 def _default_plane(controls, grips):
@@ -516,7 +529,7 @@ def main(argv):
             raise Refused("--pitch: between 2 and 60 mm")
         if (args.tester_wtt_mm is None) != (args.tester_wcg_mm is None):
             raise Refused("--tester-wtt-mm and --tester-wcg-mm go together")
-        controls, grips, diameter = _layout(args.layout)
+        controls, grips, diameter, slabs = _layout(args.layout)
         if args.plane:
             try:
                 nums = [float(x) for x in args.plane.split(",")]
@@ -539,6 +552,19 @@ def main(argv):
         print(f"ergo.reach_envelope: {exc}", file=sys.stderr)
         return 2
 
+    tester = None if args.tester_wtt_mm is None else (args.tester_wtt_mm, args.tester_wcg_mm)
+    if slabs:
+        os.makedirs(args.out, exist_ok=True)
+        _dump(os.path.join(args.out, "design_range.json"), {
+            "_what": "ANSUR 1988 design ranges by sex, mm (type-7 percentiles)",
+            "table_sha256": table.sha256, "handle_diameter_mm": None,
+            "target_pct": args.target, "proposer": "ergo.reach_envelope",
+            "not_made": (f"reach_map, fit_counts and grip_spacing: grip"
+                         f"{'s' if len(slabs) > 1 else ''} {', '.join(slabs)} "
+                         f"{'are' if len(slabs) > 1 else 'is'} kind slab, and each of the "
+                         f"three puts a wrist behind a handle (PACK.md, Slab grips)"),
+            **design_range(table, tester)})
+        return 0
     pop = Population(table)
     common = {"table_sha256": table.sha256, "handle_diameter_mm": _r(diameter),
               "target_pct": args.target, "proposer": "ergo.reach_envelope"}
@@ -549,7 +575,6 @@ def main(argv):
     except Refused as exc:
         print(f"ergo.reach_envelope: {exc}", file=sys.stderr)
         return 2
-    tester = None if args.tester_wtt_mm is None else (args.tester_wtt_mm, args.tester_wcg_mm)
     ranges = design_range(table, tester)
     os.makedirs(args.out, exist_ok=True)
     figure = draw(os.path.join(args.out, "reach_map.svg"), mapped["maps"], ss, ts, controls,

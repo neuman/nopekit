@@ -31,6 +31,9 @@ that will hold the thing.
   pass? GRIP-POSTURE is an assumption with an owner for this reason.
 - Is the declared handle diameter the largest handle, measured as perimeter / pi
   through the grip centre?
+- Is it a handle at all? A device held flat or at its edges is `kind: slab`: no count
+  is made, and the testers settle its reach. Is any grip declared a slab to escape a
+  fail on a real handle?
 
 ## 4. Centre controls on a two-handed device
 

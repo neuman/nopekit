@@ -1,6 +1,6 @@
 {
   "name": "hand-ergonomics",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Checks that a hand-held device's controls are within reach, counting ANSUR 1988 subjects one by one, on a layout that matches the drawn scene; proposes reach maps.",
   "settles": [
     "thumb reach",
