@@ -4687,5 +4687,689 @@ class APartWithNoModelIsFittedAtItsDeclaredHeight(unittest.TestCase):
         self.assertEqual((low.outcome, low.measured), ("pass", 1.35), low.render())
 
 
+
+# --------------------------------------------------------------------------- #
+# general-packs P8: the antenna's keep-out, on every copper layer
+# --------------------------------------------------------------------------- #
+RADIO_BOARD = os.path.join(ASSETS, "radio_board.kicad_pcb")
+KEEPOUT_TOOLS = (shutil.which("kicad-cli") is not None
+                 and importlib.util.find_spec("pcbnew") is not None)
+KEEPOUT_SKIP = ("needs kicad-cli and pcbnew: the gate refills the board's zones with "
+                "pcbnew and judges each copy with kicad-cli")
+PCBNEW_SKIP = "needs pcbnew: the test board is built with KiCad's own placement"
+
+#: KiCad 9.0.9's ESP32-S3-WROOM-1 keep-out, in its library frame (y down):
+#: ``RF_Module.pretty/ESP32-S3-WROOM-1.kicad_mod``'s rule area, as the library
+#: writes it. A test reads the library itself where it is installed.
+S3_KEEPOUT_LOCAL = [(-24.0, -6.75), (24.0, -6.75), (24.0, -27.75), (-24.0, -27.75)]
+
+#: Builds a test board with KiCad's own pcbnew, in a child as the asset scripts
+#: run: parts placed, turned and flipped by KiCad (so each footprint's rule area
+#: is saved where KiCad puts it), pours, tracks and named rule areas, then filled.
+_BUILD_SCRIPT = r"""
+import json, os, sys
+import pcbnew
+
+def mm(v): return pcbnew.FromMM(v)
+def xy(p): return pcbnew.VECTOR2I(mm(p[0]), mm(p[1]))
+
+spec = json.load(open(sys.argv[1]))
+out = spec["out"]
+b = pcbnew.BOARD()
+b.SetCopperLayerCount(spec.get("layers", 4))
+nets = {}
+def net(name):
+    if name not in nets:
+        n = pcbnew.NETINFO_ITEM(b, name); b.Add(n); nets[name] = n
+    return nets[name]
+for p in spec.get("parts", []):
+    fp = pcbnew.FootprintLoad(os.path.join(spec["footprints"], p["lib"] + ".pretty"), p["name"])
+    fp.SetFPID(pcbnew.LIB_ID(p["lib"], p["name"]))
+    fp.SetReference(p["ref"]); fp.SetValue(p["value"])
+    fp.SetPosition(xy(p["at"])); fp.SetOrientationDegrees(p.get("rot", 0.0))
+    for pad in fp.Pads():
+        if pad.GetNumber() in p.get("nets", {}):
+            pad.SetNet(net(p["nets"][pad.GetNumber()]))
+    b.Add(fp)
+    if p.get("back"):
+        fp.Flip(fp.GetPosition(), pcbnew.FLIP_DIRECTION_TOP_BOTTOM)
+w, h = spec["outline"]
+corners = [(0, 0), (w, 0), (w, h), (0, h)]
+for a, c in zip(corners, corners[1:] + corners[:1]):
+    e = pcbnew.PCB_SHAPE(b); e.SetShape(pcbnew.SHAPE_T_SEGMENT)
+    e.SetStart(xy(a)); e.SetEnd(xy(c)); e.SetLayer(pcbnew.Edge_Cuts); e.SetWidth(mm(0.1)); b.Add(e)
+for t in spec.get("tracks", []):
+    s = pcbnew.PCB_TRACK(b); s.SetStart(xy(t["pts"][0])); s.SetEnd(xy(t["pts"][1]))
+    s.SetWidth(mm(0.25)); s.SetLayer(b.GetLayerID(t["layer"])); s.SetNet(net(t["net"]))
+    b.Add(s)
+for z in spec.get("pours", []):
+    zone = pcbnew.ZONE(b); zone.SetLayer(b.GetLayerID(z["layer"])); zone.SetNet(net(z["net"]))
+    o = zone.Outline(); o.NewOutline()
+    for p in z["pts"]: o.Append(mm(p[0]), mm(p[1]))
+    b.Add(zone)
+for a in spec.get("areas", []):
+    zone = pcbnew.ZONE(b); zone.SetIsRuleArea(True)
+    ls = pcbnew.LSET()
+    for name in a["layers"]: ls.AddLayer(b.GetLayerID(name))
+    zone.SetLayerSet(ls); zone.SetZoneName(a["name"])
+    zone.SetDoNotAllowTracks(True); zone.SetDoNotAllowVias(True); zone.SetDoNotAllowPads(True)
+    zone.SetDoNotAllowCopperPour(True); zone.SetDoNotAllowFootprints(False)
+    o = zone.Outline(); o.NewOutline()
+    for p in a["pts"]: o.Append(mm(p[0]), mm(p[1]))
+    b.Add(zone)
+pcbnew.SaveBoard(out, b)
+b = pcbnew.LoadBoard(out)
+pcbnew.ZONE_FILLER(b).Fill(b.Zones())
+pcbnew.SaveBoard(out, b)
+for ext in (".kicad_pro", ".kicad_prl"):
+    side = out[:-len(".kicad_pcb")] + ext
+    if os.path.exists(side): os.remove(side)
+"""
+
+
+def _build_board(root: str, name: str, spec: dict) -> str:
+    out = os.path.join(root, name + ".kicad_pcb")
+    script = os.path.join(root, "build_board.py")
+    with open(script, "w", encoding="utf-8") as fh:
+        fh.write(_BUILD_SCRIPT)
+    path = os.path.join(root, name + ".json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(dict(spec, out=out, footprints=FOOTPRINTS), fh)
+    subprocess.run([sys.executable, script, path], check=True, capture_output=True,
+                   timeout=120, cwd=root)
+    return out
+
+
+def _keepout_gate():
+    return _registry().get("pcb.antenna_keepout")
+
+
+def _keepout_ctx(root: str, params: dict) -> gates_mod.GateContext:
+    out = tempfile.mkdtemp(prefix="out-", dir=root)
+    return gates_mod.GateContext(
+        root=root, ledger=Ledger(meta=ProjectMeta(name="radio")), model=None,
+        params=dict(params), out_dir=out, tier=1, log=lambda _m: None, extra={})
+
+
+def _radio_record(board: str, **over) -> dict:
+    rec = {"board": board, "ref": "U1", "value": "ESP32-S3-WROOM-1", "keepout": "footprint",
+           "source": "the stock footprint's rule area"}
+    rec.update(over)
+    return {"pcb_antennas": {"radio": rec}}
+
+
+def _radio_copy(root: str, edit=None, stem: str = "radio_board") -> str:
+    """The baseline's radio board with ``edit(tree)`` applied, written under
+    ``root`` (in a directory of its own, so each copy may take its own project
+    file)."""
+    tree = K.load_tree(RADIO_BOARD)
+    if edit is not None:
+        edit(tree)
+    where = tempfile.mkdtemp(prefix="board-", dir=root)
+    path = os.path.join(where, stem + ".kicad_pcb")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(K.dump(tree) + "\n")
+    return path
+
+
+def _keepout_evidence(v) -> dict:
+    with open(next(e for e in v.evidence if e.endswith("antenna_keepout.json")),
+              encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def _uid(name: str) -> K.Q:
+    import uuid
+    return K.Q(str(uuid.uuid5(uuid.NAMESPACE_URL, f"test:{name}")))
+
+
+def _track(layer: str, a, b, net: str = "GND"):
+    def edit(tree):
+        tree.append(["segment", ["start", f"{a[0]:g}", f"{a[1]:g}"],
+                     ["end", f"{b[0]:g}", f"{b[1]:g}"], ["width", "0.25"],
+                     ["layer", K.Q(layer)], ["net", _net_code(tree, net)],
+                     ["uuid", _uid(f"{layer}{a}{b}")]])
+    return edit
+
+
+def _via(at, net: str = "GND"):
+    def edit(tree):
+        tree.append(["via", ["at", f"{at[0]:g}", f"{at[1]:g}"], ["size", "0.6"], ["drill", "0.3"],
+                     ["layers", K.Q("F.Cu"), K.Q("B.Cu")], ["net", _net_code(tree, net)],
+                     ["uuid", _uid(f"via{at}")]])
+    return edit
+
+
+def _moved(ref: str, x: float, y: float):
+    def edit(tree):
+        at = K.child(_footprint(tree, ref), "at")
+        at[1], at[2] = f"{x:g}", f"{y:g}"
+    return edit
+
+
+def _no_footprint_keepout(ref: str):
+    def edit(tree):
+        fp = _footprint(tree, ref)
+        fp[:] = [c for c in fp if not (isinstance(c, list) and K.head(c) == "zone")]
+    return edit
+
+
+def _both(*edits):
+    def edit(tree):
+        for e in edits:
+            e(tree)
+    return edit
+
+
+class TheKeepoutIsJudgedOnEveryLayer(unittest.TestCase):
+    """KiCad's own DRC, on the radio board as stored and as refilled, with the
+    footprint's keep-out copied to every copper layer. What slipped through:
+    ``pcb.drc`` holds the stock ESP32-S3-WROOM-1's keep-out on F.Cu, In1.Cu and
+    B.Cu only, and judges a pour by its stored fill."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not KEEPOUT_TOOLS:
+            raise unittest.SkipTest(KEEPOUT_SKIP)
+        cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-")
+        cls.spec, fn = _keepout_gate()
+        cls.fn = staticmethod(fn)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, True)
+
+    def run_on(self, board: str, **over):
+        return gates_mod.run_gate(self.spec, self.fn,
+                                  _keepout_ctx(self.root, _radio_record(board, **over)))
+
+    def test_the_baseline_passes_and_its_footprint_area_names_three_layers(self):
+        tree = K.load_tree(RADIO_BOARD)
+        zone = K.children(_footprint(tree, "U1"), "zone")[0]
+        self.assertEqual(sorted(str(x) for x in K.child(zone, "layers")[1:]),
+                         ["B.Cu", "F.Cu", "In1.Cu"], "the stock area leaves In2.Cu out")
+        v = self.run_on(RADIO_BOARD)
+        self.assertEqual((v.outcome, v.measured, v.limit, v.units), ("pass", 0, 0, "findings"),
+                         v.render())
+        self.assertIn("U1 (footprint area) on radio_board.kicad_pcb, 4 copper layers", v.detail)
+        ev = _keepout_evidence(v)
+        self.assertEqual(ev["copper_layers"]["radio_board.kicad_pcb"],
+                         ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"])
+        self.assertEqual(ev["findings"], [])
+
+    def test_plain_drc_sees_nothing_in_the_keepout_of_the_known_bad(self):
+        """Nothing cheaper catches it: kicad-cli's own DRC on the known-bad board
+        reports what it reports on the baseline, item kind for item kind, and no
+        item in a keep-out."""
+        bad = gates_mod.run_fixture(self.spec, self.fn,
+                                    packs_mod.baseline_context(PACK, out_dir=self.root),
+                                    trace=None, out_dir=tempfile.mkdtemp(dir=self.root))
+        board = bad.params["pcb_antennas"]["radio"]["board"]
+        kinds = []
+        for path in (RADIO_BOARD, board):
+            report = os.path.join(self.root, "plain.json")
+            subprocess.run(["kicad-cli", "pcb", "drc", "--severity-all", "--format", "json",
+                            "-o", report, path], capture_output=True, timeout=120,
+                           cwd=self.root, check=True)
+            with open(report, encoding="utf-8") as fh:
+                kinds.append(sorted(v["type"] for v in json.load(fh)["violations"]))
+        self.assertEqual(kinds[0], kinds[1])
+        self.assertNotIn("items_not_allowed", kinds[1])
+        v = gates_mod.run_gate(self.spec, self.fn, bad)
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+        [found] = _keepout_evidence(v)["findings"]
+        self.assertEqual((found["ref"], found["copies"]), ("U1", ["refilled"]))
+        self.assertTrue(found["item"].startswith("Zone [GND] on In2.Cu"), found)
+        self.assertIn("refilled only; the stored fill holds none", v.detail)
+
+    def test_each_kind_of_copper_is_found_on_any_layer(self):
+        board = _radio_copy(self.root, _both(
+            _track("In2.Cu", (1.0, 10.0), (5.0, 10.0)),
+            _track("B.Cu", (1.0, 12.0), (5.0, 12.0)),
+            _via((3.0, 20.0)),
+            _moved("C1", 3.0, 26.0)))
+        v = self.run_on(board)
+        self.assertEqual((v.outcome, v.measured), ("fail", 5), v.render())
+        found = _keepout_evidence(v)["findings"]
+        words = sorted(f["item"].split(",")[0] for f in found)
+        self.assertEqual(words, ["Pad 1 [3V3] of C1 on F.Cu", "Pad 2 [GND] of C1 on F.Cu",
+                                 "Track [GND] on B.Cu", "Track [GND] on In2.Cu",
+                                 "Via [GND] on F.Cu - B.Cu"])
+        self.assertTrue(all(f["copies"] == ["stored", "refilled"] for f in found), found)
+
+    def test_a_stored_fill_the_refill_would_take_out_still_counts(self):
+        """The fab is sent the file's fill (kicad-cli 9 plots it as stored), so
+        copper the file holds in the keep-out counts, refill or not, even outside
+        its zone's outline, where KiCad's own DRC does not look."""
+        def stale(tree):
+            zone = next(z for z in K.children(tree, "zone")
+                        if str(K.value(z, "layer", default="")) == "In2.Cu")
+            zone.append(["filled_polygon", ["layer", K.Q("In2.Cu")],
+                         ["pts", ["xy", "1", "10"], ["xy", "4", "10"], ["xy", "4", "12"],
+                          ["xy", "1", "12"]]])
+        v = self.run_on(_radio_copy(self.root, stale))
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+        [found] = _keepout_evidence(v)["findings"]
+        self.assertEqual(found["copies"], ["stored"])
+        self.assertIn("stored only; a refill takes it out", v.detail)
+
+    def test_the_project_cannot_hide_a_finding(self):
+        """A project file that ignores ``items_not_allowed`` is set back on the
+        staged copy, and KiCad does honour the project's word: the same staged
+        board under the project's own file reports nothing."""
+        board = _radio_copy(self.root, _track("In2.Cu", (1.0, 10.0), (5.0, 10.0)))
+        with open(os.path.join(ASSETS, "esd_guard.kicad_pro"), encoding="utf-8") as fh:
+            project = json.load(fh)
+        project["board"]["design_settings"]["rule_severities"]["items_not_allowed"] = "ignore"
+        pro = board[:-len(".kicad_pcb")] + ".kicad_pro"
+        with open(pro, "w", encoding="utf-8") as fh:
+            json.dump(project, fh)
+        v = self.run_on(board)
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+        stored = next(os.path.dirname(e) for e in v.evidence
+                      if e.endswith(os.path.join("stored", "drc.json")))
+        shutil.copyfile(pro, os.path.join(stored, "radio_board.kicad_pro"))
+        report = os.path.join(stored, "hidden.json")
+        subprocess.run(["kicad-cli", "pcb", "drc", "--severity-all", "--format", "json",
+                        "-o", report, os.path.join(stored, "radio_board.kicad_pcb")],
+                       capture_output=True, timeout=120, cwd=stored, check=True)
+        with open(report, encoding="utf-8") as fh:
+            types = {x["type"] for x in json.load(fh)["violations"]}
+        self.assertNotIn("items_not_allowed", types, "the override is what finds it")
+
+    def test_one_board_named_twice_is_judged_once(self):
+        board = _radio_copy(self.root, _track("In2.Cu", (1.0, 10.0), (5.0, 10.0)))
+        # The same file spelled two ways: relative with a "." in it, and absolute.
+        spelled = os.path.join(os.path.relpath(os.path.dirname(board), self.root), ".",
+                               os.path.basename(board))
+        params = dict(_radio_record(board), pcb_board=spelled)
+        v = gates_mod.run_gate(self.spec, self.fn, _keepout_ctx(self.root, params))
+        self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+
+    def test_a_fail_stands_beside_a_board_kicad_could_not_judge(self):
+        """Two boards: KiCad finds a track on one and times out (or crashes) on
+        the other. The fail stands, and the detail names the board not judged."""
+        bad = _radio_copy(self.root, _track("In2.Cu", (1.0, 10.0), (5.0, 10.0)), stem="a")
+        other = _radio_copy(self.root, stem="b")
+        real = self.fn.__globals__["_antenna_runs"]
+        Verdict = self.fn.__globals__["Verdict"]
+        for said, stuck in (
+                ("timed out", Verdict(gate=self.spec.id, passed=False, skipped=True,
+                                      skip_reason="timed out")),
+                ("crashed", Verdict(gate=self.spec.id, passed=False, error="crashed"))):
+            def runs(ctx, gid, n, path, *rest, stuck=stuck):
+                return stuck if path.endswith("b.kicad_pcb") else real(ctx, gid, n, path, *rest)
+            params = {"pcb_antennas": {
+                "a": dict(_radio_record(bad)["pcb_antennas"]["radio"]),
+                "b": dict(_radio_record(other)["pcb_antennas"]["radio"])}}
+            with self.subTest(other=said), \
+                    mock.patch.dict(self.fn.__globals__, {"_antenna_runs": runs}):
+                v = gates_mod.run_gate(self.spec, self.fn, _keepout_ctx(self.root, params))
+                self.assertEqual((v.outcome, v.measured), ("fail", 1), v.render())
+                self.assertIn(said, v.detail)
+
+    def test_a_module_with_no_keepout_skips_by_name(self):
+        bare = _radio_copy(self.root, _no_footprint_keepout("U1"))
+        v = gates_mod.run_gate(self.spec, self.fn, _keepout_ctx(self.root, {"pcb_board": bare}))
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn("no antenna keep-out for U1 (RF_Module:ESP32-S3-WROOM-1) on "
+                      "radio_board.kicad_pcb: the footprint has none", v.skip_reason)
+        self.assertIn("(or \"none\", for an antenna off the board)", v.skip_reason)
+        # Named "none", it is listed, and a board with nothing else skips.
+        v = self.run_on(bare, keepout="none", source="a wire antenna on a pad")
+        self.assertEqual(v.outcome, "skipped", v.render())
+        self.assertIn("listed, not judged: U1 (no antenna on the board)", v.skip_reason)
+        # A record that says "footprint" of a footprint with no area is false.
+        v = self.run_on(bare)
+        self.assertEqual(v.outcome, "error", v.render())
+        self.assertIn("carries no keep-out rule area", v.error)
+
+
+class TheKeepoutRecordsAreReadStrictly(unittest.TestCase):
+    """A record is held to its board's part, and to its own keys; none of this
+    needs KiCad: each refusal comes before the board is staged."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-keepout-rec-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.spec, self.fn = _keepout_gate()
+
+    def call(self, params: dict):
+        return self.fn(_keepout_ctx(self.root, params))
+
+    def test_a_record_for_another_design_is_an_error(self):
+        v = self.call(_radio_record(RADIO_BOARD, value="ESP32-C3-MINI-1"))
+        self.assertIn("is for another design: radio_board.kicad_pcb's U1 is ESP32-S3-WROOM-1, "
+                      "the record's ESP32-C3-MINI-1", v.error)
+        v = self.call(_radio_record(RADIO_BOARD, ref="U9"))
+        self.assertIn("is for another design: radio_board.kicad_pcb has no U9", v.error)
+
+    def test_an_unknown_key_or_form_is_refused(self):
+        v = self.call(_radio_record(RADIO_BOARD, keepout_layers="all"))
+        self.assertIn("unknown key 'keepout_layers'", v.error)
+        v = self.call(_radio_record(RADIO_BOARD, keepout="all"))
+        self.assertIn("give \"footprint\", \"none\", {\"drawing\": <path>} or "
+                      "{\"rule_area\": <name>}", v.error)
+        v = self.call(_radio_record(RADIO_BOARD, keepout={"drawing": "a.json",
+                                                          "rule_area": "x"}))
+        self.assertIn("give one", v.error)
+        v = self.call({"pcb_antennas": [{"ref": "U1"}]})
+        self.assertIn("is a list", v.error)
+        v = self.call(_radio_record(RADIO_BOARD, source=" "))
+        self.assertIn("source is empty", v.error)
+
+    def test_a_rule_area_must_be_on_the_board(self):
+        v = self.call(_radio_record(RADIO_BOARD, keepout={"rule_area": "AE1 clearance"}))
+        self.assertIn("radio_board.kicad_pcb has no rule area named 'AE1 clearance'", v.error)
+
+    def test_a_newer_board_skips_with_the_guards_words(self):
+        board = _radio_copy(self.root, lambda t: K.child(t, "version").__setitem__(1, "20260206"))
+        v = self.call(_radio_record(board))
+        self.assertTrue(v.skipped, v)
+        self.assertIn("this reader was checked through board format 20241229 (KiCad 9.0); the "
+                      "file is format 20260206", v.skip_reason)
+
+    def test_no_board_and_no_record_skips(self):
+        v = self.call({})
+        self.assertTrue(v.skipped, v)
+        self.assertIn("no pcb_board and no pcb_antennas", v.skip_reason)
+        v = self.call({"pcb_board": BOARD})
+        self.assertTrue(v.skipped, v)
+        self.assertIn("no radio module on esd_guard.kicad_pcb", v.skip_reason)
+
+
+def _s3_drawing(turn_deg: float = 30.0, shift=(5.0, -3.0), y_axis: str = "up",
+                pads=("1", "14", "27", "40"), mirror: bool = False) -> dict:
+    """The ESP32-S3-WROOM-1's pads and keep-out as a vendor's figure would give
+    them: KiCad's own land and the library's keep-out, carried into another
+    frame (turned, moved, y up as printed). ``mirror`` reads its y the wrong
+    way, as a drawing transcribed with the wrong ``y_axis`` does."""
+    land, _ = K.footprint_land(K.load_tree(RADIO_BOARD), "U1")
+    by = {p.number: p for p in land}
+    c, s = math.cos(math.radians(turn_deg)), math.sin(math.radians(turn_deg))
+
+    def frame(x, y):
+        x, y = x * c - y * s + shift[0], x * s + y * c + shift[1]
+        flip = (y_axis == "up") != mirror
+        return round(x, 4), round(-y if flip else y, 4)
+    out = []
+    for n in pads:
+        x, y = frame(by[n].x, by[n].y)
+        out.append({"number": n, "function": f"P{n}", "x": x, "y": y, "w": by[n].w,
+                    "h": by[n].h})
+    return {"part": "ESP32-S3-WROOM-1", "source": "test: KiCad's land, carried",
+            "view": "top", "y_axis": y_axis, "pads": out,
+            "keepout": {"polygon": [list(frame(x, y)) for x, y in S3_KEEPOUT_LOCAL]}}
+
+
+class AVendorDrawingRegistersByItsPads(unittest.TestCase):
+    """``{"drawing": path}``: the drawing fitted on the footprint's numbered pads
+    with ``_land_fit(..., pair_by="number")``, then carried onto the board. The
+    library's own keep-out, given as a drawing in another frame, lands on the
+    area KiCad saved for the footprint. Arithmetic only: no KiCad needed."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-keepout-drawing-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.g = _keepout_gate()[1].__globals__
+        self.tree = K.load_tree(RADIO_BOARD)
+
+    def area(self, drawing: dict, tree=None, ref: str = "U1"):
+        tree = tree or self.tree
+        path = os.path.join(self.root, "drawing.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(drawing, fh)
+        ctx = _keepout_ctx(self.root, {})
+        return self.g["_drawing_area"](ctx, tree, _footprint(tree, ref), ref, path, "rec")
+
+    def stored(self, tree=None, ref: str = "U1"):
+        zone = K.children(_footprint(tree or self.tree, ref), "zone")[0]
+        return self.g["_polygon_points"](zone)
+
+    def test_the_library_keepout_lands_where_kicad_saved_it(self):
+        _poly, fit = self.area(_s3_drawing())
+        self.assertEqual(fit["paired_by"], "number")
+        self.assertLess(fit["rms_mm"], 1e-3)
+        for got, want in zip(fit["polygon_board_mm"], self.stored()):
+            self.assertAlmostEqual(got[0], want[0], places=3)
+            self.assertAlmostEqual(got[1], want[1], places=3)
+
+    def test_the_library_frame_reaches_the_board_as_kicad_places_it(self):
+        if FOOTPRINTS is None:
+            self.skipTest("needs KiCad's footprint library, to read the stock area")
+        lib = K.load_tree(os.path.join(FOOTPRINTS, "RF_Module.pretty",
+                                       "ESP32-S3-WROOM-1.kicad_mod"))
+        local = self.g["_polygon_points"](K.children(lib, "zone")[0])
+        self.assertEqual([tuple(p) for p in local], S3_KEEPOUT_LOCAL)
+        place = self.g["_footprint_to_board"](_footprint(self.tree, "U1"))
+        for (x, y), want in zip(S3_KEEPOUT_LOCAL, self.stored()):
+            got = place((x, y))
+            self.assertAlmostEqual(got[0], want[0], places=6)
+            self.assertAlmostEqual(got[1], want[1], places=6)
+
+    def test_a_drawing_that_does_not_register_is_refused(self):
+        P = self.g["P"]
+        cases = {
+            "mirrored": (_s3_drawing(mirror=True), "does not register on U1"),
+            "on one line": (_s3_drawing(pads=("1", "7", "14")), "sit on one line"),
+            "two pads": (_s3_drawing(pads=("1", "27")), "gives 2 pad(s)"),
+            "a repeated pad": (_s3_drawing(pads=("1", "14", "27", "41")),
+                               "which U1's footprint repeats"),
+            "no keep-out": (dict(_s3_drawing(), keepout=None), "has no keepout"),
+            "a short polygon": (dict(_s3_drawing(), keepout={"polygon": [[0, 0], [1, 1]]}),
+                                "three or more"),
+        }
+        for name, (drawing, said) in cases.items():
+            with self.subTest(case=name):
+                with self.assertRaises(P.RecordError) as caught:
+                    self.area(drawing)
+                self.assertIn(said, str(caught.exception))
+
+
+class EachRadioIsReadByItsOwnKeepout(unittest.TestCase):
+    """A BLE, a Wi-Fi, a sub-GHz and a LoRa module from KiCad's RF_Module on one
+    four-layer board, each placed by KiCad, the Wi-Fi module turned 37 degrees
+    and flipped to B.Cu, with a track on In2.Cu under each antenna and a ground
+    pour on In1.Cu everywhere. The BLE module's footprint (RN4871) carries an
+    every-layer antenna area and two F.Cu areas beside pads: only the antenna's
+    is read, so the pour under the pads is not a finding. The sub-GHz module's
+    area (IQRF) is on F.Cu alone, so the pour runs under its antenna, and is."""
+
+    @classmethod
+    def setUpClass(cls):
+        if not KEEPOUT_TOOLS or FOOTPRINTS is None:
+            raise unittest.SkipTest(KEEPOUT_SKIP)
+        cls.root = tempfile.mkdtemp(prefix="nopekit-keepout-radios-")
+        cls.spec, fn = _keepout_gate()
+        cls.fn = staticmethod(fn)
+        cls.g = fn.__globals__
+        parts = [
+            {"lib": "RF_Module", "name": "Microchip_RN4871", "ref": "U1", "value": "RN4871",
+             "at": [20, 60]},
+            {"lib": "RF_Module", "name": "ESP32-S3-WROOM-1", "ref": "U2",
+             "value": "ESP32-S3-WROOM-1", "at": [100, 45], "rot": 37, "back": True,
+             "nets": {"1": "GND", "40": "GND", "41": "GND"}},
+            {"lib": "RF_Module", "name": "IQRF_TRx2DA_KON-SIM-01", "ref": "U3",
+             "value": "TR-72DA", "at": [30, 12]},
+            {"lib": "RF_Module", "name": "HOPERF_RFM9XW_SMD", "ref": "U4", "value": "RFM95W",
+             "at": [45, 45]},
+        ]
+        cls.spec_board = {"layers": 4, "outline": [140, 80], "parts": parts,
+                          "pours": [{"layer": "In1.Cu", "net": "GND",
+                                     "pts": [[0.5, 0.5], [139.5, 0.5], [139.5, 79.5],
+                                             [0.5, 79.5]]}]}
+        probe = _build_board(cls.root, "probe", cls.spec_board)
+        u2 = _footprint(K.load_tree(probe), "U2")
+        cls.u2_centre = cls.g["_footprint_to_board"](u2)((0.0, -17.25))
+        x, y = cls.u2_centre
+        cls.board = _build_board(cls.root, "radios", dict(cls.spec_board, tracks=[
+            {"layer": "In2.Cu", "net": "GND", "pts": [[17, 53.5], [23, 53.5]]},
+            {"layer": "In2.Cu", "net": "GND", "pts": [[25, 29], [35, 29]]},
+            {"layer": "In2.Cu", "net": "GND", "pts": [[x - 2, y], [x + 2, y]]}]))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, True)
+
+    def run_on(self, params: dict):
+        return gates_mod.run_gate(self.spec, self.fn, _keepout_ctx(self.root, params))
+
+    def findings(self, v) -> list:
+        return sorted((f["ref"], f["item"].split(",")[0]) for f in _keepout_evidence(v)["findings"])
+
+    WANT = [("U1", "Track [GND] on In2.Cu"), ("U2", "Track [GND] on In2.Cu"),
+            ("U3", "Track [GND] on In2.Cu"), ("U3", "Zone [GND] on In1.Cu")]
+
+    def test_each_module_is_found_and_judged(self):
+        none = {"pcb_antennas": {"lora": {"ref": "U4", "value": "RFM95W", "keepout": "none",
+                                          "source": "a wire antenna on its ANT pad"}}}
+        v = self.run_on(dict(none, pcb_board=self.board))
+        self.assertEqual((v.outcome, v.measured), ("fail", 4), v.render())
+        self.assertEqual(self.findings(v), self.WANT)
+        self.assertIn("listed, not judged: U4 (no antenna on the board)", v.detail)
+        # Without the record the LoRa module is not judged, and the fails stand.
+        v = self.run_on({"pcb_board": self.board})
+        self.assertEqual((v.outcome, v.measured), ("fail", 4), v.render())
+        self.assertIn("not judged: no antenna keep-out for U4 (RF_Module:HOPERF_RFM9XW_SMD)",
+                      v.detail)
+
+    def test_a_drawing_on_a_turned_flipped_module_lands_on_its_area(self):
+        """U2's own keep-out given as a vendor drawing: registered on a module
+        KiCad turned 37 degrees and flipped, it covers what the footprint's area
+        covers, and finds the same track."""
+        tree = K.load_tree(self.board)
+        land, _ = K.footprint_land(tree, "U2")
+        by = {p.number: p for p in land}
+        drawing = {"part": "ESP32-S3-WROOM-1", "source": "test", "view": "top",
+                   "y_axis": "down",
+                   "pads": [{"number": n, "function": n, "x": by[n].x, "y": by[n].y,
+                             "w": by[n].w, "h": by[n].h} for n in ("1", "14", "27", "40")],
+                   "keepout": {"polygon": [list(p) for p in S3_KEEPOUT_LOCAL]}}
+        path = os.path.join(self.root, "u2.json")
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(drawing, fh)
+        v = self.run_on({"pcb_board": self.board, "pcb_antennas": {
+            "wifi": {"ref": "U2", "value": "ESP32-S3-WROOM-1", "keepout": {"drawing": path},
+                     "source": "test"},
+            "lora": {"ref": "U4", "value": "RFM95W", "keepout": "none", "source": "test"}}})
+        self.assertEqual(self.findings(v), self.WANT, v.render())
+        ev = _keepout_evidence(v)
+        got = next(j for j in ev["judged"] if j["ref"] == "U2")["polygons_board_mm"][0]
+        want = self.g["_polygon_points"](K.children(_footprint(tree, "U2"), "zone")[0])
+        for a, b in zip(got, want):
+            self.assertAlmostEqual(a[0], b[0], places=3)
+            self.assertAlmostEqual(a[1], b[1], places=3)
+
+    def test_a_designers_rule_area_is_read_the_same_way(self):
+        """A chip antenna's clearance the designer drew on F.Cu alone, named:
+        copied to every layer, it finds the In1.Cu pour under it."""
+        board = _build_board(self.root, "chip", dict(self.spec_board, areas=[
+            {"name": "AE1 clearance", "layers": ["F.Cu"],
+             "pts": [[60, 5], [75, 5], [75, 15], [60, 15]]}]))
+        v = self.run_on({"pcb_board": board, "pcb_antennas": {
+            "chip": {"ref": "U4", "value": "RFM95W", "keepout": {"rule_area": "AE1 clearance"},
+                     "source": "test: the antenna's datasheet clearance"}}})
+        self.assertIn(("U4", "Zone [GND] on In1.Cu"), self.findings(v), v.render())
+        self.assertIn("U4 (rule area 'AE1 clearance')", v.detail)
+
+
+class TheFootprintsAntennaAreaIsChosen(unittest.TestCase):
+    """Which of a stock footprint's rule areas is its antenna's, read from KiCad
+    9.0.9's own library: no KiCad run needed, only its footprints."""
+
+    def setUp(self):
+        if FOOTPRINTS is None:
+            self.skipTest("needs KiCad's footprint library")
+        self.g = _keepout_gate()[1].__globals__
+        self.copper = ["F.Cu", "In1.Cu", "In2.Cu", "B.Cu"]
+
+    def areas(self, name: str) -> list:
+        fp = K.load_tree(os.path.join(FOOTPRINTS, "RF_Module.pretty", name + ".kicad_mod"))
+        return [sorted(self.g["_zone_layers"](z, self.copper))
+                for z in self.g["_footprint_areas"](fp, self.copper)]
+
+    def test_the_every_layer_area_alone_beside_pad_areas(self):
+        self.assertEqual(self.areas("Microchip_RN4871"), [sorted(self.copper)])
+
+    def test_a_partial_area_is_read_and_an_area_that_allows_copper_is_not(self):
+        self.assertEqual(self.areas("ESP32-S3-WROOM-1"), [["B.Cu", "F.Cu", "In1.Cu"]])
+        self.assertEqual(self.areas("NINA-B111"), [])
+        self.assertEqual(self.areas("TD1208"), [])
+        self.assertEqual(self.areas("HOPERF_RFM9XW_SMD"), [])
+
+
+class AFindingIsTiedToItsAreaAndItsPart(unittest.TestCase):
+    """How a DRC report is read (``_antenna_findings``): an item counts when its
+    violation names one of the gate's areas; the area's own part's items are its
+    own copper, listed apart; an item another area names (the project's own
+    keep-outs, which ``pcb.drc`` judges) is not this gate's."""
+
+    def test_the_report_is_split_by_area_and_owner(self):
+        read = _keepout_gate()[1].__globals__["_antenna_findings"]
+
+        def item(words, uid):
+            return {"description": words, "uuid": uid}
+        doc = {"violations": [
+            {"type": "items_not_allowed",
+             "description": "Items not allowed (keepout area 'nopekit_antenna_U1')",
+             "items": [item("Pad 41 [GND] of U1 on F.Cu", "a"),
+                       item("Pad 1 [3V3] of U10 on F.Cu", "b"),
+                       item("Track [GND] on In2.Cu, length 3.0000 mm", "c")]},
+            {"type": "items_not_allowed", "description": "Items not allowed (keepout area)",
+             "items": [item("Track [GND] on F.Cu, length 1.0000 mm", "d")]},
+            {"type": "items_not_allowed",
+             "description": "Items not allowed (keepout area 'nopekit_antenna_U2')",
+             "items": [item("Pad 2 [GND] of U1 on F.Cu", "e")]},
+            {"type": "clearance", "description": "Clearance violation (keepout area "
+                                                 "'nopekit_antenna_U1')",
+             "items": [item("Via [GND] on F.Cu - B.Cu", "f")]},
+        ]}
+        found, own = read(doc, {"nopekit_antenna_U1": "U1", "nopekit_antenna_U2": "U2"})
+        self.assertEqual([(r[1], r[2]) for r in found],
+                         [("U1", "Pad 1 [3V3] of U10 on F.Cu"),
+                          ("U1", "Track [GND] on In2.Cu, length 3.0000 mm"),
+                          ("U2", "Pad 2 [GND] of U1 on F.Cu")])
+        self.assertEqual([(r[1], r[2]) for r in own], [("U1", "Pad 41 [GND] of U1 on F.Cu")])
+
+
+class TheKeepoutsToolsAreHeldToTheirWord(unittest.TestCase):
+    """A refill that crashes, and a DRC whose exit code and report disagree,
+    are errors. Stand-ins, so no KiCad is needed."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-keepout-tools-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.spec, self.fn = _keepout_gate()
+
+    def helper(self, body: str) -> str:
+        path = os.path.join(self.root, "fill.py")
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        return path
+
+    def test_a_crash_in_the_refill_is_an_error(self):
+        crash = self.helper("import os, signal\nos.kill(os.getpid(), signal.SIGSEGV)\n")
+        with mock.patch.dict(self.fn.__globals__, {"KEEPOUT_FILL_HELPER": crash}):
+            v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD)))
+        self.assertIn("the zone refill (KiCad's pcbnew, in a child) failed (exit -11)", v.error)
+
+    def test_an_exit_code_that_disagrees_with_its_report_is_an_error(self):
+        copy = self.helper("import json, shutil, sys\nshutil.copyfile(sys.argv[1], sys.argv[2])\n"
+                           "print(json.dumps({'zones': 4, 'filled': True}))\n")
+        bin_dir = os.path.join(self.root, "bin")
+        os.makedirs(bin_dir)
+        _stand_in(bin_dir, "kicad-cli",
+                  "import json, sys\nout = sys.argv[sys.argv.index('-o') + 1]\n"
+                  "json.dump({'violations': [{'type': 'items_not_allowed', 'description': "
+                  "\"Items not allowed (keepout area 'nopekit_antenna_U1')\", 'items': "
+                  "[{'description': 'Track [GND] on In2.Cu', 'uuid': 'x'}]}]}, open(out, 'w'))\n"
+                  "sys.exit(0)\n")
+        with mock.patch.dict(self.fn.__globals__, {"KEEPOUT_FILL_HELPER": copy}), \
+                mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]}):
+            v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD)))
+        self.assertIn("kicad-cli exited 0 on the stored copy but its report lists 1 item(s)",
+                      v.error)
+
+
 if __name__ == "__main__":
     unittest.main()

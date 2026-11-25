@@ -1,7 +1,7 @@
 {
   "name": "pcb-kicad",
   "version": "0.3.0",
-  "description": "KiCad board and schematic checks: DRC with custom rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, battery protection, mis-mating, USB-C.",
+  "description": "KiCad board and schematic checks: DRC with rules probed, ERC, parity, pin names, trace heating, fab limits, ngspice, enclosure fit, land patterns, battery rules, mis-mating, USB-C, antenna keep-outs.",
   "settles": [
     "design rule violations",
     "pcb design rule check",
@@ -66,7 +66,11 @@
     "wrong cable in a connector",
     "reversed battery",
     "usb-c cc termination",
-    "usb-c data in both orientations"
+    "usb-c data in both orientations",
+    "antenna keep-out",
+    "copper in a radio module's antenna keep-out",
+    "copper under the antenna",
+    "ground pour under a module antenna"
   ],
   "claim_classes": [
     "pcb",
@@ -103,7 +107,9 @@
     "mismate",
     "connector-keying",
     "usb-c",
-    "charging-interface"
+    "charging-interface",
+    "antenna-keepout",
+    "rf-layout"
   ],
   "provides_gates": [
     "pcb.board_readable",
@@ -122,7 +128,8 @@
     "pcb.fault_current",
     "pcb.discharge_cutoff",
     "pcb.mismate",
-    "pcb.usbc_receptacle"
+    "pcb.usbc_receptacle",
+    "pcb.antenna_keepout"
   ],
   "provides_generators": [],
   "provides_proposers": [
@@ -144,7 +151,8 @@
     "ngspice"
   ],
   "requires_python": [
-    "cadquery"
+    "cadquery",
+    "pcbnew"
   ],
   "max_tier": 1,
   "lenses": [
@@ -157,7 +165,8 @@
     "parts not in the library",
     "a part taller than its cavity",
     "a simulation of a different circuit",
-    "a cell nobody charged hot or cold"
+    "a cell nobody charged hot or cold",
+    "metal and a hand around the antenna"
   ],
   "authors": [],
   "licence": "Apache-2.0",

@@ -3,8 +3,10 @@
 The tier-0 gates (`pcb.board_readable`, `pcb.pin_names`, `pcb.net_width`) need
 nothing. `pcb.drc`, `pcb.unconnected`, `pcb.erc`, `pcb.parity` and `pcb.fab_rules`
 need `kicad-cli` from KiCad 8 or 9 on PATH; `pcb.spice` needs `ngspice`;
-`pcb.enclosure_fit` needs `kicad-cli` and the Python module `cadquery`. Without its
-tool a gate reads Skipped, never passed.
+`pcb.enclosure_fit` needs `kicad-cli` and the Python module `cadquery`;
+`pcb.antenna_keepout` needs `kicad-cli` and KiCad's own Python module `pcbnew`,
+importable by the Python that runs nopekit. Without its tool a gate reads
+Skipped, never passed.
 
 ## kicad-cli
 
@@ -21,9 +23,9 @@ The full KiCad install is about 1-2 GB with its libraries. The libraries matter 
 `pcb.pin_names` only at design time: the names are copied onto the board, and the
 gate reads the board.
 
-The baseline's generator, `selftest/assets/make_baseline.py`, also needs KiCad's
-`pcbnew` Python module (it ships with KiCad and runs under the system Python on
-Linux). The gates never import it.
+The baseline's generators (`selftest/assets/make_baseline.py`,
+`make_power_board.py`, `make_radio_board.py`) also need KiCad's `pcbnew` Python
+module (it ships with KiCad and runs under the system Python on Linux).
 
 ## ngspice (for `pcb.spice`)
 
@@ -50,6 +52,22 @@ cadquery"`. The fit also needs the parts' 3D models: KiCad's 3D library
 (`kicad-packages3d` on Debian and Ubuntu, a separate download elsewhere), or the
 models kept beside the board as `${KIPRJMOD}/...`.
 
+## pcbnew (for `pcb.antenna_keepout`)
+
+The keep-out gate refills the board's zones with KiCad's own filler before its
+DRC, in a child process run by the same Python as nopekit (`sys.executable`), so
+that Python must import `pcbnew`. Check: `python3 -c "import pcbnew;
+print(pcbnew.Version())"` prints `9.0.x`.
+
+| Platform | How |
+|---|---|
+| Ubuntu / Debian, Fedora | the distribution's KiCad package installs `pcbnew` for the system `python3`: run nopekit with that Python, not a virtual environment that hides it |
+| macOS | run nopekit with KiCad's bundled Python, `/Applications/KiCad/KiCad.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3` |
+| Windows | run nopekit with KiCad's bundled Python, in `C:\Program Files\KiCad\9.0\bin\` (Windows is untested with nopekit) |
+
+The gate imports nothing from KiCad in nopekit's own process: availability looks
+for the module without importing it, and only the child loads it.
+
 ## For `pcb.autoroute` (a proposer, optional)
 
 - A Python that imports `pcbnew`: on Linux the distribution's KiCad package installs
@@ -61,4 +79,4 @@ models kept beside the board as `${KIPRJMOD}/...`.
   github.com/freerouting/freerouting/releases (2.2.4 checked). Point
   `FREEROUTING_JAR` at it.
 
-None of this is needed by any gate.
+None of the Java or Freerouting is needed by any gate.

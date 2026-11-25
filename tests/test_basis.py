@@ -57,6 +57,12 @@ BUNDLED_BASES: dict[str, str] = {
     # no outside source for which ones count.
     "pcb.usbc_receptacle": "sourced",
     "pcb.mismate": "model-only",
+    # general-packs P8: antenna_keepout holds no copper on any layer under a
+    # module's antenna, the module vendors' guidance (Espressif's hardware design
+    # guidelines), on the footprint's own keep-out or a vendor drawing; KiCad's
+    # DRC and zone filler decide what lies in it. Its area choice and a drawing's
+    # registration are the pack's glue, as pcb.fab_rules hands KiCad a fab's numbers.
+    "pcb.antenna_keepout": "sourced",
     # general-packs F1: firmware-ci replaces firmware-zmk. The guard follows
     # GitHub's documented shell and continue-on-error behaviour; the replay's
     # verdict is the toolchain's own exit code in the job's container; the image

@@ -6,8 +6,9 @@ its schematic.
 own fixture is broken, and a green verdict from it means nothing.
 
 **Sealed.** Every fixture starts from this pack's own ``selftest/baseline.json``
-and ``selftest/assets/esd_guard.*`` or ``power_board.kicad_pcb``, never from the
-host's projection or the host's board. It hands the gate an empty ledger, or,
+and ``selftest/assets/esd_guard.*``, ``power_board.kicad_pcb`` or
+``radio_board.kicad_pcb``, never from the host's projection or the host's board.
+It hands the gate an empty ledger, or,
 for ``pcb.enclosure_fit``, which reads its limit from a claim, the baseline's own
 claims (``_claims``): never the host's. A control whose severity depended on the
 host's board or claims would fire in some projects and not in others.
@@ -69,6 +70,8 @@ def _baseline() -> dict:
     params["pcb_land_drawings"] = {ref: os.path.join(_PACK_DIR, rel)
                                    for ref, rel in params["pcb_land_drawings"].items()}
     for rec in _power_records(params):
+        rec["board"] = os.path.join(_PACK_DIR, rec["board"])
+    for rec in params.get("pcb_antennas", {}).values():
         rec["board"] = os.path.join(_PACK_DIR, rec["board"])
     return params
 
@@ -473,3 +476,39 @@ def shared_cc(ctx):
                 return
         raise KeyError("J1 pad B5")
     return _power_variant(ctx, "shared_cc", edit)
+
+
+#: How far ``pour_under_antenna`` moves the In2.Cu pour's outline edge: from the
+#: baseline's 7.0 mm to 0.5 mm, inside the board's 0 mm edge and across the
+#: footprint's keep-out, which ends at 6.15 mm. Any edge under 6.15 mm runs the
+#: pour into the keep-out; 0.5 mm is a pour drawn to the board edge, as a person
+#: drawing ground "everywhere" draws it.
+POUR_EDGE_MM = 0.5
+
+
+def pour_under_antenna(ctx):
+    """pcb.antenna_keepout — the radio board with its In2.Cu ground pour's outline
+    widened to the board's edge, under U1's antenna, and its stored fill left as
+    it was: one change, the outline, as a hand or a script that draws ground
+    everywhere leaves it before anyone refills. The footprint's own keep-out is
+    on F.Cu, In1.Cu and B.Cu only, and kicad-cli pcb drc judges the fill as
+    stored, so it finds nothing in the keep-out: its report on this board is the
+    baseline's, item for item (measured with kicad-cli 9.0.9). A refill would
+    keep the other three pours out, but not this one: the next refill (KiCad's,
+    or a fab tool's that refills before it plots) pours ground on In2.Cu under
+    the antenna."""
+    params = _baseline()
+    rec = params["pcb_antennas"]["radio"]
+    board = ctx.out_path("pcb-kicad", "known-bad", "pour_under_antenna",
+                         os.path.basename(rec["board"]))
+    tree = K.load_tree(rec["board"])
+    zone = next(z for z in K.children(tree, "zone")
+                if str(K.value(z, "layer", default="")) == "In2.Cu")
+    edge = min(float(xy[1]) for xy in K.children(K.child(K.child(zone, "polygon"), "pts"), "xy"))
+    for xy in K.children(K.child(K.child(zone, "polygon"), "pts"), "xy"):
+        if float(xy[1]) == edge:
+            xy[1] = f"{POUR_EDGE_MM:g}"
+    with open(board, "w", encoding="utf-8") as fh:
+        fh.write(K.dump(tree) + "\n")
+    rec["board"] = board
+    return dataclasses.replace(ctx, params=params, ledger=Ledger())
