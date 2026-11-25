@@ -6,7 +6,7 @@ its schematic.
 own fixture is broken, and a green verdict from it means nothing.
 
 **Sealed.** Every fixture starts from this pack's own ``selftest/baseline.json``
-and ``selftest/assets/esd_guard.*`` or ``power_board.kicad_pcb``, never from the
+and ``selftest/assets/esd_guard.*`` or ``power_board.*``, never from the
 host's projection or the host's board. It hands the gate an empty ledger, or,
 for ``pcb.enclosure_fit``, which reads its limit from a claim, the baseline's own
 claims (``_claims``): never the host's. A control whose severity depended on the
@@ -317,22 +317,42 @@ def mirrored_land(ctx):
     return _variant(ctx, "mirrored_land", edit)
 
 
-def _power_variant(ctx, name: str, edit=None, records=None) -> object:
+def _power_variant(ctx, name: str, edit=None, records=None, *, schematic=None) -> object:
     """A context whose power records name a copy of ``power_board.kicad_pcb``
-    with ``edit(tree)`` applied, and ``records(params)`` applied to the records."""
+    with ``edit(tree)`` applied, and ``records(params)`` applied to the records.
+    With ``schematic``, the board's schematic is copied beside it with
+    ``schematic(tree)`` applied (:func:`_unchanged` for a copy as it is).
+
+    A fixture passes ``schematic`` when it says how its change reads there: a
+    part swapped (its Value on the symbol too) or the board as it was. A fixture
+    that moves a net on the board writes none, rather than a schematic its board
+    no longer matches, a second defect beside the one it stages; no gate it
+    controls reads one. (What slipped through P5: ``ntc_swapped`` copied the
+    board alone, so ``pcb.charge_temperature``, which reads the schematic beside
+    a board, asked whether one sat beside the copy: a path under the control's
+    out dir that nothing in its run wrote. That question is opaque, invariant 7,
+    and the gate's qualification was never current:
+    ``tests.test_cache.OutDirReads``.)"""
     params = _baseline()
     src = params["pcb_batteries"]["main"]["board"]
     board = ctx.out_path("pcb-kicad", "known-bad", name, os.path.basename(src))
-    tree = K.load_tree(src)
-    if edit is not None:
-        edit(tree)
-    with open(board, "w", encoding="utf-8") as fh:
-        fh.write(K.dump(tree) + "\n")
+    src_stem, stem = src[:-len(".kicad_pcb")], board[:-len(".kicad_pcb")]
+    for ext, change in ((".kicad_pcb", edit or _unchanged), (".kicad_sch", schematic)):
+        if change is None:
+            continue
+        tree = K.load_tree(src_stem + ext)
+        change(tree)
+        with open(stem + ext, "w", encoding="utf-8") as fh:
+            fh.write(K.dump(tree) + "\n")
     for rec in _power_records(params):
         rec["board"] = board
     if records is not None:
         records(params)
     return dataclasses.replace(ctx, params=params, ledger=Ledger())
+
+
+def _unchanged(tree) -> None:
+    """The edit that changes nothing: a file copied as it is."""
 
 
 def _new_net(tree, name: str) -> list:
@@ -364,6 +384,17 @@ def _set_value(tree, ref: str, value: str) -> None:
     raise KeyError(f"{ref} has no Value")
 
 
+def _set_symbol_value(tree, ref: str, value: str) -> None:
+    """``ref``'s Value field on the schematic set to ``value``: the same swap
+    where a BOM substitution starts, on the symbol."""
+    for sym in K.children(tree, "symbol"):
+        props = {str(p[1]): p for p in K.children(sym, "property") if len(p) >= 3}
+        if "Reference" in props and str(props["Reference"][2]) == ref:
+            props["Value"][2] = K.Q(value)
+            return
+    raise KeyError(f"the schematic places no {ref}")
+
+
 #: ``ntc_swapped``'s NTC: ten times the baseline's R25, the same B. A 100 kOhm
 #: part in a 10 kOhm footprint is the substitution a BOM tool offers as a
 #: drop-in (same package, same B), and the commonest NTC value after 10 kOhm.
@@ -373,16 +404,17 @@ SWAPPED_VALUE = "NTC 100k B4250"
 
 def ntc_swapped(ctx):
     """pcb.charge_temperature — TH1 swapped for a 100 kOhm NTC of the same B, on
-    the board and in its record, as a BOM substitution swaps it: the footprint,
-    the nets and every other part as they were. DRC, ERC and parity all accept
-    it. The charger's trip resistances are fixed, so its window moves about 50
-    K warmer: charging is allowed from about 55 C to about 110 C, past the
-    cell's 45 C."""
+    the board, on the schematic and in its record, as a BOM substitution swaps
+    it: the footprint, the symbol, the nets and every other part as they were.
+    DRC, ERC and parity all accept it. The charger's trip resistances are
+    fixed, so its window moves about 50 K warmer: charging is allowed from
+    about 55 C to about 110 C, past the cell's 45 C."""
     def records(params):
         ntc = params["pcb_protectors"]["charger"]["functions"]["charge_temp"]["ntc"]
         ntc["value"], ntc["r25_ohm"] = SWAPPED_VALUE, SWAPPED_R25_OHM
     return _power_variant(ctx, "ntc_swapped", lambda t: _set_value(t, "TH1", SWAPPED_VALUE),
-                          records)
+                          records,
+                          schematic=lambda t: _set_symbol_value(t, "TH1", SWAPPED_VALUE))
 
 
 #: ``lfp_cell``'s cell: a LiFePO4 cell's upper charge voltage. Battery
@@ -395,13 +427,13 @@ def lfp_cell(ctx):
     """pcb.charge_limits — the baseline's cell record changed to a LiFePO4 cell
     of the same size (chemistry lifepo4, upper charge voltage 3.65 V) on the same
     board and charger: a cell swap the connector accepts. The charger's 4.232 V
-    at its worst corner is 16% past the cell's 3.65 V. The board is the
-    baseline's, unchanged."""
+    at its worst corner is 16% past the cell's 3.65 V. The board and its
+    schematic are the baseline's, unchanged."""
     def records(params):
         cell = params["pcb_batteries"]["main"]
         cell["chemistry"] = "lifepo4"
         cell["cell"]["upper_charge_v"] = LFP_UPPER_CHARGE_V
-    return _power_variant(ctx, "lfp_cell", records=records)
+    return _power_variant(ctx, "lfp_cell", records=records, schematic=_unchanged)
 
 
 #: ``fuse_trips_late``'s PTC: twice the baseline's hold and trip current, the
@@ -412,18 +444,19 @@ LATE_VALUE = "PTC_FIXTURE_1A0"
 
 def fuse_trips_late(ctx):
     """pcb.fault_current — F1 swapped for a PTC of twice the hold and trip
-    current, on the board and in its record. Its trip time at 8 A and its
-    interrupt rating are the baseline's, so the short-circuit and interrupt
-    checks do not move; the wire's 1.45 x 1 A is now below the PTC's 2 A trip,
-    so between 1.45 A and 2 A the wire heats past its rating and nothing
-    trips."""
+    current, on the board, on the schematic and in its record. Its trip time at
+    8 A and its interrupt rating are the baseline's, so the short-circuit and
+    interrupt checks do not move; the wire's 1.45 x 1 A is now below the PTC's
+    2 A trip, so between 1.45 A and 2 A the wire heats past its rating and
+    nothing trips."""
     def records(params):
         fuse = params["pcb_protectors"]["fuse"]
         fuse["value"] = LATE_VALUE
         trip = fuse["functions"]["trip"]
         trip["hold_a"], trip["trip_a"] = trip["hold_a"] * 2, trip["trip_a"] * 2
     return _power_variant(ctx, "fuse_trips_late", lambda t: _set_value(t, "F1", LATE_VALUE),
-                          records)
+                          records,
+                          schematic=lambda t: _set_symbol_value(t, "F1", LATE_VALUE))
 
 
 def cutoff_drives_nothing(ctx):

@@ -8,15 +8,18 @@ reader would refuse.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
+import re
 import unittest
 
 import _decisions as D
 import _env
 
-from nopekit import modelio, store
-from nopekit.models import Rejection, ReturnCondition
+from nopekit import cli, decisions, modelio, store
+from nopekit.models import Ledger, Rejection, ReturnCondition
 from nopekit.util import NopekitError
 
 LABEL = "decisions/d.json"
@@ -245,6 +248,97 @@ class DecideWritesTypedRejections(_env.EnvCase):
         self.assertIn("preferred against, not recorded by Robin Okafor", why)
         _code, why, _err = D.main(self.root, "why", "PRINT-IN-PETG")
         self.assertIn("decision  print-in-petg", why)
+
+
+# --------------------------------------------------------------------------- #
+# the example a refusal or a help gives is the bracket's own
+# --------------------------------------------------------------------------- #
+#: Text files a scan reads; every other file (an image, a mesh) is skipped.
+_TEXT = (".py", ".md", ".js", ".mjs", ".html", ".css", ".json", ".txt", ".yaml", ".yml")
+
+
+def _flat(text: str) -> str:
+    """``text`` lower-cased on one line: each line break, with the comment or
+    quote marker that opens the next line, reads as one space. So a phrase a
+    docstring, a ``#:`` comment or a ``>`` quote wraps is still one phrase."""
+    return re.sub(r"\s*\n\s*(?:#:?|//|\*|>)?\s*", " ", text).lower()
+
+
+class TheExamplesAreTheBracketsOwn(unittest.TestCase):
+    """The example of a rejection that ``decide``'s refusals and its help give is
+    the bracket's own loser, and no parent story stands where an example is read.
+    What slipped through until X1 and its review: these examples echoed the parent
+    device's stories ("0.5 mm|the router could not close that net", "a rigid
+    hook"), whose one home is docs/ORIGINS.md (CLAUDE.md, "No reference to the
+    parent project"). X1 changed the refusals and the help and left the same
+    sentence in three spine docstrings and in METHOD.md, and nothing read any of
+    them: a merge that took an older side back would have brought the story back
+    unseen."""
+
+    #: The bracket's loser as model/bracket.py's PARAMS records it (thickness):
+    #: build(Config(thickness=4.0)) deflects 3.75 mm against C1's 0.5 mm limit.
+    EXAMPLE = "4.0 mm|it deflected 3.75 mm, 7.5x the limit"
+    #: The parent's phrases that stood in these examples. Whole phrases, not
+    #: words: "trace" and "router" are nopekit's own words too.
+    ECHOES = ("router could not close", "wider trace was tried", "rigid hook",
+              "rigid catch")
+    #: Where an example of a rejection is read: the spine (its help included),
+    #: the doctrine, the docs but docs/ORIGINS.md, and the skills.
+    PLACES = ("src/nopekit", "docs", "skills", "METHOD.md", "README.md", "CLAUDE.md")
+    ORIGINS = os.path.join("docs", "ORIGINS.md")
+
+    def _echoes(self, text: str) -> list[str]:
+        flat = _flat(text)
+        return [echo for echo in self.ECHOES if echo in flat]
+
+    def test_each_refusal_names_the_brackets_example(self):
+        value, why = self.EXAMPLE.split("|")
+        for rejected, said in (([value], f"'{why}'"),
+                               ([("", why)], f"('{value}', 'PLA')")):
+            with self.subTest(said), self.assertRaises(NopekitError) as caught:
+                decisions.add(Ledger(), title="t", summary="s", when="2026-10-15",
+                              rejected=rejected)
+            self.assertIn(said, str(caught.exception))
+            self.assertEqual(self._echoes(str(caught.exception)), [])
+
+    def test_decides_help_gives_it(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                code = cli.main(["decide", "--help"])
+            except SystemExit as exc:           # argparse's own exit, if main lets it out
+                code = exc.code
+        self.assertEqual(code or 0, 0)
+        said = " ".join(out.getvalue().split())
+        self.assertIn(f'"{self.EXAMPLE}"', said)
+        self.assertNotIn('"0.5 mm|', said)
+        self.assertEqual(self._echoes(said), [])
+
+    def test_no_parent_story_stands_where_an_example_is_read(self):
+        found = []
+        for place in self.PLACES:
+            top = os.path.join(_env.REPO, place)
+            paths = [top] if os.path.isfile(top) else [
+                os.path.join(here, name) for here, _dirs, names in os.walk(top)
+                for name in names]
+            self.assertTrue(paths, f"{place} holds no file: the scan read nothing")
+            for path in sorted(paths):
+                rel = os.path.relpath(path, _env.REPO)
+                if rel == self.ORIGINS or not rel.endswith(_TEXT):
+                    continue
+                with open(path, encoding="utf-8", errors="replace") as fh:
+                    found += [f"{rel}: {echo}" for echo in self._echoes(fh.read())]
+        self.assertEqual(found, [])
+
+    def test_a_wrapped_echo_is_found(self):
+        """The scan's own control: the phrase as the spine wrapped it, in a
+        docstring, a ``#:`` comment and METHOD.md's quote, is found."""
+        self.assertEqual(self._echoes(
+            '"the wider trace\n    was tried and the router could not\n    close that net"'),
+            ["router could not close", "wider trace was tried"])
+        self.assertEqual(self._echoes("#: a rigid\n#: hook was tried"), ["rigid hook"])
+        self.assertEqual(self._echoes("> *A rigid catch was tried*"), ["rigid catch"])
+        self.assertEqual(self._echoes("the wider trace of the model"), [])
 
 
 if __name__ == "__main__":

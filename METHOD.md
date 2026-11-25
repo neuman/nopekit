@@ -60,11 +60,12 @@ change it. Record, inline and in the ledger:
 The rejected alternatives are the part people skip and the part that pays. The shape
 to aim for:
 
-> *The wider trace was tried first and the router could not close that net; the
-> narrower one stays inside its temperature-rise limit and routes.*
+> *A 4.0 mm plate was tried first and deflected 3.75 mm, 7.5x the limit.
+> Deflection goes as one over the cube of the thickness, and the 8.0 mm plate
+> holds it to 0.47 mm.*
 
-> *A rigid catch was tried and rejected: it transferred the drop load into the
-> print's weakest layer boundary.*
+> *PLA was tried and rejected: it creeps under a load it holds all day, and no
+> static analysis sees it.*
 
 > *Do not fit the shorter screw. It engages two threads in the boss and strips at
 > the first service.*

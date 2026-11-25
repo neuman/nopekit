@@ -8,14 +8,15 @@ actually read.
 A mature project's decision log runs to thousands of lines, newest first, and the lines
 that earn their keep are the negative ones:
 
-    the wider trace was tried first and the router could not close that net
-    a rigid hook was tried and rejected — it snapped in the 3-point bend
+    a 4.0 mm plate was tried first and deflected 3.75 mm, 7.5x the limit
+    PLA was tried and rejected — it creeps under a load it holds all day
     do not fit the shorter screw: it strips the boss at the first service
 
 None of those can be recovered from the CAD, the git history, or anybody's
 memory two months later. Without them every fresh context window re-litigates
-every settled number, re-proposes 0.5 mm, and burns a day discovering the same
-wall. A rejected alternative *with its reason* is the only thing that stops it.
+every settled number, re-proposes the value that lost, and burns a day
+discovering the same wall. A rejected alternative *with its reason* is the only
+thing that stops it.
 
 Two functions carry the weight:
 
@@ -114,9 +115,9 @@ def _coerce_rejected(items: Iterable[Any] | None) -> list[Rejection]:
 
     The tuple and dict forms exist so the CLI and a pack can hand over what they
     parsed without importing the model, but every form goes through the same
-    gate: **a rejected alternative with no reason is refused.** "the wider trace
-    was tried" is worthless; "the wider trace was tried and the router could not
-    close that net" is the whole reason this log exists. Letting the reasonless
+    gate: **a rejected alternative with no reason is refused.** "a 4.0 mm plate
+    was tried" is worthless; "a 4.0 mm plate was tried and deflected 3.75 mm, 7.5x
+    the limit" is the whole reason this log exists. Letting the reasonless
     form through would fill the log with lines that look like provenance and
     answer nothing, and the next agent would re-try it anyway.
     """
@@ -142,7 +143,7 @@ def _coerce_rejected(items: Iterable[Any] | None) -> list[Rejection]:
             raise NopekitError(
                 f"rejected alternative {item!r} has no reason. Give a "
                 f"(value, why) pair: what lost, and the concrete thing that "
-                f"beat it — 'the router could not close that net', not 'worse'"
+                f"beat it — 'it deflected 3.75 mm, 7.5x the limit', not 'worse'"
             )
         elif isinstance(item, Sequence) and 2 <= len(item) <= 3:
             value, reason = item[0], item[1]
@@ -157,7 +158,7 @@ def _coerce_rejected(items: Iterable[Any] | None) -> list[Rejection]:
         if not value:
             raise NopekitError(
                 "a rejected alternative needs a value: the thing that lost, "
-                "rendered as it would be written ('0.5 mm', 'a rigid hook')"
+                "rendered as it would be written ('4.0 mm', 'PLA')"
             )
         if not reason:
             raise NopekitError(

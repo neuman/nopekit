@@ -427,13 +427,13 @@ def sha256_file(path: str | os.PathLike[str], *, chunk: int = 1 << 20) -> str:
 class Rejected(Record):
     """An alternative that was tried or considered and did NOT win.
 
-    This is the single highest-value field in the whole system. A record like 'the
-    wider trace was tried first and the router could not close that net' means no
+    This is the single highest-value field in the whole system. A record like 'a
+    4.0 mm plate was tried first and deflected 3.75 mm, 7.5x the limit' means no
     future context window ever wastes a cycle re-proposing it. Without this, every
     fresh agent re-litigates every settled number.
     """
 
-    value: str                       # rendered value, e.g. "0.5 mm"
+    value: str                       # rendered value, e.g. "4.0 mm"
     why: str                         # why it lost, concretely and measurably
     evidence: str = ""               # path / run id / datasheet section, if any
 

@@ -440,8 +440,8 @@ def _guards(p: Protector, b: Battery, key: str, threshold: str) -> tuple[bool, s
     negative_control=NegativeControl(
         fixture="selftest/bad_boards.py:ntc_swapped",
         note="the power baseline with TH1 swapped for a 100 kOhm NTC of the same B, on the "
-             "board and in its record: a BOM substitution DRC, ERC and parity all accept, "
-             "and the charger then charges the cell far past its 45 C",
+             "board, on the schematic and in its record: a BOM substitution DRC, ERC and "
+             "parity all accept, and the charger then charges the cell far past its 45 C",
     ),
 )
 def charge_temperature(ctx: GateContext) -> Verdict:
@@ -1102,8 +1102,8 @@ def _single_fault(b: Battery, protectors: list, chargers: list) -> str:
     negative_control=NegativeControl(
         fixture="selftest/bad_boards.py:fuse_trips_late",
         note="the power baseline's PTC swapped for one of twice the hold and trip current, "
-             "on the board and in its record: between 1.45 A and 2 A the wire heats past "
-             "its rating and nothing trips",
+             "on the board, on the schematic and in its record: between 1.45 A and 2 A the "
+             "wire heats past its rating and nothing trips",
     ),
 )
 def fault_current(ctx: GateContext) -> Verdict:

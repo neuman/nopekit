@@ -6,7 +6,8 @@ how the committed board was made, so a reader can make it again and diff.
     python3 packs/pcb-kicad/selftest/assets/make_power_board.py
 
 Needs KiCad 9's ``pcbnew`` module and its stock footprints and symbols
-(/usr/share/kicad). Made with pcbnew 9.0.9.
+(/usr/share/kicad). Made with pcbnew 9.0.9. It then writes the board's schematic,
+``power_board.kicad_sch``, with ``make_power_schematic.py``.
 
 **The circuit.** A one-cell lithium pack's charger and protection, placed and
 with every pad's net set, NOT routed: the power rules read pad nets, and nothing
@@ -50,8 +51,6 @@ from __future__ import annotations
 
 import os
 import sys
-
-import pcbnew
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PACK = os.path.dirname(os.path.dirname(HERE))
@@ -128,11 +127,14 @@ NETS = {
 OUTLINE = [(0.0, 0.0), (60.0, 0.0), (60.0, 40.0), (0.0, 40.0)]
 
 
-def mm(v: float) -> int:
-    return pcbnew.FromMM(v)
-
-
 def main() -> int:
+    # KiCad's module, imported here and not at the top: make_power_schematic.py
+    # reads PARTS and NETS from this file, and the schematic needs no pcbnew.
+    import pcbnew
+
+    def mm(v: float) -> int:
+        return pcbnew.FromMM(v)
+
     board = pcbnew.BOARD()
     board.SetCopperLayerCount(2)
     nets = {}
@@ -177,12 +179,14 @@ def main() -> int:
         board.Add(e)
     pcbnew.SaveBoard(OUT, board)
     # pcbnew.SaveBoard leaves a project file and local settings beside the board:
-    # this board travels alone, and nothing reads them.
+    # this board travels with its schematic only, and nothing reads them.
     for ext in (".kicad_pro", ".kicad_prl"):
         side = OUT[:-len(".kicad_pcb")] + ext
         if os.path.exists(side):
             os.remove(side)
     print(f"wrote {OUT}")
+    import make_power_schematic                                    # noqa: E402
+    print(f"wrote {make_power_schematic.write()}")
     return 0
 
 

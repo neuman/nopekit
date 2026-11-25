@@ -42,7 +42,6 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 import unittest
@@ -1747,6 +1746,94 @@ class ThePowerRulesReadTheirRecords(_PowerCase):
         for text in ("10k 1%", "PTC_FIXTURE_0A5", "", "k"):
             with self.subTest(value=text):
                 self.assertIsNone(r(text))
+
+
+class ThePowerBaselineHasItsSchematic(_PowerCase):
+    """The power board and its schematic travel together. The known-good reads
+    TH1's symbol, a known-bad copy that swaps a part carries the schematic with
+    the part swapped there too, and KiCad says each schematic is its board's.
+    (What slipped through P5: the board travelled alone, so the known-good never
+    reached the defeat check, and ``ntc_swapped``'s copy under the control's out
+    dir had no file beside it: the gate asked for one that nothing in its run
+    wrote, an opaque read, so its qualification was never current
+    (``tests.test_cache.OutDirReads``).)"""
+
+    #: The fixtures that state their schematic, and the part each swaps there
+    #: (None: the schematic as it is). The others move a net and write none.
+    WITH_SCHEMATIC = {"ntc_swapped": ("TH1", "NTC 100k B4250"),
+                      "fuse_trips_late": ("F1", "PTC_FIXTURE_1A0"), "lfp_cell": None}
+
+    def _fixture(self, name: str) -> str:
+        bad = load_path(os.path.join(PACK, "selftest", "bad_boards.py"))
+        ctx = gates_mod.GateContext(
+            root=self.root, ledger=Ledger(meta=ProjectMeta(name="pcb")), model=None,
+            params={}, out_dir=os.path.join(self.root, "out"), tier=1,
+            log=lambda _m: None, extra={})
+        return getattr(bad, name)(ctx).params["pcb_batteries"]["main"]["board"]
+
+    @staticmethod
+    def _values(path: str) -> dict:
+        """{ref: Value} of every part a board or a schematic places (a ``#``
+        ref, a power flag, places none)."""
+        tree = K.load_tree(path)
+        found = {}
+        for node in K.children(tree, "footprint") + K.children(tree, "symbol"):
+            props = {str(p[1]): str(p[2]) for p in K.children(node, "property") if len(p) >= 3}
+            if not props.get("Reference", "#").startswith("#"):
+                found[props["Reference"]] = props.get("Value")
+        return found
+
+    def test_the_known_good_reads_its_ntcs_symbol(self):
+        verdict = self.run_gate("pcb.charge_temperature")
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+        self.assertNotIn("was not read", verdict.detail)
+        self.assertNotIn("places no TH1", verdict.detail)
+        sch = POWER_BOARD[:-len(".kicad_pcb")] + ".kicad_sch"
+        self.assertEqual(self._values(sch), self._values(POWER_BOARD))
+
+    def test_a_copy_that_swaps_a_part_carries_the_schematic_swapped(self):
+        base = self._values(POWER_BOARD)
+        for name in ("ntc_swapped", "fuse_trips_late", "lfp_cell", "cutoff_drives_nothing",
+                     "ground_beside_vbus", "shared_cc"):
+            with self.subTest(fixture=name):
+                board = self._fixture(name)
+                sch = board[:-len(".kicad_pcb")] + ".kicad_sch"
+                if name not in self.WITH_SCHEMATIC:
+                    self.assertFalse(os.path.exists(sch))
+                    continue
+                want = dict(base)
+                if self.WITH_SCHEMATIC[name]:
+                    ref, value = self.WITH_SCHEMATIC[name]
+                    want[ref] = value
+                self.assertEqual(self._values(board), want)
+                self.assertEqual(self._values(sch), want)
+
+    @unittest.skipIf(SYMBOLS is None or shutil.which("kicad-cli") is None,
+                     "needs KiCad's stock symbols and the real kicad-cli")
+    def test_kicad_says_each_schematic_is_its_boards(self):
+        """pcb.parity passes the baseline and every copy that carries a
+        schematic, and pcb.erc finds nothing but the libraries no table beside
+        the board names (make_power_schematic.py says why)."""
+        registry = _registry()
+        boards = {"baseline": POWER_BOARD,
+                  **{name: self._fixture(name) for name in self.WITH_SCHEMATIC}}
+        for name, src in boards.items():
+            with self.subTest(board=name):
+                root = os.path.join(self.root, "kicad", name)
+                os.makedirs(root)
+                for ext in (".kicad_pcb", ".kicad_sch"):
+                    shutil.copyfile(src[:-len(".kicad_pcb")] + ext,
+                                    os.path.join(root, "power_board" + ext))
+                for table in ("sym-lib-table", "fp-lib-table"):
+                    shutil.copyfile(os.path.join(ASSETS, table), os.path.join(root, table))
+                params = dict(_baseline(), pcb_board=os.path.join(root, "power_board.kicad_pcb"))
+                parity = _run(registry, "pcb.parity", root, params)
+                self.assertEqual(parity.outcome, "pass", parity.render())
+                erc = _run(registry, "pcb.erc", root, params)
+                if erc.outcome != "pass":
+                    self.assertEqual(erc.outcome, "fail", erc.render())
+                    self.assertRegex(erc.detail, r"(\d+) finding\(s\): \1x lib_symbol_issues "
+                                                 r"\(warning\) \(")
 
 
 class ChargingStopsOutsideTheWindow(_PowerCase):
@@ -4059,10 +4146,16 @@ cq.exporters.export(shape, spec["out"])
 
 
 def _enclosure_step(path: str, kind: str, lo, hi, wall: float = 2.0, add=()) -> str:
-    subprocess.run([sys.executable, "-c", _STEP_SCRIPT,
-                    json.dumps({"solid": [kind, list(lo), list(hi), wall], "out": path,
-                                "add": [[list(a), list(b)] for a, b in add]})],
-                   check=True, capture_output=True, timeout=120)
+    """The STEP of ``_STEP_SCRIPT``'s solid at ``path``, written by CadQuery in a
+    child run through ``_env.run``. (What slipped through P7: a bare
+    ``subprocess.run`` here inherited this machine's HOME, git identity and agent
+    variables, and ``test_meta.NoSubprocessOutsideRun`` went red.)"""
+    proc = _env.run([sys.executable, "-c", _STEP_SCRIPT,
+                     json.dumps({"solid": [kind, list(lo), list(hi), wall], "out": path,
+                                 "add": [[list(a), list(b)] for a, b in add]})],
+                    cwd=os.path.dirname(path), timeout=120)
+    if proc.returncode != 0:
+        raise AssertionError(f"CadQuery did not write {path}: {proc.stderr[-2000:]}")
     return path
 
 
