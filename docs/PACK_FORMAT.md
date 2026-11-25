@@ -750,7 +750,7 @@ stays as a documented fallback:
 | `cad-solid` | `assembly_bbox_mm` | `bbox_mm` | the assembled product's envelope |
 | `fdm-print` | `part_bbox_mm` | `bbox_mm`, `bbox`, `footprint_mm` | one printed part, in print orientation |
 | `cad-solid` | `process_min_wall_mm` | `min_wall_mm` | the thinnest wall a process ALLOWS (a limit) |
-| `fdm-print` | `part_min_wall_mm` | `min_wall_mm`, … | the thinnest section MEASURED in a part |
+| `fdm-print` | `part_min_wall_mm` | `min_wall_mm`, … | the thinnest wall MEASURED across a part's layer plane |
 
 **Say the frame and the object in `PACK.md`, in the first paragraph** — which
 object each gate judges, and which coordinate frame it expects the geometry in. It

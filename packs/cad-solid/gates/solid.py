@@ -545,7 +545,13 @@ def bounding(ctx: GateContext) -> Verdict:
 @gate(
     id="cad.watertight",
     title="Every solid is closed: no open edges, no non-manifold edges",
-    claims=["geometry", "mesh", "cad", "manufacturability"],
+    # `mesh-validity` is the closure gates' own tag, carried by these three and
+    # by nothing else: what slipped through while all four mesh gates shared
+    # geometry/mesh/cad/manufacturability was that no tag selected closure
+    # without the process wall, and a claim that the exported file is a valid
+    # solid failed on cad.wall_thickness's process minimum (PACK.md, "Claim
+    # vocabulary", names the move for older claims).
+    claims=["geometry", "mesh", "mesh-validity", "cad", "manufacturability"],
     tier=Tier.BUILD,
     settles="mesh watertightness",
     requires_python=["trimesh", "numpy"],
@@ -627,7 +633,8 @@ def watertight(ctx: GateContext) -> Verdict:
     id="cad.is_volume",
     basis="established",
     title="Every solid is a volume: closed, consistently wound, positive volume",
-    claims=["geometry", "mesh", "cad", "manufacturability"],
+    # `mesh-validity`: the closure gates' own tag; cad.watertight says why.
+    claims=["geometry", "mesh", "mesh-validity", "cad", "manufacturability"],
     tier=Tier.BUILD,
     settles="solid validity",
     requires_python=["trimesh", "numpy"],
@@ -771,7 +778,8 @@ def _weld_and_drop(mesh: Any, digits: int, area_eps: float, max_passes: int = 8)
 @gate(
     id="cad.degenerate_faces",
     title="No duplicate vertices and no zero-area triangles",
-    claims=["geometry", "mesh", "cad", "manufacturability"],
+    # `mesh-validity`: the closure gates' own tag; cad.watertight says why.
+    claims=["geometry", "mesh", "mesh-validity", "cad", "manufacturability"],
     tier=Tier.BUILD,
     settles="degenerate faces",
     requires_python=["trimesh", "numpy"],
@@ -975,23 +983,104 @@ def _cast_first_hit(mesh: Any, origins: Any, directions: Any) -> tuple[Any, Any,
 OPPOSED_DEG = 30.0
 OPPOSED_COS = math.cos(math.radians(OPPOSED_DEG))
 
+#: Two faces that share an edge are one SURFACE when their normals differ by less
+#: than this, and the corner exclusion asks whether two surfaces share an edge.
+#: What slipped through while a surface was a coplanar group (``mesh.facets``): a
+#: revolved 45 deg chamfer meeting a flat ledge read a 0.188 mm wall. The chamfer
+#: is a cone, so each strip of its triangles is a group of its own; the first
+#: strip shares an edge with the ledge and its rays were excluded (0.095 mm), the
+#: second does not and its rays across the 45 deg feather edge were kept. The
+#: median of 40 rays near the point read 0.536 mm. Grouped this way, the whole
+#: cone is one surface beside the ledge.
+#:
+#: 30 deg joins a curve tessellated at up to 30 deg per facet, which covers
+#: OpenCascade's default 0.5 rad (28.6 deg) deflection; it keeps a 45 deg chamfer
+#: apart from both faces it joins. The measured steps on two published cases: 75%
+#: of adjacent pairs under 5.6 deg and 90% under 20 deg. *Rejected:* a smaller
+#: angle (10 deg joined both measured cones, but not an export at the default
+#: deflection, whose second strip reads the false wall again); a larger one (a
+#: 45 deg chamfer would join its walls, and a corner it makes would read as one
+#: surface); and excluding a hit by its distance from the shared crease
+#: (``t * cot(angle)``), which needs the crease located and changes nothing on a
+#: chamfer whose strips are joined first. The cost, written down: a rib whose
+#: peak is two bevels each within 30 deg of its flank has flanks that share an
+#: edge as surfaces, and reads as the acute corner a knife-edge rib already
+#: reads as. A rib with a flat top, the case the rib fix was made on, is not
+#: joined (its flanks meet the top at 70 deg or more).
+SMOOTH_PATCH_DEG = 30.0
+
+#: The angle within which a cast face's normal must be known, degrees, and the
+#: smallest altitude that gives it. The load welds an STL's vertices at
+#: ``WELD_TOL_MM``, so a vertex may sit that far from where the exporter put it,
+#: and on a triangle whose smallest altitude is ``h`` that tilts its normal by up
+#: to ``atan(WELD_TOL_MM / h)``. A face with ``h`` under
+#: ``WELD_TOL_MM / tan(WALL_NORMAL_TOL_DEG)`` (about 0.0057 mm) has a normal
+#: nobody knows to a degree, and a ray along it goes anywhere: it is not cast
+#: from, and the detail counts it.
+#:
+#: What slipped through without it: a face of almost no area (5.9e-7 mm^2,
+#: altitude 8.5e-7 mm) sat on an edge of a printed top, its ray ran down the side
+#: face beside it, and the part read 0.126 mm where 2.57 mm and 3.1 mm of material
+#: lie. *Rejected:* an aspect-ratio floor (the two triangles of a 0.3 mm strip
+#: 20 mm long are 67:1 and their normal is known; aspect says nothing about the
+#: error, the altitude does); an area floor (a length squared: it drops the small,
+#: well-shaped faces of a fine mesh); confirming a thin reading with the rays of
+#: neighbouring faces (it needs a neighbourhood, more rays, and a rule for a wall
+#: that is thin over one face only).
+WALL_NORMAL_TOL_DEG = 1.0
+MIN_CAST_ALTITUDE_MM = WELD_TOL_MM / math.tan(math.radians(WALL_NORMAL_TOL_DEG))
+
+
+def _smooth_patches(mesh: Any) -> Any:
+    """A surface label per face: faces joined across edges under ``SMOOTH_PATCH_DEG``.
+
+    trimesh supplies the edge adjacency and the angle across each edge; its
+    graph engine (SciPy or NetworkX, declared on the gate) gives the components.
+    """
+    import numpy as np
+    from trimesh import graph
+
+    n = len(mesh.faces)
+    labels = np.arange(n)
+    angles = np.asarray(mesh.face_adjacency_angles, dtype=float)
+    joined = np.asarray(mesh.face_adjacency, dtype=int)[angles < math.radians(SMOOTH_PATCH_DEG)]
+    for component in graph.connected_components(joined, nodes=np.arange(n), min_len=1):
+        component = np.asarray(component, dtype=int)
+        labels[component] = component.min()
+    return labels
+
+
+def _castable(mesh: Any) -> Any:
+    """Faces whose normal is known to ``WALL_NORMAL_TOL_DEG``: altitude at least
+    ``MIN_CAST_ALTITUDE_MM``."""
+    import numpy as np
+
+    tri = np.asarray(mesh.triangles, dtype=float)
+    longest = np.linalg.norm(np.roll(tri, -1, axis=1) - tri, axis=2).max(axis=1)
+    area = np.asarray(mesh.area_faces, dtype=float)
+    altitude = np.where(longest > 0, 2.0 * area / np.where(longest > 0, longest, 1.0), 0.0)
+    return altitude >= MIN_CAST_ALTITUDE_MM
+
 
 def _wall_hits(mesh: Any, start: Any, hit: Any) -> Any:
-    """Keep walls; exclude rays across an acute edge of adjacent planar surfaces.
+    """Keep walls; exclude rays across an acute edge between two adjacent surfaces.
 
-    trimesh groups coplanar triangles and supplies their edge adjacency. Using
-    individual triangle neighbours would miss the same corner after subdivision.
-    The library's graph engine is declared on the gate, never replaced by a
-    second implementation here. Rejected as a replacement measure: trimesh's
+    A surface is a smooth patch (``SMOOTH_PATCH_DEG`` says what slipped through
+    while it was a coplanar group). A hit between two surfaces that share an edge
+    is excluded unless they are nearly opposed (``OPPOSED_DEG``): that ray crossed
+    the corner. A hit between surfaces that share no edge counts at every angle,
+    and so does a hit on the start's own surface: a smooth surface that faces
+    itself across material (a rounded rim, a rounded rib) is a section through the
+    material, never a corner. Using individual triangle neighbours would miss the
+    same corner after subdivision. Rejected as a replacement measure: trimesh's
     shrinking sphere, which reads 0.244 mm at the harmless acute corner of the
     subdivided 10 mm prism. It measures local reach, including that corner.
     """
     import numpy as np
 
-    surface = np.arange(len(mesh.faces))
-    for facet in mesh.facets:
-        surface[facet] = facet[0]
-    adjacent = {tuple(pair) for pair in np.sort(surface[mesh.face_adjacency], axis=1)}
+    surface = _smooth_patches(mesh)
+    joined = np.sort(surface[mesh.face_adjacency], axis=1)
+    adjacent = {tuple(pair) for pair in joined if pair[0] != pair[1]}
     pairs = np.sort(np.column_stack((surface[start], surface[hit])), axis=1)
     across_edge = np.array([tuple(pair) in adjacent for pair in pairs], dtype=bool)
     normals = np.asarray(mesh.face_normals)
@@ -1192,11 +1281,15 @@ def _read_wall_rules(names: list, global_min: float | None, global_key: str,
 @gate(
     id="cad.wall_thickness",
     title="Thinnest wall of each part, by inward ray casting, against its own minimum",
-    claims=["geometry", "mesh", "cad", "manufacturability", "wall"],
+    # No `mesh`: that tag is the exported file's closure, winding and
+    # degeneracy, and a wall is a process minimum. A claim on it carries `wall`.
+    # What slipped through while it carried `mesh`: a claim about mesh validity
+    # could not leave the process wall out.
+    claims=["geometry", "cad", "manufacturability", "wall"],
     tier=Tier.BUILD,
     settles="minimum wall thickness",
     requires_python=["trimesh", "numpy"],
-    requires_one_of=["python:scipy", "python:networkx"],  # trimesh.facets graph engine
+    requires_one_of=["python:scipy", "python:networkx"],  # trimesh.graph's components
     # Prerequisite cad.watertight (P2.2-D12): ray casting through an open mesh
     #    leaks out of the hole and reports a thickness that is not there.
     #    Isolated: the guard passes this gate's own known-bad control
@@ -1216,9 +1309,12 @@ def wall_thickness(ctx: GateContext) -> Verdict:
 
     Method, stated plainly because its limits matter more than its number: from the
     centroid of EVERY facet a ray is cast along the inward normal, and the distance
-    to the first hit is the local thickness. Only a hit between adjacent planar
-    surfaces across an acute edge is excluded (opposed thin folds still count).
-    Tapered flanks that do not share an edge count regardless of their angle.
+    to the first hit is the local thickness. Only a hit between two adjacent
+    surfaces across an acute edge is excluded (opposed thin folds still count),
+    where a surface is a smooth patch, so a tessellated chamfer is one surface
+    (``SMOOTH_PATCH_DEG``). Tapered flanks that do not share an edge count
+    regardless of their angle. A sliver face, whose normal is not known to a
+    degree, is not cast from (``MIN_CAST_ALTITUDE_MM``); the detail counts them.
 
     Each part is judged against its own minimum: its exact name in
     ``process_min_wall_mm_by_part`` first, then a pattern there that matches it,
@@ -1386,6 +1482,7 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     # same ray.
     worst = None
     thinnest = None
+    slivers = 0
     for name in judged:
         mesh = meshes[name]
         origins, normals, eps, box_of = prepared[name]
@@ -1414,12 +1511,15 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         # assembly.
         travel = np.linalg.norm(
             np.asarray(locations, dtype=float) - origins[index_ray], axis=1)
-        real = (travel > 10.0 * eps) & _wall_hits(mesh, index_ray, index_tri)
+        castable = _castable(mesh)
+        slivers += int((~castable).sum())
+        real = ((travel > 10.0 * eps) & _wall_hits(mesh, index_ray, index_tri)
+                & castable[index_ray])
         if not real.any():
             return _skipped(
                 gid,
                 f"no inward ray on part {name!r} crossed a wall after excluding "
-                "acute-edge hits — the sampler measured nothing",
+                "acute-edge hits and sliver faces — the sampler measured nothing",
             )
         distances = travel[real] + eps
         hit_rows = np.asarray(index_ray)[real]
@@ -1437,6 +1537,7 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         t_point = [round(float(c), 3) for c in origins[hit_rows[t]]]
         t_source = where_from(name, int(box_of[hit_rows[t]]))
         rows.append({"part": name, "min_mm": float(distances[t]),
+                     "sliver_faces_not_cast": int((~castable).sum()),
                      "min_minimum_mm": float(ray_min[hit_rows[t]]), "min_from": t_source,
                      "at_mm": t_point,
                      "minimum_mm": part_min, "minimum_from": minimums[name][1],
@@ -1470,6 +1571,7 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     evidence = [_write(ctx, "wall_thickness.json", {
         "thinnest": summary(thinnest), "nearest_its_minimum": summary(worst),
         "parts": rows, "boxes": box_rows, "exempt": dict(sorted(exempted.items())),
+        "sliver_faces_not_cast": slivers, "min_cast_altitude_mm": MIN_CAST_ALTITUDE_MM,
         "minimums": {name: {"mm": minimums[name][0], "from": minimums[name][1]}
                      for name in judged}})]
     sampled = sum(r["hits"] for r in rows)
@@ -1528,8 +1630,10 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         detail=f"{head} {value:.3f} mm on {value_part} at "
                f"({', '.join(f'{c:g}' for c in value_point)}) vs {value_limit:.3f} mm "
                f"minimum [{value_from}] "
-               f"({sampled}/{cast} inward face-normal rays hit, one per face; a ray "
-               f"sampler, not a proof)"
+               f"({sampled}/{cast} inward face-normal rays hit, one per face"
+               + (f", {slivers} sliver face(s) under {MIN_CAST_ALTITUDE_MM:.4f} mm "
+                  f"altitude not cast from" if slivers else "")
+               + "; a ray sampler, not a proof)"
                + nearest
                + (f"; exempt, not judged: {', '.join(shown[:4])}"
                   f"{f' and {len(shown) - 4} more' if len(shown) > 4 else ''}"
@@ -1581,6 +1685,47 @@ def _boolean_engines() -> list[str]:
     except Exception:                                  # noqa: BLE001 - third-party import side effects
         pass
     return found
+
+
+def _layer_thickness(shared: Any) -> float:
+    """How thick the shared material is as one flat layer, mm: an UPPER bound.
+
+    The extent of the shared solid's vertices along their axis of least spread.
+    Any direction's extent bounds the solid's width in that direction from above,
+    so a value under the depth tolerance proves the whole shared material lies
+    between two parallel planes that close together: a layer, not a pocket.
+
+    What slipped through without it: a seated flat contact failed on volume
+    alone. Tessellation leaves two coincident faces sharing a layer a few
+    microns thick, and its volume is that depth times the contact area, so a
+    board seated over a few hundred mm^2 passes 0.2 mm^3 with nothing wrong. The
+    pack already said this for a bonded joint. Measured on the shared solid
+    itself, the layer is judged on depth like a bonded joint, with no
+    declaration, and only while it is thinner than the pair's own depth tolerance.
+
+    *Rejected,* and measured on a published assembly before it was: judging the
+    pair on the existing equivalent depth (volume over the largest face of the
+    two boxes' overlap) or scaling the volume tolerance by that face's area. That
+    depth is a lower bound and a loose one. Three pairs read 0.00025, 0.0015 and
+    0.0027 mm by it; their shared solids were four 3 mm pads 0.0135 mm thick, two
+    bodies 0.6 x 1.3 x 5.9 mm, and a crescent 0.85 x 0.89 x 5.6 mm. Two of those
+    are real interferences that the volume tolerance caught, and either rule
+    would have passed them. *Rejected too:* twice the volume over the surface
+    area (a lower bound on the width: a crescent or an edge dug into a face reads
+    a third to a half of its depth, so the waiver would forgive two to three
+    times its tolerance). The cost of the upper bound: a curved seated layer
+    spreads along its curve and is not waived, as it was not before; declare the
+    part curved (``organic_parts``) or the pair bonded.
+    """
+    import numpy as np
+
+    vertices = np.asarray(getattr(shared, "vertices", ()), dtype=float).reshape(-1, 3)
+    if len(vertices) < 4:
+        return math.inf
+    centred = vertices - vertices.mean(axis=0)
+    _values, vectors = np.linalg.eigh(centred.T @ centred)
+    along = centred @ vectors[:, 0]
+    return float(along.max() - along.min())
 
 
 def _pair_key(a: str, b: str) -> tuple[str, str]:
@@ -1986,6 +2131,7 @@ def clash(ctx: GateContext) -> Verdict:
             try:
                 inter = trimesh.boolean.intersection([ma, mb])
                 volume = float(inter.volume) if inter is not None and len(inter.faces) else 0.0
+                layer = _layer_thickness(inter) if volume > 0.0 else 0.0
             except Exception as exc:                   # noqa: BLE001 - kernel
                 row.update(volume_mm3=None, depth_mm=None, verdict="clash",
                            why=f"boolean raised {type(exc).__name__}: {exc} — an "
@@ -2036,14 +2182,25 @@ def clash(ctx: GateContext) -> Verdict:
 
             over = volume - tol
             over_depth = depth - depth_tol
+            # A SEATED LAYER: the shared material, measured on the shared solid
+            # itself, lies within the pair's own depth tolerance of one plane. Its
+            # volume is that depth times the contact area, so the volume tolerance
+            # is waived for it as for a bonded joint; the depth tolerance stands.
+            # `_layer_thickness` says what slipped through and what was rejected.
+            seated = (not glued and over > 0 and math.isfinite(layer)
+                      and layer <= depth_tol)
+            clashes_here = (over > 0 and not seated) or over_depth > 0
             row.update(volume_mm3=volume, depth_mm=depth, contact_mm2=contact,
-                       verdict="clash" if (over > 0 or over_depth > 0) else "clear",
-                       why=f"{volume:.4f} mm^3 vs {tol_text}; "
-                           f"{depth:.4f} mm equivalent depth over {contact:.2f} mm^2 "
+                       layer_mm=layer if math.isfinite(layer) else None, seated=seated,
+                       verdict="clash" if clashes_here else "clear",
+                       why=f"{volume:.4f} mm^3 vs {tol_text}"
+                           + (f", waived: a seated layer {layer:.4f} mm thick, within "
+                              f"the {depth_tol:g} mm depth tolerance" if seated else "")
+                           + f"; {depth:.4f} mm equivalent depth over {contact:.2f} mm^2 "
                            f"vs {depth_tol:g} mm"
                            + (f" (bonded: {bonded[pair]})" if glued else ""))
             rows.append(row)
-            if over > 0 or over_depth > 0:
+            if clashes_here:
                 worst_over = max(worst_over, over)
                 if pair not in allowed:
                     clashes.append(row)
@@ -2135,10 +2292,14 @@ def clash(ctx: GateContext) -> Verdict:
               f"{len(contacts)} in surface contact, rest AABB-clear); "
               f"largest shared volume {measured:.4f} mm^3"
               + (f" on {worst['a']}/{worst['b']} vs "
-                 + (f"{worst_tol:g} mm^3 tolerance" if isinstance(worst_tol, (int, float))
+                 + (f"no volume limit (a seated layer {worst['layer_mm']:.4f} mm thick)"
+                    if worst.get("seated") else
+                    f"{worst_tol:g} mm^3 tolerance" if isinstance(worst_tol, (int, float))
                     else "no volume limit (bonded joint)")
                  if worst else "")
               + f"; deepest equivalent penetration {deepest:.4f} mm"
+              + (f"; {sum(1 for r in rows if r.get('seated'))} seated layer(s) judged "
+                 f"on depth, not volume" if any(r.get("seated") for r in rows) else "")
               + (f"; {len(allowed)} intended contact(s) allowlisted" if allowed else "")
               + (f"; {len(bonded)} bonded joint(s) held to "
                  f"{BONDED_CONTACT_DEPTH_TOL_MM:g} mm of penetration" if bonded else ""))

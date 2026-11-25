@@ -230,7 +230,7 @@ def metres_not_millimetres(ctx):
     # exponent on the 1/1000 factor: 1 for a length, 2 for an area, 3 for a volume
     dimension = {
         "part_bbox_mm": 1, "bbox_mm": 1, "bbox": 1, "footprint_mm": 1,
-        "part_min_wall_mm": 1, "min_wall_mm": 1,
+        "part_min_wall_mm": 1, "min_wall_mm": 1, "part_min_floor_mm": 1,
         "nozzle_d_mm": 1, "extrusion_width_mm": 1,
         "layer_height_mm": 1, "brim_mm": 1, "max_bridge_mm": 1,
         "max_cantilever_mm": 1, "bed_x_mm": 1, "bed_y_mm": 1, "bed_z_mm": 1,
