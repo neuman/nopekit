@@ -23,7 +23,14 @@ past a check without it:
   control outcomes at one rho_control fail always (the gate is not admitted).
 * **sealed-fixtures** — invariant 5 at runtime (`packs.seal_findings`): a pack
   control that reads its host's params passes in some projects and fails in
-  others. The known-bad input must come from the pack's own baseline.
+  others. The known-bad input must come from the pack's own baseline. Only the
+  tier-0 controls run by default (`--tier` raises it); above, a control on
+  record at its version is read, and one with none is named, never passed over
+  (holdout, general packs: the row ran every control at every tier, and
+  `doctor` took nine minutes).
+* **pack-tags** — a claim tag that gates of two or more installed packs bind:
+  a claim that carries it is covered by the gates of both (holdout, general
+  packs: `doctor` diffed the param keys, never the tags).
 * **imports** — a gate that imports a third-party module it does not declare is
   run where the module is missing and errors, instead of reading SKIPPED.
 * **env-reads** — an environment variable is never a cache key (spec §8): a read
@@ -99,7 +106,9 @@ ROWS = ("instruments", "opaque-inputs", "cache-entries", "two-outcomes", "sealed
         # where a site and its text exist, and
         # test_site_truth.TheReadersSayTheTextIsBehind holds its ok and its
         # warning).
-        "groups", "readme")
+        "groups", "readme",
+        # Holdout, general packs: two installed packs binding one claim tag.
+        "pack-tags")
 
 #: A fixture every planted project gate can borrow: the bracket's own, which
 #: sags the known-good design 30 mm — past any limit the planted gates use.
@@ -113,9 +122,9 @@ def _run(project: str, *argv: str):
     return _env.nopekit(list(argv), cwd=project)
 
 
-def _doctor(project: str) -> tuple[int, dict[str, dict]]:
+def _doctor(project: str, *argv: str) -> tuple[int, dict[str, dict]]:
     """`doctor --json` in a subprocess: ``(exit code, {row name: row})``."""
-    proc = _run(project, "doctor", "--json")
+    proc = _run(project, "doctor", "--json", *argv)
     try:
         data = json.loads(proc.stdout)
     except ValueError as exc:                      # pragma: no cover - reported
@@ -408,6 +417,43 @@ def leaky_long(ctx):
 '''
 
 
+#: The same two controls one tier up: what `doctor` runs only under `--tier 1`,
+#: and otherwise reads from a control entry `check --tier 1` recorded.
+_SEAL_BUILD_GATES = _SEAL_GATES.replace("tier=Tier.INSTANT", "tier=Tier.BUILD")
+
+#: Two planted packs whose gates both bind the claim tag `planted-shared`, and
+#: one tag each of their own. Each control is sealed: the row under test is the
+#: tag row, never the seal row.
+_TAG_GATES = '''\
+# SPDX-License-Identifier: Apache-2.0
+"""Planted by tests/test_doctor.py: one gate binding a shared tag and its own."""
+from nopekit.gates import gate
+from nopekit.models import NegativeControl, Tier, Verdict
+
+
+@gate(id="{pack}.span", claims=["planted-shared", "{pack}-own"], tier=Tier.INSTANT,
+      negative_control=NegativeControl(fixture="selftest/bad.py:sealed_long", note="planted"))
+def span(ctx):
+    value = ctx.params.get("span_mm")
+    if value is None:
+        return Verdict(gate="{pack}.span", skipped=True, skip_reason="no span_mm")
+    return Verdict(gate="{pack}.span", passed=float(value) <= 100.0, measured=float(value),
+                   limit=100.0, units="mm")
+'''
+
+
+def _plant_pack(project: str, name: str, gates_src: str) -> None:
+    """A pack under the project's `.nopekit/packs/`, installed with `packs add`:
+    `gates_src` as its one gate module, `_SEAL_FIXTURES` as its fixtures."""
+    pack = os.path.join(project, ".nopekit", "packs", name)
+    _write(pack, "pack.json", json.dumps({"name": name}) + "\n")
+    _write(pack, "gates/span.py", gates_src)
+    _write(pack, "selftest/bad.py", _SEAL_FIXTURES)
+    _write(pack, "selftest/baseline.json", json.dumps({"span_mm": 50.0}) + "\n")
+    added = _run(project, "packs", "add", name)
+    assert added.returncode == 0, added.stdout + added.stderr
+
+
 def _in_process_gate(ctx):
     """Registered from Python by this test: no recorded closure, so its code is
     keyed by this file."""
@@ -559,6 +605,72 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         self.assertEqual(code, 1, "an unsealed pack control breaks invariant 5")
         self.assertClean("sealed-fixtures")
 
+    def test_sealed_fixtures_above_tier_zero(self):
+        """Holdout, general packs: the row ran every pack control at every tier,
+        so `doctor` took nine minutes on a project with container replays. Now
+        it runs tier 0, reads a control above it from the entry `check`
+        recorded at its version, and names one it neither ran nor found, with
+        the command that runs it. A BUILD-tier control that reads its host is
+        caught each way it can be: named as not run, run under `--tier 1`, and
+        read back after `check --tier 1`."""
+        project = self.copy()
+        _plant_pack(project, "planted-seal", _SEAL_BUILD_GATES)
+
+        code, rows = _doctor(project)
+        self.assertRow(rows, "sealed-fixtures", "ok", "0 pack control(s) up to tier 0",
+                       "2 not run: above tier 0, and no control entry at its version",
+                       "planted-seal.leaky", "planted-seal.sealed",
+                       "`nopekit doctor --tier 1` runs them")
+        self.assertEqual(code, 0, rows)
+
+        code, rows = _doctor(project, "--tier", "1")
+        self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                       "selftest/bad.py:leaky_long", absent=("planted-seal.sealed:",))
+        self.assertEqual(code, 1, "an unsealed pack control breaks invariant 5")
+
+        checked = _run(project, "check", "--tier", "1")
+        self.assertIn("planted-seal.leaky", checked.stdout, checked.stdout + checked.stderr)
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "sealed-fixtures", "FAIL", "planted-seal.leaky",
+                             "selftest/bad.py:leaky_long", "(all params)",
+                             absent=("planted-seal.sealed:", "not run: above tier 0"))
+        self.assertEqual(code, 1, row)
+
+    def test_pack_tags(self):
+        """Holdout, general packs: a claim tag two installed packs bind covers a
+        claim with the gates of both, and `doctor` warned only on param keys.
+        The row names the tag, each pack's gates and the claims that carry it;
+        `check` notes a carried one and leaves its exit code alone."""
+        project = self.copy()
+        for name in ("planted-left", "planted-right"):
+            _plant_pack(project, name, _TAG_GATES.replace("{pack}", name))
+        code, rows = _doctor(project)
+        row = self.assertRow(rows, "pack-tags", "warn",
+                             "'planted-shared' binds planted-left (planted-left.span) and "
+                             "planted-right (planted-right.span) (no claim carries it yet)",
+                             absent=("planted-left-own", "planted-right-own"))
+        self.assertEqual(code, 0, row)
+        before = _run(project, "check")
+        self.assertNotIn("planted-shared", before.stdout, before.stdout)
+
+        with open(os.path.join(project, "claims", "C1.json"), encoding="utf-8") as fh:
+            claim = json.load(fh)
+        claim["tags"] = list(claim.get("tags") or []) + ["planted-shared"]
+        _write(project, "claims/C1.json", json.dumps(claim, indent=2) + "\n")
+        _code, rows = _doctor(project)
+        self.assertRow(rows, "pack-tags", "warn", "(carried by C1)",
+                       "give it a tag only the pack you mean binds")
+        after = _run(project, "check")
+        self.assertIn("note: C1 carries the tag 'planted-shared', which gates of 2 installed "
+                      "packs bind: planted-left (planted-left.span) and planted-right "
+                      "(planted-right.span)", after.stdout, after.stdout + after.stderr)
+        data = json.loads(_run(project, "check", "--json").stdout)
+        self.assertEqual(data["tag_collisions"], [
+            {"tag": "planted-shared", "claims": ["C1"],
+             "gates": {"planted-left": ["planted-left.span"],
+                       "planted-right": ["planted-right.span"]}}])
+        self.assertClean("pack-tags")
+
     def test_imports(self):
         project = self.copy()
         _write(project, "gates/planted_imports.py", _IMPORT_GATES.format(fixture=_FIXTURE))
@@ -633,6 +745,30 @@ class DoctorNamesWhatRhoCannotSee(_env.EnvCase):
         registry = _bundled_registry()
         self.assertGreaterEqual(len(registry.ids()), 50, "the bundled corpus did not load")
         self.assertEqual(cli_mod._dynamic_imports(registry, _env.REPO), [])
+
+    def test_each_static_row_scans_a_file_once(self):
+        """Holdout, general packs: the static rows scanned a module once per
+        gate defined in it (eighteen times for one pack's module), and were most
+        of what `doctor` cost once its seal row ran tier 0 only. Each row now
+        scans each file once (`cli._hits_by_file`); the rows say the same."""
+        registry = _bundled_registry()
+        files = {path for _spec, fn in registry.pairs() for path in cli_mod._source_files(fn)}
+        self.assertLess(len(files), sum(len(cli_mod._source_files(fn))
+                                        for _spec, fn in registry.pairs()),
+                        "the bundled corpus shares no file between gates: nothing to show")
+        for name, scan in (("_memo_hits", cli_mod._memo_reads),
+                           ("_env_hits", cli_mod._env_reads)):
+            with self.subTest(row=name):
+                real = getattr(cli_mod, name)
+                seen: list[int] = []
+
+                def counted(tree, real=real, seen=seen):
+                    seen.append(id(tree))
+                    return real(tree)
+                with mock.patch.object(cli_mod, name, counted):
+                    scan(registry, _env.REPO)
+                self.assertEqual(len(seen), len(set(seen)), f"{name} scanned a tree twice")
+                self.assertLessEqual(len(seen), len(files))
 
     def test_code_digest_names_a_gate_keyed_by_its_defining_file(self):
         project = self.copy()

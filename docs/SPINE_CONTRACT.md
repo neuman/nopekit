@@ -2922,6 +2922,13 @@ def available(root=None) -> list[str]                      # every pack name dis
 def key_scope(manifest) -> str                             # "fdm-print" -> "fdm" (from its gate ids)
 def key_vocabulary(name, root=None) -> dict[str, dict]     # every projection key the pack reads
 def key_collisions(names, root=None, *, projection_keys=()) -> list[KeyCollision]
+def tag_collisions(registry, claims=()) -> list[TagCollision]   # claim tags gates of 2+ packs bind
+@dataclass(frozen=True)
+class TagCollision:                          # one claim tag two or more live packs' gates bind
+    tag: str                                 # exactly as the gates declare it (claims.covers' match)
+    gates: tuple[tuple[str, tuple[str, ...]], ...]   # ((pack, (gate id, ...)), ...), sorted
+    carried: tuple[str, ...]                 # the claims that carry it now, sorted
+    # .packs -> the packs, sorted; .binds() -> "a (a.x) and b (b.y, b.z)"
 # Architecture phase 2 (SPEC 22, 25, 38): proposers — tools that propose, never settle
 PROPOSERS_DIR = "proposers"
 PROPOSER_KEYS = ("id", "basis", "description", "run")   # one provides_proposers entry
@@ -2945,7 +2952,15 @@ elsewhere) and runs `proposer_problems`.
 discoverable: it diffs the installed packs' vocabularies (from each
 `selftest/baseline.json`'s keys, `_notes` and `_aliases`) and reports any key two
 of them declare differently. `nopekit doctor` renders it as a warning naming both
-packs. See `docs/PACK_FORMAT.md`.
+packs. See `docs/PACK_FORMAT.md`. `tag_collisions` does the same for claim tags,
+from the registered specs alone: each tag that gates of two or more of the
+registry's packs bind (a project gate, with no pack, is the project's own wiring
+and is left out), with the claims that carry it, the carried ones first. A gate
+lists every tag it bears on, so a broad word two packs share covers a claim with
+the gates of both; `doctor`'s `pack-tags` row names every such tag and `check`
+notes each one a claim carries (holdout, general packs: `connectivity`,
+`clearance`, `interference`, `packaging` and `manufacturability` each bound gates
+of two or three live packs, and `doctor` warned only on param keys).
 Pack layout (also documented in the pack-authoring skill):
 ```
 packs/<name>/pack.json  PACK.md  references/*.md  gates/*.py  generators/*.py
@@ -4781,7 +4796,8 @@ each `ok` when there is nothing to say — a clean project shows that it looked:
 | `dynamic-imports` | warn | the static dynamic-import detector (`modelio.dynamic_imports`): an AST scan of every registered gate's closure files and of its owner's `selftest/*.py` (the fixtures and the known-good module its control runs) for `importlib.import_module(...)` or `__import__(...)` whose module a VALUE names. Only the run that first loads such a module in a process keys its source; a later one is served it from `sys.modules` and keys nothing. A literal name is resolved into the code closure and is not named (admission review, round 2, c) |
 | `requirements` | FAIL / warn | architecture phase 1: a claim naming a requirement no file holds, or a requirement id that is also a claim's (FAIL, as a milestone requiring a missing claim is); else a requirement no claim serves (warn: it reads Gap) |
 | `mechanisms` | warn | architecture phase 1: an evaluator a claim's mechanism names that is not registered here, or does not cover that claim (`claims.mechanism_problems`). Never a FAIL: a cross-check is not an integrity fault, and it moves no status |
-| `sealed-fixtures` | FAIL | invariant 5 at runtime: every pack control run against this project's params through `packs.seal_findings`, into a temp `out_dir`; a control that reads its host is named with the paths it read |
+| `sealed-fixtures` | FAIL | invariant 5 at runtime: the pack controls up to `doctor --tier` (default `cli.DOCTOR_SEAL_TIER`, 0) run against this project's params through `packs.seal_findings`, into a temp `out_dir`; above it, each control's entry at its version (admitted or pending, recorded on the live host by `check`) is read for its `reads.host`, not run; a control that reads its host is named with the paths it read, and one neither run nor on record is named with the `doctor --tier` that runs it. What slipped through (holdout, general packs): every control ran at every tier, container replays included, and `doctor` took nine to twelve minutes |
+| `pack-tags` | warn | `packs.tag_collisions`: each claim tag that gates of two or more installed packs bind, naming each pack's gates and the claims that carry it. Never a FAIL: a gate lists every tag it bears on by design, and the fix is the claim's narrowest tag |
 
 The four static detectors measured zero hits on the 54 bundled gates before they landed
 (R-4; `tests/test_doctor.py`). No staleness row: which gates are current is `status`'s

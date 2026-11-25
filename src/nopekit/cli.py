@@ -2073,6 +2073,12 @@ def cmd_check(args: argparse.Namespace) -> int:
             # name that are not registered or do not cover them — warnings only.
             "mechanism_problems": [dict(found._asdict(), filed=list(found.filed))
                                    for found in claims.mechanism_problems(view, registry)],
+            # Additive (holdout, general packs): each claim tag a claim carries
+            # that gates of two or more installed packs bind — a note only.
+            "tag_collisions": [{"tag": c.tag, "claims": list(c.carried),
+                                "gates": {pack: list(ids) for pack, ids in c.gates}}
+                               for c in packs.tag_collisions(registry, view.claims)
+                               if c.carried],
             # Additive (P2.1-D12): each evaluator's qualification as this check
             # judged it — the line in words, the judge's token, and the state.
             # The token is the QUALIFICATION's alone: a pass outside its
@@ -2106,6 +2112,8 @@ def cmd_check(args: argparse.Namespace) -> int:
     for line in _limit_lines(view, stale_gates):
         _say(line)
     for line in _mechanism_lines(view, registry):
+        _say(line)
+    for line in _tag_lines(view, registry):
         _say(line)
     for row in returning:
         _say(report.may_return_line(row, view))
@@ -8616,6 +8624,26 @@ def _undeclared_imports(registry: gates.Registry) -> list[str]:
     return found
 
 
+def _hits_by_file(scan: Callable[[Any], Any]) -> Callable[[str], list]:
+    """`scan` over each file's parsed tree once, however many gates share it:
+    `hits(path)` is `scan(tree)` the first time and the same list after, `[]`
+    for a file that does not parse. What slipped through (holdout, general
+    packs): the static rows scanned a module once per gate defined in it, so a
+    pack of eighteen gates in one module walked its tree eighteen times per
+    row, and the scans were most of what `doctor` cost once its seal row ran
+    tier 0 only. The rows say the same: each gate still names every hit of
+    every file it is made of."""
+    trees: dict[str, Any] = {}
+    found: dict[str, list] = {}
+
+    def hits(path: str) -> list:
+        if path not in found:
+            tree = _parse(path, trees)
+            found[path] = list(scan(tree)) if tree is not None else []
+        return found[path]
+    return hits
+
+
 def _env_hits(tree: Any) -> list[tuple[int, str]]:
     """`(line, "os.<name>")` for every reach into the environment in `tree`:
     `os.environ`, `os.getenv`, `os.putenv` (and the bytes twins) through any
@@ -8639,12 +8667,11 @@ def _env_reads(registry: gates.Registry, root: str) -> list[str]:
     """`<file>:<line> os.<name> (<gates>)` for every environment read in the code
     of every registered gate — its module and its closure (spec §3.17). Static,
     because nothing dynamic sees it: see `_ENV_NAMES`. Zero bundled hits."""
-    cache: dict[str, Any] = {}
     owners: dict[tuple[str, int, str], list[str]] = {}
+    hits = _hits_by_file(_env_hits)
     for spec, fn in registry.pairs():
         for path in _source_files(fn):
-            tree = _parse(path, cache)
-            for line, name in (_env_hits(tree) if tree is not None else ()):
+            for line, name in hits(path):
                 owners.setdefault((path, line, name), []).append(spec.id)
     base = os.path.abspath(root)
     lines = []
@@ -8764,12 +8791,11 @@ def _memo_reads(registry: gates.Registry, root: str) -> list[str]:
     cannot empty, in the code of every registered gate — its module and its
     closure. Static, like `_env_reads`, and for the same reason: a memo hit
     opens nothing, so no trace sees what it served. Zero bundled hits."""
-    cache: dict[str, Any] = {}
     owners: dict[tuple[str, int, str], list[str]] = {}
+    hits = _hits_by_file(_memo_hits)
     for spec, fn in registry.pairs():
         for path in _source_files(fn):
-            tree = _parse(path, cache)
-            for line, name in (_memo_hits(tree) if tree is not None else ()):
+            for line, name in hits(path):
                 owners.setdefault((path, line, name), []).append(spec.id)
     base = os.path.abspath(root)
     lines = []
@@ -8803,16 +8829,15 @@ def _dynamic_imports(registry: gates.Registry, root: str) -> list[str]:
     behind `importlib.import_module` moved and the PASS was served cached). A
     literal name is keyed with the gate's code; `load_path` keys a helper on
     every run. Zero bundled hits."""
-    cache: dict[str, Any] = {}
     owners: dict[tuple[str, int, str], list[str]] = {}
     walked: dict[str, list[str]] = {}
+    hits = _hits_by_file(modelio.dynamic_imports)
     for spec, fn in registry.pairs():
         owner = verdicts._owner_dir(fn, root)
         if owner not in walked:
             walked[owner] = _selftest_sources(owner)
         for path in dict.fromkeys(_source_files(fn) + walked[owner]):
-            tree = _parse(path, cache)
-            for line, call in (modelio.dynamic_imports(tree) if tree is not None else ()):
+            for line, call in hits(path):
                 owners.setdefault((path, line, call), []).append(spec.id)
     base = os.path.abspath(root)
     lines = []
@@ -9017,23 +9042,158 @@ def _doctor_qualification_rows(results: list[dict], root: str, registry: gates.R
            if missing else q["known_good_ok"])
 
 
+#: The costliest tier of pack control `doctor` runs by default (`--tier`). Why
+#: 0: tier 0 is "< ~2 s, analytic" (`models.Tier`), so the seal row costs
+#: seconds however many packs a project installs, and the first command to run
+#: when confused answers at once. What slipped through (holdout, general packs,
+#: three projects): the row ran every pack control at every tier, firmware-ci's
+#: container replays included, so `doctor` took nine to twelve minutes and said
+#: nothing while it waited on another project's replay lock. Above the tier, a
+#: control on record at its version is read, not run: `check` ran it against
+#: this project's params, and its entry keeps what it read of them.
+#: *Rejected:* every tier (the cost above); tier 1 (a geometry build or a
+#: netlist per control is still minutes on a multi-pack project); a time box
+#: (a row that says sealed or not depending on the machine's load); leaving a
+#: control above the tier unnamed (a row that says "none reads them" over
+#: controls it never saw).
+DOCTOR_SEAL_TIER = int(Tier.INSTANT)
+
+
+def _recorded_seal(root: str, registry: gates.Registry, spec: Any,
+                   resolution: verdicts.Resolution, projection: Any,
+                   ledger: Any) -> tuple[str, Any]:
+    """What a pack control's entry at its current version says it read of this
+    project's params, without running it: ``("finding", SealFinding)`` when it
+    read any, ``("sealed", None)`` when it read none, ``("none", None)`` when no
+    entry at its version was recorded against this project (``host`` "live").
+
+    The admission the qualification row reads (`resolution`, else
+    `verdicts.admission_state`, which runs nothing): admitted or pending means
+    its static part and the host params it read are current, so its
+    ``reads.host`` is what the control reads of this project now."""
+    row = resolution.rows.get(spec.id)
+    admission = row.admission if row is not None else None
+    if admission is None:
+        found = registry.get(spec.id)
+        if found is None:                           # pragma: no cover - defensive
+            return "none", None
+        admission = verdicts.admission_state(root, found[0], found[1], projection=projection,
+                                             ledger=ledger, anchors=resolution.anchors)
+    entry = admission.entry
+    if admission.state not in ("admitted", "pending") or entry is None \
+            or getattr(entry, "host", "") != "live":
+        return "none", None
+    host_rows = (getattr(entry, "reads", None) or {}).get("host") or ()
+    paths = tuple(sorted({packs._host_path(tuple(r[0])) for r in host_rows
+                          if isinstance(r, (list, tuple)) and r
+                          and isinstance(r[0], (list, tuple))}))
+    if not paths:
+        return "sealed", None
+    nc = spec.negative_control
+    return "finding", packs.SealFinding(gate=spec.id, fixture=(nc.fixture if nc else "") or "",
+                                        host_paths=paths)
+
+
+def _tag_carriers(collision: Any) -> str:
+    """``carried by C3, C4`` or ``no claim carries it yet``."""
+    if not collision.carried:
+        return "no claim carries it yet"
+    return f"carried by {_listed(list(collision.carried), ', ')}"
+
+
+def _doctor_tags_row(results: list[dict], registry: gates.Registry, ledger: Any) -> None:
+    """`pack-tags`: each claim tag that gates of two or more installed packs bind
+    (`packs.tag_collisions`), naming the gates of each pack and the claims that
+    carry it. A warning, never a FAIL: a gate lists every tag it bears on by
+    design, and the fix is the claim's — the narrowest tag (docs/PACK_FORMAT.md).
+    Always a row, so a clean project shows it looked. What slipped through
+    (holdout, general packs): `doctor` diffed the packs' param keys and not
+    their tags, so a claim tagged `connectivity` to mean "every net is routed"
+    read a CAD assembly check's fail, and nothing had named the binding."""
+    found = packs.tag_collisions(registry, getattr(ledger, "claims", None) or ())
+    if not found:
+        _check(results, "pack-tags", "ok",
+               "no claim tag binds gates of more than one installed pack")
+        return
+    rows = [f"{c.tag!r} binds {c.binds()} ({_tag_carriers(c)})" for c in found]
+    _check(results, "pack-tags", "warn",
+           f"{len(found)} claim tag(s) bind gates of more than one installed pack: "
+           + _listed(rows) + " — a claim that carries one is covered by every one of "
+                             "those gates: give it a tag only the pack you mean binds "
+                             "(each pack's PACK.md lists its tags)")
+
+
+def _tag_lines(view: Ledger, registry: Any) -> list[str]:
+    """`check`'s `note:` line for each claim tag a claim carries that gates of
+    two or more installed packs bind (`packs.tag_collisions`). Never a status
+    and never the exit code; `doctor`'s `pack-tags` row names the tags no claim
+    carries yet too."""
+    lines = []
+    for c in packs.tag_collisions(registry, view.claims):
+        if not c.carried:
+            continue
+        one = len(c.carried) == 1
+        lines.append(f"note: {_listed(list(c.carried), ', ')} carr{'ies' if one else 'y'} "
+                     f"the tag {c.tag!r}, which gates of {len(c.gates)} installed packs "
+                     f"bind: {c.binds()} — give {'it' if one else 'each'} a tag only the "
+                     f"pack you mean binds")
+    return lines
+
+
+def _doctor_tier(args: argparse.Namespace) -> int:
+    """`doctor --tier`, else `DOCTOR_SEAL_TIER`."""
+    tier = getattr(args, "tier", None)
+    return DOCTOR_SEAL_TIER if tier is None else int(tier)
+
+
 def _doctor_seal_row(results: list[dict], registry: gates.Registry,
-                     host: gates.GateContext) -> None:
-    """Invariant 5 at runtime: every pack control run against THIS project's
-    params, traced (`packs.seal_findings`). `pack validate` refuses an unsealed
-    fixture before a pack ships; this is where a project finds out that one it
+                     host: gates.GateContext, *, root: str,
+                     resolution: verdicts.Resolution, projection: Any = None,
+                     ledger: Any = None, tier: int = DOCTOR_SEAL_TIER) -> None:
+    """Invariant 5 at runtime: the pack controls up to `tier` run against THIS
+    project's params, traced (`packs.seal_findings`), and each one above it read
+    from its control entry at its version (`_recorded_seal`), which `check`
+    recorded against these params. `pack validate` refuses an unsealed fixture
+    before a pack ships; this is where a project finds out that one it
     installed — from before the detector, or from someone else — reads its host,
     so that its control fires here and may not fire in the next project. A
-    temp `out_dir`, nothing written to the project."""
+    temp `out_dir`, nothing written to the project. A control neither run nor on
+    record is named, with the command that runs it (`DOCTOR_SEAL_TIER`)."""
     pack_gates = [spec for spec in registry.specs() if (spec.pack or "").strip()]
     if not pack_gates:
         _check(results, "sealed-fixtures", "ok", "no pack gates installed")
         return
     try:
-        findings = packs.seal_findings(registry, host)
+        findings = packs.seal_findings(registry, host, tier=tier)
     except NopekitError as exc:
         _check(results, "sealed-fixtures", "FAIL", f"the seal probe did not run: {exc}")
         return
+    ran = missing = read = 0
+    left_out: dict[str, int] = {}
+    for spec in pack_gates:
+        available = gates.availability(spec)[0]
+        if int(spec.tier) <= tier and available:
+            ran += 1
+            continue
+        kind, finding = _recorded_seal(root, registry, spec, resolution, projection, ledger)
+        if kind == "finding":
+            findings.append(finding)
+        elif kind == "sealed":
+            read += 1
+        elif not available:
+            missing += 1
+        else:
+            left_out[spec.id] = int(spec.tier)
+    said = [f"{ran} pack control(s) up to tier {tier} run against this project's params"]
+    if read:
+        said.append(f"{read} above it read from their control entries at their version")
+    tail = ""
+    if left_out:
+        tail += (f"; {len(left_out)} not run: above tier {tier}, and no control entry at "
+                 f"its version ({_listed(sorted(left_out), ', ')}) — "
+                 f"`nopekit doctor --tier {max(left_out.values())}` runs them")
+    if missing:
+        tail += f"; {missing} not run: tools missing here"
     if findings:
         shown = [f"{f.gate}: {f.fixture} reads the host's "
                  f"{', '.join(f.host_paths[:3])}"
@@ -9041,12 +9201,9 @@ def _doctor_seal_row(results: list[dict], registry: gates.Registry,
                  for f in findings]
         _check(results, "sealed-fixtures", "FAIL",
                _listed(shown) + " — a pack control must build its known-bad input from its "
-                                "own selftest/baseline.json (SEALED, invariant 5)")
+                                "own selftest/baseline.json (SEALED, invariant 5)" + tail)
         return
-    missing = sum(1 for spec in pack_gates if not gates.availability(spec)[0])
-    _check(results, "sealed-fixtures", "ok",
-           f"{len(pack_gates) - missing} pack control(s) run against this project's params; "
-           f"none reads them" + (f" ({missing} not run: tools missing here)" if missing else ""))
+    _check(results, "sealed-fixtures", "ok", ", ".join(said) + "; none reads them" + tail)
 
 
 #: The legacy run history's directory, `.nopekit/runs/`. Nothing reads it
@@ -9752,7 +9909,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     `status` are the wrong place to hear about them. No staleness row: which
     gates are current is `status`'s `stale:` block, per gate, from the resolver.
     It never writes, and it runs no project gate — only pack controls, traced,
-    into a temp directory, to see whether they read their host.
+    into a temp directory, to see whether they read their host: those up to
+    `--tier` (default `DOCTOR_SEAL_TIER`, 0: seconds), and none above it. A
+    control above the tier is read from its control entry at its version, which
+    `check` recorded against this project's params, and one with no such entry
+    is named with the command that runs it (`_doctor_seal_row`). It also names
+    each claim tag that gates of two or more installed packs bind (`pack-tags`,
+    `packs.tag_collisions`), from the registry alone.
 
     From checkpoint 1.3 it also says where the project's facts live, and still
     writes nothing (`_doctor_records_rows`): `records` — the record files, each
@@ -9946,6 +10109,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                   " (this project does not publish it yet)")
                + f" — {collision.fix()}. {meanings}")
 
+    # Two packs, one TAG: a claim that carries it is covered by the gates of
+    # both, so a verdict about another object reads on it. One row, always
+    # there, a warning (it moves no status), with the carried tags first.
+    _doctor_tags_row(results, registry, ledger)
+
     # No global staleness row: one hash of the projection against the last
     # sweep's said THAT something moved, never which check it touched, and a
     # model that did not load compared equal (S-21). Which gates are current is
@@ -10012,7 +10180,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _doctor_trace_row(results, root, ledger, model, projection, resolution, registry, view,
                       built)
     _doctor_seal_row(results, registry,
-                     _context(root, ledger, model, projection, ALL_TIERS, quiet=True))
+                     _context(root, ledger, model, projection, ALL_TIERS, quiet=True),
+                     root=root, resolution=resolution, projection=projection, ledger=ledger,
+                     tier=_doctor_tier(args))
 
     site_info = _site_state(root, resolved=(
         view, registry, resolution,
@@ -10563,6 +10733,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("doctor", parents=[common],
                        help="environment, model, packs, gates and ledger integrity")
+    p.add_argument("--tier", type=int, default=None,
+                   help=f"the costliest pack controls the sealed-fixtures row runs against "
+                        f"this project's params: {DOCTOR_SEAL_TIER} instant (default), 1 "
+                        f"build, 2 solve, 3 external; above it, a control on record at its "
+                        f"version is read, not run")
     p.set_defaults(func=cmd_doctor)
 
     _tag_subparsers(parser)
