@@ -36,7 +36,7 @@ facts the person writes in `modes`.
 | `b` | What it is | Modes it takes |
 |---|---|---|
 | `{board, ref, value}` | a second connector on a board this pack reads | all |
-| `{battery: id}` | the battery's pigtail; `a` must be the battery's own connector | `reversed` |
+| `{battery: id}` | the battery's pigtail; `a` must be the battery's own connector | `reversed`, `cell_reversed` |
 | `{external: text}` | something outside every board here: a charger's plug, a soldered lead | `bridges` |
 
 Only two connectors on boards join nets (`map`). A battery's pigtail meets the
@@ -55,7 +55,7 @@ Each mode is a physical event. The rule enumerates every placement it allows.
 | `{offset: k}` | a's unshrouded header off by up to k positions | shifts of -k..k but 0; `rows: 2` shifts by columns, on KiCad's zigzag numbering only |
 | `{slide: [pins]}` | an audio plug on its way in | a's contacts, the deepest first: each plug contact passes the shallower ones |
 | `{bridges: [[p, q]]}` | a wrong plug that shorts two of a's contacts | p and q joined, beside the nominal map |
-| `cell_reversed` | one loose cell of a holder turned (a battery mating only) | counted as the cell's hazard ("A reversed cell") |
+| `cell_reversed` | one loose cell of a holder turned (a battery mating only) | the string at n - 2 cells' voltage; a hazard when a current is driven through the turned cell ("A reversed cell") |
 
 The modes that act on one housing act on `a`. When `b` can be off or slid too,
 state the mating a second time with its ends swapped. `slide` and `bridges`
@@ -151,13 +151,29 @@ backwards). An eFuse that blocks reverse current is stated as a `reverse_block`.
 
 **One loose cell turned.** A holder of loose cells, two or more in series, can
 take one of them the wrong way round. The mode is `cell_reversed`, on a battery
-mating only. The board then sees the string the right way round, at two cells'
-voltage fewer (none, for two cells), so nothing on the board is driven
-backwards; the turned cell is, by the others (IEC 60086-5, the incorrect
-installation of a primary cell). No element on a board blocks that, so the rule
-counts it as a raw hazard and says so: a holder that keys each cell is the
+mating only. The turned cell takes its voltage off the string and adds it
+against the rest, so the board sees the string the right way round at n - 2
+cells' voltage, and nothing on the board is driven backwards. The turned cell is
+a hazard when a current runs through it backwards, which charges a primary cell
+(IEC 60086-5, the incorrect installation of a primary cell):
+
+- **Three or more in series**: the board draws its current from n - 2 cells
+  through the turned one. A raw hazard.
+- **Two in series**: the two cells cancel. The loop holds no voltage, the board
+  sees 0 V, and no current flows unless something drives the string. The rule
+  sees two things that do: another string in parallel (its two cells drive the
+  turned string), and a charger stated for the battery (it charges the string
+  it reads as empty, through the turned cell backwards). Either is a raw hazard.
+  With neither, it is no hazard, and the detail says so, naming a
+  `reverse_block` that counts, since it keeps the board's other sources off the
+  string.
+
+No element on a board blocks a raw one: a holder that keys each cell is the
 remedy, and a record for such a holder states the mode no more. A one-cell
-battery is refused: `reversed` turns it whole.
+battery is refused: `reversed` turns it whole. (What slipped through, holdout
+round 2: any string of two or more was counted, so two AAA cells in an open
+holder behind a series Schottky read Failing once the mode was stated, and the
+project left the mode out.)
 
 ## The baseline, worked
 
@@ -191,6 +207,10 @@ The cell meets BT1 in a keyed housing (`modes: []`), J1 meets a charger's plug
 - `narrower` or `offset` on a footprint whose pad numbers do not run in order
   along its row (a shield tab given the next number);
 - a USB Power Delivery contract above 5 V;
+- a source that drives a two-cell string through a part (a power path, a
+  regulator that feeds back) while one cell is turned: the rule reads nets, not
+  paths through parts, so it counts no hazard there. A charger it reads only
+  from `pcb_protectors`;
 - the arc as a plug goes in, and hot-plug damage.
 
 ## Sources

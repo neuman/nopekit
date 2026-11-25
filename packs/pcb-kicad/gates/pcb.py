@@ -3080,6 +3080,45 @@ _COURTYARD_ITEMS = ("fp_line", "fp_rect", "fp_poly", "fp_circle", "fp_arc")
 #: kicad-cli places it as it places any model.
 HEIGHT_DIR = "nopekit-heights"
 
+#: How far a through-hole part's leads stand past the board's far face when its
+#: declared height states no ``lead_mm``: 2.5 mm, the longest lead protrusion
+#: IPC-A-610 accepts on a class 2 product (1.5 mm on class 3), as the design of
+#: this rule read the standard's lead-protrusion criterion for supported holes.
+#: Not re-read here: the standard is sold, not published, and the free pages
+#: read on 2026-11-25 did not quote it. So the verdict names each part fitted
+#: at it, and a project states ``lead_mm`` from the part's drawing or the
+#: assembly's (KiCad's own pin header model, for one, stands 1.32 mm past a
+#: 1.6 mm board). What slipped through (holdout round 2): a declared height
+#: was a box on the part's own side alone, so the leads of eight switches,
+#: which the layer under the board was cut for, were never fitted, and a pass
+#: on declared heights said nothing of them. *Rejected:* no lead (the false
+#: pass); requiring ``lead_mm`` of every through-hole part (a skip on each
+#: borrowed board, where a bound with its source stands in as a model does);
+#: 1.5 mm, class 3's (shorter than a class 2 board may carry, so its pass
+#: would say more than it ran); the lead's length as delivered (no record
+#: holds it).
+LEAD_DEFAULT_MM = 2.5
+
+#: The suffix of a layer name that opens the solder mask (``F.Mask``,
+#: ``B.Mask``, ``*.Mask``): a plated hole whose pad names none is covered by
+#: the mask on both sides, a via, and holds no lead. Measured on the footprint
+#: library KiCad 9.0.9 installs (2026-11-25, read with this pack's parser):
+#: all 96188 plated pads of its ``through_hole`` footprints open the mask, and
+#: the 4675 plated pads that open none are all in ``smd`` footprints, net
+#: ties and printed antennas: thermal vias under an exposed pad, an edge-mount
+#: SMA's ground vias, a net tie's holes, an antenna's feed via. *Rejected:*
+#: the ``pad_prop_heatsink`` mark alone (1200 of those vias carry no mark).
+LEAD_MASK = ".Mask"
+
+#: How far past the board file's thickness KiCad's export puts the far face a
+#: lead stands past: kicad-cli 9.0.9 seats a part on top at z T - 0.005 and one
+#: underneath at -0.085 (measured on the baseline at 1.6 and 1.0 mm: 1.595 and
+#: 0.995 on top, -0.085 under it both times), so the two faces a lead runs
+#: between are T + 0.08 apart in the export. *Rejected:* T alone (a lead
+#: 0.08 mm short of what its record states, which reads a gap that wide);
+#: measuring the export first (a second export each run).
+FAR_FACE_EXTRA_MM = 0.08
+
 #: How far past its part's own box (the part's bounding box as placed, in the
 #: enclosure's frame) a contact region may take out enclosure material, in the
 #: claim's limits. Material more than one limit past the box cannot come within
@@ -3450,15 +3489,29 @@ def _contacts(raw, label: str) -> dict:
     return out
 
 
+#: The outlines a declared height may state, one of them, each in the
+#: footprint's own frame (x right, y down, mm). What slipped through (holdout
+#: round 2): ``box_mm`` was the only one, so a round 15 mm speaker went in as a
+#: 15 mm square, and its corner read 0.025 mm^3 inside a cover its round body
+#: cleared by 1.9 mm. *Rejected:* a box always (the wrong FAIL); the courtyard
+#: read as its own shape (a courtyard is drawn as many items, and its box is a
+#: bound; a part with a round courtyard states its circle).
+HEIGHT_OUTLINES = ("box_mm", "circle_mm", "polygon_mm")
+
+
 def _heights(raw, label: str) -> dict:
-    """``{ref: {h, source, box_mm?}}``: the height above the board of a part
-    whose 3D model is not on this host (none named, or none found), where the
-    number comes from (a datasheet's seated height), and, for a part with no
-    courtyard, its outline: ``box_mm`` ``[[x0, y0], [x1, y1]]`` in mm in the
-    footprint's own frame (as KiCad's footprint editor shows it: x right, y
-    down). (What slipped through, a holdout run: a part with no courtyard could
-    take no height at all, so a board borrowed from another machine had to be
-    edited to be fitted.)"""
+    """``{ref: {h, source, box_mm? | circle_mm? | polygon_mm?, lead_mm?}}``: the
+    height above the board of a part whose 3D model is not on this host (none
+    named, or none found), where the number comes from (a datasheet's seated
+    height), and, for a part with no courtyard or one whose courtyard's box is
+    not its shape, its outline in mm in the footprint's own frame (as KiCad's
+    footprint editor shows it: x right, y down): ``box_mm`` ``[[x0, y0], [x1,
+    y1]]``, ``circle_mm`` ``{center: [x, y], d}``, or ``polygon_mm`` ``[[x, y],
+    ...]`` (:data:`HEIGHT_OUTLINES`). ``lead_mm`` is how far a through-hole
+    part's leads stand past the board's far face (:data:`LEAD_DEFAULT_MM` when
+    unstated). (What slipped through, a holdout run: a part with no courtyard
+    could take no height at all, so a board borrowed from another machine had to
+    be edited to be fitted.)"""
     if raw is None:
         return {}
     if not isinstance(raw, dict):
@@ -3466,13 +3519,26 @@ def _heights(raw, label: str) -> dict:
     out = {}
     for ref, rec in raw.items():
         at = f"{label}[{ref!r}]"
-        _record(rec, at, ("h", "source"), ("box_mm",))
+        _record(rec, at, ("h", "source"), (*HEIGHT_OUTLINES, "lead_mm"))
         h = _number(rec["h"], f"{at}.h")
         if not h > 0.0:
             raise _FitError(f"{at}.h is {h:g}: a height is above 0 mm")
         if not isinstance(rec["source"], str) or not rec["source"].strip():
             raise _FitError(f"{at}.source is empty: say where the height comes from")
         out[ref] = {"h": h, "source": rec["source"].strip()}
+        given = [k for k in HEIGHT_OUTLINES if k in rec]
+        if len(given) > 1:
+            raise _FitError(f"{at} states {' and '.join(given)}: give one outline")
+        if "lead_mm" in rec:
+            lead = _number(rec["lead_mm"], f"{at}.lead_mm")
+            if lead < 0.0:
+                raise _FitError(f"{at}.lead_mm is {lead:g}: how far the leads stand past the "
+                                f"board's far face, 0 or more")
+            out[ref]["lead_mm"] = lead
+        if "circle_mm" in rec:
+            out[ref]["circle"] = _circle_mm(rec["circle_mm"], f"{at}.circle_mm")
+        if "polygon_mm" in rec:
+            out[ref]["polygon"] = _polygon_mm(rec["polygon_mm"], f"{at}.polygon_mm")
         if "box_mm" in rec:
             box = rec["box_mm"]
             if (not isinstance(box, list) or len(box) != 2
@@ -3484,6 +3550,137 @@ def _heights(raw, label: str) -> dict:
                 raise _FitError(f"{at}.box_mm is {box!r}: each low corner must be below its "
                                 f"high one")
             out[ref]["outline"] = (x0, y0, x1, y1)
+    return out
+
+
+def _circle_mm(raw, label: str) -> tuple[float, float, float]:
+    """``(cx, cy, r)`` of a ``circle_mm`` ``{center: [x, y], d}``."""
+    _record(raw, label, ("center", "d"))
+    c = raw["center"]
+    if not isinstance(c, list) or len(c) != 2:
+        raise _FitError(f"{label}.center is {c!r}: give [x, y] in mm, in the footprint's own "
+                        f"frame (x right, y down)")
+    cx, cy = (_number(v, f"{label}.center") for v in c)
+    d = _number(raw["d"], f"{label}.d")
+    if not d > 0.0:
+        raise _FitError(f"{label}.d is {d:g}: a diameter is above 0 mm")
+    return cx, cy, d / 2.0
+
+
+def _polygon_mm(raw, label: str) -> list[tuple[float, float]]:
+    """The points of a ``polygon_mm`` ``[[x, y], ...]``: three or more, no two
+    in a row the same, no two edges crossing, an area above 0. A polygon whose
+    edges cross is no outline: OpenCascade would build a face it cannot
+    measure, an error after the export, where this one comes before it."""
+    if (not isinstance(raw, list) or len(raw) < 3
+            or not all(isinstance(p, list) and len(p) == 2 for p in raw)):
+        raise _FitError(f"{label} is {raw!r}: give three or more [x, y] in mm, in the "
+                        f"footprint's own frame (x right, y down), in order round the outline")
+    pts = [tuple(_number(v, label) for v in p) for p in raw]
+    n = len(pts)
+    if any(pts[i] == pts[(i + 1) % n] for i in range(n)):
+        raise _FitError(f"{label} repeats a point: give each corner once")
+    area = sum(pts[i][0] * pts[(i + 1) % n][1] - pts[(i + 1) % n][0] * pts[i][1]
+               for i in range(n)) / 2.0
+    if abs(area) < 1e-9:
+        raise _FitError(f"{label} encloses no area")
+
+    def cross(o, a, b) -> float:
+        return (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+
+    for i in range(n):
+        a, b = pts[i], pts[(i + 1) % n]
+        for j in range(i + 1, n):
+            if (j + 1) % n == i or j == (i + 1) % n:
+                continue                # edges that share a corner
+            c, e = pts[j], pts[(j + 1) % n]
+            if cross(a, b, c) * cross(a, b, e) < 0 and cross(c, e, a) * cross(c, e, b) < 0:
+                raise _FitError(f"{label}: its edges {i + 1} and {j + 1} cross: give the "
+                                f"corners in order round the outline")
+    return pts
+
+
+def _lead_holes(fp: list) -> list[tuple[float, float, float]]:
+    """``[(x, y, d)]``, mm, for each plated hole of footprint ``fp`` a lead can
+    pass through: its centre in the footprint's own frame (y down; a footprint
+    flipped to ``B.Cu`` has its stored y negated back, as
+    :func:`_courtyard_box` and ``_kicad.footprint_land`` read it) and a
+    diameter that holds the lead: the drill's (a lead fits its hole), an oval
+    drill's longer side, and a drill offset from its pad's centre widened by
+    twice the offset (the offset's turn with the pad is then not needed). A hole
+    with no plating (a mounting hole, a peg's) holds no lead, and neither does
+    a via in a footprint: one marked ``pad_prop_heatsink`` (KiCad's word for a
+    heat-sink pad, a thermal via under an exposed pad) or one whose pad opens
+    no solder mask on either side (:data:`LEAD_MASK`: the mask covers it, so no
+    lead goes in).
+
+    What slipped through (review of J2): every plated hole was a lead hole, so
+    a DFN fitted at its declared height, whose footprint (``attr smd``) puts
+    six 0.2 mm thermal vias under its pad, stood a 2.5 mm rod under the board
+    at each via, named under "leads at the default", and a floor 2 mm below a
+    sound board read a collision. *Rejected:* every plated hole of an ``attr
+    smd`` footprint (a USB receptacle's shield tabs are plated, opened and
+    through the board); a hole inside an SMD pad of its own number (KiCad's
+    micro-B receptacles sit their shield tabs inside SMD lands of the shield's
+    number); a smallest drill (a USB-C receptacle in KiCad's library takes
+    its leads in 0.4 mm holes, its Mini-Fit Sr connectors' vias are 0.3 mm). A
+    via that opens the mask and carries no mark is still fitted as a lead:
+    KiCad's ``*_ThermalVias`` power connectors put such vias beside their own
+    pins (enclosure-fit.md, "Leads")."""
+    back = str(K.value(fp, "layer", default="")) == "B.Cu"
+    holes = []
+    for pad in K.children(fp, "pad"):
+        if len(pad) < 3 or str(pad[2]) != "thru_hole":
+            continue
+        if any(len(x) > 1 and str(x[1]) == "pad_prop_heatsink"
+               for x in K.children(pad, "property")):
+            continue
+        if not any(str(name).endswith(LEAD_MASK) for name in (K.child(pad, "layers") or [])[1:]):
+            continue
+        drill, at = K.child(pad, "drill"), K.child(pad, "at")
+        if drill is None or at is None:
+            continue
+        sizes, offset = [], 0.0
+        for item in drill[1:]:
+            if isinstance(item, list) and K.head(item) == "offset":
+                offset = math.hypot(float(item[1]), float(item[2]))
+            elif not isinstance(item, list) and str(item) != "oval":
+                sizes.append(float(item))
+        if not sizes or max(sizes) <= 0.0:
+            continue
+        x, y = float(at[1]), float(at[2])
+        holes.append((x, -y if back else y, max(sizes) + 2.0 * offset))
+    return holes
+
+
+def _board_thickness(tree: list) -> float | None:
+    """The board file's thickness, mm (``(general (thickness T))``), or None."""
+    general = K.child(tree, "general")
+    value = K.value(general, "thickness") if general is not None else None
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _height_solids(rec: dict, thickness: float | None) -> list[dict]:
+    """The solids of a part fitted at its declared height, in the footprint's
+    model frame (x right, y UP, z up from the seating plane): its outline raised
+    ``h``, and a cylinder under it for each lead, from the seating plane to
+    ``lead_mm`` past the board's far face (:data:`FAR_FACE_EXTRA_MM`)."""
+    h = rec["h"]
+    if "circle" in rec:
+        cx, cy, r = rec["circle"]
+        out = [{"cylinder": {"at": [cx, -cy], "r": r, "z": [0.0, h]}}]
+    elif "polygon" in rec:
+        out = [{"prism": {"points": [[x, -y] for x, y in rec["polygon"]], "z": [0.0, h]}}]
+    else:
+        x0, y0, x1, y1 = rec["box"]
+        out = [{"box": [[x0, -y1, 0.0], [x1, -y0, h]]}]
+    if rec.get("leads"):
+        tip = -(thickness + FAR_FACE_EXTRA_MM + rec["lead"])
+        out += [{"cylinder": {"at": [x, -y], "r": d / 2.0, "z": [tip, 0.0]}}
+                for x, y, d in rec["leads"]]
     return out
 
 
@@ -3512,6 +3709,12 @@ class _Fit:
     #: ``{variable: absolute folder}``, the project's ``pcb_model_dirs``
     #: (:data:`MODEL_DIRS_KEY`): where a model path naming the variable is found.
     model_dirs: dict = dataclasses.field(default_factory=dict)
+    #: The board file's thickness, mm: how far a declared part's leads run
+    #: before they stand past the far face.
+    thickness: float | None = None
+    #: Parts fitted at a declared height whose leads stand at
+    #: :data:`LEAD_DEFAULT_MM`, no ``lead_mm`` stated: named in the verdict.
+    default_leads: list = dataclasses.field(default_factory=list)
 
     def name(self, ref: str) -> str:
         return f"{self.id}:{ref}" if self.id else ref
@@ -3599,6 +3802,7 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
                         f"{K.MIN_BOARD_VERSION} (KiCad 6): this reader finds footprints "
                         f"from KiCad 6 on")
     parts, models, unasked = _parts_and_models(tree)
+    fit.thickness = _board_thickness(tree)
     on_board = {K.footprint_ref(fp)[0] for fp in K.children(tree, "footprint")}
     board_dir = os.path.dirname(os.path.abspath(fit.board))
 
@@ -3632,12 +3836,35 @@ def _read_board(ctx: GateContext, gid: str, fit: _Fit) -> str | None:
         if shown:
             fit.stand_in[ref] = shown[0]
         fp = next(f for f in K.children(tree, "footprint") if K.footprint_ref(f)[0] == ref)
-        box = rec.get("outline") or _courtyard_box(fp)
+        if "circle" in rec:
+            cx, cy, r = rec["circle"]
+            box = (cx - r, cy - r, cx + r, cy + r)
+        elif "polygon" in rec:
+            xs, ys = zip(*rec["polygon"])
+            box = (min(xs), min(ys), max(xs), max(ys))
+        else:
+            box = rec.get("outline") or _courtyard_box(fp)
         if box is None:
             raise _FitError(f"{label}{ref} has a declared height and no courtyard on its own "
-                            f"side: give its outline as box_mm [[x0, y0], [x1, y1]] in the "
-                            f"footprint's frame, or draw its courtyard")
+                            f"side: give its outline as box_mm [[x0, y0], [x1, y1]], "
+                            f"circle_mm {{center: [x, y], d}} or polygon_mm [[x, y], ...] in "
+                            f"the footprint's frame, or draw its courtyard")
         rec["box"] = box
+        # A through-hole part's leads stand under the board, on the side its
+        # body is not: a cylinder for each plated hole, the drill wide, to
+        # lead_mm past the far face (LEAD_DEFAULT_MM unstated, and named).
+        holes = _lead_holes(fp)
+        if not holes and "lead_mm" in rec:
+            raise _FitError(f"{label}{ref} states lead_mm and its footprint has no plated "
+                            f"hole for a lead to pass through")
+        if holes:
+            if fit.thickness is None:
+                raise _FitError(f"{label}the board states no thickness ((general (thickness "
+                                f"T))), so {ref}'s leads cannot be placed under it")
+            rec["leads"] = holes
+            rec["lead"] = rec.get("lead_mm", LEAD_DEFAULT_MM)
+            if "lead_mm" not in rec:
+                fit.default_leads.append(ref)
     for ref in fit.contacts:
         if ref != BODY:
             # A footprint with no type and no model that takes a declared height
@@ -3920,11 +4147,10 @@ def _export(ctx: GateContext, gid: str, fit: _Fit, timeout: float, how: str = ""
         os.makedirs(os.path.join(stage, HEIGHT_DIR), exist_ok=True)
         boxes = []
         for n, (ref, rec) in enumerate(sorted(boxed.items())):
-            x0, y0, x1, y1 = rec["box"]
             name = f"{n:03d}_{re.sub(r'[^A-Za-z0-9_-]', '_', ref)}.step"
             path = os.path.abspath(os.path.join(stage, HEIGHT_DIR, name))
             boxes.append({"ref": ref, "path": path,
-                          "lo": [x0, -y1, 0.0], "hi": [x1, -y0, rec["h"]]})
+                          "solids": _height_solids(rec, fit.thickness)})
             fp = next(f for f in K.children(tree, "footprint") if K.footprint_ref(f)[0] == ref)
             # A model found nowhere here leaves the staged copy: the box is the
             # part's one body, on whatever host kicad-cli could find more.
@@ -4005,8 +4231,9 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
     that shows a model, whatever its type; not DNP) must name a model and arrive
     in the export under its reference, or have a declared height
     (``pcb_part_heights_mm``: its courtyard's box, or the outline it states,
-    raised to that height, stands in for its body where its model is found
-    nowhere on this host), or the gate skips naming it. A part that truly has
+    raised to that height, with a through-hole part's leads under the board,
+    stands in for its body where its model is found nowhere on this host), or
+    the gate skips naming it. A part that truly has
     no body above the board (an antenna drawn in copper) goes in
     ``pcb_enclosure_bodiless``, by reference, a recorded statement. A footprint
     with no type and no model is not asked for, and the verdict names it.
@@ -4253,6 +4480,11 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
     unused = [f.name(r) for f, _s, _l in exported.values() for r in sorted(f.unused)]
     if unused:
         detail += f"; declared height not used, its model found: {', '.join(unused[:6])}"
+    leads = [f.name(r) for f, _s, _l in exported.values() for r in sorted(f.default_leads)]
+    if leads:
+        detail += (f"; leads at the default {LEAD_DEFAULT_MM:g} mm past the board, no lead_mm "
+                   f"stated: {', '.join(leads[:6])}"
+                   + (f" and {len(leads) - 6} more" if len(leads) > 6 else ""))
     unasked = [f.name(r) for f, _s, _l in exported.values() for r in f.unasked]
     if unasked:
         detail += (f"; not fitted (no type, no 3D model): {', '.join(unasked[:6])}"

@@ -35,6 +35,11 @@ by firmware or a register is not on the copper: the rule skips, naming it,
 unless something it can see fails. Each function is judged on its own, so a
 firmware current never hides a voltage the board sets.
 
+**A cell value not stated is named, never a crash.** Every key of a battery's
+``cell`` is optional (a cell nobody has chosen is ``{}``). Each rule judges all
+it can without the value first, and skips, naming each key it lacks, only when
+nothing it can see fails (:class:`Unstated`).
+
 **What slipped through** the three rules these replace (the review of the
 branch's 0.2.0 cut): a charger with no safety timer read FAIL, though IEC
 62368-1 M.4.2 measures voltage, current and temperature and asks for none; a
@@ -163,6 +168,31 @@ def _error(gid: str, why: str) -> Verdict:
     return Verdict(gate=gid, passed=False, error=why)
 
 
+class Unstated(RecordError):
+    """A cell value a rule needs that the battery's record leaves out. Every key
+    of ``cell`` is optional, so a cell nobody has chosen is stated ``"cell":
+    {}`` (references/battery.md, "Every field"). Each rule judges all it can
+    without the value first (a defeat, a missing overcharge stop, a cutoff that
+    opens nothing, a protector out of place, the overload band), and only then
+    skips, naming each key it lacks: a missing datasheet value is a missing
+    input, never a crash. A value that is there and wrong still errors.
+
+    What slipped through (holdout round 2): ``pcb.charge_limits`` and
+    ``pcb.discharge_cutoff`` read the cell's value before anything else, so a
+    cell stated ``{}`` made both read errored, two crashes from gates no claim
+    bound, where round 1 read skipped; and a charger with nothing independent
+    of it to stop an overcharge, a fail a person can act on, was never
+    reached. *Rejected:* the error battery.md documented ("errors, naming the
+    key"), louder than a missing input; a skip before the rest is judged (it
+    would hide a fail the rule can see, as a firmware skip once did)."""
+
+
+def _unstated_reason(missing: list[str]) -> str:
+    """The skip's words for the cell values a rule lacked, each key named."""
+    return (f"not stated, so not judged: {'; '.join(dict.fromkeys(missing))}; state each "
+            f"from the cell's datasheet")
+
+
 # --------------------------------------------------------------------------- #
 # the records, as each rule reads them
 # --------------------------------------------------------------------------- #
@@ -204,12 +234,13 @@ class Battery:
             self.ntc = P.NTC(rec["ntc"], f"{label}.ntc")
 
     def value(self, key: str, why: str):
-        """The cell's ``key``, held to its kind; RecordError naming what reads it
-        when the record lacks it."""
+        """The cell's ``key``, held to its kind; :class:`Unstated`, naming what
+        reads it, when the record lacks it: each rule turns that into a skip
+        once it has judged what it can without the value."""
         if key not in self.cell:
             # The key quoted: a battery whose id is "cell" read "pcb_batteries.cell
             # .cell has no cell" (a holdout run), an id and a key of one name.
-            raise RecordError(f"{self.label}.cell has no key {key!r}: {why}")
+            raise Unstated(f"{self.label}.cell has no key {key!r}: {why}")
         where = f"{self.label}.cell.{key}"
         if key in ("charge_temp_c", "short_a", "internal_resistance_ohm"):
             return P.band(self.cell[key], where, positive=key != "charge_temp_c")
@@ -477,7 +508,9 @@ def charge_temperature(ctx: GateContext) -> Verdict:
 
     A defeat fails before the cell's window is read, so without it: no element
     senses the cell, or a charger whose record names only its sense pin sees
-    only fixed resistors from its own pins (:func:`_sense_only`)."""
+    only fixed resistors from its own pins (:func:`_sense_only`). With no
+    defeat, a cell whose record has no ``charge_temp_c`` skips, naming it
+    (:class:`Unstated`); one whose ``charge_temp_c`` is there and wrong errors."""
     gid = "pcb.charge_temperature"
     try:
         got = _design(ctx, gid)
@@ -493,34 +526,45 @@ def charge_temperature(ctx: GateContext) -> Verdict:
         rows = [_battery_window(ctx, d, b, protectors) for b in judged]
     except ReaderLimit as exc:
         return _skip(gid, str(exc))
+    except Unstated as exc:
+        return _skip(gid, _unstated_reason([str(exc)]))
     except RecordError as exc:
         return _error(gid, str(exc))
     faults = [f"{b.id}: {why}" for b, row in zip(judged, rows) for why in row["faults"]]
     blind = [f"{b.id}: {', '.join(row['firmware'])}" for b, row in zip(judged, rows)
-             if not row["faults"] and row["headroom"] is None and row["firmware"]]
+             if not row["faults"] and row["headroom"] is None and row["firmware"]
+             and not row["unstated"]]
+    missing = [row["unstated"] for row in rows if row["unstated"]]
     ev = _evidence(ctx, "charge_temperature", {
         "boards": sorted(d.boards),
         "batteries": {b.id: {k: v for k, v in row.items() if k != "line"}
                       for b, row in zip(judged, rows)}})
+    unjudged = (f"; not judged: {_unstated_reason(missing)}" if missing else "")
     if faults:
         return Verdict(gate=gid, passed=False, measured=None, limit=0.0, comparator=">=",
-                       units="K", evidence=ev, detail="; ".join(faults))
+                       units="K", evidence=ev, detail="; ".join(faults) + unjudged)
     seen = [r["headroom"] for r in rows if r["headroom"] is not None]
     value = round(min(seen), 2) if seen else None
-    # A cell held only by firmware skips, unless another cell here fails: a
-    # skip beside a fail would hide the fail. (What slipped through this rule's
-    # first cut: the skip was returned before the other cells were judged, so
-    # a cell charged past its window read Skipped beside a firmware-only one.)
-    if blind and (value is None or value >= 0.0):
+    # A cell held only by firmware, or one whose window is not stated, skips,
+    # unless another cell here fails: a skip beside a fail would hide the
+    # fail. (What slipped through this rule's first cut: the skip was returned
+    # before the other cells were judged, so a cell charged past its window
+    # read Skipped beside a firmware-only one.)
+    if (blind or missing) and (value is None or value >= 0.0):
+        why = []
+        if blind:
+            why.append(f"only firmware stops charging outside the window ("
+                       f"{'; '.join(blind)}): this rule cannot see it; settle it with a "
+                       f"physical claim at the window's edges")
+        if missing:
+            why.append(f"the cell's window is {_unstated_reason(missing)}")
         return Verdict(gate=gid, passed=False, skipped=True, evidence=ev,
-                       skip_reason=f"only firmware stops charging outside the window ("
-                                   f"{'; '.join(blind)}): this rule cannot see it; settle it "
-                                   f"with a physical claim at the window's edges")
+                       skip_reason="; ".join(why))
     detail = "; ".join(r["line"] for r in rows if r["line"])
     if blind:
         detail += f"; firmware only, not judged: {'; '.join(blind)}"
     return Verdict(gate=gid, passed=value >= 0.0, measured=value, limit=0.0,
-                   comparator=">=", units="K", detail=detail, evidence=ev)
+                   comparator=">=", units="K", detail=detail + unjudged, evidence=ev)
 
 
 def _battery_window(ctx, d, b: Battery, protectors: list) -> dict:
@@ -530,16 +574,22 @@ def _battery_window(ctx, d, b: Battery, protectors: list) -> dict:
     # input sees a fixed divider) fails without it. What slipped through (a
     # holdout run): the window was read first, so a design whose cell has no
     # datasheet could not be shown to have its charger's thermistor input tied
-    # off by two fixed resistors.
+    # off by two fixed resistors. Only a window left out waits (Unstated); one
+    # that is there and wrong (one number, a FILL: from the draft, a reversed
+    # band) errors here, as charge_limits and discharge_cutoff error on theirs.
+    # What slipped through (review of J2): this caught every RecordError, so
+    # once the missing window turned from an error into a skip, a malformed
+    # one read Skipped, "not stated, so not judged", a typo filed under a
+    # missing input's quieter word.
     try:
         lo, hi = b.value("charge_temp_c", "the widest window the cell's datasheet allows "
                                           "any charge in, in C")
         unstated = ""
-    except RecordError as exc:
+    except Unstated as exc:
         lo = hi = None
         unstated = str(exc)
     row = {"window_c": None if unstated else [lo, hi], "faults": [], "firmware": [],
-           "elements": [], "headroom": None, "line": ""}
+           "elements": [], "headroom": None, "line": "", "unstated": ""}
     cold, hot, flags = [], [], []
     for p in (p for p in protectors if p.battery is b and "charge_temp" in p.functions):
         if p.where == "firmware":
@@ -572,7 +622,10 @@ def _battery_window(ctx, d, b: Battery, protectors: list) -> dict:
                                  "element senses its temperature")
         return row
     if unstated:
-        raise RecordError(unstated)
+        # The elements are all judged, and none fails: the headroom is the one
+        # thing left, and it needs the window (Unstated).
+        row["unstated"] = unstated
+        return row
     t_cold, who_cold = max(cold)
     t_hot, who_hot = min(hot)
     row["headroom"] = min(t_cold - lo, hi - t_hot)
@@ -935,14 +988,21 @@ def charge_limits(ctx: GateContext) -> Verdict:
     judged. A charge voltage or current set by firmware is named and not
     judged, and the charger's other function still is: the rule skips only
     when nothing it can see fails. NiMH has no constant-voltage phase and is
-    not judged; a charger on a primary cell fails."""
+    not judged; a charger on a primary cell fails.
+
+    Each ratio reads only its own cell value: the voltage ``upper_charge_v``,
+    the current ``charge_a_max``, and a ratio whose charger function is set by
+    firmware reads none. A value the record leaves out is named (:class:
+    `Unstated`): a ratio past 1.0 still fails beside it, and so does the single
+    fault, which needs no cell value; otherwise the rule skips, naming each
+    key."""
     gid = "pcb.charge_limits"
     try:
         got = _design(ctx, gid)
         if isinstance(got, Verdict):
             return got
         d, batteries, protectors, _ = got
-        rows, faults, blind, notes = [], [], [], []
+        rows, faults, blind, notes, missing = [], [], [], [], []
         for b in batteries.values():
             chargers = _charged_here(b, protectors)
             if not chargers:
@@ -955,21 +1015,30 @@ def charge_limits(ctx: GateContext) -> Verdict:
                 notes.append(f"{b.id} ({b.chemistry}) has no constant-voltage phase: not "
                              f"judged")
                 continue
-            ulcv = b.value("upper_charge_v", "the cell's upper limit charging voltage, "
-                                             "with its tolerance")
-            i_cell = b.value("charge_a_max", "the cell's maximum charge current")
-            _plausible_v(ulcv, f"{b.label}.cell.upper_charge_v")
-            _plausible_a(i_cell, f"{b.label}.cell.charge_a_max")
-            i_pack = i_cell * b.parallel
+            # A value the cell's record states is held to its kind and band
+            # whether or not a ratio reads it: a typo is an error. One it leaves
+            # out is named only where a ratio needs it (below).
+            ulcv, no_v = _cell_value(b, "upper_charge_v", "the cell's upper limit charging "
+                                                          "voltage, with its tolerance")
+            i_cell, no_a = _cell_value(b, "charge_a_max", "the cell's maximum charge current")
+            if ulcv is not None:
+                _plausible_v(ulcv, f"{b.label}.cell.upper_charge_v")
+            if i_cell is not None:
+                _plausible_a(i_cell, f"{b.label}.cell.charge_a_max")
+            i_pack = None if i_cell is None else i_cell * b.parallel
             for c in chargers:
                 v_cell, i_max, how, firmware = _charger(d, c, b)
                 if firmware:
                     blind.append(f"{b.id}: {firmware}")
                 seen = []
-                if v_cell is not None:
+                if v_cell is not None and ulcv is None:
+                    missing.append(no_v)
+                elif v_cell is not None:
                     seen.append((v_cell / ulcv, f"{v_cell:.4g} V of the cell's {ulcv:g} V "
                                                 f"({v_cell / ulcv:.4f})"))
-                if i_max is not None:
+                if i_max is not None and i_pack is None:
+                    missing.append(no_a)
+                elif i_max is not None:
                     whose = "its" if seen else "the cell's"
                     seen.append((i_max / i_pack, f"{i_max:.4g} A of {whose} {i_pack:g} A "
                                                  f"({i_max / i_pack:.4f})"))
@@ -984,35 +1053,50 @@ def charge_limits(ctx: GateContext) -> Verdict:
                 blind.append(f"{b.id}: the overcharge stop {ov[len('FIRMWARE:'):]}")
             else:
                 notes.append(f"{b.id}'s overcharge under a single fault: {ov}")
-        if not rows and not faults and not blind:
+        if not rows and not faults and not blind and not missing:
             return _skip(gid, "nothing in pcb_protectors charges a lithium cell in "
                               "pcb_batteries" + (f" ({'; '.join(notes)})" if notes else ""))
     except ReaderLimit as exc:
         return _skip(gid, str(exc))
+    except Unstated as exc:
+        return _skip(gid, _unstated_reason([str(exc)]))
     except RecordError as exc:
         return _error(gid, str(exc))
+    missing = list(dict.fromkeys(missing))
     ev = _evidence(ctx, "charge_limits", {
         "boards": sorted(d.boards),
         "chargers": [{"battery": b.id, "charger": c.id, "ratio": r, "said": line}
                      for r, b, c, line in rows],
-        "faults": faults, "firmware": blind, "notes": notes})
+        "faults": faults, "firmware": blind, "notes": notes, "unstated": missing})
     said = "; ".join([r[3] for r in rows] + notes
-                     + ([f"set by firmware, not judged: {'; '.join(blind)}"] if blind else []))
+                     + ([f"set by firmware, not judged: {'; '.join(blind)}"] if blind else [])
+                     + ([_unstated_reason(missing)] if missing else []))
     if faults:
         return Verdict(gate=gid, passed=False, measured=None, limit=1.0, comparator="<=",
                        units="ratio", evidence=ev,
                        detail="; ".join(faults) + (f"; {said}" if said else ""))
     value = round(max(r[0] for r in rows), 4) if rows else None
-    # Firmware skips only beside nothing that fails: a skip would hide a fail
-    # the rule can see. (What slipped through this rule's first cut: a charger
-    # with a firmware current returned before its voltage was read, so a
-    # 4.232 V charger on a 3.65 V LiFePO4 cell read Skipped, not Failing.)
-    if blind and (value is None or value <= 1.0):
+    # Firmware, or a cell value not stated, skips only beside nothing that
+    # fails: a skip would hide a fail the rule can see. (What slipped through
+    # this rule's first cut: a charger with a firmware current returned before
+    # its voltage was read, so a 4.232 V charger on a 3.65 V LiFePO4 cell read
+    # Skipped, not Failing.)
+    if (blind or missing) and (value is None or value <= 1.0):
+        why = ([f"set by firmware, which this rule cannot see: {'; '.join(blind)}"]
+               if blind else []) + ([_unstated_reason(missing)] if missing else [])
         return Verdict(gate=gid, passed=False, skipped=True, evidence=ev,
-                       skip_reason=f"set by firmware, which this rule cannot see: "
-                                   f"{'; '.join(blind)}")
+                       skip_reason="; ".join(why))
     return Verdict(gate=gid, passed=value <= 1.0, measured=value, limit=1.0, comparator="<=",
                    units="ratio", detail=said, evidence=ev)
+
+
+def _cell_value(b: Battery, key: str, why: str) -> tuple:
+    """``(the cell's value, "")``, or ``(None, the words of its absence)`` when
+    the record leaves it out (:class:`Unstated`)."""
+    try:
+        return b.value(key, why), ""
+    except Unstated as exc:
+        return None, str(exc)
 
 
 def _plausible_v(v: float, label: str, *, floor_only: bool = False) -> None:
@@ -1206,7 +1290,15 @@ def fault_current(ctx: GateContext) -> Verdict:
 
     A conductor ``protected_by: []`` is one nothing protects, and is judged
     (:func:`_unprotected`): it passes on a source of at most 15 W into any load
-    (IEC 62368-1's PS1) or a continuous rating that carries the whole fault."""
+    (IEC 62368-1's PS1) or a continuous rating that carries the whole fault.
+
+    A protector's place on the copper and the overload band (c) need no cell
+    value, and are judged first. The interrupt (b), the short circuit (d) and
+    a conductor nothing protects need the fault range or the available power
+    (``short_a``, or ``internal_resistance_ohm`` with ``discharge_v_min`` and
+    the most voltage): a conductor whose cell does not state them is named
+    (:class:`Unstated`), and the rule skips, naming each key, unless another
+    conductor fails."""
     gid = "pcb.fault_current"
     try:
         got = _design(ctx, gid, conductors=True)
@@ -1218,15 +1310,21 @@ def fault_current(ctx: GateContext) -> Verdict:
                               "tracks a cell can drive a fault through, and their ratings, are "
                               "records a person enters")
         by_id = {p.id: p for p in protectors}
-        rows, faults = [], []
+        rows, faults, missing = [], [], []
         for cid, rec in sorted(conds.items()):
-            got_c = _conductor(ctx, d, cid, rec, batteries, by_id)
+            try:
+                got_c = _conductor(ctx, d, cid, rec, batteries, by_id)
+            except Unstated as exc:
+                missing.append(f"{cid}: {exc}")
+                continue
             if isinstance(got_c, str):
                 faults.append(got_c)
             else:
                 rows.append(got_c)
     except ReaderLimit as exc:
         return _skip(gid, str(exc))
+    except Unstated as exc:
+        return _skip(gid, _unstated_reason([str(exc)]))
     except RecordError as exc:
         return _error(gid, str(exc))
     ev = _evidence(ctx, "fault_current", {
@@ -1234,15 +1332,22 @@ def fault_current(ctx: GateContext) -> Verdict:
         "formulas": {"adiabatic": "t = (K S / I)^2 ln((limit + beta) / (start + beta)), K 226, "
                                   "beta 234.5 (IEC 60949, copper)",
                      "overload": "I2 <= 1.45 Iz (IEC 60364-4-43 433.1, by analogy)"},
-        "conductors": [r[2] for r in rows], "faults": faults})
+        "conductors": [r[2] for r in rows], "faults": faults, "unstated": missing})
+    unjudged = f"; not judged: {_unstated_reason(missing)}" if missing else ""
     if faults:
         return Verdict(gate=gid, passed=False, measured=None, limit=1.0, comparator=">=",
-                       units="ratio", evidence=ev, detail="; ".join(faults))
-    value = round(min(r[0] for r in rows), 4)
+                       units="ratio", evidence=ev, detail="; ".join(faults) + unjudged)
+    value = round(min(r[0] for r in rows), 4) if rows else None
+    # A conductor whose cell lacks a value skips only beside nothing that
+    # fails: a skip would hide a fail the rule can see.
+    if missing and (value is None or value >= 1.0):
+        return Verdict(gate=gid, passed=False, skipped=True, evidence=ev,
+                       skip_reason=_unstated_reason(missing))
     return Verdict(gate=gid, passed=value >= 1.0, measured=value, limit=1.0, comparator=">=",
                    units="ratio", evidence=ev,
                    detail="; ".join(r[1] for r in rows)
-                   + " (one conductor carries the whole fault; parallel contacts get no credit)")
+                   + " (one conductor carries the whole fault; parallel contacts get no credit)"
+                   + unjudged)
 
 
 def _most_v(b: Battery) -> float:
@@ -1258,11 +1363,14 @@ def _most_v(b: Battery) -> float:
     above it, and drives more current into a fault)."""
     why = "the most voltage a fault current is driven by"
     if b.chemistry in PRIMARY:
-        if "open_circuit_v" not in b.cell:
+        if "open_circuit_v" not in b.cell and "upper_charge_v" in b.cell:
+            # A charge voltage stated for a cell that has none is a wrong value,
+            # an error; a cell that states neither lacks one (Unstated).
             raise RecordError(f"{b.label} is {b.chemistry}, a primary cell, which has no "
                               f"charge voltage: give cell 'open_circuit_v' (its fresh "
                               f"open-circuit voltage, V), or its fault current as 'short_a'")
-        return b.value("open_circuit_v", why)
+        return b.value("open_circuit_v", f"a primary cell's fresh open-circuit voltage, "
+                                         f"{why}")
     v = b.value("upper_charge_v", why)
     if "open_circuit_v" in b.cell:
         v = max(v, b.value("open_circuit_v", why))
@@ -1280,8 +1388,8 @@ def _fault_range(b: Battery) -> tuple[float, float, str]:
         v_hi = _most_v(b)
         return (v_lo * b.parallel / r[1], v_hi * b.parallel / r[0],
                 "the cell's voltage over its internal resistance")
-    raise RecordError(f"{b.label}.cell has neither 'short_a' nor 'internal_resistance_ohm': "
-                      f"the current the cell drives into a fault, as [least, most]")
+    raise Unstated(f"{b.label}.cell has neither 'short_a' nor 'internal_resistance_ohm': "
+                   f"the current the cell drives into a fault, as [least, most]")
 
 
 def _available_w(b: Battery) -> tuple[float, str]:
@@ -1296,7 +1404,8 @@ def _available_w(b: Battery) -> tuple[float, str]:
     elif "internal_resistance_ohm" in b.cell:
         i = v / (b.value("internal_resistance_ohm", "")[0] * b.series / b.parallel)
     else:
-        raise RecordError(f"{b.label}.cell has neither 'short_a' nor 'internal_resistance_ohm'")
+        raise Unstated(f"{b.label}.cell has neither 'short_a' nor 'internal_resistance_ohm': "
+                       f"the current the cell drives into a fault, as [least, most]")
     return v * i / 4.0, (f"{v:.3g} V open circuit and {i:.4g} A into a short, a quarter of "
                          f"their product")
 
@@ -1355,10 +1464,14 @@ def _conductor(ctx, d, cid: str, rec: dict, batteries: dict, by_id: dict) -> tup
     if not isinstance(ids, list):
         raise RecordError(f"{label}.protected_by: give the ids of the protectors that guard "
                           f"it, or [] when nothing does")
-    i_lo, i_hi, how = _fault_range(b)
     if not ids:
+        i_lo, i_hi, how = _fault_range(b)
         return _unprotected(cid, b, what, cap, i_lo, i_hi, how)
-    interrupt, overload, short, unreached = [], [], [], []
+    # Each protector's place first, and the overload band: neither needs a cell
+    # value. The fault range is read after them (Unstated), so a cell with no
+    # datasheet still shows a fuse beside the path, or one that trips past
+    # 1.45 Iz.
+    placed = []
     for pid in ids:
         if pid not in by_id:
             raise RecordError(f"{label}.protected_by names {pid!r}, which pcb_protectors "
@@ -1374,6 +1487,19 @@ def _conductor(ctx, d, cid: str, rec: dict, batteries: dict, by_id: dict) -> tup
         t = _trip(d, p, b, net, what)
         if isinstance(t, str):
             return f"{cid}: {t}"
+        placed.append((p, t))
+    try:
+        i_lo, i_hi, how = _fault_range(b)
+    except Unstated as exc:
+        p, t = min(placed, key=lambda pt: pt[1]["trip_a"])
+        ratio = OVERLOAD_FACTOR * cap / t["trip_a"]
+        if ratio < 1.0:
+            return (f"{cid}: {what}: its best protector, {p.name}, trips by {t['trip_a']:g} A, "
+                    f"against 1.45 x {cap:.4g} A ({ratio:.4f}): nothing guards the overload "
+                    f"band, whatever {b.id} drives (its fault range is not stated: {exc})")
+        raise
+    interrupt, overload, short, unreached = [], [], [], []
+    for p, t in placed:
         if t["interrupt_a"] is not None:
             interrupt.append((t["interrupt_a"] / i_hi, f"{p.name} interrupts "
                               f"{t['interrupt_a']:g} A of {i_hi:.4g} A"))
@@ -1587,7 +1713,12 @@ def discharge_cutoff(ctx: GateContext) -> Verdict:
     nothing. Each counts at ``v_min``, its datasheet's least detection voltage.
     With none, the rule fails with no value; with only firmware, it skips. The
     parts left on the cell side of the switch, which keep drawing after the
-    cutoff, are listed. Primary and NiMH cells are named and not judged."""
+    cutoff, are listed. Primary and NiMH cells are named and not judged.
+
+    Whether anything cuts the cell off needs no cell value, so it is judged
+    first: "nothing cuts the cell off" fails without ``discharge_v_min``. A
+    cutoff that counts is held to it, and a cell whose record has none skips,
+    naming it (:class:`Unstated`), unless another cell fails."""
     gid = "pcb.discharge_cutoff"
     try:
         got = _design(ctx, gid)
@@ -1601,7 +1732,6 @@ def discharge_cutoff(ctx: GateContext) -> Verdict:
             return _skip(gid, "no lithium cell in pcb_batteries: " + "; ".join(notes))
         rows = []
         for b in judged:
-            min_v = b.value("discharge_v_min", "the cell's discharge cut-off voltage")
             counted, ignored, firmware, drain = [], [], [], set()
             for p in protectors:
                 if p.battery is not b or "overdischarge_v" not in p.functions:
@@ -1619,19 +1749,27 @@ def discharge_cutoff(ctx: GateContext) -> Verdict:
                                 if p.where == "in-pack" else p.name))
                 if cell_side is not None:
                     drain |= set(_others(d, p.path, {p.fp.ref, switch}, cell_side, b))
-            rows.append({"battery": b, "min_v": min_v, "counted": counted,
-                         "ignored": ignored, "firmware": firmware, "drain": sorted(drain)})
+            # The cell's minimum is read last: what cuts the cell off, and what
+            # does not, needs no value (Unstated).
+            min_v, unstated = _cell_value(b, "discharge_v_min",
+                                          "the cell's discharge cut-off voltage")
+            rows.append({"battery": b, "min_v": min_v, "unstated": unstated,
+                         "counted": counted, "ignored": ignored, "firmware": firmware,
+                         "drain": sorted(drain)})
     except ReaderLimit as exc:
         return _skip(gid, str(exc))
+    except Unstated as exc:
+        return _skip(gid, _unstated_reason([str(exc)]))
     except RecordError as exc:
         return _error(gid, str(exc))
     ev = _evidence(ctx, "discharge_cutoff", {
         "boards": sorted(d.boards),
         "batteries": [{"battery": r["battery"].id, "min_v": r["min_v"],
                        "counted": r["counted"], "not_counted": r["ignored"],
-                       "firmware": r["firmware"], "cell_side": r["drain"]} for r in rows],
+                       "firmware": r["firmware"], "cell_side": r["drain"],
+                       "unstated": r["unstated"]} for r in rows],
         "notes": notes})
-    lines, fails, blind, worst = [], [], [], None
+    lines, fails, blind, missing, worst = [], [], [], [], None
     for r in rows:
         b, min_v = r["battery"], r["min_v"]
         tail = f"; not counted: {'; '.join(r['ignored'])}" if r["ignored"] else ""
@@ -1642,6 +1780,9 @@ def discharge_cutoff(ctx: GateContext) -> Verdict:
             else:
                 fails.append(f"{b.id}: nothing cuts the cell off{tail}")
             continue
+        if r["unstated"]:
+            missing.append(r["unstated"])
+            continue
         v, who = max(r["counted"])
         drain = (f"; still on the cell side of the switch: {', '.join(r['drain'])}"
                  if r["drain"] else "")
@@ -1650,14 +1791,22 @@ def discharge_cutoff(ctx: GateContext) -> Verdict:
         if worst is None or v - min_v < worst[0] - worst[1]:
             worst = (v, min_v)
     tail = f"; {'; '.join(notes)}" if notes else ""
+    if missing:
+        tail += f"; not judged: {_unstated_reason(missing)}"
+    known = [r["min_v"] for r in rows if r["min_v"] is not None]
     if fails:
         return Verdict(gate=gid, passed=False, measured=None,
-                       limit=min(r["min_v"] for r in rows), comparator=">=", units="V",
+                       limit=min(known) if known else None, comparator=">=", units="V",
                        evidence=ev, detail="; ".join(fails + lines) + tail)
-    if blind and (worst is None or worst[0] >= worst[1]):
+    # Firmware, or a minimum not stated, skips only beside nothing that fails.
+    if (blind or missing) and (worst is None or worst[0] >= worst[1]):
+        why = ([f"only firmware cuts the cell off ({'; '.join(blind)}): this rule cannot "
+                f"see it"] if blind else [])
+        if missing:
+            why.append(f"a cutoff counts, and the cell's minimum is "
+                       f"{_unstated_reason(missing)}")
         return Verdict(gate=gid, passed=False, skipped=True, evidence=ev,
-                       skip_reason=f"only firmware cuts the cell off ({'; '.join(blind)}): "
-                                   f"this rule cannot see it")
+                       skip_reason="; ".join(why))
     return Verdict(gate=gid, passed=worst[0] >= worst[1], measured=worst[0], limit=worst[1],
                    comparator=">=", units="V", detail="; ".join(lines) + tail, evidence=ev)
 
@@ -2025,6 +2174,59 @@ def _reversed(d, m, b: Battery, protectors: list) -> tuple[str, str]:
     return "open", f"{head}: nothing blocks it or limits its current{tail}"
 
 
+def _cell_turned(d, m, b: Battery, protectors: list) -> tuple[str, str]:
+    """``(verdict, line)`` for one cell of ``b``'s string turned in its holder:
+    ``cell``, a raw hazard, when a current is driven through the turned cell
+    backwards; ``cancels`` when nothing drives one.
+
+    One cell of n turned leaves the string at n - 2 cells' voltage, the right
+    way round: the turned cell takes one cell's voltage off and adds its own
+    against the rest. So with three or more in series the load draws its
+    current through the turned cell backwards, which charges a primary cell
+    (IEC 60086-5, incorrect installation). With two, the two cancel: the loop
+    holds no EMF, the board sees 0 V, and nothing flows unless something
+    drives the string. This rule sees two such sources: a charger stated for
+    the cell (it charges the string the board reads as empty, and its current
+    runs through the turned cell backwards), and another string in parallel
+    (its two cells' voltage drives the turned string). A reverse block that
+    counts is named, as it keeps the board's other sources off the string.
+
+    What slipped through (holdout round 2): every string of two or more was
+    counted a raw hazard, so two AAA cells in an open holder behind a series
+    Schottky, a sound design, read Failing once the mode references/mismate.md
+    prescribes was stated, and the project left the mode out to pass.
+    *Rejected:* a hazard for any string of two (the EMF cancels, so it fails a
+    sound design); no hazard for any string of two (a charger, or a second
+    string, drives the turned cell); crediting a block for three or more (the
+    load's own current runs through the turned cell, the right way for the
+    block)."""
+    head = f"{m.id}: one cell of {b.id} turned in {m.a[1].ref}"
+    tail = (" (IEC 60086-5); nothing on a board blocks that, a holder that keys each "
+            "cell does")
+    if b.series >= 3:
+        return "cell", (f"{head}: the board sees {b.series - 2} cell(s)' voltage the right "
+                        f"way round and draws its current through the turned cell "
+                        f"backwards{tail}")
+    if b.parallel > 1:
+        return "cell", (f"{head}: its string reads 0 V beside {b.parallel - 1} string(s) "
+                        f"at two cells' voltage, which drive a current through the turned "
+                        f"cell backwards{tail}")
+    chargers = _charged_here(b, protectors)
+    if chargers:
+        return "cell", (f"{head}: the string reads 0 V, and "
+                        f"{', '.join(c.name for c in chargers)} charges it, its current "
+                        f"through the turned cell backwards{tail}")
+    blocks = []
+    for p in (p for p in protectors if p.battery is b and "reverse_block" in p.functions):
+        ok, who = _reverse_block(d, p, b)
+        if ok:
+            blocks.append(who)
+    guard = (f"; {', '.join(blocks)} keeps the board's other sources off the string"
+             if blocks else "")
+    return "cancels", (f"{head}: the two cells cancel, so the board sees 0 V and nothing "
+                       f"here drives a current through the turned cell{guard}")
+
+
 @gate(
     id="pcb.mismate",
     basis="model-only",
@@ -2066,7 +2268,9 @@ def mismate(ctx: GateContext) -> Verdict:
     does not declare), and protected when a fuse or PTC at its terminal limits
     the current; an in-pack PCM is neither. A battery of loose cells whose one
     cell can be turned in its holder (``cell_reversed``) is a hazard no board
-    element blocks, counted.
+    element blocks, counted, when something drives a current through the
+    turned cell: three or more in series, a second string in parallel, or a
+    charger; two cells alone cancel (:func:`_cell_turned`).
 
     **Coverage.** Every fitted connector (a ``Connector*`` or ``Battery``
     library, or a ref J, P, CN or BT and a number) with a pad on a source's net
@@ -2137,7 +2341,8 @@ def mismate(ctx: GateContext) -> Verdict:
     if kept:
         tail += (f"; {len(kept)} protected, judged by pcb.fault_current: "
                  + "; ".join(h["said"] for h in kept[:3]))
-    blocked = [r["said"] for r in result["reversed"] if r["verdict"] == "blocked"]
+    blocked = [r["said"] for r in result["reversed"]
+               if r["verdict"] in ("blocked", "cancels")]
     if blocked:
         tail += f"; {'; '.join(blocked)}"
     if result["signal"]:
@@ -2265,8 +2470,7 @@ def _judge(d, terms: list, batteries: dict, protectors: list) -> dict:
         rev.append({"mating": m.id, "battery": m.b, "verdict": verdict, "said": said})
         if verdict != "blocked":
             keep(("reversed", m.b), verdict == "open", said, f"{m.id}, reversed")
-    # One loose cell of several turned in its holder (_power.BATTERY_WORDS):
-    # the cell's hazard, which no element on a board blocks.
+    # One loose cell of several turned in its holder (_power.BATTERY_WORDS).
     for m in d.mates:
         if m.kind != "battery" or ("cell_reversed",) not in m.modes:
             continue
@@ -2275,12 +2479,10 @@ def _judge(d, terms: list, batteries: dict, protectors: list) -> dict:
             raise RecordError(f"{m.label}.modes: cell_reversed turns one cell of several in "
                               f"series, and {b.id} has {b.series}: state reversed for a "
                               f"battery turned whole")
-        said = (f"{m.id}: one cell of {b.id} turned in {m.a[1].ref}: the board sees "
-                f"{b.series - 2} cell(s)' voltage the right way round, and the other "
-                f"cell(s) drive the turned one backwards (IEC 60086-5); nothing on a board "
-                f"blocks that, a holder that keys each cell does")
-        rev.append({"mating": m.id, "battery": m.b, "verdict": "cell", "said": said})
-        keep(("cell_reversed", m.b), True, said, f"{m.id}, one cell turned")
+        verdict, said = _cell_turned(d, m, b, protectors)
+        rev.append({"mating": m.id, "battery": m.b, "verdict": verdict, "said": said})
+        if verdict == "cell":
+            keep(("cell_reversed", m.b), True, said, f"{m.id}, one cell turned")
     hazards = sorted(found.values(), key=lambda h: (not h["raw"], h["said"]))
     return {"hazards": [{**h, "ways": sorted(set(h["ways"]))} for h in hazards],
             "matings": matings, "reversed": rev,

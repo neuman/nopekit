@@ -91,12 +91,54 @@ resolves `${KIPRJMOD}` only where a `.kicad_pro` sits beside the board.
 
 ## A part with no model: a declared height
 
-`pcb_part_heights_mm` = `{ref: {h, source, box_mm?}}` gives a placed part whose
-3D model is not on this host a body: the box around its courtyard, on its own
-side, or the outline `box_mm` states (`[[x0, y0], [x1, y1]]`, mm, in the
-footprint's own frame, x right and y down as KiCad's footprint editor shows it:
-for a part with no courtyard), raised `h` mm (the datasheet's seated height;
-`source` says which).
+`pcb_part_heights_mm` = `{ref: {h, source, box_mm? | circle_mm? | polygon_mm?,
+lead_mm?}}` gives a placed part whose 3D model is not on this host a body: the
+box around its courtyard, on its own side, or the one outline its record states,
+raised `h` mm (the datasheet's seated height; `source` says which, and where
+`lead_mm` comes from). Each outline is in mm, in the footprint's own frame, x
+right and y down as KiCad's footprint editor shows it:
+
+- `box_mm` `[[x0, y0], [x1, y1]]`: a rectangle;
+- `circle_mm` `{"center": [x, y], "d": 15}`: a round part, a speaker or a buzzer;
+- `polygon_mm` `[[x, y], [x, y], [x, y], ...]`: three or more corners in order
+  round the outline, no two edges crossing.
+
+A courtyard's box is a bound: a round part's is a square. (What slipped through,
+holdout round 2: `box_mm` was the only outline, so a round 15 mm speaker went in
+as its 15 mm square, and the square's corner read 0.025 mm^3 inside a cover the
+round body cleared by 1.9 mm, a wrong FAIL.) State the circle or the polygon
+there, even beside a courtyard: the record's outline comes first.
+
+**Leads under the board.** A part whose footprint has plated holes (a
+through-hole switch, a header, a holder's tabs) has leads on the other side of
+the board, where its body is not. Each plated hole gets a cylinder, the drill
+wide (a lead fits its hole; an oval drill's longer side; a drill offset from
+its pad widened by twice the offset), from the part's seating plane through the
+board to `lead_mm` past the far face. KiCad's export puts the two faces the
+board file's thickness plus 0.08 mm apart (kicad-cli 9.0.9: a part on top seats
+at T - 0.005, one underneath at -0.085), and the lead is drawn to that. With no
+`lead_mm`, the lead stands 2.5 mm past the board, the longest protrusion
+IPC-A-610 accepts on a class 2 product, and the verdict names each part fitted
+so ("leads at the default 2.5 mm past the board, no lead_mm stated"). State
+`lead_mm` from the part's drawing or the assembly's: KiCad's own pin header
+model stands 1.32 mm past a 1.6 mm board, and `0` is a lead cut flush. A
+`lead_mm` on a footprint with no plated hole is refused. (What slipped through,
+holdout round 2: a declared height was a box above the board alone, so eight
+switches' leads under the board, which a layer of the case was cut for, were
+never fitted, and a pass on declared heights said nothing of them.)
+
+A via in a footprint is not a lead hole. A plated hole marked
+`pad_prop_heatsink` (KiCad's mark for a heat-sink pad), or one whose pad opens
+no solder mask on either side (the mask covers it, so no lead goes in), gets no
+cylinder: the thermal vias under an SMD part's exposed pad, an edge-mount SMA's
+ground vias. In KiCad 9.0.9's library every plated pad of a through-hole
+footprint opens the mask. A via that opens the mask and carries no mark is
+still drawn as a lead: KiCad's `*_ThermalVias` power connectors put such vias
+beside their own pins, and a floor close under one may read a collision that
+the pin's own lead does not make. (What slipped through, review of J2: every
+plated hole was a lead hole, so a DFN at its declared height stood a 2.5 mm rod
+under the board at each of its six 0.2 mm thermal vias, and a floor 2 mm under
+a sound board read a collision.)
 
 A part whose model is not on this host is one that names none, or one whose
 every model is found nowhere here: `${KIPRJMOD}` is the board's folder, a
@@ -129,8 +171,8 @@ places it.
 The box is the courtyard's, in the footprint's frame: a part turned 45 degrees gets
 a box turned 45 degrees, not the larger box around it. A courtyard is a keep-out,
 usually a little wider than the body, so the box is a little wider than the part.
-One listed as bodiless with a height, and one with neither a courtyard on its own
-side nor a `box_mm`, are refused.
+One listed as bodiless with a height, one with neither a courtyard on its own
+side nor an outline, and one that states two outlines are refused.
 
 ## A model library of the project's own: `pcb_model_dirs`
 
@@ -233,6 +275,12 @@ claim.
 Two models that overlap by design (a mated connector pair whose vendor models
 interpenetrate) read as a collision, and no contact excuses it: a wrong FAIL, said
 here so a person can read the shared volume against the drawing.
+
+A part fitted at its declared height is its outline and its leads, no more: a
+lead bent over under the board, a solder fillet wider than its hole, and a
+locating peg in a hole with no plating are not drawn; a via that opens the mask
+and carries no heat-sink mark is drawn as a lead (above). A part fitted from its
+model is what its model draws, leads or none.
 
 One limit for every board: the claim tagged `enclosure-fit` states one condition,
 and claims with that tag that state different ones make the gate error.
