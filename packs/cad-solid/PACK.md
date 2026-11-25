@@ -209,7 +209,7 @@ assume, and the assumptions are expensive.
   when the two surfaces it joins are the nearest ones there, as they are across a
   section. It ran past the part's edge when a third surface is nearer, and it ran
   along a face when the face it hit passes within half its reading times
-  sin 30° of that middle. Neither is counted, and the detail counts them. (Until
+  sin 10° of that middle. Neither is counted, and the detail counts them. (Until
   round 3 of the held-out designs, a 1.35-1.4 mm plate whose edge is a 0.6 mm land
   under a 45° chamfer read 0.605 mm: a ray from the underside 0.005 mm in from the
   land ran up beside it to the chamfer. A 1.0 mm wall over a 0.5 mm land read
@@ -217,10 +217,19 @@ assume, and the assumptions are expensive.
   it leaned into.) Two surfaces that face each other still count up to an edge, so
   a plate is its thickness to its edge, and a tie at a concave corner (a groove's
   root) is a wall. A lip that is thin all the way across still reads thin: a
-  0.75 mm lip with a 0.25 mm land under a 45° chamfer reads 0.487 mm. The cost: a
-  chamfered edge over a land reads as an edge out to about 1.55 times the land's
-  height, and a ridge drafted over 30° per side is not read across where one flank
-  runs the length of the ray.
+  0.75 mm lip with a 0.25 mm land under a 45° chamfer reads 0.487 mm. The costs,
+  measured: a chamfered edge over a land reads as an edge out to about 1.55 times
+  the land's height. A fin or rib drafted 15-30° per side loses the rays just under
+  its top land, so the thinnest ray it counts reads about 1.4 (at 16°) to 1.75 (at
+  29°) times the land, where it read 1.14 to 1.68 times before, and a minimum under
+  that passes even where the top is thinner. A 0.3 mm land on a 1.2 mm base, 1.0 mm
+  tall (24° per side), reads 0.495 mm and passes 0.45 mm, with its top 0.17 mm
+  thinner than that. No test at one ray tells that top from a plate's chamfered
+  edge: each is a wedge cut off by a land. A ridge drafted over 40° per side is not
+  read across where one flank runs the length of the ray; past 45° no flank's ray
+  reaches the other flank at all. (Until the review of round 3, the along-a-face
+  rule used 30°, and a 0.2-1.2 mm rib drafted 31° and 35° per side passed at its
+  5 mm block.)
 - **`cad.wall_thickness` does not judge an exempt part, and a box judges the rays
   that START in it.** A part in `wall_exempt_parts` is not cast from at all; nothing
   here checks its thickness, and the detail names it so a reader sees the gap. A
@@ -234,8 +243,11 @@ assume, and the assumptions are expensive.
   3, a housing's box held a 0.4 mm web whose faces each ran on past it, so no face
   centre lay over it: the box's 27 rays read 1.0 mm, and a web under its 0.36 mm
   minimum would have passed. The grid reads 0.395 mm.) The boxes of one part may add
-  at most 20,000 rays, or the part's face count when that is larger; a box that
-  needs more holds more than a thin region and is refused, named.
+  at most 20,000 rays, or the part's face count when that is larger: about 800 mm²
+  of surface at a 0.4 mm minimum. A box that needs more holds more than a thin
+  region and is refused, named. (Until the review of round 3, the count was of each
+  piece's bounding rectangle, about twice the rays a triangle casts, so a box over
+  400 mm² was refused.)
 - **`cad.degenerate_faces` is not a sliver-quality check.** It finds duplicate
   vertices and numerically zero-area triangles. A 1e-6 mm² needle with a 10,000:1
   aspect ratio passes every gate here and will still wreck a mesher.
@@ -788,7 +800,8 @@ and judges each part against its own minimum:
    verdict and not its key. Name the part to settle it. A pattern that also matches
    an exempt part governs only the parts that are judged.
 2. **`wall_exempt_parts`**, `{part: reason}`. The part is not judged and the detail
-   names it. With every part exempt the gate SKIPS. Exact names only: a pattern
+   names it, before its ray counts, so the 500-character cap on a detail cuts the
+   counts first. With every part exempt the gate SKIPS. Exact names only: a pattern
    exempts parts nobody named.
 3. **`wall_exceptions`**, `[{part, box_mm, min_mm, reason}]`. `box_mm` is
    `[[x0, y0, z0], [x1, y1, z1]]` in mm in the assembly frame, low corner first. A

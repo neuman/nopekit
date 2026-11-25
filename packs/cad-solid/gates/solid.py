@@ -1096,7 +1096,7 @@ def _wall_hits(mesh: Any, start: Any, hit: Any, surface: Any = None) -> Any:
 #: ``sin(GRAZE_DEG)`` times half the reading. When the faces a ray joins are ``a``
 #: from opposed, the midpoint is ``cos(a)`` times half the reading from the plane
 #: of the face it hit, so where that face runs the length of the ray this is
-#: "within 30 deg of grazing" (``a`` over 60 deg). Judged only where
+#: "within 10 deg of grazing" (``a`` over 80 deg). Judged only where
 #: ``_edge_rays`` judges: a hit that is not nearly opposed, on a surface that
 #: shares no edge with the start's.
 #:
@@ -1105,24 +1105,37 @@ def _wall_hits(mesh: Any, start: Any, hit: Any, surface: Any = None) -> Any:
 #: vertical face went down beside it, 0.017-0.05 mm away, and hit it 3.7 deg from
 #: grazing: 0.731 mm, where the wall it ran beside goes on down past 1.6 mm. The
 #: third-surface rule keeps it: the nearest surface to its midpoint, 0.034 mm away,
-#: is the one it hit. Half its reading times ``sin(30 deg)`` is 0.183 mm.
+#: is the one it hit. That is 0.093 of half its reading, sin(5.3 deg); the test's
+#: block that leans 4 deg (``ARayAlongAFaceIsNotAWall``) gives 0.070, sin(4.0 deg).
 #:
-#: 30 deg is the angle ``OPPOSED_DEG`` and ``SMOOTH_PATCH_DEG`` already use. Every
-#: wall measured on the held-out designs meets its hit face 45 deg or more from
-#: grazing (a 45 deg chamfer against a flat, a groove's flank, a slot's side), and a
-#: rib drafted 16-20 deg per side meets it at 50-58 deg. *Rejected:* the angle at
-#: the hit alone. A ray from a published case bottom's rounded corner left through
-#: the ceiling just past an inside corner, 22 deg from grazing, and read 1.479 mm
-#: across the corner: a real section. That ceiling starts at the corner, 0.73 mm
-#: from the ray's midpoint. With the angle alone, 2113 rays of that part went
-#: uncounted, all 1.48 mm and more; with the distance, 761. Also rejected: a floor
-#: on the midpoint's distance to every surface (a 45 deg wedge gives 0.707 of half
-#: the reading by itself, so that floor is a second angle in disguise); applying it
-#: to a hit on the start's own smooth surface (a rounded rim meets itself at any
-#: angle, and no measured case needs it). The cost: two nonadjacent surfaces more
-#: than 60 deg from opposed (a ridge drafted over 30 deg per side) are not read
-#: across where one of them runs the length of the ray.
-GRAZE_DEG = 30.0
+#: 10 deg is the measured case with a margin: sin(10 deg) is 0.174, almost twice
+#: 0.093. On a ridge drafted ``d`` per side the flanks are ``2d`` from opposed, so
+#: this drops a flank-to-flank ray only past 40 deg per side. There the sampler
+#: reads little anyway: past 45 deg no flank's normal ray reaches the other flank.
+#: Measured on the rib of ``ATaperedRibIsStillAWall`` (0.2-1.2 mm on a 5 mm block,
+#: subdivided 0-3 times), this rule and the code before it read the same wall at
+#: 16, 20, 25, 31, 35 and 38 deg per side, and at 40 deg both read the block: only
+#: a ray from the rib's top hundredth reaches the other flank. On the held-out
+#: designs every part reads what it read at 30 deg: the rays 30 deg dropped and
+#: 10 deg keeps read 1.42 mm and more, and the housing's 0.731 mm ray stays dropped.
+#: *Rejected:* 30 deg, the angle ``OPPOSED_DEG`` and ``SMOOTH_PATCH_DEG`` use (review
+#: of round 3): it dropped every flank-to-flank ray of that rib drafted over 30 deg
+#: per side, so at 31 and 35 deg the gate passed at the block's 5.000 mm, where the
+#: code before it failed at 0.517 and 0.679 mm. That is the false pass
+#: ``ATaperedRibIsStillAWall`` was written against, and the test tried only 16 and
+#: 20 deg. 15 deg passes the rib at 38 deg (the code before it failed at 0.923 mm);
+#: 5 deg is under the housing's 5.3. The angle at the hit alone: on a published case
+#: bottom it drops 308 rays at 10 deg (2023 at 30), 245 of them rays the distance
+#: keeps, the thinnest 1.520 mm. That ray meets its face 3.6 deg from grazing, but
+#: at its far end: the face is 0.735 mm from its midpoint, so the ray is a section
+#: that ends where the face begins. Also rejected: a floor on the midpoint's
+#: distance to every surface (a 45 deg wedge gives 0.707 of half the reading by
+#: itself, so that floor is a second angle in disguise); applying it to a hit on the
+#: start's own smooth surface (a rounded rim meets itself at any angle, and no
+#: measured case needs it). The cost: two nonadjacent surfaces more than 80 deg
+#: from opposed (a ridge drafted over 40 deg per side) are not read across where
+#: one of them runs the length of the ray.
+GRAZE_DEG = 10.0
 GRAZE_SIN = math.sin(math.radians(GRAZE_DEG))
 
 #: Two distances that are one point's. A concave edge between the surface a ray hit
@@ -1187,11 +1200,24 @@ def _edge_rays(mesh: Any, surface: Any, start: Any, hit: Any, length: Any,
     rib is flank, top, flank: the same topology as underside, land, chamfer); the
     midpoint's distance to every surface as a fraction of half the reading (a
     45 deg wedge gives 0.707 by itself, so the fraction must sit between 0.57,
-    the plate's false band at 0.84 mm, and 0.69, the groove: tuned). The cost: a
-    chamfered edge over a land reads as an edge out to about 1.55 times the land's
-    height (0.93 mm on the 0.6 mm land), so a minimum above that is judged on the
-    rays further in. A drafted rib loses the rays near its top, where the top is
-    nearer their midpoints than its flanks; its middle still reads.
+    the plate's false band at 0.84 mm, and 0.69, the groove: tuned).
+
+    The costs, measured. A chamfered edge over a land reads as an edge out to about
+    1.55 times the land's height (0.93 mm on the 0.6 mm land), so a minimum above
+    that is judged on the rays further in. A fin or rib drafted 15 to 30 deg per
+    side loses the rays just under its top land, where the land is nearer their
+    midpoints than the flank they hit (under 15 deg its flanks are nearly opposed and
+    not judged; past 30 deg the midpoints sit too deep). The thinnest ray it counts
+    on such a fin reads about 1.40 times the land at 16 deg per side and 1.75 times
+    at 29 deg, where the code before this read 1.14 and 1.68 times (a flank's normal
+    crosses the fin obliquely). So the fin passes a minimum under that many times its
+    land, with its top thinner than the minimum: a 0.3 mm land on a 1.2 mm base,
+    1.0 mm tall (24 deg per side), reads 0.495 mm and passes 0.45 mm, and the top
+    0.17 mm of it is thinner than 0.45 mm (``ADraftedFinIsReadBelowItsLand`` holds
+    this). No test at one ray tells that top from the plate's edge: each is a wedge
+    of about 45 deg cut off by a land, and the ray beside the land joins the
+    wedge's two faces. (In review of round 3: this said the rib's middle still
+    reads, but the thin part of a fin is its top.)
     """
     import numpy as np
     from trimesh.triangles import closest_point
@@ -1271,17 +1297,36 @@ BOX_SPACING_OF_MIN = 0.5
 #: more holds more surface than a thin region has, and is refused, named: a box
 #: drawn around most of a part at a small ``min_mm`` lowers the part's minimum
 #: everywhere in it, which is the silencer the boxes exist to replace. 20,000 rays
-#: cover about 800 mm^2 of surface at a 0.4 mm minimum. *Rejected:* sampling a
-#: large box more coarsely and passing (the spacing would then hide the walls the
-#: box is for); no limit (a box at 0.01 mm over a 100 mm part is a billion rays).
+#: cover about 800 mm^2 of surface at a 0.4 mm minimum (a ray per 0.2 mm square).
+#: The count is of the rays the grid casts, found before any is built.
+#: What slipped through (review of round 3): the count was the cells of each piece's
+#: bounding rectangle, and a triangle's piece casts from about half of them, so a box
+#: over 400 mm^2 of a plate at a 0.4 mm minimum (10,170 rays, 20,164 cells) was
+#: refused as "more than the 20000". *Rejected:* sampling a large box more coarsely
+#: and passing (the spacing would then hide the walls the box is for); no limit (a
+#: box at 0.01 mm over a 100 mm part is a billion rays); scaling each rectangle by
+#: its piece's area (an estimate, where the refusal names a count).
 BOX_RAYS_FLOOR = 20_000
+
+#: Two points of a clipped piece closer than this fraction of its largest
+#: coordinate are one point. A face's vertex that lies on a box's plane, its next
+#: vertex outside, came out of the clip twice (the vertex, then the crossing at that
+#: same vertex), and the piece's first side had no length: review of round 3 found a
+#: triangle whose piece cast no ray in one vertex order and 225 in another. 1e-9 is
+#: about seven orders above float64 round-off on a coordinate (2.2e-16 relative) and
+#: far below any grid spacing a box asks for (1e-6 mm on a 1 m part).
+_CLIP_SAME_REL = 1e-9
 
 
 def _clip_to_box(polygon: list, lo: Any, hi: Any) -> list:
     """The part of a convex polygon (a list of 3-vectors) inside a box.
 
     Sutherland-Hodgman against the box's six planes, kept inclusive, so a face
-    that lies on a box's plane stays in it."""
+    that lies on a box's plane stays in it. A point the clip gives twice in a row
+    is given once (``_CLIP_SAME_REL``), and a piece left with fewer than three
+    points is empty."""
+    import numpy as np
+
     for axis in range(3):
         for bound, below in ((lo[axis], False), (hi[axis], True)):
             kept = []
@@ -1297,22 +1342,68 @@ def _clip_to_box(polygon: list, lo: Any, hi: Any) -> list:
             polygon = kept
             if len(polygon) < 3:
                 return []
-    return polygon
+    scale = max(1.0, max(float(np.abs(p).max()) for p in polygon))
+    same = _CLIP_SAME_REL * scale
+    distinct = []
+    for p in polygon:
+        if not distinct or float(np.abs(p - distinct[-1]).max()) > same:
+            distinct.append(p)
+    while len(distinct) > 1 and float(np.abs(distinct[-1] - distinct[0]).max()) <= same:
+        distinct.pop()
+    return distinct if len(distinct) >= 3 else []
+
+
+def _column_spans(flat: Any, gx: Any, y0: float, dy: float, rows: int) -> tuple[Any, Any]:
+    """``(first, last)``: for each grid column ``gx``, the rows ``k`` in
+    ``range(first, last)`` whose cell centre ``y0 + (k + 0.5) * dy`` lies inside a
+    convex polygon ``flat``, wound counter-clockwise.
+
+    A point is inside when it is on the left of every side, or on it. A side that
+    rises along x bounds the column from below, one that falls bounds it from
+    above, and an upright side lets the whole column in or none of it. Each column
+    is solved in one step, so a piece's rays are counted before any is built, at a
+    cost in its columns and not its cells."""
+    import numpy as np
+
+    side = np.roll(flat, -1, axis=0) - flat
+    ex, ey = side[:, 0], side[:, 1]
+    px, py = flat[:, 0], flat[:, 1]
+    x = np.asarray(gx, dtype=float)[:, None]
+    bound = py + ey * (x - px) / np.where(ex != 0.0, ex, 1.0)
+    low = np.where(ex > 0.0, bound, -np.inf).max(axis=1)
+    high = np.where(ex < 0.0, bound, np.inf).min(axis=1)
+    open_ = np.all((ex != 0.0) | (ey * (x - px) <= 0.0), axis=1)
+    if dy > 0.0:
+        with np.errstate(invalid="ignore"):
+            first = np.ceil((low - y0) / dy - 0.5)
+            last = np.floor((high - y0) / dy - 0.5) + 1.0
+    else:
+        # A piece with no width: its one row sits at y0.
+        first = np.where(low <= y0, 0.0, 1.0)
+        last = np.where(high >= y0, 1.0, 0.0)
+    first = np.clip(np.nan_to_num(first, nan=rows, posinf=rows, neginf=0.0), 0, rows)
+    last = np.clip(np.nan_to_num(last, nan=0.0, posinf=rows, neginf=0.0), 0, rows)
+    last = np.where(open_, np.maximum(last, first), first)
+    return first.astype(int), last.astype(int)
 
 
 def _box_points(mesh: Any, lo: Any, hi: Any, spacing: float, limit: int):
     """``(points, faces, count)``: points on the surface inside a box, each with its
     face, on a grid no coarser than ``spacing`` (``BOX_SPACING_OF_MIN``).
 
-    Each face's piece inside the box gets a square grid in its own plane, laid from
-    the piece's own corner so the same mesh gives the same rays, and every cell
-    centre inside the piece is a point. A piece that holds none (a strip narrower
-    than a cell) gives its middle. A face wholly inside the box and no larger than
-    one cell gives none: its centre is cast already. ``points`` is ``None`` when the
-    count passes ``limit``, counted on the grids' cells before anything is built.
+    Each face's piece inside the box gets a square grid in its own plane, laid along
+    the piece's longest side from its own corner, so the same mesh gives the same
+    rays, and every cell centre inside the piece is a point. A piece that holds none
+    (a strip narrower than a cell) gives its middle. A face wholly inside the box and
+    no larger than one cell gives none: its centre is cast already. ``count`` is the
+    number of points, found column by column before any is built
+    (``_column_spans``), the columns taken a chunk at a time on ``_CAST_CHUNK_RT``
+    (columns times sides); ``points`` is ``None`` as soon as it passes ``limit``.
     *Rejected:* cutting each piece into ``k x k`` triangles (on the 4 x 20 mm faces
     of a hinge strip, ``k`` follows the long side, and the cut cost five times the
-    rays of a grid for the same spacing)."""
+    rays of a grid for the same spacing); laying the grid along the piece's first
+    side (a vertex on a box's plane gave that side no length, and the piece no
+    ray)."""
     import numpy as np
 
     tri = np.asarray(mesh.triangles, dtype=float)
@@ -1325,10 +1416,12 @@ def _box_points(mesh: Any, lo: Any, hi: Any, spacing: float, limit: int):
         if len(polygon) < 3:
             continue
         polygon = np.asarray(polygon)
-        first = polygon[1] - polygon[0]
-        if np.linalg.norm(first) <= 0.0:
+        sides = np.roll(polygon, -1, axis=0) - polygon
+        lengths = np.linalg.norm(sides, axis=1)
+        longest = int(lengths.argmax())
+        if lengths[longest] <= 0.0:
             continue
-        e1 = first / np.linalg.norm(first)
+        e1 = sides[longest] / lengths[longest]
         e2 = np.cross(face_normals[face], e1)
         flat = (polygon - polygon[0]) @ np.column_stack((e1, e2))
         low, high = flat.min(axis=0), flat.max(axis=0)
@@ -1336,22 +1429,30 @@ def _box_points(mesh: Any, lo: Any, hi: Any, spacing: float, limit: int):
         whole = bool(np.all(tri[face] >= lo) and np.all(tri[face] <= hi))
         if whole and cells[0] * cells[1] == 1:
             continue
-        pieces.append((face, polygon[0], e1, e2, flat, low, high, cells))
-        count += int(cells[0] * cells[1])
-        if count > limit:
-            return None, None, count
+        dx, dy = (high - low) / cells
+        held, columns = 0, []
+        chunk = max(1, int(_CAST_CHUNK_RT // len(flat)))
+        for begin in range(0, int(cells[0]), chunk):
+            gx = low[0] + (np.arange(begin, min(begin + chunk, int(cells[0]))) + 0.5) * dx
+            first, last = _column_spans(flat, gx, low[1], dy, int(cells[1]))
+            some = last > first
+            held += int((last - first).sum())
+            columns.append((gx[some], first[some], last[some]))
+            if count + max(held, 1) > limit:
+                return None, None, count + max(held, 1)
+        count += max(held, 1)
+        gx, first, last = (np.concatenate(part) for part in zip(*columns))
+        pieces.append((face, polygon[0], e1, e2, flat, low[1], dy, gx, first, last))
     points, faces = [], []
-    for face, origin, e1, e2, flat, low, high, cells in pieces:
-        gx = low[0] + (np.arange(cells[0]) + 0.5) * (high[0] - low[0]) / cells[0]
-        gy = low[1] + (np.arange(cells[1]) + 0.5) * (high[1] - low[1]) / cells[1]
-        grid = np.stack(np.meshgrid(gx, gy, indexing="ij"), axis=-1).reshape(-1, 2)
-        # Inside a convex piece wound counter-clockwise about its face's normal:
-        # on the left of every side. The clip keeps the face's winding.
-        edge = np.roll(flat, -1, axis=0) - flat
-        rel = grid[:, None, :] - flat[None, :, :]
-        inside = np.all(edge[None, :, 0] * rel[:, :, 1] - edge[None, :, 1] * rel[:, :, 0]
-                        >= 0.0, axis=1)
-        chosen = grid[inside] if inside.any() else flat.mean(axis=0)[None, :]
+    for face, origin, e1, e2, flat, y0, dy, gx, first, last in pieces:
+        per = last - first
+        if len(per):
+            column = np.repeat(np.arange(len(gx)), per)
+            row = np.repeat(first, per) + (np.arange(int(per.sum()))
+                                           - np.repeat(np.cumsum(per) - per, per))
+            chosen = np.column_stack((gx[column], y0 + (row + 0.5) * dy))
+        else:
+            chosen = flat.mean(axis=0)[None, :]
         points.append(origin + chosen[:, :1] * e1 + chosen[:, 1:] * e2)
         faces.append(np.full(len(chosen), face, dtype=int))
     if not points:
@@ -1945,11 +2046,16 @@ def wall_thickness(ctx: GateContext) -> Verdict:
     # On a pass, the wall nearest its own minimum is named beside the thinnest
     # when it is another ray: the verdict's margin is the thinnest wall's, and a
     # reader must see the smaller one. Its point is in the evidence, not here: the
-    # detail is capped at 500 characters and the exempt parts come after it.
+    # detail is capped at 500 characters (gates._DETAIL_MAX).
     nearest = (f"; nearest its own minimum: {worst_value:.3f} mm on {worst_part} vs "
                f"{worst_limit:.3f} mm [{worst_from}]"
                if passed and worst_ray != value_ray else "")
     shown = sorted(exempted)
+    # The order is what the cap may cut: the walls, then the exempt parts (the gap a
+    # reader must see), then the counts, whose every number is in the evidence too.
+    # What slipped through (review of round 3): the box and edge counts came first,
+    # and on an assembly with a box, slivers, edge rays, a nearest wall and six
+    # exempt parts the detail reached 500 characters at "exempt, not judge...".
     return Verdict(
         gate=gid,
         passed=passed,
@@ -1958,18 +2064,19 @@ def wall_thickness(ctx: GateContext) -> Verdict:
         units="mm",
         detail=f"{head} {value:.3f} mm on {value_part} at "
                f"({', '.join(f'{c:g}' for c in value_point)}) vs {value_limit:.3f} mm "
-               f"minimum [{value_from}] "
-               f"({sampled}/{cast} inward face-normal rays hit, one per face"
+               f"minimum [{value_from}]"
+               + nearest
+               + (f"; exempt, not judged: {', '.join(shown[:4])}"
+                  f"{f' and {len(shown) - 4} more' if len(shown) > 4 else ''}"
+                  if shown else "")
+               + f" (a ray sampler, not a proof: {sampled}/{cast} inward face-normal "
+                 f"rays hit, one per face"
                + (f" and {box_rays} more in wall_exceptions boxes" if box_rays else "")
                + (f", {slivers} sliver face(s) under {MIN_CAST_ALTITUDE_MM:.4f} mm "
                   f"altitude not cast from" if slivers else "")
                + (f", {edges} ray(s) past an edge or along a face not counted"
                   if edges else "")
-               + "; a ray sampler, not a proof)"
-               + nearest
-               + (f"; exempt, not judged: {', '.join(shown[:4])}"
-                  f"{f' and {len(shown) - 4} more' if len(shown) > 4 else ''}"
-                  if shown else ""),
+               + ")",
         evidence=evidence,
         locators=locators,
     )
