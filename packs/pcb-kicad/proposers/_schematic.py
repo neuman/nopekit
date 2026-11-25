@@ -99,6 +99,34 @@ def units(lib_sym: list) -> set[str]:
     return found
 
 
+def unit_pins(lib_sym: list) -> dict[str, dict[str, tuple[float, float]]]:
+    """``{unit: {pin number: (x, y)}}`` of each unit a symbol draws, in unit order,
+    each with the pins every unit draws (unit 0). Only body style 1 and the pins
+    common to every style (style 0) are read: a placed symbol that names no body
+    style takes style 1, and a De Morgan body (style 2) may draw a pin elsewhere.
+    A symbol that draws no numbered unit is one unit, ``"1"``.
+
+    (What slipped through: :func:`pins` reads every unit and every style into one
+    map, so the writer could not tell a dual op-amp's two halves apart, and it
+    refused every part with more than one unit, a dual op-amp, a quad gate and a
+    dual MOSFET among them: a board with one had no schematic for ERC and parity
+    to judge.)"""
+    common: dict[str, tuple[float, float]] = {}
+    by_unit: dict[str, dict[str, tuple[float, float]]] = {}
+    for x in K.children(lib_sym, "symbol"):
+        tail = str(x[1]).rsplit("_", 2)
+        if len(tail) != 3 or not (tail[1].isdigit() and tail[2].isdigit()):
+            continue
+        unit, style = tail[1], tail[2]
+        if style not in ("0", "1"):
+            continue
+        (common if unit == "0" else by_unit.setdefault(unit, {})).update(pins(x))
+    if not by_unit:
+        return {"1": common or pins(lib_sym)}
+    return {u: {**common, **found}
+            for u, found in sorted(by_unit.items(), key=lambda kv: int(kv[0]))}
+
+
 def effects(hide: bool = False, justify: str | None = None) -> list:
     node = ["effects", ["font", ["size", "1.27", "1.27"]]]
     if justify:
@@ -118,12 +146,15 @@ def prop(key: str, val: str, x: float, y: float, hide: bool = False) -> list:
 
 def placed(lib_id: str, ref: str, value: str, footprint: str, x: float, y: float,
            pin_numbers: list[str], key: str, *, project: str, root_uuid: str,
-           angle: int = 0, in_bom: bool = True, dnp: bool = False) -> list:
-    """One placed symbol, with the instance record that names it in ``project``."""
+           angle: int = 0, in_bom: bool = True, dnp: bool = False, unit: int = 1) -> list:
+    """One placed symbol (one ``unit`` of it), with the instance record that names
+    it in ``project``. Each unit of a multi-unit part is placed so, under one ref,
+    and ``pin_numbers`` is every pin of the symbol for each unit placed, as
+    eeschema 9.0.9 writes them (its own demo, ``complex_hierarchy/ampli_ht``)."""
     return ["symbol",
             ["lib_id", K.Q(lib_id)],
             ["at", n(x), n(y), str(angle)],
-            ["unit", "1"],
+            ["unit", str(unit)],
             ["exclude_from_sim", "no"], ["in_bom", "yes" if in_bom else "no"],
             ["on_board", "yes"],
             ["dnp", "yes" if dnp else "no"],
@@ -135,7 +166,7 @@ def placed(lib_id: str, ref: str, value: str, footprint: str, x: float, y: float
             *[["pin", K.Q(p), ["uuid", K.Q(uid(f"{key}:pin:{p}"))]] for p in pin_numbers],
             ["instances", ["project", K.Q(project),
                            ["path", K.Q("/" + root_uuid),
-                            ["reference", K.Q(ref)], ["unit", "1"]]]]]
+                            ["reference", K.Q(ref)], ["unit", str(unit)]]]]]
 
 
 def global_label(net: str, x: float, y: float, left: bool) -> list:

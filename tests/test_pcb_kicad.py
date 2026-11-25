@@ -5625,5 +5625,730 @@ class TheKeepoutsToolsAreHeldToTheirWord(unittest.TestCase):
                       v.error)
 
 
+# --------------------------------------------------------------------------- #
+# general-packs P9: the proposers. Every unit of a multi-unit symbol, the stock
+# libraries where KiCad puts them, and a draft of the power records.
+# --------------------------------------------------------------------------- #
+WRITER = os.path.join(PACK, "proposers", "schematic_from_board.py")
+DRAFTER = os.path.join(PACK, "proposers", "battery_record_draft.py")
+
+#: The power board's parts on KiCad's stock symbols, as ``make_power_board.py``
+#: names them: Q1, an FDS6890A, is a two-unit symbol (one FET each). The
+#: statements make KiCad's ERC find nothing on the written schematic: U1's status
+#: pins, J1's SBU pins and the FFC housings' two open positions are open on
+#: purpose, and four nets are fed from off this board.
+POWER_SYMBOLS = {
+    "symbols": {"J1": "Connector:USB_C_Receptacle_USB2.0_16P", "R*": "Device:R",
+                "C*": "Device:C", "U1": "Battery_Management:MCP73833-xxx-UN",
+                "TH1": "Device:Thermistor_NTC", "F1": "Device:Polyfuse",
+                "BT1": "Connector_Generic:Conn_01x02", "U2": "Battery_Management:AP9101CK",
+                "Q1": "Transistor_FET:FDS6890A", "J6": "Connector_Generic:Conn_01x02",
+                "J1?": "Connector_Generic:Conn_01x08"},
+    "no_connect": {"U1": ["3", "4", "7"], "J1": ["A8", "B8"], "J10": ["3", "6"],
+                   "J11": ["3", "6"]},
+    "power_flags": ["VBUS", "GND", "PROT_VDD", "CELL_N"]}
+
+
+def _write(board: str, symbols: dict, cwd: str, name: str, env: dict | None = None):
+    """``(process, out dir)`` of the schematic writer on ``board``."""
+    out = os.path.join(cwd, name)
+    os.makedirs(out)
+    path = os.path.join(cwd, f"{name}.symbols.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(symbols, fh)
+    proc = _env.run([sys.executable, WRITER, "--board", board, "--symbols", path], cwd=cwd,
+                    env={"NOPEKIT_PROPOSAL_DIR": out, **(env or {})})
+    return proc, out
+
+
+def _placed(sch: list, ref: str) -> list:
+    """The placed symbols of ``ref`` in a written schematic."""
+    return [s for s in K.children(sch, "symbol")
+            if any(len(p) > 2 and p[1] == "Reference" and p[2] == ref
+                   for p in K.children(s, "property"))]
+
+
+#: A child that prints each symbol's unit map as ``_schematic.unit_pins`` reads
+#: it: run apart, as ``_DERIVED`` is, since the module edits sys.path. The last
+#: entry is a symbol drawn here, its De Morgan body (style 2) with pin 1 moved.
+_UNITS = r"""
+import json, sys
+sys.dont_write_bytecode = True
+proposers, symbols = sys.argv[1:3]
+sys.path.insert(0, proposers)
+import _schematic as W
+K = W.K
+out = {}
+for lib_id in sys.argv[3:]:
+    lib, _, name = lib_id.partition(":")
+    out[lib_id] = W.unit_pins(W.library_symbol(symbols, lib, name))
+drawn = K.parse('(symbol "X" (symbol "X_1_1" (pin input line (at -5.08 0 0) (length 2.54) '
+                '(name "A") (number "1"))) (symbol "X_1_2" (pin input line (at 5.08 2.54 '
+                '180) (length 2.54) (name "A") (number "1"))))')
+out["drawn"] = W.unit_pins(drawn)
+print(json.dumps(out))
+"""
+
+
+@unittest.skipIf(SYMBOLS is None, "needs KiCad's stock symbols")
+class AStockSymbolIsReadUnitByUnit(unittest.TestCase):
+    """``unit_pins`` on KiCad's own multi-unit symbols: a dual op-amp with its
+    power unit (LM358, which extends LM2904), a quad gate with its supply
+    (74HC00, which extends 74LS00 and draws a De Morgan body), a dual MOSFET, and
+    a resistor, one unit. The pins every unit draws are in each; a De Morgan
+    body never moves a pin. (What slipped through: the writer refused every one
+    of the first three, exit 2.)"""
+
+    def test_each_unit_holds_its_own_pins(self):
+        proc = _env.run([sys.executable, "-c", _UNITS, os.path.join(PACK, "proposers"),
+                         SYMBOLS, "Amplifier_Operational:LM358", "74xx:74HC00",
+                         "Transistor_FET:FDS6890A", "Device:R"], cwd=REPO)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        got = {k: {u: sorted(p, key=int) for u, p in v.items()}
+               for k, v in json.loads(proc.stdout).items()}
+        self.assertEqual(got["Amplifier_Operational:LM358"],
+                         {"1": ["1", "2", "3"], "2": ["5", "6", "7"], "3": ["4", "8"]})
+        self.assertEqual(got["74xx:74HC00"],
+                         {"1": ["1", "2", "3"], "2": ["4", "5", "6"], "3": ["8", "9", "10"],
+                          "4": ["11", "12", "13"], "5": ["7", "14"]})
+        self.assertEqual(got["Transistor_FET:FDS6890A"],
+                         {"1": ["1", "2", "7", "8"], "2": ["3", "4", "5", "6"]})
+        self.assertEqual(got["Device:R"], {"1": ["1", "2"]})
+        self.assertEqual(json.loads(proc.stdout)["drawn"], {"1": {"1": [-5.08, 0.0]}})
+
+
+@unittest.skipIf(SYMBOLS is None or shutil.which("kicad-cli") is None,
+                 "needs KiCad's stock symbols and the real kicad-cli")
+class AMultiUnitPartIsPlacedWhole(unittest.TestCase):
+    """The writer on the power board, whose Q1 is a two-unit FDS6890A: both
+    units placed under Q1, KiCad's ERC finds nothing at every severity, and
+    parity finds no difference. With a unit taken out after writing, ERC names
+    the unit and parity its pins: so both judge the writer here. The same board
+    with a dual op-amp's three units mapped on Q1's eight pads still matches the
+    board pin for pin. (What slipped through: the writer refused Q1, exit 2, so
+    this board, and any with a dual op-amp, a quad gate or a dual MOSFET, had no
+    schematic to judge.)"""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-pcb-units-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        with open(POWER_BOARD, encoding="utf-8") as fh:
+            self.board = _board_copy(self.root, fh.read(), stem="p")
+
+    def _adopt(self, out: str) -> None:
+        for name in ("p.kicad_sch", "sym-lib-table"):
+            shutil.copyfile(os.path.join(out, name), os.path.join(self.root, name))
+
+    def _judge(self) -> dict:
+        registry = _registry()
+        params = dict(_baseline(), pcb_board=self.board)
+        return {gid: _run(registry, gid, self.root, params) for gid in ("pcb.erc", "pcb.parity")}
+
+    def test_every_unit_is_placed_and_kicad_agrees(self):
+        proc, out = _write(self.board, POWER_SYMBOLS, self.root, "w")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("1 multi-unit part(s), every unit placed", proc.stdout)
+        with open(os.path.join(out, "p.schematic.json"), encoding="utf-8") as fh:
+            summary = json.load(fh)
+        self.assertEqual(summary["units"], {"Q1": {"1": ["1", "2", "7", "8"],
+                                                   "2": ["3", "4", "5", "6"]}})
+        with open(os.path.join(out, "p.kicad_sch"), encoding="utf-8") as fh:
+            sch = K.parse(fh.read())
+        q1 = _placed(sch, "Q1")
+        self.assertEqual(sorted(str(K.value(s, "unit")) for s in q1), ["1", "2"])
+        self.assertEqual(len({str(K.value(s, "uuid")) for s in q1}), 2)
+        self._adopt(out)
+        for gid, verdict in self._judge().items():
+            with self.subTest(gate=gid):
+                self.assertEqual(verdict.outcome, "pass", verdict.render())
+        # Unit 2 taken out: both rules see it.
+        path = os.path.join(self.root, "p.kicad_sch")
+        tree = K.load_tree(path)
+        tree[:] = [x for x in tree if not (isinstance(x, list) and K.head(x) == "symbol"
+                                           and x in _placed(tree, "Q1")
+                                           and str(K.value(x, "unit")) == "2")]
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(K.dump(tree) + "\n")
+        found = self._judge()
+        self.assertEqual(found["pcb.erc"].outcome, "fail", found["pcb.erc"].render())
+        self.assertIn("missing_unit: Symbol Q1", found["pcb.erc"].detail)
+        self.assertEqual(found["pcb.parity"].outcome, "fail", found["pcb.parity"].render())
+        self.assertEqual(found["pcb.parity"].measured, 4)     # unit 2's pads 3 to 6
+
+    def test_a_dual_op_amp_takes_its_three_units(self):
+        symbols = copy.deepcopy(POWER_SYMBOLS)
+        symbols["symbols"]["Q1"] = "Amplifier_Operational:LM358"
+        proc, out = _write(self.board, symbols, self.root, "w")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(out, "p.schematic.json"), encoding="utf-8") as fh:
+            self.assertEqual(json.load(fh)["units"]["Q1"],
+                             {"1": ["1", "2", "3"], "2": ["5", "6", "7"], "3": ["4", "8"]})
+        self._adopt(out)
+        verdict = self._judge()["pcb.parity"]
+        self.assertEqual(verdict.outcome, "pass", verdict.render())
+
+
+@unittest.skipIf(SYMBOLS is None, "needs KiCad's stock symbols")
+class TheStockLibrariesAreNamedAsKiCadNamesThem(unittest.TestCase):
+    """Where the stock symbols come from, and the variable the sym-lib-table
+    names them by: KICAD10_SYMBOL_DIR before KICAD9_SYMBOL_DIR, each written as
+    itself; a fixed path by the release ``kicad-cli version`` gives, or KiCad 9's
+    name, said so, when none answers. (What slipped through: only
+    KICAD9_SYMBOL_DIR and the Linux path were read, and every table said
+    ``${KICAD9_SYMBOL_DIR}``, so a KiCad 10 install, macOS and Windows read no
+    symbol.)"""
+
+    UNSET = {v: None for v in ("KICAD10_SYMBOL_DIR", "KICAD9_SYMBOL_DIR", "KICAD_SYMBOL_DIR")}
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp(prefix="nopekit-pcb-stock-")
+        self.addCleanup(shutil.rmtree, self.root, True)
+        self.board = _board_copy(self.root, _board_text())
+
+    def _named(self, name: str, env: dict) -> tuple[set[str], dict]:
+        proc, out = _write(self.board, _esd_symbols(), self.root, name, env)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        with open(os.path.join(out, "sym-lib-table"), encoding="utf-8") as fh:
+            uris = set(re.findall(r'\(uri "\$\{(\w+)\}/', fh.read()))
+        with open(os.path.join(out, "b.schematic.json"), encoding="utf-8") as fh:
+            return uris, json.load(fh)["stock_variables"]
+
+    def test_the_variable_it_was_found_through(self):
+        empty = os.path.join(self.root, "empty")
+        os.makedirs(empty)
+        for name, env, want in (
+                ("ten", {**self.UNSET, "KICAD10_SYMBOL_DIR": SYMBOLS}, "KICAD10_SYMBOL_DIR"),
+                ("nine", {**self.UNSET, "KICAD10_SYMBOL_DIR": empty,
+                          "KICAD9_SYMBOL_DIR": SYMBOLS}, "KICAD9_SYMBOL_DIR")):
+            with self.subTest(env=want):
+                uris, said = self._named(name, env)
+                self.assertEqual(uris, {want})
+                self.assertEqual(said, {want: "set in the environment"})
+
+    @unittest.skipUnless(SYMBOLS == "/usr/share/kicad/symbols",
+                         "needs the stock symbols at the Linux package's fixed path")
+    def test_a_fixed_path_takes_the_release_kicad_cli_gives(self):
+        ten = os.path.join(self.root, "ten-bin")
+        none = os.path.join(self.root, "no-bin")
+        os.makedirs(ten)
+        os.makedirs(none)
+        _stand_in(ten, "kicad-cli", "print('10.0.1')\n")
+        uris, said = self._named("cli", {**self.UNSET, "PATH": ten})
+        self.assertEqual((uris, said), ({"KICAD10_SYMBOL_DIR"},
+                                        {"KICAD10_SYMBOL_DIR": "kicad-cli version 10.0.1"}))
+        uris, said = self._named("bare", {**self.UNSET, "PATH": none})
+        self.assertEqual(uris, {"KICAD9_SYMBOL_DIR"})
+        self.assertIn("not read from KiCad", said["KICAD9_SYMBOL_DIR"])
+
+    def test_the_search_order_and_a_windows_release_folder(self):
+        """The search order, and a Windows install's release folder read as its
+        variable's major: pure functions of their input (no such folder here)."""
+        proc = _env.run([sys.executable, "-c", _STOCK, os.path.join(PACK, "proposers")],
+                        cwd=REPO)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        got = json.loads(proc.stdout)
+        self.assertEqual(got["dirs"], [["/k10", "KICAD10_SYMBOL_DIR"],
+                                       ["/k9", "KICAD9_SYMBOL_DIR"],
+                                       *[[p, None] for p in got["paths"]]])
+        self.assertEqual(got["paths"][0], "/usr/share/kicad/symbols")
+        self.assertEqual(got["windows"], ["KICAD10_SYMBOL_DIR", "the release folder of "
+                                          r"C:\Program Files\KiCad\10.0\share\kicad\symbols"])
+
+
+#: A child that prints the writer's search order for a given environment, and the
+#: variable it names a Windows install's symbol folder by.
+_STOCK = r"""
+import json, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import schematic_from_board as S
+print(json.dumps({
+    "dirs": S.stock_dirs({"KICAD9_SYMBOL_DIR": "/k9", "KICAD10_SYMBOL_DIR": "/k10"}),
+    "paths": list(S.STOCK_PATHS),
+    "windows": S.stock_variable(r"C:\Program Files\KiCad\10.0\share\kicad\symbols")}))
+"""
+
+
+def _draft(root: str, *boards: str):
+    """``(process, records, summary)`` of the record draft on ``boards`` (paths
+    from ``root``), run from ``root``; the two dicts are None when it wrote
+    nothing."""
+    out = tempfile.mkdtemp(prefix="draft-", dir=root)
+    argv = [a for b in boards for a in ("--board", b)]
+    proc = _env.run([sys.executable, DRAFTER, *argv], cwd=root,
+                    env={"NOPEKIT_PROPOSAL_DIR": out})
+    names = sorted(os.listdir(out))
+    if not names:
+        return proc, None, None
+    stem = os.path.basename(boards[0])[:-len(".kicad_pcb")]
+    assert names == [f"{stem}.power_draft.json", f"{stem}.power_records.json"], names
+    with open(os.path.join(out, names[1]), encoding="utf-8") as fh:
+        records = json.load(fh)
+    with open(os.path.join(out, names[0]), encoding="utf-8") as fh:
+        summary = json.load(fh)
+    return proc, records, summary
+
+
+def _is_fill(value) -> bool:
+    if isinstance(value, list):
+        return bool(value) and all(_is_fill(v) for v in value)
+    return isinstance(value, str) and value.startswith("FILL: ")
+
+
+def _filled(draft, base):
+    """``draft`` with each FILL value replaced by ``base``'s value at its path, and
+    dropped where ``base`` has none; every other value is the draft's own."""
+    if not isinstance(draft, dict):
+        return draft
+    out = {}
+    for key, value in draft.items():
+        if isinstance(base, dict) and key in base:
+            out[key] = base[key] if _is_fill(value) else _filled(value, base[key])
+        elif not _is_fill(value):
+            out[key] = value
+    return out
+
+
+def _part(kind: str, rec: dict):
+    """What a draft record and a baseline record of one part share."""
+    if kind == "pcb_batteries":
+        return rec["terminals"]["ref"]
+    if kind == "pcb_matings":
+        return rec["a"]["ref"]
+    if kind == "pcb_conductors":
+        return rec["ref"], tuple(rec["pins"])
+    return rec.get("ref")
+
+
+#: The six rules that read the power records.
+DRAFT_GATES = POWER_GATES + ("pcb.mismate", "pcb.usbc_receptacle")
+
+
+class ADraftSettlesNothing(_PowerCase):
+    """``pcb.battery_record_draft`` on the power board: every power rule refuses
+    the draft as written, naming a drafted source, and with each source written,
+    naming a FILL value; nothing in it is a number or a flag; with every FILL
+    stated and the drafted sources kept, every rule still refuses; and with each
+    FILL and each source taken from the baseline's own records, and nothing else,
+    the draft reads as the baseline does, so the refs, pads, ids and shapes it
+    wrote are the board's and the rules'. (What it answers: the records are the
+    heaviest part of first use, and a draft that guessed one value would read as
+    a fact once adopted. What slipped through, in review of P9: the drafted
+    source was a sentence, which ``_power.source`` takes, since it checks that a
+    source says something and not what; so with every number stated the draft
+    passed all six rules, its source the proposer's words.)"""
+
+    def setUp(self):
+        super().setUp()
+        self.path = os.path.join(self.root, "power_board.kicad_pcb")
+        shutil.copyfile(POWER_BOARD, self.path)
+        self.proc, self.records, self.summary = _draft(self.root, "power_board.kicad_pcb")
+        self.assertEqual(self.proc.returncode, 0, self.proc.stderr)
+
+    def _params(self, records: dict) -> dict:
+        params = _power_params(self.path)
+        params.update(records)
+        return params
+
+    @staticmethod
+    def _sources(records: dict, source) -> dict:
+        """``records`` with each record's source replaced by ``source(kind, id,
+        record)``."""
+        out = copy.deepcopy(records)
+        for kind, recs in out.items():
+            for rid, rec in recs.items():
+                if "source" in rec:
+                    rec["source"] = source(kind, rid, records[kind][rid])
+        return out
+
+    def test_every_power_rule_refuses_the_draft_as_written(self):
+        """As written, each rule refuses a drafted source (a list: a source must
+        be a sentence); with every source written, each refuses a FILL value."""
+        for records, said in (
+                (self.records, "source is empty: say where each number comes from"),
+                (self._sources(self.records, lambda k, r, _rec: f"{k}.{r}: a person's words"),
+                 "FILL: ")):
+            params = self._params(records)
+            for gid in DRAFT_GATES:
+                with self.subTest(gate=gid, said=said):
+                    verdict = _run(self.registry, gid, self.root, params)
+                    self.assertEqual(verdict.outcome, "error", verdict.render())
+                    self.assertIn(said, verdict.error)
+
+    def test_a_board_with_no_cell_skips_or_refuses(self):
+        """The same board with its cell, charger, protector and fuse taken off:
+        the four battery rules skip (no pcb_batteries), and the mating and USB-C
+        rules refuse their FILL values. None passes."""
+        def strip(tree):
+            tree[:] = [x for x in tree if not (isinstance(x, list) and K.head(x) == "footprint"
+                                               and K.footprint_ref(x)[0] in
+                                               ("BT1", "U1", "U2", "F1"))]
+        board = self.board(strip, stem="no_cell")
+        proc, records, _summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual({k: sorted(v) for k, v in records.items() if v},
+                         {"pcb_matings": ["j1", "j10", "j11"], "pcb_usbc": ["j1"]})
+        params = _power_params(board)
+        params.update(records)
+        for gid in DRAFT_GATES:
+            with self.subTest(gate=gid):
+                verdict = _run(self.registry, gid, self.root, params)
+                self.assertIn(verdict.outcome, ("skipped", "error"), verdict.render())
+                if gid in POWER_GATES:
+                    self.assertIn("no pcb_batteries", verdict.skip_reason)
+
+    def test_no_number_and_no_flag_is_in_it(self):
+        fills, leaves = [], []
+
+        def walk(node, path):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    walk(v, f"{path}.{k}" if path else k)
+            elif isinstance(node, list):
+                for i, v in enumerate(node):
+                    walk(v, f"{path}[{i}]")
+            else:
+                leaves.append((path, node))
+                if isinstance(node, str) and node.startswith("FILL: "):
+                    fills.append(path)
+        walk(self.records, "")
+        self.assertEqual([(p, v) for p, v in leaves if not isinstance(v, str)], [])
+        self.assertEqual(self.summary["fill"], fills)
+        # 64 datasheet numbers, flags and words; U1's and U2's kind (charger,
+        # protector, bms or gauge is the person's word: in review of P9 the
+        # draft wrote it); and the 11 records' sources.
+        self.assertEqual(len(fills), 77)
+        self.assertEqual(sorted(self.records), sorted(DRAFT_RECORDS))
+        sources = 0
+        for kind, recs in self.records.items():
+            for rid, rec in recs.items():
+                if "source" in rec:
+                    sources += 1
+                    with self.subTest(record=f"{kind}.{rid}"):
+                        self.assertIsInstance(rec["source"], list)
+                        self.assertEqual(len(rec["source"]), 1)
+                        self.assertTrue(rec["source"][0].startswith(
+                            "FILL: DRAFT by pcb.battery_record_draft"), rec["source"])
+        self.assertEqual(sources, 11)
+        for pid, rec in self.records["pcb_protectors"].items():
+            with self.subTest(kind=pid):
+                self.assertTrue(_is_fill(rec["kind"]), rec["kind"])
+        self.assertIn("charger when U1", self.records["pcb_protectors"]["u1"]["kind"])
+        self.assertEqual(self.summary["keep_or_delete"], [])
+
+    def _from_baseline(self) -> tuple[dict, dict]:
+        """``(the baseline's params, the draft with each FILL taken from them)``:
+        each record's source the baseline's, a person's words, which is what
+        lets the record pass."""
+        base = _power_params(self.path)
+        filled, dropped = {}, []
+        for kind in DRAFT_RECORDS:
+            by_part = {_part(kind, rec): rec for rec in base[kind].values()}
+            filled[kind] = {}
+            for rid, rec in self.records[kind].items():
+                if _part(kind, rec) in by_part:
+                    filled[kind][rid] = _filled(rec, by_part[_part(kind, rec)])
+                else:
+                    dropped.append(f"{kind}.{rid}")
+        # J11 is the far end of the baseline's one board-to-board mating.
+        self.assertEqual(dropped, ["pcb_matings.j11"])
+        self.assertEqual(base["pcb_matings"]["flex"]["b"]["ref"], "J11")
+        self.assertEqual([p for p in self._fill_paths(filled)], [])
+        return base, filled
+
+    def test_stated_numbers_beside_a_drafted_source_pass_nothing(self):
+        """Every FILL stated from the baseline, and each source left as drafted:
+        every rule refuses the source. Writing it is the person's act that lets
+        the record pass."""
+        _base, filled = self._from_baseline()
+        kept = self._sources(filled, lambda k, r, _rec: self.records[k][r]["source"])
+        self.assertEqual(sorted({p.rsplit(".", 1)[-1] for p in self._fill_paths(kept)}),
+                         ["source[0]"])
+        params = self._params(kept)
+        for gid in DRAFT_GATES:
+            with self.subTest(gate=gid):
+                verdict = _run(self.registry, gid, self.root, params)
+                self.assertEqual(verdict.outcome, "error", verdict.render())
+                self.assertIn("source is empty", verdict.error)
+
+    def test_filled_from_the_baseline_it_reads_as_the_baseline(self):
+        base, filled = self._from_baseline()
+        for gid in DRAFT_GATES:
+            with self.subTest(gate=gid):
+                want = _run(self.registry, gid, self.root, base)
+                got = _run(self.registry, gid, self.root, self._params(filled))
+                self.assertEqual(want.outcome, "pass", want.render())
+                self.assertEqual((got.outcome, got.measured, got.units),
+                                 (want.outcome, want.measured, want.units), got.render())
+
+    @staticmethod
+    def _fill_paths(node, path=""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                yield from ADraftSettlesNothing._fill_paths(v, f"{path}.{k}")
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                yield from ADraftSettlesNothing._fill_paths(v, f"{path}[{i}]")
+        elif _is_fill(node):
+            yield path
+
+    def test_it_finds_each_part_by_its_evidence(self):
+        found = {row["record"]: row["found_by"] for row in self.summary["candidates"]}
+        self.assertEqual(found["pcb_batteries.bt1"], "ref BT1")
+        self.assertEqual(found["pcb_protectors.u1"], "pins VBAT (9, 10), PROG (6), THERM (8)")
+        self.assertEqual(found["pcb_protectors.u2"], "pins DO (4) and CO (5)")
+        self.assertEqual(found["pcb_protectors.f1"],
+                         "library Fuse, pad 1 on the battery's CELL_P")
+        charger = self.records["pcb_protectors"]["u1"]["functions"]
+        self.assertEqual(charger["charge_a"]["prog"]["ref"], "R3")
+        self.assertEqual(charger["charge_temp"]["sense"]["pin"], "8")
+        self.assertEqual(charger["charge_temp"]["ntc"]["ref"], "TH1")
+        cut = self.records["pcb_protectors"]["u2"]["functions"]
+        self.assertEqual({k: (f["acts"]["pin"], f["acts"]["switch"]["ref"],
+                              f["acts"]["switch"]["control"]) for k, f in cut.items()},
+                         {"overcharge_v": ("5", "Q1", "4"), "overdischarge_v": ("4", "Q1", "2")})
+        self.assertEqual(self.records["pcb_conductors"]["j6_vsys"]["protected_by"], ["f1"])
+        self.assertIn("in-pack", " ".join(self.summary["cannot_see"]))
+
+    def test_the_copies_are_the_gates(self):
+        """The coverage rule's connector test and the USB-C receptacle test are
+        copied into the proposer (a proposer imports no gate): held equal here,
+        constant by constant and on every footprint of both baseline boards."""
+        proc = _env.run([sys.executable, "-c", _COPIES, os.path.join(PACK, "proposers"),
+                         POWER_BOARD, BOARD], cwd=REPO)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        got = json.loads(proc.stdout)
+        power, helpers = self.power, self.helpers
+        self.assertEqual(got["connector_libs"], list(power.CONNECTOR_LIBS))
+        self.assertEqual(got["connector_ref"], power._CONNECTOR_REF.pattern)
+        self.assertEqual(got["typec_vbus"], list(helpers.TYPEC_VBUS))
+        self.assertEqual(got["typec_data"], list(helpers.TYPEC_DP + helpers.TYPEC_DM))
+        self.assertEqual(got["typec_name"], helpers._TYPEC_NAME.pattern)
+        self.assertEqual(got["typec_ref"], helpers._CONNECTOR_REF.pattern)
+        for path in (POWER_BOARD, BOARD):
+            board = K.load_board(path)
+            self.assertEqual(got["found"][path],
+                             {fp.ref: helpers.typec_receptacle(fp) for fp in board.footprints})
+        self.assertTrue(got["found"][POWER_BOARD]["J1"])
+
+    def test_a_refusal_writes_nothing(self):
+        with open(os.path.join(self.root, "not_a.kicad_pcb"), "w", encoding="utf-8") as fh:
+            fh.write("(kicad_sch (version 20250114))\n")
+        shutil.copyfile(BOARD, os.path.join(self.root, "esd.kicad_pcb"))
+        for boards, said in ((("gone.kicad_pcb",), "no KiCad board at gone.kicad_pcb"),
+                             (("power_board.kicad_pcb", "power_board.kicad_pcb"),
+                              "is named twice"),
+                             (("not_a.kicad_pcb",), "is not a board the power rules read"),
+                             (("esd.kicad_pcb",), "nothing to draft on esd.kicad_pcb")):
+            with self.subTest(said=said):
+                proc, records, _summary = _draft(self.root, *boards)
+                self.assertEqual(proc.returncode, 2, proc.stderr)
+                self.assertIn(said, proc.stderr)
+                self.assertIsNone(records)
+
+
+def _without(*refs: str):
+    """A board edit: the parts ``refs`` taken off."""
+    def edit(tree):
+        tree[:] = [x for x in tree if not (isinstance(x, list) and K.head(x) == "footprint"
+                                           and K.footprint_ref(x)[0] in refs)]
+    return edit
+
+
+def _join_net(tree, gone: str, into: str) -> None:
+    """Every pad on the net ``gone`` moved onto the net ``into``."""
+    code = _net_code(tree, into)
+    for fp in K.children(tree, "footprint"):
+        for pad in K.children(fp, "pad"):
+            net = K.child(pad, "net")
+            if net is not None and len(net) > 2 and str(net[2]) == gone:
+                net[1:] = [code, K.Q(into)]
+
+
+def _pin_names(tree, ref: str, names: dict) -> None:
+    """``ref``'s pads renamed, ``{pad number: pin name}``."""
+    for number, name in names.items():
+        K.child(_pad(tree, ref, number), "pinfunction")[1] = K.Q(name)
+
+
+#: Q1's pads named as a regulator's, on the power board with the cell's parts
+#: taken off: its drains (5 and 6, both on FET_D) the output, a source the input,
+#: the other source the ground, and J6's pin 1 moved onto FET_D.
+def _q1_as_regulator(tree) -> None:
+    _without("BT1", "U1", "U2", "F1")(tree)
+    _pin_names(tree, "Q1", {"5": "VOUT", "6": "VOUT", "1": "VIN", "3": "GND"})
+    _to_net(tree, "J6", "1", "FET_D")
+
+
+class ADraftDraftsWhatTheCopperShows(_PowerCase):
+    """What the review of P9 found the draft writing that the board does not
+    show, each on the power board edited. A cell's return drives no conductor; a
+    VBUS pad on no net puts no mating on a netless pad; two boards of one name
+    keep each its own records; a regulator's output may span pins, one on two
+    nets is named, and each rail is listed to keep or delete; and a data line's
+    DO and CO are no protector's."""
+
+    def test_a_cells_return_drives_nothing(self):
+        """BT1's - on GND (no low-side switch): its pads carry no + or - name,
+        and U1's and U2's VSS on GND show it is the return, so no connector's
+        GND is drafted as a fault conductor. (What slipped through: j1_gnd,
+        j6_gnd, j10_gnd and j11_gnd, each with its numbers to state.)"""
+        board = self.board(lambda t: _join_net(t, "CELL_N", "GND"), stem="low")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(records["pcb_conductors"]), ["j6_vsys"])
+        self.assertEqual(sorted(records["pcb_matings"]), ["bt1", "j1", "j10", "j11", "j6"])
+        self.assertIn("the copper shows its return on GND, where U1's VSS and U2's VSS sit",
+                      records["pcb_batteries"]["bt1"]["terminals"]["neg"])
+        self.assertTrue(_is_fill(records["pcb_batteries"]["bt1"]["terminals"]["neg"]))
+        self.assertEqual(summary["keep_or_delete"], [])
+
+    def test_a_return_nothing_shows_is_kept_and_said(self):
+        """With the charger and the protector off too, nothing shows which pad
+        is the -: both nets are kept, and keep_or_delete names what was drafted
+        on them, since a conductor left out is one no rule asks for."""
+        def edit(tree):
+            _join_net(tree, "CELL_N", "GND")
+            _without("U1", "U2")(tree)
+        board = self.board(edit, stem="bare")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(records["pcb_conductors"]),
+                         ["j10_gnd", "j11_gnd", "j1_gnd", "j6_gnd", "j6_vsys"])
+        self.assertEqual(len(summary["keep_or_delete"]), 1, summary["keep_or_delete"])
+        said = summary["keep_or_delete"][0]
+        self.assertIn("which of BT1's pads is the cell's -", said)
+        self.assertIn("CELL_P, GND", said)
+        for cid in records["pcb_conductors"]:
+            self.assertIn(f"pcb_conductors.{cid}", said)
+
+    def test_a_vbus_pad_on_no_net_drafts_no_mating(self):
+        """J1's A4 on no net, and J6 off every source (pin 1 on VSYS, which no
+        cell drives here, pin 2 on no net): J6 carries nothing, and no mating
+        says it carries an empty name. (What slipped through: ``A | B - {""}``
+        kept the empty name, so J6 and every connector with a netless pad was
+        drafted a mating that "carries , ...".)"""
+        def edit(tree):
+            _without("BT1", "U1", "U2", "F1")(tree)
+            _drop_net(tree, "J1", "A4")
+            _drop_net(tree, "J6", "2")
+        board = self.board(edit, stem="open_vbus")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(records["pcb_matings"]), ["j1", "j10", "j11"])
+        for row in summary["candidates"]:
+            self.assertNotIn("carries ,", row["found_by"])
+
+    def test_a_data_lines_outputs_are_no_cutoff_pair(self):
+        """U2 with DI and CI beside its DO and CO, as an addressable LED or a line
+        driver names its data and clock pins: it is drafted as no protector.
+        (What slipped through, found while the survey for CUTOFF_PAIRS was
+        written in review of P9: every such part was drafted as one.)"""
+        board = self.board(lambda t: _pin_names(t, "U2", {"1": "DI", "3": "CI"}),
+                           stem="led")
+        proc, records, _summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(sorted(records["pcb_protectors"]), ["f1", "u1"])
+
+    def test_two_boards_of_one_name_keep_their_own_records(self):
+        """a/main.kicad_pcb and b/main.kicad_pcb, two copies of the power board:
+        each id starts with its folder, so neither board's records replace the
+        other's. (What slipped through: both took the prefix main, and the
+        second board's battery, protectors, receptacle and matings replaced the
+        first's with no word.)"""
+        text = K.dump(K.load_tree(POWER_BOARD)) + "\n"
+        for side in ("a", "b"):
+            os.makedirs(os.path.join(self.root, side))
+            with open(os.path.join(self.root, side, "main.kicad_pcb"), "w",
+                      encoding="utf-8") as fh:
+                fh.write(text)
+        proc, records, _summary = _draft(self.root, "a/main.kicad_pcb", "b/main.kicad_pcb")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual({k: v["board"] for k, v in records["pcb_batteries"].items()},
+                         {"a_main_bt1": "a/main.kicad_pcb", "b_main_bt1": "b/main.kicad_pcb"})
+        self.assertEqual(len(records["pcb_protectors"]), 6)
+        self.assertEqual(len(records["pcb_matings"]), 10)
+        self.assertEqual(sorted(records["pcb_usbc"]), ["a_main_j1", "b_main_j1"])
+        self.assertIn("one of a_main_bt1, b_main_bt1",
+                      records["pcb_protectors"]["a_main_u1"]["battery"])
+
+    def test_the_prefixes_grow_until_each_is_its_own(self):
+        proc = _env.run([sys.executable, "-c", _PREFIXES, os.path.join(PACK, "proposers")],
+                        cwd=REPO)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(json.loads(proc.stdout), [
+            ["power", "main"], ["a_main", "b_main"], ["main", "sub_main"],
+            ["a_x_main", "b_x_main"], ["power_board", "power_board_2"]])
+
+    def test_a_regulators_output_may_span_pins(self):
+        """Q1 named as a regulator, its output on two pads of one net: a rail
+        on FET_D, returning on GND, listed to keep or delete with J6, the mating
+        drafted only for it. (What slipped through: one pad of each name was
+        required, so a regulator whose output spans pins was skipped, and every
+        rail read as sure as a battery's records.)"""
+        board = self.board(_q1_as_regulator, stem="reg")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        rail = records["pcb_rails"]["q1_fet_d"]
+        self.assertEqual((rail["net"], rail["return"]), ("FET_D", "GND"))
+        self.assertTrue(_is_fill(rail["nominal_v"]))
+        found = {row["record"]: row["found_by"] for row in summary["candidates"]}
+        self.assertEqual(found["pcb_rails.q1_fet_d"], "pins VOUT (5, 6) and VIN (1)")
+        self.assertEqual(len(summary["keep_or_delete"]), 1)
+        self.assertIn("pcb_rails.q1_fet_d: Q1 (FDS6890A) was taken for a regulator by its "
+                      "pin names alone", summary["keep_or_delete"][0])
+        self.assertIn("the matings drafted only for FET_D (pcb_matings.j6)",
+                      summary["keep_or_delete"][0])
+
+    def test_a_regulator_on_two_nets_is_named(self):
+        """The same, with pad 6 moved to a net of its own: no rail, and
+        cannot_see names Q1 and both nets. (What slipped through: such a part
+        was skipped and nothing said so.)"""
+        def edit(tree):
+            _q1_as_regulator(tree)
+            _move_pad_net(tree, "Q1", "6", "OTHER")
+        board = self.board(edit, stem="reg2")
+        proc, records, summary = _draft(self.root, os.path.basename(board))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(records["pcb_rails"], {})
+        self.assertIn("Q1 (FDS6890A) on reg2.kicad_pcb, a regulator by its pins VOUT (5, 6) "
+                      "and VIN (1): its VOUT pins sit on FET_D, OTHER, so no pcb_rails record "
+                      "is drafted for it", " ".join(summary["cannot_see"]))
+
+
+#: A child that prints the proposer's id prefixes for sets of board paths.
+_PREFIXES = r"""
+import json, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import battery_record_draft as D
+print(json.dumps([D.prefixes(rels) for rels in (
+    ["power.kicad_pcb", "main.kicad_pcb"], ["a/main.kicad_pcb", "b/main.kicad_pcb"],
+    ["main.kicad_pcb", "sub/main.kicad_pcb"], ["a/x/main.kicad_pcb", "b/x/main.kicad_pcb"],
+    ["power-board.kicad_pcb", "Power_Board.kicad_pcb"])]))
+"""
+
+
+DRAFT_RECORDS = ("pcb_batteries", "pcb_protectors", "pcb_conductors", "pcb_matings",
+                 "pcb_usbc", "pcb_rails")
+
+#: A child that prints the proposer's copies of the gates' connector and USB-C
+#: tests, and its receptacle verdict on each footprint of each board named.
+_COPIES = r"""
+import json, sys
+sys.dont_write_bytecode = True
+sys.path.insert(0, sys.argv[1])
+import battery_record_draft as D
+out = {"connector_libs": list(D.CONNECTOR_LIBS), "connector_ref": D._CONNECTOR_REF.pattern,
+       "typec_vbus": list(D.TYPEC_VBUS), "typec_data": list(D.TYPEC_DATA),
+       "typec_name": D._TYPEC_NAME.pattern, "typec_ref": D._TYPEC_CONNECTOR_REF.pattern,
+       "found": {}}
+for path in sys.argv[2:]:
+    board = D.K.load_board(path)
+    out["found"][path] = {fp.ref: D.typec_receptacle(fp) for fp in board.footprints}
+print(json.dumps(out))
+"""
+
+
 if __name__ == "__main__":
     unittest.main()

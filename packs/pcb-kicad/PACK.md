@@ -185,8 +185,9 @@ board; this proposer does, on KiCad's stock symbols: each part's symbol in its o
 cell, a global label of its pad's net on each connected pin end, its Footprint
 field the board's footprint name verbatim, every id a `uuid5` (the bytes repeat).
 It writes `<stem>.kicad_sch`, a `sym-lib-table` of the libraries used, and
-`<stem>.schematic.json` (the symbol per ref, the parts on generic symbols, the
-pins left open with no statement, the flagged nets, each library's sha256).
+`<stem>.schematic.json` (the symbol per ref, each multi-unit part's unit map, the
+parts on generic symbols, the pins left open with no statement, the flagged nets,
+the variable that names the stock libraries, each library's sha256).
 
 The symbols file holds the person's statements, never inferred: `symbols` (`{ref
 or glob: "Lib:Symbol"}`, an exact ref first, then globs in the order written),
@@ -194,14 +195,76 @@ or glob: "Lib:Symbol"}`, an exact ref first, then globs in the order written),
 off the board) and `library` (more `.kicad_sym` directories). A part with no
 stock symbol is mapped to `Connector_Generic:Conn_01xNN` by the person. It exits 2,
 writes nothing and names every problem when a part matches no symbol, a pad with a
-net has no pin of its number, a pad carries two nets, a symbol is missing or has
-more than one unit, or a statement names a pad or net the board lacks.
+net has no pin of its number in any unit, a pad carries two nets, a symbol is
+missing, or a statement names a pad or net the board lacks.
+
+A multi-unit symbol (a dual op-amp, a quad gate, a dual MOSFET) is placed whole:
+each unit in its own cell under the part's one ref, each pad's net on the pin of
+its number in the unit that draws it, and a pin that every unit shares labelled
+on every unit. KiCad's ERC names a unit left unplaced, and parity names its pins,
+so both judge this as well.
+
+The stock symbols are read from the directory that `KICAD10_SYMBOL_DIR`,
+`KICAD9_SYMBOL_DIR` or `KICAD_SYMBOL_DIR` names, else from where KiCad's installer
+puts them: `/usr/share/kicad/symbols`, the macOS app bundle's
+`Contents/SharedSupport/symbols`, or `share\kicad\symbols` under the Windows
+install for KiCad 10 or 9. The `sym-lib-table` names each stock library by the
+variable it was found through. For a fixed path it uses `KICAD<major>_SYMBOL_DIR`
+for the release `kicad-cli version` reports, or KiCad 9's name when no kicad-cli
+answers, and the summary says which.
 
 Adopting it (copying the files beside the board, under its name) is a person's
 decision. Then the existing `pcb.erc` and `pcb.parity` judge it, and `pcb.parity`
 is the check on the writer. When the generator moves the board, parity reads a
 difference until someone proposes again: tag such claims `netlist`, which binds
 `pcb.erc`, `pcb.parity` and `pcb.pin_names` together.
+
+## The proposer: `pcb.battery_record_draft`
+
+    nopekit propose pcb.battery_record_draft -- --board hardware/power.kicad_pcb \
+        [--board hardware/main.kicad_pcb]
+
+The power records are the heaviest part of first use. This proposer writes a
+draft of them from the boards, in the shapes the rules read: `pcb_batteries`,
+`pcb_protectors`, `pcb_conductors`, `pcb_matings`, `pcb_usbc` and `pcb_rails`,
+each an object keyed by id. It fills each record's board, ref and value, `where:
+board` for a part on a board, and the pads that a part's pin names or its copper
+show: a charger's thermistor pin and the resistor on its PROG pin, a protector's
+DO and CO pins and the switch each drives, a fuse's two pads, a connector's pins
+on a net a cell drives. It finds a battery by KiCad's `Battery*` libraries or a
+BT ref; a charger by a cell pin (BAT, VBAT, BATT) beside a PROG, ISET or
+thermistor pin; a protector by DO and CO (or DOUT and COUT, or DSG and CHG); a
+fuse by the `Fuse*` libraries or an F ref; a USB-C receptacle as
+`pcb.usbc_receptacle` does; a rail by a regulator's output and input pins, each
+name's pins on one net; and a mating for every connector on a net that a cell, a
+VBUS or a drafted rail drives, as `pcb.mismate`'s coverage rule asks. A cell
+drives the nets of its pads, but not its `-` pad's or its thermistor pad's. When
+no pad is named `-`, a net where a drafted charger's or protector's ground pin
+sits is the cell's return, and drives nothing.
+
+**It never fills a datasheet number, a flag or a choice that is yours** (a
+chemistry, a cell count, what kind of element a part is, a role, a mating's far
+side and modes). Each is a string that starts `FILL:` and says what to state,
+with what the board shows beside it. No number and no true or false is anywhere
+in the draft. Every record's source is a list that holds one `FILL:`, which says
+`DRAFT by pcb.battery_record_draft`. It writes `<stem>.power_records.json` and
+`<stem>.power_draft.json`. The summary gives each candidate with the pins and
+nets that found it, and the path of every `FILL:` value. Under `keep_or_delete`
+it names the records it may have drafted wrong: each rail (a filter, a voltage
+reference and a driver have the same pin names), and the records on a cell's
+nets when nothing names or shows its `-`. It also says what it cannot see: an
+element inside the pack, a stop that firmware makes, which connector meets
+which, a part whose pads carry no pin name, and a regulator whose output or
+input pins sit on several nets. With more than one board, each id starts with
+its board's file name, and with its folders when two boards have the same name.
+
+A draft settles nothing. Every power rule refuses a `FILL:` value where it reads
+a number, a flag or a word, and names it. Every rule also refuses a source that
+is not a string. So an adopted draft errors until each value is stated and each
+source is written. Adopting the draft (copying its records into the project's
+params) is a person's decision, and so is each value. Write each source, in
+place of its list, as one sentence that says where its numbers come from: the
+rules check that a source says something, not what it says.
 
 ## What this pack CANNOT settle
 

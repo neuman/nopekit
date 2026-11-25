@@ -142,8 +142,14 @@
     {
       "id": "pcb.schematic_from_board",
       "basis": "model-only",
-      "description": "Writes a KiCad schematic from a board's pad nets on KiCad's stock symbols, so ERC and parity can run; parity checks it once adopted.",
+      "description": "Writes a KiCad schematic from a board's pad nets on KiCad's stock symbols, every unit of a multi-unit part placed, so ERC and parity can run; parity checks it once adopted.",
       "run": "proposers/schematic_from_board.py"
+    },
+    {
+      "id": "pcb.battery_record_draft",
+      "basis": "model-only",
+      "description": "Drafts the power records from a design's boards and pin names, each datasheet number a FILL value a person states; it settles nothing, and the power rules refuse it unfilled.",
+      "run": "proposers/battery_record_draft.py"
     }
   ],
   "requires_tools": [
