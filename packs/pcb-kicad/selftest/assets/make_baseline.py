@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.join(PACK, "gates"))
 import _kicad as K                                                 # noqa: E402
 
 sys.path.insert(0, HERE)
+import make_libraries as L                                         # noqa: E402
 import make_schematic as S                                         # noqa: E402
 
 FOOTPRINTS = "/usr/share/kicad/footprints"
@@ -130,23 +131,12 @@ def library_pin_names(lib: str, symbol: str) -> dict[str, tuple[str, str]]:
     return pins
 
 
-#: The project's own library tables: the stock libraries this board and its
-#: schematic use, through KiCad's own path variable. Without them a host whose
-#: KiCad was never configured (no global table) reads every symbol as from an
-#: unknown library, and ERC's warnings would depend on the machine.
-SYM_LIBS = ("power", "Connector_Generic", "Power_Protection")
-FP_LIBS = ("Connector_PinHeader_2.54mm", "Package_TO_SOT_SMD")
-
-
-def write_lib_tables() -> None:
-    rows = {"sym-lib-table": ("sym_lib_table", "KICAD9_SYMBOL_DIR", SYM_LIBS, ".kicad_sym"),
-            "fp-lib-table": ("fp_lib_table", "KICAD9_FOOTPRINT_DIR", FP_LIBS, ".pretty")}
-    for name, (head, var, libs, ext) in rows.items():
-        lines = [f"({head}", "\t(version 7)"]
-        lines += [f'\t(lib (name "{lib}")(type "KiCad")(uri "${{{var}}}/{lib}{ext}")'
-                  f'(options "")(descr ""))' for lib in libs]
-        with open(os.path.join(HERE, name), "w", encoding="utf-8") as fh:
-            fh.write("\n".join(lines) + "\n)\n")
+#: The project's own library tables and the copies of the stock entries this
+#: board and its schematic use, which they name through ``${KIPRJMOD}/lib``:
+#: ``make_libraries.py`` writes both, and says why the pack keeps its own copies.
+#: (Before the holdout run, the tables named the host's stock libraries through
+#: ``${KICAD9_FOOTPRINT_DIR}``, and the known-good controls read whatever library
+#: the host had installed.)
 
 
 def mm(v: float) -> int:
@@ -155,7 +145,7 @@ def mm(v: float) -> int:
 
 def main() -> int:
     S.write()
-    write_lib_tables()
+    L.write()
     sym_uuids = S.symbol_uuids()
     board = pcbnew.BOARD()
     board.SetCopperLayerCount(2)

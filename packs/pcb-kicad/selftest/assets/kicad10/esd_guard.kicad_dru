@@ -1,0 +1,4 @@
+(version 1)
+(rule usb_pair
+	(condition "A.NetName == 'DP' || A.NetName == 'DM'")
+	(constraint track_width (min 0.2mm)))

@@ -1,0 +1,13 @@
+{
+  "release": "9.0.9",
+  "board_format": 20241229,
+  "schematic_format": 20250114,
+  "measured": "2026-11-24",
+  "on": "Ubuntu 24.04, KiCad's own 9.0.9 package (kicad 9.0.9~ubuntu24.04.1), its stock libraries from the distribution's 7.0.11 packages",
+  "shown": [
+    "it writes board format 20241229 and schematic format 20250114: the baseline, selftest/assets/esd_guard.*, which it made",
+    "on selftest/assets/kicad10/esd_guard.kicad_pcb (format 20260206) pcb drc exits 3, 'Failed to load board'; on its schematic (20260306) sch erc exits 3, 'Failed to load schematic'",
+    "it lists a DRC finding excluded in the project file with \"excluded\": true and its comment, and exits 5 when that is the only finding",
+    "gate selftest --pack pcb-kicad: every control as the pack records it"
+  ]
+}
