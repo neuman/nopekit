@@ -164,8 +164,8 @@ polygon onto the board. Registration only: a land is judged by function in
 First, once, before any board is staged, **the pair**: the gate asks `kicad-cli
 version --format plain` and the refill's child (`_keepout_fill.py --version`)
 which releases they are, and runs only on a pair a record in
-`gates/pcbnew/<release>.json` names: kicad-cli 9.0.9 with pcbnew 9.0.9. Any other
-pair skips, naming both releases and the pairs measured. Each release is asked
+`gates/pcbnew-pairs/<release>.json` names: kicad-cli 9.0.9 with pcbnew 9.0.9.
+Any other pair skips, naming both releases and the pairs measured. Each release is asked
 for by its record's path, found or not, so the verdict's key holds both. (What
 slipped through, in the merge of the holdout fixes: kicad-cli 10.0.8 writes
 "Items not allowed" for a track in the added area and names no area, where 9.0.9

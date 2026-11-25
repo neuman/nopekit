@@ -4838,8 +4838,22 @@ PCBNEW_SKIP = "needs pcbnew: the test board is built with KiCad's own placement"
 
 #: The gate's own answer, asked once: "" when the kicad-cli on PATH and the
 #: pcbnew this Python imports are a pair pcb.antenna_keepout was measured on,
-#: else its skip reason (``_keepout_pair``).
+#: or when the gate errors on asking; else its skip reason (``_keepout_pair``).
 _PAIR: dict[str, str] = {}
+
+
+def _pair_skip(refused) -> str:
+    """The skip reason of a class that judges a board with KiCad's own tools,
+    from ``_keepout_pair``'s answer: its skip alone, for a pair the gate was not
+    measured on. An error is no reason to skip: the class runs, and goes red on
+    the gate's error as it did before the pair was asked. (What slipped through,
+    in review of general-packs R1: every answer but None read as a skip, so a
+    pcbnew that could not be imported, or a pair record not of its shape, skipped
+    the five classes where they had failed.)"""
+    if refused is None or refused.outcome != "skipped":
+        return ""
+    return (f"needs kicad-cli and pcbnew of a pair the gate was measured on, where it "
+            f"judges a board: {refused.skip_reason}")
 
 
 def _unmeasured_pair() -> str:
@@ -4850,9 +4864,7 @@ def _unmeasured_pair() -> str:
             refused = fn.__globals__["_keepout_pair"](_keepout_ctx(root, {}), spec.id)
         finally:
             shutil.rmtree(root, True)
-        _PAIR["why"] = "" if refused is None else (
-            f"needs kicad-cli and pcbnew of a pair the gate was measured on, where it "
-            f"judges a board: {refused.skip_reason or refused.error}")
+        _PAIR["why"] = _pair_skip(refused)
     return _PAIR["why"]
 
 
@@ -8076,7 +8088,7 @@ class ADraftFindsTheCellAPersonWouldName(_PowerCase):
 # general-packs R1: the keep-out runs only on a pair of releases it was
 # measured on, and the fit reads a model folder the project states
 # --------------------------------------------------------------------------- #
-PAIRS = os.path.join(PACK, "gates", "pcbnew")
+PAIRS = os.path.join(PACK, "gates", "pcbnew-pairs")
 
 #: An item kicad-cli finds in one of the keep-out gate's areas, in the words of
 #: each release (measured on the staged copies of TheKeepoutPicksAnUnnamedArea's
@@ -8101,7 +8113,7 @@ def _keepout_report(release: str, words: str) -> dict:
 class TheKeepoutRunsOnlyOnAMeasuredPair(unittest.TestCase):
     """pcb.antenna_keepout asks the kicad-cli on PATH and the pcbnew its refill
     imports which releases they are, before it stages a board, and runs only on
-    a pair a record in ``gates/pcbnew/`` names: kicad-cli 9.0.9 with pcbnew
+    a pair a record in ``gates/pcbnew-pairs/`` names: kicad-cli 9.0.9 with pcbnew
     9.0.9. Any other pair skips, naming both. An item not allowed in a keep-out
     that names none of the gate's areas is an error, never passed over.
 
@@ -8172,7 +8184,7 @@ class TheKeepoutRunsOnlyOnAMeasuredPair(unittest.TestCase):
                 self.assertEqual(
                     v.skip_reason,
                     f"kicad-cli {cli} beside pcbnew {pcbnew}: not a pair this gate was "
-                    f"measured on (kicad-cli 9.0.9 with pcbnew 9.0.9; gates/pcbnew/)")
+                    f"measured on (kicad-cli 9.0.9 with pcbnew 9.0.9; gates/pcbnew-pairs/)")
                 self.assertEqual(self.asked(), ["version"], "nothing but the release is asked")
 
     def test_a_measured_pair_judges_the_board(self):
@@ -8238,9 +8250,10 @@ class TheKeepoutRunsOnlyOnAMeasuredPair(unittest.TestCase):
             return verdicts.Reads.from_trace(trace, anchors=anchors)
 
         measured, other = reads("9.0.9", "9.0.9"), reads("9.0.9", "9.0.10")
-        self.assertIn("<pack:pcb-kicad>/gates/pcbnew/9.0.9.json", measured.files)
+        self.assertIn("<pack:pcb-kicad>/gates/pcbnew-pairs/9.0.9.json", measured.files)
         self.assertIn("<pack:pcb-kicad>/gates/kicad-cli/9.0.9.json", measured.files)
-        self.assertIsNone(other.files.get("<pack:pcb-kicad>/gates/pcbnew/9.0.10.json", "x"))
+        self.assertIsNone(other.files.get("<pack:pcb-kicad>/gates/pcbnew-pairs/9.0.10.json",
+                                          "x"))
         self.assertNotEqual(verdicts.rho_control(self.spec.id, "static", measured),
                             verdicts.rho_control(self.spec.id, "static", other))
 
@@ -8270,7 +8283,53 @@ class TheKeepoutRunsOnlyOnAMeasuredPair(unittest.TestCase):
         with helper, path, mock.patch.dict(self.fn.__globals__, {"PCBNEW_DIR": bad}):
             v = self.fn(_keepout_ctx(self.root, _radio_record(RADIO_BOARD)))
         self.assertEqual(v.outcome, "error", v.render())
-        self.assertIn("gates/pcbnew/9.0.9.json is not a pair record", v.error)
+        self.assertIn("gates/pcbnew-pairs/9.0.9.json is not a pair record", v.error)
+
+    def test_a_missing_pcbnew_reads_as_missing(self):
+        """The refill's child, with no pcbnew on its path, says no pcbnew is
+        there. (What slipped through, in review of general-packs R1: the pair
+        records' folder was ``gates/pcbnew/``. Run as a script, the child has
+        ``gates/`` first on its path, and ``import pcbnew`` loaded the folder as a
+        namespace package: "module 'pcbnew' has no attribute 'Version'".) Run with
+        ``-E -s -S``, so no site folder gives a pcbnew; not ``-I``, which keeps the
+        script's folder off the path and would hide the fault. The second run puts
+        a folder named ``pcbnew`` beside a copy of the child: its guard keeps its
+        own folder off its path."""
+        helper = self.fn.__globals__["KEEPOUT_FILL_HELPER"]
+        beside = os.path.join(self.root, "gates")
+        os.makedirs(os.path.join(beside, "pcbnew"))
+        shutil.copy(helper, beside)
+        for script in (helper, os.path.join(beside, os.path.basename(helper))):
+            with self.subTest(script=script):
+                proc = _env.run([sys.executable, "-E", "-s", "-S", script, "--version"],
+                                cwd=self.root)
+                if proc.returncode == 0:
+                    self.skipTest(f"this Python imports pcbnew {proc.stdout.strip()} with no "
+                                  f"site folder: no missing pcbnew to show")
+                self.assertIn("No module named 'pcbnew'", proc.stderr)
+                self.assertNotIn("has no attribute", proc.stderr)
+
+    def test_the_classes_that_judge_a_board_skip_only_on_an_unmeasured_pair(self):
+        """The five classes that judge a board with KiCad's own tools skip on the
+        gate's skip for an unmeasured pair, and on nothing else it answers: a
+        pcbnew that cannot be imported is the gate's error, and the classes go
+        red on it, as they did before the pair was asked. (What slipped through,
+        in review of general-packs R1: every answer but None read as a skip.)"""
+        from nopekit.models import Verdict
+        gid = self.spec.id
+        self.assertEqual(_pair_skip(None), "")
+        broken = Verdict(gate=gid, passed=False,
+                         error="pcbnew could not name its release (_keepout_fill.py "
+                               "--version exited 1): ImportError")
+        self.assertEqual(broken.outcome, "error")
+        self.assertEqual(_pair_skip(broken), "")
+        refused = self.fn.__globals__["_skip"](
+            gid, "kicad-cli 10.0.8 beside pcbnew 9.0.9: not a pair this gate was measured on")
+        self.assertEqual(
+            _pair_skip(refused),
+            "needs kicad-cli and pcbnew of a pair the gate was measured on, where it judges "
+            "a board: kicad-cli 10.0.8 beside pcbnew 9.0.9: not a pair this gate was "
+            "measured on")
 
     def test_kicad_cli_10_in_its_image_beside_the_hosts_pcbnew_skips(self):
         """The mix itself: the kicad/kicad:10.0 image's kicad-cli through a

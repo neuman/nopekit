@@ -144,11 +144,11 @@ cutout, as KiCad saved them, so a feed track cut out of a chip antenna's
 clearance is not a finding. A project that sets `items_not_allowed` to ignore,
 or excludes a finding, does not hide one: the staged copy sets it back. It runs
 only where the kicad-cli on PATH and the pcbnew it imports are a pair it was
-measured on (`gates/pcbnew/`: kicad-cli 9.0.9 with pcbnew 9.0.9), and skips
-under any other pair, naming both: kicad-cli 10.0.8 names no keep-out area for a
-track, and the gate ties a finding to its part by that name, so under it a board
-with two tracks in the keep-out read pass (measured, beside pcbnew 9.0.9 and
-10.0.8). A finding that names none of the gate's areas is an error, never
+measured on (`gates/pcbnew-pairs/`: kicad-cli 9.0.9 with pcbnew 9.0.9), and
+skips under any other pair, naming both: kicad-cli 10.0.8 names no keep-out area
+for a track, and the gate ties a finding to its part by that name, so under it a
+board with two tracks in the keep-out read pass (measured, beside pcbnew 9.0.9
+and 10.0.8). A finding that names none of the gate's areas is an error, never
 passed over.
 
 A record (`{id: {board?, ref, value, keepout, own_nets?, source}}`, held to the
@@ -437,7 +437,7 @@ Read this before you write a claim. Every one of these has passed a "0 violation
   `_kicad.TOOL_RUN_VERSION`.
 - **The keep-out under a pair of releases it was not measured on.**
   `pcb.antenna_keepout` skips, naming both releases, unless the kicad-cli on PATH
-  and the pcbnew it imports are a pair a record in `gates/pcbnew/` names
+  and the pcbnew it imports are a pair a record in `gates/pcbnew-pairs/` names
   (kicad-cli 9.0.9 with pcbnew 9.0.9). kicad-cli 10.0.8 is in no pair: it writes
   "Items not allowed" for a track in a keep-out, naming no area, and the gate
   ties each finding to its part by that name. The move: tie such a finding to its

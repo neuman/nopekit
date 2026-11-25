@@ -9,7 +9,7 @@
     "it reads the KiCad 9 baseline, selftest/assets/esd_guard.*, and passes it at every severity once the tables name the pack's own library copies (with the stock libraries of its image it read 3x lib_footprint_mismatch)",
     "it lists a DRC finding excluded in the project file with \"excluded\": true and its comment, and exits 5 when that is the only finding",
     "it reports footprint_symbol_field_mismatch, a parity type KiCad 9.0.9 does not have",
-    "it writes \"Items not allowed\" for a track in a keep-out, naming no area (9.0.9 names it), and names the area for a pad, a via and a zone fill: pcb.antenna_keepout, which ties a finding to its part by that name, runs beside no pcbnew under it (gates/pcbnew/)",
-    "gate selftest --pack pcb-kicad, through that wrapper: every kicad-cli control as the pack records it"
+    "it writes \"Items not allowed\" for a track in a keep-out, naming no area (9.0.9 names it), and names the area for a pad, a via and a zone fill: pcb.antenna_keepout, which ties a finding to its part by that name, runs beside no pcbnew under it (gates/pcbnew-pairs/)",
+    "gate selftest --pack pcb-kicad, through that wrapper beside pcbnew 9.0.9: every kicad-cli control as the pack records it but pcb.antenna_keepout's, whose two controls skip, naming the pair (gates/pcbnew-pairs/): 17 qualified, pcb.antenna_keepout unqualified, exit 1 (2026-11-25; before the gate asked the pair it read qualified, on a control that is a zone fill, whose words name the area)"
   ]
 }

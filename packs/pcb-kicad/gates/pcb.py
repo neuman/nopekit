@@ -4269,12 +4269,13 @@ def enclosure_fit(ctx: GateContext) -> Verdict:
 KEEPOUT_FILL_HELPER = os.path.join(_HERE, "_keepout_fill.py")
 
 #: The pairs of releases ``pcb.antenna_keepout`` was measured on, by the pcbnew
-#: release that refills: one file per release, ``gates/pcbnew/<release>.json``,
-#: holding the kicad-cli releases the gate was measured beside under it
-#: (``kicad_cli``), the day and the host, and what was shown there. The gate runs
-#: only on a pair a record names (:func:`_keepout_pair`), and asks for the record
-#: of the running pcbnew by its path, found or not, so the spine keys the pcbnew
-#: release as :data:`RELEASES_DIR` keys kicad-cli's.
+#: release that refills: one file per release,
+#: ``gates/pcbnew-pairs/<release>.json``, holding the kicad-cli releases the gate
+#: was measured beside under it (``kicad_cli``), the day and the host, and what
+#: was shown there. The gate runs only on a pair a record names
+#: (:func:`_keepout_pair`), and asks for the record of the running pcbnew by its
+#: path, found or not, so the spine keys the pcbnew release as
+#: :data:`RELEASES_DIR` keys kicad-cli's.
 #:
 #: **A pair, not a release.** The gate hands one board to two KiCad programs:
 #: pcbnew refills it, kicad-cli judges both copies, and the gate ties each finding
@@ -4301,7 +4302,20 @@ KEEPOUT_FILL_HELPER = os.path.join(_HERE, "_keepout_fill.py")
 #: and judged the board, and its crash reads as the gate's error, louder than the
 #: cause). The cost: one ``kicad-cli version`` (0.1 s here, 0.2 to 0.9 s through the
 #: image) and one child that imports pcbnew (0.8 s) on each run that judges a board.
-PCBNEW_DIR = os.path.join(_HERE, "pcbnew")
+#:
+#: **The folder's name** is no name Python can import. The refill's child runs
+#: ``_keepout_fill.py`` as a script, so this folder's parent is the first entry of
+#: its path. What slipped through, in review of general-packs R1: the folder was
+#: ``gates/pcbnew/``, and where the child's own path held no pcbnew, ``import
+#: pcbnew`` loaded the folder as a namespace package, so the gate's error read
+#: "module 'pcbnew' has no attribute 'Version'" where the cause is that no pcbnew
+#: is there. The child now also drops its own folder from its path
+#: (``_keepout_fill.py``). *Rejected:* the guard in the child alone (another
+#: script in ``gates/`` that imports pcbnew would still load the folder); a name
+#: that is an identifier, such as ``keepout_pairs`` (nothing imports that name
+#: today, but a folder an import can load is the same trap for the next module
+#: given its name).
+PCBNEW_DIR = os.path.join(_HERE, "pcbnew-pairs")
 
 #: The keys of a pcbnew pair record.
 PCBNEW_KEYS = ("release", "kicad_cli", "measured", "on", "shown")
@@ -4859,9 +4873,9 @@ def _pair_records(ctx: GateContext) -> dict[str, dict]:
                 or not isinstance(record["kicad_cli"], list)
                 or not all(isinstance(r, str) and _RELEASE.fullmatch(r)
                            for r in record["kicad_cli"])):
-            raise ValueError(f"gates/pcbnew/{name} is not a pair record: it holds exactly "
-                             f"{list(PCBNEW_KEYS)}, its release as its name, kicad_cli a "
-                             f"list of releases")
+            raise ValueError(f"gates/pcbnew-pairs/{name} is not a pair record: it holds "
+                             f"exactly {list(PCBNEW_KEYS)}, its release as its name, "
+                             f"kicad_cli a list of releases")
         out[record["release"]] = record
     return out
 
@@ -4893,7 +4907,7 @@ def _keepout_pair(ctx: GateContext, gid: str) -> Verdict | None:
              for p in sorted(records, key=_release_key) for c in records[p]["kicad_cli"]]
     return _skip(gid, f"kicad-cli {cli or f'(no release: {cli_why})'} beside pcbnew "
                       f"{pcbnew or f'(no release: {pcb_why})'}: not a pair this gate was "
-                      f"measured on ({'; '.join(pairs) or 'none'}; gates/pcbnew/)")
+                      f"measured on ({'; '.join(pairs) or 'none'}; gates/pcbnew-pairs/)")
 
 
 def _refill(ctx: GateContext, gid: str, board: str, out: str, log: str):
@@ -5127,7 +5141,7 @@ def antenna_keepout(ctx: GateContext) -> Verdict:
     script written for that one board; nothing in this pack checked it.
 
     **Which releases.** Only a pair of kicad-cli and pcbnew releases a record in
-    ``gates/pcbnew/`` names (:data:`PCBNEW_DIR`, :func:`_keepout_pair`), asked
+    ``gates/pcbnew-pairs/`` names (:data:`PCBNEW_DIR`, :func:`_keepout_pair`), asked
     before any board is staged; any other pair skips, naming both. An item not
     allowed in a keep-out that names none of this gate's areas is an error
     (:func:`_antenna_untied`). What slipped through, in the merge of H1 and H2:

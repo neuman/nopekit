@@ -218,10 +218,10 @@ than skip: upgrade.
 - **The keep-out runs on a measured pair.** `pcb.antenna_keepout` hands one board
   to pcbnew (the refill) and to kicad-cli (the DRC), and ties each finding to its
   part by the name kicad-cli writes for the area. It asks both releases before it
-  stages a board, and runs only on a pair a record in `gates/pcbnew/<release>.json`
-  names (`kicad_cli`): kicad-cli 9.0.9 with pcbnew 9.0.9. Any other pair skips,
-  naming both. (What slipped through, in the merge of the holdout fixes: kicad-cli
-  10.0.8 writes "Items not allowed" for a track in a keep-out and names no area,
+  stages a board, and runs only on a pair a record in
+  `gates/pcbnew-pairs/<release>.json` names (`kicad_cli`): kicad-cli 9.0.9 with
+  pcbnew 9.0.9. Any other pair skips, naming both. (What slipped through, in the
+  merge of the holdout fixes: kicad-cli 10.0.8 writes "Items not allowed" for a track in a keep-out and names no area,
   so beside pcbnew 9.0.9, and beside pcbnew 10.0.8 in the image, a board with two
   tracks in the keep-out read pass at 0. The selftest read qualified: its control
   is a zone fill, whose words name the area.) An exact pair, not a series: a patch

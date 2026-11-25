@@ -13,9 +13,17 @@ Skipped, never passed.
 KiCad 10 is the current release. Check: `kicad-cli version` prints `10.0.x` (or
 `9.0.x`). The gates were measured on 9.0.9 and 10.0.8 (`gates/kicad-cli/`): each
 verdict names the release that ran, and a release the pack has no record of
-still runs, and says so. A kicad-cli reads the files of its own release and older
-ones: kicad-cli 9 skips a board or schematic KiCad 10 saved, naming the release,
-so a KiCad 10 design needs KiCad 10's kicad-cli.
+still runs, and says so. `pcb.antenna_keepout` is the exception. It runs only on
+a pair of kicad-cli and pcbnew releases it was measured on, and today that is
+kicad-cli 9.0.9 with pcbnew 9.0.9 ("The pair", below). Under any other pair it
+skips: a KiCad 10 install, the image's wrapper and a KiCad 9 patch release other
+than 9.0.9 included. There, `nopekit pack validate pcb-kicad` and
+`nopekit gate selftest --pack pcb-kicad` read the keep-out unqualified and exit
+1 (measured through the wrapper: the other 17 gates qualify). For every gate to
+qualify, install KiCad 9.0.9, with kicad-cli and pcbnew from the same install. A
+kicad-cli reads the files of its own release and older ones: kicad-cli 9 skips a
+board or schematic KiCad 10 saved, naming the release, so a KiCad 10 design
+needs KiCad 10's kicad-cli.
 
 | Platform | How |
 |---|---|
@@ -121,8 +129,8 @@ board under any `pcbnew`, saying "this gate was checked through board format
 `pcb.enclosure_fit` skips one too, for its STEP export.
 
 **The pair.** The keep-out runs only where the kicad-cli on PATH and the pcbnew
-this Python imports are a pair it was measured on (`gates/pcbnew/`): today
-kicad-cli 9.0.9 with pcbnew 9.0.9. Any other pair skips, naming both releases.
+this Python imports are a pair it was measured on (`gates/pcbnew-pairs/`):
+today kicad-cli 9.0.9 with pcbnew 9.0.9. Any other pair skips, naming both releases.
 kicad-cli 10.0.8 names no keep-out area for a track ("Items not allowed"), and the
 gate ties each finding to its part by that name: beside pcbnew 9.0.9, and beside
 pcbnew 10.0.8 in the image, it read pass on a board with two tracks in the
