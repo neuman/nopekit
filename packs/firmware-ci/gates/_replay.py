@@ -21,6 +21,13 @@ through subprocesses (the copy's symlinks, its snapshot, the read-back and the
 removal) or by writes this run made itself: a read of a temporary path would key
 every entry by a random name, and no two checks would write the same entry
 (tests/test_determinism).
+
+**One replay per sweep.** Every gate that reads the replay asks ``ctx.load_file``
+for it with the same loader (:func:`loader`), and the replay asks nothing of a
+path that moves between two gates (:func:`_open_lock`), so the sweep's memo
+serves the first gate's replay to the rest. It reads no environment variable in
+Python: act and git get this process's environment through ``env(1)``
+(:func:`with_env`), with the few values the replay sets over it.
 """
 from __future__ import annotations
 
@@ -34,6 +41,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import types
 
 from nopekit.modelio import load_path as _load_path
 
@@ -68,11 +76,18 @@ RUNNER_IMAGES = {
                     "3488f78aa97770c8d5d835f2913c1a782d3121ad3f2aafb17054fb1d554ea4e1",
 }
 
-#: Wall clock for one replay. The baseline's cold build measured 40-49 s (1208
-#: objects in espressif/idf v5.5.6, seven cores); a cold Zephyr or NCS ``west
-#: update`` can take many minutes. A timeout is errored, and the containers whose
-#: bind source is the copy are killed: a timeout kills only act, and the job
-#: container went on building into a directory the host then removed.
+#: Wall clock for one replay when the project names none: the baseline's cold
+#: build measured 40-49 s (1208 objects in espressif/idf v5.5.6, seven cores), and
+#: a cold Zephyr or NCS ``west update`` can take many minutes. A project sets its
+#: own in ``firmware_ci_timeout_s``, as pcb-kicad's ``pcb_drc_timeout_s``. A
+#: timeout is errored, and the containers whose bind source is the copy are
+#: removed: a timeout kills only act, and the job container went on building into
+#: a directory the host then removed. What slipped through a fixed 1800 s (holdout
+#: review, a handheld's upstream workflow): a job that clones ESP-IDF and runs its
+#: ``install.sh`` for each of five matrix entries cannot finish in it, and no key
+#: could say so. *Rejected:* a timeout scaled from the job's step count (a step
+#: count says nothing of a ``west update``); no timeout (a hung job holds the
+#: user's replay lock for every other replay on the machine).
 TIMEOUT_S = 1800
 
 #: Never copied: git's own state, nopekit's, and every file act reads secrets,
@@ -81,13 +96,16 @@ TIMEOUT_S = 1800
 #: anyway; leaving them out also keeps them out of every job container.
 EXCLUDED = frozenset({".git", ".nopekit", ".actrc", ".secrets", ".env", ".vars", ".input"})
 
-#: The files read back from the job's workspace when the job wrote them: images
-#: (ELF, BIN, Intel HEX, UF2) and the configuration the wake and transmit rules
-#: read (Zephyr's ``.config`` and ``zephyr.dts``, ESP-IDF's ``sdkconfig``). Capped:
-#: past it the replay is errored, never cut short. Never from a ``CMakeFiles/``
-#: directory: CMake's compiler probes write ``CMakeDetermineCompilerABI_C.bin`` and
-#: its kin there (four on the baseline, measured), which no device receives and the
-#: detail listed as images.
+#: The files the read-back looks at in the job's workspace when the job wrote
+#: them: images (ELF, BIN, Intel HEX, UF2) and the configuration the wake and
+#: transmit rules read (Zephyr's ``.config`` and ``zephyr.dts``, ESP-IDF's
+#: ``sdkconfig``). Every configuration file comes back whole. Every image is
+#: listed by name, size and sha256 (``images``), and only the images that
+#: ``firmware_image`` or ``firmware_elf`` name come back whole (``files``): the
+#: gates read no other image's bytes (``OUTPUT_CAP``). Never from a
+#: ``CMakeFiles/`` directory: CMake's compiler probes write
+#: ``CMakeDetermineCompilerABI_C.bin`` and its kin there (four on the baseline,
+#: measured), which no device receives and the detail listed as images.
 #:
 #: "Wrote" is read from each file's inode, change time, modification time and size
 #: (``lstat``) against a snapshot taken after the copy and before act starts. What
@@ -113,9 +131,20 @@ OUTPUT_NAMES = (".config", "zephyr.dts", "sdkconfig")
 #: the job never configured would stand in for the build's); a second build to
 #: write it (the replay is CI's own build, run once).
 BUILD_RECORDS = ("project_description.json",)
-#: The baseline wrote 7.5 MB of images (its ELF 6.4 MB, with debug information);
-#: 64 MiB leaves a build with several ELF files room. *Rejected:* no cap (every
-#: byte goes through one JSON line on a pipe and into memory).
+#: The cap on the bytes that come back whole: the images ``firmware_image`` and
+#: ``firmware_elf`` name, and the configuration files. Past it the replay is
+#: errored, never cut short, and the reason names the remedy (a glob that names
+#: one file). Sized on what the gates read: the baseline's pair is 6.9 MB (its ELF
+#: 6.4 MB, with debug information), and an NCS sysbuild's app pair 23.4 MB (its
+#: ``zephyr.elf`` 19.7 MB and ``zephyr.signed.hex`` 3.7 MB, measured in the
+#: holdout review). What slipped through a cap on every image the job wrote
+#: (holdout review, an NCS watch): that sysbuild wrote 284 MB of images
+#: (mcuboot, ipc_radio and the app, each with its ``zephyr_pre*.elf``, hex and
+#: bin), and a sound build read errored. *Rejected:* no cap (the bytes go through
+#: one JSON line on a pipe, and the sweep's memo holds them until the last gate
+#: has read them); the old cap over every image (above); writing the bytes to a
+#: file the gates open (a read of a temporary path keys every entry by a random
+#: name, the module's docstring).
 OUTPUT_CAP = 64 * 1024 * 1024
 
 #: The closed list of lines that make a failed build step the design's fault. Each
@@ -159,6 +188,55 @@ TOOL_FAULT_LINES = tuple(re.compile(p, re.M) for p in (
     r"SSL certificate problem|TLS handshake timeout",
 ))
 
+#: apt's words for a package its lists do not hold. GitHub's hosted runner image
+#: ships populated apt lists; act's runner images (catthehacker's act-24.04 and
+#: act-22.04, ``RUNNER_IMAGES``) ship them empty. So a step that runs ``sudo
+#: apt-get install`` with no ``apt-get update`` before it works on GitHub and
+#: fails in a replay. Measured: tests/fw_logs/act_apt_empty_lists.jsonl (``E:
+#: Unable to locate package gcc-arm-none-eabi`` in the pinned act-24.04 image).
+#: What slipped through before (holdout review, a handheld's upstream workflow):
+#: the reason said only that the pack cannot tell a manifest error from a network
+#: fault, and named no cause. The replay states this difference; it does not
+#: hide it. *Rejected:* running ``apt-get update`` in the runner before the job's
+#: steps (an edit to the job CI runs, and it installs today's packages, not the
+#: ones GitHub's image lists held); a runner image built here with populated lists
+#: (its digest moves every day, so no two machines replay one image).
+APT_NO_LISTS = re.compile(r"^E: Unable to locate package |^E: Package '?\S+?'? has no "
+                          r"installation candidate", re.M)
+APT_UPDATE = re.compile(r"\bapt(?:-get)?\s+(?:-\S+\s+)*update\b")
+
+#: Lines in a build step that read success which say the replay could not run a
+#: part of it: docker with no daemon (the replay mounts no docker socket into
+#: jobs, ``--container-daemon-socket -``), and a script the copy does not hold.
+#: Checked before the image the job wrote: a build that ran through a script
+#: that ignores its commands' status built nothing here, and its missing image is
+#: the replay's gap, never the design's fault. Measured:
+#: tests/fw_logs/act_script_docker.jsonl (``python3 scripts/build.py``, which
+#: runs ``docker build`` and another script through ``subprocess.run`` with no
+#: check, in the pinned act-24.04 image: docker's ``failed to connect to the
+#: docker API`` and Python's ``can't open file``). Named, not measured: the docker
+#: CLI's older ``Cannot connect to the Docker daemon``, a shell's ``docker: not
+#: found``, and a shell's ``No such file or directory`` for a script. What slipped
+#: through before (holdout review, a console's upstream workflow): such a step
+#: read success, ``fw.ci_job`` passed it, and the missing image would have read as
+#: a design FAIL.
+REPLAY_GAP_LINES = tuple(re.compile(p, re.M) for p in (
+    r"failed to connect to the docker API|Cannot connect to the Docker daemon",
+    r"(?:^|\s)docker: (?:command )?not found",
+    r"^python[\d.]*: can't open file ",
+    r"^(?:/bin/|/usr/bin/)?(?:ba)?sh: (?:line \d+: )?\S+: No such file or directory",
+))
+
+#: The lines a failed step's own output names its cause with, first in the log
+#: wins: CMake's error, apt's ``E:`` line, a compiler's or tool's ``error:``, and
+#: a ``FATAL ERROR``. What slipped through quoting the last error-like line
+#: (holdout review, an NCS watch): a west or CMake configure failure ends with
+#: west's ``FATAL ERROR: command exited with status 1``, and its cause sits many
+#: lines above it, in the ``CMake Error`` line; and a failed step before the
+#: build was quoted by act's own last line (``Job failed``), not its own output.
+CAUSE_LINE = re.compile(r"CMake Error|^E: |(?:^|[\s:])(?:fatal )?error:|FATAL[ _]ERROR",
+                        re.M | re.I)
+
 #: A build step whose process a signal stopped (act's ``exitcode '137'``: 128 + 9,
 #: SIGKILL) is errored before any line is read: the OOM killer, a ``docker kill``,
 #: or another replay that removed the job's container. Measured: two replays of one
@@ -180,16 +258,19 @@ _CMAKE_DURATION = re.compile(r"^(-- (?:Configuring|Generating) done) \([\d.]+s\)
 #: The snapshot (``snap``) and the read-back (``read``), in a subprocess (see the
 #: module's docstring). A symlink is read only when it resolves inside the copy:
 #: one the repository tracks may name a path on this machine that the runner does
-#: not have.
+#: not have. In ``read``, an image whose path matches none of the ``keep``
+#: patterns (``firmware_image`` and ``firmware_elf``, as regular expressions) is
+#: hashed here, a block at a time, and only its name, size and sha256 come back.
 _COLLECT = r"""
-import base64, json, os, sys
+import base64, hashlib, json, os, re, sys
 mode, copy, cap = sys.argv[1], sys.argv[2], int(sys.argv[3])
 suffixes, names = tuple(sys.argv[4].split(",")), tuple(sys.argv[5].split(","))
 records = tuple(sys.argv[6].split(","))
+keep = [re.compile(p) for p in json.loads(sys.argv[7])]
 before = json.load(sys.stdin) if mode == "read" else {}
 root = os.path.realpath(copy)
 inside = root + os.sep
-stats, found, configs, named, total = {}, {}, {}, [], 0
+stats, found, configs, named, images, total = {}, {}, {}, [], [], 0
 
 def take(path):
     global total
@@ -203,6 +284,18 @@ def take(path):
         print(json.dumps({"oversize": total}))
         sys.exit(0)
     return base64.b64encode(data).decode("ascii")
+
+def listed(path, rel):
+    digest, size = hashlib.sha256(), 0
+    try:
+        with open(path, "rb") as fh:
+            for block in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(block)
+                size += len(block)
+    except OSError:
+        return False
+    images.append({"name": rel, "size": size, "sha256": digest.hexdigest()})
+    return True
 
 for here, dirs, files in os.walk(copy):
     dirs[:] = sorted(d for d in dirs if d not in (".git", "CMakeFiles"))
@@ -232,6 +325,9 @@ for here, dirs, files in os.walk(copy):
             if isinstance(said, str) and said:
                 named.append(said)
             continue
+        if name.endswith(suffixes):
+            if not listed(path, rel) or not any(p.fullmatch(rel) for p in keep):
+                continue
         data = take(path)
         if data is not None:
             found[rel] = data
@@ -245,7 +341,8 @@ for said in named:
     data = take(real)
     if data is not None:
         configs[rel] = data
-print(json.dumps({"stats": stats} if mode == "snap" else {"files": found, "configs": configs}))
+print(json.dumps({"stats": stats} if mode == "snap" else
+                 {"files": found, "configs": configs, "images": images}))
 """
 
 #: The copy's symlinks, made in a subprocess: ``os.symlink`` here would be a read
@@ -272,17 +369,34 @@ class WrongAct(Exception):
 # --------------------------------------------------------------------------- #
 # the loader
 # --------------------------------------------------------------------------- #
-_LOADERS: dict = {}
+def loader(job: str, keep: tuple = (), matrix: dict | None = None,
+           timeout_s: float | None = None):
+    """The replay of ``job`` as a ``ctx.load_file`` loader, the same loader for the
+    same replay in every gate of a sweep: a method of :func:`_replay_named` bound
+    to the interned string that names the replay (the job, the globs whose images
+    come back whole, the matrix entry and the timeout).
+
+    The sweep's memo keys a load on its loader's identity, and a bound method on
+    the identities of its object and its function (``gates.load_file``). An
+    interned string is one object for one value while anything holds it, and the
+    memo's entry holds it through the loader, so every gate that asks for the
+    same replay gets the first one's. What slipped through a module-level dict of
+    ``functools.partial`` loaders (general-packs F1): it was a memo the spine
+    cannot empty (``nopekit doctor``'s memos row named it, and
+    ``tests/test_doctor`` holds every bundled gate to none). *Rejected:* an
+    ``lru_cache`` around a factory (the spine empties it before every gate, so
+    each gate got a new loader and its own replay); a new partial per call (the
+    same, by identity)."""
+    name = json.dumps({"job": job, "keep": sorted(set(keep)), "matrix": dict(matrix or {}),
+                       "timeout_s": timeout_s}, sort_keys=True)
+    return types.MethodType(_replay_named, sys.intern(name))
 
 
-def loader(job: str):
-    """The replay of ``job`` as a ``ctx.load_file`` loader: one callable per job, kept
-    for the process, because the sweep's memo keys a load on its loader's identity
-    and the three gates that read a replay must share one."""
-    fn = _LOADERS.get(job)
-    if fn is None:
-        fn = _LOADERS[job] = functools.partial(replay, job=job)
-    return fn
+def _replay_named(name: str, path: str) -> dict:
+    """:func:`replay` of the workflow at ``path`` as ``name`` (:func:`loader`) says."""
+    said = json.loads(name)
+    return replay(path, said["job"], keep=tuple(said["keep"]), matrix=said["matrix"],
+                  timeout_s=said["timeout_s"])
 
 
 def act_version() -> str:
@@ -305,23 +419,29 @@ def act_version() -> str:
     return m.group(1)
 
 
-def replay(path: str, job: str) -> dict:
+def replay(path: str, job: str, *, keep: tuple = (), matrix: dict | None = None,
+           timeout_s: float | None = None) -> dict:
     """Job ``job`` of the workflow at ``path``, replayed by act on a copy of its
     repository, and everything the gates read of it: each step's result and
-    scrubbed output, per matrix entry, the bytes of each image and
-    configuration file the job wrote into its workspace (``files``), and of each
-    sdkconfig an ESP-IDF build record names that the job left as it was
-    (``configs``, ``BUILD_RECORDS``)."""
+    scrubbed output, per matrix entry; the name, size and sha256 of each image
+    the job wrote into its workspace (``images``); the bytes of each image a
+    ``keep`` glob names and of each configuration file the job wrote
+    (``files``); and of each sdkconfig an ESP-IDF build record names that the
+    job left as it was (``configs``, ``BUILD_RECORDS``). ``matrix`` names one
+    entry of a matrix job (act's ``--matrix``, one per key); ``timeout_s`` is the
+    wall clock (``TIMEOUT_S`` when ``None``)."""
     act_version()
     repo, rel = CI.locate(path)
+    limit = float(timeout_s) if timeout_s is not None else float(TIMEOUT_S)
     tmp = tempfile.mkdtemp(prefix="nopekit-fw-")
     copy, home = os.path.join(tmp, "repo"), os.path.join(tmp, "home")
-    result = {"workflow": rel, "job": job, "rc": None, "timeout": False, "entries": [],
-              "act": [], "files": {}, "configs": {}, "oversize": 0, "toolchain": {},
-              "cleanup": ""}
+    result = {"workflow": rel, "job": job, "matrix": dict(matrix or {}), "rc": None,
+              "timeout": False, "timeout_s": limit, "entries": [], "act": [], "files": {},
+              "configs": {}, "images": [], "oversize": 0, "toolchain": {}, "cleanup": ""}
     # The image the job runs in, read before act starts: a timeout returns early,
     # and the chown below must still give the job's files back.
     image = _job_image(path, job)
+    left = ""
     try:
         _copy(repo, copy)
         _git_init(copy, home)
@@ -331,7 +451,7 @@ def replay(path: str, job: str) -> dict:
             json.dump({"ref": "refs/heads/main"}, fh)
         argv = ["act", "push", "-W", rel, "-C", copy, "-j", job, "--bind", "--json",
                 "--concurrent-jobs", "1", "--pull=false", "--action-offline-mode",
-                "--no-cache-server", "--container-daemon-socket", "-",
+                "--no-cache-server", "--container-daemon-socket", "-", "--rm",
                 "--action-cache-path",
                 os.path.join(os.path.expanduser("~"), ".cache", "nopekit", "firmware-ci",
                              "actions"),
@@ -339,26 +459,58 @@ def replay(path: str, job: str) -> dict:
                 "--env-file", os.devnull, "--input-file", os.devnull, "-e", event]
         for label, ref in RUNNER_IMAGES.items():
             argv += ["-P", f"{label}={ref}"]
-        env = dict(os.environ, HOME=home, XDG_CONFIG_HOME=os.path.join(home, ".config"),
-                   ACT_DISABLE_VERSION_CHECK="1")
+        for key, value in sorted((matrix or {}).items()):
+            argv += ["--matrix", f"{key}:{matrix_word(value)}"]
+        argv = with_env({"HOME": home, "XDG_CONFIG_HOME": os.path.join(home, ".config"),
+                         "ACT_DISABLE_VERSION_CHECK": "1"}, argv)
         with _one_replay_at_a_time():
             try:
                 proc = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                       stderr=subprocess.PIPE, text=True, errors="replace",
-                                      env=env, timeout=TIMEOUT_S)
+                                      timeout=limit)
             except subprocess.TimeoutExpired:
                 result["timeout"] = True
-                _kill(copy)
                 return result
+            finally:
+                # Inside the lock, on every outcome: the next replay of this
+                # user's must not meet this one's job container.
+                left = _remove_containers(copy)
         result["rc"] = proc.returncode
         scrub = functools.partial(_scrub, copy=copy, tmp=tmp)
         result["entries"], act_lines = parse(proc.stdout, scrub)
         result["act"] = act_lines + [scrub(ln) for ln in proc.stderr.splitlines() if ln.strip()]
         result["toolchain"] = _toolchain(image or RUNNER_IMAGES["ubuntu-latest"])
-        result["files"], result["configs"], result["oversize"] = _collect(copy, before)
+        (result["files"], result["configs"], result["images"],
+         result["oversize"]) = _collect(copy, before, keep)
     finally:
-        result["cleanup"] = _release(tmp, image)
+        result["cleanup"] = "; ".join(s for s in (left, _release(tmp, image)) if s)
     return result
+
+
+def matrix_word(value) -> str:
+    """A matrix value as act's ``--matrix key:value`` compares it: a YAML boolean
+    as ``true`` or ``false``, anything else as its text (measured with act 0.2.97:
+    ``--matrix n:2`` selects the entry whose ``n`` is the integer 2)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    return str(value)
+
+
+def with_env(overrides: dict, argv: list) -> list:
+    """``argv`` run through ``env(1)`` with ``overrides`` set over the environment
+    this process was started with.
+
+    The child gets every variable it would get with no ``env=`` at all (the
+    ``PATH`` act and git were found on, ``DOCKER_HOST``), and ``overrides`` on top.
+    What slipped through ``dict(os.environ, ...)`` (general-packs F1): a bundled
+    gate reading the environment in Python, which no verdict key holds, and
+    ``nopekit doctor``'s env-reads row named it (``tests/test_doctor`` holds every
+    bundled gate to none). pcb-kicad hands kicad-cli the environment the same way,
+    by not reading it. *Rejected:* a bare environment as the OpenFOAM packs build
+    for their tools (it drops ``DOCKER_HOST`` and the ``PATH`` a person put act
+    on); ``os.get_exec_path()`` for ``PATH`` alone (an environment read the
+    doctor's scan does not see, which is worse than one it does)."""
+    return ["env", *(f"{key}={value}" for key, value in overrides.items()), *argv]
 
 
 def _ran_in(runs_on: str) -> str:
@@ -415,19 +567,62 @@ def lock_path(root: str | None = None) -> str:
 
 def _open_lock() -> int:
     """A descriptor on the lock file: the user's own (:func:`lock_path`) when its
-    directory is a directory this uid owns, else :data:`HOME_LOCK`."""
+    directory is a directory this uid owns, else :data:`HOME_LOCK`.
+
+    **It asks nothing of a path by name.** Every ``os.stat`` and ``os.lstat`` a
+    replay makes is a path the sweep's memo signs, and a hit needs each to stat
+    the same at the next gate (``gates.load_file``). What slipped through
+    ``os.makedirs`` and ``os.lstat`` here (holdout review, a watch's check:
+    ``fw.build`` 332 s, ``fw.image_fits`` 404 s, ``fw.sleep_wake`` 272 s and
+    ``fw.tx_power`` 250 s, four replays where the docstring promised one):
+    ``makedirs`` asks whether ``/tmp`` exists, the memo signed ``/tmp``, and
+    ``/tmp`` changes whenever any process makes or removes a file in it, the
+    next gate's own controls included. So every reader missed and replayed again.
+    Now ``os.mkdir`` makes each directory (it asks nothing first), and the
+    directory's owner is read from a descriptor (``os.fstat``), never by name.
+    *Rejected:* signing only the repository's files in the memo (the memo is the
+    spine's, and a sound rule there); a per-sweep memo of the pack's own (the
+    spine cannot empty it)."""
     flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT
     path = lock_path()
     try:
-        os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-        st = os.lstat(os.path.dirname(path))
-        if stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid():
+        if _own_dir(os.path.dirname(path)):
             return os.open(path, flags | getattr(os, "O_NOFOLLOW", 0), 0o600)
     except OSError:
         pass
     path = os.path.expanduser(HOME_LOCK)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _make_dirs(os.path.dirname(path))
     return os.open(path, flags, 0o600)
+
+
+def _own_dir(path: str) -> bool:
+    """Whether ``path`` is, or now is, a directory this uid owns and not a link:
+    made with ``os.mkdir``, read through a descriptor opened with ``O_NOFOLLOW``."""
+    try:
+        os.mkdir(path, 0o700)
+    except FileExistsError:
+        pass
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                 getattr(os, "O_NOFOLLOW", 0))
+    try:
+        st = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return stat.S_ISDIR(st.st_mode) and st.st_uid == os.getuid()
+
+
+def _make_dirs(path: str) -> None:
+    """``path`` and each directory above it, made with ``os.mkdir`` from the top:
+    ``os.makedirs`` asks whether each exists first (:func:`_open_lock`)."""
+    chain, here = [], os.path.abspath(path)
+    while here and os.path.dirname(here) != here:
+        chain.append(here)
+        here = os.path.dirname(here)
+    for at in reversed(chain):
+        try:
+            os.mkdir(at, 0o700)
+        except OSError:
+            pass                    # there already; or not ours to make: open says
 
 
 class _one_replay_at_a_time:
@@ -468,9 +663,12 @@ def _job_image(path: str, job: str) -> str:
 # the copy
 # --------------------------------------------------------------------------- #
 def _git(args: list, cwd: str, env: dict | None = None) -> subprocess.CompletedProcess:
-    return subprocess.run(["git", *args], cwd=cwd, stdin=subprocess.DEVNULL,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-                          timeout=120)
+    """``git args`` in ``cwd``, with ``env`` set over this process's environment
+    (:func:`with_env`)."""
+    argv = ["git", *args]
+    return subprocess.run(with_env(env, argv) if env else argv, cwd=cwd,
+                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, timeout=120)
 
 
 def listing(repo: str) -> list[str]:
@@ -577,9 +775,8 @@ _GIT_ID = {"GIT_AUTHOR_NAME": "nopekit", "GIT_AUTHOR_EMAIL": "replay@nopekit.inv
 
 
 def _git_init(copy: str, home: str) -> None:
-    os.makedirs(home, exist_ok=True)
-    env = dict(os.environ, HOME=home, GIT_CONFIG_NOSYSTEM="1",
-               GIT_CONFIG_GLOBAL=os.devnull, **_GIT_ID)
+    os.mkdir(home)
+    env = dict(HOME=home, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, **_GIT_ID)
     for args in (["-c", "init.defaultBranch=main", "init", "-q"], ["add", "-A"],
                  ["-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty",
                   "--no-verify", "-m", "nopekit replay"]):
@@ -655,10 +852,11 @@ def parse(stdout: str, scrub=lambda s: s) -> tuple[list, list]:
     return out, loose
 
 
-def _run_collect(mode: str, copy: str, before: dict | None = None) -> dict:
+def _run_collect(mode: str, copy: str, before: dict | None = None, keep: tuple = ()) -> dict:
     proc = subprocess.run([sys.executable, "-I", "-c", _COLLECT, mode, copy,
                            str(OUTPUT_CAP), ",".join(OUTPUT_SUFFIXES),
-                           ",".join(OUTPUT_NAMES), ",".join(BUILD_RECORDS)],
+                           ",".join(OUTPUT_NAMES), ",".join(BUILD_RECORDS),
+                           json.dumps([glob_pattern(g) for g in keep])],
                           input=json.dumps(before or {}), stdout=subprocess.PIPE,
                           stderr=subprocess.PIPE, text=True, timeout=300)
     try:
@@ -676,18 +874,19 @@ def _snapshot(copy: str) -> dict:
     return _run_collect("snap", copy)["stats"]
 
 
-def _collect(copy: str, before: dict) -> tuple[dict, dict, int]:
-    """``({rel: bytes}, {rel: bytes}, oversize)``: each output file the job wrote
-    (every one whose ``lstat`` differs from ``before``, :func:`_snapshot`), and
-    each config file a build record the job wrote names that the job left as it
-    was (``BUILD_RECORDS``), read back by a subprocess (see the module's
-    docstring)."""
-    found = _run_collect("read", copy, before)
+def _collect(copy: str, before: dict, keep: tuple = ()) -> tuple[dict, dict, list, int]:
+    """``({rel: bytes}, {rel: bytes}, [image], oversize)``: each configuration
+    file the job wrote and each image it wrote that a ``keep`` glob names (every
+    file whose ``lstat`` differs from ``before``, :func:`_snapshot`); each config
+    file a build record the job wrote names that the job left as it was
+    (``BUILD_RECORDS``); and ``{name, size, sha256}`` of every image the job
+    wrote, read back by a subprocess (see the module's docstring)."""
+    found = _run_collect("read", copy, before, keep)
     if "oversize" in found:
-        return {}, {}, int(found["oversize"])
+        return {}, {}, [], int(found["oversize"])
     return ({rel: base64.b64decode(b64) for rel, b64 in found["files"].items()},
             {rel: base64.b64decode(b64) for rel, b64 in found.get("configs", {}).items()},
-            0)
+            list(found.get("images", [])), 0)
 
 
 def _toolchain(image: str) -> dict:
@@ -698,17 +897,36 @@ def _toolchain(image: str) -> dict:
     return {image: proc.stdout.strip() if proc.returncode == 0 else ""}
 
 
-def _kill(copy: str) -> None:
-    """Stop the containers whose bind source is the copy (act's job containers)."""
+def _remove_containers(copy: str) -> str:
+    """Remove every container whose bind source is the copy (act's job
+    containers), running or not; return what could not be removed, or ``""``.
+
+    Called on every outcome, inside the replay lock, after act returns. What
+    slipped through calling it on a timeout alone (holdout review, three
+    projects): act keeps a failed job's container running (``tail -f
+    /dev/null``) unless it is given ``--rm``, so each failed replay left one, bound
+    to a copy the host then removed. act now runs with ``--rm`` too; this is the
+    net for a job act did not clean up (a timeout kills act, never the job).
+    Measured with act 0.2.97: without ``--rm`` a failed job's container stays up,
+    and ``docker ps -aq --filter volume=<copy>`` names it."""
     try:
-        found = subprocess.run(["docker", "ps", "-q", "--filter", f"volume={copy}"],
+        found = subprocess.run(["docker", "ps", "-aq", "--filter", f"volume={copy}"],
                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                stderr=subprocess.DEVNULL, text=True, timeout=60)
-        for cid in found.stdout.split():
-            subprocess.run(["docker", "kill", cid], stdin=subprocess.DEVNULL,
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"docker ps did not run ({type(exc).__name__}): a job container may be left"
+    left = []
+    for cid in found.stdout.split():
+        try:
+            gone = subprocess.run(["docker", "rm", "-f", cid], stdin=subprocess.DEVNULL,
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                  timeout=60).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            gone = False
+        if not gone:
+            left.append(cid)
+    return (f"job container {', '.join(left)} could not be removed: docker rm -f "
+            f"{' '.join(left)}") if left else ""
 
 
 def _release(tmp: str, image: str) -> str:
@@ -769,22 +987,45 @@ def _last_words(entry: dict, step: dict | None = None) -> str:
     return lines[-1][:200] if lines else "no output"
 
 
+def _cause(entry: dict, step: dict | None = None) -> str:
+    """What a failed step says of its cause: the first line of its own output that
+    :data:`CAUSE_LINE` names; else its own last line of output; else act's last
+    line about it or about the job."""
+    log = (step or {}).get("log", "")
+    for line in log.splitlines():
+        if CAUSE_LINE.search(line):
+            return _TOOL_PATH.sub(r"\1: ", line.strip())[:200]
+    own = [ln.strip() for ln in log.splitlines() if ln.strip()]
+    return own[-1][:200] if own else _last_words(entry, step)
+
+
+def image_names(result: dict) -> list[str]:
+    """The workspace path of every image the job wrote (``images``), sorted."""
+    return sorted(str(row["name"]) for row in result["images"])
+
+
 def judge(result: dict, job, image_glob: str | None = None,
           tolerated: frozenset = frozenset()) -> tuple[bool, str]:
     """``(passed, detail)`` for the build job ``job`` (a ``_ci.Job``) in one replay,
     or :class:`ToolFault`. ``tolerated`` holds the indices of steps before the build
     that carry ``continue-on-error: true``: their failure stops nothing on GitHub."""
     if result["timeout"]:
-        raise ToolFault(f"act did not finish in {TIMEOUT_S} s; the job's containers were "
-                        f"stopped")
+        raise ToolFault(f"act did not finish in {result.get('timeout_s') or TIMEOUT_S:g} s "
+                        f"(firmware_ci_timeout_s); the job's containers were removed")
     entries = [e for e in result["entries"] if e["job"] == job.job]
+    chosen = result.get("matrix") or {}
     if not entries:
         words = [ln for ln in result["act"] if ln.strip()]
-        raise ToolFault(f"act exited {result['rc']} before any step of job {job.job}: "
+        which = (f" (firmware_ci_matrix {_said(chosen)} may name no entry)" if chosen else "")
+        raise ToolFault(f"act exited {result['rc']} before any step of job {job.job}{which}: "
                         f"{(words[-1] if words else 'no output')[:200]}")
+    if chosen and len(entries) != 1:
+        raise ToolFault(f"firmware_ci_matrix {_said(chosen)} selects {len(entries)} entries of "
+                        f"job {job.job}'s matrix: give a value for each key, so one runs")
     if result["oversize"]:
-        raise ToolFault(f"the job wrote {result['oversize']} B of images and configuration, "
-                        f"past the {OUTPUT_CAP} B the replay reads back")
+        raise ToolFault(f"the files read back whole (firmware_image, firmware_elf and the "
+                        f"configuration) total {result['oversize']} B, past the {OUTPUT_CAP} B "
+                        f"cap: name one file with each glob")
     fails = []
     for entry in entries:
         label = _label(entry)
@@ -794,10 +1035,18 @@ def judge(result: dict, job, image_glob: str | None = None,
                             f"{_last_words(entry, setup)}")
         for i in range(job.index):
             step = main_step(entry, job.act_id(i))
-            if step is not None and step["result"] == "failure" and i not in tolerated:
-                raise ToolFault(f"step {step['name']!r} before the build failed in job "
-                                f"{job.job}{label}: the pack cannot tell a manifest error "
-                                f"from a network fault ({_last_words(entry, step)})")
+            if step is None or step["result"] != "failure" or i in tolerated:
+                continue
+            cause = _cause(entry, step)
+            runs = tuple(getattr(job, "runs", ()) or ())
+            if (not job.image and APT_NO_LISTS.search(step["log"])
+                    and not any(APT_UPDATE.search(run) for run in runs[:i + 1])):
+                raise ToolFault(f"step {step['name']!r} before the build failed{label} on empty "
+                                f"apt lists (act's runner image has none, GitHub's has them; "
+                                f"run `sudo apt-get update` first): {cause}")
+            raise ToolFault(f"step {step['name']!r} before the build failed in job "
+                            f"{job.job}{label}: the pack cannot tell a manifest error "
+                            f"from a network fault ({cause})")
         build = main_step(entry, job.act_id(job.index))
         if build is None or build["result"] is None:
             raise ToolFault(f"the build step {job.name!r} never ran in job {job.job}{label}: "
@@ -820,15 +1069,12 @@ def judge(result: dict, job, image_glob: str | None = None,
                                     f"{_line_at(log, hit)}")
             hit = next((m for sig in DESIGN_LINES for m in [sig.search(log)] if m), None)
             if hit is None:
-                errors = [ln.strip() for ln in log.splitlines()
-                          if re.search(r"error|FAILED|fatal", ln, re.I)]
-                last = (errors or [ln for ln in log.splitlines() if ln.strip()]
-                        or [_last_words(entry, build)])[-1]
                 raise ToolFault(f"the build step failed{label} on no line this pack knows as "
-                                f"a design fault: {last.strip()[:200]}")
+                                f"a design fault: {_cause(entry, build)}")
             fails.append(f"the build fails{label}: {_line_at(log, hit)}")
         elif build["result"] == "success":
             hit = next((m for sig in DESIGN_LINES for m in [sig.search(log)] if m), None)
+            gap = next((m for sig in REPLAY_GAP_LINES for m in [sig.search(log)] if m), None)
             if hit is not None:
                 fails.append(f"the build step read success{label}, and its output holds "
                              f"{_line_at(log, hit)!r}: a failed build masked")
@@ -836,11 +1082,15 @@ def judge(result: dict, job, image_glob: str | None = None,
                 fails.append(f"the build{label} could not find its ZMK config "
                              f"({_line_at(log, ZMK_NO_CONFIG.search(log))}): it built ZMK's "
                              f"default keymap, not this repository's")
+            elif gap is not None:
+                raise ToolFault(f"the build step read success{label}, but part of it could not "
+                                f"run in the replay (no docker daemon in jobs, or a file the "
+                                f"copy lacks): {_line_at(log, gap)}")
         else:
             raise ToolFault(f"the build step ended {build['result']!r}{label}")
     if fails:
         return False, "; ".join(dict.fromkeys(fails))
-    images = sorted(rel for rel in result["files"] if rel.endswith(OUTPUT_SUFFIXES))
+    images = image_names(result)
     if image_glob and not any(matches(rel, image_glob) for rel in images):
         return False, (f"the file you flash ({image_glob}) is not what job {job.job} builds: "
                        f"it wrote {', '.join(images) or 'no image'}")
@@ -852,23 +1102,27 @@ def judge(result: dict, job, image_glob: str | None = None,
         later.append(f"{step['name']} ({step['result'] or 'not run'})")
     where = f" in {_short(job.image)}" if job.image else ""
     many = f", {len(entries)} matrix entries" if len(entries) > 1 else ""
-    said = (f"job {job.job}{many}: step {job.name!r} ({job.command}) passed{where}; "
+    one = f", matrix entry {_said(chosen)}" if chosen else ""
+    said = (f"job {job.job}{many}{one}: step {job.name!r} ({job.command}) passed{where}; "
             f"wrote {', '.join(images) or 'no image'}")
     if later:
         said += f"; later steps not judged: {', '.join(later)}"
     return True, said
 
 
+def _said(matrix: dict) -> str:
+    return "{" + ", ".join(f"{k}: {matrix_word(v)}" for k, v in sorted(matrix.items())) + "}"
+
+
 def _short(image: str) -> str:
     return re.sub(r"(@sha256:[0-9a-f]{12})[0-9a-f]+", r"\1", image)
 
 
-def matches(rel: str, glob: str) -> bool:
-    """Whether the workspace path ``rel`` matches ``glob``, a path at a time: ``*``
-    and ``?`` stay inside one directory, ``**/`` crosses any number of them. What
-    slipped through ``fnmatch`` (whose ``*`` matches ``/``): ``build/*.bin`` on the
-    ESP-IDF baseline named the bootloader's and the partition table's ``.bin`` too,
-    and the gate refused to choose."""
+def glob_pattern(glob: str) -> str:
+    """``glob`` as a regular expression over a workspace path, a path at a time:
+    ``*`` and ``?`` stay inside one directory, ``**/`` crosses any number of them.
+    The read-back's subprocess matches ``keep`` with it, so a file comes back
+    whole exactly when :func:`matches` names it."""
     out, i = [], 0
     while i < len(glob):
         if glob.startswith("**/", i):
@@ -883,7 +1137,15 @@ def matches(rel: str, glob: str) -> bool:
         else:
             out.append(re.escape(glob[i]))
             i += 1
-    return re.fullmatch("".join(out), rel) is not None
+    return "".join(out)
+
+
+def matches(rel: str, glob: str) -> bool:
+    """Whether the workspace path ``rel`` matches ``glob`` (:func:`glob_pattern`).
+    What slipped through ``fnmatch`` (whose ``*`` matches ``/``): ``build/*.bin`` on
+    the ESP-IDF baseline named the bootloader's and the partition table's ``.bin``
+    too, and the gate refused to choose."""
+    return re.fullmatch(glob_pattern(glob), rel) is not None
 
 
 def built_file(result: dict, glob: str, what: str) -> tuple[str, bytes]:
@@ -900,25 +1162,42 @@ def built_file(result: dict, glob: str, what: str) -> tuple[str, bytes]:
 
 
 def evidence(result: dict, job, out_path) -> list[str]:
-    """The build step's scrubbed log, ``images.json`` (name, size and sha256 of each
-    image the job wrote) and ``toolchain.json`` (each image reference and its local
-    id), under the gate's out directory. ``out_path`` is ``ctx.out_path``."""
+    """The replay's scrubbed log (``log.txt``: each step's own output and act's
+    lines about it, then act's lines about the job), ``images.json`` (name, size
+    and sha256 of each image the job wrote) and ``toolchain.json`` (each image
+    reference and its local id), under the gate's out directory. ``out_path`` is
+    ``ctx.out_path``.
+
+    Written on every outcome the replay reached, an errored one too. What slipped
+    through writing it on a judged build alone (holdout review, three projects):
+    an errored replay kept no log, its reason quoted act's last line (``Job
+    failed``), and each person had to replay the failure by hand to find a
+    CMake error or apt's ``Unable to locate package`` many lines above it."""
     paths = []
     entries = [e for e in result["entries"] if e["job"] == job.job]
     log = out_path("firmware-ci", "build", "log.txt")
     with open(log, "w", encoding="utf-8") as fh:
         for entry in entries:
-            step = main_step(entry, job.act_id(job.index))
-            fh.write(f"== job {entry['job']}{_label(entry)}, step {job.name!r}: "
-                     f"{(step or {}).get('result')}\n")
-            fh.write((step or {}).get("log", ""))
+            for step in entry["steps"]:
+                if step["stage"] != "Main":
+                    continue
+                mark = " (the build step)" if step["id"][:1] == [job.act_id(job.index)] else ""
+                fh.write(f"== job {entry['job']}{_label(entry)}, step {step['name']!r}{mark}: "
+                         f"{step['result'] or 'not run'}\n")
+                text = step.get("log", "")
+                fh.write(text if not text or text.endswith("\n") else text + "\n")
+                for line in step.get("act", []):
+                    fh.write(f"-- act: {line}\n")
+            if entry.get("act"):
+                fh.write(f"== job {entry['job']}{_label(entry)}, act\n")
+                fh.write("".join(f"{line}\n" for line in entry["act"]))
+        if result.get("act"):
+            fh.write("== act\n" + "".join(f"{line}\n" for line in result["act"]))
     paths.append(log)
     images = out_path("firmware-ci", "build", "images.json")
     with open(images, "w", encoding="utf-8") as fh:
-        json.dump([{"name": rel, "size": len(data),
-                    "sha256": hashlib.sha256(data).hexdigest()}
-                   for rel, data in sorted(result["files"].items())
-                   if rel.endswith(OUTPUT_SUFFIXES)], fh, indent=1, sort_keys=True)
+        json.dump(sorted(result["images"], key=lambda row: row["name"]), fh, indent=1,
+                  sort_keys=True)
         fh.write("\n")
     paths.append(images)
     chain = out_path("firmware-ci", "build", "toolchain.json")

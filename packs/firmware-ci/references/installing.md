@@ -68,6 +68,10 @@ act's `.actrc`, `.secrets`, `.env`, `.vars` and `.input`. The copy gets one comm
 with a fixed author and date, because act reads the commit and the branch from git.
 act runs with `--bind` (the job writes into the copy), `--container-daemon-socket -`
 (no docker socket in any job), `/dev/null` for secrets, variables, environment and
-inputs, no cache server, and HOME pointed at an empty directory, so no `.actrc`
-applies. After the replay the copy is handed back to your user by a `chown` in a
-container of the job's own image, and removed.
+inputs, no cache server, `--rm`, and HOME pointed at an empty directory, so no
+`.actrc` applies. act inherits the rest of your environment (`PATH`, `DOCKER_HOST`)
+through `env(1)`. After the replay, on every outcome, each container whose bind
+source is the copy is removed (`docker rm -f`), and the copy is handed back to your
+user by a `chown` in a container of the job's own image, and removed. A container
+that could not be removed is named in the replay's cleanup note. To look for one by
+hand: `docker ps -a --filter name=act-`, then `docker rm -f <id>`.

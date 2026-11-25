@@ -14,6 +14,8 @@ What it does is set by ``mode.json`` beside it, which the test writes:
 - ``log``: a JSONL file printed as act's stdout, with ``copy_in_log`` (the copy
   path the excerpt was recorded under) replaced by the real copy; ``stderr``,
   ``exit`` and ``sleep`` (seconds before anything is written).
+- ``containers``: the ids ``docker ps`` prints (a job container a replay left);
+  ``rm_fails``: ``docker rm`` exits 1.
 - ``write``: ``{rel: {"size": n, "head": "<hex>"}}``, files the "job" writes into the
   copy, ``head`` first and zero bytes after; or ``{rel: {"text": "..."}}``, written as
   UTF-8 with ``{copy}`` replaced by the copy's path (a build record that names a
@@ -50,6 +52,10 @@ if TOOL == "docker":
     log({"tool": "docker", "argv": ARGS})
     if ARGS[:2] == ["image", "inspect"]:
         print("sha256:" + "0" * 64)
+    if ARGS[:1] == ["ps"]:
+        print("\n".join(MODE.get("containers") or []))
+    if ARGS[:1] == ["rm"] and MODE.get("rm_fails"):
+        sys.exit(1)
     sys.exit(0)
 
 if "--version" in ARGS:

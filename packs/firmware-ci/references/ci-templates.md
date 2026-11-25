@@ -19,8 +19,20 @@ Rules each template keeps, and why:
 - **Uploads come after the build.** `actions/upload-artifact` is a JavaScript action
   and needs `node` in the job's image; where there is none it fails under act. A step
   after the build is named in the verdict's detail and not judged.
+- **`apt-get update` before `apt-get install`.** GitHub's hosted runner image ships
+  its apt lists filled. act's runner images ship them empty, so an install with no
+  update fails in a replay with `E: Unable to locate package`, and works on GitHub.
+- **One entry of a matrix.** Set `firmware_ci_matrix` (`{key: value}`, a value for
+  each key) to replay one entry. Without it the entries share one workspace in
+  turn, and the readers error.
+
+Each template says whether this pack has replayed it. A template that says **Not
+replayed** passes `fw.ci_job` (a test holds each one to it), and nothing more is
+known: replay it once on your project and read the detail.
 
 ## Zephyr or NCS, in a container
+
+**Not replayed** by this pack: no Zephyr image was pulled when it was written.
 
 ```yaml
 name: Build firmware
@@ -52,6 +64,9 @@ A failed `west update` is a step before the build: errored, never failed.
 
 ## ZMK, self-contained
 
+**Not replayed** in this exact form. Its build line was measured in ZMK v0.3.0's
+image on a neutral board and on upstream corne (`references/signatures.md`).
+
 ZMK's reusable `build-user-config` workflow builds in `mktemp -d`, outside the
 workspace, and its replay was not measured: `fw.ci_job` refuses it (errored, not
 failed). This job builds one board and shield in the workspace instead:
@@ -76,10 +91,15 @@ jobs:
 
 `config/west.yml` pins ZMK at a release tag, not a branch. `firmware_image`:
 `build/zephyr/zmk.uf2`. `firmware_elf`: `build/zephyr/zmk.elf`; the `.config` and
-`zephyr.dts` beside it carry the wake rule. A split keyboard needs a job per half:
-in a replay a matrix's entries share one workspace in turn.
+`zephyr.dts` beside it carry the wake rule. A split keyboard needs a job per half,
+or a matrix with `firmware_ci_matrix` naming the half to replay: in a replay a
+matrix's entries share one workspace in turn.
 
 ## ESP-IDF, in a container
+
+**Replayed** on every `gate selftest`: it is the shape of this pack's own control
+(`selftest/assets/esp-sleep/github/workflows/build.yml`), with act 0.2.97 in ESP-IDF
+v5.5.6's image.
 
 ```yaml
 name: Build firmware
@@ -102,6 +122,8 @@ act starts the job's container with its own entrypoint, so the step sources
 inside the job, and the replay mounts no docker socket into jobs.
 
 ## PlatformIO
+
+**Not replayed** by this pack.
 
 ```yaml
 name: Build firmware
@@ -128,6 +150,11 @@ is committed.
 
 ## arduino-cli
 
+**Replayed** through this pack's replay on 2026-11-24, with act 0.2.97 in the
+pinned act-24.04 runner image: arduino-cli 1.1.1, `arduino:avr@1.8.6` and
+`arduino:avr:uno` on a blink sketch. It built `build/blink.ino.hex` in 2 % of the
+flash. No ESP32 core was replayed.
+
 ```yaml
 name: Build firmware
 on: [push, pull_request]
@@ -138,16 +165,30 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
       - name: Install arduino-cli and the core
         run: |
-          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | BINDIR=$HOME/bin sh -s <pinned version>
-          $HOME/bin/arduino-cli core install <vendor:arch>@<pinned version>
+          mkdir -p "$HOME/bin"
+          curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/<pinned tag>/install.sh | BINDIR="$HOME/bin" sh -s <pinned version>
+          "$HOME/bin/arduino-cli" core update-index
+          "$HOME/bin/arduino-cli" core install <vendor:arch>@<pinned version>
       - name: Build
-        run: $HOME/bin/arduino-cli compile --fqbn <vendor:arch:board> --output-dir build .
+        run: $HOME/bin/arduino-cli compile --fqbn <vendor:arch:board> --output-dir build <sketch folder>
 ```
 
-`firmware_image`: `build/*.bin` (or `.hex`). `firmware_elf`: `build/*.elf`. The
-install step pipes into `sh`, which is fine: it is not the build step.
+`<sketch folder>` holds `<sketch folder>.ino`: arduino-cli wants the main file
+named as its folder, and a replay's workspace is not named as your repository.
+`firmware_image`: `build/<sketch folder>.ino.hex` (or `.bin`). `firmware_elf`:
+`build/<sketch folder>.ino.elf`. A glob such as `build/*.hex` names two files
+(`.ino.hex` and `.ino.with_bootloader.hex`, measured), and the gates refuse to
+choose. The install step pipes into `sh`, which is fine: it is not the build step. The
+`mkdir` is needed: `install.sh` stops with `$BINDIR folder not found` when the
+folder is not there, as in act's runner image. What slipped through (holdout
+review, a watch's first replay): the template had no `mkdir`, was never replayed,
+and failed before the build. An ESP32 core of the 2.x series also needs pyserial
+for its `esptool.py`; Ubuntu 24.04 installs it only with `pip3 install
+--break-system-packages pyserial`, as a line before the core install.
 
 ## Pico SDK
+
+**Not replayed** by this pack.
 
 ```yaml
 name: Build firmware
@@ -172,6 +213,8 @@ jobs:
 references/memory-maps.md for the RP2040 map.
 
 ## STM32, make or CMake
+
+**Not replayed** by this pack.
 
 ```yaml
 name: Build firmware

@@ -13,7 +13,8 @@ take to close it. A green replay answers none of them.
 ## The green tick on a masked failure
 
 - Does any step after the build hide its status: a `tee`, a `grep`, an `|| true`,
-  a script that ends with `echo done`? `fw.ci_job` reads the build step only.
+  a script that ends with `echo done`? `fw.ci_job` reads the build step's own lines
+  only, and names each script that step runs as not read. Open each one.
 - Does a later step upload a file a failed build left behind?
 
 ## The region nobody confirmed

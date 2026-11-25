@@ -64,10 +64,54 @@ class Job:
     #: documented route of naming the step by its id in ``firmware_ci_step`` led
     #: there; a failed step before it with an id was never named.
     ids: tuple = ()
+    #: Each step's ``run:`` text by index (``""`` for a ``uses:`` step): the
+    #: judge reads whether a step before a failed install ran ``apt-get update``
+    #: (``_replay.APT_NO_LISTS``).
+    runs: tuple = ()
+    #: The repository files the build step runs that this module does not read
+    #: (``python3 build.py``, ``./build.sh``, ``bash scripts/x.sh``): the pass
+    #: names them, so it never says more than the step's own lines show.
+    unread: tuple = ()
 
     def act_id(self, at: int) -> str:
         """The ``stepID`` act logs for step ``at``."""
         return self.ids[at] if at < len(self.ids) else str(at)
+
+
+def _runs(steps: list) -> tuple:
+    """Each step's ``run:`` text, ``""`` for a step with none."""
+    return tuple(str(s.get("run") or "") if isinstance(s, dict) else "" for s in steps)
+
+
+#: A command that runs a file of the repository through an interpreter, or by
+#: a path with a ``/`` in it: ``python3 x.py``, ``bash x.sh``, ``sh x.sh``,
+#: ``node x.js``, ``./x.sh``, ``scripts/x.sh`` (a bare ``idf.py`` is a tool on
+#: ``PATH``, not a file of the repository). The guard reads the step's own lines only, so a
+#: pass over such a step names the file it did not read. What slipped through
+#: "no masking" there (holdout review, a console's upstream workflow): the build
+#: step ran ``python3 <script>.py``, which runs ``docker build`` through
+#: ``subprocess.run(["bash", "-c", cmd])`` with no check, so a failed build exits
+#: 0, and the pass said "no masking". *Rejected:* reading the script (a Python
+#: or shell file is a program; the masking rules read GitHub's documented shell
+#: behaviour, not a language); refusing every script (a build in a script is
+#: sound, and ``firmware_ci_step`` exists for it).
+_SCRIPT = re.compile(r"(?:^|(?<=[\s;&|(]))(?:(?:python[\d.]*|bash|sh|zsh|node|perl|ruby)"
+                     r"(?:\s+-\S+)*\s+([\w./-]+\.(?:py|sh|bash|js|pl|rb))"
+                     r"|([\w.-]*/[\w./-]*\.(?:sh|bash|py))(?=\s|$|;))")
+
+
+def _scripts(run: str) -> tuple:
+    """The repository files ``run`` hands to an interpreter or runs by path, in
+    order, each once (:data:`_SCRIPT`)."""
+    found = []
+    for line in _lines(run):
+        if line.startswith("#"):
+            continue
+        for m in _SCRIPT.finditer(_bare(line)):
+            name = m.group(1) or m.group(2)
+            if name and not name.startswith("/") and name not in found:
+                found.append(name)
+    return tuple(found)
 
 
 def _act_ids(steps: list) -> tuple:
@@ -235,6 +279,10 @@ def _step_name(step: dict, at: int) -> str:
 
 
 def _named(step: dict, at: int, wanted: str) -> bool:
+    """Whether ``firmware_ci_step`` ``wanted`` names this step: its ``name:``, its
+    ``id:``, or the name act logs for it (``_step_name``: for a step with no name
+    and no ``uses:``, its run's first line). What slipped through (holdout review,
+    a handheld): the run-line handle worked and no document said so."""
     return wanted in (str(step.get("name") or ""), str(step.get("id") or ""),
                       _step_name(step, at))
 
@@ -270,7 +318,8 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
         if len(candidates) != 1:
             said = (f"{len(candidates)} jobs build ({', '.join(map(str, candidates))})"
                     if candidates else
-                    f"no job has a step named {step!r}" if step is not None else
+                    f"no job has a step named {step!r} (by its name, its id, or, with "
+                    f"neither, its run's first line)" if step is not None else
                     "no job runs a build command this pack knows")
             raise Refused(f"{rel}: {said}; name the job in firmware_ci_job")
         jid = candidates[0]
@@ -306,7 +355,7 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
                           f"in a container job instead (references/ci-templates.md, "
                           f"ESP-IDF)")
         return Job(rel, jid, at, name, f"uses: {uses}", "", image, runs_on,
-                   _matrix(body), _act_ids(steps))
+                   _matrix(body), _act_ids(steps), _runs(steps))
     shell = _shell(build, defaults, name)
     run = str(build.get("run") or "")
     if _EXPR in run and re.search(r"\$\{\{[^}]*\}\}", run) and not _build_commands(run):
@@ -322,7 +371,7 @@ def choose(wf: Workflow, job: str | None = None, step: str | None = None):
     if problem:
         return Fail(problem)
     return Job(rel, jid, at, name, command, shell, image, runs_on, _matrix(body),
-               _act_ids(steps))
+               _act_ids(steps), _runs(steps), _scripts(run))
 
 
 def _docker_anywhere(rel: str, jobs: dict) -> None:
@@ -345,7 +394,8 @@ def _build_step(rel: str, jid: str, steps: list, wanted: str | None) -> int:
         hits = [i for i, s in enumerate(steps) if isinstance(s, dict) and _named(s, i, wanted)]
         if len(hits) != 1:
             raise Refused(f"firmware_ci_step names {wanted!r}, which matches "
-                          f"{len(hits)} steps of job {jid} in {rel}")
+                          f"{len(hits)} steps of job {jid} in {rel} (a step is named by its "
+                          f"name, its id, or, with neither, its run's first line)")
         return hits[0]
     hits = [i for i, s in enumerate(steps)
             if isinstance(s, dict) and isinstance(s.get("run"), str) and _build_commands(s["run"])]
@@ -353,7 +403,8 @@ def _build_step(rel: str, jid: str, steps: list, wanted: str | None) -> int:
         return hits[0]
     if not hits:
         raise Refused(f"job {jid} in {rel} runs no build command this pack knows (a build "
-                      f"in a script is sound); name the build step in firmware_ci_step")
+                      f"in a script is sound); name the build step in firmware_ci_step (its "
+                      f"name, its id, or, with neither, its run's first line)")
     names = ", ".join(repr(_step_name(steps[i], i)) for i in hits)
     raise Refused(f"job {jid} in {rel} builds in {len(hits)} steps ({names}); name the "
                   f"build step in firmware_ci_step")
